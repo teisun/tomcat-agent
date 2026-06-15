@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-15 12:30 +0800 | ACTIVE | feature/plugin-rquickjs | 66.2 |
+| Tom | 2026-06-15 15:00 +0800 | ACTIVE | feature/plugin-rquickjs | 66.2 |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 移除 WasmEdge 运行时、资产与脚本，统一 Plugin 命名 @2026-06-14
@@ -16,6 +16,13 @@
 - [✓] **[P1]** PackageManager 规范对齐：registry schema、严格 npm 版本、`plugin.json` 单文件名、§9 验收矩阵与文档回链 @2026-06-15
 
 - [✓] **[P2]** 清理 vendored OpenSpec Cursor skills（`openspec-*`） @2026-06-15
+- [✓] **[P1]** 通用 real-LLM/E2E 测试迁移至 `DEEPSEEK_API_KEY`；OpenAI Responses/Files 专项保留 @2026-06-15
+
+### 2026-06-15 | test(llm): 通用 real-LLM 测试迁移至 DEEPSEEK_API_KEY
+
+- **交付**：`tests/common` 新增 DeepSeek 测试 helper；`cli_tests`、`llm_tests`、plan/current_tail/skill/resume/checkpoint 等通用 real-LLM 与子进程 fixture 统一走 `provider=openai` + `api_base=DeepSeek` + `DEEPSEEK_API_KEY`；`openai_provider_test` 真 API smoke 同步改 DeepSeek 兼容路径。
+- **验证**：`cargo test --tests --no-run`、`cargo test web_search --lib`、`cargo test --test web_search_tool_tests`、`cargo test --test resume_hydration_cli_e2e`、`cargo test --test checkpoint_cli_e2e` 通过；`openai_responses_integration_tests` / `openai_files_integration_tests` / `reasoning_continuity` 中 OpenAI Responses 专项用例 intentionally 保留。
+- **覆盖**：状态页沿用当前分支既有 `66.2%` baseline。
 
 ### 2026-06-15 | chore(cursor): 移除 vendored OpenSpec skills
 

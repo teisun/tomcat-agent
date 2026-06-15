@@ -31,7 +31,7 @@ async fn runtime_explicit_tavily_works_from_public_api() {
         ("TAVILY_API_KEY", Some("tavily-test-key")),
         ("BRAVE_API_KEY", None),
         ("SERPER_API_KEY", None),
-        ("OPENAI_API_KEY", None),
+        ("DEEPSEEK_API_KEY", None),
     ]);
 
     let mut cfg = AppConfig::default();
@@ -81,7 +81,7 @@ async fn runtime_auto_routes_to_http_fallback_chain() {
         ("TAVILY_API_KEY", None),
         ("BRAVE_API_KEY", Some("brave-test-key")),
         ("SERPER_API_KEY", None),
-        ("OPENAI_API_KEY", None),
+        ("DEEPSEEK_API_KEY", None),
     ]);
 
     let mut cfg = AppConfig::default();
@@ -138,7 +138,7 @@ async fn runtime_explicit_serper_works_from_public_api() {
         ("TAVILY_API_KEY", None),
         ("BRAVE_API_KEY", None),
         ("SERPER_API_KEY", Some("serper-test-key")),
-        ("OPENAI_API_KEY", None),
+        ("DEEPSEEK_API_KEY", None),
     ]);
 
     let mut cfg = AppConfig::default();

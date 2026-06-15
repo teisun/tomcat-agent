@@ -34,6 +34,32 @@ fn cmd() -> Command {
     c
 }
 
+fn real_llm_api_key(test_name: &str) -> String {
+    common::require_deepseek_api_key(test_name)
+}
+
+fn configure_deepseek_real_llm(command: &mut Command, api_key: &str) {
+    let model = common::deepseek_test_model();
+    command
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, api_key)
+        .env("TOMCAT__LLM__PROVIDER", "openai")
+        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
+        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
+        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
+}
+
+fn configure_deepseek_without_key(command: &mut Command) {
+    let model = common::deepseek_test_model();
+    command
+        .env_remove(common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env("TOMCAT__LLM__PROVIDER", "openai")
+        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
+        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
+        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
+}
+
 fn trunc(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
@@ -211,7 +237,7 @@ impl FixedResolver {
             key_source: if provider == "deepseek" {
                 "DEEPSEEK_API_KEY".to_string()
             } else {
-                "OPENAI_API_KEY".to_string()
+                "DEEPSEEK_API_KEY".to_string()
             },
             thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
             capabilities,
@@ -1196,11 +1222,12 @@ fn test_chat_without_config_exits_with_error() {
 
     let dir = tempfile::tempdir().unwrap();
 
-    info!("Arrange: 无 ~/.tomcat/ 配置且无 OPENAI_API_KEY（HOME 指向空临时目录）");
+    info!(
+        "Arrange: 无 ~/.tomcat/ 配置且无 DEEPSEEK_API_KEY（HOME 指向空临时目录）"
+    );
     let mut c = cmd();
-    c.arg("chat")
-        .env("HOME", dir.path())
-        .env_remove("OPENAI_API_KEY");
+    c.arg("chat").env("HOME", dir.path());
+    configure_deepseek_without_key(&mut c);
 
     info!("Act: execute chat");
     let assert = c.assert();
@@ -1216,7 +1243,7 @@ fn test_chat_without_config_exits_with_error() {
 #[test]
 fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span =
         info_span!("test_chat_with_valid_config_and_api_key_starts_and_produces_output").entered();
 
@@ -1224,7 +1251,7 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
 
-    info!("Arrange: init config in temp dir, set work_dir and OPENAI_API_KEY");
+    info!("Arrange: init config in temp dir, set work_dir and DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -1232,16 +1259,14 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
         .assert()
         .success();
 
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!("集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC）")
-    });
+    let api_key = real_llm_api_key("test_chat_with_valid_config_and_api_key_starts_and_produces_output");
 
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", api_key)
         .write_stdin("hi\n")
         .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut c, &api_key);
 
     info!("Act: execute chat with stdin 'hi', timeout 60s");
     let assert = c.assert();
@@ -1289,9 +1314,9 @@ fn test_chat_with_session_dir_does_not_crash() {
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env_remove("OPENAI_API_KEY")
         .write_stdin("\n")
         .timeout(std::time::Duration::from_secs(5));
+    configure_deepseek_without_key(&mut c);
 
     info!("Act: run chat without API key, timeout 5s");
     let output = c.output().expect("chat 进程应在 5s 内结束");
@@ -1522,7 +1547,7 @@ fn test_audit_export_creates_file() {
 #[test]
 fn test_user_first_time_setup_init_and_doctor() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_first_time_setup_init_and_doctor").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1851,17 +1876,17 @@ fn test_ensure_embedded_assets_tolerates_existing_assets_files() {
     assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
 }
 
-// ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 OPENAI_API_KEY） ────────────────────
+// ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 DEEPSEEK_API_KEY） ────────────────────
 
 /// [E2E-CLI-011] 用户向助手提问并收到回答
 ///
 /// 用户意图：在 tomcat chat 中提问，收到 AI 回复
 /// 验证：exit 0；stdout 非空
-/// 要求：OPENAI_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
+/// 要求：DEEPSEEK_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
 #[test]
 fn test_user_asks_pi_a_question() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_asks_pi_a_question").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1869,27 +1894,23 @@ fn test_user_asks_pi_a_question() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + OPENAI_API_KEY");
+    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
-        )
-    });
+    let api_key = real_llm_api_key("test_user_asks_pi_a_question");
 
     info!("Act: tomcat chat stdin 你好，介绍一下你自己，timeout 60s");
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("你好，介绍一下你自己\n")
         .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut c, &api_key);
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
@@ -1904,11 +1925,11 @@ fn test_user_asks_pi_a_question() {
 ///
 /// 用户意图：问 Rust 所有权系统
 /// 验证：exit 0；stdout 含"所有权"或"ownership"
-/// 要求：OPENAI_API_KEY 环境变量已设置
+/// 要求：DEEPSEEK_API_KEY 环境变量已设置
 #[test]
 fn test_user_asks_pi_technical_question() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_asks_pi_technical_question").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1916,27 +1937,23 @@ fn test_user_asks_pi_technical_question() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + OPENAI_API_KEY");
+    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
-        )
-    });
+    let api_key = real_llm_api_key("test_user_asks_pi_technical_question");
 
     info!("Act: tomcat chat stdin 问 Rust 所有权，timeout 60s");
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("用一句话解释什么是 Rust 的所有权系统\n")
         .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut c, &api_key);
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
@@ -1958,7 +1975,7 @@ fn test_user_asks_pi_technical_question() {
 #[test]
 fn test_user_asks_pi_to_run_bash_command() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_asks_pi_to_run_bash_command").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -1966,28 +1983,24 @@ fn test_user_asks_pi_to_run_bash_command() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + OPENAI_API_KEY");
+    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
-        )
-    });
+    let api_key = real_llm_api_key("test_user_asks_pi_to_run_bash_command");
 
     info!("Act: tomcat chat stdin 请执行 echo hello_from_pi，timeout 60s");
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .env("RUST_LOG", "tomcat=info")
         .write_stdin("请执行 echo hello_from_pi\n")
         .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut c, &api_key);
     let assert = c.assert();
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2010,11 +2023,11 @@ fn test_user_asks_pi_to_run_bash_command() {
 /// [E2E-CLI-016B] 用户触发 read 失败时，终端应显示真实错误原因（非 failed 占位）
 ///
 /// 验证：exit 0；stderr 含 `[tool] read` 且包含 not found 语义，并且不退化为 `✗ failed`
-/// 要求：OPENAI_API_KEY 环境变量已设置
+/// 要求：DEEPSEEK_API_KEY 环境变量已设置
 #[test]
 fn test_user_sees_read_failure_reason_in_tool_line() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_sees_read_failure_reason_in_tool_line").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2022,18 +2035,14 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + OPENAI_API_KEY");
+    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
-        )
-    });
+    let api_key = real_llm_api_key("test_user_sees_read_failure_reason_in_tool_line");
 
     let missing_path = work_dir.join("workspace-main/definitely_missing_read_e2e.txt");
     let prompt = format!(
@@ -2045,10 +2054,10 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin(format!("{prompt}\n"))
         .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut c, &api_key);
     let assert = c.assert();
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2127,18 +2136,14 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
     let scratch = scratch.canonicalize().expect("workspace-temp scratch path");
     let scratch_str = scratch.to_str().expect("utf8 scratch path");
 
-    info!("Arrange: tomcat init + OPENAI_API_KEY");
+    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
-        )
-    });
+    let api_key = real_llm_api_key("setup_background_bash_p1_real_llm_fixture");
 
     info!("Arrange: tomcat workspace add {}", scratch_str);
     cmd()
@@ -2168,11 +2173,11 @@ fn run_background_bash_p1_real_llm_chat(
     c.arg("code")
         .current_dir(&fx.scratch)
         .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &fx.api_key)
         .env("TOMCAT__CONFIG_PATH", fx.config_path.to_str().unwrap())
         .env("RUST_LOG", "tomcat=info")
         .write_stdin(prompt)
         .timeout(timeout);
+    configure_deepseek_real_llm(&mut c, &fx.api_key);
     let assert = c.assert();
     let output = assert.get_output();
     CliChatRunCapture {
@@ -2215,7 +2220,7 @@ fn load_background_bash_p1_real_llm_transcript(fx: &BackgroundBashP1RealLlmFixtu
 #[test]
 fn test_user_background_bash_autofeed_real_llm_cli() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_background_bash_autofeed_real_llm_cli").entered();
 
     let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016c_bg_autofeed");
@@ -2303,7 +2308,7 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
 #[test]
 fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_background_bash_blocking_waitslice_real_llm_cli").entered();
 
     let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016d_blockwait");
@@ -2405,7 +2410,7 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 #[test]
 fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span =
         info_span!("test_user_background_bash_multiple_timeout_slices_real_llm_cli").entered();
 
@@ -2562,7 +2567,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
 #[test]
 fn test_user_background_bash_midturn_followup_real_llm_cli() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_background_bash_midturn_followup_real_llm_cli").entered();
 
     let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016f_midturn_followup");
@@ -2703,7 +2708,7 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
 #[test]
 fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli")
         .entered();
 
@@ -2828,7 +2833,7 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
 #[test]
 fn test_user_asks_pi_to_write_hello_world_bash() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_asks_pi_to_write_hello_world_bash").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2843,18 +2848,14 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     let scratch_canon = scratch.canonicalize().expect("workspace-temp scratch path");
     let scratch_str = scratch_canon.to_str().expect("utf8 scratch path");
 
-    info!("Arrange: tomcat init + OPENAI_API_KEY");
+    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
-        )
-    });
+    let api_key = real_llm_api_key("test_user_asks_pi_to_write_hello_world_bash");
 
     info!("Arrange: tomcat workspace add {}", scratch_str);
     cmd()
@@ -2874,10 +2875,10 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin(prompt)
         .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut c, &api_key);
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
@@ -3716,17 +3717,17 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
         .stdout(predicate::str::contains("scope:").and(predicate::str::contains("(none)")));
 }
 
-// ──────────────────── Story 7: LLM 统一接入（E2E-CLI-041~042，需 OPENAI_API_KEY） ────────────────────
+// ──────────────────── Story 7: LLM 统一接入（E2E-CLI-041~042，需 DEEPSEEK_API_KEY） ────────────────────
 
 /// [E2E-CLI-041] 用户与 LLM 对话，获得流式渲染回复
 ///
 /// 用户意图：与 LLM 对话，获得非空 AI 回复
 /// 验证：exit 0；stdout 含 AI 回复
-/// 要求：OPENAI_API_KEY 已设置
+/// 要求：DEEPSEEK_API_KEY 已设置
 #[test]
 fn test_user_chats_with_llm_gets_streaming_response() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_chats_with_llm_gets_streaming_response").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -3734,27 +3735,23 @@ fn test_user_chats_with_llm_gets_streaming_response() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + OPENAI_API_KEY");
+    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
-        )
-    });
+    let api_key = real_llm_api_key("test_user_chats_with_llm_gets_streaming_response");
 
     info!("Act: tomcat chat + stdin 单句，timeout 60s");
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("请用一句话回答：1+1 等于几？\n")
         .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut c, &api_key);
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!(
@@ -3772,11 +3769,11 @@ fn test_user_chats_with_llm_gets_streaming_response() {
 ///
 /// 用户意图：发送极短提问，验证 LLM 回复非空
 /// 验证：exit 0；stdout 非空
-/// 要求：OPENAI_API_KEY 已设置
+/// 要求：DEEPSEEK_API_KEY 已设置
 #[test]
 fn test_user_receives_nonempty_llm_response() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_receives_nonempty_llm_response").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -3784,27 +3781,23 @@ fn test_user_receives_nonempty_llm_response() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + OPENAI_API_KEY");
+    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
-        )
-    });
+    let api_key = real_llm_api_key("test_user_receives_nonempty_llm_response");
 
     info!("Act: tomcat chat + stdin 说一个字，timeout 60s");
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("说一个字\n")
         .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut c, &api_key);
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
@@ -4072,7 +4065,7 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init，移除 OPENAI_API_KEY");
+    info!("Arrange: tomcat init，移除 DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -4085,9 +4078,9 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
-        .env_remove("OPENAI_API_KEY")
         .write_stdin("hello\n")
         .timeout(std::time::Duration::from_secs(5));
+    configure_deepseek_without_key(&mut c);
     let output = c.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -4158,7 +4151,8 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     c.arg("chat")
         .env("HOME", home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", "dummy-key")
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
@@ -4447,11 +4441,11 @@ fn test_user_init_then_doctor_roundtrip() {
 ///
 /// 用户意图：用 --resume 恢复已有会话，历史消息从 JSONL 加载
 /// 验证：exit 0；进程正常退出（不崩溃）
-/// 要求：OPENAI_API_KEY 已设置
+/// 要求：DEEPSEEK_API_KEY 已设置
 #[test]
 fn test_user_chat_resumes_last_session() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_chat_resumes_last_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -4459,39 +4453,35 @@ fn test_user_chat_resumes_last_session() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + OPENAI_API_KEY");
+    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
-        )
-    });
+    let api_key = real_llm_api_key("test_user_chat_resumes_last_session");
 
     info!("Act: 第一轮 tomcat chat，建立会话历史");
-    cmd()
+    let mut first_round = cmd();
+    first_round
         .arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("请回答：1+1=？\n")
-        .timeout(std::time::Duration::from_secs(60))
-        .assert()
-        .success();
+        .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut first_round, &api_key);
+    first_round.assert().success();
 
     info!("Act: 第二轮 tomcat chat --resume，恢复会话");
     let mut c = cmd();
     c.arg("chat")
         .arg("--resume")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("好的，谢谢\n")
         .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut c, &api_key);
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
@@ -5023,7 +5013,7 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
         ("TAVILY_API_KEY", Some("tavily-test-key")),
         ("BRAVE_API_KEY", None),
         ("SERPER_API_KEY", None),
-        ("OPENAI_API_KEY", None),
+        (common::DEEPSEEK_TEST_API_KEY_ENV, None),
     ]);
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".to_string();
@@ -5293,10 +5283,9 @@ fn test_session_model_override_persists_across_chat_context_restart() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some("OPENAI_API_KEY".to_string());
+    common::apply_deepseek_app_config(&mut cfg);
 
     unsafe {
-        std::env::set_var("OPENAI_API_KEY", "openai-stub");
         std::env::set_var("DEEPSEEK_API_KEY", "deepseek-stub");
     }
 
@@ -5316,7 +5305,6 @@ fn test_session_model_override_persists_across_chat_context_restart() {
     assert_eq!(entry.model_override.as_deref(), Some("deepseek-v4-pro"));
 
     unsafe {
-        std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("DEEPSEEK_API_KEY");
     }
 }
@@ -5325,12 +5313,12 @@ fn test_session_model_override_persists_across_chat_context_restart() {
 
 /// [用户场景] 用户启动 `tomcat chat` 并输入单句提问，AgentLoop 执行并输出 AI 回复
 ///
-/// 验证：exit 0 且 stdout 包含非空 AI 回复文本（需 OPENAI_API_KEY；无 key 时 panic，符合规范）
+/// 验证：exit 0 且 stdout 包含非空 AI 回复文本（需 DEEPSEEK_API_KEY；无 key 时 panic，符合规范）
 /// 意义：TASK-14 T1-P1-005 E2E 门禁——验证 AgentLoop::run() 已完整接入 tomcat chat 交互链路（E2E_TEST_SPEC §6）
 #[test]
 fn test_user_chat_non_interactive_with_prompt_flag() {
     common::setup_logging();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
     let _span = info_span!("test_user_chat_non_interactive_with_prompt_flag").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -5338,7 +5326,7 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init 生成配置；加载 OPENAI_API_KEY");
+    info!("Arrange: tomcat init 生成配置；加载 DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -5346,20 +5334,16 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
         .assert()
         .success();
 
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!(
-            "集成测试要求设置 OPENAI_API_KEY（无 key 时用例失败，符合 INTEGRATION_TEST_SPEC §5.2）"
-        )
-    });
+    let api_key = real_llm_api_key("test_user_chat_non_interactive_with_prompt_flag");
 
     info!("Act: tomcat chat stdin 单轮问答，timeout 60s");
     let mut c = cmd();
     c.arg("chat")
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
-        .env("OPENAI_API_KEY", &api_key)
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("Reply with exactly: pong\n")
         .timeout(std::time::Duration::from_secs(60));
+    configure_deepseek_real_llm(&mut c, &api_key);
 
     let assert = c.assert();
     let out = assert.get_output().stdout.clone();
