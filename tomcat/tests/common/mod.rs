@@ -39,9 +39,7 @@ pub fn require_deepseek_api_key(test_name: &str) -> String {
     setup_logging();
     load_deepseek_test_env();
     std::env::var(DEEPSEEK_TEST_API_KEY_ENV).unwrap_or_else(|_| {
-        panic!(
-            "{test_name} 必须设置 {DEEPSEEK_TEST_API_KEY_ENV}（环境变量或 tomcat/.env）"
-        )
+        panic!("{test_name} 必须设置 {DEEPSEEK_TEST_API_KEY_ENV}（环境变量或 tomcat/.env）")
     })
 }
 

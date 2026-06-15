@@ -7,8 +7,8 @@ use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::BackgroundCompletionRoutes;
-use crate::core::llm::ModelCatalog;
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
+use crate::core::llm::ModelCatalog;
 use crate::core::plan_runtime;
 use crate::core::tools::contract::registry::ToolRegistry;
 use crate::core::tools::primitive::{BashTaskId, BashTaskRegistry, PrimitiveExecutor};

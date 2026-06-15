@@ -15,6 +15,6 @@ pub use catalog::{CatalogEntry, PluginCatalog, PluginCatalogDiagnostic, PluginSo
 pub use function_registry::{FunctionRegistry, RegisteredFunction};
 pub use manager::PluginManager;
 pub use types::{
-    ConfirmPermissionsFn, ManifestFunction, ManifestTool, PluginActivation, PluginInfo,
-    PluginInstance, PluginManifest, PluginStatus, parse_manifest,
+    parse_manifest, ConfirmPermissionsFn, ManifestFunction, ManifestTool, PluginActivation,
+    PluginInfo, PluginInstance, PluginManifest, PluginStatus,
 };

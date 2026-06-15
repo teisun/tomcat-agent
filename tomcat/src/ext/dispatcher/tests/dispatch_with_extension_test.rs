@@ -12,19 +12,113 @@
 //! - `register_command_records_metadata`：插件命令注册后能从 dispatcher 取回。
 //! - `normalize_tool_parameters_unwraps_schema`：辅助函数解包 `schema` 包装。
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use super::super::helpers::normalize_tool_parameters;
+use super::super::helpers::{normalize_tool_parameters, parse_chat_request};
 use super::super::HostApiDispatcher;
 use super::mocks::{MockLlm, MockPrimitive, MockToolRegistry};
+use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::{
-    BashResult, DirEntry, EditFileResult, EditOperation, PrimitiveExecutor, PrimitiveOperation,
-    SessionManager, WriteFileResult,
+    BashResult, Capabilities, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, DirEntry,
+    EditFileResult, EditOperation, LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor,
+    PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent, WriteFileResult,
 };
 use crate::ext::host_binding::HostRequest;
 use crate::infra::error::AppError;
 use crate::infra::DefaultEventBus;
+
+#[derive(Clone)]
+struct RecordingLlm {
+    reply: &'static str,
+    calls: Arc<AtomicUsize>,
+    seen_models: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordingLlm {
+    fn new(reply: &'static str) -> (Self, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen_models = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                reply,
+                calls: Arc::clone(&calls),
+                seen_models: Arc::clone(&seen_models),
+            },
+            calls,
+            seen_models,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for RecordingLlm {
+    fn provider_name(&self) -> &str {
+        self.reply
+    }
+
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AppError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.seen_models.lock().unwrap().push(req.model.clone());
+        Ok(ChatResponse {
+            id: Some(format!("{}-id", self.reply)),
+            choices: vec![ChatResponseChoice {
+                index: 0,
+                message: ChatMessage::assistant(self.reply),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<
+        Box<dyn futures_util::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.seen_models.lock().unwrap().push(req.model.clone());
+        use futures_util::stream;
+        Ok(Box::new(stream::iter(vec![Ok(
+            StreamEvent::ContentDelta {
+                delta: self.reply.to_string(),
+            },
+        )])))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+struct StaticResolver {
+    provider: Arc<dyn LlmProvider>,
+    seen_models: Arc<Mutex<Vec<String>>>,
+}
+
+impl LlmResolver for StaticResolver {
+    fn resolve(
+        &self,
+        scene: LlmScene,
+        session_override: Option<&str>,
+    ) -> Result<ResolvedCall, AppError> {
+        assert_eq!(scene, LlmScene::Main);
+        let model = session_override.unwrap_or_default().to_string();
+        self.seen_models.lock().unwrap().push(model.clone());
+        Ok(ResolvedCall {
+            provider_impl: Arc::clone(&self.provider),
+            model,
+            api: "openai".to_string(),
+            provider: "mimo".to_string(),
+            base_url: None,
+            key_source: "TEST_KEY".to_string(),
+            thinking_format: ThinkingFormat::Openai,
+            capabilities: Capabilities::default(),
+        })
+    }
+}
 
 #[tokio::test]
 async fn dispatch_read_file_with_primitive_returns_ok() {
@@ -209,6 +303,31 @@ fn normalize_tool_parameters_unwraps_schema() {
     assert!(n.get("properties").is_some());
 }
 
+#[test]
+fn parse_chat_request_forwards_tools() {
+    let req = parse_chat_request(&serde_json::json!({
+        "messages": [{"role": "user", "content": "hi"}],
+        "model": "mimo-mini",
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "search the web",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        }]
+    }))
+    .expect("chat request");
+
+    let tools = req.tools.expect("tools should be forwarded");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["type"], serde_json::json!("function"));
+    assert_eq!(
+        tools[0]["function"]["name"],
+        serde_json::json!("web_search")
+    );
+}
+
 #[tokio::test]
 async fn dispatch_chat_with_llm_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());
@@ -221,6 +340,77 @@ async fn dispatch_chat_with_llm_returns_ok() {
     };
     let res = d.dispatch_async("inst-1", req).await.unwrap();
     assert!(res.ok);
+}
+
+#[tokio::test]
+async fn dispatch_chat_routes_named_model_via_resolver() {
+    let bus = Arc::new(DefaultEventBus::new());
+    let (global_llm, global_calls, _) = RecordingLlm::new("global");
+    let (resolved_llm, resolved_calls, resolved_models) = RecordingLlm::new("resolved");
+    let resolver_models = Arc::new(Mutex::new(Vec::new()));
+    let resolver = StaticResolver {
+        provider: Arc::new(resolved_llm),
+        seen_models: Arc::clone(&resolver_models),
+    };
+    let d = HostApiDispatcher::new(bus)
+        .with_llm(Arc::new(global_llm))
+        .with_llm_resolver(Arc::new(resolver));
+    let req = HostRequest {
+        module: "llm".to_string(),
+        method: "createChatCompletion".to_string(),
+        params: serde_json::json!({ "messages": [], "model": "mimo-v2.5-pro" }),
+        call_id: None,
+    };
+
+    let res = d.dispatch_async("inst-1", req).await.unwrap();
+    assert!(res.ok);
+    assert_eq!(global_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(resolved_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        resolver_models.lock().unwrap().clone(),
+        vec!["mimo-v2.5-pro".to_string()]
+    );
+    assert_eq!(
+        resolved_models.lock().unwrap().clone(),
+        vec!["mimo-v2.5-pro".to_string()]
+    );
+    assert_eq!(
+        res.data
+            .as_ref()
+            .and_then(|d| d["choices"][0]["message"]["content"].as_str()),
+        Some("resolved")
+    );
+}
+
+#[tokio::test]
+async fn dispatch_chat_default_model_falls_back_to_global_llm() {
+    let bus = Arc::new(DefaultEventBus::new());
+    let (global_llm, global_calls, global_models) = RecordingLlm::new("global");
+    let (resolved_llm, resolved_calls, _) = RecordingLlm::new("resolved");
+    let resolver_models = Arc::new(Mutex::new(Vec::new()));
+    let resolver = StaticResolver {
+        provider: Arc::new(resolved_llm),
+        seen_models: Arc::clone(&resolver_models),
+    };
+    let d = HostApiDispatcher::new(bus)
+        .with_llm(Arc::new(global_llm))
+        .with_llm_resolver(Arc::new(resolver));
+    let req = HostRequest {
+        module: "llm".to_string(),
+        method: "createChatCompletion".to_string(),
+        params: serde_json::json!({ "messages": [], "model": "default" }),
+        call_id: None,
+    };
+
+    let res = d.dispatch_async("inst-1", req).await.unwrap();
+    assert!(res.ok);
+    assert_eq!(global_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolved_calls.load(Ordering::SeqCst), 0);
+    assert!(resolver_models.lock().unwrap().is_empty());
+    assert_eq!(
+        global_models.lock().unwrap().clone(),
+        vec!["default".to_string()]
+    );
 }
 
 #[tokio::test]

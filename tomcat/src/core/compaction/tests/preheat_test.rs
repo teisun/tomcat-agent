@@ -7,6 +7,7 @@ fn normal_msg(id: &str) -> ChatMessage {
     ChatMessage {
         role: ChatMessageRole::User,
         content: Some(ChatMessageContent::Text("text".into())),
+        annotations: None,
         name: None,
         tool_calls: None,
         tool_call_id: None,

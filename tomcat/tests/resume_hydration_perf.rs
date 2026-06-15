@@ -18,7 +18,10 @@ fn apply_deepseek_env(command: &mut Command) {
     let model = common::deepseek_test_model();
     command
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .env("TOMCAT__LLM__PROVIDER", "openai")
         .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
         .env("TOMCAT__LLM__DEFAULT_MODEL", &model)

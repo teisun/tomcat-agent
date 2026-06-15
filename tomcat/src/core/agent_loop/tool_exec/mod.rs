@@ -134,6 +134,7 @@ impl ToolExecOutcome {
 
 struct ToolExecCtx<'a> {
     primitive: &'a Arc<dyn PrimitiveExecutor>,
+    session_id: &'a str,
     config_backend: &'a Option<SharedConfigBackend>,
     bash_task_registry: &'a Option<Arc<BashTaskRegistry>>,
     read_file_state: Option<&'a Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
@@ -241,6 +242,7 @@ pub(super) async fn execute_tool_full(
 ) -> ToolExecOutcome {
     execute_tool_full_with_policy(
         primitive,
+        "__tool_exec_test_session__",
         config_backend,
         bash_task_registry,
         read_file_state,
@@ -264,6 +266,7 @@ pub(super) async fn execute_tool_full(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_tool_full_with_policy(
     primitive: &Arc<dyn PrimitiveExecutor>,
+    session_id: &str,
     config_backend: &Option<SharedConfigBackend>,
     bash_task_registry: &Option<Arc<BashTaskRegistry>>,
     read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
@@ -284,6 +287,7 @@ pub(super) async fn execute_tool_full_with_policy(
     let mut display = None;
     let ctx = ToolExecCtx {
         primitive,
+        session_id,
         config_backend,
         bash_task_registry,
         read_file_state,

@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::Arc;
 use tomcat::{
-    AppError, DefaultEventBus, PluginInstance, PluginManager, PluginStatus, parse_manifest,
+    parse_manifest, AppError, DefaultEventBus, PluginInstance, PluginManager, PluginStatus,
 };
 
 /// [parse_manifest 合法] 合法 JSON 解析出完整 PluginManifest

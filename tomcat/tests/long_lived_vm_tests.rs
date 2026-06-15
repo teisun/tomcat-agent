@@ -8,12 +8,12 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use tomcat::{
-    DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance, PluginManager,
-    PluginRuntimeKey, PluginRuntimeManager, PluginStatus, SharedPluginRuntimeManager,
-    VmActorHandle, VmActorState, VmCommand, parse_manifest, wire,
+    parse_manifest, wire, DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance,
+    PluginManager, PluginRuntimeKey, PluginRuntimeManager, PluginStatus,
+    SharedPluginRuntimeManager, VmActorHandle, VmActorState, VmCommand,
 };
 
 fn stub_handle() -> VmActorHandle {
@@ -266,8 +266,8 @@ fn test_session_cleanup_removes_all_handles_for_session() -> Result<(), Box<dyn 
 ///
 /// 验收标准：关闭流程无悬挂线程、无 pending 泄漏 — end_session 正确清理。
 #[tokio::test]
-async fn test_plugin_manager_end_session_cleans_runtime_manager()
--> Result<(), Box<dyn std::error::Error>> {
+async fn test_plugin_manager_end_session_cleans_runtime_manager(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span =
         tracing::info_span!("test_plugin_manager_end_session_cleans_runtime_manager").entered();
@@ -332,8 +332,8 @@ async fn test_start_session_vm_without_engine_returns_err() -> Result<(), Box<dy
 
 /// [start_session_vm 无 PluginRuntimeManager] 未注入运行时管理器时返回明确错误
 #[tokio::test]
-async fn test_start_session_vm_without_runtime_manager_returns_err()
--> Result<(), Box<dyn std::error::Error>> {
+async fn test_start_session_vm_without_runtime_manager_returns_err(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span =
         tracing::info_span!("test_start_session_vm_without_runtime_manager_returns_err").entered();
@@ -359,8 +359,8 @@ async fn test_start_session_vm_without_runtime_manager_returns_err()
 
 /// [dispatch_session_event 无 dispatcher] 未注入 HostApiDispatcher 时返回错误
 #[test]
-fn test_dispatch_session_event_without_dispatcher_returns_err()
--> Result<(), Box<dyn std::error::Error>> {
+fn test_dispatch_session_event_without_dispatcher_returns_err(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span =
         tracing::info_span!("test_dispatch_session_event_without_dispatcher_returns_err").entered();

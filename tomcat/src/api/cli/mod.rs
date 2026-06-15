@@ -1,6 +1,7 @@
 //! CLI 子命令：init、doctor、config、session、plugin、audit；无参默认按配置进入 claw/code。
 
 mod audit_cmd;
+mod builtin_plugins;
 mod chat_cmd;
 mod claw_cmd;
 mod code_cmd;

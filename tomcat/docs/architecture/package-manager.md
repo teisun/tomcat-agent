@@ -724,6 +724,31 @@ acme-dev-kit/                      # package 根目录
 | runtime 扫描 | 不扫描 `packages/` | `plugin_roots()` 扫描 | `skill_roots()` 扫描 | 运行时只认 plugin/skill 自己那两类目录。 |
 | 内存对象 | 无独立 runtime 对象 | `PluginCatalog` / `PluginManager` / `ToolRegistry` 相关对象 | `SkillSet` 相关对象 | 内存里没有“PackageManager 把包整体加载起来”这回事。 |
 
+### 5.7 `web_search.backend` 用例
+
+`web_search.backend` 是一个典型的 **host-facing function** 插件用例。它的包落盘方式和普通插件一样，仍然写进目标层的 `plugins/<id>/` 目录；差别只在 manifest 里声明的是 `functions[]`，不是给 LLM 的 `tools[]`。
+
+```json
+{
+  "id": "tomcat.web-search-backends",
+  "functions": [
+    {
+      "point": "web_search.backend",
+      "function": "webSearchBackend"
+    }
+  ],
+  "tools": []
+}
+```
+
+运行时发现后：
+
+- `FunctionRegistry` 会把它登记到扩展点 `web_search.backend`
+- `ToolRegistry` **不会**出现 `webSearchBackend`
+- `WebSearchRuntime` 通过宿主调用链触发 `PluginFunctionInvoker.execute(..., session_id)`
+
+**说人话**：安装面它就是个普通插件目录；运行面它不是给模型看的工具，而是给宿主自己调的后端扩展点。
+
 ## 6. 文件职责总览（One-Glance Map）
 
 ```text

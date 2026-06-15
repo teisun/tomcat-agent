@@ -63,16 +63,16 @@
 //! - 跨 actor：`vm_actor::{VmActor, VmCommand, EventEnvelope}` 提供单插件单 VM 的
 //!   消息隔离；`runtime_manager` 跨插件共享插件 VM 实例。
 
-use super::FunctionRegistry;
 use super::types::{
     ConfirmPermissionsFn, PluginInfo, PluginInstance, PluginManifest, PluginStatus,
 };
+use super::FunctionRegistry;
 use crate::core::ToolRegistry;
 use crate::infra::audit::{AuditRecorder, PluginLifecycleAuditEntry};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use parking_lot::RwLock;
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{hash_map::Entry, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -80,7 +80,7 @@ use std::time::Instant;
 use crate::ext::runtime_manager::{PluginRuntimeKey, SharedPluginRuntimeManager};
 use crate::ext::ts_compiler::transpile_pi_plugin_for_quickjs;
 use crate::ext::vm_actor::{EventEnvelope, VmActor, VmActorHandle, VmActorState, VmCommand};
-use crate::ext::{HostApiDispatcher, PluginEngine, invoke_host_func_with};
+use crate::ext::{invoke_host_func_with, HostApiDispatcher, PluginEngine};
 
 use super::types::parse_manifest;
 

@@ -398,7 +398,10 @@ fn run_tomcat_chat(
         .env("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "5000")
         .env("TOMCAT__LLM__PROVIDER", "openai")
         .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .env(ASK_QUESTION_AUTO_PICK_ENV, "recommended")
         .env("TOMCAT__LLM__DEFAULT_MODEL", &fx.model)
         .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &fx.model)

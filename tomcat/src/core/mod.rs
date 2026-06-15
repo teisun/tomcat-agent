@@ -37,8 +37,8 @@ pub use package::{
     DetectedPackageSource, DetectedPackageSourceKind, InstallOutcome, LayerPaths,
     PackageLayerListing, PackageManager, PackageManifest, PackagePluginRecord, PackageRecord,
     PackageRegistryFile, PackageResourceKind, PackageSkillRecord, PackageSourceKind,
-    PackageVisibility, PluginRegistryEntry, PluginRegistryFile, PreparedInstall,
-    UninstallOutcome, PACKAGE_MANIFEST_SCHEMA_V1, PACKAGE_REGISTRY_SCHEMA_V1,
+    PackageVisibility, PluginRegistryEntry, PluginRegistryFile, PreparedInstall, UninstallOutcome,
+    PACKAGE_MANIFEST_SCHEMA_V1, PACKAGE_REGISTRY_SCHEMA_V1,
 };
 pub use primitives::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,

@@ -2,15 +2,15 @@
 
 use std::path::Path;
 
-use crate::core::package::{PackageVisibility, resolve_runtime_layer_paths};
 pub(crate) use crate::core::package::{
-    PluginRegistryEntry, PluginRegistryFile, load_plugin_registry, save_plugin_registry,
+    load_plugin_registry, save_plugin_registry, PluginRegistryEntry, PluginRegistryFile,
 };
+use crate::core::package::{resolve_runtime_layer_paths, PackageVisibility};
 use crate::ext::parse_manifest;
 use crate::{
-    AppConfig, AppError, AuditStore, DefaultEventBus, DefaultToolRegistry, EventBus,
-    FileAuditRecorder, PluginEngine, PluginManager, Tool, ToolExecutor, ToolRegistry,
-    TracingAuditRecorder, resolve_plugins_dir,
+    resolve_plugins_dir, AppConfig, AppError, AuditStore, DefaultEventBus, DefaultToolRegistry,
+    EventBus, FileAuditRecorder, PluginEngine, PluginManager, Tool, ToolExecutor, ToolRegistry,
+    TracingAuditRecorder,
 };
 use std::fmt::Write as _;
 

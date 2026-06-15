@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::json;
 use serial_test::serial;
 
-use crate::{AppConfig, SessionMode, api::chat::ChatContext};
+use crate::{api::chat::ChatContext, AppConfig, SessionMode};
 
 struct EnvGuard {
     key: &'static str,
@@ -442,6 +442,18 @@ fn write_project_function_plugin(
         functions,
         script,
     );
+}
+
+fn install_builtin_web_search_backends_plugin(work_dir: &Path) {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("plugins")
+        .join("web-search-backends");
+    let dst = work_dir.join("plugins").join("web-search-backends");
+    fs::create_dir_all(&dst).expect("create builtin plugin dir");
+    for name in ["plugin.json", "main.js", "README.md"] {
+        fs::copy(src.join(name), dst.join(name)).expect("copy builtin plugin asset");
+    }
 }
 
 fn write_plugin_fixture(
@@ -1628,6 +1640,33 @@ async fn host_root_catalog_order_is_stable() {
     assert_eq!(
         plugin_ids,
         vec!["alpha-function".to_string(), "beta-function".to_string()]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn builtin_web_search_backend_plugin_is_discoverable_as_host_function() {
+    const API_ENV: &str = "TOMCAT_BUILTIN_WEB_SEARCH_PLUGIN_DISCOVERY_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    install_builtin_web_search_backends_plugin(work_dir.path());
+
+    let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
+    let targets = function_targets(&ctx, "web_search.backend");
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].plugin_id, "tomcat.web-search-backends");
+    assert_eq!(targets[0].function, "webSearchBackend");
+
+    let tool_names = list_tool_names(&ctx).await;
+    assert!(
+        !tool_names.iter().any(|name| name == "webSearchBackend"),
+        "host-facing webSearchBackend must stay out of ToolRegistry"
     );
 }
 

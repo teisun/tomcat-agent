@@ -434,13 +434,6 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
     if cfg.skills.max_skills == 0 {
         return Err(AppError::Config("skills.max_skills 必须大于 0".to_string()));
     }
-    let web_search_backend = cfg.tools.web_search.backend.trim().to_ascii_lowercase();
-    if !["auto", "openai", "tavily", "brave", "serper"].contains(&web_search_backend.as_str()) {
-        return Err(AppError::Config(format!(
-            "tools.web_search.backend 非法: {}",
-            cfg.tools.web_search.backend
-        )));
-    }
     if !(1..=20).contains(&cfg.tools.web_search.count) {
         return Err(AppError::Config(format!(
             "tools.web_search.count 非法: {}（允许 [1, 20]）",

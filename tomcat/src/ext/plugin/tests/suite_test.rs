@@ -1,6 +1,6 @@
 use super::super::manager::PluginManager;
 use super::super::types::{
-    PluginActivation, PluginInstance, PluginManifest, PluginStatus, parse_manifest,
+    parse_manifest, PluginActivation, PluginInstance, PluginManifest, PluginStatus,
 };
 use crate::core::tools::contract::registry::{
     DefaultToolRegistry, Tool, ToolExecutor, ToolRegistry,

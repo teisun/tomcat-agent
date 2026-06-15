@@ -60,6 +60,7 @@ impl WebSearchBackend for TavilyBackend {
         };
 
         Ok(BackendSearchResponse {
+            backend_label: None,
             raw_hits: response
                 .results
                 .into_iter()

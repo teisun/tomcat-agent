@@ -20,7 +20,7 @@ impl PluginFunctionInvoker {
         Arc::new(Self {
             plugin_manager,
             dispatcher: Mutex::new(Weak::new()),
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(120),
             next_call_id: AtomicU64::new(1),
         })
     }

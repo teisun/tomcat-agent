@@ -90,6 +90,41 @@ fn chat_message_completion_metadata_roundtrip() {
 }
 
 #[test]
+fn chat_message_annotations_roundtrip_and_skip() {
+    let mut msg = ChatMessage::assistant("with cites");
+    msg.annotations = Some(vec![serde_json::json!({
+        "type": "url_citation",
+        "url": "https://example.com",
+        "title": "Example"
+    })]);
+
+    let json = serde_json::to_value(&msg).unwrap();
+    assert_eq!(json["annotations"][0]["type"], "url_citation");
+    let roundtrip: ChatMessage = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(
+        roundtrip
+            .annotations
+            .as_ref()
+            .and_then(|v| v.first())
+            .and_then(|v| v.get("url")),
+        Some(&serde_json::json!("https://example.com"))
+    );
+
+    let stripped = msg.without_completion_metadata();
+    let stripped_json = serde_json::to_value(&stripped).unwrap();
+    assert!(
+        stripped_json.get("annotations").is_none(),
+        "without_completion_metadata 应剥离 provider annotations"
+    );
+
+    let plain_json = serde_json::to_value(ChatMessage::assistant("plain")).unwrap();
+    assert!(
+        plain_json.get("annotations").is_none(),
+        "annotations=None 应被 skip_serializing"
+    );
+}
+
+#[test]
 fn chat_request_serialize_snake_case() {
     let req = ChatRequest {
         messages: vec![ChatMessage::user("test")],

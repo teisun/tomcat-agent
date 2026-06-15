@@ -44,6 +44,20 @@ fn run_init_writes_openai_responses_as_default_provider() {
 
 #[test]
 #[serial(env_lock)]
+fn run_init_installs_builtin_web_search_backends_plugin() {
+    with_temp_home(|| {
+        run_init().expect("init should succeed");
+
+        let plugins_dir = crate::resolve_plugins_dir(&AppConfig::default()).expect("plugins dir");
+        let plugin_dir = plugins_dir.join("web-search-backends");
+        assert!(plugin_dir.join("plugin.json").exists());
+        assert!(plugin_dir.join("main.js").exists());
+        assert!(plugin_dir.join("README.md").exists());
+    });
+}
+
+#[test]
+#[serial(env_lock)]
 fn run_init_resets_sessions_store_to_new_shape() {
     with_temp_home(|| {
         let sessions_dir =

@@ -4,18 +4,18 @@ use async_trait::async_trait;
 use futures_util::stream;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tomcat::{
-    BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, DefaultEventBus,
-    DefaultToolRegistry, DirEntry, EditFileResult, EditOperation, FunctionRegistry,
-    HostApiDispatcher, LlmProvider, PluginEngine, PluginEngineConfig, PluginFunctionInvoker,
-    PluginInstance, PluginManager, PluginRuntimeManager, PluginStatus, PluginToolExecutor,
-    PrimitiveExecutor, PrimitiveOperation, SharedPluginRuntimeManager, StreamEvent, Tool,
-    ToolExecutor, ToolRegistry, TracingAuditRecorder, VmActorHandle, VmActorState, WriteFileResult,
-    parse_manifest,
+    parse_manifest, BashResult, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice,
+    DefaultEventBus, DefaultToolRegistry, DirEntry, EditFileResult, EditOperation,
+    FunctionRegistry, HostApiDispatcher, LlmProvider, PluginEngine, PluginEngineConfig,
+    PluginFunctionInvoker, PluginInstance, PluginManager, PluginRuntimeManager, PluginStatus,
+    PluginToolExecutor, PrimitiveExecutor, PrimitiveOperation, SharedPluginRuntimeManager,
+    StreamEvent, Tool, ToolExecutor, ToolRegistry, TracingAuditRecorder, VmActorHandle,
+    VmActorState, WriteFileResult,
 };
 
 type FunctionManagerHarness = (
@@ -773,8 +773,8 @@ __pi_start_event_loop();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_toolbox_plugin_discovers_dynamic_tools_and_executes()
--> Result<(), Box<dyn std::error::Error>> {
+async fn legacy_toolbox_plugin_discovers_dynamic_tools_and_executes(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let plugin_dir = create_plugin_dir(
         "legacy-toolbox-plugin",
@@ -907,8 +907,8 @@ __pi_start_event_loop();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn runaway_plugin_timeout_interrupts_when_budget_disabled()
--> Result<(), Box<dyn std::error::Error>> {
+async fn runaway_plugin_timeout_interrupts_when_budget_disabled(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let runaway_dir = create_plugin_dir(
         "runaway-timeout-plugin",

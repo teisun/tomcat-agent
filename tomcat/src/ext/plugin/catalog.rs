@@ -1,7 +1,7 @@
 use super::source_scan::{host_root_plugin_dir, plugin_roots};
-use super::{PluginManifest, parse_manifest};
-use crate::AppConfig;
+use super::{parse_manifest, PluginManifest};
 use crate::infra::error::AppError;
+use crate::AppConfig;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

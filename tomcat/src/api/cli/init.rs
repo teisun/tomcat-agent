@@ -81,6 +81,18 @@ pub(crate) fn run_init() -> Result<(), AppError> {
         }
     }
 
+    match crate::api::cli::builtin_plugins::ensure_builtin_plugins(&cfg)? {
+        crate::api::cli::builtin_plugins::BuiltinPluginsStatus::Created => {
+            println!("  ✓ 已安装官方插件 web-search-backends")
+        }
+        crate::api::cli::builtin_plugins::BuiltinPluginsStatus::UpdatedMissingFiles => {
+            println!("  ✓ 已补齐官方插件 web-search-backends 缺失文件")
+        }
+        crate::api::cli::builtin_plugins::BuiltinPluginsStatus::AlreadyPresent => {
+            println!("  ✓ 官方插件 web-search-backends 已就绪")
+        }
+    }
+
     ensure_embedded_assets(&cfg)?;
     println!("  ✓ 内嵌资源目录已就绪");
 

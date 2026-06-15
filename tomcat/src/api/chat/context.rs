@@ -20,10 +20,10 @@ use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, PrimitiveExecutor,
-    SessionEntry, SessionManager, SessionMode, Tool, ToolExecutor, ToolRegistry,
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_plugins_dir,
-    resolve_sessions_dir, resolve_workspace_roots_paths, session_key_for_agent,
+    resolve_sessions_dir, resolve_workspace_roots_paths, session_key_for_agent, AppConfig,
+    DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, PrimitiveExecutor, SessionEntry,
+    SessionManager, SessionMode, Tool, ToolExecutor, ToolRegistry,
 };
 
 use crate::core::llm::LlmScene;
@@ -150,8 +150,8 @@ fn checkpoint_store_for(
     store
 }
 
-fn scope_runtime_cache()
--> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
+fn scope_runtime_cache(
+) -> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
     static CACHE: OnceLock<
         RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>>,
     > = OnceLock::new();
@@ -163,6 +163,7 @@ fn scope_runtime_for(
     agent_workspace_dir: std::path::PathBuf,
     audit: Arc<dyn AuditRecorder>,
     llm: Arc<dyn LlmProvider>,
+    llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
     session: Arc<SessionManager>,
 ) -> Result<Arc<ScopeContainer>, AppError> {
@@ -181,16 +182,16 @@ fn scope_runtime_for(
     }
 
     let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let deps = PluginRuntimeDeps {
+        audit,
+        event_bus: event_bus.clone(),
+        llm,
+        llm_resolver,
+        primitive,
+        session,
+    };
     let (tool_registry, function_registry, plugin_manager, plugin_function_invoker, dispatcher) =
-        build_plugin_runtime(
-            config,
-            &key,
-            audit,
-            event_bus.clone(),
-            llm,
-            primitive,
-            session,
-        )?;
+        build_plugin_runtime(config, &key, deps)?;
     let shared = Arc::new(ScopeContainer {
         event_bus,
         tool_registry,
@@ -368,6 +369,7 @@ impl ChatContext {
             agent_workspace_dir.clone(),
             audit.clone(),
             llm.clone(),
+            llm_resolver.clone(),
             primitive.clone(),
             session_arc.clone(),
         )?;
@@ -380,6 +382,12 @@ impl ChatContext {
         let function_registry = shared_scope_runtime.function_registry.clone();
         let plugin_manager = shared_scope_runtime.plugin_manager.clone();
         let plugin_function_invoker = shared_scope_runtime.plugin_function_invoker.clone();
+        if let Some(function_invoker) = plugin_function_invoker.as_ref() {
+            web_search_runtime.set_plugin_invoker(crate::ext::ExtPluginSearchInvoker::new(
+                function_registry.clone(),
+                function_invoker.clone(),
+            ));
+        }
         if let Some(plugin_manager_ref) = plugin_manager.as_ref() {
             for plugin_id in plugin_manager_ref.list_loaded() {
                 let Some(info) = plugin_manager_ref.get_plugin(&plugin_id) else {
@@ -942,6 +950,15 @@ type PluginRuntimeParts = (
     Arc<HostApiDispatcher>,
 );
 
+struct PluginRuntimeDeps {
+    audit: Arc<dyn AuditRecorder>,
+    event_bus: Arc<dyn EventBus>,
+    llm: Arc<dyn LlmProvider>,
+    llm_resolver: Arc<dyn crate::core::LlmResolver>,
+    primitive: Arc<dyn PrimitiveExecutor>,
+    session: Arc<SessionManager>,
+}
+
 fn canonicalize_or_keep(path: &std::path::Path) -> std::path::PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -978,12 +995,16 @@ fn refresh_host_function_registry(
 fn build_plugin_runtime(
     config: &AppConfig,
     agent_workspace_dir: &std::path::Path,
-    audit: Arc<dyn AuditRecorder>,
-    event_bus: Arc<dyn EventBus>,
-    llm: Arc<dyn LlmProvider>,
-    primitive: Arc<dyn PrimitiveExecutor>,
-    session: Arc<SessionManager>,
+    deps: PluginRuntimeDeps,
 ) -> Result<PluginRuntimeParts, AppError> {
+    let PluginRuntimeDeps {
+        audit,
+        event_bus,
+        llm,
+        llm_resolver,
+        primitive,
+        session,
+    } = deps;
     if plugin_runtime_disabled_via_env() {
         warn!("PI_PLUGIN_DISABLE enabled; skipping plugin runtime initialization");
         let executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
@@ -995,6 +1016,7 @@ fn build_plugin_runtime(
                 .with_tools(tool_registry.clone())
                 .with_session(session)
                 .with_llm(llm)
+                .with_llm_resolver(llm_resolver)
                 .with_primitive(primitive)
                 .with_audit(audit),
         );
@@ -1033,6 +1055,7 @@ fn build_plugin_runtime(
             .with_tools(tool_registry.clone())
             .with_session(session.clone())
             .with_llm(llm)
+            .with_llm_resolver(llm_resolver)
             .with_primitive(primitive)
             .with_audit(audit),
     );
@@ -1209,8 +1232,8 @@ mod tests {
     use serial_test::serial;
 
     use super::resolve_child_agent_compaction_runtime;
-    use crate::AppConfig;
     use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
+    use crate::AppConfig;
 
     #[test]
     #[serial(env_lock)]

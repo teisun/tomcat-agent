@@ -529,7 +529,10 @@ async fn inprocess_full_plan_path_with_real_llm() {
     std::env::set_var("TOMCAT__LLM__DEFAULT_MODEL", default_model());
     std::env::set_var("TOMCAT__LLM__PROVIDER", "openai");
     std::env::set_var("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE);
-    std::env::set_var("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV);
+    std::env::set_var(
+        "TOMCAT__LLM__API_KEY_ENV",
+        common::DEEPSEEK_TEST_API_KEY_ENV,
+    );
     std::env::set_var("TOMCAT__CONTEXT__COMPACTION_MODEL", default_model());
     let home = real_home();
     let mut config = load_user_config();

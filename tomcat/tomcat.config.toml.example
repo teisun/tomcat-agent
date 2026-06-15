@@ -69,3 +69,12 @@ auto_confirm = true
 
 [tools.read]
 max_bytes = 26214400
+
+[tools.web_search]
+# `auto` 会先尝试项目级 hosted web_search 模型，再走 HTTP 内置链，最后落到插件后端槽。
+backend = "auto"
+# 若想直接走官方插件里的 MiMo 后端，可改成：
+# backend = "mimo"
+count = 5
+# MiMo 通过 models.toml 里的 provider="mimo" 读取凭证：
+# export MIMO_API_KEY="your-mimo-api-key"

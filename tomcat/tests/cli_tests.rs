@@ -44,7 +44,10 @@ fn configure_deepseek_real_llm(command: &mut Command, api_key: &str) {
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, api_key)
         .env("TOMCAT__LLM__PROVIDER", "openai")
         .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
         .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
 }
@@ -55,7 +58,10 @@ fn configure_deepseek_without_key(command: &mut Command) {
         .env_remove(common::DEEPSEEK_TEST_API_KEY_ENV)
         .env("TOMCAT__LLM__PROVIDER", "openai")
         .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
         .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
 }
@@ -234,11 +240,7 @@ impl FixedResolver {
             api: api.to_string(),
             provider: provider.to_string(),
             base_url: Some(base_url.to_string()),
-            key_source: if provider == "deepseek" {
-                "DEEPSEEK_API_KEY".to_string()
-            } else {
-                "DEEPSEEK_API_KEY".to_string()
-            },
+            key_source: "DEEPSEEK_API_KEY".to_string(),
             thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
             capabilities,
         }
@@ -1222,9 +1224,7 @@ fn test_chat_without_config_exits_with_error() {
 
     let dir = tempfile::tempdir().unwrap();
 
-    info!(
-        "Arrange: 无 ~/.tomcat/ 配置且无 DEEPSEEK_API_KEY（HOME 指向空临时目录）"
-    );
+    info!("Arrange: 无 ~/.tomcat/ 配置且无 DEEPSEEK_API_KEY（HOME 指向空临时目录）");
     let mut c = cmd();
     c.arg("chat").env("HOME", dir.path());
     configure_deepseek_without_key(&mut c);
@@ -1259,7 +1259,8 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
         .assert()
         .success();
 
-    let api_key = real_llm_api_key("test_chat_with_valid_config_and_api_key_starts_and_produces_output");
+    let api_key =
+        real_llm_api_key("test_chat_with_valid_config_and_api_key_starts_and_produces_output");
 
     let mut c = cmd();
     c.arg("chat")
@@ -3318,12 +3319,18 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
     );
     assert_eq!(package_registry.packages[0].name, "e2e-scope-package");
     assert_eq!(package_registry.packages[0].source_kind.as_str(), "local");
-    assert_eq!(package_registry.packages[0].plugins[0].id, "e2e-scope-plugin");
+    assert_eq!(
+        package_registry.packages[0].plugins[0].id,
+        "e2e-scope-plugin"
+    );
     assert_eq!(
         package_registry.packages[0].plugins[0].relative_dir,
         "plugins/e2e-scope-plugin"
     );
-    assert_eq!(package_registry.packages[0].skills[0].name, "e2e-scope-skill");
+    assert_eq!(
+        package_registry.packages[0].skills[0].name,
+        "e2e-scope-skill"
+    );
     assert_eq!(
         package_registry.packages[0].skills[0].relative_dir,
         "skills/e2e-scope-skill"
@@ -3425,7 +3432,10 @@ fn test_user_installs_bare_plugin_to_agent_layer() {
     );
     assert_eq!(package_registry.packages[0].name, "e2e-agent-plugin");
     assert_eq!(package_registry.packages[0].source_kind.as_str(), "local");
-    assert_eq!(package_registry.packages[0].plugins[0].id, "e2e-agent-plugin");
+    assert_eq!(
+        package_registry.packages[0].plugins[0].id,
+        "e2e-agent-plugin"
+    );
     assert_eq!(package_registry.packages[0].plugins[0].relative_dir, ".");
 
     let plugin_registry = read_plugin_registry(&agent_root.join("plugins").join("registry.json"));
@@ -3596,7 +3606,10 @@ fn test_user_installs_bare_skill_to_global_layer() {
     );
     assert_eq!(package_registry.packages[0].name, "e2e-global-skill");
     assert_eq!(package_registry.packages[0].source_kind.as_str(), "local");
-    assert_eq!(package_registry.packages[0].skills[0].name, "e2e-global-skill");
+    assert_eq!(
+        package_registry.packages[0].skills[0].name,
+        "e2e-global-skill"
+    );
     assert_eq!(package_registry.packages[0].skills[0].relative_dir, ".");
 }
 
@@ -4152,7 +4165,10 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .env("HOME", home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")

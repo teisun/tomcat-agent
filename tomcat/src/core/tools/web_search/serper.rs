@@ -59,6 +59,7 @@ impl WebSearchBackend for SerperBackend {
         .await?;
 
         Ok(BackendSearchResponse {
+            backend_label: None,
             raw_hits: response
                 .organic
                 .unwrap_or_default()

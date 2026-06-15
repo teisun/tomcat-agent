@@ -253,6 +253,7 @@ pub(super) async fn run_tool_calls(
                             });
                     let exec = tool_exec::execute_tool_full_with_policy(
                         &agent.primitive,
+                        agent.config.session_id.as_str(),
                         &agent.config_backend,
                         &agent.bash_task_registry,
                         Some(&agent.config.read_file_state),
@@ -294,6 +295,7 @@ pub(super) async fn run_tool_calls(
                     .is_some_and(|skill_set| !skill_set.read().visible_skills().is_empty());
             let exec = tool_exec::execute_tool_full_with_policy(
                 &agent.primitive,
+                agent.config.session_id.as_str(),
                 &agent.config_backend,
                 &agent.bash_task_registry,
                 Some(&agent.config.read_file_state),

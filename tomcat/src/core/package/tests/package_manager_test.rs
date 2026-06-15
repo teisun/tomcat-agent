@@ -125,7 +125,11 @@ fn detect_package_manifest_requires_outer_package_json_version() {
     let manager = PackageManager::new(&cfg);
 
     let pkg_dir = tempfile::tempdir().unwrap();
-    write_skill(&pkg_dir.path().join("skills/commit"), "commit", "Create a commit.");
+    write_skill(
+        &pkg_dir.path().join("skills/commit"),
+        "commit",
+        "Create a commit.",
+    );
     std::fs::write(
         pkg_dir.path().join("package.json"),
         serde_json::to_string_pretty(&json!({
@@ -138,7 +142,10 @@ fn detect_package_manifest_requires_outer_package_json_version() {
     )
     .unwrap();
 
-    let error = manager.detect_source(pkg_dir.path()).unwrap_err().to_string();
+    let error = manager
+        .detect_source(pkg_dir.path())
+        .unwrap_err()
+        .to_string();
     assert!(
         error.contains("package.json.version"),
         "unexpected error: {error}"
@@ -152,7 +159,11 @@ fn detect_package_manifest_rejects_tomcat_version_override() {
     let manager = PackageManager::new(&cfg);
 
     let pkg_dir = tempfile::tempdir().unwrap();
-    write_skill(&pkg_dir.path().join("skills/commit"), "commit", "Create a commit.");
+    write_skill(
+        &pkg_dir.path().join("skills/commit"),
+        "commit",
+        "Create a commit.",
+    );
     std::fs::write(
         pkg_dir.path().join("package.json"),
         serde_json::to_string_pretty(&json!({
@@ -167,8 +178,14 @@ fn detect_package_manifest_rejects_tomcat_version_override() {
     )
     .unwrap();
 
-    let error = manager.detect_source(pkg_dir.path()).unwrap_err().to_string();
-    assert!(error.contains("tomcat.version"), "unexpected error: {error}");
+    let error = manager
+        .detect_source(pkg_dir.path())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("tomcat.version"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -201,7 +218,10 @@ fn detect_package_manifest_auto_scans_default_resource_dirs() {
     .unwrap();
 
     let detected = manager.detect_source(pkg_dir.path()).unwrap();
-    assert_eq!(detected.manifest.schema, crate::core::PACKAGE_MANIFEST_SCHEMA_V1);
+    assert_eq!(
+        detected.manifest.schema,
+        crate::core::PACKAGE_MANIFEST_SCHEMA_V1
+    );
     assert_eq!(detected.manifest.plugins, vec!["plugins/auto-plugin"]);
     assert_eq!(detected.manifest.skills, vec!["skills/auto-skill"]);
     assert_eq!(detected.resources.len(), 2);
@@ -411,7 +431,10 @@ fn load_package_registry_migrates_legacy_resource_shape() {
     .unwrap();
 
     let registry = load_package_registry(&path);
-    assert_eq!(registry.schema, crate::core::package::PACKAGE_REGISTRY_SCHEMA_V1);
+    assert_eq!(
+        registry.schema,
+        crate::core::package::PACKAGE_REGISTRY_SCHEMA_V1
+    );
     assert_eq!(registry.packages.len(), 1);
     let record = &registry.packages[0];
     assert_eq!(record.source_kind.as_str(), "local");

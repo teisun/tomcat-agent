@@ -1,13 +1,29 @@
 use super::helpers::{parse_chat_request, parse_tool, plugin_id_from_instance};
 use super::types::HostApiDispatcher;
-use crate::core::{EditOperation, StreamEvent};
+use crate::core::{ChatRequest, EditOperation, LlmProvider, LlmScene, StreamEvent};
 use crate::ext::host_binding::HostResponse;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{EventListenerId, ScopedEventEmitter};
 use dashmap::mapref::entry::Entry;
 use futures_util::StreamExt;
+use std::sync::Arc;
 
 impl HostApiDispatcher {
+    fn llm_for_request(&self, req: &ChatRequest) -> Result<Arc<dyn LlmProvider>, AppError> {
+        let model = req.model.trim();
+        if !model.is_empty() && model != "default" {
+            let resolver = self
+                .llm_resolver
+                .as_ref()
+                .ok_or_else(|| AppError::Plugin("LlmResolver not configured (007)".into()))?;
+            return Ok(resolver.resolve(LlmScene::Main, Some(model))?.provider_impl);
+        }
+
+        self.llm
+            .clone()
+            .ok_or_else(|| AppError::Plugin("LlmProvider not configured (004)".into()))
+    }
+
     pub(super) async fn do_read_file(
         &self,
         plugin_id: &str,
@@ -109,16 +125,13 @@ impl HostApiDispatcher {
         _plugin_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let llm = match &self.llm {
-            None => return Ok(HostResponse::err("LlmProvider not configured (004)")),
-            Some(l) => l,
-        };
         let _permit = self
             .llm_semaphore
             .acquire()
             .await
             .map_err(|_| AppError::Plugin("LLM semaphore closed".into()))?;
         let req = parse_chat_request(params)?;
+        let llm = self.llm_for_request(&req)?;
         let resp = llm.chat(req).await?;
         Ok(HostResponse::ok(
             serde_json::to_value(resp).map_err(AppError::Serialize)?,
@@ -130,16 +143,13 @@ impl HostApiDispatcher {
         _plugin_id: &str,
         params: &serde_json::Value,
     ) -> Result<HostResponse, AppError> {
-        let llm = match &self.llm {
-            None => return Ok(HostResponse::err("LlmProvider not configured (004)")),
-            Some(l) => l,
-        };
         let _permit = self
             .llm_semaphore
             .acquire()
             .await
             .map_err(|_| AppError::Plugin("LLM semaphore closed".into()))?;
         let req = parse_chat_request(params)?;
+        let llm = self.llm_for_request(&req)?;
         let mut stream = llm.chat_stream(req).await?;
         let mut content = String::new();
         while let Some(ev) = stream.next().await {

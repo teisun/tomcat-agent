@@ -381,7 +381,10 @@ fn test_resume_after_interrupt() {
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .write_stdin("/ckpt list\n")
         .assert();
 
@@ -434,7 +437,10 @@ fn test_slash_restore_recovers_after_bad_edit() {
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .write_stdin(format!("/restore {checkpoint_id}\n"))
         .assert();
 
@@ -508,7 +514,10 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .write_stdin(format!("/restore {turn_end_ckpt}\n"))
         .assert()
         .success();
@@ -548,7 +557,10 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .write_stdin(format!("/restore {manual_ckpt}\n"))
         .assert()
         .success();
@@ -587,7 +599,10 @@ fn test_idle_readline_eof_exits_without_interrupt_ckpt() {
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .write_stdin("")
         .assert()
         .success()
@@ -640,7 +655,10 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
@@ -743,7 +761,10 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env("TOMCAT__LLM__API_KEY_ENV", common::DEEPSEEK_TEST_API_KEY_ENV)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")

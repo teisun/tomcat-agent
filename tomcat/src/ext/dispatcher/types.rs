@@ -1,4 +1,4 @@
-use crate::core::{LlmProvider, PrimitiveExecutor, SessionManager, ToolRegistry};
+use crate::core::{LlmProvider, LlmResolver, PrimitiveExecutor, SessionManager, ToolRegistry};
 use crate::ext::host_binding::HostResponse;
 use crate::ext::vm_actor::EventEnvelope;
 use crate::infra::event_bus::{EventBus, EventListenerId};
@@ -26,6 +26,7 @@ pub struct HostApiDispatcher {
     pub(super) primitive: Option<Arc<dyn PrimitiveExecutor>>,
     pub(super) tools: Option<Arc<dyn ToolRegistry>>,
     pub(super) llm: Option<Arc<dyn LlmProvider>>,
+    pub(super) llm_resolver: Option<Arc<dyn LlmResolver>>,
     pub(super) session: Option<Arc<SessionManager>>,
     pub(super) session_registry: Arc<DashMap<String, Weak<SessionManager>>>,
     pub(super) audit: Option<Arc<dyn AuditRecorder>>,
@@ -68,13 +69,14 @@ impl HostApiDispatcher {
             primitive: None,
             tools: None,
             llm: None,
+            llm_resolver: None,
             session: None,
             session_registry: Arc::new(DashMap::new()),
             audit: None,
             async_results: Arc::new(DashMap::new()),
             instance_calls: Arc::new(DashMap::new()),
             tokio_handle: Handle::try_current().ok(),
-            async_timeout: Duration::from_secs(30),
+            async_timeout: Duration::from_secs(120),
             llm_semaphore: Arc::new(Semaphore::new(5)),
             event_receivers: Arc::new(DashMap::new()),
             event_senders: Arc::new(DashMap::new()),
@@ -177,6 +179,12 @@ impl HostApiDispatcher {
         self
     }
 
+    /// 注入 LLM Resolver（按显式 model 路由 provider）。
+    pub fn with_llm_resolver(mut self, resolver: Arc<dyn LlmResolver>) -> Self {
+        self.llm_resolver = Some(resolver);
+        self
+    }
+
     /// 注入 SessionManager（会话 API）。
     pub fn with_session(mut self, s: Arc<SessionManager>) -> Self {
         self.session = Some(s);
@@ -200,7 +208,7 @@ impl HostApiDispatcher {
         self
     }
 
-    /// 设置异步 Hostcall 超时时长（默认 30s）。
+    /// 设置异步 Hostcall 超时时长（默认 120s）。
     pub fn with_async_timeout(mut self, d: Duration) -> Self {
         self.async_timeout = d;
         self

@@ -107,7 +107,9 @@ pub(super) fn parse_chat_request(params: &serde_json::Value) -> Result<ChatReque
             .map(|u| u as u32),
         stream: params.get("stream").and_then(|v| v.as_bool()),
         model_override: None,
-        tools: None,
+        tools: params
+            .get("tools")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
     })
 }
 

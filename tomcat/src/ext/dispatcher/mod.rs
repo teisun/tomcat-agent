@@ -22,7 +22,7 @@
 //! │   instance_calls: DashMap<instance_id, [callId]>   ► 实例→callId 映射（清理） │
 //! │   tokio_handle ───► 共享 Runtime，同步路径 block_on / 异步路径 spawn          │
 //! │   llm_semaphore ──► 限制 LLM 并发（默认 5）                                   │
-//! │   async_timeout ──► 异步任务超时（默认 30s）                                  │
+//! │   async_timeout ──► 异步任务超时（默认 120s）                                 │
 //! └─────────────────────────────────────────────────────────────────────────────┘
 //! ```
 

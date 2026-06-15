@@ -109,6 +109,7 @@ pub fn parse_server_tool_blocks(payload: &Value) -> Result<BackendSearchResponse
     }
 
     Ok(BackendSearchResponse {
+        backend_label: None,
         raw_hits: dedupe_hits(hits),
         warnings: Vec::new(),
     })

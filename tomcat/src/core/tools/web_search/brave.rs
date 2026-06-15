@@ -65,6 +65,7 @@ impl WebSearchBackend for BraveBackend {
         .await?;
 
         Ok(BackendSearchResponse {
+            backend_label: None,
             raw_hits: response
                 .web
                 .and_then(|web| web.results)

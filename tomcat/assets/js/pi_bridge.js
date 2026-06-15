@@ -241,7 +241,9 @@
         : [{ role: 'user', content: String(prompt) }];
       return this.createChatCompletion({ messages: msgs })
         .then(function (res) {
-          return (res && res.message && res.message.content) ? res.message.content : '';
+          return (res && res.choices && res.choices[0] && res.choices[0].message && res.choices[0].message.content)
+            ? res.choices[0].message.content
+            : '';
         });
     },
 
