@@ -55,10 +55,14 @@ fn write_skill(dir: &Path, name: &str, description: &str) -> PathBuf {
 }
 
 fn write_package_manifest(root: &Path, plugins: &[&str], skills: &[&str]) {
+    write_named_package_manifest(root, "combo-package", plugins, skills);
+}
+
+fn write_named_package_manifest(root: &Path, package_name: &str, plugins: &[&str], skills: &[&str]) {
     std::fs::write(
         root.join("package.json"),
         serde_json::to_string_pretty(&json!({
-            "name": "combo-package",
+            "name": package_name,
             "version": "1.2.3",
             "description": "package description",
             "tomcat": {
@@ -339,7 +343,7 @@ fn install_scope_package_writes_layer_registries() {
     assert!(scope_paths.plugins_dir.join("release-plugin").is_dir());
     assert!(scope_paths.skills_dir.join("commit").is_dir());
 
-    let package_registry = load_package_registry(&scope_paths.package_registry_path);
+    let package_registry = load_package_registry(&scope_paths.package_registry_path).unwrap();
     assert_eq!(
         package_registry.schema,
         crate::core::package::PACKAGE_REGISTRY_SCHEMA_V1
@@ -350,7 +354,7 @@ fn install_scope_package_writes_layer_registries() {
     assert_eq!(package_registry.packages[0].plugins.len(), 1);
     assert_eq!(package_registry.packages[0].skills.len(), 1);
 
-    let plugin_registry = load_plugin_registry(&scope_paths.plugin_registry_path);
+    let plugin_registry = load_plugin_registry(&scope_paths.plugin_registry_path).unwrap();
     assert_eq!(plugin_registry.plugins.len(), 1);
     assert_eq!(plugin_registry.plugins[0].id, "release-plugin");
 }
@@ -395,6 +399,85 @@ fn install_failure_rolls_back_copied_dirs() {
 }
 
 #[test]
+fn force_install_removes_resources_dropped_from_replacement_package() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+
+    let first = tempfile::tempdir().unwrap();
+    write_plugin(
+        &first.path().join("plugins/keep-plugin"),
+        "keep-plugin",
+        "1.0.0",
+        "keep_tool",
+    );
+    write_skill(
+        &first.path().join("skills/drop-skill"),
+        "drop-skill",
+        "skill to be removed",
+    );
+    write_named_package_manifest(
+        first.path(),
+        "replaceable-package",
+        &["plugins/keep-plugin"],
+        &["skills/drop-skill"],
+    );
+    let prepared = manager
+        .prepare_install(
+            first.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    manager.install(prepared).unwrap();
+
+    let second = tempfile::tempdir().unwrap();
+    write_plugin(
+        &second.path().join("plugins/keep-plugin"),
+        "keep-plugin",
+        "2.0.0",
+        "keep_tool_v2",
+    );
+    write_named_package_manifest(second.path(), "replaceable-package", &["plugins/keep-plugin"], &[]);
+    let prepared = manager
+        .prepare_install(
+            second.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            true,
+        )
+        .unwrap();
+    manager.install(prepared).unwrap();
+
+    let scope_paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    assert!(
+        !scope_paths.skills_dir.join("drop-skill").exists(),
+        "force install should remove stale resources dropped from the replacement package"
+    );
+    let lingering_backups = std::fs::read_dir(&scope_paths.skills_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        lingering_backups
+            .iter()
+            .all(|name| !name.contains("drop-skill.backup")),
+        "successful force install should clean stale backup directories: {:?}",
+        lingering_backups
+    );
+    let package_registry = load_package_registry(&scope_paths.package_registry_path).unwrap();
+    assert_eq!(package_registry.packages.len(), 1);
+    assert!(package_registry.packages[0].skills.is_empty());
+    let plugin_registry = load_plugin_registry(&scope_paths.plugin_registry_path).unwrap();
+    assert_eq!(plugin_registry.plugins.len(), 1);
+    assert_eq!(plugin_registry.plugins[0].id, "keep-plugin");
+}
+
+#[test]
 fn load_package_registry_migrates_legacy_resource_shape() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("registry.json");
@@ -430,7 +513,7 @@ fn load_package_registry_migrates_legacy_resource_shape() {
     )
     .unwrap();
 
-    let registry = load_package_registry(&path);
+    let registry = load_package_registry(&path).unwrap();
     assert_eq!(
         registry.schema,
         crate::core::package::PACKAGE_REGISTRY_SCHEMA_V1
@@ -443,6 +526,16 @@ fn load_package_registry_migrates_legacy_resource_shape() {
     assert_eq!(record.plugins[0].id, "legacy-plugin");
     assert_eq!(record.skills.len(), 1);
     assert_eq!(record.skills[0].name, "legacy-skill");
+}
+
+#[test]
+fn load_package_registry_corrupt_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("registry.json");
+    std::fs::write(&path, "not valid json {{{").unwrap();
+
+    let error = load_package_registry(&path).unwrap_err().to_string();
+    assert!(error.contains("registry 损坏"), "unexpected error: {error}");
 }
 
 #[test]
@@ -493,9 +586,11 @@ fn uninstall_uses_package_registry_for_precise_cleanup() {
     assert!(!scope_paths.plugins_dir.join("cleanup-plugin").exists());
     assert!(!scope_paths.skills_dir.join("cleanup-skill").exists());
     assert!(load_package_registry(&scope_paths.package_registry_path)
+        .unwrap()
         .packages
         .is_empty());
     assert!(load_plugin_registry(&scope_paths.plugin_registry_path)
+        .unwrap()
         .plugins
         .is_empty());
 }

@@ -122,14 +122,16 @@ async fn bash_contract_surfaces_cwd_context_in_user_visible_error() {
 async fn bash_contract_returns_warning_for_background_pipe_holder_without_hanging() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().canonicalize().unwrap();
-    let primitive = make_executor_with_bash_timeout(&root, 80);
+    // 留出足够窗口让前台 `echo done` 稳定落到输出里，再验证后台子进程持有管道时
+    // 依旧会被 timeout 收敛为带 warning 的成功回执，而不是挂死整个 tool call。
+    let primitive = make_executor_with_bash_timeout(&root, 300);
     let tc = ToolCallInfo {
         id: "tc-bash-bg-pipe-holder".to_string(),
         name: "bash".to_string(),
         arguments: serde_json::json!({
             "command": "sleep 30 & echo done",
             "cwd": root.display().to_string(),
-            "timeout_ms": 80
+            "timeout_ms": 300
         })
         .to_string(),
     };

@@ -107,12 +107,10 @@ fn assert_js_parser_matches_expected(
         .register_host_binding(move |request_json| {
             let request: serde_json::Value =
                 serde_json::from_str(request_json).expect("host request should be JSON");
-            let actual = request
-                .get("actual")
-                .cloned()
-                .expect("host request should contain actual");
-            *captured_for_host.lock().unwrap() = Some(actual);
-            Ok("{}".to_string())
+            if let Some(actual) = request.get("actual").cloned() {
+                *captured_for_host.lock().unwrap() = Some(actual);
+            }
+            Ok(json!({ "ok": true, "data": null }).to_string())
         })
         .expect("register host binding");
     let plugin_code = plugin_backend_main_js();
@@ -139,6 +137,47 @@ pi.registerFunction = function () {{}};
         actual, *expected_hits,
         "{parser_name} parity mismatch between JS parser and legacy Rust backend"
     );
+}
+
+fn eval_plugin_script_value(script_body: &str) -> serde_json::Value {
+    let engine = PluginEngine::global(None).expect("create quickjs engine");
+    let mut instance = engine
+        .create_instance("web-search-plugin-js-eval")
+        .expect("create plugin js eval instance");
+    let captured = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let captured_for_host = Arc::clone(&captured);
+    instance
+        .register_host_binding(move |request_json| {
+            let request: serde_json::Value =
+                serde_json::from_str(request_json).expect("host request should be JSON");
+            if let Some(actual) = request.get("actual").cloned() {
+                *captured_for_host.lock().unwrap() = Some(actual);
+            }
+            Ok(json!({ "ok": true, "data": null }).to_string())
+        })
+        .expect("register host binding");
+    let plugin_code = plugin_backend_main_js();
+    let script = format!(
+        r#"
+pi.registerFunction = function () {{}};
+{plugin_code}
+(async function () {{
+  var actual = await (async function () {{
+{script_body}
+  }})();
+  __pi_host_call(JSON.stringify({{ actual: actual }}));
+}})();
+"#
+    );
+    instance
+        .run_script(&script)
+        .expect("plugin js evaluation should run");
+    let actual = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("plugin js evaluation should emit a value");
+    actual
 }
 
 #[tokio::test]
@@ -170,6 +209,59 @@ async fn plugin_backend_maps_missing_key_warning_to_backend_failure() {
         err,
         BackendFailure::MissingKey { env_name } if env_name == "TAVILY_API_KEY"
     ));
+}
+
+#[test]
+fn plugin_js_normalize_count_allows_twenty_results() {
+    let actual = eval_plugin_script_value("return normalizeCount(20);");
+    assert_eq!(actual, json!(20));
+}
+
+#[test]
+fn plugin_js_auto_backend_falls_through_after_retryable_warning() {
+    let actual = eval_plugin_script_value(
+        r#"
+var calls = [];
+backends.mimo = async function (req) {
+  calls.push(req.backend);
+  return {
+    backend: "mimo",
+    hits: [],
+    warnings: ["__missing_key__:MIMO_API_KEY"]
+  };
+};
+backends.tavily = async function (req) {
+  calls.push(req.backend);
+  return {
+    backend: "tavily",
+    hits: [{ title: "Reqwest", url: "https://docs.rs/reqwest", snippet: "HTTP client" }],
+    warnings: []
+  };
+};
+backends.brave = async function (req) {
+  calls.push(req.backend);
+  return { backend: "brave", hits: [], warnings: [] };
+};
+backends.serper = async function (req) {
+  calls.push(req.backend);
+  return { backend: "serper", hits: [], warnings: [] };
+};
+return {
+  calls: calls,
+  result: await dispatchBackend({ backend: "auto", query: "reqwest", count: 20 })
+};
+"#,
+    );
+    assert_eq!(actual["calls"], json!(["mimo", "tavily"]));
+    assert_eq!(actual["result"]["backend"], json!("tavily"));
+    assert_eq!(actual["result"]["hits"][0]["url"], json!("https://docs.rs/reqwest"));
+    assert!(
+        actual["result"]["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .iter()
+            .any(|warning| warning == "backend_unavailable:mimo, fallback=tavily")
+    );
 }
 
 #[tokio::test]

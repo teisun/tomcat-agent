@@ -829,8 +829,11 @@ impl ChatContext {
             }
         }
 
-        let function_catalog =
-            refresh_host_function_registry(&self.config, &self.global_services.function_registry)?;
+        let function_catalog = refresh_host_function_registry(
+            &self.config,
+            &self.scope_services.agent_workspace_dir,
+            &self.global_services.function_registry,
+        )?;
         let mut warnings = catalog.warnings.clone();
         warnings.extend(function_catalog.warnings.clone());
         warnings.extend(catalog.diagnostics.iter().map(|diagnostic| {
@@ -985,9 +988,10 @@ fn materialize_host_functions_from_catalog(registry: &FunctionRegistry, catalog:
 
 fn refresh_host_function_registry(
     config: &AppConfig,
+    agent_workspace_dir: &std::path::Path,
     registry: &FunctionRegistry,
 ) -> Result<PluginCatalog, AppError> {
-    let catalog = PluginCatalog::discover_host_root(config)?;
+    let catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
     materialize_host_functions_from_catalog(registry, &catalog);
     Ok(catalog)
 }
@@ -1125,7 +1129,8 @@ fn build_plugin_runtime(
             "plugin catalog scan ignored invalid entry"
         );
     }
-    let host_function_catalog = refresh_host_function_registry(config, &function_registry)?;
+    let host_function_catalog =
+        refresh_host_function_registry(config, agent_workspace_dir, &function_registry)?;
     for diagnostic in &host_function_catalog.diagnostics {
         warn!(
             path = %diagnostic.path.display(),

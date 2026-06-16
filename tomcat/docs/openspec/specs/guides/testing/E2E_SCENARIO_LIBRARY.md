@@ -53,7 +53,7 @@
 
 ## Story 2 — 4 原语安全管控（通过 `tomcat code` 驱动）（11 条）
 
-> 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`，不得跳过。
+> 需要 `DEEPSEEK_API_KEY`；无 key 时必须 `panic!`，不得跳过。
 > **验收**：本 Story 与 §4 人工验收「对话模式、四原语与用户确认」对齐，**整组建议人工补验**（流式观感、多轮、确认提示）。
 > **T2-P0-004 follow-up**：E2E-CLI-018～022 补充 drag-deny / cwd runtime / 二进制错误 / Layer0 落盘路径场景；当前自动化由对应单测/集成测试锁定，真实终端交互仍建议人工 spot-check。
 
@@ -66,11 +66,11 @@
 | E2E-CLI-014 | 人工 | `test_user_asks_pi_to_read_a_file`            | 用户要求助手读取指定文件内容                    | 预置 /tmp/test_read.txt → `tomcat code` + stdin `请读取 /tmp/test_read.txt 的内容`，timeout 60s        | exit 0；stdout 含文件内容或读取确认                                   |
 | E2E-CLI-015 | 人工 | `test_user_asks_pi_to_edit_a_file`            | 用户要求助手修改文件中的某行内容                  | 预置 /tmp/test_edit.txt → `tomcat code` + stdin `请把 /tmp/test_edit.txt 第一行改成 hello`，timeout 60s | exit 0；修改后文件第一行为 hello                                     |
 | E2E-CLI-016 | 人工 | `test_user_asks_pi_to_run_bash_command`       | 用户要求助手执行一条 bash 命令                | `tomcat code` + stdin `请执行 echo hello_from_pi`，timeout 60s                                    | exit 0；stdout 含 hello_from_pi 或命令确认提示                      |
-| E2E-CLI-016C | 自动（需 `OPENAI_API_KEY`） | `test_user_background_bash_autofeed_real_llm_cli` | 用户让助手启动后台 bash、先做独立工作，然后只能依赖 `<background-task-finished ...>` 自动回灌继续推进 | `tomcat code` + 单轮 prompt：`bash(run_in_background=true)` 写 `BG_DONE`，立即写 `MARKER`，随后禁止 `task_output/task_list/task_stop` 与新 bash，只能等系统 follow-up | exit 0；stderr 含 `[bg] task ... queued for next turn`；`bg_done.txt` 与 `marker.txt` 真实落盘；stdout 含 `AUTOFEED_OK` |
-| E2E-CLI-016D | 自动（需 `OPENAI_API_KEY`） | `test_user_background_bash_blocking_waitslice_real_llm_cli` | 用户要求助手在后台 bash 后立即进入 `task_output(block=true)`，直到拿到真实新输出再收尾 | `tomcat code` + 单轮 prompt：后台 bash `sleep 2; echo TOKEN_WAITSLICE; printf BLOCKWAIT_DONE > file; sleep 30`，必须用 `task_output(block=true, timeout_ms=300)` + `task_stop` 完成，不准 `task_output(block=false)` | exit 0；stdout 含 `BLOCKWAIT_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 至少 1 次 `task_output(block=true, timeout_ms=300)`，并出现 `TOKEN_WAITSLICE` 与 `task_stop`；产物文件内容正确 |
-| E2E-CLI-016E | 自动（需 `OPENAI_API_KEY`） | `test_user_background_bash_multiple_timeout_slices_real_llm_cli` | 用户要求助手在同一后台任务上经历至少两次 timeout slice，再继续等到一次 `new_output` | `tomcat code` + 单轮 prompt：后台 bash `sleep 8; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > file; sleep 30`，必须重复 `task_output(block=true, timeout_ms=300)` 直到看到 token，再 `task_stop` | exit 0；stdout 含 `MULTI_TIMEOUT_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 中 `task_output` 至少 3 次、timeout 结果至少 2 次，最终出现 `TOKEN_MULTI_TIMEOUT` 与 `task_stop`；产物文件内容正确 |
-| E2E-CLI-016F | 自动（需 `OPENAI_API_KEY`） | `test_user_background_bash_midturn_followup_real_llm_cli` | 用户先起后台 bash，再执行一个耗时 foreground batch；只有在 foreground batch 结束后的后续请求里看见 `<background-task-finished ...>`，助手才允许继续验证结果 | `tomcat code` + 单轮 prompt：先 `bash(run_in_background=true)` 写 `BG_DONE`，再 foreground `bash` 睡眠并写 `FG_DONE`，禁止 `task_output/task_list/task_stop`；若 foreground batch 结束时仍未看到系统消息则必须回复 `MIDTURN_MISSED_FOLLOWUP` 并停止 | exit 0；stdout 含 `MIDTURN_FOLLOWUP_OK` 且不含 `MIDTURN_MISSED_FOLLOWUP`；两份文件真实存在且内容正确；transcript 中 `<background-task-finished ...>` 位于 `FG_BATCH_START` 之后、成功词之前；不出现 `task_output/task_list/task_stop` |
-| E2E-CLI-016G | 自动（需 `OPENAI_API_KEY`） | `test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli` | 用户让助手观察一个几乎永不结束的后台 bash；在 EOF 处拿到 `timeout` 返回的 tail 快照后必须停止轮询，不能 busy loop | `tomcat code` + 单轮 prompt：后台 bash `printf HUNG_TIMEOUT_BOOT; sleep 60`；先用一次 `task_output(block=true)` 吃掉首个 `new_output`，再用第二次 `task_output(block=true)` 在 EOF 处命中 timeout 快照，随后禁止继续 poll / task_stop / task_list | exit 0；stdout 含 `HUNG_TIMEOUT_BOUNDED_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 中 `task_output` 次数有上界（<= 3）且至少 2 次；存在带 `HUNG_TIMEOUT_BOOT` 的 timeout 工具结果；`role=user` 不含 `waiting_for_output`；不出现 `task_stop/task_list` |
+| E2E-CLI-016C | 自动（需 `DEEPSEEK_API_KEY`） | `test_user_background_bash_autofeed_real_llm_cli` | 用户让助手启动后台 bash、先做独立工作，然后只能依赖 `<background-task-finished ...>` 自动回灌继续推进 | `tomcat code` + 单轮 prompt：`bash(run_in_background=true)` 写 `BG_DONE`，立即写 `MARKER`，随后禁止 `task_output/task_list/task_stop` 与新 bash，只能等系统 follow-up | exit 0；stderr 含 `[bg] task ... queued for next turn`；`bg_done.txt` 与 `marker.txt` 真实落盘；stdout 含 `AUTOFEED_OK` |
+| E2E-CLI-016D | 自动（需 `DEEPSEEK_API_KEY`） | `test_user_background_bash_blocking_waitslice_real_llm_cli` | 用户要求助手在后台 bash 后立即进入 `task_output(block=true)`，直到拿到真实新输出再收尾 | `tomcat code` + 单轮 prompt：后台 bash `sleep 2; echo TOKEN_WAITSLICE; printf BLOCKWAIT_DONE > file; sleep 30`，必须用 `task_output(block=true, timeout_ms=300)` + `task_stop` 完成，不准 `task_output(block=false)` | exit 0；stdout 含 `BLOCKWAIT_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 至少 1 次 `task_output(block=true, timeout_ms=300)`，并出现 `TOKEN_WAITSLICE` 与 `task_stop`；产物文件内容正确 |
+| E2E-CLI-016E | 自动（需 `DEEPSEEK_API_KEY`） | `test_user_background_bash_multiple_timeout_slices_real_llm_cli` | 用户要求助手在同一后台任务上经历至少两次 timeout slice，再继续等到一次 `new_output` | `tomcat code` + 单轮 prompt：后台 bash `sleep 8; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > file; sleep 30`，必须重复 `task_output(block=true, timeout_ms=300)` 直到看到 token，再 `task_stop` | exit 0；stdout 含 `MULTI_TIMEOUT_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 中 `task_output` 至少 3 次、timeout 结果至少 2 次，最终出现 `TOKEN_MULTI_TIMEOUT` 与 `task_stop`；产物文件内容正确 |
+| E2E-CLI-016F | 自动（需 `DEEPSEEK_API_KEY`） | `test_user_background_bash_midturn_followup_real_llm_cli` | 用户先起后台 bash，再执行一个耗时 foreground batch；只有在 foreground batch 结束后的后续请求里看见 `<background-task-finished ...>`，助手才允许继续验证结果 | `tomcat code` + 单轮 prompt：先 `bash(run_in_background=true)` 写 `BG_DONE`，再 foreground `bash` 睡眠并写 `FG_DONE`，禁止 `task_output/task_list/task_stop`；若 foreground batch 结束时仍未看到系统消息则必须回复 `MIDTURN_MISSED_FOLLOWUP` 并停止 | exit 0；stdout 含 `MIDTURN_FOLLOWUP_OK` 且不含 `MIDTURN_MISSED_FOLLOWUP`；两份文件真实存在且内容正确；transcript 中 `<background-task-finished ...>` 位于 `FG_BATCH_START` 之后、成功词之前；不出现 `task_output/task_list/task_stop` |
+| E2E-CLI-016G | 自动（需 `DEEPSEEK_API_KEY`） | `test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli` | 用户让助手观察一个几乎永不结束的后台 bash；在 EOF 处拿到 `timeout` 返回的 tail 快照后必须停止轮询，不能 busy loop | `tomcat code` + 单轮 prompt：后台 bash `printf HUNG_TIMEOUT_BOOT; sleep 60`；先用一次 `task_output(block=true)` 吃掉首个 `new_output`，再用第二次 `task_output(block=true)` 在 EOF 处命中 timeout 快照，随后禁止继续 poll / task_stop / task_list | exit 0；stdout 含 `HUNG_TIMEOUT_BOUNDED_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 中 `task_output` 次数有上界（<= 3）且至少 2 次；存在带 `HUNG_TIMEOUT_BOOT` 的 timeout 工具结果；`role=user` 不含 `waiting_for_output`；不出现 `task_stop/task_list` |
 | E2E-CLI-018 | 自动 | `path_with_intent_silent_passthrough_contract` | 用户输入「路径 + 意图」时不触发本地路径授权命令 | `tomcat code` → 输入 `<abs-path> 看下里面有什么文件` | `parse_chat_command` 返回 `NotACommand`；自动化见 `tests/path_command_e2e.rs` |
 | E2E-CLI-019 | 人工 | `manual_path_command_denied_shows_cancel_only` | 用户通过 `/path` 授权命中 deny 规则的路径时不能扩大授权 | 预置 `primitive.path_rules=[{path=<secret>, mode="deny"}]` → `tomcat code` → 输入 `/path <secret>` | 仅允许取消/不授权；不得展示永久允许、本次允许或工作区写授权选项；自动化回归见 `path_menu_with_deny_rule_hides_authorization_choices` |
 | E2E-CLI-020 | 人工 | `manual_config_set_path_rules_runtime_effective` | 用户在同一会话内通过配置工具新增 deny 规则后立即生效 | `tomcat code` → 触发 `config_set primitive.path_rules` 追加 deny → 再请求 read/write 同一路径 | 后续工具调用被 deny 拦截，无需重启；自动化回归见 `runtime_deny_rule_overrides_existing_session_grant` / `config_set_array_path_rule_appends_with_json_value` |
@@ -135,7 +135,7 @@
 | E2E-QJS-002 | 自动 | `pi_readfile_llm`                    | 插件通过 `pi.readFile()` 与 `pi.complete()` 走宿主 bridge | `start_session_vm` → `dispatch_session_event(session_start)`，脚本内 `await pi.readFile()` + `await pi.complete()` | VM 保持 `Running/Idle`；`readFile` 返回 mock 内容；LLM 返回 mock `"hi"` |
 | E2E-QJS-003 | 自动 | `shims_and_crypto_work_in_session_vm` | Tier-A 垫片与同步 crypto 在 session VM 内可用 | `start_session_vm` → `dispatch_session_event(session_start)`，脚本验证 `path/util/events/Buffer/crypto` | `sha256/hmac/randomBytes` 正常；VM 健康；`end_session` 后 RuntimeManager 为空 |
 | E2E-QJS-004 | 自动 | `runaway_plugin_interrupted`         | 插件跑飞后被 interrupt budget / timeout 掐断并可重建 | `start_session_vm` → `dispatch_session_event(loop)` 触发死循环 → 再次 `start_session_vm` | 首个 VM 进入 `Error`；再次启动返回新 handle 且可恢复 `Running/Idle` |
-| E2E-QJS-005 | 自动 | `panicking_plugin_isolated`          | 一个插件抛错后不连坐同 session 下其他插件         | 同 session 启动 crashy + healthy 两个插件 → 仅向 crashy 分发异常事件        | crashy 进入 `Error`；healthy 保持 `Running`；`end_session` 后 RuntimeManager 清空 |
+| E2E-QJS-005 | 自动 | `panicking_plugin_isolated`          | 一个插件抛错后不连坐同 session 下其他插件         | 同 session 启动 crashy + healthy 两个插件 → 仅向 crashy 分发异常事件        | crashy 保持 `Running/Idle`；healthy 保持 `Running`；`end_session` 后 RuntimeManager 清空 |
 
 
 ---
@@ -151,7 +151,7 @@
 
 ---
 
-## Story 6 — 事件系统（3 条）
+## Story 6 — 事件系统（4 条）
 
 
 | 编号          | 验收 | 用例名                                               | 用户意图                                           | 操作序列                                                                     | 必须断言                                                            |
@@ -159,13 +159,14 @@
 | E2E-QJS-021 | 自动 | `dispatch_events_once_returns_listener_id`        | 插件注册 `once` 监听后，宿主为其分配监听标识                     | `dispatch("events", "once", ...)`                                        | 返回 listener id；协议字段完整 |
 | E2E-QJS-022 | 自动 | `dispatch_events_off_removes_listener`            | 插件取消监听后，宿主侧监听记录被移除                              | `dispatch("events", "off", ...)`                                         | 返回成功；监听条目被删除 |
 | E2E-QJS-023 | 自动 | `shims_and_crypto_work_in_session_vm`             | session VM 中事件 shim 可用并与其他基础 shim 共存                | `start_session_vm` → `dispatch_session_event(session_start)`             | `events.EventEmitter` 可正常工作；VM 保持健康 |
+| E2E-QJS-024 | 自动 | `dispatch_event_isolates_non_fatal_handler_errors` | 同一事件的某个 handler 抛错后，后续 handler 仍继续执行            | `PluginVmInstance.run_script()` 注册两个 `pi.on("demo")` handler，第一个抛错、第二个写标记，再触发 `__pi_dispatch_event(...)` | 后续 handler 仍执行；非 fatal 错误只影响当前 handler，不得中断同事件剩余 handler |
 
 
 ---
 
 ## Story 7 — LLM 统一接入（2 条）
 
-> 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`。
+> 需要 `DEEPSEEK_API_KEY`；无 key 时必须 `panic!`。
 > **验收**：与 §4 人工验收「流式输出、对话模式观感」对齐，建议**人工补验**终端流式表现。
 
 
@@ -177,6 +178,17 @@
 | E2E-CLI-044 | 自动 | `llm_error_renders_red_status_line` | Responses `response.failed` / 顶层 `error` 被映射为结构化 LLM 错误并在 CLI 明确显示 | 构造 `CliTurnRenderer` + `llm_error` payload，模拟正文后收到错误终局 | stderr 含红色 `[llm] <error message>`；不复用 `ExtensionError`；自动化见 `src/api/chat/tests/cli_turn_renderer_test.rs` + `src/core/agent_loop/tests/stream_handler_test.rs` |
 | E2E-CLI-045 | 自动 | `llm_notice_renders_dim_non_error_hint` | Responses `incomplete/max_output_tokens` 走非错误轻提示而非红字报错 | 构造 `CliTurnRenderer` + `llm_notice{finishReason=max_output_tokens}` payload | stderr 含灰色轻提示、包含 `max_output_tokens`，且**不**出现红色错误样式；自动化见 `src/api/chat/tests/cli_turn_renderer_test.rs` + `src/core/agent_loop/tests/stream_handler_test.rs` |
 
+
+---
+
+## Story 8a — 异步 Hostcall 与 JS API 对齐（2 条）
+
+> 主验收入口为 `src/ext/tests/instance_bridge_test.rs` 与 `tests/quickjs_e2e_tests.rs` 中的 async bridge 相关用例。
+
+| 编号          | 验收 | 用例名                                        | 用户意图                                           | 操作序列                                                                 | 必须断言                                                                 |
+| ----------- | -- | ------------------------------------------ | ---------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| E2E-QJS-041 | 自动 | `pi_readfile_llm`                          | 插件通过 `async/await` 调宿主 API 时，pending→poll→ready 链路可正常 resolve | `start_session_vm` → `dispatch_session_event(session_start)`，脚本内 `await pi.readFile()` / `await pi.complete()` | Promise resolve 成功；返回值契约与 ExtensionAPI 一致；VM 保持 `Running/Idle` |
+| E2E-QJS-042 | 自动 | `async_poll_refreshes_budget_before_each_host_poll` | 长轮询 async Hostcall 在 pending→poll→ready 期间不会因 interrupt budget 耗尽被误杀 | `PluginVmInstance.run_script()` mock 一次 pending + 一次 ready，并覆盖 `__pi_budget_reset` 计数 | 每次 timer callback / host poll 前都会刷新预算；最终请求正常 resolve，且 poll fixture 至少走过一次 pending |
 
 ---
 
@@ -223,7 +235,7 @@
 | E2E-QJS-031 | 自动 | `test_multi_session_isolation_in_runtime_manager`         | 多会话上下文隔离             | 为两个不同 session 插入同一 plugin id 的 runtime handle                                                                                             | 两个 session 状态互不影响                                             |
 | E2E-QJS-032 | 自动 | `test_session_cleanup_removes_all_handles_for_session`    | 会话结束后本 session 的 VM 全量清理 | 插入多个 runtime handle → `remove_session(sess-1)`                                                                                              | 仅目标 session 被清理；其余 session 保留 |
 | E2E-QJS-033 | 自动 | `runaway_plugin_interrupted`                              | 跑飞插件被中断预算/超时掐断后可恢复     | `start_session_vm` → 触发死循环事件 → 再次 `start_session_vm`                                                                                     | 首个 VM 进入 `Error`；后续能重建恢复 |
-| E2E-QJS-034 | 自动 | `panicking_plugin_isolated`                               | 单个插件抛错不连坐其他插件        | 同 session 启动 crashy + healthy 插件 → 仅向 crashy 分发异常事件                                                                                       | crashy 失败；healthy 保持运行 |
+| E2E-QJS-034 | 自动 | `panicking_plugin_isolated`                               | 单个插件抛错不连坐其他插件        | 同 session 启动 crashy + healthy 插件 → 仅向 crashy 分发异常事件                                                                                       | crashy 保持 `Running/Idle`；healthy 保持运行 |
 | E2E-QJS-035 | 自动 | `start_session_vm_opportunistically_reaps_expired_runtime` | idle VM 按机会式语义回收     | 配置较短 `idle_ttl_ms` → 等待过期 → 再次 `start_session_vm`                                                                                           | 过期 runtime 在新活动进入时被顺手回收 |
 
 
@@ -231,13 +243,13 @@
 
 ## Story 9 — AgentLoop 核心结构（TASK-14，3 条 + TASK-17 上下文管理 3 条）
 
-> 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`（符合 INTEGRATION_TEST_SPEC §5.2）。
+> 需要 `DEEPSEEK_API_KEY`；无 key 时必须 `panic!`（符合 INTEGRATION_TEST_SPEC §5.2）。
 > **验收**：与 §4 人工验收「对话模式、多轮上下文、会话切换」对齐，建议**人工补验** AgentLoop 与终端交互体验。
 
 
 | 编号          | 验收 | 用例名                                               | 用户意图                                         | 操作序列                                                                                      | 必须断言                                         |
 | ----------- | -- | ------------------------------------------------- | -------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------- |
-| E2E-CLI-081 | 人工 | `test_user_chat_non_interactive_with_prompt_flag` | 用户启动 `tomcat code` 并输入单句提问，AgentLoop 执行并输出 AI 回复 | `tomcat init` → `tomcat code`（stdin: `"Reply with exactly: pong\n"`，timeout 60s，含 OPENAI_API_KEY） | exit 0；stdout 非空（AI 已通过 AgentLoop::run() 回复） |
+| E2E-CLI-081 | 人工 | `test_user_chat_non_interactive_with_prompt_flag` | 用户启动 `tomcat code` 并输入单句提问，AgentLoop 执行并输出 AI 回复 | `tomcat init` → `tomcat code`（stdin: `"Reply with exactly: pong\n"`，timeout 60s，含 DEEPSEEK_API_KEY） | exit 0；stdout 非空（AI 已通过 AgentLoop::run() 回复） |
 | E2E-CLI-082 | 人工 | `test_user_chat_resumes_last_session`             | 用户用 `--resume` 恢复上次会话，历史消息从 JSONL 加载         | `tomcat init` → `tomcat code`（stdin 第一轮）→ `tomcat code --resume`（stdin 第二轮，timeout 60s）               | exit 0；第二轮 stdout 非空；进程正常退出                  |
 | E2E-CLI-089 | 人工 | `test_user_chat_model_switch_persists_across_resume` | 用户在对话内切换模型，并在重启/恢复后继续沿用该会话模型 | `tomcat init` → `tomcat code` 输入 `/model list`、`/model use deepseek-reasoner`、`/model current` → 退出 → `tomcat code --resume` → 再次输入 `/model current` | `/model current` 两次都显示 `deepseek-reasoner`；resume 后 prompt / banner 仍携带当前模型；`sessions.json` 中 `model_override` 已持久化 |
 | E2E-CLI-083 | 人工 | `test_user_chat_multi_turn_context_retained`      | 用户进行两轮提问，第二轮 Agent 可引用第一轮答案（多轮上下文）           | `tomcat code`（stdin: 两行问答，第二问引用第一问答案，timeout 90s）                                             | exit 0；stdout 包含第二问回复且非空                     |

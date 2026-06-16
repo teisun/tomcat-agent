@@ -27,6 +27,7 @@ fn completions_config() -> LlmConfig {
 /// 验证：choices 非空、首条 index=0（超时 60s）
 /// 意义：TASK-05 LLM 端到端——非流式请求正向路径；无 DEEPSEEK_API_KEY 时用例必须失败（INTEGRATION_TEST_SPEC）
 #[tokio::test]
+#[serial(env_lock)]
 async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn std::error::Error>>
 {
     common::setup_logging();
@@ -64,6 +65,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
 /// 验证：stream 至少产生一个 StreamEvent（超时 60s）
 /// 意义：TASK-05 LLM 端到端——流式请求正向路径；无 DEEPSEEK_API_KEY 时用例必须失败
 #[tokio::test]
+#[serial(env_lock)]
 async fn test_llm_provider_chat_stream_real_request_yields_events(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();

@@ -1070,7 +1070,7 @@ hostcall 参数/权限错误 → HostResponse{ok:false,error}（不抛 Err，回
 | 集成 | `runtime_split_test::{plugin_runtime_can_be_disabled_via_env,plugin_runtime_uses_plugin_config_values,sessions_in_same_project_share_scope_container,different_projects_get_distinct_scope_containers,registry_shared_across_sessions_same_scope,registry_isolated_across_project_scopes,manifest_static_tools_visible_without_vm,scope_conflicts_and_activation_quadrants_route_correctly}` | ✅ 已覆盖 | `PI_PLUGIN_DISABLE`、配置接线、scope 容器与静态 tools[]。 |
 | 集成 | `plugin::tests::{host_function_is_not_visible_to_llm_tool_registry,registered_function_can_be_invoked_by_host}` | 规划中 | `functions[]` / `registerFunction` 这条宿主面不污染 LLM 工具表。 |
 | 集成 | `web_search_tool_tests::{plugin_backend_explicit_mimo_roundtrip,plugin_backend_auto_slot_degrades_cleanly}` | 规划中 | `webSearchBackend(params)` 这条 host-facing function 路打通。 |
-| E2E | `quickjs_e2e_tests::{run_script_console,pi_readfile_llm,shims_and_crypto_work_in_session_vm,runaway_plugin_interrupted,panicking_plugin_isolated}` | ✅ 已覆盖 | JS 执行、`pi.*` hostcall、Tier-A 垫片、软隔离、panic 隔离。 |
+| E2E | `quickjs_e2e_tests::{run_script_console,pi_readfile_llm,shims_and_crypto_work_in_session_vm,runaway_plugin_interrupted,panicking_plugin_isolated}` | ✅ 已覆盖 | JS 执行、`pi.*` hostcall、Tier-A 垫片、超时隔离、handler 错误隔离。 |
 | CLI | `cli_tests::doctor_*`、`plugin_cmd_test::run_plugin_load_defaults_to_allow_permissions` | ✅ 已覆盖 | doctor 不再要求 WasmEdge；CLI 加载期默认放行。 |
 | 文档 | 本文 + `user-guide.md` + `src/ext/README.md` + 测试/架构配套文档同步（§11） | 进行中 | 字和代码别两张皮。 |
 

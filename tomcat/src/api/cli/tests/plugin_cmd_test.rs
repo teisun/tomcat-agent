@@ -3,7 +3,7 @@
 //! 覆盖：
 //!
 //! - `load_plugin_registry` / `save_plugin_registry` 的 round-trip 与
-//!   损坏文件回退到空注册表的容错。
+//!   损坏文件返回显式错误。
 //! - `run_plugin` 在 `list` / `load` / `info` / `unload` / `enable` /
 //!   `disable` 五种子命令下、对不存在路径或 id 返回 `Ok` 不抛错。
 
@@ -78,7 +78,7 @@ fn plugin_registry_load_save_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("registry.json");
 
-    let reg = load_plugin_registry(&path);
+    let reg = load_plugin_registry(&path).unwrap();
     assert!(reg.plugins.is_empty());
 
     let mut reg = PluginRegistryFile::default();
@@ -90,20 +90,20 @@ fn plugin_registry_load_save_roundtrip() {
     });
     save_plugin_registry(&path, &reg).unwrap();
 
-    let loaded = load_plugin_registry(&path);
+    let loaded = load_plugin_registry(&path).unwrap();
     assert_eq!(loaded.plugins.len(), 1);
     assert_eq!(loaded.plugins[0].id, "test-plugin");
     assert!(loaded.plugins[0].enabled);
 }
 
 #[test]
-fn plugin_registry_corrupt_returns_empty() {
+fn plugin_registry_corrupt_returns_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("registry.json");
     std::fs::write(&path, "not valid json {{{").unwrap();
 
-    let reg = load_plugin_registry(&path);
-    assert!(reg.plugins.is_empty());
+    let error = load_plugin_registry(&path).unwrap_err().to_string();
+    assert!(error.contains("registry 损坏"), "unexpected error: {error}");
 }
 
 #[test]
@@ -187,7 +187,7 @@ fn run_plugin_unload_removes_registered_entry_even_without_live_manager_state() 
     );
     assert!(r.is_ok());
 
-    let registry = load_plugin_registry(&reg_path);
+    let registry = load_plugin_registry(&reg_path).unwrap();
     assert!(
         registry.plugins.is_empty(),
         "unload should clear registry-only entries even when no live PluginManager state exists"
@@ -258,7 +258,8 @@ fn run_plugin_load_defaults_to_allow_permissions() {
         &crate::resolve_plugins_dir(&cfg)
             .unwrap()
             .join("registry.json"),
-    );
+    )
+    .unwrap();
     assert!(
         registry
             .plugins
@@ -317,8 +318,8 @@ fn plugin_disable_targets_highest_priority_registry_layer() {
     )
     .unwrap();
 
-    let scope_registry = load_plugin_registry(&scope_registry_path);
-    let global_registry = load_plugin_registry(&global_registry_path);
+    let scope_registry = load_plugin_registry(&scope_registry_path).unwrap();
+    let global_registry = load_plugin_registry(&global_registry_path).unwrap();
     assert!(!scope_registry.plugins[0].enabled);
     assert!(global_registry.plugins[0].enabled);
 }
@@ -422,9 +423,13 @@ fn plugin_unload_removes_scope_entry_before_global_entry() {
     .unwrap();
 
     assert!(load_plugin_registry(&scope_registry_path)
+        .unwrap()
         .plugins
         .is_empty());
-    assert_eq!(load_plugin_registry(&global_registry_path).plugins.len(), 1);
+    assert_eq!(
+        load_plugin_registry(&global_registry_path).unwrap().plugins.len(),
+        1
+    );
 }
 
 #[test]

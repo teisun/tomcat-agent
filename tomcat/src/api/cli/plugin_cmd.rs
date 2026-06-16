@@ -118,7 +118,7 @@ fn layered_registries(cfg: &AppConfig) -> Result<Vec<LayeredRegistry>, AppError>
         out.push(LayeredRegistry {
             visibility: layer.visibility,
             path: layer.plugin_registry_path.clone(),
-            registry: load_plugin_registry(&layer.plugin_registry_path),
+            registry: load_plugin_registry(&layer.plugin_registry_path)?,
         });
     }
     Ok(out)
@@ -247,7 +247,7 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                             registry_path_value = info.plugin_root.display().to_string();
                             format_plugin_info(&info);
                         }
-                        let mut registry = load_plugin_registry(&reg_path);
+                        let mut registry = load_plugin_registry(&reg_path)?;
                         registry.plugins.retain(|e| e.id != *id);
                         registry.plugins.push(PluginRegistryEntry {
                             id: id.clone(),
@@ -293,7 +293,7 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
         }
         PluginSub::Unload { id } => match locate_registry_entry(cfg, &id)? {
             Some(located) => {
-                let mut registry = load_plugin_registry(&located.path);
+                let mut registry = load_plugin_registry(&located.path)?;
                 registry.plugins.retain(|entry| entry.id != id);
                 save_plugin_registry(&located.path, &registry)?;
                 let _ = pm.unload_plugin(&id);
@@ -303,7 +303,7 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
         },
         PluginSub::Enable { id } => match locate_registry_entry(cfg, &id)? {
             Some(located) => {
-                let mut registry = load_plugin_registry(&located.path);
+                let mut registry = load_plugin_registry(&located.path)?;
                 if let Some(entry) = registry.plugins.iter_mut().find(|entry| entry.id == id) {
                     entry.enabled = true;
                     save_plugin_registry(&located.path, &registry)?;
@@ -315,7 +315,7 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
         },
         PluginSub::Disable { id } => match locate_registry_entry(cfg, &id)? {
             Some(located) => {
-                let mut registry = load_plugin_registry(&located.path);
+                let mut registry = load_plugin_registry(&located.path)?;
                 if let Some(entry) = registry.plugins.iter_mut().find(|entry| entry.id == id) {
                     entry.enabled = false;
                     save_plugin_registry(&located.path, &registry)?;

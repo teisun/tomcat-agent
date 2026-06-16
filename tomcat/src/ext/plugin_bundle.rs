@@ -161,7 +161,7 @@ fn ordered_source_files(src_dir: &Path) -> Result<Vec<PathBuf>, AppError> {
         .into_iter()
         .filter(|path| path != &entry && !seen.contains(path))
         .collect::<Vec<_>>();
-    remaining.sort_by(|left, right| relative_key(src_dir, left).cmp(&relative_key(src_dir, right)));
+    remaining.sort_by_key(|path| relative_key(src_dir, path));
     ordered.extend(remaining);
     ordered.push(entry);
     Ok(ordered)

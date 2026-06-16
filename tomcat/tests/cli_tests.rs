@@ -8,7 +8,7 @@ mod common;
 use assert_cmd::Command;
 use async_trait::async_trait;
 use predicates::prelude::*;
-use serde_json::json;
+use serde_json::{json, Value};
 use serial_test::serial;
 use std::collections::VecDeque;
 use std::fs;
@@ -451,6 +451,65 @@ fn deterministic_chat_context_fixture_with_config(
         .create_session(&session_key, None)
         .unwrap();
     (dir, ctx)
+}
+
+fn assistant_tool_calls_from_transcript(transcript: &str) -> Vec<(String, Value)> {
+    let mut calls = Vec::new();
+    for line in transcript.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for tool_call in tool_calls {
+            let Some(function) = tool_call.get("function") else {
+                continue;
+            };
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let arguments = function
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}");
+            let parsed = serde_json::from_str::<Value>(arguments).unwrap_or_else(|err| {
+                panic!("tool arguments should be valid json: {arguments}; err: {err}");
+            });
+            calls.push((name, parsed));
+        }
+    }
+    calls
+}
+
+fn tool_results_from_transcript(transcript: &str) -> Vec<Value> {
+    let mut results = Vec::new();
+    for line in transcript.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        let Some(content) = message.get("content").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Ok(parsed) = serde_json::from_str::<Value>(content) {
+            results.push(parsed);
+        }
+    }
+    results
 }
 
 fn seed_dangling_tool_round(session: &SessionManager, tool_call_id: &str) {
@@ -2370,25 +2429,39 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 
     // transcript 级硬断言：必须能看到真实 `task_output(block=true)` + `task_stop`。
     let transcript = load_background_bash_p1_real_llm_transcript(&fx);
-    let task_output_calls = transcript.matches("\"name\":\"task_output\"").count();
+    let tool_calls = assistant_tool_calls_from_transcript(&transcript);
+    let task_output_calls: Vec<_> = tool_calls
+        .iter()
+        .filter(|(name, _)| name == "task_output")
+        .collect();
     assert!(
-        task_output_calls >= 1,
+        !task_output_calls.is_empty(),
         "transcript 中 task_output 次数应至少为 1（证明真 LLM 走了 block=true 等待路径），实际 {}；transcript: {}",
-        task_output_calls,
+        task_output_calls.len(),
         trunc(&transcript, 1500)
     );
+    for (_, args) in &task_output_calls {
+        assert!(
+            args.get("block").and_then(Value::as_bool) == Some(true)
+                && args.get("timeout_ms").and_then(Value::as_u64) == Some(300),
+            "task_output 调用参数应固定为 block=true + timeout_ms=300，实际 args={args}"
+        );
+    }
+    let tool_results = tool_results_from_transcript(&transcript);
     assert!(
-        transcript.contains("\\\"block\\\":true") && transcript.contains("\\\"timeout_ms\\\":300"),
-        "transcript 应含 block=true 与 timeout_ms=300；actual: {}",
-        trunc(&transcript, 1500)
-    );
-    assert!(
-        transcript.contains("TOKEN_WAITSLICE"),
+        tool_results.iter().any(|result| {
+            result.get("wakeReason").and_then(Value::as_str) == Some("new_output")
+                && result
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(|content| content.contains("TOKEN_WAITSLICE"))
+                    .unwrap_or(false)
+        }),
         "transcript 应能看到 wait-slice 唤醒后的 token；actual: {}",
         trunc(&transcript, 1500)
     );
     assert!(
-        transcript.contains("\"name\":\"task_stop\""),
+        tool_calls.iter().any(|(name, _)| name == "task_stop"),
         "transcript 应含 task_stop（收尾后台任务），actual: {}",
         trunc(&transcript, 1500)
     );
@@ -2473,56 +2546,37 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     );
 
     let transcript = load_background_bash_p1_real_llm_transcript(&fx);
+    let tool_calls = assistant_tool_calls_from_transcript(&transcript);
+    let tool_results = tool_results_from_transcript(&transcript);
 
     let mut task_output_calls = 0usize;
     let mut timeout_results = 0usize;
     let mut saw_new_output_token = false;
     let mut saw_task_stop = false;
-    for line in transcript.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(message) = value.get("message") else {
-            continue;
-        };
-        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        if role == "assistant" {
-            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
-                for tc in tool_calls {
-                    let name = tc
-                        .get("function")
-                        .and_then(|f| f.get("name"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let args = tc
-                        .get("function")
-                        .and_then(|f| f.get("arguments"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if name == "task_output" {
-                        task_output_calls += 1;
-                        assert!(
-                            args.contains("\"block\":true") && args.contains("\"timeout_ms\":300"),
-                            "task_output 调用参数应固定为 block=true + timeout_ms=300，实际 args={args}"
-                        );
-                    } else if name == "task_stop" {
-                        saw_task_stop = true;
-                    }
-                }
-            }
-        } else if role == "tool" {
-            let content = message
+    for (name, args) in &tool_calls {
+        if name == "task_output" {
+            task_output_calls += 1;
+            assert!(
+                args.get("block").and_then(Value::as_bool) == Some(true)
+                    && args.get("timeout_ms").and_then(Value::as_u64) == Some(300),
+                "task_output 调用参数应固定为 block=true + timeout_ms=300，实际 args={args}"
+            );
+        } else if name == "task_stop" {
+            saw_task_stop = true;
+        }
+    }
+    for result in &tool_results {
+        if result.get("wakeReason").and_then(Value::as_str) == Some("timeout") {
+            timeout_results += 1;
+        }
+        if result.get("wakeReason").and_then(Value::as_str) == Some("new_output")
+            && result
                 .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if content.contains("\"wakeReason\":\"timeout\"") {
-                timeout_results += 1;
-            }
-            if content.contains("TOKEN_MULTI_TIMEOUT")
-                && content.contains("\"wakeReason\":\"new_output\"")
-            {
-                saw_new_output_token = true;
-            }
+                .and_then(Value::as_str)
+                .map(|content| content.contains("TOKEN_MULTI_TIMEOUT"))
+                .unwrap_or(false)
+        {
+            saw_new_output_token = true;
         }
     }
 
@@ -2544,7 +2598,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
         trunc(&transcript, 1800)
     );
     assert!(
-        saw_task_stop || transcript.contains("\"name\":\"task_stop\""),
+        saw_task_stop,
         "transcript 应含 task_stop（收尾后台任务），actual: {}",
         trunc(&transcript, 1800)
     );
@@ -5029,10 +5083,13 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
         ("TAVILY_API_KEY", Some("tavily-test-key")),
         ("BRAVE_API_KEY", None),
         ("SERPER_API_KEY", None),
+        ("NO_PROXY", Some("127.0.0.1,localhost")),
+        ("no_proxy", Some("127.0.0.1,localhost")),
         (common::DEEPSEEK_TEST_API_KEY_ENV, None),
     ]);
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".to_string();
+    cfg.tools.web_search.legacy_http_backends = true;
     cfg.tools.web_search.tavily_base_url = server.uri();
     let (_dir, mut ctx) = deterministic_chat_context_fixture_with_config(cfg, ENV_KEY);
     let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
@@ -5296,13 +5353,15 @@ fn test_session_model_override_persists_across_chat_context_restart() {
     let _span =
         info_span!("test_session_model_override_persists_across_chat_context_restart").entered();
 
+    const ENV_KEY: &str = "TOMCAT_SESSION_MODEL_OVERRIDE_TEST_KEY";
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
     common::apply_deepseek_app_config(&mut cfg);
+    cfg.llm.api_key_env = Some(ENV_KEY.to_string());
 
     unsafe {
-        std::env::set_var("DEEPSEEK_API_KEY", "deepseek-stub");
+        std::env::set_var(ENV_KEY, "deepseek-stub");
     }
 
     let ctx = ChatContext::from_config(cfg.clone()).expect("chat context should be created");
@@ -5321,7 +5380,7 @@ fn test_session_model_override_persists_across_chat_context_restart() {
     assert_eq!(entry.model_override.as_deref(), Some("deepseek-v4-pro"));
 
     unsafe {
-        std::env::remove_var("DEEPSEEK_API_KEY");
+        std::env::remove_var(ENV_KEY);
     }
 }
 

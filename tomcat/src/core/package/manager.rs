@@ -4,21 +4,31 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::Deserialize;
-use uuid::Uuid;
 
 use crate::core::skill::parse as parse_skill_frontmatter;
 use crate::ext::parse_manifest as parse_plugin_manifest;
-use crate::infra::{read_file_utf8, write_file_atomic, AppError};
+use crate::infra::{read_file_utf8, AppError};
 use crate::AppConfig;
 
 use super::model::{
     DetectedPackageResource, DetectedPackageSource, DetectedPackageSourceKind, InstallOutcome,
-    PackageLayerListing, PackageManifest, PackagePluginRecord, PackageRecord, PackageRegistryFile,
-    PackageResourceKind, PackageSkillRecord, PackageSourceKind, PackageVisibility,
-    PluginRegistryEntry, PluginRegistryFile, PreparedInstall, PreparedInstallResource,
-    UninstallOutcome, PACKAGE_MANIFEST_SCHEMA_V1,
+    PackageLayerListing, PackageManifest, PackagePluginRecord, PackageRecord, PackageResourceKind,
+    PackageSkillRecord, PackageSourceKind, PackageVisibility, PluginRegistryEntry,
+    PreparedInstall, PreparedInstallResource, UninstallOutcome, PACKAGE_MANIFEST_SCHEMA_V1,
 };
-use super::paths::{resolve_layer_paths, resolve_runtime_layer_paths, LayerPaths};
+use super::paths::{resolve_layer_paths, resolve_runtime_layer_paths};
+
+mod install_fs;
+mod registry;
+
+use self::install_fs::{
+    cleanup_install_artifacts, install_resource, prepare_force_remove_path, remove_path_if_exists,
+    rollback_install,
+};
+pub use self::registry::{
+    load_package_registry, load_plugin_registry, save_package_registry, save_plugin_registry,
+};
+use self::registry::RegistrySnapshot;
 
 #[derive(Debug)]
 pub struct PackageManager<'a> {
@@ -95,7 +105,7 @@ impl<'a> PackageManager<'a> {
         force: bool,
     ) -> Result<PreparedInstall, AppError> {
         let layer_paths = resolve_layer_paths(self.cfg, visibility, scope_root)?;
-        let package_registry = load_package_registry(&layer_paths.package_registry_path);
+        let package_registry = load_package_registry(&layer_paths.package_registry_path)?;
         if package_registry
             .packages
             .iter()
@@ -158,20 +168,70 @@ impl<'a> PackageManager<'a> {
         let mut mutations = Vec::new();
 
         let install_result = (|| -> Result<InstallOutcome, AppError> {
-            let mut package_registry = package_snapshot.package_value();
+            let mut package_registry = package_snapshot.package_value()?;
+            let previous_record = package_registry
+                .packages
+                .iter()
+                .find(|record| record.name == prepared.detected.manifest.name)
+                .cloned();
             package_registry
                 .packages
                 .retain(|record| record.name != prepared.detected.manifest.name);
-            let mut plugin_registry = plugin_snapshot.plugin_value();
+            let mut plugin_registry = plugin_snapshot.plugin_value()?;
             let plugin_ids = prepared
                 .resources
                 .iter()
                 .filter(|resource| resource.kind == PackageResourceKind::Plugin)
                 .map(|resource| resource.id.clone())
                 .collect::<HashSet<_>>();
+            let skill_ids = prepared
+                .resources
+                .iter()
+                .filter(|resource| resource.kind == PackageResourceKind::Skill)
+                .map(|resource| resource.id.clone())
+                .collect::<HashSet<_>>();
+            let removed_plugin_ids = previous_record
+                .as_ref()
+                .map(|record| {
+                    record
+                        .plugins
+                        .iter()
+                        .map(|plugin| plugin.id.clone())
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default();
+            let all_replaced_plugin_ids = removed_plugin_ids
+                .union(&plugin_ids)
+                .cloned()
+                .collect::<HashSet<_>>();
             plugin_registry
                 .plugins
-                .retain(|entry| !plugin_ids.contains(&entry.id));
+                .retain(|entry| !all_replaced_plugin_ids.contains(&entry.id));
+
+            if let Some(previous_record) = &previous_record {
+                for plugin in previous_record
+                    .plugins
+                    .iter()
+                    .filter(|plugin| !plugin_ids.contains(&plugin.id))
+                {
+                    if let Some(mutation) =
+                        prepare_force_remove_path(&prepared.layer_paths.plugins_dir.join(&plugin.id))?
+                    {
+                        mutations.push(mutation);
+                    }
+                }
+                for skill in previous_record
+                    .skills
+                    .iter()
+                    .filter(|skill| !skill_ids.contains(&skill.name))
+                {
+                    if let Some(mutation) =
+                        prepare_force_remove_path(&prepared.layer_paths.skills_dir.join(&skill.name))?
+                    {
+                        mutations.push(mutation);
+                    }
+                }
+            }
 
             for resource in &prepared.resources {
                 mutations.push(install_resource(resource, prepared.force)?);
@@ -231,6 +291,8 @@ impl<'a> PackageManager<'a> {
             }
             save_plugin_registry(&prepared.layer_paths.plugin_registry_path, &plugin_registry)?;
 
+            cleanup_install_artifacts(&mutations);
+
             Ok(InstallOutcome {
                 record,
                 warnings: prepared.warnings.clone(),
@@ -265,7 +327,7 @@ impl<'a> PackageManager<'a> {
         scope_root: Option<&Path>,
     ) -> Result<UninstallOutcome, AppError> {
         let layer_paths = resolve_layer_paths(self.cfg, visibility, scope_root)?;
-        let mut package_registry = load_package_registry(&layer_paths.package_registry_path);
+        let mut package_registry = load_package_registry(&layer_paths.package_registry_path)?;
         let Some(index) = package_registry
             .packages
             .iter()
@@ -293,7 +355,7 @@ impl<'a> PackageManager<'a> {
 
         save_package_registry(&layer_paths.package_registry_path, &package_registry)?;
 
-        let mut plugin_registry = load_plugin_registry(&layer_paths.plugin_registry_path);
+        let mut plugin_registry = load_plugin_registry(&layer_paths.plugin_registry_path)?;
         let plugin_ids = record
             .plugins
             .iter()
@@ -319,32 +381,16 @@ impl<'a> PackageManager<'a> {
             Some(visibility) => vec![resolve_layer_paths(self.cfg, visibility, scope_root)?],
             None => resolve_runtime_layer_paths(self.cfg, scope_root)?,
         };
-        Ok(layers
-            .into_iter()
-            .map(|layer| PackageLayerListing {
+        let mut listings = Vec::with_capacity(layers.len());
+        for layer in layers {
+            let registry = load_package_registry(&layer.package_registry_path)?;
+            listings.push(PackageLayerListing {
                 visibility: layer.visibility,
-                records: load_package_registry(&layer.package_registry_path).packages,
-            })
-            .collect())
+                records: registry.packages,
+            });
+        }
+        Ok(listings)
     }
-}
-
-pub fn load_package_registry(path: &Path) -> PackageRegistryFile {
-    let mut registry: PackageRegistryFile = load_registry(path).unwrap_or_default();
-    registry.normalize();
-    registry
-}
-
-pub fn save_package_registry(path: &Path, registry: &PackageRegistryFile) -> Result<(), AppError> {
-    save_registry(path, registry)
-}
-
-pub fn load_plugin_registry(path: &Path) -> PluginRegistryFile {
-    load_registry(path).unwrap_or_default()
-}
-
-pub fn save_plugin_registry(path: &Path, registry: &PluginRegistryFile) -> Result<(), AppError> {
-    save_registry(path, registry)
 }
 
 #[derive(Debug, Deserialize)]
@@ -740,228 +786,8 @@ fn ordered_detected_resources(
     ordered.into_iter()
 }
 
-fn install_resource(
-    resource: &PreparedInstallResource,
-    force: bool,
-) -> Result<InstallFsMutation, AppError> {
-    let parent = resource
-        .destination_dir
-        .parent()
-        .ok_or_else(|| AppError::Config("目标目录无父目录".to_string()))?;
-    fs::create_dir_all(parent).map_err(AppError::Io)?;
-
-    let stage_dir = hidden_sibling_path(parent, &resource.id, "staging");
-    copy_dir_recursive(&resource.source_dir, &stage_dir).inspect_err(|_| {
-        let _ = remove_path_if_exists(&stage_dir);
-    })?;
-
-    let backup_dir = if resource.destination_dir.exists() {
-        if !force {
-            let _ = remove_path_if_exists(&stage_dir);
-            return Err(AppError::Config(format!(
-                "目标已存在且未开启 force: {}",
-                resource.destination_dir.display()
-            )));
-        }
-        let backup = hidden_sibling_path(parent, &resource.id, "backup");
-        fs::rename(&resource.destination_dir, &backup).map_err(AppError::Io)?;
-        Some(backup)
-    } else {
-        None
-    };
-
-    if let Err(error) = fs::rename(&stage_dir, &resource.destination_dir) {
-        let _ = remove_path_if_exists(&stage_dir);
-        if let Some(backup) = &backup_dir {
-            let _ = fs::rename(backup, &resource.destination_dir);
-        }
-        return Err(AppError::Io(error));
-    }
-
-    Ok(InstallFsMutation {
-        destination_dir: resource.destination_dir.clone(),
-        backup_dir,
-        stage_dir,
-    })
-}
-
-fn rollback_install(
-    layer_paths: &LayerPaths,
-    package_snapshot: &RegistrySnapshot,
-    plugin_snapshot: &RegistrySnapshot,
-    mutations: &[InstallFsMutation],
-) -> Vec<String> {
-    let mut errors = Vec::new();
-    for mutation in mutations.iter().rev() {
-        if let Err(error) = remove_path_if_exists(&mutation.destination_dir) {
-            errors.push(format!(
-                "remove {} failed: {error}",
-                mutation.destination_dir.display()
-            ));
-        }
-        if let Some(backup_dir) = &mutation.backup_dir {
-            if backup_dir.exists() {
-                if let Err(error) = fs::rename(backup_dir, &mutation.destination_dir) {
-                    errors.push(format!(
-                        "restore {} failed: {error}",
-                        mutation.destination_dir.display()
-                    ));
-                }
-            }
-        }
-        if mutation.stage_dir.exists() {
-            if let Err(error) = remove_path_if_exists(&mutation.stage_dir) {
-                errors.push(format!(
-                    "cleanup stage {} failed: {error}",
-                    mutation.stage_dir.display()
-                ));
-            }
-        }
-    }
-
-    if let Err(error) = package_snapshot.restore(&layer_paths.package_registry_path) {
-        errors.push(format!("restore package registry failed: {error}"));
-    }
-    if let Err(error) = plugin_snapshot.restore(&layer_paths.plugin_registry_path) {
-        errors.push(format!("restore plugin registry failed: {error}"));
-    }
-    errors
-}
-
-fn load_registry<T>(path: &Path) -> Result<T, AppError>
-where
-    T: serde::de::DeserializeOwned + Default,
-{
-    if !path.exists() {
-        return Ok(T::default());
-    }
-    let raw = fs::read_to_string(path).map_err(AppError::Io)?;
-    serde_json::from_str(&raw)
-        .map_err(|_| AppError::Config(format!("registry 损坏: {}", path.display())))
-}
-
-fn save_registry<T>(path: &Path, registry: &T) -> Result<(), AppError>
-where
-    T: serde::Serialize,
-{
-    let json = serde_json::to_vec_pretty(registry).map_err(AppError::Serialize)?;
-    write_file_atomic(path, &json)
-}
-
 fn canonicalize_existing_path(path: &Path) -> Result<PathBuf, AppError> {
     path.canonicalize().map_err(|error| {
         AppError::Config(format!("路径不存在或不可读: {} ({error})", path.display()))
     })
-}
-
-fn hidden_sibling_path(parent: &Path, stem: &str, suffix: &str) -> PathBuf {
-    parent.join(format!(".{stem}.{suffix}.{}", Uuid::new_v4()))
-}
-
-fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), AppError> {
-    let metadata = fs::symlink_metadata(source).map_err(AppError::Io)?;
-    if metadata.file_type().is_symlink() {
-        return Err(AppError::Permission(format!(
-            "不支持复制符号链接目录: {}",
-            source.display()
-        )));
-    }
-    if !metadata.is_dir() {
-        return Err(AppError::Config(format!(
-            "待安装资源必须是目录: {}",
-            source.display()
-        )));
-    }
-    fs::create_dir_all(target).map_err(AppError::Io)?;
-    for entry in fs::read_dir(source).map_err(AppError::Io)? {
-        let entry = entry.map_err(AppError::Io)?;
-        let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
-        let file_type = entry.file_type().map_err(AppError::Io)?;
-        if file_type.is_symlink() {
-            return Err(AppError::Permission(format!(
-                "不支持复制符号链接文件: {}",
-                source_path.display()
-            )));
-        }
-        if file_type.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
-        } else if file_type.is_file() {
-            fs::copy(&source_path, &target_path).map_err(AppError::Io)?;
-        }
-    }
-    Ok(())
-}
-
-fn remove_path_if_exists(path: &Path) -> Result<bool, AppError> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let metadata = fs::symlink_metadata(path).map_err(AppError::Io)?;
-    if metadata.is_dir() {
-        fs::remove_dir_all(path).map_err(AppError::Io)?;
-    } else {
-        fs::remove_file(path).map_err(AppError::Io)?;
-    }
-    Ok(true)
-}
-
-#[derive(Debug, Clone)]
-struct InstallFsMutation {
-    destination_dir: PathBuf,
-    backup_dir: Option<PathBuf>,
-    stage_dir: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-struct RegistrySnapshot {
-    existed: bool,
-    raw_json: String,
-}
-
-impl RegistrySnapshot {
-    fn capture_package(path: &Path) -> Self {
-        Self::capture(path)
-    }
-
-    fn capture_plugin(path: &Path) -> Self {
-        Self::capture(path)
-    }
-
-    fn capture(path: &Path) -> Self {
-        match fs::read_to_string(path) {
-            Ok(raw_json) => Self {
-                existed: true,
-                raw_json,
-            },
-            Err(_) => Self {
-                existed: false,
-                raw_json: String::new(),
-            },
-        }
-    }
-
-    fn package_value(&self) -> PackageRegistryFile {
-        if !self.existed {
-            return PackageRegistryFile::default();
-        }
-        serde_json::from_str(&self.raw_json).unwrap_or_default()
-    }
-
-    fn plugin_value(&self) -> PluginRegistryFile {
-        if !self.existed {
-            return PluginRegistryFile::default();
-        }
-        serde_json::from_str(&self.raw_json).unwrap_or_default()
-    }
-
-    fn restore(&self, path: &Path) -> Result<(), AppError> {
-        if self.existed {
-            write_file_atomic(path, self.raw_json.as_bytes())
-        } else if path.exists() {
-            fs::remove_file(path).map_err(AppError::Io)
-        } else {
-            Ok(())
-        }
-    }
 }

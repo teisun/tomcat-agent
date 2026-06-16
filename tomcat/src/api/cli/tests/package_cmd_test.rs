@@ -105,16 +105,20 @@ fn run_install_scope_package_writes_layer_registries() {
     assert!(scope_paths.skills_dir.join("cli-skill").is_dir());
     assert_eq!(
         load_package_registry(&scope_paths.package_registry_path)
+            .unwrap()
             .packages
             .len(),
         1
     );
     assert_eq!(
-        load_package_registry(&scope_paths.package_registry_path).schema,
+        load_package_registry(&scope_paths.package_registry_path)
+            .unwrap()
+            .schema,
         crate::core::package::PACKAGE_REGISTRY_SCHEMA_V1
     );
     assert_eq!(
         load_plugin_registry(&scope_paths.plugin_registry_path)
+            .unwrap()
             .plugins
             .len(),
         1
@@ -148,6 +152,7 @@ fn run_install_without_visibility_defaults_to_scope_in_noninteractive_mode() {
     .unwrap();
     assert_eq!(
         load_package_registry(&scope_paths.package_registry_path)
+            .unwrap()
             .packages
             .len(),
         1
@@ -187,6 +192,7 @@ fn run_uninstall_removes_scope_installed_package() {
     )
     .unwrap();
     assert!(load_package_registry(&scope_paths.package_registry_path)
+        .unwrap()
         .packages
         .is_empty());
 }

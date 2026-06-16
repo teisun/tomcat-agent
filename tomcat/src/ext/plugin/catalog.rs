@@ -2,6 +2,7 @@ use super::source_scan::{host_root_plugin_dir, plugin_roots};
 use super::{parse_manifest, PluginManifest};
 use crate::infra::error::AppError;
 use crate::AppConfig;
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -96,6 +97,7 @@ fn scan_root(root: &Path, source: PluginSource, catalog: &mut PluginCatalog) {
     if !root.exists() {
         return;
     }
+    let registry_filter = load_registry_filter(root, catalog);
 
     let Ok(entries) = std::fs::read_dir(root) else {
         catalog.diagnostics.push(PluginCatalogDiagnostic {
@@ -127,7 +129,11 @@ fn scan_root(root: &Path, source: PluginSource, catalog: &mut PluginCatalog) {
         };
 
         match read_catalog_entry(&manifest_path, &plugin_root, source) {
-            Ok(catalog_entry) => catalog.insert_entry(catalog_entry),
+            Ok(catalog_entry) => {
+                if registry_filter.includes(&catalog_entry.manifest.id) {
+                    catalog.insert_entry(catalog_entry);
+                }
+            }
             Err(error) => catalog.diagnostics.push(PluginCatalogDiagnostic {
                 path: manifest_path,
                 reason: error.to_string(),
@@ -168,4 +174,68 @@ fn read_catalog_entry(
         plugin_root: plugin_root.to_path_buf(),
         source,
     })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LayerPluginRegistryFile {
+    #[serde(default)]
+    plugins: Vec<LayerPluginRegistryEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LayerPluginRegistryEntry {
+    id: String,
+    #[serde(default = "default_registry_plugin_enabled")]
+    enabled: bool,
+}
+
+fn default_registry_plugin_enabled() -> bool {
+    true
+}
+
+enum RegistryFilter {
+    Absent,
+    Present(BTreeMap<String, bool>),
+}
+
+impl RegistryFilter {
+    fn includes(&self, plugin_id: &str) -> bool {
+        match self {
+            Self::Absent => true,
+            Self::Present(entries) => entries.get(plugin_id).copied().unwrap_or(false),
+        }
+    }
+}
+
+fn load_registry_filter(root: &Path, catalog: &mut PluginCatalog) -> RegistryFilter {
+    let registry_path = root.join("registry.json");
+    if !registry_path.exists() {
+        return RegistryFilter::Absent;
+    }
+    let raw = match std::fs::read_to_string(&registry_path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            catalog.diagnostics.push(PluginCatalogDiagnostic {
+                path: registry_path,
+                reason: format!("读取 plugin registry 失败: {error}"),
+            });
+            return RegistryFilter::Present(BTreeMap::new());
+        }
+    };
+    let parsed: LayerPluginRegistryFile = match serde_json::from_str(&raw) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            catalog.diagnostics.push(PluginCatalogDiagnostic {
+                path: registry_path,
+                reason: format!("plugin registry 解析失败: {error}"),
+            });
+            return RegistryFilter::Present(BTreeMap::new());
+        }
+    };
+    let entries = parsed
+        .plugins
+        .into_iter()
+        .map(|entry| (entry.id, entry.enabled))
+        .collect::<BTreeMap<_, _>>();
+    RegistryFilter::Present(entries)
 }

@@ -19,7 +19,7 @@ function normalizeQuery(raw) {
 }
 
 function normalizeCount(raw) {
-  return Math.max(1, Math.min(Number(raw || 5), 10));
+  return Math.max(1, Math.min(Number(raw || 5), 20));
 }
 
 function dedupeHits(hits) {

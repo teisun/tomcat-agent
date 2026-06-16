@@ -1567,8 +1567,8 @@ pi.registerFunction("echoHost", function () {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial(env_lock)]
-async fn function_discovery_reads_only_host_root() {
-    const API_ENV: &str = "TOMCAT_FUNCTION_HOST_ROOT_ONLY_TEST_KEY";
+async fn function_discovery_reads_all_runtime_layers() {
+    const API_ENV: &str = "TOMCAT_FUNCTION_LAYERED_DISCOVERY_TEST_KEY";
 
     let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -1600,11 +1600,19 @@ async fn function_discovery_reads_only_host_root() {
     );
 
     let ctx = ChatContext::from_config(cfg).expect("ctx");
-    let plugin_ids = function_targets(&ctx, "test.echo")
+    let mut plugin_ids = function_targets(&ctx, "test.echo")
         .into_iter()
         .map(|entry| entry.plugin_id)
         .collect::<Vec<_>>();
-    assert_eq!(plugin_ids, vec!["host-only-function".to_string()]);
+    plugin_ids.sort();
+    assert_eq!(
+        plugin_ids,
+        vec![
+            "agent-function".to_string(),
+            "host-only-function".to_string(),
+            "project-function".to_string()
+        ]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

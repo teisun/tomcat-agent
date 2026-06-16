@@ -120,6 +120,72 @@ impl LlmResolver for StaticResolver {
     }
 }
 
+#[derive(Clone)]
+struct CapturingLlm {
+    seen_max_tokens: Arc<Mutex<Vec<Option<u32>>>>,
+    seen_temperatures: Arc<Mutex<Vec<Option<f32>>>>,
+}
+
+type SeenMaxTokens = Arc<Mutex<Vec<Option<u32>>>>;
+type SeenTemperatures = Arc<Mutex<Vec<Option<f32>>>>;
+
+impl CapturingLlm {
+    fn new() -> (Self, SeenMaxTokens, SeenTemperatures) {
+        let seen_max_tokens = Arc::new(Mutex::new(Vec::new()));
+        let seen_temperatures = Arc::new(Mutex::new(Vec::new()));
+        (
+            Self {
+                seen_max_tokens: Arc::clone(&seen_max_tokens),
+                seen_temperatures: Arc::clone(&seen_temperatures),
+            },
+            seen_max_tokens,
+            seen_temperatures,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for CapturingLlm {
+    fn provider_name(&self) -> &str {
+        "capturing"
+    }
+
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AppError> {
+        self.seen_max_tokens.lock().unwrap().push(req.max_tokens);
+        self.seen_temperatures.lock().unwrap().push(req.temperature);
+        Ok(ChatResponse {
+            id: Some("capturing-id".to_string()),
+            choices: vec![ChatResponseChoice {
+                index: 0,
+                message: ChatMessage::assistant("captured"),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<
+        Box<dyn futures_util::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        self.seen_max_tokens.lock().unwrap().push(req.max_tokens);
+        self.seen_temperatures.lock().unwrap().push(req.temperature);
+        use futures_util::stream;
+        Ok(Box::new(stream::iter(vec![Ok(
+            StreamEvent::ContentDelta {
+                delta: "captured".to_string(),
+            },
+        )])))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
 #[tokio::test]
 async fn dispatch_read_file_with_primitive_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());
@@ -777,13 +843,14 @@ async fn dispatch_events_off_removes_listener() {
 #[tokio::test]
 async fn dispatch_chat_parses_max_tokens_and_temperature() {
     let bus = Arc::new(DefaultEventBus::new());
-    let d = HostApiDispatcher::new(bus).with_llm(Arc::new(MockLlm));
+    let (llm, seen_max_tokens, seen_temperatures) = CapturingLlm::new();
+    let d = HostApiDispatcher::new(bus).with_llm(Arc::new(llm));
     let req = HostRequest {
         module: "llm".to_string(),
         method: "createChatCompletion".to_string(),
         params: serde_json::json!({
             "messages": [],
-            "model": "m",
+            "model": "default",
             "maxTokens": 100,
             "temperature": 0.7
         }),
@@ -791,6 +858,14 @@ async fn dispatch_chat_parses_max_tokens_and_temperature() {
     };
     let res = d.dispatch_async("inst-1", req).await.unwrap();
     assert!(res.ok);
+    assert_eq!(seen_max_tokens.lock().unwrap().as_slice(), &[Some(100)]);
+    let temperatures = seen_temperatures.lock().unwrap();
+    assert_eq!(temperatures.len(), 1);
+    let actual = temperatures[0].expect("temperature should be parsed");
+    assert!(
+        (actual - 0.7).abs() < f32::EPSILON,
+        "expected 0.7, got {actual}"
+    );
 }
 
 #[tokio::test]

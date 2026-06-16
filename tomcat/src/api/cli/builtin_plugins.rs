@@ -34,8 +34,8 @@ pub(crate) fn ensure_builtin_plugins(cfg: &AppConfig) -> Result<BuiltinPluginsSt
             WEB_SEARCH_BACKENDS_MANIFEST,
         )?;
     }
-    wrote_any |= write_if_missing(&plugin_dir.join("main.js"), WEB_SEARCH_BACKENDS_MAIN)?;
-    wrote_any |= write_if_missing(&plugin_dir.join("README.md"), WEB_SEARCH_BACKENDS_README)?;
+    wrote_any |= write_if_different(&plugin_dir.join("main.js"), WEB_SEARCH_BACKENDS_MAIN)?;
+    wrote_any |= write_if_different(&plugin_dir.join("README.md"), WEB_SEARCH_BACKENDS_README)?;
 
     Ok(match (existed, wrote_any || merged_manifest) {
         (false, _) => BuiltinPluginsStatus::Created,
@@ -47,6 +47,17 @@ pub(crate) fn ensure_builtin_plugins(cfg: &AppConfig) -> Result<BuiltinPluginsSt
 fn write_if_missing(path: &std::path::Path, contents: &str) -> Result<bool, AppError> {
     if path.exists() {
         return Ok(false);
+    }
+    std::fs::write(path, contents).map_err(AppError::Io)?;
+    Ok(true)
+}
+
+fn write_if_different(path: &std::path::Path, contents: &str) -> Result<bool, AppError> {
+    if path.exists() {
+        let existing = std::fs::read_to_string(path).map_err(AppError::Io)?;
+        if existing == contents {
+            return Ok(false);
+        }
     }
     std::fs::write(path, contents).map_err(AppError::Io)?;
     Ok(true)

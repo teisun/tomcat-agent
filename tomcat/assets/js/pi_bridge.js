@@ -62,6 +62,9 @@
           module: '__async', method: 'poll',
           params: { callId: callId }
         });
+        if (typeof __pi_budget_reset === 'function') {
+          __pi_budget_reset();
+        }
         var pollRes = __pi_host_call(pollReq);
         var pr = typeof pollRes === 'string' ? JSON.parse(pollRes) : pollRes;
 
@@ -596,7 +599,13 @@
         handlers[i].fn(eventData, ctx);
       } catch (e) {
         try { pi.log('pi_bridge: handler error for ' + eventType + ': ' + e); } catch (_) {}
-        throw markFatal(e);
+        try {
+          if (typeof __pi_interrupt_reason === 'function' && __pi_interrupt_reason()) {
+            throw markFatal(e);
+          }
+        } catch (interruptErr) {
+          throw interruptErr;
+        }
       }
     }
   };

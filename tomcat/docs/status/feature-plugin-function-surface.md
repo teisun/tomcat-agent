@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-15 15:00 +0800 | ACTIVE | feature/plugin-rquickjs | 66.2 |
+| Tom | 2026-06-16 08:36 +0800 | ACTIVE | feature/plugin-function-surface | 66.2 |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** 移除 WasmEdge 运行时、资产与脚本，统一 Plugin 命名 @2026-06-14
@@ -14,9 +14,9 @@
 - [✓] **[P1]** 三类真实插件测试：纯工具型 E2E、session_start 集成探针、legacy 工具箱 E2E、跨事件 VM 状态 @2026-06-14
 - [✓] **[P1]** PackageManager 统一安装：三层 package/plugin/skill 安装与卸载、`/install` live refresh、黑盒/集成/E2E/文档收口 @2026-06-15
 - [✓] **[P1]** PackageManager 规范对齐：registry schema、严格 npm 版本、`plugin.json` 单文件名、§9 验收矩阵与文档回链 @2026-06-15
-
 - [✓] **[P2]** 清理 vendored OpenSpec Cursor skills（`openspec-*`） @2026-06-15
 - [✓] **[P1]** 通用 real-LLM/E2E 测试迁移至 `DEEPSEEK_API_KEY`；OpenAI Responses/Files 专项保留 @2026-06-15
+- [ ] **[P1]** 集成验收收尾：修复 `pi_bridge` 错误隔离/预算刷新、PackageManager/registry 防腐、layered function refresh、web_search auto fallback，并在当前分支复跑全量门禁 @2026-06-16
 
 ### 2026-06-15 | test(llm): 通用 real-LLM 测试迁移至 DEEPSEEK_API_KEY
 

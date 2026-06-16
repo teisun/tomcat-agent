@@ -1013,10 +1013,15 @@ __pi_start_event_loop();
         serde_json::json!({}),
         serde_json::json!({}),
     )?;
-
+    tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(
-        wait_for_state(&crashy, VmActorState::Error).await,
-        "throwing plugin should be isolated into Error state"
+        matches!(crashy.current_state(), VmActorState::Running | VmActorState::Idle),
+        "non-fatal handler errors should stay isolated without crashing the runtime"
+    );
+    assert_eq!(
+        rm.len(),
+        2,
+        "non-fatal handler errors should keep both runtimes registered"
     );
 
     manager.dispatch_session_event(

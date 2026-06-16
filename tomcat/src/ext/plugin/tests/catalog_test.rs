@@ -148,6 +148,59 @@ fn discover_host_root_ignores_project_and_agent_layers_for_functions() {
     assert!(catalog.get("project-function-plugin").is_none());
 }
 
+#[test]
+fn discover_respects_registry_enabled_flags_when_registry_exists() {
+    let work_dir = tempfile::tempdir().expect("create work dir");
+    let project_dir = tempfile::tempdir().expect("create project dir");
+
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
+    cfg.agent.id = "agent-a".to_string();
+
+    let plugin_root = project_dir.path().join(".tomcat").join("plugins");
+    write_plugin(
+        &plugin_root.join("enabled-plugin"),
+        "enabled-plugin",
+        "enabled",
+    );
+    write_plugin(
+        &plugin_root.join("disabled-plugin"),
+        "disabled-plugin",
+        "disabled",
+    );
+    write_plugin(
+        &plugin_root.join("unregistered-plugin"),
+        "unregistered-plugin",
+        "unregistered",
+    );
+    fs::create_dir_all(&plugin_root).expect("create plugin registry parent");
+    fs::write(
+        plugin_root.join("registry.json"),
+        r#"{
+            "plugins": [
+                {
+                    "id": "enabled-plugin",
+                    "path": "/tmp/enabled-plugin",
+                    "enabled": true,
+                    "loadedAt": "2026-01-01T00:00:00Z"
+                },
+                {
+                    "id": "disabled-plugin",
+                    "path": "/tmp/disabled-plugin",
+                    "enabled": false,
+                    "loadedAt": "2026-01-01T00:00:00Z"
+                }
+            ]
+        }"#,
+    )
+    .expect("write registry");
+
+    let catalog = PluginCatalog::discover(&cfg, project_dir.path()).expect("discover catalog");
+    assert!(catalog.get("enabled-plugin").is_some());
+    assert!(catalog.get("disabled-plugin").is_none());
+    assert!(catalog.get("unregistered-plugin").is_none());
+}
+
 fn write_plugin(root: &Path, plugin_id: &str, description: &str) {
     fs::create_dir_all(root).expect("create plugin root");
     fs::write(

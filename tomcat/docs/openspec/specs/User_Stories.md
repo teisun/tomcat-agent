@@ -48,6 +48,16 @@
 - [ ] 插件执行错误完全隔离，单个插件崩溃不会影响宿主引擎与其他插件运行
 - [ ] `tomcat plugin`系列命令可实现插件的加载、卸载、列表查看、启用/禁用
 
+### Story 3b: PackageManager 统一安装
+**作为用户**，我希望能通过统一的安装入口管理 package、bare plugin 与 bare skill，并明确控制它们对当前项目、当前 agent 或全局环境的可见范围。
+**验收标准**：
+- [ ] `tomcat install` / `tomcat uninstall` / `tomcat packages` 与会话内 `/install` 共享同一套安装核心，支持 package、bare plugin、bare skill 三类本地 source
+- [ ] 支持 `scope` / `agent` / `global` 三层可见范围；未显式指定时交互式入口可选择目标层，非交互 shell 默认落到当前 project(scope)
+- [ ] 安装后按层写入 `packages/registry.json`，plugin 同步维护同层 `plugins/registry.json`；registry 损坏时必须返回显式错误，不得静默当成空账本
+- [ ] `tomcat packages` 与 `tomcat plugin list/enable/disable/unload` 能正确反映 layered 视图与启用状态；被禁用 plugin 不得继续出现在 runtime discovery 结果中
+- [ ] `--force` 替换安装会清理被新版本移除的 plugin/skill；任一步失败后文件与 registry 必须回滚，不留下半安装脏状态
+- [ ] code/claw 会话内 `/install` 成功后，当前会话的 skill/plugin 静态清单立即刷新；但不得热替换已加载 plugin 实例
+
 ### Story 4: Node.js 兼容层
 **作为用户**，我希望沙箱内插件能正常调用 Node.js API，无需为 tomcat 单独改写法。
 **验收标准**：
@@ -94,6 +104,7 @@
 **验收标准**：
 - [ ] `pi.exec()`、`pi.createChatCompletion()` 等耗时 API 返回 Promise，插件可用 `await` 消费
 - [ ] LLM 调用、命令执行等耗时 Hostcall 不阻塞插件 VM，宿主后台异步处理
+- [ ] 长轮询 async Hostcall 在 pending→poll→ready 路径中持续刷新 QuickJS interrupt budget，不得因预算耗尽误杀正常请求
 - [ ] 返回值格式与 ExtensionAPI 约定一致（`ExecResult: {stdout, stderr, exitCode}`、`CompletionResult: {message, usage}`）
 - [ ] `pi.on`/`pi.off`/`pi.emit` 无重复定义 bug，`pi.once` 可用，注册一次后多次 emit 仅触发 1 次
 - [ ] 插件内多个并发异步调用（如同时 `await pi.exec()` + `await pi.createChatCompletion()`）可正确运行

@@ -9,6 +9,7 @@
 //! 上抬后保留拆分但加 `ts_compiler_` 前缀。
 
 mod host_binding_test;
+mod instance_bridge_test;
 mod instance_shim_test;
 mod plugin_bundle_test;
 mod plugin_function_invoker_test;
