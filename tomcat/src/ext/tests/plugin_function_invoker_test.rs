@@ -1327,7 +1327,74 @@ async fn net_fetch_hostcall_respects_concurrency_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ext_plugin_search_invoker_retries_after_unsupported_backend() {
+async fn ext_plugin_search_invoker_uses_first_registered_provider_only() {
+    let plugin_a = plugin_function_fixture(
+        "plugin-a",
+        &[("web_search.backend", "webSearchBackend")],
+        r#"
+pi.registerFunction("webSearchBackend", function (params) {
+  return {
+    backend: params.backend,
+    provider: "plugin-a",
+    hits: [{ title: "Docs A", url: "https://a.example.com" }],
+    warnings: []
+  };
+});
+"#,
+    );
+    let plugin_b = plugin_function_fixture(
+        "plugin-b",
+        &[("web_search.backend", "webSearchBackend")],
+        r#"
+pi.registerFunction("webSearchBackend", function (params) {
+  return {
+    backend: params.backend,
+    provider: "plugin-b",
+    hits: [{ title: "Docs B", url: "https://b.example.com" }],
+    warnings: []
+  };
+});
+"#,
+    );
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(Arc::new(DefaultEventBus::new()))
+            .with_tokio_handle(tokio::runtime::Handle::current()),
+    );
+    let (invoker, function_registry, manager, _dispatcher) =
+        function_search_harness(dispatcher, Duration::from_secs(1));
+
+    function_registry.register_plugin_functions(
+        "plugin-a",
+        plugin_a.path(),
+        &[manifest_function("web_search.backend", "webSearchBackend")],
+    );
+    function_registry.register_plugin_functions(
+        "plugin-b",
+        plugin_b.path(),
+        &[manifest_function("web_search.backend", "webSearchBackend")],
+    );
+    manager.load_plugin(plugin_a.path()).expect("load plugin-a");
+    manager.load_plugin(plugin_b.path()).expect("load plugin-b");
+
+    let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
+    let result = search_invoker
+        .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
+        .await
+        .expect("first provider should satisfy request");
+
+    assert_eq!(result["provider"], "plugin-a");
+    assert_eq!(result["hits"][0]["url"], json!("https://a.example.com"));
+    assert!(manager.has_session_vm("s1", "plugin-a"));
+    assert!(
+        !manager.has_session_vm("s1", "plugin-b"),
+        "shadowed provider should not be started once a winner exists"
+    );
+
+    manager.end_session("s1").await.expect("end session");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ext_plugin_search_invoker_does_not_fallback_after_unsupported_backend() {
     let plugin_a = plugin_function_fixture(
         "plugin-a",
         &[("web_search.backend", "webSearchBackend")],
@@ -1371,13 +1438,22 @@ pi.registerFunction("webSearchBackend", function (params) {
     manager.load_plugin(plugin_b.path()).expect("load plugin-b");
 
     let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
-    let result = search_invoker
+    let err = search_invoker
         .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
         .await
-        .expect("second provider should handle backend");
+        .expect_err("unsupported_backend should not fall through to shadowed provider");
 
-    assert_eq!(result["backend"], "mimo");
-    assert_eq!(result["hits"][0]["url"], json!("https://docs.rs"));
+    match err {
+        BackendFailure::Incompatible { detail } => {
+            assert!(detail.contains("未找到名为 `mimo` 的 web_search 插件后端"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert!(manager.has_session_vm("s1", "plugin-a"));
+    assert!(
+        !manager.has_session_vm("s1", "plugin-b"),
+        "shadowed provider should stay untouched after unsupported_backend"
+    );
 
     manager.end_session("s1").await.expect("end session");
 }

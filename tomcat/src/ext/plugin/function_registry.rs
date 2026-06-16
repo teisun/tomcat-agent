@@ -29,6 +29,9 @@ impl FunctionRegistry {
             .push(function);
     }
 
+    /// Direct registration appends raw manifest entries for a plugin and does
+    /// not apply point-level override resolution. Production layered override is
+    /// resolved before calling `replace_all()`.
     pub fn register_plugin_functions(
         &self,
         plugin_id: &str,
@@ -51,6 +54,7 @@ impl FunctionRegistry {
         }
     }
 
+    /// Replace the registry with an already-resolved effective snapshot.
     pub fn replace_all(&self, functions: impl IntoIterator<Item = RegisteredFunction>) {
         let mut next = BTreeMap::<String, Vec<RegisteredFunction>>::new();
         for function in functions {

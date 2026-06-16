@@ -8,7 +8,7 @@ use tracing::warn;
 
 use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::tools::primitive::PrimitiveOperation;
-use crate::ext::plugin::PluginCatalog;
+use crate::ext::plugin::{PluginCatalog, PluginSource};
 use crate::ext::{
     FunctionRegistry, HostApiDispatcher, PluginEngine, PluginEngineConfig, PluginFunctionInvoker,
     PluginManager, PluginRuntimeManager, PluginToolExecutor, RegisteredFunction,
@@ -966,24 +966,84 @@ fn canonicalize_or_keep(path: &std::path::Path) -> std::path::PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn materialize_host_functions_from_catalog(registry: &FunctionRegistry, catalog: &PluginCatalog) {
-    let registered = catalog
-        .iter()
-        .flat_map(|(plugin_id, entry)| {
-            entry
-                .manifest
-                .functions
-                .iter()
-                .map(|function| RegisteredFunction {
-                    plugin_id: plugin_id.clone(),
-                    plugin_root: canonicalize_or_keep(&entry.plugin_root),
-                    point: function.point.clone(),
-                    function: function.function.clone(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    registry.replace_all(registered);
+fn host_function_source_rank(source: PluginSource) -> u8 {
+    match source {
+        PluginSource::Project => 0,
+        PluginSource::Agent => 1,
+        PluginSource::Managed => 2,
+    }
+}
+
+fn materialize_host_functions_from_catalog(
+    registry: &FunctionRegistry,
+    catalog: &PluginCatalog,
+) -> Vec<String> {
+    #[derive(Debug)]
+    struct HostFunctionCandidate {
+        order: usize,
+        source: PluginSource,
+        plugin_id: String,
+        plugin_root: std::path::PathBuf,
+        point: String,
+        function: String,
+    }
+
+    let mut candidates = Vec::<HostFunctionCandidate>::new();
+    for (plugin_id, entry) in catalog.iter() {
+        for function in &entry.manifest.functions {
+            candidates.push(HostFunctionCandidate {
+                order: candidates.len(),
+                source: entry.source,
+                plugin_id: plugin_id.clone(),
+                plugin_root: canonicalize_or_keep(&entry.plugin_root),
+                point: function.point.clone(),
+                function: function.function.clone(),
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        host_function_source_rank(left.source)
+            .cmp(&host_function_source_rank(right.source))
+            .then(left.order.cmp(&right.order))
+    });
+
+    let mut warnings = Vec::new();
+    let mut winners =
+        std::collections::BTreeMap::<String, (PluginSource, RegisteredFunction)>::new();
+    for candidate in candidates {
+        let registered = RegisteredFunction {
+            plugin_id: candidate.plugin_id.clone(),
+            plugin_root: candidate.plugin_root.clone(),
+            point: candidate.point.clone(),
+            function: candidate.function.clone(),
+        };
+        if let Some((winner_source, winner)) = winners.get(&candidate.point) {
+            let warning = if *winner_source == candidate.source {
+                format!(
+                    "function_point_conflict:{}:{} shadowed_by {} (source={}, policy=first_wins)",
+                    candidate.point,
+                    candidate.plugin_id,
+                    winner.plugin_id,
+                    candidate.source.as_str()
+                )
+            } else {
+                format!(
+                    "function_point_shadowed:{}:{}:{} shadowed_by {}:{}",
+                    candidate.point,
+                    candidate.source.as_str(),
+                    candidate.plugin_id,
+                    winner_source.as_str(),
+                    winner.plugin_id
+                )
+            };
+            warnings.push(warning);
+            continue;
+        }
+        winners.insert(candidate.point.clone(), (candidate.source, registered));
+    }
+
+    registry.replace_all(winners.into_values().map(|(_, function)| function));
+    warnings
 }
 
 fn refresh_host_function_registry(
@@ -991,8 +1051,10 @@ fn refresh_host_function_registry(
     agent_workspace_dir: &std::path::Path,
     registry: &FunctionRegistry,
 ) -> Result<PluginCatalog, AppError> {
-    let catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
-    materialize_host_functions_from_catalog(registry, &catalog);
+    let mut catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
+    catalog
+        .warnings
+        .extend(materialize_host_functions_from_catalog(registry, &catalog));
     Ok(catalog)
 }
 

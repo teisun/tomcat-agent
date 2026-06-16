@@ -915,7 +915,7 @@ pi.registerFunction("echoHost", function (params) {
 说明：
 
 - `functions[]` 只报“我提供哪个宿主扩展点、回 VM 时该调哪个 JS 函数名”，不要把插件内部默认参数、排序或厂商细节上浮到宿主。
-- 当前 host-facing function 的发现 / 安装根固定为宿主根 `~/.tomcat/{plugins,packages}`；不复用 `project > agent > global` 三层 overlay。
+- 当前 host-facing function 与普通 plugin 一样复用 `project > agent > global` 三层发现 / 安装链；真正特殊的地方只在注册面：进入 `FunctionRegistry` 前会按 `point` 做 override，高层声明覆盖低层。
 - 一个插件可以同时有 `tools[]`、`functions[]`、`events[]`，也可以只有其中一类。
 
 ```bash

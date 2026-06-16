@@ -55,6 +55,8 @@
 - [ ] 支持 `scope` / `agent` / `global` 三层可见范围；未显式指定时交互式入口可选择目标层，非交互 shell 默认落到当前 project(scope)
 - [ ] 安装后按层写入 `packages/registry.json`，plugin 同步维护同层 `plugins/registry.json`；registry 损坏时必须返回显式错误，不得静默当成空账本
 - [ ] `tomcat packages` 与 `tomcat plugin list/enable/disable/unload` 能正确反映 layered 视图与启用状态；被禁用 plugin 不得继续出现在 runtime discovery 结果中
+- [ ] host-facing `functions[]` 插件与普通 plugin 复用同一套 `scope > agent > global` 安装层与发现层；不得再存在“只认宿主根”的单独来源规则
+- [ ] 对同一宿主扩展点 `point`，runtime 物化到 `FunctionRegistry` 时必须执行 `scope > agent > global` override：高层声明覆盖低层，同层冲突 stable first-wins + warning，卸载/移除高层后低层可在 refresh 后重新成为赢家
 - [ ] `--force` 替换安装会清理被新版本移除的 plugin/skill；任一步失败后文件与 registry 必须回滚，不留下半安装脏状态
 - [ ] code/claw 会话内 `/install` 成功后，当前会话的 skill/plugin 静态清单立即刷新；但不得热替换已加载 plugin 实例
 

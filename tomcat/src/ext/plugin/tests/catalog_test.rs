@@ -104,7 +104,7 @@ fn discover_three_tier_first_wins() {
 }
 
 #[test]
-fn discover_host_root_ignores_project_and_agent_layers_for_functions() {
+fn discover_host_root_helper_remains_managed_only() {
     let work_dir = tempfile::tempdir().expect("create work dir");
     let project_dir = tempfile::tempdir().expect("create project dir");
 

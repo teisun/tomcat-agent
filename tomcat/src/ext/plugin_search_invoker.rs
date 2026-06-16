@@ -31,31 +31,29 @@ impl PluginSearchInvoker for ExtPluginSearchInvoker {
         params: serde_json::Value,
         session_id: &str,
     ) -> Result<serde_json::Value, BackendFailure> {
-        let providers = self.functions.functions_for_point("web_search.backend");
-        if providers.is_empty() {
+        let Some(provider) = self
+            .functions
+            .functions_for_point("web_search.backend")
+            .into_iter()
+            .next()
+        else {
             return Err(unsupported_backend_error(backend));
-        }
+        };
 
-        for provider in providers {
-            match self
-                .function_invoker
-                .execute(&provider, params.clone(), Some(session_id))
-                .await
-            {
-                Ok(value) if reports_unsupported_backend(&value) => continue,
-                Ok(value) => return Ok(value),
-                Err(err) => {
-                    return Err(BackendFailure::Transport {
-                        detail: format!(
-                            "web_search plugin backend `{backend}` via `{}` failed: {err}",
-                            provider.plugin_id
-                        ),
-                    });
-                }
-            }
+        match self
+            .function_invoker
+            .execute(&provider, params, Some(session_id))
+            .await
+        {
+            Ok(value) if reports_unsupported_backend(&value) => Err(unsupported_backend_error(backend)),
+            Ok(value) => Ok(value),
+            Err(err) => Err(BackendFailure::Transport {
+                detail: format!(
+                    "web_search plugin backend `{backend}` via `{}` failed: {err}",
+                    provider.plugin_id
+                ),
+            }),
         }
-
-        Err(unsupported_backend_error(backend))
     }
 }
 

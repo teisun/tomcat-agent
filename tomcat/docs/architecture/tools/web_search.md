@@ -75,10 +75,10 @@ tomcat init
          └─ README.md
 
 宿主启动 / catalog refresh
-  └─ 只扫描宿主根 ~/.tomcat/plugins
+  └─ 扫描 scope > agent > global 三层 plugin roots
       └─ FunctionRegistry["web_search.backend"]
-          └─ [tomcat.web-search-backends/webSearchBackend]
-             (不会进入 ToolRegistry)
+          └─ [当前 scope 的赢家 provider]
+             (同 point 按层 override；不会进入 ToolRegistry)
 
 
 [运行时主链路]
