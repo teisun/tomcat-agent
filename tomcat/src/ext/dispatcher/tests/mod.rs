@@ -15,4 +15,5 @@ mod async_calls_test;
 mod dispatch_no_extension_test;
 mod dispatch_with_extension_test;
 mod events_test;
+mod tokio_handle_capture_test;
 mod mocks;

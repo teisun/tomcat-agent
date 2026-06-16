@@ -364,15 +364,16 @@ fn install_host_globals<'js>(
     globals.set("__pi_sleep", sleep_fn)?;
 
     let wait_bridge = bridge.clone();
+    let wait_guard = guard.clone();
     let wait_fn = Function::new(
         ctx.clone(),
         Async(move |timeout_ms: u64| {
             let wait_bridge = wait_bridge.clone();
+            let wait_guard = wait_guard.clone();
             async move {
-                wait_bridge
-                    .wait_for_event(timeout_ms)
-                    .await
-                    .map_err(|e| js_runtime_error(e.to_string()))
+                let result = wait_bridge.wait_for_event(timeout_ms).await;
+                wait_guard.reset();
+                result.map_err(|e| js_runtime_error(e.to_string()))
             }
         }),
     )?;
@@ -609,6 +610,48 @@ globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
             err.to_string().contains("50ms timeout"),
             "timeout error should mention the configured 50ms budget, got: {err}"
         );
+    }
+
+    #[test]
+    fn wait_for_event_refreshes_timeout_budget_between_idle_ticks() {
+        let mut instance = PluginVmInstance::new(
+            PluginEngineConfig {
+                quickjs_heap_mb: 8,
+                call_timeout_ms: 50,
+                interrupt_budget: 0,
+                ..Default::default()
+            },
+            "idle-budget-reset".to_string(),
+        )
+        .expect("create quickjs instance");
+        instance
+            .register_host_binding(|request_json| {
+                let request: serde_json::Value =
+                    serde_json::from_str(request_json).expect("host request should be JSON");
+                if request["module"] == "__session" && request["method"] == "waitForEvent" {
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                    return Ok(
+                        serde_json::json!({ "ok": true, "data": { "type": "__tick" } }).to_string()
+                    );
+                }
+                Ok(serde_json::json!({ "ok": true, "data": null }).to_string())
+            })
+            .expect("register host binding");
+        instance
+            .run_script(
+                r#"
+(async function () {
+  globalThis.__idleBudgetSink = 0;
+  for (var i = 0; i < 4; i += 1) {
+    await __pi_wait_for_event(30);
+    for (var j = 0; j < 5000; j += 1) {
+      globalThis.__idleBudgetSink += j;
+    }
+  }
+})();
+"#,
+            )
+            .expect("idle wait ticks should reset timeout budget instead of tripping it");
     }
 
     #[test]

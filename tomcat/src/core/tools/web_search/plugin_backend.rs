@@ -55,6 +55,43 @@ impl PluginWebSearchBackend {
         }
         None
     }
+
+    fn classify_plugin_runtime_failure(&self, warnings: &[String]) -> Option<BackendFailure> {
+        let plugin_runtime_warnings: Vec<String> = warnings
+            .iter()
+            .filter(|warning| {
+                warning.starts_with("plugin_backend_error")
+                    && !is_retryable_timeout_warning(warning)
+            })
+            .cloned()
+            .collect();
+        if plugin_runtime_warnings.is_empty() {
+            None
+        } else {
+            Some(BackendFailure::PluginRuntime {
+                detail: plugin_runtime_warnings.join("; "),
+            })
+        }
+    }
+
+    fn unsupported_backend_failure(&self, warnings: &[String]) -> BackendFailure {
+        let mut detail = format!(
+            "web_search plugin backend `{}` reported unsupported_backend",
+            self.backend
+        );
+        if !warnings.is_empty() {
+            detail.push('：');
+            detail.push_str(&warnings.join("; "));
+        }
+        BackendFailure::Incompatible { detail }
+    }
+}
+
+fn is_retryable_timeout_warning(warning: &str) -> bool {
+    warning.starts_with("plugin_backend_error")
+        && (warning.contains("pi.fetch request timed out")
+            || warning.contains("request timed out")
+            || warning.contains("请求超时"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,7 +103,7 @@ struct PluginSearchResponse {
     hits: Vec<PluginSearchHit>,
     #[serde(default)]
     warnings: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "unsupported_backend")]
     unsupported_backend: bool,
 }
 
@@ -108,16 +145,21 @@ impl WebSearchBackend for PluginWebSearchBackend {
             serde_json::from_value(raw).map_err(|err| BackendFailure::Parse {
                 detail: err.to_string(),
             })?;
-        if parsed.unsupported_backend {
-            return Err(BackendFailure::Incompatible {
-                detail: format!(
-                    "web_search plugin backend `{}` reported unsupported_backend",
-                    self.backend
-                ),
-            });
+        if let Some(failure) = self.classify_plugin_runtime_failure(&parsed.warnings) {
+            return Err(failure);
         }
         if let Some(failure) = self.classify_warning_failure(&parsed.warnings) {
             return Err(failure);
+        }
+        if parsed.unsupported_backend {
+            if parsed
+                .warnings
+                .iter()
+                .any(|warning| is_retryable_timeout_warning(warning))
+            {
+                return Err(BackendFailure::Timeout);
+            }
+            return Err(self.unsupported_backend_failure(&parsed.warnings));
         }
         Ok(BackendSearchResponse {
             backend_label: parsed.backend,

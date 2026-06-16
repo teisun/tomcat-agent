@@ -139,6 +139,7 @@ pub trait WebSearchBackend: Send + Sync {
 pub enum BackendFailure {
     MissingKey { env_name: String },
     Incompatible { detail: String },
+    PluginRuntime { detail: String },
     Unauthorized { status: u16 },
     RateLimited { status: u16 },
     ServerError { status: u16 },
@@ -186,6 +187,10 @@ impl BackendFailure {
                 backend, env_name
             )),
             Self::Incompatible { detail } => AppError::Tool(detail.clone()),
+            Self::PluginRuntime { detail } => AppError::Tool(format!(
+                "web_search backend `{}` 运行时错误：{}",
+                backend, detail
+            )),
             Self::InvalidRequest { status, detail } => AppError::Tool(format!(
                 "web_search backend `{}` 请求不合法（status={}）：{}",
                 backend, status, detail

@@ -33,15 +33,51 @@ pub fn check_double_tap(last: Option<Instant>, now: Instant, window: Duration) -
 /// 双击判定默认窗口。
 const DOUBLE_TAP_WINDOW: Duration = Duration::from_secs(2);
 
+/// 构造 chat 运行时与上下文。
+///
+/// 关键约束：`ChatContext` 必须在 `rt.enter()` 上下文内构造，否则
+/// `HostApiDispatcher::new()` 在 `Handle::try_current()` 上捕获不到 Tokio handle，
+/// 异步 hostcall（`pi.fetch` / `createChatCompletion`）会在真正发请求前失败。
+///
+/// 返回值中 `Runtime` 需要由调用方持有到 `ChatContext` 生命周期结束，避免插件
+/// hostcall 依赖的后台运行时提前被 drop。
+pub fn build_runtime_and_context_with_overrides(
+    cfg: &AppConfig,
+    mode: SessionMode,
+    overrides: crate::api::chat::ChatContextOverrides,
+) -> Result<(tokio::runtime::Runtime, crate::api::chat::ChatContext), AppError> {
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| AppError::Config(format!("创建 tokio 运行时失败: {}", e)))?;
+
+    let ctx = {
+        let _enter = rt.enter();
+        crate::api::chat::ChatContext::from_config_with_mode_and_overrides(
+            cfg.clone(),
+            mode,
+            overrides,
+        )?
+    };
+
+    Ok((rt, ctx))
+}
+
+pub fn build_runtime_and_context(
+    cfg: &AppConfig,
+    mode: SessionMode,
+) -> Result<(tokio::runtime::Runtime, crate::api::chat::ChatContext), AppError> {
+    build_runtime_and_context_with_overrides(
+        cfg,
+        mode,
+        crate::api::chat::ChatContextOverrides::default(),
+    )
+}
+
 pub(super) fn run_chat_mode(
     resume: bool,
     cfg: &AppConfig,
     mode: SessionMode,
 ) -> Result<(), AppError> {
-    let ctx = super::super::chat::ChatContext::from_config_with_mode(cfg.clone(), mode)?;
-
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| AppError::Config(format!("创建 tokio 运行时失败: {}", e)))?;
+    let (rt, ctx) = build_runtime_and_context(cfg, mode)?;
 
     // 桥接 L0 → L1：SIGINT → ChatContext.cancel_token.cancel() + 双击检测。
     let cancel_token = ctx.session_runtime.cancel_token.clone();

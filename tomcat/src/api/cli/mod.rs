@@ -30,6 +30,8 @@ use crate::{
 };
 
 pub(crate) use audit_cmd::run_audit;
+pub use chat_cmd::build_runtime_and_context;
+pub use chat_cmd::build_runtime_and_context_with_overrides;
 pub(crate) use claw_cmd::run_claw;
 pub(crate) use code_cmd::run_code;
 pub(crate) use config_cmd::{config_file_path, run_config};

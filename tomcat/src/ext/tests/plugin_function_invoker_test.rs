@@ -1394,7 +1394,7 @@ pi.registerFunction("webSearchBackend", function (params) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ext_plugin_search_invoker_does_not_fallback_after_unsupported_backend() {
+async fn ext_plugin_search_invoker_passthroughs_unsupported_backend_without_shadow_fallback() {
     let plugin_a = plugin_function_fixture(
         "plugin-a",
         &[("web_search.backend", "webSearchBackend")],
@@ -1438,17 +1438,12 @@ pi.registerFunction("webSearchBackend", function (params) {
     manager.load_plugin(plugin_b.path()).expect("load plugin-b");
 
     let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
-    let err = search_invoker
+    let result = search_invoker
         .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
         .await
-        .expect_err("unsupported_backend should not fall through to shadowed provider");
+        .expect("unsupported_backend should be passed through for upper-layer classification");
 
-    match err {
-        BackendFailure::Incompatible { detail } => {
-            assert!(detail.contains("未找到名为 `mimo` 的 web_search 插件后端"));
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    assert_eq!(result["unsupported_backend"], json!(true));
     assert!(manager.has_session_vm("s1", "plugin-a"));
     assert!(
         !manager.has_session_vm("s1", "plugin-b"),
@@ -1459,7 +1454,7 @@ pi.registerFunction("webSearchBackend", function (params) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ext_plugin_search_invoker_reports_clear_error_when_all_providers_unsupported() {
+async fn ext_plugin_search_invoker_returns_raw_unsupported_backend_when_only_provider_declines() {
     let plugin_a = plugin_function_fixture(
         "plugin-a",
         &[("web_search.backend", "webSearchBackend")],
@@ -1484,10 +1479,29 @@ pi.registerFunction("webSearchBackend", function () {
     manager.load_plugin(plugin_a.path()).expect("load plugin-a");
 
     let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
+    let result = search_invoker
+        .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
+        .await
+        .expect("unsupportedBackend payload should be returned for upper-layer classification");
+    assert_eq!(result["unsupportedBackend"], json!(true));
+
+    manager.end_session("s1").await.expect("end session");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ext_plugin_search_invoker_without_registered_provider_stays_incompatible() {
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(Arc::new(DefaultEventBus::new()))
+            .with_tokio_handle(tokio::runtime::Handle::current()),
+    );
+    let (invoker, function_registry, manager, _dispatcher) =
+        function_search_harness(dispatcher, Duration::from_secs(1));
+
+    let search_invoker = ExtPluginSearchInvoker::new(function_registry, invoker);
     let err = search_invoker
         .search("mimo", json!({ "backend": "mimo", "query": "rust" }), "s1")
         .await
-        .expect_err("all providers unsupported should fail clearly");
+        .expect_err("missing provider registration should still be incompatible");
 
     match err {
         BackendFailure::Incompatible { detail } => {

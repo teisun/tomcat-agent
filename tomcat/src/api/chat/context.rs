@@ -168,6 +168,7 @@ fn scope_runtime_cache(
     CACHE.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scope_runtime_for(
     config: &AppConfig,
     agent_workspace_dir: std::path::PathBuf,

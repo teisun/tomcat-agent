@@ -163,6 +163,21 @@ pi.registerFunction = function () {{}};
     actual
 }
 
+fn basic_web_search_request() -> super::types::WebSearchRequest {
+    super::types::WebSearchRequest::from_tool_args(
+        WebSearchArgs {
+            query: "rust".into(),
+            count: None,
+            freshness: None,
+            country: None,
+            language: None,
+            domain_filter: Vec::new(),
+        },
+        &AppConfig::default().tools.web_search,
+    )
+    .expect("request")
+}
+
 #[tokio::test]
 async fn plugin_backend_maps_missing_key_warning_to_backend_failure() {
     let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
@@ -274,6 +289,147 @@ async fn plugin_backend_maps_unauthorized_warning_to_backend_failure() {
         .await
         .expect_err("unauthorized should fail");
     assert!(matches!(err, BackendFailure::Unauthorized { status } if status == 403));
+}
+
+#[tokio::test]
+async fn plugin_backend_maps_plugin_backend_error_to_plugin_runtime_failure() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
+        "backend": "mimo",
+        "hits": [],
+        "warnings": [
+            "plugin_backend_error (backend=mimo): TypeError: async hostcall requires a Tokio runtime handle"
+        ]
+    }))]);
+    let backend = PluginWebSearchBackend::new(invoker, "mimo", "test-session");
+
+    let err = backend
+        .search(&basic_web_search_request())
+        .await
+        .expect_err("plugin runtime warnings should fail loud");
+    match err {
+        BackendFailure::PluginRuntime { detail } => {
+            assert!(detail.contains("plugin_backend_error (backend=mimo)"));
+            assert!(detail.contains("async hostcall requires a Tokio runtime handle"));
+        }
+        other => panic!("expected PluginRuntime, got {other:?}"),
+    }
+}
+
+#[test]
+fn plugin_runtime_failure_is_non_retryable_and_formats_tool_error() {
+    let failure = BackendFailure::PluginRuntime {
+        detail: "plugin_backend_error (backend=mimo): synthetic runtime failure".to_string(),
+    };
+    assert!(
+        !failure.is_retryable_unavailable(),
+        "PluginRuntime should never enter auto fallback"
+    );
+    assert!(
+        !failure.is_explicit_degraded(),
+        "PluginRuntime should stay hard-fail even on explicit backends"
+    );
+    let err = failure.to_tool_error("auto");
+    let text = err.to_string();
+    assert!(text.contains("web_search backend `auto` 运行时错误"));
+    assert!(text.contains("synthetic runtime failure"));
+}
+
+#[tokio::test]
+async fn plugin_backend_plugin_runtime_warning_wins_over_missing_key() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
+        "backend": "mimo",
+        "hits": [],
+        "warnings": [
+            "__missing_key__:MIMO_API_KEY",
+            "plugin_backend_error (backend=mimo): TypeError: async hostcall requires a Tokio runtime handle"
+        ]
+    }))]);
+    let backend = PluginWebSearchBackend::new(invoker, "mimo", "test-session");
+
+    let err = backend
+        .search(&basic_web_search_request())
+        .await
+        .expect_err("plugin runtime warnings should outrank retryable sentinels");
+    assert!(
+        matches!(err, BackendFailure::PluginRuntime { .. }),
+        "expected PluginRuntime precedence, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn plugin_backend_timeout_warning_stays_retryable_on_exhausted_auto_response() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
+        "backend": "auto",
+        "hits": [],
+        "warnings": [
+            "backend_unavailable:tavily, fallback=brave",
+            "plugin_backend_error (backend=tavily): Error: pi.fetch request timed out"
+        ],
+        "unsupported_backend": true
+    }))]);
+    let backend = PluginWebSearchBackend::new(invoker, "auto", "test-session");
+
+    let err = backend
+        .search(&basic_web_search_request())
+        .await
+        .expect_err("timeout warnings on exhausted auto should remain retryable");
+    assert!(
+        matches!(err, BackendFailure::Timeout),
+        "expected Timeout, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn plugin_backend_timeout_warning_allows_successful_auto_fallback() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
+        "backend": "brave",
+        "hits": [
+            {
+                "title": "reqwest",
+                "url": "https://docs.rs/reqwest",
+                "snippet": "HTTP client"
+            }
+        ],
+        "warnings": [
+            "backend_unavailable:tavily, fallback=brave",
+            "plugin_backend_error (backend=tavily): Error: pi.fetch request timed out"
+        ]
+    }))]);
+    let backend = PluginWebSearchBackend::new(invoker, "auto", "test-session");
+
+    let output = backend
+        .search(&basic_web_search_request())
+        .await
+        .expect("timeout warnings should not fail a later successful fallback");
+    assert_eq!(output.backend_label.as_deref(), Some("brave"));
+    assert_eq!(output.raw_hits.len(), 1);
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("pi.fetch request timed out")));
+}
+
+#[tokio::test]
+async fn plugin_backend_bare_unsupported_backend_includes_warning_summary() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
+        "backend": "mimo",
+        "hits": [],
+        "warnings": ["shadowed_provider"],
+        "unsupported_backend": true
+    }))]);
+    let backend = PluginWebSearchBackend::new(invoker, "mimo", "test-session");
+
+    let err = backend
+        .search(&basic_web_search_request())
+        .await
+        .expect_err("unsupported_backend should stay incompatible");
+    match err {
+        BackendFailure::Incompatible { detail } => {
+            assert!(detail.contains("reported unsupported_backend"));
+            assert!(detail.contains("shadowed_provider"));
+        }
+        other => panic!("expected Incompatible, got {other:?}"),
+    }
 }
 
 #[test]
@@ -814,6 +970,36 @@ async fn explicit_plugin_backend_timeout_returns_tool_error() {
 }
 
 #[tokio::test]
+async fn explicit_plugin_backend_runtime_error_returns_original_detail() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::PluginRuntime {
+        detail: "plugin_backend_error (backend=mimo): synthetic runtime failure".to_string(),
+    })]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "mimo".into();
+    let runtime = runtime_with_catalog(cfg, None);
+    runtime.set_plugin_invoker(invoker);
+
+    let err = runtime
+        .search(
+            WebSearchArgs {
+                query: "reqwest".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "session-plugin-pluginruntime",
+        )
+        .await
+        .expect_err("plugin runtime errors should preserve original detail");
+    let text = err.to_string();
+    assert!(text.contains("web_search backend `mimo` 运行时错误"));
+    assert!(text.contains("synthetic runtime failure"));
+}
+
+#[tokio::test]
 async fn explicit_plugin_backend_unsupported_error_is_preserved() {
     let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::Incompatible {
         detail: "未找到名为 `mimo` 的 web_search 插件后端".to_string(),
@@ -985,6 +1171,52 @@ async fn auto_exhausted_returns_tool_error_and_does_not_cache() {
         invoker.calls().len(),
         2,
         "exhausted auto errors should not be cached"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn auto_plugin_runtime_failure_fails_loud_without_all_backends_unavailable() {
+    let _env = EnvGuard::set_many(&[
+        ("OPENAI_API_KEY", None),
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+    ]);
+    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
+        "backend": "mimo",
+        "hits": [],
+        "warnings": [
+            "plugin_backend_error (backend=mimo): TypeError: async hostcall requires a Tokio runtime handle"
+        ],
+        "unsupported_backend": true
+    }))]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "auto".into();
+    let runtime = runtime_with_catalog(cfg, None);
+    runtime.set_plugin_invoker(invoker);
+
+    let err = runtime
+        .search(
+            WebSearchArgs {
+                query: "rust".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "auto-pluginruntime-1",
+        )
+        .await
+        .expect_err("plugin runtime warnings should fail loud");
+    let text = err.to_string();
+    assert!(text.contains("web_search backend `auto` 运行时错误"));
+    assert!(text.contains("async hostcall requires a Tokio runtime handle"));
+    assert!(
+        !text.contains("所有后端均不可用"),
+        "plugin runtime failures should not be flattened into exhausted auto: {text}"
     );
 }
 

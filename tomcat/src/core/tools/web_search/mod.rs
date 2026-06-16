@@ -133,7 +133,12 @@ impl WebSearchRuntime {
                             .auto_fallback_warnings(BackendName::Openai.as_str(), first_fallback),
                     );
                 }
-                Err(failure) => return Err(failure.to_tool_error(BackendName::Openai.as_str())),
+                Err(failure) => {
+                    return Err(log_hard_failure(
+                        BackendName::Openai.as_str(),
+                        failure.to_tool_error(BackendName::Openai.as_str()),
+                    ))
+                }
             }
         }
 
@@ -152,7 +157,7 @@ impl WebSearchRuntime {
                 Err(failure) if failure.is_retryable_unavailable() => {
                     extend_unique(&mut warnings, failure.auto_fallback_warnings("auto", None));
                 }
-                Err(failure) => return Err(failure.to_tool_error("auto")),
+                Err(failure) => return Err(log_hard_failure("auto", failure.to_tool_error("auto"))),
             }
         }
 
@@ -179,7 +184,7 @@ impl WebSearchRuntime {
             .await
         {
             Ok(output) => Ok(output),
-            Err(failure) => Err(failure.to_tool_error(backend)),
+            Err(failure) => Err(log_hard_failure(backend, failure.to_tool_error(backend))),
         }
     }
 
@@ -190,11 +195,17 @@ impl WebSearchRuntime {
     ) -> Result<WebSearchOutput, AppError> {
         match self.execute_openai_hosted(request, candidate).await {
             Ok(output) => Ok(output),
-            Err(BackendFailure::Incompatible { .. }) => Err(AppError::Tool(format!(
-                "hosted web_search model {} is misconfigured or unavailable",
-                candidate.id
-            ))),
-            Err(failure) => Err(failure.to_tool_error(BackendName::Openai.as_str())),
+            Err(BackendFailure::Incompatible { .. }) => Err(log_hard_failure(
+                BackendName::Openai.as_str(),
+                AppError::Tool(format!(
+                    "hosted web_search model {} is misconfigured or unavailable",
+                    candidate.id
+                )),
+            )),
+            Err(failure) => Err(log_hard_failure(
+                BackendName::Openai.as_str(),
+                failure.to_tool_error(BackendName::Openai.as_str()),
+            )),
         }
     }
 
@@ -332,6 +343,11 @@ fn should_cache(output: &WebSearchOutput) -> bool {
         .iter()
         .any(|warning| warning == "all_backends_unavailable")
         || (output.hits.is_empty() && output.truncated))
+}
+
+fn log_hard_failure(backend: &str, error: AppError) -> AppError {
+    tracing::error!(backend, detail = %error, "web_search backend hard failure");
+    error
 }
 
 fn all_backends_unavailable_error(query: &str, warnings: &[String]) -> AppError {

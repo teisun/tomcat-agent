@@ -177,6 +177,14 @@ impl HostApiDispatcher {
         self.command_waiters.len()
     }
 
+    /// 是否在构造时捕获到 Tokio runtime handle。异步 hostcall（pi.fetch /
+    /// createChatCompletion）依赖它；若为 false，插件后端会在发起请求前抛
+    /// "async hostcall requires a Tokio runtime handle"。回归测试用。
+    #[cfg(test)]
+    pub(crate) fn has_tokio_handle(&self) -> bool {
+        self.tokio_handle.is_some()
+    }
+
     /// 注入 `uiNotify` 调用计数器（E2E / 集成测试）。
     pub fn with_ui_notify_counter(mut self, counter: Arc<AtomicU32>) -> Self {
         self.ui_notify_count = Some(counter);
