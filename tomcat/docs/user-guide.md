@@ -126,7 +126,7 @@ tomcat 默认将所有数据存放在 `~/.tomcat/`。可在 `tomcat.config.toml`
 │   ├── .env                       # API Key 等敏感配置（0600 权限）
 │   ├── .versions.json             # 内嵌资源 SHA-256 版本记录
 │   ├── .lock                      # 并发写入保护锁
-│   └── modules/                   # 内嵌资源自动释放（预留）
+│   └── js/                        # 运行时注入脚本与 shim 资源
 ├── plugins/                       # 插件目录（见第 9 节）
 └── memory/                        # 向量检索索引
 ```
@@ -220,10 +220,18 @@ doctor 逐项检查环境并给出可执行的修复建议：
 | 配置文件 | `✓ 配置合法 (~/.tomcat/tomcat.config.toml)` | `✗ 未找到配置文件` |
 | 内嵌资源 | `✓ 内嵌资源已就绪` | `✗ 资源释放失败` |
 | 资源版本 | `资源版本: modules=def456...` | — |
+| 代理语义 | `✓ llm.proxy 已配置，将优先于环境代理` / `✓ 检测到环境代理（HTTPS_PROXY）` | `⚠ HTTPS_PROXY 含首尾空格` / `⚠ ALL_PROXY 使用 socks5://...` |
 | .env 权限 | `✓ .env 权限: 0600` | `⚠ .env 权限: 0644（建议 0600）` |
 | API Key | `✓ OPENAI_API_KEY 已设置` | `⚠ OPENAI_API_KEY 未设置` |
 
 每个失败/警告项都会给出 `→ 运行 tomcat init 或...` 修复建议。插件运行时相关检查见 [第 9 节](#9-rquickjs-插件运行时)。
+
+代理诊断的规则是：
+
+- `llm.proxy` 已配置时，优先于 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。
+- `llm.proxy` 未配置时，Tomcat 的出网 client 会尊重环境代理；`web_search`、`web_fetch`、plugin `pi.fetch` 走同一套语义。
+- `doctor` 会提示代理值的首尾空格，因为这类配置很容易造成“看起来配了代理，实际行为不一致”。
+- 当前构建未启用 reqwest 的 socks feature，`ALL_PROXY=socks5://...` 不作为 `web_search` 的推荐配置；优先使用 `HTTPS_PROXY=http://...`。
 
 ---
 
@@ -747,11 +755,16 @@ jq '.[0]' /tmp/audit_backup.json
 | `OPENAI_API_KEY` | 必填（code/claw/LLM） | LLM API 密钥 |
 | `HTTPS_PROXY` | 可选 | 全局 HTTPS 代理（curl 兼容格式）|
 | `HTTP_PROXY` | 可选 | 全局 HTTP 代理 |
+| `ALL_PROXY` | 可选 | 兜底代理；当前更推荐配 `HTTPS_PROXY=http://...`，`socks5://` 不作为 `web_search` 官方支持路径 |
 | `TOMCAT__LLM__PROXY` | 可选 | 仅 LLM 请求使用的代理，覆盖 config |
 | `TOMCAT__LLM__API_BASE_FALLBACK` | 可选 | 主 API 不通时的备用 base URL |
 | `TOMCAT__LLM__DEFAULT_MODEL` | 可选 | 覆盖 `[llm] default_model`；未设置时以配置文件 / 代码默认 `gpt-5.4` 为准 |
 
 > LLM 相关的 `TOMCAT__LLM__*` 变量可覆盖 `tomcat.config.toml` 中对应字段，`__` 作为嵌套分隔符。仓库与安装包**不会**默认注入这些变量；若本机 shell 里长期设置了旧模型 id，会导致与 `tomcat init` 新写入的 toml 不一致。
+>
+> `web_search` / `web_fetch` / plugin `pi.fetch` 的代理优先级与此保持一致：`llm.proxy`（或 `TOMCAT__LLM__PROXY`）优先；未配置时回退到环境 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。
+
+> 测试仓库中的 `tomcat/.env` 只服务于本地/CI 测试夹具；生产 CLI 实际读取的是 `~/.tomcat/assets/.env`。两者都可能把代理变量灌进当前进程环境，但用途不同，不要混用排障结论。
 
 ### 常见问题
 
@@ -929,4 +942,4 @@ tomcat plugin unload my-plugin
 
 `tomcat plugin load` 仍是**运行态加载入口**，会执行一次短生命周期初始化校验，并把登记信息写入全局 `{work_dir}/plugins/registry.json`。而 `tomcat install` / `/install` 是**安装管理入口**：它会按 `scope|agent|global` 三层分别写对应层的 `plugins/registry.json` 与 `packages/registry.json`，但不会在安装路径执行插件代码。真正的长生命周期 session VM 仍只会在会话里首次用到该插件时按需创建。
 
-实现细节见 [src/ext/README.md](../src/ext/README.md)。
+实现细节见 [architecture/plugin-system-overview.md](./architecture/plugin-system-overview.md) 与 [src/ext/README.md](../src/ext/README.md)。

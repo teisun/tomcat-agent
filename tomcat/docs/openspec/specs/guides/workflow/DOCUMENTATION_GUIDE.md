@@ -5,7 +5,7 @@
 | 类别 | 落盘位置 | 规范 | 标杆案例 |
 |------|----------|------|----------|
 | **A. 模块 README** | `src/**/README.md` | [`MODULE_README_SPEC.md`](MODULE_README_SPEC.md) | 各子模块 README + [`src/README.md`](../../../../src/README.md) 顶层索引 |
-| **B. 架构方案** | `docs/architecture/**/*.md` | [`ARCHITECTURE_SPEC.md`](ARCHITECTURE_SPEC.md) | [`architecture/tools/search_files.md`](../../../../docs/architecture/tools/search_files.md) · [`architecture/tools/read.md`](../../../../docs/architecture/tools/read.md)（**§4.1 / §4.2** 已定稿选型与实施范例）· [`architecture/interrupt-and-cancellation.md`](../../../../docs/architecture/interrupt-and-cancellation.md)（**§1.3**：§4.1/§4.2 职责映射范例） |
+| **B. 架构方案** | `docs/architecture/**/*.md` | [`ARCHITECTURE_SPEC.md`](ARCHITECTURE_SPEC.md) | [`architecture/tools/search_files.md`](../../../../architecture/tools/search_files.md) · [`architecture/tools/read.md`](../../../../architecture/tools/read.md)（**§4.1 / §4.2** 已定稿选型与实施范例）· [`architecture/interrupt-and-cancellation.md`](../../../../architecture/interrupt-and-cancellation.md)（**§1.3**：§4.1/§4.2 职责映射范例） |
 
 ## 二选一速判
 
@@ -44,4 +44,4 @@
 | 说人话 / 决策（B 类） | **先专业、后口语**：主要小节与图后可跟短段「说人话」；**§4.1** 七列矩阵第三列 **`决策`**（专业裁决结论）+ 末列 **`说人话`**（口语扫读）；其他高密度表末列 **`说人话`**：**SHOULD**，见 [`ARCHITECTURE_SPEC.md`](ARCHITECTURE_SPEC.md) **§4.1 / §14.1**；与 Constitution **二.10** 同向 |
 | 与实现一致 | 实施期调整就地修订并标 `【未改签名 / 依赖 Drop】` 等显式标签；禁止留"原计划 / 现落地"两份真相 |
 | 验收可执行 | 目标可量化、验收映射到具体测试函数名 |
-| 选型与交付钉死 | B 类须在 **§4** 含 **§4.1 落地选型决策表（维度取舍，七列：含 `决策` + `说人话`）** + **§4.2 实施点（已闭环；交付物与代码落点在此表）**（[`ARCHITECTURE_SPEC.md`](ARCHITECTURE_SPEC.md) MUST）；写法见 [`read.md` §4.1–§4.2](../../../../docs/architecture/tools/read.md)；补充文档的 §4 映射见 [`interrupt-and-cancellation.md` §1.3](../../../../docs/architecture/interrupt-and-cancellation.md) |
+| 选型与交付钉死 | B 类须在 **§4** 含 **§4.1 落地选型决策表（维度取舍，七列：含 `决策` + `说人话`）** + **§4.2 实施点（已闭环；交付物与代码落点在此表）**（[`ARCHITECTURE_SPEC.md`](ARCHITECTURE_SPEC.md) MUST）；写法见 [`read.md` §4.1–§4.2](../../../../architecture/tools/read.md)；补充文档的 §4 映射见 [`interrupt-and-cancellation.md` §1.3](../../../../architecture/interrupt-and-cancellation.md) |

@@ -2,6 +2,7 @@ mod cache_test;
 mod fetcher_test;
 mod markdownify_test;
 mod persist_test;
+mod proxy_regression_test;
 mod redirect_test;
 mod validate_test;
 

@@ -1,6 +1,6 @@
 # 工作目录与数据布局
 
-本文为 [Architecture](../Architecture.md) 中「10. 工作目录与数据布局」的详细设计，总览见主文档。参考 [openclaw 多 agent 目录约定]
+本文为 [Architecture](../openspec/specs/Architecture.md) 中「8. 工作目录与数据布局」的详细设计，总览见主文档。参考 [openclaw 多 agent 目录约定]
 
 ## 1. 默认工作根目录（work_dir）
 
@@ -81,6 +81,5 @@
 
 ## 5. 引用本设计
 
-- [Architecture](../Architecture.md) 详细设计索引已包含本文档。
-- 树形目录与示例布局（`~/.tomcat/` 等）的可视化说明见 [directory-structure](./directory-structure.md)（与本文档配套阅读）。
+- [Architecture](../openspec/specs/Architecture.md) 详细设计索引已包含本文档。
 - 涉及会话路径、存储根目录、配置与数据布局的文档（如 host-core-layer、session-storage、[src/infra/README.md](../../../src/infra/README.md)、design、[src/ext/README.md](../../../src/ext/README.md) 等）应在相应小节引用本文档。

@@ -601,7 +601,7 @@ pub fn create_secure_vm_config(cfg: &PluginConfig) -> PluginEngineConfig {
 供 AI 在遇到模糊地带时查阅：
 
 > **架构决策树：**
-> 1. **这个功能是否会影响 Wasm 插件或 ExtensionAPI 行为？** -> 是：优先对照 `docs/architecture/plugin-system/` 与现有 Hostcall 契约；否：按 Rust 最佳实践实现。
+> 1. **这个功能是否会影响 `rquickjs` 插件运行时或 ExtensionAPI 行为？** -> 是：优先对照 `docs/architecture/plugin-system-overview.md`、`docs/architecture/plugin-system/host-call-protocol.md` 与现有 Hostcall 契约；否：按 Rust 最佳实践实现。
 > 2. **这个操作是否需要访问系统资源？** -> 是：必须封装在“4原语”或“宿主API层”中，并经过权限校验；否：可以在插件侧纯 JS 实现。
 > 3. **这个数据是否需要持久化？** -> 是：对话记录存 JSONL（Append），元数据存 sessions.json（Atomic Write）；否：存内存 State。
 > 4. **这个错误是否会暴露给插件？** -> 是：转换为 `PluginError` 并映射为 JS Exception；否：记录在 `tracing` 日志中。

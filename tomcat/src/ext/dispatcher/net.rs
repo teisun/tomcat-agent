@@ -4,6 +4,7 @@ use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
 use serde_json::Value;
+use tracing::debug;
 
 use super::helpers::plugin_id_from_instance;
 use super::types::HostApiDispatcher;
@@ -89,6 +90,13 @@ impl HostApiDispatcher {
             request = request.body(body);
         }
 
+        debug!(
+            target: "tomcat::pi_fetch",
+            host = %host,
+            proxy_mode = self.fetch_proxy_mode_label,
+            timeout_ms = self.fetch_timeout.as_millis(),
+            "dispatching pi.fetch request"
+        );
         let response = request.send().await.map_err(map_fetch_transport_error)?;
         let status = response.status().as_u16();
         if response.status().is_redirection() {

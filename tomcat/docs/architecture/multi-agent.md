@@ -1,6 +1,6 @@
-# 14. 多 Agent 架构设计
+# 多 Agent 架构设计
 
-本文为 [Architecture](../Architecture.md) 中第 14 节的详细设计，总览见主文档。
+本文为 [Architecture](../openspec/specs/Architecture.md) 中「11. 多 Agent 与扩展子系统」的详细设计，总览见主文档。
 
 ---
 
@@ -588,10 +588,10 @@ SubAgentEnd {
 
 | 章节 | 关系 |
 |------|------|
-| **第 8 节（事件系统）** | 新增 `SubAgentStart` / `SubAgentEnd` 两个 `AgentEvent` 变体；事件通过 envelope 统一携带 `sessionId`，其中子生命周期事件的 envelope `sessionId = child_session_id`；订阅方按 `EventContext.session_id` 过滤，并结合 `parentSessionId` / `childSessionId` 追踪父子关系。 |
-| **第 9 节（会话存储）** | `SessionEntry` 预留注释「channel/agent 相关字段供三期多 channel 使用」；本节给出 `parent_session_id` 的具体语义与写入时机（子 Agent 创建时 patch）。 |
-| **第 10 节（工作目录）** | 子 Agent session 的 transcript 路径沿用 `agents/<agentId>/sessions/` 布局，以 `child_session_id`（含冒号，需 URL encode 或替换为下划线）作为文件名。 |
-| **第 13 节（Agent Loop）** | `AgentLoop` 本身不修改；`dispatch_agent` 工具作为普通工具注入 `tool_definitions`；`AgentRegistry` 是新增的进程级管理层；`AgentLoopConfig` 新增 `parent_session_id` / `spawn_depth` / `subagent_type` / `role` 四个字段。 |
+| [`plugin-system/events.md`](./plugin-system/events.md) | 新增 `SubAgentStart` / `SubAgentEnd` 两个 `AgentEvent` 变体；事件通过 envelope 统一携带 `sessionId`，其中子生命周期事件的 envelope `sessionId = child_session_id`；订阅方按 `EventContext.session_id` 过滤，并结合 `parentSessionId` / `childSessionId` 追踪父子关系。 |
+| [`session-storage.md`](./session-storage.md) | `SessionEntry` 预留注释「channel/agent 相关字段供三期多 channel 使用」；本节给出 `parent_session_id` 的具体语义与写入时机（子 Agent 创建时 patch）。 |
+| [`work-dir-and-data-layout.md`](./work-dir-and-data-layout.md) | 子 Agent session 的 transcript 路径沿用 `agents/<agentId>/sessions/` 布局，以 `child_session_id`（含冒号，需 URL encode 或替换为下划线）作为文件名。 |
+| [`agent-loop.md`](./agent-loop.md) | `AgentLoop` 本身不修改；`dispatch_agent` 工具作为普通工具注入 `tool_definitions`；`AgentRegistry` 是新增的进程级管理层；`AgentLoopConfig` 新增 `parent_session_id` / `spawn_depth` / `subagent_type` / `role` 四个字段。 |
 
 ### 14.6.1 internal subagent dispatch（reviewer 消费方）
 

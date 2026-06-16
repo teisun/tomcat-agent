@@ -1,398 +1,204 @@
-本文为 [Architecture](../../Architecture.md) 中「4. 插件系统（统一入口）」的补充设计，聚焦“插件来源扫描 -> 注册 -> 加载 -> 运行时管理”闭环。
+# 插件发现、作用域与加载
 
----
+本文为 [Architecture](../../openspec/specs/Architecture.md) 中「4. 插件系统（统一入口）」的专题页，补充 [`../plugin-system-overview.md`](../plugin-system-overview.md) 的磁盘发现、scope 视图、激活时机与 layered registry 规则。
 
-## 插件来源扫描注册加载技术方案
+## 这份文档回答什么
 
-本文目标：
+- 插件从哪里被发现
+- `scope / agent / global` 三层根怎么组合成“当前可见集”
+- `install`、catalog、registry、session VM 分别在什么阶段出现
+- 为什么安装成功不等于插件代码已经运行
+- 为什么 `tools[]` 与 `functions[]` 虽然都静态可见，却不应该混成一张表
 
-1. 对照 `openclaw` 与 `pi-mono` 的来源扫描/注册/加载实践。
-2. 给出 `tomcat` 的备选架构与推荐定版方案。
-3. 提供可执行的模块边界、状态模型、测试矩阵与演进路径。
+## 文首导读：先别把三件事混在一起
 
-> 本文为架构优先设计，不以当前实现细节为前提；现有代码仅作为迁移输入，不作为架构约束。
+这份文档最容易读混的地方有三个：
 
-### 实现状态（待实现）
+1. **发现 / 编目**：系统只是“知道有这个插件”，还没运行它。
+2. **scope 视图物化**：系统把当前项目能看见的插件能力整理出来，决定谁进入 `ToolRegistry`、谁进入 `FunctionRegistry`。
+3. **运行时激活**：某个 `(session_id, plugin_id)` 的活体 VM 真正启动，并开始执行 JS。
 
-- 本文所有架构与流程目前为目标设计，默认状态为**待实现**。
-- 若后续落地，请按章节更新为：`已实现` / `部分实现` / `待实现` 并附实现文件链接。
+> 说人话：先建目录，再摆上说明书，最后真的开机放片。安装、可见、运行是三件不同的事。
 
----
+## A.0 从磁盘到共享注册面的时序图
 
-## 术语表
+```mermaid
+sequenceDiagram
+    participant Disk as DiskRoots
+    participant Catalog as PluginCatalog
+    participant ScopeView as ScopeView
+    participant ToolReg as ToolRegistry
+    participant FnReg as FunctionRegistry
+    participant Runtime as RuntimeManager
 
-| 术语 | 含义 |
-|------|------|
-| Source Scan | 扫描候选插件来源（目录/配置/内置/宿主注入）。 |
-| Manifest | 插件声明文件（ID、版本、配置 schema、能力声明等）。 |
-| Catalog | 可发现插件清单（元数据层，不含运行时实例）。 |
-| Registry | 运行时注册表（已激活实例、状态、句柄）。 |
-| Activation | 从 Catalog 命中后按需加载到 Registry。 |
-| Enabled State | 策略层状态（是否允许启用）。 |
-| Load State | 运行时状态（是否加载、是否失败）。 |
+    Disk->>Catalog: scan scope/agent/global manifests
+    Catalog-->>ScopeView: merge current scope view
 
----
+    alt manifest has static tools
+        ScopeView->>ToolReg: materialize declared tools
+    else legacy plugin without static tools
+        ScopeView->>Runtime: run short-lived activation VM
+        Runtime->>ToolReg: registerTool() results
+    end
 
-## 一、对标设计：openclaw
+    opt manifest has functions
+        ScopeView->>FnReg: point override winners
+    end
 
-### 1.1 设计摘要
-
-`openclaw` 的主线是“两阶段”：
-
-- 阶段 1（发现/校验）：`discover + manifest-registry`
-- 阶段 2（激活/注册）：`loader + plugin-registry`
-
-核心特点：
-
-- 多来源扫描（`bundled/workspace/global/config`）
-- Manifest 先行（先校验清单，再加载代码）
-- 诊断内建（重复 ID、路径逃逸、权限可疑、schema 缺失）
-- 运行时注册内容丰富（tools/hooks/commands/providers/channels/httpRoutes/...）
-
-### 1.2 ASCII 核心四图（openclaw）
-
-#### 1) 结构图
-
-```text
-┌──────────────────────────────────────────────────────────────────────┐
-│                        OpenClaw Plugin Pipeline                     │
-├──────────────────────────────────────────────────────────────────────┤
-│ Source Discovery                                                     │
-│   bundled / workspace / global / config                             │
-│         │                                                            │
-│         ▼                                                            │
-│ Manifest Registry                                                    │
-│   id, origin, schema, diagnostics, precedence                        │
-│         │                                                            │
-│         ▼                                                            │
-│ Loader                                                               │
-│   allow/deny/entries/slota -> resolve enabled set                    │
-│         │                                                            │
-│         ▼                                                            │
-│ Runtime Plugin Registry                                              │
-│   plugins/tools/hooks/commands/providers/channels/httpRoutes/...     │
-└──────────────────────────────────────────────────────────────────────┘
+    Runtime->>Runtime: start or reuse session VM on first real use
 ```
 
-#### 2) 调用流图
+## 三层根与优先级
+
+当前发现与安装都遵循同一套三层模型：
+
+| 可见层 | 目录根 | 用途 | 说人话 |
+|------|--------|------|--------|
+| `scope` | `<scope_root>/.tomcat/plugins/` | 当前项目私有插件，优先级最高 | 这个项目自己带的插件，应该最能覆盖本地需要。 |
+| `agent` | `~/.tomcat/agents/<agentId>/plugins/` | 当前 agent 私有插件 | 只服务这个 agent，不影响别的 agent。 |
+| `global` | `~/.tomcat/plugins/` | 全局兜底插件 | 装一份，大家都能看见，但优先级最低。 |
+
+覆盖规则：
+
+- **同名插件**：高层覆盖低层。
+- **宿主函数 provider**：进入 `FunctionRegistry` 前按 `point` 做高层优先收口。
+- **安装账本**：每层分别维护自己的 `plugins/registry.json` 与 `packages/registry.json`。
+
+## 三个加载点
+
+### 1. 发现 / 编目
+
+这个阶段只做：
+
+- 扫描三层根
+- 读取 `plugin.json`
+- 建立 `PluginCatalog` / layered registry / 诊断结果
+
+这个阶段**不做**：
+
+- 运行插件 JS
+- 启动 session VM
+- 热替换当前会话里已经跑起来的实例
+
+### 2. 会话进入 / scope 首次激活
+
+这个阶段负责把“当前 scope 看得见什么”物化出来：
+
+- 解决同名 shadow / override
+- 建立当前 scope 的 `plugins` 管理视图
+- 把 manifest 中静态可见的 `tools[]` / `functions[]` 物化到当前 scope 的注册面
+
+这里的关键点是：
+
+- `tools[]` 面向 LLM，可进入 `ToolRegistry`
+- `functions[]` 面向宿主，可进入 `FunctionRegistry`
+- 两者都属于**能力可见性**，不等于“用户代码已经执行”
+
+### 3. 首次真实使用
+
+真正执行插件代码发生在运行态：
+
+- 会话进入时需要预热的插件
+- `session_start` 等生命周期事件触发的插件
+- 首次 `tool_call`
+- 宿主按扩展点调用 `functions[]`
+
+这一步才会：
+
+- `ensure/start_session_vm(session_id, plugin_id)`
+- 命中复用已有 `(session_id, plugin_id)` 实例，或新建 `VmActor`
+- 执行插件 JS，并把 JS 实现绑定到当前 VM
+
+## 两条正交判断：`tools[]` 与 `activation`
+
+不要给插件贴“它是工具型还是生命周期型”这种单一标签。当前更准确的判断方式是两条独立开关：
+
+| 维度 | 决策 | 说人话 |
+|------|------|--------|
+| `tools[]` | 决定工具面是否能零跑码进入 `ToolRegistry` | 这是“LLM 先能不能看见它”的开关。 |
+| `activation` | 决定是否要在会话进入时预启动长生命周期 VM | 这是“这个插件是不是必须提前在场”的开关。 |
+| `functions[]` | 决定宿主面是否静态可见 | 这是“系统内部能不能按扩展点找到它”的开关。 |
+
+于是会形成 4 种主要组合：
+
+1. **有静态 `tools[]` + `activation=lazy`**：工具面零跑码可见；首次真实使用时再起长 VM。
+2. **有静态 `tools[]` + `activation=session`**：工具面零跑码可见；会话进入时直接预启动长 VM。
+3. **无静态 `tools[]` + `activation=lazy`**：需要在 scope 首次激活时跑一次短命校验 VM，补登记工具。
+4. **无静态 `tools[]` + `activation=session`**：会话进入时预启动长 VM，并由它顺带完成工具登记。
+
+> 说人话：`tools[]` 回答“先不跑代码能不能看见能力”，`activation` 回答“要不要提前让活体 VM 在场”。两件事不能混写成一个枚举。
+
+## install 与 runtime 的关系
+
+`tomcat install` / `/install` 的职责是**安装管理**，不是**运行时加载**。
+
+安装时会发生：
+
+- 写插件正文到目标层目录
+- 更新该层 `plugins/registry.json`
+- 更新该层 `packages/registry.json`
+- 刷新当前进程的 catalog / 可见集
+
+安装时不会发生：
+
+- 调用 `load_plugin()`
+- 启动 session VM
+- 热替换当前会话里已经运行的插件实例
+
+这个边界是当前文档和 [`../package-manager.md`](../package-manager.md) 的共同约束。
+
+## 四张表分层：别把它们当一张
 
 ```text
-discoverOpenClawPlugins()
-    -> loadPluginManifestRegistry()
-        -> resolve duplicate/precedence/security diagnostics
-            -> createPluginRegistry()
-                -> load module (jiti)
-                    -> plugin register(api)
-                        -> registerTool/registerHook/registerCommand/...
-                            -> setActivePluginRegistry()
+磁盘 plugin.json
+   │
+   ▼
+PluginCatalog
+   │
+   ▼
+当前 scope 可见视图
+   │
+   ├─ ToolRegistry       （给 LLM）
+   ├─ FunctionRegistry   （给宿主）
+   └─ plugins 管理态
+   │
+   ▼
+Running instance
+   └─ (session_id, plugin_id) -> VmActor / PluginVmInstance
 ```
 
-#### 3) 时序图
-
-```text
-Startup
-  │
-  ├─ scan sources ---------------------------> candidates
-  ├─ read manifests -------------------------> manifest records + diagnostics
-  ├─ apply config policy --------------------> enabled/disabled decision
-  ├─ load selected modules ------------------> plugin register(api)
-  └─ commit active registry -----------------> runtime available
-```
-
-#### 4) 数据闭环图
-
-```text
-manifest + source metadata
-        │
-        ▼
-catalog decision (enabled?)
-        │ yes
-        ▼
-runtime registration (tools/hooks/commands/...)
-        │
-        ▼
-agent/runtime invocation
-        │
-        └─ diagnostics/events/metrics -> feedback to operations
-```
-
----
-
-## 二、对标设计：pi-mono
-
-### 2.1 设计摘要
-
-`pi-mono` 的核心是“扩展运行时注册”：
-
-- 发现侧：通过 `package.json` 的 `pi` manifest（如 `pi.extensions`）与目录约定收集资源。
-- 加载侧：extension module 加载后，将声明写入内存结构。
-- 运行侧：runner 按事件/工具/命令三类统一调度。
-
-三个关键注册面：
-
-- `handlers`：事件回调（on）
-- `tools`：LLM/运行时可调用工具（registerTool）
-- `commands`：命令入口（registerCommand）
-
-### 2.2 ASCII 核心四图（pi-mono）
-
-#### 1) 结构图
-
-```text
-┌────────────────────────────────────────────────────────────┐
-│                    pi-mono Extension System                │
-├────────────────────────────────────────────────────────────┤
-│ Resource Discovery                                          │
-│   package.json(pi manifest) + conventions + filters         │
-│         │                                                    │
-│         ▼                                                    │
-│ Extension Loader                                             │
-│   load module -> createExtensionAPI                          │
-│         │                                                    │
-│         ▼                                                    │
-│ In-Memory Extension Store                                    │
-│   handlers Map / tools Map / commands Map                    │
-│         │                                                    │
-│         ▼                                                    │
-│ Extension Runner                                             │
-│   dispatch events / resolve tools / resolve commands         │
-└────────────────────────────────────────────────────────────┘
-```
-
-#### 2) 调用流图
-
-```text
-discover extension paths
-    -> loadExtensionModule(path)
-        -> factory(api)
-            -> api.on(...)
-            -> api.registerTool(...)
-            -> api.registerCommand(...)
-                -> store in extension maps
-                    -> runner dispatch at runtime
-```
-
-#### 3) 时序图
-
-```text
-Session/Startup
-  │
-  ├─ collect resources from manifest/filter
-  ├─ load extension modules
-  ├─ execute factory registration
-  ├─ build effective tool/command set
-  └─ runtime emits events -> handlers execute
-```
-
-#### 4) 数据闭环图
-
-```text
-manifest/resource config
-      │
-      ▼
-extension load
-      │
-      ▼
-handlers/tools/commands maps
-      │
-      ├─ event path ----> handlers
-      ├─ tool path -----> tools
-      └─ command path --> commands
-```
-
----
-
-## 三、本项目备选设计（tomcat）
-
-> 实现状态：**待实现**
-
-### 3.1 方案 A：目录直载（最小改动）
-
-- 通过路径直接 `load_plugin(path)`，立即实例化并执行初始化。
-- 优点：实现简单，改动小。
-- 缺点：缺乏 catalog 层、策略层弱、难支持多 agent 独立策略。
-
-### 3.2 方案 B：GlobalCatalog + AgentRegistry（推荐）
-
-- GlobalCatalog：聚合可发现插件（全局/agent/宿主注入），统一清单与诊断。
-- AgentRegistry：按 agent 按需激活，维护运行时实例与状态。
-- Session 仅携带上下文，不复制插件实例。
-
-### 3.3 方案 C：进程级单 Registry
-
-- 类似“全局唯一 active registry”。
-- 优点：模型简单。
-- 缺点：多 agent 隔离弱，状态污染风险高，不利于后续精细化调度。
-
-### 3.4 选择建议
-
-推荐方案 B。理由：
-
-1. 保留全局可发现能力，同时保证 agent 执行隔离。
-2. 最适配后续多 agent 并发与策略差异化。
-3. 兼顾懒加载效率与状态可观测性。
-
----
-
-## 四、推荐定版：GlobalCatalog + AgentRegistry + SessionContext
-
-> 实现状态：**待实现（推荐目标架构）**
-
-### 4.1 分层定义
-
-- `GlobalCatalog`（可发现层）  
-  保存插件元数据与来源信息，不保存 VM 实例。
-- `AgentRegistry`（执行层）  
-  每个 agent 一张已激活实例表，保存 VM/绑定状态/句柄。
-- `SessionContext`（调用层）  
-  只提供 `session_id`、权限与上下文，不承载插件实例。
-
-### 4.2 状态模型
-
-每个插件条目最少包含：
-
-- `enabled_state`: `enabled | disabled`
-- `load_state`: `unloaded | loading | loaded | error`
-- `source_origin`: `global | agent | host_injected`
-- `diagnostics[]`: 扫描/校验/加载诊断
-
-### 4.3 生命周期约束
-
-- 懒加载：首次命中才激活实例。
-- 常驻：本期不自动卸载。
-- 卸载接口：预留 API 与状态机转移（后续实现 GC/hot-reload）。
-
-### 4.4 ASCII 核心四图（本项目推荐架构）
-
-#### 1) 结构图
-
-```text
-┌──────────────────────────────────────────────────────────────────────┐
-│                        Plugin Runtime Architecture                  │
-├──────────────────────────────────────────────────────────────────────┤
-│ GlobalCatalog                                                        │
-│   scan(global dir, agent dir, host injected)                         │
-│   validate manifest/schema/security                                  │
-│   build discoverable records + diagnostics                           │
-├──────────────────────────────────────────────────────────────────────┤
-│ AgentRegistry (per agent)                                            │
-│   activated plugin instances                                          │
-│   vm handle / tool bindings / event handlers / status                │
-├──────────────────────────────────────────────────────────────────────┤
-│ SessionContext (per session call)                                    │
-│   session_id / permissions / runtime context                          │
-└──────────────────────────────────────────────────────────────────────┘
-```
-
-#### 2) 调用流图
-
-```text
-runtime needs plugin X
-    -> query GlobalCatalog(X)
-        -> check enabled_state + policy
-            -> if unloaded: activate into AgentRegistry
-                -> bind tools/handlers/commands
-                    -> execute with SessionContext
-```
-
-#### 3) 时序图
-
-```text
-Process Start
-  │
-  ├─ build GlobalCatalog (scan + validate + diagnostics)
-  │
-Agent First Use(plugin X)
-  │
-  ├─ AgentRegistry miss
-  ├─ activate plugin X from GlobalCatalog
-  └─ AgentRegistry hit (subsequent calls)
-```
-
-#### 4) 数据闭环图
-
-```text
-Source Scan -> Catalog Record -> Agent Activation -> Runtime Invocation
-      │               │                  │                   │
-      └---------------┴------------------┴-------------------┘
-                      diagnostics/metrics/state feedback
-```
-
----
-
-## 五、模块边界（目标设计）
-
-建议目标模块：
-
-- `plugin_source_scanner`：来源扫描（global/agent/host injected）
-- `plugin_manifest_registry`：manifest 解析、校验、去重、优先级
-- `plugin_catalog`：可发现插件集合查询接口
-- `agent_plugin_registry`：agent 运行时实例表与状态机
-- `plugin_activator`：按需激活流程（load/bind/register）
-- `plugin_lifecycle_service`：启用/禁用/预留卸载与观测
-
-### 模块落地清单（待实现）
-
-- [ ] `plugin_source_scanner`：完成来源扫描（全局/agent/宿主注入）
-- [ ] `plugin_manifest_registry`：完成 manifest/schema 校验、去重与优先级
-- [ ] `plugin_catalog`：完成可发现插件查询接口
-- [ ] `agent_plugin_registry`：完成 per-agent 运行时表与状态机
-- [ ] `plugin_activator`：完成按需激活与绑定流程
-- [ ] `plugin_lifecycle_service`：完成启用/禁用与卸载接口占位
-
-注意：
-
-- 插件注册表与工具系统分层。
-- 4 原语/LLM 属于核心能力，不是插件条目。
-- 插件“贡献工具”才进入插件运行时注册域。
-
----
-
-## 六、测试矩阵与演进路线
-
-> 实现状态：**待实现**
-
-### 6.1 测试矩阵
-
-1. 来源扫描：
-   - 全局目录、agent 目录、宿主注入来源识别
-   - 非法路径、重复 ID、manifest/schema 错误诊断
-2. 激活流程：
-   - 懒加载首次激活
-   - 二次命中复用（不重复初始化）
-3. 隔离性：
-   - 不同 agent 相同插件独立实例
-   - 同 agent 多会话共享实例但上下文隔离
-4. 状态机：
-   - `enabled_state`/`load_state` 的转移正确性
-   - `error` 态恢复路径
-
-### 6.2 演进路线
-
-- Phase 1：Catalog + AgentRegistry + 懒加载常驻
-- Phase 2：显式卸载 + 生命周期回收（idle TTL/手动卸载）
-- Phase 3：热更新与版本并行（灰度、回滚）
-
-### 测试任务清单（待实现）
-
-- [ ] 来源扫描测试（来源识别、路径安全、重复 ID）
-- [ ] 激活流程测试（懒加载首命中、二次命中复用）
-- [ ] 隔离性测试（跨 agent 隔离、同 agent 多会话上下文隔离）
-- [ ] 状态机测试（`enabled_state` / `load_state` 转移、error 恢复）
-
----
-
-## 与其他文档关系
-
-| 主题 | 文档 |
-|------|------|
-| 插件系统总览 | [插件系统全貌](../plugin-system-overview.md) |
-| Host API 边界 | [宿主API层](host-api-layer.md) |
-| Hostcall 协议 | [Hostcall JSON 协议](host-call-protocol.md) |
-| 异步执行模型 | [异步 Hostcall 与事件循环](async-hostcall-event-loop.md) |
-| 长生命周期 VM | [Phase 2 长生命周期 VM](phase2-long-lived-vm.md) |
-
----
-
-**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 相关： [Architecture](../../Architecture.md)
-
+它们分别回答的是四种不同问题：
+
+| 层 | 回答什么问题 | 说人话 |
+|----|--------------|--------|
+| `PluginCatalog` | 系统“知道有哪些插件” | 这是片单底座。 |
+| scope 可见视图 | 当前项目 / agent “看得见哪些插件能力” | 这是当前项目真正能选的片。 |
+| `ToolRegistry` / `FunctionRegistry` | 当前 scope 下分别给 LLM 和宿主暴露了什么能力 | 一个给模型看，一个给系统自己看。 |
+| Running instance | 当前会话里“哪些插件代码真的跑起来了” | 这才是已经开机放映的活体。 |
+
+## 关键决策速查
+
+| 主题 | 决策 | 说人话 |
+|------|------|--------|
+| 发现路径 | **通用插件发现层复用 `scope > agent > global` 三层磁盘根** | 和 skill / package 的三层安装语义对齐，别再单独造第四套路径规则。 |
+| 工具面来源 | **优先使用 manifest 静态 `tools[]`；legacy `registerTool` 只作兼容** | 不要为了“看一眼有哪些工具”就把所有插件代码拉起来跑。 |
+| 函数面来源 | **manifest `functions[]` 静态可见，进入 `FunctionRegistry` 前按 `point` 选赢家** | 给宿主用的扩展点也走三层发现，但同一点位不应该把多层 provider 全都暴露出来。 |
+| install vs run | **安装只改磁盘与账本，不自动起 VM** | 安装成功不等于插件代码已经执行。 |
+| 活体实例 | **运行期按 `(session_id, plugin_id)` 隔离** | 当前项目共享“看见什么”，具体会话隔离“谁真的在跑”。 |
+
+## 为什么这样分层
+
+这么拆的核心收益是：
+
+1. 安装、发现、可见性、执行时机互不混淆。
+2. 多层覆盖规则统一，`install` 与 `chat` 看到的是同一套层级语义。
+3. LLM 工具面与宿主函数面都能做静态可见性收口，不必把“看见能力”误解成“已经起 VM”。
+4. 多 session 并发时，只在真正需要时创建 `(session_id, plugin_id)` 运行实例。
+
+## 与其他文档的关系
+
+- 总入口与全局结论：[`../plugin-system-overview.md`](../plugin-system-overview.md)
+- 安装命令、账本与三层路径：[`../package-manager.md`](../package-manager.md)
+- JS bridge / host API 边界：[`js-bridge-and-host-api.md`](./js-bridge-and-host-api.md)
+- Hostcall / manifest / `tools[]` / `functions[]`：[`host-call-protocol.md`](./host-call-protocol.md)
+- 运行时物化与 `VmActor` 生命周期：[`runtime-and-sandbox.md`](./runtime-and-sandbox.md)

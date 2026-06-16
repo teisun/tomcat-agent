@@ -786,7 +786,7 @@ async fn explicit_plugin_backend_without_invoker_returns_clear_error() {
 }
 
 #[tokio::test]
-async fn explicit_plugin_backend_timeout_returns_degraded_output() {
+async fn explicit_plugin_backend_timeout_returns_tool_error() {
     let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::Timeout)]);
 
     let mut cfg = AppConfig::default();
@@ -794,7 +794,7 @@ async fn explicit_plugin_backend_timeout_returns_degraded_output() {
     let runtime = runtime_with_catalog(cfg, None);
     runtime.set_plugin_invoker(invoker);
 
-    let output = runtime
+    let err = runtime
         .search(
             WebSearchArgs {
                 query: "reqwest".into(),
@@ -807,19 +807,10 @@ async fn explicit_plugin_backend_timeout_returns_degraded_output() {
             "session-plugin-3",
         )
         .await
-        .expect("timeout should degrade, not hard fail");
-
-    assert_eq!(output.backend, "mimo");
-    assert!(output.hits.is_empty());
-    assert!(output.truncated);
-    assert!(output
-        .warnings
-        .iter()
-        .any(|w| w == "backend_unavailable:mimo"));
-    assert!(output
-        .warnings
-        .iter()
-        .any(|w| w == "timeout (backend=mimo)"));
+        .expect_err("timeout should surface as tool error");
+    assert!(err
+        .to_string()
+        .contains("web_search backend `mimo` 请求超时"));
 }
 
 #[tokio::test]
@@ -923,7 +914,7 @@ async fn auto_plugin_slot_calls_invoker_once_and_then_hits_cache() {
 
 #[tokio::test]
 #[serial]
-async fn explicit_plugin_backend_rate_limit_returns_degraded_output() {
+async fn explicit_plugin_backend_rate_limit_returns_tool_error() {
     let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::RateLimited {
         status: 429,
     })]);
@@ -933,7 +924,7 @@ async fn explicit_plugin_backend_rate_limit_returns_degraded_output() {
     let runtime = runtime_with_catalog(cfg, None);
     runtime.set_plugin_invoker(invoker);
 
-    let output = runtime
+    let err = runtime
         .search(
             WebSearchArgs {
                 query: "rust".into(),
@@ -946,19 +937,55 @@ async fn explicit_plugin_backend_rate_limit_returns_degraded_output() {
             "test-session",
         )
         .await
-        .expect("rate-limited plugin search");
+        .expect_err("rate-limited plugin search should fail clearly");
+    assert!(err
+        .to_string()
+        .contains("web_search backend `tavily` 暂不可用（status=429）"));
+}
 
-    assert_eq!(output.backend, "tavily");
-    assert!(output.hits.is_empty());
-    assert!(output.truncated);
-    assert!(output
-        .warnings
-        .iter()
-        .any(|w| w == "backend_unavailable:tavily"));
-    assert!(output
-        .warnings
-        .iter()
-        .any(|w| w == "rate_limited (backend=tavily,status=429)"));
+#[tokio::test]
+#[serial]
+async fn auto_exhausted_returns_tool_error_and_does_not_cache() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![
+        Err(BackendFailure::Timeout),
+        Err(BackendFailure::Timeout),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "auto".into();
+    cfg.tools.web_search.cache_capacity = 8;
+    cfg.tools.web_search.cache_ttl_secs = 60;
+    let runtime = runtime_with_catalog(cfg, None);
+    runtime.set_plugin_invoker(invoker.clone());
+
+    let args = WebSearchArgs {
+        query: "rust".into(),
+        count: Some(3),
+        freshness: None,
+        country: None,
+        language: None,
+        domain_filter: Vec::new(),
+    };
+    let first = runtime
+        .search(args.clone(), "auto-exhausted-1")
+        .await
+        .expect_err("first exhausted search should error");
+    let second = runtime
+        .search(args, "auto-exhausted-2")
+        .await
+        .expect_err("second exhausted search should also error");
+
+    for err in [first, second] {
+        let text = err.to_string();
+        assert!(text.contains("web_search 查询 `rust` 所有后端均不可用"));
+        assert!(text.contains("backend_unavailable:auto"));
+        assert!(text.contains("timeout (backend=auto)"));
+    }
+    assert_eq!(
+        invoker.calls().len(),
+        2,
+        "exhausted auto errors should not be cached"
+    );
 }
 
 #[tokio::test]
@@ -990,6 +1017,11 @@ async fn auto_backend_uses_project_hosted_candidate() {
         ("BRAVE_API_KEY", None),
         ("SERPER_API_KEY", None),
         ("OPENAI_API_KEY", Some("openai-test-key")),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
     ]);
 
     let mut cfg = AppConfig::default();
@@ -1103,6 +1135,11 @@ async fn explicit_openai_requires_project_candidate() {
         ("BRAVE_API_KEY", None),
         ("SERPER_API_KEY", None),
         ("OPENAI_API_KEY", None),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
     ]);
 
     let mut cfg = AppConfig::default();

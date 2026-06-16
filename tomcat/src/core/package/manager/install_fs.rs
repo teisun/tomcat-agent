@@ -67,7 +67,9 @@ pub(super) fn install_resource(
     })
 }
 
-pub(super) fn prepare_force_remove_path(path: &Path) -> Result<Option<InstallFsMutation>, AppError> {
+pub(super) fn prepare_force_remove_path(
+    path: &Path,
+) -> Result<Option<InstallFsMutation>, AppError> {
     if !path.exists() {
         return Ok(None);
     }
@@ -121,7 +123,10 @@ pub(super) fn rollback_install(
                 stage_dir,
             } => {
                 if let Err(error) = remove_path_if_exists(destination_dir) {
-                    errors.push(format!("remove {} failed: {error}", destination_dir.display()));
+                    errors.push(format!(
+                        "remove {} failed: {error}",
+                        destination_dir.display()
+                    ));
                 }
                 if let Some(backup_dir) = backup_dir {
                     if backup_dir.exists() {

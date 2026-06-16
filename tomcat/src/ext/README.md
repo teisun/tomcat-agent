@@ -5,6 +5,7 @@
 - **职责**：提供基于 `rquickjs` 的插件运行时、宿主导入绑定、Hostcall 分发、插件生命周期管理，以及长生命周期 session VM 的隔离与回收。
 - **所在层级**：扩展层；依赖 `infra`，通过 trait/contract 接入 `core` 的工具、会话与执行器能力。
 - **现状**：这里已经不再使用 WasmEdge、QuickJS wasm、`engine_stub.rs` / `instance_stub.rs` 或 `assets/modules/` 那套旧兼容层。
+- **架构入口**：如果你想先看文档而不是代码，请从 [`docs/architecture/plugin-system-overview.md`](../../docs/architecture/plugin-system-overview.md) 与其子文档进入。
 
 ### 核心文件
 

@@ -365,6 +365,634 @@ web_search = true
 
 #[tokio::test]
 #[serial]
+async fn runtime_explicit_openai_uses_llm_proxy_and_trims_whitespace() {
+    let hosted = common::HttpsTestServer::start(
+        "api.openai.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        hosted_web_search_response(),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let proxy =
+        common::ProxyTestServer::start(vec![("api.openai.com".to_string(), hosted.addr())]).await;
+    let proxy_url = proxy.url();
+
+    let _env = EnvGuard::set_many(&[
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("OPENAI_API_KEY", Some("openai-test-key")),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "openai".into();
+    cfg.llm.proxy = Some(format!("{proxy_url} "));
+    let runtime = build_runtime(
+        cfg,
+        Some(hosted_openai_models_toml("https://api.openai.com")),
+    );
+
+    let err = runtime
+        .search(
+            WebSearchArgs {
+                query: "rust language".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["rust-lang.org".into()],
+            },
+            "hosted-proxy-session",
+        )
+        .await
+        .expect_err("proxy path should be exercised before TLS trust fails");
+
+    assert!(err.to_string().contains("web_search backend `openai`"));
+    assert!(proxy.saw_host("api.openai.com"));
+}
+
+#[tokio::test]
+#[serial]
+async fn runtime_injected_fetch_client_bypasses_env_proxy() {
+    let tavily = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "results": [
+                {
+                    "title": "Tokio",
+                    "url": "https://tokio.rs",
+                    "content": "Async runtime for Rust"
+                }
+            ]
+        }))
+        .expect("serialize tavily response"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let proxy =
+        common::ProxyTestServer::start(vec![("api.tavily.com".to_string(), tavily.addr())]).await;
+    let proxy_url = proxy.url();
+
+    let _env = EnvGuard::set_many(&[
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("DEEPSEEK_API_KEY", None),
+        ("HTTPS_PROXY", Some(proxy_url.as_str())),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "tavily".into();
+    let harness = build_runtime_with_builtin_plugin_and_fetch_client(
+        cfg,
+        None,
+        Some(tavily.client_for("api.tavily.com", std::time::Duration::from_secs(2))),
+    );
+
+    let output = harness
+        .runtime
+        .search(
+            WebSearchArgs {
+                query: "tokio rust".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["tokio.rs".into()],
+            },
+            "injected-fetch-client-session",
+        )
+        .await
+        .expect("tavily search");
+
+    assert_eq!(output.backend, "tavily");
+    assert_eq!(output.hits.len(), 1);
+    assert!(
+        !proxy.saw_host("api.tavily.com"),
+        "injected loopback client should bypass ambient proxy"
+    );
+    harness
+        .manager
+        .end_session("injected-fetch-client-session")
+        .await
+        .expect("end injected fetch client test session");
+}
+
+#[tokio::test]
+#[serial]
+async fn production_path_explicit_tavily_uses_env_https_proxy() {
+    let tavily = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "results": [
+                {
+                    "title": "Tokio",
+                    "url": "https://tokio.rs",
+                    "content": "Async runtime for Rust"
+                }
+            ]
+        }))
+        .expect("serialize tavily response"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let proxy =
+        common::ProxyTestServer::start(vec![("api.tavily.com".to_string(), tavily.addr())]).await;
+    let proxy_url = proxy.url();
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_PROD_PROXY_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", Some(proxy_url.as_str())),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "tavily".into();
+    let harness = build_production_web_search_harness(cfg, ENV_KEY, None);
+    let session_id = current_session_id(&harness.ctx);
+    let err = harness
+        .ctx
+        .global_services
+        .web_search_runtime
+        .search(
+            WebSearchArgs {
+                query: "tokio rust".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["tokio.rs".into()],
+            },
+            &session_id,
+        )
+        .await
+        .expect_err("proxy path should be exercised before TLS trust fails");
+
+    end_current_plugin_session(&harness.ctx).await;
+    assert!(err.to_string().contains("tavily"));
+    assert!(proxy.saw_host("api.tavily.com"));
+}
+
+#[tokio::test]
+#[serial]
+async fn production_path_llm_proxy_overrides_env_proxy_for_plugin_fetch() {
+    let tavily = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "results": [
+                {
+                    "title": "Tokio",
+                    "url": "https://tokio.rs",
+                    "content": "Async runtime for Rust"
+                }
+            ]
+        }))
+        .expect("serialize tavily response"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let env_proxy =
+        common::ProxyTestServer::start(vec![("api.tavily.com".to_string(), tavily.addr())]).await;
+    let cfg_proxy =
+        common::ProxyTestServer::start(vec![("api.tavily.com".to_string(), tavily.addr())]).await;
+    let env_proxy_url = env_proxy.url();
+    let cfg_proxy_url = cfg_proxy.url();
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_CFG_PROXY_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", Some(env_proxy_url.as_str())),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "tavily".into();
+    cfg.llm.proxy = Some(format!("{cfg_proxy_url} "));
+    let harness = build_production_web_search_harness(cfg, ENV_KEY, None);
+    let session_id = current_session_id(&harness.ctx);
+    let err = harness
+        .ctx
+        .global_services
+        .web_search_runtime
+        .search(
+            WebSearchArgs {
+                query: "tokio rust".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["tokio.rs".into()],
+            },
+            &session_id,
+        )
+        .await
+        .expect_err("cfg proxy path should be exercised before TLS trust fails");
+
+    end_current_plugin_session(&harness.ctx).await;
+    assert!(err.to_string().contains("tavily"));
+    assert!(cfg_proxy.saw_host("api.tavily.com"));
+    assert!(
+        !env_proxy.saw_host("api.tavily.com"),
+        "explicit llm.proxy should override ambient HTTPS_PROXY"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn production_path_plugin_timeout_returns_tool_error_before_vm_timeout() {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind hanging tcp listener");
+    let hang_addr = listener.local_addr().expect("hang listener addr");
+    let hang_task = tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _stream = stream;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+    let proxy =
+        common::ProxyTestServer::start(vec![("api.tavily.com".to_string(), hang_addr)]).await;
+    let proxy_url = proxy.url();
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_TIMEOUT_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", Some(proxy_url.as_str())),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "tavily".into();
+    cfg.tools.web_fetch.fetch_timeout_ms = 60_000;
+    cfg.plugin.call_timeout_ms = 1_500;
+    let harness = build_production_web_search_harness(cfg, ENV_KEY, None);
+    let session_id = current_session_id(&harness.ctx);
+    let start = std::time::Instant::now();
+    let err = harness
+        .ctx
+        .global_services
+        .web_search_runtime
+        .search(
+            WebSearchArgs {
+                query: "tokio rust".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["tokio.rs".into()],
+            },
+            &session_id,
+        )
+        .await
+        .expect_err("timeout should surface as tool error");
+    hang_task.abort();
+
+    end_current_plugin_session(&harness.ctx).await;
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(2_000),
+        "client timeout should fire before plugin VM hard timeout, elapsed={:?}",
+        start.elapsed()
+    );
+    assert!(
+        err.to_string().contains("请求超时"),
+        "expected structured timeout, got: {err}"
+    );
+    assert!(proxy.saw_host("api.tavily.com"));
+}
+
+#[tokio::test]
+#[serial]
+async fn runtime_auto_timeout_falls_back_to_brave_after_tavily_timeout() {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind hanging tcp listener");
+    let hang_addr = listener.local_addr().expect("hang listener addr");
+    let hang_task = tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _stream = stream;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+    let brave = common::HttpsTestServer::start(
+        "api.search.brave.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "web": {
+                "results": [
+                    {
+                        "title": "reqwest",
+                        "url": "https://docs.rs/reqwest",
+                        "description": "HTTP client"
+                    }
+                ]
+            }
+        }))
+        .expect("serialize brave response"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_AUTO_TIMEOUT_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("MIMO_API_KEY", None),
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", Some("brave-test-key")),
+        ("SERPER_API_KEY", None),
+        ("DEEPSEEK_API_KEY", None),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "auto".into();
+    cfg.tools.web_fetch.fetch_timeout_ms = 2_000;
+    cfg.plugin.call_timeout_ms = 1_500;
+    let fetch_client = reqwest::Client::builder()
+        .no_proxy()
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_millis(2_000))
+        .resolve("api.tavily.com", hang_addr)
+        .resolve("api.search.brave.com", brave.addr())
+        .build()
+        .expect("build timeout fallback client");
+    let harness = build_runtime_with_builtin_plugin_and_fetch_client(cfg, None, Some(fetch_client));
+    let start = std::time::Instant::now();
+    let output = harness
+        .runtime
+        .search(
+            WebSearchArgs {
+                query: "reqwest rust".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["docs.rs".into()],
+            },
+            "timeout-fallback-session",
+        )
+        .await
+        .expect("auto search should fall back to brave after tavily timeout");
+    hang_task.abort();
+
+    harness
+        .manager
+        .end_session("timeout-fallback-session")
+        .await
+        .expect("end timeout fallback session");
+    assert!(
+        start.elapsed() < std::time::Duration::from_millis(5_000),
+        "timeout fallback should finish after a structured timeout and fallback, elapsed={:?}",
+        start.elapsed()
+    );
+    assert_eq!(output.backend, "brave");
+    assert_eq!(output.hits.len(), 1);
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("backend_unavailable:mimo")));
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("tavily") && warning.contains("fallback=brave")));
+}
+
+#[tokio::test]
+#[serial]
+async fn production_path_explicit_openai_uses_env_https_proxy() {
+    let hosted = common::HttpsTestServer::start(
+        "api.openai.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        hosted_web_search_response(),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let proxy =
+        common::ProxyTestServer::start(vec![("api.openai.com".to_string(), hosted.addr())]).await;
+    let proxy_url = proxy.url();
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_HOSTED_PROXY_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("OPENAI_API_KEY", Some("openai-test-key")),
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", Some(proxy_url.as_str())),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "openai".into();
+    let harness = build_production_web_search_harness(
+        cfg,
+        ENV_KEY,
+        Some(hosted_openai_models_toml("https://api.openai.com")),
+    );
+    let session_id = current_session_id(&harness.ctx);
+    let err = harness
+        .ctx
+        .global_services
+        .web_search_runtime
+        .search(
+            WebSearchArgs {
+                query: "rust language".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["rust-lang.org".into()],
+            },
+            &session_id,
+        )
+        .await
+        .expect_err("proxy path should be exercised before TLS trust fails");
+
+    end_current_plugin_session(&harness.ctx).await;
+    assert!(err.to_string().contains("web_search backend `openai`"));
+    assert!(proxy.saw_host("api.openai.com"));
+}
+
+#[tokio::test]
+#[serial]
+async fn production_path_hosted_openai_direct_without_proxy_succeeds() {
+    let hosted = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "results": [
+                        {
+                            "title": "Rust",
+                            "url": "https://www.rust-lang.org",
+                            "snippet": "Language homepage"
+                        }
+                    ]
+                }
+            ]
+        })))
+        .expect(1)
+        .mount(&hosted)
+        .await;
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_HOSTED_DIRECT_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("OPENAI_API_KEY", Some("openai-test-key")),
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "openai".into();
+    let harness = build_production_web_search_harness(
+        cfg,
+        ENV_KEY,
+        Some(hosted_openai_models_toml(&hosted.uri())),
+    );
+    let session_id = current_session_id(&harness.ctx);
+    let output = harness
+        .ctx
+        .global_services
+        .web_search_runtime
+        .search(
+            WebSearchArgs {
+                query: "rust language".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["rust-lang.org".into()],
+            },
+            &session_id,
+        )
+        .await
+        .expect("direct hosted search should succeed");
+
+    end_current_plugin_session(&harness.ctx).await;
+    assert_eq!(output.backend, "openai");
+    assert_eq!(output.hits.len(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn production_path_explicit_serper_uses_env_https_proxy() {
+    let serper = common::HttpsTestServer::start(
+        "google.serper.dev",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "organic": [
+                {
+                    "title": "Rust Book",
+                    "link": "https://doc.rust-lang.org/book/",
+                    "snippet": "The Rust Programming Language"
+                }
+            ]
+        }))
+        .expect("serialize serper response"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let proxy =
+        common::ProxyTestServer::start(vec![("google.serper.dev".to_string(), serper.addr())])
+            .await;
+    let proxy_url = proxy.url();
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_SERPER_PROXY_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("OPENAI_API_KEY", Some("openai-test-key")),
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", Some("serper-test-key")),
+        ("HTTPS_PROXY", Some(proxy_url.as_str())),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "serper".into();
+    let harness = build_production_web_search_harness(cfg, ENV_KEY, None);
+    let session_id = current_session_id(&harness.ctx);
+    let err = harness
+        .ctx
+        .global_services
+        .web_search_runtime
+        .search(
+            WebSearchArgs {
+                query: "rust programming language".into(),
+                count: Some(5),
+                freshness: None,
+                country: Some("us".into()),
+                language: Some("en".into()),
+                domain_filter: Vec::new(),
+            },
+            &session_id,
+        )
+        .await
+        .expect_err("proxy path should be exercised before TLS trust fails");
+
+    end_current_plugin_session(&harness.ctx).await;
+    assert!(err.to_string().contains("serper"));
+    assert!(proxy.saw_host("google.serper.dev"));
+}
+
+#[tokio::test]
+#[serial]
 async fn live_tavily_search_smoke() {
     if std::env::var("PI_LIVE_WEB_SEARCH").ok().as_deref() != Some("1") {
         return;
@@ -409,12 +1037,17 @@ async fn real_tavily_plugin_web_search() {
     if !require_env_var_or_skip("TAVILY_API_KEY", "real_tavily_plugin_web_search") {
         return;
     }
+    const ENV_KEY: &str = "TOMCAT_REAL_TAVILY_PROD_CLIENT_KEY";
+    let _env = EnvGuard::set_many(&[(ENV_KEY, Some("stub"))]);
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
-    let harness = build_runtime_with_builtin_plugin(cfg, None);
+    let harness = build_production_web_search_harness(cfg, ENV_KEY, None);
+    let session_id = current_session_id(&harness.ctx);
     let output = harness
-        .runtime
+        .ctx
+        .global_services
+        .web_search_runtime
         .search(
             WebSearchArgs {
                 query: "rust async runtime".into(),
@@ -424,22 +1057,18 @@ async fn real_tavily_plugin_web_search() {
                 language: Some("en".into()),
                 domain_filter: vec!["tokio.rs".into(), "docs.rs".into()],
             },
-            "live-tavily-plugin-session",
+            &session_id,
         )
         .await
         .expect("live tavily plugin search");
 
+    end_current_plugin_session(&harness.ctx).await;
     assert_eq!(output.backend, "tavily");
     assert!(
         !output.hits.is_empty(),
         "expected Tavily plugin backend to return hits, warnings={:?}",
         output.warnings
     );
-    harness
-        .manager
-        .end_session("live-tavily-plugin-session")
-        .await
-        .expect("end live tavily plugin session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -450,12 +1079,17 @@ async fn real_brave_plugin_web_search() {
     if !require_env_var_or_skip("BRAVE_API_KEY", "real_brave_plugin_web_search") {
         return;
     }
+    const ENV_KEY: &str = "TOMCAT_REAL_BRAVE_PROD_CLIENT_KEY";
+    let _env = EnvGuard::set_many(&[(ENV_KEY, Some("stub"))]);
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "brave".into();
-    let harness = build_runtime_with_builtin_plugin(cfg, None);
+    let harness = build_production_web_search_harness(cfg, ENV_KEY, None);
+    let session_id = current_session_id(&harness.ctx);
     let output = harness
-        .runtime
+        .ctx
+        .global_services
+        .web_search_runtime
         .search(
             WebSearchArgs {
                 query: "reqwest rust".into(),
@@ -465,22 +1099,18 @@ async fn real_brave_plugin_web_search() {
                 language: Some("en".into()),
                 domain_filter: Vec::new(),
             },
-            "live-brave-plugin-session",
+            &session_id,
         )
         .await
         .expect("live brave plugin search");
 
+    end_current_plugin_session(&harness.ctx).await;
     assert_eq!(output.backend, "brave");
     assert!(
         !output.hits.is_empty(),
         "expected Brave plugin backend to return hits, warnings={:?}",
         output.warnings
     );
-    harness
-        .manager
-        .end_session("live-brave-plugin-session")
-        .await
-        .expect("end live brave plugin session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -491,12 +1121,17 @@ async fn real_serper_plugin_web_search() {
     if !require_env_var_or_skip("SERPER_API_KEY", "real_serper_plugin_web_search") {
         return;
     }
+    const ENV_KEY: &str = "TOMCAT_REAL_SERPER_PROD_CLIENT_KEY";
+    let _env = EnvGuard::set_many(&[(ENV_KEY, Some("stub"))]);
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "serper".into();
-    let harness = build_runtime_with_builtin_plugin(cfg, None);
+    let harness = build_production_web_search_harness(cfg, ENV_KEY, None);
+    let session_id = current_session_id(&harness.ctx);
     let output = harness
-        .runtime
+        .ctx
+        .global_services
+        .web_search_runtime
         .search(
             WebSearchArgs {
                 query: "rust programming language".into(),
@@ -506,26 +1141,21 @@ async fn real_serper_plugin_web_search() {
                 language: Some("en".into()),
                 domain_filter: Vec::new(),
             },
-            "live-serper-plugin-session",
+            &session_id,
         )
         .await
         .expect("live serper plugin search");
 
+    end_current_plugin_session(&harness.ctx).await;
     assert_eq!(output.backend, "serper");
     assert!(
         !output.hits.is_empty(),
         "expected Serper plugin backend to return hits, warnings={:?}",
         output.warnings
     );
-    harness
-        .manager
-        .end_session("live-serper-plugin-session")
-        .await
-        .expect("end live serper plugin session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
 async fn real_mimo_web_search() {
     common::setup_logging();
     common::load_openai_test_env();
@@ -664,6 +1294,13 @@ struct PluginRuntimeHarness {
     _temp: tempfile::TempDir,
 }
 
+struct ProductionWebSearchHarness {
+    ctx: tomcat::api::chat::ChatContext,
+    _work_dir: tempfile::TempDir,
+    _workspace: tempfile::TempDir,
+    _cwd_guard: common::CwdGuard,
+}
+
 fn build_runtime_with_builtin_plugin(
     config: AppConfig,
     models_toml: Option<String>,
@@ -729,12 +1366,91 @@ fn build_runtime_with_builtin_plugin_and_fetch_client(
     }
 }
 
+fn build_production_web_search_harness(
+    mut config: AppConfig,
+    env_key: &str,
+    models_toml: Option<String>,
+) -> ProductionWebSearchHarness {
+    let work_dir = tempfile::tempdir().expect("work dir");
+    install_builtin_web_search_plugin(work_dir.path());
+    if let Some(contents) = models_toml {
+        std::fs::write(work_dir.path().join("models.toml"), contents).expect("write models.toml");
+    }
+    let workspace = tempfile::tempdir().expect("workspace");
+    let cwd_guard = common::CwdGuard::set(workspace.path());
+    config.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
+    config.llm.api_key_env = Some(env_key.to_string());
+    let ctx = tomcat::api::chat::ChatContext::from_config_with_overrides(
+        config,
+        tomcat::api::chat::ChatContextOverrides::default(),
+    )
+    .expect("chat context should be created");
+    ProductionWebSearchHarness {
+        ctx,
+        _work_dir: work_dir,
+        _workspace: workspace,
+        _cwd_guard: cwd_guard,
+    }
+}
+
+fn current_session_id(ctx: &tomcat::api::chat::ChatContext) -> String {
+    ctx.session_runtime
+        .session
+        .current_session_id()
+        .expect("current_session_id")
+        .expect("session id should exist")
+}
+
+async fn end_current_plugin_session(ctx: &tomcat::api::chat::ChatContext) {
+    let Some(plugin_manager) = ctx.global_services.plugin_manager.as_ref() else {
+        return;
+    };
+    let session_id = current_session_id(ctx);
+    plugin_manager
+        .end_session(&session_id)
+        .await
+        .expect("end current plugin session");
+}
+
+fn hosted_openai_models_toml(base_url: &str) -> String {
+    format!(
+        r#"
+[[models]]
+id = "gpt-5.4-web"
+api = "openai-responses"
+provider = "openai"
+base_url = "{base_url}"
+
+[models.capabilities]
+web_search = true
+"#
+    )
+}
+
+fn hosted_web_search_response() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "output": [
+            {
+                "type": "web_search_call",
+                "results": [
+                    {
+                        "title": "Rust",
+                        "url": "https://www.rust-lang.org",
+                        "snippet": "Language homepage"
+                    }
+                ]
+            }
+        ]
+    }))
+    .expect("serialize hosted web_search response")
+}
+
 fn install_builtin_web_search_plugin(dest_root: &Path) -> PathBuf {
     let src = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("assets")
         .join("plugins")
         .join("web-search-backends");
-    let dst = dest_root.join("web-search-backends");
+    let dst = dest_root.join("plugins").join("web-search-backends");
     std::fs::create_dir_all(&dst).expect("create builtin web_search plugin dir");
     for name in ["plugin.json", "main.js", "README.md"] {
         std::fs::copy(src.join(name), dst.join(name)).expect("copy builtin web_search asset");

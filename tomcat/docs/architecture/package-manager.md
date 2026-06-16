@@ -467,7 +467,7 @@ sequenceDiagram
 技术要点：
 
 - `work-dir-and-data-layout.md` 需要补 `packages/registry.json` 的三层位置。
-- `skill-system.md` 与 `plugin-system-overview_new.md` 需要回链 package install 入口，并说明 package 不是新的 runtime 类型。
+- `skill-system.md` 与 `plugin-system-overview.md` 需要回链 package install 入口，并说明 package 不是新的 runtime 类型。
 - CLI 与 runtime 的三层名词要统一为“scope / agent / global（实现里对应 Project / Agent / Managed）”。
 
 ## 5. 协议（入参 / 出参 / Schema）
@@ -946,7 +946,7 @@ packages list 无结果 → Ok + 空列表 / 友好提示
 
 1. `docs/architecture/work-dir-and-data-layout.md`：补三层 `packages/registry.json` 与 layer root 的说明。
 2. `docs/architecture/skill-system.md`：补“skill 既可手工放目录，也可经 `tomcat install` 安装到三层根”的入口说明。
-3. `docs/architecture/plugin-system-overview_new.md`：补“plugin 发现三层根对应 PackageManager 安装层”的说明，并说明 `plugin_cmd.rs` 的 layered registry 变化。
+3. `docs/architecture/plugin-system-overview.md`：补“plugin 发现三层根对应 PackageManager 安装层”的说明，并说明 `plugin_cmd.rs` 的 layered registry 变化。
 4. `docs/user-guide.md`：补 `install/uninstall/packages`、会话内 `/install` 与交互式 chooser 用法。
 
 一句话总结：`PackageManager` 的核心不是“多了一个 install 命令”，而是把 **统一 package 入口**、**三层可见范围**、**分层账本** 和 **既有 runtime 发现模型** 四件事钉成一条闭环，让 Tomcat 终于既会三层发现，也会三层安装与管理。

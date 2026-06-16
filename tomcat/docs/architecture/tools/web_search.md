@@ -476,6 +476,32 @@ MiMo choices[0].message.annotations[]
 
 ---
 
+## 3.5 代理语义与测试分层（2026-06 校准）
+
+### 3.5.1 单一代理语义
+
+- **单一事实源**：所有宿主出网 client（LLM / `web_fetch` / `web_search` hosted / plugin `pi.fetch`）统一经 `build_outbound_client(...)` 构造。
+- **优先级**：有 `llm.proxy`（或 `TOMCAT__LLM__PROXY`）时优先使用，并在运行时 `trim`；未配置时**不再强制 `.no_proxy()`**，交由环境 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 生效。
+- **`NO_PROXY`**：显式 `llm.proxy` 场景下仍继承环境 `NO_PROXY` / `no_proxy` 例外列表。
+- **SOCKS**：当前构建未启用 reqwest socks feature，`ALL_PROXY=socks5://...` 不作为 `web_search` 的官方支持路径；推荐 `HTTPS_PROXY=http://...`。
+- **超时层级**：plugin `pi.fetch` 的总超时必须小于 plugin VM `call_timeout_ms`，否则会把网络故障暴露成原始 `execution exceeded ... timeout`，而不是结构化 tool error。
+
+### 3.5.2 测试分层
+
+- **L1 单测 / JS 语义**：锁定 `BackendFailure` 分类、plugin fallback 顺序、聚合错误语义；不依赖网络。
+- **L2 Runtime 集成**：使用 `HttpsTestServer` + `ProxyTestServer` 验证 `WebSearchRuntime`、hosted `self.client`、plugin `pi.fetch` 的代理 / timeout / fallback 行为。
+- **L3 Chat E2E**：验证 `LLM -> tool call -> web_search -> tool result / tool error -> transcript`，确保上层看到的是工具级错误而不是 VM 硬中断。
+- **L4 生产路径回归**：必须命中 `ChatContext::build_plugin_runtime`，覆盖环境代理、`llm.proxy` 优先级、生产 `pi.fetch` client 超时预算。
+- **L5 真网 smoke**：只验证“当前机器 + 当前代理 + 当前供应商”今天还能通；可缺 key skip，**不能**替代前四层的确定性回归。
+
+### 3.5.3 两套 `.env` 的职责
+
+- **测试 `.env`**：仓库内 `tomcat/.env`，供本地/CI 测试夹具加载真实 key 与代理。
+- **生产 `.env`**：`~/.tomcat/assets/.env`，供 CLI 启动时加载。
+- 两者都会把代理变量灌进进程环境；排查“测试绿、线上挂”时，必须确认命中的到底是哪一套加载路径。
+
+---
+
 ## 4. 协议（入参 / 出参 / Schema）
 
 **单一事实源**：

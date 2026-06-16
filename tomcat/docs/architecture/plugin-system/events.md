@@ -1,4 +1,4 @@
-本文为 [Architecture](../../Architecture.md) 中「事件系统设计」的详细设计，总览见主文档。
+本文为 [Architecture](../../openspec/specs/Architecture.md) 中「4. 插件系统（统一入口）」的事件专题页，总入口见 [`../plugin-system-overview.md`](../plugin-system-overview.md)。
 
 ## 事件系统设计（替代原钩子设计，完全对齐pi-agent-rust）
 
@@ -143,8 +143,8 @@ sequenceDiagram
 ```
 
 - **观察向**：UI / 日志订阅 `tool_execution_start`、`tool_execution_end`（及可选 `tool_execution_update`），表示「工具生命周期」。
-- **钩子向**：扩展订阅 `tool_call`（执行前）、`tool_result`（执行后）；pi-mono 中可 block / 改写结果，本仓库当前阶段以**发射事件**为主，拦截语义见 [pi-mono-compat-strategy.md §13](pi-mono-compat-strategy.md) 与 `feature-plugin-compat-tier1.md`。
-- **VM 路径**：`PluginManager::dispatch_session_event` 透传 `event_type` 至长生命周期 VM，与 `EventBus::emit_sync` **并行**；插件 JS 是否收到与 `emit_sync` 同源的事件取决于桥接实现，详见 compat 文档。
+- **钩子向**：扩展订阅 `tool_call`（执行前）、`tool_result`（执行后）；本仓库当前阶段以**发射事件**为主，不把插件事件系统设计成可任意拦截和改写宿主结果的通用切面。
+- **VM 路径**：`PluginManager::dispatch_session_event` 透传 `event_type` 至长生命周期 VM，与 `EventBus::emit_sync` **并行**；插件 JS 如何收到这条事件、`ctx` 如何构造成“静态快照 + 动态代理”，详见 [`js-bridge-and-host-api.md`](./js-bridge-and-host-api.md)。
 
 ### 事件执行机制
 
@@ -154,6 +154,3 @@ sequenceDiagram
 - 扩展通过 `agent.emit()` 发布自定义事件（如 Custom 前缀），实现插件间通信
 - 插件卸载时自动注销该插件所有监听，无泄漏
 
----
-
-**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[异步 Hostcall 与事件循环](async-hostcall-event-loop.md) | 下一节：[JS API 与 pi-mono 对齐](js-api-alignment.md)

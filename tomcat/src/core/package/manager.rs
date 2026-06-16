@@ -13,8 +13,8 @@ use crate::AppConfig;
 use super::model::{
     DetectedPackageResource, DetectedPackageSource, DetectedPackageSourceKind, InstallOutcome,
     PackageLayerListing, PackageManifest, PackagePluginRecord, PackageRecord, PackageResourceKind,
-    PackageSkillRecord, PackageSourceKind, PackageVisibility, PluginRegistryEntry,
-    PreparedInstall, PreparedInstallResource, UninstallOutcome, PACKAGE_MANIFEST_SCHEMA_V1,
+    PackageSkillRecord, PackageSourceKind, PackageVisibility, PluginRegistryEntry, PreparedInstall,
+    PreparedInstallResource, UninstallOutcome, PACKAGE_MANIFEST_SCHEMA_V1,
 };
 use super::paths::{resolve_layer_paths, resolve_runtime_layer_paths};
 
@@ -25,10 +25,10 @@ use self::install_fs::{
     cleanup_install_artifacts, install_resource, prepare_force_remove_path, remove_path_if_exists,
     rollback_install,
 };
+use self::registry::RegistrySnapshot;
 pub use self::registry::{
     load_package_registry, load_plugin_registry, save_package_registry, save_plugin_registry,
 };
-use self::registry::RegistrySnapshot;
 
 #[derive(Debug)]
 pub struct PackageManager<'a> {
@@ -214,9 +214,9 @@ impl<'a> PackageManager<'a> {
                     .iter()
                     .filter(|plugin| !plugin_ids.contains(&plugin.id))
                 {
-                    if let Some(mutation) =
-                        prepare_force_remove_path(&prepared.layer_paths.plugins_dir.join(&plugin.id))?
-                    {
+                    if let Some(mutation) = prepare_force_remove_path(
+                        &prepared.layer_paths.plugins_dir.join(&plugin.id),
+                    )? {
                         mutations.push(mutation);
                     }
                 }
@@ -225,9 +225,9 @@ impl<'a> PackageManager<'a> {
                     .iter()
                     .filter(|skill| !skill_ids.contains(&skill.name))
                 {
-                    if let Some(mutation) =
-                        prepare_force_remove_path(&prepared.layer_paths.skills_dir.join(&skill.name))?
-                    {
+                    if let Some(mutation) = prepare_force_remove_path(
+                        &prepared.layer_paths.skills_dir.join(&skill.name),
+                    )? {
                         mutations.push(mutation);
                     }
                 }

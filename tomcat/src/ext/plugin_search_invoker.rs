@@ -49,12 +49,11 @@ impl PluginSearchInvoker for ExtPluginSearchInvoker {
                 Err(unsupported_backend_error(backend))
             }
             Ok(value) => Ok(value),
-            Err(err) => Err(BackendFailure::Transport {
-                detail: format!(
-                    "web_search plugin backend `{backend}` via `{}` failed: {err}",
-                    provider.plugin_id
-                ),
-            }),
+            Err(err) => Err(classify_plugin_invocation_error(
+                backend,
+                provider.plugin_id.as_str(),
+                &err.to_string(),
+            )),
         }
     }
 }
@@ -74,4 +73,19 @@ fn unsupported_backend_error(backend: &str) -> BackendFailure {
         format!("未找到名为 `{backend}` 的 web_search 插件后端")
     };
     BackendFailure::Incompatible { detail }
+}
+
+fn classify_plugin_invocation_error(
+    backend: &str,
+    plugin_id: &str,
+    err_text: &str,
+) -> BackendFailure {
+    if err_text.contains("pi.fetch request timed out") || err_text.contains("execution exceeded ") {
+        return BackendFailure::Timeout;
+    }
+    BackendFailure::Transport {
+        detail: format!(
+            "web_search plugin backend `{backend}` via `{plugin_id}` failed: {err_text}"
+        ),
+    }
 }

@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 
 use reqwest::redirect::Policy;
 
+use crate::infra::http_client::{
+    build_outbound_client, OutboundClientErrorKind, OutboundClientOptions,
+};
 use crate::infra::{AppConfig, AppError, ToolsWebFetchConfig};
 
 use self::cache::{CacheKey, WebFetchCache};
@@ -97,17 +100,14 @@ fn build_web_fetch_http_client(
     config: &AppConfig,
     web_cfg: &ToolsWebFetchConfig,
 ) -> Result<reqwest::Client, AppError> {
-    let mut builder = reqwest::Client::builder()
-        .redirect(Policy::none())
-        .timeout(Duration::from_millis(web_cfg.fetch_timeout_ms));
-    if let Some(proxy_url) = config.llm.proxy.as_deref() {
-        let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|e| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, e)))?;
-        builder = builder.proxy(proxy);
-    }
-    builder
-        .build()
-        .map_err(|e| AppError::Tool(format!("创建 web_fetch HTTP 客户端失败: {}", e)))
+    let mut options = OutboundClientOptions::new(config.llm.proxy.as_deref());
+    options.redirect_policy = Some(Policy::none());
+    options.timeout = Some(Duration::from_millis(web_cfg.fetch_timeout_ms));
+    build_outbound_client(
+        options,
+        OutboundClientErrorKind::Tool,
+        "创建 web_fetch HTTP 客户端失败",
+    )
 }
 
 pub(crate) fn elapsed_ms(start: Instant) -> u64 {

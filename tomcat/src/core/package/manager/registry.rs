@@ -55,9 +55,10 @@ impl RegistrySnapshot {
         if !self.existed {
             return Ok(PackageRegistryFile::default());
         }
-        let mut registry: PackageRegistryFile = serde_json::from_str(&self.raw_json).map_err(
-            |error| AppError::Config(format!("package registry snapshot 损坏: {error}")),
-        )?;
+        let mut registry: PackageRegistryFile =
+            serde_json::from_str(&self.raw_json).map_err(|error| {
+                AppError::Config(format!("package registry snapshot 损坏: {error}"))
+            })?;
         registry.normalize();
         Ok(registry)
     }

@@ -630,6 +630,6 @@ impl PlanRuntime {
 - 任务卡：[T2-P1-002.md](../../agents/TASK_BOARD_002/tasks/T2-P1-002.md)
 - 文档规范：[ARCHITECTURE_SPEC.md](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)
 - transcript 自定义事件：[session-storage.md](../session-storage.md)
-- 完成后代码验证（verifier，与 reviewer 分拆）：[plan-exec-code-verification.md](../plan-exec-code-verification.md)（索引：[plan-todo-post-completion-verification-survey.md](../plan-todo-post-completion-verification-survey.md)）
+- 完成后代码验证（verifier，与 reviewer 分拆）：[plan-exec-code-verification.md](../plan-exec-code-verification.md)
 
-**说人话**：reviewer 由 `create-plan.md` 内部触发；dispatch 通用子 Agent 看 `multi-agent.md` §14.6.1。
+**说人话**：reviewer 由 `create-plan.md` 内部触发；dispatch 通用子 Agent 看 [`multi-agent.md`](../multi-agent.md)。

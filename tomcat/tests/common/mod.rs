@@ -4,13 +4,14 @@
 #![allow(dead_code)]
 
 use rcgen::generate_simple_self_signed;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::sync::Once;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio_rustls::TlsAcceptor;
@@ -329,6 +330,10 @@ impl HttpsTestServer {
     pub fn max_concurrency(&self) -> usize {
         self.max_concurrency.load(Ordering::SeqCst)
     }
+
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
 }
 
 impl Drop for HttpsTestServer {
@@ -338,4 +343,148 @@ impl Drop for HttpsTestServer {
         }
         self.task.abort();
     }
+}
+
+pub struct ProxyTestServer {
+    addr: std::net::SocketAddr,
+    seen_hosts: Arc<Mutex<Vec<String>>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ProxyTestServer {
+    pub async fn start(routes: Vec<(String, std::net::SocketAddr)>) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind proxy test server");
+        let addr = listener.local_addr().expect("proxy listener addr");
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let routes = Arc::new(
+            routes
+                .into_iter()
+                .map(|(host, addr)| (host.to_ascii_lowercase(), addr))
+                .collect::<HashMap<_, _>>(),
+        );
+        let seen_hosts = Arc::new(Mutex::new(Vec::new()));
+        let task_routes = Arc::clone(&routes);
+        let task_seen_hosts = Arc::clone(&seen_hosts);
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accept = listener.accept() => {
+                        let Ok((stream, _)) = accept else { break; };
+                        let routes = Arc::clone(&task_routes);
+                        let seen_hosts = Arc::clone(&task_seen_hosts);
+                        tokio::spawn(async move {
+                            handle_proxy_connection(stream, routes, seen_hosts).await;
+                        });
+                    }
+                }
+            }
+        });
+        Self {
+            addr,
+            seen_hosts,
+            shutdown_tx: Some(shutdown_tx),
+            task,
+        }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    pub fn saw_host(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        self.seen_hosts
+            .lock()
+            .expect("proxy seen_hosts mutex")
+            .iter()
+            .any(|recorded| recorded == &host)
+    }
+
+    pub fn seen_hosts(&self) -> Vec<String> {
+        self.seen_hosts
+            .lock()
+            .expect("proxy seen_hosts mutex")
+            .clone()
+    }
+}
+
+impl Drop for ProxyTestServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        self.task.abort();
+    }
+}
+
+async fn handle_proxy_connection(
+    mut stream: TcpStream,
+    routes: Arc<HashMap<String, std::net::SocketAddr>>,
+    seen_hosts: Arc<Mutex<Vec<String>>>,
+) {
+    let Some(authority) = read_connect_authority(&mut stream).await else {
+        let _ = stream
+            .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+            .await;
+        return;
+    };
+    let host = authority
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(authority.as_str())
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    seen_hosts
+        .lock()
+        .expect("proxy seen_hosts mutex")
+        .push(host.clone());
+    let Some(target_addr) = routes.get(&host).copied() else {
+        let _ = stream
+            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+            .await;
+        return;
+    };
+    let Ok(mut upstream) = TcpStream::connect(target_addr).await else {
+        let _ = stream
+            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+            .await;
+        return;
+    };
+    if stream
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = copy_bidirectional(&mut stream, &mut upstream).await;
+}
+
+async fn read_connect_authority(stream: &mut TcpStream) -> Option<String> {
+    let mut buffer = Vec::new();
+    loop {
+        let mut chunk = [0u8; 1024];
+        let read = stream.read(&mut chunk).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.windows(4).any(|window| window == b"\r\n\r\n") || buffer.len() > 8192 {
+            break;
+        }
+    }
+    let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+    let header = String::from_utf8_lossy(&buffer[..header_end]);
+    let request_line = header.lines().next()?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?;
+    let authority = parts.next()?;
+    if !method.eq_ignore_ascii_case("CONNECT") {
+        return None;
+    }
+    Some(authority.to_string())
 }

@@ -138,14 +138,14 @@
 - [ ] mid-turn `Failed` / 流中断后，本轮已落盘的 `user`、完整 `assistant`、`assistant + tool_calls`、已完成 `tool_result` 仍保留在 transcript；用户下一条输入直接开启下一轮，无需 `/retry`
 - [ ] LLM API Rate Limit 或网络超时时，Agent 自动指数退避重试，对用户透明；致命错误（API Key 无效、模型不存在、Parse、NonStreamStale 等）给出清晰的阶段化提示并终止
 - [ ] 工具执行进度通过事件实时反馈（agent_start/turn_start/tool_execution_start/end/agent_end），CLI 据此渲染执行状态
-- [ ] 单条工具结果超过 `[context].layer0_single_result_max_chars`（默认 **50_000** chars，与 [context-management.md §4.4](../../docs/architecture/context-management.md) 一致）时 Layer 0 落盘 + preview，不撑爆单次请求；可观测事件见 `tool_result_truncated` / 压缩相关事件（以代码与 [events.md](../../docs/architecture/plugin-system/events.md) 为准）
-- [ ] 长对话 token 超预算时按 [context-management.md](../../docs/architecture/context-management.md) **现行**链路：**Layer 0**（同步：落盘 / compactable 区占位）→ **Layer 1**（异步预热摘要，时机 ⑤ 不阻塞）→ **Layer 2**（Boundary 延迟应用，时机 ②）→ **Layer 3**（仅 API **Context Overflow** 后 `force_drop_oldest_to_target` 兜底）；保护最近若干 turns 与水位线见文档 §4.2；压缩后继续正常对话
+- [ ] 单条工具结果超过 `[context].layer0_single_result_max_chars`（默认 **50_000** chars，与 [context-management.md §4.4](../../architecture/context-management.md) 一致）时 Layer 0 落盘 + preview，不撑爆单次请求；可观测事件见 `tool_result_truncated` / 压缩相关事件（以代码与 [events.md](../../architecture/plugin-system/events.md) 为准）
+- [ ] 长对话 token 超预算时按 [context-management.md](../../architecture/context-management.md) **现行**链路：**Layer 0**（同步：落盘 / compactable 区占位）→ **Layer 1**（异步预热摘要，时机 ⑤ 不阻塞）→ **Layer 2**（Boundary 延迟应用，时机 ②）→ **Layer 3**（仅 API **Context Overflow** 后 `force_drop_oldest_to_target` 兜底）；保护最近若干 turns 与水位线见文档 §4.2；压缩后继续正常对话
 - [ ] Session 重载时正确识别 `BranchSummaryEntry`（含 `is_boundary=false` 跳过 / `true` 折叠、`S::E` 锚点，§5.7），恢复 `CompactionSummary` 消息（`MessageKind::CompactionSummary`）/ `Preheat` 状态与运行时一致，不重复摘要
 
 > **Story 8 — 自动化 / 集成索引（上下文与 JSONL）**  
 > 逐条对照见 [docs/reports/traceability-story8-context.md](../../docs/reports/traceability-story8-context.md)；E2E 场景编号见 [guides/testing/E2E_SCENARIO_LIBRARY.md](guides/testing/E2E_SCENARIO_LIBRARY.md) 表中 **E2E-CLI-081～091、092、093**（Story 9 小节，覆盖 AgentLoop + 上下文管理）。  
 > **Transcript 格式（开发阶段）**：压缩摘要行仅支持 JSONL **`type: branch_summary`**；**不**提供读盘时将历史 `type: compaction` 映射为 `branch_summary`。无法反序列化的行在 `read_entries_tail` 中 **warn + skip**（见 `src/core/session/transcript.rs`）。  
-> **§5.7.5.1 陈旧 `CompactionResult`**：单测 `check_after_reply_stale_apply_removes_branch_summary_and_keeps_preheat_idle`（`src/core/compaction/tests.rs`），与 [context-management.md §5.7.5.1](../../docs/architecture/context-management.md) 一致。
+> **§5.7.5.1 陈旧 `CompactionResult`**：单测 `check_after_reply_stale_apply_removes_branch_summary_and_keeps_preheat_idle`（`src/core/compaction/tests.rs`），与 [context-management.md §5.7.5.1](../../architecture/context-management.md) 一致。
 
 ## P1 二期核心用户故事
 ### Story 8b: 长生命周期 VM 与有状态插件支持
