@@ -9,7 +9,12 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 static INIT: Once = Once::new();
 
-/// 为依赖 `OPENAI_API_KEY` 的集成测试加载环境变量（与 `UNIT_TEST_SPEC` / `INTEGRATION_TEST_SPEC` 对齐）。
+pub const DEEPSEEK_TEST_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
+pub const DEEPSEEK_TEST_API_BASE: &str = "https://api.deepseek.com";
+pub const DEEPSEEK_TEST_MODEL_ENV: &str = "TOMCAT_E2E_DEEPSEEK_MODEL";
+pub const DEEPSEEK_TEST_DEFAULT_MODEL: &str = "deepseek-v4-pro";
+
+/// 为依赖真实 LLM 凭证的集成测试加载环境变量（与 `UNIT_TEST_SPEC` / `INTEGRATION_TEST_SPEC` 对齐）。
 ///
 /// 顺序（`dotenvy` 默认不覆盖已存在的环境变量）：
 /// 1. `tomcat/.env`（`CARGO_MANIFEST_DIR`，与 `src/core/llm/tests/mocks.rs::load_dotenv` 一致）
@@ -18,6 +23,38 @@ pub fn load_openai_test_env() {
     let manifest_env = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
     let _ = dotenvy::from_path(&manifest_env);
     let _ = dotenvy::dotenv();
+}
+
+/// 为通用 real-LLM / E2E 测试加载环境变量；当前统一走 DeepSeek。
+pub fn load_deepseek_test_env() {
+    load_openai_test_env();
+}
+
+pub fn deepseek_test_model() -> String {
+    std::env::var(DEEPSEEK_TEST_MODEL_ENV)
+        .unwrap_or_else(|_| DEEPSEEK_TEST_DEFAULT_MODEL.to_string())
+}
+
+pub fn require_deepseek_api_key(test_name: &str) -> String {
+    setup_logging();
+    load_deepseek_test_env();
+    std::env::var(DEEPSEEK_TEST_API_KEY_ENV).unwrap_or_else(|_| {
+        panic!("{test_name} 必须设置 {DEEPSEEK_TEST_API_KEY_ENV}（环境变量或 tomcat/.env）")
+    })
+}
+
+pub fn apply_deepseek_llm_config(cfg: &mut tomcat::LlmConfig) {
+    cfg.provider = "openai".to_string();
+    cfg.api_base = Some(DEEPSEEK_TEST_API_BASE.to_string());
+    cfg.api_key_env = Some(DEEPSEEK_TEST_API_KEY_ENV.to_string());
+    cfg.default_model = deepseek_test_model();
+    cfg.thinking.enabled = true;
+    cfg.thinking.level = "high".to_string();
+}
+
+pub fn apply_deepseek_app_config(cfg: &mut tomcat::AppConfig) {
+    apply_deepseek_llm_config(&mut cfg.llm);
+    cfg.context.compaction_model = deepseek_test_model();
 }
 
 /// 初始化日志，供各集成测试在入口调用；使用 test_writer 以便 cargo test 捕获输出。

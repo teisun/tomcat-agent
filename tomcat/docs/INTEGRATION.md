@@ -2,6 +2,8 @@
 
 以下由 develop 与各 feature 分支的 status 碎片自动汇总，执行 `/aggregate-status` 更新。
 
+> 注：本文件包含历史集成记录，个别条目会提及当时仍存在的 WasmEdge / `integration-wasm` 等链路；这些内容仅表示**历史上下文**，不代表当前实现。当前插件运行时请以 `rquickjs` 与现行测试/脚本入口为准。
+
 
 ## develop
 

@@ -28,36 +28,37 @@ impl BackendName {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BackendMode {
     Auto,
     Openai,
     Tavily,
     Brave,
     Serper,
+    Plugin(String),
 }
 
 impl BackendMode {
     pub fn parse(raw: &str) -> Result<Self, AppError> {
-        match raw.trim().to_ascii_lowercase().as_str() {
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
             "" | "auto" => Ok(Self::Auto),
             "openai" => Ok(Self::Openai),
             "tavily" => Ok(Self::Tavily),
             "brave" => Ok(Self::Brave),
             "serper" => Ok(Self::Serper),
-            other => Err(AppError::Tool(format!(
-                "web_search: 未知 backend `{other}`，允许 auto/openai/tavily/brave/serper"
-            ))),
+            _ => Ok(Self::Plugin(normalized)),
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Auto => "auto",
             Self::Openai => "openai",
             Self::Tavily => "tavily",
             Self::Brave => "brave",
             Self::Serper => "serper",
+            Self::Plugin(name) => name.as_str(),
         }
     }
 }
@@ -88,19 +89,27 @@ pub enum BackendPlan {
     Auto {
         hosted_candidate: Option<HostedCandidateModel>,
         http_chain: Vec<BackendName>,
+        plugin_slot: bool,
     },
     ExplicitHttp(BackendName),
+    ExplicitPlugin(String),
     HostedOnly(HostedCandidateModel),
 }
 
 pub fn pick_backend(
     backend: BackendMode,
     hosted_candidate: Option<HostedCandidateModel>,
+    legacy_http_backends: bool,
 ) -> Result<BackendPlan, AppError> {
     match backend {
         BackendMode::Auto => Ok(BackendPlan::Auto {
             hosted_candidate,
-            http_chain: HTTP_AUTO_CHAIN.to_vec(),
+            http_chain: if legacy_http_backends {
+                HTTP_AUTO_CHAIN.to_vec()
+            } else {
+                Vec::new()
+            },
+            plugin_slot: true,
         }),
         BackendMode::Openai => hosted_candidate
             .map(BackendPlan::HostedOnly)
@@ -109,14 +118,28 @@ pub fn pick_backend(
                     "no hosted web_search model configured; set capabilities.web_search=true on one models.toml entry".to_string(),
                 )
             }),
-        BackendMode::Tavily => Ok(BackendPlan::ExplicitHttp(BackendName::Tavily)),
-        BackendMode::Brave => Ok(BackendPlan::ExplicitHttp(BackendName::Brave)),
-        BackendMode::Serper => Ok(BackendPlan::ExplicitHttp(BackendName::Serper)),
+        BackendMode::Tavily => Ok(if legacy_http_backends {
+            BackendPlan::ExplicitHttp(BackendName::Tavily)
+        } else {
+            BackendPlan::ExplicitPlugin(BackendName::Tavily.as_str().to_string())
+        }),
+        BackendMode::Brave => Ok(if legacy_http_backends {
+            BackendPlan::ExplicitHttp(BackendName::Brave)
+        } else {
+            BackendPlan::ExplicitPlugin(BackendName::Brave.as_str().to_string())
+        }),
+        BackendMode::Serper => Ok(if legacy_http_backends {
+            BackendPlan::ExplicitHttp(BackendName::Serper)
+        } else {
+            BackendPlan::ExplicitPlugin(BackendName::Serper.as_str().to_string())
+        }),
+        BackendMode::Plugin(name) => Ok(BackendPlan::ExplicitPlugin(name)),
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct BackendSearchResponse {
+    pub backend_label: Option<String>,
     pub raw_hits: Vec<RawHit>,
     pub warnings: Vec<String>,
 }
@@ -173,79 +196,61 @@ impl BackendFailure {
         )
     }
 
-    pub fn to_tool_error(&self, backend: BackendName) -> AppError {
+    pub fn to_tool_error(&self, backend: &str) -> AppError {
         match self {
             Self::MissingKey { env_name } => AppError::Tool(format!(
                 "web_search backend `{}` 未配置凭证；请设置 `{}`。",
-                backend.as_str(),
-                env_name
+                backend, env_name
             )),
             Self::Incompatible { detail } => AppError::Tool(detail.clone()),
             Self::InvalidRequest { status, detail } => AppError::Tool(format!(
                 "web_search backend `{}` 请求不合法（status={}）：{}",
-                backend.as_str(),
-                status,
-                detail
+                backend, status, detail
             )),
             Self::Parse { detail } => AppError::Tool(format!(
                 "web_search backend `{}` 返回解析失败：{}",
-                backend.as_str(),
-                detail
+                backend, detail
             )),
             Self::Unauthorized { status } => AppError::Tool(format!(
                 "web_search backend `{}` 鉴权失败（status={}）。",
-                backend.as_str(),
-                status
+                backend, status
             )),
             Self::RateLimited { status } | Self::ServerError { status } => AppError::Tool(format!(
                 "web_search backend `{}` 暂不可用（status={}）。",
-                backend.as_str(),
-                status
+                backend, status
             )),
-            Self::Timeout => AppError::Tool(format!(
-                "web_search backend `{}` 请求超时。",
-                backend.as_str()
-            )),
+            Self::Timeout => AppError::Tool(format!("web_search backend `{}` 请求超时。", backend)),
             Self::Transport { detail } => AppError::Tool(format!(
                 "web_search backend `{}` 网络错误：{}",
-                backend.as_str(),
-                detail
+                backend, detail
             )),
         }
     }
 
-    pub fn explicit_degraded_warnings(&self, backend: BackendName) -> Vec<String> {
-        let mut warnings = vec![format!("backend_unavailable:{}", backend.as_str())];
+    pub fn explicit_degraded_warnings(&self, backend: &str) -> Vec<String> {
+        let mut warnings = vec![format!("backend_unavailable:{backend}")];
         match self {
             Self::RateLimited { status } | Self::ServerError { status } => warnings.push(format!(
                 "rate_limited (backend={},status={status})",
-                backend.as_str()
+                backend
             )),
-            Self::Timeout => warnings.push(format!("timeout (backend={})", backend.as_str())),
+            Self::Timeout => warnings.push(format!("timeout (backend={backend})")),
             _ => {}
         }
         warnings
     }
 
-    pub fn auto_fallback_warnings(
-        &self,
-        backend: BackendName,
-        fallback: Option<BackendName>,
-    ) -> Vec<String> {
+    pub fn auto_fallback_warnings(&self, backend: &str, fallback: Option<&str>) -> Vec<String> {
         let mut warnings = vec![match fallback {
-            Some(next) => format!(
-                "backend_unavailable:{}, fallback={}",
-                backend.as_str(),
-                next.as_str()
-            ),
-            None => format!("backend_unavailable:{}", backend.as_str()),
+            Some(next) => format!("backend_unavailable:{}, fallback={}", backend, next),
+            None => format!("backend_unavailable:{backend}"),
         }];
         match self {
             Self::RateLimited { status } | Self::ServerError { status } => warnings.push(format!(
                 "rate_limited (backend={},status={status})",
-                backend.as_str()
+                backend
             )),
-            Self::Timeout => warnings.push(format!("timeout (backend={})", backend.as_str())),
+            Self::Timeout => warnings.push(format!("timeout (backend={backend})")),
             _ => {}
         }
         warnings

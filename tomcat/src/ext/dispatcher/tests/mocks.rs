@@ -135,6 +135,7 @@ impl ToolRegistry for MockToolRegistry {
         _name: &str,
         _params: serde_json::Value,
         _plugin_id: &str,
+        _session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         Ok(serde_json::json!({ "content": "ok", "details": null }))
     }

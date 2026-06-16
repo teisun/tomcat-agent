@@ -11,7 +11,7 @@ pub(in super::super) async fn handle_web_search(
     let parsed: WebSearchArgs = serde_json::from_value(args.clone())
         .map_err(|err| format!("web_search 参数解析失败: {err}"))?;
     let output = runtime
-        .search(parsed)
+        .search(parsed, ctx.session_id)
         .await
         .map_err(|err| err.to_string())?;
     serde_json::to_string_pretty(&output).map_err(|err| format!("web_search 结果序列化失败: {err}"))

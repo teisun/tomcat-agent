@@ -8,7 +8,7 @@
 
 E2E 测试 = **进程边界黑盒 + 用户操作模拟**：
 
-- 启动 `tomcat` CLI（二进制名 `tomcat`，crate `tomcat`）或真实 WasmEdge + QuickJS 运行时
+- 启动 `tomcat` CLI（二进制名 `tomcat`，crate `tomcat`）或真实 `rquickjs` 插件运行时
 - 模拟真实用户的完整操作路径（输入 → 等待 → 断言输出/副作用）
 - 断言对象：stdout/stderr/exit code/磁盘文件/进程行为
 
@@ -23,7 +23,7 @@ E2E 测试 = **进程边界黑盒 + 用户操作模拟**：
 项目内两种 E2E：
 
 - **CLI E2E**：`tests/cli_tests.rs`，通过 `assert_cmd` 启动 `tomcat` 子进程
-- **Wasm E2E**：`tests/wasmedge_e2e_tests.rs`，驱动真实 WasmEdge + QuickJS 运行时
+- **Plugin Runtime E2E**：如 `tests/quickjs_e2e_tests.rs`、`tests/long_lived_vm_tests.rs`，驱动真实 `rquickjs` 插件运行时
 
 ---
 
@@ -31,7 +31,7 @@ E2E 测试 = **进程边界黑盒 + 用户操作模拟**：
 
 完整场景库见 **[E2E_SCENARIO_LIBRARY.md](E2E_SCENARIO_LIBRARY.md)**，共 41 条；在覆盖 P0 全部 User Stories的基础上，补充了 `web_search` / `web_fetch` 的用户可见场景。
 
-新增用例须同步更新 `E2E_SCENARIO_LIBRARY.md`，并遵循编号规则（`E2E-CLI-NNN` / `E2E-WASM-NNN`）。
+新增用例须同步更新 `E2E_SCENARIO_LIBRARY.md`，并遵循编号规则（`E2E-CLI-NNN` / `E2E-QJS-NNN`）。
 
 ---
 
@@ -46,18 +46,18 @@ E2E 测试 = **进程边界黑盒 + 用户操作模拟**：
 ### 技术约束
 
 - **CLI E2E**：`Command::cargo_bin("tomcat")`，禁止直接调用 Rust pub API
-- **Wasm E2E**：`WasmEngine::global()` + `WasmInstance`，须真实 WasmEdge
+- **Plugin Runtime E2E**：`PluginEngine::global()` / `PluginVmInstance` / `PluginManager` / `VmActor` 等真实链路
 - **环境隔离**：每用例 `tempfile::tempdir()` + `TOMCAT__STORAGE__WORK_DIR` 环境变量隔离
 - **文档注释**：三行格式（`[用户场景]` / 验证 / 意义）
 - **日志**：`common::setup_logging()` + `info_span!` + AAA 三阶段各一条 `tracing::info!`
-- **超时**：chat/Wasm 类用例须 `.timeout(Duration::from_secs(60))` 或 `tokio::time::timeout`
+- **超时**：chat/插件运行时类用例须 `.timeout(Duration::from_secs(60))` 或 `tokio::time::timeout`
 
 ---
 
 ## §4 不可跳过原则
 
 - 无 `OPENAI_API_KEY` 时 chat 类 E2E 须 `panic!`（不得 `#[ignore]`）
-- 无 WasmEdge 时 Wasm E2E 须 `panic!` 并给出安装命令（`./scripts/install-wasmedge.sh`）
+- 无法初始化 `rquickjs` 运行时时，相关 E2E 须直接失败并给出可定位错误
 - 失败即失败，不得以「环境未就绪」为由跳过
 
 ---
@@ -70,8 +70,8 @@ E2E 测试 = **进程边界黑盒 + 用户操作模拟**：
 # CLI E2E（含全日志）
 RUST_LOG=tomcat=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1
 
-# Wasm E2E（含全日志）
-RUST_LOG=tomcat=debug,info cargo test -j 1 --test wasmedge_e2e_tests -- --nocapture --test-threads=1
+# Plugin Runtime E2E（含全日志）
+RUST_LOG=tomcat=debug,info cargo test -j 1 --test quickjs_e2e_tests -- --nocapture --test-threads=1
 
 # 一键全量（含 E2E，含日志）
 RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration
@@ -81,17 +81,17 @@ RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration
 
 ## §6 新功能 E2E 覆盖规则（强制）
 
-**每次合并新功能时，必须在 `tests/cli_tests.rs` 或 `tests/wasmedge_e2e_tests.rs` 中补充至少 1 条用户操作模拟用例。**
+**每次合并新功能时，必须在 `tests/cli_tests.rs`、`tests/quickjs_e2e_tests.rs` 或其他当前有效的用户视角测试入口中补充至少 1 条用户操作模拟用例。**
 
 判断标准（满足其一即须补）：
 
 - 新增或修改了任何 `tomcat` CLI 子命令
 - 新增或修改了用户可见的 chat/plugin/session/config/audit 行为
-- 新增了 Wasm/插件相关能力
+- 新增了插件/运行时相关能力
 
 补充用例须：
 
-1. 使用子进程 `Command::cargo_bin("tomcat")`（CLI 类）或 Wasm 运行时（Wasm 类）
+1. 使用子进程 `Command::cargo_bin("tomcat")`（CLI 类）或真实插件运行时（插件类）
 2. 函数名前缀 `test_user_` 表示用户视角
 3. 断言 stdout 内容（不得仅断言 exit 0）
 4. 同步更新 [E2E_SCENARIO_LIBRARY.md](E2E_SCENARIO_LIBRARY.md)
@@ -102,4 +102,4 @@ RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration
 
 - P0 User Stories 的所有「用户可 X」验收标准，须有对应 `test_user_*` E2E 用例
 - 每次 Nibbles 集成循环，E2E 步骤必须全部通过，不可跳过
-- 新用例须通过所属分类命令验证日志可见：CLI / Wasm E2E 属于串行组，使用 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-serial`；可并发 E2E 使用 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-parallel`
+- 新用例须通过所属分类命令验证日志可见：CLI / 插件运行时 E2E 属于串行组，使用 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-serial`；可并发 E2E 使用 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-parallel`

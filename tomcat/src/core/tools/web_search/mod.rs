@@ -1,15 +1,14 @@
-mod backend;
-mod brave;
+pub(crate) mod backend;
 mod cache;
+mod legacy_http;
 pub mod openai_server;
-pub mod serper;
-pub mod tavily;
+pub mod plugin_backend;
 pub mod types;
 
 #[cfg(test)]
 mod tests;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::core::llm::catalog::infer_default_base_url;
@@ -20,10 +19,9 @@ use self::backend::{
     discover_hosted_candidate, pick_backend, BackendFailure, BackendName, BackendPlan,
     BackendSearchResponse, HostedCandidateModel, WebSearchBackend,
 };
-use self::brave::BraveBackend;
 use self::cache::{CacheKey, WebSearchCache};
-use self::serper::SerperBackend;
-use self::tavily::TavilyBackend;
+use self::legacy_http::{BraveBackend, SerperBackend, TavilyBackend};
+use self::plugin_backend::{PluginSearchInvoker, PluginWebSearchBackend};
 use self::types::{normalize_hits, Stats, WebSearchArgs, WebSearchOutput, WebSearchRequest};
 
 #[derive(Clone)]
@@ -34,6 +32,7 @@ pub struct WebSearchRuntime {
     auth: AuthStore,
     llm_fallback_env: Option<String>,
     cache: WebSearchCache,
+    plugin_invoker: OnceLock<Arc<dyn PluginSearchInvoker>>,
     tavily: TavilyBackend,
     brave: BraveBackend,
     serper: SerperBackend,
@@ -53,10 +52,19 @@ impl WebSearchRuntime {
             model_catalog,
             auth: AuthStore,
             llm_fallback_env: config.llm.api_key_env.clone(),
+            plugin_invoker: OnceLock::new(),
         })
     }
 
-    pub async fn search(&self, args: WebSearchArgs) -> Result<WebSearchOutput, AppError> {
+    pub fn set_plugin_invoker(&self, invoker: Arc<dyn PluginSearchInvoker>) {
+        let _ = self.plugin_invoker.set(invoker);
+    }
+
+    pub async fn search(
+        &self,
+        args: WebSearchArgs,
+        session_id: &str,
+    ) -> Result<WebSearchOutput, AppError> {
         let request = WebSearchRequest::from_tool_args(args, &self.config)?;
         let cache_key = CacheKey::from_request(&request);
         if let Some(mut cached) = self.cache.get(&cache_key) {
@@ -65,17 +73,32 @@ impl WebSearchRuntime {
         }
 
         let hosted_candidate = discover_hosted_candidate(&self.model_catalog);
-        let plan = pick_backend(request.backend, hosted_candidate)?;
+        let plan = pick_backend(
+            request.backend.clone(),
+            hosted_candidate,
+            self.config.legacy_http_backends,
+        )?;
         let output = match plan {
             BackendPlan::Auto {
                 hosted_candidate,
                 http_chain,
+                plugin_slot,
             } => {
-                self.execute_auto(&request, hosted_candidate, &http_chain)
-                    .await?
+                self.execute_auto(
+                    &request,
+                    hosted_candidate,
+                    &http_chain,
+                    plugin_slot,
+                    session_id,
+                )
+                .await?
             }
             BackendPlan::ExplicitHttp(backend) => {
                 self.execute_explicit_http(&request, backend).await?
+            }
+            BackendPlan::ExplicitPlugin(backend) => {
+                self.execute_explicit_plugin(&request, &backend, session_id)
+                    .await?
             }
             BackendPlan::HostedOnly(candidate) => {
                 self.execute_explicit_openai(&request, &candidate).await?
@@ -104,44 +127,56 @@ impl WebSearchRuntime {
         request: &WebSearchRequest,
         hosted_candidate: Option<HostedCandidateModel>,
         http_chain: &[BackendName],
+        plugin_slot: bool,
+        session_id: &str,
     ) -> Result<WebSearchOutput, AppError> {
         let start = Instant::now();
         let mut warnings = Vec::new();
         let hosted_present = hosted_candidate.is_some();
         let mut last_backend = hosted_candidate
             .as_ref()
-            .map(|_| BackendName::Openai)
-            .or_else(|| http_chain.last().copied())
-            .unwrap_or(BackendName::Tavily);
+            .map(|_| BackendName::Openai.as_str().to_string())
+            .or_else(|| {
+                http_chain
+                    .last()
+                    .map(|backend| backend.as_str().to_string())
+            })
+            .or_else(|| {
+                if plugin_slot {
+                    Some("auto".to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| BackendName::Tavily.as_str().to_string());
         let mut all_http_missing_keys = true;
+        let first_fallback = next_auto_fallback(http_chain, plugin_slot);
 
         if let Some(candidate) = hosted_candidate {
-            last_backend = BackendName::Openai;
+            last_backend = BackendName::Openai.as_str().to_string();
             match self.execute_openai_hosted(request, &candidate).await {
                 Ok(output) => return Ok(output),
                 Err(BackendFailure::Incompatible { .. }) => warnings.push(format!(
                     "hosted_candidate_unavailable, fallback={}",
-                    http_chain[0].as_str()
+                    first_fallback.unwrap_or("auto")
                 )),
                 Err(failure) if failure.is_retryable_unavailable() => {
                     warnings.push(format!(
                         "openai_unavailable, fallback={}",
-                        http_chain[0].as_str()
+                        first_fallback.unwrap_or("auto")
                     ));
                     extend_unique(
                         &mut warnings,
-                        failure.auto_fallback_warnings(
-                            BackendName::Openai,
-                            http_chain.first().copied(),
-                        ),
+                        failure
+                            .auto_fallback_warnings(BackendName::Openai.as_str(), first_fallback),
                     );
                 }
-                Err(failure) => return Err(failure.to_tool_error(BackendName::Openai)),
+                Err(failure) => return Err(failure.to_tool_error(BackendName::Openai.as_str())),
             }
         }
 
         for (index, backend) in http_chain.iter().copied().enumerate() {
-            last_backend = backend;
+            last_backend = backend.as_str().to_string();
             match self.execute_http_backend(request, backend).await {
                 Ok(mut output) => {
                     prepend_unique(&mut output.warnings, warnings);
@@ -150,21 +185,47 @@ impl WebSearchRuntime {
                 Err(failure @ BackendFailure::MissingKey { .. }) => {
                     extend_unique(
                         &mut warnings,
-                        failure.auto_fallback_warnings(backend, http_chain.get(index + 1).copied()),
+                        failure.auto_fallback_warnings(
+                            backend.as_str(),
+                            http_chain.get(index + 1).map(|next| next.as_str()),
+                        ),
                     );
                 }
                 Err(failure) if failure.is_retryable_unavailable() => {
                     all_http_missing_keys = false;
                     extend_unique(
                         &mut warnings,
-                        failure.auto_fallback_warnings(backend, http_chain.get(index + 1).copied()),
+                        failure.auto_fallback_warnings(
+                            backend.as_str(),
+                            http_chain.get(index + 1).map(|next| next.as_str()),
+                        ),
                     );
                 }
-                Err(failure) => return Err(failure.to_tool_error(backend)),
+                Err(failure) => return Err(failure.to_tool_error(backend.as_str())),
             }
         }
 
-        if !hosted_present && all_http_missing_keys {
+        if plugin_slot {
+            last_backend = "auto".to_string();
+            if self.plugin_invoker.get().is_none() {
+                return Err(plugin_invoker_missing_error());
+            }
+            match self
+                .execute_plugin_backend(request, "auto", session_id)
+                .await
+            {
+                Ok(mut output) => {
+                    prepend_unique(&mut output.warnings, warnings);
+                    return Ok(output);
+                }
+                Err(failure) if failure.is_retryable_unavailable() => {
+                    extend_unique(&mut warnings, failure.auto_fallback_warnings("auto", None));
+                }
+                Err(failure) => return Err(failure.to_tool_error("auto")),
+            }
+        }
+
+        if !hosted_present && all_http_missing_keys && !plugin_slot {
             return Err(AppError::Tool(
                 "no web_search backend configured".to_string(),
             ));
@@ -172,7 +233,7 @@ impl WebSearchRuntime {
         warnings.push("all_backends_unavailable".to_string());
         Ok(WebSearchOutput::degraded(
             request.query.clone(),
-            last_backend.as_str(),
+            last_backend,
             elapsed_ms(start),
             warnings,
         ))
@@ -189,6 +250,31 @@ impl WebSearchRuntime {
             Err(failure) if failure.is_explicit_degraded() => Ok(WebSearchOutput::degraded(
                 request.query.clone(),
                 backend.as_str(),
+                elapsed_ms(start),
+                failure.explicit_degraded_warnings(backend.as_str()),
+            )),
+            Err(failure) => Err(failure.to_tool_error(backend.as_str())),
+        }
+    }
+
+    async fn execute_explicit_plugin(
+        &self,
+        request: &WebSearchRequest,
+        backend: &str,
+        session_id: &str,
+    ) -> Result<WebSearchOutput, AppError> {
+        if self.plugin_invoker.get().is_none() {
+            return Err(plugin_invoker_missing_error());
+        }
+        let start = Instant::now();
+        match self
+            .execute_plugin_backend(request, backend, session_id)
+            .await
+        {
+            Ok(output) => Ok(output),
+            Err(failure) if failure.is_explicit_degraded() => Ok(WebSearchOutput::degraded(
+                request.query.clone(),
+                backend,
                 elapsed_ms(start),
                 failure.explicit_degraded_warnings(backend),
             )),
@@ -208,13 +294,13 @@ impl WebSearchRuntime {
                 request.query.clone(),
                 BackendName::Openai.as_str(),
                 elapsed_ms(start),
-                failure.explicit_degraded_warnings(BackendName::Openai),
+                failure.explicit_degraded_warnings(BackendName::Openai.as_str()),
             )),
             Err(BackendFailure::Incompatible { .. }) => Err(AppError::Tool(format!(
                 "hosted web_search model {} is misconfigured or unavailable",
                 candidate.id
             ))),
-            Err(failure) => Err(failure.to_tool_error(BackendName::Openai)),
+            Err(failure) => Err(failure.to_tool_error(BackendName::Openai.as_str())),
         }
     }
 
@@ -266,7 +352,7 @@ impl WebSearchRuntime {
             }
             other => other?,
         };
-        Ok(self.build_output(request, BackendName::Openai, raw, start))
+        Ok(self.build_output(request, BackendName::Openai.as_str(), raw, start))
     }
 
     async fn execute_http_backend(
@@ -276,27 +362,52 @@ impl WebSearchRuntime {
     ) -> Result<WebSearchOutput, BackendFailure> {
         let start = Instant::now();
         let raw = self.http_backend(backend).search(request).await?;
+        Ok(self.build_output(request, backend.as_str(), raw, start))
+    }
+
+    async fn execute_plugin_backend(
+        &self,
+        request: &WebSearchRequest,
+        backend: &str,
+        session_id: &str,
+    ) -> Result<WebSearchOutput, BackendFailure> {
+        let invoker =
+            self.plugin_invoker
+                .get()
+                .cloned()
+                .ok_or_else(|| BackendFailure::Incompatible {
+                    detail: "web_search plugin backend invoker not configured".to_string(),
+                })?;
+        let start = Instant::now();
+        let raw = PluginWebSearchBackend::new(invoker, backend, session_id)
+            .search(request)
+            .await?;
         Ok(self.build_output(request, backend, raw, start))
     }
 
     fn build_output(
         &self,
         request: &WebSearchRequest,
-        backend: BackendName,
+        default_backend: &str,
         backend_response: BackendSearchResponse,
         start: Instant,
     ) -> WebSearchOutput {
+        let BackendSearchResponse {
+            backend_label,
+            raw_hits,
+            warnings,
+        } = backend_response;
         let mut normalized = normalize_hits(
-            backend_response.raw_hits,
+            raw_hits,
             request.count,
             &request.allowed_domains,
             &request.blocked_domains,
         );
-        prepend_unique(&mut normalized.warnings, backend_response.warnings);
+        prepend_unique(&mut normalized.warnings, warnings);
         WebSearchOutput {
             query: request.query.clone(),
             hits: normalized.hits,
-            backend: backend.as_str().to_string(),
+            backend: backend_label.unwrap_or_else(|| default_backend.to_string()),
             stats: Stats {
                 elapsed_ms: elapsed_ms(start),
                 cached: false,
@@ -315,6 +426,10 @@ impl WebSearchRuntime {
             BackendName::Openai => unreachable!("openai hosted path does not use http_backend"),
         }
     }
+}
+
+fn plugin_invoker_missing_error() -> AppError {
+    AppError::Tool("web_search plugin backend invoker not configured".to_string())
 }
 
 fn build_web_search_http_client(
@@ -369,4 +484,11 @@ fn looks_like_unsupported_hosted_tool(detail: &str) -> bool {
             || lower.contains("not support")
             || lower.contains("unknown tool")
             || lower.contains("invalid tool"))
+}
+
+fn next_auto_fallback(http_chain: &[BackendName], plugin_slot: bool) -> Option<&str> {
+    http_chain
+        .first()
+        .map(|backend| backend.as_str())
+        .or(if plugin_slot { Some("auto") } else { None })
 }

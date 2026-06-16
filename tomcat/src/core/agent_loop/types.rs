@@ -9,6 +9,7 @@ use crate::core::llm::openai_files::OpenAiFilesRuntime;
 use crate::core::llm::{ChatMessage, LlmProvider};
 use crate::core::session::manager::ContextState;
 use crate::core::session::manager::MessageAppendSink;
+use crate::core::tools::contract::registry::ToolRegistry;
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::{CheckpointStore, NoopStore};
@@ -288,6 +289,8 @@ pub struct AgentLoop {
     /// `todos` 会话级 runtime：持有当前 session 的 base_dir + session_id，统一落盘到
     /// `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`。不注入时 `todos` 工具只写内存。
     pub(super) todos_runtime: Option<Arc<crate::core::plan_runtime::todo_runtime::TodosRuntime>>,
+    /// 插件工具共享注册表。未注入时 AgentLoop 仅支持内置工具。
+    pub(super) tool_registry: Option<Arc<dyn ToolRegistry>>,
     pub(super) config: AgentLoopConfig,
     pub(super) steering_queue: Arc<Mutex<Vec<ChatMessage>>>,
     /// P1：可由 `ChatContext` 通过 [`AgentLoop::with_shared_follow_up_queue`]

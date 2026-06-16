@@ -152,10 +152,53 @@ impl Default for AgentConfig {
 }
 
 /// 插件配置：启动时自动加载的插件列表。插件目录由 [`resolve_plugins_dir`] 从 work_dir 推导。
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PluginConfig {
     #[serde(default)]
     pub auto_load: Vec<String>,
+    #[serde(default = "default_plugin_js_heap_mb")]
+    pub js_heap_mb: u32,
+    #[serde(default = "default_plugin_call_timeout_ms")]
+    pub call_timeout_ms: u64,
+    #[serde(default = "default_plugin_interrupt_budget")]
+    pub interrupt_budget: u64,
+    #[serde(default = "default_plugin_event_channel_capacity")]
+    pub event_channel_capacity: usize,
+    #[serde(default = "default_plugin_idle_ttl_ms")]
+    pub idle_ttl_ms: u64,
+}
+
+fn default_plugin_js_heap_mb() -> u32 {
+    16
+}
+
+fn default_plugin_call_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_plugin_interrupt_budget() -> u64 {
+    5_000_000
+}
+
+fn default_plugin_event_channel_capacity() -> usize {
+    64
+}
+
+fn default_plugin_idle_ttl_ms() -> u64 {
+    5 * 60 * 1000
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            auto_load: Vec::new(),
+            js_heap_mb: default_plugin_js_heap_mb(),
+            call_timeout_ms: default_plugin_call_timeout_ms(),
+            interrupt_budget: default_plugin_interrupt_budget(),
+            event_channel_capacity: default_plugin_event_channel_capacity(),
+            idle_ttl_ms: default_plugin_idle_ttl_ms(),
+        }
+    }
 }
 
 /// 全局工作区授权：额外可访问根路径列表，**所有 agent 共用**，与 `[agent]` 下的 `workspace`（设计态目录）不同。
@@ -218,11 +261,6 @@ impl Default for SecurityConfig {
         }
     }
 }
-
-/// Wasm 运行时配置（feature "wasmedge" 时使用）。
-/// quickjs wasm 路径由 [`resolve_quickjs_path`] 从 work_dir 推导，回退到环境变量。
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct WasmConfig {}
 
 /// `tomcat chat` 启动时的像素风吉祥物 Splash 配置。
 ///

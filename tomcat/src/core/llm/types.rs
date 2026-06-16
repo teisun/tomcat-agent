@@ -397,6 +397,9 @@ pub struct ChatMessage {
     pub role: ChatMessageRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<ChatMessageContent>,
+    /// Provider-specific structured metadata such as URL citations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Vec<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -436,6 +439,7 @@ impl ChatMessage {
         Self {
             role: ChatMessageRole::User,
             content: Some(ChatMessageContent::Text(text.into())),
+            annotations: None,
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -457,6 +461,7 @@ impl ChatMessage {
         Self {
             role: ChatMessageRole::User,
             content: Some(ChatMessageContent::Parts(parts)),
+            annotations: None,
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -476,6 +481,7 @@ impl ChatMessage {
         Self {
             role: ChatMessageRole::Assistant,
             content: Some(ChatMessageContent::Text(text.into())),
+            annotations: None,
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -498,6 +504,7 @@ impl ChatMessage {
         Self {
             role: ChatMessageRole::Assistant,
             content: content.map(|s| ChatMessageContent::Text(s.to_string())),
+            annotations: None,
             name: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
@@ -517,6 +524,7 @@ impl ChatMessage {
         Self {
             role: ChatMessageRole::Tool,
             content: Some(ChatMessageContent::Text(content.to_string())),
+            annotations: None,
             name: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
@@ -536,6 +544,7 @@ impl ChatMessage {
         Self {
             role: ChatMessageRole::System,
             content: Some(ChatMessageContent::Text(text.into())),
+            annotations: None,
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -555,6 +564,7 @@ impl ChatMessage {
         Self {
             role: ChatMessageRole::User,
             content: Some(ChatMessageContent::Text(text.into())),
+            annotations: None,
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -574,6 +584,7 @@ impl ChatMessage {
         Self {
             role: ChatMessageRole::User,
             content: Some(ChatMessageContent::Text(text.into())),
+            annotations: None,
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -618,6 +629,7 @@ impl ChatMessage {
     /// 请求发往上游前剥离本地 transcript 元数据，避免污染 API wire payload。
     pub fn without_completion_metadata(&self) -> Self {
         let mut cloned = self.clone();
+        cloned.annotations = None;
         cloned.finish_reason = None;
         cloned.error_message = None;
         cloned.error_code = None;

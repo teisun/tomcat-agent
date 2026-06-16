@@ -44,14 +44,19 @@ fn make_gate_with(
 }
 
 struct CurrentDirGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
     previous: PathBuf,
 }
 
 impl CurrentDirGuard {
     fn set(path: &Path) -> Self {
+        let lock = crate::test_support::cwd_lock().lock().unwrap();
         let previous = std::env::current_dir().expect("current_dir");
         std::env::set_current_dir(path).expect("set_current_dir");
-        Self { previous }
+        Self {
+            _lock: lock,
+            previous,
+        }
     }
 }
 

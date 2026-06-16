@@ -57,6 +57,7 @@ impl AgentLoop {
             web_fetch_runtime: None,
             web_search_runtime: None,
             todos_runtime: None,
+            tool_registry: None,
             config,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
@@ -118,6 +119,14 @@ impl AgentLoop {
         self
     }
 
+    pub fn with_tool_registry(
+        mut self,
+        registry: Arc<dyn crate::core::tools::contract::registry::ToolRegistry>,
+    ) -> Self {
+        self.tool_registry = Some(registry);
+        self
+    }
+
     /// P1：注入 `ChatContext` 持有的 session 级共享 `follow_up_queue`。
     ///
     /// 不调用此方法时保持原有"单次 AgentLoop 私有 queue"语义（向后兼容
@@ -172,6 +181,7 @@ impl AgentLoop {
             web_fetch_runtime: None,
             web_search_runtime: None,
             todos_runtime: None,
+            tool_registry: None,
             config,
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             completion_routes: None,

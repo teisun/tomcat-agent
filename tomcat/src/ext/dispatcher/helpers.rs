@@ -107,7 +107,9 @@ pub(super) fn parse_chat_request(params: &serde_json::Value) -> Result<ChatReque
             .map(|u| u as u32),
         stream: params.get("stream").and_then(|v| v.as_bool()),
         model_override: None,
-        tools: None,
+        tools: params
+            .get("tools")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
     })
 }
 
@@ -145,4 +147,11 @@ pub(super) fn parse_tool(params: &serde_json::Value, plugin_id: &str) -> Result<
         is_enabled: true,
         created_at,
     })
+}
+
+pub(super) fn plugin_id_from_instance(instance_id: &str) -> &str {
+    instance_id
+        .rsplit_once('/')
+        .map(|(_, plugin_id)| plugin_id)
+        .unwrap_or(instance_id)
 }

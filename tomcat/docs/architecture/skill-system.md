@@ -2,6 +2,8 @@
 
 本文是 **tomcat Skill 系统** 的技术方案（OpenSpec **架构子系统类**：`docs/architecture/`，与 `plan-runtime.md` / `plugin-system-overview.md` 同级）。Skill 系统跨 `core/skill`（新模块）、`core/llm/system_prompt`、`core/tools/contract/catalog`、`core/agent_loop/tool_exec`、`infra/config` 五处一级落点，触发 `[ARCHITECTURE_SPEC.md](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)` §1 第 1/2/3 条「跨 ≥2 子目录 + 新增工具/事件契约 + 新生命周期」，故单开一份架构文档。
 
+> **安装入口补充（T2-P1-017 PackageManager）**：skill 仍然只通过三层磁盘根被发现，但现在除了手工把 `SKILL.md` 放进目录外，也支持走统一安装入口：shell 用 `tomcat install <source>` / `tomcat uninstall <package>` / `tomcat packages`，会话内用 `/install <source> [current-project|agent|global]`。`current-project` 只是 UI 标签，内部仍映射到 `scope`。code/claw 当前会话里的 `/install` 成功后会自动 `reload_skill_set()`，让新装的 skill 立即进入当前 `SkillSet`；这一步只刷新发现结果，不赋予 skill 额外权限。
+
 ---
 
 ## 先看总图：文首导读

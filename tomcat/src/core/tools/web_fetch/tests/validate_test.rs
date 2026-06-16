@@ -23,7 +23,7 @@ fn url_invalid_scheme_rejected() {
 #[test]
 fn url_single_segment_host_rejected() {
     let err = validate_input_url("https://localhost/path").expect_err("should reject");
-    assert!(err.to_string().contains("single-segment host rejected"));
+    assert!(err.to_string().contains("local hostname rejected"));
 }
 
 #[test]

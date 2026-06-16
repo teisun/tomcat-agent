@@ -13,7 +13,7 @@
 - [ ] `tomcat init`命令可完成初始化配置，以 model-first 方式选择默认模型，并自动推导匹配的 `provider` / `api_base` / `api_key_env`
 - [ ] 首次生成的 `tomcat.config.toml` 默认 `[llm] provider = "openai-responses"`；`provider = "openai"` 仍可手动配置但不再作为 init 默认路径
 - [ ] 配置文件可正确加载并生效（敏感信息加密存储 TODO 后续考虑）
-- [ ] `tomcat doctor`命令可检测运行环境、WasmEdge依赖、配置合法性，给出修复建议
+- [ ] `tomcat doctor`命令可检测运行环境、`rquickjs` 可用性、配置合法性，给出修复建议
 - [ ] 引擎可正常启动、关闭，无崩溃、无致命错误日志，跨Windows/macOS/Linux三大平台正常运行
 
 ### Story 2: 4原语核心能力与安全管控
@@ -37,25 +37,35 @@
 - [ ] LLM 必须把 `agent_workspace_dir` 视为“当前目录 / 这个项目 / 相对路径”的唯一来源；`agent_definition_dir`（`workspace-<agentId>/`）和 `agent_trail_dir`（`agents/<agentId>/`）不得替代用户工作目录
 - [ ] 单条大工具结果按 Layer 0 落盘到 `agent_trail_dir/tool-results/{session_id}/` 并在上下文中留下 preview；`agent_definition_dir` 仅是 agent 行为定义工作区，不承载运行态 tool-results
 
-### Story 3: WasmEdge+QuickJS沙箱插件系统
-**作为用户**，我希望能加载、运行 Wasm 沙箱插件，插件在隔离环境中运行，不影响宿主系统安全。
+### Story 3: rquickjs 插件系统
+**作为用户**，我希望能加载、运行 JS/TS 插件，插件在隔离环境中运行，不影响宿主系统安全。
 **验收标准**：
-- [ ] 基于WasmEdge实现插件沙箱运行时，每个插件独立Wasm实例隔离
-- [ ] 内置WasmEdge官方QuickJS运行时，支持原生JS/TS插件执行，无需手动编译
+- [ ] 基于 `rquickjs` 实现插件运行时，每个 `(session_id, plugin_id)` 组合拥有独立插件 VM
+- [ ] 支持原生 JS/TS 插件执行，无需手动编译 Wasm
 - [ ] 实现插件全生命周期管理：加载、初始化、启用、禁用、卸载，资源完全释放
 - [ ] ExtensionAPI 契约稳定，符合规范的插件可正常加载运行
-- [ ] 插件级权限管控，加载插件时需用户确认授权的权限范围，未授权API无法调用
+- [ ] 插件声明权限具备扩展位；当前加载期默认放行，真正敏感能力仍由 hostcall gate 收口
 - [ ] 插件执行错误完全隔离，单个插件崩溃不会影响宿主引擎与其他插件运行
 - [ ] `tomcat plugin`系列命令可实现插件的加载、卸载、列表查看、启用/禁用
+
+### Story 3b: PackageManager 统一安装
+**作为用户**，我希望能通过统一的安装入口管理 package、bare plugin 与 bare skill，并明确控制它们对当前项目、当前 agent 或全局环境的可见范围。
+**验收标准**：
+- [ ] `tomcat install` / `tomcat uninstall` / `tomcat packages` 与会话内 `/install` 共享同一套安装核心，支持 package、bare plugin、bare skill 三类本地 source
+- [ ] 支持 `scope` / `agent` / `global` 三层可见范围；未显式指定时交互式入口可选择目标层，非交互 shell 默认落到当前 project(scope)
+- [ ] 安装后按层写入 `packages/registry.json`，plugin 同步维护同层 `plugins/registry.json`；registry 损坏时必须返回显式错误，不得静默当成空账本
+- [ ] `tomcat packages` 与 `tomcat plugin list/enable/disable/unload` 能正确反映 layered 视图与启用状态；被禁用 plugin 不得继续出现在 runtime discovery 结果中
+- [ ] `--force` 替换安装会清理被新版本移除的 plugin/skill；任一步失败后文件与 registry 必须回滚，不留下半安装脏状态
+- [ ] code/claw 会话内 `/install` 成功后，当前会话的 skill/plugin 静态清单立即刷新；但不得热替换已加载 plugin 实例
 
 ### Story 4: Node.js 兼容层
 **作为用户**，我希望沙箱内插件能正常调用 Node.js API，无需为 tomcat 单独改写法。
 **验收标准**：
-- [ ] 基于 WasmEdge 原生实现 Node.js 核心兼容层，覆盖沙箱插件高频使用的 fs / path / process / console 等全局对象与内置模块
+- [ ] 基于 `rquickjs` 提供轻量 Node 兼容层，覆盖高频使用的 `path` / `events` / `Buffer` / `crypto` 等能力，并对敏感模块 fail-closed
 - [ ] 支持CommonJS模块规范，require/import正常工作，插件内相对路径模块加载正常
-- [ ] 实现事件循环机制，基于WASI Preview2异步IO，setTimeout/setInterval/Promise异步行为与Node.js完全对齐
-- [ ] 支持http/https模块，网络请求受插件权限管控，可正常调用第三方API
-- [ ] 绝大多数纯JS npm包可在插件内正常加载使用，无兼容性问题
+- [ ] 实现事件循环机制，支持 `setTimeout` / Promise 等基础异步行为
+- [ ] 网络请求与其他敏感能力继续受宿主权限与 hostcall 管控
+- [ ] 支持一批轻量纯 JS 包与工具 shim（如 `@sinclair/typebox`、`ms`），不承诺完整 Node/npm 兼容
 
 ### Story 5: 宿主核心API与工具注册
 **作为插件开发者**，我希望能通过宿主API注册自定义工具，扩展Agent能力，被对话与其他插件调用。
@@ -93,14 +103,15 @@
 **作为插件开发者**，我希望在插件中使用 `async/await` 调用宿主 API（如 `await pi.exec("ls")`），耗时操作不阻塞插件执行，与宿主异步 Hostcall 模型一致。
 **验收标准**：
 - [ ] `pi.exec()`、`pi.createChatCompletion()` 等耗时 API 返回 Promise，插件可用 `await` 消费
-- [ ] LLM 调用、命令执行等耗时 Hostcall 不阻塞 Wasm 实例，宿主后台异步处理
+- [ ] LLM 调用、命令执行等耗时 Hostcall 不阻塞插件 VM，宿主后台异步处理
+- [ ] 长轮询 async Hostcall 在 pending→poll→ready 路径中持续刷新 QuickJS interrupt budget，不得因预算耗尽误杀正常请求
 - [ ] 返回值格式与 ExtensionAPI 约定一致（`ExecResult: {stdout, stderr, exitCode}`、`CompletionResult: {message, usage}`）
 - [ ] `pi.on`/`pi.off`/`pi.emit` 无重复定义 bug，`pi.once` 可用，注册一次后多次 emit 仅触发 1 次
 - [ ] 插件内多个并发异步调用（如同时 `await pi.exec()` + `await pi.createChatCompletion()`）可正确运行
 - [ ] 异步操作超时后返回清晰错误，插件可通过 `try/catch` 捕获
 - [ ] 同步 API（`pi.log`、`pi.registerTool`、`pi.on` 等）行为不变，不受异步改造影响
 - [ ] `pi.registerTool` 注册工具后宿主可通过 host_call 感知（registerTool 触发 ≥1 次 host_call）；`pi.unregisterTool` 可正常反注册
-- [ ] 以上异步 API 行为均可通过 `tests/wasmedge_e2e_tests.rs` 中 Wasm 真实运行时集成测试验证（E2E-WASM-011/022/023）
+- [ ] 以上异步 API 行为均可通过当前 `rquickjs` 集成测试验证（如 `tests/quickjs_e2e_tests.rs` 与 `tests/long_lived_vm_tests.rs`）
 
 ### Story 8: CLI工具基础对话与会话管理
 **作为用户**，我希望能通过CLI工具与Agent对话，管理会话历史，正常使用插件能力。
@@ -140,7 +151,7 @@
 **验收标准**：
 - [ ] 插件的全局变量跨多次事件调用保持（如 `let counter = 0` 在多次 `tool_call` 事件间累加）
 - [ ] `pi.on()` 注册的 handler 只需注册一次，后续事件直接触发，无需每次重新执行插件脚本
-- [ ] 周期性定时器在会话期间持续运行（`setInterval` 或等价的 `setTimeout` 链；后者为 wasmedge_quickjs 兼容实现，见 E2E-WASM-033）
+- [ ] 周期性定时器在会话期间持续运行（`setInterval` 或等价的 `setTimeout` 链）
 - [ ] `session_start` 初始化的数据可在后续 `before_agent_start`、`tool_call` 等事件中读取
 - [ ] 会话结束时（`session_shutdown` 或用户退出）VM 正常关闭，资源完全释放
 - [ ] 典型有状态插件场景（git-checkpoint、todo、plan-mode、ssh 等）在长生命周期 VM 下可正确运行
@@ -149,7 +160,7 @@
 **作为用户**，我希望Agent能根据我的自然语言需求，自主生成、编译、加载插件，无需人工干预。
 **验收标准**：
 - [ ] Agent 可从自然语言需求中提取插件功能点，生成符合宿主插件规范的 JS/TS 代码
-- [ ] 支持运行时动态加载生成的插件代码到WasmEdge沙箱中，无需重启引擎
+- [ ] 支持运行时动态加载生成的插件代码到 `rquickjs` 插件 VM 中，无需重启引擎
 - [ ] 插件加载/运行失败时，自动提取错误信息，反馈给LLM自动修复代码，形成闭环
 - [ ] 插件生成前清晰告知用户功能、权限需求，获得用户确认后方可生成加载
 - [ ] 实现插件模板库，内置常用场景插件模板，提升生成成功率

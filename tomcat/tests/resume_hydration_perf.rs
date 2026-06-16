@@ -14,6 +14,20 @@ fn cmd() -> Command {
     c
 }
 
+fn apply_deepseek_env(command: &mut Command) {
+    let model = common::deepseek_test_model();
+    command
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
+        .env("TOMCAT__LLM__PROVIDER", "openai")
+        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
+        .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
+        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
+}
+
 struct Fixture {
     _home: tempfile::TempDir,
     home_path: PathBuf,
@@ -36,6 +50,12 @@ fn setup_fixture() -> Fixture {
 
     let config_path = home_path.join(".tomcat").join("tomcat.config.toml");
     let mut cfg = load_config_toml_file(&config_path).expect("config should load");
+    common::apply_deepseek_app_config(&mut cfg);
+    std::fs::write(
+        &config_path,
+        toml::to_string_pretty(&cfg).expect("serialize deepseek test config"),
+    )
+    .expect("persist deepseek test config");
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
     let sessions_dir = resolve_sessions_dir(&cfg).unwrap();
     std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -114,9 +134,9 @@ fn run_resume_trace(fx: &Fixture, extra_env: &[(&str, &str)]) -> String {
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
         .env("TOMCAT_RESUME_TRACE", "1")
         .write_stdin("");
+    apply_deepseek_env(&mut command);
     for (key, value) in extra_env {
         command.env(key, value);
     }

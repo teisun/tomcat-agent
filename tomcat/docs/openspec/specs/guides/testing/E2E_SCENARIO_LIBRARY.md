@@ -5,10 +5,10 @@
 ## 用例编号规则
 
 
-| 前缀           | 含义                                             |
-| ------------ | ---------------------------------------------- |
-| E2E-CLI-NNN  | CLI 子进程 E2E 用例（`tests/cli_tests.rs`）           |
-| E2E-WASM-NNN | Wasm 运行时 E2E 用例（`tests/wasmedge_e2e_tests.rs`） |
+| 前缀           | 含义                                                         |
+| ------------ | ---------------------------------------------------------- |
+| E2E-CLI-NNN  | CLI 子进程 E2E 用例（`tests/cli_tests.rs`）                       |
+| E2E-QJS-NNN  | `rquickjs` 插件运行时与相关集成验证（如 `tests/quickjs_e2e_tests.rs`、`tests/long_lived_vm_tests.rs`） |
 
 
 ---
@@ -19,7 +19,7 @@
 
 | 取值 | 含义 |
 | --- | --- |
-| 自动 | 以 `cargo test`（`cli_tests` / `wasmedge_e2e_tests`）通过为准即可。 |
+| 自动 | 以 `cargo test`（如 `cli_tests` / `quickjs_e2e_tests` / `long_lived_vm_tests`）通过为准即可。 |
 | 人工 | 建议在**真实终端、本机环境**下再执行等价操作，补验观感、确认流、路径与依赖；与 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) §4「人工验收」及跨平台（Windows/macOS/Linux）要求配合使用。 |
 
 **说明**：标为「人工」的用例**通常已有**自动化测试；该标记表示交付前仍建议人工过一遍，避免仅依赖子进程 E2E 的断言盲区。
@@ -39,10 +39,10 @@
 | E2E-CLI-003 | 自动 | `test_user_views_full_config`                | 用户查看当前全部配置                          | `tomcat config get`                     | exit 0；stdout 含配置段关键字                                              |
 | E2E-CLI-004 | 自动 | `test_workspace_add_list_remove_e2e`         | 用户授权工作区目录（add/list/remove，持久化 `tomcat.config.toml` `[workspace] workspace_roots`） | `tomcat init` → `tomcat workspace add <path>` → `tomcat workspace list` → `tomcat workspace remove`（`HOME` 隔离） | add/remove exit 0 且 stdout 含「已添加/已移除」；list 含路径；最终 list 提示无已授权工作区 |
 | E2E-CLI-005 | 自动 | `test_init_auto_adds_path_to_shell_profile` | init 将 PATH 写入隔离 `HOME` 下 shell 配置 | `tomcat init`（`HOME`+`SHELL=/bin/zsh`） | `$HOME/.zshrc` 含 `# Added by tomcat init` 与 `export PATH=` |
-| E2E-CLI-006 | 自动 | `test_user_doctor_detects_environment`       | 用户运行 doctor 检测 WasmEdge/QuickJS 可用性 | `tomcat doctor`                         | exit 0；stdout 含 WasmEdge/配置/✓/内嵌资源/.env 检查项                       |
+| E2E-CLI-006 | 自动 | `test_user_doctor_detects_environment`       | 用户运行 doctor 检测 QuickJS/rquickjs 环境 | `tomcat doctor`                         | exit 0；stdout 含 rquickjs/配置/✓/内嵌资源/.env 检查项                       |
 | E2E-CLI-007 | 自动 | `test_init_creates_env_file`                 | init 后配置文件包含 LLM 配置段并落到默认 provider 路径                | `tomcat init`                           | exit 0；config 文件存在且含 `[llm]`，并包含 `provider = "openai-responses"`、`default_model = "gpt-5.4"`、`api_key_env = "OPENAI_API_KEY"` |
 | E2E-CLI-008 | 自动 | `test_init_creates_env_with_correct_permissions` | init 后 .env 权限为 0600（Unix）       | `tomcat init` → 检查 .env 权限              | .env 存在时 mode=0600                                                 |
-| E2E-CLI-009 | 自动 | `test_doctor_reports_all_checks`             | doctor 输出含全部检查项                     | `tomcat init` → `tomcat doctor`             | exit 0；stdout 含 配置合法/内嵌资源/QuickJS wasm/WasmEdge                   |
+| E2E-CLI-009 | 自动 | `test_doctor_reports_all_checks`             | doctor 输出含全部检查项                     | `tomcat init` → `tomcat doctor`             | exit 0；stdout 含 配置合法/内嵌资源/rquickjs                   |
 | E2E-CLI-010 | 自动 | `test_init_idempotent`                       | 连续两次 init，第二次以现有配置为基线继续运行 model-first 向导               | `tomcat init` × 2（同 `HOME`）           | 两次均 exit 0；第二次 stdout 含「已存在配置文件」或「已更新配置文件」 |
 | E2E-CLI-017 | 自动 | `test_workspace_add_cwd_e2e`                 | `tomcat workspace add --cwd` 添加当前目录           | `tomcat init` → `cd` 至临时目录 → `tomcat workspace add --cwd` → `tomcat workspace list` | add exit 0；list 含该目录绝对路径 |
 
@@ -53,7 +53,7 @@
 
 ## Story 2 — 4 原语安全管控（通过 `tomcat code` 驱动）（11 条）
 
-> 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`，不得跳过。
+> 需要 `DEEPSEEK_API_KEY`；无 key 时必须 `panic!`，不得跳过。
 > **验收**：本 Story 与 §4 人工验收「对话模式、四原语与用户确认」对齐，**整组建议人工补验**（流式观感、多轮、确认提示）。
 > **T2-P0-004 follow-up**：E2E-CLI-018～022 补充 drag-deny / cwd runtime / 二进制错误 / Layer0 落盘路径场景；当前自动化由对应单测/集成测试锁定，真实终端交互仍建议人工 spot-check。
 
@@ -66,11 +66,11 @@
 | E2E-CLI-014 | 人工 | `test_user_asks_pi_to_read_a_file`            | 用户要求助手读取指定文件内容                    | 预置 /tmp/test_read.txt → `tomcat code` + stdin `请读取 /tmp/test_read.txt 的内容`，timeout 60s        | exit 0；stdout 含文件内容或读取确认                                   |
 | E2E-CLI-015 | 人工 | `test_user_asks_pi_to_edit_a_file`            | 用户要求助手修改文件中的某行内容                  | 预置 /tmp/test_edit.txt → `tomcat code` + stdin `请把 /tmp/test_edit.txt 第一行改成 hello`，timeout 60s | exit 0；修改后文件第一行为 hello                                     |
 | E2E-CLI-016 | 人工 | `test_user_asks_pi_to_run_bash_command`       | 用户要求助手执行一条 bash 命令                | `tomcat code` + stdin `请执行 echo hello_from_pi`，timeout 60s                                    | exit 0；stdout 含 hello_from_pi 或命令确认提示                      |
-| E2E-CLI-016C | 自动（需 `OPENAI_API_KEY`） | `test_user_background_bash_autofeed_real_llm_cli` | 用户让助手启动后台 bash、先做独立工作，然后只能依赖 `<background-task-finished ...>` 自动回灌继续推进 | `tomcat code` + 单轮 prompt：`bash(run_in_background=true)` 写 `BG_DONE`，立即写 `MARKER`，随后禁止 `task_output/task_list/task_stop` 与新 bash，只能等系统 follow-up | exit 0；stderr 含 `[bg] task ... queued for next turn`；`bg_done.txt` 与 `marker.txt` 真实落盘；stdout 含 `AUTOFEED_OK` |
-| E2E-CLI-016D | 自动（需 `OPENAI_API_KEY`） | `test_user_background_bash_blocking_waitslice_real_llm_cli` | 用户要求助手在后台 bash 后立即进入 `task_output(block=true)`，直到拿到真实新输出再收尾 | `tomcat code` + 单轮 prompt：后台 bash `sleep 2; echo TOKEN_WAITSLICE; printf BLOCKWAIT_DONE > file; sleep 30`，必须用 `task_output(block=true, timeout_ms=300)` + `task_stop` 完成，不准 `task_output(block=false)` | exit 0；stdout 含 `BLOCKWAIT_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 至少 1 次 `task_output(block=true, timeout_ms=300)`，并出现 `TOKEN_WAITSLICE` 与 `task_stop`；产物文件内容正确 |
-| E2E-CLI-016E | 自动（需 `OPENAI_API_KEY`） | `test_user_background_bash_multiple_timeout_slices_real_llm_cli` | 用户要求助手在同一后台任务上经历至少两次 timeout slice，再继续等到一次 `new_output` | `tomcat code` + 单轮 prompt：后台 bash `sleep 8; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > file; sleep 30`，必须重复 `task_output(block=true, timeout_ms=300)` 直到看到 token，再 `task_stop` | exit 0；stdout 含 `MULTI_TIMEOUT_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 中 `task_output` 至少 3 次、timeout 结果至少 2 次，最终出现 `TOKEN_MULTI_TIMEOUT` 与 `task_stop`；产物文件内容正确 |
-| E2E-CLI-016F | 自动（需 `OPENAI_API_KEY`） | `test_user_background_bash_midturn_followup_real_llm_cli` | 用户先起后台 bash，再执行一个耗时 foreground batch；只有在 foreground batch 结束后的后续请求里看见 `<background-task-finished ...>`，助手才允许继续验证结果 | `tomcat code` + 单轮 prompt：先 `bash(run_in_background=true)` 写 `BG_DONE`，再 foreground `bash` 睡眠并写 `FG_DONE`，禁止 `task_output/task_list/task_stop`；若 foreground batch 结束时仍未看到系统消息则必须回复 `MIDTURN_MISSED_FOLLOWUP` 并停止 | exit 0；stdout 含 `MIDTURN_FOLLOWUP_OK` 且不含 `MIDTURN_MISSED_FOLLOWUP`；两份文件真实存在且内容正确；transcript 中 `<background-task-finished ...>` 位于 `FG_BATCH_START` 之后、成功词之前；不出现 `task_output/task_list/task_stop` |
-| E2E-CLI-016G | 自动（需 `OPENAI_API_KEY`） | `test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli` | 用户让助手观察一个几乎永不结束的后台 bash；在 EOF 处拿到 `timeout` 返回的 tail 快照后必须停止轮询，不能 busy loop | `tomcat code` + 单轮 prompt：后台 bash `printf HUNG_TIMEOUT_BOOT; sleep 60`；先用一次 `task_output(block=true)` 吃掉首个 `new_output`，再用第二次 `task_output(block=true)` 在 EOF 处命中 timeout 快照，随后禁止继续 poll / task_stop / task_list | exit 0；stdout 含 `HUNG_TIMEOUT_BOUNDED_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 中 `task_output` 次数有上界（<= 3）且至少 2 次；存在带 `HUNG_TIMEOUT_BOOT` 的 timeout 工具结果；`role=user` 不含 `waiting_for_output`；不出现 `task_stop/task_list` |
+| E2E-CLI-016C | 自动（需 `DEEPSEEK_API_KEY`） | `test_user_background_bash_autofeed_real_llm_cli` | 用户让助手启动后台 bash、先做独立工作，然后只能依赖 `<background-task-finished ...>` 自动回灌继续推进 | `tomcat code` + 单轮 prompt：`bash(run_in_background=true)` 写 `BG_DONE`，立即写 `MARKER`，随后禁止 `task_output/task_list/task_stop` 与新 bash，只能等系统 follow-up | exit 0；stderr 含 `[bg] task ... queued for next turn`；`bg_done.txt` 与 `marker.txt` 真实落盘；stdout 含 `AUTOFEED_OK` |
+| E2E-CLI-016D | 自动（需 `DEEPSEEK_API_KEY`） | `test_user_background_bash_blocking_waitslice_real_llm_cli` | 用户要求助手在后台 bash 后立即进入 `task_output(block=true)`，直到拿到真实新输出再收尾 | `tomcat code` + 单轮 prompt：后台 bash `sleep 2; echo TOKEN_WAITSLICE; printf BLOCKWAIT_DONE > file; sleep 30`，必须用 `task_output(block=true, timeout_ms=300)` + `task_stop` 完成，不准 `task_output(block=false)` | exit 0；stdout 含 `BLOCKWAIT_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 至少 1 次 `task_output(block=true, timeout_ms=300)`，并出现 `TOKEN_WAITSLICE` 与 `task_stop`；产物文件内容正确 |
+| E2E-CLI-016E | 自动（需 `DEEPSEEK_API_KEY`） | `test_user_background_bash_multiple_timeout_slices_real_llm_cli` | 用户要求助手在同一后台任务上经历至少两次 timeout slice，再继续等到一次 `new_output` | `tomcat code` + 单轮 prompt：后台 bash `sleep 8; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > file; sleep 30`，必须重复 `task_output(block=true, timeout_ms=300)` 直到看到 token，再 `task_stop` | exit 0；stdout 含 `MULTI_TIMEOUT_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 中 `task_output` 至少 3 次、timeout 结果至少 2 次，最终出现 `TOKEN_MULTI_TIMEOUT` 与 `task_stop`；产物文件内容正确 |
+| E2E-CLI-016F | 自动（需 `DEEPSEEK_API_KEY`） | `test_user_background_bash_midturn_followup_real_llm_cli` | 用户先起后台 bash，再执行一个耗时 foreground batch；只有在 foreground batch 结束后的后续请求里看见 `<background-task-finished ...>`，助手才允许继续验证结果 | `tomcat code` + 单轮 prompt：先 `bash(run_in_background=true)` 写 `BG_DONE`，再 foreground `bash` 睡眠并写 `FG_DONE`，禁止 `task_output/task_list/task_stop`；若 foreground batch 结束时仍未看到系统消息则必须回复 `MIDTURN_MISSED_FOLLOWUP` 并停止 | exit 0；stdout 含 `MIDTURN_FOLLOWUP_OK` 且不含 `MIDTURN_MISSED_FOLLOWUP`；两份文件真实存在且内容正确；transcript 中 `<background-task-finished ...>` 位于 `FG_BATCH_START` 之后、成功词之前；不出现 `task_output/task_list/task_stop` |
+| E2E-CLI-016G | 自动（需 `DEEPSEEK_API_KEY`） | `test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli` | 用户让助手观察一个几乎永不结束的后台 bash；在 EOF 处拿到 `timeout` 返回的 tail 快照后必须停止轮询，不能 busy loop | `tomcat code` + 单轮 prompt：后台 bash `printf HUNG_TIMEOUT_BOOT; sleep 60`；先用一次 `task_output(block=true)` 吃掉首个 `new_output`，再用第二次 `task_output(block=true)` 在 EOF 处命中 timeout 快照，随后禁止继续 poll / task_stop / task_list | exit 0；stdout 含 `HUNG_TIMEOUT_BOUNDED_OK`；非 TTY stderr 不含 `waiting_for_output`；transcript 中 `task_output` 次数有上界（<= 3）且至少 2 次；存在带 `HUNG_TIMEOUT_BOOT` 的 timeout 工具结果；`role=user` 不含 `waiting_for_output`；不出现 `task_stop/task_list` |
 | E2E-CLI-018 | 自动 | `path_with_intent_silent_passthrough_contract` | 用户输入「路径 + 意图」时不触发本地路径授权命令 | `tomcat code` → 输入 `<abs-path> 看下里面有什么文件` | `parse_chat_command` 返回 `NotACommand`；自动化见 `tests/path_command_e2e.rs` |
 | E2E-CLI-019 | 人工 | `manual_path_command_denied_shows_cancel_only` | 用户通过 `/path` 授权命中 deny 规则的路径时不能扩大授权 | 预置 `primitive.path_rules=[{path=<secret>, mode="deny"}]` → `tomcat code` → 输入 `/path <secret>` | 仅允许取消/不授权；不得展示永久允许、本次允许或工作区写授权选项；自动化回归见 `path_menu_with_deny_rule_hides_authorization_choices` |
 | E2E-CLI-020 | 人工 | `manual_config_set_path_rules_runtime_effective` | 用户在同一会话内通过配置工具新增 deny 规则后立即生效 | `tomcat code` → 触发 `config_set primitive.path_rules` 追加 deny → 再请求 read/write 同一路径 | 后续工具调用被 deny 拦截，无需重启；自动化回归见 `runtime_deny_rule_overrides_existing_session_grant` / `config_set_array_path_rule_appends_with_json_value` |
@@ -94,7 +94,7 @@
 
 ---
 
-## Story 3 — WasmEdge + QuickJS 插件系统（6 条）
+## Story 3 — 插件管理 CLI（6 条）
 
 > **验收**：021–025 与 §4 人工验收「插件加载/卸载、错误隔离」对齐，建议在**本机真实插件路径**下补验；026 以自动化断言为主。
 
@@ -111,17 +111,31 @@
 
 ---
 
-## Story 4 — Node.js 兼容层（Wasm E2E）（5 条）
+## Story 3b — PackageManager 统一安装（4 条）
 
-> Wasm 真实运行时 E2E 用例（`tests/wasmedge_e2e_tests.rs`、`tests/js_api_alignment_tests.rs`）。须 `--features wasmedge` 才编译/运行；默认 `./scripts/run-integration-tests.sh all` 跳过 Wasm 组（与 commit `f613708` 之后 no-wasm 默认编译路径一致），显式 Wasm 验收用 `./scripts/run-integration-tests.sh integration-wasm`。
+> 主验收入口为 `tests/cli_tests.rs`。027–030 覆盖 shell CLI 的 install / packages / uninstall 黑盒路径；真实 TTY chooser/cancel/shadow warning 与 code/claw 会话内 `/install` live refresh 观感仍需按人工清单补验。
 
-| 编号           | 验收 | 用例名                                              | 用户意图                                           | 操作序列                                                  | 必须断言                                                           |
-| ------------ | -- | ------------------------------------------------ | ---------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------- |
-| E2E-WASM-001 | 自动 | `test_wasmedge_e2e_hello_world_inline`           | 插件 JS 可执行内联脚本                                  | WasmEngine + `run_script("print('Hello World');")`    | Ok；无崩溃                                                         |
-| E2E-WASM-002 | 自动 | `test_wasmedge_e2e_hello_world_script_file`      | 插件 JS 可执行 .js 文件                               | `run_script_file(hello.js)`                           | Ok                                                             |
-| E2E-WASM-003 | 自动 | `test_wasmedge_e2e_bridge_layer`                 | 插件 JS 可通过 globalThis.pi 桥接调用全部 4 原语                      | `run_script_file(bridge_test.js)`                     | host_call 次数 ≥4（readFile/writeFile/editFile/executeBash 各 1 次） |
-| E2E-WASM-004 | 自动 | `test_wasmedge_e2e_require_path_modules_preopen` | `require('path')` 可用（WASI `./modules` preopen） | `run_script_file(require_path_test.js)`               | Ok；`path.join('a','b')` 不抛错                                    |
-| E2E-WASM-005 | 自动 | `test_wasmedge_e2e_tps_transpile_run_script_poc` | SWC 转译后 tps 示例插件可加载                         | `transpile_pi_plugin_for_quickjs` + `run_script_file` | Ok；不崩溃                                                         |
+| 编号          | 验收 | 用例名                                                | 用户意图                                            | 操作序列                                                                 | 必须断言                                                                 |
+| ----------- | -- | -------------------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| E2E-CLI-027 | 自动 | `test_user_installs_scope_package_and_lists_layered_packages` | 用户把 package 安装到当前项目，并确认三层 package 视图可见 | `tomcat install <package_dir> --scope-root <project>`（非交互默认 scope）→ `tomcat packages --scope-root <project>` | install exit 0；scope 层 `plugins/`、`skills/`、`packages/registry.json`、`plugins/registry.json` 均落盘；packages 输出含 `scope/agent/global` 三层与资源摘要 |
+| E2E-CLI-028 | 自动 | `test_user_installs_bare_plugin_to_agent_layer`     | 用户把 bare plugin 安装到 agent 私有层                  | `tomcat install <plugin_dir> --visibility agent --scope-root <project>` → `tomcat packages --visibility agent --scope-root <project>` | install exit 0；agent 层 package/plugin registry 写入成功；packages 输出含 `[barePlugin]` 与 `plugin:<id>` |
+| E2E-CLI-029 | 自动 | `test_user_installs_bare_skill_to_global_layer`     | 用户把 bare skill 安装到全局共享层                        | `tomcat install <skill_dir> --visibility global --scope-root <project>` → `tomcat packages --visibility global --scope-root <project>` | install exit 0；global 层 `skills/` 与 `packages/registry.json` 落盘；packages 输出含 `[bareSkill]` 与 `skill:<name>` |
+| E2E-CLI-030 | 自动 | `test_user_uninstalls_scope_package_and_cleans_scope_layer` | 用户卸载 scope package 后，资源与账本被精准清理               | 先 `tomcat install <package_dir> --visibility scope --scope-root <project>` → 再 `tomcat uninstall <package_name> --visibility scope --scope-root <project>` → `tomcat packages --visibility scope --scope-root <project>` | uninstall exit 0；scope 层 plugin/skill 目录消失；`packages/registry.json` 与 `plugins/registry.json` 清空；packages 回到 `(none)` |
+
+
+---
+
+## Story 4 — rquickjs 插件运行时与兼容层（5 条）
+
+> 主验收入口为 `tests/quickjs_e2e_tests.rs` 与 `tests/long_lived_vm_tests.rs`；对应架构实施点见 [plugin-system-overview_new.md](../../../../architecture/plugin-system-overview_new.md) 中 P2/P3/P4/P10。事件语义补充见 [plugin-system/events.md](../../../../architecture/plugin-system/events.md)。
+
+| 编号          | 验收 | 用例名                                  | 用户意图                                   | 操作序列                                                                 | 必须断言                                                                 |
+| ----------- | -- | ------------------------------------ | -------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| E2E-QJS-001 | 自动 | `run_script_console`                 | 插件脚本可在 rquickjs 中使用 `console` / microtask / timer | `PluginEngine.create_instance()` → `run_script()` 执行 `console.log/error`、`Promise.resolve()`、`setTimeout()` | host binding 收到 `log/error/microtask/timer` 四类日志；脚本无崩溃 |
+| E2E-QJS-002 | 自动 | `pi_readfile_llm`                    | 插件通过 `pi.readFile()` 与 `pi.complete()` 走宿主 bridge | `start_session_vm` → `dispatch_session_event(session_start)`，脚本内 `await pi.readFile()` + `await pi.complete()` | VM 保持 `Running/Idle`；`readFile` 返回 mock 内容；LLM 返回 mock `"hi"` |
+| E2E-QJS-003 | 自动 | `shims_and_crypto_work_in_session_vm` | Tier-A 垫片与同步 crypto 在 session VM 内可用 | `start_session_vm` → `dispatch_session_event(session_start)`，脚本验证 `path/util/events/Buffer/crypto` | `sha256/hmac/randomBytes` 正常；VM 健康；`end_session` 后 RuntimeManager 为空 |
+| E2E-QJS-004 | 自动 | `runaway_plugin_interrupted`         | 插件跑飞后被 interrupt budget / timeout 掐断并可重建 | `start_session_vm` → `dispatch_session_event(loop)` 触发死循环 → 再次 `start_session_vm` | 首个 VM 进入 `Error`；再次启动返回新 handle 且可恢复 `Running/Idle` |
+| E2E-QJS-005 | 自动 | `panicking_plugin_isolated`          | 一个插件抛错后不连坐同 session 下其他插件         | 同 session 启动 crashy + healthy 两个插件 → 仅向 crashy 分发异常事件        | crashy 保持 `Running/Idle`；healthy 保持 `Running`；`end_session` 后 RuntimeManager 清空 |
 
 
 ---
@@ -129,29 +143,30 @@
 ## Story 5 — 宿主工具注册（2 条）
 
 
-| 编号           | 验收 | 用例名                                                 | 用户意图                                       | 操作序列                                               | 必须断言                                         |
-| ------------ | -- | --------------------------------------------------- | ------------------------------------------ | -------------------------------------------------- | -------------------------------------------- |
-| E2E-WASM-011 | 自动 | `test_wasmedge_e2e_tool_registration`               | 插件 JS 通过 registerTool 注册工具后宿主可感知 host_call | `run_script_file(tool_register_test.js)`           | host_call 中 method=registerTool 至少触发 1 次；无崩溃 |
-| E2E-CLI-031  | 人工 | `test_user_tool_registered_by_plugin_can_be_called` | 插件注册的工具可被对话模式调用（需 OPENAI_API_KEY）        | load_plugin + `tomcat code` + 触发工具的 prompt，timeout 60s | stdout 含工具执行结果或调用确认                          |
+| 编号          | 验收 | 用例名                                                 | 用户意图                                       | 操作序列                                               | 必须断言                                         |
+| ----------- | -- | --------------------------------------------------- | ------------------------------------------ | -------------------------------------------------- | -------------------------------------------- |
+| E2E-QJS-011 | 自动 | `registered_tool_surfaces_to_tool_registry`         | 插件通过 `registerTool` 注册工具后宿主 registry 可见      | `load_plugin` → 读取 `ToolRegistry`                 | 注册成功；工具元数据可见；无崩溃 |
+| E2E-CLI-031 | 人工 | `test_user_tool_registered_by_plugin_can_be_called` | 插件注册的工具可被对话模式调用（需 OPENAI_API_KEY）        | load_plugin + `tomcat code` + 触发工具的 prompt，timeout 60s | stdout 含工具执行结果或调用确认                          |
 
 
 ---
 
-## Story 6 — 事件系统（Wasm E2E）（3 条）
+## Story 6 — 事件系统（4 条）
 
 
-| 编号           | 验收 | 用例名                                               | 用户意图                                           | 操作序列                                                                     | 必须断言                                                            |
-| ------------ | -- | ------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------- |
-| E2E-WASM-021 | 自动 | `test_wasmedge_e2e_event_dispatch`                | 宿主分发事件后插件 JS handler 被触发，ctx 全部方法均触发 host_call | `dispatch_event(event_dispatch_test.js, "test_event", ...)`              | host_call 次数 ≥8                                                 |
-| E2E-WASM-022 | 自动 | `test_wasmedge_e2e_event_once_fires_exactly_once` | 事件 once handler 可通过 dispatch_event 触发          | `dispatch_event(event_once_test.js, "__e2e_once_event", ...)` 一次         | log host_call 计数 ≥1；注：MVP 无状态执行模型下「恰好 1 次」保证需 Story 8b（P1）实现后补充 |
-| E2E-WASM-023 | 自动 | `test_wasmedge_e2e_event_on_multiple_handlers`    | 多个 on 监听同一事件均被触发                               | `run_script_file(event_multi_handler_test.js)`（pi.on 注册 h1/h2 + emit 一次） | log host_call 计数 ≥2（h1、h2 各触发一次）                                |
+| 编号          | 验收 | 用例名                                               | 用户意图                                           | 操作序列                                                                     | 必须断言                                                            |
+| ----------- | -- | ------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| E2E-QJS-021 | 自动 | `dispatch_events_once_returns_listener_id`        | 插件注册 `once` 监听后，宿主为其分配监听标识                     | `dispatch("events", "once", ...)`                                        | 返回 listener id；协议字段完整 |
+| E2E-QJS-022 | 自动 | `dispatch_events_off_removes_listener`            | 插件取消监听后，宿主侧监听记录被移除                              | `dispatch("events", "off", ...)`                                         | 返回成功；监听条目被删除 |
+| E2E-QJS-023 | 自动 | `shims_and_crypto_work_in_session_vm`             | session VM 中事件 shim 可用并与其他基础 shim 共存                | `start_session_vm` → `dispatch_session_event(session_start)`             | `events.EventEmitter` 可正常工作；VM 保持健康 |
+| E2E-QJS-024 | 自动 | `dispatch_event_isolates_non_fatal_handler_errors` | 同一事件的某个 handler 抛错后，后续 handler 仍继续执行            | `PluginVmInstance.run_script()` 注册两个 `pi.on("demo")` handler，第一个抛错、第二个写标记，再触发 `__pi_dispatch_event(...)` | 后续 handler 仍执行；非 fatal 错误只影响当前 handler，不得中断同事件剩余 handler |
 
 
 ---
 
 ## Story 7 — LLM 统一接入（2 条）
 
-> 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`。
+> 需要 `DEEPSEEK_API_KEY`；无 key 时必须 `panic!`。
 > **验收**：与 §4 人工验收「流式输出、对话模式观感」对齐，建议**人工补验**终端流式表现。
 
 
@@ -163,6 +178,17 @@
 | E2E-CLI-044 | 自动 | `llm_error_renders_red_status_line` | Responses `response.failed` / 顶层 `error` 被映射为结构化 LLM 错误并在 CLI 明确显示 | 构造 `CliTurnRenderer` + `llm_error` payload，模拟正文后收到错误终局 | stderr 含红色 `[llm] <error message>`；不复用 `ExtensionError`；自动化见 `src/api/chat/tests/cli_turn_renderer_test.rs` + `src/core/agent_loop/tests/stream_handler_test.rs` |
 | E2E-CLI-045 | 自动 | `llm_notice_renders_dim_non_error_hint` | Responses `incomplete/max_output_tokens` 走非错误轻提示而非红字报错 | 构造 `CliTurnRenderer` + `llm_notice{finishReason=max_output_tokens}` payload | stderr 含灰色轻提示、包含 `max_output_tokens`，且**不**出现红色错误样式；自动化见 `src/api/chat/tests/cli_turn_renderer_test.rs` + `src/core/agent_loop/tests/stream_handler_test.rs` |
 
+
+---
+
+## Story 8a — 异步 Hostcall 与 JS API 对齐（2 条）
+
+> 主验收入口为 `src/ext/tests/instance_bridge_test.rs` 与 `tests/quickjs_e2e_tests.rs` 中的 async bridge 相关用例。
+
+| 编号          | 验收 | 用例名                                        | 用户意图                                           | 操作序列                                                                 | 必须断言                                                                 |
+| ----------- | -- | ------------------------------------------ | ---------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| E2E-QJS-041 | 自动 | `pi_readfile_llm`                          | 插件通过 `async/await` 调宿主 API 时，pending→poll→ready 链路可正常 resolve | `start_session_vm` → `dispatch_session_event(session_start)`，脚本内 `await pi.readFile()` / `await pi.complete()` | Promise resolve 成功；返回值契约与 ExtensionAPI 一致；VM 保持 `Running/Idle` |
+| E2E-QJS-042 | 自动 | `async_poll_refreshes_budget_before_each_host_poll` | 长轮询 async Hostcall 在 pending→poll→ready 期间不会因 interrupt budget 耗尽被误杀 | `PluginVmInstance.run_script()` mock 一次 pending + 一次 ready，并覆盖 `__pi_budget_reset` 计数 | 每次 timer callback / host poll 前都会刷新预算；最终请求正常 resolve，且 poll fixture 至少走过一次 pending |
 
 ---
 
@@ -198,39 +224,32 @@
 
 ---
 
-## Story 8b — 长生命周期 VM 与有状态插件（TASK-15 + TASK-05b/c Tier1–2，8 条）
+## Story 8b — 长生命周期 VM 与有状态插件（5 条）
 
-> Wasm 真实运行时 E2E 用例（`tests/wasmedge_e2e_tests.rs`）。须安装 WasmEdge 且以 `--features wasmedge` 编译；默认 `./scripts/run-integration-tests.sh all` 跳过本组（commit `f613708` 收窄），显式验收走 `./scripts/run-integration-tests.sh integration-wasm`。
-> **验收**：031–035 以 `wasmedge_e2e_tests` 自动化为准；036–038 与插件兼容矩阵相关，建议**人工补验**本机 WasmEdge 与真实扩展抽样。
+> 主验收入口为 `tests/quickjs_e2e_tests.rs`、`tests/long_lived_vm_tests.rs` 与 `src/ext/plugin/tests/suite_test.rs`。
+> **验收**：以自动化为主；若涉及真实插件样例，可再按需做人工 spot-check。
 
 
-| 编号           | 验收 | 用例名                                                       | 用户意图                 | 操作序列                                                                                                                                       | 必须断言                                                                        |
-| ------------ | -- | --------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| E2E-WASM-031 | 自动 | `test_wasmedge_e2e_vm_actor_state_persists_across_events` | 插件全局变量跨事件保持          | start_session_vm → dispatch_session_event x2 → 检查 host_call 中的累加值                                                                          | 第二次事件的 host_call 反映累加状态；无崩溃                                                 |
-| E2E-WASM-032 | 自动 | `test_wasmedge_e2e_handler_stays_registered`              | 已注册 handler 多次事件持续有效 | start_session_vm → dispatch_session_event("evt") x2                                                                                        | 每次 dispatch 均触发 handler（host_call 计数递增）                                     |
-| E2E-WASM-033 | 自动 | `test_wasmedge_e2e_set_interval_runs_during_session`      | 会话期间周期性日志（定时器语义）稳定触发 | start_session_vm；fixture 用 `setTimeout` 链模拟周期（wasmedge_quickjs 对全局 `setInterval` 不稳定）；sleep ≥1.2s；断言 `VmActorState::Running`；`end_session` | 会话中 VM 仍为 Running；`pi.log` 侧可见多次 tick；`end_session` 后 RuntimeManager 为空、无悬挂 |
-| E2E-WASM-034 | 自动 | `test_wasmedge_e2e_multi_session_isolation`               | 多会话上下文隔离             | start_session_vm(s1) + start_session_vm(s2) → 分别 dispatch → 验证各自 host_call                                                                 | s1 与 s2 的 host_call 各自独立、状态不串会话                                             |
-| E2E-WASM-035 | 自动 | `test_wasmedge_e2e_session_end_no_hanging_threads`        | 关闭流程无悬挂线程            | start_session_vm → end_session → 检查 VmActorHandle 状态                                                                                       | end_session 后 RuntimeManager 为空；handle state 为 Stopped/Error                |
-| E2E-WASM-036 | 人工 | `test_wasmedge_e2e_tps_tier1_agent_end_notify`            | tps Tier1：TS 长生命周期 + notify              | 临时插件 `main.ts`（fixture tps 源码）→ `start_session_vm` → `dispatch_session_event(agent_start)` → sleep → `dispatch_session_event(agent_end)`（含 assistant usage） | `with_ui_notify_counter` ≥1；`end_session` 后 RuntimeManager 为空                         |
-| E2E-WASM-037 | 人工 | `test_wasmedge_e2e_tier2_compat_script`                   | TASK-05c Tier2：`registerCommand`+`__pi_invoke_command`、`registerTool`（schema 包装）、`ctx.ui` 等价 host、`executeBash`+args | `run_script_file(tier2_compat_test.js)` + stub host | 相关 host_call 次数 ≥7；脚本打印 done、无抛错 |
-| E2E-WASM-038 | 人工 | `test_wasmedge_e2e_tier2_transpiled_export_default_plugin` | TASK-05c：社区风格 `export default function(pi)` TS 经 SWC 加载 + 命令注册与同步 invoke | 临时 `tier2_snippet.ts` → `run_script_file` + stub host | `registerCommand` host_call ≥1；脚本无抛错 |
-| E2E-WASM-039 | 自动 | `test_wasmedge_e2e_tier3_diff_custom_ui` | TASK-05d Tier3：diff.ts 核心路径——registerCommand("diff") → exec("git") → ctx.ui.custom 渲染 Container/SelectList/Text | `run_script_file(tier3_diff_test.js)` + stub host（git status 返回固定 porcelain） | `executeBash` ≥1；`uiCustom` ≥1；脚本打印 done、无抛错 |
-| E2E-WASM-040 | 自动 | `test_wasmedge_e2e_tier4_files_session_branch` | TASK-05d Tier4：files.ts 核心路径——registerCommand("files") → ctx.sessionManager.getBranch() → 空 session 降级 uiNotify | `run_script_file(tier4_files_test.js)` + stub host（getBranch 返回空数组） | `getBranch` ≥1；`uiNotify` ≥1；脚本打印 done、无抛错 |
-| E2E-WASM-041 | 自动 | `test_wasmedge_e2e_tier3_diff_real_ts` | diff.ts 真实 TS 源码——长生命周期 VM + command_invoke → async handler 调用 pi.exec("git") → commandCompleted | `start_session_vm` + SWC 转译 diff.ts + `dispatch_session_event(command_invoke)` + mock PrimitiveExecutor | `commandCompleted` ≥1；handler 异步完成、无挂起 |
-| E2E-WASM-042 | 自动 | `test_wasmedge_e2e_tier4_files_real_ts` | files.ts 真实 TS 源码——长生命周期 VM + command_invoke → async handler 调用 ctx.sessionManager.getBranch() → commandCompleted | `start_session_vm` + SWC 转译 files.ts + `dispatch_session_event(command_invoke)` + mock SessionManager | `commandCompleted` ≥1；handler 异步完成、无挂起 |
+| 编号          | 验收 | 用例名                                                       | 用户意图                 | 操作序列                                                                                                                                       | 必须断言                                                                        |
+| ----------- | -- | --------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| E2E-QJS-031 | 自动 | `test_multi_session_isolation_in_runtime_manager`         | 多会话上下文隔离             | 为两个不同 session 插入同一 plugin id 的 runtime handle                                                                                             | 两个 session 状态互不影响                                             |
+| E2E-QJS-032 | 自动 | `test_session_cleanup_removes_all_handles_for_session`    | 会话结束后本 session 的 VM 全量清理 | 插入多个 runtime handle → `remove_session(sess-1)`                                                                                              | 仅目标 session 被清理；其余 session 保留 |
+| E2E-QJS-033 | 自动 | `runaway_plugin_interrupted`                              | 跑飞插件被中断预算/超时掐断后可恢复     | `start_session_vm` → 触发死循环事件 → 再次 `start_session_vm`                                                                                     | 首个 VM 进入 `Error`；后续能重建恢复 |
+| E2E-QJS-034 | 自动 | `panicking_plugin_isolated`                               | 单个插件抛错不连坐其他插件        | 同 session 启动 crashy + healthy 插件 → 仅向 crashy 分发异常事件                                                                                       | crashy 保持 `Running/Idle`；healthy 保持运行 |
+| E2E-QJS-035 | 自动 | `start_session_vm_opportunistically_reaps_expired_runtime` | idle VM 按机会式语义回收     | 配置较短 `idle_ttl_ms` → 等待过期 → 再次 `start_session_vm`                                                                                           | 过期 runtime 在新活动进入时被顺手回收 |
 
 
 ---
 
 ## Story 9 — AgentLoop 核心结构（TASK-14，3 条 + TASK-17 上下文管理 3 条）
 
-> 需要 `OPENAI_API_KEY`；无 key 时必须 `panic!`（符合 INTEGRATION_TEST_SPEC §5.2）。
+> 需要 `DEEPSEEK_API_KEY`；无 key 时必须 `panic!`（符合 INTEGRATION_TEST_SPEC §5.2）。
 > **验收**：与 §4 人工验收「对话模式、多轮上下文、会话切换」对齐，建议**人工补验** AgentLoop 与终端交互体验。
 
 
 | 编号          | 验收 | 用例名                                               | 用户意图                                         | 操作序列                                                                                      | 必须断言                                         |
 | ----------- | -- | ------------------------------------------------- | -------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------- |
-| E2E-CLI-081 | 人工 | `test_user_chat_non_interactive_with_prompt_flag` | 用户启动 `tomcat code` 并输入单句提问，AgentLoop 执行并输出 AI 回复 | `tomcat init` → `tomcat code`（stdin: `"Reply with exactly: pong\n"`，timeout 60s，含 OPENAI_API_KEY） | exit 0；stdout 非空（AI 已通过 AgentLoop::run() 回复） |
+| E2E-CLI-081 | 人工 | `test_user_chat_non_interactive_with_prompt_flag` | 用户启动 `tomcat code` 并输入单句提问，AgentLoop 执行并输出 AI 回复 | `tomcat init` → `tomcat code`（stdin: `"Reply with exactly: pong\n"`，timeout 60s，含 DEEPSEEK_API_KEY） | exit 0；stdout 非空（AI 已通过 AgentLoop::run() 回复） |
 | E2E-CLI-082 | 人工 | `test_user_chat_resumes_last_session`             | 用户用 `--resume` 恢复上次会话，历史消息从 JSONL 加载         | `tomcat init` → `tomcat code`（stdin 第一轮）→ `tomcat code --resume`（stdin 第二轮，timeout 60s）               | exit 0；第二轮 stdout 非空；进程正常退出                  |
 | E2E-CLI-089 | 人工 | `test_user_chat_model_switch_persists_across_resume` | 用户在对话内切换模型，并在重启/恢复后继续沿用该会话模型 | `tomcat init` → `tomcat code` 输入 `/model list`、`/model use deepseek-reasoner`、`/model current` → 退出 → `tomcat code --resume` → 再次输入 `/model current` | `/model current` 两次都显示 `deepseek-reasoner`；resume 后 prompt / banner 仍携带当前模型；`sessions.json` 中 `model_override` 已持久化 |
 | E2E-CLI-083 | 人工 | `test_user_chat_multi_turn_context_retained`      | 用户进行两轮提问，第二轮 Agent 可引用第一轮答案（多轮上下文）           | `tomcat code`（stdin: 两行问答，第二问引用第一问答案，timeout 90s）                                             | exit 0；stdout 包含第二问回复且非空                     |

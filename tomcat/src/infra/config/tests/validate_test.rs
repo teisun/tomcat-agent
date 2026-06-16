@@ -24,10 +24,10 @@ fn validate_config_rejects_invalid_session_default_mode() {
 }
 
 #[test]
-fn validate_config_rejects_invalid_web_search_backend() {
+fn validate_config_accepts_custom_web_search_plugin_backend() {
     let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "bing".to_string();
-    assert!(validate_config(&cfg).is_err());
+    cfg.tools.web_search.backend = "mimo".to_string();
+    assert!(validate_config(&cfg).is_ok());
 }
 
 #[test]

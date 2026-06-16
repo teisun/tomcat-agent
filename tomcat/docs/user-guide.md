@@ -15,7 +15,7 @@
 - [6. 对话模式](#6-对话模式)
 - [7. 审计日志](#7-审计日志)
 - [8. 附录](#8-附录)
-- [9. Wasm / WasmEdge 与插件（建设中）](#9-wasm--wasmedge-与插件建设中)
+- [9. rquickjs 插件运行时](#9-rquickjs-插件运行时)
 
 ---
 
@@ -127,7 +127,7 @@ tomcat 默认将所有数据存放在 `~/.tomcat/`。可在 `tomcat.config.toml`
 │   ├── .versions.json             # 内嵌资源 SHA-256 版本记录
 │   ├── .lock                      # 并发写入保护锁
 │   └── modules/                   # 内嵌资源自动释放（预留）
-├── plugins/                       # 插件目录（Wasm 能力建设中，见第 9 节）
+├── plugins/                       # 插件目录（见第 9 节）
 └── memory/                        # 向量检索索引
 ```
 
@@ -223,7 +223,7 @@ doctor 逐项检查环境并给出可执行的修复建议：
 | .env 权限 | `✓ .env 权限: 0600` | `⚠ .env 权限: 0644（建议 0600）` |
 | API Key | `✓ OPENAI_API_KEY 已设置` | `⚠ OPENAI_API_KEY 未设置` |
 
-每个失败/警告项都会给出 `→ 运行 tomcat init 或...` 修复建议。Wasm / 插件相关检查见 [第 9 节](#9-wasm--wasmedge-与插件建设中)（能力建设中）。
+每个失败/警告项都会给出 `→ 运行 tomcat init 或...` 修复建议。插件运行时相关检查见 [第 9 节](#9-rquickjs-插件运行时)。
 
 ---
 
@@ -443,6 +443,60 @@ tomcat workspace remove /path/to/project
 # 已移除工作区: /path/to/project
 ```
 
+### PackageManager 安装
+
+从 T2-P1-017 开始，plugin / skill 的**正式安装入口**统一为 `PackageManager`。它只做本地 source 的静态校验、三层落盘和账本维护；真正的 runtime 发现仍然复用现有的 `plugins/` / `skills/` 三层扫描。
+
+支持的 source 形态：
+
+- `package.json` 顶层带 `tomcat` 块的 package 目录。
+- bare plugin：带 `plugin.json` 的目录。
+- bare skill：带 `SKILL.md` 的目录。
+
+三层可见范围：
+
+- `scope`：当前项目，落到 `<scope_root>/.tomcat/{plugins,skills,packages}`。
+- `agent`：当前 agent，落到 `~/.tomcat/agents/<id>/{plugins,skills,packages}`。
+- `global`：全局共享层，落到 `~/.tomcat/{plugins,skills,packages}`。
+
+shell CLI：
+
+```bash
+# 安装到当前项目（非交互 shell 缺省即 scope；交互式 TTY 未传时会弹 chooser）
+tomcat install ./my-package --visibility scope
+
+# 安装到 agent / global
+tomcat install ./my-plugin --visibility agent
+tomcat install ./my-skill --visibility global
+
+# 显式指定 scope 根
+tomcat install ./my-package --visibility scope --scope-root /path/to/project
+
+# 同层已有同名资源时允许覆盖
+tomcat install ./my-package --visibility scope --force
+
+# 查看已安装 package 账本（缺省列出当前 scope + agent + global）
+tomcat packages
+tomcat packages --visibility agent
+
+# 按 package 名称卸载某层资源与账本
+tomcat uninstall my-package --visibility scope
+```
+
+对话内安装：
+
+```text
+/install ./my-package
+/install ./my-plugin agent
+/install ./my-skill current-project
+```
+
+说明：
+
+- `/install` 里的 `current-project` 只是用户标签，内部映射到 `scope`。
+- code/claw 会话里 `/install` 成功后，当前会话会立即刷新 `SkillSet` 与 plugin catalog/static tool 清单，因此新装的 skill / 静态 plugin 能力无需重进会话即可可见。
+- 这个 live refresh **不会**在安装路径执行插件代码，也**不会**热替换已经加载的 plugin 实例；若当前会话里某个 plugin 已在跑，它会继续沿用旧实例，直到后续正常 runtime 路径重新激活。
+
 ---
 
 ## 6. 对话模式
@@ -610,7 +664,7 @@ tomcat code
 
 ## 7. 审计日志
 
-tomcat 将 4 原语操作、工具调用等记录到**独立审计日志**，便于事后排查。审计日志仅追加、不可篡改，与业务日志分离。（插件相关审计类型见 [第 9 节](#9-wasm--wasmedge-与插件建设中)，能力建设中。）
+tomcat 将 4 原语操作、工具调用等记录到**独立审计日志**，便于事后排查。审计日志仅追加、不可篡改，与业务日志分离。（插件相关审计类型见 [第 9 节](#9-rquickjs-插件运行时)。）
 
 **说明**：当前审计日志为明文存储；加密存储为后续 TODO。
 
@@ -753,30 +807,26 @@ tomcat code
 
 ---
 
-## 9. Wasm / WasmEdge 与插件（建设中）
+## 9. rquickjs 插件运行时
 
-> **状态**：Wasm 沙箱插件与 WasmEdge 运行时集成**尚未完成产品化建设**。默认 `cargo build --release` 为 no-wasm 构建，`tomcat plugin *` 与 `doctor` 中的 WasmEdge / QuickJS 检查仅在与 `--features wasmedge` 或 `standalone` 编译时才有意义。下文为规划中的操作预览，供后续验收参考。
+> **状态**：插件系统当前走**进程内 `rquickjs`**，不再依赖 WasmEdge、QuickJS wasm 文件或额外 C 运行时安装。`tomcat doctor` 只检查当前构建与 `rquickjs` 运行时是否可用。
 
-### 构建与依赖（预览）
+### 运行时特性
 
-| 依赖 | 版本要求 | 用途 |
-|------|----------|------|
-| WasmEdge C 库 | 0.13.5 | `--features wasmedge`（`scripts/install-wasmedge.sh`） |
-| CMake + C 编译器 | 任意 | `--features standalone`（构建时自动链接 WasmEdge） |
-
-```bash
-cd tomcat
-# cargo build --release --features wasmedge
-# cargo build --release --features standalone
-bash scripts/install-wasmedge.sh -y
-source $HOME/.wasmedge/env
-```
-
-`tomcat doctor` 在启用 Wasm feature 时会检查 QuickJS wasm（`~/.tomcat/assets/wasm/wasmedge_quickjs.wasm`）与 WasmEdge 运行时；默认构建会提示「当前构建未启用 Wasm/插件能力」，属预期。
-
-### 插件 CLI（预览）
-
-tomcat 规划支持 Wasm 沙箱插件（`plugin.json` + `main.js`）。注册信息写入 `{work_dir}/plugins/registry.json`；进程内需 `plugin load` 载入 VM。
+- 入口仍是 `plugin.json` + `main.js` / `main.ts`。
+- manifest 里有两条注册面：`tools[]` 给 LLM，`functions[]` 给宿主；两者都允许为空，但已声明的 `functions[]` 条目必须同时提供非空 `point` / `function`。
+- 敏感能力统一走 `pi.*` hostcall，例如 `pi.readFile()`、`pi.writeFile()`、`pi.editFile()`、`pi.exec()`。
+- `node:fs`、`node:child_process`、`node:os` 不会直接暴露给插件；会返回明确的 fail-closed 错误。
+- 当前默认提供的轻量能力包括：
+  - `path`
+  - `util.format`
+  - `events.EventEmitter`
+  - `Buffer`
+  - `crypto`（含 `hash` / `hmac` / `randomBytes` / `randomUUID` / `aes-gcm` / `ed25519`）
+  - `@sinclair/typebox`
+  - `ms`
+- 可用环境变量：
+  - `PI_PLUGIN_DISABLE=1|true|yes|on`：整套插件运行时入口短路。
 
 **最小插件示例**
 
@@ -791,6 +841,18 @@ tomcat 规划支持 Wasm 沙箱插件（`plugin.json` + `main.js`）。注册信
   "author": "me",
   "main": "main.js",
   "requiredPermissions": [],
+  "tools": [
+    {
+      "name": "hello_world",
+      "description": "返回一条问候语",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ],
+  "events": ["session_start"],
+  "activation": "lazy",
   "requiredApiVersion": "1.0",
   "tags": []
 }
@@ -799,8 +861,62 @@ tomcat 规划支持 Wasm 沙箱插件（`plugin.json` + `main.js`）。注册信
 `main.js`：
 
 ```js
+pi.on("session_start", function () {
+  pi.log("my-plugin: session_start");
+});
+
 pi.log("my-plugin: 已加载");
 ```
+
+说明：
+
+- 敏感能力一律走 `pi.*`，例如读写文件用 `pi.readFile()` / `pi.writeFile()`，执行命令用 `pi.exec()`。
+- `tools[]` 是给 LLM 的静态工具契约；`functions[]` 是给宿主自己的静态函数契约。宿主函数不会进入 `ToolRegistry`，也不会出现在喂给 LLM 的工具清单里。
+- `functions[]` 的 `point` 是宿主扩展点 ID，例如 `web_search.backend`、`test.echo`。宿主按 `point` 枚举候选函数，再回 VM 调用 `function` 字段对应的 JS 入口名。
+- `pi.registerFunction(name, handler)` 只负责把 JS 实现绑定到当前 VM；宿主能否“看见”这条能力，仍然只取决于 manifest 里的 `functions[]`。
+- `node:fs`、`node:child_process` 等 Node 内置模块不会直接暴露给插件；当前只保留少量轻量能力与 fail-closed alias。
+- 加载期 `requiredPermissions` 本期默认放行，但真正敏感的文件/命令/会话能力仍由 `pi.*` 路由统一鉴权与审计。
+
+**宿主函数最小示例**
+
+`plugin.json`：
+
+```json
+{
+  "id": "my-host-function-plugin",
+  "name": "My Host Function Plugin",
+  "version": "0.1.0",
+  "description": "给宿主提供一个 echo 扩展点",
+  "author": "me",
+  "main": "main.js",
+  "requiredPermissions": [],
+  "requiredApiVersion": "1.0",
+  "tags": [],
+  "tools": [],
+  "functions": [
+    {
+      "point": "test.echo",
+      "function": "echoHost"
+    }
+  ]
+}
+```
+
+`main.js`：
+
+```js
+pi.registerFunction("echoHost", function (params) {
+  return {
+    echoed: params && params.text ? params.text : null
+  };
+});
+```
+
+说明：
+
+- `functions[]` 只报“我提供哪个宿主扩展点、回 VM 时该调哪个 JS 函数名”，不要把插件内部默认参数、排序或厂商细节上浮到宿主。
+- 当前 host-facing function 的发现 / 安装根固定为宿主根 `~/.tomcat/{plugins,packages}`；不复用 `project > agent > global` 三层 overlay。
+- 一个插件可以同时有 `tools[]`、`functions[]`、`events[]`，也可以只有其中一类。
 
 ```bash
 tomcat plugin load ~/tomcat-plugins/my-plugin
@@ -810,5 +926,7 @@ tomcat plugin disable my-plugin
 tomcat plugin enable my-plugin
 tomcat plugin unload my-plugin
 ```
+
+`tomcat plugin load` 仍是**运行态加载入口**，会执行一次短生命周期初始化校验，并把登记信息写入全局 `{work_dir}/plugins/registry.json`。而 `tomcat install` / `/install` 是**安装管理入口**：它会按 `scope|agent|global` 三层分别写对应层的 `plugins/registry.json` 与 `packages/registry.json`，但不会在安装路径执行插件代码。真正的长生命周期 session VM 仍只会在会话里首次用到该插件时按需创建。
 
 实现细节见 [src/ext/README.md](../src/ext/README.md)。

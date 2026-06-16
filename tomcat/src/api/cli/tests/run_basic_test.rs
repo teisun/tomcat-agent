@@ -44,6 +44,20 @@ fn run_init_writes_openai_responses_as_default_provider() {
 
 #[test]
 #[serial(env_lock)]
+fn run_init_installs_builtin_web_search_backends_plugin() {
+    with_temp_home(|| {
+        run_init().expect("init should succeed");
+
+        let plugins_dir = crate::resolve_plugins_dir(&AppConfig::default()).expect("plugins dir");
+        let plugin_dir = plugins_dir.join("web-search-backends");
+        assert!(plugin_dir.join("plugin.json").exists());
+        assert!(plugin_dir.join("main.js").exists());
+        assert!(plugin_dir.join("README.md").exists());
+    });
+}
+
+#[test]
+#[serial(env_lock)]
 fn run_init_resets_sessions_store_to_new_shape() {
     with_temp_home(|| {
         let sessions_dir =
@@ -214,6 +228,26 @@ fn run_config_edit_returns_ok() {
 fn run_doctor_is_always_ok() {
     let r = run_doctor();
     assert!(r.is_ok());
+}
+
+#[test]
+fn doctor_plugin_runtime_lines_report_success_exactly() {
+    let lines = crate::api::cli::init::doctor_plugin_runtime_lines(Ok(()));
+    assert_eq!(lines, vec!["✓ rquickjs 运行时：可用".to_string()]);
+}
+
+#[test]
+fn doctor_plugin_runtime_lines_report_failure_and_hint() {
+    let lines = crate::api::cli::init::doctor_plugin_runtime_lines(Err(AppError::Plugin(
+        "boom".to_string(),
+    )));
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], "✗ rquickjs 运行时：初始化失败 (插件错误: boom)");
+    assert!(
+        lines[1].contains("重新运行 tomcat init"),
+        "failure hint should guide the user toward recovery: {}",
+        lines[1]
+    );
 }
 
 #[test]

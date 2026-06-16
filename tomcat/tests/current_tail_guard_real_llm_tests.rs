@@ -28,35 +28,28 @@ use tomcat::{
     SessionManager,
 };
 
-const COMPACTION_MODEL: &str = "gpt-5.2";
+const COMPACTION_MODEL: &str = "deepseek-v4-pro";
 const SESSION_KEY: &str = "keepalive-real-llm";
 const SESSION_ID: &str = "keepalive-real-llm-session";
 const LLM_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn require_api_key() {
-    common::setup_logging();
-    common::load_openai_test_env();
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        panic!(
-            "current_tail_guard_real_llm_tests 必须设置 OPENAI_API_KEY（环境变量或 tomcat/.env）"
-        );
-    }
+    let _ = common::require_deepseek_api_key("current_tail_guard_real_llm_tests");
 }
 
 fn default_model() -> String {
-    std::env::var("TOMCAT_E2E_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string())
+    common::deepseek_test_model()
 }
 
 fn real_llm_config() -> LlmConfig {
-    LlmConfig {
-        provider: "openai-responses".to_string(),
-        default_model: default_model(),
-        ..LlmConfig::default()
-    }
+    let mut cfg = LlmConfig::default();
+    common::apply_deepseek_llm_config(&mut cfg);
+    cfg
 }
 
 fn real_llm() -> Arc<dyn tomcat::LlmProvider> {
-    resolve_llm(&real_llm_config()).expect("resolve_llm 失败：请检查 OPENAI_API_KEY / OpenAI 配置")
+    resolve_llm(&real_llm_config())
+        .expect("resolve_llm 失败：请检查 DEEPSEEK_API_KEY / DeepSeek 配置")
 }
 
 struct HomeGuard {

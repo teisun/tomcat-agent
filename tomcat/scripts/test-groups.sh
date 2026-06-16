@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 集成测试二进制分类唯一来源。
-# 默认进入串行组；确认无进程级全局状态、真实 Wasm 运行时或重子进程依赖后再移入并发组。
+# 默认进入串行组；确认无进程级全局状态或重子进程依赖后再移入并发组。
 
 TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   audit_tests
@@ -34,9 +34,8 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
   checkpoint_cli_e2e
   openai_files_integration_tests
   resume_hydration_cli_e2e
-  wasmedge_e2e_tests
+  quickjs_e2e_tests
   long_lived_vm_tests
-  js_api_alignment_tests
   hostcall_tests
   primitives_tools_tests
   tool_catalog_doc
@@ -55,7 +54,3 @@ TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
   reasoning_continuity_real_llm_tests
 )
 
-TOMCAT_WASMEDGE_TESTS=(
-  wasmedge_e2e_tests
-  js_api_alignment_tests
-)

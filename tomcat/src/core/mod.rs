@@ -7,6 +7,7 @@ pub mod agent_registry;
 pub mod checkpoint;
 pub mod compaction;
 pub mod llm;
+pub mod package;
 pub mod permission;
 pub mod plan_runtime;
 pub mod prompts;
@@ -29,6 +30,15 @@ pub use llm::{
     ChatResponse, ChatResponseChoice, Credential, DefaultLlmResolver, LlmProvider, LlmResolver,
     LlmScene, ModelCatalog, ModelEntry, ResolvedCall, SessionTokenUsage, StreamEvent,
     FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+};
+pub use package::{
+    canonical_scope_root, load_package_registry, load_plugin_registry, resolve_layer_paths,
+    resolve_runtime_layer_paths, save_package_registry, save_plugin_registry,
+    DetectedPackageSource, DetectedPackageSourceKind, InstallOutcome, LayerPaths,
+    PackageLayerListing, PackageManager, PackageManifest, PackagePluginRecord, PackageRecord,
+    PackageRegistryFile, PackageResourceKind, PackageSkillRecord, PackageSourceKind,
+    PackageVisibility, PluginRegistryEntry, PluginRegistryFile, PreparedInstall, UninstallOutcome,
+    PACKAGE_MANIFEST_SCHEMA_V1, PACKAGE_REGISTRY_SCHEMA_V1,
 };
 pub use primitives::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,

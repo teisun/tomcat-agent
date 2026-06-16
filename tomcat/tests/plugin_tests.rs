@@ -70,6 +70,158 @@ fn test_parse_manifest_missing_id_returns_err() {
     );
 }
 
+#[test]
+fn test_parse_manifest_functions_default_empty() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+
+    let json = r#"{
+        "id": "function-default-empty",
+        "name": "Function Default Empty",
+        "version": "0.1.0",
+        "description": "desc",
+        "author": "author",
+        "main": "index.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": []
+    }"#;
+
+    let manifest = parse_manifest(json)?;
+    assert!(
+        manifest.functions.is_empty(),
+        "未声明 functions 时应回落为 []"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_parse_manifest_function_only_plugin_allowed() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+
+    let json = r#"{
+        "id": "function-only",
+        "name": "Function Only",
+        "version": "0.1.0",
+        "description": "desc",
+        "author": "author",
+        "main": "index.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "functions": [
+            { "point": "test.echo", "function": "echoHost" }
+        ]
+    }"#;
+
+    let manifest = parse_manifest(json)?;
+    assert_eq!(manifest.functions.len(), 1);
+    assert_eq!(manifest.functions[0].point, "test.echo");
+    assert_eq!(manifest.functions[0].function, "echoHost");
+    Ok(())
+}
+
+#[test]
+fn test_parse_manifest_event_only_plugin_allowed() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+
+    let json = r#"{
+        "id": "event-only",
+        "name": "Event Only",
+        "version": "0.1.0",
+        "description": "desc",
+        "author": "author",
+        "main": "index.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "functions": [],
+        "events": ["session_start"]
+    }"#;
+
+    let manifest = parse_manifest(json)?;
+    assert!(manifest.tools.is_empty());
+    assert!(manifest.functions.is_empty());
+    assert_eq!(manifest.events, vec!["session_start"]);
+    Ok(())
+}
+
+#[test]
+fn test_parse_manifest_function_entry_requires_non_empty_point() {
+    common::setup_logging();
+
+    let json = r#"{
+        "id": "bad-point",
+        "name": "Bad Point",
+        "version": "0.1.0",
+        "description": "desc",
+        "author": "author",
+        "main": "index.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "functions": [
+            { "point": "", "function": "echoHost" }
+        ]
+    }"#;
+
+    let err = parse_manifest(json).expect_err("empty point should be rejected");
+    assert!(err.to_string().contains("manifest.functions[].point"));
+}
+
+#[test]
+fn test_parse_manifest_function_entry_requires_non_empty_function() {
+    common::setup_logging();
+
+    let json = r#"{
+        "id": "bad-function",
+        "name": "Bad Function",
+        "version": "0.1.0",
+        "description": "desc",
+        "author": "author",
+        "main": "index.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "functions": [
+            { "point": "test.echo", "function": "" }
+        ]
+    }"#;
+
+    let err = parse_manifest(json).expect_err("empty function should be rejected");
+    assert!(err.to_string().contains("manifest.functions[].function"));
+}
+
+#[test]
+fn test_parse_manifest_unknown_point_retained() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+
+    let json = r#"{
+        "id": "unknown-point",
+        "name": "Unknown Point",
+        "version": "0.1.0",
+        "description": "desc",
+        "author": "author",
+        "main": "index.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "functions": [
+            { "point": "reranker.default", "function": "rankDocuments" }
+        ]
+    }"#;
+
+    let manifest = parse_manifest(json)?;
+    assert_eq!(manifest.functions[0].point, "reranker.default");
+    assert_eq!(manifest.functions[0].function, "rankDocuments");
+    Ok(())
+}
+
 /// [PluginManager register + list] 注册插件后 list_loaded 含该插件
 ///
 /// 验证：list_loaded 含 "p1"、get_plugin 返回 Some 且 id 正确
@@ -102,9 +254,11 @@ fn test_plugin_manager_register_and_list_loaded() -> Result<(), Box<dyn std::err
     let instance = PluginInstance {
         id: "p1".to_string(),
         manifest,
-        wasm_instance: None,
+        plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
+        registered_functions: vec![],
+        registered_commands: vec![],
         event_listener_ids: vec![],
         config: serde_json::json!({}),
         created_at: now,

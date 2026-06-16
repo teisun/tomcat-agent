@@ -256,8 +256,28 @@ struct ListenerEntry {
 pub trait EventBus: Send + Sync + 'static {
     /// 注册持久监听，返回用于 [`EventBus::off`] 的 ID。
     fn on(&self, event_name: &str, callback: EventCallback) -> EventListenerId;
+    /// 注册持久监听，并记录所属插件，便于卸载时清理。
+    fn on_plugin(
+        &self,
+        event_name: &str,
+        plugin_id: &str,
+        callback: EventCallback,
+    ) -> EventListenerId {
+        let _ = plugin_id;
+        self.on(event_name, callback)
+    }
     /// 注册单次监听，触发一次后自动移除。
     fn once(&self, event_name: &str, callback: EventCallback) -> EventListenerId;
+    /// 注册单次监听，并记录所属插件，便于卸载时清理。
+    fn once_plugin(
+        &self,
+        event_name: &str,
+        plugin_id: &str,
+        callback: EventCallback,
+    ) -> EventListenerId {
+        let _ = plugin_id;
+        self.once(event_name, callback)
+    }
     /// 按 ID 移除监听器。
     fn off(&self, listener_id: EventListenerId);
     /// 同步触发事件，按 priority 降序执行回调；不因单个回调返回 Err 或 panic 而返回 Err。
@@ -339,8 +359,26 @@ impl EventBus for DefaultEventBus {
         self.add_listener(event_name, false, None, 0, callback)
     }
 
+    fn on_plugin(
+        &self,
+        event_name: &str,
+        plugin_id: &str,
+        callback: EventCallback,
+    ) -> EventListenerId {
+        self.add_listener(event_name, false, Some(plugin_id.to_string()), 0, callback)
+    }
+
     fn once(&self, event_name: &str, callback: EventCallback) -> EventListenerId {
         self.add_listener(event_name, true, None, 0, callback)
+    }
+
+    fn once_plugin(
+        &self,
+        event_name: &str,
+        plugin_id: &str,
+        callback: EventCallback,
+    ) -> EventListenerId {
+        self.add_listener(event_name, true, Some(plugin_id.to_string()), 0, callback)
     }
 
     fn off(&self, listener_id: EventListenerId) {

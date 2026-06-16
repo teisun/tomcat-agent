@@ -396,6 +396,7 @@ async fn tool_exec_load_skill_allowed_for_reviewer_when_exposed() {
 
     let outcome = execute_tool_full_with_policy(
         &primitive,
+        "__test_session__",
         &None,
         &None,
         None,
@@ -500,6 +501,7 @@ async fn tool_exec_load_skill_allowed_for_verifier_when_exposed() {
 
     let outcome = execute_tool_full_with_policy(
         &primitive,
+        "__test_session__",
         &None,
         &None,
         None,

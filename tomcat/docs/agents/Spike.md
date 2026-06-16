@@ -16,7 +16,7 @@
 - **LLM 接入**：LlmProvider、OpenAI 适配器、流式/非流式、Token 统计
 - **4 原语引擎**：read/write/edit/bash 执行、权限校验、审计
 - **工具注册中心**：ToolRegistry、注册/注销/调用
-- **Wasm/插件**：WasmEdge + QuickJS、宿主 API 绑定、插件生命周期
+- **插件系统**：`rquickjs`、宿主 API 绑定、插件生命周期
 - **CLI**：子命令实现、对话模式、流式渲染
 
 ## 计划质量要求

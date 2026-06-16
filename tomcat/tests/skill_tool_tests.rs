@@ -114,10 +114,10 @@ impl FixedResolver {
         ResolvedCall {
             provider_impl: self.provider.clone(),
             model: model.to_string(),
-            api: "openai-responses".to_string(),
-            provider: "openai".to_string(),
-            base_url: Some("https://api.openai.com".to_string()),
-            key_source: "OPENAI_API_KEY".to_string(),
+            api: "openai".to_string(),
+            provider: "deepseek".to_string(),
+            base_url: Some(common::DEEPSEEK_TEST_API_BASE.to_string()),
+            key_source: common::DEEPSEEK_TEST_API_KEY_ENV.to_string(),
             thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
             capabilities: Capabilities {
                 vision: false,
@@ -377,10 +377,7 @@ async fn live_skill_load_roundtrip_with_real_llm() {
     if std::env::var("PI_LIVE_SKILL").ok().as_deref() != Some("1") {
         return;
     }
-    common::load_openai_test_env();
-    let _api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| {
-        panic!("live_skill_load_roundtrip_with_real_llm 要求设置 OPENAI_API_KEY（环境变量或 tomcat/.env）")
-    });
+    let _api_key = common::require_deepseek_api_key("live_skill_load_roundtrip_with_real_llm");
 
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -398,8 +395,7 @@ async fn live_skill_load_roundtrip_with_real_llm() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
-    cfg.llm.default_model =
-        std::env::var("TOMCAT_E2E_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string());
+    common::apply_deepseek_app_config(&mut cfg);
     cfg.workspace.workspace_roots = vec![workspace.path().to_string_lossy().to_string()];
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 

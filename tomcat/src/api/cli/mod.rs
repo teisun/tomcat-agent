@@ -1,6 +1,7 @@
 //! CLI 子命令：init、doctor、config、session、plugin、audit；无参默认按配置进入 claw/code。
 
 mod audit_cmd;
+mod builtin_plugins;
 mod chat_cmd;
 mod claw_cmd;
 mod code_cmd;
@@ -8,6 +9,7 @@ mod config_cmd;
 mod init;
 mod init_model_wizard;
 mod models_toml;
+mod package_cmd;
 mod pathrules_cmd;
 mod plugin_cmd;
 mod session_cmd;
@@ -32,6 +34,7 @@ pub(crate) use claw_cmd::run_claw;
 pub(crate) use code_cmd::run_code;
 pub(crate) use config_cmd::{config_file_path, run_config};
 pub(crate) use init::{run_doctor, run_init};
+pub(crate) use package_cmd::{run_install, run_packages, run_uninstall};
 pub(crate) use pathrules_cmd::run_pathrules;
 pub(crate) use plugin_cmd::run_plugin;
 pub(crate) use session_cmd::run_session;
@@ -54,7 +57,7 @@ pub(crate) use plugin_cmd::{
 #[command(
     name = CLI_NAME,
     about = "Tomcat Agent CLI — 插件化 AI Agent 运行时",
-    long_about = "tomcat 是基于 WasmEdge + QuickJS 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令；`tomcat claw` 提供全局会话，`tomcat code` 提供按项目隔离的对话模式。",
+    long_about = "tomcat 是基于 rquickjs 的插件化 AI Agent 运行时。\n支持 init/doctor/config/session/plugin/audit 子命令；`tomcat claw` 提供全局会话，`tomcat code` 提供按项目隔离的对话模式。",
     version
 )]
 pub struct Cli {
@@ -66,7 +69,7 @@ pub struct Cli {
 pub enum Commands {
     /// 初始化配置，引导 LLM 与安全策略，生成配置文件
     Init,
-    /// 检测运行环境、WasmEdge/QuickJS、配置合法性，输出修复建议
+    /// 检测运行环境、QuickJS 资源与配置合法性，输出修复建议
     Doctor,
     /// 配置管理：get/set/edit
     Config {
@@ -78,7 +81,7 @@ pub enum Commands {
         #[command(subcommand)]
         sub: SessionSub,
     },
-    /// 插件管理：list/load/unload/enable/disable/info
+    /// 插件管理：list/load/build/unload/enable/disable/info
     Plugin {
         #[command(subcommand)]
         sub: PluginSub,
@@ -92,6 +95,40 @@ pub enum Commands {
     Skill {
         #[command(subcommand)]
         sub: SkillSub,
+    },
+    /// 安装 package / bare plugin / bare skill
+    Install {
+        /// 本地 source 路径
+        source: String,
+        /// 安装可见层
+        #[arg(long, value_enum)]
+        visibility: Option<PackageVisibilityArg>,
+        /// scope 安装时显式指定 project 根目录
+        #[arg(long)]
+        scope_root: Option<String>,
+        /// 允许覆盖当前层已有同名资源
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// 卸载某层 package 账本记录及其资源目录
+    Uninstall {
+        /// package 名称
+        package: String,
+        /// 要卸载的目标层
+        #[arg(long, value_enum)]
+        visibility: Option<PackageVisibilityArg>,
+        /// scope 卸载时显式指定 project 根目录
+        #[arg(long)]
+        scope_root: Option<String>,
+    },
+    /// 列出各层已安装 packages
+    Packages {
+        /// 只查看某一层；缺省时展示当前 scope + agent + global
+        #[arg(long, value_enum)]
+        visibility: Option<PackageVisibilityArg>,
+        /// scope 视图显式指定 project 根目录
+        #[arg(long)]
+        scope_root: Option<String>,
     },
     /// 工作区管理：add/list/remove
     Workspace {
@@ -135,6 +172,23 @@ impl SessionScopeArg {
         match self {
             Self::Code => crate::SessionMode::Code,
             Self::Claw => crate::SessionMode::Claw,
+        }
+    }
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageVisibilityArg {
+    Scope,
+    Agent,
+    Global,
+}
+
+impl PackageVisibilityArg {
+    pub fn into_visibility(self) -> crate::core::package::PackageVisibility {
+        match self {
+            Self::Scope => crate::core::package::PackageVisibility::Scope,
+            Self::Agent => crate::core::package::PackageVisibility::Agent,
+            Self::Global => crate::core::package::PackageVisibility::Global,
         }
     }
 }
@@ -237,6 +291,11 @@ pub enum PluginSub {
         /// 插件根目录路径或清单文件（plugin.json）路径
         path: String,
     },
+    /// 从 src/ 构建插件交付产物
+    Build {
+        /// 插件根目录路径或清单文件（plugin.json）路径
+        path: String,
+    },
     /// 卸载已加载的插件
     Unload {
         /// 插件 ID
@@ -335,6 +394,21 @@ pub fn run_cli() -> Result<(), AppError> {
         Commands::Doctor => unreachable!("doctor handled before config load"),
         Commands::Config { sub } => run_config(sub, &cfg),
         Commands::Session { sub } => run_session(sub, &cfg),
+        Commands::Install {
+            source,
+            visibility,
+            scope_root,
+            force,
+        } => run_install(source, visibility, scope_root, force, &cfg),
+        Commands::Uninstall {
+            package,
+            visibility,
+            scope_root,
+        } => run_uninstall(package, visibility, scope_root, &cfg),
+        Commands::Packages {
+            visibility,
+            scope_root,
+        } => run_packages(visibility, scope_root, &cfg),
         Commands::Workspace { sub } => run_workspace(sub, &cfg),
         Commands::Pathrules { sub } => run_pathrules(sub, &cfg),
         Commands::Plugin { sub } => run_plugin(sub, &cfg),

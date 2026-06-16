@@ -1,14 +1,14 @@
-本文为 [Architecture](../../Architecture.md) 中「5. 沙箱执行层」的详细设计，总览见主文档。
+# 沙箱层（现行摘要）
 
-## 5. 沙箱执行层
+Tomcat 当前的“沙箱”不是 Wasm 内存硬墙，而是 **进程内 `rquickjs` + 软隔离**：
 
-插件代码的实际运行环境，完全隔离于宿主系统，仅能通过显式注册的宿主API与外界交互。
-- 插件执行上下文：每个插件独立的QuickJS上下文，全局作用域隔离，插件间无法直接互相访问内存
-- 权限边界：仅能使用宿主授权的API，未授权的系统调用、网络访问、文件操作直接拦截
-- 资源限制：每个插件实例可配置CPU、内存、执行超时硬限制，避免资源耗尽
-- 错误隔离：插件执行错误完全捕获，不传递到宿主主程序，不会导致宿主崩溃
-- 模块加载：支持插件内npm包加载、相对路径模块导入，完全兼容pi-mono插件的模块规范
+- `VmActor` 专属线程
+- `catch_unwind` 兜 Rust panic
+- `call_timeout_ms`
+- `interrupt_budget`
+- `js_heap_mb`
+- `PluginRuntimeManager` + 机会式 idle 回收
 
----
+真正敏感的宿主能力仍统一收口到 `pi.*` hostcall。
 
-**导航**：返回 [插件系统全貌](../plugin-system-overview.md) | 上一节：[WasmEdge 运行时层](wasmedge-runtime-layer.md) | 下一节：[异步 Hostcall 与事件循环](async-hostcall-event-loop.md)
+更多细节请看 [`../plugin-system-overview_new.md`](../plugin-system-overview_new.md) 的隔离与风险章节。

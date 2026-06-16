@@ -660,7 +660,6 @@ LLM          tool_exec              bash::execute_bash_impl        gate / spawn
 
 | 来源 | 键 | 含义 | 备注 | 说人话 |
 |------|-----|------|------|--------|
-| `tomcat.config.toml` / `PrimitiveConfig` | `wasmedge_env_path` | Unix 下 `sh -c` 前可选 `source` 的脚本 | 默认 `$HOME/.wasmedge/env`；见 [`infra/config/types.rs`](../../../src/infra/config/types.rs) 注释 | WasmEdge 环境注入用。 |
 | **规划** `[tools.bash]` | `timeout_ms` / `max_output_chars` 等 | PR-E 墙钟与输出上限 | **PENDING** | 以后配置文件也能拧超时。 |
 
 ---

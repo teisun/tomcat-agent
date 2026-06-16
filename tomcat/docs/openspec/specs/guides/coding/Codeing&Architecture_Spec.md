@@ -34,7 +34,7 @@
 // src/lib.rs - 作为门面（Facade），管理顶层模块声明
 pub mod infra;    // 基础设施：日志、配置、错误定义
 pub mod core;     // 核心逻辑：Agent 决策、会话状态
-pub mod ext;      // 外部扩展：WASM 运行时、工具集
+pub mod ext;      // 外部扩展：插件运行时、工具集
 pub mod common;   // 公共契约：不依赖任何层的纯类型定义
 
 // 示例：src/infra/mod.rs 内部结构
@@ -83,7 +83,7 @@ pub use config::AppConfig; // 外部只能看到 AppConfig，看不到 InnerConf
 
 ### 理论 (Theory)
 核心逻辑不应直接依赖具体的第三方库或底层实现。通过 **Trait (接口)** 定义需求，由底层实现这些 Trait。
-- **解耦**：如果明天想从 `WasmEdge` 换成 `Wasmtime`，只需改 `ext` 层，不影响 `core`。
+- **解耦**：如果明天想从一种插件运行时切到另一种实现，只需改 `ext` 层，不影响 `core`。
 - **Mocking**：在测试 Agent 时，可以传入一个内存中的 `MockDatabase` 而非真实的 SQLite。
 
 ### 实践 (Practice)
@@ -179,7 +179,7 @@ Err(e) => {
 
 #### 规则 4.3 — 第三方 API「伪失败」的处理模式
 
-部分第三方 SDK 在正常退出时也可能返回 `Err`（如 WasmEdge QuickJS `_start` 以 exit code 0 退出）。对这种场景：
+部分第三方 SDK 在正常退出时也可能返回 `Err`。对这种场景：
 1. **必须 `match`**，不得 `let _ =` 或 `unwrap()`
 2. **区分真假错误**：通过错误消息模式匹配（如 `contains("exit code 0")`）识别正常退出
 3. **附注释说明**：解释为何将某个 `Err` 视为成功，避免后续维护者误改
@@ -263,12 +263,12 @@ pub fn host_register_tool(req_json: String) -> Result<(), AppError> {
 ## 7. 插件 Hostcall 分发规范 (Hostcall Dispatching)
 
 ### 理论 (Theory)
-Wasm 沙箱调用宿主能力（Hostcall）时，如果每个 API 都写一个独立的绑定，会导致 `src/ext/wasm/` 变得臃肿且难以维护。
+插件运行时调用宿主能力（Hostcall）时，如果每个 API 都写一个独立的绑定，会导致 `src/ext/` 变得臃肿且难以维护。
 - **集中分发**：采用类似微服务的“路由分发”模式，由一个统一的入口接收调用请求，根据方法名分发给不同的处理器（Processor）。
 为了平衡性能与可维护性，遵循以下原则：
-- **单一入口多路复用**：宿主仅向 Wasm 注册一个或极少数核心 Import 函数（如 `__pi_host_call`），避免 Wasm 导入表臃肿。
+- **单一入口多路复用**：宿主仅暴露一个或极少数核心入口（如 `__pi_host_call`），避免桥接面持续膨胀。
 - **协议契约**：使用 JSON 序列化参数，与插件侧 JS/TS 生态及 Hostcall 载荷约定一致。
-- **异步桥接 (Async Bridge)**：由于 Rust 侧 LLM 调用是 `async` 的，而 Wasm 调用通常是同步语义，需利用 WasmEdge 的异步转译或“请求-轮询/回调”模式，确保不阻塞引擎。
+- **异步桥接 (Async Bridge)**：由于 Rust 侧 LLM 调用是 `async` 的，而插件侧调用 often 以同步入口发起，需利用“请求-轮询/回调”模式，确保不阻塞引擎。
 - **上下文感知**：每次调用必须自动关联插件 ID，用于权限校验和审计日志。
 
 ### 实践 (Practice)
@@ -307,11 +307,11 @@ impl HostApiDispatcher {
 }
 ```
 
-####  Wasm 边界处理 (Low-level Handler)
+####  历史 Wasm 边界处理示例（当前 `rquickjs` 不适用）
 ```rust
-// 宿主导出的 Wasm 原生函数
+// 历史 Wasm guest 场景下的宿主导出原生函数
 fn universal_host_handler(
-    frame: &CallingFrame, // WasmEdge 提供的调用帧
+    frame: &CallingFrame, // 历史 Wasm SDK 提供的调用帧
     args: Vec<WasmValue>,
 ) -> Result<Vec<WasmValue>, HostFuncError> {
     // 理论：通过 frame 获取实例关联的 plugin_id (Context)
@@ -320,7 +320,7 @@ fn universal_host_handler(
     let mem_ptr = args[0].to_i32();
     let mem_len = args[1].to_i32();
     
-    // SAFETY: 读取内存前必须进行边界校验 (WasmEdge SDK 通常已处理)
+    // SAFETY: 读取内存前必须进行边界校验
     let json_data = read_wasm_memory(frame, mem_ptr, mem_len)?; 
     let request: HostRequest = serde_json::from_slice(&json_data)?;
 
@@ -446,14 +446,12 @@ pub struct EntryBase { ... }
 
 #### 规则 10.2 — stub/mock 模块用模块级标注
 
-当整个模块是降级 stub（如 `engine_stub`、`instance_stub`），在 `mod.rs` 的模块声明处统一标注 `#[allow(dead_code)]`，避免模块内部每个函数逐条标注。
+当整个模块是测试辅助或未来保留实现时，可在 `mod.rs` 的模块声明处统一标注 `#[allow(dead_code)]`，避免模块内部每个函数逐条标注。
 
 ```rust
-// src/ext/mod.rs
+// src/ext/tests/mod.rs
 #[allow(dead_code)]
-mod engine_stub;   // WasmEdge 不可用时的降级实现
-#[allow(dead_code)]
-mod instance_stub;
+mod fixtures;
 ```
 
 #### 规则 10.3 — 未来特性字段用双重标注
@@ -573,19 +571,19 @@ if chars > LARGE_RESULT_THRESHOLD_CHARS { ... }
 - **原语频率**：防止插件高频调用 `executeBash` 导致拒绝服务攻击。
 
 ### 实践 (Practice)
-在配置 `WasmEdge` 实例时，强制注入资源限制。
+在配置插件运行时时，强制注入资源限制。
 
 ```rust
-// src/ext/wasm/config.rs
-pub fn create_secure_vm_config(cfg: &PluginConfig) -> WasmEdgeConfig {
-    let mut config = WasmEdgeConfig::default();
+// src/ext/engine_config.rs
+pub fn create_secure_vm_config(cfg: &PluginConfig) -> PluginEngineConfig {
+    let mut config = PluginEngineConfig::default();
     
-    // 1. 限制线性内存大小 (例如 128MB)
-    config.set_max_memory_pages(2048); 
+    // 1. 限制 JS 堆大小
+    config.js_heap_mb = cfg.js_heap_mb;
     
-    // 2. 开启指令计数（防止死循环）
-    config.set_statistics(true);
-    config.set_cost_table(...); 
+    // 2. 注入单次调用超时与中断预算
+    config.call_timeout_ms = cfg.call_timeout_ms;
+    config.interrupt_budget = cfg.interrupt_budget;
 
     // 3. 在宿主 API 层实现 Rate Limiting (理论：逻辑限流)
     if self.call_counter.get(plugin_id) > MAX_CALLS_PER_MINUTE {

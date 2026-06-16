@@ -46,7 +46,7 @@
 本角色自身无"任务验收"，但需保证：
 
 - 合并到 develop 的代码通过 `cargo build`、`cargo clippy`、`RUST_LOG=tomcat=debug,info cargo test -j 1 -- --nocapture --test-threads=1`（全量）。
-- **已按规范编写/补充集成测试与 E2E 测试代码**；集成测试符合 INTEGRATION_TEST_SPEC，E2E 测试符合 E2E_TEST_SPEC 且与 User_Stories、E2E_SCENARIO_LIBRARY 对应；`RUST_LOG=tomcat=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 包含并通过集成测试，cli_tests / wasmedge_e2e_tests 通过。
+- **已按规范编写/补充集成测试与 E2E 测试代码**；集成测试符合 INTEGRATION_TEST_SPEC，E2E 测试符合 E2E_TEST_SPEC 且与 User_Stories、E2E_SCENARIO_LIBRARY 对应；`RUST_LOG=tomcat=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 包含并通过集成测试，`cli_tests` / `quickjs_e2e_tests` 等关键入口通过。
 - 验收清单执行通过或问题已记录并指派。
 
 ---

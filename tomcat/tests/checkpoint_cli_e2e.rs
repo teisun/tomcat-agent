@@ -58,6 +58,12 @@ fn setup_fixture() -> Fixture {
 
     let config_path = home_path.join(".tomcat").join("tomcat.config.toml");
     let mut cfg = load_config_toml_file(&config_path).expect("config should load");
+    common::apply_deepseek_app_config(&mut cfg);
+    fs::write(
+        &config_path,
+        toml::to_string_pretty(&cfg).expect("serialize deepseek test config"),
+    )
+    .expect("persist deepseek test config");
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
     let sessions_dir = resolve_sessions_dir(&cfg).unwrap();
     fs::create_dir_all(&sessions_dir).unwrap();
@@ -374,7 +380,11 @@ fn test_resume_after_interrupt() {
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .write_stdin("/ckpt list\n")
         .assert();
 
@@ -426,7 +436,11 @@ fn test_slash_restore_recovers_after_bad_edit() {
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .write_stdin(format!("/restore {checkpoint_id}\n"))
         .assert();
 
@@ -499,7 +513,11 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .write_stdin(format!("/restore {turn_end_ckpt}\n"))
         .assert()
         .success();
@@ -538,7 +556,11 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .write_stdin(format!("/restore {manual_ckpt}\n"))
         .assert()
         .success();
@@ -576,7 +598,11 @@ fn test_idle_readline_eof_exits_without_interrupt_ckpt() {
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .write_stdin("")
         .assert()
         .success()
@@ -628,7 +654,11 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
@@ -730,7 +760,11 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")

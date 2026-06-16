@@ -89,6 +89,10 @@ pub struct WebSearchRequest {
     pub allowed_domains: Vec<String>,
     /// Result-side denylist, applied during hit normalization.
     pub blocked_domains: Vec<String>,
+    /// Optional per-provider base URL overrides that plugins can consume.
+    pub tavily_base_url: Option<String>,
+    pub brave_base_url: Option<String>,
+    pub serper_base_url: Option<String>,
 }
 
 impl WebSearchRequest {
@@ -162,6 +166,9 @@ impl WebSearchRequest {
             domain_filter,
             allowed_domains,
             blocked_domains,
+            tavily_base_url: Some(cfg.tavily_base_url.clone()),
+            brave_base_url: Some(cfg.brave_base_url.clone()),
+            serper_base_url: Some(cfg.serper_base_url.clone()),
         })
     }
 }

@@ -1,0 +1,35 @@
+{
+  "id": "tomcat.web-search-backends",
+  "name": "web-search-backends",
+  "version": "0.1.0",
+  "description": "Official web_search backend plugin bundle",
+  "author": "tomcat",
+  "main": "main.js",
+  "requiredPermissions": [
+    "net:fetch"
+  ],
+  "requiredSecrets": [
+    "TAVILY_API_KEY",
+    "BRAVE_API_KEY",
+    "SERPER_API_KEY"
+  ],
+  "allowedHosts": [
+    "api.tavily.com",
+    "api.search.brave.com",
+    "google.serper.dev"
+  ],
+  "requiredApiVersion": "1.0",
+  "tags": [
+    "web-search",
+    "backend"
+  ],
+  "tools": [],
+  "functions": [
+    {
+      "point": "web_search.backend",
+      "function": "webSearchBackend"
+    }
+  ],
+  "events": [],
+  "activation": "lazy"
+}

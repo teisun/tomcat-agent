@@ -32,7 +32,7 @@
 3. **Skill 系统**（P2）；
 4. **记忆系统 / USER.md / MEMORY.md**（P3）；
 5. **自进化 / 学习回路**（P4）；
-6. **跨平台（WasmEdge 下载脚本、Android、openclaw 兼容）**（P7）；
+6. **跨平台（Android、openclaw 兼容与平台适配）**（P7）；
 7. **多 LLM 适配 / 多 IM 网关**（P8）；
 8. **UI（Tauri、Android、插件可视化）**（P9）。
 

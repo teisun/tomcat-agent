@@ -15,6 +15,7 @@ use crate::core::tools::primitive::{BashTaskId, BashTaskRegistry, PrimitiveExecu
 use crate::core::tools::web_fetch::WebFetchRuntime;
 use crate::core::tools::web_search::WebSearchRuntime;
 use crate::core::{CheckpointStore, LlmProvider, LlmResolver, SessionManager};
+use crate::ext::{FunctionRegistry, HostApiDispatcher, PluginFunctionInvoker, PluginManager};
 use crate::infra::{AuditRecorder, EventBus};
 
 pub struct GlobalServices {
@@ -23,15 +24,31 @@ pub struct GlobalServices {
     pub llm_resolver: Arc<dyn LlmResolver>,
     pub primitive: Arc<dyn PrimitiveExecutor>,
     pub tool_registry: Arc<dyn ToolRegistry>,
+    pub function_registry: Arc<FunctionRegistry>,
     pub event_bus: Arc<dyn EventBus>,
     pub audit: Arc<dyn AuditRecorder>,
     pub gate: Arc<dyn crate::core::permission::PermissionGate>,
     pub config_backend: Option<crate::core::agent_loop::SharedConfigBackend>,
     pub web_fetch_runtime: Arc<WebFetchRuntime>,
     pub web_search_runtime: Arc<WebSearchRuntime>,
+    pub plugin_manager: Option<Arc<PluginManager>>,
+    pub plugin_function_invoker: Option<Arc<PluginFunctionInvoker>>,
+}
+
+pub struct ScopeContainer {
+    pub event_bus: Arc<dyn EventBus>,
+    pub tool_registry: Arc<dyn ToolRegistry>,
+    pub function_registry: Arc<FunctionRegistry>,
+    pub plugin_manager: Option<Arc<PluginManager>>,
+    pub plugin_function_invoker: Option<Arc<PluginFunctionInvoker>>,
+    pub dispatcher: Arc<HostApiDispatcher>,
+    pub skill_set: Arc<RwLock<crate::core::skill::SkillSet>>,
+    pub skill_discovery_handle:
+        Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<crate::core::skill::SkillSet>>>>,
 }
 
 pub struct ScopeServices {
+    pub scope_container: Arc<ScopeContainer>,
     pub checkpoint_switcher: Arc<crate::core::SwitchingCheckpointStore>,
     pub checkpoint_store: Arc<dyn CheckpointStore>,
     pub agent_workspace_dir: PathBuf,

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 集成测试：默认路径不依赖 WasmEdge；仅显式 Wasm 验收时才安装/source WasmEdge 环境。
+# 集成测试：默认路径不依赖外部 Wasm 运行时。
 # 测试执行按资源需求分类：单元测试默认并发；集成测试分为并发组与串行组。
 # 非 TTY 下强制 EDITOR/PAGER 为无交互，避免子进程阻塞；说明见 docs/reports/integration_test_hang_remediation.md。
 #
@@ -12,7 +12,6 @@
 #   ./scripts/run-integration-tests.sh integration          # 并发组 + 串行组
 #   ./scripts/run-integration-tests.sh integration-parallel # 仅可并发的 integration crate
 #   ./scripts/run-integration-tests.sh integration-serial   # 仅必须串行的 integration crate
-#   ./scripts/run-integration-tests.sh integration-wasm     # 仅真实 Wasm 集成测试（显式开启 WasmEdge 环境准备）
 #   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM E2E（需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY）
 #
 # 未知子命令：打印用法并 exit 2。
@@ -35,53 +34,12 @@ log_phase() {
   echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] $* ==="
 }
 
-is_wasmedge_test() {
-  local test_name="$1"
-  local known
-  for known in "${TOMCAT_WASMEDGE_TESTS[@]}"; do
-    if [ "$test_name" = "$known" ]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
 build_test_args() {
-  local skip_wasm="$1"
-  shift
-  local test_name
-  for test_name in "$@"; do
-    if [ "$skip_wasm" -eq 1 ] && is_wasmedge_test "$test_name"; then
-      continue
-    fi
-    printf '%s\n' "--test"
-    printf '%s\n' "$test_name"
-  done
-}
-
-build_test_args_raw() {
   local test_name
   for test_name in "$@"; do
     printf '%s\n' "--test"
     printf '%s\n' "$test_name"
   done
-}
-
-prepare_wasmedge_env() {
-  if [ -n "$OS" ] && [ "$OS" = "Windows_NT" ]; then
-    echo "Windows：跳过 WasmEdge 验收；请按文档安装 WasmEdge 后手动执行。" >&2
-    return 1
-  fi
-
-  if ! command -v wasmedge >/dev/null 2>&1 && [ ! -x "$HOME/.wasmedge/bin/wasmedge" ]; then
-    echo "未检测到 WasmEdge，正在执行 ./scripts/install-wasmedge.sh -y ..."
-    ./scripts/install-wasmedge.sh -y
-  fi
-  if [ -f "$HOME/.wasmedge/env" ]; then
-    set +e
-    . "$HOME/.wasmedge/env"
-    set -e
-  fi
 }
 
 run_release() {
@@ -112,7 +70,7 @@ run_integration_parallel() {
   local args=()
   while IFS= read -r arg; do
     args+=("$arg")
-  done < <(build_test_args 0 "${TOMCAT_INTEGRATION_PARALLEL_TESTS[@]}")
+  done < <(build_test_args "${TOMCAT_INTEGRATION_PARALLEL_TESTS[@]}")
 
   log_phase "开始 integration-parallel（可并发 integration crate）"
   cargo test --no-fail-fast "${args[@]}" -- --nocapture
@@ -125,7 +83,7 @@ run_integration_serial() {
   local args=()
   while IFS= read -r arg; do
     args+=("$arg")
-  done < <(build_test_args "$SKIP_WASMEDGE" "${TOMCAT_INTEGRATION_SERIAL_TESTS[@]}")
+  done < <(build_test_args "${TOMCAT_INTEGRATION_SERIAL_TESTS[@]}")
 
   if [ "${#args[@]}" -eq 0 ]; then
     log_phase "跳过 integration-serial：当前平台无可执行串行组"
@@ -154,35 +112,11 @@ run_integration_real_llm() {
   local args=()
   while IFS= read -r arg; do
     args+=("$arg")
-  done < <(build_test_args 0 "${TOMCAT_INTEGRATION_REAL_LLM_TESTS[@]}")
+  done < <(build_test_args "${TOMCAT_INTEGRATION_REAL_LLM_TESTS[@]}")
   log_phase "开始 integration-real-llm（真 LLM E2E；串行，需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY）"
   cargo test -j 1 --no-fail-fast "${args[@]}" -- --nocapture --test-threads=1
   local status=$?
   log_phase "结束 integration-real-llm"
-  return $status
-}
-
-# 默认 no-wasm：显式 Wasm 验收才开启真实 Wasm 组。
-SKIP_WASMEDGE=1
-if [ -n "$OS" ] && [ "$OS" = "Windows_NT" ]; then
-  echo "Windows：跳过 WasmEdge 串行组测试；Wasm 验收请按文档安装 WasmEdge 后手动执行。" >&2
-  SKIP_WASMEDGE=1
-fi
-
-run_integration_wasm() {
-  if ! prepare_wasmedge_env; then
-    return 0
-  fi
-
-  local args=()
-  while IFS= read -r arg; do
-    args+=("$arg")
-  done < <(build_test_args_raw "${TOMCAT_WASMEDGE_TESTS[@]}")
-
-  log_phase "开始 integration-wasm（真实 WasmEdge 集成测试）"
-  cargo test -j 1 --no-fail-fast --features wasmedge "${args[@]}" -- --nocapture --test-threads=1
-  local status=$?
-  log_phase "结束 integration-wasm"
   return $status
 }
 
@@ -208,9 +142,6 @@ case "$CMD" in
   integration-serial)
     run_integration_serial
     ;;
-  integration-wasm)
-    run_integration_wasm
-    ;;
   integration-real-llm)
     run_integration_real_llm
     ;;
@@ -233,9 +164,8 @@ case "$CMD" in
     exit 0
     ;;
   *)
-    echo "用法: $0 [release|clippy|lib|integration|integration-parallel|integration-serial|integration-wasm|integration-real-llm|all|-h]" >&2
-    echo "  默认与 all：release → clippy → lib → integration-parallel → integration-serial（不含 Wasm）" >&2
-    echo "  integration-wasm 显式启用 WasmEdge 环境准备并运行真实 Wasm 组" >&2
+    echo "用法: $0 [release|clippy|lib|integration|integration-parallel|integration-serial|integration-real-llm|all|-h]" >&2
+    echo "  默认与 all：release → clippy → lib → integration-parallel → integration-serial" >&2
     echo "  integration-real-llm 需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY；不进 all，须显式触发" >&2
     exit 2
     ;;

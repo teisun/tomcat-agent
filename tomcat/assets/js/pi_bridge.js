@@ -1,10 +1,19 @@
 // pi_bridge.js — pi-mono compatible bridge layer for tomcat
 // Constructs globalThis.pi object that routes API calls through __pi_host_call.
 // Loaded by run_script_file_impl before user plugin scripts.
+// Authoring note: plugin source should not import this file directly; use
+// assets/types/tomcat-plugin.d.ts for IDE hints and let the host inject `pi`.
 // See: architecture/plugin-system/js-bridge-layer.md, architecture/plugin-system/host-call-protocol.md,
 //      architecture/plugin-system/js-api-alignment.md, architecture/plugin-system/async-hostcall-event-loop.md
 (function () {
   'use strict';
+
+  globalThis.__pi_last_fatal_error = null;
+
+  function markFatal(err) {
+    globalThis.__pi_last_fatal_error = String(err);
+    return err;
+  }
 
   // -- Node.js polyfills for extensions that reference process.platform --------
   if (typeof globalThis.process === 'undefined') {
@@ -53,6 +62,9 @@
           module: '__async', method: 'poll',
           params: { callId: callId }
         });
+        if (typeof __pi_budget_reset === 'function') {
+          __pi_budget_reset();
+        }
         var pollRes = __pi_host_call(pollReq);
         var pr = typeof pollRes === 'string' ? JSON.parse(pollRes) : pollRes;
 
@@ -61,6 +73,10 @@
           return;
         }
         if (pr.data && pr.data.ready) {
+          if (pr.data.response && typeof pr.data.response.ok === 'boolean') {
+            resolve(pr.data.response);
+            return;
+          }
           resolve({ ok: true, data: pr.data.result });
           return;
         }
@@ -72,9 +88,29 @@
     });
   }
 
+  function toHostError(err, fallbackMessage) {
+    var raw = (err && err.message) ? String(err.message) : String(fallbackMessage || 'hostcall failed');
+    var candidate = raw;
+    var jsonStart = raw.indexOf('{');
+    if (jsonStart >= 0) {
+      candidate = raw.slice(jsonStart);
+    }
+    try {
+      var parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && parsed.code) {
+        var structured = new Error(parsed.message || parsed.code);
+        structured.code = parsed.code;
+        if (parsed.details !== undefined) structured.details = parsed.details;
+        return structured;
+      }
+    } catch (_ignored) {}
+    return err instanceof Error ? err : new Error(raw);
+  }
+
   // -- Internal registries ----------------------------------------------------
   var __pi_hooks = {};   // eventName -> [{id, fn}, ...]
   var __pi_tools = {};   // toolName  -> handler
+  var __pi_functions = {}; // functionName -> handler
   var __pi_commands = {}; // commandName -> { description, handler }
   var __pi_nextId = 1;
 
@@ -192,6 +228,13 @@
       return hostCall('tools', 'unregisterTool', { toolName: name });
     },
 
+    registerFunction: function (name, handler) {
+      if (name) {
+        __pi_functions[name] = handler;
+      }
+      return null;
+    },
+
     // =========================================================================
     // Command Registration (pi-mono ExtensionAPI.registerCommand)
     // =========================================================================
@@ -201,7 +244,7 @@
         description: options.description || '',
         handler: options.handler || null
       };
-      return hostCall('tools', 'registerCommand', {
+      return hostCall('commands', 'registerCommand', {
         name: name,
         description: options.description
       });
@@ -218,6 +261,16 @@
         });
     },
 
+    fetch: function (params) {
+      return hostCallAsync('net', 'fetch', params)
+        .then(function (r) {
+          if (!r.ok) throw toHostError(new Error(r.error || 'fetch failed'), 'fetch failed');
+          return r.data;
+        }, function (err) {
+          throw toHostError(err, 'fetch failed');
+        });
+    },
+
     // Simplified single-turn LLM call — wraps createChatCompletion.
     // Returns Promise<string> (the assistant reply text).
     complete: function (prompt, options) {
@@ -226,7 +279,9 @@
         : [{ role: 'user', content: String(prompt) }];
       return this.createChatCompletion({ messages: msgs })
         .then(function (res) {
-          return (res && res.message && res.message.content) ? res.message.content : '';
+          return (res && res.choices && res.choices[0] && res.choices[0].message && res.choices[0].message.content)
+            ? res.choices[0].message.content
+            : '';
         });
     },
 
@@ -528,6 +583,7 @@
   // -- Expose internals needed by the async main loop injected in instance_wasmedge.rs --
   globalThis.__pi_build_ctx = __pi_build_ctx;
   globalThis.__pi_hostCall = hostCall;
+  globalThis.__pi_functions = __pi_functions;
   globalThis.__pi_commands = __pi_commands;
 
   // -- Event dispatch entry (called by host via __pi_dispatch_event) ----------
@@ -543,6 +599,13 @@
         handlers[i].fn(eventData, ctx);
       } catch (e) {
         try { pi.log('pi_bridge: handler error for ' + eventType + ': ' + e); } catch (_) {}
+        try {
+          if (typeof __pi_interrupt_reason === 'function' && __pi_interrupt_reason()) {
+            throw markFatal(e);
+          }
+        } catch (interruptErr) {
+          throw interruptErr;
+        }
       }
     }
   };
@@ -584,58 +647,89 @@
       return JSON.stringify({ ok: false, error: 'tool not found: ' + call.toolName });
     }
     try {
-      var result = handler.execute(call.toolCallId, call.params, undefined, undefined, null);
+      var result = handler.execute(call.toolCallId, call.params, undefined, undefined, call.ctx || null);
+      if (result && typeof result.then === 'function') {
+        return JSON.stringify({ ok: false, error: 'tool returned Promise; use __pi_execute_tool_async' });
+      }
       return JSON.stringify({ ok: true, data: result });
     } catch (e) {
       return JSON.stringify({ ok: false, error: String(e) });
     }
   };
 
-  // -- Long-lived VM session event loop (Phase 2) -----------------------------
-  // Called by host when VM actor receives Init command.
-  // Uses setTimeout(loop, 0) to yield control after each event dispatch,
-  // allowing QuickJS run_loop_without_io() to drain Promises and tick tasks
-  // before blocking again on waitForEvent.
-  //
-  // Two-layer collaboration:
-  //   JS layer: setTimeout(loop, 0) schedules next iteration as a tick task
-  //   Rust layer: run_loop_without_io() processes pending Promises + tick tasks
-  //   Net effect: all async work resolves between consecutive waitForEvent calls.
-  // 使用带超时的 waitForEvent：超时返回 type=__tick，让 QuickJS 在两次宿主调用之间处理 setInterval/setTimeout。
-  // 纯阻塞 recv + setTimeout(loop,0) 会导致 loop() 返回后同步脚本结束，_start 退出、VM 变 Stopped。
-  globalThis.__pi_start_event_loop = function () {
-    // Neutralize timer APIs so QuickJS's internal js_std_loop drains
-    // after the event loop exits. Without this, a setTimeout chain
-    // (e.g. setTimeout(tick, 200) inside tick()) keeps _start alive forever.
-    function neutralizeTimers() {
-      globalThis.setTimeout = function () {};
-      globalThis.setInterval = function () {};
+  globalThis.__pi_execute_tool_async = async function (toolCallJson) {
+    var call = JSON.parse(toolCallJson);
+    var handler = __pi_tools[call.toolName];
+    if (!handler || !handler.execute) {
+      return { ok: false, error: 'tool not found: ' + call.toolName };
     }
+    try {
+      var result = handler.execute(call.toolCallId, call.params, undefined, undefined, call.ctx || null);
+      if (result && typeof result.then === 'function') {
+        result = await result;
+      }
+      return { ok: true, data: result };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  };
 
+  globalThis.__pi_execute_function = function (functionCallJson) {
+    var call = JSON.parse(functionCallJson);
+    var handler = __pi_functions[call.functionName];
+    if (typeof handler !== 'function') {
+      return JSON.stringify({ ok: false, error: 'function not found: ' + call.functionName });
+    }
+    try {
+      var result = handler(call.params, call.ctx || null);
+      if (result && typeof result.then === 'function') {
+        return JSON.stringify({ ok: false, error: 'function returned Promise; use __pi_execute_function_async' });
+      }
+      return JSON.stringify({ ok: true, data: result });
+    } catch (e) {
+      return JSON.stringify({ ok: false, error: String(e) });
+    }
+  };
+
+  globalThis.__pi_execute_function_async = async function (functionCallJson) {
+    var call = JSON.parse(functionCallJson);
+    var handler = __pi_functions[call.functionName];
+    if (typeof handler !== 'function') {
+      return { ok: false, error: 'function not found: ' + call.functionName };
+    }
+    try {
+      var result = handler(call.params, call.ctx || null);
+      if (result && typeof result.then === 'function') {
+        result = await result;
+      }
+      return { ok: true, data: result };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  };
+
+  // -- Long-lived VM session event loop (rquickjs async mode) -----------------
+  // Host exposes `__pi_wait_for_event(timeoutMs)` as a Promise-returning async
+  // function. That lets the VM keep timers / Promise chains alive while still
+  // blocking on host events between dispatches.
+  globalThis.__pi_start_event_loop = async function () {
     for (;;) {
       var raw;
       try {
-        raw = __pi_host_call(JSON.stringify({
-          module: '__session',
-          method: 'waitForEvent',
-          params: { timeoutMs: 50 }
-        }));
+        raw = await __pi_wait_for_event(50);
       } catch (hostErr) {
         try { pi.log('[event_loop] exiting: hostErr=' + hostErr); } catch (_) {}
-        neutralizeTimers();
         return;
       }
       var res = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
       if (!res.ok) {
         try { pi.log('[event_loop] exiting: !res.ok'); } catch (_) {}
-        neutralizeTimers();
         return;
       }
 
       if (res.data && res.data.type === '__shutdown') {
         try { pi.log('[event_loop] exiting: __shutdown received'); } catch (_) {}
-        neutralizeTimers();
         return;
       }
 
@@ -644,16 +738,20 @@
       }
 
       // command_invoke: store pending command and exit the event loop so the
-      // async main loop can await the handler with run_loop_without_io active.
+      // async main loop can await the handler before waiting for the next event.
       if (res.data && res.data.type === 'command_invoke') {
         globalThis.__pi_pending_command_invoke = res.data;
         return;
       }
 
       try {
+        if (typeof __pi_budget_reset === 'function') {
+          __pi_budget_reset();
+        }
         __pi_dispatch_event(JSON.stringify(res.data));
       } catch (e) {
         try { pi.log('event_loop error: ' + e); } catch (_) {}
+        throw markFatal(e);
       }
     }
   };

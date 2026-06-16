@@ -1,19 +1,296 @@
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use serde_json::json;
 use serial_test::serial;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::core::llm::ModelCatalog;
+use crate::ext::PluginEngine;
 use crate::infra::AppConfig;
 
-use super::backend::discover_hosted_candidate;
+use super::backend::{
+    discover_hosted_candidate, pick_backend, BackendFailure, BackendMode, BackendPlan,
+    WebSearchBackend, HTTP_AUTO_CHAIN,
+};
 use super::cache::CacheKey;
+use super::legacy_http::{BraveBackend, SerperBackend, TavilyBackend};
 use super::openai_server::{build_hosted_request_body, parse_server_tool_blocks};
+use super::plugin_backend::{PluginSearchInvoker, PluginWebSearchBackend};
 use super::types::{normalize_hits, RawHit, WebSearchArgs};
 use super::WebSearchRuntime;
+
+struct RecordingPluginInvoker {
+    calls: Mutex<Vec<(String, serde_json::Value, String)>>,
+    responses: Mutex<VecDeque<Result<serde_json::Value, BackendFailure>>>,
+}
+
+impl RecordingPluginInvoker {
+    fn with_responses(responses: Vec<Result<serde_json::Value, BackendFailure>>) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            responses: Mutex::new(VecDeque::from(responses)),
+        })
+    }
+
+    fn calls(&self) -> Vec<(String, serde_json::Value, String)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl PluginSearchInvoker for RecordingPluginInvoker {
+    async fn search(
+        &self,
+        backend: &str,
+        params: serde_json::Value,
+        session_id: &str,
+    ) -> Result<serde_json::Value, BackendFailure> {
+        self.calls.lock().unwrap().push((
+            backend.to_string(),
+            params.clone(),
+            session_id.to_string(),
+        ));
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| {
+                Ok(json!({
+                    "backend": backend,
+                    "hits": [],
+                    "warnings": [],
+                }))
+            })
+    }
+}
+
+fn plugin_backend_main_js() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("plugins")
+        .join("web-search-backends")
+        .join("main.js");
+    std::fs::read_to_string(path).expect("read builtin web-search-backends main.js")
+}
+
+fn raw_hits_to_plugin_json(raw_hits: &[RawHit]) -> serde_json::Value {
+    json!(raw_hits
+        .iter()
+        .map(|hit| {
+            json!({
+                "title": hit.title,
+                "url": hit.url,
+                "snippet": hit.snippet,
+                "published_at": hit.published_at,
+            })
+        })
+        .collect::<Vec<_>>())
+}
+
+fn assert_js_parser_matches_expected(
+    parser_name: &str,
+    response_body: &serde_json::Value,
+    expected_hits: &serde_json::Value,
+) {
+    let engine = PluginEngine::global(None).expect("create quickjs engine");
+    let mut instance = engine
+        .create_instance(&format!("parser-parity-{parser_name}"))
+        .expect("create parser parity instance");
+    let captured = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let captured_for_host = Arc::clone(&captured);
+    instance
+        .register_host_binding(move |request_json| {
+            let request: serde_json::Value =
+                serde_json::from_str(request_json).expect("host request should be JSON");
+            if let Some(actual) = request.get("actual").cloned() {
+                *captured_for_host.lock().unwrap() = Some(actual);
+            }
+            Ok(json!({ "ok": true, "data": null }).to_string())
+        })
+        .expect("register host binding");
+    let plugin_code = plugin_backend_main_js();
+    let body_json = serde_json::to_string(response_body).expect("serialize parser fixture");
+    let script = format!(
+        r#"
+pi.registerFunction = function () {{}};
+{plugin_code}
+(function () {{
+  var actual = {parser_name}(JSON.parse({body_json:?}));
+  __pi_host_call(JSON.stringify({{ actual: actual }}));
+}})();
+"#
+    );
+    instance
+        .run_script(&script)
+        .expect("js parser script should run");
+    let actual = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("js parser should emit actual hits");
+    assert_eq!(
+        actual, *expected_hits,
+        "{parser_name} parity mismatch between JS parser and legacy Rust backend"
+    );
+}
+
+fn eval_plugin_script_value(script_body: &str) -> serde_json::Value {
+    let engine = PluginEngine::global(None).expect("create quickjs engine");
+    let mut instance = engine
+        .create_instance("web-search-plugin-js-eval")
+        .expect("create plugin js eval instance");
+    let captured = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let captured_for_host = Arc::clone(&captured);
+    instance
+        .register_host_binding(move |request_json| {
+            let request: serde_json::Value =
+                serde_json::from_str(request_json).expect("host request should be JSON");
+            if let Some(actual) = request.get("actual").cloned() {
+                *captured_for_host.lock().unwrap() = Some(actual);
+            }
+            Ok(json!({ "ok": true, "data": null }).to_string())
+        })
+        .expect("register host binding");
+    let plugin_code = plugin_backend_main_js();
+    let script = format!(
+        r#"
+pi.registerFunction = function () {{}};
+{plugin_code}
+(async function () {{
+  var actual = await (async function () {{
+{script_body}
+  }})();
+  __pi_host_call(JSON.stringify({{ actual: actual }}));
+}})();
+"#
+    );
+    instance
+        .run_script(&script)
+        .expect("plugin js evaluation should run");
+    let actual = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("plugin js evaluation should emit a value");
+    actual
+}
+
+#[tokio::test]
+async fn plugin_backend_maps_missing_key_warning_to_backend_failure() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
+        "backend": "tavily",
+        "hits": [],
+        "warnings": ["__missing_key__:TAVILY_API_KEY"]
+    }))]);
+    let backend = PluginWebSearchBackend::new(invoker, "tavily", "test-session");
+    let request = super::types::WebSearchRequest::from_tool_args(
+        WebSearchArgs {
+            query: "rust".into(),
+            count: None,
+            freshness: None,
+            country: None,
+            language: None,
+            domain_filter: Vec::new(),
+        },
+        &AppConfig::default().tools.web_search,
+    )
+    .expect("request");
+
+    let err = backend
+        .search(&request)
+        .await
+        .expect_err("missing key should fail");
+    assert!(matches!(
+        err,
+        BackendFailure::MissingKey { env_name } if env_name == "TAVILY_API_KEY"
+    ));
+}
+
+#[test]
+fn plugin_js_normalize_count_allows_twenty_results() {
+    let actual = eval_plugin_script_value("return normalizeCount(20);");
+    assert_eq!(actual, json!(20));
+}
+
+#[test]
+fn plugin_js_auto_backend_falls_through_after_retryable_warning() {
+    let actual = eval_plugin_script_value(
+        r#"
+var calls = [];
+backends.mimo = async function (req) {
+  calls.push(req.backend);
+  return {
+    backend: "mimo",
+    hits: [],
+    warnings: ["__missing_key__:MIMO_API_KEY"]
+  };
+};
+backends.tavily = async function (req) {
+  calls.push(req.backend);
+  return {
+    backend: "tavily",
+    hits: [{ title: "Reqwest", url: "https://docs.rs/reqwest", snippet: "HTTP client" }],
+    warnings: []
+  };
+};
+backends.brave = async function (req) {
+  calls.push(req.backend);
+  return { backend: "brave", hits: [], warnings: [] };
+};
+backends.serper = async function (req) {
+  calls.push(req.backend);
+  return { backend: "serper", hits: [], warnings: [] };
+};
+return {
+  calls: calls,
+  result: await dispatchBackend({ backend: "auto", query: "reqwest", count: 20 })
+};
+"#,
+    );
+    assert_eq!(actual["calls"], json!(["mimo", "tavily"]));
+    assert_eq!(actual["result"]["backend"], json!("tavily"));
+    assert_eq!(actual["result"]["hits"][0]["url"], json!("https://docs.rs/reqwest"));
+    assert!(
+        actual["result"]["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .iter()
+            .any(|warning| warning == "backend_unavailable:mimo, fallback=tavily")
+    );
+}
+
+#[tokio::test]
+async fn plugin_backend_maps_unauthorized_warning_to_backend_failure() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
+        "backend": "brave",
+        "hits": [],
+        "warnings": ["__unauthorized__:403"]
+    }))]);
+    let backend = PluginWebSearchBackend::new(invoker, "brave", "test-session");
+    let request = super::types::WebSearchRequest::from_tool_args(
+        WebSearchArgs {
+            query: "rust".into(),
+            count: None,
+            freshness: None,
+            country: None,
+            language: None,
+            domain_filter: Vec::new(),
+        },
+        &AppConfig::default().tools.web_search,
+    )
+    .expect("request");
+
+    let err = backend
+        .search(&request)
+        .await
+        .expect_err("unauthorized should fail");
+    assert!(matches!(err, BackendFailure::Unauthorized { status } if status == 403));
+}
 
 #[test]
 fn discover_hosted_candidate_uses_merged_catalog_order() {
@@ -219,6 +496,531 @@ fn parse_server_tool_blocks_handles_openai_and_server_tool_shapes() {
     assert_eq!(parsed.raw_hits[1].url, "https://www.rust-lang.org");
 }
 
+#[test]
+fn backend_mode_parse_supports_builtin_and_plugin_names() {
+    assert_eq!(BackendMode::parse("auto").unwrap(), BackendMode::Auto);
+    assert_eq!(BackendMode::parse("openai").unwrap(), BackendMode::Openai);
+    assert_eq!(BackendMode::parse("tavily").unwrap(), BackendMode::Tavily);
+    assert_eq!(BackendMode::parse("brave").unwrap(), BackendMode::Brave);
+    assert_eq!(BackendMode::parse("serper").unwrap(), BackendMode::Serper);
+    assert_eq!(
+        BackendMode::parse("MiMo").unwrap(),
+        BackendMode::Plugin("mimo".to_string())
+    );
+    assert_eq!(
+        BackendMode::Plugin("mimo".to_string()).clone().as_str(),
+        "mimo"
+    );
+}
+
+#[test]
+fn auto_backend_plan_contains_single_plugin_slot() {
+    match pick_backend(BackendMode::Auto, None, false).expect("auto backend plan") {
+        BackendPlan::Auto {
+            hosted_candidate,
+            http_chain,
+            plugin_slot,
+        } => {
+            assert!(hosted_candidate.is_none());
+            assert!(
+                http_chain.is_empty(),
+                "plugin route should own auto ordering by default"
+            );
+            assert!(plugin_slot, "auto path should end with one plugin slot");
+        }
+        other => panic!("unexpected backend plan: {other:?}"),
+    }
+}
+
+#[test]
+fn auto_backend_plan_can_still_opt_into_legacy_http_chain() {
+    match pick_backend(BackendMode::Auto, None, true).expect("legacy auto backend plan") {
+        BackendPlan::Auto {
+            hosted_candidate,
+            http_chain,
+            plugin_slot,
+        } => {
+            assert!(hosted_candidate.is_none());
+            assert_eq!(http_chain, HTTP_AUTO_CHAIN.to_vec());
+            assert!(plugin_slot, "auto path should end with one plugin slot");
+        }
+        other => panic!("unexpected backend plan: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn explicit_plugin_backend_roundtrips_and_normalizes_hits() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
+        "backend": "mimo",
+        "hits": [
+            {
+                "title": "Reqwest",
+                "url": "https://docs.rs/reqwest",
+                "snippet": "HTTP client"
+            },
+            {
+                "title": "Discard Missing Url"
+            },
+            {
+                "title": "Discard Private Url",
+                "url": "http://127.0.0.1/private",
+                "snippet": "private"
+            }
+        ],
+        "warnings": ["mimo_ignores_language"]
+    }))]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "mimo".into();
+    let runtime = runtime_with_catalog(cfg, None);
+    runtime.set_plugin_invoker(invoker.clone());
+
+    let output = runtime
+        .search(
+            WebSearchArgs {
+                query: "reqwest rust".into(),
+                count: Some(5),
+                freshness: Some("day".into()),
+                country: Some("us".into()),
+                language: Some("en".into()),
+                domain_filter: vec!["docs.rs".into()],
+            },
+            "session-plugin-1",
+        )
+        .await
+        .expect("plugin search");
+
+    assert_eq!(output.backend, "mimo");
+    assert_eq!(output.hits.len(), 1);
+    assert_eq!(output.hits[0].url, "https://docs.rs/reqwest");
+    assert!(output.warnings.iter().any(|w| w == "mimo_ignores_language"));
+    assert!(output.warnings.iter().any(|w| w == "ssrf_filtered"));
+
+    let calls = invoker.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "mimo");
+    assert_eq!(calls[0].2, "session-plugin-1");
+    assert_eq!(calls[0].1["query"], json!("reqwest rust"));
+    assert_eq!(calls[0].1["count"], json!(5));
+    assert_eq!(calls[0].1["freshness"], json!("day"));
+    assert_eq!(calls[0].1["country"], json!("US"));
+    assert_eq!(calls[0].1["language"], json!("en"));
+    assert_eq!(calls[0].1["domainFilter"], json!(["docs.rs"]));
+}
+
+#[tokio::test]
+async fn explicit_builtin_aliases_route_to_plugin_by_default() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![
+        Ok(json!({
+            "backend": "tavily",
+            "hits": [{ "title": "Tokio", "url": "https://tokio.rs" }],
+            "warnings": []
+        })),
+        Ok(json!({
+            "backend": "brave",
+            "hits": [{ "title": "Reqwest", "url": "https://docs.rs/reqwest" }],
+            "warnings": []
+        })),
+        Ok(json!({
+            "backend": "serper",
+            "hits": [{ "title": "Rust", "url": "https://www.rust-lang.org" }],
+            "warnings": []
+        })),
+    ]);
+
+    for backend in ["tavily", "brave", "serper"] {
+        let mut cfg = AppConfig::default();
+        cfg.tools.web_search.backend = backend.to_string();
+        cfg.tools.web_search.tavily_base_url = "https://tavily.example.test".to_string();
+        cfg.tools.web_search.brave_base_url = "https://brave.example.test".to_string();
+        cfg.tools.web_search.serper_base_url = "https://serper.example.test".to_string();
+        let runtime = runtime_with_catalog(cfg, None);
+        runtime.set_plugin_invoker(invoker.clone());
+
+        let output = runtime
+            .search(
+                WebSearchArgs {
+                    query: "rust".into(),
+                    count: Some(3),
+                    freshness: None,
+                    country: None,
+                    language: None,
+                    domain_filter: Vec::new(),
+                },
+                "session-plugin-alias",
+            )
+            .await
+            .expect("plugin alias search");
+        assert_eq!(output.backend, backend);
+        assert_eq!(output.hits.len(), 1);
+    }
+
+    let calls = invoker.calls();
+    assert_eq!(
+        calls.iter().map(|call| call.0.as_str()).collect::<Vec<_>>(),
+        vec!["tavily", "brave", "serper"]
+    );
+    for (_, payload, _) in &calls {
+        assert_eq!(
+            payload["tavilyBaseUrl"],
+            json!("https://tavily.example.test")
+        );
+        assert_eq!(payload["braveBaseUrl"], json!("https://brave.example.test"));
+        assert_eq!(
+            payload["serperBaseUrl"],
+            json!("https://serper.example.test")
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn tavily_parser_fixture_matches_legacy_backend() {
+    let server = MockServer::start().await;
+    let fixture = json!({
+        "results": [
+            {
+                "title": "Reqwest",
+                "url": "https://docs.rs/reqwest/latest/reqwest/",
+                "content": "An ergonomic HTTP client for Rust.",
+                "published_date": "2026-06-01"
+            },
+            {
+                "title": "Tokio",
+                "url": "https://tokio.rs",
+                "snippet": "Async runtime"
+            },
+            {
+                "title": "Drop Missing Url"
+            }
+        ]
+    });
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let _env = EnvGuard::set_many(&[
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+    ]);
+    let request = super::types::WebSearchRequest::from_tool_args(
+        WebSearchArgs {
+            query: "reqwest rust".into(),
+            count: Some(3),
+            freshness: Some("day".into()),
+            country: Some("us".into()),
+            language: Some("en".into()),
+            domain_filter: vec!["docs.rs".into()],
+        },
+        &AppConfig::default().tools.web_search,
+    )
+    .expect("request");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("client");
+    let response = TavilyBackend::new(client, server.uri())
+        .search(&request)
+        .await
+        .expect("legacy tavily search");
+
+    assert_js_parser_matches_expected(
+        "parseTavilyResponse",
+        &fixture,
+        &raw_hits_to_plugin_json(&response.raw_hits),
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn brave_parser_fixture_matches_legacy_backend() {
+    let server = MockServer::start().await;
+    let fixture = json!({
+        "web": {
+            "results": [
+                {
+                    "title": "Reqwest",
+                    "url": "https://docs.rs/reqwest",
+                    "description": "HTTP client"
+                },
+                {
+                    "title": "Rust",
+                    "url": "https://www.rust-lang.org",
+                    "page_age": "2 days ago"
+                },
+                {
+                    "title": "Drop Missing Url"
+                }
+            ]
+        }
+    });
+    Mock::given(method("GET"))
+        .and(path("/res/v1/web/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let _env = EnvGuard::set_many(&[
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", Some("brave-test-key")),
+        ("SERPER_API_KEY", None),
+    ]);
+    let request = super::types::WebSearchRequest::from_tool_args(
+        WebSearchArgs {
+            query: "reqwest rust".into(),
+            count: Some(3),
+            freshness: Some("week".into()),
+            country: Some("us".into()),
+            language: Some("en".into()),
+            domain_filter: vec!["docs.rs".into()],
+        },
+        &AppConfig::default().tools.web_search,
+    )
+    .expect("request");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("client");
+    let response = BraveBackend::new(client, server.uri())
+        .search(&request)
+        .await
+        .expect("legacy brave search");
+
+    assert_js_parser_matches_expected(
+        "parseBraveResponse",
+        &fixture,
+        &raw_hits_to_plugin_json(&response.raw_hits),
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn serper_parser_fixture_matches_legacy_backend() {
+    let server = MockServer::start().await;
+    let fixture = json!({
+        "organic": [
+            {
+                "title": "Rust Book",
+                "link": "https://doc.rust-lang.org/book/",
+                "snippet": "The Rust Programming Language",
+                "date": "Jun 1, 2026"
+            },
+            {
+                "title": "Tokio",
+                "link": "https://tokio.rs"
+            },
+            {
+                "title": "Drop Missing Link"
+            }
+        ]
+    });
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let _env = EnvGuard::set_many(&[
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", Some("serper-test-key")),
+    ]);
+    let request = super::types::WebSearchRequest::from_tool_args(
+        WebSearchArgs {
+            query: "rust book".into(),
+            count: Some(3),
+            freshness: Some("month".into()),
+            country: Some("us".into()),
+            language: Some("en".into()),
+            domain_filter: vec!["doc.rust-lang.org".into()],
+        },
+        &AppConfig::default().tools.web_search,
+    )
+    .expect("request");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("client");
+    let response = SerperBackend::new(client, server.uri())
+        .search(&request)
+        .await
+        .expect("legacy serper search");
+
+    assert_js_parser_matches_expected(
+        "parseSerperResponse",
+        &fixture,
+        &raw_hits_to_plugin_json(&response.raw_hits),
+    );
+}
+
+#[tokio::test]
+async fn explicit_plugin_backend_without_invoker_returns_clear_error() {
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "mimo".into();
+    let runtime = runtime_with_catalog(cfg, None);
+
+    let err = runtime
+        .search(
+            WebSearchArgs {
+                query: "reqwest".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "session-plugin-2",
+        )
+        .await
+        .expect_err("missing plugin invoker should fail");
+
+    assert!(err
+        .to_string()
+        .contains("web_search plugin backend invoker not configured"));
+}
+
+#[tokio::test]
+async fn explicit_plugin_backend_timeout_returns_degraded_output() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::Timeout)]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "mimo".into();
+    let runtime = runtime_with_catalog(cfg, None);
+    runtime.set_plugin_invoker(invoker);
+
+    let output = runtime
+        .search(
+            WebSearchArgs {
+                query: "reqwest".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "session-plugin-3",
+        )
+        .await
+        .expect("timeout should degrade, not hard fail");
+
+    assert_eq!(output.backend, "mimo");
+    assert!(output.hits.is_empty());
+    assert!(output.truncated);
+    assert!(output
+        .warnings
+        .iter()
+        .any(|w| w == "backend_unavailable:mimo"));
+    assert!(output
+        .warnings
+        .iter()
+        .any(|w| w == "timeout (backend=mimo)"));
+}
+
+#[tokio::test]
+async fn explicit_plugin_backend_unsupported_error_is_preserved() {
+    let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::Incompatible {
+        detail: "未找到名为 `mimo` 的 web_search 插件后端".to_string(),
+    })]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "mimo".into();
+    let runtime = runtime_with_catalog(cfg, None);
+    runtime.set_plugin_invoker(invoker);
+
+    let err = runtime
+        .search(
+            WebSearchArgs {
+                query: "reqwest".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "session-plugin-4",
+        )
+        .await
+        .expect_err("unsupported plugin backend should fail clearly");
+
+    assert!(err
+        .to_string()
+        .contains("未找到名为 `mimo` 的 web_search 插件后端"));
+}
+
+#[tokio::test]
+#[serial]
+async fn auto_plugin_slot_calls_invoker_once_and_then_hits_cache() {
+    let _env = EnvGuard::set_many(&[
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("OPENAI_API_KEY", None),
+    ]);
+    let invoker = RecordingPluginInvoker::with_responses(vec![Ok(json!({
+        "backend": "mimo",
+        "hits": [
+            {
+                "title": "Tokio",
+                "url": "https://tokio.rs",
+                "snippet": "Async runtime"
+            }
+        ],
+        "warnings": ["plugin_auto_used"]
+    }))]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "auto".into();
+    cfg.tools.web_search.cache_capacity = 8;
+    cfg.tools.web_search.cache_ttl_secs = 60;
+    let runtime = runtime_with_catalog(cfg, None);
+    runtime.set_plugin_invoker(invoker.clone());
+
+    let first = runtime
+        .search(
+            WebSearchArgs {
+                query: "tokio rust".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["tokio.rs".into()],
+            },
+            "session-plugin-auto-1",
+        )
+        .await
+        .expect("first auto plugin search");
+    let second = runtime
+        .search(
+            WebSearchArgs {
+                query: "tokio rust".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["tokio.rs".into()],
+            },
+            "session-plugin-auto-2",
+        )
+        .await
+        .expect("second auto plugin search");
+
+    assert_eq!(first.backend, "mimo");
+    assert!(!first.stats.cached);
+    assert_eq!(second.backend, "mimo");
+    assert!(second.stats.cached);
+    assert_eq!(
+        invoker.calls().len(),
+        1,
+        "cache hit should skip plugin invoker"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn tavily_runtime_maps_request_and_normalizes_hits() {
@@ -248,17 +1050,21 @@ async fn tavily_runtime_maps_request_and_normalizes_hits() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
+    cfg.tools.web_search.legacy_http_backends = true;
     cfg.tools.web_search.tavily_base_url = server.uri();
     let runtime = runtime_with_catalog(cfg, None);
     let output = runtime
-        .search(WebSearchArgs {
-            query: "reqwest rust".into(),
-            count: Some(3),
-            freshness: Some("day".into()),
-            country: Some("us".into()),
-            language: Some("en".into()),
-            domain_filter: vec!["docs.rs".into()],
-        })
+        .search(
+            WebSearchArgs {
+                query: "reqwest rust".into(),
+                count: Some(3),
+                freshness: Some("day".into()),
+                country: Some("us".into()),
+                language: Some("en".into()),
+                domain_filter: vec!["docs.rs".into()],
+            },
+            "test-session",
+        )
         .await
         .expect("tavily search");
 
@@ -315,20 +1121,24 @@ async fn auto_backend_falls_back_to_brave_and_then_hits_cache() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "auto".into();
+    cfg.tools.web_search.legacy_http_backends = true;
     cfg.tools.web_search.brave_base_url = brave.uri();
     cfg.tools.web_search.cache_capacity = 8;
     cfg.tools.web_search.cache_ttl_secs = 60;
     let runtime = runtime_with_catalog(cfg, None);
 
     let first = runtime
-        .search(WebSearchArgs {
-            query: "reqwest".into(),
-            count: None,
-            freshness: None,
-            country: None,
-            language: None,
-            domain_filter: vec!["docs.rs".into()],
-        })
+        .search(
+            WebSearchArgs {
+                query: "reqwest".into(),
+                count: None,
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["docs.rs".into()],
+            },
+            "test-session",
+        )
         .await
         .expect("first auto search");
     assert_eq!(first.backend, "brave");
@@ -343,14 +1153,17 @@ async fn auto_backend_falls_back_to_brave_and_then_hits_cache() {
         .any(|w| w == "brave_domain_filter_via_query_rewrite"));
 
     let second = runtime
-        .search(WebSearchArgs {
-            query: "reqwest".into(),
-            count: None,
-            freshness: None,
-            country: None,
-            language: None,
-            domain_filter: vec!["docs.rs".into()],
-        })
+        .search(
+            WebSearchArgs {
+                query: "reqwest".into(),
+                count: None,
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: vec!["docs.rs".into()],
+            },
+            "test-session",
+        )
         .await
         .expect("second auto search");
     assert_eq!(second.backend, "brave");
@@ -410,20 +1223,24 @@ async fn auto_backend_falls_back_after_brave_timeout() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "auto".into();
+    cfg.tools.web_search.legacy_http_backends = true;
     cfg.tools.web_search.timeout_ms = 200;
     cfg.tools.web_search.brave_base_url = brave.uri();
     cfg.tools.web_search.serper_base_url = serper.uri();
     let runtime = runtime_with_catalog(cfg, None);
 
     let output = runtime
-        .search(WebSearchArgs {
-            query: "rust".into(),
-            count: None,
-            freshness: None,
-            country: None,
-            language: None,
-            domain_filter: Vec::new(),
-        })
+        .search(
+            WebSearchArgs {
+                query: "rust".into(),
+                count: None,
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "test-session",
+        )
         .await
         .expect("timeout fallback search");
 
@@ -490,14 +1307,17 @@ web_search = true
     );
 
     let output = runtime
-        .search(WebSearchArgs {
-            query: "reqwest".into(),
-            count: None,
-            freshness: None,
-            country: Some("us".into()),
-            language: None,
-            domain_filter: vec!["docs.rs".into()],
-        })
+        .search(
+            WebSearchArgs {
+                query: "reqwest".into(),
+                count: None,
+                freshness: None,
+                country: Some("us".into()),
+                language: None,
+                domain_filter: vec!["docs.rs".into()],
+            },
+            "test-session",
+        )
         .await
         .expect("hosted auto search");
     assert_eq!(output.backend, "openai");
@@ -535,18 +1355,22 @@ async fn explicit_tavily_rate_limit_returns_degraded_output() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
+    cfg.tools.web_search.legacy_http_backends = true;
     cfg.tools.web_search.tavily_base_url = tavily.uri();
     let runtime = runtime_with_catalog(cfg, None);
 
     let output = runtime
-        .search(WebSearchArgs {
-            query: "rust".into(),
-            count: None,
-            freshness: None,
-            country: None,
-            language: None,
-            domain_filter: Vec::new(),
-        })
+        .search(
+            WebSearchArgs {
+                query: "rust".into(),
+                count: None,
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "test-session",
+        )
         .await
         .expect("rate-limited search");
 
@@ -591,6 +1415,7 @@ async fn incompatible_hosted_candidate_falls_back_to_tavily() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "auto".into();
+    cfg.tools.web_search.legacy_http_backends = true;
     cfg.tools.web_search.tavily_base_url = tavily.uri();
     let runtime = runtime_with_catalog(
         cfg,
@@ -609,14 +1434,17 @@ web_search = true
     );
 
     let output = runtime
-        .search(WebSearchArgs {
-            query: "rust".into(),
-            count: None,
-            freshness: None,
-            country: None,
-            language: None,
-            domain_filter: Vec::new(),
-        })
+        .search(
+            WebSearchArgs {
+                query: "rust".into(),
+                count: None,
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "test-session",
+        )
         .await
         .expect("fallback search");
     assert_eq!(output.backend, "tavily");
@@ -640,14 +1468,17 @@ async fn explicit_openai_requires_project_candidate() {
     cfg.tools.web_search.backend = "openai".into();
     let runtime = runtime_with_catalog(cfg, None);
     let error = runtime
-        .search(WebSearchArgs {
-            query: "rust".into(),
-            count: None,
-            freshness: None,
-            country: None,
-            language: None,
-            domain_filter: Vec::new(),
-        })
+        .search(
+            WebSearchArgs {
+                query: "rust".into(),
+                count: None,
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "test-session",
+        )
         .await
         .unwrap_err();
     assert!(error

@@ -1,6 +1,6 @@
+use std::future::Future;
 use std::io::{self, Write as IoWrite};
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, Weak};
 
 use parking_lot::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -8,22 +8,28 @@ use tracing::warn;
 
 use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::tools::primitive::PrimitiveOperation;
+use crate::ext::plugin::PluginCatalog;
+use crate::ext::{
+    FunctionRegistry, HostApiDispatcher, PluginEngine, PluginEngineConfig, PluginFunctionInvoker,
+    PluginManager, PluginRuntimeManager, PluginToolExecutor, RegisteredFunction,
+    SharedPluginRuntimeManager,
+};
 use crate::infra::config::ThinkingDisplay;
 use crate::infra::error::AppError;
 use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_sessions_dir,
-    resolve_workspace_roots_paths, session_key_for_agent, AppConfig, DefaultPrimitiveExecutor,
-    DefaultToolRegistry, LlmProvider, PrimitiveExecutor, SessionEntry, SessionManager, SessionMode,
-    Tool, ToolExecutor, ToolRegistry,
+    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_plugins_dir,
+    resolve_sessions_dir, resolve_workspace_roots_paths, session_key_for_agent, AppConfig,
+    DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, PrimitiveExecutor, SessionEntry,
+    SessionManager, SessionMode, Tool, ToolExecutor, ToolRegistry,
 };
 
 use crate::core::llm::LlmScene;
 use crate::core::plan_runtime;
 
-use super::session_runtime::{GlobalServices, ScopeServices, SessionRuntime};
+use super::session_runtime::{GlobalServices, ScopeContainer, ScopeServices, SessionRuntime};
 use super::{panels, permission};
 
 pub struct ChatContext {
@@ -142,6 +148,81 @@ fn checkpoint_store_for(
     ));
     cache.insert(key, Arc::downgrade(&store));
     store
+}
+
+fn scope_runtime_cache(
+) -> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
+    static CACHE: OnceLock<
+        RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
+}
+
+fn scope_runtime_for(
+    config: &AppConfig,
+    agent_workspace_dir: std::path::PathBuf,
+    audit: Arc<dyn AuditRecorder>,
+    llm: Arc<dyn LlmProvider>,
+    llm_resolver: Arc<dyn crate::core::LlmResolver>,
+    primitive: Arc<dyn PrimitiveExecutor>,
+    session: Arc<SessionManager>,
+) -> Result<Arc<ScopeContainer>, AppError> {
+    let key = std::fs::canonicalize(&agent_workspace_dir).unwrap_or(agent_workspace_dir);
+    if let Some(existing) = scope_runtime_cache()
+        .read()
+        .get(&key)
+        .and_then(Weak::upgrade)
+    {
+        return Ok(existing);
+    }
+
+    let mut cache = scope_runtime_cache().write();
+    if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
+        return Ok(existing);
+    }
+
+    let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let deps = PluginRuntimeDeps {
+        audit,
+        event_bus: event_bus.clone(),
+        llm,
+        llm_resolver,
+        primitive,
+        session,
+    };
+    let (tool_registry, function_registry, plugin_manager, plugin_function_invoker, dispatcher) =
+        build_plugin_runtime(config, &key, deps)?;
+    let shared = Arc::new(ScopeContainer {
+        event_bus,
+        tool_registry,
+        function_registry,
+        plugin_manager,
+        plugin_function_invoker,
+        dispatcher,
+        skill_set: Arc::new(RwLock::new(crate::core::skill::SkillSet::default())),
+        skill_discovery_handle: Arc::new(tokio::sync::Mutex::new(None)),
+    });
+    cache.insert(key, Arc::downgrade(&shared));
+    Ok(shared)
+}
+
+fn block_on_plugin_future<F, T>(future: F) -> Result<T, AppError>
+where
+    F: Future<Output = Result<T, AppError>> + Send + 'static,
+    T: Send + 'static,
+{
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return std::thread::spawn(move || handle.block_on(future))
+            .join()
+            .map_err(|_| AppError::Plugin("scope activation worker panicked".to_string()))?;
+    }
+
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+        AppError::Plugin(format!(
+            "create runtime for scope activation failed: {error}"
+        ))
+    })?;
+    runtime.block_on(future)
 }
 
 impl ChatContext {
@@ -282,11 +363,91 @@ impl ChatContext {
             checkpoint_store_for(agent_trail_dir.clone(), agent_workspace_dir.clone());
         let checkpoint_store: Arc<dyn crate::core::CheckpointStore> = checkpoint_switcher.clone();
 
-        let tool_executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
-        let tool_registry: Arc<dyn ToolRegistry> =
-            Arc::new(DefaultToolRegistry::new(tool_executor, audit.clone()));
+        let session_arc = Arc::new(session.clone());
+        let shared_scope_runtime = scope_runtime_for(
+            &config,
+            agent_workspace_dir.clone(),
+            audit.clone(),
+            llm.clone(),
+            llm_resolver.clone(),
+            primitive.clone(),
+            session_arc.clone(),
+        )?;
+        shared_scope_runtime.dispatcher.bind_session(
+            &current_session_entry.session_id,
+            Arc::downgrade(&session_arc),
+        );
+        let event_bus = shared_scope_runtime.event_bus.clone();
+        let tool_registry = shared_scope_runtime.tool_registry.clone();
+        let function_registry = shared_scope_runtime.function_registry.clone();
+        let plugin_manager = shared_scope_runtime.plugin_manager.clone();
+        let plugin_function_invoker = shared_scope_runtime.plugin_function_invoker.clone();
+        if let Some(function_invoker) = plugin_function_invoker.as_ref() {
+            web_search_runtime.set_plugin_invoker(crate::ext::ExtPluginSearchInvoker::new(
+                function_registry.clone(),
+                function_invoker.clone(),
+            ));
+        }
+        if let Some(plugin_manager_ref) = plugin_manager.as_ref() {
+            for plugin_id in plugin_manager_ref.list_loaded() {
+                let Some(info) = plugin_manager_ref.get_plugin(&plugin_id) else {
+                    continue;
+                };
+                if info.manifest.tools.is_empty() && info.loaded_at == 0 {
+                    if let Err(err) = plugin_manager_ref.load_plugin(&info.plugin_root) {
+                        warn!(
+                            plugin = %plugin_id,
+                            path = %info.plugin_root.display(),
+                            error = %err,
+                            "scope activation failed to pre-register legacy dynamic plugin"
+                        );
+                    }
+                    if info.manifest.activation == crate::ext::PluginActivation::Lazy {
+                        continue;
+                    }
+                }
+                if info.manifest.activation != crate::ext::PluginActivation::Session {
+                    continue;
+                }
+                if plugin_manager_ref.has_session_vm(&current_session_entry.session_id, &plugin_id)
+                {
+                    continue;
+                }
 
-        let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+                let pm = Arc::clone(plugin_manager_ref);
+                let session_id = current_session_entry.session_id.clone();
+                let plugin_id_for_start = plugin_id.clone();
+                if let Err(err) = block_on_plugin_future(async move {
+                    pm.start_session_vm(&session_id, &plugin_id_for_start)
+                        .await
+                        .map(|_| ())
+                }) {
+                    warn!(
+                        plugin = %plugin_id,
+                        session = %current_session_entry.session_id,
+                        error = %err,
+                        "scope activation failed to prestart session plugin"
+                    );
+                    continue;
+                }
+                if let Err(err) = plugin_manager_ref.dispatch_session_event(
+                    &current_session_entry.session_id,
+                    &plugin_id,
+                    crate::infra::wire::vm::WIRE_SESSION_START,
+                    serde_json::json!({}),
+                    serde_json::json!({
+                        "sessionId": current_session_entry.session_id.clone(),
+                    }),
+                ) {
+                    warn!(
+                        plugin = %plugin_id,
+                        session = %current_session_entry.session_id,
+                        error = %err,
+                        "scope activation failed to deliver session_start"
+                    );
+                }
+            }
+        }
         let cancel_token = Arc::new(Mutex::new(CancellationToken::new()));
         let last_interrupt_at = Arc::new(Mutex::new(None));
 
@@ -341,8 +502,8 @@ impl ChatContext {
         let root_agent_guard = agent_registry
             .register_root(current_session_entry.session_id.clone())
             .map_err(|e| AppError::Config(format!("agent_registry root register 失败: {e}")))?;
-        let skill_set = Arc::new(RwLock::new(crate::core::skill::SkillSet::default()));
-        let skill_discovery_handle = Arc::new(tokio::sync::Mutex::new(None));
+        let skill_set = shared_scope_runtime.skill_set.clone();
+        let skill_discovery_handle = shared_scope_runtime.skill_discovery_handle.clone();
 
         let reviewer_max_turns = std::env::var("TOMCAT_REVIEWER_MAX_TURNS")
             .ok()
@@ -431,14 +592,18 @@ impl ChatContext {
             llm_resolver: llm_resolver.clone(),
             primitive: primitive.clone(),
             tool_registry: tool_registry.clone(),
+            function_registry: function_registry.clone(),
             event_bus: event_bus.clone(),
             audit: audit.clone(),
             gate: gate.clone(),
             config_backend: config_backend.clone(),
             web_fetch_runtime: web_fetch_runtime.clone(),
             web_search_runtime: web_search_runtime.clone(),
+            plugin_manager,
+            plugin_function_invoker,
         };
         let scope_services = ScopeServices {
+            scope_container: shared_scope_runtime.clone(),
             checkpoint_switcher: checkpoint_switcher.clone(),
             checkpoint_store: checkpoint_store.clone(),
             agent_workspace_dir: agent_workspace_dir.clone(),
@@ -589,6 +754,104 @@ impl ChatContext {
         *self.scope_services.skill_set.write() = skill_set.clone();
         skill_set
     }
+
+    pub(crate) async fn refresh_plugin_catalog_inventory(&self) -> Result<Vec<String>, AppError> {
+        let Some(plugin_manager) = self.global_services.plugin_manager.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let current_session_id = self
+            .session_runtime
+            .session
+            .current_session_id()
+            .ok()
+            .flatten();
+
+        let catalog =
+            PluginCatalog::discover(&self.config, &self.scope_services.agent_workspace_dir)?;
+        let discovered_ids = catalog
+            .iter()
+            .map(|(plugin_id, _)| plugin_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+
+        for existing_id in plugin_manager.list_loaded() {
+            let Some(info) = plugin_manager.get_plugin(&existing_id) else {
+                continue;
+            };
+            let has_session_vm = current_session_id
+                .as_deref()
+                .map(|session_id| plugin_manager.has_session_vm(session_id, &existing_id))
+                .unwrap_or(false);
+            if info.loaded_at != 0 || has_session_vm {
+                continue;
+            }
+            if discovered_ids.contains(&existing_id) {
+                continue;
+            }
+            self.global_services
+                .tool_registry
+                .unregister_plugin_tools(&existing_id);
+            let _ = plugin_manager.unload_plugin(&existing_id);
+        }
+
+        for (plugin_id, entry) in catalog.iter() {
+            let loaded = plugin_manager
+                .get_plugin(plugin_id)
+                .map(|info| info.loaded_at > 0)
+                .unwrap_or(false);
+            let has_session_vm = current_session_id
+                .as_deref()
+                .map(|session_id| plugin_manager.has_session_vm(session_id, plugin_id))
+                .unwrap_or(false);
+            if loaded || has_session_vm {
+                continue;
+            }
+
+            plugin_manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone())?;
+            self.global_services
+                .tool_registry
+                .unregister_plugin_tools(plugin_id);
+            for manifest_tool in &entry.manifest.tools {
+                self.global_services
+                    .tool_registry
+                    .register_tool(
+                        Tool {
+                            name: manifest_tool.name.clone(),
+                            label: manifest_tool.name.clone(),
+                            description: manifest_tool.description.clone(),
+                            parameters: manifest_tool.parameters.clone(),
+                            plugin_id: plugin_id.clone(),
+                            is_enabled: true,
+                            created_at: 0,
+                        },
+                        plugin_id,
+                    )
+                    .await?;
+            }
+        }
+
+        let function_catalog = refresh_host_function_registry(
+            &self.config,
+            &self.scope_services.agent_workspace_dir,
+            &self.global_services.function_registry,
+        )?;
+        let mut warnings = catalog.warnings.clone();
+        warnings.extend(function_catalog.warnings.clone());
+        warnings.extend(catalog.diagnostics.iter().map(|diagnostic| {
+            format!(
+                "plugin catalog ignored {}: {}",
+                diagnostic.path.display(),
+                diagnostic.reason
+            )
+        }));
+        warnings.extend(function_catalog.diagnostics.iter().map(|diagnostic| {
+            format!(
+                "host function catalog ignored {}: {}",
+                diagnostic.path.display(),
+                diagnostic.reason
+            )
+        }));
+        Ok(warnings)
+    }
 }
 
 impl Drop for ChatContext {
@@ -682,6 +945,240 @@ fn extract_path_from_preview(preview: &str) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+type PluginRuntimeParts = (
+    Arc<dyn ToolRegistry>,
+    Arc<FunctionRegistry>,
+    Option<Arc<PluginManager>>,
+    Option<Arc<PluginFunctionInvoker>>,
+    Arc<HostApiDispatcher>,
+);
+
+struct PluginRuntimeDeps {
+    audit: Arc<dyn AuditRecorder>,
+    event_bus: Arc<dyn EventBus>,
+    llm: Arc<dyn LlmProvider>,
+    llm_resolver: Arc<dyn crate::core::LlmResolver>,
+    primitive: Arc<dyn PrimitiveExecutor>,
+    session: Arc<SessionManager>,
+}
+
+fn canonicalize_or_keep(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn materialize_host_functions_from_catalog(registry: &FunctionRegistry, catalog: &PluginCatalog) {
+    let registered = catalog
+        .iter()
+        .flat_map(|(plugin_id, entry)| {
+            entry
+                .manifest
+                .functions
+                .iter()
+                .map(|function| RegisteredFunction {
+                    plugin_id: plugin_id.clone(),
+                    plugin_root: canonicalize_or_keep(&entry.plugin_root),
+                    point: function.point.clone(),
+                    function: function.function.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    registry.replace_all(registered);
+}
+
+fn refresh_host_function_registry(
+    config: &AppConfig,
+    agent_workspace_dir: &std::path::Path,
+    registry: &FunctionRegistry,
+) -> Result<PluginCatalog, AppError> {
+    let catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
+    materialize_host_functions_from_catalog(registry, &catalog);
+    Ok(catalog)
+}
+
+fn build_plugin_runtime(
+    config: &AppConfig,
+    agent_workspace_dir: &std::path::Path,
+    deps: PluginRuntimeDeps,
+) -> Result<PluginRuntimeParts, AppError> {
+    let PluginRuntimeDeps {
+        audit,
+        event_bus,
+        llm,
+        llm_resolver,
+        primitive,
+        session,
+    } = deps;
+    if plugin_runtime_disabled_via_env() {
+        warn!("PI_PLUGIN_DISABLE enabled; skipping plugin runtime initialization");
+        let executor: Arc<dyn ToolExecutor> = Arc::new(NoopToolExecutor);
+        let tool_registry: Arc<dyn ToolRegistry> =
+            Arc::new(DefaultToolRegistry::new(executor, audit.clone()));
+        let function_registry = Arc::new(FunctionRegistry::new());
+        let dispatcher = Arc::new(
+            HostApiDispatcher::new(event_bus.clone())
+                .with_tools(tool_registry.clone())
+                .with_session(session)
+                .with_llm(llm)
+                .with_llm_resolver(llm_resolver)
+                .with_primitive(primitive)
+                .with_audit(audit),
+        );
+        return Ok((tool_registry, function_registry, None, None, dispatcher));
+    }
+
+    let mut plugin_manager = Arc::new(PluginManager::new(event_bus.clone()));
+    let plugin_manager_strong_count = Arc::strong_count(&plugin_manager);
+    let inner = Arc::get_mut(&mut plugin_manager).ok_or_else(|| {
+        AppError::Plugin(format!(
+            "plugin_manager unexpectedly shared before runtime init (strong_count={})",
+            plugin_manager_strong_count
+        ))
+    })?;
+    inner.set_plugin_engine(PluginEngine::global(Some(PluginEngineConfig {
+        quickjs_heap_mb: config.plugin.js_heap_mb,
+        call_timeout_ms: config.plugin.call_timeout_ms,
+        interrupt_budget: config.plugin.interrupt_budget,
+        idle_ttl_ms: config.plugin.idle_ttl_ms,
+    }))?);
+    let runtime_manager: SharedPluginRuntimeManager =
+        Arc::new(PluginRuntimeManager::with_idle_ttl(
+            std::time::Duration::from_millis(config.plugin.idle_ttl_ms),
+        ));
+    inner.set_plugin_runtime_manager(runtime_manager);
+    inner.set_audit_recorder(audit.clone());
+    inner.set_event_channel_capacity(config.plugin.event_channel_capacity);
+    inner.set_confirm_permissions(Arc::new(|_| Ok(true)));
+
+    let executor = PluginToolExecutor::new(Arc::downgrade(&plugin_manager));
+    let function_registry = Arc::new(FunctionRegistry::new());
+    let default_tool_registry = Arc::new(DefaultToolRegistry::new(executor.clone(), audit.clone()));
+    let tool_registry: Arc<dyn ToolRegistry> = default_tool_registry.clone();
+    let mut fetch_client_builder = reqwest::Client::builder()
+        .dns_resolver(Arc::new(crate::infra::net_guard::PublicIpDnsResolver))
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_millis(
+            config.tools.web_fetch.fetch_timeout_ms,
+        ));
+    if let Some(proxy_url) = config.llm.proxy.as_deref() {
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|e| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, e)))?;
+        fetch_client_builder = fetch_client_builder.proxy(proxy);
+    } else {
+        fetch_client_builder = fetch_client_builder.no_proxy();
+    }
+    let fetch_client = fetch_client_builder
+        .build()
+        .map_err(|e| AppError::Tool(format!("创建 plugin net.fetch HTTP 客户端失败: {}", e)))?;
+    let dispatcher = Arc::new(
+        HostApiDispatcher::new(event_bus.clone())
+            .with_tools(tool_registry.clone())
+            .with_session(session.clone())
+            .with_llm(llm)
+            .with_llm_resolver(llm_resolver)
+            .with_primitive(primitive)
+            .with_plugin_manager(Arc::downgrade(&plugin_manager))
+            .with_fetch_http_client(fetch_client)
+            .with_fetch_max_body_bytes(config.tools.web_fetch.max_http_content_bytes)
+            .with_audit(audit),
+    );
+    let function_invoker = PluginFunctionInvoker::new(Arc::downgrade(&plugin_manager));
+    executor.attach_dispatcher(Arc::downgrade(&dispatcher));
+    function_invoker.attach_dispatcher(Arc::downgrade(&dispatcher));
+    plugin_manager.set_tool_registry(tool_registry.clone());
+    plugin_manager.set_function_registry(function_registry.clone());
+    plugin_manager.set_host_dispatcher(dispatcher.clone());
+
+    let catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
+    for (plugin_id, entry) in catalog.iter() {
+        if let Err(err) =
+            plugin_manager.register_catalog_plugin(&entry.plugin_root, entry.manifest.clone())
+        {
+            warn!(
+                plugin = %plugin_id,
+                path = %entry.plugin_root.display(),
+                error = %err,
+                "catalog register plugin failed; continuing without this plugin"
+            );
+            continue;
+        }
+        for manifest_tool in &entry.manifest.tools {
+            let tool = Tool {
+                name: manifest_tool.name.clone(),
+                label: manifest_tool.name.clone(),
+                description: manifest_tool.description.clone(),
+                parameters: manifest_tool.parameters.clone(),
+                plugin_id: plugin_id.clone(),
+                is_enabled: true,
+                created_at: 0,
+            };
+            if let Err(err) = default_tool_registry.register_tool_local(tool, plugin_id) {
+                warn!(
+                    plugin = %plugin_id,
+                    tool = %manifest_tool.name,
+                    error = %err,
+                    "catalog materialize static tool failed; continuing without this tool"
+                );
+            }
+        }
+    }
+    for diagnostic in &catalog.diagnostics {
+        warn!(
+            path = %diagnostic.path.display(),
+            reason = %diagnostic.reason,
+            "plugin catalog scan ignored invalid entry"
+        );
+    }
+    let host_function_catalog =
+        refresh_host_function_registry(config, agent_workspace_dir, &function_registry)?;
+    for diagnostic in &host_function_catalog.diagnostics {
+        warn!(
+            path = %diagnostic.path.display(),
+            reason = %diagnostic.reason,
+            "host function catalog scan ignored invalid entry"
+        );
+    }
+
+    let plugins_dir = resolve_plugins_dir(config)?;
+    for entry in &config.plugin.auto_load {
+        let configured = std::path::PathBuf::from(entry);
+        let load_path = if let Some(catalog_entry) = catalog.get(entry) {
+            catalog_entry.plugin_root.clone()
+        } else if configured.is_absolute() || configured.exists() {
+            configured
+        } else {
+            plugins_dir.join(entry)
+        };
+        if let Err(err) = plugin_manager.load_plugin(&load_path) {
+            warn!(
+                plugin = %entry,
+                path = %load_path.display(),
+                error = %err,
+                "auto-load plugin failed; continuing without this plugin"
+            );
+        }
+    }
+
+    Ok((
+        tool_registry,
+        function_registry,
+        Some(plugin_manager),
+        Some(function_invoker),
+        dispatcher,
+    ))
+}
+
+fn plugin_runtime_disabled_via_env() -> bool {
+    match std::env::var("PI_PLUGIN_DISABLE") {
+        Ok(raw) => matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
+#[allow(dead_code)]
 struct NoopToolExecutor;
 
 #[async_trait::async_trait]
@@ -691,6 +1188,7 @@ impl ToolExecutor for NoopToolExecutor {
         tool: &Tool,
         _params: serde_json::Value,
         _caller_plugin_id: &str,
+        _session_id: Option<&str>,
     ) -> Result<serde_json::Value, AppError> {
         Err(AppError::Tool(format!(
             "对话模式下不支持插件工具执行: {}",

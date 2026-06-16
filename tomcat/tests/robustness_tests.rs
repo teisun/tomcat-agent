@@ -124,9 +124,11 @@ fn test_plugin_manager_repeated_register_unload_state_consistent(
         let instance = PluginInstance {
             id: "stress".to_string(),
             manifest: manifest.clone(),
-            wasm_instance: None,
+            plugin_vm_instance: None,
             status: PluginStatus::Loaded,
             registered_tools: vec![],
+            registered_functions: vec![],
+            registered_commands: vec![],
             event_listener_ids: vec![],
             config: serde_json::json!({}),
             created_at: now + i as i64,

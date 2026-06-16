@@ -101,11 +101,7 @@ impl FixedResolver {
             api: api.to_string(),
             provider: provider.to_string(),
             base_url: Some(base_url.to_string()),
-            key_source: if provider == "deepseek" {
-                "DEEPSEEK_API_KEY".to_string()
-            } else {
-                "OPENAI_API_KEY".to_string()
-            },
+            key_source: "DEEPSEEK_API_KEY".to_string(),
             thinking_format: tomcat::core::llm::thinking_policy::thinking_format_for_model(model),
             capabilities,
         }

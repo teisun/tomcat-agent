@@ -1,4 +1,5 @@
 use super::super::vm_actor::*;
+use crate::ext::PluginEngine;
 use crate::infra::wire;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -40,4 +41,42 @@ fn handle_state_check() {
     assert_eq!(handle.current_state(), VmActorState::Created);
     state.store(VmActorState::Running as u8, Ordering::Relaxed);
     assert_eq!(handle.current_state(), VmActorState::Running);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actor_panic_is_caught_and_marked_error() {
+    let engine = PluginEngine::global(None).expect("create quickjs engine");
+    let mut instance = engine
+        .create_instance("panic-actor-test")
+        .expect("create quickjs instance");
+    instance
+        .register_host_binding(
+            |_request_json| -> Result<String, crate::infra::error::AppError> {
+                panic!("intentional host binding panic");
+            },
+        )
+        .expect("register host binding");
+
+    let temp = tempfile::tempdir().expect("create tempdir for vm_actor test");
+    let script_path = temp.path().join("main.js");
+    std::fs::write(&script_path, "pi.log('trigger panic');\n")
+        .expect("write vm_actor panic test script");
+
+    let handle = VmActor::spawn(instance, script_path, 8);
+    handle
+        .dispatch(VmCommand::Init)
+        .await
+        .expect("send init command");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if handle.current_state() == VmActorState::Error {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "VmActor should enter Error after host binding panic"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }

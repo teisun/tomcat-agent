@@ -1,19 +1,19 @@
 # tomcat 整体技术架构
 
-本文是架构总索引：各子系统细节在 `docs/architecture/` 与下文链接中展开。**当前阶段**以单 Agent 体验完善为主（内置工具、会话、Agent Loop、Checkpoint、PLAN 模式等），Wasm 插件能力保留维护、默认构建可不启用；路线图见 [Product_Brief.md](Product_Brief.md)。
+本文是架构总索引：各子系统细节在 `docs/architecture/` 与下文链接中展开。**当前阶段**以单 Agent 体验完善与 rquickjs 插件体系收口为主（内置工具、会话、Agent Loop、Checkpoint、PLAN 模式等）；路线图见 [Product_Brief.md](Product_Brief.md)。
 
 ## 设计原则
 
-1. **稳定插件契约**：启用 Wasm 插件时，宿主对沙箱暴露的 API、事件机制与 Hostcall 协议保持版本内一致，便于扩展与回归验证。
-2. **安全隔离优先**：不可信代码仅在 WasmEdge 独立沙箱内运行（`wasmedge` / `standalone` feature）；宿主可信逻辑与插件逻辑分离，仅通过显式注册的 API 通信。默认 no-wasm 构建无插件沙箱，核心能力仍在 Rust 宿主内。
+1. **稳定插件契约**：宿主对插件暴露的 API、事件机制与 Hostcall 协议保持版本内一致，便于扩展与回归验证。
+2. **安全隔离优先**：不可信代码运行在进程内 `rquickjs` 插件 VM 中；宿主可信逻辑与插件逻辑分离，仅通过显式注册的 API 通信，并配合超时、中断预算、堆上限与 `VmActor` 隔离。
 3. **极简分层**：严格遵循单向依赖、无循环依赖；对话、LLM、内置工具、权限与审计等**核心能力在宿主层实现**，不依赖插件加载即可运行 `tomcat chat`。
-4. **原生性能**：Rust 宿主负责调度与可信逻辑；可选 WasmEdge + QuickJS 执行沙箱内 JS/TS 插件。
-5. **可插拔扩展**：非核心或第三方能力可通过 Wasm 插件扩展；宿主侧通过工具 catalog 统一注册内置工具与插件工具，支持按需启用/禁用。
+4. **原生性能**：Rust 宿主负责调度与可信逻辑；进程内 `rquickjs` 负责执行插件 JS/TS。
+5. **可插拔扩展**：非核心或第三方能力可通过 JS/TS 插件扩展；宿主侧通过工具 catalog 统一注册内置工具与插件工具，支持按需启用/禁用。
 
 ## 整体分层架构
 
 从宿主可信层到沙箱插件层，单向依赖、边界清晰，架构层级从下到上依次为：
-**基础设施层 → 宿主核心能力层 → 宿主API层 → WasmEdge运行时层 → 沙箱执行层 → 交互层**
+**基础设施层 → 宿主核心能力层 → 宿主API层 → rquickjs 插件运行时层 → 沙箱执行层 → 交互层**
 
 ## 项目全貌
 
@@ -40,13 +40,13 @@
 - **状态与规划**：`CheckpointStore`（影子 Git）、`PlanRuntime`（PLAN / EXEC 模式）
 - **权限**：`PermissionGate`、工作区与 `path_rules`
 
-插件生命周期在启用 Wasm 时由 `ext/` 与核心协同；详见宿主核心层文档。
+插件生命周期由 `ext/` 与核心协同；详见宿主核心层文档。
 
 详见 [2. 宿主核心能力层（详细）](../../docs/architecture/host-core-layer.md)。
 
 ### 3. 宿主API层
 
-宿主向插件开放的唯一可信接口，基于 ExtensionAPI 与统一 Hostcall 协议；包含核心 Agent API 表、Node.js 兼容层、Hostcall 通信（含高并发分发、异步 Hostcall、细粒度锁定及实现指导）。
+宿主向插件开放的唯一可信接口，基于统一 Hostcall 协议；包含核心 Agent API 表、少量 Node alias / fail-closed 行为、Hostcall 通信（含高并发分发、异步 Hostcall、细粒度锁定及实现指导）。
 
 ### 4. 插件系统（统一入口）
 
@@ -60,9 +60,9 @@
 
 #### 4.2 桥接与运行时
 
-覆盖从 JS 桥接脚本到 Host-Guest 边界，再到 WasmEdge 实例执行的完整运行时链路。运行时侧基于 WasmEdge 官方构建，全局单例 Engine，每个插件对应独立 Store/Instance，提供内存安全与数据交换、并发调度、资源与内存模式（MemoryProfile：Low/Standard/High/Auto）能力。
+覆盖从 JS 桥接脚本到 Host-Guest 边界，再到 `rquickjs` 插件实例执行的完整运行时链路。运行时侧由 `PluginEngine` / `PluginVmInstance` / `VmActor` / `PluginRuntimeManager` 组成，提供堆上限、超时、中断预算、并发调度与机会式 idle 回收能力。
 
-详见 [JS 桥接层架构](../../docs/architecture/plugin-system/js-bridge-layer.md)、[Host-Guest 层设计](../../docs/architecture/plugin-system/host-guest-layer.md)、[WasmEdge运行时层（详细）](../../docs/architecture/plugin-system/wasmedge-runtime-layer.md)。
+详见 [JS 桥接层架构](../../docs/architecture/plugin-system/js-bridge-layer.md)、[Host-Guest 层设计](../../docs/architecture/plugin-system/host-guest-layer.md)、[插件系统全貌（现行）](../../docs/architecture/plugin-system-overview_new.md)。
 
 #### 4.3 沙箱执行
 
@@ -72,7 +72,7 @@
 
 #### 4.4 异步与事件
 
-针对 LLM 调用、命令执行等耗时 Hostcall，采用复用 `__pi_host_call` 的 submit/poll 非阻塞模型；依托 wasmedge_quickjs 内置事件循环驱动 Promise 解析，宿主通过 `callId` 与 `__async.poll` 路由管理请求提交与结果轮询。事件系统采用发布-订阅模型，区分 AgentEvent 与 ExtensionEvent，保证单次回调失败不阻断主流程。
+针对 LLM 调用、命令执行等耗时 Hostcall，采用复用 `__pi_host_call` 的 submit/poll 非阻塞模型；事件循环由注入到 `rquickjs` VM 的 bridge / main loop 驱动，宿主通过 `callId` 与 `__async.poll` 路由管理请求提交与结果轮询。事件系统采用发布-订阅模型，区分 AgentEvent 与 ExtensionEvent，保证单次回调失败不阻断主流程。
 
 详见 [异步 Hostcall 与事件循环设计（详细）](../../docs/architecture/plugin-system/async-hostcall-event-loop.md)、[事件系统设计（详细）](../../docs/architecture/plugin-system/events.md)。
 
@@ -86,7 +86,7 @@
 
 长生命周期 VM 等插件运行时演进方向，确保性能与状态保持能力可迭代扩展。
 
-详见 [插件系统全貌（详细）](../../docs/architecture/plugin-system-overview.md)、[Phase 2 长生命周期 VM 方案设计（详细）](../../docs/architecture/plugin-system/phase2-long-lived-vm.md)。
+详见 [插件系统全貌（现行）](../../docs/architecture/plugin-system-overview_new.md)、[长生命周期 VM（现行摘要）](../../docs/architecture/plugin-system/phase2-long-lived-vm.md)。
 
 ### 5. 交互层
 
@@ -145,18 +145,18 @@ Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（
 | [docs/architecture/infrastructure-layer.md](../../docs/architecture/infrastructure-layer.md)                                       | 基础设施层                                     |
 | [docs/architecture/audit-log.md](../../docs/architecture/audit-log.md)                                                             | 审计日志设计                                    |
 | [docs/architecture/host-core-layer.md](../../docs/architecture/host-core-layer.md)                                                 | 宿主核心能力层                                   |
-| [docs/architecture/plugin-system-overview.md](../../docs/architecture/plugin-system-overview.md)                                   | 插件系统全貌                                    |
+| [docs/architecture/plugin-system-overview_new.md](../../docs/architecture/plugin-system-overview_new.md)                           | 插件系统全貌（现行）                              |
 | [docs/architecture/plugin-system/plugin-source-scan-register-load.md](../../docs/architecture/plugin-system/plugin-source-scan-register-load.md) | 插件来源扫描、注册与加载技术方案                         |
 | [docs/architecture/plugin-system/host-api-layer.md](../../docs/architecture/plugin-system/host-api-layer.md)                       | 宿主API层                                    |
 | [docs/architecture/plugin-system/host-call-protocol.md](../../docs/architecture/plugin-system/host-call-protocol.md)               | Hostcall JSON 协议（请求/响应与 module/method 约定） |
 | [docs/architecture/plugin-system/js-bridge-layer.md](../../docs/architecture/plugin-system/js-bridge-layer.md)                     | JS 桥接层架构                                  |
 | [docs/architecture/plugin-system/host-guest-layer.md](../../docs/architecture/plugin-system/host-guest-layer.md)                   | Host-Guest 层设计                            |
-| [docs/architecture/plugin-system/wasmedge-runtime-layer.md](../../docs/architecture/plugin-system/wasmedge-runtime-layer.md)       | WasmEdge运行时层                              |
+| [docs/architecture/plugin-system/wasmedge-runtime-layer.md](../../docs/architecture/plugin-system/wasmedge-runtime-layer.md)       | WasmEdge 运行时层（历史说明）                     |
 | [docs/architecture/plugin-system/sandbox-layer.md](../../docs/architecture/plugin-system/sandbox-layer.md)                         | 沙箱执行层                                     |
 | [docs/architecture/plugin-system/async-hostcall-event-loop.md](../../docs/architecture/plugin-system/async-hostcall-event-loop.md) | 异步 Hostcall 与事件循环设计                       |
 | [docs/architecture/plugin-system/events.md](../../docs/architecture/plugin-system/events.md)                                       | 事件系统设计                                    |
-| [docs/architecture/plugin-system/js-api-alignment.md](../../docs/architecture/plugin-system/js-api-alignment.md)                   | JS API 与桥接对齐设计                            |
-| [docs/architecture/plugin-system/phase2-long-lived-vm.md](../../docs/architecture/plugin-system/phase2-long-lived-vm.md)           | Phase 2 长生命周期 VM 方案设计（方案 A/B 对比）          |
+| [docs/architecture/plugin-system/js-api-alignment.md](../../docs/architecture/plugin-system/js-api-alignment.md)                   | JS API 对齐范围（现行摘要）                        |
+| [docs/architecture/plugin-system/phase2-long-lived-vm.md](../../docs/architecture/plugin-system/phase2-long-lived-vm.md)           | 长生命周期 VM（现行摘要）                           |
 | [docs/architecture/interaction-layer.md](../../docs/architecture/interaction-layer.md)                                             | 交互层                                       |
 | [docs/architecture/security.md](../../docs/architecture/security.md)                                                               | 安全设计核心原则                                  |
 | [docs/architecture/permission-system.md](../../docs/architecture/permission-system.md)                                             | 权限子系统（PermissionGate）— T2-P0-004 工作区权限分级 |

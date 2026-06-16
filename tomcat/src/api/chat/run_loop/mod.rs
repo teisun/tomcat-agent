@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::core::agent_loop::AgentRunOutcome;
 use crate::core::compaction::apply::check_before_request;
@@ -56,18 +56,51 @@ pub(crate) use self::thinking_persist::{
     register_thinking_persist_listeners, unregister_thinking_persist_listeners,
 };
 
-fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
+async fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
     let skill_set = ctx.skill_set_snapshot();
     let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
-    plan_runtime::catalog::visible_tools_for_mode_with_policy(
+    let mut tools = plan_runtime::catalog::visible_tools_for_mode_with_policy(
         &ctx.session_runtime.plan_runtime.mode(),
         allow_load_skill,
-    )
+    );
+    match ctx.global_services.tool_registry.list_tools(None).await {
+        Ok(plugin_tools) => {
+            tools.extend(
+                plugin_tools
+                    .iter()
+                    .map(crate::core::tools::contract::registry::tool_to_function_definition),
+            );
+        }
+        Err(err) => {
+            warn!(error = %err, "list plugin tools for LLM definitions failed; continuing with builtins only");
+        }
+    }
+    tools
 }
 
-fn build_system_text(ctx: &ChatContext, context_budget_chars: usize) -> String {
+async fn build_system_text(ctx: &ChatContext, context_budget_chars: usize) -> String {
     let skill_set = ctx.skill_set_snapshot();
     let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
+    let plugin_tool_lines = match ctx.global_services.tool_registry.list_tools(None).await {
+        Ok(plugin_tools) => plugin_tools
+            .iter()
+            .map(|tool| format!("- {}: {}", tool.name, tool.description))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(err) => {
+            warn!(error = %err, "list plugin tools for system prompt failed; omitting plugin tool lines");
+            String::new()
+        }
+    };
+    let builtin_tool_lines =
+        crate::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
+            allow_load_skill,
+        );
+    let tool_lines = if plugin_tool_lines.is_empty() {
+        builtin_tool_lines
+    } else {
+        format!("{builtin_tool_lines}\n{plugin_tool_lines}")
+    };
     let workspace_context = crate::core::llm::system_prompt::WorkspaceContext {
         agent_workspace_dir: ctx
             .scope_services
@@ -87,11 +120,7 @@ fn build_system_text(ctx: &ChatContext, context_budget_chars: usize) -> String {
             .agent_trail_dir
             .to_string_lossy()
             .to_string(),
-        tool_lines: Some(
-            crate::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(
-                allow_load_skill,
-            ),
-        ),
+        tool_lines: Some(tool_lines),
     };
     let workspace_state = compute_workspace_state(ctx);
     crate::core::llm::system_prompt::build_system_prompt_with_state_and_skills(
@@ -271,7 +300,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         let _ = ctx.await_skill_discovery().await;
     }
     let context_budget_chars = crate::infra::config::compute_context_budget_chars(context_config);
-    let mut system_text = build_system_text(ctx, context_budget_chars);
+    let mut system_text = build_system_text(ctx, context_budget_chars).await;
     persist::schedule_checkpoint_prune(ctx);
     // ResumePlan 目前恒为 Continue；保留 hook，未来若恢复逻辑需要 tail，可在这里恢复
     // `read_entries_tail(..., 64)` 预读。
@@ -391,7 +420,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             guard.clone()
         };
 
-        let next_system_text = build_system_text(ctx, context_budget_chars);
+        let next_system_text = build_system_text(ctx, context_budget_chars).await;
         sync_context_state_system_prompt_len(
             &mut context_state,
             system_text.len(),
@@ -414,6 +443,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     eprintln!("(致命错误，退出对话)");
                     context_state.preheat.abort();
                     cleanup::cleanup_openai_files_on_session_end(ctx, "chat_fatal_exit").await;
+                    cleanup::cleanup_plugin_sessions_on_session_end(ctx, "chat_fatal_exit").await;
                     events::stderr::unregister_chat_session_stderr_listeners(
                         &*ctx.global_services.event_bus,
                         &session_stderr_ids,
@@ -429,6 +459,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     }
 
     cleanup::cleanup_openai_files_on_session_end(ctx, "session_end").await;
+    cleanup::cleanup_plugin_sessions_on_session_end(ctx, "session_end").await;
     events::stderr::unregister_chat_session_stderr_listeners(
         &*ctx.global_services.event_bus,
         &session_stderr_ids,
@@ -543,7 +574,7 @@ pub async fn run_chat_turn(
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
         model,
         session_id: session_id.clone(),
-        tool_definitions: build_tool_definitions(ctx),
+        tool_definitions: build_tool_definitions(ctx).await,
         context_config: context_config.clone(),
         compaction_provider: Some(compaction_provider.clone()),
         agent_trail_dir: ctx
@@ -569,6 +600,7 @@ pub async fn run_chat_turn(
         config,
         turn_token,
     );
+    agent_loop = agent_loop.with_tool_registry(ctx.global_services.tool_registry.clone());
     if let Some(backend) = ctx.global_services.config_backend.clone() {
         agent_loop = agent_loop.with_config_backend(backend);
     }

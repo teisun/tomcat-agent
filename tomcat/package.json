@@ -6,7 +6,8 @@
     "os:init": "openspec init",
     "os:update": "openspec update",
     "os:list": "openspec list --json",
-    "os": "openspec"
+    "os": "openspec",
+    "build:web-search-backends": "node ./scripts/build-web-search-backends.mjs"
   },
   "devDependencies": {
     "@fission-ai/openspec": "latest"

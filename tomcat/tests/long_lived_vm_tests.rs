@@ -12,8 +12,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tomcat::{
     parse_manifest, wire, DefaultEventBus, EventEnvelope, HostApiDispatcher, PluginInstance,
-    PluginManager, PluginStatus, RuntimeManager, SharedRuntimeManager, VmActorHandle, VmActorState,
-    VmCommand, VmRuntimeKey,
+    PluginManager, PluginRuntimeKey, PluginRuntimeManager, PluginStatus,
+    SharedPluginRuntimeManager, VmActorHandle, VmActorState, VmCommand,
 };
 
 fn stub_handle() -> VmActorHandle {
@@ -49,9 +49,11 @@ fn make_plugin_instance(id: &str) -> PluginInstance {
     PluginInstance {
         id: id.to_string(),
         manifest,
-        wasm_instance: None,
+        plugin_vm_instance: None,
         status: PluginStatus::Loaded,
         registered_tools: vec![],
+        registered_functions: vec![],
+        registered_commands: vec![],
         event_listener_ids: vec![],
         config: serde_json::json!({}),
         created_at: now,
@@ -72,15 +74,15 @@ fn test_runtime_manager_insert_get_by_composite_key() -> Result<(), Box<dyn std:
     common::setup_logging();
     let _span = tracing::info_span!("test_runtime_manager_insert_get_by_composite_key").entered();
 
-    let mgr = RuntimeManager::new();
-    let key = VmRuntimeKey::new("session-1", "plugin-a");
+    let mgr = PluginRuntimeManager::new();
+    let key = PluginRuntimeKey::new("session-1", "plugin-a");
 
     tracing::info!("Arrange: 创建 RuntimeManager 与 VmRuntimeKey(session-1/plugin-a)");
     mgr.insert(key.clone(), stub_handle());
 
     tracing::info!("Act: get 同 key 和不同 key");
     let found = mgr.get(&key);
-    let not_found = mgr.get(&VmRuntimeKey::new("session-1", "plugin-b"));
+    let not_found = mgr.get(&PluginRuntimeKey::new("session-1", "plugin-b"));
 
     tracing::info!("Assert: 同 key 返回 Some，不同 key 返回 None");
     assert!(found.is_some(), "同 key 应找到 handle");
@@ -177,10 +179,10 @@ fn test_multi_session_isolation_in_runtime_manager() -> Result<(), Box<dyn std::
     common::setup_logging();
     let _span = tracing::info_span!("test_multi_session_isolation_in_runtime_manager").entered();
 
-    let mgr = RuntimeManager::new();
+    let mgr = PluginRuntimeManager::new();
 
-    let key_s1 = VmRuntimeKey::new("session-A", "plugin-x");
-    let key_s2 = VmRuntimeKey::new("session-B", "plugin-x");
+    let key_s1 = PluginRuntimeKey::new("session-A", "plugin-x");
+    let key_s2 = PluginRuntimeKey::new("session-B", "plugin-x");
 
     let (tx1, _rx1) = tokio::sync::mpsc::channel(1);
     let state1 = Arc::new(AtomicU8::new(VmActorState::Running as u8));
@@ -239,11 +241,11 @@ fn test_session_cleanup_removes_all_handles_for_session() -> Result<(), Box<dyn 
     let _span =
         tracing::info_span!("test_session_cleanup_removes_all_handles_for_session").entered();
 
-    let mgr = RuntimeManager::new();
-    mgr.insert(VmRuntimeKey::new("sess-1", "p1"), stub_handle());
-    mgr.insert(VmRuntimeKey::new("sess-1", "p2"), stub_handle());
-    mgr.insert(VmRuntimeKey::new("sess-1", "p3"), stub_handle());
-    mgr.insert(VmRuntimeKey::new("sess-2", "p1"), stub_handle());
+    let mgr = PluginRuntimeManager::new();
+    mgr.insert(PluginRuntimeKey::new("sess-1", "p1"), stub_handle());
+    mgr.insert(PluginRuntimeKey::new("sess-1", "p2"), stub_handle());
+    mgr.insert(PluginRuntimeKey::new("sess-1", "p3"), stub_handle());
+    mgr.insert(PluginRuntimeKey::new("sess-2", "p1"), stub_handle());
 
     tracing::info!("Arrange: sess-1 下 3 个 handle，sess-2 下 1 个 handle，共 4 个");
     assert_eq!(mgr.len(), 4);
@@ -254,8 +256,8 @@ fn test_session_cleanup_removes_all_handles_for_session() -> Result<(), Box<dyn 
     tracing::info!("Assert: 移除 3 个，剩余 1 个（sess-2/p1）");
     assert_eq!(removed.len(), 3);
     assert_eq!(mgr.len(), 1);
-    assert!(mgr.get(&VmRuntimeKey::new("sess-2", "p1")).is_some());
-    assert!(mgr.get(&VmRuntimeKey::new("sess-1", "p1")).is_none());
+    assert!(mgr.get(&PluginRuntimeKey::new("sess-2", "p1")).is_some());
+    assert!(mgr.get(&PluginRuntimeKey::new("sess-1", "p1")).is_none());
 
     Ok(())
 }
@@ -272,14 +274,14 @@ async fn test_plugin_manager_end_session_cleans_runtime_manager(
 
     let bus = Arc::new(DefaultEventBus::new());
     let dispatcher = Arc::new(HostApiDispatcher::new(bus.clone()));
-    let rm: SharedRuntimeManager = Arc::new(RuntimeManager::new());
+    let rm: SharedPluginRuntimeManager = Arc::new(PluginRuntimeManager::new());
 
     let mut mgr = PluginManager::new(bus);
     mgr.set_host_dispatcher(dispatcher);
-    mgr.set_runtime_manager(rm.clone());
+    mgr.set_plugin_runtime_manager(rm.clone());
 
-    rm.insert(VmRuntimeKey::new("sess-x", "plugin-a"), stub_handle());
-    rm.insert(VmRuntimeKey::new("sess-x", "plugin-b"), stub_handle());
+    rm.insert(PluginRuntimeKey::new("sess-x", "plugin-a"), stub_handle());
+    rm.insert(PluginRuntimeKey::new("sess-x", "plugin-b"), stub_handle());
 
     tracing::info!("Arrange: PluginManager 注入 RuntimeManager(2 个 handle) + dispatcher");
     assert_eq!(rm.len(), 2);
@@ -297,7 +299,7 @@ async fn test_plugin_manager_end_session_cleans_runtime_manager(
 // 场景 5：PluginManager start_session_vm 依赖校验
 // ---------------------------------------------------------------------------
 
-/// [start_session_vm 无 engine] 未注入 WasmEngine 时调用 start_session_vm 返回明确错误
+/// [start_session_vm 无 engine] 未注入 PluginEngine 时调用 start_session_vm 返回明确错误
 ///
 /// 验收标准：错误隔离——缺失依赖时不 panic，返回 AppError::Plugin
 #[tokio::test]
@@ -307,28 +309,28 @@ async fn test_start_session_vm_without_engine_returns_err() -> Result<(), Box<dy
     let _span = tracing::info_span!("test_start_session_vm_without_engine_returns_err").entered();
 
     let bus = Arc::new(DefaultEventBus::new());
-    let rm: SharedRuntimeManager = Arc::new(RuntimeManager::new());
+    let rm: SharedPluginRuntimeManager = Arc::new(PluginRuntimeManager::new());
     let mut mgr = PluginManager::new(bus.clone());
-    mgr.set_runtime_manager(rm);
+    mgr.set_plugin_runtime_manager(rm);
 
     mgr.register_plugin(make_plugin_instance("test-plugin"))?;
 
-    tracing::info!("Arrange: PluginManager 有 RuntimeManager 和已注册插件，但无 WasmEngine");
+    tracing::info!("Arrange: PluginManager 有运行时管理器和已注册插件，但无 PluginEngine");
     tracing::info!("Act: start_session_vm(sess, test-plugin)");
     let result = mgr.start_session_vm("sess-1", "test-plugin").await;
 
-    tracing::info!("Assert: 返回 Err(Plugin(...))，msg 含 wasm_engine");
+    tracing::info!("Assert: 返回 Err(Plugin(...))，msg 含 plugin_engine");
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("wasm_engine"),
-        "错误应提示 wasm_engine 未设置，实际: {err_msg}"
+        err_msg.contains("plugin_engine"),
+        "错误应提示 plugin_engine 未设置，实际: {err_msg}"
     );
 
     Ok(())
 }
 
-/// [start_session_vm 无 RuntimeManager] 未注入 RuntimeManager 时返回明确错误
+/// [start_session_vm 无 PluginRuntimeManager] 未注入运行时管理器时返回明确错误
 #[tokio::test]
 async fn test_start_session_vm_without_runtime_manager_returns_err(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -344,12 +346,12 @@ async fn test_start_session_vm_without_runtime_manager_returns_err(
     tracing::info!("Act: start_session_vm(sess, test-plugin)");
     let result = mgr.start_session_vm("sess-1", "test-plugin").await;
 
-    tracing::info!("Assert: 返回 Err，msg 含 runtime_manager");
+    tracing::info!("Assert: 返回 Err，msg 含 plugin_runtime_manager");
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("runtime_manager"),
-        "错误应提示 runtime_manager 未设置，实际: {err_msg}"
+        err_msg.contains("plugin_runtime_manager"),
+        "错误应提示 plugin_runtime_manager 未设置，实际: {err_msg}"
     );
 
     Ok(())
@@ -442,7 +444,9 @@ fn test_dispatcher_event_channel_register_and_deliver() -> Result<(), Box<dyn st
         },
     )?;
 
-    tracing::info!("Assert: 通过 tx 对应的 rx 可接收到事件（由 register_event_channel 返回的 tx 侧验证 channel 联通）");
+    tracing::info!(
+        "Assert: 通过 tx 对应的 rx 可接收到事件（由 register_event_channel 返回的 tx 侧验证 channel 联通）"
+    );
     // deliver_event 写入的是 dispatcher 内部维护的 tx，这里验证不返回错误即通过
     // 更深入的验证：channel 满时返回回压错误
     Ok(())

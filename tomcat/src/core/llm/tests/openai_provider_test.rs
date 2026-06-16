@@ -14,6 +14,16 @@ use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, ChatRequest};
 use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::LlmConfig;
 
+fn deepseek_openai_config() -> LlmConfig {
+    LlmConfig {
+        provider: "openai".to_string(),
+        api_base: Some("https://api.deepseek.com".to_string()),
+        api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
+        default_model: "deepseek-v4-pro".to_string(),
+        ..LlmConfig::default()
+    }
+}
+
 #[test]
 fn openai_provider_new_fails_without_api_key() {
     println!("[TEST] openai_provider_new_fails_without_api_key — 开始");
@@ -30,24 +40,24 @@ fn openai_provider_new_fails_without_api_key() {
 #[test]
 fn openai_provider_new_succeeds_with_api_key() {
     load_dotenv();
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        panic!("OPENAI_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
+    if std::env::var("DEEPSEEK_API_KEY").is_err() {
+        panic!("DEEPSEEK_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
     }
 
-    let config = LlmConfig::default();
-    let provider = OpenAiProvider::new(&config).expect("OPENAI_API_KEY 已设置时应创建成功");
+    let config = deepseek_openai_config();
+    let provider = OpenAiProvider::new(&config).expect("DEEPSEEK_API_KEY 已设置时应创建成功");
     assert_eq!(provider.provider_name(), "openai");
 }
 
 #[test]
 fn count_tokens_approximate() {
     load_dotenv();
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        panic!("OPENAI_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
+    if std::env::var("DEEPSEEK_API_KEY").is_err() {
+        panic!("DEEPSEEK_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
     }
 
-    let config = LlmConfig::default();
-    let provider = OpenAiProvider::new(&config).expect("OPENAI_API_KEY 已设置时应创建成功");
+    let config = deepseek_openai_config();
+    let provider = OpenAiProvider::new(&config).expect("DEEPSEEK_API_KEY 已设置时应创建成功");
     let messages = vec![
         ChatMessage::user("hello world"),
         ChatMessage::assistant("hi there"),
@@ -119,17 +129,17 @@ fn parts_with_image_returns_structured_error() {
     );
 }
 
-/// 依赖 OPENAI_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。
+/// 依赖 DEEPSEEK_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。
 #[tokio::test]
-#[ignore = "依赖真实 OpenAI API 与配额，CI 默认跳过"]
+#[ignore = "依赖真实 DeepSeek API 与配额，CI 默认跳过"]
 async fn chat_real_request_response_print() {
     load_dotenv();
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        panic!("OPENAI_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
+    if std::env::var("DEEPSEEK_API_KEY").is_err() {
+        panic!("DEEPSEEK_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
     }
 
-    let config = LlmConfig::default();
-    let provider = OpenAiProvider::new(&config).expect("OPENAI_API_KEY 已设置时应创建成功");
+    let config = deepseek_openai_config();
+    let provider = OpenAiProvider::new(&config).expect("DEEPSEEK_API_KEY 已设置时应创建成功");
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say exactly: ok")],
         model: config.default_model.clone(),
@@ -146,7 +156,7 @@ async fn chat_real_request_response_print() {
         }
         Err(e) => {
             panic!(
-                "chat 请求失败: {}（请在本机终端运行 cargo test，并确认可访问 api.openai.com 且已配置 OPENAI_API_KEY）",
+                "chat 请求失败: {}（请在本机终端运行 cargo test，并确认可访问 api.deepseek.com 且已配置 DEEPSEEK_API_KEY）",
                 e
             );
         }

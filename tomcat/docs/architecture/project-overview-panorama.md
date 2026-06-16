@@ -20,8 +20,8 @@
 | 术语 | 白话解释 | 在系统中的位置 |
 |------|----------|----------------|
 | **宿主 (Host)** | 用 Rust 写的、你完全信任的那部分程序，负责调度、安全与核心能力。 | 整个 Rust 侧：基础设施层、宿主核心能力层、宿主API层、以及调度 Agent 的交互层。 |
-| **插件 (Plugin / Extension)** | 用 JS/TS 写的、跑在沙箱里的扩展逻辑，不能直接动系统，只能通过宿主提供的 API 调用。 | 运行在 WasmEdge + QuickJS 的沙箱执行层；通过「宿主API层」与宿主通信。 |
-| **WasmEdge** | 负责跑 WebAssembly 的运行时；本项目里主要用来跑内置的 QuickJS，从而执行插件的 JS 代码。 | WasmEdge 运行时层：每个插件对应独立 Store/Instance，与宿主内存隔离。 |
+| **插件 (Plugin / Extension)** | 用 JS/TS 写的、跑在沙箱里的扩展逻辑，不能直接动系统，只能通过宿主提供的 API 调用。 | 运行在 `rquickjs` 插件运行时层；通过「宿主API层」与宿主通信。 |
+| **Plugin VM / `rquickjs`** | 负责执行插件 JS/TS 的进程内运行时；每个 `(session_id, plugin_id)` 可对应一个独立 VM。 | 插件运行时层：`PluginEngine` / `PluginVmInstance` / `VmActor` / `PluginRuntimeManager`。 |
 | **Hostcall** | 插件向宿主「发起一次请求」的统称；所有请求都走同一个入口（如 `__pi_host_call`），用 JSON 里 module/method 做路由。 | 宿主API层：HostApiDispatcher 按 (module, method) 分发给各个 Processor。 |
 | **4 原语** | 宿主提供给插件的四种原子能力：读文件、写文件、编辑文件、执行 Shell 命令；是插件与系统交互的主通道。 | 宿主核心能力层实现，经宿主API层暴露；调用可审计、可权限管控。 |
 | **Agent Loop** | Agent 的「主循环」：不断「问 LLM → 拿到回复 → 若需要就执行工具 → 把结果再喂给 LLM」，直到产出最终回答或出错/中断。 | 核心编排逻辑，在宿主侧；详见 [Agent Loop 设计](agent-loop.md)。 |
@@ -45,7 +45,7 @@ flowchart TB
   subgraph sandbox [沙箱执行层]
     PluginCode[插件 JS 代码]
   end
-  subgraph wasmedge [WasmEdge 运行时层]
+  subgraph pluginvm [rquickjs 插件运行时层]
     QuickJS[QuickJS 实例]
   end
   subgraph hostApi [宿主 API 层]
@@ -85,7 +85,7 @@ flowchart TB
 - **基础设施层**：事件总线、配置、审计、日志；无业务逻辑，全项目共用。
 - **宿主核心能力层**：`AgentLoop` 是编排中心，负责把 `CLI` 输入驱动成「问 LLM → 执行工具 → 回流结果 → 下一轮推理」的闭环；同时依赖会话、`PlanRuntime`、LLM、4 原语、工具注册与权限门禁。
 - **宿主 API 层**：插件能调到的唯一入口（Hostcall）；单入口多路复用，按 `module/method` 路由到会话、LLM、4 原语、工具或事件系统。
-- **WasmEdge 运行时层**：跑 Wasm/QuickJS，每插件独立实例，内存隔离。
+- **rquickjs 插件运行时层**：跑插件 JS/TS，配合 `VmActor`、堆上限、超时与中断预算提供软隔离。
 - **沙箱执行层**：插件代码的真实执行环境；只能通过宿主 API 与外界通信。
 - **交互层**：CLI 等入口，通常直接驱动 `AgentLoop` 启动一次 Agent 运行。
 
@@ -288,11 +288,11 @@ src 总计 39 个 .rs（main/lib=2, api=4, core=16, ext=8, infra=9）
 │ [B] ext 内核区（文件级协作，重点 host_binding.rs）                                                                         │
 │                                                                                                                            │
 │  plugin.rs::PluginManager::load_plugin() ④                                                                                │
-│      ├─ engine_wasmedge.rs::WasmEngine::global()/create_instance() ⑤                                                      │
-│      ├─ instance_wasmedge.rs::WasmInstance::register_host_binding(invoke_fn) ⑥                                            │
+│      ├─ engine_rquickjs.rs::PluginEngine::global()/create_instance() ⑤                                                    │
+│      ├─ instance_rquickjs.rs::PluginVmInstance::register_host_binding(invoke_fn) ⑥                                        │
 │      └─ invoke_fn(request_json) => host_binding::invoke_host_func_with(...) ⑦                                             │
 │                                                                                                                            │
-│  instance_wasmedge.rs::build_vm() 注册 env.__pi_host_call                                                                  │
+│  instance_rquickjs.rs::build_vm() 注册 env.__pi_host_call                                                                  │
 │      └─ JS(pi_bridge.js) / QuickJS 触发 __pi_host_call(request_json)                                                       │
 │                                                                                                                            │
 │  host_binding.rs（协议层 + 分发桥）                                                                                        │

@@ -45,14 +45,17 @@ workspace_roots = []
 
 [plugin]
 auto_load = []
+js_heap_mb = 16
+call_timeout_ms = 30000
+interrupt_budget = 5000000
+event_channel_capacity = 64
+idle_ttl_ms = 300000
 
 [security]
 default_plugin_permission_level = "restricted"
 enable_audit_log = true
 audit_log_retention_days = 90
 enable_plugin_safety_scan = false
-
-[wasm]
 
 [primitive]
 path_rules = []

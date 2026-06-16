@@ -49,9 +49,6 @@ pub enum AppError {
     /// JSON 序列化/反序列化错误。
     #[error("序列化错误: {0}")]
     Serialize(#[from] serde_json::Error),
-    /// Wasm 运行时（如 WasmEdge）错误。
-    #[error("Wasm运行时错误: {0}")]
-    WasmEdge(String),
     /// QuickJS 执行错误。
     #[error("JS执行错误: {0}")]
     QuickJS(String),

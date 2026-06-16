@@ -1,42 +1,40 @@
-//! # WasmEdge 运行时层 (ext)
+//! # 插件运行时层 (ext)
 //!
-//! 全局 Engine、独立 Wasm 实例、宿主导入绑定骨架。
-//! 默认为桩实现；启用 feature "wasmedge" 且安装 WasmEdge 后为真实实现。
+//! 全局 Engine、独立 VM 实例、宿主导入绑定骨架。
+//! 当前真实实现基于 `rquickjs`。
 
 pub mod dispatcher;
-#[allow(dead_code)]
-mod engine_stub;
-#[cfg(feature = "wasmedge")]
-mod engine_wasmedge;
 pub mod host_binding;
-#[allow(dead_code)]
-mod instance_stub;
-#[cfg(feature = "wasmedge")]
-mod instance_wasmedge;
 pub mod plugin;
+pub mod plugin_bundle;
+mod plugin_function_invoker;
+mod plugin_search_invoker;
+mod plugin_tool_executor;
+mod runtime;
 pub mod runtime_manager;
 pub mod ts_compiler;
 pub mod vm_actor;
 
 pub use dispatcher::{AsyncCallStatus, HostApiDispatcher};
-pub use engine_stub::{WasmEngineConfig, DEFAULT_QUICKJS_HEAP_MB, DEFAULT_WASM_MAX_PAGES};
 pub use host_binding::{invoke_host_func, invoke_host_func_with, HostRequest, HostResponse};
+pub use plugin_bundle::{
+    bundle_plugin_from_path, write_plugin_bundle_from_path, PluginBundleResult,
+};
+pub use runtime::{
+    PluginEngine, PluginEngineConfig, PluginVmInstance, DEFAULT_PLUGIN_CALL_TIMEOUT_MS,
+    DEFAULT_PLUGIN_IDLE_TTL_MS, DEFAULT_PLUGIN_INTERRUPT_BUDGET, DEFAULT_QUICKJS_HEAP_MB,
+};
 pub use ts_compiler::{transpile_pi_plugin_for_quickjs, transpile_typescript};
 
-#[cfg(not(feature = "wasmedge"))]
-pub use engine_stub::WasmEngine;
-#[cfg(feature = "wasmedge")]
-pub use engine_wasmedge::WasmEngine;
-
-#[cfg(not(feature = "wasmedge"))]
-pub use instance_stub::WasmInstance;
-#[cfg(feature = "wasmedge")]
-pub use instance_wasmedge::WasmInstance;
-
 pub use plugin::{
-    parse_manifest, PluginInfo, PluginInstance, PluginManager, PluginManifest, PluginStatus,
+    parse_manifest, CatalogEntry, FunctionRegistry, ManifestFunction, ManifestTool,
+    PluginActivation, PluginCatalog, PluginCatalogDiagnostic, PluginInfo, PluginInstance,
+    PluginManager, PluginManifest, PluginSource, PluginStatus, RegisteredFunction,
 };
-pub use runtime_manager::{RuntimeManager, SharedRuntimeManager, VmRuntimeKey};
+pub use plugin_function_invoker::PluginFunctionInvoker;
+pub use plugin_search_invoker::ExtPluginSearchInvoker;
+pub use plugin_tool_executor::PluginToolExecutor;
+pub use runtime_manager::{PluginRuntimeKey, PluginRuntimeManager, SharedPluginRuntimeManager};
 pub use vm_actor::{EventEnvelope, VmActorHandle, VmActorState, VmCommand};
 
 #[cfg(test)]

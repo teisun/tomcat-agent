@@ -101,11 +101,27 @@ impl HostApiDispatcher {
             }
         }
 
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let dispatcher = self.clone();
+            let inst_id = instance_id.to_string();
+            return std::thread::spawn(move || dispatcher.block_on_dispatch(inst_id, request))
+                .join()
+                .map_err(|_| AppError::Plugin("sync hostcall worker panicked".into()))?;
+        }
+
+        self.block_on_dispatch(instance_id.to_string(), request)
+    }
+
+    fn block_on_dispatch(
+        &self,
+        instance_id: String,
+        request: HostRequest,
+    ) -> Result<HostResponse, AppError> {
         match &self.tokio_handle {
-            Some(h) => h.block_on(self.dispatch_async(instance_id, request)),
+            Some(h) => h.block_on(self.dispatch_async(&instance_id, request)),
             None => {
                 let rt = tokio::runtime::Runtime::new().expect("create runtime for sync dispatch");
-                rt.block_on(self.dispatch_async(instance_id, request))
+                rt.block_on(self.dispatch_async(&instance_id, request))
             }
         }
     }
@@ -191,6 +207,13 @@ impl HostApiDispatcher {
         self.event_receivers.remove(instance_id);
         self.event_senders.remove(instance_id);
         tracing::debug!("[cleanup_instance] {instance_id} channels removed");
+    }
+
+    /// 清理某插件在宿主侧登记的能力镜像（tools / commands / listeners 元数据）。
+    pub fn cleanup_plugin_capabilities(&self, plugin_id: &str) {
+        self.plugin_commands.remove(plugin_id);
+        self.plugin_tools.remove(plugin_id);
+        self.plugin_event_listeners.remove(plugin_id);
     }
 
     /// 为长生命周期 VM 注册事件 channel。
@@ -331,11 +354,12 @@ impl HostApiDispatcher {
             ("fs" | "primitive", "writeFile") => self.do_write_file(instance_id, &params).await,
             ("fs" | "primitive", "editFile") => self.do_edit_file(instance_id, &params).await,
             ("fs" | "primitive", "executeBash") => self.do_execute_bash(instance_id, &params).await,
+            ("net", "fetch") => self.do_fetch(instance_id, &params).await,
             ("llm", "createChatCompletion") => self.do_chat(instance_id, &params).await,
             ("llm", "createChatCompletionStream") => {
                 self.do_chat_stream(instance_id, &params).await
             }
-            ("llm", "getModel") => Ok(Self::do_llm_get_model()),
+            ("llm", "getModel") => Ok(self.do_llm_get_model(instance_id)),
             ("llm", "setModel") => Ok(Self::do_llm_set_model(&params)),
             ("tools", "registerTool") => self.do_register_tool(instance_id, &params).await,
             ("tools", "unregisterTool") => self.do_unregister_tool(instance_id, &params).await,
@@ -343,7 +367,9 @@ impl HostApiDispatcher {
             ("tools", "callTool") => self.do_call_tool(instance_id, &params).await,
             ("tools", "getActiveTools") => self.do_get_active_tools(instance_id, &params).await,
             ("tools", "setActiveTools") => self.do_set_active_tools(instance_id, &params).await,
-            ("tools", "registerCommand") => self.do_register_command(instance_id, &params).await,
+            ("tools", "registerCommand") | ("commands", "registerCommand") => {
+                self.do_register_command(instance_id, &params).await
+            }
             ("tools", "registerFlag") | ("tools", "registerShortcut") | ("tools", "getFlag") => {
                 Ok(HostResponse::ok(serde_json::Value::Null))
             }
@@ -361,22 +387,22 @@ impl HostApiDispatcher {
                 self.do_events(instance_id, effective_method, &params).await
             }
             ("session" | "agent", "getCurrentSession") => {
-                self.do_get_current_session(&params).await
+                self.do_get_current_session(instance_id, &params).await
             }
-            ("session", "getMessages") => self.do_get_messages(&params).await,
-            ("session", "getBranch") => self.do_session_get_branch(&params),
-            ("session", "getLeafEntry") => self.do_session_get_leaf_entry(),
-            ("session", "getLeafId") => self.do_session_get_leaf_id(),
-            ("session", "getEntry") => self.do_session_get_entry(&params),
-            ("session", "getHeader") => self.do_session_get_header(),
-            ("session", "getEntries") => self.do_session_get_entries(&params),
-            ("session", "sendMessage") => self.do_send_message(&params).await,
-            ("agent", "sendMessage") => self.do_agent_send_message(&params),
-            ("agent", "sendUserMessage") => self.do_agent_send_user_message(&params),
+            ("session", "getMessages") => self.do_get_messages(instance_id, &params).await,
+            ("session", "getBranch") => self.do_session_get_branch(instance_id, &params),
+            ("session", "getLeafEntry") => self.do_session_get_leaf_entry(instance_id),
+            ("session", "getLeafId") => self.do_session_get_leaf_id(instance_id),
+            ("session", "getEntry") => self.do_session_get_entry(instance_id, &params),
+            ("session", "getHeader") => self.do_session_get_header(instance_id),
+            ("session", "getEntries") => self.do_session_get_entries(instance_id, &params),
+            ("session", "sendMessage") => self.do_send_message(instance_id, &params).await,
+            ("agent", "sendMessage") => self.do_agent_send_message(instance_id, &params),
+            ("agent", "sendUserMessage") => self.do_agent_send_user_message(instance_id, &params),
             ("context", "isIdle") => Ok(Self::do_context_is_idle()),
             ("context", "abort") => Ok(Self::do_context_abort()),
-            ("context", "getCwd") => Ok(Self::do_context_get_cwd()),
-            ("context", "getModel") => Ok(Self::do_context_get_model()),
+            ("context", "getCwd") => Ok(self.do_context_get_cwd(instance_id)),
+            ("context", "getModel") => Ok(self.do_context_get_model(instance_id)),
             ("context", "uiNotify") => Ok(self.do_context_ui_notify(&params)),
             ("context", "uiSelect") => Ok(Self::do_context_ui_select(&params)),
             ("context", "uiConfirm") => Ok(Self::do_context_ui_confirm(&params)),
@@ -446,11 +472,14 @@ impl HostApiDispatcher {
                 }
                 AsyncCallStatus::Done(resp) => {
                     let data = resp.data.clone();
+                    let full_response = resp.clone();
                     drop(entry);
                     self.async_results.remove(call_id);
-                    Ok(HostResponse::ok(
-                        serde_json::json!({"ready": true, "result": data}),
-                    ))
+                    Ok(HostResponse::ok(serde_json::json!({
+                        "ready": true,
+                        "result": data,
+                        "response": full_response,
+                    })))
                 }
                 AsyncCallStatus::Error(e) => {
                     let err = e.clone();

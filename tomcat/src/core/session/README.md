@@ -73,10 +73,10 @@
 |--------|------|
 | `tomcat`（无参） | 默认执行 chat |
 | `init` | 生成默认配置文件（默认路径 `~/.tomcat/tomcat.config.toml`） |
-| `doctor` | 检查配置文件存在与合法性；WasmEdge/QuickJS 检测占位 |
+| `doctor` | 检查配置文件、工作目录与 `rquickjs` 运行时可用性 |
 | `config get/set/edit/export/import` | 配置管理，session 依赖 load_config(None) 与默认路径 |
 | `session list/new/switch/delete/archive/search` | 依赖 SessionManager，空会话列表时提示 |
-| `plugin list/load/unload/enable/disable/info` | 占位，待 T1-P0-009 对接 |
+| `plugin list/load/unload/enable/disable/info` | 插件注册表与加载状态管理 |
 | `audit list/show/export` | 占位，待 T1-P1-001 对接 |
 | `chat [--resume]` | 进入交互式对话模式（流式渲染、多轮上下文、工具调用） |
 

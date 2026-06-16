@@ -1,4 +1,4 @@
-//! # 嵌入式资产抽取（`assets` 子模块）
+//! # 资产目录辅助测试（`assets` 子模块）
 //!
 //! 覆盖：
 //!
@@ -6,15 +6,10 @@
 //!   产生相同哈希、不同内容产生不同哈希。
 //! - `write_atomic`：能创建嵌套目录与覆盖既存文件。
 //! - `acquire_assets_lock`：会创建 `.lock` 文件；并发持锁不会死锁。
-//! - `ensure_embedded_assets`：抽取 wasm + modules，幂等再次调用不报错；
-//!   被本地篡改的 wasm 会被重新覆盖恢复（SHA mismatch 触发升级）。
-//! - `extract_wasm_if_needed`：SHA 命中时跳过重写（mtime 不变）。
-//! - 编译期常量 `EMBEDDED_WASM_SHA256` / `EMBEDDED_MODULES_SHA256` 必须为
-//!   64 位 hex。
+//! - `ensure_embedded_assets`：仅保证 `assets/` 目录存在，幂等再次调用不报错。
 
 use super::super::assets::{
-    acquire_assets_lock, compute_dir_sha256, compute_file_sha256, extract_wasm_if_needed,
-    write_atomic, EMBEDDED_MODULES_SHA256, EMBEDDED_WASM_SHA256,
+    acquire_assets_lock, compute_dir_sha256, compute_file_sha256, write_atomic,
 };
 use super::super::*;
 use super::mocks::cfg_with_work_dir;
@@ -97,110 +92,22 @@ fn acquire_assets_lock_creates_lock_file() {
 }
 
 #[test]
-fn ensure_embedded_assets_extracts_wasm_and_modules() {
+fn ensure_embedded_assets_creates_assets_dir() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = cfg_with_work_dir(dir.path());
     ensure_work_dir_structure(&cfg).unwrap();
     ensure_embedded_assets(&cfg).unwrap();
-
-    let wasm_path = dir
-        .path()
-        .join("assets")
-        .join("wasm")
-        .join("wasmedge_quickjs.wasm");
-    assert!(wasm_path.exists(), "wasm file should be extracted");
-    assert!(wasm_path.metadata().unwrap().len() > 0);
-
-    let modules_dir = dir.path().join("assets").join("modules");
-    assert!(modules_dir.is_dir(), "modules dir should be extracted");
-    let count = std::fs::read_dir(&modules_dir).unwrap().count();
-    assert!(count > 0, "modules dir should contain files");
-
-    let versions = dir.path().join("assets").join(".versions.json");
-    assert!(versions.exists(), ".versions.json should be created");
-    let content = std::fs::read_to_string(&versions).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-    assert!(!v["wasm_sha256"].as_str().unwrap_or("").is_empty());
-    assert!(!v["modules_sha256"].as_str().unwrap_or("").is_empty());
+    assert!(dir.path().join("assets").is_dir());
 }
 
 #[test]
-fn ensure_embedded_assets_idempotent() {
+fn ensure_embedded_assets_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = cfg_with_work_dir(dir.path());
     ensure_work_dir_structure(&cfg).unwrap();
     ensure_embedded_assets(&cfg).unwrap();
     ensure_embedded_assets(&cfg).unwrap();
-
-    let wasm_path = dir
-        .path()
-        .join("assets")
-        .join("wasm")
-        .join("wasmedge_quickjs.wasm");
-    assert!(wasm_path.exists());
-}
-
-#[test]
-fn ensure_embedded_assets_upgrades_on_sha_mismatch() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = cfg_with_work_dir(dir.path());
-    ensure_work_dir_structure(&cfg).unwrap();
-    ensure_embedded_assets(&cfg).unwrap();
-
-    let wasm_path = dir
-        .path()
-        .join("assets")
-        .join("wasm")
-        .join("wasmedge_quickjs.wasm");
-    let original = std::fs::read(&wasm_path).unwrap();
-
-    std::fs::write(&wasm_path, b"tampered content").unwrap();
-    assert_ne!(std::fs::read(&wasm_path).unwrap(), original);
-
-    ensure_embedded_assets(&cfg).unwrap();
-    assert_eq!(
-        std::fs::read(&wasm_path).unwrap(),
-        original,
-        "tampered wasm should be overwritten with embedded version"
-    );
-}
-
-#[test]
-fn extract_wasm_skips_when_sha_matches() {
-    let dir = tempfile::tempdir().unwrap();
-    extract_wasm_if_needed(dir.path()).unwrap();
-
-    let wasm_path = dir
-        .path()
-        .join("assets")
-        .join("wasm")
-        .join("wasmedge_quickjs.wasm");
-    let mtime_before = std::fs::metadata(&wasm_path).unwrap().modified().unwrap();
-
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    let result = extract_wasm_if_needed(dir.path()).unwrap();
-    assert_eq!(result, wasm_path);
-
-    let mtime_after = std::fs::metadata(&wasm_path).unwrap().modified().unwrap();
-    assert_eq!(
-        mtime_before, mtime_after,
-        "file should not be rewritten when SHA matches"
-    );
-}
-
-#[test]
-fn embedded_sha256_constants_are_nonempty() {
-    assert!(
-        !EMBEDDED_WASM_SHA256.is_empty(),
-        "compile-time wasm SHA-256 must be set"
-    );
-    assert!(
-        !EMBEDDED_MODULES_SHA256.is_empty(),
-        "compile-time modules SHA-256 must be set"
-    );
-    assert_eq!(EMBEDDED_WASM_SHA256.len(), 64);
-    assert_eq!(EMBEDDED_MODULES_SHA256.len(), 64);
+    assert!(dir.path().join("assets").is_dir());
 }
 
 #[test]

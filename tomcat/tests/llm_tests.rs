@@ -1,5 +1,5 @@
 //! 集成测试：LLM 与真实外部 API 的协作（chat / chat_stream）。
-//! 不 Mock 网络，在配置 OPENAI_API_KEY 时真实发起 HTTP 请求；无 key 时视为失败，不得 ignore。
+//! 不 Mock 网络，在配置 DEEPSEEK_API_KEY 时真实发起 HTTP 请求；无 key 时视为失败，不得 ignore。
 //! 鲁棒性：异步用例均包裹在超时内，避免依赖挂起导致测试挂起（INTEGRATION_TEST_ROBUSTNESS 2.2）。
 //!
 //! 调用面：所有 Provider 通过 [`tomcat::resolve_llm`] 拿 `Arc<dyn LlmProvider>`，
@@ -17,26 +17,26 @@ use tomcat::{
 };
 
 fn completions_config() -> LlmConfig {
-    LlmConfig {
-        provider: "openai".to_string(),
-        ..LlmConfig::default()
-    }
+    let mut cfg = LlmConfig::default();
+    common::apply_deepseek_llm_config(&mut cfg);
+    cfg
 }
 
-/// [LLM 非流式 chat] 真实 API 调用 OpenAI Chat Completions 返回合法响应
+/// [LLM 非流式 chat] 真实 API 调用 DeepSeek OpenAI-compatible Chat Completions 返回合法响应
 ///
 /// 验证：choices 非空、首条 index=0（超时 60s）
-/// 意义：TASK-05 LLM 端到端——非流式请求正向路径；无 OPENAI_API_KEY 时用例必须失败（INTEGRATION_TEST_SPEC）
+/// 意义：TASK-05 LLM 端到端——非流式请求正向路径；无 DEEPSEEK_API_KEY 时用例必须失败（INTEGRATION_TEST_SPEC）
 #[tokio::test]
+#[serial(env_lock)]
 async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn std::error::Error>>
 {
     common::setup_logging();
     let _span = tracing::info_span!("test_llm_provider_chat_real_request_returns_ok").entered();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
 
     let config = completions_config();
     let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+        .expect("集成测试要求设置 DEEPSEEK_API_KEY（环境变量或 .env），无 key 视为失败");
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say exactly: ok")],
         model: config.default_model.clone(),
@@ -48,7 +48,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
         model_override: None,
         tools: None,
     };
-    tracing::info!("Arrange: 加载 .env，resolve_llm(provider=openai) 拿 Arc<dyn LlmProvider>");
+    tracing::info!("Arrange: 加载 .env，resolve_llm(provider=openai, api_base=DeepSeek) 拿 Arc<dyn LlmProvider>");
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
         .await
         .map_err(|_| "chat 超时 60s，可能网络或上游不可达")??;
@@ -63,18 +63,19 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
 /// [LLM 流式 chat_stream] 真实 API 调用产生流式事件
 ///
 /// 验证：stream 至少产生一个 StreamEvent（超时 60s）
-/// 意义：TASK-05 LLM 端到端——流式请求正向路径；无 OPENAI_API_KEY 时用例必须失败
+/// 意义：TASK-05 LLM 端到端——流式请求正向路径；无 DEEPSEEK_API_KEY 时用例必须失败
 #[tokio::test]
+#[serial(env_lock)]
 async fn test_llm_provider_chat_stream_real_request_yields_events(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     let _span =
         tracing::info_span!("test_llm_provider_chat_stream_real_request_yields_events").entered();
-    common::load_openai_test_env();
+    common::load_deepseek_test_env();
 
     let config = completions_config();
     let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+        .expect("集成测试要求设置 DEEPSEEK_API_KEY（环境变量或 .env），无 key 视为失败");
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say hi")],
         model: config.default_model.clone(),

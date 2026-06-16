@@ -7,7 +7,7 @@
 ## 1. 集成测试哲学：验证“协作”而非“逻辑”
 
 - **理论**：单元测试验证零件（如：Path 是否合规），集成测试验证组装（如：插件调用 4 原语时，白名单过滤是否生效）。
-- **实践**：在 `tests/` 目录下，禁止 Mock 内部核心模块（如 `WasmRuntime` 或 `EventBus`），必须使用真实实例进行端到端测试。
+- **实践**：在 `tests/` 目录下，禁止 Mock 内部核心模块（如插件运行时或 `EventBus`），必须使用真实实例进行端到端测试。
 - **不脱离真实环境**：与外部系统（LLM API、存储、网络服务）的协作必须在真实环境下验证，不得在集成测试中 Mock 外部服务。
 
 ---
@@ -16,10 +16,10 @@
 
 ### 场景 A：插件沙箱与 4 原语协作 (Story 2 & 3 & 4)
 
-**验证重点**：JS 插件通过 Node.js 兼容层调用宿主的 `fs.write` 时，安全管控是否拦截。
+**验证重点**：JS 插件通过 bridge / hostcall 调用宿主能力时，安全管控是否拦截。
 
-- **理论 (Theory)**：跨语言调用链路闭环。JS (QuickJS) -> WASI -> Host (Rust) -> Security Policy -> Filesystem。
-- **真实运行时要求**：场景 A 的**完整验证**须走集成测试串行组（`./scripts/run-integration-tests.sh integration-serial`；Wasm 相关目标强制 `-j 1 --test-threads=1`，分类约定见 INTEGRATION_TEST_SPEC §7.1 / §7.2），并确保 `WASMEDGE_QUICKJS_PATH` 或配置指向 `wasmedge_quickjs.wasm`（如项目内 `assets/wasm/wasmedge_quickjs.wasm`）。**环境缺失不允许跳过**，须先安装 WasmEdge 并配置路径，再执行上述测试；失败即视为失败。现有用例覆盖 Dispatcher/PluginManager/事件等路径；「JS 调用 fs.write → 宿主白名单拦截」需真实 WasmEngine + run_script。
+- **理论 (Theory)**：跨层调用链路闭环。JS (`rquickjs`) -> bridge / hostcall -> Host (Rust) -> Security Policy -> Filesystem。
+- **真实运行时要求**：场景 A 的**完整验证**须走集成测试串行组（`./scripts/run-integration-tests.sh integration-serial`；插件运行时相关目标强制 `-j 1 --test-threads=1`，分类约定见 INTEGRATION_TEST_SPEC §7.1 / §7.2）。**环境缺失不允许跳过**，须先修复 `rquickjs` 运行时环境，再执行上述测试；失败即视为失败。现有用例覆盖 Dispatcher / PluginManager / 事件 / session VM 等路径；安全边界测试应使用真实 `PluginEngine` + `run_script` / `start_session_vm`。
 - **实践 (Practice)**：
   ```rust
   #[tokio::test]
@@ -139,7 +139,7 @@
 由于集成测试涉及文件操作（Story 2 & 8），必须确保测试环境的“瞬时性”：
 
 - **TempDir 模式**：使用 `tempfile` crate 为每个测试创建独立的配置根目录。
-- **进程清理**：涉及 WasmEdge 实例的任务，测试结束必须显式调用 `drop` 或 `shutdown`，并在测试结束检查是否有僵尸线程。
+- **进程清理**：涉及插件 VM / `VmActor` 的任务，测试结束必须显式调用 `drop`、`shutdown` 或 `end_session`，并在测试结束检查是否有悬挂线程。
 
 ---
 
@@ -158,8 +158,8 @@
 
 | 测试对象 | 理论验证点 | 实践验证手段 |
 | :--- | :--- | :--- |
-| **CLI Doctor** | 环境依赖检测算法 | 构造缺失 WasmEdge 的环境运行 `doctor` |
+| **CLI Doctor** | 环境依赖检测算法 | 构造缺失关键运行时条件的环境运行 `doctor` |
 | **4 Primitives** | 权限拦截器中间件 | 尝试 `write` 白名单外的目录，捕获异常 |
-| **Plugin System** | JS 引擎与 WASI 的绑定 | 加载一个读环境变量的 JS，看宿主能否传过去 |
+| **Plugin System** | JS 引擎与 hostcall / bridge 的绑定 | 加载一个读环境变量或调用 `pi.*` 的 JS，看宿主能否传过去 |
 | **Session Mgr** | 持久化与内存同步 | 写入一条 Chat，重启 Engine 看能否 Load 出来 |
 | **LLM** | 与真实 API 的请求/响应/流式协作 | 配置 `OPENAI_API_KEY` 后调用真实 `LlmProvider::chat` / `chat_stream`，验证 `ChatResponse`、`StreamEvent` 序列；

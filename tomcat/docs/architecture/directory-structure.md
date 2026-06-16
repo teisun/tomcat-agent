@@ -48,10 +48,8 @@
 │   ├── .env                        # 敏感配置（API Key 等），tomcat init 自动生成，权限 0600
 │   ├── .versions.json              # 内嵌资源 SHA-256 版本记录 + 释放时间戳
 │   ├── .lock                       # 并发写入保护文件锁（fs2 exclusive lock）
-│   ├── wasm/                       # 全局 Wasm 运行时引擎
-│   │   └── wasmedge_quickjs.wasm   # 内嵌资源自动释放目标（~3.3MB）
-│   └── modules/                    # 全局 JS 兼容模块（内嵌资源自动释放目标）
-│       └── (79 个 Node.js 兼容 shim，~1MB)
+│   └── js/                         # 全局 JS runtime/shim 资源
+│       └── (bridge / crypto / node alias / utility shims)
 ```
 
 以下为**多 agent 注册表示例**（规划中；文件名以最终实现为准）。

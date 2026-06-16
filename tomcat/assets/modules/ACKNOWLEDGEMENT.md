@@ -1,1 +1,0 @@
-Some files in the `modules` directory are reused from or inspired by the [Deno project](https://github.com/denoland/deno/), which is [licensed under the MIT license](https://github.com/denoland/deno/blob/main/LICENSE.md).

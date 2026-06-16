@@ -20,6 +20,7 @@
 mod audit_test;
 mod config_keys_test;
 mod mocks;
+mod package_cmd_test;
 mod parse_cli_test;
 mod pathrules_cmd_run_test;
 mod plugin_cmd_test;

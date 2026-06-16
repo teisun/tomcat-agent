@@ -55,3 +55,32 @@ pub(crate) async fn cleanup_openai_files_on_session_end(ctx: &ChatContext, reaso
         );
     }
 }
+
+pub(crate) async fn cleanup_plugin_sessions_on_session_end(ctx: &ChatContext, reason: &str) {
+    let Some(plugin_manager) = ctx.global_services.plugin_manager.as_ref() else {
+        return;
+    };
+    let Some(session_id) = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    if let Err(err) = plugin_manager.end_session(&session_id).await {
+        warn!(
+            reason = reason,
+            session_id = %session_id,
+            error = %err,
+            "plugin session cleanup finished with failures"
+        );
+    } else {
+        info!(
+            reason = reason,
+            session_id = %session_id,
+            "plugin session cleanup completed"
+        );
+    }
+}

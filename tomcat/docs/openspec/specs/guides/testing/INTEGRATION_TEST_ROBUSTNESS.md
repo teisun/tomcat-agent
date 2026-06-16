@@ -92,7 +92,7 @@ async fn test_path_traversal_prevention() {
 ```
 
 ### 2.4 资源泄露验证 (Long-run Stability)
-**实践要求**：对于涉及 WasmEdge 实例等重资源的模块，模拟循环操作。
+**实践要求**：对于涉及插件 VM、`VmActor` 等重资源的模块，模拟循环操作。
 
 *   **案例**：循环加载卸载插件 50 次，检查内存增长。
 ```rust
@@ -100,7 +100,7 @@ async fn test_path_traversal_prevention() {
 fn test_plugin_reload_no_memory_leak() {
     let initial_mem = get_process_memory();
     for _ in 0..50 {
-        let p = engine.load_plugin("my_plugin.wasm");
+        let p = engine.load_plugin("my_plugin");
         engine.unload_plugin(p);
     }
     let final_mem = get_process_memory();

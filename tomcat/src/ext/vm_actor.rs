@@ -1,6 +1,6 @@
 //! # VM Actor 模型
 //!
-//! 将 Wasm VM 封装在专属 `spawn_blocking` 线程中，
+//! 将插件 VM 封装在专属 `spawn_blocking` 线程中，
 //! 外部通过 `VmActorHandle` 发送命令（Init/DispatchEvent/Shutdown），
 //! 避免并发直接持有可变 Vm。
 
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::WasmInstance;
+use super::PluginVmInstance;
 
 /// VM actor 生命周期状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,13 +89,11 @@ impl VmActorHandle {
     }
 }
 
-/// VM actor：封装 WasmInstance，在专属线程中运行。
+/// VM actor：封装 `PluginVmInstance`，在专属线程中运行。
 pub struct VmActor {
-    instance: WasmInstance,
-    #[cfg_attr(not(feature = "wasmedge"), allow(dead_code))]
+    instance: PluginVmInstance,
     script_path: PathBuf,
     cmd_rx: tokio::sync::mpsc::Receiver<VmCommand>,
-    event_rx: std::sync::mpsc::Receiver<EventEnvelope>,
     state: Arc<AtomicU8>,
 }
 
@@ -104,31 +102,28 @@ impl VmActor {
     ///
     /// `event_capacity`：有界事件 channel 容量（回压阈值）。
     pub fn spawn(
-        instance: WasmInstance,
+        instance: PluginVmInstance,
         script_path: PathBuf,
-        event_capacity: usize,
-    ) -> (VmActorHandle, std::sync::mpsc::SyncSender<EventEnvelope>) {
+        _event_capacity: usize,
+    ) -> VmActorHandle {
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<VmCommand>(32);
-        let (event_tx, event_rx) = std::sync::mpsc::sync_channel::<EventEnvelope>(event_capacity);
         let state = Arc::new(AtomicU8::new(VmActorState::Created as u8));
 
         let handle = VmActorHandle {
             cmd_tx,
             state: state.clone(),
         };
-        let event_tx_clone = event_tx.clone();
 
         let actor = VmActor {
             instance,
             script_path,
             cmd_rx,
-            event_rx,
             state,
         };
 
         tokio::task::spawn_blocking(move || actor.run());
 
-        (handle, event_tx_clone)
+        handle
     }
 
     fn set_state(&self, s: VmActorState) {
@@ -203,41 +198,9 @@ impl VmActor {
         }
     }
 
-    #[cfg(feature = "wasmedge")]
     fn run_vm(&mut self) -> Result<(), AppError> {
         let pid = self.instance.plugin_id().to_string();
-        tracing::debug!("[VmActor {pid}] run_vm: init_vm start");
-        let (mut vm, _combined_path, _tmp_dir) = self.instance.init_vm(&self.script_path)?;
-        tracing::debug!("[VmActor {pid}] run_vm: calling _start");
-        let _start_t0 = Instant::now();
-        let run_result = vm.run_func(Some("quickjs"), "_start", []);
-        let _start_ms = _start_t0.elapsed().as_millis();
-        tracing::debug!(
-            "[VmActor {pid}] run_vm: _start returned ok={} elapsed_ms={_start_ms}",
-            run_result.is_ok()
-        );
-        match run_result {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("exit code 0") || msg.contains("success") {
-                    Ok(())
-                } else {
-                    Err(AppError::QuickJS(format!("_start failed: {msg}")))
-                }
-            }
-        }
-    }
-
-    #[cfg(not(feature = "wasmedge"))]
-    fn run_vm(&mut self) -> Result<(), AppError> {
-        Err(AppError::WasmEdge(
-            "VM actor requires `--features wasmedge` or `--features standalone`.".to_string(),
-        ))
-    }
-
-    /// 获取事件接收端的引用（供 dispatcher waitForEvent 路由使用）。
-    pub fn event_rx(&self) -> &std::sync::mpsc::Receiver<EventEnvelope> {
-        &self.event_rx
+        tracing::debug!("[VmActor {pid}] run_vm: start session script");
+        self.instance.run_session_script(&self.script_path)
     }
 }

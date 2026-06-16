@@ -7,8 +7,8 @@
 //! transcript 顺序的主验收锚点；CLI smoke 只保留 resume/build wiring。
 //!
 //! ## 门禁
-//! - `OPENAI_API_KEY` 必须存在；缺失 → 测试 panic 失败（E2E_TEST_SPEC §4）。
-//! - 默认模型来自 `TOMCAT_E2E_LLM_MODEL` env，未设则 `gpt-5.4`。
+//! - `DEEPSEEK_API_KEY` 必须存在；缺失 → 测试 panic 失败（E2E_TEST_SPEC §4）。
+//! - 默认模型来自 `TOMCAT_E2E_DEEPSEEK_MODEL` env，未设则 `deepseek-v4-pro`。
 //!
 //! ## 数据目录
 //! - 使用进程**真实 HOME**（不覆盖 `HOME` env）；plan 落盘到 `~/.tomcat/plans/`。
@@ -68,16 +68,11 @@ const EXEC_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 fn require_api_key() {
-    common::load_openai_test_env();
-    if std::env::var("OPENAI_API_KEY").is_err() {
-        panic!(
-            "plan_real_llm_inprocess_tests 必须设置 OPENAI_API_KEY（环境变量或 tomcat/.env；E2E-PLAN-RL-002 / E2E_TEST_SPEC §4）"
-        );
-    }
+    let _ = common::require_deepseek_api_key("plan_real_llm_inprocess_tests");
 }
 
 fn default_model() -> String {
-    std::env::var("TOMCAT_E2E_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string())
+    common::deepseek_test_model()
 }
 
 fn real_home() -> PathBuf {
@@ -95,11 +90,13 @@ fn user_config_path() -> PathBuf {
 
 fn load_user_config() -> tomcat::AppConfig {
     let cfg_path = user_config_path();
-    if cfg_path.exists() {
+    let mut cfg = if cfg_path.exists() {
         load_config_toml_file(&cfg_path).expect("load ~/.tomcat/tomcat.config.toml 失败")
     } else {
         tomcat::load_config(None).expect("load_config 失败")
-    }
+    };
+    common::apply_deepseek_app_config(&mut cfg);
+    cfg
 }
 
 fn counter_path(workdir: &Path) -> PathBuf {
@@ -530,6 +527,13 @@ async fn inprocess_full_plan_path_with_real_llm() {
     ensure_plans_dir();
     std::env::set_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "5000");
     std::env::set_var("TOMCAT__LLM__DEFAULT_MODEL", default_model());
+    std::env::set_var("TOMCAT__LLM__PROVIDER", "openai");
+    std::env::set_var("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE);
+    std::env::set_var(
+        "TOMCAT__LLM__API_KEY_ENV",
+        common::DEEPSEEK_TEST_API_KEY_ENV,
+    );
+    std::env::set_var("TOMCAT__CONTEXT__COMPACTION_MODEL", default_model());
     let home = real_home();
     let mut config = load_user_config();
     config.plan.max_code_review_rounds = 1;

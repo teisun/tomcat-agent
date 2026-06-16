@@ -25,7 +25,7 @@
 | 跨 session 的断点续跑 / `session resume` 子命令 / Checkpoint 快照 | T2-P1-001 |
 | Stream 心跳 / `tokio::time::timeout`（正常超时语义，非用户手动中断） | T2-P0-003 |
 | 中断期间的"摘要中断原因"元数据 | 本次**仅**给 `AgentEnd.error="interrupted"` 标签，不再多塞字段 |
-| 插件 Hook 的取消传播（WasmEdge VM 回调路径） | 后续接入 T2-P0-009 pipeline 重构时统一处理 |
+| 插件 Hook 的取消传播（插件 VM 回调路径） | 后续接入 T2-P0-009 pipeline 重构时统一处理 |
 | Windows 平台 Ctrl+Break 区分 | 暂不支持，沿用 `ctrlc` crate 默认行为 |
 | 清理 `ext/dispatcher/session_ops.rs` 等既有 `abort_signal` / `cancelled` 引用 | 保留 `AtomicBool` 作为 poll 兼容出口 |
 

@@ -16,6 +16,20 @@ fn cmd() -> Command {
     c
 }
 
+fn apply_deepseek_env(command: &mut Command) {
+    let model = common::deepseek_test_model();
+    command
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
+        .env("TOMCAT__LLM__PROVIDER", "openai")
+        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
+        .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
+        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
+}
+
 struct Fixture {
     _home: tempfile::TempDir,
     home_path: PathBuf,
@@ -38,6 +52,12 @@ fn setup_fixture() -> Fixture {
 
     let config_path = home_path.join(".tomcat").join("tomcat.config.toml");
     let mut cfg = load_config_toml_file(&config_path).expect("config should load");
+    common::apply_deepseek_app_config(&mut cfg);
+    std::fs::write(
+        &config_path,
+        toml::to_string_pretty(&cfg).expect("serialize deepseek test config"),
+    )
+    .expect("persist deepseek test config");
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
     let sessions_dir = resolve_sessions_dir(&cfg).unwrap();
     std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -211,17 +231,22 @@ fn resume_cli_cold_start_trace_is_bounded_with_sidecar() {
     let _ = init_context_state(&fx.session, &ContextConfig::default(), "sys").unwrap();
     let file_len = std::fs::metadata(&transcript_path).unwrap().len();
 
-    let output = cmd()
+    let mut command = cmd();
+    command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
         .env("TOMCAT_RESUME_TRACE", "1")
-        .write_stdin("")
-        .output()
-        .expect("code --resume should run");
-    assert!(output.status.success());
+        .write_stdin("");
+    apply_deepseek_env(&mut command);
+    let output = command.output().expect("code --resume should run");
+    assert!(
+        output.status.success(),
+        "code --resume should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("TOMCAT_RESUME_TRACE mode=Tail"),
@@ -268,17 +293,22 @@ fn resume_cli_plan_fastpath_reports_sidecar_plan_source() {
     }
     let _ = init_context_state(&fx.session, &ContextConfig::default(), "sys").unwrap();
 
-    let output = cmd()
+    let mut command = cmd();
+    command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
         .env("TOMCAT_RESUME_TRACE", "1")
-        .write_stdin("")
-        .output()
-        .expect("code --resume should run");
-    assert!(output.status.success());
+        .write_stdin("");
+    apply_deepseek_env(&mut command);
+    let output = command.output().expect("code --resume should run");
+    assert!(
+        output.status.success(),
+        "code --resume should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("plan_source=sidecar"),
@@ -309,17 +339,22 @@ fn resume_cli_corrupt_index_rebuilds_on_startup() {
     json["schema_version"] = serde_json::json!(999);
     std::fs::write(&sidecar, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
 
-    let output = cmd()
+    let mut command = cmd();
+    command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
         .env("TOMCAT_RESUME_TRACE", "1")
-        .write_stdin("")
-        .output()
-        .expect("code --resume should run");
-    assert!(output.status.success());
+        .write_stdin("");
+    apply_deepseek_env(&mut command);
+    let output = command.output().expect("code --resume should run");
+    assert!(
+        output.status.success(),
+        "code --resume should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("fallback=rebuild"),
@@ -352,16 +387,21 @@ fn resume_cli_heals_dangling_tool_call_tail_without_llm() {
         .unwrap();
     let transcript_path = fx.session.current_transcript_path().unwrap().unwrap();
 
-    let output = cmd()
+    let mut command = cmd();
+    command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
-        .write_stdin("")
-        .output()
-        .expect("code --resume should run");
-    assert!(output.status.success());
+        .write_stdin("");
+    apply_deepseek_env(&mut command);
+    let output = command.output().expect("code --resume should run");
+    assert!(
+        output.status.success(),
+        "code --resume should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let entries = tomcat::core::session::read_entries_tail(&transcript_path, 8).unwrap();
     assert!(
@@ -438,19 +478,25 @@ fn resume_cli_large_session_restores_recent_context_in_request_body() {
         spawn_capturing_openai_stream_server("RESUME_BODY_OK");
     write_mock_models_toml(&fx.home_path, &base_url);
 
-    let output = cmd()
+    let mut command = cmd();
+    command
         .current_dir(&fx.workdir)
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env("OPENAI_API_KEY", "dummy-key")
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
-        .write_stdin("continue\n")
-        .output()
-        .expect("code --resume should run");
-    assert!(output.status.success());
+        .write_stdin("continue\n");
+    apply_deepseek_env(&mut command);
+    command.env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local");
+    let output = command.output().expect("code --resume should run");
+    assert!(
+        output.status.success(),
+        "code --resume should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("恢复会话"),
