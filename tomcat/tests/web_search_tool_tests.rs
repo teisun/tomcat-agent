@@ -1156,83 +1156,39 @@ async fn real_serper_plugin_web_search() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn real_mimo_web_search() {
     common::setup_logging();
     common::load_openai_test_env();
-    if std::env::var("PI_LIVE_MIMO_WEB_SEARCH").ok().as_deref() != Some("1") {
+    if !require_env_var_or_skip("MIMO_API_KEY", "real_mimo_web_search") {
         return;
     }
-    require_env_var("MIMO_API_KEY", "real_mimo_web_search");
-
+    const ENV_KEY: &str = "TOMCAT_REAL_MIMO_PROD_CLIENT_KEY";
     let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
         ("TAVILY_API_KEY", None),
         ("BRAVE_API_KEY", None),
         ("SERPER_API_KEY", None),
     ]);
-    let mut cfg = AppConfig::default();
-    cfg.tools.web_search.backend = "mimo".into();
 
-    let temp = tempfile::tempdir().expect("tempdir");
-    let models_toml_path = temp.path().join("models.toml");
     let mimo_model =
         std::env::var("TOMCAT_E2E_MIMO_MODEL").unwrap_or_else(|_| "mimo-v2.5-pro".to_string());
     let mimo_base_url = std::env::var("TOMCAT_E2E_MIMO_BASE_URL")
         .or_else(|_| std::env::var("PI_LIVE_MIMO_BASE_URL"))
         .unwrap_or_else(|_| "https://token-plan-cn.xiaomimimo.com".to_string());
-    std::fs::write(
-        &models_toml_path,
-        format!(
-            r#"
-[[models]]
-id = "{mimo_model}"
-api = "openai"
-provider = "mimo"
-base_url = "{mimo_base_url}"
 
-[models.capabilities]
-tools = true
-reasoning = true
-"#
-        ),
-    )
-    .expect("write live mimo models.toml");
-    let catalog = Arc::new(
-        ModelCatalog::load_from_path(&cfg, models_toml_path).expect("load live mimo catalog"),
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "mimo".into();
+    let harness = build_production_web_search_harness(
+        cfg,
+        ENV_KEY,
+        Some(mimo_models_toml(&mimo_model, &mimo_base_url)),
     );
-    let runtime = WebSearchRuntime::new(&cfg, catalog.clone()).expect("build runtime");
-
-    let plugin_root = install_builtin_web_search_plugin(temp.path());
-    let event_bus = Arc::new(DefaultEventBus::new());
-    let mut manager = Arc::new(PluginManager::new(event_bus.clone()));
-    let function_registry = Arc::new(FunctionRegistry::new());
-    let inner = Arc::get_mut(&mut manager).expect("plugin manager should be uniquely owned");
-    inner.set_plugin_engine(PluginEngine::global(None).expect("create quickjs engine"));
-    inner.set_plugin_runtime_manager(Arc::new(PluginRuntimeManager::new()));
-    inner.set_audit_recorder(Arc::new(TracingAuditRecorder));
-    inner.set_function_registry(function_registry.clone());
-
-    let invoker = PluginFunctionInvoker::new(Arc::downgrade(&manager));
-    let dispatcher = Arc::new(
-        HostApiDispatcher::new(event_bus.clone())
-            .with_tokio_handle(tokio::runtime::Handle::current())
-            .with_llm_resolver(Arc::new(DefaultLlmResolver::new(cfg.clone(), catalog))),
-    );
-    invoker.attach_dispatcher(Arc::downgrade(&dispatcher));
-    manager.set_host_dispatcher(dispatcher);
-    function_registry.register_plugin_functions(
-        "tomcat.web-search-backends",
-        &plugin_root,
-        &[ManifestFunction {
-            point: "web_search.backend".to_string(),
-            function: "webSearchBackend".to_string(),
-        }],
-    );
-    manager
-        .load_plugin(&plugin_root)
-        .expect("load builtin web_search plugin");
-    runtime.set_plugin_invoker(ExtPluginSearchInvoker::new(function_registry, invoker));
-
-    let output = runtime
+    let session_id = current_session_id(&harness.ctx);
+    let output = harness
+        .ctx
+        .global_services
+        .web_search_runtime
         .search(
             WebSearchArgs {
                 query: "Rust reqwest async".into(),
@@ -1242,11 +1198,12 @@ reasoning = true
                 language: Some("en".into()),
                 domain_filter: Vec::new(),
             },
-            "live-mimo-session",
+            &session_id,
         )
         .await
         .expect("live mimo plugin search");
 
+    end_current_plugin_session(&harness.ctx).await;
     assert_eq!(output.backend, "mimo");
     assert!(
         !output.hits.is_empty(),
@@ -1257,16 +1214,6 @@ reasoning = true
         output.hits.iter().all(|hit| hit.url.starts_with("http")),
         "all mapped hits should contain URLs"
     );
-
-    manager
-        .end_session("live-mimo-session")
-        .await
-        .expect("end live mimo session");
-}
-
-fn require_env_var(env_key: &str, test_name: &str) -> String {
-    std::env::var(env_key)
-        .unwrap_or_else(|_| panic!("{test_name} 必须设置 {env_key}（环境变量或 tomcat/.env）"))
 }
 
 fn require_env_var_or_skip(env_key: &str, test_name: &str) -> bool {
@@ -1410,6 +1357,22 @@ async fn end_current_plugin_session(ctx: &tomcat::api::chat::ChatContext) {
         .end_session(&session_id)
         .await
         .expect("end current plugin session");
+}
+
+fn mimo_models_toml(model_id: &str, base_url: &str) -> String {
+    format!(
+        r#"
+[[models]]
+id = "{model_id}"
+api = "openai"
+provider = "mimo"
+base_url = "{base_url}"
+
+[models.capabilities]
+tools = true
+reasoning = true
+"#
+    )
 }
 
 fn hosted_openai_models_toml(base_url: &str) -> String {
