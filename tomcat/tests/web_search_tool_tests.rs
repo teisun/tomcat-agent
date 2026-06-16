@@ -18,10 +18,11 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[tokio::test]
 #[serial]
 async fn runtime_explicit_tavily_works_from_public_api() {
-    let tavily = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+    let tavily = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
             "results": [
                 {
                     "title": "Tokio",
@@ -29,10 +30,11 @@ async fn runtime_explicit_tavily_works_from_public_api() {
                     "content": "Async runtime for Rust"
                 }
             ]
-        })))
-        .expect(1)
-        .mount(&tavily)
-        .await;
+        }))
+        .expect("serialize tavily response"),
+        std::time::Duration::ZERO,
+    )
+    .await;
 
     let _env = EnvGuard::set_many(&[
         ("TAVILY_API_KEY", Some("tavily-test-key")),
@@ -43,11 +45,14 @@ async fn runtime_explicit_tavily_works_from_public_api() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
-    cfg.tools.web_search.legacy_http_backends = true;
-    cfg.tools.web_search.tavily_base_url = tavily.uri();
-    let runtime = build_runtime(cfg, None);
+    let harness = build_runtime_with_builtin_plugin_and_fetch_client(
+        cfg,
+        None,
+        Some(tavily.client_for("api.tavily.com", std::time::Duration::from_secs(2))),
+    );
 
-    let output = runtime
+    let output = harness
+        .runtime
         .search(
             WebSearchArgs {
                 query: "tokio rust".into(),
@@ -65,15 +70,21 @@ async fn runtime_explicit_tavily_works_from_public_api() {
     assert_eq!(output.backend, "tavily");
     assert_eq!(output.hits.len(), 1);
     assert_eq!(output.hits[0].url, "https://tokio.rs/");
+    harness
+        .manager
+        .end_session("test-session")
+        .await
+        .expect("end tavily plugin test session");
 }
 
 #[tokio::test]
 #[serial]
-async fn runtime_auto_routes_to_http_fallback_chain() {
-    let brave = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/res/v1/web/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+async fn runtime_auto_routes_to_plugin_backends_after_retryable_failures() {
+    let brave = common::HttpsTestServer::start(
+        "api.search.brave.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
             "web": {
                 "results": [
                     {
@@ -83,10 +94,11 @@ async fn runtime_auto_routes_to_http_fallback_chain() {
                     }
                 ]
             }
-        })))
-        .expect(1)
-        .mount(&brave)
-        .await;
+        }))
+        .expect("serialize brave response"),
+        std::time::Duration::ZERO,
+    )
+    .await;
 
     let _env = EnvGuard::set_many(&[
         ("TAVILY_API_KEY", None),
@@ -97,13 +109,16 @@ async fn runtime_auto_routes_to_http_fallback_chain() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "auto".into();
-    cfg.tools.web_search.legacy_http_backends = true;
-    cfg.tools.web_search.brave_base_url = brave.uri();
     cfg.tools.web_search.cache_ttl_secs = 60;
     cfg.tools.web_search.cache_capacity = 8;
-    let runtime = build_runtime(cfg, None);
+    let harness = build_runtime_with_builtin_plugin_and_fetch_client(
+        cfg,
+        None,
+        Some(brave.client_for("api.search.brave.com", std::time::Duration::from_secs(2))),
+    );
 
-    let output = runtime
+    let output = harness
+        .runtime
         .search(
             WebSearchArgs {
                 query: "reqwest rust".into(),
@@ -123,20 +138,98 @@ async fn runtime_auto_routes_to_http_fallback_chain() {
     assert!(output
         .warnings
         .iter()
+        .any(|warning| warning.contains("backend_unavailable:mimo")));
+    assert!(output
+        .warnings
+        .iter()
         .any(|warning| warning == "backend_unavailable:tavily, fallback=brave"));
     assert!(output
         .warnings
         .iter()
         .any(|warning| warning == "brave_domain_filter_via_query_rewrite"));
+    harness
+        .manager
+        .end_session("test-session")
+        .await
+        .expect("end auto plugin test session");
+}
+
+#[tokio::test]
+#[serial]
+async fn runtime_explicit_brave_works_from_public_api() {
+    let brave = common::HttpsTestServer::start(
+        "api.search.brave.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "web": {
+                "results": [
+                    {
+                        "title": "Reqwest",
+                        "url": "https://docs.rs/reqwest",
+                        "description": "HTTP client"
+                    }
+                ]
+            }
+        }))
+        .expect("serialize brave response"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+
+    let _env = EnvGuard::set_many(&[
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", Some("brave-test-key")),
+        ("SERPER_API_KEY", None),
+        ("DEEPSEEK_API_KEY", None),
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "brave".into();
+    let harness = build_runtime_with_builtin_plugin_and_fetch_client(
+        cfg,
+        None,
+        Some(brave.client_for("api.search.brave.com", std::time::Duration::from_secs(2))),
+    );
+
+    let output = harness
+        .runtime
+        .search(
+            WebSearchArgs {
+                query: "reqwest rust".into(),
+                count: Some(3),
+                freshness: Some("week".into()),
+                country: Some("us".into()),
+                language: Some("en".into()),
+                domain_filter: vec!["docs.rs".into()],
+            },
+            "test-session",
+        )
+        .await
+        .expect("brave search");
+
+    assert_eq!(output.backend, "brave");
+    assert_eq!(output.hits.len(), 1);
+    assert_eq!(output.hits[0].url, "https://docs.rs/reqwest");
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning == "brave_domain_filter_via_query_rewrite"));
+    harness
+        .manager
+        .end_session("test-session")
+        .await
+        .expect("end brave plugin test session");
 }
 
 #[tokio::test]
 #[serial]
 async fn runtime_explicit_serper_works_from_public_api() {
-    let serper = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+    let serper = common::HttpsTestServer::start(
+        "google.serper.dev",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
             "organic": [
                 {
                     "title": "Rust Book",
@@ -144,10 +237,11 @@ async fn runtime_explicit_serper_works_from_public_api() {
                     "snippet": "The Rust Programming Language"
                 }
             ]
-        })))
-        .expect(1)
-        .mount(&serper)
-        .await;
+        }))
+        .expect("serialize serper response"),
+        std::time::Duration::ZERO,
+    )
+    .await;
 
     let _env = EnvGuard::set_many(&[
         ("TAVILY_API_KEY", None),
@@ -158,11 +252,14 @@ async fn runtime_explicit_serper_works_from_public_api() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "serper".into();
-    cfg.tools.web_search.legacy_http_backends = true;
-    cfg.tools.web_search.serper_base_url = serper.uri();
-    let runtime = build_runtime(cfg, None);
+    let harness = build_runtime_with_builtin_plugin_and_fetch_client(
+        cfg,
+        None,
+        Some(serper.client_for("google.serper.dev", std::time::Duration::from_secs(2))),
+    );
 
-    let output = runtime
+    let output = harness
+        .runtime
         .search(
             WebSearchArgs {
                 query: "rust book".into(),
@@ -184,6 +281,11 @@ async fn runtime_explicit_serper_works_from_public_api() {
         .warnings
         .iter()
         .any(|warning| warning == "serper_domain_filter_via_query_rewrite"));
+    harness
+        .manager
+        .end_session("test-session")
+        .await
+        .expect("end serper plugin test session");
 }
 
 #[tokio::test]
@@ -270,9 +372,9 @@ async fn live_tavily_search_smoke() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
-    cfg.tools.web_search.legacy_http_backends = true;
-    let runtime = build_runtime(cfg, None);
-    let output = runtime
+    let harness = build_runtime_with_builtin_plugin(cfg, None);
+    let output = harness
+        .runtime
         .search(
             WebSearchArgs {
                 query: "rust async runtime".into(),
@@ -292,6 +394,11 @@ async fn live_tavily_search_smoke() {
         !output.hits.is_empty(),
         "expected at least one Tavily hit when PI_LIVE_WEB_SEARCH=1"
     );
+    harness
+        .manager
+        .end_session("test-session")
+        .await
+        .expect("end live tavily session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -299,7 +406,9 @@ async fn live_tavily_search_smoke() {
 async fn real_tavily_plugin_web_search() {
     common::setup_logging();
     common::load_openai_test_env();
-    require_env_var("TAVILY_API_KEY", "real_tavily_plugin_web_search");
+    if !require_env_var_or_skip("TAVILY_API_KEY", "real_tavily_plugin_web_search") {
+        return;
+    }
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
@@ -338,7 +447,9 @@ async fn real_tavily_plugin_web_search() {
 async fn real_brave_plugin_web_search() {
     common::setup_logging();
     common::load_openai_test_env();
-    require_env_var("BRAVE_API_KEY", "real_brave_plugin_web_search");
+    if !require_env_var_or_skip("BRAVE_API_KEY", "real_brave_plugin_web_search") {
+        return;
+    }
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "brave".into();
@@ -377,7 +488,9 @@ async fn real_brave_plugin_web_search() {
 async fn real_serper_plugin_web_search() {
     common::setup_logging();
     common::load_openai_test_env();
-    require_env_var("SERPER_API_KEY", "real_serper_plugin_web_search");
+    if !require_env_var_or_skip("SERPER_API_KEY", "real_serper_plugin_web_search") {
+        return;
+    }
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "serper".into();
@@ -526,6 +639,14 @@ fn require_env_var(env_key: &str, test_name: &str) -> String {
         .unwrap_or_else(|_| panic!("{test_name} 必须设置 {env_key}（环境变量或 tomcat/.env）"))
 }
 
+fn require_env_var_or_skip(env_key: &str, test_name: &str) -> bool {
+    if std::env::var(env_key).is_ok() {
+        return true;
+    }
+    eprintln!("skip {test_name}: missing {env_key}");
+    false
+}
+
 fn build_runtime(config: AppConfig, models_toml: Option<String>) -> WebSearchRuntime {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("models.toml");
@@ -547,6 +668,14 @@ fn build_runtime_with_builtin_plugin(
     config: AppConfig,
     models_toml: Option<String>,
 ) -> PluginRuntimeHarness {
+    build_runtime_with_builtin_plugin_and_fetch_client(config, models_toml, None)
+}
+
+fn build_runtime_with_builtin_plugin_and_fetch_client(
+    config: AppConfig,
+    models_toml: Option<String>,
+    fetch_client: Option<reqwest::Client>,
+) -> PluginRuntimeHarness {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("models.toml");
     if let Some(contents) = models_toml {
@@ -567,15 +696,17 @@ fn build_runtime_with_builtin_plugin(
     inner.set_function_registry(function_registry.clone());
 
     let invoker = PluginFunctionInvoker::new(Arc::downgrade(&manager));
-    let dispatcher = Arc::new(
-        HostApiDispatcher::new(event_bus.clone())
-            .with_tokio_handle(tokio::runtime::Handle::current())
-            .with_plugin_manager(Arc::downgrade(&manager))
-            .with_llm_resolver(Arc::new(DefaultLlmResolver::new(
-                config.clone(),
-                catalog.clone(),
-            ))),
-    );
+    let mut dispatcher = HostApiDispatcher::new(event_bus.clone())
+        .with_tokio_handle(tokio::runtime::Handle::current())
+        .with_plugin_manager(Arc::downgrade(&manager))
+        .with_llm_resolver(Arc::new(DefaultLlmResolver::new(
+            config.clone(),
+            catalog.clone(),
+        )));
+    if let Some(fetch_client) = fetch_client {
+        dispatcher = dispatcher.with_fetch_http_client(fetch_client);
+    }
+    let dispatcher = Arc::new(dispatcher);
     invoker.attach_dispatcher(Arc::downgrade(&dispatcher));
     manager.set_host_dispatcher(dispatcher);
     function_registry.register_plugin_functions(

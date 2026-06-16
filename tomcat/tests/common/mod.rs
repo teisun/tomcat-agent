@@ -3,8 +3,17 @@
 
 #![allow(dead_code)]
 
+use rcgen::generate_simple_self_signed;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::Once;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio_rustls::TlsAcceptor;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 static INIT: Once = Once::new();
@@ -217,5 +226,116 @@ impl Drop for CwdGuard {
         if let Some(p) = &self.orig {
             let _ = std::env::set_current_dir(p);
         }
+    }
+}
+
+pub struct HttpsTestServer {
+    addr: std::net::SocketAddr,
+    max_concurrency: Arc<AtomicUsize>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl HttpsTestServer {
+    pub async fn start(
+        hostname: &str,
+        status_line: &str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        delay: Duration,
+    ) -> Self {
+        let certified = generate_simple_self_signed(vec![hostname.to_string()])
+            .expect("generate self-signed cert");
+        let cert_chain = vec![CertificateDer::from(certified.cert.der().to_vec())];
+        let private_key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(
+            certified.signing_key.serialize_der(),
+        ));
+        let server_config = tokio_rustls::rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, private_key)
+            .expect("build rustls server config");
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind https test server");
+        let addr = listener.local_addr().expect("listener addr");
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let current_concurrency = Arc::new(AtomicUsize::new(0));
+        let max_concurrency = Arc::new(AtomicUsize::new(0));
+        let task_current = Arc::clone(&current_concurrency);
+        let task_max = Arc::clone(&max_concurrency);
+        let status_line = status_line.to_string();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accept = listener.accept() => {
+                        let Ok((stream, _)) = accept else { break; };
+                        let acceptor = acceptor.clone();
+                        let headers = headers.clone();
+                        let body = body.clone();
+                        let status_line = status_line.clone();
+                        let task_current = Arc::clone(&task_current);
+                        let task_max = Arc::clone(&task_max);
+                        tokio::spawn(async move {
+                            let Ok(mut tls_stream) = acceptor.accept(stream).await else {
+                                return;
+                            };
+                            let mut request_buf = vec![0u8; 4096];
+                            let _ = tls_stream.read(&mut request_buf).await;
+                            let in_flight = task_current.fetch_add(1, Ordering::SeqCst) + 1;
+                            task_max.fetch_max(in_flight, Ordering::SeqCst);
+                            if !delay.is_zero() {
+                                tokio::time::sleep(delay).await;
+                            }
+                            let mut response = format!("HTTP/1.1 {status_line}\r\n");
+                            for (name, value) in &headers {
+                                response.push_str(name);
+                                response.push_str(": ");
+                                response.push_str(value);
+                                response.push_str("\r\n");
+                            }
+                            response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                            response.push_str("Connection: close\r\n\r\n");
+                            let _ = tls_stream.write_all(response.as_bytes()).await;
+                            let _ = tls_stream.write_all(&body).await;
+                            let _ = tls_stream.flush().await;
+                            let _ = tls_stream.shutdown().await;
+                            task_current.fetch_sub(1, Ordering::SeqCst);
+                        });
+                    }
+                }
+            }
+        });
+        Self {
+            addr,
+            max_concurrency,
+            shutdown_tx: Some(shutdown_tx),
+            task,
+        }
+    }
+
+    pub fn client_for(&self, hostname: &str, timeout: Duration) -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .danger_accept_invalid_certs(true)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(timeout)
+            .resolve(hostname, self.addr)
+            .build()
+            .expect("build https test client")
+    }
+
+    pub fn max_concurrency(&self) -> usize {
+        self.max_concurrency.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for HttpsTestServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        self.task.abort();
     }
 }

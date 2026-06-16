@@ -82,9 +82,6 @@ backend = "auto"
 # backend = "brave"
 # backend = "serper"
 #
-# 过渡期回滚开关：打开后，backend=tavily/brave/serper 以及 auto 的 HTTP 链
-# 会优先走 Rust legacy HTTP 后端，而不是插件里的同名后端。
-# legacy_http_backends = true
 count = 5
 # MiMo 通过 models.toml 里的 provider="mimo" 读取凭证：
 # export MIMO_API_KEY="your-mimo-api-key"

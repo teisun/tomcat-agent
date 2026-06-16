@@ -44,11 +44,17 @@ pub struct ChatContext {
 #[derive(Default)]
 pub struct ChatContextOverrides {
     pub ask_question_panel: Option<Arc<dyn panels::AskQuestionPanel>>,
+    pub fetch_http_client: Option<reqwest::Client>,
 }
 
 impl ChatContextOverrides {
     pub fn with_ask_question_panel(mut self, panel: Arc<dyn panels::AskQuestionPanel>) -> Self {
         self.ask_question_panel = Some(panel);
+        self
+    }
+
+    pub fn with_fetch_http_client(mut self, client: reqwest::Client) -> Self {
+        self.fetch_http_client = Some(client);
         self
     }
 }
@@ -166,25 +172,32 @@ fn scope_runtime_for(
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
     session: Arc<SessionManager>,
+    overrides: &ChatContextOverrides,
 ) -> Result<Arc<ScopeContainer>, AppError> {
+    let disable_cache = overrides.fetch_http_client.is_some();
     let key = std::fs::canonicalize(&agent_workspace_dir).unwrap_or(agent_workspace_dir);
-    if let Some(existing) = scope_runtime_cache()
-        .read()
-        .get(&key)
-        .and_then(Weak::upgrade)
-    {
-        return Ok(existing);
+    if !disable_cache {
+        if let Some(existing) = scope_runtime_cache()
+            .read()
+            .get(&key)
+            .and_then(Weak::upgrade)
+        {
+            return Ok(existing);
+        }
     }
 
-    let mut cache = scope_runtime_cache().write();
-    if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
-        return Ok(existing);
+    let mut cache_guard = (!disable_cache).then(|| scope_runtime_cache().write());
+    if let Some(cache) = cache_guard.as_ref() {
+        if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
+            return Ok(existing);
+        }
     }
 
     let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
     let deps = PluginRuntimeDeps {
         audit,
         event_bus: event_bus.clone(),
+        fetch_http_client: overrides.fetch_http_client.clone(),
         llm,
         llm_resolver,
         primitive,
@@ -202,7 +215,9 @@ fn scope_runtime_for(
         skill_set: Arc::new(RwLock::new(crate::core::skill::SkillSet::default())),
         skill_discovery_handle: Arc::new(tokio::sync::Mutex::new(None)),
     });
-    cache.insert(key, Arc::downgrade(&shared));
+    if let Some(cache) = cache_guard.as_mut() {
+        cache.insert(key, Arc::downgrade(&shared));
+    }
     Ok(shared)
 }
 
@@ -372,6 +387,7 @@ impl ChatContext {
             llm_resolver.clone(),
             primitive.clone(),
             session_arc.clone(),
+            &overrides,
         )?;
         shared_scope_runtime.dispatcher.bind_session(
             &current_session_entry.session_id,
@@ -952,6 +968,7 @@ type PluginRuntimeParts = (
 struct PluginRuntimeDeps {
     audit: Arc<dyn AuditRecorder>,
     event_bus: Arc<dyn EventBus>,
+    fetch_http_client: Option<reqwest::Client>,
     llm: Arc<dyn LlmProvider>,
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
@@ -1062,6 +1079,7 @@ fn build_plugin_runtime(
     let PluginRuntimeDeps {
         audit,
         event_bus,
+        fetch_http_client,
         llm,
         llm_resolver,
         primitive,
@@ -1112,22 +1130,26 @@ fn build_plugin_runtime(
     let function_registry = Arc::new(FunctionRegistry::new());
     let default_tool_registry = Arc::new(DefaultToolRegistry::new(executor.clone(), audit.clone()));
     let tool_registry: Arc<dyn ToolRegistry> = default_tool_registry.clone();
-    let mut fetch_client_builder = reqwest::Client::builder()
-        .dns_resolver(Arc::new(crate::infra::net_guard::PublicIpDnsResolver))
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_millis(
-            config.tools.web_fetch.fetch_timeout_ms,
-        ));
-    if let Some(proxy_url) = config.llm.proxy.as_deref() {
-        let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|e| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, e)))?;
-        fetch_client_builder = fetch_client_builder.proxy(proxy);
+    let fetch_client = if let Some(client) = fetch_http_client {
+        client
     } else {
-        fetch_client_builder = fetch_client_builder.no_proxy();
-    }
-    let fetch_client = fetch_client_builder
-        .build()
-        .map_err(|e| AppError::Tool(format!("创建 plugin net.fetch HTTP 客户端失败: {}", e)))?;
+        let mut fetch_client_builder = reqwest::Client::builder()
+            .dns_resolver(Arc::new(crate::infra::net_guard::PublicIpDnsResolver))
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_millis(
+                config.tools.web_fetch.fetch_timeout_ms,
+            ));
+        if let Some(proxy_url) = config.llm.proxy.as_deref() {
+            let proxy = reqwest::Proxy::all(proxy_url)
+                .map_err(|e| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, e)))?;
+            fetch_client_builder = fetch_client_builder.proxy(proxy);
+        } else {
+            fetch_client_builder = fetch_client_builder.no_proxy();
+        }
+        fetch_client_builder
+            .build()
+            .map_err(|e| AppError::Tool(format!("创建 plugin net.fetch HTTP 客户端失败: {}", e)))?
+    };
     let dispatcher = Arc::new(
         HostApiDispatcher::new(event_bus.clone())
             .with_tools(tool_registry.clone())

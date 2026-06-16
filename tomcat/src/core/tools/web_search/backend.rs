@@ -6,9 +6,6 @@ use crate::infra::AppError;
 
 use super::types::{RawHit, WebSearchRequest};
 
-pub const HTTP_AUTO_CHAIN: [BackendName; 3] =
-    [BackendName::Tavily, BackendName::Brave, BackendName::Serper];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendName {
     Openai,
@@ -88,10 +85,8 @@ pub fn discover_hosted_candidate(catalog: &ModelCatalog) -> Option<HostedCandida
 pub enum BackendPlan {
     Auto {
         hosted_candidate: Option<HostedCandidateModel>,
-        http_chain: Vec<BackendName>,
         plugin_slot: bool,
     },
-    ExplicitHttp(BackendName),
     ExplicitPlugin(String),
     HostedOnly(HostedCandidateModel),
 }
@@ -99,16 +94,10 @@ pub enum BackendPlan {
 pub fn pick_backend(
     backend: BackendMode,
     hosted_candidate: Option<HostedCandidateModel>,
-    legacy_http_backends: bool,
 ) -> Result<BackendPlan, AppError> {
     match backend {
         BackendMode::Auto => Ok(BackendPlan::Auto {
             hosted_candidate,
-            http_chain: if legacy_http_backends {
-                HTTP_AUTO_CHAIN.to_vec()
-            } else {
-                Vec::new()
-            },
             plugin_slot: true,
         }),
         BackendMode::Openai => hosted_candidate
@@ -118,21 +107,15 @@ pub fn pick_backend(
                     "no hosted web_search model configured; set capabilities.web_search=true on one models.toml entry".to_string(),
                 )
             }),
-        BackendMode::Tavily => Ok(if legacy_http_backends {
-            BackendPlan::ExplicitHttp(BackendName::Tavily)
-        } else {
-            BackendPlan::ExplicitPlugin(BackendName::Tavily.as_str().to_string())
-        }),
-        BackendMode::Brave => Ok(if legacy_http_backends {
-            BackendPlan::ExplicitHttp(BackendName::Brave)
-        } else {
-            BackendPlan::ExplicitPlugin(BackendName::Brave.as_str().to_string())
-        }),
-        BackendMode::Serper => Ok(if legacy_http_backends {
-            BackendPlan::ExplicitHttp(BackendName::Serper)
-        } else {
-            BackendPlan::ExplicitPlugin(BackendName::Serper.as_str().to_string())
-        }),
+        BackendMode::Tavily => Ok(BackendPlan::ExplicitPlugin(
+            BackendName::Tavily.as_str().to_string(),
+        )),
+        BackendMode::Brave => Ok(BackendPlan::ExplicitPlugin(
+            BackendName::Brave.as_str().to_string(),
+        )),
+        BackendMode::Serper => Ok(BackendPlan::ExplicitPlugin(
+            BackendName::Serper.as_str().to_string(),
+        )),
         BackendMode::Plugin(name) => Ok(BackendPlan::ExplicitPlugin(name)),
     }
 }

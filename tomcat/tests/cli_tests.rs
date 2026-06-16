@@ -166,12 +166,21 @@ fn spawn_quick_openai_stream_server(reply: &'static str) -> (String, std::thread
 }
 
 struct DeterministicMockLlm {
+    chat_responses: Mutex<VecDeque<Result<ChatResponse, AppError>>>,
     streams: Mutex<VecDeque<Vec<Result<StreamEvent, AppError>>>>,
 }
 
 impl DeterministicMockLlm {
     fn new(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> Self {
+        Self::with_chat_and_streams(vec![], streams)
+    }
+
+    fn with_chat_and_streams(
+        chat_responses: Vec<Result<ChatResponse, AppError>>,
+        streams: Vec<Vec<Result<StreamEvent, AppError>>>,
+    ) -> Self {
         Self {
+            chat_responses: Mutex::new(chat_responses.into()),
             streams: Mutex::new(streams.into()),
         }
     }
@@ -184,7 +193,11 @@ impl LlmProvider for DeterministicMockLlm {
     }
 
     async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
-        Err(AppError::Llm("mock chat not used".to_string()))
+        self.chat_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(AppError::Llm("mock chat not used".to_string())))
     }
 
     async fn chat_stream(
@@ -434,13 +447,41 @@ fn deterministic_chat_context_fixture_with_config(
     mut cfg: AppConfig,
     env_key: &str,
 ) -> (tempfile::TempDir, ChatContext) {
+    deterministic_chat_context_fixture_with_config_and_overrides(
+        cfg,
+        env_key,
+        tomcat::api::chat::ChatContextOverrides::default(),
+    )
+}
+
+fn deterministic_chat_context_fixture_with_config_and_overrides(
+    mut cfg: AppConfig,
+    env_key: &str,
+    overrides: tomcat::api::chat::ChatContextOverrides,
+) -> (tempfile::TempDir, ChatContext) {
     let dir = tempfile::tempdir().unwrap();
-    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    let ctx = deterministic_chat_context_from_work_dir_with_overrides(
+        cfg,
+        env_key,
+        dir.path(),
+        overrides,
+    );
+    (dir, ctx)
+}
+
+fn deterministic_chat_context_from_work_dir_with_overrides(
+    mut cfg: AppConfig,
+    env_key: &str,
+    work_dir: &Path,
+    overrides: tomcat::api::chat::ChatContextOverrides,
+) -> ChatContext {
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(env_key.to_string());
 
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
-    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let ctx = ChatContext::from_config_with_overrides(cfg, overrides)
+        .expect("chat context should be created");
     let session_key = ctx
         .session_runtime
         .session
@@ -450,7 +491,85 @@ fn deterministic_chat_context_fixture_with_config(
         .session
         .create_session(&session_key, None)
         .unwrap();
-    (dir, ctx)
+    ctx
+}
+
+fn install_builtin_web_search_backends_plugin(work_dir: &Path) -> PathBuf {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("plugins")
+        .join("web-search-backends");
+    let dst = work_dir.join("plugins").join("web-search-backends");
+    fs::create_dir_all(&dst).expect("create builtin plugin dir");
+    for name in ["plugin.json", "main.js", "README.md"] {
+        fs::copy(src.join(name), dst.join(name)).expect("copy builtin plugin asset");
+    }
+    dst
+}
+
+fn write_function_plugin_dir(
+    plugin_dir: &Path,
+    plugin_id: &str,
+    functions: &[(&str, &str)],
+    script: &str,
+) {
+    fs::create_dir_all(plugin_dir).expect("create function plugin dir");
+    let manifest_functions = functions
+        .iter()
+        .map(|(point, function)| {
+            json!({
+                "point": point,
+                "function": function,
+            })
+        })
+        .collect::<Vec<_>>();
+    let manifest = json!({
+        "id": plugin_id,
+        "name": plugin_id,
+        "version": "0.1.0",
+        "description": "web_search function test fixture",
+        "author": "tests",
+        "main": "main.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "functions": manifest_functions,
+    });
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        serde_json::to_string_pretty(&manifest).expect("serialize function plugin manifest"),
+    )
+    .expect("write function plugin manifest");
+    fs::write(plugin_dir.join("main.js"), script).expect("write function plugin script");
+}
+
+fn write_project_function_plugin(
+    workspace: &Path,
+    plugin_id: &str,
+    functions: &[(&str, &str)],
+    script: &str,
+) {
+    write_function_plugin_dir(
+        &workspace.join(".tomcat").join("plugins").join(plugin_id),
+        plugin_id,
+        functions,
+        script,
+    );
+}
+
+fn write_host_root_function_plugin(
+    work_dir: &Path,
+    plugin_id: &str,
+    functions: &[(&str, &str)],
+    script: &str,
+) {
+    write_function_plugin_dir(
+        &work_dir.join("plugins").join(plugin_id),
+        plugin_id,
+        functions,
+        script,
+    );
 }
 
 fn assistant_tool_calls_from_transcript(transcript: &str) -> Vec<(String, Value)> {
@@ -5060,10 +5179,11 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
     common::setup_logging();
     let _span = info_span!("test_chat_path_executes_web_search_tool_with_mock_server").entered();
 
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+    let server = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
             "results": [
                 {
                     "title": "reqwest",
@@ -5072,10 +5192,12 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
                     "published_date": "2026-06-01"
                 }
             ]
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
+        }))
+        .expect("serialize tavily mock body"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(2));
 
     const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_CHAT_KEY";
     let _env = EnvGuard::set_many(&[
@@ -5083,15 +5205,22 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
         ("TAVILY_API_KEY", Some("tavily-test-key")),
         ("BRAVE_API_KEY", None),
         ("SERPER_API_KEY", None),
-        ("NO_PROXY", Some("127.0.0.1,localhost")),
-        ("no_proxy", Some("127.0.0.1,localhost")),
         (common::DEEPSEEK_TEST_API_KEY_ENV, None),
     ]);
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".to_string();
-    cfg.tools.web_search.legacy_http_backends = true;
-    cfg.tools.web_search.tavily_base_url = server.uri();
-    let (_dir, mut ctx) = deterministic_chat_context_fixture_with_config(cfg, ENV_KEY);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    install_builtin_web_search_backends_plugin(work_dir.path());
+    let overrides =
+        tomcat::api::chat::ChatContextOverrides::default().with_fetch_http_client(fetch_client);
+    let mut ctx = deterministic_chat_context_from_work_dir_with_overrides(
+        cfg,
+        ENV_KEY,
+        work_dir.path(),
+        overrides,
+    );
     let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
         cli_tool_call_stream(
             "call_ws",
@@ -5152,6 +5281,187 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
         "tool result 应包含搜索命中 URL，实际: {}",
         trunc(tool_text, 400)
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_chat_path_routes_auto_web_search_through_plugin_slot() {
+    common::setup_logging();
+    let _span = info_span!("test_chat_path_routes_auto_web_search_through_plugin_slot").entered();
+
+    let server = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "results": [
+                {
+                    "title": "reqwest",
+                    "url": "https://docs.rs/reqwest",
+                    "content": "HTTP client",
+                    "published_date": "2026-06-01"
+                }
+            ]
+        }))
+        .expect("serialize tavily auto mock body"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(2));
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_AUTO_CHAT_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        (common::DEEPSEEK_TEST_API_KEY_ENV, None),
+    ]);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    install_builtin_web_search_backends_plugin(work_dir.path());
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "auto".to_string();
+    let mut ctx = deterministic_chat_context_from_work_dir_with_overrides(
+        cfg,
+        ENV_KEY,
+        work_dir.path(),
+        tomcat::api::chat::ChatContextOverrides::default().with_fetch_http_client(fetch_client),
+    );
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_tool_call_stream("call_ws", "web_search", r#"{"query":"reqwest rust"}"#),
+        cli_text_stream("AUTO_SEARCH_OK"),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请搜索 reqwest rust",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("应正常完成 auto web_search chat 路径，实际: {other:?}"),
+    };
+    assert!(result.final_text.contains("AUTO_SEARCH_OK"));
+    let tool_msg = result
+        .new_messages
+        .iter()
+        .find(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::Tool
+                && msg.tool_call_id.as_deref() == Some("call_ws")
+        })
+        .expect("should persist web_search tool result");
+    let tool_text = tool_msg.text_content().expect("tool result should be text");
+    assert!(
+        tool_text.contains("\"backend\":\"tavily\"")
+            || tool_text.contains("\"backend\": \"tavily\""),
+        "tool result 应包含 backend=tavily，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        tool_text.contains("https://docs.rs/reqwest"),
+        "tool result 应包含插件 slot 落到 Tavily 后返回的命中 URL，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        tool_text.contains("backend_unavailable:mimo"),
+        "tool result 应记录 auto 插件内从 mimo 继续推进，实际: {}",
+        trunc(tool_text, 400)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn test_web_search_backend_does_not_fallback_to_shadowed_provider() {
+    common::setup_logging();
+    let _span =
+        info_span!("test_web_search_backend_does_not_fallback_to_shadowed_provider").entered();
+
+    const API_ENV: &str = "TOMCAT_WEB_SEARCH_SHADOWED_PROVIDER_KEY";
+    let _env = EnvGuard::set_many(&[(API_ENV, Some("stub"))]);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "global-web-search-success",
+        &[("web_search.backend", "webSearchBackend")],
+        r#"
+pi.registerFunction("webSearchBackend", function (params) {
+  return {
+    backend: params.backend,
+    hits: [{ title: "Docs", url: "https://docs.rs/reqwest", snippet: "HTTP client" }],
+    warnings: []
+  };
+});
+"#,
+    );
+    write_project_function_plugin(
+        workspace.path(),
+        "project-shadow-web-search",
+        &[("web_search.backend", "webSearchBackend")],
+        r#"
+pi.registerFunction("webSearchBackend", function () {
+  return { hits: [], warnings: [], unsupported_backend: true };
+});
+"#,
+    );
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "mimo".to_string();
+    let ctx = deterministic_chat_context_from_work_dir_with_overrides(
+        cfg,
+        API_ENV,
+        work_dir.path(),
+        tomcat::api::chat::ChatContextOverrides::default(),
+    );
+    let err = ctx
+        .global_services
+        .web_search_runtime
+        .search(
+            tomcat::core::tools::web_search::types::WebSearchArgs {
+                query: "reqwest rust".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "shadowed-provider-session",
+        )
+        .await
+        .expect_err("unsupported_backend should not fall through to lower provider");
+
+    assert!(
+        err.to_string()
+            .contains("未找到名为 `mimo` 的 web_search 插件后端"),
+        "should surface clear incompatibility without touching shadowed provider: {err}"
+    );
+    if let Some(plugin_manager) = ctx.global_services.plugin_manager.as_ref() {
+        plugin_manager
+            .end_session("shadowed-provider-session")
+            .await
+            .expect("end shadowed provider plugin session");
+    }
 }
 
 #[tokio::test]

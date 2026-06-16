@@ -45,7 +45,9 @@ impl PluginSearchInvoker for ExtPluginSearchInvoker {
             .execute(&provider, params, Some(session_id))
             .await
         {
-            Ok(value) if reports_unsupported_backend(&value) => Err(unsupported_backend_error(backend)),
+            Ok(value) if reports_unsupported_backend(&value) => {
+                Err(unsupported_backend_error(backend))
+            }
             Ok(value) => Ok(value),
             Err(err) => Err(BackendFailure::Transport {
                 detail: format!(
