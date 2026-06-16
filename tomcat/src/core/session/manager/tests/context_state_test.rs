@@ -247,3 +247,54 @@ fn persist_context_observability_writes_sessions_json() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn persist_context_observability_stays_on_pinned_session_after_external_repoint() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let original = mgr.new_current_session(None).expect("original session");
+    mgr.pin_session(&original.session_id);
+
+    let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
+    let hijacked = external
+        .new_current_session(None)
+        .expect("hijacked session");
+
+    let state = ContextState {
+        messages: vec![],
+        estimate_context_chars: 0,
+        context_budget_chars: 1000,
+        context_budget_tokens: 250,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::from("dummy.jsonl"),
+        latest_plan_event: None,
+        preheat: Preheat::new(),
+        session_obs: super::super::types::SessionContextObservation {
+            compaction_count: 7,
+            compaction_tokens_freed: 12345,
+            tool_result_chars_persisted: 999,
+        },
+        live: Default::default(),
+    };
+    mgr.persist_context_observability(&state).unwrap();
+
+    let original_entry = mgr
+        .get_session_by_id(&original.session_id)
+        .unwrap()
+        .expect("original entry");
+    let hijacked_entry = mgr
+        .get_session_by_id(&hijacked.session_id)
+        .unwrap()
+        .expect("hijacked entry");
+    assert_eq!(original_entry.compaction_count, Some(7));
+    assert_eq!(original_entry.compaction_tokens_freed, Some(12345));
+    assert_eq!(original_entry.tool_result_chars_persisted, Some(999));
+    assert_eq!(hijacked_entry.compaction_count, None);
+    assert_eq!(hijacked_entry.compaction_tokens_freed, None);
+    assert_eq!(hijacked_entry.tool_result_chars_persisted, None);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

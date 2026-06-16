@@ -346,9 +346,63 @@ pub enum SkillSub {
     Reload,
 }
 
+const TOMCAT_AGENT_ACTIVE_ENV: &str = "TOMCAT_AGENT_ACTIVE";
+const NESTED_INVOCATION_REFUSAL: &str = "Refusing to run this Tomcat command inside an active Tomcat agent session because it would mutate session or global state. Use the agent's tool calls instead, or run the command from a separate terminal outside the active session.";
+
+fn nested_agent_invocation_active() -> bool {
+    matches!(std::env::var(TOMCAT_AGENT_ACTIVE_ENV).as_deref(), Ok("1"))
+}
+
+fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
+    match cmd {
+        Commands::Init => true,
+        Commands::Doctor => false,
+        Commands::Config { sub } => !matches!(sub, ConfigSub::Get { .. }),
+        Commands::Session { sub } => matches!(
+            sub,
+            SessionSub::New { .. }
+                | SessionSub::Switch { .. }
+                | SessionSub::Delete { .. }
+                | SessionSub::Archive { .. }
+        ),
+        Commands::Plugin { sub } => matches!(
+            sub,
+            PluginSub::Load { .. }
+                | PluginSub::Unload { .. }
+                | PluginSub::Enable { .. }
+                | PluginSub::Disable { .. }
+        ),
+        Commands::Audit { .. } => false,
+        Commands::Skill { .. } => false,
+        Commands::Install { .. } | Commands::Uninstall { .. } => true,
+        Commands::Packages { .. } => false,
+        Commands::Workspace { sub } => {
+            matches!(sub, WorkspaceSub::Add { .. } | WorkspaceSub::Remove { .. })
+        }
+        Commands::Pathrules { sub } => matches!(sub, PathRulesSub::Add { .. }),
+        Commands::Claw { .. } | Commands::Code { .. } | Commands::Chat { .. } => true,
+    }
+}
+
+fn guard_nested_invocation(cmd: Option<&Commands>) -> Result<(), AppError> {
+    if !nested_agent_invocation_active() {
+        return Ok(());
+    }
+    let Some(cmd) = cmd else {
+        return Ok(());
+    };
+    if nested_invocation_mutates_state(cmd) {
+        return Err(AppError::Config(NESTED_INVOCATION_REFUSAL.to_string()));
+    }
+    Ok(())
+}
+
 /// 解析参数并执行对应子命令；无子命令时按配置进入默认 session mode。
 pub fn run_cli() -> Result<(), AppError> {
     let cli = Cli::parse();
+    let had_explicit_command = cli.command.is_some();
+
+    guard_nested_invocation(cli.command.as_ref())?;
 
     match cli.command.as_ref() {
         Some(Commands::Init) => return run_init(),
@@ -388,6 +442,10 @@ pub fn run_cli() -> Result<(), AppError> {
             crate::SessionMode::Claw => Commands::Claw { resume: false },
         },
     };
+
+    if !had_explicit_command {
+        guard_nested_invocation(Some(&cmd))?;
+    }
 
     match cmd {
         Commands::Init => unreachable!("init handled before config load"),

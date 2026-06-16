@@ -251,7 +251,6 @@ impl ChatContext {
         overrides: ChatContextOverrides,
     ) -> Result<Self, AppError> {
         let sessions_path = resolve_sessions_dir(&config)?;
-        let sessions_path_for_appender = sessions_path.clone();
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
         let cwd_for_key = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let session_key = session_key_for_agent(&config.agent.id, mode, &cwd_for_key);
@@ -264,6 +263,7 @@ impl ChatContext {
         let agent_trail_dir = resolve_agent_trail_dir(&config)?;
         std::fs::create_dir_all(&agent_trail_dir).map_err(AppError::Io)?;
         let current_session_entry = session.ensure_current_session(session_cwd.clone())?;
+        session.pin_session(&current_session_entry.session_id);
         migrate_legacy_layer0_tool_results(&agent_definition_dir, &agent_trail_dir);
 
         let agent_workspace_dir =
@@ -569,13 +569,9 @@ impl ChatContext {
         plan_runtime.attach_verifier(Arc::new(prod_verifier));
 
         {
-            let appender_session_key = session.current_session_key().to_string();
+            let appender_session = session.clone();
             plan_runtime.attach_transcript_appender(Arc::new(move |extra| {
-                let sm = SessionManager::new_scoped(
-                    sessions_path_for_appender.clone(),
-                    appender_session_key.clone(),
-                );
-                sm.append_custom_entry(extra)
+                appender_session.append_custom_entry(extra)
             }));
         }
 

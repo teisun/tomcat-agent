@@ -460,6 +460,8 @@ pub(super) async fn execute_bash_impl(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
+    // 让嵌套启动的 `tomcat` CLI 感知自己正运行在活动 agent 会话内部，从而走护栏。
+    cmd.env("TOMCAT_AGENT_ACTIVE", "1");
 
     // Unix：让子进程做新进程组的 leader（pgid = pid），超时分支 SIGKILL 整组。
     // 否则 `sh -c '...; sleep N'` 派生出的孙子进程（sleep）只会被遗弃、继续撑住 stdout 管道

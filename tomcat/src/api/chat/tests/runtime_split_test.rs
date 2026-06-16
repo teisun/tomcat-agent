@@ -810,6 +810,105 @@ pi.registerTool({
 
 #[test]
 #[serial(env_lock)]
+fn chat_context_stays_pinned_after_external_session_new() {
+    const API_ENV: &str = "TOMCAT_NESTED_SESSION_PIN_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+
+    let cfg = make_config(work_dir.path(), API_ENV);
+    let ctx = ChatContext::from_config(cfg.clone()).expect("ctx");
+    let original_session_id = current_session_id(&ctx);
+    let original_path = ctx
+        .session_runtime
+        .session
+        .current_transcript_path()
+        .expect("current transcript path")
+        .expect("transcript path should exist");
+
+    let external = crate::SessionManager::new_scoped(
+        crate::resolve_sessions_dir(&cfg).expect("sessions dir"),
+        ctx.session_runtime
+            .session
+            .current_session_key()
+            .to_string(),
+    );
+    let hijacked = external
+        .new_current_session(Some(workspace.path().to_string_lossy().to_string()))
+        .expect("hijacked session");
+    assert_ne!(hijacked.session_id, original_session_id);
+
+    ctx.session_runtime
+        .plan_runtime
+        .write_transcript_custom(json!({ "customType": "nested-session-guard" }));
+    ctx.session_runtime
+        .session
+        .switch_current_model(Some("openai"), Some("chat-runtime-model"))
+        .expect("model update should stay on pinned session");
+
+    assert_eq!(current_session_id(&ctx), original_session_id);
+    assert_eq!(
+        ctx.session_runtime
+            .session
+            .current_transcript_path()
+            .expect("current transcript path after repoint"),
+        Some(original_path.clone())
+    );
+
+    let original_entries = ctx
+        .session_runtime
+        .session
+        .get_entries_for_session(&original_session_id, 8)
+        .expect("original entries");
+    assert!(original_entries.iter().any(|entry| matches!(
+        entry,
+        crate::core::session::transcript::TranscriptEntry::Custom(custom)
+            if custom
+                .extra
+                .get("customType")
+                .and_then(|value| value.as_str())
+                == Some("nested-session-guard")
+    )));
+    assert!(original_entries.iter().any(|entry| matches!(
+        entry,
+        crate::core::session::transcript::TranscriptEntry::ModelChange(change)
+            if change.model_id.as_deref() == Some("chat-runtime-model")
+    )));
+    assert!(
+        ctx.session_runtime
+            .session
+            .get_entries_for_session(&hijacked.session_id, 8)
+            .expect("hijacked entries")
+            .is_empty(),
+        "external session must stay empty when live runtime is pinned elsewhere"
+    );
+
+    let original_entry = ctx
+        .session_runtime
+        .session
+        .get_session_by_id(&original_session_id)
+        .expect("original entry lookup")
+        .expect("original entry");
+    let hijacked_entry = ctx
+        .session_runtime
+        .session
+        .get_session_by_id(&hijacked.session_id)
+        .expect("hijacked entry lookup")
+        .expect("hijacked entry");
+    assert_eq!(
+        original_entry.model_override.as_deref(),
+        Some("chat-runtime-model")
+    );
+    assert_eq!(hijacked_entry.model_override, None);
+}
+
+#[test]
+#[serial(env_lock)]
 fn from_config_prefers_session_cwd_when_reopening_existing_session() {
     const API_ENV: &str = "TOMCAT_RUNTIME_WORKSPACE_CWD_TEST_KEY";
 
@@ -1640,9 +1739,11 @@ async fn function_override_scope_wins_over_agent_and_global() {
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].plugin_id, "project-function");
     assert!(
-        targets[0]
-            .plugin_root
-            .ends_with(Path::new(".tomcat").join("plugins").join("project-function")),
+        targets[0].plugin_root.ends_with(
+            Path::new(".tomcat")
+                .join("plugins")
+                .join("project-function")
+        ),
         "scope 层应覆盖 agent/global 同 point provider"
     );
 }
@@ -1707,8 +1808,14 @@ async fn function_override_distinct_points_resolve_independently() {
     );
 
     let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
-    assert_eq!(function_targets(&ctx, "test.alpha")[0].plugin_id, "project-alpha");
-    assert_eq!(function_targets(&ctx, "test.beta")[0].plugin_id, "global-beta");
+    assert_eq!(
+        function_targets(&ctx, "test.alpha")[0].plugin_id,
+        "project-alpha"
+    );
+    assert_eq!(
+        function_targets(&ctx, "test.beta")[0].plugin_id,
+        "global-beta"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1772,7 +1879,10 @@ async fn function_override_recomputes_winner_on_refresh_after_higher_layer_added
     );
 
     let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
-    assert_eq!(function_targets(&ctx, "test.echo")[0].plugin_id, "global-function");
+    assert_eq!(
+        function_targets(&ctx, "test.echo")[0].plugin_id,
+        "global-function"
+    );
 
     write_project_function_plugin(
         workspace.path(),
@@ -1820,7 +1930,10 @@ async fn function_override_lower_layer_reemerges_after_higher_layer_removed() {
     );
 
     let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
-    assert_eq!(function_targets(&ctx, "test.echo")[0].plugin_id, "project-function");
+    assert_eq!(
+        function_targets(&ctx, "test.echo")[0].plugin_id,
+        "project-function"
+    );
 
     fs::remove_dir_all(&project_plugin_dir).expect("remove higher-layer plugin");
     ctx.refresh_plugin_catalog_inventory()
