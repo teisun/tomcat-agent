@@ -607,6 +607,6 @@ show_search_tools_ui = false
 - 计划：[`/Users/yankeben/.cursor/plans/search_files_兜底选型_c8b4a778.plan.md`](../../../../../.cursor/plans/search_files_兜底选型_c8b4a778.plan.md)
 - 工具目录：[`docs/tool-catalog.md`](../../../../docs/tool-catalog.md)
 - 用户指南：[`docs/user-guide.md`](../../../../docs/user-guide.md)
-- 跨 Agent 工具描述报告：[`docs/reports/builtin-tool-description-cross-agent-study.md`](../../../../docs/reports/builtin-tool-description-cross-agent-study.md)
-- Cursor 内置工具参考：[`docs/reports/cursor-builtin-tools-reference.md`](../../../../docs/reports/cursor-builtin-tools-reference.md)
+- 跨 Agent 工具描述报告：[`docs/reports/builtin-tool-description-cross-agent-study.md`](../../reports/builtin-tool-description-cross-agent-study.md)
+- Cursor 内置工具参考：[`docs/reports/cursor-builtin-tools-reference.md`](../../reports/cursor-builtin-tools-reference.md)
 - 相关架构：[`permission-system.md`](../permission-system.md)（gate / deny 规则）、[`audit-log.md`](../audit-log.md)（审计 `implementation` 字段）、[`interrupt-and-cancellation.md`](../interrupt-and-cancellation.md)（取消令牌）

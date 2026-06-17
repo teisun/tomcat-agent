@@ -121,13 +121,16 @@
 | E2E-CLI-028 | 自动 | `test_user_installs_bare_plugin_to_agent_layer`     | 用户把 bare plugin 安装到 agent 私有层                  | `tomcat install <plugin_dir> --visibility agent --scope-root <project>` → `tomcat packages --visibility agent --scope-root <project>` | install exit 0；agent 层 package/plugin registry 写入成功；packages 输出含 `[barePlugin]` 与 `plugin:<id>` |
 | E2E-CLI-029 | 自动 | `test_user_installs_bare_skill_to_global_layer`     | 用户把 bare skill 安装到全局共享层                        | `tomcat install <skill_dir> --visibility global --scope-root <project>` → `tomcat packages --visibility global --scope-root <project>` | install exit 0；global 层 `skills/` 与 `packages/registry.json` 落盘；packages 输出含 `[bareSkill]` 与 `skill:<name>` |
 | E2E-CLI-030 | 自动 | `test_user_uninstalls_scope_package_and_cleans_scope_layer` | 用户卸载 scope package 后，资源与账本被精准清理               | 先 `tomcat install <package_dir> --visibility scope --scope-root <project>` → 再 `tomcat uninstall <package_name> --visibility scope --scope-root <project>` → `tomcat packages --visibility scope --scope-root <project>` | uninstall exit 0；scope 层 plugin/skill 目录消失；`packages/registry.json` 与 `plugins/registry.json` 清空；packages 回到 `(none)` |
+| E2E-CLI-031a | 自动 | `test_scope_function_override_wins_over_agent_and_global` | 用户在 scope / agent / global 三层各安装一个同 `point` 的 host-facing function 插件，当前项目应只看到 scope 赢家 | 预置三层 `plugins/<id>/plugin.json`，三者都声明同一 `functions[].point` → 构造/刷新当前 project scope → 读取 `FunctionRegistry` 或等价宿主调用视图 | `FunctionRegistry.functions_for_point(point)` 长度为 1；赢家来自 scope 层；agent/global 同点位 provider 不进入当前 scope 有效视图 |
+| E2E-CLI-031b | 自动 | `test_lower_layer_function_reappears_after_scope_override_removed` | 用户移除高层覆盖插件后，低层同 `point` provider 在 refresh 后重新生效 | 先构造 global + scope 两层同 `point` 插件并确认 scope 获胜 → 删除 scope 层插件目录或卸载 scope package → refresh plugin catalog inventory | refresh 后 `FunctionRegistry.functions_for_point(point)` 仍长度为 1；赢家切回 global；不出现重复条目 |
+| E2E-CLI-031c | 自动 | `test_web_search_backend_does_not_fallback_to_shadowed_provider` | 用户在高层覆盖 `web_search.backend` 后，即使赢家返回 `unsupported_backend`，宿主也不应自动回落到低层 provider | 预置高层和低层两个 `web_search.backend` 插件；高层返回 `unsupported_backend`，低层本可成功 → 触发宿主 `web_search` 调用 | 返回 `BackendFailure::Incompatible` 或等价清晰错误；低层 provider 不被调用；跨插件 fallback 不再发生 |
 
 
 ---
 
 ## Story 4 — rquickjs 插件运行时与兼容层（5 条）
 
-> 主验收入口为 `tests/quickjs_e2e_tests.rs` 与 `tests/long_lived_vm_tests.rs`；对应架构实施点见 [plugin-system-overview_new.md](../../../../architecture/plugin-system-overview_new.md) 中 P2/P3/P4/P10。事件语义补充见 [plugin-system/events.md](../../../../architecture/plugin-system/events.md)。
+> 主验收入口为 `tests/quickjs_e2e_tests.rs` 与 `tests/long_lived_vm_tests.rs`；对应架构入口见 [plugin-system-overview.md](../../../../architecture/plugin-system-overview.md)，运行时细节见 [plugin-system/runtime-and-sandbox.md](../../../../architecture/plugin-system/runtime-and-sandbox.md)。事件语义补充见 [plugin-system/events.md](../../../../architecture/plugin-system/events.md)。
 
 | 编号          | 验收 | 用例名                                  | 用户意图                                   | 操作序列                                                                 | 必须断言                                                                 |
 | ----------- | -- | ------------------------------------ | -------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
@@ -268,7 +271,7 @@
 
 > **TASK-17 备注**：E2E-CLI-084/085/086 上下文管理对用户透明（无新 CLI 命令），验收以 `tests/context_management_tests.rs` 为主、`src/core/compaction/tests.rs` 为 Layer0/L2 单测补充（见上表「用例名」列）。
 > **TASK-20 备注**：E2E-CLI-087~090 异步预热与 Boundary/L3 语义：集成见 `context_management_tests.rs`，状态机与 `apply_boundary` 见 `src/core/compaction/tests.rs`；时机 ② `check_before_request` 见 `apply.rs` 与 `api/chat`。
-> **TASK-21 备注**：§5.7 消息级 ID、锚点插入、`S::E`：`src/core/session/transcript/tests.rs` 与 `context_management_tests.rs` 中重载/边界用例对齐 JSONL 行序与 fold。**§5.7.5.1 陈旧 apply** 见 **E2E-CLI-092**；**read_entries_tail 跳过未知 type** 见 **E2E-CLI-093**。开发阶段不读盘兼容 `type: compaction`，见 [session-storage.md](../../../../docs/architecture/session-storage.md) transcript 说明。
+> **TASK-21 备注**：§5.7 消息级 ID、锚点插入、`S::E`：`src/core/session/transcript/tests.rs` 与 `context_management_tests.rs` 中重载/边界用例对齐 JSONL 行序与 fold。**§5.7.5.1 陈旧 apply** 见 **E2E-CLI-092**；**read_entries_tail 跳过未知 type** 见 **E2E-CLI-093**。开发阶段不读盘兼容 `type: compaction`，见 [session-storage.md](../../../../architecture/session-storage.md) transcript 说明。
 > **上下文可观测性完善**：E2E-CLI-091 中 `test_context_metrics_update_event_published` 位于 `tests/agent_loop_tests.rs`，`persist_context_observability_writes_sessions_json` 位于 `src/core/session/manager/tests.rs`（lib 单测）。
 > **阶段二 current-tail guard**：E2E-CLI-094/095 对应“发请求前减负”与“整份 collapse + keepalive”两条主路径；其中 094 现在同时覆盖 helper 级单测与 `AgentLoop::run()` 集成链路。本轮复用既有 integration crate，因此 `scripts/test-groups.sh` 仍无需额外分组变更。
 

@@ -1,4 +1,4 @@
-use super::super::{FunctionRegistry, ManifestFunction};
+use super::super::{FunctionRegistry, ManifestFunction, RegisteredFunction};
 
 fn manifest_function(point: &str, function: &str) -> ManifestFunction {
     ManifestFunction {
@@ -48,7 +48,7 @@ fn function_registry_supports_same_plugin_multi_point() {
 }
 
 #[test]
-fn function_registry_preserves_registration_order() {
+fn function_registry_direct_registration_allows_multiple_candidates_per_point() {
     let registry = FunctionRegistry::new();
     let plugin_a_root = tempfile::tempdir().expect("tempdir a");
     let plugin_b_root = tempfile::tempdir().expect("tempdir b");
@@ -68,7 +68,31 @@ fn function_registry_preserves_registration_order() {
         .iter()
         .map(|entry| entry.plugin_id.as_str())
         .collect::<Vec<_>>();
+    assert_eq!(functions.len(), 2);
     assert_eq!(ordered, vec!["plugin-a", "plugin-b"]);
+}
+
+#[test]
+fn function_registry_replace_all_overwrites_previous_snapshot() {
+    let registry = FunctionRegistry::new();
+    let plugin_root = tempfile::tempdir().expect("tempdir");
+    registry.register_plugin_functions(
+        "plugin-a",
+        plugin_root.path(),
+        &[manifest_function("test.echo", "echo_a")],
+    );
+
+    registry.replace_all([RegisteredFunction {
+        plugin_id: "winner-plugin".to_string(),
+        plugin_root: plugin_root.path().to_path_buf(),
+        point: "test.echo".to_string(),
+        function: "winner_echo".to_string(),
+    }]);
+
+    let functions = registry.functions_for_point("test.echo");
+    assert_eq!(functions.len(), 1);
+    assert_eq!(functions[0].plugin_id, "winner-plugin");
+    assert_eq!(functions[0].function, "winner_echo");
 }
 
 #[test]

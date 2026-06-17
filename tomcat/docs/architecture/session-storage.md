@@ -1,4 +1,4 @@
-本文为 [Architecture](../Architecture.md) 中「会话存储数据结构设计」的详细设计，总览见主文档。会话与存储根目录、多 agent 布局见 [工作目录与数据布局](work-dir-and-data-layout.md)。
+本文为 [Architecture](../openspec/specs/Architecture.md) 中「7. 会话存储与模式」的详细设计，总览见主文档。会话与存储根目录、多 agent 布局见 [工作目录与数据布局](work-dir-and-data-layout.md)。
 
 ## 会话存储数据结构设计
 

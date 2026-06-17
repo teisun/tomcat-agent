@@ -1015,7 +1015,10 @@ __pi_start_event_loop();
     )?;
     tokio::time::sleep(Duration::from_millis(250)).await;
     assert!(
-        matches!(crashy.current_state(), VmActorState::Running | VmActorState::Idle),
+        matches!(
+            crashy.current_state(),
+            VmActorState::Running | VmActorState::Idle
+        ),
         "non-fatal handler errors should stay isolated without crashing the runtime"
     );
     assert_eq!(

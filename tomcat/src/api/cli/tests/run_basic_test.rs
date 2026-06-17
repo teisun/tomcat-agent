@@ -10,6 +10,35 @@ use super::mocks::{test_config, with_temp_home, with_tomcat_config_in_home};
 use serial_test::serial;
 use std::collections::BTreeMap;
 
+struct EnvVarGuard {
+    saved: Vec<(String, Option<String>)>,
+}
+
+impl EnvVarGuard {
+    fn set_many(entries: &[(&str, Option<&str>)]) -> Self {
+        let mut saved = Vec::new();
+        for (key, value) in entries {
+            saved.push(((*key).to_string(), std::env::var(key).ok()));
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            match value {
+                Some(value) => std::env::set_var(&key, value),
+                None => std::env::remove_var(&key),
+            }
+        }
+    }
+}
+
 #[test]
 #[serial(env_lock)]
 fn run_init_returns_ok() {
@@ -248,6 +277,47 @@ fn doctor_plugin_runtime_lines_report_failure_and_hint() {
         "failure hint should guide the user toward recovery: {}",
         lines[1]
     );
+}
+
+#[test]
+#[serial(env_lock)]
+fn doctor_proxy_lines_reports_env_proxy_without_llm_override() {
+    let _env = EnvVarGuard::set_many(&[
+        ("HTTPS_PROXY", Some("http://127.0.0.1:7890")),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+    ]);
+    let mut cfg = AppConfig::default();
+    cfg.llm.proxy = None;
+
+    let lines = crate::api::cli::init::doctor_proxy_lines(&cfg);
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("环境代理") && line.contains("HTTPS_PROXY")));
+}
+
+#[test]
+#[serial(env_lock)]
+fn doctor_proxy_lines_warn_on_whitespace_and_socks() {
+    let _env = EnvVarGuard::set_many(&[
+        ("HTTPS_PROXY", Some("http://127.0.0.1:7890 ")),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", Some("socks5://127.0.0.1:7890")),
+    ]);
+    let mut cfg = AppConfig::default();
+    cfg.llm.proxy = Some("http://127.0.0.1:8888 ".to_string());
+
+    let lines = crate::api::cli::init::doctor_proxy_lines(&cfg);
+    assert!(lines.iter().any(|line| line.contains("llm.proxy 已配置")));
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("llm.proxy 含首尾空格")));
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("HTTPS_PROXY 含首尾空格")));
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("reqwest socks feature")));
 }
 
 #[test]

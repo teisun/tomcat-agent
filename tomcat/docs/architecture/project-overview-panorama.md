@@ -1,4 +1,4 @@
-本文为 [Architecture](../Architecture.md) 中「项目全貌」的详细设计，总览见主文档。
+本文为 [Architecture](../openspec/specs/Architecture.md) 中「项目全貌」的详细设计，总览见主文档。
 
 ## 项目全貌
 
@@ -328,6 +328,6 @@ src 总计 39 个 .rs（main/lib=2, api=4, core=16, ext=8, infra=9）
 
 ### 与各层详细设计的对应关系
 
-- 分层与各层职责的细节 → [各层核心模块详细设计](../Architecture.md#各层核心模块详细设计) 下的 1–7 节及对应子文档。
+- 分层与各层职责的细节 → [Architecture 总索引](../openspec/specs/Architecture.md) 与 [`README.md`](./README.md)。
 - 插件如何与宿主通信、异步 Hostcall、事件与工具回路 → [插件系统全貌](plugin-system-overview.md)。
-- Agent 主循环、Steering/FollowUp/Abort、重试与事件发布时机 → [13. Agent Loop 设计](agent-loop.md)。
+- Agent 主循环、Steering/FollowUp/Abort、重试与事件发布时机 → [Agent Loop 设计](agent-loop.md)。

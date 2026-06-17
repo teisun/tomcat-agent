@@ -166,12 +166,21 @@ fn spawn_quick_openai_stream_server(reply: &'static str) -> (String, std::thread
 }
 
 struct DeterministicMockLlm {
+    chat_responses: Mutex<VecDeque<Result<ChatResponse, AppError>>>,
     streams: Mutex<VecDeque<Vec<Result<StreamEvent, AppError>>>>,
 }
 
 impl DeterministicMockLlm {
     fn new(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> Self {
+        Self::with_chat_and_streams(vec![], streams)
+    }
+
+    fn with_chat_and_streams(
+        chat_responses: Vec<Result<ChatResponse, AppError>>,
+        streams: Vec<Vec<Result<StreamEvent, AppError>>>,
+    ) -> Self {
         Self {
+            chat_responses: Mutex::new(chat_responses.into()),
             streams: Mutex::new(streams.into()),
         }
     }
@@ -184,7 +193,11 @@ impl LlmProvider for DeterministicMockLlm {
     }
 
     async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
-        Err(AppError::Llm("mock chat not used".to_string()))
+        self.chat_responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(AppError::Llm("mock chat not used".to_string())))
     }
 
     async fn chat_stream(
@@ -431,16 +444,44 @@ fn deterministic_chat_context_fixture(env_key: &str) -> (tempfile::TempDir, Chat
 }
 
 fn deterministic_chat_context_fixture_with_config(
-    mut cfg: AppConfig,
+    cfg: AppConfig,
     env_key: &str,
 ) -> (tempfile::TempDir, ChatContext) {
+    deterministic_chat_context_fixture_with_config_and_overrides(
+        cfg,
+        env_key,
+        tomcat::api::chat::ChatContextOverrides::default(),
+    )
+}
+
+fn deterministic_chat_context_fixture_with_config_and_overrides(
+    cfg: AppConfig,
+    env_key: &str,
+    overrides: tomcat::api::chat::ChatContextOverrides,
+) -> (tempfile::TempDir, ChatContext) {
     let dir = tempfile::tempdir().unwrap();
-    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    let ctx = deterministic_chat_context_from_work_dir_with_overrides(
+        cfg,
+        env_key,
+        dir.path(),
+        overrides,
+    );
+    (dir, ctx)
+}
+
+fn deterministic_chat_context_from_work_dir_with_overrides(
+    mut cfg: AppConfig,
+    env_key: &str,
+    work_dir: &Path,
+    overrides: tomcat::api::chat::ChatContextOverrides,
+) -> ChatContext {
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
     cfg.llm.api_key_env = Some(env_key.to_string());
 
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
-    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let ctx = ChatContext::from_config_with_overrides(cfg, overrides)
+        .expect("chat context should be created");
     let session_key = ctx
         .session_runtime
         .session
@@ -450,7 +491,161 @@ fn deterministic_chat_context_fixture_with_config(
         .session
         .create_session(&session_key, None)
         .unwrap();
-    (dir, ctx)
+    ctx
+}
+
+struct ChatContextHarness {
+    _runtime: Option<tokio::runtime::Runtime>,
+    ctx: Option<ChatContext>,
+}
+
+impl std::ops::Deref for ChatContextHarness {
+    type Target = ChatContext;
+
+    fn deref(&self) -> &Self::Target {
+        self.ctx.as_ref().expect("chat context should exist")
+    }
+}
+
+impl std::ops::DerefMut for ChatContextHarness {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.ctx.as_mut().expect("chat context should exist")
+    }
+}
+
+impl Drop for ChatContextHarness {
+    fn drop(&mut self) {
+        if let Some(ctx) = self.ctx.take() {
+            drop(ctx);
+        }
+        if let Some(runtime) = self._runtime.take() {
+            std::thread::spawn(move || drop(runtime))
+                .join()
+                .expect("drop production chat runtime");
+        }
+    }
+}
+
+fn production_chat_context_from_work_dir_with_overrides(
+    mut cfg: AppConfig,
+    env_key: &str,
+    work_dir: &Path,
+    overrides: tomcat::api::chat::ChatContextOverrides,
+) -> ChatContextHarness {
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(env_key.to_string());
+
+    // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
+    unsafe { std::env::set_var(env_key, "stub") };
+    let (runtime, ctx) = tomcat::api::cli::build_runtime_and_context_with_overrides(
+        &cfg,
+        tomcat::SessionMode::Claw,
+        overrides,
+    )
+    .expect("chat context should be created with production runtime ordering");
+    let session_key = ctx.session_runtime.session.current_session_key().to_string();
+    ctx.session_runtime
+        .session
+        .create_session(&session_key, None)
+        .unwrap();
+    ChatContextHarness {
+        _runtime: Some(runtime),
+        ctx: Some(ctx),
+    }
+}
+
+async fn end_current_plugin_session(ctx: &ChatContext) {
+    let Some(plugin_manager) = ctx.global_services.plugin_manager.as_ref() else {
+        return;
+    };
+    let session_id = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .expect("current_session_id")
+        .expect("session id should exist");
+    plugin_manager
+        .end_session(&session_id)
+        .await
+        .expect("end current plugin session");
+}
+
+fn install_builtin_web_search_backends_plugin(work_dir: &Path) -> PathBuf {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("plugins")
+        .join("web-search-backends");
+    let dst = work_dir.join("plugins").join("web-search-backends");
+    fs::create_dir_all(&dst).expect("create builtin plugin dir");
+    for name in ["plugin.json", "main.js", "README.md"] {
+        fs::copy(src.join(name), dst.join(name)).expect("copy builtin plugin asset");
+    }
+    dst
+}
+
+fn write_function_plugin_dir(
+    plugin_dir: &Path,
+    plugin_id: &str,
+    functions: &[(&str, &str)],
+    script: &str,
+) {
+    fs::create_dir_all(plugin_dir).expect("create function plugin dir");
+    let manifest_functions = functions
+        .iter()
+        .map(|(point, function)| {
+            json!({
+                "point": point,
+                "function": function,
+            })
+        })
+        .collect::<Vec<_>>();
+    let manifest = json!({
+        "id": plugin_id,
+        "name": plugin_id,
+        "version": "0.1.0",
+        "description": "web_search function test fixture",
+        "author": "tests",
+        "main": "main.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "functions": manifest_functions,
+    });
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        serde_json::to_string_pretty(&manifest).expect("serialize function plugin manifest"),
+    )
+    .expect("write function plugin manifest");
+    fs::write(plugin_dir.join("main.js"), script).expect("write function plugin script");
+}
+
+fn write_project_function_plugin(
+    workspace: &Path,
+    plugin_id: &str,
+    functions: &[(&str, &str)],
+    script: &str,
+) {
+    write_function_plugin_dir(
+        &workspace.join(".tomcat").join("plugins").join(plugin_id),
+        plugin_id,
+        functions,
+        script,
+    );
+}
+
+fn write_host_root_function_plugin(
+    work_dir: &Path,
+    plugin_id: &str,
+    functions: &[(&str, &str)],
+    script: &str,
+) {
+    write_function_plugin_dir(
+        &work_dir.join("plugins").join(plugin_id),
+        plugin_id,
+        functions,
+        script,
+    );
 }
 
 fn assistant_tool_calls_from_transcript(transcript: &str) -> Vec<(String, Value)> {
@@ -5060,10 +5255,11 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
     common::setup_logging();
     let _span = info_span!("test_chat_path_executes_web_search_tool_with_mock_server").entered();
 
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+    let server = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
             "results": [
                 {
                     "title": "reqwest",
@@ -5072,26 +5268,41 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
                     "published_date": "2026-06-01"
                 }
             ]
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
+        }))
+        .expect("serialize tavily mock body"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(5));
 
     const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_CHAT_KEY";
     let _env = EnvGuard::set_many(&[
         (ENV_KEY, Some("stub")),
+        ("OPENAI_API_KEY", None),
         ("TAVILY_API_KEY", Some("tavily-test-key")),
         ("BRAVE_API_KEY", None),
         ("SERPER_API_KEY", None),
-        ("NO_PROXY", Some("127.0.0.1,localhost")),
-        ("no_proxy", Some("127.0.0.1,localhost")),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
         (common::DEEPSEEK_TEST_API_KEY_ENV, None),
     ]);
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".to_string();
-    cfg.tools.web_search.legacy_http_backends = true;
-    cfg.tools.web_search.tavily_base_url = server.uri();
-    let (_dir, mut ctx) = deterministic_chat_context_fixture_with_config(cfg, ENV_KEY);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    install_builtin_web_search_backends_plugin(work_dir.path());
+    let overrides =
+        tomcat::api::chat::ChatContextOverrides::default().with_fetch_http_client(fetch_client);
+    let mut ctx = production_chat_context_from_work_dir_with_overrides(
+        cfg,
+        ENV_KEY,
+        work_dir.path(),
+        overrides,
+    );
     let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
         cli_tool_call_stream(
             "call_ws",
@@ -5152,6 +5363,925 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
         "tool result 应包含搜索命中 URL，实际: {}",
         trunc(tool_text, 400)
     );
+    end_current_plugin_session(&ctx).await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_chat_path_routes_auto_web_search_through_plugin_slot() {
+    common::setup_logging();
+    let _span = info_span!("test_chat_path_routes_auto_web_search_through_plugin_slot").entered();
+
+    let server = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "results": [
+                {
+                    "title": "reqwest",
+                    "url": "https://docs.rs/reqwest",
+                    "content": "HTTP client",
+                    "published_date": "2026-06-01"
+                }
+            ]
+        }))
+        .expect("serialize tavily auto mock body"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(2));
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_AUTO_CHAT_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("OPENAI_API_KEY", None),
+        ("MIMO_API_KEY", None),
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+        (common::DEEPSEEK_TEST_API_KEY_ENV, None),
+    ]);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    write_project_function_plugin(
+        workspace.path(),
+        "project-web-search-missing-key",
+        &[("web_search.backend", "webSearchBackend")],
+        r#"
+pi.registerFunction("webSearchBackend", function () {
+  return {
+    backend: "tavily",
+    hits: [],
+    warnings: ["__missing_key__:TAVILY_API_KEY"],
+    unsupported_backend: true
+  };
+});
+"#,
+    );
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "auto".to_string();
+    let mut ctx = production_chat_context_from_work_dir_with_overrides(
+        cfg,
+        ENV_KEY,
+        work_dir.path(),
+        tomcat::api::chat::ChatContextOverrides::default().with_fetch_http_client(fetch_client),
+    );
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_tool_call_stream("call_ws", "web_search", r#"{"query":"reqwest rust"}"#),
+        cli_text_stream("AUTO_SEARCH_OK"),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请搜索 reqwest rust",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("应正常完成 auto web_search chat 路径，实际: {other:?}"),
+    };
+    assert!(result.final_text.contains("AUTO_SEARCH_OK"));
+    let tool_msg = result
+        .new_messages
+        .iter()
+        .find(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::Tool
+                && msg.tool_call_id.as_deref() == Some("call_ws")
+        })
+        .expect("should persist web_search tool result");
+    let tool_text = tool_msg.text_content().expect("tool result should be text");
+    assert!(
+        tool_text.contains("\"backend\":\"tavily\"")
+            || tool_text.contains("\"backend\": \"tavily\""),
+        "tool result 应包含 backend=tavily，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        tool_text.contains("https://docs.rs/reqwest"),
+        "tool result 应包含插件 slot 落到 Tavily 后返回的命中 URL，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        tool_text.contains("backend_unavailable:mimo"),
+        "tool result 应记录 auto 插件内从 mimo 继续推进，实际: {}",
+        trunc(tool_text, 400)
+    );
+    end_current_plugin_session(&ctx).await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_chat_path_surfaces_web_search_tool_error_without_vm_timeout() {
+    common::setup_logging();
+    let _span =
+        info_span!("test_chat_path_surfaces_web_search_tool_error_without_vm_timeout").entered();
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind hanging tcp listener");
+    let hang_addr = listener.local_addr().expect("hang listener addr");
+    let hang_task = tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _stream = stream;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+    let proxy =
+        common::ProxyTestServer::start(vec![("api.tavily.com".to_string(), hang_addr)]).await;
+    let proxy_url = proxy.url();
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_CHAT_TIMEOUT_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", Some(proxy_url.as_str())),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+        (common::DEEPSEEK_TEST_API_KEY_ENV, None),
+    ]);
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "tavily".to_string();
+    cfg.tools.web_fetch.fetch_timeout_ms = 60_000;
+    cfg.plugin.call_timeout_ms = 1_500;
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    install_builtin_web_search_backends_plugin(work_dir.path());
+    let mut ctx = production_chat_context_from_work_dir_with_overrides(
+        cfg,
+        ENV_KEY,
+        work_dir.path(),
+        tomcat::api::chat::ChatContextOverrides::default(),
+    );
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_tool_call_stream("call_ws", "web_search", r#"{"query":"reqwest rust"}"#),
+        cli_text_stream("SEARCH_TOOL_ERROR_HANDLED"),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请搜索 reqwest rust",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("应在 tool error 后继续完成第二轮 assistant，实际: {other:?}"),
+    };
+    assert!(result.final_text.contains("SEARCH_TOOL_ERROR_HANDLED"));
+    let tool_msg = result
+        .new_messages
+        .iter()
+        .find(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::Tool
+                && msg.tool_call_id.as_deref() == Some("call_ws")
+        })
+        .expect("should persist web_search tool error");
+    let tool_text = tool_msg.text_content().expect("tool error should be text");
+    assert!(
+        tool_text.contains("web_search backend `tavily` 请求超时"),
+        "tool error 应暴露结构化超时文案，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        !tool_text.contains("execution exceeded 30000ms timeout"),
+        "不应再暴露原始 VM timeout，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(proxy.saw_host("api.tavily.com"));
+    hang_task.abort();
+    end_current_plugin_session(&ctx).await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_chat_path_surfaces_plugin_runtime_error_with_original_detail() {
+    common::setup_logging();
+    let _span = info_span!(
+        "test_chat_path_surfaces_plugin_runtime_error_with_original_detail"
+    )
+    .entered();
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_PLUGIN_RUNTIME_CHAT_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("OPENAI_API_KEY", None),
+        ("MIMO_API_KEY", None),
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+        (common::DEEPSEEK_TEST_API_KEY_ENV, None),
+    ]);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    write_project_function_plugin(
+        workspace.path(),
+        "project-web-search-runtime-fail",
+        &[("web_search.backend", "webSearchBackend")],
+        r#"
+pi.registerFunction("webSearchBackend", function () {
+  throw new Error("synthetic plugin runtime failure");
+});
+"#,
+    );
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "mimo".to_string();
+    let mut ctx = production_chat_context_from_work_dir_with_overrides(
+        cfg,
+        ENV_KEY,
+        work_dir.path(),
+        tomcat::api::chat::ChatContextOverrides::default(),
+    );
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_tool_call_stream("call_ws", "web_search", r#"{"query":"reqwest rust"}"#),
+        cli_text_stream("PLUGIN_RUNTIME_HANDLED"),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请搜索 reqwest rust",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("应在 runtime tool error 后继续完成第二轮 assistant，实际: {other:?}"),
+    };
+    assert!(result.final_text.contains("PLUGIN_RUNTIME_HANDLED"));
+    let tool_msg = result
+        .new_messages
+        .iter()
+        .find(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::Tool
+                && msg.tool_call_id.as_deref() == Some("call_ws")
+        })
+        .expect("should persist web_search runtime tool error");
+    let tool_text = tool_msg.text_content().expect("tool error should be text");
+    assert!(
+        tool_text.contains("web_search backend `mimo` 运行时错误"),
+        "tool error 应标记为 runtime hard failure，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        tool_text.contains("synthetic plugin runtime failure"),
+        "tool error 应保留原始异常文本，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        !tool_text.contains("所有后端均不可用"),
+        "runtime hard failure 不应被压扁为 all_backends_unavailable，实际: {}",
+        trunc(tool_text, 400)
+    );
+    end_current_plugin_session(&ctx).await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_chat_path_auto_missing_keys_remains_degraded() {
+    common::setup_logging();
+    let _span = info_span!("test_chat_path_auto_missing_keys_remains_degraded").entered();
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_AUTO_DEGRADED_CHAT_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("OPENAI_API_KEY", None),
+        ("MIMO_API_KEY", None),
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+        (common::DEEPSEEK_TEST_API_KEY_ENV, None),
+    ]);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    write_project_function_plugin(
+        workspace.path(),
+        "project-web-search-missing-key",
+        &[("web_search.backend", "webSearchBackend")],
+        r#"
+pi.registerFunction("webSearchBackend", function () {
+  return {
+    backend: "tavily",
+    hits: [],
+    warnings: ["__missing_key__:TAVILY_API_KEY"],
+    unsupported_backend: true
+  };
+});
+"#,
+    );
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "auto".to_string();
+    let mut ctx = production_chat_context_from_work_dir_with_overrides(
+        cfg,
+        ENV_KEY,
+        work_dir.path(),
+        tomcat::api::chat::ChatContextOverrides::default(),
+    );
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_tool_call_stream("call_ws", "web_search", r#"{"query":"reqwest rust"}"#),
+        cli_text_stream("AUTO_DEGRADED_HANDLED"),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请搜索 reqwest rust",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+    end_current_plugin_session(&ctx).await;
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("应在可降级 tool error 后继续完成第二轮 assistant，实际: {other:?}"),
+    };
+    assert!(result.final_text.contains("AUTO_DEGRADED_HANDLED"));
+    let tool_msg = result
+        .new_messages
+        .iter()
+        .find(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::Tool
+                && msg.tool_call_id.as_deref() == Some("call_ws")
+        })
+        .expect("should persist degraded auto web_search error");
+    let tool_text = tool_msg.text_content().expect("tool error should be text");
+    assert!(
+        tool_text.contains("所有后端均不可用"),
+        "auto 缺 key 应保持可降级 exhausted 文案，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        tool_text.contains("backend_unavailable:auto"),
+        "degraded auto path 应保留 fallback warnings，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        !tool_text.contains("运行时错误"),
+        "纯缺 key 不应被误升级成 runtime hard failure，实际: {}",
+        trunc(tool_text, 400)
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_chat_path_web_search_survives_idle_gap_between_turns() {
+    common::setup_logging();
+    let _span = info_span!("test_chat_path_web_search_survives_idle_gap_between_turns").entered();
+
+    let server = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "results": [
+                {
+                    "title": "reqwest",
+                    "url": "https://docs.rs/reqwest",
+                    "content": "HTTP client",
+                    "published_date": "2026-06-01"
+                }
+            ]
+        }))
+        .expect("serialize tavily mock body"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(2));
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_IDLE_CHAT_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("OPENAI_API_KEY", None),
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+        (common::DEEPSEEK_TEST_API_KEY_ENV, None),
+    ]);
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "tavily".to_string();
+    cfg.plugin.call_timeout_ms = 200;
+    cfg.plugin.interrupt_budget = 0;
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    install_builtin_web_search_backends_plugin(work_dir.path());
+    let mut ctx = production_chat_context_from_work_dir_with_overrides(
+        cfg,
+        ENV_KEY,
+        work_dir.path(),
+        tomcat::api::chat::ChatContextOverrides::default().with_fetch_http_client(fetch_client),
+    );
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_tool_call_stream("call_ws_1", "web_search", r#"{"query":"reqwest rust"}"#),
+        cli_text_stream("FIRST_SEARCH_OK"),
+        cli_tool_call_stream("call_ws_2", "web_search", r#"{"query":"reqwest async"}"#),
+        cli_text_stream("SECOND_SEARCH_OK"),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请搜索 reqwest rust",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("first run_chat_turn timeout 5s")
+    .expect("first run_chat_turn result");
+    let first = match first {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("首轮 web_search 应成功完成，实际: {other:?}"),
+    };
+    assert!(first.final_text.contains("FIRST_SEARCH_OK"));
+
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "再搜索一次 reqwest async",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("second run_chat_turn timeout 5s")
+    .expect("second run_chat_turn result");
+    let second = match second {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("空闲后第二轮 web_search 应仍成功，实际: {other:?}"),
+    };
+    assert!(second.final_text.contains("SECOND_SEARCH_OK"));
+    let tool_msg = second
+        .new_messages
+        .iter()
+        .find(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::Tool
+                && msg.tool_call_id.as_deref() == Some("call_ws_2")
+        })
+        .expect("should persist second web_search tool result");
+    let tool_text = tool_msg.text_content().expect("tool result should be text");
+    assert!(
+        tool_text.contains("https://docs.rs/reqwest"),
+        "第二轮 tool result 应仍返回命中 URL，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        !tool_text.contains("execution exceeded"),
+        "空闲后第二轮不应再暴露 idle timeout 症状，实际: {}",
+        trunc(tool_text, 400)
+    );
+    end_current_plugin_session(&ctx).await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_chat_path_routes_auto_web_search_through_hosted_openai_candidate() {
+    common::setup_logging();
+    let _span = info_span!("test_chat_path_routes_auto_web_search_through_hosted_openai_candidate")
+        .entered();
+
+    let hosted = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "results": [
+                        {
+                            "title": "Rust",
+                            "url": "https://www.rust-lang.org",
+                            "snippet": "Language homepage"
+                        }
+                    ]
+                }
+            ]
+        })))
+        .expect(1)
+        .mount(&hosted)
+        .await;
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_CHAT_HOSTED_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("OPENAI_API_KEY", Some("openai-test-key")),
+        ("TAVILY_API_KEY", None),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+    ]);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    install_builtin_web_search_backends_plugin(work_dir.path());
+    std::fs::write(
+        work_dir.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "gpt-5.4-web"
+api = "openai-responses"
+provider = "openai"
+base_url = "{}"
+
+[models.capabilities]
+web_search = true
+"#,
+            hosted.uri()
+        ),
+    )
+    .expect("write models.toml");
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "auto".to_string();
+    let mut ctx = production_chat_context_from_work_dir_with_overrides(
+        cfg,
+        ENV_KEY,
+        work_dir.path(),
+        tomcat::api::chat::ChatContextOverrides::default(),
+    );
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_tool_call_stream("call_ws", "web_search", r#"{"query":"rust language"}"#),
+        cli_text_stream("HOSTED_SEARCH_OK"),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请搜索 Rust language",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("应正常完成 hosted auto web_search chat 路径，实际: {other:?}"),
+    };
+    assert!(result.final_text.contains("HOSTED_SEARCH_OK"));
+    let tool_msg = result
+        .new_messages
+        .iter()
+        .find(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::Tool
+                && msg.tool_call_id.as_deref() == Some("call_ws")
+        })
+        .expect("should persist hosted web_search tool result");
+    let tool_text = tool_msg.text_content().expect("tool result should be text");
+    assert!(
+        tool_text.contains("\"backend\":\"openai\"")
+            || tool_text.contains("\"backend\": \"openai\""),
+        "tool result 应包含 backend=openai，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        tool_text.contains("https://www.rust-lang.org"),
+        "tool result 应包含 hosted web_search 命中 URL，实际: {}",
+        trunc(tool_text, 400)
+    );
+    end_current_plugin_session(&ctx).await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn test_chat_path_web_search_falls_back_to_plugin_after_hosted_openai_failure() {
+    common::setup_logging();
+    let _span =
+        info_span!("test_chat_path_web_search_falls_back_to_plugin_after_hosted_openai_failure")
+            .entered();
+
+    let hosted = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "error": "upstream unavailable"
+        })))
+        .expect(1)
+        .mount(&hosted)
+        .await;
+
+    let tavily = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "results": [
+                {
+                    "title": "reqwest",
+                    "url": "https://docs.rs/reqwest",
+                    "content": "HTTP client",
+                    "published_date": "2026-06-01"
+                }
+            ]
+        }))
+        .expect("serialize tavily fallback body"),
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let fetch_client = tavily.client_for("api.tavily.com", std::time::Duration::from_secs(2));
+
+    const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_CHAT_HOSTED_FALLBACK_KEY";
+    let _env = EnvGuard::set_many(&[
+        (ENV_KEY, Some("stub")),
+        ("OPENAI_API_KEY", Some("openai-test-key")),
+        ("MIMO_API_KEY", None),
+        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("BRAVE_API_KEY", None),
+        ("SERPER_API_KEY", None),
+        ("HTTPS_PROXY", None),
+        ("HTTP_PROXY", None),
+        ("ALL_PROXY", None),
+        ("NO_PROXY", None),
+        ("no_proxy", None),
+        (common::DEEPSEEK_TEST_API_KEY_ENV, None),
+    ]);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    install_builtin_web_search_backends_plugin(work_dir.path());
+    std::fs::write(
+        work_dir.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "gpt-5.4-web"
+api = "openai-responses"
+provider = "openai"
+base_url = "{}"
+
+[models.capabilities]
+web_search = true
+"#,
+            hosted.uri()
+        ),
+    )
+    .expect("write models.toml");
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "auto".to_string();
+    let mut ctx = production_chat_context_from_work_dir_with_overrides(
+        cfg,
+        ENV_KEY,
+        work_dir.path(),
+        tomcat::api::chat::ChatContextOverrides::default().with_fetch_http_client(fetch_client),
+    );
+    let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
+        cli_tool_call_stream("call_ws", "web_search", r#"{"query":"reqwest rust"}"#),
+        cli_text_stream("HOSTED_FALLBACK_OK"),
+    ]));
+    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+
+    let system_text = "system prompt";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .unwrap();
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请搜索 reqwest rust",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn result");
+
+    let result = match outcome {
+        tomcat::AgentRunOutcome::Completed(result) => result,
+        other => panic!("应在 hosted 失败后回落插件并完成收尾，实际: {other:?}"),
+    };
+    assert!(result.final_text.contains("HOSTED_FALLBACK_OK"));
+    let tool_msg = result
+        .new_messages
+        .iter()
+        .find(|msg| {
+            msg.role == tomcat::core::llm::ChatMessageRole::Tool
+                && msg.tool_call_id.as_deref() == Some("call_ws")
+        })
+        .expect("should persist fallback web_search tool result");
+    let tool_text = tool_msg.text_content().expect("tool result should be text");
+    end_current_plugin_session(&ctx).await;
+    assert!(
+        tool_text.contains("\"backend\":\"tavily\"")
+            || tool_text.contains("\"backend\": \"tavily\""),
+        "tool result 应在 hosted 失败后回落到 tavily，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        tool_text.contains("openai_unavailable") && tool_text.contains("fallback=auto"),
+        "tool result 应记录 hosted 失败后回落 auto，实际: {}",
+        trunc(tool_text, 400)
+    );
+    assert!(
+        tool_text.contains("https://docs.rs/reqwest"),
+        "tool result 应包含回落插件后的命中 URL，实际: {}",
+        trunc(tool_text, 400)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn test_web_search_backend_does_not_fallback_to_shadowed_provider() {
+    common::setup_logging();
+    let _span =
+        info_span!("test_web_search_backend_does_not_fallback_to_shadowed_provider").entered();
+
+    const API_ENV: &str = "TOMCAT_WEB_SEARCH_SHADOWED_PROVIDER_KEY";
+    let _env = EnvGuard::set_many(&[(API_ENV, Some("stub"))]);
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = common::CwdGuard::set(workspace.path());
+    let work_dir = tempfile::tempdir().expect("workdir tempdir");
+    write_host_root_function_plugin(
+        work_dir.path(),
+        "global-web-search-success",
+        &[("web_search.backend", "webSearchBackend")],
+        r#"
+pi.registerFunction("webSearchBackend", function (params) {
+  return {
+    backend: params.backend,
+    hits: [{ title: "Docs", url: "https://docs.rs/reqwest", snippet: "HTTP client" }],
+    warnings: []
+  };
+});
+"#,
+    );
+    write_project_function_plugin(
+        workspace.path(),
+        "project-shadow-web-search",
+        &[("web_search.backend", "webSearchBackend")],
+        r#"
+pi.registerFunction("webSearchBackend", function () {
+  return { hits: [], warnings: [], unsupported_backend: true };
+});
+"#,
+    );
+
+    let mut cfg = AppConfig::default();
+    cfg.tools.web_search.backend = "mimo".to_string();
+    let ctx = production_chat_context_from_work_dir_with_overrides(
+        cfg,
+        API_ENV,
+        work_dir.path(),
+        tomcat::api::chat::ChatContextOverrides::default(),
+    );
+    let err = ctx
+        .global_services
+        .web_search_runtime
+        .search(
+            tomcat::core::tools::web_search::types::WebSearchArgs {
+                query: "reqwest rust".into(),
+                count: Some(3),
+                freshness: None,
+                country: None,
+                language: None,
+                domain_filter: Vec::new(),
+            },
+            "shadowed-provider-session",
+        )
+        .await
+        .expect_err("unsupported_backend should not fall through to lower provider");
+
+    assert!(
+        err.to_string()
+            .contains("web_search plugin backend `mimo` reported unsupported_backend"),
+        "should surface passthrough unsupported_backend incompatibility without touching shadowed provider: {err}"
+    );
+    if let Some(plugin_manager) = ctx.global_services.plugin_manager.as_ref() {
+        plugin_manager
+            .end_session("shadowed-provider-session")
+            .await
+            .expect("end shadowed provider plugin session");
+    }
 }
 
 #[tokio::test]

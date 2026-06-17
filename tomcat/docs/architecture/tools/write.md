@@ -1,6 +1,6 @@
 # `write` 工具：覆盖策略、陈旧检测与落盘契约
 
-本文档是内置工具 **`write`**（当前 catalog / `tool_exec` 仍为 `write_file`，见 §12）的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`），承接主计划 [strengthen-four-core-tools_b51c9eae.plan.md](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md) §0.3（W1–W7）、§2.2 **PR-C**、§3.2 **PR-G**、§4.2 **T3-K**，以及调研 [agent-tools-comparison.md](../../../../docs/reports/agent-tools-comparison.md) §3 维 7 / §6「Write 安全」。**已定稿目标行为**与 **待合入 PR** 在 **§3.4** 总表区分，细节见 **§3.4.1** 起；**实现以合入后的仓库代码为准**。
+本文档是内置工具 **`write`**（当前 catalog / `tool_exec` 仍为 `write_file`，见 §12）的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`），承接主计划 [strengthen-four-core-tools_b51c9eae.plan.md](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md) §0.3（W1–W7）、§2.2 **PR-C**、§3.2 **PR-G**、§4.2 **T3-K**，以及调研 [agent-tools-comparison.md](../../reports/agent-tools-comparison.md) §3 维 7 / §6「Write 安全」。**已定稿目标行为**与 **待合入 PR** 在 **§3.4** 总表区分，细节见 **§3.4.1** 起；**实现以合入后的仓库代码为准**。
 
 **兄弟 spec**：[read.md](read.md)（`ReadFileState`、`ReadStamp`、`FILE_UNCHANGED`、dedup）；[edit.md](edit.md)（同表 staleness、`NoPriorRead` 与 write 同 PR 节奏、secrets T3-K）；[search_files.md](search_files.md)（先定位再写的工作流）。
 
@@ -507,7 +507,7 @@ sequenceDiagram
 - [bash.md](bash.md) — shell 执行、gate、审计与超时/输出路线图（`execute_bash` → `bash`）。
 - [../permission-system.md](../permission-system.md) — Write 权限与确认流。
 - 主计划：[strengthen-four-core-tools_b51c9eae.plan.md](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)。
-- 调研：[agent-tools-comparison.md](../../../../docs/reports/agent-tools-comparison.md)。
+- 调研：[agent-tools-comparison.md](../../reports/agent-tools-comparison.md)。
 - 代码：[read_state.rs](../../../../src/core/tools/pipeline/read_state.rs)、[write_edit.rs](../../../../src/core/tools/primitive/executor/write_edit.rs)、[tool_exec.rs](../../../../src/core/agent_loop/tool_exec.rs)、[platform/mod.rs](../../../../src/infra/platform/mod.rs)、[secrets.rs](../../../../src/core/security/secrets.rs)。
 
 ---

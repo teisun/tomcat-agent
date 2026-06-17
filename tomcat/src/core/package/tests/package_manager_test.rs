@@ -58,7 +58,12 @@ fn write_package_manifest(root: &Path, plugins: &[&str], skills: &[&str]) {
     write_named_package_manifest(root, "combo-package", plugins, skills);
 }
 
-fn write_named_package_manifest(root: &Path, package_name: &str, plugins: &[&str], skills: &[&str]) {
+fn write_named_package_manifest(
+    root: &Path,
+    package_name: &str,
+    plugins: &[&str],
+    skills: &[&str],
+) {
     std::fs::write(
         root.join("package.json"),
         serde_json::to_string_pretty(&json!({
@@ -440,7 +445,12 @@ fn force_install_removes_resources_dropped_from_replacement_package() {
         "2.0.0",
         "keep_tool_v2",
     );
-    write_named_package_manifest(second.path(), "replaceable-package", &["plugins/keep-plugin"], &[]);
+    write_named_package_manifest(
+        second.path(),
+        "replaceable-package",
+        &["plugins/keep-plugin"],
+        &[],
+    );
     let prepared = manager
         .prepare_install(
             second.path(),

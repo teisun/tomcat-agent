@@ -1,6 +1,14 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-16 10:49 +0800 | ACTIVE | develop | — |
+| Cursor | 2026-06-16 11:55 +0800 | ACTIVE | feature/host-functions-point-override | — |
+
+### 2026-06-16 | host-facing `functions[]` point override 语义收口
+
+- **分支与范围**：从 `develop` 拉出 `feature/host-functions-point-override`，收口 host-facing `functions[]` 的分层发现 / 注册面语义，并同步更新主架构文档、PackageManager、User Stories、E2E 场景库、集成交付说明、`web_search` 架构文档与用户指南。
+- **语义结论**：`functions[]` 与普通 plugin 一样复用 `scope > agent > global` 三层发现 / 安装链；真正特殊的地方只在 `FunctionRegistry` 物化阶段按 `point` 执行 override。高层声明覆盖低层；同层冲突 stable first-wins + warning；高层移除后低层可在 refresh 后重新成为赢家；`web_search.backend` 的 `unsupported_backend` 不再跨插件兜底。
+- **代码与测试收口**：`materialize_host_functions_from_catalog()` 改为按 layer+point 选赢家并产出 `function_point_conflict` / `function_point_shadowed` warning；`ExtPluginSearchInvoker` 只消费当前赢家 provider；`runtime_split_test` / `plugin_function_invoker_test` / `function_registry_test` / `catalog_test` 已补齐 point override、tools 不受影响、registry contract 与官方单插件 `auto` 路由守护。
+- **本轮验证**：已通过 `cargo test -p tomcat --lib runtime_split_test -- --nocapture`、`cargo test -p tomcat --lib plugin_function_invoker_test -- --nocapture`、`cargo test -p tomcat --lib function_registry_test -- --nocapture`、`cargo test -p tomcat --lib catalog_test -- --nocapture`、`cargo test -p tomcat --lib plugin_backend_ -- --nocapture`、`cargo clippy --all-targets -- -D warnings`。
+- **门禁决策**：本轮**未**额外复跑“无 OpenAI 全量 integration gate”。原因是改动面集中在 host function 分层发现、point override 物化、`web_search.backend` 调用收口与文档/单测；未改 CLI 外部协议、真实 LLM/OpenAI 路径或新的 integration binary。focused suites 已覆盖本次语义风险面，故先以 focused + clippy 作为本轮 gate 记录。
 
 ### 2026-06-16 | merge `feature/plugin-function-surface` → develop（T2-P1-016 / T2-P1-017 集成验收）
 

@@ -1,6 +1,6 @@
-# 13. Agent Loop 设计
+# Agent Loop 设计
 
-本文为 [Architecture](../Architecture.md) 中第 13 节的详细设计，总览见主文档。
+本文为 [Architecture](../openspec/specs/Architecture.md) 中「9. Agent Loop 设计」的详细设计，总览见主文档。
 
 ## 2026-05 PlanRuntime 启动挂接补充
 
@@ -24,7 +24,7 @@ agent/chat 进入主循环前，启动顺序新增一条 plan 恢复挂接：
 
 ## 13.1 概述与设计目标
 
-Agent Loop 是 Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（Steering/FollowUp/Abort）、容错重试（Compaction/Backoff）的完整生命周期。本设计与 pi-mono、openclaw 对齐，采用三层嵌套循环，并明确与事件系统（第 8 节）的发布时机对应关系。
+Agent Loop 是 Agent 的核心运行循环，编排 LLM 调用、工具执行、用户中断（Steering/FollowUp/Abort）、容错重试（Compaction/Backoff）的完整生命周期。本设计与 pi-mono、openclaw 对齐，采用三层嵌套循环，并明确与插件事件系统的发布时机对应关系。
 
 ### 设计目标
 

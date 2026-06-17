@@ -8,7 +8,7 @@ use tracing::warn;
 
 use crate::core::tools::contract::confirmation::{ConfirmDecision, UserConfirmationProvider};
 use crate::core::tools::primitive::PrimitiveOperation;
-use crate::ext::plugin::PluginCatalog;
+use crate::ext::plugin::{PluginCatalog, PluginSource};
 use crate::ext::{
     FunctionRegistry, HostApiDispatcher, PluginEngine, PluginEngineConfig, PluginFunctionInvoker,
     PluginManager, PluginRuntimeManager, PluginToolExecutor, RegisteredFunction,
@@ -16,6 +16,10 @@ use crate::ext::{
 };
 use crate::infra::config::ThinkingDisplay;
 use crate::infra::error::AppError;
+use crate::infra::http_client::{
+    build_outbound_client, clamp_timeout_within_budget, default_connect_timeout_for, has_proxy_env,
+    OutboundClientErrorKind, OutboundClientOptions,
+};
 use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
@@ -44,11 +48,17 @@ pub struct ChatContext {
 #[derive(Default)]
 pub struct ChatContextOverrides {
     pub ask_question_panel: Option<Arc<dyn panels::AskQuestionPanel>>,
+    pub fetch_http_client: Option<reqwest::Client>,
 }
 
 impl ChatContextOverrides {
     pub fn with_ask_question_panel(mut self, panel: Arc<dyn panels::AskQuestionPanel>) -> Self {
         self.ask_question_panel = Some(panel);
+        self
+    }
+
+    pub fn with_fetch_http_client(mut self, client: reqwest::Client) -> Self {
+        self.fetch_http_client = Some(client);
         self
     }
 }
@@ -158,6 +168,7 @@ fn scope_runtime_cache(
     CACHE.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scope_runtime_for(
     config: &AppConfig,
     agent_workspace_dir: std::path::PathBuf,
@@ -166,25 +177,32 @@ fn scope_runtime_for(
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
     session: Arc<SessionManager>,
+    overrides: &ChatContextOverrides,
 ) -> Result<Arc<ScopeContainer>, AppError> {
+    let disable_cache = overrides.fetch_http_client.is_some();
     let key = std::fs::canonicalize(&agent_workspace_dir).unwrap_or(agent_workspace_dir);
-    if let Some(existing) = scope_runtime_cache()
-        .read()
-        .get(&key)
-        .and_then(Weak::upgrade)
-    {
-        return Ok(existing);
+    if !disable_cache {
+        if let Some(existing) = scope_runtime_cache()
+            .read()
+            .get(&key)
+            .and_then(Weak::upgrade)
+        {
+            return Ok(existing);
+        }
     }
 
-    let mut cache = scope_runtime_cache().write();
-    if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
-        return Ok(existing);
+    let mut cache_guard = (!disable_cache).then(|| scope_runtime_cache().write());
+    if let Some(cache) = cache_guard.as_ref() {
+        if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
+            return Ok(existing);
+        }
     }
 
     let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
     let deps = PluginRuntimeDeps {
         audit,
         event_bus: event_bus.clone(),
+        fetch_http_client: overrides.fetch_http_client.clone(),
         llm,
         llm_resolver,
         primitive,
@@ -202,7 +220,9 @@ fn scope_runtime_for(
         skill_set: Arc::new(RwLock::new(crate::core::skill::SkillSet::default())),
         skill_discovery_handle: Arc::new(tokio::sync::Mutex::new(None)),
     });
-    cache.insert(key, Arc::downgrade(&shared));
+    if let Some(cache) = cache_guard.as_mut() {
+        cache.insert(key, Arc::downgrade(&shared));
+    }
     Ok(shared)
 }
 
@@ -251,7 +271,6 @@ impl ChatContext {
         overrides: ChatContextOverrides,
     ) -> Result<Self, AppError> {
         let sessions_path = resolve_sessions_dir(&config)?;
-        let sessions_path_for_appender = sessions_path.clone();
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
         let cwd_for_key = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let session_key = session_key_for_agent(&config.agent.id, mode, &cwd_for_key);
@@ -264,6 +283,7 @@ impl ChatContext {
         let agent_trail_dir = resolve_agent_trail_dir(&config)?;
         std::fs::create_dir_all(&agent_trail_dir).map_err(AppError::Io)?;
         let current_session_entry = session.ensure_current_session(session_cwd.clone())?;
+        session.pin_session(&current_session_entry.session_id);
         migrate_legacy_layer0_tool_results(&agent_definition_dir, &agent_trail_dir);
 
         let agent_workspace_dir =
@@ -372,6 +392,7 @@ impl ChatContext {
             llm_resolver.clone(),
             primitive.clone(),
             session_arc.clone(),
+            &overrides,
         )?;
         shared_scope_runtime.dispatcher.bind_session(
             &current_session_entry.session_id,
@@ -569,13 +590,9 @@ impl ChatContext {
         plan_runtime.attach_verifier(Arc::new(prod_verifier));
 
         {
-            let appender_session_key = session.current_session_key().to_string();
+            let appender_session = session.clone();
             plan_runtime.attach_transcript_appender(Arc::new(move |extra| {
-                let sm = SessionManager::new_scoped(
-                    sessions_path_for_appender.clone(),
-                    appender_session_key.clone(),
-                );
-                sm.append_custom_entry(extra)
+                appender_session.append_custom_entry(extra)
             }));
         }
 
@@ -956,6 +973,7 @@ type PluginRuntimeParts = (
 struct PluginRuntimeDeps {
     audit: Arc<dyn AuditRecorder>,
     event_bus: Arc<dyn EventBus>,
+    fetch_http_client: Option<reqwest::Client>,
     llm: Arc<dyn LlmProvider>,
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
@@ -966,24 +984,84 @@ fn canonicalize_or_keep(path: &std::path::Path) -> std::path::PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn materialize_host_functions_from_catalog(registry: &FunctionRegistry, catalog: &PluginCatalog) {
-    let registered = catalog
-        .iter()
-        .flat_map(|(plugin_id, entry)| {
-            entry
-                .manifest
-                .functions
-                .iter()
-                .map(|function| RegisteredFunction {
-                    plugin_id: plugin_id.clone(),
-                    plugin_root: canonicalize_or_keep(&entry.plugin_root),
-                    point: function.point.clone(),
-                    function: function.function.clone(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    registry.replace_all(registered);
+fn host_function_source_rank(source: PluginSource) -> u8 {
+    match source {
+        PluginSource::Project => 0,
+        PluginSource::Agent => 1,
+        PluginSource::Managed => 2,
+    }
+}
+
+fn materialize_host_functions_from_catalog(
+    registry: &FunctionRegistry,
+    catalog: &PluginCatalog,
+) -> Vec<String> {
+    #[derive(Debug)]
+    struct HostFunctionCandidate {
+        order: usize,
+        source: PluginSource,
+        plugin_id: String,
+        plugin_root: std::path::PathBuf,
+        point: String,
+        function: String,
+    }
+
+    let mut candidates = Vec::<HostFunctionCandidate>::new();
+    for (plugin_id, entry) in catalog.iter() {
+        for function in &entry.manifest.functions {
+            candidates.push(HostFunctionCandidate {
+                order: candidates.len(),
+                source: entry.source,
+                plugin_id: plugin_id.clone(),
+                plugin_root: canonicalize_or_keep(&entry.plugin_root),
+                point: function.point.clone(),
+                function: function.function.clone(),
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        host_function_source_rank(left.source)
+            .cmp(&host_function_source_rank(right.source))
+            .then(left.order.cmp(&right.order))
+    });
+
+    let mut warnings = Vec::new();
+    let mut winners =
+        std::collections::BTreeMap::<String, (PluginSource, RegisteredFunction)>::new();
+    for candidate in candidates {
+        let registered = RegisteredFunction {
+            plugin_id: candidate.plugin_id.clone(),
+            plugin_root: candidate.plugin_root.clone(),
+            point: candidate.point.clone(),
+            function: candidate.function.clone(),
+        };
+        if let Some((winner_source, winner)) = winners.get(&candidate.point) {
+            let warning = if *winner_source == candidate.source {
+                format!(
+                    "function_point_conflict:{}:{} shadowed_by {} (source={}, policy=first_wins)",
+                    candidate.point,
+                    candidate.plugin_id,
+                    winner.plugin_id,
+                    candidate.source.as_str()
+                )
+            } else {
+                format!(
+                    "function_point_shadowed:{}:{}:{} shadowed_by {}:{}",
+                    candidate.point,
+                    candidate.source.as_str(),
+                    candidate.plugin_id,
+                    winner_source.as_str(),
+                    winner.plugin_id
+                )
+            };
+            warnings.push(warning);
+            continue;
+        }
+        winners.insert(candidate.point.clone(), (candidate.source, registered));
+    }
+
+    registry.replace_all(winners.into_values().map(|(_, function)| function));
+    warnings
 }
 
 fn refresh_host_function_registry(
@@ -991,8 +1069,10 @@ fn refresh_host_function_registry(
     agent_workspace_dir: &std::path::Path,
     registry: &FunctionRegistry,
 ) -> Result<PluginCatalog, AppError> {
-    let catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
-    materialize_host_functions_from_catalog(registry, &catalog);
+    let mut catalog = PluginCatalog::discover(config, agent_workspace_dir)?;
+    catalog
+        .warnings
+        .extend(materialize_host_functions_from_catalog(registry, &catalog));
     Ok(catalog)
 }
 
@@ -1004,6 +1084,7 @@ fn build_plugin_runtime(
     let PluginRuntimeDeps {
         audit,
         event_bus,
+        fetch_http_client,
         llm,
         llm_resolver,
         primitive,
@@ -1054,24 +1135,37 @@ fn build_plugin_runtime(
     let function_registry = Arc::new(FunctionRegistry::new());
     let default_tool_registry = Arc::new(DefaultToolRegistry::new(executor.clone(), audit.clone()));
     let tool_registry: Arc<dyn ToolRegistry> = default_tool_registry.clone();
-    let mut fetch_client_builder = reqwest::Client::builder()
-        .dns_resolver(Arc::new(crate::infra::net_guard::PublicIpDnsResolver))
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_millis(
-            config.tools.web_fetch.fetch_timeout_ms,
-        ));
-    if let Some(proxy_url) = config.llm.proxy.as_deref() {
-        let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|e| AppError::Config(format!("代理 URL 无效 {}: {}", proxy_url, e)))?;
-        fetch_client_builder = fetch_client_builder.proxy(proxy);
+    let plugin_fetch_timeout = clamp_timeout_within_budget(
+        config.tools.web_fetch.fetch_timeout_ms,
+        config.plugin.call_timeout_ms,
+    );
+    let fetch_client = if let Some(client) = fetch_http_client {
+        client
     } else {
-        fetch_client_builder = fetch_client_builder.no_proxy();
-    }
-    let fetch_client = fetch_client_builder
-        .build()
-        .map_err(|e| AppError::Tool(format!("创建 plugin net.fetch HTTP 客户端失败: {}", e)))?;
+        let mut options = OutboundClientOptions::new(config.llm.proxy.as_deref());
+        options.use_public_ip_dns_resolver = true;
+        options.redirect_policy = Some(reqwest::redirect::Policy::none());
+        options.timeout = Some(plugin_fetch_timeout);
+        options.connect_timeout = Some(default_connect_timeout_for(plugin_fetch_timeout));
+        build_outbound_client(
+            options,
+            OutboundClientErrorKind::Tool,
+            "创建 plugin net.fetch HTTP 客户端失败",
+        )?
+    };
+    let explicit_fetch_proxy = config
+        .llm
+        .proxy
+        .as_deref()
+        .is_some_and(|proxy| !proxy.trim().is_empty());
+    let ambient_fetch_proxy = !explicit_fetch_proxy && has_proxy_env();
     let dispatcher = Arc::new(
         HostApiDispatcher::new(event_bus.clone())
+            .with_fetch_transport_diagnostics(
+                plugin_fetch_timeout,
+                explicit_fetch_proxy,
+                ambient_fetch_proxy,
+            )
             .with_tools(tool_registry.clone())
             .with_session(session.clone())
             .with_llm(llm)

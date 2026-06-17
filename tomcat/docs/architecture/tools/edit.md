@@ -1,6 +1,6 @@
 # `edit` 工具：原文契约、陈旧检测与分阶段增强
 
-本文档是内置工具 **`edit`**（当前代码中仍为 `edit_file`）的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`），承接主计划 [`strengthen-four-core-tools_b51c9eae.plan.md`](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)（§0.4 edit 维度、§2.3 **PR-D**、§3.3 **PR-H**、§4.4 **PR-M** / T3-K）、看板中与四工具相关的条目，以及调研 [`docs/reports/agent-tools-comparison.md`](../../../../docs/reports/agent-tools-comparison.md) §4.2。**已定稿部分**与 **计划合入部分** 在 §2.4 用「实施点」表区分；**实现以合入后的仓库代码为准**。
+本文档是内置工具 **`edit`**（当前代码中仍为 `edit_file`）的冻结版技术方案（OpenSpec **B 类**：`docs/architecture/tools/`），承接主计划 [`strengthen-four-core-tools_b51c9eae.plan.md`](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)（§0.4 edit 维度、§2.3 **PR-D**、§3.3 **PR-H**、§4.4 **PR-M** / T3-K）、看板中与四工具相关的条目，以及调研 [`docs/reports/agent-tools-comparison.md`](../../reports/agent-tools-comparison.md) §4.2。**已定稿部分**与 **计划合入部分** 在 §2.4 用「实施点」表区分；**实现以合入后的仓库代码为准**。
 
 **兄弟 spec**：[`read.md`](read.md)（`ReadFileState`、dedup、`hashline`、edit 前陈旧检查 **§7.3**、会话表 **§8**）；[`search_files.md`](search_files.md)（先搜后改工作流）。
 
@@ -691,7 +691,7 @@ sequenceDiagram
 - [`bash.md`](bash.md) — shell 工具与 `search_files` 分工（勿用 bash 跑 rg）。
 - [`../permission-system.md`](../permission-system.md) — Edit 权限与 secrets `confirm`。
 - 主计划：[strengthen-four-core-tools_b51c9eae.plan.md](../../../../../.cursor/plans/strengthen-four-core-tools_b51c9eae.plan.md)。
-- 调研：[agent-tools-comparison.md](../../../../docs/reports/agent-tools-comparison.md) §4.2。
+- 调研：[agent-tools-comparison.md](../../reports/agent-tools-comparison.md) §4.2。
 - 代码：[read_state.rs](../../../../src/core/tools/pipeline/read_state.rs)、[write_edit.rs](../../../../src/core/tools/primitive/executor/write_edit.rs)、[tool_exec.rs](../../../../src/core/agent_loop/tool_exec.rs)、[types.rs](../../../../src/core/tools/primitive/types.rs)。
 
 ---

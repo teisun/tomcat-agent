@@ -89,4 +89,4 @@ directly and does not resolve relative ES module imports at runtime.
 
 - `backend=auto` now hands control to this plugin when hosted search is unavailable
 - `backend=tavily|brave|serper|mimo` all resolve here by default
-- `tools.web_search.legacy_http_backends = true` keeps the old Rust HTTP path available as a rollback switch
+- this plugin is now the only supported path for `tavily|brave|serper|mimo`

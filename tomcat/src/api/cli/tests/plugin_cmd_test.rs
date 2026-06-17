@@ -427,7 +427,10 @@ fn plugin_unload_removes_scope_entry_before_global_entry() {
         .plugins
         .is_empty());
     assert_eq!(
-        load_plugin_registry(&global_registry_path).unwrap().plugins.len(),
+        load_plugin_registry(&global_registry_path)
+            .unwrap()
+            .plugins
+            .len(),
         1
     );
 }

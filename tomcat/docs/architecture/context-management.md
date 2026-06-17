@@ -1,4 +1,4 @@
-本文为 [Architecture](../Architecture.md) 中「上下文管理」的详细设计，总览见主文档。关联文档：[Agent Loop 设计](agent-loop.md)、[会话存储数据结构](session-storage.md)。研究报告：[context-management-deep-dive.md](../../../docs/reports/context-management-deep-dive.md)。重构建议报告：[context-management-refactoring-proposal.md](../../../docs/reports/context-management-refactoring-proposal.md)。
+本文为 [Architecture](../openspec/specs/Architecture.md) 中「9. Agent Loop 设计」相关的上下文管理专题，总览见主文档。启动期 transcript hydrate 的实现事实源见 [`chat-resume-hydration.md`](./chat-resume-hydration.md)。研究报告：[context-management-deep-dive.md](../reports/context-management-deep-dive.md)。重构建议报告：[context-management-refactoring-proposal.md](../reports/context-management-refactoring-proposal.md)。
 
 ---
 
@@ -16,7 +16,7 @@ chat 启动期的 transcript 物理读取、sidecar schema、`latest_plan_event`
 
 ### 1.1 背景
 
-TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → Layer 2 LLM 摘要 → Layer 3 强制删除）和 token-aware 滑窗。后续基于 [Claude Code 上下文管理机制](../../../docs/reports/context-management-refactoring-proposal.md) 的对比分析，升级为 ratio 水位线 + 级联降压模式。
+TASK-17 落地了四层同步防护（Layer 0 截断 → Layer 1 占位符 → Layer 2 LLM 摘要 → Layer 3 强制删除）和 token-aware 滑窗。后续基于 [Claude Code 上下文管理机制](../reports/context-management-refactoring-proposal.md) 的对比分析，升级为 ratio 水位线 + 级联降压模式。
 
 本轮重构将 **LLM 摘要从同步阻塞改为异步预热 + 延迟应用**，核心目标是 **主线程零等待**，避免压缩操作卡住 UI。四层重新定义为：
 
@@ -1152,7 +1152,7 @@ Use this EXACT format (same as the original summary):
 
 ### 7.5 Compaction v2 修订（T2-P0-002）
 
-> 本小节为 **T2-P0-002**（compaction prompt 与 context v2）的最小落档；§7.1 / §7.3 的中间形态已被本次升级取代，**单一事实来源**为 [`src/core/compaction/preheat.rs`](../../../src/core/compaction/preheat.rs) 中两个 `pub(super) const` 字面量，配套对照见 [报告 §5.3 / §5.4](../../../docs/reports/compaction-prompt-cc-vs-pi.md)。
+> 本小节为 **T2-P0-002**（compaction prompt 与 context v2）的最小落档；§7.1 / §7.3 的中间形态已被本次升级取代，**单一事实来源**为 [`src/core/compaction/preheat.rs`](../../../src/core/compaction/preheat.rs) 中两个 `pub(super) const` 字面量，配套对照见 [报告 §5.3 / §5.4](../reports/compaction-prompt-cc-vs-pi.md)。
 
 #### 7.5.1 模板升级为 9 节
 
@@ -1198,7 +1198,7 @@ pub attempts: Option<u32>,
 
 #### 7.5.4 三项不实施决议（关闭/转后续）
 
-T2-P0-002 立项决议中**明确不做**的三项相关动作（决议另见 [`docs/TODOS.md`](../../../docs/TODOS.md) 与工程变更记录，背景论证见 [报告 §5.7](../../../docs/reports/compaction-prompt-cc-vs-pi.md)）：
+T2-P0-002 立项决议中**明确不做**的三项相关动作（决议另见 [`docs/TODOS.md`](../TODOS.md) 与工程变更记录，背景论证见 [报告 §5.7](../reports/compaction-prompt-cc-vs-pi.md)）：
 
 | 决议 | 范围 | 承接路径 |
 | :--- | :--- | :--- |

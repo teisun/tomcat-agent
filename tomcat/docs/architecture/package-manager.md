@@ -467,7 +467,7 @@ sequenceDiagram
 技术要点：
 
 - `work-dir-and-data-layout.md` 需要补 `packages/registry.json` 的三层位置。
-- `skill-system.md` 与 `plugin-system-overview_new.md` 需要回链 package install 入口，并说明 package 不是新的 runtime 类型。
+- `skill-system.md` 与 `plugin-system-overview.md` 需要回链 package install 入口，并说明 package 不是新的 runtime 类型。
 - CLI 与 runtime 的三层名词要统一为“scope / agent / global（实现里对应 Project / Agent / Managed）”。
 
 ## 5. 协议（入参 / 出参 / Schema）
@@ -743,7 +743,7 @@ acme-dev-kit/                      # package 根目录
 
 ### 5.7 `web_search.backend` 用例
 
-`web_search.backend` 是一个典型的 **host-facing function** 插件用例。它的包落盘方式和普通插件一样，仍然写进目标层的 `plugins/<id>/` 目录；差别只在 manifest 里声明的是 `functions[]`，不是给 LLM 的 `tools[]`。当前官方插件 `tomcat.web-search-backends` 还会额外声明 `net:fetch`、`requiredSecrets`、`allowedHosts`，因为它内部已经托管了 `tavily` / `brave` / `serper` 这些真实 REST 后端；其源码虽然已拆到 `src/`，但安装与运行时仍只消费构建后的 `main.js`。
+`web_search.backend` 是一个典型的 **host-facing function** 插件用例。它的包落盘方式和普通插件一样，仍然写进目标层的 `plugins/<id>/` 目录；差别只在 manifest 里声明的是 `functions[]`，不是给 LLM 的 `tools[]`。**这里“特殊”的地方不在安装层或发现层**：它和普通 plugin 一样复用 `scope > agent > global` 三层落盘、三层发现、三层 registry；真正不同的是 runtime 把 `functions[]` 物化到 `FunctionRegistry` 时，会按 `point` 做 `scope > agent > global` override，只保留当前 scope 的赢家视图。当前官方插件 `tomcat.web-search-backends` 还会额外声明 `net:fetch`、`requiredSecrets`、`allowedHosts`，因为它内部已经托管了 `tavily` / `brave` / `serper` 这些真实 REST 后端；其源码虽然已拆到 `src/`，但安装与运行时仍只消费构建后的 `main.js`。
 
 ```json
 {
@@ -771,12 +771,14 @@ acme-dev-kit/                      # package 根目录
 
 运行时发现后：
 
+- `PluginCatalog` 与普通 plugin 一样按 `scope > agent > global` 扫描 `functions[]`
+- `FunctionRegistry` 会对同一 `point` 做高层优先的 override；高层一旦声明，低层同 `point` provider 不再进入当前 scope 的有效视图
 - `FunctionRegistry` 会把它登记到扩展点 `web_search.backend`
 - `ToolRegistry` **不会**出现 `webSearchBackend`
 - `WebSearchRuntime` 通过宿主调用链触发 `PluginFunctionInvoker.execute(..., session_id)`
 - 插件若调用 `pi.fetch`，宿主会在运行期再次校验 `requiredPermissions` / `requiredSecrets` / `allowedHosts`
 
-**说人话**：安装面它就是个普通插件目录；运行面它不是给模型看的工具，而是给宿主自己调的后端扩展点。`web_search` 现在默认把 Tavily / Brave / Serper 这些后端也交给这个插件拥有，宿主自己只保留调度、缓存、过滤和安全闸门。
+**说人话**：安装面它就是个普通插件目录，照样可以装到 scope / agent / global 任一层；运行面它不是给模型看的工具，而是给宿主自己调的后端扩展点。宿主真正特殊的地方只是一条规则: 同一个 `point` 先按层选赢家，再调用赢家；不会把低层同点位 provider 一起摊给调用方。
 
 ## 6. 文件职责总览（One-Glance Map）
 
@@ -944,7 +946,7 @@ packages list 无结果 → Ok + 空列表 / 友好提示
 
 1. `docs/architecture/work-dir-and-data-layout.md`：补三层 `packages/registry.json` 与 layer root 的说明。
 2. `docs/architecture/skill-system.md`：补“skill 既可手工放目录，也可经 `tomcat install` 安装到三层根”的入口说明。
-3. `docs/architecture/plugin-system-overview_new.md`：补“plugin 发现三层根对应 PackageManager 安装层”的说明，并说明 `plugin_cmd.rs` 的 layered registry 变化。
+3. `docs/architecture/plugin-system-overview.md`：补“plugin 发现三层根对应 PackageManager 安装层”的说明，并说明 `plugin_cmd.rs` 的 layered registry 变化。
 4. `docs/user-guide.md`：补 `install/uninstall/packages`、会话内 `/install` 与交互式 chooser 用法。
 
 一句话总结：`PackageManager` 的核心不是“多了一个 install 命令”，而是把 **统一 package 入口**、**三层可见范围**、**分层账本** 和 **既有 runtime 发现模型** 四件事钉成一条闭环，让 Tomcat 终于既会三层发现，也会三层安装与管理。

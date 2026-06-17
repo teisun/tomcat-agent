@@ -3,12 +3,15 @@ use crate::ext::host_binding::HostResponse;
 use crate::ext::vm_actor::EventEnvelope;
 use crate::ext::PluginManager;
 use crate::infra::event_bus::{EventBus, EventListenerId};
+use crate::infra::http_client::{
+    build_outbound_client, default_connect_timeout_for, OutboundClientErrorKind,
+    OutboundClientOptions,
+};
 use crate::infra::{
-    net_guard::PublicIpDnsResolver, AuditRecorder, DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES,
+    AuditRecorder, DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES,
     DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS,
 };
 use dashmap::DashMap;
-use reqwest::redirect::Policy;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -42,6 +45,8 @@ pub struct HostApiDispatcher {
     pub(super) async_timeout: Duration,
     pub(super) llm_semaphore: Arc<Semaphore>,
     pub(super) fetch_client: reqwest::Client,
+    pub(super) fetch_proxy_mode_label: &'static str,
+    pub(super) fetch_timeout: Duration,
     pub(super) fetch_semaphore: Arc<Semaphore>,
     pub(super) fetch_max_body_bytes: usize,
     pub(super) plugin_manager: Option<Weak<PluginManager>>,
@@ -73,12 +78,18 @@ impl HostApiDispatcher {
     /// Tokio Handle 默认通过 `Handle::try_current()` 自动获取；
     /// 可通过 `with_tokio_handle()` 显式注入。
     pub fn new(event_bus: Arc<dyn EventBus>) -> Self {
-        let fetch_client = reqwest::Client::builder()
-            .dns_resolver(Arc::new(PublicIpDnsResolver))
-            .redirect(Policy::none())
-            .timeout(Duration::from_millis(DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS))
-            .build()
-            .expect("create default net.fetch client");
+        let timeout = Duration::from_millis(DEFAULT_TOOLS_WEB_FETCH_TIMEOUT_MS);
+        let mut options = OutboundClientOptions::new(None);
+        options.use_public_ip_dns_resolver = true;
+        options.redirect_policy = Some(reqwest::redirect::Policy::none());
+        options.timeout = Some(timeout);
+        options.connect_timeout = Some(default_connect_timeout_for(timeout));
+        let fetch_client = build_outbound_client(
+            options,
+            OutboundClientErrorKind::Tool,
+            "创建默认 net.fetch HTTP 客户端失败",
+        )
+        .expect("create default net.fetch client");
         Self {
             event_bus,
             primitive: None,
@@ -94,6 +105,8 @@ impl HostApiDispatcher {
             async_timeout: Duration::from_secs(120),
             llm_semaphore: Arc::new(Semaphore::new(5)),
             fetch_client,
+            fetch_proxy_mode_label: "system",
+            fetch_timeout: timeout,
             fetch_semaphore: Arc::new(Semaphore::new(5)),
             fetch_max_body_bytes: DEFAULT_TOOLS_WEB_FETCH_MAX_HTTP_CONTENT_BYTES,
             plugin_manager: None,
@@ -162,6 +175,14 @@ impl HostApiDispatcher {
     #[cfg(test)]
     pub(crate) fn command_waiter_count(&self) -> usize {
         self.command_waiters.len()
+    }
+
+    /// 是否在构造时捕获到 Tokio runtime handle。异步 hostcall（pi.fetch /
+    /// createChatCompletion）依赖它；若为 false，插件后端会在发起请求前抛
+    /// "async hostcall requires a Tokio runtime handle"。回归测试用。
+    #[cfg(test)]
+    pub(crate) fn has_tokio_handle(&self) -> bool {
+        self.tokio_handle.is_some()
     }
 
     /// 注入 `uiNotify` 调用计数器（E2E / 集成测试）。
@@ -241,6 +262,23 @@ impl HostApiDispatcher {
 
     pub fn with_fetch_http_client(mut self, client: reqwest::Client) -> Self {
         self.fetch_client = client;
+        self
+    }
+
+    pub fn with_fetch_transport_diagnostics(
+        mut self,
+        timeout: Duration,
+        explicit_proxy: bool,
+        ambient_proxy: bool,
+    ) -> Self {
+        self.fetch_timeout = timeout;
+        self.fetch_proxy_mode_label = if explicit_proxy {
+            "explicit"
+        } else if ambient_proxy {
+            "env"
+        } else {
+            "direct"
+        };
         self
     }
 

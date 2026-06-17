@@ -340,3 +340,209 @@ fn switch_current_model_updates_override_and_appends_event() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn pin_only_applies_to_the_manager_scope_key() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let code_mgr = SessionManager::new_scoped(dir.clone(), "agent:test:code".to_string());
+    let code_entry = code_mgr.new_current_session(None).expect("code session");
+    code_mgr.pin_session(&code_entry.session_id);
+
+    let claw_mgr = SessionManager::new_scoped(dir.clone(), "agent:test:claw".to_string());
+    let claw_entry = claw_mgr.new_current_session(None).expect("claw session");
+
+    let other_scope = code_mgr
+        .get_session(claw_mgr.current_session_key())
+        .unwrap()
+        .expect("other scope should still resolve from current map");
+    assert_eq!(other_scope.session_id, claw_entry.session_id);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn clone_shares_pin_and_ignores_external_repoint() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mgr = SessionManager::new(dir.clone());
+    let original = mgr
+        .new_current_session(Some("/tmp/original".to_string()))
+        .expect("original session");
+    let clone = mgr.clone();
+    mgr.pin_session(&original.session_id);
+
+    let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
+    let hijacked = external
+        .new_current_session(Some("/tmp/hijacked".to_string()))
+        .expect("hijacked session");
+    assert_ne!(original.session_id, hijacked.session_id);
+
+    assert_eq!(
+        clone.current_session_id().unwrap().as_deref(),
+        Some(original.session_id.as_str())
+    );
+    assert_eq!(
+        clone
+            .current_session_entry()
+            .unwrap()
+            .map(|entry| entry.session_id),
+        Some(original.session_id.clone())
+    );
+    assert_eq!(
+        clone.current_transcript_path().unwrap(),
+        Some(clone.transcript_path(&original.session_id))
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn append_message_stays_on_pinned_transcript_after_external_repoint() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mgr = SessionManager::new(dir.clone());
+    let original = mgr.new_current_session(None).expect("original session");
+    mgr.pin_session(&original.session_id);
+
+    let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
+    let hijacked = external
+        .new_current_session(None)
+        .expect("hijacked session");
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"hi"}))
+        .unwrap();
+
+    assert_eq!(
+        mgr.current_session_id().unwrap().as_deref(),
+        Some(original.session_id.as_str())
+    );
+    assert_eq!(
+        mgr.get_entries_for_session(&original.session_id, 8)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        mgr.get_entries_for_session(&hijacked.session_id, 8)
+            .unwrap()
+            .is_empty(),
+        "external repoint must not redirect append traffic"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn switch_current_model_updates_pinned_session_after_external_repoint() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mgr = SessionManager::new(dir.clone());
+    let original = mgr.new_current_session(None).expect("original session");
+    mgr.pin_session(&original.session_id);
+
+    let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
+    let hijacked = external
+        .new_current_session(None)
+        .expect("hijacked session");
+
+    mgr.switch_current_model(Some("openai"), Some("deepseek-v4-flash"))
+        .unwrap();
+
+    let original_entry = mgr
+        .get_session_by_id(&original.session_id)
+        .unwrap()
+        .expect("original entry");
+    let hijacked_entry = mgr
+        .get_session_by_id(&hijacked.session_id)
+        .unwrap()
+        .expect("hijacked entry");
+    assert_eq!(
+        original_entry.model_override.as_deref(),
+        Some("deepseek-v4-flash")
+    );
+    assert_eq!(hijacked_entry.model_override, None);
+
+    let original_entries = mgr
+        .get_entries_for_session(&original.session_id, 8)
+        .unwrap();
+    assert!(original_entries.iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::ModelChange(change)
+            if change.model_id.as_deref() == Some("deepseek-v4-flash")
+    )));
+    assert!(
+        mgr.get_entries_for_session(&hijacked.session_id, 8)
+            .unwrap()
+            .is_empty(),
+        "model change transcript should stay on pinned session"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn new_current_session_updates_pin_when_manager_is_already_pinned() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mgr = SessionManager::new(dir.clone());
+    let first = mgr
+        .new_current_session(Some("/tmp/one".to_string()))
+        .expect("first session");
+    mgr.pin_session(&first.session_id);
+
+    let second = mgr
+        .new_current_session(Some("/tmp/two".to_string()))
+        .expect("second session");
+
+    let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
+    external
+        .switch_current_to_session_id(&first.session_id)
+        .expect("repoint disk current back to first");
+
+    assert_eq!(
+        mgr.current_session_id().unwrap().as_deref(),
+        Some(second.session_id.as_str())
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn switch_current_to_session_id_updates_pin_when_manager_is_already_pinned() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mgr = SessionManager::new(dir.clone());
+    let first = mgr.new_current_session(None).expect("first session");
+    let second = mgr.new_current_session(None).expect("second session");
+    mgr.pin_session(&second.session_id);
+
+    let switched = mgr
+        .switch_current_to_session_id(&first.session_id)
+        .expect("switch to first");
+    assert_eq!(switched.session_id, first.session_id);
+
+    let external = SessionManager::new_scoped(dir.clone(), mgr.current_session_key().to_string());
+    external
+        .switch_current_to_session_id(&second.session_id)
+        .expect("repoint disk current back to second");
+
+    assert_eq!(
+        mgr.current_session_id().unwrap().as_deref(),
+        Some(first.session_id.as_str())
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

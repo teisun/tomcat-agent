@@ -157,8 +157,6 @@ impl Default for ToolsBashConfig {
 pub struct ToolsWebSearchConfig {
     #[serde(default = "default_tools_web_search_backend")]
     pub backend: String,
-    #[serde(default)]
-    pub legacy_http_backends: bool,
     #[serde(default = "default_tools_web_search_count")]
     pub count: u32,
     #[serde(default)]
@@ -232,7 +230,6 @@ impl Default for ToolsWebSearchConfig {
     fn default() -> Self {
         Self {
             backend: default_tools_web_search_backend(),
-            legacy_http_backends: false,
             count: default_tools_web_search_count(),
             freshness: None,
             country: None,

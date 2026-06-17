@@ -231,6 +231,9 @@ pub(crate) fn run_doctor_checks(
     for line in doctor_plugin_runtime_lines(PluginEngine::global(None).map(|_| ())) {
         println!("{line}");
     }
+    for line in doctor_proxy_lines(cfg) {
+        println!("{line}");
+    }
 
     if !skip_api_key {
         // --- .env 检查 ---
@@ -274,6 +277,79 @@ pub(crate) fn run_doctor_checks(
     }
 
     Ok(())
+}
+
+struct ProxyEnvDiagnostic {
+    key: &'static str,
+    value: String,
+    had_whitespace: bool,
+}
+
+fn proxy_env_diagnostics() -> Vec<ProxyEnvDiagnostic> {
+    ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"]
+        .into_iter()
+        .filter_map(|key| {
+            let raw = std::env::var(key).ok()?;
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            Some(ProxyEnvDiagnostic {
+                key,
+                value: trimmed.to_string(),
+                had_whitespace: raw != trimmed,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn doctor_proxy_lines(cfg: &AppConfig) -> Vec<String> {
+    let env_proxies = proxy_env_diagnostics();
+    let configured_proxy = cfg.llm.proxy.as_deref().and_then(|proxy| {
+        let trimmed = proxy.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some((proxy, trimmed))
+        }
+    });
+    let mut lines = Vec::new();
+
+    match configured_proxy {
+        Some((raw, trimmed)) => {
+            lines.push("✓ llm.proxy 已配置，将优先于环境代理".to_string());
+            if raw != trimmed {
+                lines.push("⚠ llm.proxy 含首尾空格；运行时会 trim，建议清理配置".to_string());
+            }
+        }
+        None if !env_proxies.is_empty() => {
+            let keys = env_proxies
+                .iter()
+                .map(|item| item.key)
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!(
+                "✓ 检测到环境代理（{keys}）；未配置 llm.proxy 时，出网请求将由环境变量生效"
+            ));
+        }
+        None => {
+            lines.push("✓ 未检测到 llm.proxy 或环境代理；出网请求将直连".to_string());
+        }
+    }
+
+    for item in env_proxies {
+        if item.had_whitespace {
+            lines.push(format!("⚠ {} 含首尾空格；建议清理配置", item.key));
+        }
+        if item.key == "ALL_PROXY" && item.value.to_ascii_lowercase().starts_with("socks5://") {
+            lines.push(
+                "⚠ ALL_PROXY 使用 socks5://，当前构建未启用 reqwest socks feature；web_search 建议改用 HTTPS_PROXY=http://..."
+                    .to_string(),
+            );
+        }
+    }
+
+    lines
 }
 
 pub(crate) fn doctor_plugin_runtime_lines(probe: Result<(), AppError>) -> Vec<String> {

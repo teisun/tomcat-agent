@@ -49,6 +49,11 @@ pub struct SessionManager {
     store_path: PathBuf,
     /// 当前 manager 绑定的 scope key。
     session_key: String,
+    /// 运行中 live 会话的进程内绑定；仅对当前 manager 自己的 session_key 生效。
+    ///
+    /// 这允许磁盘 `current[key]` 继续承担“跨进程默认指针”的角色，同时保证已启动
+    /// 的 chat 在会话存活期间始终写回同一个 session_id。
+    pinned_session_id: Arc<parking_lot::RwLock<Option<String>>>,
     /// 序列化 store 写入，禁止锁文件
     write_mutex: Arc<Mutex<()>>,
     transcript_mutexes: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
@@ -61,6 +66,7 @@ impl Clone for SessionManager {
             sessions_dir: self.sessions_dir.clone(),
             store_path: self.store_path.clone(),
             session_key: self.session_key.clone(),
+            pinned_session_id: Arc::clone(&self.pinned_session_id),
             write_mutex: Arc::clone(&self.write_mutex),
             transcript_mutexes: Arc::clone(&self.transcript_mutexes),
             append_in_flight: Arc::clone(&self.append_in_flight),
@@ -81,6 +87,7 @@ impl SessionManager {
             sessions_dir: sessions_dir.clone(),
             store_path,
             session_key: session_key.into(),
+            pinned_session_id: Arc::new(parking_lot::RwLock::new(None)),
             write_mutex: Arc::new(Mutex::new(())),
             transcript_mutexes: Arc::new(Mutex::new(HashMap::new())),
             append_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -165,6 +172,28 @@ impl SessionManager {
         &self.session_key
     }
 
+    /// 将当前 manager 绑定到某个已解析的 session_id。
+    pub fn pin_session(&self, session_id: &str) {
+        *self.pinned_session_id.write() = Some(session_id.to_string());
+    }
+
+    fn has_pinned_session(&self) -> bool {
+        self.pinned_session_id.read().is_some()
+    }
+
+    /// 解析某个 session_key 此刻应指向哪个 session_id。
+    ///
+    /// 对当前 live manager 自己的 key，进程内 pin 优先于磁盘 `current[key]`；对其它
+    /// scope 的 key 仍完全沿用磁盘 current 语义，避免 pin 越权污染别的 scope。
+    fn resolve_active_session_id(&self, store: &SessionStore, session_key: &str) -> Option<String> {
+        if session_key == self.current_session_key() {
+            if let Some(session_id) = self.pinned_session_id.read().clone() {
+                return Some(session_id);
+            }
+        }
+        store.current.get(session_key).cloned()
+    }
+
     /// 当前会话条目；无当前映射时返回 None。
     pub fn current_session_entry(&self) -> Result<Option<SessionEntry>, AppError> {
         self.get_session(self.current_session_key())
@@ -175,9 +204,13 @@ impl SessionManager {
         Ok(self.current_session_entry()?.map(|entry| entry.session_id))
     }
 
-    fn session_entry_for_key(store: &SessionStore, session_key: &str) -> Option<SessionEntry> {
-        let session_id = store.current.get(session_key)?;
-        store.sessions.get(session_id).cloned()
+    fn session_entry_for_key(
+        &self,
+        store: &SessionStore,
+        session_key: &str,
+    ) -> Option<SessionEntry> {
+        let session_id = self.resolve_active_session_id(store, session_key)?;
+        store.sessions.get(&session_id).cloned()
     }
 
     fn scope_entries(store: &SessionStore, session_key: &str) -> Vec<(String, SessionEntry)> {
@@ -269,7 +302,11 @@ impl SessionManager {
 
     /// 为当前固定 key 创建新的 session，并把 current 映射切到它。
     pub fn new_current_session(&self, cwd: Option<String>) -> Result<SessionEntry, AppError> {
-        self.create_session(self.current_session_key(), cwd)
+        let entry = self.create_session(self.current_session_key(), cwd)?;
+        if self.has_pinned_session() {
+            self.pin_session(&entry.session_id);
+        }
+        Ok(entry)
     }
 
     /// 确保当前固定 key 已绑定某个 session；缺失时创建新的 current session。
@@ -282,7 +319,7 @@ impl SessionManager {
 
     /// 把当前固定 key 切到某个已存在的 session_id。
     pub fn switch_current_to_session_id(&self, session_id: &str) -> Result<SessionEntry, AppError> {
-        self.with_store_mut(|store| {
+        let entry = self.with_store_mut(|store| {
             let Some(entry) = store.sessions.get_mut(session_id) else {
                 return Err(AppError::Config(format!("会话不存在: {session_id}")));
             };
@@ -298,7 +335,11 @@ impl SessionManager {
                 session_id.to_string(),
             );
             Ok(entry)
-        })
+        })?;
+        if self.has_pinned_session() {
+            self.pin_session(&entry.session_id);
+        }
+        Ok(entry)
     }
 
     /// 列出 sessions 目录下所有历史 session_id（按文件名倒序，通常也是时间倒序）。
@@ -326,7 +367,7 @@ impl SessionManager {
     /// 按 sessionKey 获取元数据。
     pub fn get_session(&self, session_key: &str) -> Result<Option<SessionEntry>, AppError> {
         let store = self.load_store()?;
-        Ok(Self::session_entry_for_key(&store, session_key))
+        Ok(self.session_entry_for_key(&store, session_key))
     }
 
     /// 按 session_id 获取元数据。
@@ -348,7 +389,7 @@ impl SessionManager {
         f: impl FnOnce(&mut SessionEntry),
     ) -> Result<(), AppError> {
         self.with_store_mut(|store| {
-            let Some(session_id) = store.current.get(session_key).cloned() else {
+            let Some(session_id) = self.resolve_active_session_id(store, session_key) else {
                 return Ok(());
             };
             if let Some(entry) = store.sessions.get_mut(&session_id) {

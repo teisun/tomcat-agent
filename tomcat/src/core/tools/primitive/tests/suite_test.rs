@@ -294,6 +294,31 @@ async fn execute_bash_success() {
 }
 
 #[tokio::test]
+async fn execute_bash_marks_child_as_nested_agent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let path_str = dir.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    #[cfg(unix)]
+    let command = r#"printf "%s" "${TOMCAT_AGENT_ACTIVE:-missing}""#;
+    #[cfg(windows)]
+    let command = r#"echo %TOMCAT_AGENT_ACTIVE%"#;
+
+    let res = exec
+        .execute_bash(command, Some(&path_str), "p1", None, None)
+        .await
+        .expect("bash command should succeed");
+
+    assert_eq!(res.exit_code, 0);
+    assert_eq!(res.stdout.trim(), "1");
+}
+
+#[tokio::test]
 #[serial(env_lock)]
 async fn execute_bash_empty_string_cwd_treated_as_none() {
     let dir = tempfile::tempdir().expect("tempdir");

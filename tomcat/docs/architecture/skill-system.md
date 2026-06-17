@@ -348,7 +348,7 @@ sequenceDiagram
 | **source / precedence（来源与优先级）**   | 同名技能的去重裁决依据                                            | `Skill.source: SkillSource{Project,Agent,Managed}`                                   | 同名 **first-wins**（高优先级先入选，低优先级丢弃 + warning）                                                                   | 同名技能撞车时，优先级高的赢。                     |
 | `**disable_model_invocation`**    | 该技能是否对模型隐藏（仅用户可用）                                      | frontmatter `disable-model-invocation: true` → `Skill.disable_model_invocation`      | `true` → 不进 `<available_skills>`、`load_skill` 拒绝；用户 `/skill use <name>` 仍可用                                              | 这条技能不让模型自己点，只能用户主动用。                |
 | **官方内置 skill 资产**                  | 随 tomcat 发版的官方 skill 文件源                                   | `tomcat/assets/skills/`（编译嵌入 `.rs`），`tomcat init` 写入 `~/.tomcat/skills/`          | 不是独立发现根；写入后按普通 Managed skill 参与发现/披露/装载；用户可见、可删、可被 P0/P1 覆盖                                             | 出厂自带几条 skill，但发现链路里不单独加一档。             |
-| **Skill vs Plugin（技能 vs 插件）**     | 技能是「惰性指令文本」，插件是「可执行代码」                                 | Skill：`core/skill`（无 hostcall）；Plugin：`ext/plugin`（Wasm 注册 `Tool`）                   | 技能 **不能** 自己执行代码、不注册工具；要执行的动作交给既有工具 + 权限闸门                                                                    | 技能是说明书，插件才是能跑的程序，两条线。               |
+| **Skill vs Plugin（技能 vs 插件）**     | 技能是「惰性指令文本」，插件是「可执行代码」                                 | Skill：`core/skill`（无 hostcall）；Plugin：`ext/plugin`（`rquickjs` 插件运行时）                   | 技能 **不能** 自己执行代码、不注册工具；要执行的动作交给既有工具 + 权限闸门                                                                    | 技能是说明书，插件才是能跑的程序，两条线。               |
 
 
 **「LLM 收到 `load_skill` 结果后」**：指 `**tool_exec` 已把技能正文（含 `<skill>` 包裹）序列化为 tool 消息文本**、写入会话历史、**即将进入下一轮模型推理之前**。
@@ -392,7 +392,7 @@ sequenceDiagram
 1. **磁盘格式 / 发现 / 渐进式披露 / read 装载** 对齐 **pi_agent_rust**——它是 Rust 同构实现，`Skill` serde 结构、`merge_resource_paths` 去重、`format_skills_for_prompt` XML、`enforce_read_scope_with_roots` 几乎可直接镜像到 tomcat 既有 `catalog.rs`/`system_prompt.rs`/`gate.rs` 模式。
 2. **调用机制取 cc-fork-01 / hermes 的「专用工具 + 按名解析」**，而非 codex/pi 的「裸 `read` 路径」——tomcat 的 `tool_exec` match + `catalog` 是干净的单一事实源，新增 `load_skill` 一臂即可统一覆盖 **内嵌（无磁盘路径）/ 托管（在可写集外）/ 工作区** 三类来源，且按名解析免去模型猜路径、天然可审计。
 3. `**<available_skills>` 元数据块 + 预算封顶** 取 **openclaw / pi-mono 的 XML 模板 + codex 的 2% 预算**——与 tomcat `render_core_identity_tool_lines()` 注入工具清单的现有做法同构，挂一个 `AvailableSkillsSection` 即可。
-4. **技能=惰性资源、执行交给既有工具/插件** 取 **pi_agent_rust 的 skill/extension 二分**——tomcat 已有 `ext/plugin`（Wasm 可执行）承担「可执行扩展」，技能只做指令文本，避免重复造「可执行技能」并放大攻击面。
+4. **技能=惰性资源、执行交给既有工具/插件** 取 **pi_agent_rust 的 skill/extension 二分**——tomcat 已有 `ext/plugin`（`rquickjs` 可执行扩展）承担「可执行扩展」，技能只做指令文本，避免重复造「可执行技能」并放大攻击面。
 5. **用量/老化（hermes Curator）、海量语义检索（GenericAgent）列为非目标**——本期先把「静态发现 + 渐进式披露 + 按名装载 + 安全门闩」做扎实（见 §3 非目标），把自进化留给 P4。
 
 ### 2.3 跨竞品共识（onboarding 速览）
@@ -433,7 +433,7 @@ sequenceDiagram
 | 系统自动匹配 / 隐式触发选中技能（auto-selection）         | P2 后续（见 §11；届时叠加阈值 + 可解释理由日志）                                                                                                                       | 让系统自动猜该用哪条技能，本期先靠模型显式 `load_skill`。 |
 | 来源信任分级（source→trust 细分可见 / 自动性）           | P2 后续（参考 openclaw `SkillTrustLevel`）                                                                                                                | 把技能按来源分信任档，本期先用来源优先级，不做细分信任。        |
 | 海量技能语义检索（embedding / 远程检索）                | P2 后续 / P3（参考 GenericAgent `skill_search`）                                                                                                          | 上千条技能再上检索，先做静态清单。                   |
-| 可执行技能 / 技能注册自定义工具                         | `ext/plugin`（Wasm 插件，`[plugin-system-overview.md](./plugin-system-overview.md)`）                                                                    | 要跑代码的走插件，不在技能里塞可执行逻辑。               |
+| 可执行技能 / 技能注册自定义工具                         | `ext/plugin`（`rquickjs` 插件，`[plugin-system-overview.md](./plugin-system-overview.md)`）                                                                    | 要跑代码的走插件，不在技能里塞可执行逻辑。               |
 | 技能热重载（文件监听）                               | P2 后续（参考 cc-fork chokidar `skillChangeDetector`）                                                                                                    | 改了技能要重启才生效，先不做热加载。                  |
 | MCP / plugin 携带技能                         | P2 后续（codex `plugin_skill_roots` 模式）                                                                                                                | 插件捎带技能这期不做，先做本地三类根。                 |
 | frontmatter `allowed-tools` 强制白名单         | P2 后续（openclaw/pi 均「解析不强制」）                                                                                                                         | 先解析存下来，强制限权以后再说。                    |
@@ -894,7 +894,7 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 - ~~技能正文随元数据一起常驻 system prompt~~ → **否**：技能正文动辄上千字，常驻会爆上下文。**改渐进式披露**：仅 name+description 常驻，正文经 `load_skill` 按需装载（对齐 codex/openclaw/pi）。
 - ~~用裸 `read(<SKILL.md 绝对路径>)` 装载（codex/pi 路线）~~ → **否**：内嵌技能无磁盘路径、托管技能在 `agent_definition_dir` 可写集判定之外、project 本地技能路径又依赖当前 cwd，模型易猜错路径。**改专用 `load_skill(name)` 按名装载**，统一覆盖三类来源且可被 guard 门控。
 - ~~技能可携带 `allowed-tools` 临时提权 / inline 跑 shell（cc-fork 路线）~~ → **否**：违背 tomcat「一切副作用经 `PermissionGate` + 审计」。**技能零特权**：`allowed-tools` 本期仅解析记录不强制；正文动作逐次过闸门。
-- ~~技能=可执行插件的一种（注册自定义工具）~~ → **否**：tomcat 已有 `ext/plugin`（Wasm）承担可执行扩展。**技能=惰性指令资源**，与插件二分（对齐 pi_agent_rust skill/extension 二分）。
+- ~~技能=可执行插件的一种（注册自定义工具）~~ → **否**：tomcat 已有 `ext/plugin`（`rquickjs`）承担可执行扩展。**技能=惰性指令资源**，与插件二分（对齐 pi_agent_rust skill/extension 二分）。
 - ~~把技能配置塞进 `[tools]` 子表~~ → **否**：技能是跨工具的独立子系统，非「某工具的磁盘上限」。**新增 `[skills]` 顶层子表**（对齐 codex 顶层 `skills`）。
 - ~~本期就做用量统计 / Curator 老化 / 语义检索 / 热重载~~ → **否（范围控制）**：先把静态发现 + 渐进式披露 + 按名装载 + 安全门闩做扎实，自进化与海量检索推给 P4 / P2 后续（见 §3.2）。
 - ~~系统自动按回合匹配 + 自动注入选中技能正文（auto-selection + per-turn injection，隐式触发路线）~~ → **否（本期）**：自动注入更「魔法」、误命中代价高（要配阈值 / 可解释性 / 缓存失效一整套），且绕开「模型显式决策 + 工具审计」这条 tomcat 主线。**改 `load_skill(name)` 模型显式按名装载**；自动匹配留作 P2 后续增强（届时叠加阈值与理由日志），与显式装载并存、显式优先。
