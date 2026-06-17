@@ -108,8 +108,11 @@ impl PluginRuntimeManager {
         self.handles.remove(key).map(|(_, entry)| entry.handle)
     }
 
-    /// 移除指定 session 下的所有 VM actor，返回被移除的 handle 列表。
-    pub fn remove_session(&self, session_id: &str) -> Vec<VmActorHandle> {
+    /// 移除指定 session 下的所有 VM actor，返回被移除的 key + handle 列表。
+    pub fn remove_session_entries(
+        &self,
+        session_id: &str,
+    ) -> Vec<(PluginRuntimeKey, VmActorHandle)> {
         let keys_to_remove: Vec<PluginRuntimeKey> = self
             .handles
             .iter()
@@ -119,7 +122,19 @@ impl PluginRuntimeManager {
 
         keys_to_remove
             .into_iter()
-            .filter_map(|k| self.handles.remove(&k).map(|(_, entry)| entry.handle))
+            .filter_map(|key| {
+                self.handles
+                    .remove(&key)
+                    .map(|(_, entry)| (key, entry.handle))
+            })
+            .collect()
+    }
+
+    /// 移除指定 session 下的所有 VM actor，返回被移除的 handle 列表。
+    pub fn remove_session(&self, session_id: &str) -> Vec<VmActorHandle> {
+        self.remove_session_entries(session_id)
+            .into_iter()
+            .map(|(_, handle)| handle)
             .collect()
     }
 

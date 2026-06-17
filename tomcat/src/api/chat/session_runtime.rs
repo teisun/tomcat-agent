@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
@@ -65,6 +66,7 @@ pub struct SessionRuntime {
     pub message_append_sink: Arc<dyn crate::core::session::manager::MessageAppendSink>,
     pub cancel_token: Arc<Mutex<CancellationToken>>,
     pub last_interrupt_at: Arc<Mutex<Option<Instant>>>,
+    pub hard_exit_requested: Arc<AtomicBool>,
     pub session_grants: crate::core::permission::SessionGrants,
     pub bash_task_registry: Arc<BashTaskRegistry>,
     pub follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>>,

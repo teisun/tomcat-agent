@@ -5,7 +5,7 @@ use predicates::prelude::*;
 use serde_json::json;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -83,6 +83,38 @@ fn setup_fixture() -> Fixture {
         session_id,
         store,
     }
+}
+
+fn write_session_plugin_fixture(workspace: &Path, plugin_id: &str, activation: &str) {
+    let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
+    fs::create_dir_all(&plugin_dir).expect("create plugin fixture dir");
+    let manifest = json!({
+        "id": plugin_id,
+        "name": plugin_id,
+        "version": "0.1.0",
+        "description": format!("fixture {plugin_id}"),
+        "author": "tests",
+        "main": "main.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "events": ["session_start"],
+        "activation": activation
+    });
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        serde_json::to_string_pretty(&manifest).expect("serialize plugin manifest"),
+    )
+    .expect("write plugin manifest");
+    fs::write(
+        plugin_dir.join("main.js"),
+        r#"
+pi.on("session_start", function () {});
+__pi_start_event_loop();
+"#,
+    )
+    .expect("write plugin main");
 }
 
 fn record_checkpoint(
@@ -616,6 +648,47 @@ fn test_idle_readline_eof_exits_without_interrupt_ckpt() {
         checkpoints.is_empty(),
         "阻塞在 readline 时 Ctrl+D / EOF 应直接退出，不写 Interrupt checkpoint"
     );
+}
+
+#[test]
+fn test_idle_readline_eof_with_loaded_lazy_plugin_avoids_cleanup_warning() {
+    if !git_available() {
+        return;
+    }
+    common::setup_logging();
+    let _span =
+        info_span!("test_idle_readline_eof_with_loaded_lazy_plugin_avoids_cleanup_warning")
+            .entered();
+    let fx = setup_fixture();
+    let config_path = fx.home_path.join(".tomcat").join("tomcat.config.toml");
+    let mut cfg = load_config_toml_file(&config_path).expect("config should load");
+    cfg.plugin.auto_load = vec![
+        "session-eof-plugin".to_string(),
+        "lazy-eof-plugin".to_string(),
+    ];
+    fs::write(
+        &config_path,
+        toml::to_string_pretty(&cfg).expect("serialize config with plugin auto-load"),
+    )
+    .expect("persist config with plugin auto-load");
+    write_session_plugin_fixture(&fx.workdir, "session-eof-plugin", "session");
+    write_session_plugin_fixture(&fx.workdir, "lazy-eof-plugin", "lazy");
+
+    cmd()
+        .current_dir(&fx.workdir)
+        .arg("code")
+        .env("HOME", &fx.home_path)
+        .env("SHELL", "/bin/zsh")
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
+        .write_stdin("")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("再见！"))
+        .stderr(predicate::str::contains("[cleanup_instance] no event_sender").not());
 }
 
 #[cfg(unix)]

@@ -82,7 +82,8 @@ pub(super) fn run_chat_mode(
     // 桥接 L0 → L1：SIGINT → ChatContext.cancel_token.cancel() + 双击检测。
     let cancel_token = ctx.session_runtime.cancel_token.clone();
     let last_interrupt_at = ctx.session_runtime.last_interrupt_at.clone();
-    let append_in_flight = ctx.session_runtime.session.append_in_flight_counter();
+    let hard_exit_requested = ctx.session_runtime.hard_exit_requested.clone();
+    let append_in_flight_for_exit = ctx.session_runtime.session.append_in_flight_counter();
     ctrlc::set_handler(move || {
         let now = Instant::now();
         let prev = {
@@ -93,16 +94,8 @@ pub(super) fn run_chat_mode(
         };
         match check_double_tap(prev, now, DOUBLE_TAP_WINDOW) {
             DoubleTap::Hard => {
-                let deadline = Instant::now() + Duration::from_millis(500);
-                while append_in_flight.load(std::sync::atomic::Ordering::SeqCst) > 0
-                    && Instant::now() < deadline
-                {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                // 进程级硬中断：POSIX 约定 128 + SIGINT(2) = 130。
-                // 依赖 `SessionManager` 的 append-only JSONL 在首击 partial 落盘时已
-                // flush，此处即便进程立即结束，transcript 也完整。
-                std::process::exit(130);
+                hard_exit_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+                cancel_token.lock().cancel();
             }
             DoubleTap::Soft => {
                 // 软中断：通知当前回合取消。token 一旦 cancel 不可逆，chat_loop
@@ -113,7 +106,21 @@ pub(super) fn run_chat_mode(
     })
     .ok();
 
-    rt.block_on(super::super::chat::chat_loop(&ctx, resume))
+    let result = rt.block_on(super::super::chat::chat_loop(&ctx, resume));
+    if ctx
+        .session_runtime
+        .hard_exit_requested
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while append_in_flight_for_exit.load(std::sync::atomic::Ordering::SeqCst) > 0
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::process::exit(130);
+    }
+    result
 }
 
 #[cfg(test)]

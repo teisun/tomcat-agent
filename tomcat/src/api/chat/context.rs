@@ -49,6 +49,7 @@ pub struct ChatContext {
 pub struct ChatContextOverrides {
     pub ask_question_panel: Option<Arc<dyn panels::AskQuestionPanel>>,
     pub fetch_http_client: Option<reqwest::Client>,
+    pub skip_session_plugin_activation: bool,
 }
 
 impl ChatContextOverrides {
@@ -59,6 +60,11 @@ impl ChatContextOverrides {
 
     pub fn with_fetch_http_client(mut self, client: reqwest::Client) -> Self {
         self.fetch_http_client = Some(client);
+        self
+    }
+
+    pub fn skip_session_plugin_activation(mut self) -> Self {
+        self.skip_session_plugin_activation = true;
         self
     }
 }
@@ -423,7 +429,8 @@ impl ChatContext {
                 function_invoker.clone(),
             ));
         }
-        if let Some(plugin_manager_ref) = plugin_manager.as_ref() {
+        if !overrides.skip_session_plugin_activation {
+            if let Some(plugin_manager_ref) = plugin_manager.as_ref() {
             for plugin_id in plugin_manager_ref.list_loaded() {
                 let Some(info) = plugin_manager_ref.get_plugin(&plugin_id) else {
                     continue;
@@ -483,8 +490,10 @@ impl ChatContext {
                 }
             }
         }
+        }
         let cancel_token = Arc::new(Mutex::new(CancellationToken::new()));
         let last_interrupt_at = Arc::new(Mutex::new(None));
+        let hard_exit_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let bash_task_registry = Arc::new(
             crate::core::tools::primitive::BashTaskRegistry::new(
@@ -649,6 +658,7 @@ impl ChatContext {
             message_append_sink: message_append_sink.clone(),
             cancel_token: cancel_token.clone(),
             last_interrupt_at: last_interrupt_at.clone(),
+            hard_exit_requested: hard_exit_requested.clone(),
             session_grants: session_grants.clone(),
             bash_task_registry: bash_task_registry.clone(),
             follow_up_queue: follow_up_queue.clone(),

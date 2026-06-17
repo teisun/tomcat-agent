@@ -6,7 +6,12 @@
 
 use super::super::*;
 use super::mocks::test_config;
+use crate::SessionMode;
+use serde_json::json;
+use std::ffi::OsString;
+use std::fs;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +37,90 @@ fn spawn_delete_404_server() -> (String, Arc<AtomicUsize>, std::thread::JoinHand
         }
     });
     (format!("http://{}", addr), hits, handle)
+}
+
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: impl Into<OsString>) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: test-scoped env mutation guarded by the test lock.
+        unsafe { std::env::set_var(key, value.into()) };
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(prev) => {
+                // SAFETY: restore original env during test teardown.
+                unsafe { std::env::set_var(self.key, prev) };
+            }
+            None => {
+                // SAFETY: clear test-only env during teardown.
+                unsafe { std::env::remove_var(self.key) };
+            }
+        }
+    }
+}
+
+struct CurrentDirGuard {
+    _lock: crate::test_support::TestLockGuard<'static>,
+    previous: PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn set(path: &Path) -> Self {
+        let lock = crate::test_support::cwd_lock().lock().unwrap();
+        let previous = std::env::current_dir().expect("current_dir");
+        std::env::set_current_dir(path).expect("set_current_dir");
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
+}
+
+fn write_session_plugin_fixture(workspace: &Path, plugin_id: &str, activation: &str) {
+    let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
+    fs::create_dir_all(&plugin_dir).expect("create plugin fixture dir");
+    let manifest = json!({
+        "id": plugin_id,
+        "name": plugin_id,
+        "version": "0.1.0",
+        "description": format!("fixture {plugin_id}"),
+        "author": "tests",
+        "main": "main.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "events": ["session_start"],
+        "activation": activation
+    });
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        serde_json::to_string_pretty(&manifest).expect("serialize plugin manifest"),
+    )
+    .expect("write plugin manifest");
+    fs::write(
+        plugin_dir.join("main.js"),
+        r#"
+pi.on("session_start", function () {});
+__pi_start_event_loop();
+"#,
+    )
+    .expect("write plugin main");
 }
 
 #[test]
@@ -258,6 +347,92 @@ fn run_session_delete_triggers_openai_files_cleanup_registry() {
             None => std::env::remove_var("no_proxy"),
         }
     };
+}
+
+fn assert_session_subcommand_cleans_plugin_vm(build_sub: impl FnOnce(String) -> SessionSub) {
+    const API_ENV: &str = "TOMCAT_SESSION_PLUGIN_CLEANUP_TEST_KEY";
+    const PLUGIN_ID: &str = "session-cmd-cleanup-plugin";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+
+    write_session_plugin_fixture(workspace.path(), PLUGIN_ID, "session");
+
+    let mut cfg = test_config(work_dir.path());
+    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    cfg.plugin.auto_load = vec![PLUGIN_ID.to_string()];
+    crate::ensure_work_dir_structure(&cfg).unwrap();
+
+    let (rt, ctx) =
+        crate::api::cli::build_runtime_and_context(&cfg, SessionMode::Code).expect("build ctx");
+    let plugin_manager = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager");
+    let session_id = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .unwrap()
+        .expect("current session id");
+    if !plugin_manager.has_session_vm(&session_id, PLUGIN_ID) {
+        rt.block_on(plugin_manager.start_session_vm(&session_id, PLUGIN_ID))
+            .expect("start session vm");
+    }
+
+    let instance_id = format!("{session_id}/{PLUGIN_ID}");
+    assert!(
+        plugin_manager.has_session_vm(&session_id, PLUGIN_ID),
+        "fixture should have an active session VM before running session command"
+    );
+    assert!(
+        ctx.scope_services
+            .scope_container
+            .dispatcher
+            .get_event_sender(&instance_id)
+            .is_some(),
+        "session VM should register an event channel before running session command"
+    );
+
+    let result = run_session(build_sub(session_id.clone()), &cfg);
+    assert!(
+        result.is_ok(),
+        "session subcommand should succeed while cleaning plugin VM: {result:?}"
+    );
+    assert!(
+        !plugin_manager.has_session_vm(&session_id, PLUGIN_ID),
+        "session subcommand should end the target session VM"
+    );
+    assert!(
+        ctx.scope_services
+            .scope_container
+            .dispatcher
+            .get_event_sender(&instance_id)
+            .is_none(),
+        "session subcommand should remove the target session event channel"
+    );
+}
+
+#[test]
+fn run_session_delete_cleans_plugin_vm_in_current_process() {
+    assert_session_subcommand_cleans_plugin_vm(|session_id| SessionSub::Delete {
+        session_id,
+        scope: Some(SessionScopeArg::Code),
+    });
+}
+
+#[test]
+fn run_session_archive_cleans_plugin_vm_in_current_process() {
+    assert_session_subcommand_cleans_plugin_vm(|session_id| SessionSub::Archive {
+        session_id,
+        scope: Some(SessionScopeArg::Code),
+    });
 }
 
 #[test]

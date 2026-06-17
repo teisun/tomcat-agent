@@ -78,9 +78,36 @@ use crate::ext::host_binding::{HostRequest, HostResponse};
 use crate::ext::vm_actor::EventEnvelope;
 use crate::infra::error::AppError;
 use crate::infra::HostcallAuditEntry;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 impl HostApiDispatcher {
+    pub(crate) fn session_instance_ids(&self, session_id: &str) -> Vec<String> {
+        let prefix = format!("{session_id}/");
+        let mut ids = BTreeSet::new();
+
+        for entry in self.event_senders.iter() {
+            let instance_id = entry.key();
+            if instance_id.starts_with(&prefix) {
+                ids.insert(instance_id.clone());
+            }
+        }
+        for entry in self.event_receivers.iter() {
+            let instance_id = entry.key();
+            if instance_id.starts_with(&prefix) {
+                ids.insert(instance_id.clone());
+            }
+        }
+        for entry in self.instance_calls.iter() {
+            let instance_id = entry.key();
+            if instance_id.starts_with(&prefix) {
+                ids.insert(instance_id.clone());
+            }
+        }
+
+        ids.into_iter().collect()
+    }
+
     /// 同步分发入口：
     /// - `request.call_id` 非空且 module != "__async" → 异步提交（spawn Tokio 任务，立即返回 `{pending: true}`）
     /// - 否则 → 同步路径（block_on dispatch_async）

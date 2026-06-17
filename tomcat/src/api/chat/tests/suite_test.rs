@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::api::chat::run_loop::cleanup_plugin_sessions_on_session_end;
 use crate::api::chat::run_loop::compose_planned_turn_messages;
 use crate::core::session::manager::init_context_state;
 use crate::SessionEntry;
@@ -7,7 +8,12 @@ use crate::{
     CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
     RetentionPolicy, SessionManager,
 };
+use serde_json::json;
+use serial_test::serial;
+use std::ffi::OsString;
+use std::fs;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -42,6 +48,90 @@ fn spawn_single_response_server(
         }
     });
     (format!("http://{}", addr), hits, handle)
+}
+
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: impl Into<OsString>) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: test-scoped env mutation guarded by serial + home_env_lock.
+        unsafe { std::env::set_var(key, value.into()) };
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(prev) => {
+                // SAFETY: restore original env during test teardown.
+                unsafe { std::env::set_var(self.key, prev) };
+            }
+            None => {
+                // SAFETY: clear test-only env during teardown.
+                unsafe { std::env::remove_var(self.key) };
+            }
+        }
+    }
+}
+
+struct CurrentDirGuard {
+    _lock: crate::test_support::TestLockGuard<'static>,
+    previous: PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn set(path: &Path) -> Self {
+        let lock = crate::test_support::cwd_lock().lock().unwrap();
+        let previous = std::env::current_dir().expect("current_dir");
+        std::env::set_current_dir(path).expect("set_current_dir");
+        Self {
+            _lock: lock,
+            previous,
+        }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
+}
+
+fn write_session_plugin_fixture(workspace: &Path, plugin_id: &str, activation: &str) {
+    let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
+    fs::create_dir_all(&plugin_dir).expect("create plugin fixture dir");
+    let manifest = json!({
+        "id": plugin_id,
+        "name": plugin_id,
+        "version": "0.1.0",
+        "description": format!("fixture {plugin_id}"),
+        "author": "tests",
+        "main": "main.js",
+        "requiredPermissions": [],
+        "requiredApiVersion": "1.0",
+        "tags": [],
+        "tools": [],
+        "events": ["session_start"],
+        "activation": activation
+    });
+    fs::write(
+        plugin_dir.join("plugin.json"),
+        serde_json::to_string_pretty(&manifest).expect("serialize plugin manifest"),
+    )
+    .expect("write plugin manifest");
+    fs::write(
+        plugin_dir.join("main.js"),
+        r#"
+pi.on("session_start", function () {});
+__pi_start_event_loop();
+"#,
+    )
+    .expect("write plugin main");
 }
 
 // T2-P1-002 PR-PLA：build_tool_definitions 现在需要 &ChatContext 才能按 PlanState 过滤。
@@ -997,4 +1087,76 @@ async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
             None => std::env::remove_var("no_proxy"),
         }
     };
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn cleanup_plugin_sessions_on_session_end_releases_current_session_vm() {
+    const API_ENV: &str = "TOMCAT_CHAT_PLUGIN_CLEANUP_TEST_KEY";
+    const PLUGIN_ID: &str = "session-cleanup-plugin";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+
+    write_session_plugin_fixture(workspace.path(), PLUGIN_ID, "session");
+
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    cfg.plugin.auto_load = vec![PLUGIN_ID.to_string()];
+
+    let ctx = ChatContext::from_config(cfg).expect("chat context");
+    let plugin_manager = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager");
+    let session_id = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .expect("current session id query")
+        .expect("current session id");
+    let instance_id = format!("{session_id}/{PLUGIN_ID}");
+
+    if !plugin_manager.has_session_vm(&session_id, PLUGIN_ID) {
+        plugin_manager
+            .start_session_vm(&session_id, PLUGIN_ID)
+            .await
+            .expect("start session vm");
+    }
+
+    assert!(
+        plugin_manager.has_session_vm(&session_id, PLUGIN_ID),
+        "fixture should have an active session VM before cleanup"
+    );
+    assert!(
+        ctx.scope_services
+            .scope_container
+            .dispatcher
+            .get_event_sender(&instance_id)
+            .is_some(),
+        "session VM should register an event channel before cleanup"
+    );
+
+    cleanup_plugin_sessions_on_session_end(&ctx, "suite_test_cleanup").await;
+    cleanup_plugin_sessions_on_session_end(&ctx, "suite_test_cleanup_again").await;
+
+    assert!(
+        !plugin_manager.has_session_vm(&session_id, PLUGIN_ID),
+        "cleanup helper should remove the current session VM"
+    );
+    assert!(
+        ctx.scope_services
+            .scope_container
+            .dispatcher
+            .get_event_sender(&instance_id)
+            .is_none(),
+        "cleanup helper should remove the session event channel"
+    );
 }

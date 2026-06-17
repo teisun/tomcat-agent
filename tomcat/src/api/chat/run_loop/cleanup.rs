@@ -56,6 +56,11 @@ pub(crate) async fn cleanup_openai_files_on_session_end(ctx: &ChatContext, reaso
     }
 }
 
+pub(crate) async fn cleanup_chat_session_resources(ctx: &ChatContext, reason: &str) {
+    cleanup_openai_files_on_session_end(ctx, reason).await;
+    cleanup_plugin_sessions_on_session_end(ctx, reason).await;
+}
+
 pub(crate) async fn cleanup_plugin_sessions_on_session_end(ctx: &ChatContext, reason: &str) {
     let Some(plugin_manager) = ctx.global_services.plugin_manager.as_ref() else {
         return;

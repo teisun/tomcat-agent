@@ -53,10 +53,16 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
             }
         }
         SessionSub::Delete { session_id, scope } => {
-            let mgr = scoped_session_manager(cfg, scope)?;
+            let (mgr, mode) = scoped_session_manager_and_mode(cfg, scope)?;
             cleanup_openai_files_for_session(
                 cfg,
                 mgr.sessions_dir(),
+                &session_id,
+                "session_delete",
+            );
+            cleanup_plugin_session_for_session(
+                cfg,
+                mode,
                 &session_id,
                 "session_delete",
             );
@@ -67,10 +73,16 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
             }
         }
         SessionSub::Archive { session_id, scope } => {
-            let mgr = scoped_session_manager(cfg, scope)?;
+            let (mgr, mode) = scoped_session_manager_and_mode(cfg, scope)?;
             cleanup_openai_files_for_session(
                 cfg,
                 mgr.sessions_dir(),
+                &session_id,
+                "session_archive",
+            );
+            cleanup_plugin_session_for_session(
+                cfg,
+                mode,
                 &session_id,
                 "session_archive",
             );
@@ -133,12 +145,19 @@ fn scoped_session_manager(
     cfg: &AppConfig,
     scope: Option<SessionScopeArg>,
 ) -> Result<SessionManager, AppError> {
+    scoped_session_manager_and_mode(cfg, scope).map(|(mgr, _)| mgr)
+}
+
+fn scoped_session_manager_and_mode(
+    cfg: &AppConfig,
+    scope: Option<SessionScopeArg>,
+) -> Result<(SessionManager, SessionMode), AppError> {
     let sessions_path = resolve_sessions_dir(cfg)?;
     std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
     let mode = resolve_scope_mode(cfg, scope)?;
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let session_key = session_key_for_agent(&cfg.agent.id, mode, &cwd);
-    Ok(SessionManager::new_scoped(sessions_path, session_key))
+    Ok((SessionManager::new_scoped(sessions_path, session_key), mode))
 }
 
 fn cleanup_openai_files_for_session(
@@ -189,6 +208,38 @@ fn cleanup_openai_files_for_session(
             deleted = summary.deleted,
             failed = summary.failed,
             "openai files cleanup finished with failures"
+        );
+    }
+}
+
+fn cleanup_plugin_session_for_session(
+    cfg: &AppConfig,
+    mode: SessionMode,
+    session_id: &str,
+    reason: &str,
+) {
+    let overrides = crate::api::chat::ChatContextOverrides::default().skip_session_plugin_activation();
+    let (rt, ctx) = match super::build_runtime_and_context_with_overrides(cfg, mode, overrides) {
+        Ok(v) => v,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                session_id = session_id,
+                reason = reason,
+                "skip plugin session cleanup: cannot build cleanup context"
+            );
+            return;
+        }
+    };
+    let Some(plugin_manager) = ctx.global_services.plugin_manager.clone() else {
+        return;
+    };
+    if let Err(error) = rt.block_on(async { plugin_manager.end_session(session_id).await }) {
+        tracing::warn!(
+            error = %error,
+            session_id = session_id,
+            reason = reason,
+            "plugin session cleanup finished with failures"
         );
     }
 }

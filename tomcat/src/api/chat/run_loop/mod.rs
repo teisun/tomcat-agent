@@ -40,6 +40,9 @@ use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
 use self::workspace_state::compute_workspace_state;
 
 #[cfg(test)]
+pub(crate) use self::cleanup::cleanup_plugin_sessions_on_session_end;
+
+#[cfg(test)]
 pub(crate) use self::cleanup::cleanup_openai_files_on_session_end;
 #[cfg(test)]
 pub(crate) use self::persist::{
@@ -348,8 +351,18 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     }
 
     let mut auto_turn_count: u32 = 0;
+    let mut fatal_error: Option<AppError> = None;
 
-    loop {
+    let exit_reason = loop {
+        if ctx
+            .session_runtime
+            .hard_exit_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            context_state.preheat.abort();
+            break "hard_interrupt_exit";
+        }
+
         let queued_follow_ups = !ctx.session_runtime.follow_up_queue.lock().is_empty();
         let auto_drain = queued_follow_ups && auto_turn_count < AUTO_TURN_BUDGET;
         if !auto_drain {
@@ -370,16 +383,26 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 Err(rustyline::error::ReadlineError::Eof) => {
                     println!("\n再见！");
                     context_state.preheat.abort();
-                    break;
+                    break "chat_eof_exit";
                 }
-                Err(rustyline::error::ReadlineError::Interrupted) => continue,
+                Err(rustyline::error::ReadlineError::Interrupted) => {
+                    if ctx
+                        .session_runtime
+                        .hard_exit_requested
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        context_state.preheat.abort();
+                        break "hard_interrupt_exit";
+                    }
+                    continue;
+                }
                 Err(rustyline::error::ReadlineError::Signal(rustyline::error::Signal::Resize)) => {
                     continue;
                 }
                 Err(error) => {
                     eprintln!("输入错误: {}", error);
                     context_state.preheat.abort();
-                    break;
+                    break "chat_input_error_exit";
                 }
             };
             let trimmed = raw.trim().to_string();
@@ -434,6 +457,15 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         match outcome {
             AgentRunOutcome::Completed(_) => {}
             AgentRunOutcome::Interrupted(_) => {
+                if ctx
+                    .session_runtime
+                    .hard_exit_requested
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    eprintln!("\n^C 已中断，正在退出...");
+                    context_state.preheat.abort();
+                    break "hard_interrupt_exit";
+                }
                 eprintln!("\n^C 已中断（partial 已保存）");
             }
             AgentRunOutcome::Failed(error) => {
@@ -442,13 +474,8 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                 if fatal {
                     eprintln!("(致命错误，退出对话)");
                     context_state.preheat.abort();
-                    cleanup::cleanup_openai_files_on_session_end(ctx, "chat_fatal_exit").await;
-                    cleanup::cleanup_plugin_sessions_on_session_end(ctx, "chat_fatal_exit").await;
-                    events::stderr::unregister_chat_session_stderr_listeners(
-                        &*ctx.global_services.event_bus,
-                        &session_stderr_ids,
-                    );
-                    return Err(error);
+                    fatal_error = Some(error);
+                    break "chat_fatal_exit";
                 }
                 eprintln!("{}", nonfatal_error_hint(&error));
                 continue;
@@ -456,14 +483,16 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         }
 
         println!();
-    }
+    };
 
-    cleanup::cleanup_openai_files_on_session_end(ctx, "session_end").await;
-    cleanup::cleanup_plugin_sessions_on_session_end(ctx, "session_end").await;
+    cleanup::cleanup_chat_session_resources(ctx, exit_reason).await;
     events::stderr::unregister_chat_session_stderr_listeners(
         &*ctx.global_services.event_bus,
         &session_stderr_ids,
     );
+    if let Some(error) = fatal_error {
+        return Err(error);
+    }
     Ok(())
 }
 

@@ -72,7 +72,7 @@ use crate::infra::audit::{AuditRecorder, PluginLifecycleAuditEntry};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use parking_lot::RwLock;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -675,29 +675,37 @@ impl PluginManager {
             .as_ref()
             .ok_or_else(|| AppError::Plugin("plugin_runtime_manager not set".into()))?;
 
-        let handles = runtime_manager.remove_session(session_id);
+        let removed = runtime_manager.remove_session_entries(session_id);
         tracing::debug!(
             "[end_session] removed {} handles elapsed_ms={}",
-            handles.len(),
+            removed.len(),
             t0.elapsed().as_millis()
         );
-        for h in &handles {
-            let _ = h.shutdown().await;
+        for (_, handle) in &removed {
+            let _ = handle.shutdown().await;
         }
-        tracing::debug!(
-            "[end_session] shutdown commands sent elapsed_ms={}",
-            t0.elapsed().as_millis()
-        );
+
+        let mut instance_ids: BTreeSet<String> = removed
+            .iter()
+            .map(|(key, _)| key.to_string())
+            .collect();
 
         if let Some(dispatcher) = self.host_dispatcher.read().clone() {
-            let map = self.plugins.read();
-            for pid in map.keys() {
-                let instance_id = format!("{session_id}/{pid}");
+            instance_ids.extend(dispatcher.session_instance_ids(session_id));
+            for instance_id in instance_ids {
                 tracing::debug!("[end_session] cleanup_instance {instance_id}");
                 dispatcher.cleanup_instance(&instance_id);
             }
         }
 
+        tracing::debug!(
+            "[end_session] shutdown commands sent elapsed_ms={}",
+            t0.elapsed().as_millis()
+        );
+        tracing::debug!(
+            "[end_session] session cleanup candidates processed elapsed_ms={}",
+            t0.elapsed().as_millis()
+        );
         tracing::debug!(
             "[end_session] session={session_id} complete elapsed_ms={}",
             t0.elapsed().as_millis()

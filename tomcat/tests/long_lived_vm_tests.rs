@@ -277,11 +277,13 @@ async fn test_plugin_manager_end_session_cleans_runtime_manager(
     let rm: SharedPluginRuntimeManager = Arc::new(PluginRuntimeManager::new());
 
     let mut mgr = PluginManager::new(bus);
-    mgr.set_host_dispatcher(dispatcher);
+    mgr.set_host_dispatcher(dispatcher.clone());
     mgr.set_plugin_runtime_manager(rm.clone());
 
     rm.insert(PluginRuntimeKey::new("sess-x", "plugin-a"), stub_handle());
     rm.insert(PluginRuntimeKey::new("sess-x", "plugin-b"), stub_handle());
+    dispatcher.register_event_channel("sess-x/plugin-a", 4);
+    dispatcher.register_event_channel("sess-x/plugin-b", 4);
 
     tracing::info!("Arrange: PluginManager 注入 RuntimeManager(2 个 handle) + dispatcher");
     assert_eq!(rm.len(), 2);
