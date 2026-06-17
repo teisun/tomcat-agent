@@ -18,7 +18,7 @@ pub(crate) use crate::core::tools::plan_tool::{
     ask_question, create_plan, shared_todo_ops, todos, update_plan, ToolError,
 };
 
-pub fn home_lock() -> &'static std::sync::Mutex<()> {
+pub fn home_lock() -> &'static crate::test_support::TestLock {
     crate::test_support::home_env_lock()
 }
 

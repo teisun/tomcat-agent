@@ -33,7 +33,7 @@ impl Drop for EnvGuard {
 }
 
 struct CurrentDirGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::test_support::TestLockGuard<'static>,
     previous: std::path::PathBuf,
 }
 
@@ -371,4 +371,9 @@ pi.registerTool({
         plugin_manager.has_session_vm(&session_id, "loaded-plugin"),
         "current session VM should stay attached after /install"
     );
+
+    plugin_manager
+        .end_session(&session_id)
+        .await
+        .expect("active session VM should shut down cleanly after test");
 }

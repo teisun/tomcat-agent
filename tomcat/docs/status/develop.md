@@ -1,14 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Cursor | 2026-06-16 11:55 +0800 | ACTIVE | feature/host-functions-point-override | — |
+| Cursor | 2026-06-17 12:22 +0800 | ACTIVE | develop | — |
 
-### 2026-06-16 | host-facing `functions[]` point override 语义收口
+### 2026-06-17 | merge `feature/host-functions-point-override` → develop（Nibbles 集成验收）
 
-- **分支与范围**：从 `develop` 拉出 `feature/host-functions-point-override`，收口 host-facing `functions[]` 的分层发现 / 注册面语义，并同步更新主架构文档、PackageManager、User Stories、E2E 场景库、集成交付说明、`web_search` 架构文档与用户指南。
-- **语义结论**：`functions[]` 与普通 plugin 一样复用 `scope > agent > global` 三层发现 / 安装链；真正特殊的地方只在 `FunctionRegistry` 物化阶段按 `point` 执行 override。高层声明覆盖低层；同层冲突 stable first-wins + warning；高层移除后低层可在 refresh 后重新成为赢家；`web_search.backend` 的 `unsupported_backend` 不再跨插件兜底。
-- **代码与测试收口**：`materialize_host_functions_from_catalog()` 改为按 layer+point 选赢家并产出 `function_point_conflict` / `function_point_shadowed` warning；`ExtPluginSearchInvoker` 只消费当前赢家 provider；`runtime_split_test` / `plugin_function_invoker_test` / `function_registry_test` / `catalog_test` 已补齐 point override、tools 不受影响、registry contract 与官方单插件 `auto` 路由守护。
-- **本轮验证**：已通过 `cargo test -p tomcat --lib runtime_split_test -- --nocapture`、`cargo test -p tomcat --lib plugin_function_invoker_test -- --nocapture`、`cargo test -p tomcat --lib function_registry_test -- --nocapture`、`cargo test -p tomcat --lib catalog_test -- --nocapture`、`cargo test -p tomcat --lib plugin_backend_ -- --nocapture`、`cargo clippy --all-targets -- -D warnings`。
-- **门禁决策**：本轮**未**额外复跑“无 OpenAI 全量 integration gate”。原因是改动面集中在 host function 分层发现、point override 物化、`web_search.backend` 调用收口与文档/单测；未改 CLI 外部协议、真实 LLM/OpenAI 路径或新的 integration binary。focused suites 已覆盖本次语义风险面，故先以 focused + clippy 作为本轮 gate 记录。
+- **合并范围**：已将 `feature/host-functions-point-override` 合入 `develop`，把 host-facing `functions[]` 的 layer+point override 语义、`web_search.backend` 单赢家消费模型、插件系统架构文档补图，以及 develop 侧验收所需的 VM 会话清理、test lock / Tokio handle 修复、`cli_tests` 路由断言收口一起带入主线。
+- **develop 侧验收**：`cargo build --release`、`cargo test --lib -- --nocapture`、`cargo clippy --all-targets -- -D warnings` 全部通过；串行 E2E 复跑完成，`cli_tests` **108 passed**、`quickjs_e2e_tests` **15 passed**。其中 `cli_tests` 的 develop-side 收尾包含两处预期修正：shadowed `web_search.backend` 不再跨插件兜底，以及 503 exhausted 后按同进程 `context_state` 保留失败轮进度。
+- **integration 口径**：`run-integration-tests.sh integration` 触发 `openai_responses_integration_tests` 的 401；经用户确认，本机 `OPENAI_API_KEY` 已过期，属于外部环境阻塞而非代码回归。本轮据此以本地 build / lib / clippy / E2E 门禁作为 develop 合并验收记录，其余非 OpenAI 本地回归路径均已复核通过。
+- **状态台账**：`TASK_BOARD_002` 中未找到与 `feature/host-functions-point-override` 对应的 `PENDING_INTEGRATION` 任务卡，因此本轮仅更新 `docs/status/develop.md`；未推送远端。
 
 ### 2026-06-16 | merge `feature/plugin-function-surface` → develop（T2-P1-016 / T2-P1-017 集成验收）
 

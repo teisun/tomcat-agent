@@ -180,7 +180,6 @@ impl HostApiDispatcher {
     /// 是否在构造时捕获到 Tokio runtime handle。异步 hostcall（pi.fetch /
     /// createChatCompletion）依赖它；若为 false，插件后端会在发起请求前抛
     /// "async hostcall requires a Tokio runtime handle"。回归测试用。
-    #[cfg(test)]
     pub(crate) fn has_tokio_handle(&self) -> bool {
         self.tokio_handle.is_some()
     }

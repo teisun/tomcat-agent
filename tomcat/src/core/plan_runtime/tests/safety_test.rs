@@ -4,7 +4,7 @@ use super::super::safety::{
 };
 use super::super::state::PlanState;
 
-fn home_lock() -> &'static std::sync::Mutex<()> {
+fn home_lock() -> &'static crate::test_support::TestLock {
     crate::test_support::home_env_lock()
 }
 

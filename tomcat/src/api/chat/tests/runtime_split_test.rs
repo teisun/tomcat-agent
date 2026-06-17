@@ -41,7 +41,7 @@ impl Drop for EnvGuard {
 }
 
 struct CurrentDirGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::test_support::TestLockGuard<'static>,
     previous: PathBuf,
 }
 
@@ -190,6 +190,12 @@ pi.registerTool({
 
     let ctx = ChatContext::from_config(cfg).expect("ctx");
     let session_id = current_session_id(&ctx);
+    let plugin_manager = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager")
+        .clone();
     let err = tokio::time::timeout(
         Duration::from_secs(5),
         ctx.global_services.tool_registry.call_tool(
@@ -210,6 +216,10 @@ pi.registerTool({
             || message.to_ascii_lowercase().contains("memory"),
         "heap limit failure should surface as a QuickJS-side error, got: {err}"
     );
+    plugin_manager
+        .end_session(&session_id)
+        .await
+        .expect("heap-limited session VM should shut down cleanly");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -247,6 +257,12 @@ pi.registerTool({
 
     let ctx = ChatContext::from_config(cfg).expect("ctx");
     let session_id = current_session_id(&ctx);
+    let plugin_manager = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager")
+        .clone();
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         ctx.global_services.tool_registry.call_tool(
@@ -268,6 +284,10 @@ pi.registerTool({
         Some(4 * 1024 * 1024),
         "heap=0 should allow the full allocation to succeed"
     );
+    plugin_manager
+        .end_session(&session_id)
+        .await
+        .expect("heap-unlimited session VM should shut down cleanly");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2130,6 +2150,12 @@ async fn manifest_js_name_mismatch_surfaces_clear_error() {
 
     let ctx = ChatContext::from_config(make_config(work_dir.path(), API_ENV)).expect("ctx");
     let session_id = current_session_id(&ctx);
+    let plugin_manager = ctx
+        .global_services
+        .plugin_manager
+        .as_ref()
+        .expect("plugin manager")
+        .clone();
     let invoker = function_invoker(&ctx);
     let target = function_targets(&ctx, "test.echo")
         .into_iter()
@@ -2144,6 +2170,10 @@ async fn manifest_js_name_mismatch_surfaces_clear_error() {
         err.to_string().contains("function not found: echoHost"),
         "错误信息应直接指向缺失的 handler 名称: {err}"
     );
+    plugin_manager
+        .end_session(&session_id)
+        .await
+        .expect("manifest mismatch session VM should shut down cleanly");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -4,7 +4,7 @@ use serial_test::serial;
 use std::path::Path;
 
 struct CurrentDirGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::test_support::TestLockGuard<'static>,
     previous: std::path::PathBuf,
 }
 

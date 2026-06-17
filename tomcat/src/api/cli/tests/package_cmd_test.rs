@@ -5,7 +5,7 @@ use super::mocks::test_config;
 use crate::core::load_package_registry;
 
 struct CurrentDirGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::test_support::TestLockGuard<'static>,
     previous: std::path::PathBuf,
 }
 

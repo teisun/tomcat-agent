@@ -12,7 +12,7 @@ use super::mocks::test_config;
 use crate::api::cli::plugin_cmd::render_plugin_list_output;
 
 struct CurrentDirGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::test_support::TestLockGuard<'static>,
     previous: std::path::PathBuf,
 }
 

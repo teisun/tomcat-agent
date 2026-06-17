@@ -44,7 +44,7 @@ fn make_gate_with(
 }
 
 struct CurrentDirGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::test_support::TestLockGuard<'static>,
     previous: PathBuf,
 }
 

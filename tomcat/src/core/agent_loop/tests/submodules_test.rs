@@ -1481,38 +1481,51 @@ async fn task_output_block_true_claims_completion_route_on_finished() {
     let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
     let task_id = ticket["taskId"].as_str().unwrap().to_string();
 
-    let out_tc = ToolCallInfo {
-        id: "to-cr".into(),
-        name: "task_output".into(),
-        arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":3000}}"#,
-            task_id
-        ),
-    };
-    let outcome = execute_tool_full(
-        &primitive,
-        &None,
-        &registry_opt,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        SubagentType::User,
-        None,
-        &tokio_util::sync::CancellationToken::new(),
-        &out_tc,
-        None,
-        Some(&routes),
-    )
-    .await;
-    assert!(!outcome.is_error);
-    let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
-    assert_eq!(
-        chunk["wakeReason"],
-        serde_json::Value::String("finished".into())
-    );
+    let mut since: u64 = 0;
+    let mut got_finished = false;
+    for _ in 0..6 {
+        let out_tc = ToolCallInfo {
+            id: "to-cr".into(),
+            name: "task_output".into(),
+            arguments: format!(
+                r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":3000}}"#,
+                task_id, since
+            ),
+        };
+        let outcome = execute_tool_full(
+            &primitive,
+            &None,
+            &registry_opt,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            SubagentType::User,
+            None,
+            &tokio_util::sync::CancellationToken::new(),
+            &out_tc,
+            None,
+            Some(&routes),
+        )
+        .await;
+        assert!(!outcome.is_error);
+        let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
+        let wake_reason = chunk["wakeReason"].as_str().unwrap_or("");
+        let finished = chunk["finished"].as_bool().unwrap_or(false);
+        if wake_reason == "finished" || finished {
+            assert_eq!(
+                chunk["wakeReason"],
+                serde_json::Value::String("finished".into())
+            );
+            assert!(finished);
+            got_finished = true;
+            break;
+        }
+        since = chunk["nextOffset"].as_u64().unwrap_or(since);
+    }
+    assert!(got_finished, "should eventually claim Delivered on finished");
     let g = routes.lock();
     assert!(matches!(g.get(&task_id), Some(CompletionRoute::Delivered)));
 }

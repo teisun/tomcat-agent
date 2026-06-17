@@ -32,7 +32,7 @@ impl Drop for EnvGuard {
 }
 
 struct CurrentDirGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
+    _lock: crate::test_support::TestLockGuard<'static>,
     previous: std::path::PathBuf,
 }
 

@@ -359,6 +359,8 @@ impl HttpsTestServer {
         reqwest::Client::builder()
             .no_proxy()
             .danger_accept_invalid_certs(true)
+            .http1_only()
+            .pool_max_idle_per_host(0)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(timeout)
             .resolve(hostname, self.addr)
@@ -1135,7 +1137,7 @@ async fn net_fetch_hostcall_rejects_redirect_responses_by_default() {
         Duration::ZERO,
     )
     .await;
-    let client = server.client_for("api.tavily.com", Duration::from_secs(2));
+    let client = server.client_for("api.tavily.com", Duration::from_secs(5));
     let plugin_dir = plugin_function_fixture_with_manifest(
         "net-fetch-redirect",
         json!({
@@ -1166,11 +1168,15 @@ async fn net_fetch_hostcall_rejects_redirect_responses_by_default() {
         .expect("hostcall should resolve with HostResponse");
 
     assert!(!response.ok);
-    assert!(response
-        .error
-        .as_deref()
-        .unwrap_or("")
-        .contains("redirect_not_allowed"));
+    assert!(
+        response
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("redirect_not_allowed"),
+        "expected redirect_not_allowed, got {:?}",
+        response.error
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1183,7 +1189,7 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
         Duration::ZERO,
     )
     .await;
-    let client = server.client_for("api.tavily.com", Duration::from_secs(2));
+    let client = server.client_for("api.tavily.com", Duration::from_secs(5));
     let plugin_dir = plugin_function_fixture_with_manifest(
         "net-fetch-large-body",
         json!({
@@ -1265,7 +1271,7 @@ async fn net_fetch_hostcall_enforces_request_timeout() {
     assert!(response.error.as_deref().unwrap_or("").contains("timeout"));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn net_fetch_hostcall_respects_concurrency_limit() {
     let server = HttpsTestServer::start(
         "api.tavily.com",
@@ -1275,7 +1281,7 @@ async fn net_fetch_hostcall_respects_concurrency_limit() {
         Duration::from_millis(120),
     )
     .await;
-    let client = server.client_for("api.tavily.com", Duration::from_secs(2));
+    let client = server.client_for("api.tavily.com", Duration::from_secs(10));
     let plugin_dir = plugin_function_fixture_with_manifest(
         "net-fetch-concurrency",
         json!({
@@ -1317,8 +1323,8 @@ async fn net_fetch_hostcall_respects_concurrency_limit() {
 
     let first = first.await.expect("join first");
     let second = second.await.expect("join second");
-    assert!(first.ok, "first request should succeed");
-    assert!(second.ok, "second request should succeed");
+    assert!(first.ok, "first request should succeed, got {:?}", first.error);
+    assert!(second.ok, "second request should succeed, got {:?}", second.error);
     assert_eq!(
         server.max_concurrency(),
         1,

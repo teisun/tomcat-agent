@@ -181,20 +181,25 @@ fn scope_runtime_for(
 ) -> Result<Arc<ScopeContainer>, AppError> {
     let disable_cache = overrides.fetch_http_client.is_some();
     let key = std::fs::canonicalize(&agent_workspace_dir).unwrap_or(agent_workspace_dir);
+    let current_tokio_handle = tokio::runtime::Handle::try_current().ok();
     if !disable_cache {
         if let Some(existing) = scope_runtime_cache()
             .read()
             .get(&key)
             .and_then(Weak::upgrade)
         {
-            return Ok(existing);
+            if current_tokio_handle.is_none() || existing.dispatcher.has_tokio_handle() {
+                return Ok(existing);
+            }
         }
     }
 
     let mut cache_guard = (!disable_cache).then(|| scope_runtime_cache().write());
     if let Some(cache) = cache_guard.as_ref() {
         if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
-            return Ok(existing);
+            if current_tokio_handle.is_none() || existing.dispatcher.has_tokio_handle() {
+                return Ok(existing);
+            }
         }
     }
 
@@ -270,6 +275,15 @@ impl ChatContext {
         mode: SessionMode,
         overrides: ChatContextOverrides,
     ) -> Result<Self, AppError> {
+        #[cfg(test)]
+        let _home_lock = crate::test_support::home_env_lock()
+            .lock()
+            .expect("test home env lock");
+        #[cfg(test)]
+        let _cwd_lock = crate::test_support::cwd_lock()
+            .lock()
+            .expect("test cwd lock");
+
         let sessions_path = resolve_sessions_dir(&config)?;
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
         let cwd_for_key = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

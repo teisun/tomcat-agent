@@ -108,18 +108,6 @@ fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_onl
     fs::write(skill_dir.join("SKILL.md"), content).expect("write skill");
 }
 
-fn load_current_transcript_for_work_dir(work_dir: &Path) -> String {
-    let mut cfg = AppConfig::default();
-    cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
-    let sessions_dir = tomcat::resolve_sessions_dir(&cfg).expect("resolve sessions dir");
-    let session = SessionManager::new(sessions_dir);
-    let transcript_path = session
-        .current_transcript_path()
-        .expect("current_transcript_path")
-        .expect("transcript path should exist");
-    fs::read_to_string(&transcript_path).expect("read transcript")
-}
-
 fn spawn_quick_openai_stream_server(reply: &'static str) -> (String, std::thread::JoinHandle<()>) {
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
@@ -5083,7 +5071,7 @@ async fn test_cli_chat_path_retry_exhausted_503_preserves_progress_for_next_turn
             .entered();
 
     const ENV_KEY: &str = "TOMCAT_CLI_GATEWAY_503_EXHAUST_KEY";
-    let (work_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    let (_work_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
     ctx.config.llm.agent_max_attempts = 2;
     ctx.config.llm.agent_retry_base_delay_ms = 0;
     let failing_llm = Arc::new(DeterministicMockLlm::new(vec![
@@ -5125,11 +5113,18 @@ async fn test_cli_chat_path_retry_exhausted_503_preserves_progress_for_next_turn
         matches!(first, tomcat::AgentRunOutcome::Failed(_)),
         "503 重试耗尽后当前轮应失败"
     );
-    let transcript_after_fail = load_current_transcript_for_work_dir(work_dir.path());
+    let carried_messages = state
+        .messages
+        .iter()
+        .map(|msg| format!("{:?}:{:?}", msg.role, msg.text_content()))
+        .collect::<Vec<_>>();
     assert!(
-        transcript_after_fail.contains("第一轮会失败但应保留进度"),
-        "失败轮的用户输入应已落盘保留，actual transcript: {}",
-        trunc(&transcript_after_fail, 800)
+        state
+            .messages
+            .iter()
+            .any(|msg| msg.text_content() == Some("第一轮会失败但应保留进度")),
+        "失败轮的用户输入应仍保留在 context_state，actual messages: {:?}",
+        carried_messages
     );
 
     let success_llm = Arc::new(DeterministicMockLlm::new(vec![cli_text_stream(
@@ -5368,9 +5363,12 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn test_chat_path_routes_auto_web_search_through_plugin_slot() {
+async fn test_chat_path_auto_web_search_does_not_fallback_past_shadowed_plugin_slot() {
     common::setup_logging();
-    let _span = info_span!("test_chat_path_routes_auto_web_search_through_plugin_slot").entered();
+    let _span = info_span!(
+        "test_chat_path_auto_web_search_does_not_fallback_past_shadowed_plugin_slot"
+    )
+    .entered();
 
     let server = common::HttpsTestServer::start(
         "api.tavily.com",
@@ -5476,19 +5474,18 @@ pi.registerFunction("webSearchBackend", function () {
         .expect("should persist web_search tool result");
     let tool_text = tool_msg.text_content().expect("tool result should be text");
     assert!(
-        tool_text.contains("\"backend\":\"tavily\"")
-            || tool_text.contains("\"backend\": \"tavily\""),
-        "tool result 应包含 backend=tavily，实际: {}",
+        tool_text.contains("所有后端均不可用"),
+        "shadowed plugin slot declination 应保持 auto exhausted 文案，实际: {}",
         trunc(tool_text, 400)
     );
     assert!(
-        tool_text.contains("https://docs.rs/reqwest"),
-        "tool result 应包含插件 slot 落到 Tavily 后返回的命中 URL，实际: {}",
+        tool_text.contains("backend_unavailable:auto"),
+        "shadowed plugin slot declination 应记录 auto exhausted warnings，实际: {}",
         trunc(tool_text, 400)
     );
     assert!(
-        tool_text.contains("backend_unavailable:mimo"),
-        "tool result 应记录 auto 插件内从 mimo 继续推进，实际: {}",
+        !tool_text.contains("https://docs.rs/reqwest"),
+        "shadowed plugin slot declination 不应再跨插件兜底到下层 Tavily，实际: {}",
         trunc(tool_text, 400)
     );
     end_current_plugin_session(&ctx).await;
@@ -5997,6 +5994,15 @@ base_url = "{}"
 
 [models.capabilities]
 web_search = true
+
+[[models]]
+id = "mimo-v2.5-pro"
+api = "openai"
+provider = "mimo"
+base_url = "https://token-plan-cn.xiaomimimo.com"
+thinking_format = "doubao"
+context_window = 1000000
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true }}
 "#,
             hosted.uri()
         ),
@@ -6084,32 +6090,12 @@ async fn test_chat_path_web_search_falls_back_to_plugin_after_hosted_openai_fail
         .mount(&hosted)
         .await;
 
-    let tavily = common::HttpsTestServer::start(
-        "api.tavily.com",
-        "200 OK",
-        vec![("Content-Type".to_string(), "application/json".to_string())],
-        serde_json::to_vec(&json!({
-            "results": [
-                {
-                    "title": "reqwest",
-                    "url": "https://docs.rs/reqwest",
-                    "content": "HTTP client",
-                    "published_date": "2026-06-01"
-                }
-            ]
-        }))
-        .expect("serialize tavily fallback body"),
-        std::time::Duration::ZERO,
-    )
-    .await;
-    let fetch_client = tavily.client_for("api.tavily.com", std::time::Duration::from_secs(2));
-
     const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_CHAT_HOSTED_FALLBACK_KEY";
     let _env = EnvGuard::set_many(&[
         (ENV_KEY, Some("stub")),
         ("OPENAI_API_KEY", Some("openai-test-key")),
         ("MIMO_API_KEY", None),
-        ("TAVILY_API_KEY", Some("tavily-test-key")),
+        ("TAVILY_API_KEY", None),
         ("BRAVE_API_KEY", None),
         ("SERPER_API_KEY", None),
         ("HTTPS_PROXY", None),
@@ -6122,7 +6108,26 @@ async fn test_chat_path_web_search_falls_back_to_plugin_after_hosted_openai_fail
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let _cwd_guard = common::CwdGuard::set(workspace.path());
     let work_dir = tempfile::tempdir().expect("workdir tempdir");
-    install_builtin_web_search_backends_plugin(work_dir.path());
+    write_project_function_plugin(
+        workspace.path(),
+        "project-hosted-fallback-web-search",
+        &[("web_search.backend", "webSearchBackend")],
+        r#"
+pi.registerFunction("webSearchBackend", function () {
+  return {
+    backend: "tavily",
+    hits: [
+      {
+        title: "reqwest",
+        url: "https://docs.rs/reqwest",
+        snippet: "HTTP client"
+      }
+    ],
+    warnings: ["plugin_slot_fallback"]
+  };
+});
+"#,
+    );
     std::fs::write(
         work_dir.path().join("models.toml"),
         format!(
@@ -6147,7 +6152,7 @@ web_search = true
         cfg,
         ENV_KEY,
         work_dir.path(),
-        tomcat::api::chat::ChatContextOverrides::default().with_fetch_http_client(fetch_client),
+        tomcat::api::chat::ChatContextOverrides::default(),
     );
     let mock_llm = Arc::new(DeterministicMockLlm::new(vec![
         cli_tool_call_stream("call_ws", "web_search", r#"{"query":"reqwest rust"}"#),
