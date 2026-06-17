@@ -128,7 +128,98 @@ sequenceDiagram
     Note over PM,Map: unload_plugin(id) 时: 删该 scope 的 plugins表条 + 据 registered_tools / registered_functions 清理 ToolRegistry / 宿主扩展点注册表；事件监听现状主要按 plugin_id 批量 remove_plugin_listeners；RM.evict VM
 ```
 
-## A.1 抽象 ASCII 总图
+## A.1 一图看懂：插件系统怎么转起来
+
+如果你前面那张 Mermaid 时序图看得头大，先看下面这张。它不追求把所有分支都画全，而是先把这套系统最重要的主路径钉死：**插件先被发现，再决定谁可见，再按需起 VM，最后通过事件和 hostcall 跑起来。**
+
+```text
+[磁盘上的插件]
+project/.tomcat/plugins        agent plugins        global plugins
+           \                        |                    /
+            \_______________________|___________________/
+                                    |
+                                    v
+[阶段 1: 发现 / 编目]
+PluginManager.scan()
+  -> 只读 plugin.json / main 路径
+  -> PluginCatalog
+       |- manifest.tools[]       -> 以后给 LLM 看
+       |- manifest.functions[]   -> 以后给宿主子系统调
+       |- events[] / activation
+       `- 此时还没有真正跑 JS
+
+                                    |
+                                    v
+[阶段 2: scope 物化]
+当前 project / agent / global 叠层决定 "谁可见"
+  -> ToolRegistry         (LLM 只看这里)
+  -> FunctionRegistry     (web_search 等宿主子系统只看这里)
+  -> PluginRuntimeManager (准备管理活体 VM, 但此时可以还是空的)
+
+                                    |
+                                    v
+[阶段 3: 起活体 VM]
+当 activation="session" 或首次真正调用时:
+  key = (session_id, plugin_id)
+      -> VmActor (专属线程)
+      -> PluginVmInstance (rquickjs)
+      -> 注入 pi_bridge.js / pi_main_loop.js / __pi_* host bindings
+      -> 进入空闲循环: await __pi_wait_for_event(50)
+
+                                    |
+                    +---------------+----------------+
+                    |                                |
+                    v                                v
+[入口 A: LLM 工具调用]                        [入口 B: 宿主函数调用]
+LLM                                        WebSearchRuntime / other host subsystem
+ -> AgentLoop.execute_tool                  -> FunctionRegistry dispatch(point)
+ -> ToolRegistry.get_tool(name)             -> PluginFunctionInvoker.execute
+ -> PluginToolExecutor.execute              -> ensure/start_session_vm(...)
+ -> ensure/start_session_vm(...)            -> dispatcher.deliver_event(command_invoke)
+ -> dispatcher.deliver_event(command_invoke)-> VM 收到 command_invoke
+ -> VM 收到 command_invoke                  -> __pi_execute_function(functionName, params)
+ -> __pi_execute_tool(toolName, params)     -> 插件 JS 运行
+ -> 插件 JS 运行                            -> pi.* / __pi_host_call(...)
+ -> pi.* / __pi_host_call(...)              -> HostApiDispatcher
+ -> HostApiDispatcher                       -> result -> commandCompleted(call_id, result)
+ -> result -> commandCompleted(...)         -> 宿主收到 function result
+ -> 宿主收到 tool result
+ -> 返回给 LLM
+
+                                    |
+                                    v
+[阶段 4: VM 空闲等待下一件事]
+JS 回到 __pi_start_event_loop:
+  await __pi_wait_for_event(50)
+     |- 宿主在 50ms 内塞来事件 -> 返回真实事件
+     |- 50ms 内没事件         -> 返回 { type: "__tick" }
+     `- channel 关闭          -> 返回 { type: "__shutdown" }
+
+  关键点:
+  - 宿主不是去 "查看 VM 里有没有事件"
+  - 而是自己维护一条 event channel:
+      deliver_event()  -> tx.try_send(...)
+      waitForEvent()   -> rx.recv_timeout(...)
+  - timeout 的意思只是 "这 50ms 没人投递", 所以给 VM 一个 __tick
+  - __pi_wait_for_event() 每次返回后, Rust 侧会 guard.reset()
+    所以空闲等待不计入 call_timeout_ms
+
+                                    |
+                                    v
+[阶段 5: 回收]
+session_end / idle_ttl / VM Error
+  -> cleanup_instance
+  -> shutdown / evict runtime key
+  -> 下次再需要时可重建
+```
+
+读这张图时，脑子里只要先分清三句话就够了：
+
+1. **Catalog / Registry 决定谁可见，VM 决定谁真的活着。**
+2. **tool 调用给 LLM 用，function 调用给宿主自己用，但最后都落到同一台 session VM。**
+3. **宿主和 VM 之间不是共享内存式直接互看，而是靠 event channel + hostcall 双向通信。**
+
+## A.2 抽象 ASCII 总图
 
 ```text
                          ┌──────────────────────── tomcat 进程 ────────────────────────┐
@@ -154,7 +245,7 @@ plugin.json + main       │               │                                  
                          └───────────────────────────────────────────────────────────────┘
 ```
 
-## A.2 具体 ASCII 总图
+## A.3 最简组件图
 
 ```text
 磁盘 plugin/                            tomcat 进程内

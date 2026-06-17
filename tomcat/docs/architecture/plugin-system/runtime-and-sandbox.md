@@ -132,10 +132,83 @@ Created -> Running -> Idle -> Running
 | 层 | 机制 | 说人话 |
 |----|------|--------|
 | 线程隔离 | `VmActor` 把长跑 VM 放到专属线程 | 一个插件卡死时，不直接把主循环一起拖住。 |
-| 时间预算 | `call_timeout_ms` | 单次执行跑太久就掐。 |
+| 时间预算 | `call_timeout_ms` | 两次「让出宿主」之间，连续同步 JS 跑太久就掐。 |
 | 指令预算 | `interrupt_budget` | 死循环不能无限跑。 |
 | 堆预算 | `js_heap_mb` | 不让单实例把 JS 堆吃穿。 |
 | 错误降级 | `catch_unwind` + `Error` 态 | 真出事时先把当前实例标红关掉，别拖垮别的实例。 |
+
+### `call_timeout_ms` 到底量什么
+
+`ExecutionGuardState` 用 QuickJS 的中断钩子周期性调用 `should_interrupt()`。它有两条触发线：
+
+1. **墙钟超时**：`started_at.elapsed() >= call_timeout_ms`
+2. **指令预算**：`interrupt_count > interrupt_budget`
+
+设计意图是：**只拦「不向宿主让出的纯同步死循环」**，而不是把「VM 在等下一条事件」也算进执行时间。
+
+长生命周期 session VM 的空闲路径是：
+
+```text
+web_search 等命令跑完
+  -> 回到 __pi_start_event_loop
+  -> 每 ~50ms：await __pi_wait_for_event(50)
+  -> 宿主没事件：返回 { type: "__tick" }
+  -> JS continue，继续等
+```
+
+修复前的问题：`__tick` 路径**不会**调用 `__pi_budget_reset()`，而 `__pi_wait_for_event` 返回后宿主也**没有**刷新守卫。于是 `started_at` 一直停在上次命令结束时刻；空闲累计超过 `call_timeout_ms`（默认 30s）后，下一次 tick 迭代一跑 JS 就命中超时 → `VmActor` 记 `Error`，用户会看到「结果已经返回了，过一会又冒 `execution exceeded 30000ms timeout`」。
+
+修复后：在 Rust 侧 `__pi_wait_for_event` 绑定里，**每次等待返回**（含 `__tick`、`command_invoke`、`__shutdown`）都调用 `guard.reset()`。空闲等待不再计入 `call_timeout_ms`；真正的不让出死循环（例如 `while (true) {}`）仍会按时被拦截。
+
+```366:380:tomcat/src/ext/runtime/instance.rs
+    let wait_bridge = bridge.clone();
+    let wait_guard = guard.clone();
+    let wait_fn = Function::new(
+        ctx.clone(),
+        Async(move |timeout_ms: u64| {
+            let wait_bridge = wait_bridge.clone();
+            let wait_guard = wait_guard.clone();
+            async move {
+                let result = wait_bridge.wait_for_event(timeout_ms).await;
+                wait_guard.reset();
+                result.map_err(|e| js_runtime_error(e.to_string()))
+            }
+        }),
+    )?;
+    globals.set("__pi_wait_for_event", wait_fn)?;
+```
+
+守卫本体与 reset 语义：
+
+```38:74:tomcat/src/ext/runtime/instance.rs
+struct ExecutionGuardState {
+    started_at: Mutex<Instant>,
+    interrupt_count: AtomicU64,
+    reason: Mutex<Option<InterruptReason>>,
+    timeout: Duration,
+    budget: u64,
+}
+
+impl ExecutionGuardState {
+    fn reset(&self) {
+        *self.started_at.lock() = Instant::now();
+        self.interrupt_count.store(0, Ordering::SeqCst);
+        *self.reason.lock() = None;
+    }
+
+    fn should_interrupt(&self) -> bool {
+        if !self.timeout.is_zero() && self.started_at.lock().elapsed() >= self.timeout {
+            *self.reason.lock() = Some(InterruptReason::Timeout);
+            return true;
+        }
+        // ...
+    }
+}
+```
+
+为什么放在宿主侧而不是只改 JS：`pi_bridge.js` 里 `__tick` 分支是 `continue`，不会走 `__pi_budget_reset()`；异步 hostcall 的 poll 循环虽然会 reset，但**空闲 event loop 不走那条路**。宿主是「让出边界」的权威，在 `__pi_wait_for_event` 返回处 reset 可以保证 JS 侧不会漏掉。
+
+回归测试：`instance.rs` 中 `wait_for_event_refreshes_timeout_budget_between_idle_ticks`；集成/E2E 见 `runtime_session_vm_survives_idle_beyond_call_timeout`、`test_chat_path_web_search_survives_idle_gap_between_turns`。
 
 这套模型的结论是：
 
@@ -164,7 +237,7 @@ Created -> Running -> Idle -> Running
 | 项 | 默认值 | `0` 值语义 | 说明 | 说人话 |
 |----|--------|------------|------|--------|
 | `[plugin] js_heap_mb` | `16` | 不设置 QuickJS 堆上限 | 单实例 JS 堆预算 | 别让某个插件把内存吃穿。 |
-| `[plugin] call_timeout_ms` | `30000` | 禁用单次执行软超时 | 单段 JS 执行墙钟时限 | 一次执行跑太久就当异常处理。 |
+| `[plugin] call_timeout_ms` | `30000` | 禁用单次执行软超时 | 两次宿主让出点之间的同步执行墙钟时限 | 拦纯同步死循环；**不含** `__pi_wait_for_event` 空闲等待（见上文「call_timeout_ms 到底量什么」）。 |
 | `[plugin] interrupt_budget` | `5000000` | 禁用 budget 中断 | 单次执行预算 | 死循环和超大计算不能无限跑。 |
 | `[plugin] event_channel_capacity` | `64` | 退化为同步交接 | 宿主向长生命周期 VM 投递事件的队列深度 | 排队能排多深。 |
 | `[plugin] idle_ttl_ms` | `300000` | 禁用 idle TTL 回收 | 机会式空闲回收阈值 | 闲太久再关厅，但不是后台每秒巡逻。 |

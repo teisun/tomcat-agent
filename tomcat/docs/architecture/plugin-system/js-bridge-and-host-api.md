@@ -34,7 +34,7 @@ Rust 侧还会额外注入：
 
 - `__pi_host_call`
 - `__pi_sleep`
-- `__pi_wait_for_event`
+- `__pi_wait_for_event`（每次返回后宿主刷新 `ExecutionGuardState`，空闲 `__tick` 不计入 `call_timeout_ms`）
 - `__pi_budget_reset`
 - `__pi_interrupt_reason`
 - `__pi_crypto_*_native`
@@ -142,6 +142,37 @@ await pi.exec("ls")
 - VM 边界清晰，不把宿主异步执行模型泄漏成 JS 里的隐式共享状态；
 - submit / poll / timeout / interrupt 都能被统一审计；
 - 对工具调用、宿主函数调用、事件循环都能复用同一套生命周期语义。
+
+## 长生命周期 VM 的空闲 event loop 与执行预算
+
+session VM 在 `pi_main_loop.js` / `pi_bridge.js` 里通过 `__pi_start_event_loop` 常驻运行：
+
+```715:738:tomcat/assets/js/pi_bridge.js
+  globalThis.__pi_start_event_loop = async function () {
+    for (;;) {
+      var raw;
+      try {
+        raw = await __pi_wait_for_event(50);
+      } catch (hostErr) {
+        // ...
+        return;
+      }
+      // ...
+      if (res.data && res.data.type === '__tick') {
+        continue;
+      }
+```
+
+要点：
+
+| 路径 | 是否刷新执行预算 | 说明 |
+|------|------------------|------|
+| `await __pi_wait_for_event(...)` 返回 | **是**（Rust 绑定内 `guard.reset()`） | 含 `__tick`、真实事件、`__shutdown` |
+| `__tick` 分支 | 否（仅 `continue`） | 依赖宿主在 wait 返回时已 reset |
+| 异步 hostcall 的 poll 循环 | 是（JS 调 `__pi_budget_reset()`） | 长耗时 `pi.fetch` 等不会误杀 |
+| 纯同步死循环 | 否 | 仍由 `call_timeout_ms` / `interrupt_budget` 拦截 |
+
+> 说人话：`call_timeout_ms` 量的是「两次找宿主办事之间，JS 自己闷头跑多久」，不是「VM 开了多久」或「空闲等了多久」。详见 [`runtime-and-sandbox.md`](./runtime-and-sandbox.md) 中「call_timeout_ms 到底量什么」。
 
 ## `__pi_execute_tool` 与 `__pi_execute_function`
 
