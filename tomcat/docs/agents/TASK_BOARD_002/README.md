@@ -48,6 +48,7 @@
 | **T2-P1-015** | 会话模式与多会话并发（claw/code + SessionRuntime） | `DONE` | Jerry | `feature/optimize`                     | [tasks/T2-P1-015.md](./tasks/T2-P1-015.md) |
 | **T2-P1-016** | 插件系统（rquickjs 迁移）                           | `DONE` | Tom   | `feature/plugin-function-surface`      | [tasks/T2-P1-016.md](./tasks/T2-P1-016.md) |
 | **T2-P1-017** | PackageManager（统一包安装）                        | `DONE` | Tom   | `feature/plugin-function-surface`      | [tasks/T2-P1-017.md](./tasks/T2-P1-017.md) |
+| **T2-P1-018** | Agent Server 与 UI Gateway                    | `TODO` | —     | `feature/agent-server-ui-gateway`      | [tasks/T2-P1-018.md](./tasks/T2-P1-018.md) |
 
 ## 5. 开放任务依赖（概览）
 
@@ -65,6 +66,7 @@ flowchart LR
     P115[T2-P1-015<br/>会话模式]
     P116[T2-P1-016<br/>插件 rquickjs]
     P117[T2-P1-017<br/>PackageManager]
+    P118[T2-P1-018<br/>Agent Server / UI Gateway]
     P008 -.->|TUI 增强后可并行| P109
     P112 -.->|共享 tool_exec 热区| P113
     P113 -.->|共享 tool_exec 热区| P114
@@ -78,6 +80,7 @@ flowchart LR
     P115
     P116
     P117
+    P118
     P116 -.->|插件 runtime 就绪后可并行| P117
 ```
 

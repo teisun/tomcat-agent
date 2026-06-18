@@ -17,6 +17,7 @@
 - 会话模式与前台行为：[`session-modes.md`](./session-modes.md)
 - PLAN / EXEC 相关前台命令：[`plan-runtime.md`](./plan-runtime.md)
 - 流式事件与终端表现：[`llm-stream-events-cli-pipeline.md`](./llm-stream-events-cli-pipeline.md)
+- 对外暴露给 VSCode / 桌面 GUI（Agent Server / Gateway / stdio 进程边界）：[`agent-server-and-ui-gateway.md`](./agent-server-and-ui-gateway.md)（§3「为未来 Web / TUI / IPC 预留一致接口形态」的具体落地方案）
 
 ## 3. 设计约束
 

@@ -25,6 +25,7 @@
 
 - [`infrastructure-layer.md`](./infrastructure-layer.md)
 - [`interaction-layer.md`](./interaction-layer.md)
+- [`agent-server-and-ui-gateway.md`](./agent-server-and-ui-gateway.md)：把 CLI 能力暴露给 VSCode / 桌面 GUI 的进程边界（Agent Server / Gateway / stdio）方案。
 - [`security.md`](./security.md)
 - [`permission-system.md`](./permission-system.md)
 - [`audit-log.md`](./audit-log.md)
