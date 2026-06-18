@@ -227,6 +227,21 @@
 
 ---
 
+## Story 8c — Agent Server / UI Gateway（5 条）
+
+> 主验收入口为 `tests/serve_stdio_e2e.rs`、`tests/serve_multi_session.rs`、`tests/serve_ask_question_tests.rs`、`tests/serve_robustness_tests.rs`、`tests/serve_schema_fixture.rs`。
+> **验收**：以自动化为主；目标是把 `tomcat serve --stdio` 的协议、并发、审批回环、错误模型与 schema 漂移锁住，供 IDE / GUI 宿主稳定集成。
+
+| 编号 | 验收 | 用例名 | 用户意图 | 操作序列 | 必须断言 |
+| ---- | ---- | ------ | -------- | -------- | -------- |
+| E2E-CLI-096 | 自动 | `serve_stdio_user_roundtrip_e2e` | IDE/GUI 父进程以 stdio 启动 `tomcat serve` 并完成一次基础问答回合 | spawn `tomcat serve --stdio` → `initialize` → `prompt` → EOF | `initialize` 回 `protocolVersion=1`；stdout 全为 NDJSON；`prompt` 至少产生 `agent_start/message_update/agent_end`；EOF 退出码为 0 |
+| E2E-CLI-097 | 自动 | `serve_multi_session_concurrency_and_isolation` | 宿主同时驱动两个不同 `sessionId`，确认跨会话真并发且事件不串台 | `initialize` → `new_session` → 对 `s1/s2` 并发 `prompt` | 两个会话都收到各自 `agent_start/agent_end`；快会话可先于慢会话收敛；所有事件的 `sessionId` 与目标会话一致 |
+| E2E-CLI-098 | 自动 | `serve_same_session_is_busy_until_turn_finishes` | 宿主在同一会话未收敛时再次 `prompt`，应拿到明确 `busy` 语义 | 单会话 `prompt`（慢响应）→ 立刻第二次 `prompt` 同 `sessionId` | 第二条命令收到 `response{success:false,error:"busy"}`；首轮仍正常收敛为 `agent_end` |
+| E2E-CLI-099 | 自动 | `serve_ask_question_roundtrip_resumes_turn`；`serve_ask_question_cancel_roundtrip_does_not_hang` | 宿主收到 `ask_question` 控制请求后，能走回答 / 取消两条回环并让 turn 正常收口 | LLM 首轮返回 `ask_question` tool call → 宿主回 `control_response` 或 `control_cancel` → 继续下轮 LLM | `control_request{subtype=ask_question}` 含稳定 `requestId`；回答/取消都能触发后续 LLM 请求并最终收敛到 `agent_end`，不得卡死 |
+| E2E-CLI-100 | 自动 | `serve_parse_error_does_not_break_following_initialize`；`serve_eof_exits_cleanly`；`serve_print_schema_matches_fixture` | 宿主面对坏输入、EOF 与 schema 导出时获得可恢复且可审计的行为 | 发送坏行 → 再 `initialize`；或直接 EOF；或执行 `serve --print-schema` | 坏行返回结构化 `parse_error` 且不打断后续初始化；EOF 干净退出无 panic；`serve.schema.json` / `serve.d.ts` 与 committed fixture 无漂移 |
+
+---
+
 ## Story 8b — 长生命周期 VM 与有状态插件（5 条）
 
 > 主验收入口为 `tests/quickjs_e2e_tests.rs`、`tests/long_lived_vm_tests.rs` 与 `src/ext/plugin/tests/suite_test.rs`。

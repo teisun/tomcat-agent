@@ -686,7 +686,8 @@ async fn runtime_session_vm_survives_idle_beyond_call_timeout() {
     .await
     .expect("idle session teardown should not hang")
     .expect("end idle web search session");
-    let second = second_result.expect("second search should still succeed after idle timeout budget passes");
+    let second =
+        second_result.expect("second search should still succeed after idle timeout budget passes");
     assert_eq!(second.backend, "tavily");
     assert!(
         !second.hits.is_empty(),
@@ -973,8 +974,11 @@ async fn runtime_auto_timeout_falls_back_to_brave_after_tavily_timeout() {
         .resolve("api.search.brave.com", brave.addr())
         .build()
         .expect("build timeout fallback client");
-    let harness =
-        build_runtime_with_builtin_plugin_without_mimo_and_fetch_client(cfg, None, Some(fetch_client));
+    let harness = build_runtime_with_builtin_plugin_without_mimo_and_fetch_client(
+        cfg,
+        None,
+        Some(fetch_client),
+    );
     let start = std::time::Instant::now();
     let search_result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -1538,7 +1542,8 @@ fn build_runtime_with_builtin_plugin_and_fetch_client_with_patch(
     let plugin_root = install_builtin_web_search_plugin(temp.path());
     if let Some(snippet) = patch_main_js {
         let main_js = plugin_root.join("main.js");
-        let mut script = std::fs::read_to_string(&main_js).expect("read builtin web_search main.js");
+        let mut script =
+            std::fs::read_to_string(&main_js).expect("read builtin web_search main.js");
         script.push_str(snippet);
         std::fs::write(&main_js, script).expect("patch builtin web_search main.js");
     }
@@ -1599,9 +1604,8 @@ fn build_production_web_search_harness(
     let cwd_guard = common::CwdGuard::set(workspace.path());
     config.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
     config.llm.api_key_env = Some(env_key.to_string());
-    let (runtime, ctx) =
-        tomcat::api::cli::build_runtime_and_context(&config, SessionMode::Claw)
-            .expect("chat context should be created with production runtime ordering");
+    let (runtime, ctx) = tomcat::api::cli::build_runtime_and_context(&config, SessionMode::Claw)
+        .expect("chat context should be created with production runtime ordering");
     ProductionWebSearchHarness {
         _runtime: Some(runtime),
         ctx: Some(ctx),

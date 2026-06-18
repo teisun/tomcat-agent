@@ -971,9 +971,10 @@ async fn explicit_plugin_backend_timeout_returns_tool_error() {
 
 #[tokio::test]
 async fn explicit_plugin_backend_runtime_error_returns_original_detail() {
-    let invoker = RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::PluginRuntime {
-        detail: "plugin_backend_error (backend=mimo): synthetic runtime failure".to_string(),
-    })]);
+    let invoker =
+        RecordingPluginInvoker::with_responses(vec![Err(BackendFailure::PluginRuntime {
+            detail: "plugin_backend_error (backend=mimo): synthetic runtime failure".to_string(),
+        })]);
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "mimo".into();

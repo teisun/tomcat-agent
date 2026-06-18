@@ -1,0 +1,707 @@
+{
+  "serve_command": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ServeCommand",
+    "oneOf": [
+      {
+        "type": "object",
+        "required": [
+          "text",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "prompt"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "text",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "steer"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "text",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "follow_up"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "get_state"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "model",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_model"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "params": {
+            "default": {},
+            "allOf": [
+              {
+                "$ref": "#/definitions/NewSessionParams"
+              }
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "new_session"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "sessionId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "switch_session"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "params": {
+            "default": {},
+            "allOf": [
+              {
+                "$ref": "#/definitions/GetMessagesParams"
+              }
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "get_messages"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "close_session"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "list_sessions"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "interrupt"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "requestId",
+          "subtype",
+          "type"
+        ],
+        "properties": {
+          "payload": true,
+          "requestId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subtype": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "control_request"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "requestId",
+          "type"
+        ],
+        "properties": {
+          "payload": true,
+          "requestId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "control_response"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "requestId",
+          "type"
+        ],
+        "properties": {
+          "payload": true,
+          "requestId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "control_cancel"
+            ]
+          }
+        }
+      }
+    ],
+    "definitions": {
+      "GetMessagesParams": {
+        "type": "object",
+        "properties": {
+          "lastNTurns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint",
+            "minimum": 0.0
+          }
+        }
+      },
+      "NewSessionParams": {
+        "type": "object",
+        "properties": {
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ServeSessionMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ServeSessionMode": {
+        "type": "string",
+        "enum": [
+          "code",
+          "claw"
+        ]
+      }
+    }
+  },
+  "control_frame": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ControlFrame",
+    "oneOf": [
+      {
+        "type": "object",
+        "required": [
+          "requestId",
+          "subtype",
+          "type"
+        ],
+        "properties": {
+          "payload": true,
+          "requestId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subtype": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "control_request"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "requestId",
+          "type"
+        ],
+        "properties": {
+          "payload": true,
+          "requestId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "control_response"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "requestId",
+          "type"
+        ],
+        "properties": {
+          "payload": true,
+          "requestId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "control_cancel"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "response_frame": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ResponseFrame",
+    "type": "object",
+    "required": [
+      "success",
+      "type"
+    ],
+    "properties": {
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "payload": true,
+      "sessionId": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "success": {
+        "type": "boolean"
+      },
+      "type": {
+        "type": "string"
+      }
+    }
+  },
+  "out_frame": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "OutFrame",
+    "anyOf": [
+      {
+        "$ref": "#/definitions/ResponseFrame"
+      },
+      {
+        "$ref": "#/definitions/ControlFrame"
+      },
+      true
+    ],
+    "definitions": {
+      "ControlFrame": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "requestId",
+              "subtype",
+              "type"
+            ],
+            "properties": {
+              "payload": true,
+              "requestId": {
+                "type": "string"
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "subtype": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "control_request"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "requestId",
+              "type"
+            ],
+            "properties": {
+              "payload": true,
+              "requestId": {
+                "type": "string"
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "control_response"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "requestId",
+              "type"
+            ],
+            "properties": {
+              "payload": true,
+              "requestId": {
+                "type": "string"
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "control_cancel"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "ResponseFrame": {
+        "type": "object",
+        "required": [
+          "success",
+          "type"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payload": true,
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

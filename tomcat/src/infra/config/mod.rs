@@ -40,8 +40,9 @@ pub use types::{
 pub use types::{AskQuestionConfig, PlanConfig, ReviewerConfig, TodosConfig};
 #[allow(unused_imports)]
 pub use types::{
-    ToolsBashConfig, ToolsConfig, ToolsReadConfig, ToolsWebFetchConfig, ToolsWebSearchConfig,
-    ToolsWriteConfig, DEFAULT_SKILLS_MAX_DESCRIPTION_CHARS, DEFAULT_SKILLS_MAX_SKILLS,
+    ServeConfig, ServeTransport, ToolsBashConfig, ToolsConfig, ToolsReadConfig,
+    ToolsWebFetchConfig, ToolsWebSearchConfig, ToolsWriteConfig,
+    DEFAULT_SKILLS_MAX_DESCRIPTION_CHARS, DEFAULT_SKILLS_MAX_SKILLS,
     DEFAULT_SKILLS_PROMPT_BUDGET_FLOOR_CHARS, DEFAULT_SKILLS_PROMPT_BUDGET_PCT,
     DEFAULT_SKILLS_SYSTEM_ENABLED, DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS,
     DEFAULT_TOOLS_BASH_TIMEOUT_MS, DEFAULT_TOOLS_READ_MAX_BYTES,

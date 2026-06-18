@@ -59,7 +59,10 @@ fn build_runtime_and_context_constructs_chat_context_with_tokio_handle() {
     let (_rt, ctx) =
         build_runtime_and_context(&cfg, SessionMode::Claw).expect("build runtime and context");
     assert!(
-        ctx.scope_services.scope_container.dispatcher.has_tokio_handle(),
+        ctx.scope_services
+            .scope_container
+            .dispatcher
+            .has_tokio_handle(),
         "shared builder should construct ChatContext within rt.enter() so async hostcall can spawn"
     );
 

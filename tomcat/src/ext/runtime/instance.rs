@@ -631,7 +631,7 @@ globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
                 if request["module"] == "__session" && request["method"] == "waitForEvent" {
                     std::thread::sleep(std::time::Duration::from_millis(30));
                     return Ok(
-                        serde_json::json!({ "ok": true, "data": { "type": "__tick" } }).to_string()
+                        serde_json::json!({ "ok": true, "data": { "type": "__tick" } }).to_string(),
                     );
                 }
                 Ok(serde_json::json!({ "ok": true, "data": null }).to_string())

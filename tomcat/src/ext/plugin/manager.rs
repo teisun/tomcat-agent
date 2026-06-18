@@ -685,10 +685,8 @@ impl PluginManager {
             let _ = handle.shutdown().await;
         }
 
-        let mut instance_ids: BTreeSet<String> = removed
-            .iter()
-            .map(|(key, _)| key.to_string())
-            .collect();
+        let mut instance_ids: BTreeSet<String> =
+            removed.iter().map(|(key, _)| key.to_string()).collect();
 
         if let Some(dispatcher) = self.host_dispatcher.read().clone() {
             instance_ids.extend(dispatcher.session_instance_ids(session_id));

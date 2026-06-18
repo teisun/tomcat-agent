@@ -183,6 +183,8 @@ pub struct AgentHandle {
 - `AgentHandle` 字段**严格收敛**为：`session_id`、`parent_session_id`、`spawn_depth`、`abort_signal`，（可选 Phase 3+ `subagent_type` / `role` 镜像供 `tool_exec` 守卫读）。**不**加入 `AgentLoop`、`messages`、`tool_state` 等执行面字段——这些数据要么在 `AgentLoop` 栈上、要么在 `ContextState` 里。
 - 子 loop 在 `AgentRegistry` 里登记的 `abort_signal` **与子 loop 内部使用的是同一个 `Arc<AtomicBool>`**——`CascadeAbort` 在表上一次 `store(true)`，reasoning 间隙的子 loop 就能看到。
 
+> 导航：本节的 `ChatContextRegistry` 在 `tomcat serve --stdio` 里的实际多会话 dispatcher / `sessionId` 路由 / writer demux 落地，见 [`agent-server-and-ui-gateway.md`](./agent-server-and-ui-gateway.md)。
+
 **说人话**：`ChatContextRegistry` 是「楼层档案」（哪间聊天室是谁的）；`AgentRegistry` 是「访客登记处」（谁正在干活、急停按钮在哪）。两张表互不掺和，但要靠 `ChatContext.root_session_id` 把彼此串起来——见 [`plan-runtime.md` §6.4](./plan-runtime.md#64-chatcontext-持有关系)。
 
 ### 14.3.3 AgentLoopConfig 扩展

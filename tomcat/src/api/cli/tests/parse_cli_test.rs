@@ -188,6 +188,19 @@ fn cli_parse_code_resume() {
 }
 
 #[test]
+fn cli_parse_serve_stdio_and_print_schema() {
+    let cli = Cli::try_parse_from(["tomcat", "serve", "--stdio", "--print-schema"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Serve {
+            stdio: true,
+            ws: false,
+            print_schema: true
+        })
+    ));
+}
+
+#[test]
 fn cli_parse_chat_alias_resume() {
     let cli = Cli::try_parse_from(["tomcat", "chat", "--resume"]).unwrap();
     assert!(matches!(cli.command, Some(Commands::Chat { resume: true })));

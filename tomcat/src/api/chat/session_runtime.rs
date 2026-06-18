@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 
 use parking_lot::{Mutex, RwLock};
@@ -70,6 +70,7 @@ pub struct SessionRuntime {
     pub session_grants: crate::core::permission::SessionGrants,
     pub bash_task_registry: Arc<BashTaskRegistry>,
     pub follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>>,
+    pub steering_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>>,
     pub completion_routes: BackgroundCompletionRoutes,
     pub delivered_completion: Arc<Mutex<HashSet<BashTaskId>>>,
     pub completion_subscriber_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -78,6 +79,7 @@ pub struct SessionRuntime {
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
     pub todos_runtime: Arc<plan_runtime::todo_runtime::TodosRuntime>,
     pub plan_runtime: Arc<plan_runtime::PlanRuntime>,
+    pub suppress_cli_output: bool,
 }
 
 pub type SessionRuntimeRegistry = Arc<Mutex<HashMap<String, Arc<SessionRuntime>>>>;

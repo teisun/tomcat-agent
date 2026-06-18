@@ -19,7 +19,6 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   session_concurrency_tests
   plugin_tests
   llm_tests
-  openai_responses_integration_tests
   context_management_tests
   plan_runtime_integration_tests
   plan_e2e_with_mock_llm_tests
@@ -32,13 +31,17 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
 TOMCAT_INTEGRATION_SERIAL_TESTS=(
   cli_tests
   checkpoint_cli_e2e
-  openai_files_integration_tests
   resume_hydration_cli_e2e
   quickjs_e2e_tests
   long_lived_vm_tests
   hostcall_tests
   primitives_tools_tests
   tool_catalog_doc
+  serve_multi_session
+  serve_ask_question_tests
+  serve_schema_fixture
+  serve_robustness_tests
+  serve_stdio_e2e
 )
 
 # 真 LLM E2E（需 OPENAI_API_KEY；缺 key 时 fixture panic）。
@@ -49,6 +52,8 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
 # run-integration-tests.sh 显式跳过本组，用户/CI 需要时按需 `cargo test --test plan_real_llm_*` 单独触发。
 TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
   current_tail_guard_real_llm_tests
+  openai_files_integration_tests
+  openai_responses_integration_tests
   plan_real_llm_inprocess_tests
   plan_real_llm_cli_e2e
   reasoning_continuity_real_llm_tests

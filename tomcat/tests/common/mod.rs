@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod serve;
+
 use rcgen::generate_simple_self_signed;
 use std::collections::HashMap;
 use std::path::Path;

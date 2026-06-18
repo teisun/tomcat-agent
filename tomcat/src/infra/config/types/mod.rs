@@ -64,4 +64,7 @@ pub struct AppConfig {
     /// `tomcat chat` 启动像素风吉祥物 Splash 配置。
     #[serde(default)]
     pub splash: SplashConfig,
+    /// `tomcat serve --stdio` 子进程网关配置。
+    #[serde(default)]
+    pub serve: ServeConfig,
 }

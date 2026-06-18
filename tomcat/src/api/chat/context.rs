@@ -50,6 +50,8 @@ pub struct ChatContextOverrides {
     pub ask_question_panel: Option<Arc<dyn panels::AskQuestionPanel>>,
     pub fetch_http_client: Option<reqwest::Client>,
     pub skip_session_plugin_activation: bool,
+    pub suppress_cli_output: bool,
+    pub session_cwd_override: Option<std::path::PathBuf>,
 }
 
 impl ChatContextOverrides {
@@ -65,6 +67,16 @@ impl ChatContextOverrides {
 
     pub fn skip_session_plugin_activation(mut self) -> Self {
         self.skip_session_plugin_activation = true;
+        self
+    }
+
+    pub fn suppress_cli_output(mut self) -> Self {
+        self.suppress_cli_output = true;
+        self
+    }
+
+    pub fn with_session_cwd_override(mut self, cwd: std::path::PathBuf) -> Self {
+        self.session_cwd_override = Some(cwd);
         self
     }
 }
@@ -292,7 +304,9 @@ impl ChatContext {
 
         let sessions_path = resolve_sessions_dir(&config)?;
         std::fs::create_dir_all(&sessions_path).map_err(AppError::Io)?;
-        let cwd_for_key = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd_for_key = overrides.session_cwd_override.clone().unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
         let session_key = session_key_for_agent(&config.agent.id, mode, &cwd_for_key);
         let session = SessionManager::new_scoped(sessions_path, session_key);
         let message_append_sink: Arc<dyn crate::core::session::manager::MessageAppendSink> =
@@ -431,65 +445,66 @@ impl ChatContext {
         }
         if !overrides.skip_session_plugin_activation {
             if let Some(plugin_manager_ref) = plugin_manager.as_ref() {
-            for plugin_id in plugin_manager_ref.list_loaded() {
-                let Some(info) = plugin_manager_ref.get_plugin(&plugin_id) else {
-                    continue;
-                };
-                if info.manifest.tools.is_empty() && info.loaded_at == 0 {
-                    if let Err(err) = plugin_manager_ref.load_plugin(&info.plugin_root) {
-                        warn!(
-                            plugin = %plugin_id,
-                            path = %info.plugin_root.display(),
-                            error = %err,
-                            "scope activation failed to pre-register legacy dynamic plugin"
-                        );
+                for plugin_id in plugin_manager_ref.list_loaded() {
+                    let Some(info) = plugin_manager_ref.get_plugin(&plugin_id) else {
+                        continue;
+                    };
+                    if info.manifest.tools.is_empty() && info.loaded_at == 0 {
+                        if let Err(err) = plugin_manager_ref.load_plugin(&info.plugin_root) {
+                            warn!(
+                                plugin = %plugin_id,
+                                path = %info.plugin_root.display(),
+                                error = %err,
+                                "scope activation failed to pre-register legacy dynamic plugin"
+                            );
+                        }
+                        if info.manifest.activation == crate::ext::PluginActivation::Lazy {
+                            continue;
+                        }
                     }
-                    if info.manifest.activation == crate::ext::PluginActivation::Lazy {
+                    if info.manifest.activation != crate::ext::PluginActivation::Session {
                         continue;
                     }
-                }
-                if info.manifest.activation != crate::ext::PluginActivation::Session {
-                    continue;
-                }
-                if plugin_manager_ref.has_session_vm(&current_session_entry.session_id, &plugin_id)
-                {
-                    continue;
-                }
+                    if plugin_manager_ref
+                        .has_session_vm(&current_session_entry.session_id, &plugin_id)
+                    {
+                        continue;
+                    }
 
-                let pm = Arc::clone(plugin_manager_ref);
-                let session_id = current_session_entry.session_id.clone();
-                let plugin_id_for_start = plugin_id.clone();
-                if let Err(err) = block_on_plugin_future(async move {
-                    pm.start_session_vm(&session_id, &plugin_id_for_start)
-                        .await
-                        .map(|_| ())
-                }) {
-                    warn!(
-                        plugin = %plugin_id,
-                        session = %current_session_entry.session_id,
-                        error = %err,
-                        "scope activation failed to prestart session plugin"
-                    );
-                    continue;
-                }
-                if let Err(err) = plugin_manager_ref.dispatch_session_event(
-                    &current_session_entry.session_id,
-                    &plugin_id,
-                    crate::infra::wire::vm::WIRE_SESSION_START,
-                    serde_json::json!({}),
-                    serde_json::json!({
-                        "sessionId": current_session_entry.session_id.clone(),
-                    }),
-                ) {
-                    warn!(
-                        plugin = %plugin_id,
-                        session = %current_session_entry.session_id,
-                        error = %err,
-                        "scope activation failed to deliver session_start"
-                    );
+                    let pm = Arc::clone(plugin_manager_ref);
+                    let session_id = current_session_entry.session_id.clone();
+                    let plugin_id_for_start = plugin_id.clone();
+                    if let Err(err) = block_on_plugin_future(async move {
+                        pm.start_session_vm(&session_id, &plugin_id_for_start)
+                            .await
+                            .map(|_| ())
+                    }) {
+                        warn!(
+                            plugin = %plugin_id,
+                            session = %current_session_entry.session_id,
+                            error = %err,
+                            "scope activation failed to prestart session plugin"
+                        );
+                        continue;
+                    }
+                    if let Err(err) = plugin_manager_ref.dispatch_session_event(
+                        &current_session_entry.session_id,
+                        &plugin_id,
+                        crate::infra::wire::vm::WIRE_SESSION_START,
+                        serde_json::json!({}),
+                        serde_json::json!({
+                            "sessionId": current_session_entry.session_id.clone(),
+                        }),
+                    ) {
+                        warn!(
+                            plugin = %plugin_id,
+                            session = %current_session_entry.session_id,
+                            error = %err,
+                            "scope activation failed to deliver session_start"
+                        );
+                    }
                 }
             }
-        }
         }
         let cancel_token = Arc::new(Mutex::new(CancellationToken::new()));
         let last_interrupt_at = Arc::new(Mutex::new(None));
@@ -510,6 +525,8 @@ impl ChatContext {
             ),
         );
         let follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let steering_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
             Arc::new(Mutex::new(Vec::new()));
         let completion_routes: crate::core::agent_loop::BackgroundCompletionRoutes =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
@@ -662,6 +679,7 @@ impl ChatContext {
             session_grants: session_grants.clone(),
             bash_task_registry: bash_task_registry.clone(),
             follow_up_queue: follow_up_queue.clone(),
+            steering_queue: steering_queue.clone(),
             completion_routes: completion_routes.clone(),
             delivered_completion: delivered_completion.clone(),
             completion_subscriber_handle: completion_subscriber_handle.clone(),
@@ -670,6 +688,7 @@ impl ChatContext {
             openai_files_runtime: openai_files_runtime.clone(),
             todos_runtime: todos_runtime.clone(),
             plan_runtime: plan_runtime.clone(),
+            suppress_cli_output: overrides.suppress_cli_output,
         };
 
         Ok(Self {

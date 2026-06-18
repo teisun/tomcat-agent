@@ -3,5 +3,6 @@
 pub mod chat;
 pub mod cli;
 pub mod render;
+pub mod serve;
 
 pub use cli::run_cli;

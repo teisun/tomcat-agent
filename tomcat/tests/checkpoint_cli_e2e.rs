@@ -656,9 +656,8 @@ fn test_idle_readline_eof_with_loaded_lazy_plugin_avoids_cleanup_warning() {
         return;
     }
     common::setup_logging();
-    let _span =
-        info_span!("test_idle_readline_eof_with_loaded_lazy_plugin_avoids_cleanup_warning")
-            .entered();
+    let _span = info_span!("test_idle_readline_eof_with_loaded_lazy_plugin_avoids_cleanup_warning")
+        .entered();
     let fx = setup_fixture();
     let config_path = fx.home_path.join(".tomcat").join("tomcat.config.toml");
     let mut cfg = load_config_toml_file(&config_path).expect("config should load");

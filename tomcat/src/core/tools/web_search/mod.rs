@@ -157,7 +157,9 @@ impl WebSearchRuntime {
                 Err(failure) if failure.is_retryable_unavailable() => {
                     extend_unique(&mut warnings, failure.auto_fallback_warnings("auto", None));
                 }
-                Err(failure) => return Err(log_hard_failure("auto", failure.to_tool_error("auto"))),
+                Err(failure) => {
+                    return Err(log_hard_failure("auto", failure.to_tool_error("auto")))
+                }
             }
         }
 

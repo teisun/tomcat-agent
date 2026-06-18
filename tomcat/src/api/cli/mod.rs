@@ -154,6 +154,18 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         resume: bool,
     },
+    /// 以 stdio 协议暴露多会话 Agent Server 给 IDE / GUI
+    Serve {
+        /// 显式选择 stdio 传输（Phase 1 主路径）
+        #[arg(long, default_value_t = false, conflicts_with = "ws")]
+        stdio: bool,
+        /// 预留给 Phase 2 的 WebSocket 传输
+        #[arg(long, default_value_t = false, conflicts_with = "stdio")]
+        ws: bool,
+        /// 导出 serve 协议 schema 工件并退出
+        #[arg(long = "print-schema", default_value_t = false)]
+        print_schema: bool,
+    },
     /// 兼容旧命令；等价于 `tomcat code`
     #[command(hide = true)]
     Chat {
@@ -382,7 +394,10 @@ fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
             matches!(sub, WorkspaceSub::Add { .. } | WorkspaceSub::Remove { .. })
         }
         Commands::Pathrules { sub } => matches!(sub, PathRulesSub::Add { .. }),
-        Commands::Claw { .. } | Commands::Code { .. } | Commands::Chat { .. } => true,
+        Commands::Claw { .. }
+        | Commands::Code { .. }
+        | Commands::Serve { .. }
+        | Commands::Chat { .. } => true,
     }
 }
 
@@ -476,6 +491,18 @@ pub fn run_cli() -> Result<(), AppError> {
         Commands::Skill { sub } => run_skill(sub, &cfg),
         Commands::Claw { resume } => run_claw(resume, &cfg),
         Commands::Code { resume } => run_code(resume, &cfg),
+        Commands::Serve {
+            stdio,
+            ws,
+            print_schema,
+        } => crate::api::serve::run_serve(
+            crate::api::serve::ServeCliArgs {
+                stdio,
+                ws,
+                print_schema,
+            },
+            &cfg,
+        ),
         Commands::Chat { resume } => run_code(resume, &cfg),
     }
 }

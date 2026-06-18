@@ -531,7 +531,11 @@ fn production_chat_context_from_work_dir_with_overrides(
         overrides,
     )
     .expect("chat context should be created with production runtime ordering");
-    let session_key = ctx.session_runtime.session.current_session_key().to_string();
+    let session_key = ctx
+        .session_runtime
+        .session
+        .current_session_key()
+        .to_string();
     ctx.session_runtime
         .session
         .create_session(&session_key, None)
@@ -5365,10 +5369,9 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
 #[serial(env_lock)]
 async fn test_chat_path_auto_web_search_does_not_fallback_past_shadowed_plugin_slot() {
     common::setup_logging();
-    let _span = info_span!(
-        "test_chat_path_auto_web_search_does_not_fallback_past_shadowed_plugin_slot"
-    )
-    .entered();
+    let _span =
+        info_span!("test_chat_path_auto_web_search_does_not_fallback_past_shadowed_plugin_slot")
+            .entered();
 
     let server = common::HttpsTestServer::start(
         "api.tavily.com",
@@ -5599,10 +5602,8 @@ async fn test_chat_path_surfaces_web_search_tool_error_without_vm_timeout() {
 #[serial(env_lock)]
 async fn test_chat_path_surfaces_plugin_runtime_error_with_original_detail() {
     common::setup_logging();
-    let _span = info_span!(
-        "test_chat_path_surfaces_plugin_runtime_error_with_original_detail"
-    )
-    .entered();
+    let _span =
+        info_span!("test_chat_path_surfaces_plugin_runtime_error_with_original_detail").entered();
 
     const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_PLUGIN_RUNTIME_CHAT_KEY";
     let _env = EnvGuard::set_many(&[

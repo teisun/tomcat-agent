@@ -48,7 +48,7 @@
 | **T2-P1-015** | 会话模式与多会话并发（claw/code + SessionRuntime） | `DONE` | Jerry | `feature/optimize`                     | [tasks/T2-P1-015.md](./tasks/T2-P1-015.md) |
 | **T2-P1-016** | 插件系统（rquickjs 迁移）                           | `DONE` | Tom   | `feature/plugin-function-surface`      | [tasks/T2-P1-016.md](./tasks/T2-P1-016.md) |
 | **T2-P1-017** | PackageManager（统一包安装）                        | `DONE` | Tom   | `feature/plugin-function-surface`      | [tasks/T2-P1-017.md](./tasks/T2-P1-017.md) |
-| **T2-P1-018** | Agent Server 与 UI Gateway                    | `TODO` | —     | `feature/agent-server-ui-gateway`      | [tasks/T2-P1-018.md](./tasks/T2-P1-018.md) |
+| **T2-P1-018** | Agent Server 与 UI Gateway                    | `BLOCKED` | Spike | `feature/agent-server-ui-gateway`      | [tasks/T2-P1-018.md](./tasks/T2-P1-018.md) |
 
 ## 5. 开放任务依赖（概览）
 

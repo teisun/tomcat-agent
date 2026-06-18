@@ -54,8 +54,8 @@ pub use infra::{
     AuditRecorder, AuditStore, CheckpointConfig, ContextConfig, DefaultEventBus, EventBus,
     EventContext, EventListenerId, ExtensionEvent, FileAuditRecorder, HostcallAuditEntry,
     LlmConfig, LlmError, LlmErrorStage, LogConfig, PluginLifecycleAuditEntry, PreflightConfig,
-    PrimitiveAuditEntry, PrimitiveConfig, ResumeHydrationMode, SecurityConfig, SessionConfig,
-    ToolAuditEntry, TracingAuditRecorder, WorkspaceConfig, BRAND_ID, CLI_NAME,
-    DEFAULT_CONFIG_FILENAME, DEFAULT_CONFIG_PATH, DEFAULT_LLM_MODEL, DEFAULT_WORK_DIR, ENV_PREFIX,
-    INTERNAL_STABLE_ID, PRODUCT_NAME, QUICKJS_MODULES_PATH_ENV,
+    PrimitiveAuditEntry, PrimitiveConfig, ResumeHydrationMode, SecurityConfig, ServeConfig,
+    ServeTransport, SessionConfig, ToolAuditEntry, TracingAuditRecorder, WorkspaceConfig, BRAND_ID,
+    CLI_NAME, DEFAULT_CONFIG_FILENAME, DEFAULT_CONFIG_PATH, DEFAULT_LLM_MODEL, DEFAULT_WORK_DIR,
+    ENV_PREFIX, INTERNAL_STABLE_ID, PRODUCT_NAME, QUICKJS_MODULES_PATH_ENV,
 };

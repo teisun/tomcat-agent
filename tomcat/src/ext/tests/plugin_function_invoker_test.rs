@@ -1323,8 +1323,16 @@ async fn net_fetch_hostcall_respects_concurrency_limit() {
 
     let first = first.await.expect("join first");
     let second = second.await.expect("join second");
-    assert!(first.ok, "first request should succeed, got {:?}", first.error);
-    assert!(second.ok, "second request should succeed, got {:?}", second.error);
+    assert!(
+        first.ok,
+        "first request should succeed, got {:?}",
+        first.error
+    );
+    assert!(
+        second.ok,
+        "second request should succeed, got {:?}",
+        second.error
+    );
     assert_eq!(
         server.max_concurrency(),
         1,

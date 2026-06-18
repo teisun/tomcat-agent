@@ -2,6 +2,55 @@ use serde::{Deserialize, Serialize};
 
 use super::core::default_true;
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ServeTransport {
+    #[default]
+    Stdio,
+    Ws,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServeConfig {
+    #[serde(default)]
+    pub transport: ServeTransport,
+    #[serde(default = "default_serve_max_sessions")]
+    pub max_sessions: usize,
+    #[serde(default)]
+    pub session_idle_unload_ms: u32,
+    #[serde(default = "default_serve_delta_coalesce_ms")]
+    pub delta_coalesce_ms: u32,
+    #[serde(default = "default_serve_max_buffered_frames")]
+    pub max_buffered_frames: usize,
+    #[serde(default)]
+    pub schema_out_dir: Option<String>,
+}
+
+fn default_serve_max_sessions() -> usize {
+    crate::core::agent_registry::MAX_CONCURRENT_AGENTS as usize
+}
+
+fn default_serve_delta_coalesce_ms() -> u32 {
+    25
+}
+
+fn default_serve_max_buffered_frames() -> usize {
+    64
+}
+
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self {
+            transport: ServeTransport::default(),
+            max_sessions: default_serve_max_sessions(),
+            session_idle_unload_ms: 0,
+            delta_coalesce_ms: default_serve_delta_coalesce_ms(),
+            max_buffered_frames: default_serve_max_buffered_frames(),
+            schema_out_dir: None,
+        }
+    }
+}
+
 /// `[plan]` 子表（T2-P1-002 PR-PLA/PLB）：PLAN 模式运行时全局参数。
 ///
 /// 设计口径：仅放「锁等待 / 自动 checkpoint 开关」这类**运行时与磁盘资源**相关的全局

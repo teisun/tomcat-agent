@@ -72,15 +72,12 @@ fn classify_plugin_invocation_error(
     if err_text.contains("pi.fetch request timed out") {
         return BackendFailure::Timeout;
     }
-    let detail = format!(
-        "web_search plugin backend `{backend}` via `{plugin_id}` failed: {err_text}"
-    );
+    let detail =
+        format!("web_search plugin backend `{backend}` via `{plugin_id}` failed: {err_text}");
     if looks_like_plugin_runtime_error(err_text) {
         return BackendFailure::PluginRuntime { detail };
     }
-    BackendFailure::Transport {
-        detail,
-    }
+    BackendFailure::Transport { detail }
 }
 
 fn looks_like_plugin_runtime_error(err_text: &str) -> bool {

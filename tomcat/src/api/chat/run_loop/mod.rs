@@ -81,7 +81,7 @@ async fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json::Value> {
     tools
 }
 
-async fn build_system_text(ctx: &ChatContext, context_budget_chars: usize) -> String {
+pub(crate) async fn build_system_text(ctx: &ChatContext, context_budget_chars: usize) -> String {
     let skill_set = ctx.skill_set_snapshot();
     let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
     let plugin_tool_lines = match ctx.global_services.tool_registry.list_tools(None).await {
@@ -135,7 +135,7 @@ async fn build_system_text(ctx: &ChatContext, context_budget_chars: usize) -> St
     )
 }
 
-fn sync_context_state_system_prompt_len(
+pub(crate) fn sync_context_state_system_prompt_len(
     context_state: &mut crate::core::ContextState,
     old_len: usize,
     new_len: usize,
@@ -596,6 +596,7 @@ pub async fn run_chat_turn(
         return Ok(AgentRunOutcome::Failed(error));
     }
 
+    let render_cli_output = !ctx.session_runtime.suppress_cli_output;
     let renderer = Arc::new(Mutex::new(MarkdownRenderer::new()));
     let config = AgentLoopConfig {
         max_attempts: ctx.config.llm.agent_max_attempts,
@@ -639,6 +640,7 @@ pub async fn run_chat_turn(
     agent_loop = agent_loop.with_todos_runtime(ctx.session_runtime.todos_runtime.clone());
     agent_loop =
         agent_loop.with_shared_follow_up_queue(ctx.session_runtime.follow_up_queue.clone());
+    agent_loop = agent_loop.with_shared_steering_queue(ctx.session_runtime.steering_queue.clone());
     agent_loop = agent_loop.with_completion_routes(ctx.session_runtime.completion_routes.clone());
 
     let previous_state = std::mem::replace(
@@ -647,15 +649,19 @@ pub async fn run_chat_turn(
     );
     agent_loop.set_context_state(Some(previous_state));
 
-    let cli_turn_renderer = cli_turn_renderer::CliTurnRenderer::new(
-        Arc::clone(&renderer),
-        Arc::clone(&ctx.session_runtime.thinking_display),
-        Some(session_id.clone()),
-        ctx.config.llm.thinking.print_to_stderr,
-        ctx.config.llm.tool_cli_verbosity,
-    );
-    let listener_ids = cli_turn_renderer.register(&*ctx.global_services.event_bus);
-    let thinking_persist_listener_ids = if ctx.config.llm.thinking.persist {
+    let listener_ids = if render_cli_output {
+        let cli_turn_renderer = cli_turn_renderer::CliTurnRenderer::new(
+            Arc::clone(&renderer),
+            Arc::clone(&ctx.session_runtime.thinking_display),
+            Some(session_id.clone()),
+            ctx.config.llm.thinking.print_to_stderr,
+            ctx.config.llm.tool_cli_verbosity,
+        );
+        Some(cli_turn_renderer.register(&*ctx.global_services.event_bus))
+    } else {
+        None
+    };
+    let thinking_persist_listener_ids = if render_cli_output && ctx.config.llm.thinking.persist {
         let transcript_path = ctx
             .session_runtime
             .session
@@ -669,14 +675,16 @@ pub async fn run_chat_turn(
         None
     };
 
-    print!(
-        "\n{}",
-        agent_prompt_for_mode(
-            &ctx.config.agent.id,
-            &ctx.session_runtime.plan_runtime.mode()
-        )
-    );
-    io::stdout().flush().map_err(AppError::Io)?;
+    if render_cli_output {
+        print!(
+            "\n{}",
+            agent_prompt_for_mode(
+                &ctx.config.agent.id,
+                &ctx.session_runtime.plan_runtime.mode()
+            )
+        );
+        io::stdout().flush().map_err(AppError::Io)?;
+    }
 
     info!(
         target: "tomcat_chat_diag",
@@ -691,11 +699,18 @@ pub async fn run_chat_turn(
             ids,
         );
     }
-    cli_turn_renderer::CliTurnRenderer::unregister(&*ctx.global_services.event_bus, &listener_ids);
+    if let Some(listener_ids) = &listener_ids {
+        cli_turn_renderer::CliTurnRenderer::unregister(
+            &*ctx.global_services.event_bus,
+            listener_ids,
+        );
+    }
 
-    if let Some(remaining) = renderer.lock().flush() {
-        print!("{}", remaining);
-        let _ = io::stdout().flush();
+    if render_cli_output {
+        if let Some(remaining) = renderer.lock().flush() {
+            print!("{}", remaining);
+            let _ = io::stdout().flush();
+        }
     }
 
     let mut next_state = agent_loop.take_context_state().unwrap_or_else(|| {

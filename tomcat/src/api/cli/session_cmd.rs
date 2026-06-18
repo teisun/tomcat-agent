@@ -60,12 +60,7 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
                 &session_id,
                 "session_delete",
             );
-            cleanup_plugin_session_for_session(
-                cfg,
-                mode,
-                &session_id,
-                "session_delete",
-            );
+            cleanup_plugin_session_for_session(cfg, mode, &session_id, "session_delete");
             match mgr.delete_session(&session_id) {
                 Ok(()) => println!("已删除会话: {}", session_id),
                 Err(AppError::Config(_)) => println!("会话不存在: {}", session_id),
@@ -80,12 +75,7 @@ pub(crate) fn run_session(sub: SessionSub, cfg: &AppConfig) -> Result<(), AppErr
                 &session_id,
                 "session_archive",
             );
-            cleanup_plugin_session_for_session(
-                cfg,
-                mode,
-                &session_id,
-                "session_archive",
-            );
+            cleanup_plugin_session_for_session(cfg, mode, &session_id, "session_archive");
             match mgr.archive_session(&session_id) {
                 Ok(()) => println!("已归档会话: {}", session_id),
                 Err(AppError::Config(_)) => println!("会话不存在: {}", session_id),
@@ -218,7 +208,8 @@ fn cleanup_plugin_session_for_session(
     session_id: &str,
     reason: &str,
 ) {
-    let overrides = crate::api::chat::ChatContextOverrides::default().skip_session_plugin_activation();
+    let overrides =
+        crate::api::chat::ChatContextOverrides::default().skip_session_plugin_activation();
     let (rt, ctx) = match super::build_runtime_and_context_with_overrides(cfg, mode, overrides) {
         Ok(v) => v,
         Err(error) => {

@@ -140,6 +140,13 @@ impl AgentLoop {
         self
     }
 
+    /// serve / host 模式：注入 session 级共享 `steering_queue`，允许连接外部在当前
+    /// run 进行中把 steering 消息塞进下一次 attempt 的注入通道。
+    pub fn with_shared_steering_queue(mut self, queue: Arc<Mutex<Vec<ChatMessage>>>) -> Self {
+        self.steering_queue = queue;
+        self
+    }
+
     /// P1：注入 `ChatContext` 持有的 session 级 `completion_routes` 路由表。
     ///
     /// `task_output(block=true)` 路径据此做 claim-on-entry，并在 wake 时按

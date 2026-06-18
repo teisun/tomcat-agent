@@ -118,6 +118,11 @@ fn blocked_commands() -> Vec<Commands> {
         },
         Commands::Claw { resume: false },
         Commands::Code { resume: false },
+        Commands::Serve {
+            stdio: true,
+            ws: false,
+            print_schema: false,
+        },
         Commands::Chat { resume: false },
     ]
 }
