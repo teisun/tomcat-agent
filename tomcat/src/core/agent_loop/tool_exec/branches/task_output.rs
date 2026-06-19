@@ -298,6 +298,49 @@ mod tests {
     use super::*;
     use crate::infra::{wire, DefaultEventBus, EventBus, EventContext};
 
+    async fn wait_until_finished(
+        registry: &Arc<crate::core::tools::primitive::BashTaskRegistry>,
+        task_id: &str,
+    ) -> crate::core::tools::primitive::BashTaskOutputChunk {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let chunk = registry
+                .read_output(task_id, Some(0))
+                .await
+                .expect("read_output");
+            if chunk.finished {
+                return chunk;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "task {task_id} did not finish within 3s; last chunk={chunk:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    async fn wait_until_has_output(
+        registry: &Arc<crate::core::tools::primitive::BashTaskRegistry>,
+        task_id: &str,
+        since: u64,
+    ) -> crate::core::tools::primitive::BashTaskOutputChunk {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let chunk = registry
+                .read_output(task_id, Some(since))
+                .await
+                .expect("read_output");
+            if !chunk.content.is_empty() {
+                return chunk;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "task {task_id} produced no output within 3s from offset {since}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
     #[tokio::test]
     async fn finish_blocking_with_new_output_and_finished_marks_delivered() {
         use crate::core::tools::primitive::BashTaskRegistry;
@@ -309,7 +352,7 @@ mod tests {
             .await
             .expect("spawn");
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = wait_until_finished(&registry, &ticket.task_id).await;
 
         let (text, delivered) =
             finish_blocking_with(&registry, &ticket.task_id, 0, BlockingWakeKind::NewOutput)
@@ -336,11 +379,7 @@ mod tests {
             .await
             .expect("spawn");
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let first = registry
-            .read_output(&ticket.task_id, Some(0))
-            .await
-            .expect("read_output");
+        let first = wait_until_has_output(&registry, &ticket.task_id, 0).await;
         assert!(
             first.content.contains("SNAPSHOT_TIMEOUT"),
             "首个增量应包含 token，实际 {:?}",
@@ -382,7 +421,7 @@ mod tests {
             .await
             .expect("spawn");
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = wait_until_finished(&registry, &ticket.task_id).await;
         let (text, delivered) =
             finish_blocking_with(&registry, &ticket.task_id, 0, BlockingWakeKind::Timeout)
                 .await

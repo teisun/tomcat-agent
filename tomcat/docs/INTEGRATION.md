@@ -23,7 +23,7 @@
 - **合并范围**：用户指定合并 `feature/web-search` → `develop`；先在功能分支补 `web_search` merge-gap 修复（cache key 纳入 `allowed_domains` / `blocked_domains`、命中过滤拒任意 IP literal / 保留内网 hostname、`tool_exec` 成功路由与 chat-path E2E），并把 `web_fetch` / OpenSpec / 场景库对齐当前实现；随后 `git merge --no-ff` → `748683c`。对应 **T2-P1-012** / **T2-P1-013**。
 - **全量 review（编码规范 4 件套）**：`web_search/{cache,types,mod,tests}.rs`、`submodules_test.rs`、`cli_tests.rs`、`web_search.md`、`web_fetch.md`、`User_Stories.md`、`E2E_SCENARIO_LIBRARY.md`、`E2E_TEST_SPEC.md`、`INTEGRATION_TEST_SPEC.md` 全量复核：`web_search` 缓存命中现与配置域约束同键；hits 过滤现拒任意 IP literal 与保留内网 hostname；`web_fetch` 的 domain gate / DNS 解析型 SSRF 继续显式登记为后置残余风险；缺失的 `tool_exec` 成功路径与 chat 用户路径覆盖已补齐。
 - **门禁修复（非功能回归）**：首轮 `run-integration-tests.sh all` 暴露两条与 web 工具无关的 `current_tail_guard_runtime_test` HOME/env 竞争型 flaky；已在 `current_tail_guard_runtime_test.rs` 为两条 plan-path 用例补 `#[serial(env_lock)]`，并在 helper 中显式 `create_dir_all(parent)`，复跑后稳定通过。
-- **§4 全量验收（develop 侧复跑）**：`cargo build --release` / `cargo clippy --all-targets -- -D warnings` / `cargo test --lib` **1421 passed, 1 ignored** / `run-integration-tests.sh integration` 全绿（含 `cli_tests` **87 passed**、`web_search_tool_tests` **5 passed**、`web_fetch_tool_tests` **2 passed**）；显式 live smoke：`PI_LIVE_WEB_SEARCH=1 cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture` 与 `PI_LIVE_WEB_FETCH=1 cargo test --test web_fetch_tool_tests live_example_fetch_smoke -- --nocapture` 均通过。
+- **§4 全量验收（develop 侧复跑）**：`cargo build --release` / `cargo clippy --all-targets -- -D warnings` / `cargo test --lib` **1421 passed, 1 ignored** / `run-integration-tests.sh integration` 全绿（含 `cli_tests` **87 passed**、`web_search_tool_tests` **5 passed**、`web_fetch_tool_tests` **2 passed**）；显式 live smoke：在本机配置 Tavily key 后执行 `cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture`，以及 `PI_LIVE_WEB_FETCH=1 cargo test --test web_fetch_tool_tests live_example_fetch_smoke -- --nocapture`，均通过。
 - **结论**：`feature/web-search` 已合入 `develop`；`T2-P1-012` / `T2-P1-013` 已在任务索引中保留并置为 `DONE`。`web_fetch` 的 `PermissionGate::Domain` / DNS 解析型 SSRF 仍按文档记录为后置风险，不再与“已实现”口径混淆。未推送远端。
 
 ### 2026-06-04 | docs(tools): web_search 项目级 hosted 候选 + 看板/计划规范
@@ -185,7 +185,7 @@
 ### 2026-05-10 | T2-P0-015 OpenAI Files 上传管理进入集成前状态
 
 - **范围**：落地 `OpenAiFilesClient`（`upload/get/delete/list` + retry + `DELETE 404` 幂等）、`ChatMessageContentPart::{image_upload,file_upload}`、会话级双索引 cache（path/hash + inflight 单飞）、`read` inline/upload 决策注入、CLI/chat 退出 cleanup、`[llm.files] expires_after_seconds` 配置链路与文档同步。
-- **阶段 T（门禁）**：已跑关键单测/焦小测（openai_files 模块、tool_exec oversize 路由、chat/session cleanup、config 边界与 env 覆盖、provider lazy files client）；`openai_files_integration_tests` 已新增并完成编译（默认 `#[ignore]`，手动触发真实 API）。
+- **阶段 T（门禁）**：已跑关键单测/焦小测（openai_files 模块、tool_exec oversize 路由、chat/session cleanup、config 边界与 env 覆盖、provider lazy files client）；`openai_files_integration_tests` 已新增并完成编译（默认 `#[ignore]`，需 `PI_LIVE_OPENAI_FILES=1` 手动触发真实 API）。
 - **看板**：`TASK_BOARD_002` 中 `T2-P0-015` 更新为 `PENDING_INTEGRATION`（任务卡与总览同步）。
 
 ### 2026-05-08 | 架构文档 `llm-stream-events-cli-pipeline.md` 增补 §5.3
@@ -539,7 +539,7 @@ cargo run --bin gen-tool-catalog -p tomcat                → OK
 - [✓] **[P1]** 完成 `PR-WS-O`：实现 project-level hosted 候选模型发现、显式 `openai` / `auto` hosted 路径、`openai_server.rs` 归一化与 `Capabilities.web_search`
 - [✓] **[P1]** 完成 `PR-WS-W`：在 `normalize_hits` 落 SSRF / 私网 / loopback / 单段 host 拦截，以及 `allowed_domains` / `blocked_domains` 过滤
 - [✓] **[P1]** 已补 `tests/web_search_tool_tests.rs` 并登记 `scripts/test-groups.sh`
-- [✓] **[P1]** 本地验证通过：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`./scripts/run-integration-tests.sh lib`、`./scripts/run-integration-tests.sh integration`、`PI_LIVE_WEB_SEARCH=1 cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture`
+- [✓] **[P1]** 本地验证通过：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`./scripts/run-integration-tests.sh lib`、`./scripts/run-integration-tests.sh integration`、在本机配置 Tavily key 后执行 `cargo test --test web_search_tool_tests live_tavily_search_smoke -- --nocapture`
 - [✓] **[P1]** 方案复核整改：修正 catalog / tool-catalog 过期占位说明；`web_search.md` 对齐 hosted sidecar 落点；Brave/Serper 域名改写 warning、Tavily warning 命名统一；相关单测 / 集成测复绿
 - [✓] **[P1]** 已完成 `T2-P1-013` 当前批次：`web_fetch` 已注册 `url / prompt / format` schema，接入 catalog / `tool_exec` / chat runtime 注入链，并补 `missing runtime` 友好错误
 - [✓] **[P1]** 已完成 `web_fetch` 主链：`validate.rs` 的 URL 校验 / SSRF 守卫、`http -> https` 首跳升级、受控重定向、`html2md` 转换、超大正文 `.md` 落盘、PDF/图片/二进制落盘、magic 覆盖错误 `content-type`、moka 缓存；`PR-WF-D / PR-WF-P` 继续后置

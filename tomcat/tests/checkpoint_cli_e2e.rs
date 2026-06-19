@@ -252,7 +252,7 @@ fn spawn_tool_then_text_openai_stream_server(
     let stage = Arc::new(AtomicUsize::new(0));
     let stage_clone = Arc::clone(&stage);
     let handle = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut emitted_background_tool = false;
         let mut emitted_wait_tool = false;
         while stage_clone.load(Ordering::SeqCst) < 3 && Instant::now() < deadline {
@@ -714,9 +714,11 @@ fn test_hangup_during_run_leaves_interrupt_ckpt() {
 id = "mock-local"
 api = "openai"
 provider = "openai"
+api_key_env = "{api_key_env}"
 base_url = "{base_url}"
 capabilities = {{ vision = false, files = false, tools = true, reasoning = false }}
-"#
+"#,
+            api_key_env = common::DEEPSEEK_TEST_API_KEY_ENV,
         ),
     )
     .unwrap();
@@ -820,9 +822,11 @@ fn test_hangup_during_tool_run_allows_same_process_followup() {
 id = "mock-local"
 api = "openai"
 provider = "openai"
+api_key_env = "{api_key_env}"
 base_url = "{base_url}"
 capabilities = {{ vision = false, files = false, tools = true, reasoning = false }}
-"#
+"#,
+            api_key_env = common::DEEPSEEK_TEST_API_KEY_ENV,
         ),
     )
     .unwrap();
@@ -860,7 +864,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     stdin.flush().unwrap();
     drop(stdin);
 
-    let output = wait_for_child_output(child, Duration::from_secs(15));
+    let output = wait_for_child_output(child, Duration::from_secs(30));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

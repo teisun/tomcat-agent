@@ -109,15 +109,17 @@ pub fn apply_openai_responses_test_config(
     let model_id = cfg.llm.default_model.clone();
     write_model_override(
         cfg,
-        &model_id,
-        "openai-responses",
-        "openai",
-        env_key,
-        base_url.or(Some("https://api.openai.com")),
-        None,
-        Some("openai"),
-        true,
-        true,
+        ModelOverrideSpec {
+            model_id: &model_id,
+            api: "openai-responses",
+            provider: "openai",
+            env_key,
+            base_url: base_url.or(Some("https://api.openai.com")),
+            model_name: None,
+            thinking_format: Some("openai"),
+            supports_files: true,
+            supports_reasoning: true,
+        },
     );
 }
 
@@ -133,15 +135,17 @@ pub fn apply_openai_compatible_test_config(
     cfg.context.compaction_model = model_id.to_string();
     write_model_override(
         cfg,
-        model_id,
-        "openai",
-        provider,
-        env_key,
-        Some(base_url),
-        None,
-        thinking_format,
-        false,
-        true,
+        ModelOverrideSpec {
+            model_id,
+            api: "openai",
+            provider,
+            env_key,
+            base_url: Some(base_url),
+            model_name: None,
+            thinking_format,
+            supports_files: false,
+            supports_reasoning: true,
+        },
     );
 }
 
@@ -210,36 +214,41 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true 
     std::fs::write(path, entries.join("\n")).expect("write test models.toml");
 }
 
-fn write_model_override(
-    cfg: &AppConfig,
-    model_id: &str,
-    api: &str,
-    provider: &str,
-    env_key: &str,
-    base_url: Option<&str>,
-    model_name: Option<&str>,
-    thinking_format: Option<&str>,
+struct ModelOverrideSpec<'a> {
+    model_id: &'a str,
+    api: &'a str,
+    provider: &'a str,
+    env_key: &'a str,
+    base_url: Option<&'a str>,
+    model_name: Option<&'a str>,
+    thinking_format: Option<&'a str>,
     supports_files: bool,
     supports_reasoning: bool,
-) {
+}
+
+fn write_model_override(cfg: &AppConfig, spec: ModelOverrideSpec<'_>) {
     let Some(work_dir) = cfg.storage.work_dir.as_deref().map(Path::new) else {
         return;
     };
-    let mut lines = vec!["[[models]]".to_string(), format!("id = \"{model_id}\"")];
-    if let Some(model_name) = model_name {
+    let mut lines = vec![
+        "[[models]]".to_string(),
+        format!("id = \"{}\"", spec.model_id),
+    ];
+    if let Some(model_name) = spec.model_name {
         lines.push(format!("model_name = \"{model_name}\""));
     }
-    lines.push(format!("api = \"{api}\""));
-    lines.push(format!("provider = \"{provider}\""));
-    lines.push(format!("api_key_env = \"{env_key}\""));
-    if let Some(base_url) = base_url {
+    lines.push(format!("api = \"{}\"", spec.api));
+    lines.push(format!("provider = \"{}\"", spec.provider));
+    lines.push(format!("api_key_env = \"{}\"", spec.env_key));
+    if let Some(base_url) = spec.base_url {
         lines.push(format!("base_url = \"{base_url}\""));
     }
-    if let Some(thinking_format) = thinking_format {
+    if let Some(thinking_format) = spec.thinking_format {
         lines.push(format!("thinking_format = \"{thinking_format}\""));
     }
     lines.push(format!(
-        "capabilities = {{ vision = true, files = {supports_files}, tools = true, reasoning = {supports_reasoning}, web_search = false }}"
+        "capabilities = {{ vision = true, files = {}, tools = true, reasoning = {}, web_search = false }}",
+        spec.supports_files, spec.supports_reasoning
     ));
     let path = work_dir.join("models.toml");
     if let Some(parent) = path.parent() {

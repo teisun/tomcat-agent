@@ -63,7 +63,8 @@ TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
 # 用途：集中管理 LiteLLM / OpenAI Responses 线上的 live 验收，不混入 DeepSeek / Mimo 分支。
 # 注意：
 # - `reasoning_continuity_real_llm_tests` 只跑 OpenAI Responses 那条 case；
-# - `openai_files_integration_tests` 仍需 `--ignored`，因为 Files 能力可能未在网关侧开启。
+# - `openai_files_integration_tests` 仍需 `--ignored`，且仅在 `PI_LIVE_OPENAI_FILES=1`
+#   时真正打外网，因为 Files 能力可能未在网关侧开启。
 TOMCAT_INTEGRATION_OPENAI_RESPONSES_WIRE_COMMANDS=(
   "cargo test -j 1 --test openai_responses_integration_tests -- --nocapture --test-threads=1"
   "cargo test -j 1 --test reasoning_continuity_real_llm_tests openai_responses_roundtrip_replays_reasoning_items -- --nocapture --test-threads=1"

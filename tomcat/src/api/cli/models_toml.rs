@@ -187,8 +187,9 @@ fn sync_managed_model_names(contents: &str) -> (String, Vec<&'static str>) {
         let mut id_line_index = None;
         let mut has_model_name = false;
 
-        for line_index in (index + 1)..next_block {
-            let trimmed = lines[line_index].trim();
+        for (offset, line) in lines[(index + 1)..next_block].iter().enumerate() {
+            let line_index = index + 1 + offset;
+            let trimmed = line.trim();
             if model_id.is_none() {
                 if let Some(value) = parse_string_field(trimmed, "id") {
                     model_id = Some(value.to_string());

@@ -73,7 +73,7 @@ max_bytes = 26214400
 [tools.web_search]
 # `auto` 会先尝试项目级 hosted web_search 模型；
 # 若没有可用 hosted 候选，则默认交给官方 `web-search-backends` 插件，
-# 再由插件内部 `autoOrder` 决定先试 mimo / tavily / brave / serper。
+# 再由插件内部 `autoOrder` 决定先试 tavily / brave / serper / mimo。
 backend = "auto"
 # 若想直接走官方插件里的 MiMo 后端，可改成：
 # backend = "mimo"

@@ -84,12 +84,20 @@ fn array_fields_classification() {
 }
 
 fn empty_config(dir: &TempDir) -> std::path::PathBuf {
-    let p = dir.path().join("tomcat.config.toml");
+    let work_dir = dir.path();
+    let p = work_dir.join("tomcat.config.toml");
+    let work_dir_s = work_dir.to_string_lossy();
     std::fs::write(
         &p,
-        "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai-responses'\ndefault_model='gpt-5.4'\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
+        format!(
+            "[agent]\nid='main'\nworkspace='{work_dir_s}'\n\n[storage]\nwork_dir='{work_dir_s}'\n\n[llm]\ndefault_model='gpt-5.4'\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true"
+        ),
     )
     .unwrap();
+    crate::test_support::write_models_override(
+        work_dir,
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses("OPENAI_API_KEY")],
+    );
     p
 }
 
@@ -108,7 +116,7 @@ async fn config_get_returns_preflight_ui_value_for_allowlisted_key() {
     let p = empty_config(&dir);
     std::fs::write(
         &p,
-        "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai-responses'\ndefault_model='gpt-5.4'\n\n[preflight]\nshow_git_ui=true\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
+        "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\ndefault_model='gpt-5.4'\n\n[preflight]\nshow_git_ui=true\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
     )
     .unwrap();
     let cfg = load_config(Some(&p)).unwrap();

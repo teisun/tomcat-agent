@@ -1076,7 +1076,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `config get workspace primitive model`
 
-Read the current value of an allowed tomcat configuration key. The tool is constrained by CONFIG_READ_ALLOWLIST and CONFIG_HARDCODED_READ_DENY: workspace.*, agent.id, primitive.path_rules, primitive.bash_*, llm.default_model and similar non-sensitive fields are readable; llm.api_key*, llm.api_base, security.*, storage.* and other sensitive fields are denied. Missing dot-path keys return not_set.
+Read the current value of an allowed tomcat configuration key. The tool is constrained by CONFIG_READ_ALLOWLIST and CONFIG_HARDCODED_READ_DENY: workspace.*, agent.id, primitive.path_rules, primitive.bash_*, llm.default_model and similar non-sensitive fields are readable; llm.api_key*, llm.api_base_fallback, security.*, storage.* and other sensitive fields are denied. Missing dot-path keys return not_set.
 
 Parameters:
 

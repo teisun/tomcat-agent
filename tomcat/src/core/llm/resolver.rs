@@ -256,9 +256,7 @@ impl DefaultLlmResolver {
         if default_model.is_empty() || entry.id == default_model {
             return None;
         }
-        let Some(default_entry) = self.catalog.lookup(default_model) else {
-            return None;
-        };
+        let default_entry = self.catalog.lookup(default_model)?;
         if default_entry.provider == entry.provider {
             default_entry.api_key_env.as_deref()
         } else {

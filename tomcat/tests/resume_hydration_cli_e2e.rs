@@ -96,6 +96,7 @@ id = "mock-local"
 api = "openai"
 provider = "openai"
 base_url = "{base_url}"
+api_key_env = "OPENAI_API_KEY"
 capabilities = {{ vision = false, files = false, tools = true, reasoning = false }}
 "#
         ),
@@ -484,6 +485,7 @@ fn resume_cli_large_session_restores_recent_context_in_request_body() {
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
+        .env("OPENAI_API_KEY", "stub")
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")

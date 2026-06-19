@@ -2,9 +2,9 @@
 //!
 //! 说明：
 //! - 真实网络调用，依赖 `OPENAI_API_KEY`（环境变量或 `.env`，与 `tests/openai_responses_integration_tests.rs` 同模式）。
-//! - **TODO(T2-P0-015)**：当前用例全部 `#[ignore]`——部分账号/项目 key 对 `/v1/files` 返回 401（与 Responses 可用性不一致），待拿到**明确支持 Files API** 的 key 后去掉 `#[ignore]` 并跑通验收。
+//! - **TODO(T2-P0-015)**：当前用例全部 `#[ignore]`——部分账号/项目 key 对 `/v1/files` 返回 401/500（与 Responses 可用性不一致），待拿到**明确支持 Files API** 的 key 后去掉 `#[ignore]` 并跑通验收。
 //! - 手动执行被忽略的用例：
-//!   `cargo test --test openai_files_integration_tests -- --ignored --nocapture`
+//!   `PI_LIVE_OPENAI_FILES=1 cargo test --test openai_files_integration_tests -- --ignored --nocapture`
 
 mod common;
 
@@ -48,6 +48,14 @@ fn unique_prefix() -> String {
         .unwrap_or_default()
         .as_secs();
     format!("t2-p0-015-it-{ts}")
+}
+
+fn require_live_openai_files_opt_in(test_name: &str) -> bool {
+    if std::env::var("PI_LIVE_OPENAI_FILES").ok().as_deref() == Some("1") {
+        return true;
+    }
+    eprintln!("skip {test_name}: set PI_LIVE_OPENAI_FILES=1 to enable live OpenAI Files API tests");
+    false
 }
 
 fn files_client_from_provider(
@@ -105,6 +113,9 @@ impl Drop for CleanupGuard {
 #[serial]
 async fn openai_files_roundtrip_four_sizes_real_api() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
+    if !require_live_openai_files_opt_in("openai_files_roundtrip_four_sizes_real_api") {
+        return Ok(());
+    }
     common::load_openai_test_env();
     let cfg = responses_config();
     let provider = common::resolve_main_provider(&cfg);
@@ -149,6 +160,9 @@ async fn openai_files_roundtrip_four_sizes_real_api() -> Result<(), Box<dyn std:
 #[serial]
 async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
+    if !require_live_openai_files_opt_in("openai_file_id_reference_roundtrip_real_api") {
+        return Ok(());
+    }
     common::load_openai_test_env();
     let cfg = responses_config();
     let provider = common::resolve_main_provider(&cfg);
@@ -210,6 +224,9 @@ async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std
 async fn openai_files_cli_single_turn_image_describe_real_api(
 ) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
+    if !require_live_openai_files_opt_in("openai_files_cli_single_turn_image_describe_real_api") {
+        return Ok(());
+    }
     common::load_openai_test_env();
     let cfg = responses_config();
     let provider = common::resolve_main_provider(&cfg);
@@ -289,6 +306,9 @@ async fn openai_files_cli_single_turn_image_describe_real_api(
 async fn openai_files_tui_two_phase_pdf_describe_real_api() -> Result<(), Box<dyn std::error::Error>>
 {
     common::setup_logging();
+    if !require_live_openai_files_opt_in("openai_files_tui_two_phase_pdf_describe_real_api") {
+        return Ok(());
+    }
     common::load_openai_test_env();
     let cfg = responses_config();
     let provider = common::resolve_main_provider(&cfg);

@@ -521,7 +521,11 @@ fn production_chat_context_from_work_dir_with_overrides(
     overrides: tomcat::api::chat::ChatContextOverrides,
 ) -> ChatContextHarness {
     cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
-    common::apply_openai_responses_test_config(&mut cfg, env_key, None);
+    // Some tests pre-seed a custom models.toml to exercise routing/fallback behavior.
+    // Preserve those fixtures instead of overwriting them with the default OpenAI entry.
+    if !work_dir.join("models.toml").exists() {
+        common::apply_openai_responses_test_config(&mut cfg, env_key, None);
+    }
 
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
@@ -556,10 +560,13 @@ async fn end_current_plugin_session(ctx: &ChatContext) {
         .current_session_id()
         .expect("current_session_id")
         .expect("session id should exist");
-    plugin_manager
-        .end_session(&session_id)
-        .await
-        .expect("end current plugin session");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        plugin_manager.end_session(&session_id),
+    )
+    .await
+    .expect("timed out ending current plugin session")
+    .expect("end current plugin session");
 }
 
 fn install_builtin_web_search_backends_plugin(work_dir: &Path) -> PathBuf {
@@ -812,7 +819,7 @@ fn test_version_output_exits_ok() {
 
 /// [init 子命令] 在临时目录生成配置文件
 ///
-/// 验证：exit 0、tomcat.config.toml 已创建且默认 provider 为 openai-responses、stdout 含三步向导与「配置文件已写入」
+/// 验证：exit 0、tomcat.config.toml 已创建且默认模型已写入、models.toml 已生成、stdout 含三步向导与「配置文件已写入」
 /// 意义：首次使用流程门禁（TASK-02 10.2：引导 LLM 配置、生成配置文件）
 #[test]
 fn test_init_creates_config_file_in_temp_dir() {
@@ -821,6 +828,7 @@ fn test_init_creates_config_file_in_temp_dir() {
 
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
+    let models_path = dir.path().join(".tomcat").join("models.toml");
 
     info!("Arrange: temp dir at {:?}", dir.path());
     let mut c = cmd();
@@ -843,9 +851,10 @@ fn test_init_creates_config_file_in_temp_dir() {
         "config should contain [log] section"
     );
     assert!(
-        content.contains("provider = \"openai-responses\""),
-        "config should default to openai-responses"
+        content.contains("default_model = \"gpt-5.4\""),
+        "config should persist the selected default model"
     );
+    assert!(models_path.exists(), "models.toml should be created");
 }
 
 // ────────────────────── doctor ──────────────────────
@@ -1905,7 +1914,7 @@ fn test_user_doctor_detects_environment() {
 
 /// [TASK-06] init 后生成配置中的 LLM 段
 ///
-/// 验证：tomcat init exit 0；`tomcat.config.toml` 存在且默认 provider 为 openai-responses（.env 仅在用户输入非空 Key 时写入）
+/// 验证：tomcat init exit 0；`tomcat.config.toml` 存在且写入默认模型；模型连接元数据落在 `models.toml`
 #[test]
 fn test_init_creates_env_file() {
     common::setup_logging();
@@ -1913,6 +1922,7 @@ fn test_init_creates_env_file() {
 
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
+    let models_path = dir.path().join(".tomcat").join("models.toml");
 
     info!("Arrange: fresh temp dir");
     info!("Act: tomcat init");
@@ -1929,20 +1939,18 @@ fn test_init_creates_env_file() {
     let cfg_content = fs::read_to_string(&config_path).unwrap();
     info!("Config content (truncated): {}", trunc(&cfg_content, 300));
     assert!(
-        cfg_content.contains("[llm]") || cfg_content.contains("provider"),
+        cfg_content.contains("[llm]"),
         "config should contain LLM section"
-    );
-    assert!(
-        cfg_content.contains("provider = \"openai-responses\""),
-        "config should default to openai-responses"
     );
     assert!(
         cfg_content.contains("default_model = \"gpt-5.4\""),
         "config should persist the selected default model"
     );
+    assert!(models_path.exists(), "models.toml should be created");
+    let models_content = fs::read_to_string(&models_path).unwrap();
     assert!(
-        cfg_content.contains("api_key_env = \"OPENAI_API_KEY\""),
-        "config should persist the provider-derived api_key_env"
+        models_content.contains("api_key_env = \"OPENAI_API_KEY\""),
+        "models.toml should persist provider-derived api_key_env"
     );
 }
 
@@ -6049,7 +6057,6 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true 
         tomcat::AgentRunOutcome::Completed(result) => result,
         other => panic!("应正常完成 hosted auto web_search chat 路径，实际: {other:?}"),
     };
-    assert!(result.final_text.contains("HOSTED_SEARCH_OK"));
     let tool_msg = result
         .new_messages
         .iter()
@@ -6059,6 +6066,8 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true 
         })
         .expect("should persist hosted web_search tool result");
     let tool_text = tool_msg.text_content().expect("tool result should be text");
+    end_current_plugin_session(&ctx).await;
+    assert!(result.final_text.contains("HOSTED_SEARCH_OK"));
     assert!(
         tool_text.contains("\"backend\":\"openai\"")
             || tool_text.contains("\"backend\": \"openai\""),
@@ -6070,7 +6079,6 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true 
         "tool result 应包含 hosted web_search 命中 URL，实际: {}",
         trunc(tool_text, 400)
     );
-    end_current_plugin_session(&ctx).await;
 }
 
 #[tokio::test]
