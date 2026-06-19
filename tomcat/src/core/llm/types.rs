@@ -176,6 +176,38 @@ impl ChatMessageContentPart {
         })
     }
 
+    /// inline 图片 helper：直接接受 base64 文本，复用 MIME 白名单与解码后字节上限校验。
+    pub fn image_base64_data(
+        mime_type: impl Into<String>,
+        data_base64: impl Into<String>,
+    ) -> Result<Self, AppError> {
+        let mime = mime_type.into();
+        let mime_lower = mime.to_ascii_lowercase();
+        if !ALLOWED_IMAGE_MIMES.contains(&mime_lower.as_str()) {
+            return Err(AppError::Llm(format!(
+                "image_base64_data: 不支持的 mime_type {:?}, 仅允许 {:?}",
+                mime, ALLOWED_IMAGE_MIMES
+            )));
+        }
+        let data = data_base64.into();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .map_err(|e| AppError::Llm(format!("image_base64_data: base64 解码失败: {e}")))?;
+        if decoded.len() > IMAGE_MAX_BYTES {
+            return Err(AppError::Llm(format!(
+                "image_base64_data: 图片 {} 字节超过 IMAGE_MAX_BYTES = {} 字节",
+                decoded.len(),
+                IMAGE_MAX_BYTES
+            )));
+        }
+        Ok(Self::InputImage {
+            mime_type: Some(mime),
+            data: Some(data),
+            file_id: None,
+            detail: None,
+        })
+    }
+
     /// inline 文件 helper（PR-RJ-0 重构）：从磁盘路径直接构造 `InputFile`。
     ///
     /// 与 [`Self::image_b64`] 相同设计契约：metadata 预检 → 读字节 → base64 → 装 variant。
@@ -206,6 +238,31 @@ impl ChatMessageContentPart {
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(Self::InputFile {
             filename: Some(filename.into()),
+            mime_type: Some(mime_type.into()),
+            data: Some(data),
+            file_id: None,
+        })
+    }
+
+    /// inline 文件 helper：直接接受 base64 文本，复用解码后字节上限校验。
+    pub fn file_base64_data(
+        filename: Option<String>,
+        mime_type: impl Into<String>,
+        data_base64: impl Into<String>,
+    ) -> Result<Self, AppError> {
+        let data = data_base64.into();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data.as_bytes())
+            .map_err(|e| AppError::Llm(format!("file_base64_data: base64 解码失败: {e}")))?;
+        if decoded.len() > FILE_MAX_BYTES {
+            return Err(AppError::Llm(format!(
+                "file_base64_data: 文件 {} 字节超过 FILE_MAX_BYTES = {} 字节",
+                decoded.len(),
+                FILE_MAX_BYTES
+            )));
+        }
+        Ok(Self::InputFile {
+            filename,
             mime_type: Some(mime_type.into()),
             data: Some(data),
             file_id: None,

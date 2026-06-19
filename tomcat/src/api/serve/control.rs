@@ -79,7 +79,18 @@ pub(crate) async fn handle_control_or_interrupt(
                 )))?;
                 return Ok(true);
             }
-            let resolved = state.registry.resolve_session_id(session_id.as_deref())?;
+            let resolved = match state.registry.resolve_session_id(session_id.as_deref()) {
+                Ok(resolved) => resolved,
+                Err(error) if is_config_error(&error, "unknown_session") => {
+                    state.writer.send(OutFrame::Response(ResponseFrame::error(
+                        id,
+                        session_id,
+                        "unknown_session",
+                    )))?;
+                    return Ok(true);
+                }
+                Err(error) => return Err(error),
+            };
             let slot = state
                 .registry
                 .get(&resolved)
@@ -138,6 +149,10 @@ pub(crate) fn ask_bridge(state: &ServeState) -> &ServeAskQuestionBridge {
     &state.ask_question
 }
 
+fn is_config_error(error: &AppError, expected: &str) -> bool {
+    matches!(error, AppError::Config(message) if message == expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ensure_initialized_or_error, handle_control_or_interrupt};
@@ -150,7 +165,7 @@ mod tests {
     use crate::api::serve::test_support::{
         build_initialized_state_with_streams, install_test_api_key, read_ndjson_lines,
     };
-    use crate::api::serve::types::ServeCommand;
+    use crate::api::serve::types::{ServeCommand, ServeMessageParams};
 
     async fn wait_for_line(
         buffer: &crate::api::serve::test_support::SharedWriterBuffer,
@@ -210,6 +225,26 @@ mod tests {
                 .and_then(serde_json::Value::as_i64),
             Some(1)
         );
+        let capabilities = payload["capabilities"]
+            .as_array()
+            .expect("capabilities array");
+        let capability_names = capabilities
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>();
+        for expected in [
+            "prompt",
+            "steer",
+            "follow_up",
+            "new_session",
+            "interrupt",
+            "ask_question",
+        ] {
+            assert!(
+                capability_names.contains(&expected),
+                "missing capability {expected:?} in {capability_names:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -225,7 +260,7 @@ mod tests {
                 id: Some("prompt-1".to_string()),
                 session_id: Some(slot.session_id.clone()),
                 text: "hello".to_string(),
-                params: serde_json::Map::new(),
+                params: ServeMessageParams::default(),
             },
         )
         .unwrap();
@@ -275,5 +310,74 @@ mod tests {
             response.get("success").and_then(serde_json::Value::as_bool),
             Some(true)
         );
+    }
+
+    #[tokio::test]
+    #[serial(env_lock)]
+    async fn serve_interrupt_unknown_session_returns_error_response() {
+        let _api_key = install_test_api_key();
+        let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![]).await;
+
+        let handled = handle_control_or_interrupt(
+            Arc::clone(&state),
+            ServeCommand::Interrupt {
+                id: Some("interrupt-missing".to_string()),
+                session_id: Some("missing-session".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(handled);
+
+        let lines = wait_for_line(&buffer, |line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("interrupt-missing")
+        })
+        .await;
+        let response = lines
+            .iter()
+            .find(|line| {
+                line.get("id").and_then(serde_json::Value::as_str)
+                    == Some("interrupt-missing")
+            })
+            .unwrap();
+        assert_eq!(response.get("success").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(
+            response.get("error").and_then(serde_json::Value::as_str),
+            Some("unknown_session")
+        );
+    }
+
+    #[tokio::test]
+    #[serial(env_lock)]
+    async fn serve_unknown_control_subtype_returns_unknown_command_error() {
+        let _api_key = install_test_api_key();
+        let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![]).await;
+
+        let handled = handle_control_or_interrupt(
+            Arc::clone(&state),
+            ServeCommand::ControlRequest {
+                request_id: "weird-1".to_string(),
+                subtype: "mystery".to_string(),
+                session_id: None,
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(handled);
+
+        let lines = wait_for_line(&buffer, |line| {
+            line.get("error").and_then(serde_json::Value::as_str)
+                == Some("unknown_command: control_request/mystery")
+        })
+        .await;
+        let response = lines
+            .iter()
+            .find(|line| {
+                line.get("error").and_then(serde_json::Value::as_str)
+                    == Some("unknown_command: control_request/mystery")
+            })
+            .unwrap();
+        assert_eq!(response.get("success").and_then(serde_json::Value::as_bool), Some(false));
     }
 }

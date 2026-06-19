@@ -3,12 +3,15 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 
 use crate::api::chat::panels::AskQuestionResult;
-use crate::core::llm::ChatMessage;
+use crate::core::llm::{ChatMessage, ChatMessageContentPart};
 use crate::{AppError, TranscriptEntry};
 
 use super::control;
 use super::event_pump;
-use super::types::{OutFrame, ResponseFrame, ServeCommand};
+use super::types::{
+    OutFrame, ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand,
+    ServeMessageParams,
+};
 use super::{create_session_slot, register_slot_hooks, run_slot_turn, ServeState};
 
 pub(crate) async fn handle_command(
@@ -27,7 +30,7 @@ pub(crate) async fn handle_command(
             id,
             session_id,
             text,
-            ..
+            params,
         } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {
@@ -37,13 +40,20 @@ pub(crate) async fn handle_command(
                 send_error(&state, id, session_id, "busy")?;
                 return Ok(());
             }
-            start_turn(state, slot, id, text).await?;
+            let input_message = match build_user_message(text, &params) {
+                Ok(message) => message,
+                Err(error) => {
+                    send_error(&state, id, Some(slot.session_id.clone()), error)?;
+                    return Ok(());
+                }
+            };
+            start_turn(state, slot, id, input_message).await?;
         }
         ServeCommand::Steer {
             id,
             session_id,
             text,
-            ..
+            params: _,
         } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {
@@ -62,24 +72,31 @@ pub(crate) async fn handle_command(
                 )))?;
                 return Ok(());
             }
-            start_turn(state, slot, id, text).await?;
+            start_turn(state, slot, id, ChatMessage::user(text)).await?;
         }
         ServeCommand::FollowUp {
             id,
             session_id,
             text,
-            ..
+            params,
         } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {
                 return Ok(());
+            };
+            let input_message = match build_user_message(text, &params) {
+                Ok(message) => message,
+                Err(error) => {
+                    send_error(&state, id, Some(slot.session_id.clone()), error)?;
+                    return Ok(());
+                }
             };
             if slot.is_busy() {
                 slot.ctx
                     .session_runtime
                     .follow_up_queue
                     .lock()
-                    .push(ChatMessage::user(text));
+                    .push(input_message);
                 state.writer.send(OutFrame::Response(ResponseFrame::ok(
                     id,
                     Some(slot.session_id.clone()),
@@ -87,7 +104,7 @@ pub(crate) async fn handle_command(
                 )))?;
                 return Ok(());
             }
-            start_turn(state, slot, id, text).await?;
+            start_turn(state, slot, id, input_message).await?;
         }
         ServeCommand::NewSession { id, params } => {
             match create_session_slot(Arc::clone(&state), params, true).await {
@@ -165,6 +182,7 @@ pub(crate) async fn handle_command(
                     "sessionId": slot.session_id,
                     "header": header,
                     "messages": entries,
+                    // TODO(next): wire up real seq/upToSeq when Phase-2 visibility resync lands.
                     "upToSeq": serde_json::Value::Null
                 })),
             )))?;
@@ -279,7 +297,7 @@ async fn start_turn(
     state: Arc<ServeState>,
     slot: Arc<super::registry::SessionSlot>,
     id: Option<String>,
-    text: String,
+    input_message: ChatMessage,
 ) -> Result<(), AppError> {
     if !slot.mark_busy() {
         send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
@@ -296,9 +314,10 @@ async fn start_turn(
     let slot_for_task = Arc::clone(&slot);
     let state_for_task = Arc::clone(&state);
     let handle = tokio::spawn(async move {
-        let result = std::panic::AssertUnwindSafe(run_slot_turn(Arc::clone(&slot_for_task), text))
-            .catch_unwind()
-            .await;
+        let result =
+            std::panic::AssertUnwindSafe(run_slot_turn(Arc::clone(&slot_for_task), input_message))
+                .catch_unwind()
+                .await;
         match result {
             Ok(Ok(_outcome)) => {}
             Ok(Err(error)) => {
@@ -319,6 +338,72 @@ async fn start_turn(
     });
     *slot.run_task.lock() = Some(handle);
     Ok(())
+}
+
+fn build_user_message(text: String, params: &ServeMessageParams) -> Result<ChatMessage, String> {
+    if params.attachments.is_empty() {
+        return Ok(ChatMessage::user(text));
+    }
+
+    let mut parts = Vec::with_capacity(1 + params.attachments.len());
+    parts.push(ChatMessageContentPart::text(text));
+    for attachment in &params.attachments {
+        parts.push(parse_attachment_part(attachment)?);
+    }
+    Ok(ChatMessage::user_with_parts(parts))
+}
+
+fn parse_attachment_part(attachment: &ServeAttachment) -> Result<ChatMessageContentPart, String> {
+    match (&attachment.data_base64, &attachment.file_id) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "invalid_attachment: dataBase64 and fileId are mutually exclusive".to_string(),
+            );
+        }
+        (None, None) => {
+            return Err(
+                "invalid_attachment: exactly one of dataBase64 or fileId is required".to_string(),
+            );
+        }
+        _ => {}
+    }
+
+    match attachment.kind {
+        ServeAttachmentKind::Image => {
+            if let Some(file_id) = attachment.file_id.clone() {
+                ChatMessageContentPart::image_file_id(file_id)
+                    .map_err(|error| format!("invalid_attachment: {error}"))
+            } else {
+                let mime_type = attachment
+                    .mime_type
+                    .clone()
+                    .ok_or_else(|| "invalid_attachment: image attachment requires mimeType".to_string())?;
+                let data = attachment
+                    .data_base64
+                    .clone()
+                    .ok_or_else(|| "invalid_attachment: image attachment requires dataBase64".to_string())?;
+                ChatMessageContentPart::image_base64_data(mime_type, data)
+                    .map_err(|error| format!("invalid_attachment: {error}"))
+            }
+        }
+        ServeAttachmentKind::File => {
+            if let Some(file_id) = attachment.file_id.clone() {
+                ChatMessageContentPart::file_file_id(file_id, None)
+                    .map_err(|error| format!("invalid_attachment: {error}"))
+            } else {
+                let mime_type = attachment
+                    .mime_type
+                    .clone()
+                    .ok_or_else(|| "invalid_attachment: file attachment requires mimeType".to_string())?;
+                let data = attachment
+                    .data_base64
+                    .clone()
+                    .ok_or_else(|| "invalid_attachment: file attachment requires dataBase64".to_string())?;
+                ChatMessageContentPart::file_base64_data(None, mime_type, data)
+                    .map_err(|error| format!("invalid_attachment: {error}"))
+            }
+        }
+    }
 }
 
 fn send_error(
@@ -348,12 +433,15 @@ mod tests {
     use serial_test::serial;
 
     use crate::api::serve::test_support::{
-        build_initialized_state_with_panicking_provider, build_initialized_state_with_streams,
+        build_initialized_state_with_panicking_provider, build_initialized_state_with_recorded_streams,
+        build_initialized_state_with_streams,
         build_initialized_state_with_streams_and_max_sessions, install_test_api_key,
         read_ndjson_lines,
     };
-    use crate::api::serve::types::NewSessionParams;
-    use crate::core::llm::StreamEvent;
+    use crate::api::serve::types::{
+        NewSessionParams, ServeAttachment, ServeAttachmentKind, ServeMessageParams,
+    };
+    use crate::core::llm::{ChatMessageContent, ChatMessageContentPart, StreamEvent};
 
     async fn wait_for_line(
         buffer: &crate::api::serve::test_support::SharedWriterBuffer,
@@ -427,7 +515,7 @@ mod tests {
                 id: Some("p2".to_string()),
                 session_id: Some(session_id.clone()),
                 text: "second".to_string(),
-                params: serde_json::Map::new(),
+                params: ServeMessageParams::default(),
             },
         )
         .await
@@ -463,7 +551,7 @@ mod tests {
                 id: Some("unknown-1".to_string()),
                 session_id: Some("missing-session".to_string()),
                 text: "hello".to_string(),
-                params: serde_json::Map::new(),
+                params: ServeMessageParams::default(),
             },
         )
         .await
@@ -541,7 +629,7 @@ mod tests {
                 id: Some("p1".to_string()),
                 session_id: Some(session_id.clone()),
                 text: "say hello".to_string(),
-                params: serde_json::Map::new(),
+                params: ServeMessageParams::default(),
             },
         )
         .await
@@ -578,6 +666,288 @@ mod tests {
 
     #[tokio::test]
     #[serial(env_lock)]
+    async fn serve_prompt_with_image_attachment_builds_multimodal_message() {
+        let _api_key = install_test_api_key();
+        let stream = vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "vision ok".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ];
+        let (state, buffer, _temp, slot, requests) =
+            build_initialized_state_with_recorded_streams(vec![stream]).await;
+
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::Prompt {
+                id: Some("img-1".to_string()),
+                session_id: Some(slot.session_id.clone()),
+                text: "describe this".to_string(),
+                params: ServeMessageParams {
+                    attachments: vec![ServeAttachment {
+                        kind: ServeAttachmentKind::Image,
+                        mime_type: None,
+                        data_base64: None,
+                        file_id: Some("file-vision".to_string()),
+                    }],
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let _ = wait_for_line(&buffer, |line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+        })
+        .await;
+
+        let captured = requests.0.lock();
+        assert_eq!(captured.len(), 1, "expected exactly one LLM request");
+        let user_message = captured[0]
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
+            .expect("user message");
+        let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
+            panic!("expected multimodal parts user message, got {:?}", user_message.content);
+        };
+        assert_eq!(parts.len(), 2, "expected text + image parts");
+        assert!(matches!(
+            &parts[0],
+            ChatMessageContentPart::InputText { text } if text == "describe this"
+        ));
+        assert!(matches!(
+            &parts[1],
+            ChatMessageContentPart::InputImage {
+                file_id: Some(file_id),
+                data: None,
+                ..
+            } if file_id == "file-vision"
+        ));
+    }
+
+    #[tokio::test]
+    #[serial(env_lock)]
+    async fn serve_follow_up_with_attachment_queues_multimodal_message_when_busy() {
+        let _api_key = install_test_api_key();
+        let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+        slot.busy.store(true, Ordering::SeqCst);
+
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::FollowUp {
+                id: Some("fu-1".to_string()),
+                session_id: Some(slot.session_id.clone()),
+                text: "look at this too".to_string(),
+                params: ServeMessageParams {
+                    attachments: vec![ServeAttachment {
+                        kind: ServeAttachmentKind::Image,
+                        mime_type: None,
+                        data_base64: None,
+                        file_id: Some("file-follow-up".to_string()),
+                    }],
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let lines = wait_for_line(&buffer, |line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("fu-1")
+        })
+        .await;
+        let response = lines
+            .iter()
+            .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("fu-1"))
+            .expect("queued follow_up response");
+        assert_eq!(response["payload"]["queued"].as_bool(), Some(true));
+
+        let queue = slot.ctx.session_runtime.follow_up_queue.lock();
+        assert_eq!(queue.len(), 1, "expected one queued follow_up");
+        let Some(ChatMessageContent::Parts(parts)) = &queue[0].content else {
+            panic!("expected queued multimodal follow_up, got {:?}", queue[0].content);
+        };
+        assert!(matches!(
+            &parts[1],
+            ChatMessageContentPart::InputImage {
+                file_id: Some(file_id),
+                data: None,
+                ..
+            } if file_id == "file-follow-up"
+        ));
+    }
+
+    #[tokio::test]
+    #[serial(env_lock)]
+    async fn serve_prompt_invalid_attachment_returns_error() {
+        let _api_key = install_test_api_key();
+        let stream = vec![Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        })];
+        let (state, buffer, _temp, slot, requests) =
+            build_initialized_state_with_recorded_streams(vec![stream]).await;
+
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::Prompt {
+                id: Some("bad-attachment".to_string()),
+                session_id: Some(slot.session_id.clone()),
+                text: "bad".to_string(),
+                params: ServeMessageParams {
+                    attachments: vec![ServeAttachment {
+                        kind: ServeAttachmentKind::Image,
+                        mime_type: None,
+                        data_base64: Some("Zm9v".to_string()),
+                        file_id: None,
+                    }],
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let lines = wait_for_line(&buffer, |line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("bad-attachment")
+        })
+        .await;
+        let response = lines
+            .iter()
+            .find(|line| {
+                line.get("id").and_then(serde_json::Value::as_str) == Some("bad-attachment")
+            })
+            .expect("invalid attachment response");
+        assert_eq!(response["success"].as_bool(), Some(false));
+        assert_eq!(
+            response["error"].as_str(),
+            Some("invalid_attachment: image attachment requires mimeType")
+        );
+        assert!(
+            requests.0.lock().is_empty(),
+            "invalid attachment should not reach LLM"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(env_lock)]
+    async fn serve_prompt_without_attachments_falls_back_to_user_text() {
+        let _api_key = install_test_api_key();
+        let stream = vec![Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        })];
+        let (state, buffer, _temp, slot, requests) =
+            build_initialized_state_with_recorded_streams(vec![stream]).await;
+
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::Prompt {
+                id: Some("plain-1".to_string()),
+                session_id: Some(slot.session_id.clone()),
+                text: "plain text".to_string(),
+                params: ServeMessageParams::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let _ = wait_for_line(&buffer, |line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+        })
+        .await;
+
+        let captured = requests.0.lock();
+        let user_message = captured[0]
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
+            .expect("user message");
+        assert!(matches!(
+            &user_message.content,
+            Some(ChatMessageContent::Text(text)) if text == "plain text"
+        ));
+    }
+
+    #[tokio::test]
+    #[serial(env_lock)]
+    async fn serve_steer_ignores_attachments() {
+        let _api_key = install_test_api_key();
+        let stream = vec![Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        })];
+        let (state, buffer, _temp, slot, requests) =
+            build_initialized_state_with_recorded_streams(vec![stream]).await;
+
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::Steer {
+                id: Some("steer-1".to_string()),
+                session_id: Some(slot.session_id.clone()),
+                text: "just steer".to_string(),
+                params: ServeMessageParams {
+                    attachments: vec![ServeAttachment {
+                        kind: ServeAttachmentKind::Image,
+                        mime_type: None,
+                        data_base64: None,
+                        file_id: Some("ignored-file".to_string()),
+                    }],
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let _ = wait_for_line(&buffer, |line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+        })
+        .await;
+
+        let captured = requests.0.lock();
+        let user_message = captured[0]
+            .messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
+            .expect("user message");
+        assert!(matches!(
+            &user_message.content,
+            Some(ChatMessageContent::Text(text)) if text == "just steer"
+        ));
+    }
+
+    #[tokio::test]
+    #[serial(env_lock)]
+    async fn serve_get_messages_uptoseq_is_null_placeholder() {
+        let _api_key = install_test_api_key();
+        let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::GetMessages {
+                id: Some("gm-1".to_string()),
+                session_id: Some(slot.session_id.clone()),
+                params: crate::api::serve::types::GetMessagesParams::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let lines = wait_for_line(&buffer, |line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("gm-1")
+        })
+        .await;
+        let response = lines
+            .iter()
+            .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-1"))
+            .expect("get_messages response");
+        assert!(response["payload"].get("upToSeq").is_some());
+        assert!(response["payload"]["upToSeq"].is_null());
+    }
+
+    #[tokio::test]
+    #[serial(env_lock)]
     async fn serve_prompt_panic_isolation_emits_agent_end_error() {
         let _api_key = install_test_api_key();
         let (state, buffer, _temp, slot) = build_initialized_state_with_panicking_provider().await;
@@ -588,7 +958,7 @@ mod tests {
                 id: Some("panic-1".to_string()),
                 session_id: Some(slot.session_id.clone()),
                 text: "panic".to_string(),
-                params: serde_json::Map::new(),
+                params: ServeMessageParams::default(),
             },
         )
         .await

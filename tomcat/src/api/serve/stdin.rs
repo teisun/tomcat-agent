@@ -22,10 +22,14 @@ pub(crate) async fn run_stdio_loop(state: Arc<ServeState>) -> Result<(), AppErro
         let command = match parse_command_line(trimmed) {
             Ok(command) => command,
             Err(error) => {
+                let message = match &error {
+                    AppError::Config(message) => message.clone(),
+                    _ => error.to_string(),
+                };
                 state.writer.send(OutFrame::Response(ResponseFrame::error(
                     None,
                     None,
-                    error.to_string(),
+                    message,
                 )))?;
                 continue;
             }

@@ -54,6 +54,9 @@ impl ServeAskQuestionBridge {
         event_bus.on(
             crate::infra::wire::WIRE_PLAN_ASK_QUESTION,
             Box::new(move |ctx| {
+                if ctx.session_id.as_deref() != Some(session_id.as_str()) {
+                    return Ok(());
+                }
                 let Ok(request) =
                     serde_json::from_value::<AskQuestionWireRequest>(ctx.payload.clone())
                 else {
@@ -328,6 +331,41 @@ mod tests {
         assert_eq!(response.request_id, "ask-2");
         assert_eq!(response.result.answers.len(), 1);
         assert!(!response.result.cancelled);
+    }
+
+    #[tokio::test]
+    #[serial(env_lock)]
+    async fn serve_ask_question_bridge_routes_by_session() {
+        let (writer, buffer) = spawn_buffered_writer(&ServeConfig::default());
+        let bridge = ServeAskQuestionBridge::new(writer);
+        let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+        bridge.register_request_listener("session-a".to_string(), Arc::clone(&bus));
+        bridge.register_request_listener("session-b".to_string(), Arc::clone(&bus));
+        let request = sample_request("ask-route");
+
+        bus.emit_sync(
+            crate::infra::wire::WIRE_PLAN_ASK_QUESTION,
+            EventContext::new(
+                crate::infra::wire::WIRE_PLAN_ASK_QUESTION,
+                serde_json::to_value(request).unwrap(),
+            )
+            .with_session_id("session-a"),
+        )
+        .unwrap();
+
+        let lines = wait_for_line(&buffer, |line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+        })
+        .await;
+        let controls = lines
+            .iter()
+            .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("control_request"))
+            .collect::<Vec<_>>();
+        assert_eq!(controls.len(), 1, "expected exactly one routed control frame");
+        assert_eq!(
+            controls[0].get("sessionId").and_then(serde_json::Value::as_str),
+            Some("session-a")
+        );
     }
 
     #[tokio::test]

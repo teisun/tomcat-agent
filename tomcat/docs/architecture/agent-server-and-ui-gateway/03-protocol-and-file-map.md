@@ -30,6 +30,40 @@
 
 `interrupt` 只表示**取消该会话当前活跃 turn**（约等于 Ctrl+C）；关闭会话用 `close_session`，不是 `interrupt`。
 
+#### 4.1.1 多模态附件 `params.attachments`（`prompt`/`follow_up`，本期落地·见 R14）
+
+> 附件挂在「发话命令」内部的 `params` 上，**不是** 独立命令、**不是** 控制帧——它属于「这句话的内容」。本期 `prompt`/`follow_up` 支持；`steer` 本期忽略 `attachments`（仅取 `text`），是否支持留下期评估。
+
+`params.attachments` 是一个数组，每个元素形如：
+
+
+| 字段          | JSON 类型 | 必填  | 适用 `kind`     | 说明                                                       | 说人话           |
+| ----------- | ------- | --- | ------------- | -------------------------------------------------------- | ------------- |
+| `kind`      | string  | 是   | 全部            | `image` / `file`                                         | 这块附件是图还是文件。   |
+| `mimeType`  | string  | 条件  | `dataBase64` 时 | 图片限 `image/{png,jpeg,gif,webp}` 白名单；文件按类型                | 附件的 MIME。     |
+| `dataBase64`| string  | 二选一 | inline 内容     | base64 内容；与 `fileId` 互斥                                   | 直接把字节塞进来。     |
+| `fileId`    | string  | 二选一 | 已上传引用         | 复用 `file_id` 通道；与 `dataBase64` 互斥                         | 引用已上传的文件。     |
+
+
+映射到内部类型（复用既有构造器，不新增）：
+
+- `kind=image` + `dataBase64` → `ChatMessageContentPart::image_b64`（走 MIME 白名单校验）
+- `kind=image` + `fileId` → `ChatMessageContentPart::image_file_id`
+- `kind=file` + `dataBase64`/`fileId` → file 变体
+- 命令的 `text` → 作为首个 `input_text` part
+
+最终组装为 `ChatMessage::user_with_parts([text_part, ...attachment_parts])`；`attachments` 为空或缺省时退回 `ChatMessage::user(text)`，行为与现状一致。
+
+```jsonc
+{"type":"prompt","id":"c1","sessionId":"s1","text":"看看这张图，指出 bug",
+ "params":{"attachments":[
+   {"kind":"image","mimeType":"image/png","dataBase64":"iVBORw0KGgo..."},
+   {"kind":"file","fileId":"file-abc"}
+ ]}}
+```
+
+非法附件 → 该 `prompt` 回 `error:"invalid_attachment: ..."`，不进入 turn，不影响其它会话。校验**复用底层现成规则**（不在 serve 另写一套）：MIME 白名单与大小上限由 `ChatMessageContentPart::image_b64` / `file_b64` 构造器在装配时校验——图片复用 `IMAGE_MAX_BYTES`（4.5 MB）、文件复用 `FILE_MAX_BYTES`（25 MB）；`dataBase64`/`fileId` 必须恰好二选一。
+
 ### 4.2 下行事件帧（agent → UI）——复用既有 `AgentEvent`
 
 事件帧**不新增**，直接是 `WireEnvelope` 序列化结果（见 `src/infra/events/mod.rs`）。关键既有变体（节选）：
@@ -48,6 +82,33 @@
 
 > 完整变体与字段命名以 `src/infra/events/mod.rs` 的 `AgentEvent` 为准；serde 合约：顶层 `tag="type"` snake_case，payload 字段 camelCase，顶层附加 `sessionId`。
 
+#### 4.2.1 事件帧的 schema / TS 工件（本期落地·见 R13）
+
+事件帧也要进 `--print-schema` 工件，UI 才能拿到具名类型而非 `unknown`。落地形态：
+
+- **wire 形状（已是运行时行为，此处只是钉成契约）**：每条下行事件帧 = `WireEvent { sessionId, #[flatten] AgentEvent }` 的序列化结果——顶层 `type`（snake_case 判别键）+ `sessionId` + 变体专属 camelCase payload（与 `WireEnvelope` 完全一致）。
+- **单一事实源**：给 `AgentEvent` 派生 `JsonSchema`（不另造第二套），新增 `WireEvent` 包装类型纳入 `ServeSchemaBundle`。
+- **改动面控制（关键事实）**：`AgentEvent` 引用的几个「重型」字段在 Rust 里**本就是 `serde_json::Value` 包装**（`Message`/`ToolOutput`/`AssistantMessageEvent` 见 `events/mod.rs`），派生 `JsonSchema` 后它们**天然就是 open object（any）**——这不是「降级」，是如实反映现状，无需为出类型把核心类型树翻一遍；后续可逐个细化为精确结构。
+- **TS 生成**：`serve_dts()` 不再返回 `unknown` 空壳，改为从上述 JSON Schema 经 in-crate 轻量 emitter 生成具名 `interface`/`union`；fixture 同步重生成。
+- **漂移保护**：`serve_schema_fixture` 测试覆盖「命令 + 控制 + 响应 + 事件」全套；并补一条「真实 `emit` 出的事件能被生成 schema 校验通过」的 round-trip 测试，防 open-object 与运行时漂移。
+
+**字段精度清单（哪些精确、哪些开放对象）**
+
+> 原则：UI 高频消费、形状稳定的字段出精确类型；Rust 里本就是 `serde_json::Value` 包装、形状不定的出开放对象（`any`）。
+
+
+| 字段 / 类型             | 出现在哪些事件                                                                      | 当前 Rust 类型                                                  | schema 出法     | 理由                                            |
+| ------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------- | ------------ | --------------------------------------------- |
+| `Message`           | `agent_end.messages`、`turn_end.{message,toolResults}`、`message_*.message`     | `struct Message(serde_json::Value)`                         | **开放对象**     | Rust 里本就是 `Value`，无精确结构可出                      |
+| `ToolOutput`        | `tool_execution_update.partialResult`、`tool_execution_end.result`            | `struct ToolOutput(serde_json::Value)`                      | **开放对象**     | 同上                                            |
+| `args` / `argsPreview` | `tool_execution_start.args`、`tool_call_streaming.argsPreview`、`tool_execution_update.args` | `serde_json::Value`                                         | **开放对象**     | 工具入参形状因工具而异，本就不定型                             |
+| `AssistantMessageEvent` | `message_update.assistantMessageEvent`                                       | `struct AssistantMessageEvent(serde_json::Value)`（形状见源码注释：`kind`/`delta`/`source?`/`signature?`） | **开放对象** | Rust 里本就是 `Value` 包装；UI 按源码注释约定的形状自行解析 |
+| `ToolDisplay`       | `tool_execution_end.display`                                                 | `enum {File,Plan,Text}`（已具名）                                | **精确**       | 本就是具名枚举，零成本出精确类型                              |
+| 其余标量字段              | 各事件的 `type`/`sessionId`/`toolCallId`/`toolName`/`isError`/`turnIndex`/`timestamp`/`error`/`errorCode`/`finishReason`/`ratio`/`attempt`/`delayMs` 等 | 原生标量（string/bool/usize/f64/...）                            | **精确**       | 直接出准类型                                        |
+
+
+> **决策（已定）**：`Message`/`ToolOutput`/`AssistantMessageEvent`/`args` 全部维持开放对象（它们在 Rust 里本就是 `serde_json::Value` 包装，无精确结构可出）。`AssistantMessageEvent` 的形状在源码注释里已钉死（`kind`/`delta`/`source?`/`signature?`），UI 按该约定自行解析；本期**不**为它单独提升具名类型。
+
 ### 4.3 控制帧 `control_request / control_response / control_cancel`（双向）
 
 
@@ -55,8 +116,8 @@
 | ------------ | ------- | --- | --- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ----------- |
 | `type`       | string  | 是   | —   | 全部                                                                  | `control_request`(server→UI) / `control_response`(UI→server) / `control_cancel` | 控制帧三态。      |
 | `request_id` | string  | 是   | —   | 全部                                                                  | 请求/响应**全局唯一**配对键（回包只认它，不靠 sessionId 路由）                                         | 哪个请求的答复。    |
-| `sessionId`  | string  | 条件  | —   | `ask_question`/`permission`/`interrupt` 等会话级控制；`initialize` 不带（连接级） | 控制请求归属的会话，供 UI 展示分流；回包可省（用 `request_id` 即可）                                     | 这条控制属于哪个会话。 |
-| `subtype`    | string  | 是   | —   | `control_request`                                                   | `initialize` / `ask_question` / `permission` / `interrupt`                      | 这条控制要干嘛。    |
+| `sessionId`  | string  | 条件  | —   | `ask_question`/`permission` 等会话级控制；`initialize` 不带（连接级） | 控制请求归属的会话，供 UI 展示分流；回包可省（用 `request_id` 即可）                                     | 这条控制属于哪个会话。 |
+| `subtype`    | string  | 是   | —   | `control_request`                                                   | `initialize` / `ask_question` / `permission`                                    | 这条控制要干嘛。    |
 | `payload`    | object  | 条件  | —   | 按 subtype                                                           | `ask_question` 即 `AskQuestionWireRequest`；响应即 `AskQuestionWireResponse`         | 控制的具体内容/回包。 |
 
 

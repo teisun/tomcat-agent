@@ -68,6 +68,7 @@
 //! 中以"任意 JSON"携带，不强制 wire schema——避免 LLM provider 升级时全链路
 //! 改 enum；强类型断言留在调用方（如 `agent_loop::reasoning_loop`）。
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// JSON `type` 字段与 pi-mono / 审计展示用字符串；业务与测试请引用此处常量，避免散落字面量。
@@ -174,7 +175,7 @@ pub mod wire {
 }
 
 /// 占位：与 pi-mono / OpenAI 风格 Message 对齐，MVP 用 JSON 表示。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Message(pub serde_json::Value);
 
 /// 占位：Assistant 消息流式事件。
@@ -192,15 +193,15 @@ pub struct Message(pub serde_json::Value);
 ///
 /// 兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径，
 /// 除非订阅者显式按 `kind` 分流）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AssistantMessageEvent(pub serde_json::Value);
 
 /// 占位：工具输出。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ToolOutput(pub serde_json::Value);
 
 /// 工具执行成功后给 CLI/TUI 的结构化展示提示。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolDisplay {
     File { file: String },
@@ -220,19 +221,19 @@ pub struct PlanEventPayload {
 }
 
 /// 占位：AssistantMessage。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AssistantMessage(pub serde_json::Value);
 
 /// 占位：ToolResultMessage。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ToolResultMessage(pub serde_json::Value);
 
 /// 占位：ContentBlock。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ContentBlock(pub serde_json::Value);
 
 /// 占位：ImageContent。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ImageContent(pub serde_json::Value);
 
 /// 领域事件的 wire 信封：把 sessionId 作为 envelope 元数据统一附加在顶层 JSON。
@@ -252,6 +253,16 @@ impl<'a> WireEnvelope<'a> {
     }
 }
 
+/// serve `--print-schema` 使用的事件 wire 入口：与 [`WireEnvelope`] 同形，但用拥有所有权的字段
+/// 参与 `JsonSchema` / fixture 导出，不影响运行时 event bus 发射路径。
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct WireEvent {
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(flatten)]
+    pub event: AgentEvent,
+}
+
 /// 扩展事件的 wire 信封：与 [`WireEnvelope`] 同语义，但载荷为 [`ExtensionEvent`]。
 #[derive(Debug, Serialize)]
 pub(super) struct ExtensionWireEnvelope<'a> {
@@ -268,7 +279,7 @@ impl<'a> ExtensionWireEnvelope<'a> {
 }
 
 /// 宿主侧流式/UI 与生命周期事件，供前端或日志消费。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     /// Agent 会话开始。

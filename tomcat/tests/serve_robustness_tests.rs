@@ -46,6 +46,27 @@ fn serve_parse_error_does_not_break_following_initialize() {
 
 #[test]
 #[serial]
+fn serve_unknown_command_returns_error_response() {
+    common::setup_logging();
+    let server = spawn_scripted_openai_stream_server(vec![]);
+    let fx = setup_serve_fixture(&server.base_url);
+    let mut child = spawn_serve_child(&fx);
+
+    child.send_value(&json!({
+        "type": "mystery",
+        "id": "mystery-1"
+    }));
+    let response = child.recv_value(Duration::from_secs(5));
+    assert_eq!(response["type"].as_str(), Some("response"));
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(
+        response["error"].as_str(),
+        Some("unknown_command: mystery")
+    );
+}
+
+#[test]
+#[serial]
 fn serve_eof_exits_cleanly() {
     common::setup_logging();
     let server = spawn_scripted_openai_stream_server(vec![]);

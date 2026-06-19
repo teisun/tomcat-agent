@@ -17,8 +17,7 @@
             ]
           },
           "params": {
-            "type": "object",
-            "additionalProperties": true
+            "$ref": "#/definitions/ServeMessageParams"
           },
           "sessionId": {
             "type": [
@@ -51,8 +50,7 @@
             ]
           },
           "params": {
-            "type": "object",
-            "additionalProperties": true
+            "$ref": "#/definitions/ServeMessageParams"
           },
           "sessionId": {
             "type": [
@@ -85,8 +83,7 @@
             ]
           },
           "params": {
-            "type": "object",
-            "additionalProperties": true
+            "$ref": "#/definitions/ServeMessageParams"
           },
           "sessionId": {
             "type": [
@@ -442,6 +439,53 @@
           }
         }
       },
+      "ServeAttachment": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "dataBase64": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fileId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/definitions/ServeAttachmentKind"
+          },
+          "mimeType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ServeAttachmentKind": {
+        "type": "string",
+        "enum": [
+          "image",
+          "file"
+        ]
+      },
+      "ServeMessageParams": {
+        "type": "object",
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ServeAttachment"
+            }
+          }
+        }
+      },
       "ServeSessionMode": {
         "type": "string",
         "enum": [
@@ -572,6 +616,974 @@
       }
     }
   },
+  "wire_event": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "WireEvent",
+    "description": "serve `--print-schema` 使用的事件 wire 入口：与 [`WireEnvelope`] 同形，但用拥有所有权的字段 参与 `JsonSchema` / fixture 导出，不影响运行时 event bus 发射路径。",
+    "type": "object",
+    "oneOf": [
+      {
+        "description": "Agent 会话开始。",
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "agent_start"
+            ]
+          }
+        }
+      },
+      {
+        "description": "Agent 会话结束，含消息与可选错误。",
+        "type": "object",
+        "required": [
+          "messages",
+          "type"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/Message"
+            }
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "agent_end"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "timestamp",
+          "turnIndex",
+          "type"
+        ],
+        "properties": {
+          "timestamp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "turnIndex": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "turn_start"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "message",
+          "toolResults",
+          "turnIndex",
+          "type"
+        ],
+        "properties": {
+          "message": {
+            "$ref": "#/definitions/Message"
+          },
+          "toolResults": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/Message"
+            }
+          },
+          "turnIndex": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "turn_end"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "message",
+          "type"
+        ],
+        "properties": {
+          "message": {
+            "$ref": "#/definitions/Message"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "message_start"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "assistantMessageEvent",
+          "message",
+          "type"
+        ],
+        "properties": {
+          "assistantMessageEvent": {
+            "$ref": "#/definitions/AssistantMessageEvent"
+          },
+          "message": {
+            "$ref": "#/definitions/Message"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "message_update"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "message",
+          "type"
+        ],
+        "properties": {
+          "message": {
+            "$ref": "#/definitions/Message"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "message_end"
+            ]
+          }
+        }
+      },
+      {
+        "description": "LLM 终局错误（如 Responses `response.failed` / 顶层 `error` / `content_filter`）。",
+        "type": "object",
+        "required": [
+          "errorMessage",
+          "reason",
+          "type"
+        ],
+        "properties": {
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "errorMessage": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "llm_error"
+            ]
+          }
+        }
+      },
+      {
+        "description": "LLM 非错误终局提示（当前用于 `max_output_tokens` 截断轻提示）。",
+        "type": "object",
+        "required": [
+          "finishReason",
+          "message",
+          "type"
+        ],
+        "properties": {
+          "finishReason": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "llm_notice"
+            ]
+          }
+        }
+      },
+      {
+        "description": "线格式 `tool_execution_start`（观察向）；钩子 `tool_call` 见 `ExtensionEvent::ToolCall`。",
+        "type": "object",
+        "required": [
+          "args",
+          "toolCallId",
+          "toolName",
+          "type"
+        ],
+        "properties": {
+          "args": true,
+          "toolCallId": {
+            "type": "string"
+          },
+          "toolName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "tool_execution_start"
+            ]
+          }
+        }
+      },
+      {
+        "description": "线格式 `tool_call_streaming`：参数仍在流式到达时的轻量预告；只带摘要，不带大 payload。",
+        "type": "object",
+        "required": [
+          "argsPreview",
+          "toolCallId",
+          "toolName",
+          "type"
+        ],
+        "properties": {
+          "argsPreview": true,
+          "toolCallId": {
+            "type": "string"
+          },
+          "toolName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "tool_call_streaming"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "args",
+          "partialResult",
+          "toolCallId",
+          "toolName",
+          "type"
+        ],
+        "properties": {
+          "args": true,
+          "partialResult": {
+            "$ref": "#/definitions/ToolOutput"
+          },
+          "toolCallId": {
+            "type": "string"
+          },
+          "toolName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "tool_execution_update"
+            ]
+          }
+        }
+      },
+      {
+        "description": "线格式 `tool_execution_end`（观察向）；钩子 `tool_result` 见 `ExtensionEvent::ToolResult`。",
+        "type": "object",
+        "required": [
+          "isError",
+          "result",
+          "toolCallId",
+          "toolName",
+          "type"
+        ],
+        "properties": {
+          "display": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ToolDisplay"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "isError": {
+            "type": "boolean"
+          },
+          "result": {
+            "$ref": "#/definitions/ToolOutput"
+          },
+          "toolCallId": {
+            "type": "string"
+          },
+          "toolName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "tool_execution_end"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "coveredCount",
+          "ratioBefore",
+          "type"
+        ],
+        "properties": {
+          "coveredCount": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "ratioBefore": {
+            "type": "number",
+            "format": "double"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "auto_compaction_start"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "coveredCount",
+          "elapsedMs",
+          "estimatedCoveredTokensBefore",
+          "estimatedSummaryTokens",
+          "estimatedTokensSaved",
+          "ratioAfter",
+          "summaryChars",
+          "type"
+        ],
+        "properties": {
+          "coveredCount": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "elapsedMs": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "estimatedCoveredTokensBefore": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "estimatedSummaryTokens": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "estimatedTokensSaved": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "ratioAfter": {
+            "type": "number",
+            "format": "double"
+          },
+          "summaryChars": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "auto_compaction_end"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "attempts",
+          "error",
+          "exhaustedAfterRetries",
+          "source",
+          "type"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "error": {
+            "type": "string"
+          },
+          "exhaustedAfterRetries": {
+            "type": "boolean"
+          },
+          "ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "source": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "compaction_error"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "originalChars",
+          "toolName",
+          "truncatedChars",
+          "type"
+        ],
+        "properties": {
+          "originalChars": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "toolName": {
+            "type": "string"
+          },
+          "truncatedChars": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "tool_result_truncated"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "attempt",
+          "delayMs",
+          "errorMessage",
+          "maxAttempts",
+          "type"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "delayMs": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "errorMessage": {
+            "type": "string"
+          },
+          "maxAttempts": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "auto_retry_start"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "attempt",
+          "success",
+          "type"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "finalError": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "auto_retry_end"
+            ]
+          }
+        }
+      },
+      {
+        "description": "扩展/插件触发错误，含扩展 ID、事件名与错误信息。",
+        "type": "object",
+        "required": [
+          "error",
+          "event",
+          "type"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "event": {
+            "type": "string"
+          },
+          "extensionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "extension_error"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "compactionCount",
+          "compactionTokensFreed",
+          "contextUtilizationRatio",
+          "inputTokensUsed",
+          "preheatInProgress",
+          "preheatResultPending",
+          "totalToolResultBytesPersisted",
+          "type"
+        ],
+        "properties": {
+          "compactionCount": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "compactionTokensFreed": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "contextUtilizationRatio": {
+            "type": "number",
+            "format": "double"
+          },
+          "inputTokensUsed": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "preheatInProgress": {
+            "type": "boolean"
+          },
+          "preheatResultPending": {
+            "type": "boolean"
+          },
+          "totalToolResultBytesPersisted": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "context_metrics_update"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "originalChars",
+          "persistedPath",
+          "toolName",
+          "type"
+        ],
+        "properties": {
+          "originalChars": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "persistedPath": {
+            "type": "string"
+          },
+          "toolName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "tool_result_persisted"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "ratio",
+          "reason",
+          "type"
+        ],
+        "properties": {
+          "ratio": {
+            "type": "number",
+            "format": "double"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "context_overflow_trim_start"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "estimatedTokensFreed",
+          "ratioAfter",
+          "ratioBefore",
+          "turnsRemoved",
+          "type",
+          "willRetry"
+        ],
+        "properties": {
+          "estimatedTokensFreed": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "ratioAfter": {
+            "type": "number",
+            "format": "double"
+          },
+          "ratioBefore": {
+            "type": "number",
+            "format": "double"
+          },
+          "turnsRemoved": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "context_overflow_trim_end"
+            ]
+          },
+          "willRetry": {
+            "type": "boolean"
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "coveredCount",
+          "estimatedTokensFreed",
+          "ratioAfter",
+          "ratioBefore",
+          "type",
+          "wasSyncWait"
+        ],
+        "properties": {
+          "coveredCount": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "estimatedTokensFreed": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "ratioAfter": {
+            "type": "number",
+            "format": "double"
+          },
+          "ratioBefore": {
+            "type": "number",
+            "format": "double"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "boundary_switched"
+            ]
+          },
+          "wasSyncWait": {
+            "type": "boolean"
+          }
+        }
+      },
+      {
+        "description": "L0 落盘 + 占位符在本轮 timing ⑤ 释放的估算 tokens（不计入 L1/L2）。",
+        "type": "object",
+        "required": [
+          "persistTokensFreed",
+          "placeholderTokensFreed",
+          "type"
+        ],
+        "properties": {
+          "persistTokensFreed": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "placeholderTokensFreed": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "layer0_context_release"
+            ]
+          }
+        }
+      },
+      {
+        "description": "用户中断（Soft Interrupt）：携带本回合已累积的 partial 尺寸统计， 便于订阅者区分\"失败 vs 中断\"。本事件与 `AgentEnd(interrupted)` **并存**， 后者保留向后兼容。",
+        "type": "object",
+        "required": [
+          "partialTextLen",
+          "toolResultsCount",
+          "type"
+        ],
+        "properties": {
+          "partialTextLen": {
+            "description": "partial assistant 累积字符数（非字节数）。",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "toolResultsCount": {
+            "description": "本回合已追加到 messages 的 tool_result 数量。",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "agent_interrupted"
+            ]
+          }
+        }
+      },
+      {
+        "description": "父 Agent 通过 `AgentRegistry::spawn_subagent_internal` 派生子 Agent 时发射。 用于审计 / TUI 关联父子关系；与 `Interrupted` 同档「描述生命周期」语义。\n\n注：reviewer 子 Agent **不**写父 transcript（隔离），仅靠本事件让父侧观察到子的存在。",
+        "type": "object",
+        "required": [
+          "childSessionId",
+          "parentSessionId",
+          "spawnDepth",
+          "subagentType",
+          "type"
+        ],
+        "properties": {
+          "childSessionId": {
+            "type": "string"
+          },
+          "parentSessionId": {
+            "type": "string"
+          },
+          "spawnDepth": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "subagentType": {
+            "description": "`SubagentType::as_str()`（如 `\"reviewer\"`）。",
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "sub_agent_start"
+            ]
+          }
+        }
+      },
+      {
+        "description": "子 Agent run() 收敛 / abort / fatal 时发射；`outcome ∈ {\"completed\",\"interrupted\",\"failed\"}`。",
+        "type": "object",
+        "required": [
+          "childSessionId",
+          "outcome",
+          "parentSessionId",
+          "subagentType",
+          "type"
+        ],
+        "properties": {
+          "childSessionId": {
+            "type": "string"
+          },
+          "errorMessage": {
+            "description": "失败 / abort 时的简短理由（成功为 `None`）。",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "parentSessionId": {
+            "type": "string"
+          },
+          "subagentType": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "sub_agent_end"
+            ]
+          }
+        }
+      }
+    ],
+    "properties": {
+      "sessionId": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "definitions": {
+      "AssistantMessageEvent": {
+        "description": "占位：Assistant 消息流式事件。\n\n**payload schema（T2-P0-006 P3 起）**：\n\n```json { \"kind\": \"content_delta\" | \"thinking_delta\",   // 必有；老消费者可忽略 \"delta\": \"...\",                                 // 必有：增量文本 \"source\": \"summary\" | \"raw\",                   // thinking_delta 必有 \"signature\": \"...\"                              // 可选：仅 thinking_delta + Anthropic } ```\n\n兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径， 除非订阅者显式按 `kind` 分流）。"
+      },
+      "Message": {
+        "description": "占位：与 pi-mono / OpenAI 风格 Message 对齐，MVP 用 JSON 表示。"
+      },
+      "ToolDisplay": {
+        "description": "工具执行成功后给 CLI/TUI 的结构化展示提示。",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "file",
+              "kind"
+            ],
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "file"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "plan"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "plan"
+                ]
+              },
+              "plan": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "text"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              },
+              "text": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "ToolOutput": {
+        "description": "占位：工具输出。"
+      }
+    }
+  },
   "out_frame": {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "OutFrame",
@@ -582,9 +1594,14 @@
       {
         "$ref": "#/definitions/ControlFrame"
       },
-      true
+      {
+        "$ref": "#/definitions/WireEvent"
+      }
     ],
     "definitions": {
+      "AssistantMessageEvent": {
+        "description": "占位：Assistant 消息流式事件。\n\n**payload schema（T2-P0-006 P3 起）**：\n\n```json { \"kind\": \"content_delta\" | \"thinking_delta\",   // 必有；老消费者可忽略 \"delta\": \"...\",                                 // 必有：增量文本 \"source\": \"summary\" | \"raw\",                   // thinking_delta 必有 \"signature\": \"...\"                              // 可选：仅 thinking_delta + Anthropic } ```\n\n兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径， 除非订阅者显式按 `kind` 分流）。"
+      },
       "ControlFrame": {
         "oneOf": [
           {
@@ -668,6 +1685,9 @@
           }
         ]
       },
+      "Message": {
+        "description": "占位：与 pi-mono / OpenAI 风格 Message 对齐，MVP 用 JSON 表示。"
+      },
       "ResponseFrame": {
         "type": "object",
         "required": [
@@ -699,6 +1719,964 @@
           },
           "type": {
             "type": "string"
+          }
+        }
+      },
+      "ToolDisplay": {
+        "description": "工具执行成功后给 CLI/TUI 的结构化展示提示。",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "file",
+              "kind"
+            ],
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "file"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "plan"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "plan"
+                ]
+              },
+              "plan": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "text"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              },
+              "text": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "ToolOutput": {
+        "description": "占位：工具输出。"
+      },
+      "WireEvent": {
+        "description": "serve `--print-schema` 使用的事件 wire 入口：与 [`WireEnvelope`] 同形，但用拥有所有权的字段 参与 `JsonSchema` / fixture 导出，不影响运行时 event bus 发射路径。",
+        "type": "object",
+        "oneOf": [
+          {
+            "description": "Agent 会话开始。",
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent_start"
+                ]
+              }
+            }
+          },
+          {
+            "description": "Agent 会话结束，含消息与可选错误。",
+            "type": "object",
+            "required": [
+              "messages",
+              "type"
+            ],
+            "properties": {
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "messages": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/Message"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent_end"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "timestamp",
+              "turnIndex",
+              "type"
+            ],
+            "properties": {
+              "timestamp": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "turnIndex": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "turn_start"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "toolResults",
+              "turnIndex",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "$ref": "#/definitions/Message"
+              },
+              "toolResults": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/definitions/Message"
+                }
+              },
+              "turnIndex": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "turn_end"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "$ref": "#/definitions/Message"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "message_start"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "assistantMessageEvent",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "assistantMessageEvent": {
+                "$ref": "#/definitions/AssistantMessageEvent"
+              },
+              "message": {
+                "$ref": "#/definitions/Message"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "message_update"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "$ref": "#/definitions/Message"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "message_end"
+                ]
+              }
+            }
+          },
+          {
+            "description": "LLM 终局错误（如 Responses `response.failed` / 顶层 `error` / `content_filter`）。",
+            "type": "object",
+            "required": [
+              "errorMessage",
+              "reason",
+              "type"
+            ],
+            "properties": {
+              "errorCode": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "errorMessage": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "llm_error"
+                ]
+              }
+            }
+          },
+          {
+            "description": "LLM 非错误终局提示（当前用于 `max_output_tokens` 截断轻提示）。",
+            "type": "object",
+            "required": [
+              "finishReason",
+              "message",
+              "type"
+            ],
+            "properties": {
+              "finishReason": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "llm_notice"
+                ]
+              }
+            }
+          },
+          {
+            "description": "线格式 `tool_execution_start`（观察向）；钩子 `tool_call` 见 `ExtensionEvent::ToolCall`。",
+            "type": "object",
+            "required": [
+              "args",
+              "toolCallId",
+              "toolName",
+              "type"
+            ],
+            "properties": {
+              "args": true,
+              "toolCallId": {
+                "type": "string"
+              },
+              "toolName": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_execution_start"
+                ]
+              }
+            }
+          },
+          {
+            "description": "线格式 `tool_call_streaming`：参数仍在流式到达时的轻量预告；只带摘要，不带大 payload。",
+            "type": "object",
+            "required": [
+              "argsPreview",
+              "toolCallId",
+              "toolName",
+              "type"
+            ],
+            "properties": {
+              "argsPreview": true,
+              "toolCallId": {
+                "type": "string"
+              },
+              "toolName": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_call_streaming"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "args",
+              "partialResult",
+              "toolCallId",
+              "toolName",
+              "type"
+            ],
+            "properties": {
+              "args": true,
+              "partialResult": {
+                "$ref": "#/definitions/ToolOutput"
+              },
+              "toolCallId": {
+                "type": "string"
+              },
+              "toolName": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_execution_update"
+                ]
+              }
+            }
+          },
+          {
+            "description": "线格式 `tool_execution_end`（观察向）；钩子 `tool_result` 见 `ExtensionEvent::ToolResult`。",
+            "type": "object",
+            "required": [
+              "isError",
+              "result",
+              "toolCallId",
+              "toolName",
+              "type"
+            ],
+            "properties": {
+              "display": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/ToolDisplay"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "isError": {
+                "type": "boolean"
+              },
+              "result": {
+                "$ref": "#/definitions/ToolOutput"
+              },
+              "toolCallId": {
+                "type": "string"
+              },
+              "toolName": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_execution_end"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "coveredCount",
+              "ratioBefore",
+              "type"
+            ],
+            "properties": {
+              "coveredCount": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "ratioBefore": {
+                "type": "number",
+                "format": "double"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "auto_compaction_start"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "coveredCount",
+              "elapsedMs",
+              "estimatedCoveredTokensBefore",
+              "estimatedSummaryTokens",
+              "estimatedTokensSaved",
+              "ratioAfter",
+              "summaryChars",
+              "type"
+            ],
+            "properties": {
+              "coveredCount": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "elapsedMs": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
+              "estimatedCoveredTokensBefore": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "estimatedSummaryTokens": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "estimatedTokensSaved": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "ratioAfter": {
+                "type": "number",
+                "format": "double"
+              },
+              "summaryChars": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "auto_compaction_end"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "attempts",
+              "error",
+              "exhaustedAfterRetries",
+              "source",
+              "type"
+            ],
+            "properties": {
+              "attempts": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "error": {
+                "type": "string"
+              },
+              "exhaustedAfterRetries": {
+                "type": "boolean"
+              },
+              "ratio": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "source": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "compaction_error"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "originalChars",
+              "toolName",
+              "truncatedChars",
+              "type"
+            ],
+            "properties": {
+              "originalChars": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "toolName": {
+                "type": "string"
+              },
+              "truncatedChars": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_result_truncated"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "attempt",
+              "delayMs",
+              "errorMessage",
+              "maxAttempts",
+              "type"
+            ],
+            "properties": {
+              "attempt": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "delayMs": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
+              "errorMessage": {
+                "type": "string"
+              },
+              "maxAttempts": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "auto_retry_start"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "attempt",
+              "success",
+              "type"
+            ],
+            "properties": {
+              "attempt": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "finalError": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "success": {
+                "type": "boolean"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "auto_retry_end"
+                ]
+              }
+            }
+          },
+          {
+            "description": "扩展/插件触发错误，含扩展 ID、事件名与错误信息。",
+            "type": "object",
+            "required": [
+              "error",
+              "event",
+              "type"
+            ],
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "event": {
+                "type": "string"
+              },
+              "extensionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "extension_error"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "compactionCount",
+              "compactionTokensFreed",
+              "contextUtilizationRatio",
+              "inputTokensUsed",
+              "preheatInProgress",
+              "preheatResultPending",
+              "totalToolResultBytesPersisted",
+              "type"
+            ],
+            "properties": {
+              "compactionCount": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "compactionTokensFreed": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "contextUtilizationRatio": {
+                "type": "number",
+                "format": "double"
+              },
+              "inputTokensUsed": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "preheatInProgress": {
+                "type": "boolean"
+              },
+              "preheatResultPending": {
+                "type": "boolean"
+              },
+              "totalToolResultBytesPersisted": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "context_metrics_update"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "originalChars",
+              "persistedPath",
+              "toolName",
+              "type"
+            ],
+            "properties": {
+              "originalChars": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "persistedPath": {
+                "type": "string"
+              },
+              "toolName": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_result_persisted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "ratio",
+              "reason",
+              "type"
+            ],
+            "properties": {
+              "ratio": {
+                "type": "number",
+                "format": "double"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "context_overflow_trim_start"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "estimatedTokensFreed",
+              "ratioAfter",
+              "ratioBefore",
+              "turnsRemoved",
+              "type",
+              "willRetry"
+            ],
+            "properties": {
+              "estimatedTokensFreed": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "ratioAfter": {
+                "type": "number",
+                "format": "double"
+              },
+              "ratioBefore": {
+                "type": "number",
+                "format": "double"
+              },
+              "turnsRemoved": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "context_overflow_trim_end"
+                ]
+              },
+              "willRetry": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "coveredCount",
+              "estimatedTokensFreed",
+              "ratioAfter",
+              "ratioBefore",
+              "type",
+              "wasSyncWait"
+            ],
+            "properties": {
+              "coveredCount": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "estimatedTokensFreed": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "ratioAfter": {
+                "type": "number",
+                "format": "double"
+              },
+              "ratioBefore": {
+                "type": "number",
+                "format": "double"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "boundary_switched"
+                ]
+              },
+              "wasSyncWait": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "description": "L0 落盘 + 占位符在本轮 timing ⑤ 释放的估算 tokens（不计入 L1/L2）。",
+            "type": "object",
+            "required": [
+              "persistTokensFreed",
+              "placeholderTokensFreed",
+              "type"
+            ],
+            "properties": {
+              "persistTokensFreed": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "placeholderTokensFreed": {
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "layer0_context_release"
+                ]
+              }
+            }
+          },
+          {
+            "description": "用户中断（Soft Interrupt）：携带本回合已累积的 partial 尺寸统计， 便于订阅者区分\"失败 vs 中断\"。本事件与 `AgentEnd(interrupted)` **并存**， 后者保留向后兼容。",
+            "type": "object",
+            "required": [
+              "partialTextLen",
+              "toolResultsCount",
+              "type"
+            ],
+            "properties": {
+              "partialTextLen": {
+                "description": "partial assistant 累积字符数（非字节数）。",
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "toolResultsCount": {
+                "description": "本回合已追加到 messages 的 tool_result 数量。",
+                "type": "integer",
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent_interrupted"
+                ]
+              }
+            }
+          },
+          {
+            "description": "父 Agent 通过 `AgentRegistry::spawn_subagent_internal` 派生子 Agent 时发射。 用于审计 / TUI 关联父子关系；与 `Interrupted` 同档「描述生命周期」语义。\n\n注：reviewer 子 Agent **不**写父 transcript（隔离），仅靠本事件让父侧观察到子的存在。",
+            "type": "object",
+            "required": [
+              "childSessionId",
+              "parentSessionId",
+              "spawnDepth",
+              "subagentType",
+              "type"
+            ],
+            "properties": {
+              "childSessionId": {
+                "type": "string"
+              },
+              "parentSessionId": {
+                "type": "string"
+              },
+              "spawnDepth": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "subagentType": {
+                "description": "`SubagentType::as_str()`（如 `\"reviewer\"`）。",
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "sub_agent_start"
+                ]
+              }
+            }
+          },
+          {
+            "description": "子 Agent run() 收敛 / abort / fatal 时发射；`outcome ∈ {\"completed\",\"interrupted\",\"failed\"}`。",
+            "type": "object",
+            "required": [
+              "childSessionId",
+              "outcome",
+              "parentSessionId",
+              "subagentType",
+              "type"
+            ],
+            "properties": {
+              "childSessionId": {
+                "type": "string"
+              },
+              "errorMessage": {
+                "description": "失败 / abort 时的简短理由（成功为 `None`）。",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "outcome": {
+                "type": "string"
+              },
+              "parentSessionId": {
+                "type": "string"
+              },
+              "subagentType": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "sub_agent_end"
+                ]
+              }
+            }
+          }
+        ],
+        "properties": {
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       }

@@ -16,8 +16,9 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use crate::api::chat::run_chat_turn;
+use crate::api::chat::run_chat_turn_with_message;
 use crate::api::chat::{ChatContext, ChatContextOverrides};
+use crate::core::llm::ChatMessage;
 use crate::{
     ensure_work_dir_structure, resolve_sessions_dir, session_key_for_agent, AppConfig, AppError,
     SessionManager, SessionMode,
@@ -190,7 +191,7 @@ pub(crate) fn register_slot_hooks(state: &ServeState, slot: &Arc<SessionSlot>) {
 
 pub(crate) async fn run_slot_turn(
     slot: Arc<SessionSlot>,
-    input: String,
+    input_message: ChatMessage,
 ) -> Result<crate::AgentRunOutcome, AppError> {
     let turn_token = {
         let mut guard = slot.ctx.session_runtime.cancel_token.lock();
@@ -217,9 +218,9 @@ pub(crate) async fn run_slot_turn(
         system_text.len(),
         next_system_text.len(),
     );
-    let outcome = run_chat_turn(
+    let outcome = run_chat_turn_with_message(
         &slot.ctx,
-        &input,
+        Some(input_message),
         &next_system_text,
         &mut context_state,
         turn_token,

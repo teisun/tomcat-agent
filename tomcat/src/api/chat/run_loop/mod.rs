@@ -190,21 +190,39 @@ fn drain_follow_up_messages(ctx: &ChatContext) -> Vec<ChatMessage> {
     }
 }
 
-pub(crate) fn compose_planned_turn_messages(
-    input: &str,
+fn compose_planned_turn_messages_from_message(
+    input_message: Option<ChatMessage>,
     drained_follow_ups: Vec<ChatMessage>,
 ) -> Vec<ChatMessage> {
     // Synthetic background completions are runtime signals, not a fresher user ask.
     // Keep any real typed prompt last so the next request preserves user intent.
     let mut planned = drained_follow_ups;
-    if !input.is_empty() {
-        planned.push(ChatMessage::user(input));
+    if let Some(message) = input_message {
+        planned.push(message);
     }
     planned
 }
 
-fn drain_planned_turn_messages(ctx: &ChatContext, input: &str) -> Vec<ChatMessage> {
-    compose_planned_turn_messages(input, drain_follow_up_messages(ctx))
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn compose_planned_turn_messages(
+    input: &str,
+    drained_follow_ups: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    compose_planned_turn_messages_from_message(
+        if input.is_empty() {
+            None
+        } else {
+            Some(ChatMessage::user(input))
+        },
+        drained_follow_ups,
+    )
+}
+
+fn drain_planned_turn_messages(
+    ctx: &ChatContext,
+    input_message: Option<ChatMessage>,
+) -> Vec<ChatMessage> {
+    compose_planned_turn_messages_from_message(input_message, drain_follow_up_messages(ctx))
 }
 
 type PlannedAppendOutcome = (Vec<ChatMessage>, Vec<(ChatMessage, bool)>);
@@ -503,6 +521,21 @@ pub async fn run_chat_turn(
     context_state: &mut crate::core::ContextState,
     turn_token: CancellationToken,
 ) -> Result<AgentRunOutcome, AppError> {
+    let input_message = if input.is_empty() {
+        None
+    } else {
+        Some(ChatMessage::user(input))
+    };
+    run_chat_turn_with_message(ctx, input_message, system_text, context_state, turn_token).await
+}
+
+pub async fn run_chat_turn_with_message(
+    ctx: &ChatContext,
+    input_message: Option<ChatMessage>,
+    system_text: &str,
+    context_state: &mut crate::core::ContextState,
+    turn_token: CancellationToken,
+) -> Result<AgentRunOutcome, AppError> {
     ctx.session_runtime
         .plan_runtime
         .attach_cancel_hook(turn_token.clone());
@@ -544,7 +577,7 @@ pub async fn run_chat_turn(
         ),
         _ => system_text.to_string(),
     };
-    let planned_messages = drain_planned_turn_messages(ctx, input);
+    let planned_messages = drain_planned_turn_messages(ctx, input_message);
     let (messages, appended_messages) = append_planned_messages_with_rehydrate_retry(
         ctx,
         system_text,

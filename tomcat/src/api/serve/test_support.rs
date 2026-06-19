@@ -174,6 +174,27 @@ impl DeterministicMockLlm {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct SharedRequests(pub Arc<Mutex<Vec<ChatRequest>>>);
+
+pub struct RecordingMockLlm {
+    streams: Mutex<std::collections::VecDeque<Vec<Result<StreamEvent, AppError>>>>,
+    requests: SharedRequests,
+}
+
+impl RecordingMockLlm {
+    pub fn new(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> (Self, SharedRequests) {
+        let requests = SharedRequests::default();
+        (
+            Self {
+                streams: Mutex::new(streams.into()),
+                requests: requests.clone(),
+            },
+            requests,
+        )
+    }
+}
+
 #[async_trait]
 impl LlmProvider for DeterministicMockLlm {
     fn provider_name(&self) -> &str {
@@ -195,6 +216,35 @@ impl LlmProvider for DeterministicMockLlm {
             self.streams.lock().pop_front().ok_or_else(|| {
                 AppError::Llm("DeterministicMockLlm: no more streams".to_string())
             })?;
+        Ok(Box::new(tokio_stream::iter(events)))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RecordingMockLlm {
+    fn provider_name(&self) -> &str {
+        "recording-mock"
+    }
+
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+        Err(AppError::Llm("recording mock chat not used".to_string()))
+    }
+
+    async fn chat_stream(
+        &self,
+        req: ChatRequest,
+    ) -> Result<
+        Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        self.requests.0.lock().push(req);
+        let events = self.streams.lock().pop_front().ok_or_else(|| {
+            AppError::Llm("RecordingMockLlm: no more streams".to_string())
+        })?;
         Ok(Box::new(tokio_stream::iter(events)))
     }
 
@@ -362,6 +412,23 @@ pub async fn build_initialized_state_with_streams(
     let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
     let provider: Arc<dyn LlmProvider> = Arc::new(DeterministicMockLlm::new(streams));
     build_initialized_state_with_provider(temp, cfg, provider).await
+}
+
+pub async fn build_initialized_state_with_recorded_streams(
+    streams: Vec<Vec<Result<StreamEvent, AppError>>>,
+) -> (
+    Arc<ServeState>,
+    SharedWriterBuffer,
+    tempfile::TempDir,
+    Arc<SessionSlot>,
+    SharedRequests,
+) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let (provider, requests) = RecordingMockLlm::new(streams);
+    let provider: Arc<dyn LlmProvider> = Arc::new(provider);
+    let (state, buffer, temp, slot) = build_initialized_state_with_provider(temp, cfg, provider).await;
+    (state, buffer, temp, slot, requests)
 }
 
 pub async fn build_initialized_state_with_streams_and_max_sessions(

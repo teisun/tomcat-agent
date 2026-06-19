@@ -16,6 +16,7 @@ pub struct ServeConfig {
     pub transport: ServeTransport,
     #[serde(default = "default_serve_max_sessions")]
     pub max_sessions: usize,
+    // TODO(next): implement idle ChatContext eviction before advertising this as live behavior.
     #[serde(default)]
     pub session_idle_unload_ms: u32,
     #[serde(default = "default_serve_delta_coalesce_ms")]

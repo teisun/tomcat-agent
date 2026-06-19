@@ -1,4 +1,5 @@
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::AppError;
 
@@ -11,7 +12,30 @@ pub fn ndjson_safe_stringify<T: Serialize>(value: &T) -> Result<String, AppError
 }
 
 pub fn parse_command_line(line: &str) -> Result<super::types::ServeCommand, AppError> {
-    serde_json::from_str(line).map_err(|error| AppError::Config(format!("parse_error: {error}")))
+    let value: Value =
+        serde_json::from_str(line).map_err(|error| AppError::Config(format!("parse_error: {error}")))?;
+    if let Some(command_type) = value.get("type").and_then(Value::as_str) {
+        if !matches!(
+            command_type,
+            "prompt"
+                | "steer"
+                | "follow_up"
+                | "get_state"
+                | "set_model"
+                | "new_session"
+                | "switch_session"
+                | "get_messages"
+                | "close_session"
+                | "list_sessions"
+                | "interrupt"
+                | "control_request"
+                | "control_response"
+                | "control_cancel"
+        ) {
+            return Err(AppError::Config(format!("unknown_command: {command_type}")));
+        }
+    }
+    serde_json::from_value(value).map_err(|error| AppError::Config(format!("parse_error: {error}")))
 }
 
 #[cfg(test)]
@@ -33,5 +57,11 @@ mod tests {
     fn parse_command_line_rejects_bad_json() {
         let err = parse_command_line("{bad json").unwrap_err();
         assert!(err.to_string().contains("parse_error"));
+    }
+
+    #[test]
+    fn parse_command_line_rejects_unknown_command_type() {
+        let err = parse_command_line(r#"{"type":"mystery","id":"u1"}"#).unwrap_err();
+        assert_eq!(err.to_string(), "unknown_command: mystery");
     }
 }

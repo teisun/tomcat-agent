@@ -336,6 +336,16 @@ fn content_part_serde_roundtrip_image_b64() {
 }
 
 #[test]
+fn content_part_serde_roundtrip_image_base64_data() {
+    let p =
+        ChatMessageContentPart::image_base64_data("image/png", TINY_PNG_B64.to_string()).unwrap();
+    let j = serde_json::to_value(&p).unwrap();
+    assert_eq!(j["type"], "input_image");
+    assert_eq!(j["mime_type"], "image/png");
+    assert_eq!(j["image_b64"], TINY_PNG_B64);
+}
+
+#[test]
 fn content_part_serde_roundtrip_file_id() {
     let p = ChatMessageContentPart::file_file_id("file-xyz", Some("a.pdf".to_string())).unwrap();
     let j = serde_json::to_value(&p).unwrap();
@@ -352,6 +362,20 @@ fn content_part_serde_roundtrip_file_id() {
             mime_type: None,
         } if id == "file-xyz" && name == "a.pdf"
     ));
+}
+
+#[test]
+fn image_base64_data_rejects_invalid_base64() {
+    let err = ChatMessageContentPart::image_base64_data("image/png", "***not-base64***")
+        .expect_err("非法 base64 应拒绝");
+    assert!(err.to_string().contains("base64 解码失败"));
+}
+
+#[test]
+fn image_base64_data_rejects_non_whitelisted_mime() {
+    let err = ChatMessageContentPart::image_base64_data("image/svg+xml", TINY_PNG_B64)
+        .expect_err("svg 不在白名单应拒绝");
+    assert!(err.to_string().contains("mime_type"));
 }
 
 #[test]
@@ -378,6 +402,24 @@ fn image_b64_rejects_non_whitelisted_mime() {
         .expect_err("svg 不在白名单应拒绝");
     let s = err.to_string();
     assert!(s.contains("mime_type"), "错误文案不对: {}", s);
+}
+
+#[test]
+fn file_base64_data_roundtrip() {
+    use base64::Engine;
+
+    let data = base64::engine::general_purpose::STANDARD.encode(b"hello pdf");
+    let p = ChatMessageContentPart::file_base64_data(
+        Some("a.pdf".to_string()),
+        "application/pdf",
+        data.clone(),
+    )
+    .unwrap();
+    let j = serde_json::to_value(&p).unwrap();
+    assert_eq!(j["type"], "input_file");
+    assert_eq!(j["filename"], "a.pdf");
+    assert_eq!(j["mime_type"], "application/pdf");
+    assert_eq!(j["file_b64"], data);
 }
 
 #[test]

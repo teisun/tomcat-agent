@@ -1,8 +1,40 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-pub type JsonMap = Map<String, Value>;
+use crate::infra::events::WireEvent;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServeAttachmentKind {
+    Image,
+    File,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServeAttachment {
+    pub kind: ServeAttachmentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServeMessageParams {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ServeAttachment>,
+}
+
+impl ServeMessageParams {
+    pub fn is_empty(&self) -> bool {
+        self.attachments.is_empty()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -48,8 +80,8 @@ pub enum ServeCommand {
         #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         text: String,
-        #[serde(default, skip_serializing_if = "Map::is_empty")]
-        params: JsonMap,
+        #[serde(default, skip_serializing_if = "ServeMessageParams::is_empty")]
+        params: ServeMessageParams,
     },
     #[serde(rename_all = "camelCase")]
     Steer {
@@ -58,8 +90,8 @@ pub enum ServeCommand {
         #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         text: String,
-        #[serde(default, skip_serializing_if = "Map::is_empty")]
-        params: JsonMap,
+        #[serde(default, skip_serializing_if = "ServeMessageParams::is_empty")]
+        params: ServeMessageParams,
     },
     #[serde(rename_all = "camelCase")]
     FollowUp {
@@ -68,8 +100,8 @@ pub enum ServeCommand {
         #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         text: String,
-        #[serde(default, skip_serializing_if = "Map::is_empty")]
-        params: JsonMap,
+        #[serde(default, skip_serializing_if = "ServeMessageParams::is_empty")]
+        params: ServeMessageParams,
     },
     #[serde(rename_all = "camelCase")]
     GetState {
@@ -368,7 +400,7 @@ impl ControlFrame {
 pub enum OutFrame {
     Response(ResponseFrame),
     Control(ControlFrame),
-    Event(Value),
+    Event(#[schemars(with = "WireEvent")] Value),
 }
 
 impl OutFrame {
@@ -388,7 +420,9 @@ impl OutFrame {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_lossless(&self) -> bool {
+        // TODO(next): either wire this into writer backpressure classification or delete it.
         !matches!(self.wire_type(), Some("message_update"))
     }
 

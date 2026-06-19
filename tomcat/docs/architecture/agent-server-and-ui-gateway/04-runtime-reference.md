@@ -8,7 +8,7 @@
 | `TOMCAT_AGENT_ACTIVE`          | `1`                  | 标记当前已在 agent 会话内，serve 子进程继承后拒绝嵌套变更类命令（复用既有门禁）                 | env（最高）    | 防止 agent 自己又开自己。 |
 | `serve.transport`              | `stdio`/`ws`(Phase2) | serve 默认传输                                                     | config     | 默认走管道。           |
 | `serve.max_sessions`           | usize                | 单 serve 进程并发会话数上限（默认对齐 `MAX_CONCURRENT_AGENTS=16`，含子 Agent 占额） | config     | 一个进程最多开几个会话 tab。 |
-| `serve.session_idle_unload_ms` | u32                  | 空闲会话（无活跃 run/订阅）多久后回收 `ChatContext`，`0`=不回收（对标 codex 30min）    | config     | 没人用的会话多久自动清掉。    |
+| `serve.session_idle_unload_ms` | u32                  | **预留字段，本期未接线**：未来空闲会话（无活跃 run/订阅）多久后回收 `ChatContext`，`0`=不回收（对标 codex 30min）    | config     | 先留配置名，本期还不会真的自动清。    |
 | `serve.delta_coalesce_ms`      | u32                  | delta 合并窗口（ms），`0`=不合并                                         | config     | 增量字攒多久发一批。       |
 | `serve.max_buffered_frames`    | usize                | writer **每会话**队列上限，超限丢可丢帧（lossless 帧不丢）                        | config     | 单个会话队列多长算「慢客户端」。 |
 | `serve.schema_out_dir`         | path                 | `--print-schema` 输出目录                                          | env/config | 类型文件吐到哪。         |
@@ -74,33 +74,55 @@ stdin EOF / 管道关闭
 
 | 维度   | 用例 / 编号                                                                     | 状态      | 说人话                              |
 | ---- | --------------------------------------------------------------------------- | ------- | -------------------------------- |
-| 单元   | `serve::writer::tests::serve_writer_single_drain_orders_frames`             | PENDING | 单写者保序锁死。                         |
-| 单元   | `serve::ndjson::tests::ndjson_safe_stringify_escapes_line_separators`       | PENDING | U+2028/9 不破行。                    |
-| 单元   | `serve::commands::tests::serve_prompt_drives_agent_run`                     | PENDING | 命令真能驱动 run。                      |
-| 单元   | `serve::commands::tests::serve_unknown_command_returns_error_response`      | PENDING | 坏命令归一化错。                         |
-| 单元   | `serve::event_pump::tests::serve_event_pump_streams_agent_events`           | PENDING | 事件确实被搬到下行。                       |
-| 单元   | `serve::event_pump::tests::serve_lifecycle_events_not_dropped`              | PENDING | 事件泵不漏生命周期事件（R3/P2）。              |
-| 单元   | `serve::writer::tests::serve_writer_never_drops_lifecycle`                  | PENDING | 关键事件不丢（R9 锁死）。                   |
-| 单元   | `serve::writer::tests::serve_writer_coalesces_deltas_under_pressure`        | PENDING | 背压下 delta 合并（R9）。                |
-| 单元   | `serve::control::tests::serve_initialize_handshake_returns_caps`            | PENDING | 握手回能力位。                          |
-| 单元   | `serve::control::tests::serve_interrupt_stops_only_target_session`          | PENDING | 急停只停目标会话（R8/R6）。                 |
-| 单元   | `serve::registry::tests::serve_new_session_registers_slot`                  | PENDING | new_session 入注册表（R8/P1.5）。       |
-| 单元   | `serve::commands::tests::serve_command_routes_by_session_id`                | PENDING | 命令按 sessionId 选槽（R8）。            |
-| 单元   | `serve::commands::tests::serve_same_session_second_prompt_is_busy`          | PENDING | 同会话串行 busy（R8）。                  |
-| 集成   | `tests/serve_multi_session::serve_two_sessions_run_concurrently`            | PENDING | 两会话真并发流式（R8/维度A 锁死）。             |
-| 集成   | `tests/serve_multi_session::serve_session_isolation_no_event_crosstalk`     | PENDING | 会话间事件不串台（R8）。                    |
-| 集成   | `tests/serve_multi_session::serve_writer_fair_across_sessions`              | PENDING | 跨会话公平不饿死（R9/P5）。                 |
+| 单元   | `serve::writer::tests::serve_writer_single_drain_orders_frames`             | ✅ 2026-06-19 | 单写者保序锁死。                         |
+| 单元   | `serve::ndjson::tests::ndjson_safe_stringify_escapes_line_separators`       | ✅ 2026-06-19 | U+2028/9 不破行。                    |
+| 单元   | `serve::ndjson::tests::parse_command_line_rejects_unknown_command_type`     | ✅ 2026-06-19 | 未知命令类型不会伪装成 parse_error。 |
+| 单元   | `serve::commands::tests::serve_prompt_drives_agent_run`                     | ✅ 2026-06-19 | 命令真能驱动 run。                      |
+| 单元   | `serve::control::tests::serve_unknown_control_subtype_returns_unknown_command_error` | ✅ 2026-06-19 | 坏控制命令归一化错。                         |
+| 单元   | `serve::event_pump::tests::serve_event_pump_streams_agent_events`           | ✅ 2026-06-19 | 事件确实被搬到下行。                       |
+| 单元   | `serve::event_pump::tests::serve_lifecycle_events_not_dropped_for_other_sessions` | ✅ 2026-06-19 | 事件泵不漏生命周期事件（R3/P2）。              |
+| 单元   | `serve::writer::tests::serve_writer_never_drops_lifecycle`                  | ✅ 2026-06-19 | 关键事件不丢（R9 锁死）。                   |
+| 单元   | `serve::writer::tests::serve_writer_coalesces_deltas_under_pressure`        | ✅ 2026-06-19 | 背压下 delta 合并（R9）。                |
+| 单元   | `serve::control::tests::serve_initialize_control_request_sets_ready_state`  | ✅ 2026-06-19 | 握手回能力位。                          |
+| 单元   | `serve::control::tests::serve_interrupt_cancels_target_session`             | ✅ 2026-06-19 | 急停只停目标会话（R8/R6）。                 |
+| 单元   | `serve::control::tests::serve_interrupt_unknown_session_returns_error_response` | ✅ 2026-06-19 | interrupt 命中未知会话时回标准错误。       |
+| 单元   | `serve::registry::tests::new_session_registers_slot_in_registry`            | ✅ 2026-06-19 | new_session 入注册表（R8/P1.5）。       |
+| 单元   | `serve::commands::tests::serve_command_routes_by_session_id`                | ✅ 2026-06-19 | 命令按 sessionId 选槽（R8）。            |
+| 单元   | `serve::commands::tests::serve_same_session_second_prompt_is_busy`          | ✅ 2026-06-19 | 同会话串行 busy（R8）。                  |
+| 单元   | `serve::commands::tests::serve_prompt_with_image_attachment_builds_multimodal_message` | ✅ 2026-06-19 | `prompt` 附件真正进多模态消息。 |
+| 单元   | `serve::commands::tests::serve_follow_up_with_attachment_queues_multimodal_message_when_busy` | ✅ 2026-06-19 | 忙会话 `follow_up` 附件排队不丢。 |
+| 单元   | `serve::commands::tests::serve_prompt_invalid_attachment_returns_error` | ✅ 2026-06-19 | 坏附件在入口直接被拒绝。 |
+| 单元   | `serve::commands::tests::serve_prompt_without_attachments_falls_back_to_user_text` | ✅ 2026-06-19 | 没附件时仍走原来的纯文本路径。 |
+| 单元   | `serve::commands::tests::serve_steer_ignores_attachments` | ✅ 2026-06-19 | `steer` 本期明确只吃 text，不偷偷消费附件。 |
+| 单元   | `serve::commands::tests::serve_get_messages_uptoseq_is_null_placeholder` | ✅ 2026-06-19 | `upToSeq` 仍是 Phase 2 占位，不假装支持。 |
+| 单元   | `serve::schema::tests::serve_emitted_event_validates_against_generated_schema` | ✅ 2026-06-19 | 真实事件样本能过生成 schema 校验。 |
+| 集成   | `tests/serve_multi_session::serve_multi_session_concurrency_and_isolation`  | ✅ 2026-06-19 | 两会话真并发流式，且事件不串台（R8/维度A 锁死）。             |
+| 集成   | `serve::writer::tests::serve_writer_round_robins_across_sessions`           | ✅ 2026-06-19 | 跨会话公平不饿死（R9/P5）。                 |
 | 单元   | `serve::writer::tests::serve_hidden_session_drops_delta_keeps_lossless`     | PENDING | Phase 2：hidden 丢 delta、留 lossless（R12/P5.5）。 |
 | 集成   | `tests/serve_visibility::serve_visibility_switch_resyncs_via_snapshot`      | PENDING | Phase 2：切前台用快照重建不缺帧/不重复（R12/P5.5）。       |
 | 集成   | `tests/serve_visibility::serve_visibility_switch_midstream_message_not_truncated` | PENDING | Phase 2：流式中途切前台不只显示半截（飞行中消息，R12/P5.5）。  |
 | 集成   | `tests/serve_visibility::serve_hidden_session_approval_still_delivered`     | PENDING | Phase 2：后台会话审批仍下发不卡死（R12/P5.5）。          |
-| 集成   | `tests/serve_ask_question_tests::serve_ask_question_roundtrips_via_control` | PENDING | 审批回环跑通（R7，复用 ask_question_wire）。 |
-| 集成   | `tests/serve_ask_question_tests::serve_ask_question_routes_by_session`      | PENDING | 审批回到正确会话（R8）。                    |
-| 集成   | `tests/serve_ask_question_tests::serve_ask_question_cancel_propagates`      | PENDING | 取消能传播。                           |
-| 集成   | `tests/serve_stdio_e2e::serve_prompt_emits_lifecycle_to_agent_end`          | PENDING | 端到端一次 turn 全链路。                  |
-| 快照   | `tests/serve_schema_fixture::serve_schema_matches_committed_fixture`        | PENDING | 协议 schema 漂移防回归（R11）。            |
-| 关键承诺 | §3.1 R5 单写者 / R7 审批请求 / R8 多会话并发 / R9 背压 各有上面锁死测试；R12 visible/hidden 保留 Phase 2 设计测试锚点 | PENDING | 本期承诺与二期设计储备都留了测试钉。                       |
-| 文档   | 本文与 `interaction-layer.md`、`multi-agent.md`、`README.md` 链接一致                | PENDING | 字跟得上代码。                          |
+| 集成   | `tests/serve_ask_question_tests::serve_ask_question_roundtrip_resumes_turn` | ✅ 2026-06-19 | 审批回环跑通（R7，复用 ask_question wire）。 |
+| 集成   | `tests/serve_ask_question_tests::serve_ask_question_cancel_roundtrip_does_not_hang` | ✅ 2026-06-19 | 取消能传播，且不会挂死。                           |
+| 集成   | `tests/serve_ask_question_tests::serve_ask_question_routes_by_session`      | ✅ 2026-06-19 | 两会话并发时审批只回正确 session。 |
+| 集成   | `tests/serve_ask_question_tests::serve_interrupt_emits_agent_interrupted_and_tool_execution_end` | ✅ 2026-06-19 | 中断时 `agent_interrupted` 与在途工具收口一起锁住。 |
+| 集成   | `tests/serve_robustness_tests::serve_unknown_command_returns_error_response` | ✅ 2026-06-19 | 未知命令回标准 `unknown_command`。 |
+| 集成   | `tests/serve_robustness_tests::serve_parse_error_does_not_break_following_initialize` | ✅ 2026-06-19 | 坏 JSON 之后还能继续 initialize。 |
+| 集成   | `tests/serve_robustness_tests::serve_eof_exits_cleanly` | ✅ 2026-06-19 | stdin EOF 能干净退出。 |
+| 集成   | `tests/serve_stdio_e2e::serve_stdio_user_roundtrip_e2e`                     | ✅ 2026-06-19 | 端到端一次 turn 全链路。                  |
+| 集成   | `tests/serve_stdio_e2e::serve_interrupt_emits_agent_interrupted_e2e`        | ✅ 2026-06-19 | stdio 端到端能看到 `agent_interrupted`。 |
+| 集成   | `tests/serve_stdio_e2e::serve_stdout_only_emits_ndjson_frames`              | ✅ 2026-06-19 | stdout 只吐 NDJSON，不夹日志杂音。 |
+| 集成   | `tests/serve_stdio_e2e::serve_prompt_with_attachment_roundtrip`             | ✅ 2026-06-19 | 附件 prompt 走完整子进程链路直到 `agent_end`。 |
+| 单元   | `serve::writer::tests::serve_writer_backpressure_notice_emitted_once`       | ✅ 2026-06-19 | 慢客户端提醒只发一次，不刷屏。 |
+| 单元   | `serve::control::tests::serve_not_initialized_returns_error_response`        | ✅ 2026-06-19 | 未 initialize 的命令会回标准错误。 |
+| 单元   | `serve::commands::tests::serve_prompt_unknown_session_returns_error`         | ✅ 2026-06-19 | 命中未知 session 时回标准错误。 |
+| 单元   | `serve::commands::tests::serve_prompt_panic_isolation_emits_agent_end_error` | ✅ 2026-06-19 | 单会话 panic 会被隔离并正常收口。 |
+| 单元   | `serve::ask_question::tests::serve_ask_question_bridge_emits_control_request` | ✅ 2026-06-19 | ask_question bridge 能正确下发控制请求。 |
+| 单元   | `serve::ask_question::tests::serve_ask_question_bridge_round_trips_control_response` | ✅ 2026-06-19 | ask_question bridge 能把 UI 回包送回原请求。 |
+| 单元   | `serve::ask_question::tests::serve_ask_question_bridge_ignores_unknown_request_id` | ✅ 2026-06-19 | 乱入 request_id 不会污染正确会话。 |
+| 快照   | `tests/serve_schema_fixture::serve_print_schema_matches_fixture`            | ✅ 2026-06-19 | 协议 schema / `.d.ts` 漂移防回归（R11/R13/R14）。            |
+| 关键承诺 | §3.1 R5 单写者 / R7 审批请求 / R8 多会话并发 / R9 背压 / R13 schema / R14 附件 各有上面锁死测试；R12 visible/hidden 保留 Phase 2 设计测试锚点 | ✅ 2026-06-19 | 本期承诺与二期设计储备都留了测试钉。                       |
+| 文档   | 本文与 `interaction-layer.md`、`multi-agent.md`、`README.md` 链接一致                | ✅ 2026-06-19 | 字跟得上代码。                          |
 
 
 ---
@@ -110,7 +132,7 @@ stdin EOF / 管道关闭
 
 | 风险                                | 影响          | 应对（具体动作）                                                                                                                                                                | 说人话                     |
 | --------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| stdout 被非 JSON 污染（log/print 误入下行） | 高           | 强制单写者 + serve 模式下把 tracing 输出钉到 stderr；新增 `serve_stdout_only_ndjson` 断言；参考 cc-fork `streamJsonStdoutGuard`                                                              | 别让日志混进数据管道把 UI 解析搞崩。    |
+| stdout 被非 JSON 污染（log/print 误入下行） | 高           | 强制单写者 + serve 模式下把 tracing 输出钉到 stderr；新增 `tests/serve_stdio_e2e::serve_stdout_only_emits_ndjson_frames` 断言；参考 cc-fork `streamJsonStdoutGuard`                                                              | 别让日志混进数据管道把 UI 解析搞崩。    |
 | EventBus 回调跨线程并发写导致帧交错            | 高           | 所有下行只准 `mpsc::send`，唯一 writer 任务 drain；`catch_unwind` 已隔离回调 panic（`event_bus/mod.rs`）                                                                                   | 一个出口排队，谁都不许插队直写。        |
 | 审批回环卡死（UI 不回包）                    | 中           | `control_request` 带超时（对标 pi_agent_rust ACP 120s）+ `cancel_signal` 轮询（`ask_question_wire.rs` 已有 10ms 轮询）；超时按 cancelled 收口                                                | UI 不答就别永远等，超时按取消处理。     |
 | 慢客户端撑爆内存                          | 中           | `max_buffered_frames` **每会话**上限 + delta 合并/丢（lossless 帧保留），对标 openclaw `dropIfSlow`                                                                                     | 客户端太慢就少发增量，别把自己撑死。      |
@@ -136,8 +158,8 @@ stdin EOF / 管道关闭
 
 ### 跨文档修订意图
 
-- `[interaction-layer.md](../interaction-layer.md)` §3 已声明「为未来 Web / TUI / IPC 预留一致接口形态」与「CLISlash command、后续图形界面复用同一套宿主能力」；本文是该预留的**具体落地方案**，应在该入口页补一条指向本文的导航链接（见 §README 链接规则，由父文档负责向下导航）。
-- `[multi-agent.md](../multi-agent.md)` **维度A（多会话并发）+ §14.3.2.1（`ChatContextRegistry` vs `AgentRegistry` 分工）** 是本文 §3.3 多会话落地的上位设计；本文把维度A 规划的 `ChatContextRegistry` 在 serve 进程内具体落地为 `src/api/serve/registry.rs`，并复用**已实现**的 `src/core/agent_registry/mod.rs`（`register_root`/`cascade_abort`/并发上限）。两文应保持「维度A=设计、本文 §3.3=serve 落地」的一致引用。
+- `[interaction-layer.md](../interaction-layer.md)` §3 已补到本文的导航链接：上游继续声明统一交互层目标，本文负责给出 `tomcat serve` 的具体落地。
+- `[multi-agent.md](../multi-agent.md)` **维度A（多会话并发）+ §14.3.2.1（`ChatContextRegistry` vs `AgentRegistry` 分工）** 是本文 §3.3 多会话落地的上位设计；链接已互相对齐，保持「维度A=设计、本文 §3.3=serve 落地」的一致引用。
 - `[llm-stream-events-cli-pipeline.md](../llm-stream-events-cli-pipeline.md)` 的 `StreamEvent → AgentEvent → EventBus → CliTurnRenderer` 链路与本文复用同一 `AgentEvent`；本文不改其语义，仅新增 `EventBus → serve writer → stdout` 的并行订阅者（多会话下按 `sessionId` demux）。
 
 ---

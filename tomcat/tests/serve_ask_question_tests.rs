@@ -29,6 +29,21 @@ fn initialize(child: &mut ServeChild) -> String {
         .to_string()
 }
 
+fn new_session(child: &mut ServeChild, request_id: &str) -> String {
+    child.send_value(&json!({
+        "type": "new_session",
+        "id": request_id,
+        "params": {}
+    }));
+    let frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("id").and_then(|v| v.as_str()) == Some(request_id)
+    });
+    frames.last().expect("new_session response")["payload"]["sessionId"]
+        .as_str()
+        .expect("new session id")
+        .to_string()
+}
+
 fn ask_question_server() -> common::serve::ScriptedOpenAiServer {
     spawn_scripted_openai_stream_server(vec![
         response(vec![
@@ -151,4 +166,171 @@ fn serve_ask_question_cancel_roundtrip_does_not_hang() {
         "expected turn to settle after cancel, got {frames:?}"
     );
     assert_eq!(server.captured_requests().len(), 2);
+}
+
+#[test]
+#[serial]
+fn serve_ask_question_routes_by_session() {
+    common::setup_logging();
+    let server = spawn_scripted_openai_stream_server(vec![
+        response(vec![
+            sse_tool_call("call_1", "ask_question", ASK_QUESTION_ARGS),
+            sse_finish("tool_calls"),
+            sse_done(),
+        ]),
+        response(vec![
+            sse_delta("second session kept running"),
+            sse_finish("stop"),
+            sse_done(),
+        ]),
+        response(vec![
+            sse_delta("after approval"),
+            sse_finish("stop"),
+            sse_done(),
+        ]),
+    ]);
+    let fx = setup_serve_fixture(&server.base_url);
+    let mut child = spawn_serve_child(&fx);
+    let session_a = initialize(&mut child);
+    let session_b = new_session(&mut child, "new-2");
+
+    child.send_value(&json!({
+        "type": "prompt",
+        "id": "ask-route-1",
+        "sessionId": session_a.clone(),
+        "text": "ask session a",
+        "params": {}
+    }));
+
+    let ask_frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("control_request")
+            && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
+    });
+    let control = ask_frames.last().expect("control request");
+    assert_eq!(control["sessionId"].as_str(), Some(session_a.as_str()));
+    let request_id = control["requestId"]
+        .as_str()
+        .expect("ask_question request id");
+
+    child.send_value(&json!({
+        "type": "prompt",
+        "id": "session-b-1",
+        "sessionId": session_b.clone(),
+        "text": "run in session b",
+        "params": {}
+    }));
+    let session_b_frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
+            && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_b.as_str())
+    });
+    assert!(
+        session_b_frames.iter().any(|value| {
+            value.get("type").and_then(|v| v.as_str()) == Some("message_update")
+                && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_b.as_str())
+                && value
+                    .get("assistantMessageEvent")
+                    .and_then(|v| v.get("delta"))
+                    .and_then(|v| v.as_str())
+                    == Some("second session kept running")
+        }),
+        "expected session b to continue independently, got {session_b_frames:?}"
+    );
+    assert!(
+        !session_b_frames.iter().any(|value| {
+            value.get("type").and_then(|v| v.as_str()) == Some("control_request")
+                && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_b.as_str())
+        }),
+        "ask_question control should stay on session a: {session_b_frames:?}"
+    );
+
+    child.send_value(&json!({
+        "type": "control_response",
+        "requestId": request_id,
+        "sessionId": session_a.clone(),
+        "payload": {
+            "answers": [{
+                "question_id": "q1",
+                "option_ids": ["a"],
+                "custom_text": null,
+                "skipped": false,
+                "picked_recommended": true
+            }],
+            "cancelled": false
+        }
+    }));
+
+    let session_a_frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
+            && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_a.as_str())
+    });
+    assert!(
+        session_a_frames.iter().any(|value| {
+            value.get("type").and_then(|v| v.as_str()) == Some("message_update")
+                && value
+                    .get("assistantMessageEvent")
+                    .and_then(|v| v.get("delta"))
+                    .and_then(|v| v.as_str())
+                    == Some("after approval")
+        }),
+        "expected session a to resume after approval, got {session_a_frames:?}"
+    );
+    assert_eq!(server.captured_requests().len(), 3);
+}
+
+#[test]
+#[serial]
+fn serve_interrupt_emits_agent_interrupted_and_tool_execution_end() {
+    common::setup_logging();
+    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+        sse_tool_call("call_1", "ask_question", ASK_QUESTION_ARGS),
+        sse_finish("tool_calls"),
+        sse_done(),
+    ])]);
+    let fx = setup_serve_fixture(&server.base_url);
+    let mut child = spawn_serve_child(&fx);
+    let session_id = initialize(&mut child);
+
+    child.send_value(&json!({
+        "type": "prompt",
+        "id": "interrupt-ask-1",
+        "sessionId": session_id.clone(),
+        "text": "ask then interrupt",
+        "params": {}
+    }));
+
+    let mut frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("control_request")
+            && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
+    });
+    assert!(frames.iter().any(|value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("tool_execution_start")
+            && value.get("toolCallId").and_then(|v| v.as_str()) == Some("call_1")
+    }));
+
+    child.send_value(&json!({
+        "type": "interrupt",
+        "id": "interrupt-ask-ack",
+        "sessionId": session_id.clone()
+    }));
+    frames.extend(child.recv_until(Duration::from_secs(5), |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
+            && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.as_str())
+    }));
+
+    assert!(frames.iter().any(|value| {
+        value.get("id").and_then(|v| v.as_str()) == Some("interrupt-ask-ack")
+            && value.get("success").and_then(|v| v.as_bool()) == Some(true)
+    }));
+    assert!(frames.iter().any(|value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_interrupted")
+            && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.as_str())
+    }));
+    assert!(frames.iter().any(|value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("tool_execution_end")
+            && value.get("toolCallId").and_then(|v| v.as_str()) == Some("call_1")
+    }));
+    assert!(frames.iter().any(|value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
+            && value.get("error").and_then(|v| v.as_str()) == Some("interrupted")
+    }));
 }
