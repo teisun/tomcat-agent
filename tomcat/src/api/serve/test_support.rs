@@ -103,6 +103,7 @@ pub fn write_models_override(work_dir: &Path, base_url: &str) {
 id = "gpt-5.4"
 api = "openai"
 provider = "openai"
+api_key_env = "{TEST_API_KEY_ENV}"
 base_url = "{base_url}"
 
 [models.capabilities]
@@ -121,10 +122,8 @@ pub fn serve_test_config(work_dir: &Path, base_url: &str) -> AppConfig {
     write_models_override(work_dir, base_url);
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
-    cfg.llm.provider = "openai".to_string();
     cfg.llm.default_model = "gpt-5.4".to_string();
     cfg.context.compaction_model = "gpt-5.4".to_string();
-    cfg.llm.api_key_env = Some(TEST_API_KEY_ENV.to_string());
     cfg.skills.enabled = false;
     cfg.serve = ServeConfig {
         max_sessions: 8,

@@ -104,13 +104,61 @@ fn load_config_env_overrides_llm_files_expires_after_seconds() {
     let dir = std::env::temp_dir().join("tomcat_files_env_override_test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("config.toml");
-    std::fs::write(&path, "[llm]\nprovider = \"openai-responses\"\n").unwrap();
+    std::fs::write(&path, "[llm]\ndefault_model = \"gpt-5.4\"\n").unwrap();
     // SAFETY: 用例串行执行；仅在本测试作用域内临时覆盖环境变量。
     unsafe { std::env::set_var("TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS", "7200") };
     let cfg = load_config(Some(path.as_path())).unwrap();
     assert_eq!(cfg.llm.files.expires_after_seconds, 7200);
     // SAFETY: 清理测试环境变量，避免污染后续用例。
     unsafe { std::env::remove_var("TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS") };
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn load_config_rejects_legacy_llm_provider_field() {
+    let dir = std::env::temp_dir().join("tomcat_legacy_llm_provider_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[llm]\nprovider = \"openai-responses\"\n").unwrap();
+
+    let err = load_config(Some(path.as_path())).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("llm.provider"));
+    assert!(msg.contains("models.toml"));
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn load_config_rejects_legacy_llm_api_base_field() {
+    let dir = std::env::temp_dir().join("tomcat_legacy_llm_api_base_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[llm]\napi_base = \"https://example.test\"\n").unwrap();
+
+    let err = load_config(Some(path.as_path())).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("llm.api_base"));
+    assert!(msg.contains("models.toml"));
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir(&dir);
+}
+
+#[test]
+fn load_config_rejects_legacy_llm_api_key_env_field() {
+    let dir = std::env::temp_dir().join("tomcat_legacy_llm_api_key_env_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[llm]\napi_key_env = \"OPENAI_API_KEY\"\n").unwrap();
+
+    let err = load_config(Some(path.as_path())).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("llm.api_key_env"));
+    assert!(msg.contains("models.toml"));
+
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
 }

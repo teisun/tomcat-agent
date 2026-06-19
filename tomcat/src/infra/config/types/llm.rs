@@ -105,15 +105,14 @@ impl<'de> Deserialize<'de> for ThinkingDisplay {
     }
 }
 
-/// LLM 接入配置：提供商、API 地址、密钥环境变量、默认模型、限流、重试与多层超时。
+/// LLM 配置：
+/// - 选择层：`default_model` / `vision_model` / `title_model`
+/// - 运行时层：并发 / 重试 / 超时 / proxy / files / continuity 等全局旋钮
+///
+/// 模型如何连接（`api` / `provider` / `api_key_env` / `base_url`）不再出现在这里，
+/// 全部收敛到 `models.toml` 的 [`crate::core::llm::ModelEntry`]。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LlmConfig {
-    #[serde(default = "default_llm_provider")]
-    pub provider: String,
-    #[serde(default)]
-    pub api_base: Option<String>,
-    #[serde(default)]
-    pub api_key_env: Option<String>,
     #[serde(default = "default_llm_model")]
     pub default_model: String,
     /// Vision 场景模型；未设置时回落主模型，由 resolver 负责 capability guard。
@@ -122,6 +121,19 @@ pub struct LlmConfig {
     /// 标题生成场景模型；未设置时回落 compaction_model / default_model。
     #[serde(default)]
     pub title_model: Option<String>,
+    /// 仅供 `#[cfg(test)]` 单测维持最小迁移成本的隐藏覆写字段：
+    /// - 不参与真实配置反序列化；
+    /// - 生产代码与用户配置都不可见；
+    /// - 仅测试构建下 resolver 会把它当作 fallback/base override。
+    #[cfg(test)]
+    #[serde(skip)]
+    pub provider: String,
+    #[cfg(test)]
+    #[serde(skip)]
+    pub api_base: Option<String>,
+    #[cfg(test)]
+    #[serde(skip)]
+    pub api_key_env: Option<String>,
     /// 最大并发 LLM 请求数，0 表示不限制（不推荐）。
     #[serde(default = "default_max_concurrent_requests")]
     pub max_concurrent_requests: u32,
@@ -164,6 +176,62 @@ pub struct LlmConfig {
     /// OpenAI Responses 专属子配置。
     #[serde(default)]
     pub openai_responses: OpenAiResponsesConfig,
+}
+
+/// 供 provider 构造复用的全局运行时参数。
+///
+/// 与 [`LlmConfig`] 的区别：
+/// - [`LlmConfig`] 还包含“选哪个模型”的字段；
+/// - 本结构体只保留“无论选哪个模型都一样”的运行时旋钮。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LlmRuntimeConfig {
+    pub max_concurrent_requests: u32,
+    pub retry_count: u32,
+    pub agent_max_attempts: u32,
+    pub agent_retry_base_delay_ms: u64,
+    pub stream_timeout_sec: u64,
+    pub non_stream_stale_timeout_sec: u64,
+    pub http_read_timeout_sec: u64,
+    pub proxy: Option<String>,
+    pub api_base_fallback: Option<String>,
+    pub thinking: ThinkingConfig,
+    pub tool_cli_verbosity: ToolCliVerbosity,
+    pub files: LlmFilesConfig,
+    pub reasoning_continuity: ReasoningContinuityConfig,
+    pub openai_responses: OpenAiResponsesConfig,
+}
+
+impl From<&LlmConfig> for LlmRuntimeConfig {
+    fn from(value: &LlmConfig) -> Self {
+        Self {
+            max_concurrent_requests: value.max_concurrent_requests,
+            retry_count: value.retry_count,
+            agent_max_attempts: value.agent_max_attempts,
+            agent_retry_base_delay_ms: value.agent_retry_base_delay_ms,
+            stream_timeout_sec: value.stream_timeout_sec,
+            non_stream_stale_timeout_sec: value.non_stream_stale_timeout_sec,
+            http_read_timeout_sec: value.http_read_timeout_sec,
+            proxy: value.proxy.clone(),
+            api_base_fallback: value.api_base_fallback.clone(),
+            thinking: value.thinking.clone(),
+            tool_cli_verbosity: value.tool_cli_verbosity,
+            files: value.files.clone(),
+            reasoning_continuity: value.reasoning_continuity.clone(),
+            openai_responses: value.openai_responses.clone(),
+        }
+    }
+}
+
+impl Default for LlmRuntimeConfig {
+    fn default() -> Self {
+        LlmConfig::default().runtime()
+    }
+}
+
+impl LlmConfig {
+    pub fn runtime(&self) -> LlmRuntimeConfig {
+        self.into()
+    }
 }
 
 /// OpenAI Files 子配置（T2-P0-015）。
@@ -294,13 +362,6 @@ impl Default for ReasoningContinuityConfig {
     }
 }
 
-/// 默认 LLM 后端 id；与 [`crate::core::llm::registered_provider_ids`] 对齐。
-/// `"openai-responses"` 走 OpenAI Responses API（`POST /v1/responses`）；
-/// 改 `"openai"` 切回 Chat Completions（`POST /v1/chat/completions`）。
-fn default_llm_provider() -> String {
-    "openai-responses".to_string()
-}
-
 /// 全局默认 LLM 模型 id（`LlmConfig` 默认值、`tomcat init` 首次写入与文档一致）。
 /// 可通过 `tomcat.config.toml` 中 `[llm] default_model` 或环境变量 `TOMCAT__LLM__DEFAULT_MODEL` 覆盖（后者优先级更高，见 [`load_config`]）。
 pub const DEFAULT_LLM_MODEL: &str = "gpt-5.4";
@@ -360,12 +421,15 @@ impl Default for LlmFilesConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            provider: default_llm_provider(),
-            api_base: None,
-            api_key_env: Some("OPENAI_API_KEY".to_string()),
             default_model: default_llm_model(),
             vision_model: None,
             title_model: None,
+            #[cfg(test)]
+            provider: "openai-responses".to_string(),
+            #[cfg(test)]
+            api_base: None,
+            #[cfg(test)]
+            api_key_env: None,
             max_concurrent_requests: default_max_concurrent_requests(),
             retry_count: default_llm_retry_count(),
             agent_max_attempts: default_agent_max_attempts(),

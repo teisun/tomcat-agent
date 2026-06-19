@@ -1597,13 +1597,23 @@ fn build_production_web_search_harness(
 ) -> ProductionWebSearchHarness {
     let work_dir = tempfile::tempdir().expect("work dir");
     install_builtin_web_search_plugin(work_dir.path());
-    if let Some(contents) = models_toml {
-        std::fs::write(work_dir.path().join("models.toml"), contents).expect("write models.toml");
-    }
     let workspace = tempfile::tempdir().expect("workspace");
     let cwd_guard = common::CwdGuard::set(workspace.path());
     config.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
-    config.llm.api_key_env = Some(env_key.to_string());
+    if let Some(contents) = models_toml {
+        let contents = if contents.contains("api_key_env") {
+            contents
+        } else {
+            contents.replacen(
+                "provider = ",
+                &format!("api_key_env = \"{env_key}\"\nprovider = "),
+                1,
+            )
+        };
+        std::fs::write(work_dir.path().join("models.toml"), contents).expect("write models.toml");
+    } else {
+        common::apply_openai_responses_test_config(&mut config, env_key, None);
+    }
     let (runtime, ctx) = tomcat::api::cli::build_runtime_and_context(&config, SessionMode::Claw)
         .expect("chat context should be created with production runtime ordering");
     ProductionWebSearchHarness {

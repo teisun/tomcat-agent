@@ -309,7 +309,7 @@ async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(ENV_KEY.to_string());
+    common::apply_openai_responses_test_config(&mut cfg, ENV_KEY, None);
     let mut ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 
     let skill_set =

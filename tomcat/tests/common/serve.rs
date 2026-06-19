@@ -9,8 +9,6 @@ use std::time::{Duration, Instant};
 
 use tomcat::load_config_toml_file;
 
-use super::apply_deepseek_app_config;
-
 #[allow(deprecated)]
 pub fn cargo_bin_path() -> PathBuf {
     assert_cmd::cargo::cargo_bin("tomcat")
@@ -45,11 +43,8 @@ pub fn setup_serve_fixture(base_url: &str) -> ServeFixture {
 
     let config_path = home_path.join(".tomcat").join("tomcat.config.toml");
     let mut cfg = load_config_toml_file(&config_path).expect("load config");
-    apply_deepseek_app_config(&mut cfg);
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
-    cfg.llm.provider = "openai".to_string();
     cfg.llm.default_model = "gpt-5.4".to_string();
-    cfg.llm.api_key_env = Some("OPENAI_API_KEY".to_string());
     cfg.context.compaction_model = "gpt-5.4".to_string();
     cfg.skills.enabled = false;
     fs::write(

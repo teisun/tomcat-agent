@@ -53,36 +53,31 @@ pub(crate) fn run_model_wizard(
 }
 
 pub(crate) fn apply_model_choice(cfg: &mut AppConfig, entry: &ModelEntry) -> InitModelChoice {
-    let env_name = env_name_for_provider(&entry.provider);
+    let env_name = provider_env_name(entry);
     cfg.llm.default_model = entry.id.clone();
     cfg.context.compaction_model = entry.id.clone();
-    cfg.llm.provider = entry.api.clone();
-    cfg.llm.api_base = persisted_api_base(entry);
-    cfg.llm.api_key_env = Some(env_name.clone());
     InitModelChoice {
         entry: entry.clone(),
         env_name,
     }
 }
 
-fn persisted_api_base(entry: &ModelEntry) -> Option<String> {
-    match (entry.api.as_str(), entry.base_url.as_deref()) {
-        ("openai", Some("https://api.openai.com"))
-        | ("openai-responses", Some("https://api.openai.com")) => None,
-        _ => entry.base_url.clone(),
-    }
+fn provider_env_name(entry: &ModelEntry) -> String {
+    entry
+        .api_key_env
+        .clone()
+        .unwrap_or_else(|| env_name_for_provider(&entry.provider))
 }
 
 pub(crate) fn additional_provider_env_names(
     catalog: &ModelCatalog,
-    selected_provider: &str,
+    selected_env_name: &str,
 ) -> Vec<String> {
-    let selected_env = env_name_for_provider(selected_provider);
     catalog
         .entries()
         .into_iter()
-        .map(|entry| env_name_for_provider(&entry.provider))
-        .filter(|env_name| env_name != &selected_env)
+        .map(|entry| provider_env_name(&entry))
+        .filter(|env_name| env_name != selected_env_name)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()

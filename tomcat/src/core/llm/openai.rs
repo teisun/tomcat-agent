@@ -19,13 +19,15 @@ use crate::core::llm::replay_policy::{
     apply_text_downgrade, plan_scoped, replay_requirement_for_profile, CaptureMode,
     ProviderCompatProfile, ReplayAction, ReplayDowngradeReport, ReplayWindow,
 };
+use crate::infra::config::LlmRuntimeConfig;
 use crate::infra::error::AppError;
 use crate::infra::error::{
     is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,
     llm_http_status_error, llm_http_status_error_with_stage, LlmErrorStage,
 };
-use crate::infra::LlmConfig;
 
+use super::super::auth::Credential;
+use super::super::catalog::{infer_default_base_url, ModelEntry};
 use super::super::retry_delay::provider_retry_delay;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
@@ -411,6 +413,7 @@ pub struct OpenAiProvider {
     /// 主 base 不通时自动用此 URL 重试；None 表示不降级。
     api_base_fallback: Option<String>,
     api_key: String,
+    catalog_model_id: String,
     default_model: String,
     /// 并发上限，None 表示不限制（仅当 max_concurrent_requests == 0）。
     semaphore: Option<Semaphore>,
@@ -448,62 +451,73 @@ where
 }
 
 impl OpenAiProvider {
-    /// 从配置构建；api_key 从 api_key_env 指定环境变量读取，缺失则返回错误。
-    pub fn new(config: &LlmConfig) -> Result<Self, AppError> {
-        let base_url = config
-            .api_base
-            .as_deref()
-            .unwrap_or("https://api.openai.com")
+    /// 从模型条目 + 全局运行时配置构建。
+    pub fn new(
+        entry: &ModelEntry,
+        runtime: &LlmRuntimeConfig,
+        credential: &Credential,
+    ) -> Result<Self, AppError> {
+        let base_url = entry
+            .base_url
+            .clone()
+            .or_else(|| infer_default_base_url(Some(entry.provider.as_str())))
+            .or_else(|| infer_default_base_url(Some(entry.api.as_str())))
+            .unwrap_or_else(|| "https://api.openai.com".to_string())
             .trim_end_matches('/')
             .to_string();
-        let api_key_env = config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
-        let api_key = std::env::var(api_key_env)
-            .map_err(|_| AppError::Config(format!("环境变量 {} 未设置", api_key_env)))?;
 
-        let client = build_http_client(config, None)?;
+        let client = build_http_client(runtime, None)?;
 
-        let semaphore = if config.max_concurrent_requests > 0 {
-            Some(Semaphore::new(config.max_concurrent_requests as usize))
+        let semaphore = if runtime.max_concurrent_requests > 0 {
+            Some(Semaphore::new(runtime.max_concurrent_requests as usize))
         } else {
             None
         };
 
-        let api_base_fallback = config
+        let api_base_fallback = runtime
             .api_base_fallback
             .as_deref()
             .map(|s| s.trim_end_matches('/').to_string());
 
         let configured_thinking_format =
             crate::core::llm::thinking_policy::ThinkingFormat::parse_or_auto(
-                config.thinking.format.as_deref(),
+                entry
+                    .thinking_format
+                    .as_deref()
+                    .or(runtime.thinking.format.as_deref()),
             );
         Ok(Self {
             client,
             base_url,
             api_base_fallback,
-            api_key,
-            default_model: config.default_model.clone(),
+            api_key: credential.value.clone(),
+            catalog_model_id: entry.id.clone(),
+            default_model: entry.request_model_name().to_string(),
             semaphore,
-            retry_count: config.retry_count,
-            stream_timeout_sec: config.stream_timeout_sec,
-            non_stream_stale_timeout_sec: config.non_stream_stale_timeout_sec,
-            http_read_timeout_sec: config.http_read_timeout_sec,
-            thinking_cfg: config.thinking.clone(),
+            retry_count: runtime.retry_count,
+            stream_timeout_sec: runtime.stream_timeout_sec,
+            non_stream_stale_timeout_sec: runtime.non_stream_stale_timeout_sec,
+            http_read_timeout_sec: runtime.http_read_timeout_sec,
+            thinking_cfg: runtime.thinking.clone(),
             configured_thinking_format,
-            continuity_enabled: config.reasoning_continuity.enabled,
+            continuity_enabled: runtime.reasoning_continuity.enabled,
         })
     }
 
     fn effective_model(&self, request: &ChatRequest) -> String {
-        request
-            .model_override
-            .as_deref()
-            .unwrap_or(if request.model.is_empty() {
-                &self.default_model
+        if let Some(m) = request.model_override.as_deref().filter(|s| !s.is_empty()) {
+            return if m == self.catalog_model_id {
+                self.default_model.clone()
             } else {
-                &request.model
-            })
-            .to_string()
+                m.to_string()
+            };
+        }
+        let req_model = request.model.trim();
+        if req_model.is_empty() || req_model == self.catalog_model_id {
+            self.default_model.clone()
+        } else {
+            req_model.to_string()
+        }
     }
 
     fn thinking_format_for_model(

@@ -2,9 +2,9 @@
 //!
 //! 定义 [`LlmProvider`] trait 与协议无关的请求/响应/流事件类型。**Provider 实现文件**
 //! （`openai.rs` / `openai_responses.rs` / 未来新增的 `xxx.rs`）由 [`registry`] 子模块
-//! 通过 `#[cfg] #[path]` 内挂并提供 [`resolve_llm`]，本入口**不再**为每个 Provider 显式
-//! `mod xxx;` 与 `pub use xxx::XxxProvider;`——上层一律通过 `resolve_llm` 拿
-//! `Arc<dyn LlmProvider>`。
+//! 通过 `#[cfg] #[path]` 内挂并提供 [`build_provider`]，本入口**不再**为每个 Provider 显式
+//! `mod xxx;` 与 `pub use xxx::XxxProvider;`——上层一律通过 registry / resolver 产出的
+//! `Arc<dyn LlmProvider>` 使用具体实现。
 //!
 //! 模型/会话相关的 token 统计在 [`token_usage`]，model_override 由请求层传入并与
 //! `SessionEntry` 约定一致。本模块不直接依赖 `SessionEntry`，仅消费已解析的
@@ -27,7 +27,7 @@ mod types;
 pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
 pub use catalog::{Capabilities, Cost, ModelCatalog, ModelEntry};
 pub use provider::LlmProvider;
-pub use registry::{registered_provider_ids, resolve_llm};
+pub use registry::{build_provider, registered_provider_ids};
 #[allow(unused_imports)]
 pub use replay_policy::{
     apply_text_downgrade, model_family, plan as plan_replay, CaptureMode, DowngradeMode,

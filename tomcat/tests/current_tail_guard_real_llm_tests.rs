@@ -24,8 +24,7 @@ use tomcat::core::session::{PlanEventKind, PlanEventRef};
 use tomcat::core::tools::contract::catalog::builtin_tool_by_name;
 use tomcat::core::tools::plan_tool::update_plan::{self, UpdatePlanArgs};
 use tomcat::{
-    init_context_state, resolve_llm, ChatMessage, ChatRequest, ContextConfig, LlmConfig,
-    SessionManager,
+    init_context_state, AppConfig, ChatMessage, ChatRequest, ContextConfig, SessionManager,
 };
 
 const COMPACTION_MODEL: &str = "deepseek-v4-pro";
@@ -41,15 +40,19 @@ fn default_model() -> String {
     common::deepseek_test_model()
 }
 
-fn real_llm_config() -> LlmConfig {
-    let mut cfg = LlmConfig::default();
-    common::apply_deepseek_llm_config(&mut cfg);
+fn real_llm_config() -> AppConfig {
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(
+        common::dot_tomcat_e2e_workdir("current_tail_guard_real_llm")
+            .display()
+            .to_string(),
+    );
+    common::apply_deepseek_app_config(&mut cfg);
     cfg
 }
 
 fn real_llm() -> Arc<dyn tomcat::LlmProvider> {
-    resolve_llm(&real_llm_config())
-        .expect("resolve_llm 失败：请检查 DEEPSEEK_API_KEY / DeepSeek 配置")
+    common::resolve_main_provider(&real_llm_config())
 }
 
 struct HomeGuard {

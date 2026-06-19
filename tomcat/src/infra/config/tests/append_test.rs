@@ -14,7 +14,7 @@ fn empty_config_file(dir: &TempDir) -> PathBuf {
     let p = dir.path().join("tomcat.config.toml");
     std::fs::write(
         &p,
-        "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\nprovider='openai-responses'\ndefault_model='gpt-5.4'\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
+        "[agent]\nid='main'\nworkspace='/tmp'\n\n[storage]\nwork_dir='/tmp'\n\n[llm]\ndefault_model='gpt-5.4'\n\n[workspace]\nworkspace_roots=[]\nentries=[]\n\n[primitive]\npath_rules=[]\nbash_approval_required=[]\nbash_forbidden=[]\nauto_confirm=true",
     )
     .unwrap();
     p

@@ -1,13 +1,13 @@
 use std::time::Duration;
 
-use crate::infra::config::LlmConfig;
+use crate::infra::config::LlmRuntimeConfig;
 use crate::infra::error::AppError;
 use crate::infra::http_client::{
     build_outbound_client, OutboundClientErrorKind, OutboundClientOptions,
 };
 
 pub(crate) fn build_http_client(
-    cfg: &LlmConfig,
+    cfg: &LlmRuntimeConfig,
     proxy_override: Option<&str>,
 ) -> Result<reqwest::Client, AppError> {
     let mut options = OutboundClientOptions::new(proxy_override.or(cfg.proxy.as_deref()));
@@ -27,6 +27,7 @@ mod tests {
 
     use std::sync::{Arc, Mutex};
 
+    use crate::infra::LlmConfig;
     use serial_test::serial;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -146,7 +147,8 @@ mod tests {
             proxy: Some(cfg_proxy.url.clone()),
             ..LlmConfig::default()
         };
-        let client = build_http_client(&cfg, Some(&format!("{} ", override_proxy.url)))
+        let runtime = cfg.runtime();
+        let client = build_http_client(&runtime, Some(&format!("{} ", override_proxy.url)))
             .expect("build http client");
         let response = client
             .get("http://example.test/override")
@@ -173,7 +175,8 @@ mod tests {
             ("no_proxy", None),
         ]);
 
-        let client = build_http_client(&LlmConfig::default(), None).expect("build http client");
+        let runtime = LlmConfig::default().runtime();
+        let client = build_http_client(&runtime, None).expect("build http client");
         let response = client
             .get("http://example.test/from-env")
             .send()

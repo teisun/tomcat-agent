@@ -14,6 +14,7 @@ use crate::core::llm::types::{
     ChatMessage, ChatRequest, ContinuityMetadata, ReasoningContinuation, ReasoningFormat,
     ReplayRequirement, StreamEvent, ThinkingSource,
 };
+use crate::core::llm::{Capabilities, Credential, ModelEntry};
 use crate::infra::error::{llm_http_status, llm_stage, llm_summary, AppError, LlmErrorStage};
 use crate::infra::LlmConfig;
 use bytes::Bytes;
@@ -679,19 +680,29 @@ fn stream_test_provider(
     api_base_fallback: Option<String>,
     retry_count: u32,
 ) -> OpenAiProvider {
-    // SAFETY: 单测内短生命周期环境变量；每个用例独立设置/清理。
-    unsafe { std::env::set_var(STREAM_TEST_KEY_ENV, "stub-key") };
-    let cfg = LlmConfig {
+    let entry = ModelEntry {
+        id: "gpt-5.4".to_string(),
+        model_name: None,
+        api: "openai".to_string(),
+        provider: "openai".to_string(),
         api_key_env: Some(STREAM_TEST_KEY_ENV.to_string()),
-        api_base: Some(base_url),
-        api_base_fallback,
-        retry_count,
-        stream_timeout_sec: 0,
-        ..LlmConfig::default()
+        base_url: Some(base_url),
+        capabilities: Capabilities::default(),
+        context_window: None,
+        cost: None,
+        thinking_format: Some("openai".to_string()),
     };
-    let mut provider = OpenAiProvider::new(&cfg).expect("应该能构造 openai provider");
-    // SAFETY: 避免污染其它测试。
-    unsafe { std::env::remove_var(STREAM_TEST_KEY_ENV) };
+    let mut runtime = LlmConfig::default().runtime();
+    runtime.api_base_fallback = api_base_fallback;
+    runtime.retry_count = retry_count;
+    runtime.stream_timeout_sec = 0;
+    let credential = Credential {
+        provider: "openai".to_string(),
+        env_name: STREAM_TEST_KEY_ENV.to_string(),
+        value: "stub-key".to_string(),
+    };
+    let mut provider =
+        OpenAiProvider::new(&entry, &runtime, &credential).expect("应该能构造 openai provider");
     provider.client = reqwest::Client::builder()
         .no_proxy()
         .build()

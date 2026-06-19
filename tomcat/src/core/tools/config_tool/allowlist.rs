@@ -13,7 +13,6 @@ const CONFIG_READ_ALLOWLIST: &[&str] = &[
     "primitive.bash_forbidden",
     "primitive.auto_confirm",
     "llm.default_model",
-    "llm.provider",
     "session.default_mode",
     "context.context_window",
     "context.max_output_tokens",
@@ -30,9 +29,7 @@ const CONFIG_READ_ALLOWLIST: &[&str] = &[
 
 /// 读硬黑名单：通配前缀，优先级高于 [`CONFIG_READ_ALLOWLIST`]，即使误列也会被拦。
 const CONFIG_HARDCODED_READ_DENY: &[&str] = &[
-    "llm.api_key_env",
     "llm.api_key",
-    "llm.api_base",
     "llm.api_base_fallback",
     "llm.proxy",
     "security.",

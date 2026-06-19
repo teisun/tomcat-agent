@@ -4,13 +4,13 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tracing::warn;
 
-use crate::infra::config::{AppConfig, LlmConfig};
+use crate::infra::config::{AppConfig, LlmRuntimeConfig};
 use crate::infra::error::AppError;
 
 use super::auth::{AuthStore, Credential};
 use super::catalog::{infer_default_base_url, Capabilities, ModelCatalog, ModelEntry};
 use super::provider::LlmProvider;
-use super::registry::resolve_llm;
+use super::registry::build_provider;
 use super::thinking_policy::{thinking_format_for_model, ThinkingFormat};
 use super::{ChatMessage, ChatMessageContent, ChatMessageContentPart};
 
@@ -237,7 +237,7 @@ impl DefaultLlmResolver {
         entry: &ModelEntry,
         compatible_fallback_env: Option<&str>,
     ) -> Result<Credential, AppError> {
-        self.auth.get(&entry.provider, compatible_fallback_env)
+        self.auth.get(entry, compatible_fallback_env)
     }
 
     fn compatible_fallback_env<'a>(
@@ -247,27 +247,30 @@ impl DefaultLlmResolver {
     ) -> Option<&'a str> {
         match scene {
             LlmScene::Compaction => self.compaction_fallback_env(entry),
-            _ => self.config.llm.api_key_env.as_deref(),
+            _ => self.test_fallback_env(),
         }
     }
 
     fn compaction_fallback_env<'a>(&'a self, entry: &ModelEntry) -> Option<&'a str> {
-        let fallback_env = self.config.llm.api_key_env.as_deref();
         let default_model = self.config.llm.default_model.trim();
         if default_model.is_empty() || entry.id == default_model {
-            return fallback_env;
+            return None;
         }
-        let Ok(default_entry) = self.lookup_entry(default_model) else {
+        let Some(default_entry) = self.catalog.lookup(default_model) else {
             return None;
         };
         if default_entry.provider == entry.provider {
-            fallback_env
+            default_entry.api_key_env.as_deref()
         } else {
             None
         }
     }
 
     fn effective_base_url(&self, entry: &ModelEntry) -> Option<String> {
+        #[cfg(test)]
+        if let Some(base_url) = self.config.llm.api_base.clone() {
+            return Some(base_url);
+        }
         entry
             .base_url
             .clone()
@@ -275,55 +278,55 @@ impl DefaultLlmResolver {
             .or_else(|| infer_default_base_url(Some(entry.api.as_str())))
     }
 
-    fn build_provider_config(&self, entry: &ModelEntry, credential: &Credential) -> LlmConfig {
-        let mut cfg = self.config.llm.clone();
-        cfg.provider = entry.api.clone();
-        cfg.api_base = self.effective_base_url(entry);
-        cfg.api_key_env = Some(credential.env_name.clone());
-        cfg.default_model = entry.id.clone();
-        if let Some(format) = entry.thinking_format.clone() {
-            cfg.thinking.format = Some(format);
-        }
-        cfg
+    #[cfg(test)]
+    fn test_fallback_env(&self) -> Option<&str> {
+        self.config.llm.api_key_env.as_deref()
+    }
+
+    #[cfg(not(test))]
+    fn test_fallback_env(&self) -> Option<&str> {
+        None
     }
 
     fn resolved_thinking_format(&self, entry: &ModelEntry) -> ThinkingFormat {
+        let model_name = entry.request_model_name();
         match entry.thinking_format.as_deref() {
             Some(format) => {
-                ThinkingFormat::parse_or_auto(Some(format)).resolve_for_model(&entry.id)
+                ThinkingFormat::parse_or_auto(Some(format)).resolve_for_model(model_name)
             }
             None => match self.config.llm.thinking.format.as_deref() {
                 Some(format) => {
-                    ThinkingFormat::parse_or_auto(Some(format)).resolve_for_model(&entry.id)
+                    ThinkingFormat::parse_or_auto(Some(format)).resolve_for_model(model_name)
                 }
-                None => thinking_format_for_model(&entry.id),
+                None => thinking_format_for_model(model_name),
             },
         }
     }
 
-    fn provider_cache_key(
-        &self,
-        provider_cfg: &LlmConfig,
-        credential: &Credential,
-    ) -> ProviderCacheKey {
+    fn runtime(&self) -> LlmRuntimeConfig {
+        self.config.llm.runtime()
+    }
+
+    fn provider_cache_key(&self, entry: &ModelEntry, credential: &Credential) -> ProviderCacheKey {
         ProviderCacheKey {
-            api: provider_cfg.provider.clone(),
-            base_url: provider_cfg.api_base.clone(),
+            api: entry.api.clone(),
+            base_url: self.effective_base_url(entry),
             key_source: credential.env_name.clone(),
         }
     }
 
     fn resolve_cached_provider(
         &self,
-        provider_cfg: &LlmConfig,
+        entry: &ModelEntry,
         credential: &Credential,
     ) -> Result<Arc<dyn LlmProvider>, AppError> {
-        let cache_key = self.provider_cache_key(provider_cfg, credential);
+        let cache_key = self.provider_cache_key(entry, credential);
         if let Some(existing) = self.provider_cache.lock().get(&cache_key).cloned() {
             return Ok(existing);
         }
 
-        let provider = resolve_llm(provider_cfg)?;
+        let runtime = self.runtime();
+        let provider = build_provider(entry, &runtime, credential)?;
         let mut cache = self.provider_cache.lock();
         Ok(cache
             .entry(cache_key)
@@ -340,14 +343,14 @@ impl DefaultLlmResolver {
         self.guard_scene(scene, &entry)?;
         let compatible_fallback_env = self.compatible_fallback_env(scene, &entry);
         let credential = self.credential_for(&entry, compatible_fallback_env)?;
-        let provider_cfg = self.build_provider_config(&entry, &credential);
-        let provider_impl = self.resolve_cached_provider(&provider_cfg, &credential)?;
+        let provider_impl = self.resolve_cached_provider(&entry, &credential)?;
+        let base_url = self.effective_base_url(&entry);
         Ok(ResolvedCall {
             provider_impl,
-            model: entry.id.clone(),
+            model: entry.request_model_name().to_string(),
             api: entry.api.clone(),
             provider: entry.provider.clone(),
-            base_url: provider_cfg.api_base.clone(),
+            base_url,
             key_source: credential.env_name,
             thinking_format: self.resolved_thinking_format(&entry),
             capabilities: entry.capabilities.clone(),

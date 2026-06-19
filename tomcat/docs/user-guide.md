@@ -145,9 +145,16 @@ tomcat 默认将所有数据存放在 `~/.tomcat/`。可在 `tomcat.config.toml`
 tomcat init
 ```
 
-`tomcat init` 为**非交互式**三步流程（不再选择 Provider / 模型 / API Base URL；首次写入默认 `openai-responses` + `gpt-5.4`，与 `tomcat.config.toml.example` 及代码中 `DEFAULT_LLM_MODEL` 一致）：
+`tomcat init` 为**非交互式**三步流程。当前主配置 `tomcat.config.toml` 只负责：
 
-1. **[1/3] 环境初始化**：写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、生成模型清单 `~/.tomcat/models.toml`（含一条可用的 `mimo-v2.5-pro` 样板，见下）、释放内嵌资源（modules 等）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
+- 选哪个模型：`[llm].default_model` / `vision_model` / `title_model`
+- 全局运行时旋钮：并发、重试、超时、proxy、files、continuity 等
+
+模型怎么连（`api` / `provider` / `base_url` / `api_key_env`）已经全部迁到 `~/.tomcat/models.toml`。
+
+三步流程如下：
+
+1. **[1/3] 环境初始化**：写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、生成模型清单 `~/.tomcat/models.toml`（受管默认条目：`mimo-v2.5-pro`、`gpt-5.2`、`deepseek-v4-flash`）、释放内嵌资源（modules 等）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
 2. **[2/3] 资源检查**：与 `tomcat doctor` 相同的检查项（配置合法、内嵌资源、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
 3. **[3/3] API Key 配置**：若 `~/.tomcat/assets/.env` 中尚无有效 `OPENAI_API_KEY`，提示输入（可回车跳过）。**回车跳过不会创建或写入 `.env`**（避免留下空 Key 文件）；可稍后再次运行 `tomcat init` 输入 Key，或自行创建/编辑 `~/.tomcat/assets/.env`
 
@@ -156,10 +163,11 @@ tomcat init
 ```
 [1/3] 环境初始化
   ✓ 配置文件已写入: ~/.tomcat/tomcat.config.toml
-  ✓ 默认 LLM Provider: openai-responses
   ✓ 默认模型: gpt-5.4
+  ✓ 默认模型协议线: openai-responses
+  ✓ 模型逻辑厂商: openai
   ✓ 目录结构就绪
-  ✓ 已生成模型清单 models.toml（含 mimo-v2.5-pro）
+  ✓ 已生成模型清单 models.toml（含 mimo-v2.5-pro, gpt-5.2, deepseek-v4-flash）
   ✓ 内嵌资源已释放
   ✓ 已加入 PATH 环境变量
 
@@ -177,7 +185,7 @@ tomcat init
 
 若无法自动写入 shell 配置，会打印 `⚠ 无法自动配置 PATH` 及一行可手动执行的 `export PATH=...`。
 
-**幂等性**：若 `~/.tomcat/tomcat.config.toml` **已存在**，默认**不覆盖**，仅打印保留说明并继续执行目录/资源/PATH/检查/API Key 步骤；第二次起可看到「使用已有配置文件」类提示。若要换新默认模型等，请用 `tomcat config set` 或自行编辑配置后重跑。
+**幂等性**：若 `~/.tomcat/tomcat.config.toml` **已存在**，会以现有配置为基线更新；`models.toml` 不会重写你已有的条目与注释，只会在缺失时补齐受管默认模型。第二次起会看到「已更新配置文件」与「受管默认模型已齐全」类提示。
 
 **与 `tomcat doctor`**：`init` 第二步与 `doctor` 共用同一套检查逻辑；配置与资源有疑义时可再运行 `tomcat doctor` 查看含 API Key / `.env` 的完整诊断。
 
@@ -185,9 +193,19 @@ tomcat init
 
 `tomcat init` 会生成 `~/.tomcat/models.toml`（**模型清单**）。这是「增删模型」的唯一入口：
 
-- **启动自动加载**：`tomcat code` / `tomcat claw` 等启动路径会合并「内置模型表（gpt / deepseek）+ `models.toml`」，**同 id 覆盖内置、新 id 新增**，无需改代码、无需重新编译。
-- **幂等生成**：`models.toml` 不存在则创建；已存在但缺 `mimo-v2.5-pro` 则**仅追加**；已含则原样不动——**绝不覆盖你已有的条目或注释**。重复 `tomcat init` 安全。
-- **再加一个模型**：复制现有 `[[models]]` 段，改 `id` / `provider` / `base_url` 即可。
+- **启动自动加载**：`tomcat code` / `tomcat claw` 等启动路径会合并「内置模型表 + `models.toml`」，**同 id 覆盖内置、新 id 新增**，无需改代码、无需重新编译。
+- **当前内置模型只有 2 条**：`gpt-5.4` 与 `deepseek-v4-pro`。其余常用模型（如 `gpt-5.2`、`deepseek-v4-flash`、`mimo-v2.5-pro`）都由 `tomcat init` 写进 `models.toml`。
+- **幂等生成**：`models.toml` 不存在则创建；已存在但缺受管默认条目则**仅追加缺失项**；已齐全则原样不动——**绝不覆盖你已有的条目或注释**。重复 `tomcat init` 安全。
+- **再加一个模型**：复制现有 `[[models]]` 段，显式填写 `api` / `provider` / `base_url`；`api_key_env` 可选，不写时默认推断成 `<PROVIDER>_API_KEY`。
+
+字段语义：
+
+- `id`：本地模型 id，给 `/model list`、默认模型选择、会话持久化使用
+- `model_name`：真正发给上游的模型名；省略时默认等于 `id`
+- `api`：走哪条 wire，目前支持 `openai` 与 `openai-responses`
+- `provider`：逻辑厂商名，只用于凭证推断、展示、审计
+- `api_key_env`：显式指定环境变量名；省略时自动推断为 `<PROVIDER>_API_KEY`
+- `base_url`：只填 host，不要写完整 endpoint
 
 **MiMo Token Plan 最小配置**（init 默认就帮你写好一条）：
 
@@ -206,6 +224,29 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
 - **base_url**：只填 **host**，`/v1/chat/completions` 由程序拼接，**不要**写成完整 endpoint。host 以你订阅页显示的为准（CN / SGP / AMS 区域代号对应中国 / 新加坡 / 欧洲）。
 - **使用**：在 `tomcat code` / `tomcat claw` 里用 `/model mimo-v2.5-pro` 切换，或把 `[llm] default_model` 设成它。
 - **能力边界**：`mimo-v2.5-pro` 官方仅文本（无图片/文件），故 `vision/files=false`；thinking 服务端默认开，本集成走豆包系 `thinking` 线格式。
+
+### OpenAI 与 LiteLLM 网关并存
+
+如果你既想保留官方 `gpt-5.4`，又想加一条走公司网关的 `gpt-5.4`，不要复用同一个 `id`。推荐在 `models.toml` 新增一条：
+
+```toml
+[[models]]
+id = "gpt-5.4_litellm-sunmi"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "litellm-sunmi"
+base_url = "https://aigateway.sunmi.com"
+thinking_format = "openai"
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
+```
+
+- 切到网关：把 `[llm].default_model` 改成 `gpt-5.4_litellm-sunmi`
+- 切回官方：改回 `gpt-5.4`
+- `provider = "litellm-sunmi"` 默认会把 key 推断成 `LITELLM_SUNMI_API_KEY`
+
+### 旧配置迁移
+
+旧的 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env` 已删除。现在如果继续写这些字段，Tomcat 会直接报迁移错误，并提示你把连接信息迁到 `models.toml`。
 
 ### tomcat doctor — 环境诊断
 

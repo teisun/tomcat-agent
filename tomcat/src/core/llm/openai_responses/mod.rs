@@ -35,13 +35,14 @@ use tokio::sync::Semaphore;
 use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
+use super::super::auth::Credential;
+use super::super::catalog::{infer_default_base_url, ModelEntry};
 use crate::core::llm::http_client::build_http_client;
-use crate::infra::config::LlmFilesConfig;
+use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
     is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,
     llm_http_status_error, llm_http_status_error_with_stage, AppError, LlmErrorStage,
 };
-use crate::infra::LlmConfig;
 
 use super::super::retry_delay::provider_retry_delay;
 use crate::core::llm::openai_files::{OpenAiFilesClient, OpenAiFilesProviderContext};
@@ -172,8 +173,8 @@ fn map_http_status_error(status: reqwest::StatusCode, body: &[u8]) -> AppError {
     llm_http_status_error(PROVIDER_NAME, status.as_u16(), message)
 }
 
-/// `POST {base}/v1/responses` 适配器；与 [`OpenAiProvider`] 共享 [`LlmConfig`] 横切字段
-/// （spec §6.5.2 「稳定 schema」），不为本 Provider 引入专属字段。
+/// `POST {base}/v1/responses` 适配器；与 [`OpenAiProvider`] 共享 [`LlmRuntimeConfig`] 横切字段，
+/// 但模型连接信息来自 [`ModelEntry`] 与 [`Credential`]。
 #[derive(Debug)]
 pub struct OpenAiResponsesProvider {
     client: reqwest::Client,
@@ -181,6 +182,8 @@ pub struct OpenAiResponsesProvider {
     /// 主 base 不通时自动用此 URL 重试；None 表示不降级。
     api_base_fallback: Option<String>,
     api_key: String,
+    /// Catalog [`ModelEntry::id`]；出站时若 request 仍带此 id，映射为 wire 名 [`default_model`]。
+    catalog_model_id: String,
     default_model: String,
     /// 并发上限，None 表示不限制（仅当 max_concurrent_requests == 0）。
     semaphore: Option<Semaphore>,
@@ -245,66 +248,76 @@ fn is_previous_response_id_error(err: &AppError) -> bool {
 }
 
 impl OpenAiResponsesProvider {
-    /// 从配置构建；与 [`OpenAiProvider::new`](super::openai::OpenAiProvider::new) 行为一致：
-    /// `api_key` 从 `api_key_env` 指定环境变量读取；缺失返回 [`AppError::Config`]。
-    pub fn new(config: &LlmConfig) -> Result<Self, AppError> {
-        let base_url = config
-            .api_base
-            .as_deref()
-            .unwrap_or("https://api.openai.com")
+    /// 从模型条目 + 全局运行时配置构建。
+    pub fn new(
+        entry: &ModelEntry,
+        runtime: &LlmRuntimeConfig,
+        credential: &Credential,
+    ) -> Result<Self, AppError> {
+        let base_url = entry
+            .base_url
+            .clone()
+            .or_else(|| infer_default_base_url(Some(entry.provider.as_str())))
+            .or_else(|| infer_default_base_url(Some(entry.api.as_str())))
+            .unwrap_or_else(|| "https://api.openai.com".to_string())
             .trim_end_matches('/')
             .to_string();
-        let api_key_env = config.api_key_env.as_deref().unwrap_or("OPENAI_API_KEY");
-        let api_key = std::env::var(api_key_env)
-            .map_err(|_| AppError::Config(format!("环境变量 {} 未设置", api_key_env)))?;
 
-        let client = build_http_client(config, None)?;
+        let client = build_http_client(runtime, None)?;
 
-        let semaphore = if config.max_concurrent_requests > 0 {
-            Some(Semaphore::new(config.max_concurrent_requests as usize))
+        let semaphore = if runtime.max_concurrent_requests > 0 {
+            Some(Semaphore::new(runtime.max_concurrent_requests as usize))
         } else {
             None
         };
 
-        let api_base_fallback = config
+        let api_base_fallback = runtime
             .api_base_fallback
             .as_deref()
             .map(|s| s.trim_end_matches('/').to_string());
 
         let configured_thinking_format =
             crate::core::llm::thinking_policy::ThinkingFormat::parse_or_auto(
-                config.thinking.format.as_deref(),
+                entry
+                    .thinking_format
+                    .as_deref()
+                    .or(runtime.thinking.format.as_deref()),
             );
         Ok(Self {
             client,
             base_url,
             api_base_fallback,
-            api_key,
-            default_model: config.default_model.clone(),
+            api_key: credential.value.clone(),
+            catalog_model_id: entry.id.clone(),
+            default_model: entry.request_model_name().to_string(),
             semaphore,
-            retry_count: config.retry_count,
-            stream_timeout_sec: config.stream_timeout_sec,
-            non_stream_stale_timeout_sec: config.non_stream_stale_timeout_sec,
-            http_read_timeout_sec: config.http_read_timeout_sec,
+            retry_count: runtime.retry_count,
+            stream_timeout_sec: runtime.stream_timeout_sec,
+            non_stream_stale_timeout_sec: runtime.non_stream_stale_timeout_sec,
+            http_read_timeout_sec: runtime.http_read_timeout_sec,
             files_client: std::sync::OnceLock::new(),
-            files_expires_after_seconds: config.files.expires_after_seconds,
-            thinking_cfg: config.thinking.clone(),
+            files_expires_after_seconds: runtime.files.expires_after_seconds,
+            thinking_cfg: runtime.thinking.clone(),
             configured_thinking_format,
-            continuity_enabled: config.reasoning_continuity.enabled,
-            use_previous_response_id: config.openai_responses.use_previous_response_id,
+            continuity_enabled: runtime.reasoning_continuity.enabled,
+            use_previous_response_id: runtime.openai_responses.use_previous_response_id,
         })
     }
 
     fn effective_model(&self, request: &ChatRequest) -> String {
-        request
-            .model_override
-            .as_deref()
-            .unwrap_or(if request.model.is_empty() {
-                &self.default_model
+        if let Some(m) = request.model_override.as_deref().filter(|s| !s.is_empty()) {
+            return if m == self.catalog_model_id {
+                self.default_model.clone()
             } else {
-                &request.model
-            })
-            .to_string()
+                m.to_string()
+            };
+        }
+        let req_model = request.model.trim();
+        if req_model.is_empty() || req_model == self.catalog_model_id {
+            self.default_model.clone()
+        } else {
+            req_model.to_string()
+        }
     }
 
     fn thinking_format_for_model(

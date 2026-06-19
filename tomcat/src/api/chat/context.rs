@@ -337,7 +337,9 @@ impl ChatContext {
         let llm_resolver: Arc<dyn crate::core::llm::LlmResolver> = Arc::new(
             crate::core::llm::DefaultLlmResolver::new(config.clone(), model_catalog.clone()),
         );
-        let llm: Arc<dyn LlmProvider> = crate::core::llm::resolve_llm(&config.llm)?;
+        let llm: Arc<dyn LlmProvider> = llm_resolver
+            .resolve(crate::core::llm::LlmScene::Main, None)?
+            .provider_impl;
         let openai_files_runtime = crate::core::llm::openai_files::build_runtime_for_provider(
             llm.as_ref(),
             &config.llm.files,

@@ -13,6 +13,7 @@
 #   ./scripts/run-integration-tests.sh integration-parallel # 仅可并发的 integration crate
 #   ./scripts/run-integration-tests.sh integration-serial   # 仅必须串行的 integration crate
 #   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM E2E（需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY）
+#   ./scripts/run-integration-tests.sh integration-openai-responses-wire # 只跑 OpenAI Responses wire 真链路组
 #
 # 未知子命令：打印用法并 exit 2。
 set -e
@@ -120,6 +121,29 @@ run_integration_real_llm() {
   return $status
 }
 
+run_integration_openai_responses_wire() {
+  if [ "${#TOMCAT_INTEGRATION_OPENAI_RESPONSES_WIRE_COMMANDS[@]}" -eq 0 ]; then
+    log_phase "跳过 integration-openai-responses-wire：当前未配置命令"
+    return 0
+  fi
+
+  log_phase "开始 integration-openai-responses-wire（仅 OpenAI Responses wire 真链路组）"
+  local fail=0
+  local cmd
+  set +e
+  for cmd in "${TOMCAT_INTEGRATION_OPENAI_RESPONSES_WIRE_COMMANDS[@]}"; do
+    log_phase "执行: $cmd"
+    eval "$cmd"
+    local status=$?
+    if [ $status -ne 0 ]; then
+      fail=1
+    fi
+  done
+  set -e
+  log_phase "结束 integration-openai-responses-wire"
+  return $fail
+}
+
 export RUST_LOG=tomcat=debug,info
 
 CMD="${1:-all}"
@@ -145,6 +169,9 @@ case "$CMD" in
   integration-real-llm)
     run_integration_real_llm
     ;;
+  integration-openai-responses-wire)
+    run_integration_openai_responses_wire
+    ;;
   all)
     set +e
     FAIL=0
@@ -164,7 +191,7 @@ case "$CMD" in
     exit 0
     ;;
   *)
-    echo "用法: $0 [release|clippy|lib|integration|integration-parallel|integration-serial|integration-real-llm|all|-h]" >&2
+    echo "用法: $0 [release|clippy|lib|integration|integration-parallel|integration-serial|integration-real-llm|integration-openai-responses-wire|all|-h]" >&2
     echo "  默认与 all：release → clippy → lib → integration-parallel → integration-serial" >&2
     echo "  integration-real-llm 需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY；不进 all，须显式触发" >&2
     exit 2

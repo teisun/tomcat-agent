@@ -66,7 +66,10 @@ impl Drop for CurrentDirGuard {
 fn make_config(work_dir: &Path, api_env: &str) -> AppConfig {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(api_env.to_string());
+    crate::test_support::write_models_override(
+        work_dir,
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(api_env)],
+    );
     cfg
 }
 
@@ -685,7 +688,10 @@ fn from_config_reuses_scope_services_and_isolates_session_runtime_state() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    crate::test_support::write_models_override(
+        work_dir.path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(API_ENV)],
+    );
 
     let ctx1 = ChatContext::from_config(cfg.clone()).expect("ctx1");
     let ctx2 = ChatContext::from_config(cfg).expect("ctx2");
@@ -942,7 +948,10 @@ fn from_config_prefers_session_cwd_when_reopening_existing_session() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    crate::test_support::write_models_override(
+        work_dir.path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(API_ENV)],
+    );
     let expected_a = std::fs::canonicalize(project_a.path()).expect("canonicalize project_a path");
 
     {
@@ -979,7 +988,10 @@ fn from_config_with_code_mode_isolates_scope_runtime_between_projects() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    crate::test_support::write_models_override(
+        work_dir.path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(API_ENV)],
+    );
 
     let ctx_a = {
         let _cwd_guard = CurrentDirGuard::set(project_a.path());

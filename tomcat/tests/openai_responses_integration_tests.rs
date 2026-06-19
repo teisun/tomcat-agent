@@ -1,10 +1,10 @@
 //! 集成测试：OpenAI Responses 适配器与真实 API（`POST /v1/responses`）。
 //!
-//! 不 Mock 网络；已配置 `OPENAI_API_KEY` 时真实发起 HTTP；无 key 时视为失败，不得 `ignore`。
+//! 不 Mock 网络；已配置目标模型所需 key 时真实发起 HTTP；无 key 时视为失败，不得 `ignore`。
 //! 写法与 `tests/llm_tests.rs` 对齐：`mod common`、`dotenvy::dotenv`、`setup_logging`、60s 超时
 //! （INTEGRATION_TEST_ROBUSTNESS 2.2）。
 //!
-//! 调用面：通过 [`tomcat::resolve_llm`] 拿 `Arc<dyn LlmProvider>`，**不直接构造**
+//! 调用面：通过 catalog + resolver 拿 `Arc<dyn LlmProvider>`，**不直接构造**
 //! 任何 concrete Provider 类型；`provider = "openai-responses"` 即可路由到
 //! Responses 适配器（实现细节由 `core/llm/registry.rs` 单点维护）。
 
@@ -14,8 +14,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use std::time::Duration;
 use tomcat::{
-    resolve_llm, ChatMessage, ChatMessageContentPart, ChatRequest, LlmConfig, StreamEvent,
-    IMAGE_MAX_BYTES,
+    AppConfig, ChatMessage, ChatMessageContentPart, ChatRequest, StreamEvent, IMAGE_MAX_BYTES,
 };
 
 /// Sample puppy PNG (≈ 46 KB), base64 字面量；fixture 详见
@@ -24,11 +23,22 @@ const SAMPLE_IMAGE_B64: &str = include_str!("fixtures/llm_multimodal/sample_imag
 /// Sample one-page PDF（reportlab 生成，含字符串 "Hello PDF content for LLM summarize test"），base64 字面量。
 const SAMPLE_PDF_B64: &str = include_str!("fixtures/llm_multimodal/sample_pdf_b64.txt");
 
-fn responses_config() -> LlmConfig {
-    LlmConfig {
-        provider: "openai-responses".to_string(),
-        ..LlmConfig::default()
-    }
+fn responses_config() -> AppConfig {
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(
+        common::dot_tomcat_e2e_workdir("openai_responses")
+            .display()
+            .to_string(),
+    );
+    common::apply_openai_app_config(&mut cfg);
+    cfg
+}
+
+fn responses_provider_and_model(
+    config: &AppConfig,
+) -> (std::sync::Arc<dyn tomcat::LlmProvider>, String) {
+    let call = common::resolve_main_call(config);
+    (call.provider_impl, call.model)
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -66,20 +76,17 @@ async fn test_openai_responses_chat_real_request_returns_ok(
     common::load_openai_test_env();
 
     let config = responses_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let (provider, model) = responses_provider_and_model(&config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say exactly: ok")],
-        model: config.default_model.clone(),
+        model,
         temperature: None,
         max_tokens: Some(16),
         stream: Some(false),
         model_override: None,
         tools: None,
     };
-    tracing::info!(
-        "Arrange: LlmConfig(provider=openai-responses) → resolve_llm → Arc<dyn LlmProvider>"
-    );
+    tracing::info!("Arrange: AppConfig + models.toml fixture → resolver → Arc<dyn LlmProvider>");
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
         .await
         .map_err(|_| "chat 超时 60s，可能网络或上游不可达")??;
@@ -101,11 +108,10 @@ async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
     common::load_openai_test_env();
 
     let config = responses_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let (provider, model) = responses_provider_and_model(&config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Answer with exactly one word: ok")],
-        model: config.default_model.clone(),
+        model,
         temperature: None,
         max_tokens: Some(64),
         stream: Some(false),
@@ -132,13 +138,12 @@ async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_r
     common::load_openai_test_env();
 
     let config = responses_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let (provider, model) = responses_provider_and_model(&config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user(
             "Write the numbers from 1 to 200, one per line, with no summary or explanation.",
         )],
-        model: config.default_model.clone(),
+        model,
         temperature: None,
         max_tokens: Some(16),
         stream: Some(false),
@@ -170,11 +175,10 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
     common::load_openai_test_env();
 
     let config = responses_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let (provider, model) = responses_provider_and_model(&config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say hi")],
-        model: config.default_model.clone(),
+        model,
         temperature: None,
         max_tokens: Some(16),
         stream: Some(true),
@@ -213,8 +217,7 @@ async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
     common::load_openai_test_env();
 
     let config = responses_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let (provider, model) = responses_provider_and_model(&config);
     // 真实模型在个别请求上可能不给 thinking（同样提示词下偶发），这里允许有限重试，
     // 以减少测试抖动；若解析链路回归，重试后仍会稳定失败。
     const MAX_ATTEMPTS: usize = 3;
@@ -224,7 +227,7 @@ async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
             messages: vec![ChatMessage::user(
                 "Compute 387 * 249, think step by step, then give the final result in one sentence.",
             )],
-            model: config.default_model.clone(),
+            model: model.clone(),
             temperature: None,
             max_tokens: Some(256),
             stream: Some(true),
@@ -298,8 +301,7 @@ async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reas
     common::load_openai_test_env();
 
     let config = responses_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let (provider, model) = responses_provider_and_model(&config);
     let tools = vec![json!({
         "type": "function",
         "function": {
@@ -318,7 +320,7 @@ async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reas
         messages: vec![ChatMessage::user(
             "You must call echo_tool exactly once with text='hi' and do not answer directly.",
         )],
-        model: config.default_model.clone(),
+        model,
         temperature: None,
         max_tokens: Some(64),
         stream: Some(false),
@@ -365,13 +367,12 @@ async fn test_openai_responses_latest_user_language_behavior_opt_in(
     common::load_openai_test_env();
 
     let config = responses_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let (provider, model) = responses_provider_and_model(&config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user(
             "请用一句中文回答：为什么 Rust 的所有权系统能减少内存错误？",
         )],
-        model: config.default_model.clone(),
+        model,
         temperature: None,
         max_tokens: Some(256),
         stream: Some(true),
@@ -427,8 +428,7 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
     common::load_openai_test_env();
 
     let config = responses_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let (provider, model) = responses_provider_and_model(&config);
 
     let image_b64 = SAMPLE_IMAGE_B64.trim();
     let img_tmp = decode_b64_to_tempfile(image_b64);
@@ -438,8 +438,8 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
     ];
     let request = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
-        // 不显式指定 model，沿用 LlmConfig.default_model（当前 gpt-5.4，支持 vision）
-        model: config.default_model.clone(),
+        // 走 resolver 后的 wire model，贴近真实主链路。
+        model,
         temperature: None,
         max_tokens: Some(96),
         stream: Some(false),
@@ -496,13 +496,15 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
 }
 
 /// [Responses 多模态 inline PDF] 真 API roundtrip：发一份 reportlab 生成的 PDF，
-/// 让模型总结其内容。
+/// 让模型读出其中那句已知文本。
 ///
-/// 模型要求：沿用 `LlmConfig.default_model`（当前 `gpt-5.4`，已确认支持 input_file）；
-/// 若未来默认模型不支持 input_file，本测试会以 API 4xx 暴露问题，不静默跳过。
+/// 设计说明：
+/// - fixture PDF 只有一行固定文本 `"Hello PDF content for LLM summarize test"`；
+/// - 这个用例要验证的是 **inline `input_file` 读取得到正文**，不是测试 reasoning；
+/// - 因此这里显式关闭 thinking，避免小 `max_output_tokens` 被 reasoning summary 吃光，
+///   导致响应只剩 `output=[{type: "reasoning"}]` 而没有最终 `output_text`。
 ///
-/// 验证：HTTP 200 + 响应文本非空 + 至少命中关键词 [hello/pdf/summary/summarize/test]
-/// 之一（容忍 LLM 输出口径漂移），超时 60s。
+/// 验证：HTTP 200 + 响应文本非空 + 能读出该固定句子的核心片段，超时 60s。
 #[tokio::test]
 async fn responses_inline_pdf_input_file_summarize_roundtrip(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -511,20 +513,22 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
         tracing::info_span!("responses_inline_pdf_input_file_summarize_roundtrip").entered();
     common::load_openai_test_env();
 
-    let config = responses_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let mut config = responses_config();
+    config.llm.thinking.enabled = false;
+    let (provider, model) = responses_provider_and_model(&config);
 
     let pdf_b64 = SAMPLE_PDF_B64.trim();
     let pdf_tmp = decode_b64_to_tempfile(pdf_b64);
     let parts = vec![
-        ChatMessageContentPart::text("Summarize the attached PDF in one short sentence."),
+        ChatMessageContentPart::text(
+            "Read the attached PDF and answer with the exact visible sentence only.",
+        ),
         ChatMessageContentPart::file_b64("sample.pdf", "application/pdf", pdf_tmp.path())?,
     ];
     let request = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
-        // 不显式指定 model，沿用 LlmConfig.default_model（当前 gpt-5.4，支持 input_file）
-        model: config.default_model.clone(),
+        // 走 resolver 后的 wire model，贴近真实主链路。
+        model,
         temperature: None,
         max_tokens: Some(96),
         stream: Some(false),
@@ -548,12 +552,13 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
     tracing::info!(response = %text, "PDF 响应内容");
     assert!(!text.trim().is_empty(), "PDF 响应文本不应为空: {:?}", text);
 
-    let keywords = ["hello", "pdf", "summary", "summarize", "test"];
-    let hit = keywords.iter().any(|kw| text.contains(kw));
+    let expected = "hello pdf content for llm summarize test";
+    let normalized = text.replace(['“', '”', '"', '’', '\''], "");
     assert!(
-        hit,
-        "PDF 响应应至少命中关键词 {:?} 之一（容忍 LLM 输出漂移），实际: {:?}",
-        keywords, text
+        normalized.contains(expected),
+        "PDF 响应应读出 fixture 中的固定文本 {:?}，实际: {:?}",
+        expected,
+        text
     );
     Ok(())
 }

@@ -12,18 +12,20 @@ use serial_test::serial;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tomcat::core::llm::openai_files::{FilePurpose, OpenAiFilesClient};
-use tomcat::{
-    resolve_llm, ChatMessage, ChatMessageContentPart, ChatRequest, LlmConfig, LlmProvider,
-};
+use tomcat::{AppConfig, ChatMessage, ChatMessageContentPart, ChatRequest, LlmProvider};
 
 const SAMPLE_IMAGE_PATH: &str = "tests/fixtures/llm_multimodal/sample_image.png";
 const SAMPLE_PDF_B64: &str = include_str!("fixtures/llm_multimodal/sample_pdf_b64.txt");
 
-fn responses_config() -> LlmConfig {
-    LlmConfig {
-        provider: "openai-responses".to_string(),
-        ..LlmConfig::default()
-    }
+fn responses_config() -> AppConfig {
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(
+        common::dot_tomcat_e2e_workdir("openai_files")
+            .display()
+            .to_string(),
+    );
+    common::apply_openai_app_config(&mut cfg);
+    cfg
 }
 
 fn decode_b64_to_tempfile(
@@ -50,13 +52,13 @@ fn unique_prefix() -> String {
 
 fn files_client_from_provider(
     provider: &dyn LlmProvider,
-    cfg: &LlmConfig,
+    cfg: &AppConfig,
 ) -> Result<OpenAiFilesClient, Box<dyn std::error::Error>> {
     if !provider.supports_openai_files_api() {
         return Err("当前 provider 不支持 OpenAI Files API".into());
     }
     provider
-        .openai_files_client(&cfg.files)
+        .openai_files_client(&cfg.llm.files)
         .ok_or_else(|| "provider 未返回 OpenAI Files client".into())
 }
 
@@ -105,8 +107,7 @@ async fn openai_files_roundtrip_four_sizes_real_api() -> Result<(), Box<dyn std:
     common::setup_logging();
     common::load_openai_test_env();
     let cfg = responses_config();
-    let provider = resolve_llm(&cfg)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let provider = common::resolve_main_provider(&cfg);
     let client = files_client_from_provider(provider.as_ref(), &cfg)?;
     let prefix = unique_prefix();
 
@@ -150,8 +151,7 @@ async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std
     common::setup_logging();
     common::load_openai_test_env();
     let cfg = responses_config();
-    let provider = resolve_llm(&cfg)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let provider = common::resolve_main_provider(&cfg);
     let client = files_client_from_provider(provider.as_ref(), &cfg)?;
     let prefix = unique_prefix();
     let filename = format!("{prefix}-sample.txt");
@@ -172,7 +172,7 @@ async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std
     ];
     let req = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
-        model: cfg.default_model.clone(),
+        model: cfg.llm.default_model.clone(),
         temperature: None,
         max_tokens: Some(96),
         stream: Some(false),
@@ -212,8 +212,7 @@ async fn openai_files_cli_single_turn_image_describe_real_api(
     common::setup_logging();
     common::load_openai_test_env();
     let cfg = responses_config();
-    let provider = resolve_llm(&cfg)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let provider = common::resolve_main_provider(&cfg);
     let client = files_client_from_provider(provider.as_ref(), &cfg)?;
     let prefix = unique_prefix();
     let image_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(SAMPLE_IMAGE_PATH);
@@ -233,7 +232,7 @@ async fn openai_files_cli_single_turn_image_describe_real_api(
     ];
     let req = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
-        model: cfg.default_model.clone(),
+        model: cfg.llm.default_model.clone(),
         temperature: None,
         max_tokens: Some(96),
         stream: Some(false),
@@ -292,8 +291,7 @@ async fn openai_files_tui_two_phase_pdf_describe_real_api() -> Result<(), Box<dy
     common::setup_logging();
     common::load_openai_test_env();
     let cfg = responses_config();
-    let provider = resolve_llm(&cfg)
-        .expect("集成测试要求设置 OPENAI_API_KEY（环境变量或 .env），无 key 视为失败");
+    let provider = common::resolve_main_provider(&cfg);
     let client = files_client_from_provider(provider.as_ref(), &cfg)?;
     let prefix = unique_prefix();
     let filename = format!("{prefix}-tui-two-phase.pdf");
@@ -319,7 +317,7 @@ async fn openai_files_tui_two_phase_pdf_describe_real_api() -> Result<(), Box<dy
     ];
     let req = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
-        model: cfg.default_model.clone(),
+        model: cfg.llm.default_model.clone(),
         temperature: None,
         max_tokens: Some(96),
         stream: Some(false),

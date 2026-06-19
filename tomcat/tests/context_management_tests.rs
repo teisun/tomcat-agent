@@ -361,7 +361,7 @@ fn chat_context_fixture(env_key: &str) -> (tempfile::TempDir, ChatContext) {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(env_key.to_string());
+    common::apply_openai_responses_test_config(&mut cfg, env_key, None);
 
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };

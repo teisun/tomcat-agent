@@ -2,24 +2,46 @@
 //!
 //! 覆盖（plan §5 Phase E.1）：
 //!
-//! - `resolve_llm`：未知 provider → [`AppError::Config`] 且消息列出已注册 id；
-//! - `resolve_llm(&LlmConfig::default())` → `provider_name == "openai-responses"`（需 stub API key）；
-//! - `provider = "openai"` → Completions 适配器。
+//! - `build_provider`：未知 api → [`AppError::Config`] 且消息列出已注册 id；
+//! - `api = "openai-responses"` → `provider_name == "openai-responses"`；
+//! - `api = "openai"` → Completions 适配器。
 
-use super::super::registry::resolve_llm;
-use super::mocks::load_dotenv;
+use super::super::registry::build_provider;
+use crate::core::llm::{Capabilities, Credential, ModelEntry};
 use crate::infra::error::AppError;
 use crate::infra::LlmConfig;
 
 const REGISTRY_STUB_ENV: &str = "__PI_REGISTRY_STUB_OPENAI_KEY__";
 
+fn entry_with_api(api: &str) -> ModelEntry {
+    ModelEntry {
+        id: format!("test-{api}"),
+        model_name: None,
+        api: api.to_string(),
+        provider: "openai".to_string(),
+        api_key_env: Some(REGISTRY_STUB_ENV.to_string()),
+        base_url: Some("https://api.openai.com".to_string()),
+        capabilities: Capabilities::default(),
+        context_window: None,
+        cost: None,
+        thinking_format: Some("openai".to_string()),
+    }
+}
+
+fn stub_credential() -> Credential {
+    Credential {
+        provider: "openai".to_string(),
+        env_name: REGISTRY_STUB_ENV.to_string(),
+        value: "stub".to_string(),
+    }
+}
+
 #[test]
-fn resolve_llm_unknown_provider_returns_config_error_listing_ids() {
-    let cfg = LlmConfig {
-        provider: "claude".to_string(),
-        ..LlmConfig::default()
-    };
-    let err = match resolve_llm(&cfg) {
+fn build_provider_unknown_api_returns_config_error_listing_ids() {
+    let cfg = LlmConfig::default();
+    let runtime = cfg.runtime();
+    let entry = entry_with_api("claude");
+    let err = match build_provider(&entry, &runtime, &stub_credential()) {
         Err(e) => e,
         Ok(_) => panic!("expected unknown provider error"),
     };
@@ -34,29 +56,19 @@ fn resolve_llm_unknown_provider_returns_config_error_listing_ids() {
 }
 
 #[test]
-fn resolve_llm_default_returns_openai_responses() {
-    load_dotenv();
-    // SAFETY: 单测串行；临时 stub env。
-    unsafe { std::env::set_var(REGISTRY_STUB_ENV, "stub") };
-    let cfg = LlmConfig {
-        api_key_env: Some(REGISTRY_STUB_ENV.to_string()),
-        ..LlmConfig::default()
-    };
-    let llm = resolve_llm(&cfg).expect("resolve default");
+fn build_provider_openai_responses_returns_responses_impl() {
+    let cfg = LlmConfig::default();
+    let runtime = cfg.runtime();
+    let entry = entry_with_api("openai-responses");
+    let llm = build_provider(&entry, &runtime, &stub_credential()).expect("build provider");
     assert_eq!(llm.provider_name(), "openai-responses");
-    unsafe { std::env::remove_var(REGISTRY_STUB_ENV) };
 }
 
 #[test]
-fn resolve_llm_explicit_openai_returns_completions() {
-    load_dotenv();
-    unsafe { std::env::set_var(REGISTRY_STUB_ENV, "stub") };
-    let cfg = LlmConfig {
-        provider: "openai".to_string(),
-        api_key_env: Some(REGISTRY_STUB_ENV.to_string()),
-        ..LlmConfig::default()
-    };
-    let llm = resolve_llm(&cfg).expect("resolve openai");
+fn build_provider_openai_returns_completions() {
+    let cfg = LlmConfig::default();
+    let runtime = cfg.runtime();
+    let entry = entry_with_api("openai");
+    let llm = build_provider(&entry, &runtime, &stub_credential()).expect("build provider");
     assert_eq!(llm.provider_name(), "openai");
-    unsafe { std::env::remove_var(REGISTRY_STUB_ENV) };
 }

@@ -23,8 +23,8 @@ retention_max = 50
 retention_days = 7
 
 [llm]
-# "openai-responses"（默认）或 "openai"。
-provider = "openai-responses"
+# 这里只负责“选哪个模型”和全局运行时旋钮；
+# 模型怎么连（api/provider/base_url/api_key_env）请写到 `models.toml`。
 default_model = "gpt-5.4"
 max_concurrent_requests = 4
 retry_count = 3

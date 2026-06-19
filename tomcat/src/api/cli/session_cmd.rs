@@ -156,8 +156,24 @@ fn cleanup_openai_files_for_session(
     session_id: &str,
     reason: &str,
 ) {
-    let llm = match crate::core::llm::resolve_llm(&cfg.llm) {
-        Ok(v) => v,
+    let model_catalog = match crate::core::llm::ModelCatalog::load(cfg) {
+        Ok(v) => std::sync::Arc::new(v),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                session_id = session_id,
+                "skip openai files cleanup: cannot load llm model catalog"
+            );
+            return;
+        }
+    };
+    let resolver = crate::core::llm::DefaultLlmResolver::new(cfg.clone(), model_catalog);
+    let llm = match crate::core::llm::LlmResolver::resolve(
+        &resolver,
+        crate::core::llm::LlmScene::Main,
+        None,
+    ) {
+        Ok(v) => v.provider_impl,
         Err(e) => {
             tracing::warn!(
                 error = %e,

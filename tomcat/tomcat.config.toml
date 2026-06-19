@@ -7,8 +7,6 @@ level = "warn"
 file_enabled = true
 
 [llm]
-provider = "openai-responses"
-api_base = "https://api.openai.com"
 default_model = "gpt-5.4"
 max_concurrent_requests = 4
 retry_count = 3

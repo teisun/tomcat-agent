@@ -1,5 +1,7 @@
 use crate::infra::error::AppError;
 
+use super::catalog::ModelEntry;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credential {
     pub provider: String,
@@ -11,23 +13,41 @@ pub struct Credential {
 pub struct AuthStore;
 
 impl AuthStore {
-    pub fn get(&self, provider: &str, fallback_env: Option<&str>) -> Result<Credential, AppError> {
-        let inferred_env = env_name_for_provider(provider);
-        if let Some(value) = read_env_value(&inferred_env) {
+    pub fn get(
+        &self,
+        entry: &ModelEntry,
+        fallback_env: Option<&str>,
+    ) -> Result<Credential, AppError> {
+        self.get_for_provider(&entry.provider, entry.api_key_env.as_deref(), fallback_env)
+    }
+
+    pub fn get_for_provider(
+        &self,
+        provider: &str,
+        preferred_env: Option<&str>,
+        fallback_env: Option<&str>,
+    ) -> Result<Credential, AppError> {
+        let provider = provider.trim();
+        let preferred_env = preferred_env
+            .map(str::trim)
+            .filter(|env| !env.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| env_name_for_provider(provider));
+        if let Some(value) = read_env_value(&preferred_env) {
             return Ok(Credential {
-                provider: provider.trim().to_string(),
-                env_name: inferred_env,
+                provider: provider.to_string(),
+                env_name: preferred_env.clone(),
                 value,
             });
         }
 
         if let Some(fallback_env) = fallback_env
             .map(str::trim)
-            .filter(|env| !env.is_empty() && *env != inferred_env)
+            .filter(|env| !env.is_empty() && *env != preferred_env.as_str())
         {
             if let Some(value) = read_env_value(fallback_env) {
                 return Ok(Credential {
-                    provider: provider.trim().to_string(),
+                    provider: provider.to_string(),
                     env_name: fallback_env.to_string(),
                     value,
                 });
@@ -36,7 +56,7 @@ impl AuthStore {
 
         Err(AppError::Config(missing_key_message(
             provider,
-            &inferred_env,
+            &preferred_env,
             fallback_env,
         )))
     }

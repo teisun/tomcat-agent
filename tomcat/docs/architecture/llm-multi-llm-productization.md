@@ -1,5 +1,18 @@
 # 多 LLM 产品化技术方案（架构 spec）
 
+> **实现状态更新（2026-06）**
+>
+> 本文里原先很多“计划新增”已经落地，当前实现以代码为准：
+>
+> - `LlmConfig` 现在只保留“选哪个模型”和全局运行时旋钮；旧 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env` 已删除，继续使用会直接报迁移错误。
+> - `ModelEntry` 现在显式包含 `api`、`provider`、`base_url`、`api_key_env`、`model_name`、`capabilities`。
+> - `LlmRuntimeConfig` 已从 `LlmConfig` 拆出，provider 构造统一走 `new(entry, runtime, credential)`。
+> - provider registry 现在按 `entry.api` 路由；`provider` 只表示逻辑厂商，用于凭证推断、展示、审计。
+> - 当前内置模型只剩 `gpt-5.4` 与 `deepseek-v4-pro`；`gpt-5.2`、`deepseek-v4-flash`、`mimo-v2.5-pro` 由 `tomcat init` 补进 `models.toml`。
+> - OpenAI 直连与 LiteLLM 网关并存的推荐范式是：保留 `gpt-5.4`，另加 `gpt-5.4_litellm-sunmi`，并用 `model_name = "gpt-5.4"` 把本地 id 与上游真名解耦。
+>
+> 下文保留大量历史设计推导，方便理解为什么会收敛到当前形态；但如果与代码冲突，请以实现与 `docs/user-guide.md` / `src/core/llm/README.md` 为准。
+
 > **范围**：把 tomcat 当前「全局单 `LlmProvider` + 若干 model 字符串」升级为 **元数据驱动（Model Catalog）+ 场景化路由 + 多后端鉴权/降级** 的可产品化形态。
 >
 > **承接**：本文聚焦「**多模型/多后端如何变成用户可选、可降级、可计量的产品能力**」；provider 主骨架与 wire 接线见 [`llm-multiprovider-integration.md`](llm-multiprovider-integration.md)，跨 turn 推理续传见 [`llm-openai-deepseek-reasoning-continuity.md`](llm-openai-deepseek-reasoning-continuity.md)，stream 事件管线见 [`llm-stream-events-cli-pipeline.md`](llm-stream-events-cli-pipeline.md)。三者是本方案的**前置事实**，本文不重复其 wire 细则。

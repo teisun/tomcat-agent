@@ -26,12 +26,10 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     }
 
     let mut cfg = if config_existed {
-        crate::load_config(Some(&config_file)).unwrap_or_default()
+        crate::load_config(Some(&config_file))?
     } else {
         let llm = crate::LlmConfig {
-            provider: "openai-responses".to_string(),
             default_model: DEFAULT_LLM_MODEL.to_string(),
-            api_base: None,
             ..Default::default()
         };
         AppConfig {
@@ -54,8 +52,8 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     } else {
         println!("  ✓ 配置文件已写入: {}", config_file.display());
     }
-    println!("  ✓ 默认 LLM Provider: {}", cfg.llm.provider);
     println!("  ✓ 默认模型: {}", cfg.llm.default_model);
+    println!("  ✓ 默认模型协议线: {}", model_choice.entry.api);
     println!("  ✓ 模型逻辑厂商: {}", model_choice.entry.provider);
     println!("  ✓ 当前模型凭证变量: {}", model_choice.env_name);
 
@@ -69,15 +67,37 @@ pub(crate) fn run_init() -> Result<(), AppError> {
         println!("  ✓ sessions.json 已保留（{} 个历史会话）", store.len());
     }
 
-    match crate::api::cli::models_toml::ensure_mimo_models_toml(&cfg)? {
-        crate::api::cli::models_toml::ModelsTomlStatus::Created => {
-            println!("  ✓ 已生成模型清单 models.toml（含 mimo-v2.5-pro）")
+    match crate::api::cli::models_toml::ensure_default_models_toml(&cfg)? {
+        crate::api::cli::models_toml::ModelsTomlStatus::Created { added_model_ids } => {
+            println!(
+                "  ✓ 已生成模型清单 models.toml（含 {}）",
+                added_model_ids.join(", ")
+            )
         }
-        crate::api::cli::models_toml::ModelsTomlStatus::AppendedMimo => {
-            println!("  ✓ 已向现有 models.toml 追加 mimo-v2.5-pro")
-        }
+        crate::api::cli::models_toml::ModelsTomlStatus::UpdatedExisting {
+            added_model_ids,
+            updated_model_name_ids,
+        } => match (
+            added_model_ids.is_empty(),
+            updated_model_name_ids.is_empty(),
+        ) {
+            (false, false) => println!(
+                "  ✓ 已向现有 models.toml 补齐受管默认模型：{}；并补写 model_name：{}",
+                added_model_ids.join(", "),
+                updated_model_name_ids.join(", ")
+            ),
+            (false, true) => println!(
+                "  ✓ 已向现有 models.toml 补齐受管默认模型：{}",
+                added_model_ids.join(", ")
+            ),
+            (true, false) => println!(
+                "  ✓ 已为现有 models.toml 补写受管默认模型的 model_name：{}",
+                updated_model_name_ids.join(", ")
+            ),
+            (true, true) => println!("  ✓ models.toml 已就绪（受管默认模型已齐全）"),
+        },
         crate::api::cli::models_toml::ModelsTomlStatus::AlreadyPresent => {
-            println!("  ✓ models.toml 已就绪（已含 mimo-v2.5-pro）")
+            println!("  ✓ models.toml 已就绪（受管默认模型与 model_name 已齐全）")
         }
     }
 
@@ -140,7 +160,7 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     }
     let additional_envs = crate::api::cli::init_model_wizard::additional_provider_env_names(
         &model_catalog,
-        &model_choice.entry.provider,
+        &model_choice.env_name,
     );
     for (env_name, status) in crate::api::cli::init_model_wizard::prompt_additional_provider_keys(
         &env_path,
@@ -261,11 +281,14 @@ pub(crate) fn run_doctor_checks(
         }
 
         // --- 当前默认模型所需 API Key ---
-        let key_env = cfg
-            .llm
-            .api_key_env
-            .clone()
-            .filter(|env| !env.trim().is_empty())
+        let key_env = crate::core::llm::ModelCatalog::load(cfg)
+            .ok()
+            .and_then(|catalog| catalog.lookup(&cfg.llm.default_model).cloned())
+            .map(|entry| {
+                entry
+                    .api_key_env
+                    .unwrap_or_else(|| crate::core::llm::env_name_for_provider(&entry.provider))
+            })
             .unwrap_or_else(|| "OPENAI_API_KEY".to_string());
         match std::env::var(&key_env) {
             Ok(k) if !k.is_empty() => println!("✓ {} 已设置", key_env),

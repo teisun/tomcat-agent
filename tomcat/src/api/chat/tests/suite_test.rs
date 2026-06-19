@@ -596,7 +596,10 @@ fn startup_prune_scheduled_without_blocking_readline() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(ENV_KEY.to_string());
+    crate::test_support::write_models_override(
+        dir.path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)],
+    );
 
     // SAFETY: 单测内部设置独立 env key，结束后立即清理。
     unsafe { std::env::set_var(ENV_KEY, "stub") };
@@ -635,7 +638,10 @@ fn chat_context_attaches_cli_ask_question_panel() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(ENV_KEY.to_string());
+    crate::test_support::write_models_override(
+        dir.path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)],
+    );
 
     // SAFETY: 测试使用独立 env key，作用域结束后立即清理。
     unsafe { std::env::set_var(ENV_KEY, "stub") };
@@ -712,7 +718,10 @@ fn checkpoint_recording_test_context(
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(env_key.to_string());
+    crate::test_support::write_models_override(
+        dir.path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(env_key)],
+    );
 
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
@@ -1053,8 +1062,15 @@ async fn chat_cleanup_on_session_end_handles_delete_404_idempotently() {
     let mut cfg = AppConfig::default();
     let dir = tempfile::tempdir().unwrap();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
-    cfg.llm.api_base = Some(base_url);
-    cfg.llm.api_key_env = Some("TOMCAT_CHAT_CLEANUP_TEST_KEY".to_string());
+    crate::test_support::write_models_override(
+        dir.path(),
+        &[
+            crate::test_support::TestModelOverride::gpt54_openai_responses(
+                "TOMCAT_CHAT_CLEANUP_TEST_KEY",
+            )
+            .with_base_url(&base_url),
+        ],
+    );
     // SAFETY: 测试内部临时设置 env，结束后立即清理。
     unsafe { std::env::set_var("TOMCAT_CHAT_CLEANUP_TEST_KEY", "stub") };
 
@@ -1107,7 +1123,10 @@ async fn cleanup_plugin_sessions_on_session_end_releases_current_session_vm() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    crate::test_support::write_models_override(
+        work_dir.path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(API_ENV)],
+    );
     cfg.plugin.auto_load = vec![PLUGIN_ID.to_string()];
 
     let ctx = ChatContext::from_config(cfg).expect("chat context");

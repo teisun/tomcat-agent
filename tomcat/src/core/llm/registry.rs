@@ -1,39 +1,23 @@
 //! # Provider 注册表（同时负责 Provider 文件的 mod 声明）
 //!
-//! 按 [`LlmConfig::provider`] 字符串选实现：`"openai"` → [`OpenAiProvider`]（**OpenAI-compatible**
-//! Chat Completions adapter，`POST /v1/chat/completions`），`"openai-responses"` →
-//! [`OpenAiResponsesProvider`]（Responses API，`POST /v1/responses`）。详见
-//! [`docs/architecture/llm-multiprovider-integration.md`] §6.5。
+//! 注册表按 `ModelEntry.api` 选择 wire adapter：
+//! - `"openai"` -> [`OpenAiProvider`]（`POST /v1/chat/completions`）
+//! - `"openai-responses"` -> [`OpenAiResponsesProvider`]（`POST /v1/responses`）
 //!
-//! ## 新增后端的标准动作（仅 2 步，集中在本文件 + 新文件）
+//! 模型怎么连（`base_url` / `api_key_env` / `model_name`）来自 [`ModelEntry`]；
+//! 全局重试/超时/proxy 等运行时参数来自 [`LlmRuntimeConfig`]；
+//! 凭证值来自 [`Credential`]。
+//! 当前内置模型只有 `gpt-5.4` / `deepseek-v4-pro`；其余模型通常来自 `models.toml`。
 //!
-//! 先补一句总原则：**不是每接一家 OpenAI-compatible 厂商都要立刻加新 provider。**
-//! 如果目标仍兼容 OpenAI Chat Completions，优先复用现有 `provider="openai"`，通过
-//! `api_base` / `api_key_env` / `default_model`（必要时再配 `thinking.format`）接入；只有当
-//! 协议、流式事件、错误模型或产品语义明显分叉时，再考虑拆独立 provider。
-//!
-//! 1. 在 `core/llm/` 下新建 `<new>.rs`：`impl LlmProvider`，文件末尾按
-//!    [RUST_FILE_LINES_SPEC §A 第 9 条] 自带
-//!    `#[cfg(test)] #[path = "tests/<new>_test.rs"] mod tests;`，**禁止**为测试放宽可见性。
-//! 2. 本文件追加两行：
-//!    `#[path = "<new>.rs"] mod <new>;` 与 [`PROVIDERS`] 表里 `("<id>", build_<new>)`，
-//!    并写一个 3 行的 `build_<new>(cfg)` 包成 `Arc<dyn LlmProvider>` 即可。
-//!
-//! 上层（`api/chat`、`compaction`、集成测试…）一律只通过 [`resolve_llm`] 拿
-//! `Arc<dyn LlmProvider>`，**不感知**任何 concrete Provider 类型；因此 `core/llm/mod.rs`
-//! 与 `lib.rs` 也不需要为新 Provider 增加任何 `mod` 或 `pub use`。
-//!
-//! ## 设计约束
-//!
-//! - **不**修改 [`LlmConfig`] schema 引入 vendor 专属字段（spec §6.5.2 「稳定 schema」）；
-//! - 公共横切字段（`api_base` / `api_key_env` / `proxy` / `retry_count` / `stream_timeout_sec`
-//!   / `api_base_fallback` / `max_concurrent_requests`）由所有 Provider 共享。
+//! 因此这里不再接收整个 [`LlmConfig`]，也不再做“克隆配置再覆写四个字段”的桥接。
 
 use std::sync::Arc;
 
-use crate::infra::config::LlmConfig;
+use crate::infra::config::LlmRuntimeConfig;
 use crate::infra::error::AppError;
 
+use super::auth::Credential;
+use super::catalog::ModelEntry;
 use super::provider::LlmProvider;
 
 #[path = "openai.rs"]
@@ -47,7 +31,8 @@ mod openai_responses;
 use openai::OpenAiProvider;
 use openai_responses::OpenAiResponsesProvider;
 
-type ProviderCtor = fn(&LlmConfig) -> Result<Arc<dyn LlmProvider>, AppError>;
+type ProviderCtor =
+    fn(&ModelEntry, &LlmRuntimeConfig, &Credential) -> Result<Arc<dyn LlmProvider>, AppError>;
 
 /// 已注册 Provider 列表；新增条目即扩展，无需改其他位置。
 const PROVIDERS: &[(&str, ProviderCtor)] = &[
@@ -55,28 +40,43 @@ const PROVIDERS: &[(&str, ProviderCtor)] = &[
     ("openai-responses", build_openai_responses),
 ];
 
-fn build_openai_completions(cfg: &LlmConfig) -> Result<Arc<dyn LlmProvider>, AppError> {
-    Ok(Arc::new(OpenAiProvider::new(cfg)?))
+fn build_openai_completions(
+    entry: &ModelEntry,
+    runtime: &LlmRuntimeConfig,
+    credential: &Credential,
+) -> Result<Arc<dyn LlmProvider>, AppError> {
+    Ok(Arc::new(OpenAiProvider::new(entry, runtime, credential)?))
 }
 
-fn build_openai_responses(cfg: &LlmConfig) -> Result<Arc<dyn LlmProvider>, AppError> {
-    Ok(Arc::new(OpenAiResponsesProvider::new(cfg)?))
+fn build_openai_responses(
+    entry: &ModelEntry,
+    runtime: &LlmRuntimeConfig,
+    credential: &Credential,
+) -> Result<Arc<dyn LlmProvider>, AppError> {
+    Ok(Arc::new(OpenAiResponsesProvider::new(
+        entry, runtime, credential,
+    )?))
 }
 
-/// 按 `cfg.provider` 字符串查表构造 [`Arc<dyn LlmProvider>`]；未知 id 返回 [`AppError::Config`]
-/// 并列出当前已注册的 id 集合，便于用户排查 `[llm] provider = ?`。
-pub fn resolve_llm(cfg: &LlmConfig) -> Result<Arc<dyn LlmProvider>, AppError> {
-    match PROVIDERS.iter().find(|(id, _)| *id == cfg.provider) {
-        Some((_, ctor)) => ctor(cfg),
+/// 按 `entry.api` 字符串查表构造 [`Arc<dyn LlmProvider>`]；未知 id 返回 [`AppError::Config`]
+/// 并列出当前已注册的 id 集合，便于用户排查 `models.toml` 中的 `api = ?`。
+pub fn build_provider(
+    entry: &ModelEntry,
+    runtime: &LlmRuntimeConfig,
+    credential: &Credential,
+) -> Result<Arc<dyn LlmProvider>, AppError> {
+    match PROVIDERS.iter().find(|(id, _)| *id == entry.api) {
+        Some((_, ctor)) => ctor(entry, runtime, credential),
         None => Err(AppError::Config(format!(
-            "未知 [llm] provider = {:?}; 已注册: {:?}",
-            cfg.provider,
+            "未知模型 `{}` 的 api = {:?}; 已注册: {:?}",
+            entry.id,
+            entry.api,
             PROVIDERS.iter().map(|(id, _)| *id).collect::<Vec<_>>()
         ))),
     }
 }
 
-/// 已注册的 provider id 集合（供测试与文档/工具引用，避免在外部硬编码）。
+/// 已注册的 wire api id 集合（供测试与文档/工具引用，避免在外部硬编码）。
 pub fn registered_provider_ids() -> Vec<&'static str> {
     PROVIDERS.iter().map(|(id, _)| *id).collect()
 }

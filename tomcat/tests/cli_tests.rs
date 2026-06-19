@@ -464,7 +464,7 @@ fn deterministic_chat_context_from_work_dir_with_overrides(
     overrides: tomcat::api::chat::ChatContextOverrides,
 ) -> ChatContext {
     cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(env_key.to_string());
+    common::apply_openai_responses_test_config(&mut cfg, env_key, None);
 
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
@@ -521,7 +521,7 @@ fn production_chat_context_from_work_dir_with_overrides(
     overrides: tomcat::api::chat::ChatContextOverrides,
 ) -> ChatContextHarness {
     cfg.storage.work_dir = Some(work_dir.to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(env_key.to_string());
+    common::apply_openai_responses_test_config(&mut cfg, env_key, None);
 
     // SAFETY: 测试使用独立 env key，作用域结束后由调用方清理。
     unsafe { std::env::set_var(env_key, "stub") };
@@ -6494,7 +6494,14 @@ fn test_session_model_override_persists_across_chat_context_restart() {
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
     common::apply_deepseek_app_config(&mut cfg);
-    cfg.llm.api_key_env = Some(ENV_KEY.to_string());
+    common::apply_openai_compatible_test_config(
+        &mut cfg,
+        &common::deepseek_test_model(),
+        "deepseek",
+        ENV_KEY,
+        common::DEEPSEEK_TEST_API_BASE,
+        Some("deepseek"),
+    );
 
     unsafe {
         std::env::set_var(ENV_KEY, "deepseek-stub");

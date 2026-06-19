@@ -11,53 +11,93 @@
 use super::*;
 use crate::core::llm::tests::mocks::load_dotenv;
 use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, ChatRequest};
+use crate::core::llm::{Capabilities, Credential, ModelEntry};
 use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::LlmConfig;
 
-fn deepseek_openai_config() -> LlmConfig {
-    LlmConfig {
-        provider: "openai".to_string(),
-        api_base: Some("https://api.deepseek.com".to_string()),
-        api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
-        default_model: "deepseek-v4-pro".to_string(),
-        ..LlmConfig::default()
+fn deepseek_entry(api_key_env: &str) -> ModelEntry {
+    ModelEntry {
+        id: "deepseek-v4-pro".to_string(),
+        model_name: None,
+        api: "openai".to_string(),
+        provider: "deepseek".to_string(),
+        api_key_env: Some(api_key_env.to_string()),
+        base_url: Some("https://api.deepseek.com".to_string()),
+        capabilities: Capabilities::default(),
+        context_window: None,
+        cost: None,
+        thinking_format: Some("deepseek".to_string()),
     }
 }
 
 #[test]
-fn openai_provider_new_fails_without_api_key() {
-    println!("[TEST] openai_provider_new_fails_without_api_key — 开始");
-    let config = LlmConfig {
-        api_key_env: Some("TOMCAT_TEST_NONEXISTENT_ENV_VAR_12345".to_string()),
-        ..LlmConfig::default()
+fn openai_provider_new_uses_supplied_credential_without_env_lookup() {
+    let entry = deepseek_entry("TOMCAT_TEST_NONEXISTENT_ENV_VAR_12345");
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "deepseek".to_string(),
+        env_name: "TOMCAT_TEST_NONEXISTENT_ENV_VAR_12345".to_string(),
+        value: "stub-key".to_string(),
     };
-    let r = OpenAiProvider::new(&config);
-    assert!(r.is_err());
-    let msg = r.unwrap_err().to_string();
-    assert!(msg.contains("未设置"));
-}
-
-#[test]
-fn openai_provider_new_succeeds_with_api_key() {
-    load_dotenv();
-    if std::env::var("DEEPSEEK_API_KEY").is_err() {
-        panic!("DEEPSEEK_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
-    }
-
-    let config = deepseek_openai_config();
-    let provider = OpenAiProvider::new(&config).expect("DEEPSEEK_API_KEY 已设置时应创建成功");
+    let provider =
+        OpenAiProvider::new(&entry, &runtime, &credential).expect("显式 credential 应可直接构造");
     assert_eq!(provider.provider_name(), "openai");
 }
 
 #[test]
-fn count_tokens_approximate() {
-    load_dotenv();
-    if std::env::var("DEEPSEEK_API_KEY").is_err() {
-        panic!("DEEPSEEK_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
-    }
+fn openai_provider_new_succeeds_with_api_key() {
+    let entry = deepseek_entry("DEEPSEEK_API_KEY");
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "deepseek".to_string(),
+        env_name: "DEEPSEEK_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider =
+        OpenAiProvider::new(&entry, &runtime, &credential).expect("显式 credential 应创建成功");
+    assert_eq!(provider.provider_name(), "openai");
+}
 
-    let config = deepseek_openai_config();
-    let provider = OpenAiProvider::new(&config).expect("DEEPSEEK_API_KEY 已设置时应创建成功");
+#[test]
+fn openai_provider_effective_model_maps_catalog_id_to_model_name() {
+    let mut entry = deepseek_entry("LITELLM_SUNMI_API_KEY");
+    entry.id = "gpt-5.4_litellm-sunmi".to_string();
+    entry.model_name = Some("gpt-5.4".to_string());
+    entry.provider = "litellm-sunmi".to_string();
+    entry.base_url = Some("https://aigateway.sunmi.com".to_string());
+    entry.thinking_format = Some("openai".to_string());
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "litellm-sunmi".to_string(),
+        env_name: "LITELLM_SUNMI_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider =
+        OpenAiProvider::new(&entry, &runtime, &credential).expect("显式 credential 应创建成功");
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user("Say exactly: ok")],
+        // 这里故意传 catalog id，覆盖“调用方仍给本地 id 时 provider 必须 remap 到 wire model_name”。
+        model: "gpt-5.4_litellm-sunmi".to_string(),
+        temperature: Some(0.0),
+        max_tokens: Some(10),
+        stream: Some(false),
+        model_override: None,
+        tools: None,
+    };
+    assert_eq!(provider.effective_model(&request), "gpt-5.4");
+}
+
+#[test]
+fn count_tokens_approximate() {
+    let entry = deepseek_entry("DEEPSEEK_API_KEY");
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "deepseek".to_string(),
+        env_name: "DEEPSEEK_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider =
+        OpenAiProvider::new(&entry, &runtime, &credential).expect("显式 credential 应创建成功");
     let messages = vec![
         ChatMessage::user("hello world"),
         ChatMessage::assistant("hi there"),
@@ -134,15 +174,25 @@ fn parts_with_image_returns_structured_error() {
 #[ignore = "依赖真实 DeepSeek API 与配额，CI 默认跳过"]
 async fn chat_real_request_response_print() {
     load_dotenv();
-    if std::env::var("DEEPSEEK_API_KEY").is_err() {
-        panic!("DEEPSEEK_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
-    }
+    let api_key = match std::env::var("DEEPSEEK_API_KEY") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            panic!("DEEPSEEK_API_KEY 未配置，本用例不通过（宪法与单测规范：无 key 不得跳过）");
+        }
+    };
 
-    let config = deepseek_openai_config();
-    let provider = OpenAiProvider::new(&config).expect("DEEPSEEK_API_KEY 已设置时应创建成功");
+    let entry = deepseek_entry("DEEPSEEK_API_KEY");
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "deepseek".to_string(),
+        env_name: "DEEPSEEK_API_KEY".to_string(),
+        value: api_key,
+    };
+    let provider = OpenAiProvider::new(&entry, &runtime, &credential)
+        .expect("DEEPSEEK_API_KEY 已设置时应创建成功");
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say exactly: ok")],
-        model: config.default_model.clone(),
+        model: entry.request_model_name().to_string(),
         temperature: Some(0.0),
         max_tokens: Some(10),
         stream: Some(false),

@@ -1,5 +1,5 @@
 use crate::api::chat::ChatContext;
-use crate::core::llm::{Capabilities, LlmScene};
+use crate::core::llm::{Capabilities, LlmScene, ModelEntry};
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
@@ -81,25 +81,9 @@ fn run_list(ctx: &ChatContext) -> ChatCommandOutcome {
 
     println!("可用模型:");
     for item in ctx.global_services.model_catalog.entries() {
-        let mut tags = Vec::new();
-        if item.id == current_model {
-            tags.push("current");
-        }
-        if item.id == default_model {
-            tags.push("default");
-        }
-        let tag_text = if tags.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", tags.join(", "))
-        };
         println!(
-            "  - {}{}  api={} provider={} caps={}",
-            item.id,
-            tag_text,
-            item.api,
-            item.provider,
-            format_capabilities(&item.capabilities)
+            "{}",
+            format_model_list_line(&item, item.id == current_model, item.id == default_model)
         );
     }
     ChatCommandOutcome::Handled
@@ -157,4 +141,31 @@ fn format_capabilities(capabilities: &Capabilities) -> String {
     } else {
         labels.join("+")
     }
+}
+
+pub(crate) fn format_model_list_line(
+    item: &ModelEntry,
+    is_current: bool,
+    is_default: bool,
+) -> String {
+    let mut tags = Vec::new();
+    if is_current {
+        tags.push("current");
+    }
+    if is_default {
+        tags.push("default");
+    }
+    let tag_text = if tags.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", tags.join(", "))
+    };
+    format!(
+        "  - {}{}  api={} provider={} caps={}",
+        item.id,
+        tag_text,
+        item.api,
+        item.provider,
+        format_capabilities(&item.capabilities)
+    )
 }

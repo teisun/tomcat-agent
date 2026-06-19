@@ -2,41 +2,55 @@
 
 ## 1. 概述 (Overview)
 
-- **职责**：为宿主 API 与 chat 提供统一的 LLM 能力：`LlmProvider` Trait、OpenAI Chat Completions / Responses 适配器、流式/非流式调用、限流与指数退避重试、Token 统计、会话级模型配置（model_override）。
-- **所在层级**：宿主核心能力层（`src/core/llm`），依赖基础设施层（AppError、LlmConfig、load_config 等）。
+- **职责**：为宿主 API 与 chat 提供统一的 LLM 能力：`ModelCatalog`、`DefaultLlmResolver`、`LlmProvider` Trait、OpenAI Chat Completions / Responses 适配器、流式/非流式调用、限流与指数退避重试、Token 统计、会话级模型切换。
+- **所在层级**：宿主核心能力层（`src/core/llm`），依赖基础设施层（`AppConfig` / `LlmConfig` / `LlmRuntimeConfig` / `AppError`）。
 - **核心文件**：
-  - `src/core/mod.rs` — core 层聚合，re-export llm 对外类型
-  - `src/core/llm/mod.rs` — LLM 模块聚合与 re-export（含 **`resolve_llm`**）
-  - `src/core/llm/registry.rs` — **`PROVIDERS` 表**：`[llm] provider` 字符串 → `Arc<dyn LlmProvider>`
-  - `src/core/llm/types.rs` — ChatMessage、ChatRequest、ChatResponse、StreamEvent、TokenUsage
-  - `src/core/llm/provider.rs` — LlmProvider Trait 定义
-  - `src/core/llm/openai.rs` — **OpenAiProvider**（OpenAI-compatible Chat Completions adapter，`POST …/v1/chat/completions`）
-  - `src/core/llm/openai_responses/mod.rs` — **OpenAiResponsesProvider**（`POST …/v1/responses`）
-  - `src/core/llm/token_usage.rs` — SessionTokenUsage 会话级汇总结构
+  - `src/core/llm/catalog.rs` — `ModelEntry` / `ModelCatalog`；合并内置模型与 `models.toml`
+  - `src/core/llm/resolver.rs` — `DefaultLlmResolver` / `ResolvedCall`；按 scene + session override 选模型
+  - `src/core/llm/auth.rs` — 凭证解析；优先 `api_key_env`，否则推断 `<PROVIDER>_API_KEY`
+  - `src/core/llm/registry.rs` — `entry.api` → `Arc<dyn LlmProvider>`
+  - `src/core/llm/openai.rs` — `OpenAiProvider`（`POST …/v1/chat/completions`）
+  - `src/core/llm/openai_responses/mod.rs` — `OpenAiResponsesProvider`（`POST …/v1/responses`）
 
-### 1.1 Provider 注册表（`provider` 字符串）
+### 1.1 当前配置模型
 
-运行时根据 **`LlmConfig.provider`** 选型（默认 **`openai-responses`**）：
+现在分成两层：
 
-| `provider` id | 实现 | HTTP |
-|---------------|------|------|
-| **`openai-responses`**（默认） | `OpenAiResponsesProvider` | `POST {base}/v1/responses` |
-| **`openai`** | `OpenAiProvider`（OpenAI-compatible Chat Completions adapter） | `POST {base}/v1/chat/completions` |
+1. **`[llm]`（`tomcat.config.toml`）**：只负责“选哪个模型”与全局运行时旋钮。
+2. **`models.toml`**：负责每个模型怎么连（`api` / `provider` / `base_url` / `api_key_env` / `model_name` / `capabilities`）。
 
-装配入口：**`crate::core::llm::resolve_llm(&config.llm)`**（例如 `ChatContext::from_config`）。未知 id 返回 **`AppError::Config`** 并列出已注册 id。
+这意味着旧的 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env` 已经删除；如果用户继续写，会直接得到迁移错误，并提示改到 `models.toml`。
 
-当前规划补一句：**并不是每接一家“类 OpenAI”后端都立刻新建 provider。** 只要目标接口仍兼容 OpenAI Chat Completions，就优先复用 `provider="openai"` 这条 adapter，通过 `api_base` / `api_key_env` / `default_model` 接入；例如 DeepSeek 当前就走这条路线。`ThinkingFormat::Auto` 现在按 `model` 自动分派，`deepseek-v4-pro` / `deepseek-v4-flash` 都会自动走 DeepSeek thinking wire，通常不必再手配 `thinking.format`。只有当协议、流式事件、错误模型、重试策略或产品语义明显分叉时，才考虑新增独立 provider id / 实现。
+### 1.2 Provider 注册表（按 `api` 路由）
 
-详见 openspec **[`architecture/llm-multiprovider-integration.md`](../../../docs/architecture/llm-multiprovider-integration.md)**。
+注册表现在按 **`ModelEntry.api`** 选 wire adapter，而不是按厂商名选：
 
-### 1.1.1 models.toml 与「零代码加模型」（含 MiMo 案例）
+| `api` | 实现 | HTTP |
+|------|------|------|
+| `openai-responses` | `OpenAiResponsesProvider` | `POST {base}/v1/responses` |
+| `openai` | `OpenAiProvider` | `POST {base}/v1/chat/completions` |
 
-- **模型清单事实源**：`builtin_models()`（仅 gpt / deepseek）+ 用户级 `~/.tomcat/models.toml`（同 id 覆盖内置、新 id 新增），由 `ModelCatalog::load` 在启动时自动合并。
-- **`tomcat init` 自动生成**：init 会在 `[1/3] 环境初始化` 阶段调用 `api/cli/models_toml.rs::ensure_mimo_models_toml`，生成含一条可用 `mimo-v2.5-pro` 的 `models.toml`。**幂等**：文件不存在则创建；已存在但缺 MiMo 则仅追加；已含 MiMo 则不动——绝不覆盖用户已有条目/注释。
-- **MiMo 事实源在生成的 `models.toml`，不在 `builtin_models()`**：MiMo 走 `api = "openai"`（OpenAI-compatible Chat Completions）、`provider = "mimo"`、`base_url = "https://token-plan-cn.xiaomimimo.com"`（**只填 host**，`/v1/chat/completions` 由 `openai.rs` 拼接）、`thinking_format = "doubao"`、能力按官方文档定死（`vision/files=false`、`tools/reasoning=true`）。因此 MiMo 本身就是「零代码加模型」的活样板。
-- **鉴权**：`provider="mimo"` 经通用 `auth.rs::env_name_for_provider` 直接得到 `MIMO_API_KEY`，无需为它写专门分支。Token Plan 的 `tp-xxxxx` key 不能与按量 `sk-xxxxx` 混用。
-- **裸 id 兜底**：即便 `models.toml` 只写 `id = "mimo-v2.5-pro"`，`catalog.rs` 的 `infer_*`（provider/api/base_url/capabilities）与 `thinking_policy.rs::thinking_format_for_model` 也会推断出正确路由与 Doubao thinking 线格式。
-- **再加一个「同类」LLM（协议属 OpenAI chat-completions / responses、thinking 属已支持格式、续传是 `reasoning_content` 或 responses items）**：只需 (1) 设置 `<PROVIDER>_API_KEY`；(2) 在 `models.toml` 加一条 `[[models]]`。无需改代码。只有引入「新协议 / 新 thinking 线格式 / 新 continuity 捕获形态 / 新能力维度」时才需要加对应实现。
+`provider` 现在只表示**逻辑厂商**，用于凭证推断、展示和审计；例如 `provider = "deepseek"` 仍然可以配 `api = "openai"`。
+
+### 1.3 `models.toml` 与内置模型
+
+- **当前内置模型只有两条**：`gpt-5.4`、`deepseek-v4-pro`
+- **`tomcat init` 会补的受管默认模型**：`mimo-v2.5-pro`、`gpt-5.2`、`deepseek-v4-flash`
+- **同 id 覆盖内置，新 id 直接新增**
+- **新增用户条目必须显式写 `api` 和 `provider`**；不再按模型家族猜协议/厂商/能力
+
+`model_name` 用来解决“本地 id”和“上游真名”并存的问题。例如公司网关场景可写：
+
+```toml
+[[models]]
+id = "gpt-5.4_litellm-sunmi"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "litellm-sunmi"
+base_url = "https://aigateway.sunmi.com"
+```
+
+这样本地可以同时保留 `gpt-5.4` 与 `gpt-5.4_litellm-sunmi` 两条模型，但真正发给上游的 `model` 仍然是 `gpt-5.4`。
 
 ### 1.2 LLM 调用路径（ASCII）
 
@@ -45,7 +59,7 @@
             |
             v
      +------+------+
-     | resolve_llm   |
+     | resolve(model) |
      | Semaphore 限流   |
      | 重试 + fallback base |
      +------+------+
@@ -56,13 +70,16 @@
      +-------------+       +-------------------+
 ```
 
-- **配置来源**：`LlmConfig` 来自 `AppConfig`（见 [infra/README.md](../../infra/README.md) 中配置与代理说明）。
+- **配置来源**：`AppConfig.llm` 负责默认模型与全局运行时旋钮；`ModelCatalog` 负责模型条目事实源。
 - **数据面总览**：与 [src 模块索引](../../README.md)「图 2」中 `LlmProvider` 与 `SessionManager` 的衔接关系一致。
 
 ## 2. 使用方式
 
-- **选型**：在聊天入口使用 **`resolve_llm(&app_config.llm)?`** 得到 **`Arc<dyn LlmProvider>`**，不要手写 `OpenAiProvider::new` / `OpenAiResponsesProvider::new`（除非是测试或直接构造单一后端）。
-- **构造具体实现（测试 / 工具）**：`OpenAiProvider::new(&config)` 或 `OpenAiResponsesProvider::new(&config)`，其中 `config` 为 `LlmConfig`（含 api_base、api_key_env、default_model、max_concurrent_requests、retry_count、stream_timeout_sec；可选 **proxy** 显式代理、**api_base_fallback** 自动降级用备用 base）。api_key 从 `api_key_env` 指定环境变量读取，未设置则返回错误。若配置 `proxy`，所有 LLM 请求经该代理；未配置时 reqwest 仍尊重环境变量 `HTTPS_PROXY`/`HTTP_PROXY`。代理与降级 URL 可通过配置文件（见项目根 **tomcat.config.toml.example**）或环境变量 `TOMCAT__LLM__PROXY`、`TOMCAT__LLM__API_BASE_FALLBACK` 配置，详见 [infra/README.md](../../infra/README.md) 中「代理与降级 URL 的配置方式」。对 DeepSeek 一类 OpenAI-compatible 后端，通常也是复用 `OpenAiProvider::new(&config)`，只改 `api_base` / `api_key_env` / `default_model`。
+- **聊天入口**：优先用 `DefaultLlmResolver::resolve(scene, session_override)`，拿到 `ResolvedCall { provider_impl, model, ... }`。上层把 `ResolvedCall.model` 作为 wire `model` 传给 provider。
+- **直接构造 provider（测试 / 工具）**：`OpenAiProvider::new(entry, runtime, credential)` 或 `OpenAiResponsesProvider::new(entry, runtime, credential)`。其中：
+  - `entry: &ModelEntry` 提供 `api` / `provider` / `base_url` / `model_name`
+  - `runtime: &LlmRuntimeConfig` 提供重试、超时、proxy、files、continuity 等全局旋钮
+  - `credential: &Credential` 提供已经解析好的 key 值；provider 自己不再读 env
 - **Files 上传配置**：`[llm.files] expires_after_seconds` 控制上传时 `expires_after.seconds`（默认 `86400`，`0` 表示不传该字段）；环境变量覆盖键为 `TOMCAT__LLM__FILES__EXPIRES_AFTER_SECONDS`。
 - **Continuity 默认值**：`[llm.reasoning_continuity] enabled` 默认就是 `true`；只有想显式退回“只带可见历史、不做 opaque replay”的旧行为时才需要关。
 - **chat-completions `reasoning_content` continuity 语义（数据驱动）**：`reasoning_content` 的 **capture** 与 **replay** 明确解耦，且**不再按厂商名硬编码**。「哪个模型走 `reasoning_content` 续传」由 `replay_policy.rs` 的数据表 `CHAT_COMPLETIONS_CONTINUITY_RULES` 决定（当前含 `deepseek-v4` 与 `mimo-v2.5-pro` 两行，共用同一条逻辑）；新增同类模型 = 加一行数据，`maybe_snapshot` / `is_compatible` / `transport_messages` 等 continuity 各道门只读 `ProviderCompatProfile` 字段（`capture_mode` / `api_family` / `provider`+`model_family`），无需修改。只要响应里抓到 snapshot 就照常写进 transcript；后续**同 profile**（provider + model_family 一致）请求会优先回放兼容的 `reasoning_content`，`same_profile` 比对保证 DeepSeek / MiMo 互不串档。`had_tool_call` / `replay_requirement` 仍保留在 transcript metadata 里，用于审计和表达 tool turn 的 replay 强约束。
@@ -71,13 +88,14 @@
 - **可 replay 窗口（出站收敛）**：wire builder 出站时按 `ReplayWindow` 收敛——只有**最新 assistant turn** 与**当前 turn**（最后一条真实 user 之后的消息）内的 continuity 才参与 opaque/文本 replay；更早的历史轮次一律 `StripOpaque`（只留可见内容、丢弃隐藏 blob、**不转文本**、**不告警**）。这样既保住当前轮的高保真续传，又从根上避免对整段历史逐条降级判定与刷屏。
 - **Replay warning 语义**：逐消息 warn 已改为**每请求至多一条汇总告警**（`ReplayDowngradeReport::emit`），且只在窗口内出现「真正降级失败」时触发：**A** 同 profile 却没能 `KeepOpaque`（任何非 keep 动作都算异常 → `SameProfileIncompatible`）；**B** 跨 profile 且连 fallback 文本都救不回、落到 `StripOpaque`（continuity 彻底丢失）。跨 profile 的 `ConvertToText` 属设计内的优雅降级，**不告警**；窗口外老历史的静默 strip 仅计数、**从不告警**。不再使用进程内“问题指纹”缓存压重复 warning。
 - **结构化错误模型**：provider 不再把 `503/429/400` 等语义只塞进一段字符串；统一构造 `LlmError { provider, stage, http_status, summary, source }`，并由 `infra/error/llm.rs` 作为 `is_retryable_llm_error` / `llm_connect_or_network` / `is_context_overflow` 的单一事实来源。
-- **非流式调用**：`provider.chat(request).await`，请求中 `model_override` 优先于 `request.model` 选模型；支持限流（Semaphore）与可重试错误的指数退避重试。provider 级退避现统一为 `500ms` 基准、`±20%` jitter、`4s` cap，并使用饱和算术避免大 `retry_count` 下的整型溢出；当对主 api_base 请求发生连接/网络错误且配置了 `api_base_fallback` 时，自动用 fallback URL 重试一次。
-- **流式调用**：`provider.chat_stream(request).await` 返回 `Box<dyn Stream<Item = Result<StreamEvent, AppError>>>`，消费端可通过 drop 提前结束以释放连接；同样支持主 base 不通时自动用 `api_base_fallback` 重试。**安全边界**：provider 层仅在**首个 delta 产出前**对建连/状态阶段做自动重试；一旦正文已经开始输出，后续 `BodyRead` / `Parse` 错误必须原样上抛，避免重复出字。
+- **非流式调用**：`provider.chat(request).await`
+- **流式调用**：`provider.chat_stream(request).await`
+- **base fallback**：当对主 `base_url` 请求发生连接/网络错误且配置了 `api_base_fallback` 时，自动用 fallback URL 重试一次。
 - **Token 统计**：`ChatResponse.usage` / `StreamEvent::Usage` 提供单次 usage；会话级汇总由调用方使用 `SessionTokenUsage` 累加，并写入 SessionEntry（当 003 可用时）。
 
 ## 3. 会话级模型配置
 
-- `ChatRequest.model_override: Option<String>` 与 SessionEntry.model_override 约定一致；为 None 时使用请求的 model 字段（通常由上层从 LlmConfig.default_model 或 SessionEntry 填入）。
+- `ChatRequest.model_override: Option<String>` 与 SessionEntry.model_override 约定一致；为 None 时使用请求的 model 字段（通常由上层从 `ResolvedCall.model` 或 SessionEntry 填入）。
 - `SessionManager::switch_current_model(provider, model_id)` 会同时更新当前 session 的 `model_override`，并落一条 `model_change` transcript 事件；当前仅作为最小切换链路与测试/会话审计入口，**不是**完整多 LLM 产品化方案。
 
 ## 3.5 多模态 parts（图片 / PDF 附件）
@@ -102,10 +120,17 @@
 ### 最小调用示例
 
 ```rust
-use tomcat::{resolve_llm, ChatMessage, ChatMessageContentPart, ChatRequest, LlmConfig};
+use std::sync::Arc;
+use tomcat::{
+    AppConfig, ChatMessage, ChatMessageContentPart, ChatRequest, DefaultLlmResolver, LlmResolver,
+    LlmScene, ModelCatalog,
+};
 
-let cfg = LlmConfig { provider: "openai-responses".to_string(), ..LlmConfig::default() };
-let provider = resolve_llm(&cfg)?;
+let cfg = AppConfig::default();
+let catalog = Arc::new(ModelCatalog::load(&cfg)?);
+let resolver = DefaultLlmResolver::new(cfg.clone(), catalog);
+let resolved = resolver.resolve(LlmScene::Main, None)?;
+let provider = resolved.provider_impl;
 
 // A 通道：inline 图片（PR-RJ-0：直接传路径，helper 自动读盘 + base64）
 let parts = vec![
@@ -121,7 +146,7 @@ let parts = vec![
 
 let req = ChatRequest {
     messages: vec![ChatMessage::user_with_parts(parts)],
-    model: cfg.default_model.clone(),
+    model: resolved.model.clone(),
     max_tokens: Some(96),
     ..Default::default()
 };
@@ -139,5 +164,5 @@ let resp = provider.chat(req).await?;
 
 ## 4. 扩展
 
-- **新增其它 OpenAI 形后端**：默认先评估能否直接复用 `provider="openai"` + `api_base`。如果只是一个 OpenAI-compatible Chat Completions 终端，通常不必立刻实现新的 `LlmProvider`；只有当协议或产品语义明显分叉时，再在 **`registry.rs`** 的 **`PROVIDERS`** 表追加新 `(id, ctor)` 并实现独立 provider。
-- **新增其它厂商**：同上；保持 `LlmConfig` 横切字段不无限膨胀（见 architecture spec §6.5.2）。
+- **新增其它 OpenAI 形后端**：默认先评估能否直接复用现有 `api = "openai"` 或 `api = "openai-responses"`，把差异收进 `models.toml` 条目即可。
+- **新增其它厂商**：同上；优先保持 `LlmConfig` 只存“选哪个模型”和全局旋钮，不把单模型连接字段重新塞回主配置。

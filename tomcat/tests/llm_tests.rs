@@ -12,13 +12,15 @@ use serial_test::serial;
 use std::sync::Arc;
 use std::time::Duration;
 use tomcat::{
-    resolve_llm, AppConfig, ChatMessage, ChatRequest, DefaultLlmResolver, LlmConfig, LlmResolver,
-    LlmScene, ModelCatalog,
+    AppConfig, ChatMessage, ChatRequest, DefaultLlmResolver, LlmResolver, LlmScene, ModelCatalog,
 };
 
-fn completions_config() -> LlmConfig {
-    let mut cfg = LlmConfig::default();
-    common::apply_deepseek_llm_config(&mut cfg);
+fn completions_config() -> AppConfig {
+    let mut cfg = AppConfig::default();
+    let dir = tempfile::tempdir().expect("create llm test workdir");
+    cfg.storage.work_dir = Some(dir.path().display().to_string());
+    common::apply_deepseek_app_config(&mut cfg);
+    std::mem::forget(dir);
     cfg
 }
 
@@ -35,11 +37,10 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
     common::load_deepseek_test_env();
 
     let config = completions_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 DEEPSEEK_API_KEY（环境变量或 .env），无 key 视为失败");
+    let provider = common::resolve_main_provider(&config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say exactly: ok")],
-        model: config.default_model.clone(),
+        model: config.llm.default_model.clone(),
         temperature: None,
         // 某些模型在严格/最小输出预算下会返回 max_tokens 限制错误（HTTP 400）。
         // 给到一个小但稳妥的上限，避免把网络 E2E 用例变成配额边界测试。
@@ -48,7 +49,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
         model_override: None,
         tools: None,
     };
-    tracing::info!("Arrange: 加载 .env，resolve_llm(provider=openai, api_base=DeepSeek) 拿 Arc<dyn LlmProvider>");
+    tracing::info!("Arrange: 加载 .env，经 catalog/resolver 拿 Arc<dyn LlmProvider>");
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
         .await
         .map_err(|_| "chat 超时 60s，可能网络或上游不可达")??;
@@ -74,11 +75,10 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
     common::load_deepseek_test_env();
 
     let config = completions_config();
-    let provider = resolve_llm(&config)
-        .expect("集成测试要求设置 DEEPSEEK_API_KEY（环境变量或 .env），无 key 视为失败");
+    let provider = common::resolve_main_provider(&config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say hi")],
-        model: config.default_model.clone(),
+        model: config.llm.default_model.clone(),
         temperature: None,
         max_tokens: Some(5),
         stream: Some(true),

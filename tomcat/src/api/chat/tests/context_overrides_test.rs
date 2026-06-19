@@ -11,7 +11,10 @@ fn chat_context_uses_injected_ask_question_panel_override() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some(ENV_KEY.to_string());
+    crate::test_support::write_models_override(
+        dir.path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(ENV_KEY)],
+    );
 
     // SAFETY: 测试使用独立 env key，结束后立即清理。
     unsafe { std::env::set_var(ENV_KEY, "stub") };

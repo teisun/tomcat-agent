@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::infra::config::{get_work_dir, AppConfig, ContextConfig, LlmConfig};
+use crate::infra::config::{get_work_dir, AppConfig, ContextConfig};
 use crate::infra::error::AppError;
 
 fn default_tools_enabled() -> bool {
@@ -47,8 +47,12 @@ pub struct Cost {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelEntry {
     pub id: String,
+    #[serde(default)]
+    pub model_name: Option<String>,
     pub api: String,
     pub provider: String,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
@@ -59,6 +63,12 @@ pub struct ModelEntry {
     pub cost: Option<Cost>,
     #[serde(default)]
     pub thinking_format: Option<String>,
+}
+
+impl ModelEntry {
+    pub fn request_model_name(&self) -> &str {
+        self.model_name.as_deref().unwrap_or(self.id.as_str())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -92,8 +102,7 @@ impl ModelCatalog {
             })?;
             for raw in file.models {
                 let model_id = raw.id.clone();
-                let merged =
-                    merge_user_model(raw, by_id.remove(&model_id), &config.llm, &config.context);
+                let merged = merge_user_model(raw, by_id.remove(&model_id), &config.context)?;
                 if !ordered_ids.iter().any(|existing| existing == &merged.id) {
                     ordered_ids.push(merged.id.clone());
                 }
@@ -149,9 +158,13 @@ struct UserModelsFile {
 struct UserModelEntry {
     id: String,
     #[serde(default)]
+    model_name: Option<String>,
+    #[serde(default)]
     api: Option<String>,
     #[serde(default)]
     provider: Option<String>,
+    #[serde(default)]
+    api_key_env: Option<String>,
     #[serde(default)]
     base_url: Option<String>,
     #[serde(default)]
@@ -182,24 +195,10 @@ fn builtin_models(context: &ContextConfig) -> Vec<ModelEntry> {
     vec![
         ModelEntry {
             id: "gpt-5.4".to_string(),
+            model_name: None,
             api: "openai-responses".to_string(),
             provider: "openai".to_string(),
-            base_url: Some("https://api.openai.com".to_string()),
-            capabilities: Capabilities {
-                vision: true,
-                files: true,
-                tools: true,
-                reasoning: true,
-                web_search: false,
-            },
-            context_window: Some(context.context_window as u32),
-            cost: None,
-            thinking_format: None,
-        },
-        ModelEntry {
-            id: "gpt-5.2".to_string(),
-            api: "openai-responses".to_string(),
-            provider: "openai".to_string(),
+            api_key_env: None,
             base_url: Some("https://api.openai.com".to_string()),
             capabilities: Capabilities {
                 vision: true,
@@ -214,24 +213,10 @@ fn builtin_models(context: &ContextConfig) -> Vec<ModelEntry> {
         },
         ModelEntry {
             id: "deepseek-v4-pro".to_string(),
+            model_name: None,
             api: "openai".to_string(),
             provider: "deepseek".to_string(),
-            base_url: Some("https://api.deepseek.com".to_string()),
-            capabilities: Capabilities {
-                vision: false,
-                files: false,
-                tools: true,
-                reasoning: true,
-                web_search: false,
-            },
-            context_window: Some(context.context_window as u32),
-            cost: None,
-            thinking_format: Some("deepseek".to_string()),
-        },
-        ModelEntry {
-            id: "deepseek-v4-flash".to_string(),
-            api: "openai".to_string(),
-            provider: "deepseek".to_string(),
+            api_key_env: None,
             base_url: Some("https://api.deepseek.com".to_string()),
             capabilities: Capabilities {
                 vision: false,
@@ -250,35 +235,47 @@ fn builtin_models(context: &ContextConfig) -> Vec<ModelEntry> {
 fn merge_user_model(
     raw: UserModelEntry,
     existing: Option<ModelEntry>,
-    llm: &LlmConfig,
     context: &ContextConfig,
-) -> ModelEntry {
-    let default_provider = infer_provider_from_model_id(&raw.id)
-        .or_else(|| infer_provider_from_env(llm.api_key_env.as_deref()))
-        .unwrap_or_else(|| llm.provider.clone());
-    let default_api = infer_api_from_model_id(&raw.id).unwrap_or_else(|| llm.provider.clone());
+) -> Result<ModelEntry, AppError> {
     let mut merged = existing.unwrap_or_else(|| ModelEntry {
         id: raw.id.clone(),
-        api: default_api,
-        provider: default_provider,
-        base_url: llm
-            .api_base
-            .clone()
-            .or_else(|| infer_default_base_url(infer_provider_from_model_id(&raw.id).as_deref())),
-        capabilities: infer_capabilities_from_model_id(&raw.id),
+        model_name: None,
+        api: String::new(),
+        provider: String::new(),
+        api_key_env: None,
+        base_url: None,
+        capabilities: Capabilities::default(),
         context_window: Some(context.context_window as u32),
         cost: None,
         thinking_format: None,
     });
     merged.id = raw.id.clone();
+    if let Some(model_name) = raw.model_name {
+        merged.model_name = Some(model_name);
+    }
     if let Some(api) = raw.api {
         merged.api = api;
+    } else if merged.api.trim().is_empty() {
+        return Err(AppError::Config(format!(
+            "models.toml 中模型 `{}` 必须显式填写 `api`。",
+            raw.id.trim()
+        )));
     }
     if let Some(provider) = raw.provider {
         merged.provider = provider;
+    } else if merged.provider.trim().is_empty() {
+        return Err(AppError::Config(format!(
+            "models.toml 中模型 `{}` 必须显式填写 `provider`。",
+            raw.id.trim()
+        )));
+    }
+    if let Some(api_key_env) = raw.api_key_env {
+        merged.api_key_env = Some(api_key_env);
     }
     if let Some(base_url) = raw.base_url {
         merged.base_url = Some(base_url);
+    } else if merged.base_url.is_none() {
+        merged.base_url = infer_default_base_url(Some(merged.provider.as_str()));
     }
     if let Some(capabilities) = raw.capabilities {
         apply_partial_capabilities(&mut merged.capabilities, capabilities);
@@ -292,7 +289,7 @@ fn merge_user_model(
     if let Some(thinking_format) = raw.thinking_format {
         merged.thinking_format = Some(thinking_format);
     }
-    merged
+    Ok(merged)
 }
 
 fn apply_partial_capabilities(target: &mut Capabilities, partial: PartialCapabilities) {
@@ -321,68 +318,11 @@ fn missing_model_error(model_id: &str, user_path: &Path) -> AppError {
     ))
 }
 
-pub(crate) fn infer_provider_from_env(env_name: Option<&str>) -> Option<String> {
-    let env = env_name?.trim();
-    env.strip_suffix("_API_KEY")
-        .filter(|prefix| !prefix.is_empty())
-        .map(|prefix| prefix.to_ascii_lowercase())
-}
-
-pub(crate) fn infer_provider_from_model_id(model_id: &str) -> Option<String> {
-    let lower = model_id.trim().to_ascii_lowercase();
-    if lower.starts_with("deepseek-") {
-        Some("deepseek".to_string())
-    } else if lower.starts_with("gpt-") || lower.starts_with("o1") || lower.starts_with("o3") {
-        Some("openai".to_string())
-    } else if lower.starts_with("claude-") {
-        Some("anthropic".to_string())
-    } else if lower.starts_with("mimo-") {
-        Some("mimo".to_string())
-    } else {
-        None
-    }
-}
-
-pub(crate) fn infer_api_from_model_id(model_id: &str) -> Option<String> {
-    let lower = model_id.trim().to_ascii_lowercase();
-    if lower.starts_with("deepseek-") || lower.starts_with("mimo-") {
-        Some("openai".to_string())
-    } else if lower.starts_with("gpt-") || lower.starts_with("o1") || lower.starts_with("o3") {
-        Some("openai-responses".to_string())
-    } else {
-        None
-    }
-}
-
 pub(crate) fn infer_default_base_url(provider: Option<&str>) -> Option<String> {
     match provider.unwrap_or_default() {
         "openai" | "openai-responses" => Some("https://api.openai.com".to_string()),
         "deepseek" => Some("https://api.deepseek.com".to_string()),
         "mimo" => Some("https://token-plan-cn.xiaomimimo.com".to_string()),
         _ => None,
-    }
-}
-
-pub(crate) fn infer_capabilities_from_model_id(model_id: &str) -> Capabilities {
-    let lower = model_id.trim().to_ascii_lowercase();
-    if lower.starts_with("deepseek-v4-") || lower.starts_with("gpt-5.") {
-        Capabilities {
-            vision: lower.starts_with("gpt-"),
-            files: lower.starts_with("gpt-"),
-            tools: true,
-            reasoning: true,
-            web_search: false,
-        }
-    } else if lower.starts_with("mimo-") {
-        // 官方文档：mimo-v2.5-pro 仅文本（图片/音视频只在 mimo-v2.5 / mimo-v2-omni）。
-        Capabilities {
-            vision: false,
-            files: false,
-            tools: true,
-            reasoning: true,
-            web_search: false,
-        }
-    } else {
-        Capabilities::default()
     }
 }

@@ -98,6 +98,30 @@ fn reject_legacy_whitelist_keys(path: &Path) -> Result<(), AppError> {
     let Ok(value) = content.parse::<toml::Value>() else {
         return Ok(());
     };
+    let llm_hits = value
+        .get("llm")
+        .and_then(|v| v.as_table())
+        .map(|llm| {
+            [
+                (
+                    "provider",
+                    "models.toml 中 [[models]].api（协议线）与 [[models]].provider（厂商）",
+                ),
+                ("api_base", "models.toml 中 [[models]].base_url"),
+                ("api_key_env", "models.toml 中 [[models]].api_key_env"),
+            ]
+            .into_iter()
+            .filter(|(key, _)| llm.contains_key(*key))
+            .map(|(key, target)| format!("llm.{key} -> {target}"))
+            .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !llm_hits.is_empty() {
+        return Err(AppError::Config(format!(
+            "配置包含已删除的 [llm] 单模型连接字段：{}。请迁移到 models.toml 后重试。",
+            llm_hits.join("; ")
+        )));
+    }
     let Some(primitive) = value.get("primitive").and_then(|v| v.as_table()) else {
         return Ok(());
     };

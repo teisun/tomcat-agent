@@ -50,15 +50,15 @@ fn run_init_returns_ok() {
 
 #[test]
 #[serial(env_lock)]
-fn run_init_writes_openai_responses_as_default_provider() {
+fn run_init_writes_default_model_without_legacy_llm_connection_fields() {
     with_temp_home(|| {
         run_init().expect("init should succeed");
 
         let config_path = normalize_path(DEFAULT_CONFIG_PATH).expect("config path");
         let config_text = std::fs::read_to_string(&config_path).expect("config text");
         assert!(
-            config_text.contains("provider = \"openai-responses\""),
-            "generated config should default to openai-responses, got:\n{config_text}"
+            !config_text.contains("provider = "),
+            "generated config should not persist legacy llm.provider, got:\n{config_text}"
         );
         assert!(
             config_text.contains("[context]"),
@@ -68,6 +68,27 @@ fn run_init_writes_openai_responses_as_default_provider() {
             config_text.contains("compaction_model = \"gpt-5.4\""),
             "generated config should align compaction model with init default model, got:\n{config_text}"
         );
+    });
+}
+
+#[test]
+#[serial(env_lock)]
+fn run_init_rejects_legacy_llm_connection_fields_in_existing_config() {
+    with_temp_home(|| {
+        let config_path = normalize_path(DEFAULT_CONFIG_PATH).expect("config path");
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent).expect("create config parent");
+        }
+        std::fs::write(
+            &config_path,
+            "[llm]\nprovider = \"openai-responses\"\ndefault_model = \"gpt-5.4\"\n",
+        )
+        .expect("write legacy config");
+
+        let err = run_init().expect_err("init should reject legacy llm connection fields");
+        let msg = err.to_string();
+        assert!(msg.contains("llm.provider"));
+        assert!(msg.contains("models.toml"));
     });
 }
 
@@ -355,8 +376,10 @@ fn apply_model_choice_updates_provider_and_key_env() {
     let mut cfg = AppConfig::default();
     let entry = crate::core::llm::ModelEntry {
         id: "deepseek-v4-pro".to_string(),
+        model_name: None,
         api: "openai".to_string(),
         provider: "deepseek".to_string(),
+        api_key_env: None,
         base_url: Some("https://api.deepseek.com".to_string()),
         capabilities: crate::core::llm::Capabilities::default(),
         context_window: None,
@@ -367,12 +390,6 @@ fn apply_model_choice_updates_provider_and_key_env() {
     let choice = apply_model_choice(&mut cfg, &entry);
     assert_eq!(cfg.llm.default_model, "deepseek-v4-pro");
     assert_eq!(cfg.context.compaction_model, "deepseek-v4-pro");
-    assert_eq!(cfg.llm.provider, "openai");
-    assert_eq!(
-        cfg.llm.api_base.as_deref(),
-        Some("https://api.deepseek.com")
-    );
-    assert_eq!(cfg.llm.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
     assert_eq!(choice.env_name, "DEEPSEEK_API_KEY");
 }
 
@@ -404,9 +421,11 @@ fn additional_provider_env_names_skip_selected_provider_and_dedupe() {
     .expect("load catalog");
 
     let extra_for_openai =
-        super::super::init_model_wizard::additional_provider_env_names(&catalog, "openai");
-    let extra_for_deepseek =
-        super::super::init_model_wizard::additional_provider_env_names(&catalog, "deepseek");
+        super::super::init_model_wizard::additional_provider_env_names(&catalog, "OPENAI_API_KEY");
+    let extra_for_deepseek = super::super::init_model_wizard::additional_provider_env_names(
+        &catalog,
+        "DEEPSEEK_API_KEY",
+    );
 
     assert_eq!(extra_for_openai, vec!["DEEPSEEK_API_KEY".to_string()]);
     assert_eq!(extra_for_deepseek, vec!["OPENAI_API_KEY".to_string()]);
@@ -417,8 +436,10 @@ fn apply_model_choice_skips_default_openai_base_url() {
     let mut cfg = AppConfig::default();
     let entry = crate::core::llm::ModelEntry {
         id: "gpt-5.4".to_string(),
+        model_name: None,
         api: "openai-responses".to_string(),
         provider: "openai".to_string(),
+        api_key_env: None,
         base_url: Some("https://api.openai.com".to_string()),
         capabilities: crate::core::llm::Capabilities::default(),
         context_window: None,
@@ -428,9 +449,7 @@ fn apply_model_choice_skips_default_openai_base_url() {
 
     apply_model_choice(&mut cfg, &entry);
     assert_eq!(cfg.context.compaction_model, "gpt-5.4");
-    assert_eq!(cfg.llm.provider, "openai-responses");
-    assert_eq!(cfg.llm.api_base, None);
-    assert_eq!(cfg.llm.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
+    assert_eq!(cfg.llm.default_model, "gpt-5.4");
 }
 
 #[test]

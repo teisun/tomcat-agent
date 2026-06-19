@@ -281,9 +281,16 @@ fn run_session_archive_returns_ok() {
 fn run_session_delete_triggers_openai_files_cleanup_registry() {
     let (base_url, hits, handle) = spawn_delete_404_server();
     let dir = tempfile::tempdir().unwrap();
-    let mut cfg = test_config(dir.path());
-    cfg.llm.api_base = Some(base_url);
-    cfg.llm.api_key_env = Some("TOMCAT_SESSION_CLEANUP_TEST_KEY".to_string());
+    let cfg = test_config(dir.path());
+    crate::test_support::write_models_override(
+        dir.path(),
+        &[
+            crate::test_support::TestModelOverride::gpt54_openai_responses(
+                "TOMCAT_SESSION_CLEANUP_TEST_KEY",
+            )
+            .with_base_url(&base_url),
+        ],
+    );
     let old_no_proxy = std::env::var("NO_PROXY").ok();
     let old_no_proxy_lower = std::env::var("no_proxy").ok();
     // SAFETY: 测试作用域内强制本地 127.0.0.1 请求绕过代理，避免 mock 请求被外部代理劫持。
@@ -364,7 +371,10 @@ fn assert_session_subcommand_cleans_plugin_vm(build_sub: impl FnOnce(String) -> 
     write_session_plugin_fixture(workspace.path(), PLUGIN_ID, "session");
 
     let mut cfg = test_config(work_dir.path());
-    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    crate::test_support::write_models_override(
+        work_dir.path(),
+        &[crate::test_support::TestModelOverride::gpt54_openai_responses(API_ENV)],
+    );
     cfg.plugin.auto_load = vec![PLUGIN_ID.to_string()];
     crate::ensure_work_dir_structure(&cfg).unwrap();
 

@@ -20,7 +20,7 @@ pub use core::{
     SessionManager, SessionMode, SessionStore, TranscriptEntry, DEFAULT_SESSION_KEY,
 };
 pub use core::{
-    resolve_llm, AgentLoop, AgentLoopConfig, AgentRunResult, AllowAllConfirmation, AuthStore,
+    build_provider, AgentLoop, AgentLoopConfig, AgentRunResult, AllowAllConfirmation, AuthStore,
     BashResult, Capabilities, ChatMessage, ChatMessageContentPart, ChatRequest, ChatResponse,
     ChatResponseChoice, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
     CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, Credential,

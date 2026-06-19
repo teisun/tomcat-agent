@@ -106,6 +106,20 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
 fn provider_cache_reuses_arc_for_same_route() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "gpt-5.4-copy"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com"
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
+"#,
+    )
+    .unwrap();
     let cfg = AppConfig::default();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
     let resolver = DefaultLlmResolver::new(cfg, catalog);
@@ -115,7 +129,9 @@ fn provider_cache_reuses_arc_for_same_route() {
     }
 
     let default_call = resolver.resolve(LlmScene::Main, None).unwrap();
-    let switched_call = resolver.resolve(LlmScene::Main, Some("gpt-5.2")).unwrap();
+    let switched_call = resolver
+        .resolve(LlmScene::Main, Some("gpt-5.4-copy"))
+        .unwrap();
     assert!(
         Arc::ptr_eq(&default_call.provider_impl, &switched_call.provider_impl),
         "same (api, base_url, key_source) should reuse provider instance"
@@ -128,12 +144,23 @@ fn provider_cache_reuses_arc_for_same_route() {
 
 #[test]
 #[serial(env_lock)]
-fn catalog_route_ignores_legacy_api_base_override() {
+fn catalog_route_uses_entry_base_url() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
-    let mut cfg = AppConfig::default();
-    cfg.llm.provider = "openai".to_string();
-    cfg.llm.api_base = Some("http://127.0.0.1:8899".to_string());
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "gpt-5.4"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "http://127.0.0.1:8899"
+capabilities = { vision = true, files = true, tools = true, reasoning = true }
+"#,
+    )
+    .unwrap();
+    let cfg = AppConfig::default();
     let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
     let resolver = DefaultLlmResolver::new(cfg, catalog);
 
@@ -147,7 +174,7 @@ fn catalog_route_ignores_legacy_api_base_override() {
     assert_eq!(resolved.model, "gpt-5.4");
     assert_eq!(resolved.api, "openai-responses");
     assert_eq!(resolved.provider, "openai");
-    assert_eq!(resolved.base_url.as_deref(), Some("https://api.openai.com"));
+    assert_eq!(resolved.base_url.as_deref(), Some("http://127.0.0.1:8899"));
     assert_eq!(resolved.key_source, "OPENAI_API_KEY");
 
     unsafe {

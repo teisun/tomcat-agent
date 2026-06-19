@@ -1,6 +1,21 @@
 use serial_test::serial;
 
-use crate::core::llm::{env_name_for_provider, missing_key_message, AuthStore};
+use crate::core::llm::{env_name_for_provider, missing_key_message, AuthStore, ModelEntry};
+
+fn entry(provider: &str, api_key_env: Option<&str>) -> ModelEntry {
+    ModelEntry {
+        id: format!("test-{provider}"),
+        model_name: None,
+        api: "openai".to_string(),
+        provider: provider.to_string(),
+        api_key_env: api_key_env.map(str::to_string),
+        base_url: None,
+        capabilities: Default::default(),
+        context_window: None,
+        cost: None,
+        thinking_format: None,
+    }
+}
 
 #[test]
 #[serial(env_lock)]
@@ -13,7 +28,7 @@ fn per_provider_env_prefers_provider_specific_api_key() {
 
     let store = AuthStore;
     let credential = store
-        .get("deepseek", Some("OPENAI_API_KEY"))
+        .get(&entry("deepseek", None), Some("OPENAI_API_KEY"))
         .expect("应优先命中 DEEPSEEK_API_KEY");
     assert_eq!(credential.env_name, "DEEPSEEK_API_KEY");
     assert_eq!(credential.value, "deepseek-secret");
@@ -22,6 +37,26 @@ fn per_provider_env_prefers_provider_specific_api_key() {
     unsafe {
         std::env::remove_var("DEEPSEEK_API_KEY");
         std::env::remove_var("OPENAI_API_KEY");
+    }
+}
+
+#[test]
+#[serial(env_lock)]
+fn explicit_api_key_env_overrides_default_provider_env() {
+    unsafe {
+        std::env::set_var("CUSTOM_OPENAI_KEY", "custom-secret");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    let store = AuthStore;
+    let credential = store
+        .get(&entry("openai", Some("CUSTOM_OPENAI_KEY")), None)
+        .expect("应优先命中显式 api_key_env");
+    assert_eq!(credential.env_name, "CUSTOM_OPENAI_KEY");
+    assert_eq!(credential.value, "custom-secret");
+
+    unsafe {
+        std::env::remove_var("CUSTOM_OPENAI_KEY");
     }
 }
 
@@ -46,7 +81,7 @@ fn mimo_provider_uses_mimo_api_key_env() {
 
     let store = AuthStore;
     let credential = store
-        .get("mimo", Some("OPENAI_API_KEY"))
+        .get(&entry("mimo", None), Some("OPENAI_API_KEY"))
         .expect("应命中 MIMO_API_KEY");
     assert_eq!(credential.env_name, "MIMO_API_KEY");
     assert_eq!(credential.value, "tp-secret");

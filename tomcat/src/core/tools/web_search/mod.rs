@@ -32,7 +32,6 @@ pub struct WebSearchRuntime {
     config: ToolsWebSearchConfig,
     model_catalog: Arc<ModelCatalog>,
     auth: AuthStore,
-    llm_fallback_env: Option<String>,
     cache: WebSearchCache,
     plugin_invoker: OnceLock<Arc<dyn PluginSearchInvoker>>,
 }
@@ -47,7 +46,6 @@ impl WebSearchRuntime {
             config: web_cfg,
             model_catalog,
             auth: AuthStore,
-            llm_fallback_env: config.llm.api_key_env.clone(),
             plugin_invoker: OnceLock::new(),
         })
     }
@@ -227,7 +225,7 @@ impl WebSearchRuntime {
 
         let credential = self
             .auth
-            .get(&candidate.provider, self.llm_fallback_env.as_deref())
+            .get_for_provider(&candidate.provider, None, None)
             .map_err(|_| BackendFailure::MissingKey {
                 env_name: env_name_for_provider(&candidate.provider),
             })?;

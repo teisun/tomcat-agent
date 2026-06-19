@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tomcat::core::llm::{ContinuityMetadata, ReasoningContinuation};
 use tomcat::{
-    build_context_from_state, init_context_state, resolve_llm, AppError, ChatMessage, ChatRequest,
-    ContextConfig, LlmConfig, LlmProvider, SessionManager, StreamEvent, TranscriptEntry,
+    build_context_from_state, init_context_state, AppConfig, AppError, ChatMessage, ChatRequest,
+    ContextConfig, LlmProvider, SessionManager, StreamEvent, TranscriptEntry,
 };
 
 const STREAM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -44,7 +44,15 @@ fn require_api_key(env_key: &str) {
 }
 
 fn openai_model() -> String {
-    std::env::var("TOMCAT_E2E_LLM_MODEL").unwrap_or_else(|_| "gpt-5.4".to_string())
+    common::e2e_openai_model()
+}
+
+fn openai_api_key_env() -> &'static str {
+    if openai_model() == "gpt-5.4" {
+        "OPENAI_API_KEY"
+    } else {
+        common::OPENAI_GATEWAY_TEST_API_KEY_ENV
+    }
 }
 
 fn deepseek_model() -> String {
@@ -57,50 +65,41 @@ fn deepseek_alt_model() -> String {
 }
 
 fn mimo_model() -> String {
-    std::env::var("TOMCAT_E2E_MIMO_MODEL").unwrap_or_else(|_| "mimo-v2.5-pro".to_string())
+    common::mimo_test_model()
 }
 
-fn mimo_base_url() -> String {
-    std::env::var("TOMCAT_E2E_MIMO_BASE_URL")
-        .unwrap_or_else(|_| "https://token-plan-cn.xiaomimimo.com".to_string())
-}
-
-fn openai_responses_continuity_config() -> LlmConfig {
-    let mut cfg = LlmConfig {
-        provider: "openai-responses".to_string(),
-        default_model: openai_model(),
-        ..LlmConfig::default()
-    };
-    cfg.reasoning_continuity.enabled = true;
+fn base_continuity_config(label: &str) -> AppConfig {
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(common::dot_tomcat_e2e_workdir(label).display().to_string());
     cfg
 }
 
-fn deepseek_continuity_config() -> LlmConfig {
-    let mut cfg = LlmConfig {
-        provider: "openai".to_string(),
-        api_base: Some("https://api.deepseek.com".to_string()),
-        api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
-        default_model: deepseek_model(),
-        ..LlmConfig::default()
-    };
-    cfg.reasoning_continuity.enabled = true;
-    cfg.thinking.enabled = true;
-    cfg.thinking.level = "high".to_string();
+fn openai_responses_continuity_config() -> AppConfig {
+    let mut cfg = base_continuity_config("reasoning_continuity_openai");
+    common::apply_openai_app_config(&mut cfg);
+    cfg.llm.default_model = openai_model();
+    cfg.llm.reasoning_continuity.enabled = true;
     cfg
 }
 
-fn mimo_continuity_config() -> LlmConfig {
-    let mut cfg = LlmConfig {
-        provider: "openai".to_string(),
-        api_base: Some(mimo_base_url()),
-        api_key_env: Some("MIMO_API_KEY".to_string()),
-        default_model: mimo_model(),
-        ..LlmConfig::default()
-    };
-    cfg.reasoning_continuity.enabled = true;
-    cfg.thinking.enabled = true;
-    cfg.thinking.level = "high".to_string();
-    cfg.thinking.format = Some("doubao".to_string());
+fn deepseek_continuity_config() -> AppConfig {
+    let mut cfg = base_continuity_config("reasoning_continuity_deepseek");
+    common::apply_deepseek_app_config(&mut cfg);
+    cfg.llm.default_model = deepseek_model();
+    cfg.llm.reasoning_continuity.enabled = true;
+    cfg.llm.thinking.enabled = true;
+    cfg.llm.thinking.level = "high".to_string();
+    cfg
+}
+
+fn mimo_continuity_config() -> AppConfig {
+    let mut cfg = base_continuity_config("reasoning_continuity_mimo");
+    common::apply_deepseek_app_config(&mut cfg);
+    cfg.llm.default_model = mimo_model();
+    cfg.llm.reasoning_continuity.enabled = true;
+    cfg.llm.thinking.enabled = true;
+    cfg.llm.thinking.level = "high".to_string();
+    cfg.llm.thinking.format = Some("doubao".to_string());
     cfg
 }
 
@@ -227,11 +226,12 @@ async fn run_chat(
 #[tokio::test]
 async fn openai_responses_roundtrip_replays_reasoning_items(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    require_api_key("OPENAI_API_KEY");
+    require_api_key(openai_api_key_env());
 
     let config = openai_responses_continuity_config();
-    let provider = resolve_llm(&config)
-        .expect("resolve_llm(openai-responses) 失败：请检查 OPENAI_API_KEY / OpenAI 配置");
+    let call = common::resolve_main_call(&config);
+    let provider = call.provider_impl;
+    let model = call.model;
     let prompt =
         "Compute 387 * 249 carefully, think step by step, then answer with the final number only.";
 
@@ -240,7 +240,7 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
             provider.clone(),
             ChatRequest {
                 messages: vec![ChatMessage::user(prompt)],
-                model: config.default_model.clone(),
+                model: model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
                 stream: Some(true),
@@ -291,7 +291,7 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
                         "Continue the same thread and answer with the same final number only.",
                     ),
                 ],
-                model: config.default_model.clone(),
+                model: model.clone(),
                 temperature: None,
                 max_tokens: Some(128),
                 stream: Some(false),
@@ -316,9 +316,7 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
     require_api_key("DEEPSEEK_API_KEY");
 
     let config = deepseek_continuity_config();
-    let provider = resolve_llm(&config).expect(
-        "resolve_llm(deepseek via provider=openai) 失败：请检查 DEEPSEEK_API_KEY / api_base 配置",
-    );
+    let provider = common::resolve_main_provider(&config);
     let prompt =
         "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
 
@@ -327,7 +325,7 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
             provider.clone(),
             ChatRequest {
                 messages: vec![ChatMessage::user(prompt)],
-                model: config.default_model.clone(),
+                model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(512),
                 stream: Some(true),
@@ -397,7 +395,7 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
                         "Do not call any more tools. Answer directly in one short sentence.",
                     ),
                 ],
-                model: config.default_model.clone(),
+                model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
                 stream: Some(false),
@@ -425,9 +423,7 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
     require_api_key("MIMO_API_KEY");
 
     let config = mimo_continuity_config();
-    let provider = resolve_llm(&config).expect(
-        "resolve_llm(mimo via provider=openai) 失败：请检查 MIMO_API_KEY / TOMCAT_E2E_MIMO_BASE_URL 配置",
-    );
+    let provider = common::resolve_main_provider(&config);
     let prompt =
         "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
 
@@ -436,7 +432,7 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
             provider.clone(),
             ChatRequest {
                 messages: vec![ChatMessage::user(prompt)],
-                model: config.default_model.clone(),
+                model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(512),
                 stream: Some(true),
@@ -506,7 +502,7 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
                         "Do not call any more tools. Answer directly in one short sentence.",
                     ),
                 ],
-                model: config.default_model.clone(),
+                model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
                 stream: Some(false),
@@ -536,13 +532,11 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
     let config = deepseek_continuity_config();
     let switched_model = deepseek_alt_model();
     assert_ne!(
-        config.default_model, switched_model,
+        config.llm.default_model, switched_model,
         "切 model replay 用例需要两个不同的 DeepSeek model；可通过 TOMCAT_E2E_DEEPSEEK_ALT_MODEL 覆盖"
     );
 
-    let provider = resolve_llm(&config).expect(
-        "resolve_llm(deepseek via provider=openai) 失败：请检查 DEEPSEEK_API_KEY / api_base 配置",
-    );
+    let provider = common::resolve_main_provider(&config);
     let prompt =
         "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
     let followup =
@@ -553,7 +547,7 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
             provider.clone(),
             ChatRequest {
                 messages: vec![ChatMessage::user(prompt)],
-                model: config.default_model.clone(),
+                model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(512),
                 stream: Some(true),
@@ -614,7 +608,7 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
             ),
         )?;
 
-        session.switch_current_model(Some(config.provider.as_str()), Some(&switched_model))?;
+        session.switch_current_model(Some("deepseek"), Some(&switched_model))?;
         let entry = session
             .current_session_entry()?
             .expect("切 model 后当前 session 应存在");
@@ -639,7 +633,7 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
             provider.clone(),
             ChatRequest {
                 messages: build_context_from_state(&state),
-                model: config.default_model.clone(),
+                model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
                 stream: Some(false),
@@ -667,9 +661,7 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
     require_api_key("DEEPSEEK_API_KEY");
 
     let config = deepseek_continuity_config();
-    let provider = resolve_llm(&config).expect(
-        "resolve_llm(deepseek via provider=openai) 失败：请检查 DEEPSEEK_API_KEY / api_base 配置",
-    );
+    let provider = common::resolve_main_provider(&config);
     let prompt =
         "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
     let followup =
@@ -681,7 +673,7 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
             provider.clone(),
             ChatRequest {
                 messages: vec![ChatMessage::user(prompt)],
-                model: config.default_model.clone(),
+                model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(512),
                 stream: Some(true),
@@ -740,7 +732,7 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                     tool_output.clone(),
                     ChatMessage::user(followup),
                 ],
-                model: config.default_model.clone(),
+                model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
                 stream: Some(true),
@@ -796,7 +788,7 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                     second_assistant,
                     ChatMessage::user(third_prompt),
                 ],
-                model: config.default_model.clone(),
+                model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),
                 stream: Some(false),

@@ -13,12 +13,14 @@ fn resolve_known_model() {
     let gpt = catalog.lookup("gpt-5.4").expect("builtin gpt-5.4");
     assert_eq!(gpt.api, "openai-responses");
     assert_eq!(gpt.provider, "openai");
+    assert!(catalog.lookup("gpt-5.2").is_none());
 
     let deepseek = catalog
         .lookup("deepseek-v4-pro")
         .expect("builtin deepseek-v4-pro");
     assert_eq!(deepseek.api, "openai");
     assert_eq!(deepseek.provider, "deepseek");
+    assert!(catalog.lookup("deepseek-v4-flash").is_none());
 }
 
 #[test]
@@ -47,8 +49,7 @@ vision = false
 }
 
 #[test]
-fn infer_mimo_v25_pro_from_bare_models_toml_entry() {
-    // 仅写裸 id 也应推断出 MiMo 的 provider/api/base_url/能力（catalog 推断兜底）。
+fn new_user_entry_requires_explicit_api_and_provider() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");
     std::fs::write(
@@ -61,23 +62,11 @@ id = "mimo-v2.5-pro"
     .unwrap();
 
     let cfg = AppConfig::default();
-    let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load mimo catalog");
-    let entry = catalog
-        .lookup("mimo-v2.5-pro")
-        .expect("inferred mimo entry");
-    assert_eq!(entry.api, "openai");
-    assert_eq!(entry.provider, "mimo");
-    assert_eq!(
-        entry.base_url.as_deref(),
-        Some("https://token-plan-cn.xiaomimimo.com")
-    );
-    assert!(
-        !entry.capabilities.vision,
-        "mimo-v2.5-pro 仅文本，无 vision"
-    );
-    assert!(!entry.capabilities.files);
-    assert!(entry.capabilities.tools);
-    assert!(entry.capabilities.reasoning);
+    let err =
+        ModelCatalog::load_from_path(&cfg, path).expect_err("missing api/provider should fail");
+    let msg = err.to_string();
+    assert!(msg.contains("mimo-v2.5-pro"));
+    assert!(msg.contains("api") || msg.contains("provider"));
 }
 
 #[test]
@@ -150,5 +139,48 @@ web_search = true
             .expect("builtin override")
             .capabilities
             .web_search
+    );
+}
+
+#[test]
+fn user_entry_can_define_model_name_and_api_key_env_alongside_builtin_gpt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "gpt-5.4_litellm-sunmi"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "litellm-sunmi"
+api_key_env = "LITELLM_SUNMI_API_KEY"
+base_url = "https://aigateway.sunmi.com"
+
+[models.capabilities]
+vision = true
+files = true
+tools = true
+reasoning = true
+"#,
+    )
+    .unwrap();
+
+    let cfg = AppConfig::default();
+    let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load catalog");
+    let builtin = catalog.lookup("gpt-5.4").expect("builtin gpt entry");
+    let gateway = catalog
+        .lookup("gpt-5.4_litellm-sunmi")
+        .expect("gateway entry");
+    assert_eq!(builtin.request_model_name(), "gpt-5.4");
+    assert_eq!(gateway.request_model_name(), "gpt-5.4");
+    assert_eq!(
+        gateway.api_key_env.as_deref(),
+        Some("LITELLM_SUNMI_API_KEY")
+    );
+    assert_eq!(gateway.provider, "litellm-sunmi");
+    assert_eq!(
+        gateway.base_url.as_deref(),
+        Some("https://aigateway.sunmi.com")
     );
 }

@@ -17,6 +17,7 @@ use crate::core::llm::tests::mocks::{MockHttpServer, ScriptedHttpResponse};
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContentPart, ChatRequest, StreamEvent, ThinkingSource,
 };
+use crate::core::llm::{Capabilities, Credential, ModelEntry};
 use crate::infra::error::{
     llm_http_status, llm_http_status_error, llm_stage, llm_summary, AppError, LlmErrorStage,
 };
@@ -28,17 +29,40 @@ use std::time::Duration;
 
 const TEST_KEY_ENV: &str = "__OPENAI_RESPONSES_TEST_KEY__";
 
-fn provider_with_stub_key() -> OpenAiResponsesProvider {
-    // SAFETY: 单测内部，串行环境受 `--test-threads=1` 约束；mutate env 仅本测试感知。
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
-    let cfg = LlmConfig {
+fn responses_entry() -> ModelEntry {
+    ModelEntry {
+        id: "gpt-5.4".to_string(),
+        model_name: None,
+        api: "openai-responses".to_string(),
+        provider: "openai".to_string(),
         api_key_env: Some(TEST_KEY_ENV.to_string()),
-        ..LlmConfig::default()
+        base_url: Some("https://api.openai.com".to_string()),
+        capabilities: Capabilities {
+            vision: true,
+            files: true,
+            tools: true,
+            reasoning: true,
+            web_search: false,
+        },
+        context_window: None,
+        cost: None,
+        thinking_format: Some("openai".to_string()),
+    }
+}
+
+fn provider_from_cfg(cfg: LlmConfig) -> OpenAiResponsesProvider {
+    let entry = responses_entry();
+    let runtime = cfg.runtime();
+    let credential = Credential {
+        provider: "openai".to_string(),
+        env_name: TEST_KEY_ENV.to_string(),
+        value: "stub-key".to_string(),
     };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("应该能构造 provider");
-    // SAFETY: 同上，移除 env 避免污染后续用例。
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
-    p
+    OpenAiResponsesProvider::new(&entry, &runtime, &credential).expect("provider new ok")
+}
+
+fn provider_with_stub_key() -> OpenAiResponsesProvider {
+    provider_from_cfg(LlmConfig::default())
 }
 
 fn test_profile() -> crate::core::llm::ProviderCompatProfile {
@@ -58,15 +82,8 @@ fn new_responses_stream<S>(stream: S, prefer_ndjson: bool) -> ResponsesStream<S>
 
 #[test]
 fn openai_files_client_is_lazy_once_per_provider() {
-    // SAFETY: 单测串行，临时注入 stub key。
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
-    let cfg = LlmConfig {
-        api_key_env: Some(TEST_KEY_ENV.to_string()),
-        ..LlmConfig::default()
-    };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
-    // SAFETY: 清理环境变量，避免污染后续用例。
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+    let cfg = LlmConfig::default();
+    let p = provider_from_cfg(cfg.clone());
 
     let c1 = p
         .openai_files_client(&cfg.files)
@@ -561,18 +578,93 @@ fn responses_chunk_incomplete_max_output_tokens_emits_notice_finish_and_usage() 
 }
 
 #[test]
+fn responses_build_request_body_uses_model_name_when_present() {
+    let mut entry = responses_entry();
+    entry.id = "gpt-5.4_litellm-sunmi".to_string();
+    entry.model_name = Some("gpt-5.4".to_string());
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "litellm-sunmi".to_string(),
+        env_name: "LITELLM_SUNMI_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider =
+        OpenAiResponsesProvider::new(&entry, &runtime, &credential).expect("provider new ok");
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: String::new(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = provider.build_request_body(&req, true);
+    assert_eq!(body["model"], "gpt-5.4");
+}
+
+#[test]
+fn responses_build_request_body_maps_catalog_id_to_model_name() {
+    let mut entry = responses_entry();
+    entry.id = "gpt-5.4_litellm-sunmi".to_string();
+    entry.model_name = Some("gpt-5.4".to_string());
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "litellm-sunmi".to_string(),
+        env_name: "LITELLM_SUNMI_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider =
+        OpenAiResponsesProvider::new(&entry, &runtime, &credential).expect("provider new ok");
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: "gpt-5.4_litellm-sunmi".to_string(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = provider.build_request_body(&req, true);
+    assert_eq!(body["model"], "gpt-5.4");
+}
+
+#[test]
+fn responses_build_request_body_without_model_name_uses_id() {
+    let mut entry = responses_entry();
+    entry.id = "custom-responses-id".to_string();
+    entry.model_name = None;
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "openai".to_string(),
+        env_name: TEST_KEY_ENV.to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider =
+        OpenAiResponsesProvider::new(&entry, &runtime, &credential).expect("provider new ok");
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: String::new(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        tools: None,
+    };
+    let body = provider.build_request_body(&req, true);
+    assert_eq!(body["model"], "custom-responses-id");
+}
+
+#[test]
 fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
     let cfg = LlmConfig {
-        api_key_env: Some(TEST_KEY_ENV.to_string()),
         thinking: crate::infra::config::ThinkingConfig {
             enabled: false,
             ..crate::infra::config::ThinkingConfig::default()
         },
         ..LlmConfig::default()
     };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+    let p = provider_from_cfg(cfg.clone());
 
     let req = ChatRequest {
         messages: vec![ChatMessage::user("hi")],
@@ -594,9 +686,7 @@ fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
 
 #[test]
 fn responses_build_request_body_high_writes_reasoning_effort() {
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
     let cfg = LlmConfig {
-        api_key_env: Some(TEST_KEY_ENV.to_string()),
         thinking: crate::infra::config::ThinkingConfig {
             enabled: true,
             level: "high".into(),
@@ -606,8 +696,7 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
         },
         ..LlmConfig::default()
     };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+    let p = provider_from_cfg(cfg.clone());
 
     let req = ChatRequest {
         messages: vec![ChatMessage::user("hi")],
@@ -637,9 +726,7 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
 
 #[test]
 fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
     let cfg = LlmConfig {
-        api_key_env: Some(TEST_KEY_ENV.to_string()),
         thinking: crate::infra::config::ThinkingConfig {
             enabled: true,
             show: crate::infra::config::ThinkingDisplay::Full,
@@ -648,8 +735,7 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
         },
         ..LlmConfig::default()
     };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+    let p = provider_from_cfg(cfg.clone());
 
     let req = ChatRequest {
         messages: vec![ChatMessage::user("hi")],
@@ -669,9 +755,7 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
 
 #[test]
 fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
     let cfg = LlmConfig {
-        api_key_env: Some(TEST_KEY_ENV.to_string()),
         thinking: crate::infra::config::ThinkingConfig {
             enabled: true,
             show: crate::infra::config::ThinkingDisplay::Summary,
@@ -680,8 +764,7 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
         },
         ..LlmConfig::default()
     };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+    let p = provider_from_cfg(cfg.clone());
 
     let req = ChatRequest {
         messages: vec![ChatMessage::user("hi")],
@@ -701,9 +784,7 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
 
 #[test]
 fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_summary_auto() {
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
     let cfg = LlmConfig {
-        api_key_env: Some(TEST_KEY_ENV.to_string()),
         thinking: crate::infra::config::ThinkingConfig {
             enabled: true,
             show: crate::infra::config::ThinkingDisplay::Summary,
@@ -712,8 +793,7 @@ fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_su
         },
         ..LlmConfig::default()
     };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+    let p = provider_from_cfg(cfg.clone());
 
     let req = ChatRequest {
         messages: vec![ChatMessage::user("hi")],
@@ -734,14 +814,11 @@ fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_su
 
 #[test]
 fn responses_build_request_body_continuity_enabled_requests_encrypted_content() {
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
     let cfg = LlmConfig {
-        api_key_env: Some(TEST_KEY_ENV.to_string()),
         reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
         ..LlmConfig::default()
     };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+    let p = provider_from_cfg(cfg.clone());
 
     let req = ChatRequest {
         messages: vec![ChatMessage::user("hi")],
@@ -759,14 +836,11 @@ fn responses_build_request_body_continuity_enabled_requests_encrypted_content() 
 
 #[test]
 fn openai_responses_roundtrip_replays_reasoning_items() {
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
     let cfg = LlmConfig {
-        api_key_env: Some(TEST_KEY_ENV.to_string()),
         reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
         ..LlmConfig::default()
     };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+    let p = provider_from_cfg(cfg.clone());
 
     let assistant = ChatMessage::assistant("prior answer").with_reasoning_state(
         Some("safe summary".to_string()),
@@ -803,17 +877,14 @@ fn openai_responses_roundtrip_replays_reasoning_items() {
 
 #[test]
 fn responses_build_request_body_previous_response_id_switches_to_store_true() {
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
     let cfg = LlmConfig {
-        api_key_env: Some(TEST_KEY_ENV.to_string()),
         reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
         openai_responses: crate::infra::config::OpenAiResponsesConfig {
             use_previous_response_id: true,
         },
         ..LlmConfig::default()
     };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+    let p = provider_from_cfg(cfg.clone());
 
     let assistant = ChatMessage::assistant("prior answer").with_reasoning_state(
         Some("safe summary".to_string()),
@@ -863,17 +934,14 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
 
 #[test]
 fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
-    unsafe { std::env::set_var(TEST_KEY_ENV, "stub-key") };
     let cfg = LlmConfig {
-        api_key_env: Some(TEST_KEY_ENV.to_string()),
         reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
         openai_responses: crate::infra::config::OpenAiResponsesConfig {
             use_previous_response_id: true,
         },
         ..LlmConfig::default()
     };
-    let p = OpenAiResponsesProvider::new(&cfg).expect("provider new ok");
-    unsafe { std::env::remove_var(TEST_KEY_ENV) };
+    let p = provider_from_cfg(cfg.clone());
 
     let assistant = ChatMessage::assistant("prior answer").with_reasoning_state(
         Some("safe summary".to_string()),

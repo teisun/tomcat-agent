@@ -26,7 +26,7 @@ pub use checkpoint::{
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use llm::system_prompt;
 pub use llm::{
-    resolve_llm, AuthStore, Capabilities, ChatMessage, ChatMessageContentPart, ChatRequest,
+    build_provider, AuthStore, Capabilities, ChatMessage, ChatMessageContentPart, ChatRequest,
     ChatResponse, ChatResponseChoice, Credential, DefaultLlmResolver, LlmProvider, LlmResolver,
     LlmScene, ModelCatalog, ModelEntry, ResolvedCall, SessionTokenUsage, StreamEvent,
     FILE_MAX_BYTES, IMAGE_MAX_BYTES,

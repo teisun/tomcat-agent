@@ -50,7 +50,14 @@ fn build_runtime_and_context_constructs_chat_context_with_tokio_handle() {
     let work_dir = tempfile::tempdir().expect("work dir");
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
-    cfg.llm.api_key_env = Some("CHAT_CMD_BUILD_RUNTIME_TEST_KEY".to_string());
+    crate::test_support::write_models_override(
+        work_dir.path(),
+        &[
+            crate::test_support::TestModelOverride::gpt54_openai_responses(
+                "CHAT_CMD_BUILD_RUNTIME_TEST_KEY",
+            ),
+        ],
+    );
 
     unsafe {
         std::env::set_var("CHAT_CMD_BUILD_RUNTIME_TEST_KEY", "stub");

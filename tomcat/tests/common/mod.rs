@@ -17,6 +17,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio_rustls::TlsAcceptor;
+use tomcat::{AppConfig, DefaultLlmResolver, LlmProvider, LlmResolver, LlmScene, ModelCatalog};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 static INIT: Once = Once::new();
@@ -25,6 +26,15 @@ pub const DEEPSEEK_TEST_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 pub const DEEPSEEK_TEST_API_BASE: &str = "https://api.deepseek.com";
 pub const DEEPSEEK_TEST_MODEL_ENV: &str = "TOMCAT_E2E_DEEPSEEK_MODEL";
 pub const DEEPSEEK_TEST_DEFAULT_MODEL: &str = "deepseek-v4-pro";
+pub const OPENAI_TEST_MODEL_ENV: &str = "TOMCAT_E2E_OPENAI_TARGET";
+pub const OPENAI_TEST_DEFAULT_MODEL: &str = "gpt-5.4_litellm-sunmi";
+pub const OPENAI_GATEWAY_TEST_API_KEY_ENV: &str = "LITELLM_SUNMI_API_KEY";
+pub const OPENAI_GATEWAY_TEST_BASE_URL: &str = "https://aigateway.sunmi.com";
+pub const MIMO_TEST_MODEL_ENV: &str = "TOMCAT_E2E_MIMO_MODEL";
+pub const MIMO_TEST_DEFAULT_MODEL: &str = "mimo-v2.5-pro";
+pub const MIMO_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_MIMO_BASE_URL";
+pub const MIMO_TEST_DEFAULT_BASE_URL: &str = "https://token-plan-cn.xiaomimimo.com";
+pub const MIMO_TEST_API_KEY_ENV: &str = "MIMO_API_KEY";
 
 /// 为依赖真实 LLM 凭证的集成测试加载环境变量（与 `UNIT_TEST_SPEC` / `INTEGRATION_TEST_SPEC` 对齐）。
 ///
@@ -47,6 +57,18 @@ pub fn deepseek_test_model() -> String {
         .unwrap_or_else(|_| DEEPSEEK_TEST_DEFAULT_MODEL.to_string())
 }
 
+pub fn e2e_openai_model() -> String {
+    std::env::var(OPENAI_TEST_MODEL_ENV).unwrap_or_else(|_| OPENAI_TEST_DEFAULT_MODEL.to_string())
+}
+
+pub fn mimo_test_model() -> String {
+    std::env::var(MIMO_TEST_MODEL_ENV).unwrap_or_else(|_| MIMO_TEST_DEFAULT_MODEL.to_string())
+}
+
+pub fn mimo_test_base_url() -> String {
+    std::env::var(MIMO_TEST_BASE_URL_ENV).unwrap_or_else(|_| MIMO_TEST_DEFAULT_BASE_URL.to_string())
+}
+
 pub fn require_deepseek_api_key(test_name: &str) -> String {
     setup_logging();
     load_deepseek_test_env();
@@ -56,9 +78,6 @@ pub fn require_deepseek_api_key(test_name: &str) -> String {
 }
 
 pub fn apply_deepseek_llm_config(cfg: &mut tomcat::LlmConfig) {
-    cfg.provider = "openai".to_string();
-    cfg.api_base = Some(DEEPSEEK_TEST_API_BASE.to_string());
-    cfg.api_key_env = Some(DEEPSEEK_TEST_API_KEY_ENV.to_string());
     cfg.default_model = deepseek_test_model();
     cfg.thinking.enabled = true;
     cfg.thinking.level = "high".to_string();
@@ -67,6 +86,166 @@ pub fn apply_deepseek_llm_config(cfg: &mut tomcat::LlmConfig) {
 pub fn apply_deepseek_app_config(cfg: &mut tomcat::AppConfig) {
     apply_deepseek_llm_config(&mut cfg.llm);
     cfg.context.compaction_model = deepseek_test_model();
+    maybe_write_test_models(cfg);
+}
+
+pub fn apply_openai_app_config(cfg: &mut AppConfig) {
+    cfg.llm.default_model = e2e_openai_model();
+    cfg.context.compaction_model = "gpt-5.4".to_string();
+    maybe_write_test_models(cfg);
+}
+
+pub fn apply_openai_responses_test_config(
+    cfg: &mut AppConfig,
+    env_key: &str,
+    base_url: Option<&str>,
+) {
+    if cfg.llm.default_model.trim().is_empty() {
+        cfg.llm.default_model = "gpt-5.4".to_string();
+    }
+    if cfg.context.compaction_model.trim().is_empty() {
+        cfg.context.compaction_model = cfg.llm.default_model.clone();
+    }
+    let model_id = cfg.llm.default_model.clone();
+    write_model_override(
+        cfg,
+        &model_id,
+        "openai-responses",
+        "openai",
+        env_key,
+        base_url.or(Some("https://api.openai.com")),
+        None,
+        Some("openai"),
+        true,
+        true,
+    );
+}
+
+pub fn apply_openai_compatible_test_config(
+    cfg: &mut AppConfig,
+    model_id: &str,
+    provider: &str,
+    env_key: &str,
+    base_url: &str,
+    thinking_format: Option<&str>,
+) {
+    cfg.llm.default_model = model_id.to_string();
+    cfg.context.compaction_model = model_id.to_string();
+    write_model_override(
+        cfg,
+        model_id,
+        "openai",
+        provider,
+        env_key,
+        Some(base_url),
+        None,
+        thinking_format,
+        false,
+        true,
+    );
+}
+
+pub fn resolve_main_provider(cfg: &AppConfig) -> Arc<dyn LlmProvider> {
+    resolve_main_call(cfg).provider_impl
+}
+
+pub fn resolve_main_call(cfg: &AppConfig) -> tomcat::ResolvedCall {
+    let catalog = Arc::new(ModelCatalog::load(cfg).expect("load model catalog for test"));
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog);
+    resolver
+        .resolve(LlmScene::Main, None)
+        .expect("resolve main provider for test")
+}
+
+fn maybe_write_test_models(cfg: &AppConfig) {
+    let Some(work_dir) = cfg.storage.work_dir.as_deref().map(Path::new) else {
+        return;
+    };
+    let mut entries = vec![format!(
+        r#"[[models]]
+id = "{model_id}"
+api = "openai"
+provider = "deepseek"
+api_key_env = "{env_name}"
+base_url = "{base_url}"
+thinking_format = "deepseek"
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true }}
+"#,
+        model_id = deepseek_test_model(),
+        env_name = DEEPSEEK_TEST_API_KEY_ENV,
+        base_url = DEEPSEEK_TEST_API_BASE,
+    )];
+    entries.push(format!(
+        r#"[[models]]
+id = "gpt-5.4_litellm-sunmi"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "litellm-sunmi"
+api_key_env = "{env_name}"
+base_url = "{base_url}"
+thinking_format = "openai"
+capabilities = {{ vision = true, files = true, tools = true, reasoning = true }}
+"#,
+        env_name = OPENAI_GATEWAY_TEST_API_KEY_ENV,
+        base_url = OPENAI_GATEWAY_TEST_BASE_URL,
+    ));
+    entries.push(format!(
+        r#"[[models]]
+id = "{model_id}"
+api = "openai"
+provider = "mimo"
+api_key_env = "{env_name}"
+base_url = "{base_url}"
+thinking_format = "doubao"
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true }}
+"#,
+        model_id = mimo_test_model(),
+        env_name = MIMO_TEST_API_KEY_ENV,
+        base_url = mimo_test_base_url(),
+    ));
+    let path = work_dir.join("models.toml");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create test models.toml parent");
+    }
+    std::fs::write(path, entries.join("\n")).expect("write test models.toml");
+}
+
+fn write_model_override(
+    cfg: &AppConfig,
+    model_id: &str,
+    api: &str,
+    provider: &str,
+    env_key: &str,
+    base_url: Option<&str>,
+    model_name: Option<&str>,
+    thinking_format: Option<&str>,
+    supports_files: bool,
+    supports_reasoning: bool,
+) {
+    let Some(work_dir) = cfg.storage.work_dir.as_deref().map(Path::new) else {
+        return;
+    };
+    let mut lines = vec!["[[models]]".to_string(), format!("id = \"{model_id}\"")];
+    if let Some(model_name) = model_name {
+        lines.push(format!("model_name = \"{model_name}\""));
+    }
+    lines.push(format!("api = \"{api}\""));
+    lines.push(format!("provider = \"{provider}\""));
+    lines.push(format!("api_key_env = \"{env_key}\""));
+    if let Some(base_url) = base_url {
+        lines.push(format!("base_url = \"{base_url}\""));
+    }
+    if let Some(thinking_format) = thinking_format {
+        lines.push(format!("thinking_format = \"{thinking_format}\""));
+    }
+    lines.push(format!(
+        "capabilities = {{ vision = true, files = {supports_files}, tools = true, reasoning = {supports_reasoning}, web_search = false }}"
+    ));
+    let path = work_dir.join("models.toml");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create model override parent");
+    }
+    std::fs::write(path, format!("{}\n", lines.join("\n"))).expect("write model override");
 }
 
 /// 初始化日志，供各集成测试在入口调用；使用 test_writer 以便 cargo test 捕获输出。
