@@ -75,7 +75,7 @@
 | `stream.thinkingProgress(delta)` | 思考过程折叠块 | 可选 | 把 `MessageUpdate{kind:"thinking_delta"}` 渲染成普通 markdown 折叠引用块（`<details>` 或前缀样式） | 思考块用普通可折叠文本顶上。 |
 | `stream.beginToolInvocation/updateToolInvocation` | 富工具调用卡（状态/计时/子代理） | 可选 | 用 `stream.progress(text)` + `stream.markdown` + `stream.filetree`/`anchor` 拼工具卡 | 工具卡用进度条+markdown+文件树拼出来。 |
 | `stream.usage(ChatResultUsage)` | token 用量徽标 | 可选 | 用 `stream.markdown` 在末尾打一行用量统计（数据来自 `context_metrics_update` 事件） | 用量直接写一行文字。 |
-| `defaultChatParticipant` | 占据"默认无 @ 即用"代理 | **不采纳** | 用户显式 `@tomcat`；不抢默认槽（默认槽属内置 Copilot，且受门禁） | 不抢默认位，老老实实做 @tomcat。 |
+| `defaultChatParticipant` | 占据 **VSCode 原生 Chat** 的"默认无 @ 即用"代理 | **对 Phase 1 原生 participant 不采纳；对 Phase 2 自建 UI 不需要它** | 在 VSCode 原生 Chat 面板里，用户显式 `@tomcat`；若走自建 webview / 侧栏 UI，则 Tomcat 天然就是默认且唯一入口，无需该 proposed API | 不去抢 VSCode 公共聊天的默认槽；但在我们自己的插件 UI 里，默认当然就是 Tomcat。 |
 | `lm.registerChatModelProvider`（`chatProvider`） | 把 Tomcat 注册成可选模型（=形态 B） | **不采纳**（见 §3.1 R1） | N/A（形态 B 本身被否决） | 这条等于走 B 路线，已否。 |
 
 > 说人话：清单结论——**没有一条 proposed 是 Tomcat 必需的**。招牌体验里"编辑 diff、审批、思考块、工具卡、用量"全部有稳定替代（Cline 已证明），代价只是"聊天内联"变成"打开 diff 标签 / 按钮 / 折叠文本"。因此锁死稳定档位，换取可上架可安装。

@@ -11,6 +11,14 @@
 > 专业：本扩展不定义新协议，完整复用 `tomcat serve` 的 stdio NDJSON wire。**单一事实源**：`ServeCommand`/`ResponseFrame`/`ControlFrame`/`OutFrame` 在 `tomcat/src/api/serve/types.rs`；事件 `AgentEvent`/`WireEvent` 在 `tomcat/src/infra/events/mod.rs`；可机读类型由 `tomcat serve --print-schema` 导出（`schema.rs`）。下表只描述「扩展侧关心的字段与消费方式」。
 > 说人话：协议是 Tomcat 定的，扩展只是按它的格式收发。下面列出常用命令/事件的字段，外加几段真实 NDJSON 样例和扩展该怎么读。
 
+当前 casing 契约先钉死，避免误读：
+
+- **`type` 的枚举值仍是 `snake_case`**，例如 `follow_up`、`control_request`、`tool_execution_end`；
+- **除 `type` 外，大多数结构字段走 `camelCase`**，例如 `sessionId`、`requestId`、`toolCallId`、`assistantMessageEvent`；
+- **事件的 `sessionId` 现在统一挂在 `WireEvent` 顶层信封**，不再重复塞进各个 `AgentEvent` payload 内部。这是 `072586a`（`fix(events): 收敛 sessionId 到事件信封`）的变更；`99a720f` 又把 `serve` 类型注释与协议文档同步了一次。
+
+> 说人话：不是“整个协议都改成驼峰”了，而是现在的规则更清楚了：**种类名 snake_case，字段名 camelCase，`sessionId` 统一放外层信封**。
+
 ### 4.1 命令（扩展 → serve）：`ServeCommand`
 
 每行一个 JSON，`type` 字段判别（snake_case）。带 `id` 的命令会收到同 `id` 的 `ResponseFrame`。
