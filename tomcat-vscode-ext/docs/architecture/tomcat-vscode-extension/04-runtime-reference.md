@@ -51,20 +51,35 @@ serve 可执行缺失/启动失败 → spawn error（扩展：引导用户配置
 
 ## 8. 测试矩阵（验收）
 
-> 专业：每条 §3 可观察交付映射到锁死它的测试。扩展侧测试用 TS（vitest/mocha + `@vscode/test-electron`）；协议侧已被 Tomcat 自带测试锁死，本表回指。
-> 说人话：前面定的每个行为，这里都给一个"测它的钩子"，状态写清。
+> 专业：每条 §3 可观察交付映射到锁死它的测试。扩展侧测试分四层：`TS 单元`、`spawn 真实 serve 的集成`、`真实宿主 E2E`、`文档/流程验收`；协议侧行为仍以 Tomcat 自带测试为事实源回指。当前条目已按实际实现状态更新，便于后续分支验收与回归复用。
+> 说人话：这些测试现在不是“将来要补”，而是已经落进仓库并在本分支跑过，可以直接拿来回归。
 
 | 维度 | 用例 / 编号 | 状态 | 说人话 |
 |------|-------------|------|--------|
-| 单元（桥接） | `serveClient/tests/ndjson_framing_test.ts`：粘包/半行/多帧一行分帧 | PENDING | 锁住"一行一帧"解析不出错。 |
-| 单元（桥接） | `serveClient/tests/messenger_test.ts`：id↔Promise 配对、control 回环、initialize 校验 | PENDING | 锁住请求-应答与审批回环。 |
-| 单元（渲染） | `ui/participant/tests/render_test.ts`：AgentEvent→stream 调用映射、ask_question→button 三态 | PENDING | 锁住事件到 UI 的映射。 |
-| 集成（spawn） | `tests/serve_e2e.test.ts`：spawn 真实 `tomcat serve --stdio`，跑 initialize→prompt→agent_end | PENDING | 真起子进程跑通一轮。 |
-| 集成（多会话/生命周期） | `tests/session_lifecycle.test.ts`：双会话不串台、kill→failed+重启、interrupt 生效 | PENDING | 锁住多开/中断/崩溃恢复。 |
+| 单元（桥接分帧） | `src/serveClient/tests/ndjson_framing.test.ts`：半行、粘包、多帧一批次、空行跳过、非法 JSON 恢复 | ✅ | 锁住“一行一帧”的最底层读管道。 |
+| 单元（桥接协议） | `src/serveClient/tests/messenger_request_response.test.ts`：`id -> Promise`、未知 `id` 丢弃、超时清理 | ✅ | 锁住命令回执，不让请求表越跑越乱。 |
+| 单元（控制回环） | `src/serveClient/tests/messenger_control_roundtrip.test.ts`：`initialize`、`ask_question`、`control_cancel`、能力位校验 | ✅ | 锁住审批/提问这条最容易出错的带外通道。 |
+| 单元（渲染映射） | `src/ui/participant/tests/render_message_stream.test.ts`：`message_update`/`tool_execution_*`/`agent_end` → `ChatResponseStream` 调用序列 | ✅ | 锁住事件怎么被画进原生聊天框。 |
+| 单元（审批 UI） | `src/ui/participant/tests/ask_question_commands.test.ts`：问题渲染、推荐按钮、QuickPick fallback、答复 payload 组装 | ✅ | 锁住按钮点下去以后回给 serve 的内容。 |
+| 单元（编辑落地） | `src/ide/tests/diff_apply_edit.test.ts`：虚拟只读文档、`vscode.diff` 参数、`WorkspaceEdit` 应用 | ✅ | 锁住“看 diff”和“真正改文件”是同一份改动。 |
+| 集成（spawn happy path） | `tests/serve_e2e.test.ts`：spawn 真实 `tomcat serve --stdio`，跑 `initialize -> prompt -> message_update -> agent_end` | ✅ | 真起子进程跑通最短链路。 |
+| 集成（ask_question） | `tests/serve_ask_question_integration.test.ts`：真实 `control_request{subtype:\"ask_question\"}` → UI 答复 → `control_response` 回环 | ✅ | 审批不只单测过，还要和真实 serve 串起来。 |
+| 集成（多会话/生命周期） | `tests/session_lifecycle.test.ts`：双会话不串台、kill→restart、`interrupt` 生效 | ✅ | 锁住多开、中断和崩溃恢复。 |
+| 集成（背压/降级） | `tests/backpressure_notice.test.ts`：`llm_notice{finishReason:\"backpressure\"}` 提示与生命周期帧不丢 | ✅ | UI 再慢也不能把“结束/错误/审批”吃掉。 |
+| 关键承诺（R3 防漂移） | `npm run check:wire` / `gen-wire.ts`：产物与 `tomcat serve --print-schema` 生成的 `serve.d.ts` 一致性校验 | ✅ | 协议一变，生成校验就红，不能靠肉眼追。 |
 | 协议事实源（Tomcat 侧，回指） | `tomcat` `src/api/serve/control.rs::tests`（握手/not_initialized/interrupt/unknown_command）、`writer.rs::tests`（轮转/合并/背压 notice 一次）、`ask_question.rs::tests`（control 回环/按会话路由）、`schema.rs::tests`（serve_dts 命名）、`tests/serve_stdio_e2e.rs` | ✅（Tomcat 现有） | 协议行为已被 Tomcat 自己测死，扩展直接信。 |
-| 关键承诺（R3 防漂移） | CI：`gen-wire.ts` 产物与提交的 `wire.d.ts` 一致性校验 | PENDING | 协议一变，CI 就红。 |
-| E2E（手测） | `E2E-VSCEXT-001`：装扩展→`@tomcat`→一问一答+编辑 diff+审批+中断 | PENDING | 用户真实路径走一遍。 |
-| 文档 | 本文定稿 + 与 `agent-server-and-ui-gateway.md` 同步 | ✅ 2026-06-20 | 字和代码别两张皮。 |
+| E2E（真实宿主 / VSCode Dev Host） | `E2E-VSCEXT-001`：真实 VSCode Dev Host 下执行一问一答、审批、diff、interrupt | ✅ | 不只测 test host，要在真的 VSCode 宿主里走主链路。 |
+| E2E（真实安装 / VSCode 本机） | `E2E-VSCEXT-002`：本地打包并安装扩展到 VSCode，再跑同一组宿主断言 | ✅ | 真装一遍，避免“开发宿主能跑、安装版翻车”。 |
+| E2E（Cursor 兼容运行） | `E2E-VSCEXT-003`：Cursor 以共享 VSCode 扩展目录的方式加载已安装扩展并跑宿主断言 | ✅ | Cursor 要真的跑，不只口头说兼容。 |
+| E2E（多会话真实交互） | `E2E-VSCEXT-004`：真实宿主里验证聊天线程到 `sessionId` 的稳定映射 | ✅ | 多会话不能只在集成里测，真实宿主也要看路由。 |
+| E2E（恢复/中断真实交互） | `E2E-VSCEXT-005`：真实宿主里验证 interrupt + restart 后继续可用 | ✅ | 真正站在用户角度验“挂了还能不能接着用”。 |
+| 文档 / 流程 | 本组架构文档、`docs/status/feature-tomcat-vscode-extension.md`、任务卡/看板状态与实际实现一致 | ✅ | 字、测试、流程三本账要对得上。 |
+
+补充口径：
+
+1. **VSCode 是“真实安装”强门禁**：因为本机已装 VSCode，且本任务产物本质是 VSCode 扩展，`E2E-VSCEXT-001/002` 视为本期强制验收项。
+2. **Cursor 是“真实运行”强兼容门禁**：官方文档明确支持 OpenVSX 安装与从 VSCode 导入扩展，但未明确承诺“本地 VSIX / 本地开发扩展 sideload”路径，因此 `E2E-VSCEXT-003` 先强制验证“Cursor 中真实可运行”，安装方式优先走官方支持路径；若实现期验证本地 sideload 稳定，再把该路径补写为正式步骤。
+3. **Cline / Continue 参考不只体现在实现，也体现在验收**：`Cline` 侧重点对齐 diff / 审批 / 原生宿主交互，`Continue` 侧重点对齐 NDJSON bridge、spawn 子进程与 IDE 宿主联调。
 
 ---
 

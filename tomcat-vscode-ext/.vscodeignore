@@ -1,0 +1,8 @@
+*
+!out/**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!LICENSE.txt
+!LICENSE.md

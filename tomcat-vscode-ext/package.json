@@ -1,0 +1,106 @@
+{
+  "name": "tomcat-vscode-ext",
+  "displayName": "Tomcat",
+  "description": "Tomcat chat participant for VS Code.",
+  "version": "0.1.0",
+  "publisher": "tomcat",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/teisun/tomcat-agent.git"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "tomcat",
+    "agent",
+    "chat",
+    "vscode"
+  ],
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onChatParticipant:tomcat.tomcat",
+    "onCommand:tomcat.restartServe",
+    "onCommand:tomcat.session.new",
+    "onCommand:tomcat.session.list"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "tomcat.restartServe",
+        "title": "Tomcat: Restart Serve"
+      },
+      {
+        "command": "tomcat.session.new",
+        "title": "Tomcat: Start New Session"
+      },
+      {
+        "command": "tomcat.session.list",
+        "title": "Tomcat: List Sessions"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "tomcat.tomcat",
+        "name": "tomcat",
+        "fullName": "Tomcat",
+        "description": "Tomcat agent runtime backed by tomcat serve --stdio."
+      }
+    ],
+    "configuration": {
+      "title": "Tomcat",
+      "properties": {
+        "tomcat.path": {
+          "type": "string",
+          "default": "tomcat",
+          "description": "Path to the tomcat executable used to launch `tomcat serve --stdio`."
+        },
+        "tomcat.serve.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional CLI arguments passed to `tomcat serve --stdio`."
+        },
+        "tomcat.session.defaultCwd": {
+          "type": "string",
+          "default": "",
+          "description": "Default working directory used when creating a new Tomcat session. Empty means the first workspace folder."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "rm -rf out dist .vscode-test .wire-tmp *.vsix",
+    "gen:wire": "tsx scripts/gen-wire.ts",
+    "check:wire": "tsx scripts/gen-wire.ts --check",
+    "compile": "tsc -p tsconfig.json",
+    "build": "npm run gen:wire && npm run compile",
+    "watch": "npm run gen:wire && tsc -watch -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test:unit": "vitest run",
+    "test:integration": "vitest run tests",
+    "test:e2e:vscode-devhost": "tsx scripts/run-vscode-devhost.ts",
+    "test:e2e:vscode-install": "tsx scripts/run-vscode-install-e2e.ts",
+    "test:e2e:cursor": "tsx scripts/run-cursor-compat-e2e.ts",
+    "test": "npm run test:unit",
+    "package:vsix": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^26.0.0",
+    "@types/vscode": "1.101.0",
+    "@vscode/test-electron": "^3.0.0",
+    "@vscode/vsce": "^3.9.2",
+    "mocha": "^11.7.6",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^3.2.6"
+  }
+}
