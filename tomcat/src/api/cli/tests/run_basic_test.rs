@@ -73,7 +73,7 @@ fn run_init_writes_default_model_without_legacy_llm_connection_fields() {
 
 #[test]
 #[serial(env_lock)]
-fn run_init_rejects_legacy_llm_connection_fields_in_existing_config() {
+fn run_init_migrates_legacy_llm_connection_fields_in_existing_config() {
     with_temp_home(|| {
         let config_path = normalize_path(DEFAULT_CONFIG_PATH).expect("config path");
         if let Some(parent) = config_path.parent() {
@@ -85,10 +85,16 @@ fn run_init_rejects_legacy_llm_connection_fields_in_existing_config() {
         )
         .expect("write legacy config");
 
-        let err = run_init().expect_err("init should reject legacy llm connection fields");
-        let msg = err.to_string();
-        assert!(msg.contains("llm.provider"));
-        assert!(msg.contains("models.toml"));
+        run_init().expect("init should migrate legacy llm connection fields");
+        let config_text = std::fs::read_to_string(&config_path).expect("config text");
+        assert!(
+            !config_text.contains("provider = "),
+            "init should drop legacy llm.provider from rewritten config, got:\n{config_text}"
+        );
+        let models_path =
+            crate::core::llm::ModelCatalog::default_user_path(&AppConfig::default()).expect("models path");
+        let models_text = std::fs::read_to_string(models_path).expect("models.toml text");
+        assert!(models_text.contains("id = \"gpt-5.2\""));
     });
 }
 

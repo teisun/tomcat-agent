@@ -2,6 +2,7 @@
   "serve_command": {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "ServeCommand",
+    "description": "UI 通过 stdin 发送给 `tomcat serve` 的命令帧。",
     "oneOf": [
       {
         "type": "object",
@@ -398,6 +399,7 @@
     ],
     "definitions": {
       "GetMessagesParams": {
+        "description": "`get_messages` 的分页/裁剪参数。",
         "type": "object",
         "properties": {
           "lastNTurns": {
@@ -419,6 +421,7 @@
         }
       },
       "NewSessionParams": {
+        "description": "`new_session` 的可选参数。",
         "type": "object",
         "properties": {
           "cwd": {
@@ -440,6 +443,7 @@
         }
       },
       "ServeAttachment": {
+        "description": "多模态消息中的单个附件描述。",
         "type": "object",
         "required": [
           "kind"
@@ -469,6 +473,7 @@
         }
       },
       "ServeAttachmentKind": {
+        "description": "`prompt` / `follow_up` 附件的逻辑类型。",
         "type": "string",
         "enum": [
           "image",
@@ -476,6 +481,7 @@
         ]
       },
       "ServeMessageParams": {
+        "description": "发送给 `prompt` / `follow_up` / `steer` 的附加参数。",
         "type": "object",
         "properties": {
           "attachments": {
@@ -487,6 +493,7 @@
         }
       },
       "ServeSessionMode": {
+        "description": "新会话的运行模式。",
         "type": "string",
         "enum": [
           "code",
@@ -498,6 +505,7 @@
   "control_frame": {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "ControlFrame",
+    "description": "审批、初始化与取消等双向控制帧。",
     "oneOf": [
       {
         "type": "object",
@@ -583,6 +591,7 @@
   "response_frame": {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "ResponseFrame",
+    "description": "普通命令的 ack / error 响应。",
     "type": "object",
     "required": [
       "success",
@@ -1587,6 +1596,7 @@
   "out_frame": {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "OutFrame",
+    "description": "writer 下行队列里的统一帧类型。",
     "anyOf": [
       {
         "$ref": "#/definitions/ResponseFrame"
@@ -1603,6 +1613,7 @@
         "description": "占位：Assistant 消息流式事件。\n\n**payload schema（T2-P0-006 P3 起）**：\n\n```json { \"kind\": \"content_delta\" | \"thinking_delta\",   // 必有；老消费者可忽略 \"delta\": \"...\",                                 // 必有：增量文本 \"source\": \"summary\" | \"raw\",                   // thinking_delta 必有 \"signature\": \"...\"                              // 可选：仅 thinking_delta + Anthropic } ```\n\n兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径， 除非订阅者显式按 `kind` 分流）。"
       },
       "ControlFrame": {
+        "description": "审批、初始化与取消等双向控制帧。",
         "oneOf": [
           {
             "type": "object",
@@ -1689,6 +1700,7 @@
         "description": "占位：与 pi-mono / OpenAI 风格 Message 对齐，MVP 用 JSON 表示。"
       },
       "ResponseFrame": {
+        "description": "普通命令的 ack / error 响应。",
         "type": "object",
         "required": [
           "success",

@@ -145,7 +145,7 @@ tomcat 默认将所有数据存放在 `~/.tomcat/`。可在 `tomcat.config.toml`
 tomcat init
 ```
 
-`tomcat init` 为**非交互式**三步流程。当前主配置 `tomcat.config.toml` 只负责：
+`tomcat init` 为**交互式 model-first** 三步向导。当前主配置 `tomcat.config.toml` 只负责：
 
 - 选哪个模型：`[llm].default_model` / `vision_model` / `title_model`
 - 全局运行时旋钮：并发、重试、超时、proxy、files、continuity 等
@@ -154,9 +154,9 @@ tomcat init
 
 三步流程如下：
 
-1. **[1/3] 环境初始化**：写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、生成模型清单 `~/.tomcat/models.toml`（受管默认条目：`mimo-v2.5-pro`、`gpt-5.2`、`deepseek-v4-flash`）、释放内嵌资源（modules 等）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
+1. **[1/3] 环境初始化**：先确保 `~/.tomcat/models.toml` 至少含受管默认条目（`mimo-v2.5-pro`、`gpt-5.2`、`deepseek-v4-flash`），再加载模型 catalog 进入交互式选模；随后写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（modules 等）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
 2. **[2/3] 资源检查**：与 `tomcat doctor` 相同的检查项（配置合法、内嵌资源、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
-3. **[3/3] API Key 配置**：若 `~/.tomcat/assets/.env` 中尚无有效 `OPENAI_API_KEY`，提示输入（可回车跳过）。**回车跳过不会创建或写入 `.env`**（避免留下空 Key 文件）；可稍后再次运行 `tomcat init` 输入 Key，或自行创建/编辑 `~/.tomcat/assets/.env`
+3. **[3/3] API Key 配置**：先按你在向导里选中的默认模型提示对应的凭证变量（例如 `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `MIMO_API_KEY` / `LITELLM_SUNMI_API_KEY`），再可选顺手补其它 provider 的 key。可回车跳过；**跳过不会写入空 Key**。后续可再次运行 `tomcat init`，或自行编辑 `~/.tomcat/assets/.env`
 
 预期输出（节选）：
 
@@ -186,6 +186,8 @@ tomcat init
 若无法自动写入 shell 配置，会打印 `⚠ 无法自动配置 PATH` 及一行可手动执行的 `export PATH=...`。
 
 **幂等性**：若 `~/.tomcat/tomcat.config.toml` **已存在**，会以现有配置为基线更新；`models.toml` 不会重写你已有的条目与注释，只会在缺失时补齐受管默认模型。第二次起会看到「已更新配置文件」与「受管默认模型已齐全」类提示。
+
+**旧配置迁移**：如果老配置里还残留 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env`，`tomcat init` 会允许你进入向导并在写回时清掉这些旧连接字段，把连接事实迁到 `models.toml`。
 
 **与 `tomcat doctor`**：`init` 第二步与 `doctor` 共用同一套检查逻辑；配置与资源有疑义时可再运行 `tomcat doctor` 查看含 API Key / `.env` 的完整诊断。
 
@@ -294,11 +296,35 @@ level = "warn"
 file_enabled = true
 
 [llm]
-provider = "openai-responses"
-api_key_env = "OPENAI_API_KEY"
 default_model = "gpt-5.4"
+
+[context]
+compaction_model = "gpt-5.4"
 ...
 ```
+
+注意：`tomcat config get` 只显示 `tomcat.config.toml`；模型连接细节（`api` / `provider` / `base_url` / `api_key_env`）在 `~/.tomcat/models.toml`，不会出现在这里。
+
+### serve 网关
+
+```bash
+tomcat serve --stdio
+```
+
+`tomcat serve` 是给 IDE / GUI 宿主使用的 Agent Server 入口。Phase 1 当前只开放 `--stdio`：
+
+- 上行：宿主经 stdin 发送一行一个 NDJSON 命令帧（如 `initialize`、`prompt`、`new_session`、`interrupt`）
+- 下行：Tomcat 经 stdout 只输出 NDJSON 响应/事件帧，不夹杂普通日志
+- 多会话：通过 `sessionId` 路由；未带 `sessionId` 时默认命中当前活跃会话
+- 审批回环：`ask_question` 通过 `control_request` / `control_response` / `control_cancel` 往返
+
+如需导出协议工件给扩展侧消费：
+
+```bash
+tomcat serve --print-schema
+```
+
+该命令会输出 schema 目录路径，目录内包含 `serve.schema.json` 与 `serve.d.ts`。
 
 ### 查询单个配置项
 

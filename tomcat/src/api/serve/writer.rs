@@ -1,9 +1,15 @@
+//! `serve` 的唯一 stdout writer。
+//!
+//! 所有命令响应、控制帧和事件下行都必须先进入这里，再由单写者任务序列化成 NDJSON。
+
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
 use crate::AppError;
 
@@ -12,6 +18,7 @@ use super::types::OutFrame;
 
 type BoxWriter = Pin<Box<dyn AsyncWrite + Send>>;
 
+/// writer 的背压与合并参数。
 #[derive(Debug, Clone, Copy)]
 pub struct WriterConfig {
     pub delta_coalesce_ms: u32,
@@ -27,31 +34,35 @@ impl From<&crate::ServeConfig> for WriterConfig {
     }
 }
 
+/// 供其他模块写入 stdout 队列的轻量句柄。
 #[derive(Clone)]
 pub struct WriterHandle {
-    tx: mpsc::UnboundedSender<OutFrame>,
+    shared: Arc<WriterShared>,
 }
 
 impl WriterHandle {
+    /// 将一帧写入 writer 队列。
     pub fn send(&self, frame: OutFrame) -> Result<(), AppError> {
-        self.tx
-            .send(frame)
-            .map_err(|_| AppError::Config("serve writer channel closed".to_string()))
+        self.shared.enqueue(frame);
+        Ok(())
     }
 }
 
+/// 以真实 stdout 作为下行目标创建 writer。
 pub fn spawn_stdout_writer(config: WriterConfig) -> WriterHandle {
     spawn_writer(Box::pin(tokio::io::stdout()), config)
 }
 
+/// 以任意 `AsyncWrite` 创建 writer，便于测试和未来扩展传输层。
 pub fn spawn_writer(writer: BoxWriter, config: WriterConfig) -> WriterHandle {
-    let (tx, rx) = mpsc::unbounded_channel();
+    let shared = Arc::new(WriterShared::new(config));
+    let shared_for_task = Arc::clone(&shared);
     tokio::spawn(async move {
-        if let Err(error) = writer_task(writer, rx, config).await {
+        if let Err(error) = writer_task(writer, shared_for_task).await {
             tracing::error!(error = %error, "serve writer task failed");
         }
     });
-    WriterHandle { tx }
+    WriterHandle { shared }
 }
 
 struct BufferedFrame {
@@ -73,49 +84,82 @@ impl SessionBuffer {
     }
 }
 
-async fn writer_task(
-    mut writer: BoxWriter,
-    mut rx: mpsc::UnboundedReceiver<OutFrame>,
-    config: WriterConfig,
-) -> Result<(), AppError> {
-    let mut buffers: HashMap<String, SessionBuffer> = HashMap::new();
-    let mut session_order: VecDeque<String> = VecDeque::new();
-    let mut global_frames: VecDeque<BufferedFrame> = VecDeque::new();
+struct WriterQueues {
+    buffers: HashMap<String, SessionBuffer>,
+    session_order: VecDeque<String>,
+    global_frames: VecDeque<BufferedFrame>,
+}
 
-    while let Some(frame) = rx.recv().await {
-        enqueue_frame(
-            frame,
-            &mut buffers,
-            &mut session_order,
-            &mut global_frames,
-            config,
-        );
-        while let Ok(frame) = rx.try_recv() {
-            enqueue_frame(
-                frame,
-                &mut buffers,
-                &mut session_order,
-                &mut global_frames,
-                config,
-            );
+impl WriterQueues {
+    fn new() -> Self {
+        Self {
+            buffers: HashMap::new(),
+            session_order: VecDeque::new(),
+            global_frames: VecDeque::new(),
         }
-        drain_pending(
-            &mut writer,
-            &mut buffers,
-            &mut session_order,
-            &mut global_frames,
-        )
-        .await?;
+    }
+}
+
+struct WriterShared {
+    queues: Mutex<WriterQueues>,
+    notify: Notify,
+    config: WriterConfig,
+}
+
+impl WriterShared {
+    fn new(config: WriterConfig) -> Self {
+        Self {
+            queues: Mutex::new(WriterQueues::new()),
+            notify: Notify::new(),
+            config,
+        }
     }
 
-    drain_pending(
-        &mut writer,
-        &mut buffers,
-        &mut session_order,
-        &mut global_frames,
-    )
-    .await?;
-    Ok(())
+    fn enqueue(&self, frame: OutFrame) {
+        {
+            let mut queues = self.queues.lock();
+            let WriterQueues {
+                buffers,
+                session_order,
+                global_frames,
+            } = &mut *queues;
+            enqueue_frame(
+                frame,
+                buffers,
+                session_order,
+                global_frames,
+                self.config,
+            );
+        }
+        self.notify.notify_one();
+    }
+
+    fn dequeue(&self) -> Option<OutFrame> {
+        let mut queues = self.queues.lock();
+        if let Some(frame) = queues.global_frames.pop_front() {
+            return Some(frame.frame);
+        }
+
+        let session_id = queues.session_order.pop_front()?;
+        let buffer = queues.buffers.get_mut(&session_id)?;
+        let frame = buffer.frames.pop_front().map(|buffered| buffered.frame);
+        if buffer.frames.is_empty() {
+            queues.buffers.remove(&session_id);
+        } else {
+            queues.session_order.push_back(session_id);
+        }
+        frame
+    }
+}
+
+async fn writer_task(mut writer: BoxWriter, shared: Arc<WriterShared>) -> Result<(), AppError> {
+    loop {
+        if let Some(frame) = shared.dequeue() {
+            write_frame(&mut writer, &frame).await?;
+            continue;
+        }
+        shared.notify.notified().await;
+    }
 }
 
 fn enqueue_frame(
@@ -231,35 +275,6 @@ fn coalesce_message_update(target: &mut OutFrame, next: &OutFrame) -> bool {
     true
 }
 
-async fn drain_pending(
-    writer: &mut BoxWriter,
-    buffers: &mut HashMap<String, SessionBuffer>,
-    session_order: &mut VecDeque<String>,
-    global_frames: &mut VecDeque<BufferedFrame>,
-) -> Result<(), AppError> {
-    while !global_frames.is_empty() || !session_order.is_empty() {
-        if let Some(frame) = global_frames.pop_front() {
-            write_frame(writer, &frame.frame).await?;
-        }
-
-        let Some(session_id) = session_order.pop_front() else {
-            continue;
-        };
-        let Some(buffer) = buffers.get_mut(&session_id) else {
-            continue;
-        };
-        if let Some(frame) = buffer.frames.pop_front() {
-            write_frame(writer, &frame.frame).await?;
-        }
-        if buffer.frames.is_empty() {
-            buffers.remove(&session_id);
-        } else {
-            session_order.push_back(session_id);
-        }
-    }
-    Ok(())
-}
-
 async fn write_frame(writer: &mut BoxWriter, frame: &OutFrame) -> Result<(), AppError> {
     let rendered = ndjson_safe_stringify(frame)?;
     writer
@@ -268,235 +283,4 @@ async fn write_frame(writer: &mut BoxWriter, frame: &OutFrame) -> Result<(), App
         .map_err(AppError::Io)?;
     writer.write_all(b"\n").await.map_err(AppError::Io)?;
     writer.flush().await.map_err(AppError::Io)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use tokio::io::AsyncWrite;
-
-    #[derive(Clone, Default)]
-    struct SharedBuffer(Arc<parking_lot::Mutex<Vec<u8>>>);
-
-    struct VecWriter {
-        inner: SharedBuffer,
-    }
-
-    impl AsyncWrite for VecWriter {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            let inner = self.get_mut().inner.clone();
-            let mut guard = inner.0.lock();
-            guard.extend_from_slice(buf);
-            std::task::Poll::Ready(Ok(buf.len()))
-        }
-
-        fn poll_flush(
-            self: Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            let _ = self;
-            std::task::Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(
-            self: Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            let _ = self;
-            std::task::Poll::Ready(Ok(()))
-        }
-    }
-
-    fn event(session: &str, ty: &str, delta: Option<&str>) -> OutFrame {
-        let payload = if let Some(delta) = delta {
-            serde_json::json!({
-                "type": ty,
-                "sessionId": session,
-                "assistantMessageEvent": {
-                    "kind": "content_delta",
-                    "delta": delta
-                }
-            })
-        } else {
-            serde_json::json!({
-                "type": ty,
-                "sessionId": session
-            })
-        };
-        OutFrame::Event(payload)
-    }
-
-    #[tokio::test]
-    async fn serve_writer_single_drain_orders_frames() {
-        let shared = SharedBuffer::default();
-        let writer = VecWriter {
-            inner: shared.clone(),
-        };
-        let handle = spawn_writer(
-            Box::pin(writer),
-            WriterConfig {
-                delta_coalesce_ms: 0,
-                max_buffered_frames: 8,
-            },
-        );
-        handle
-            .send(OutFrame::Response(super::super::types::ResponseFrame::ok(
-                Some("1".to_string()),
-                None,
-                None,
-            )))
-            .unwrap();
-        handle
-            .send(OutFrame::Response(super::super::types::ResponseFrame::ok(
-                Some("2".to_string()),
-                None,
-                None,
-            )))
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let bytes = shared.0.lock().clone();
-        let rendered = String::from_utf8(bytes).unwrap();
-        let lines: Vec<&str> = rendered.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("\"id\":\"1\""));
-        assert!(lines[1].contains("\"id\":\"2\""));
-    }
-
-    #[tokio::test]
-    async fn serve_writer_coalesces_deltas_under_pressure() {
-        let shared = SharedBuffer::default();
-        let writer = VecWriter {
-            inner: shared.clone(),
-        };
-        let handle = spawn_writer(
-            Box::pin(writer),
-            WriterConfig {
-                delta_coalesce_ms: 100,
-                max_buffered_frames: 8,
-            },
-        );
-        handle
-            .send(event("s1", "message_update", Some("he")))
-            .unwrap();
-        handle
-            .send(event("s1", "message_update", Some("llo")))
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let bytes = shared.0.lock().clone();
-        let rendered = String::from_utf8(bytes).unwrap();
-        assert!(rendered.contains("\"delta\":\"hello\""));
-        assert_eq!(rendered.lines().count(), 1);
-    }
-
-    #[tokio::test]
-    async fn serve_writer_never_drops_lifecycle() {
-        let shared = SharedBuffer::default();
-        let writer = VecWriter {
-            inner: shared.clone(),
-        };
-        let handle = spawn_writer(
-            Box::pin(writer),
-            WriterConfig {
-                delta_coalesce_ms: 0,
-                max_buffered_frames: 1,
-            },
-        );
-        handle
-            .send(event("s1", "message_update", Some("a")))
-            .unwrap();
-        handle
-            .send(event("s1", "message_update", Some("b")))
-            .unwrap();
-        handle.send(event("s1", "agent_end", None)).unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let bytes = shared.0.lock().clone();
-        let rendered = String::from_utf8(bytes).unwrap();
-        assert!(rendered.contains("\"type\":\"agent_end\""));
-    }
-
-    #[test]
-    fn serve_writer_backpressure_notice_emitted_once() {
-        let mut buffers: HashMap<String, SessionBuffer> = HashMap::new();
-        let mut session_order = VecDeque::new();
-        let mut global_frames = VecDeque::new();
-        let config = WriterConfig {
-            delta_coalesce_ms: 0,
-            max_buffered_frames: 1,
-        };
-
-        enqueue_frame(
-            event("s1", "message_update", Some("a")),
-            &mut buffers,
-            &mut session_order,
-            &mut global_frames,
-            config,
-        );
-        enqueue_frame(
-            event("s1", "message_update", Some("b")),
-            &mut buffers,
-            &mut session_order,
-            &mut global_frames,
-            config,
-        );
-        enqueue_frame(
-            event("s1", "message_update", Some("c")),
-            &mut buffers,
-            &mut session_order,
-            &mut global_frames,
-            config,
-        );
-
-        let buffer = buffers.get("s1").expect("session buffer");
-        let notices = buffer
-            .frames
-            .iter()
-            .filter(|frame| {
-                frame.frame.session_id() == Some("s1")
-                    && matches!(
-                        &frame.frame,
-                        OutFrame::Event(value)
-                            if value.get("type").and_then(serde_json::Value::as_str)
-                                == Some("llm_notice")
-                    )
-            })
-            .count();
-        assert_eq!(notices, 1);
-    }
-
-    #[tokio::test]
-    async fn serve_writer_round_robins_across_sessions() {
-        let shared = SharedBuffer::default();
-        let writer = VecWriter {
-            inner: shared.clone(),
-        };
-        let handle = spawn_writer(
-            Box::pin(writer),
-            WriterConfig {
-                delta_coalesce_ms: 0,
-                max_buffered_frames: 8,
-            },
-        );
-        handle
-            .send(event("s1", "message_update", Some("a1")))
-            .unwrap();
-        handle
-            .send(event("s1", "message_update", Some("a2")))
-            .unwrap();
-        handle
-            .send(event("s2", "message_update", Some("b1")))
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let bytes = shared.0.lock().clone();
-        let rendered = String::from_utf8(bytes).unwrap();
-        let lines: Vec<&str> = rendered.lines().collect();
-        assert_eq!(lines.len(), 3);
-        assert!(lines[0].contains("\"sessionId\":\"s1\""));
-        assert!(lines[1].contains("\"sessionId\":\"s2\""));
-        assert!(lines[2].contains("\"sessionId\":\"s1\""));
-    }
 }

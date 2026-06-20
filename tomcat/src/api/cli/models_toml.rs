@@ -11,6 +11,8 @@
 //!   `model_name`，绝不重写 / 覆盖用户已有条目与注释。
 //! - `gpt-5.2` / `deepseek-v4-flash` 的“事实源”现在放在这里生成的 `models.toml`，而非 `builtin_models()`。
 
+use std::path::Path;
+
 use crate::core::llm::ModelCatalog;
 use crate::{AppConfig, AppError};
 
@@ -115,7 +117,7 @@ pub(crate) fn ensure_default_models_toml(cfg: &AppConfig) -> Result<ModelsTomlSt
             "{MODELS_TOML_HEADER}\n{}",
             render_entry_blocks(MANAGED_MODELS)
         );
-        std::fs::write(&path, contents).map_err(AppError::Io)?;
+        write_file_atomic(&path, contents.as_bytes())?;
         return Ok(ModelsTomlStatus::Created {
             added_model_ids: managed_model_ids(MANAGED_MODELS),
         });
@@ -135,7 +137,7 @@ pub(crate) fn ensure_default_models_toml(cfg: &AppConfig) -> Result<ModelsTomlSt
         updated.push('\n');
         updated.push_str(&render_entry_blocks(&missing_models));
     }
-    std::fs::write(&path, updated).map_err(AppError::Io)?;
+    write_file_atomic(&path, updated.as_bytes())?;
     Ok(ModelsTomlStatus::UpdatedExisting {
         added_model_ids: managed_model_ids(&missing_models),
         updated_model_name_ids,
@@ -144,6 +146,19 @@ pub(crate) fn ensure_default_models_toml(cfg: &AppConfig) -> Result<ModelsTomlSt
 
 fn managed_model_ids(models: &[ManagedModelTemplate]) -> Vec<&'static str> {
     models.iter().map(|entry| entry.id).collect()
+}
+
+fn write_file_atomic(target: &Path, content: &[u8]) -> Result<(), AppError> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::Io)?;
+    }
+    let tmp = target.with_extension("tmp");
+    std::fs::write(&tmp, content).map_err(AppError::Io)?;
+    std::fs::rename(&tmp, target).or_else(|_| {
+        std::fs::copy(&tmp, target).map_err(AppError::Io)?;
+        let _ = std::fs::remove_file(&tmp);
+        Ok(())
+    })
 }
 
 fn render_entry_blocks(models: &[ManagedModelTemplate]) -> String {
@@ -249,7 +264,7 @@ fn leading_whitespace(line: &str) -> &str {
 
 /// 解析现有 `models.toml`，判断是否已含某个 model id。
 ///
-/// 解析失败（用户写坏了文件）时保守返回 `false`，让 init 追加一条可用 MiMo，
+/// 解析失败（用户写坏了文件）时保守返回 `false`，让 init 仅按缺失条目追加受管默认模型，
 /// 同时绝不触碰用户原有文本。
 fn models_file_has_model(contents: &str, model_id: &str) -> bool {
     let Ok(value) = toml::from_str::<toml::Value>(contents) else {

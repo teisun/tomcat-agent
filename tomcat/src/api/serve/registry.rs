@@ -1,3 +1,8 @@
+//! `serve` 层的会话注册表。
+//!
+//! 负责把 `sessionId` 映射到运行时会话壳 `SessionSlot`，与
+//! `core::agent_registry::AgentRegistry` 的“Agent 实例登记”分工正交。
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -8,12 +13,14 @@ use tokio::task::JoinHandle;
 use crate::infra::event_bus::EventListenerId;
 use crate::{api::chat::ChatContext, AppError, ContextState, SessionMode};
 
+/// 单会话 turn 之间需要延续的上下文快照。
 pub struct SessionTurnState {
     pub context_state: ContextState,
     pub system_text: String,
     pub context_budget_chars: usize,
 }
 
+/// `serve` 层维护的单个会话槽位。
 pub struct SessionSlot {
     pub session_id: String,
     pub ctx: Arc<ChatContext>,
@@ -60,12 +67,14 @@ impl SessionSlot {
     }
 }
 
+/// `list_sessions` 返回的最小会话摘要。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
     pub session_id: String,
     pub busy: bool,
 }
 
+/// 进程内 `sessionId -> SessionSlot` 的注册表。
 pub struct ChatContextRegistry {
     slots: DashMap<String, Arc<SessionSlot>>,
     order: Mutex<Vec<String>>,
@@ -162,49 +171,5 @@ impl ChatContextRegistry {
                 })
             })
             .collect()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use serial_test::serial;
-
-    use crate::api::serve::test_support::{
-        build_initialized_state_with_streams, install_test_api_key,
-    };
-    use crate::api::serve::types::NewSessionParams;
-
-    #[tokio::test]
-    #[serial(env_lock)]
-    async fn new_session_registers_slot_in_registry() {
-        let _api_key = install_test_api_key();
-        let (state, _buffer, _temp, initial_slot) = build_initialized_state_with_streams(vec![]).await;
-        let initial_len = state.registry.len();
-        let new_slot =
-            super::super::create_session_slot(Arc::clone(&state), NewSessionParams::default(), true)
-                .await
-                .expect("new session slot");
-
-        state
-            .registry
-            .insert(Arc::clone(&new_slot))
-            .expect("insert new session slot");
-
-        assert_eq!(state.registry.len(), initial_len + 1);
-        assert!(state.registry.get(&new_slot.session_id).is_some());
-        assert!(
-            state
-                .registry
-                .list()
-                .iter()
-                .any(|session| session.session_id == new_slot.session_id)
-        );
-        assert_eq!(
-            state.registry.active_session_id().as_deref(),
-            Some(initial_slot.session_id.as_str()),
-            "insert alone should not implicitly steal active session"
-        );
     }
 }

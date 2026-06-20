@@ -42,7 +42,7 @@ writer 背压超 max_buffered_frames
   -> content_delta/thinking_delta 合并或丢弃 + 一次性 warning 事件
   -> lifecycle/control 帧绝不丢（lossless）
 
-control_response 携带未知 request_id
+control_response 携带未知 requestId
   -> debug 日志一行，丢弃该回包（防伪造/迟到），不影响主链路
 
 initialize 之前收到 prompt
@@ -119,7 +119,7 @@ stdin EOF / 管道关闭
 | 单元   | `serve::commands::tests::serve_prompt_panic_isolation_emits_agent_end_error` | ✅ 2026-06-19 | 单会话 panic 会被隔离并正常收口。 |
 | 单元   | `serve::ask_question::tests::serve_ask_question_bridge_emits_control_request` | ✅ 2026-06-19 | ask_question bridge 能正确下发控制请求。 |
 | 单元   | `serve::ask_question::tests::serve_ask_question_bridge_round_trips_control_response` | ✅ 2026-06-19 | ask_question bridge 能把 UI 回包送回原请求。 |
-| 单元   | `serve::ask_question::tests::serve_ask_question_bridge_ignores_unknown_request_id` | ✅ 2026-06-19 | 乱入 request_id 不会污染正确会话。 |
+| 单元   | `serve::ask_question::tests::serve_ask_question_bridge_ignores_unknown_request_id` | ✅ 2026-06-19 | 乱入 requestId 不会污染正确会话。 |
 | 快照   | `tests/serve_schema_fixture::serve_print_schema_matches_fixture`            | ✅ 2026-06-19 | 协议 schema / `.d.ts` 漂移防回归（R11/R13/R14）。            |
 | 关键承诺 | §3.1 R5 单写者 / R7 审批请求 / R8 多会话并发 / R9 背压 / R13 schema / R14 附件 各有上面锁死测试；R12 visible/hidden 保留 Phase 2 设计测试锚点 | ✅ 2026-06-19 | 本期承诺与二期设计储备都留了测试钉。                       |
 | 文档   | 本文与 `interaction-layer.md`、`multi-agent.md`、`README.md` 链接一致                | ✅ 2026-06-19 | 字跟得上代码。                          |
@@ -151,7 +151,7 @@ stdin EOF / 管道关闭
 - ~~先实现网络 Gateway（HTTP/WebSocket daemon）再接 UI~~ → **否**：过早引入端口/鉴权/CORS/背压复杂度，且 openclaw `embedded-backend.ts` 证明纯网关会逼出 embed 重复实现。改为 **先 stdio Agent Server，网关 Phase 2 复用同一 dispatcher**。
 - ~~为 serve 设计独立精简事件集~~ → **否**：codex 三套 schema（core/app-server/exec）并存导致 SDK 对接混乱。改为 **直接复用既有 `AgentEvent` wire**。
 - ~~首发即采用 ACP 作唯一协议~~ → **否**：ACP 绑定 IDE 语义与 Tomcat 能力面不完全重合，会拖慢首发。改为 **自有 `{type}` NDJSON 首发，ACP 作 Phase 2+ 兼容层**。
-- ~~Phase 1 采用 NDJSON + JSON-RPC 信封（即便 method 填自有名）~~ → **否**：Tomcat 上下行非对称——下行主战场是已与 CLI/审计共用的高频 `AgentEvent` 流（R3）；套 `jsonrpc`/`method` 只在 `content_delta` 等热路径增加固定样板，事件侧仍须按 `type` 分支，`method` 路由无收益；且会把命令/事件从同构 `{type}` 拆成两套心智。改为 **Phase 1 = NDJSON + 自有 `{type}`，不套 JSON-RPC 外壳**；**同时**自有帧结构上贴近 JSON-RPC（命令 `id`↔`id`、控制 `request_id`↔双向请求 `id`、`type`↔`method`，见 §3.2.5），使 Phase 2 `acp/`* 为机械翻译而非重写 dispatcher。拒绝理由：「现在上 JSON-RPC 信封以后接 ACP 更省」不成立——ACP 的适配工作量在方法语义映射，不在信封；Phase 1 上信封省不了 Phase 2 的 `session/*`、permission 等映射。
+- ~~Phase 1 采用 NDJSON + JSON-RPC 信封（即便 method 填自有名）~~ → **否**：Tomcat 上下行非对称——下行主战场是已与 CLI/审计共用的高频 `AgentEvent` 流（R3）；套 `jsonrpc`/`method` 只在 `content_delta` 等热路径增加固定样板，事件侧仍须按 `type` 分支，`method` 路由无收益；且会把命令/事件从同构 `{type}` 拆成两套心智。改为 **Phase 1 = NDJSON + 自有 `{type}`，不套 JSON-RPC 外壳**；**同时**自有帧结构上贴近 JSON-RPC（命令 `id`↔`id`、控制 `requestId`↔双向请求 `id`、`type`↔`method`，见 §3.2.5），使 Phase 2 `acp/`* 为机械翻译而非重写 dispatcher。拒绝理由：「现在上 JSON-RPC 信封以后接 ACP 更省」不成立——ACP 的适配工作量在方法语义映射，不在信封；Phase 1 上信封省不了 Phase 2 的 `session/*`、permission 等映射。
 - ~~以 SSE 作 UI 主链路~~ → **否**：SSE 单向、需额外上行通道；竞品中 SSE 仅用于历史回放/兼容 API。改为 **stdio NDJSON 双工**。
 - ~~MVP 先做「一连接一活跃会话」，多会话调度推迟~~ → **否**（本次修订）：核心已具备多会话并发底座（`AgentLoop` 多实例 + `WireEnvelope.sessionId` 信封 + `AgentRegistry` 登记/`cascade_abort`/上限**已实现**，见 §2.5.3），缺口仅在 serve 层。改为 **本期即做单进程多会话并发**：新增 `ChatContextRegistry`（落地 `multi-agent.md` 维度A/MA2）+ sessionId 命令路由 + 同会话串行 + 单写者公平 demux，对标 codex `ThreadManager`。拒绝 switch 式单活跃（pi-mono，会丢 in-flight turn）与多进程隔离（cc-fork，重资源 ×N）。
 - ~~单写者只保序、背压只做合并/丢~~ → **补强**：多会话下单写者还须 **按 sessionId demux + 跨会话 round-robin 公平**，修正 codex（全局队列）/ openclaw（连接级 bufferedAmount）暴露的「快会话饿死慢会话」缺口。

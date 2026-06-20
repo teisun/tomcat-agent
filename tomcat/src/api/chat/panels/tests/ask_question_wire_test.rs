@@ -30,6 +30,19 @@ fn sample_question() -> Question {
     }
 }
 
+fn sample_result() -> AskQuestionResult {
+    AskQuestionResult {
+        answers: vec![Answer {
+            question_id: "color".into(),
+            option_ids: vec!["red".into()],
+            custom_text: None,
+            skipped: false,
+            picked_recommended: true,
+        }],
+        cancelled: false,
+    }
+}
+
 #[tokio::test]
 async fn event_bus_panel_round_trips_via_mock_host() {
     let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
@@ -60,16 +73,7 @@ async fn event_bus_panel_round_trips_via_mock_host() {
             .expect("host should receive request");
         let response = AskQuestionWireResponse {
             request_id: req.request_id.clone(),
-            result: AskQuestionResult {
-                answers: vec![Answer {
-                    question_id: "color".into(),
-                    option_ids: vec!["red".into()],
-                    custom_text: None,
-                    skipped: false,
-                    picked_recommended: true,
-                }],
-                cancelled: false,
-            },
+            result: sample_result(),
         };
         bus_for_host
             .emit_sync(
@@ -189,4 +193,72 @@ async fn event_bus_panel_request_event_carries_session_id() {
         ctx.payload.get("sessionId").and_then(|v| v.as_str()),
         Some("sid-ask-question")
     );
+}
+
+#[test]
+fn ask_question_wire_payload_serializes_as_camel_case() {
+    let request = AskQuestionWireRequest {
+        request_id: "ask-serde".into(),
+        response_event: ask_question_response_event_name("ask-serde"),
+        questions: vec![sample_question()],
+    };
+    let request_value = serde_json::to_value(&request).expect("serialize wire request");
+    assert_eq!(request_value.get("requestId").and_then(|v| v.as_str()), Some("ask-serde"));
+    assert!(
+        request_value.get("request_id").is_none(),
+        "wire request should not leak snake_case keys"
+    );
+    assert_eq!(
+        request_value.get("responseEvent").and_then(|v| v.as_str()),
+        Some(ask_question_response_event_name("ask-serde").as_str())
+    );
+
+    let response = AskQuestionWireResponse {
+        request_id: "ask-serde".into(),
+        result: sample_result(),
+    };
+    let response_value = serde_json::to_value(&response).expect("serialize wire response");
+    assert_eq!(
+        response_value["result"]["answers"][0]
+            .get("questionId")
+            .and_then(|v| v.as_str()),
+        Some("color")
+    );
+    assert_eq!(
+        response_value["result"]["answers"][0]
+            .get("optionIds")
+            .and_then(|v| v.as_array())
+            .and_then(|items| items.first())
+            .and_then(|v| v.as_str()),
+        Some("red")
+    );
+    assert!(
+        response_value["result"]["answers"][0]
+            .get("question_id")
+            .is_none(),
+        "wire response should not leak snake_case keys"
+    );
+}
+
+#[test]
+fn ask_question_wire_payload_deserializes_camel_case_host_response() {
+    let response: AskQuestionWireResponse = serde_json::from_value(serde_json::json!({
+        "requestId": "ask-deser",
+        "result": {
+            "answers": [{
+                "questionId": "color",
+                "optionIds": ["blue"],
+                "customText": "navy",
+                "pickedRecommended": false
+            }],
+            "cancelled": false
+        }
+    }))
+    .expect("deserialize camelCase host response");
+
+    assert_eq!(response.request_id, "ask-deser");
+    assert_eq!(response.result.answers[0].question_id, "color");
+    assert_eq!(response.result.answers[0].option_ids, vec!["blue"]);
+    assert_eq!(response.result.answers[0].custom_text.as_deref(), Some("navy"));
+    assert!(!response.result.answers[0].picked_recommended);
 }

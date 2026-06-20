@@ -101,6 +101,8 @@ TEST_PID=$!
    - `DEEPSEEK_API_KEY=...`（`cli_tests` / `llm_tests` / DeepSeek 兼容对话 E2E 必填）
    - `OPENAI_API_KEY=...`（`openai_responses_integration_tests` 与 OpenAI Responses 相关门禁必填）
 2. **代理（按需）**：若直连上游不可用，在同一 `.env` 中配置 `HTTPS_PROXY`（及必要时 `HTTP_PROXY`）。`reqwest` 会读取当前进程环境；`llm_tests` / `openai_responses_integration_tests` 日志中都可见代理是否生效。
+   - **`gpt-5.4_litellm-sunmi` / `aigateway.sunmi.com` 实战备注（2026-06-20）**：当本机已接入内网时，`integration-openai-responses-wire` 更稳定的口径是**直连 `aigateway.sunmi.com`，不要再走本地 `127.0.0.1:7890` 代理**；否则 `responses_inline_image_describe_roundtrip` 可能返回 HTML `403 Forbidden`。建议在同一命令前显式加：
+     `env -u HTTPS_PROXY -u https_proxy -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u http_proxy NO_PROXY=aigateway.sunmi.com no_proxy=aigateway.sunmi.com`
 3. **先探活再跑长测**：OpenAI 路径可在 `tomcat` 下执行 `./scripts/verify-openai-apis.sh 1 3`（或交互选 `1`～`5`）快速验证 `OPENAI_API_KEY` 与网络；DeepSeek 路径至少应先单跑一条 `llm_tests` 用例确认 `DEEPSEEK_API_KEY` 可用，避免 `cargo test` 编译许久后才因 401/网络失败。
 4. **向测试进程注入环境（推荐）**：仅依赖测试内的 `dotenvy::dotenv()` 时，cwd 非 crate 根可能加载不到 `.env`。**推荐**在 shell 中先导出变量再跑测试：
 

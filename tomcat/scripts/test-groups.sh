@@ -19,6 +19,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   session_concurrency_tests
   plugin_tests
   llm_tests
+  llm_gateway_toggle_tests
   context_management_tests
   plan_runtime_integration_tests
   plan_e2e_with_mock_llm_tests
@@ -44,7 +45,7 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
   serve_stdio_e2e
 )
 
-# 真 LLM E2E（需 OPENAI_API_KEY；缺 key 时 fixture panic）。
+# 真 LLM E2E（需当前 OpenAI target 对应 key；部分 target 还需 DEEPSEEK_API_KEY / MIMO_API_KEY）。
 # 这几个 target 串行运行：fixture 都会碰真实 `~/.tomcat` 盘目录，并发会互踩。
 # 其中 `plan_real_llm_cli_e2e` 现在只保留 planning-only / exec-only 两条窄 CLI smoke，
 # full completion / artifact / transcript 顺序 / EOF settlement 等重断言交给更快的

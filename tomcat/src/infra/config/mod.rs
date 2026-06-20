@@ -17,7 +17,8 @@ pub use append::append_workspace_entry_to_disk;
 pub use append::{append_path_rule_to_disk, append_workspace_root_to_disk};
 pub use assets::ensure_embedded_assets;
 pub use load::{
-    ensure_work_dir_structure, get_work_dir, load_config, load_config_toml_file,
+    ensure_work_dir_structure, get_work_dir, load_config, load_config_for_init,
+    load_config_toml_file,
     resolve_agent_definition_dir, resolve_agent_dir, resolve_agent_trail_dir, resolve_assets_dir,
     resolve_audit_dir, resolve_checkpoints_dir, resolve_dot_tomcat_temp_dir, resolve_log_dir,
     resolve_memory_dir, resolve_plans_dir, resolve_plugins_dir, resolve_sessions_dir,

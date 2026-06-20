@@ -19,7 +19,7 @@ Official host-function plugin that provides `web_search.backend` providers for T
 ## Auto order
 
 ```json
-["mimo", "tavily", "brave", "serper"]
+["tavily", "brave", "serper", "mimo"]
 ```
 
 The plugin owns this order. Host-side `backend=auto` hands control to the plugin slot, and the

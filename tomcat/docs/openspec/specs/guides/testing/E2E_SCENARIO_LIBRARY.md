@@ -227,7 +227,7 @@
 
 ---
 
-## Story 8c — Agent Server / UI Gateway（5 条）
+## Story 8c — Agent Server / UI Gateway（6 条）
 
 > 主验收入口为 `tests/serve_stdio_e2e.rs`、`tests/serve_multi_session.rs`、`tests/serve_ask_question_tests.rs`、`tests/serve_robustness_tests.rs`、`tests/serve_schema_fixture.rs`。
 > **验收**：以自动化为主；目标是把 `tomcat serve --stdio` 的协议、并发、审批回环、错误模型与 schema 漂移锁住，供 IDE / GUI 宿主稳定集成。
@@ -239,6 +239,7 @@
 | E2E-CLI-098 | 自动 | `serve_same_session_is_busy_until_turn_finishes` | 宿主在同一会话未收敛时再次 `prompt`，应拿到明确 `busy` 语义 | 单会话 `prompt`（慢响应）→ 立刻第二次 `prompt` 同 `sessionId` | 第二条命令收到 `response{success:false,error:"busy"}`；首轮仍正常收敛为 `agent_end` |
 | E2E-CLI-099 | 自动 | `serve_ask_question_roundtrip_resumes_turn`；`serve_ask_question_cancel_roundtrip_does_not_hang` | 宿主收到 `ask_question` 控制请求后，能走回答 / 取消两条回环并让 turn 正常收口 | LLM 首轮返回 `ask_question` tool call → 宿主回 `control_response` 或 `control_cancel` → 继续下轮 LLM | `control_request{subtype=ask_question}` 含稳定 `requestId`；回答/取消都能触发后续 LLM 请求并最终收敛到 `agent_end`，不得卡死 |
 | E2E-CLI-100 | 自动 | `serve_parse_error_does_not_break_following_initialize`；`serve_eof_exits_cleanly`；`serve_print_schema_matches_fixture` | 宿主面对坏输入、EOF 与 schema 导出时获得可恢复且可审计的行为 | 发送坏行 → 再 `initialize`；或直接 EOF；或执行 `serve --print-schema` | 坏行返回结构化 `parse_error` 且不打断后续初始化；EOF 干净退出无 panic；`serve.schema.json` / `serve.d.ts` 与 committed fixture 无漂移 |
+| E2E-CLI-101 | 自动 | `serve_prompt_with_attachment_roundtrip` | 宿主通过 `prompt.params.attachments` 发送多模态输入时，serve 能把附件装配进真实回合而不是降级成纯文本 | `initialize` → `prompt{text, params.attachments}`（`image`/`file` 任选其一）→ 等待回合收口 | 首轮命令被接受；下行仍是纯 NDJSON；附件经 `ChatMessage::user_with_parts(...)` 进入 agent 回合，最终正常收敛到 `agent_end` |
 
 ---
 

@@ -12,8 +12,8 @@
 #   ./scripts/run-integration-tests.sh integration          # 并发组 + 串行组
 #   ./scripts/run-integration-tests.sh integration-parallel # 仅可并发的 integration crate
 #   ./scripts/run-integration-tests.sh integration-serial   # 仅必须串行的 integration crate
-#   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM E2E（需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY）
-#   ./scripts/run-integration-tests.sh integration-openai-responses-wire # 只跑 OpenAI Responses wire 真链路组
+#   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM E2E（需当前 OpenAI target 对应 key + DEEPSEEK_API_KEY + MIMO_API_KEY）
+#   ./scripts/run-integration-tests.sh integration-openai-responses-wire # 只跑 OpenAI Responses wire 真链路组（需当前 OpenAI target 对应 key）
 #
 # 未知子命令：打印用法并 exit 2。
 set -e
@@ -41,6 +41,34 @@ build_test_args() {
     printf '%s\n' "--test"
     printf '%s\n' "$test_name"
   done
+}
+
+openai_responses_target() {
+  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-gpt-5.4_litellm-sunmi}"
+}
+
+openai_responses_key_env() {
+  local target
+  target="$(openai_responses_target)"
+  if [ "$target" = "gpt-5.4" ]; then
+    printf '%s' "OPENAI_API_KEY"
+  else
+    printf '%s' "LITELLM_SUNMI_API_KEY"
+  fi
+}
+
+missing_required_envs_for_real_llm() {
+  local openai_key_env
+  openai_key_env="$(openai_responses_key_env)"
+  if [ -z "${!openai_key_env}" ]; then
+    printf '%s\n' "$openai_key_env"
+  fi
+  if [ -z "$DEEPSEEK_API_KEY" ]; then
+    printf '%s\n' "DEEPSEEK_API_KEY"
+  fi
+  if [ -z "$MIMO_API_KEY" ]; then
+    printf '%s\n' "MIMO_API_KEY"
+  fi
 }
 
 run_release() {
@@ -106,15 +134,24 @@ run_integration() {
 }
 
 run_integration_real_llm() {
-  if [ -z "$OPENAI_API_KEY" ]; then
-    echo "跳过 integration-real-llm：未设置 OPENAI_API_KEY（新增 DeepSeek target 时还需 DEEPSEEK_API_KEY）" >&2
+  local openai_key_env
+  openai_key_env="$(openai_responses_key_env)"
+  local missing=()
+  local env_name
+  while IFS= read -r env_name; do
+    if [ -n "$env_name" ]; then
+      missing+=("$env_name")
+    fi
+  done < <(missing_required_envs_for_real_llm)
+  if [ "${#missing[@]}" -ne 0 ]; then
+    echo "跳过 integration-real-llm：未设置 ${missing[*]}（当前 OpenAI target=$(openai_responses_target)）" >&2
     return 0
   fi
   local args=()
   while IFS= read -r arg; do
     args+=("$arg")
   done < <(build_test_args "${TOMCAT_INTEGRATION_REAL_LLM_TESTS[@]}")
-  log_phase "开始 integration-real-llm（真 LLM E2E；串行，需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY）"
+  log_phase "开始 integration-real-llm（真 LLM E2E；串行，需 ${openai_key_env} + DEEPSEEK_API_KEY + MIMO_API_KEY）"
   cargo test -j 1 --no-fail-fast "${args[@]}" -- --nocapture --test-threads=1
   local status=$?
   log_phase "结束 integration-real-llm"
@@ -124,6 +161,12 @@ run_integration_real_llm() {
 run_integration_openai_responses_wire() {
   if [ "${#TOMCAT_INTEGRATION_OPENAI_RESPONSES_WIRE_COMMANDS[@]}" -eq 0 ]; then
     log_phase "跳过 integration-openai-responses-wire：当前未配置命令"
+    return 0
+  fi
+  local openai_key_env
+  openai_key_env="$(openai_responses_key_env)"
+  if [ -z "${!openai_key_env}" ]; then
+    log_phase "跳过 integration-openai-responses-wire：当前 OpenAI target=$(openai_responses_target) 未设置 ${openai_key_env}"
     return 0
   fi
 
@@ -193,7 +236,7 @@ case "$CMD" in
   *)
     echo "用法: $0 [release|clippy|lib|integration|integration-parallel|integration-serial|integration-real-llm|integration-openai-responses-wire|all|-h]" >&2
     echo "  默认与 all：release → clippy → lib → integration-parallel → integration-serial" >&2
-    echo "  integration-real-llm 需 OPENAI_API_KEY；部分 target 还需 DEEPSEEK_API_KEY；不进 all，须显式触发" >&2
+    echo "  integration-real-llm 需当前 OpenAI target 对应 key + DEEPSEEK_API_KEY + MIMO_API_KEY；不进 all，须显式触发" >&2
     exit 2
     ;;
 esac

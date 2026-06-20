@@ -621,7 +621,7 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
             entries.iter().any(|entry| matches!(
                 entry,
                 TranscriptEntry::ModelChange(change)
-                    if change.provider.as_deref() == Some("openai")
+                    if change.provider.as_deref() == Some("deepseek")
                         && change.model_id.as_deref() == Some(switched_model.as_str())
             )),
             "切 model 应写入 model_change transcript 事件"

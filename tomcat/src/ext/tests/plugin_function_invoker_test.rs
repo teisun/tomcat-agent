@@ -718,21 +718,21 @@ async fn official_web_search_backend_function_maps_mimo_annotations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn official_web_search_backend_function_auto_prefers_mimo_from_config() {
+async fn official_web_search_backend_function_auto_uses_first_backend_from_config_order() {
     let plugin_dir = builtin_web_search_backends_fixture_with_main_suffix(
         r#"
 searchWithMimo = async function (req) {
   return {
     backend: req.backend,
     hits: [{ title: "MiMo", url: "https://mimo.example.com" }],
-    warnings: ["auto_prefers_mimo"]
+    warnings: ["auto_reached_mimo_fallback"]
   };
 };
 searchWithTavily = async function (req) {
   return {
     backend: req.backend,
     hits: [{ title: "Tavily", url: "https://tavily.example.com" }],
-    warnings: []
+    warnings: ["auto_prefers_tavily"]
   };
 };
 backends.mimo = searchWithMimo;
@@ -773,13 +773,13 @@ backends.tavily = searchWithTavily;
         .await
         .expect("builtin web_search function call");
 
-    assert_eq!(result["backend"], "mimo");
-    assert_eq!(result["hits"][0]["url"], json!("https://mimo.example.com"));
+    assert_eq!(result["backend"], "tavily");
+    assert_eq!(result["hits"][0]["url"], json!("https://tavily.example.com"));
     assert!(result["warnings"]
         .as_array()
         .expect("warnings array")
         .iter()
-        .any(|warning| warning == "auto_prefers_mimo"));
+        .any(|warning| warning == "auto_prefers_tavily"));
 
     manager.end_session("s1").await.expect("end session");
 }

@@ -115,8 +115,8 @@
 | 字段           | JSON 类型 | 必填  | 默认值 | 适用场景                                                                | 说明                                                                              | 说人话         |
 | ------------ | ------- | --- | --- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ----------- |
 | `type`       | string  | 是   | —   | 全部                                                                  | `control_request`(server→UI) / `control_response`(UI→server) / `control_cancel` | 控制帧三态。      |
-| `request_id` | string  | 是   | —   | 全部                                                                  | 请求/响应**全局唯一**配对键（回包只认它，不靠 sessionId 路由）                                         | 哪个请求的答复。    |
-| `sessionId`  | string  | 条件  | —   | `ask_question`/`permission` 等会话级控制；`initialize` 不带（连接级） | 控制请求归属的会话，供 UI 展示分流；回包可省（用 `request_id` 即可）                                     | 这条控制属于哪个会话。 |
+| `requestId`  | string  | 是   | —   | 全部                                                                  | 请求/响应**全局唯一**配对键（回包只认它，不靠 sessionId 路由）                                         | 哪个请求的答复。    |
+| `sessionId`  | string  | 条件  | —   | `ask_question`/`permission` 等会话级控制；`initialize` 不带（连接级） | 控制请求归属的会话，供 UI 展示分流；回包可省（用 `requestId` 即可）                                     | 这条控制属于哪个会话。 |
 | `subtype`    | string  | 是   | —   | `control_request`                                                   | `initialize` / `ask_question` / `permission`                                    | 这条控制要干嘛。    |
 | `payload`    | object  | 条件  | —   | 按 subtype                                                           | `ask_question` 即 `AskQuestionWireRequest`；响应即 `AskQuestionWireResponse`         | 控制的具体内容/回包。 |
 
@@ -125,14 +125,14 @@
 
 ```jsonc
 // ── UI → agent（stdin）──
-{"type":"control_request","subtype":"initialize","request_id":"init-0","payload":{"clientInfo":{"name":"tomcat-vscode","version":"0.1.0"}}}
+{"type":"control_request","subtype":"initialize","requestId":"init-0","payload":{"clientInfo":{"name":"tomcat-vscode","version":"0.1.0"}}}
 {"type":"new_session","id":"n1"}                         // 开会话 s1
 {"type":"prompt","id":"c1","sessionId":"s1","text":"重构 src/main.rs 并跑测试"}
 {"type":"new_session","id":"n2"}                         // 再开一个 tab：s2
 {"type":"prompt","id":"c2","sessionId":"s2","text":"给 src/lib.rs 写文档注释"}
 
 // ── agent → UI（stdout，节选，每行一帧；s1/s2 事件交错，靠 sessionId demux）──
-{"type":"control_response","request_id":"init-0","payload":{"protocolVersion":1,"capabilities":["prompt","interrupt","ask_question","new_session"]}}
+{"type":"control_response","requestId":"init-0","payload":{"protocolVersion":1,"capabilities":["prompt","interrupt","ask_question","new_session"]}}
 {"type":"response","id":"n1","success":true,"sessionId":"s1"}
 {"type":"agent_start","sessionId":"s1"}
 {"type":"response","id":"n2","success":true,"sessionId":"s2"}
@@ -143,10 +143,10 @@
 {"type":"tool_execution_end","sessionId":"s1","toolCallId":"call_1","toolName":"read","isError":false,"result":{"lines":238}}
 
 // ── s1 的危险工具触发审批（control_request 带 sessionId）；此时 s2 不受影响仍可流式 ──
-{"type":"control_request","subtype":"ask_question","request_id":"askq-0","sessionId":"s1","payload":{"requestId":"askq-0","responseEvent":"plan.ask_question.response.askq-0","questions":[{"prompt":"允许执行 cargo build 吗？","options":[{"id":"yes","label":"同意"},{"id":"no","label":"拒绝"}]}]}}
+{"type":"control_request","subtype":"ask_question","requestId":"askq-0","sessionId":"s1","payload":{"requestId":"askq-0","responseEvent":"plan.ask_question.response.askq-0","questions":[{"prompt":"允许执行 cargo build 吗？","options":[{"id":"yes","label":"同意"},{"id":"no","label":"拒绝"}]}]}}
 {"type":"message_update","sessionId":"s2","assistantMessageEvent":{"kind":"content_delta","delta":"…的核心入口。"}}   // s1 等审批时 s2 照跑
-// ── UI → agent control_response（request_id 全局唯一，sessionId 仅用于 UI 归属）──
-{"type":"control_response","request_id":"askq-0","payload":{"requestId":"askq-0","result":{"answers":[{"questionId":"0","optionId":"yes"}],"cancelled":false}}}
+// ── UI → agent control_response（requestId 全局唯一，sessionId 仅用于 UI 归属）──
+{"type":"control_response","requestId":"askq-0","payload":{"requestId":"askq-0","result":{"answers":[{"questionId":"0","optionIds":["yes"]}],"cancelled":false}}}
 
 {"type":"agent_end","sessionId":"s2","messages":[]}
 {"type":"agent_end","sessionId":"s1","messages":[]}

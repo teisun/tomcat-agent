@@ -250,17 +250,19 @@ return {
 };
 "#,
     );
-    assert_eq!(actual["calls"], json!(["mimo", "tavily"]));
+    assert_eq!(actual["calls"], json!(["tavily"]));
     assert_eq!(actual["result"]["backend"], json!("tavily"));
     assert_eq!(
         actual["result"]["hits"][0]["url"],
         json!("https://docs.rs/reqwest")
     );
-    assert!(actual["result"]["warnings"]
-        .as_array()
-        .expect("warnings array")
-        .iter()
-        .any(|warning| warning == "backend_unavailable:mimo, fallback=tavily"));
+    assert!(
+        actual["result"]["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .is_empty(),
+        "tavily is first in autoOrder, so auto should not fall through first: {actual}"
+    );
 }
 
 #[tokio::test]

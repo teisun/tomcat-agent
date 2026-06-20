@@ -1,7 +1,18 @@
+//! `tomcat serve` 的 stdio 传输层与会话调度层。
+//!
+//! Phase 1 负责：
+//! - `tomcat serve --stdio` 的命令/控制/事件帧编排
+//! - 多会话 `sessionId` 路由
+//! - `ask_question` 回环桥接
+//! - schema / TypeScript 工件导出
+//!
+//! `AgentLoop`、`EventBus`、`ChatContext` 等核心能力保持复用，避免在传输层复制业务逻辑。
+
 pub mod ask_question;
 pub mod commands;
 pub mod control;
 pub mod event_pump;
+mod fanout_event_bus;
 pub mod ndjson;
 pub mod registry;
 pub mod schema;
@@ -12,6 +23,9 @@ pub mod writer;
 #[cfg(test)]
 mod test_support;
 
+#[cfg(test)]
+mod tests;
+
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -19,12 +33,14 @@ use std::sync::Arc;
 use crate::api::chat::run_chat_turn_with_message;
 use crate::api::chat::{ChatContext, ChatContextOverrides};
 use crate::core::llm::ChatMessage;
+use crate::core::agent_registry::AgentRegistry;
 use crate::{
     ensure_work_dir_structure, resolve_sessions_dir, session_key_for_agent, AppConfig, AppError,
     SessionManager, SessionMode,
 };
 
 use ask_question::ServeAskQuestionBridge;
+use fanout_event_bus::FanoutEventBus;
 use registry::{ChatContextRegistry, SessionSlot, SessionTurnState};
 use types::{NewSessionParams, ServeSessionMode};
 use writer::{WriterConfig, WriterHandle};
@@ -41,6 +57,8 @@ pub(crate) struct ServeState {
     pub registry: Arc<ChatContextRegistry>,
     pub writer: WriterHandle,
     pub ask_question: ServeAskQuestionBridge,
+    pub shared_agent_registry: Arc<AgentRegistry>,
+    pub shared_event_bus: Arc<FanoutEventBus>,
     pub initialized: AtomicBool,
 }
 
@@ -48,11 +66,15 @@ impl ServeState {
     fn new(cfg: AppConfig, writer: WriterHandle) -> Arc<Self> {
         let registry = Arc::new(ChatContextRegistry::new(cfg.serve.max_sessions));
         let ask_question = ServeAskQuestionBridge::new(writer.clone());
+        let shared_event_bus = Arc::new(FanoutEventBus::new());
+        let shared_agent_registry = AgentRegistry::new().attach_event_bus(shared_event_bus.clone());
         Arc::new(Self {
             cfg,
             registry,
             writer,
             ask_question,
+            shared_agent_registry,
+            shared_event_bus,
             initialized: AtomicBool::new(false),
         })
     }
@@ -137,8 +159,12 @@ pub(crate) async fn create_session_slot(
 
     let overrides = ChatContextOverrides::default()
         .suppress_cli_output()
+        .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
         .with_session_cwd_override(cwd_path.clone());
     let ctx = ChatContext::from_config_with_mode_and_overrides(state.cfg.clone(), mode, overrides)?;
+    state
+        .shared_event_bus
+        .register_session_bus(current_entry.session_id.clone(), ctx.global_services.event_bus.clone());
     let ask_panel = state.ask_question.panel_for_session(
         ctx.global_services.event_bus.clone(),
         &current_entry.session_id,
@@ -192,13 +218,8 @@ pub(crate) fn register_slot_hooks(state: &ServeState, slot: &Arc<SessionSlot>) {
 pub(crate) async fn run_slot_turn(
     slot: Arc<SessionSlot>,
     input_message: ChatMessage,
+    turn_token: tokio_util::sync::CancellationToken,
 ) -> Result<crate::AgentRunOutcome, AppError> {
-    let turn_token = {
-        let mut guard = slot.ctx.session_runtime.cancel_token.lock();
-        *guard = tokio_util::sync::CancellationToken::new();
-        guard.clone()
-    };
-
     let (mut context_state, system_text, context_budget_chars) = {
         let mut guard = slot.turn_state.lock();
         let state = guard

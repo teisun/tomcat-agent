@@ -4,10 +4,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::oneshot;
 
-use crate::core::plan_runtime::panels::{AskQuestionPanel, AskQuestionResult, Question};
+use crate::core::plan_runtime::panels::{
+    Answer, AskQuestionPanel, AskQuestionResult, Question, QuestionOption,
+};
 use crate::infra::{wire, EventBus, ScopedEventEmitter};
 
 const CANCEL_POLL_MS: Duration = Duration::from_millis(10);
@@ -18,17 +20,193 @@ const CANCEL_POLL_MS: Duration = Duration::from_millis(10);
 /// - request event 固定为 `plan.ask_question`
 /// - response event 由 request payload 携带，约定仍以 `plan.ask_question` 为前缀
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AskQuestionWireRequest {
+    #[serde(alias = "request_id")]
     pub request_id: String,
+    #[serde(alias = "response_event")]
     pub response_event: String,
+    #[serde(with = "wire_questions")]
     pub questions: Vec<Question>,
 }
 
 /// 宿主回包；未来 IDE host 与测试 mock host 都按此结构回复。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AskQuestionWireResponse {
+    #[serde(alias = "request_id")]
     pub request_id: String,
+    #[serde(with = "wire_result")]
     pub result: AskQuestionResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireQuestion {
+    id: String,
+    prompt: String,
+    options: Vec<WireQuestionOption>,
+}
+
+impl From<Question> for WireQuestion {
+    fn from(value: Question) -> Self {
+        Self {
+            id: value.id,
+            prompt: value.prompt,
+            options: value.options.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<WireQuestion> for Question {
+    fn from(value: WireQuestion) -> Self {
+        Self {
+            id: value.id,
+            prompt: value.prompt,
+            options: value.options.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireQuestionOption {
+    id: String,
+    label: String,
+    #[serde(default)]
+    recommended: bool,
+}
+
+impl From<QuestionOption> for WireQuestionOption {
+    fn from(value: QuestionOption) -> Self {
+        Self {
+            id: value.id,
+            label: value.label,
+            recommended: value.recommended,
+        }
+    }
+}
+
+impl From<WireQuestionOption> for QuestionOption {
+    fn from(value: WireQuestionOption) -> Self {
+        Self {
+            id: value.id,
+            label: value.label,
+            recommended: value.recommended,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireAnswer {
+    #[serde(alias = "question_id")]
+    question_id: String,
+    #[serde(alias = "option_ids")]
+    option_ids: Vec<String>,
+    #[serde(default, alias = "custom_text", skip_serializing_if = "Option::is_none")]
+    custom_text: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    skipped: bool,
+    #[serde(alias = "picked_recommended")]
+    picked_recommended: bool,
+}
+
+impl From<Answer> for WireAnswer {
+    fn from(value: Answer) -> Self {
+        Self {
+            question_id: value.question_id,
+            option_ids: value.option_ids,
+            custom_text: value.custom_text,
+            skipped: value.skipped,
+            picked_recommended: value.picked_recommended,
+        }
+    }
+}
+
+impl From<WireAnswer> for Answer {
+    fn from(value: WireAnswer) -> Self {
+        Self {
+            question_id: value.question_id,
+            option_ids: value.option_ids,
+            custom_text: value.custom_text,
+            skipped: value.skipped,
+            picked_recommended: value.picked_recommended,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WireAskQuestionResult {
+    answers: Vec<WireAnswer>,
+    #[serde(default)]
+    cancelled: bool,
+}
+
+impl From<AskQuestionResult> for WireAskQuestionResult {
+    fn from(value: AskQuestionResult) -> Self {
+        Self {
+            answers: value.answers.into_iter().map(Into::into).collect(),
+            cancelled: value.cancelled,
+        }
+    }
+}
+
+impl From<WireAskQuestionResult> for AskQuestionResult {
+    fn from(value: WireAskQuestionResult) -> Self {
+        Self {
+            answers: value.answers.into_iter().map(Into::into).collect(),
+            cancelled: value.cancelled,
+        }
+    }
+}
+
+mod wire_questions {
+    use super::*;
+
+    pub fn serialize<S>(questions: &[Question], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let wire = questions
+            .iter()
+            .cloned()
+            .map(WireQuestion::from)
+            .collect::<Vec<_>>();
+        wire.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<Question>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = Vec::<WireQuestion>::deserialize(deserializer)?;
+        Ok(wire.into_iter().map(Question::from).collect())
+    }
+}
+
+mod wire_result {
+    use super::*;
+
+    pub fn serialize<S>(result: &AskQuestionResult, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        WireAskQuestionResult::from(result.clone()).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<AskQuestionResult, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = WireAskQuestionResult::deserialize(deserializer)?;
+        Ok(wire.into())
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub fn ask_question_request_event_name() -> &'static str {

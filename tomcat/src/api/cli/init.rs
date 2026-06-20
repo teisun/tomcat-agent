@@ -4,9 +4,9 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::{
-    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config, load_store,
-    normalize_path, resolve_sessions_dir, validate_config, AppConfig, AppError, PluginEngine,
-    DEFAULT_LLM_MODEL,
+    ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config,
+    load_config_for_init, load_store, normalize_path, resolve_sessions_dir, validate_config,
+    AppConfig, AppError, PluginEngine, DEFAULT_LLM_MODEL,
 };
 
 use super::DEFAULT_CONFIG_PATH;
@@ -26,7 +26,7 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     }
 
     let mut cfg = if config_existed {
-        crate::load_config(Some(&config_file))?
+        load_config_for_init(Some(&config_file))?
     } else {
         let llm = crate::LlmConfig {
             default_model: DEFAULT_LLM_MODEL.to_string(),
@@ -37,6 +37,7 @@ pub(crate) fn run_init() -> Result<(), AppError> {
             ..Default::default()
         }
     };
+    let models_toml_status = crate::api::cli::models_toml::ensure_default_models_toml(&cfg)?;
     let model_catalog = crate::core::llm::ModelCatalog::load(&cfg)?;
     let model_choice =
         crate::api::cli::init_model_wizard::run_model_wizard(&mut cfg, &model_catalog)?;
@@ -67,7 +68,7 @@ pub(crate) fn run_init() -> Result<(), AppError> {
         println!("  ✓ sessions.json 已保留（{} 个历史会话）", store.len());
     }
 
-    match crate::api::cli::models_toml::ensure_default_models_toml(&cfg)? {
+    match models_toml_status {
         crate::api::cli::models_toml::ModelsTomlStatus::Created { added_model_ids } => {
             println!(
                 "  ✓ 已生成模型清单 models.toml（含 {}）",

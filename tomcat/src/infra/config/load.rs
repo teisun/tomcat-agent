@@ -22,6 +22,20 @@ use super::types::AppConfig;
 /// # Errors
 /// * [`AppError::Config`] - 配置文件解析失败或反序列化到 [`AppConfig`] 失败时返回。
 pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, AppError> {
+    load_config_impl(config_path, true)
+}
+
+/// 为 `tomcat init` 加载配置：保留环境变量合并，但跳过 legacy 连接字段拒绝。
+///
+/// 这样旧单模型配置用户仍可进入 init 交互流程，把连接信息迁移到 `models.toml`。
+pub fn load_config_for_init(config_path: Option<&std::path::Path>) -> Result<AppConfig, AppError> {
+    load_config_impl(config_path, false)
+}
+
+fn load_config_impl(
+    config_path: Option<&std::path::Path>,
+    reject_legacy_keys: bool,
+) -> Result<AppConfig, AppError> {
     // 安全护栏（plan §5）：敏感 env vars 必须由 TOML 主导，不允许 env 覆盖。
     // 若 TOML 文件存在且声明了对应 key，则在 layered.build 之前 unset env，
     // 防止 shell 中误设的 `TOMCAT__SECURITY__*` / `TOMCAT__LLM__API_KEY*`
@@ -31,7 +45,9 @@ pub fn load_config(config_path: Option<&std::path::Path>) -> Result<AppConfig, A
     let mut builder = ::config::Config::builder();
     if let Some(p) = config_path {
         if p.exists() {
-            reject_legacy_whitelist_keys(p)?;
+            if reject_legacy_keys {
+                reject_legacy_whitelist_keys(p)?;
+            }
             builder = builder.add_source(::config::File::from(p));
         }
     }

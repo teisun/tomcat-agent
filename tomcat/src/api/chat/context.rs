@@ -49,6 +49,7 @@ pub struct ChatContext {
 pub struct ChatContextOverrides {
     pub ask_question_panel: Option<Arc<dyn panels::AskQuestionPanel>>,
     pub fetch_http_client: Option<reqwest::Client>,
+    pub shared_agent_registry: Option<Arc<crate::core::agent_registry::AgentRegistry>>,
     pub skip_session_plugin_activation: bool,
     pub suppress_cli_output: bool,
     pub session_cwd_override: Option<std::path::PathBuf>,
@@ -62,6 +63,14 @@ impl ChatContextOverrides {
 
     pub fn with_fetch_http_client(mut self, client: reqwest::Client) -> Self {
         self.fetch_http_client = Some(client);
+        self
+    }
+
+    pub fn with_shared_agent_registry(
+        mut self,
+        registry: Arc<crate::core::agent_registry::AgentRegistry>,
+    ) -> Self {
+        self.shared_agent_registry = Some(registry);
         self
     }
 
@@ -560,8 +569,9 @@ impl ChatContext {
         plan_runtime.register_todos_panel(Arc::new(panels::CliTodosPanel));
         plan_runtime.attach_ask_question_panel(ask_question_panel);
 
-        let agent_registry =
-            crate::core::agent_registry::AgentRegistry::new().attach_event_bus(event_bus.clone());
+        let agent_registry = overrides.shared_agent_registry.unwrap_or_else(|| {
+            crate::core::agent_registry::AgentRegistry::new().attach_event_bus(event_bus.clone())
+        });
         let root_agent_guard = agent_registry
             .register_root(current_session_entry.session_id.clone())
             .map_err(|e| AppError::Config(format!("agent_registry root register 失败: {e}")))?;

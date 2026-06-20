@@ -347,10 +347,14 @@ async fn build_initialized_state_with_provider(
 
     let overrides = ChatContextOverrides::default()
         .suppress_cli_output()
+        .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
         .with_session_cwd_override(cwd_path.clone());
     let mut ctx =
         ChatContext::from_config_with_mode_and_overrides(cfg.clone(), SessionMode::Code, overrides)
             .expect("chat context");
+    state
+        .shared_event_bus
+        .register_session_bus(current_entry.session_id.clone(), ctx.global_services.event_bus.clone());
     let ask_panel = state.ask_question.panel_for_session(
         ctx.global_services.event_bus.clone(),
         &current_entry.session_id,

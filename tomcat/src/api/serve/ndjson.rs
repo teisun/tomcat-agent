@@ -1,3 +1,5 @@
+//! NDJSON 序列化与命令反序列化工具。
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -14,6 +16,7 @@ pub fn ndjson_safe_stringify<T: Serialize>(value: &T) -> Result<String, AppError
 pub fn parse_command_line(line: &str) -> Result<super::types::ServeCommand, AppError> {
     let value: Value =
         serde_json::from_str(line).map_err(|error| AppError::Config(format!("parse_error: {error}")))?;
+    reject_explicit_null_session_id(&value)?;
     if let Some(command_type) = value.get("type").and_then(Value::as_str) {
         if !matches!(
             command_type,
@@ -38,30 +41,17 @@ pub fn parse_command_line(line: &str) -> Result<super::types::ServeCommand, AppE
     serde_json::from_value(value).map_err(|error| AppError::Config(format!("parse_error: {error}")))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn ndjson_safe_stringify_escapes_line_separators() {
-        let frame = json!({ "text": "a\u{2028}b\u{2029}c" });
-        let rendered = ndjson_safe_stringify(&frame).unwrap();
-        assert!(rendered.contains("\\u2028"));
-        assert!(rendered.contains("\\u2029"));
-        assert!(!rendered.contains('\u{2028}'));
-        assert!(!rendered.contains('\u{2029}'));
+fn reject_explicit_null_session_id(value: &Value) -> Result<(), AppError> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    if object
+        .get("sessionId")
+        .is_some_and(serde_json::Value::is_null)
+    {
+        return Err(AppError::Config(
+            "invalid_request: sessionId must be omitted or a string".to_string(),
+        ));
     }
-
-    #[test]
-    fn parse_command_line_rejects_bad_json() {
-        let err = parse_command_line("{bad json").unwrap_err();
-        assert!(err.to_string().contains("parse_error"));
-    }
-
-    #[test]
-    fn parse_command_line_rejects_unknown_command_type() {
-        let err = parse_command_line(r#"{"type":"mystery","id":"u1"}"#).unwrap_err();
-        assert_eq!(err.to_string(), "unknown_command: mystery");
-    }
+    Ok(())
 }

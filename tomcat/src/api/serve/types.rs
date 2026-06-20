@@ -1,9 +1,18 @@
+//! `tomcat serve` 的协议类型定义。
+//!
+//! 这里集中承载：
+//! - UI -> agent 的命令帧
+//! - 双向控制帧
+//! - agent -> UI 的响应/事件信封
+//! - schema 导出所需的 `schemars` 派生
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::infra::events::WireEvent;
 
+/// `prompt` / `follow_up` 附件的逻辑类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ServeAttachmentKind {
@@ -11,6 +20,7 @@ pub enum ServeAttachmentKind {
     File,
 }
 
+/// 多模态消息中的单个附件描述。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ServeAttachment {
@@ -23,6 +33,7 @@ pub struct ServeAttachment {
     pub file_id: Option<String>,
 }
 
+/// 发送给 `prompt` / `follow_up` / `steer` 的附加参数。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ServeMessageParams {
@@ -36,6 +47,7 @@ impl ServeMessageParams {
     }
 }
 
+/// 新会话的运行模式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ServeSessionMode {
@@ -52,6 +64,7 @@ impl ServeSessionMode {
     }
 }
 
+/// `new_session` 的可选参数。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSessionParams {
@@ -61,6 +74,7 @@ pub struct NewSessionParams {
     pub mode: Option<ServeSessionMode>,
 }
 
+/// `get_messages` 的分页/裁剪参数。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GetMessagesParams {
@@ -70,6 +84,7 @@ pub struct GetMessagesParams {
     pub limit: Option<usize>,
 }
 
+/// UI 通过 stdin 发送给 `tomcat serve` 的命令帧。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServeCommand {
@@ -261,6 +276,7 @@ impl ServeCommand {
     }
 }
 
+/// 普通命令的 ack / error 响应。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ResponseFrame {
@@ -278,6 +294,7 @@ pub struct ResponseFrame {
 }
 
 impl ResponseFrame {
+    /// 构造成功响应。
     pub fn ok(id: Option<String>, session_id: Option<String>, payload: Option<Value>) -> Self {
         Self {
             frame_type: "response".to_string(),
@@ -289,6 +306,7 @@ impl ResponseFrame {
         }
     }
 
+    /// 构造失败响应。
     pub fn error(id: Option<String>, session_id: Option<String>, error: impl Into<String>) -> Self {
         Self {
             frame_type: "response".to_string(),
@@ -301,6 +319,7 @@ impl ResponseFrame {
     }
 }
 
+/// 审批、初始化与取消等双向控制帧。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlFrame {
@@ -395,6 +414,7 @@ impl ControlFrame {
     }
 }
 
+/// writer 下行队列里的统一帧类型。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum OutFrame {
