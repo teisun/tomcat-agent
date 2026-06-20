@@ -1,6 +1,11 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Cursor | 2026-06-20 20:29 +0800 | ACTIVE | develop | — |
+| Cursor | 2026-06-20 21:05 +0800 | ACTIVE | develop | — |
+
+### 2026-06-20 | chore: 发布版本号 0.1.7
+
+- **变更**：`tomcat/Cargo.toml` 与 `Cargo.lock` 将 crate 版本从 `0.1.6` 升至 `0.1.7`。
+- **原因**：`feature/agent-server-ui-gateway` 已合入 `develop` 并完成验收，主线版本号与当前集成状态对齐，便于后续 release / install 脚本引用。
 
 ### 2026-06-20 | merge `feature/agent-server-ui-gateway` → develop（T2-P1-018 集成验收）
 
