@@ -1,6 +1,13 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Cursor | 2026-06-17 12:22 +0800 | ACTIVE | develop | — |
+| Cursor | 2026-06-20 20:29 +0800 | ACTIVE | develop | — |
+
+### 2026-06-20 | merge `feature/agent-server-ui-gateway` → develop（T2-P1-018 集成验收）
+
+- **合并范围**：已将 `feature/agent-server-ui-gateway` 快进合入 `develop`（feature 头提交 `99a720f`），带入 `tomcat serve` 多会话 stdio gateway、共享 `AgentRegistry` + `FanoutEventBus`、writer backpressure 改造、`ask_question` camelCase wire、`init/models.toml` 迁移、schema / `.d.ts` 工件、多模态附件 roundtrip，以及对应 tests / docs / VSCode 扩展架构文档同步。
+- **develop 侧验收**：clean env `./scripts/run-integration-tests.sh all` 全绿；live 组按 `set -a && source .env && set +a && NO_PROXY=aigateway.sunmi.com no_proxy=aigateway.sunmi.com ...` 口径复跑 `integration-real-llm` 与 `integration-openai-responses-wire`，均通过。
+- **网络口径**：本机已接入内网时，`aigateway.sunmi.com` 应走 `NO_PROXY` 直连，不再经本地 `127.0.0.1:7890` 代理；否则 `responses_inline_image_describe_roundtrip` 可能返回 HTML `403 Forbidden`。同口径下 `responses_inline_pdf_input_file_summarize_roundtrip` 记录过 1 次瞬时“未看到附件”的 live 抖动，但原文件级复跑与脚本重试均转绿，已同步到验收文档。
+- **状态台账**：`T2-P1-018` 已从 `PENDING_INTEGRATION` 更新为 `DONE`。未推送远端。
 
 ### 2026-06-17 | merge `feature/host-functions-point-override` → develop（Nibbles 集成验收）
 
