@@ -21,7 +21,7 @@ async function emitState(frame: HostToWebviewFrame) {
 }
 
 describe("Tomcat webview App", () => {
-  it("renders messages, tools, approvals, and session tabs from state", async () => {
+  it("renders transcript timeline, plan UI, attachments, and context ratio", async () => {
     mount();
 
     await emitState({
@@ -42,8 +42,56 @@ describe("Tomcat webview App", () => {
         ],
         sessionViews: {
           s1: {
-            approvals: [
+            busy: false,
+            conflictMessage: null,
+            contextRatio: 0.42,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [
               {
+                attachment: {
+                  dataBase64: "YWJj",
+                  kind: "file",
+                  mimeType: "text/markdown",
+                },
+                id: "att-1",
+                kind: "file",
+                label: "README.md",
+                mimeType: "text/markdown",
+                path: "/workspace/README.md",
+              },
+            ],
+            planFile: {
+              path: "/workspace/login-refactor.plan.md",
+              planId: "plan-1",
+              state: "planning",
+            },
+            planId: "plan-1",
+            planState: "planning",
+            sessionId: "s1",
+            timeline: [
+              { id: "m1", kind: "assistant", text: "hello", type: "message" },
+              { id: "m2", text: "thinking...", type: "thinking" },
+              {
+                display: { file: "src/app.ts", kind: "file" },
+                id: "tool-card-1",
+                isError: false,
+                status: "complete",
+                summary: "updated file",
+                toolCallId: "tool-1",
+                toolName: "edit",
+                type: "tool",
+              },
+              {
+                id: "plan-card-1",
+                path: "/workspace/login-refactor.plan.md",
+                planId: "plan-1",
+                state: "planning",
+                type: "plan",
+              },
+              {
+                id: "approval-1",
                 request: {
                   questions: [
                     {
@@ -57,28 +105,7 @@ describe("Tomcat webview App", () => {
                 },
                 resolved: false,
                 sessionId: "s1",
-              },
-            ],
-            busy: false,
-            conflictMessage: null,
-            messages: [
-              { id: "m1", kind: "assistant", text: "hello" },
-              { id: "m2", kind: "thinking", text: "thinking..." },
-            ],
-            model: "gpt-5.4",
-            ownedByThisFrontend: true,
-            owner: "webview",
-            planId: "plan-1",
-            planState: "planning",
-            sessionId: "s1",
-            tools: [
-              {
-                display: { file: "src/app.ts", kind: "file" },
-                isError: false,
-                status: "complete",
-                summary: "updated file",
-                toolCallId: "tool-1",
-                toolName: "edit",
+                type: "approval",
               },
             ],
           },
@@ -89,21 +116,26 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByText("hello")).toBeTruthy();
+    expect(screen.queryByText("thinking...")).toBeNull();
+    fireEvent.click(screen.getByTestId("thinking-toggle"));
     expect(screen.getByText("thinking...")).toBeTruthy();
     expect(screen.getByText("Proceed?")).toBeTruthy();
     expect(screen.getByText("edit (complete)")).toBeTruthy();
-    expect(screen.getByTestId("session-tab").textContent).toContain("s1 *");
-    expect(screen.getByTestId("session-tab").textContent).toContain("(webview)");
+    expect(screen.getByTestId("session-option").textContent).toContain("s1");
+    expect(screen.getByTestId("plan-card").textContent).toContain("login-refactor.plan.md");
+    expect(screen.getByTestId("build-plan").textContent).toContain("Build");
+    expect(screen.getByTestId("attachment-chip").textContent).toContain("README.md");
+    expect(screen.getByTestId("context-ratio").textContent).toContain("Ctx 42%");
   });
 
-  it("posts prompt and approval intents", async () => {
+  it("posts prompt and composer action intents", async () => {
     const { postMessage } = mount();
 
     await emitState({
       channel: "state",
       content: {
         activeSessionId: "s1",
-        availableModels: ["gpt-5.4"],
+        availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
         ready: true,
         sessions: [
           {
@@ -117,8 +149,44 @@ describe("Tomcat webview App", () => {
         ],
         sessionViews: {
           s1: {
-            approvals: [
+            busy: false,
+            conflictMessage: null,
+            contextRatio: 0.42,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [
               {
+                attachment: {
+                  dataBase64: "YWJj",
+                  kind: "file",
+                  mimeType: "text/markdown",
+                },
+                id: "att-1",
+                kind: "file",
+                label: "README.md",
+                mimeType: "text/markdown",
+                path: "/workspace/README.md",
+              },
+            ],
+            planFile: {
+              path: "/workspace/login-refactor.plan.md",
+              planId: "plan-1",
+              state: "planning",
+            },
+            planId: null,
+            planState: "planning",
+            sessionId: "s1",
+            timeline: [
+              {
+                id: "plan-card-1",
+                path: "/workspace/login-refactor.plan.md",
+                planId: "plan-1",
+                state: "planning",
+                type: "plan",
+              },
+              {
+                id: "approval-1",
                 request: {
                   questions: [
                     {
@@ -132,18 +200,9 @@ describe("Tomcat webview App", () => {
                 },
                 resolved: false,
                 sessionId: "s1",
+                type: "approval",
               },
             ],
-            busy: false,
-            conflictMessage: null,
-            messages: [],
-            model: "gpt-5.4",
-            ownedByThisFrontend: true,
-            owner: "webview",
-            planId: null,
-            planState: "chat",
-            sessionId: "s1",
-            tools: [],
           },
         },
         uiMode: "both",
@@ -154,7 +213,17 @@ describe("Tomcat webview App", () => {
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: "send this" },
     });
-    fireEvent.click(screen.getByText("Send"));
+    fireEvent.click(screen.getByTestId("send-button"));
+    fireEvent.change(screen.getByTestId("model-select"), {
+      target: { value: "claude-4.6-sonnet" },
+    });
+    fireEvent.change(screen.getByTestId("mode-select"), {
+      target: { value: "chat" },
+    });
+    fireEvent.click(screen.getByLabelText("Add attachment"));
+    fireEvent.click(screen.getByTestId("attachment-chip"));
+    fireEvent.click(screen.getByLabelText("Open plan file"));
+    fireEvent.click(screen.getByTestId("build-plan"));
     fireEvent.click(screen.getByText("Yes (Recommended)"));
 
     expect(
@@ -168,6 +237,44 @@ describe("Tomcat webview App", () => {
         ([message]) =>
           message.type === "answerQuestion" &&
           message.data?.requestId === "r1",
+      ),
+    ).toBe(true);
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) =>
+          message.type === "setModel" &&
+          message.data?.modelId === "claude-4.6-sonnet",
+      ),
+    ).toBe(true);
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) =>
+          message.type === "setPlanMode" &&
+          message.data?.action === "exit",
+      ),
+    ).toBe(true);
+    expect(
+      postMessage.mock.calls.some(([message]) => message.type === "pickAttachment"),
+    ).toBe(true);
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) =>
+          message.type === "removeAttachment" &&
+          message.data?.attachmentId === "att-1",
+      ),
+    ).toBe(true);
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) =>
+          message.type === "openPlanFile" &&
+          message.data?.path === "/workspace/login-refactor.plan.md",
+      ),
+    ).toBe(true);
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) =>
+          message.type === "setPlanMode" &&
+          message.data?.action === "build",
       ),
     ).toBe(true);
   });
@@ -193,17 +300,18 @@ describe("Tomcat webview App", () => {
         ],
         sessionViews: {
           s1: {
-            approvals: [],
             busy: false,
             conflictMessage: null,
-            messages: [],
+            contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
             owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
             planId: null,
             planState: "chat",
             sessionId: "s1",
-            tools: [],
+            timeline: [],
           },
         },
         uiMode: "both",
@@ -246,17 +354,18 @@ describe("Tomcat webview App", () => {
         ],
         sessionViews: {
           "locked-session": {
-            approvals: [],
             busy: false,
             conflictMessage: "This session is currently owned by the Tomcat participant.",
-            messages: [],
+            contextRatio: null,
             model: null,
             ownedByThisFrontend: false,
             owner: "participant",
+            pendingAttachments: [],
+            planFile: null,
             planId: null,
             planState: "chat",
             sessionId: "locked-session",
-            tools: [],
+            timeline: [],
           },
         },
         uiMode: "both",

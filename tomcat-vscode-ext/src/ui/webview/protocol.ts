@@ -3,49 +3,97 @@ import type {
   AskQuestionWireRequest,
   ControlRequestFrame,
 } from "../../serveClient/protocol";
-import type { ServeEvent } from "../../serveClient/wire";
+import type { ServeAttachment, ServeEvent } from "../../serveClient/wire";
+import type { ParticipantPlanState } from "../participant/planState";
 
 export type TomcatUiMode = "both" | "participant" | "webview";
 export type FrontendOwnerKind = "participant" | "webview";
 
 export interface WebviewMessageBlock {
   id: string;
-  kind: "assistant" | "error" | "notice" | "thinking" | "user";
+  kind: "assistant" | "error" | "notice" | "user";
+  text: string;
+  type: "message";
+}
+
+export interface WebviewThinkingBlock {
+  id: string;
+  text: string;
+  type: "thinking";
+}
+
+export interface WebviewToolDisplayFile {
+  file: string;
+  kind: "file";
+}
+
+export interface WebviewToolDisplayPlan {
+  kind: "plan";
+  plan: string;
+}
+
+export interface WebviewToolDisplayText {
+  kind: "text";
   text: string;
 }
 
+export type WebviewToolDisplay =
+  | WebviewToolDisplayFile
+  | WebviewToolDisplayPlan
+  | WebviewToolDisplayText;
+
 export interface WebviewToolCard {
-  display?: {
-    file?: string;
-    kind: "file" | "plan" | "text";
-    plan?: string;
-    text?: string;
-  };
+  display?: WebviewToolDisplay;
+  id: string;
   isError: boolean;
   status: "complete" | "running" | "streaming";
   summary?: string;
   toolCallId: string;
   toolName: string;
+  type: "tool";
+}
+
+export interface WebviewPlanFileRef {
+  path: string;
+  planId?: string | null;
+  state: ParticipantPlanState | null;
+}
+
+export interface WebviewPlanFileCard extends WebviewPlanFileRef {
+  id: string;
+  type: "plan";
 }
 
 export interface WebviewApprovalCard {
+  id: string;
   request: AskQuestionWireRequest;
   resolved: boolean;
   sessionId?: string | null;
+  type: "approval";
+}
+
+export interface WebviewPendingAttachment {
+  attachment: ServeAttachment;
+  id: string;
+  kind: ServeAttachment["kind"];
+  label: string;
+  mimeType?: string | null;
+  path?: string | null;
 }
 
 export interface WebviewSessionSnapshot {
-  approvals: WebviewApprovalCard[];
   busy: boolean;
   conflictMessage?: string | null;
-  messages: WebviewMessageBlock[];
+  contextRatio?: number | null;
   model?: string | null;
   ownedByThisFrontend: boolean;
   owner: FrontendOwnerKind | null;
+  pendingAttachments: WebviewPendingAttachment[];
+  planFile?: WebviewPlanFileRef | null;
   planId?: string | null;
-  planState?: string | null;
+  planState?: ParticipantPlanState | null;
   sessionId: string;
-  tools: WebviewToolCard[];
+  timeline: WebviewTimelineItem[];
 }
 
 export interface WebviewSessionTab {
@@ -65,6 +113,13 @@ export interface WebviewStateSnapshot {
   sessions: WebviewSessionTab[];
   uiMode: TomcatUiMode;
 }
+
+export type WebviewTimelineItem =
+  | WebviewApprovalCard
+  | WebviewMessageBlock
+  | WebviewPlanFileCard
+  | WebviewThinkingBlock
+  | WebviewToolCard;
 
 export type HostEventFrameContent =
   | ControlRequestFrame
@@ -144,7 +199,22 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "pickAttachment";
+      data?: {
+        sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
       type: "ready";
+    }
+  | {
+      messageId: string;
+      type: "removeAttachment";
+      data: {
+        attachmentId: string;
+        sessionId?: string | null;
+      };
     }
   | {
       messageId: string;
@@ -169,6 +239,13 @@ export type WebviewIntent =
       data: {
         sessionId?: string | null;
         text: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "openPlanFile";
+      data: {
+        path: string;
       };
     }
   | {
@@ -226,6 +303,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "ready":
     case "listSessions":
       return true;
+    case "pickAttachment":
+      return value.data === undefined || isRecord(value.data);
     case "prompt":
     case "steer":
       return isRecord(value.data) && isString(value.data.text);
@@ -248,6 +327,10 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "openDiff":
     case "applyEdit":
       return isRecord(value.data) && isString(value.data.toolCallId);
+    case "openPlanFile":
+      return isRecord(value.data) && isString(value.data.path);
+    case "removeAttachment":
+      return isRecord(value.data) && isString(value.data.attachmentId);
     case "answerQuestion":
       return (
         isRecord(value.data) &&

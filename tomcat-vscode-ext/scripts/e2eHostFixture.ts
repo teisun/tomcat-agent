@@ -32,12 +32,14 @@ export async function seedChatUserSettings(userDataDir: string): Promise<void> {
 function buildFakeServeSource(editFilePath: string): string {
   return `#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 const readline = require("node:readline");
 
 const editFilePath = ${JSON.stringify(editFilePath)};
 const MODEL_OPTIONS = ["fake-model", "gpt-5.4", "claude-4.6-sonnet"];
 const sessions = new Map();
 let sessionCounter = 1;
+let historyCounter = 1;
 let pendingApproval = null;
 let pendingInterrupt = null;
 let activeSessionId = null;
@@ -52,9 +54,11 @@ function createSession() {
   sessions.set(sessionId, touchSession({
     busy: false,
     cwd: process.cwd(),
+    history: [],
     mode: "code",
     model: MODEL_OPTIONS[0],
     planId: null,
+    planPath: null,
     planState: "chat",
     sessionKey: "fake-workspace",
   }));
@@ -75,9 +79,11 @@ function ensureSession(sessionId) {
     sessions.set(sessionId, touchSession({
       busy: false,
       cwd: process.cwd(),
+      history: [],
       mode: "code",
       model: MODEL_OPTIONS[0],
       planId: null,
+      planPath: null,
       planState: "chat",
       sessionKey: "fake-workspace",
     }));
@@ -100,10 +106,37 @@ function emitMessageDelta(sessionId, delta) {
 function emitPlanEvent(sessionId, type) {
   const session = ensureSession(sessionId);
   send({
+    path: session.planPath,
     planId: session.planId,
     sessionId,
     state: session.planState,
     type,
+  });
+}
+
+function recordHistoryMessage(sessionId, role, content) {
+  const session = touchSession(ensureSession(sessionId));
+  session.history.push({
+    id: \`h-\${historyCounter++}\`,
+    message: {
+      content,
+      role,
+    },
+    type: "message",
+  });
+}
+
+function emitContextMetrics(sessionId, ratio = 0.42) {
+  send({
+    compactionCount: 0,
+    compactionTokensFreed: 0,
+    contextUtilizationRatio: ratio,
+    inputTokensUsed: 256,
+    preheatInProgress: false,
+    preheatResultPending: false,
+    sessionId,
+    totalToolResultBytesPersisted: 0,
+    type: "context_metrics_update",
   });
 }
 
@@ -153,6 +186,10 @@ function handlePrompt(frame) {
   startTurn(sessionId);
 
   const text = String(frame.text || "");
+  const attachmentCount = Array.isArray(frame.params && frame.params.attachments)
+    ? frame.params.attachments.length
+    : 0;
+  recordHistoryMessage(sessionId, "user", text);
   if (text.includes("approve edit")) {
     const requestId = \`ask-\${sessionId}\`;
     pendingApproval = { requestId, sessionId };
@@ -184,12 +221,19 @@ function handlePrompt(frame) {
     pendingInterrupt = setTimeout(() => {
       pendingInterrupt = null;
       emitMessageDelta(sessionId, "late completion");
+      recordHistoryMessage(sessionId, "assistant", "late completion");
+      emitContextMetrics(sessionId, 0.36);
       finishTurn(sessionId, null);
     }, 1000);
     return;
   }
 
-  emitMessageDelta(sessionId, "hello from fake tomcat");
+  const responseText = attachmentCount
+    ? \`hello from fake tomcat (\${attachmentCount} attachments)\`
+    : "hello from fake tomcat";
+  emitMessageDelta(sessionId, responseText);
+  recordHistoryMessage(sessionId, "assistant", responseText);
+  emitContextMetrics(sessionId, attachmentCount ? 0.58 : 0.42);
   finishTurn(sessionId, null);
 }
 
@@ -225,10 +269,13 @@ function handleControlResponse(frame) {
         type: "tool_execution_end",
       });
       emitMessageDelta(sessionId, "edit applied");
+      recordHistoryMessage(sessionId, "assistant", "edit applied");
+      emitContextMetrics(sessionId, 0.47);
       finishTurn(sessionId, null);
     }, 250);
   } else {
     emitMessageDelta(sessionId, "edit rejected");
+    recordHistoryMessage(sessionId, "assistant", "edit rejected");
     finishTurn(sessionId, null);
   }
 
@@ -358,6 +405,28 @@ function handleCommand(frame) {
       });
       break;
     }
+    case "get_messages": {
+      const sessionId = frame.sessionId || activeSessionId;
+      const session = ensureSession(sessionId);
+      send({
+        id: frame.id,
+        payload: {
+          header: {
+            cwd: session.cwd,
+            id: sessionId,
+            type: "session",
+            version: 3,
+          },
+          messages: session.history,
+          sessionId,
+          upToSeq: null,
+        },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
     case "close_session":
       sessions.delete(frame.sessionId);
       if (activeSessionId === frame.sessionId) {
@@ -400,6 +469,9 @@ function handleCommand(frame) {
       if (frame.action === "enter") {
         session.planState = "planning";
         session.planId = session.planId || "fake-plan";
+        session.planPath = path.join(process.cwd(), "plans", \`\${session.planId}.plan.md\`);
+        fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
+        fs.writeFileSync(session.planPath, "# Fake plan\\n\\n- Step 1\\n", "utf8");
         send({
           id: frame.id,
           payload: { planId: session.planId, planState: session.planState },
@@ -425,12 +497,15 @@ function handleCommand(frame) {
       }
 
       session.planId = frame.planId || session.planId || "fake-plan";
+      session.planPath = session.planPath || path.join(process.cwd(), "plans", \`\${session.planId}.plan.md\`);
+      fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
+      fs.writeFileSync(session.planPath, "# Fake plan\\n\\n- Step 1\\n- Build\\n", "utf8");
       session.planState = "executing";
       send({
         id: frame.id,
         payload: {
           planId: session.planId,
-          planPath: \`~/.tomcat/plans/\${session.planId}.plan.md\`,
+          planPath: session.planPath,
           planState: session.planState,
         },
         sessionId,

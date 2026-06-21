@@ -22,6 +22,7 @@ import type {
   ResponseFrame,
   ServeCommand,
   ServeEvent,
+  GetMessagesParams,
   SetPlanModeAction,
 } from "./wire";
 
@@ -305,6 +306,21 @@ export class TomcatMessenger {
         planId: command.planId,
         sessionId: command.sessionId,
         type: "set_plan_mode",
+      },
+      timeoutMs,
+    );
+  }
+
+  sendGetMessages(
+    sessionId: string | null | undefined,
+    params: GetMessagesParams = {},
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request(
+      {
+        params,
+        sessionId,
+        type: "get_messages",
       },
       timeoutMs,
     );

@@ -642,7 +642,12 @@ export async function assertWebviewDiffFlow(
     api,
     (state) => {
       for (const [sessionId, session] of Object.entries(state.sessionViews)) {
-        const pendingApproval = session.approvals[0];
+        const pendingApproval = session.timeline.find(
+          (
+            item,
+          ): item is Extract<typeof session.timeline[number], { type: "approval" }> =>
+            item.type === "approval" && !item.resolved,
+        );
         if (pendingApproval) {
           return {
             activeSessionId: sessionId,

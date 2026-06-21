@@ -25,6 +25,7 @@ import {
   type HostEventFrameContent,
   type HostToWebviewFrame,
   type TomcatUiMode,
+  type WebviewPendingAttachment,
   type WebviewIntent,
 } from "./protocol";
 import { SessionOwnershipTracker } from "./ownership";
@@ -75,6 +76,36 @@ function parseModelIds(payload: unknown): string[] {
         typeof entry === "object" && entry !== null && typeof (entry as { id?: unknown }).id === "string",
     )
     .map((entry) => entry.id);
+}
+
+function guessMimeType(filePath: string): string {
+  switch (path.extname(filePath).toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    case ".svg":
+      return "image/svg+xml";
+    case ".md":
+      return "text/markdown";
+    case ".txt":
+      return "text/plain";
+    case ".json":
+      return "application/json";
+    case ".pdf":
+      return "application/pdf";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function inferAttachmentKind(mimeType: string): "file" | "image" {
+  return mimeType.startsWith("image/") ? "image" : "file";
 }
 
 export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -239,6 +270,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
     this.stateStore.setActiveSession(preferredSessionId);
     await this.refreshSessionState(preferredSessionId);
+    await this.refreshSessionHistory(preferredSessionId);
     await this.postState();
   }
 
@@ -309,6 +341,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           const fallback = this.sessionPool.pickDefaultSession(this.currentStateToSessionList());
           if (fallback) {
             await this.refreshSessionState(fallback);
+            await this.refreshSessionHistory(fallback);
             this.stateStore.setActiveSession(fallback);
           } else {
             this.stateStore.setActiveSession(null);
@@ -325,16 +358,23 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
           return;
         }
+        const pendingAttachments =
+          intent.type === "prompt"
+            ? this.currentState().sessionViews[sessionId]?.pendingAttachments ?? []
+            : [];
         this.stateStore.setActiveSession(sessionId);
         this.stateStore.appendMessage(
           sessionId,
           "user",
           intent.data.text,
         );
+        if (pendingAttachments.length) {
+          this.stateStore.clearPendingAttachments(sessionId);
+        }
         await this.postState();
         const response = await this.deps.messenger.request({
           params: {
-            attachments: [],
+            attachments: pendingAttachments.map((entry) => entry.attachment),
           },
           sessionId,
           text: intent.data.text,
@@ -348,6 +388,39 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           );
         }
         await this.refreshSessionState(sessionId);
+        await this.postState();
+        return;
+      }
+      case "pickAttachment": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSession(intent.data?.sessionId ?? null);
+        if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        const picks = await vscode.window.showOpenDialog({
+          canSelectFiles: true,
+          canSelectFolders: false,
+          canSelectMany: true,
+          openLabel: "Attach to Tomcat",
+        });
+        if (!picks?.length) {
+          return;
+        }
+        const attachments = await Promise.all(
+          picks.map(async (uri) => this.readPendingAttachment(uri)),
+        );
+        const existing = this.currentState().sessionViews[sessionId]?.pendingAttachments ?? [];
+        this.stateStore.setPendingAttachments(sessionId, [...existing, ...attachments]);
+        await this.postState();
+        return;
+      }
+      case "removeAttachment": {
+        const sessionId = intent.data.sessionId ?? this.currentState().activeSessionId;
+        if (!sessionId) {
+          return;
+        }
+        this.stateStore.removePendingAttachment(sessionId, intent.data.attachmentId);
         await this.postState();
         return;
       }
@@ -410,6 +483,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         return;
       case "applyEdit":
         await this.deps.ide.applyPreparedEdit(intent.data.toolCallId);
+        return;
+      case "openPlanFile":
+        await this.deps.ide.showFile(intent.data.path);
         return;
       case "answerQuestion": {
         const pending = this.pendingQuestions.get(intent.data.requestId);
@@ -553,6 +629,36 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     );
   }
 
+  private async refreshSessionHistory(sessionId: string): Promise<void> {
+    if (typeof this.deps.sessionRouter.getMessages !== "function") {
+      return;
+    }
+    const history = await this.deps.sessionRouter.getMessages(sessionId, {
+      lastNTurns: 12,
+    }).catch(() => null);
+    if (!history) {
+      return;
+    }
+    this.stateStore.hydrateHistory(sessionId, history);
+  }
+
+  private async readPendingAttachment(uri: vscode.Uri): Promise<WebviewPendingAttachment> {
+    const bytes = await vscode.workspace.fs.readFile(uri);
+    const mimeType = guessMimeType(uri.fsPath);
+    return {
+      attachment: {
+        dataBase64: Buffer.from(bytes).toString("base64"),
+        kind: inferAttachmentKind(mimeType),
+        mimeType,
+      },
+      id: `${path.basename(uri.fsPath)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: inferAttachmentKind(mimeType),
+      label: path.basename(uri.fsPath),
+      mimeType,
+      path: uri.fsPath,
+    };
+  }
+
   private renderHtml(webview: vscode.Webview): string {
     const distRoot = path.join(this.deps.extensionUri.fsPath, "gui", "dist");
     const jsPath = path.join(distRoot, "index.js");
@@ -607,6 +713,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       await this.sessionPool.switchTo(sessionId);
     }
     await this.refreshSessionState(sessionId);
+    await this.refreshSessionHistory(sessionId);
     await this.refreshSessions();
     await this.postState();
   }
@@ -618,6 +725,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       await this.sessionPool.switchTo(sessionId);
     }
     await this.refreshSessionState(sessionId);
+    await this.refreshSessionHistory(sessionId);
     await this.refreshSessions();
     // Keep the user-selected session visible even when it cannot be claimed.
     this.stateStore.setActiveSession(sessionId);

@@ -3,22 +3,64 @@ export type FrontendOwnerKind = "participant" | "webview";
 
 export interface WebviewMessageBlock {
   id: string;
-  kind: "assistant" | "error" | "notice" | "thinking" | "user";
+  kind: "assistant" | "error" | "notice" | "user";
+  text: string;
+  type: "message";
+}
+
+export interface WebviewThinkingBlock {
+  id: string;
+  text: string;
+  type: "thinking";
+}
+
+export interface WebviewToolDisplayFile {
+  file: string;
+  kind: "file";
+}
+
+export interface WebviewToolDisplayPlan {
+  kind: "plan";
+  plan: string;
+}
+
+export interface WebviewToolDisplayText {
+  kind: "text";
   text: string;
 }
 
+export type WebviewToolDisplay =
+  | WebviewToolDisplayFile
+  | WebviewToolDisplayPlan
+  | WebviewToolDisplayText;
+
 export interface WebviewToolCard {
-  display?: {
-    file?: string;
-    kind: "file" | "plan" | "text";
-    plan?: string;
-    text?: string;
-  };
+  display?: WebviewToolDisplay;
+  id: string;
   isError: boolean;
   status: "complete" | "running" | "streaming";
   summary?: string;
   toolCallId: string;
   toolName: string;
+  type: "tool";
+}
+
+export type WebviewPlanState =
+  | "chat"
+  | "planning"
+  | "executing"
+  | "pending"
+  | "completed";
+
+export interface WebviewPlanFileRef {
+  path: string;
+  planId?: string | null;
+  state: WebviewPlanState | null;
+}
+
+export interface WebviewPlanFileCard extends WebviewPlanFileRef {
+  id: string;
+  type: "plan";
 }
 
 export interface WebviewApprovalOption {
@@ -34,6 +76,7 @@ export interface WebviewApprovalQuestion {
 }
 
 export interface WebviewApprovalCard {
+  id: string;
   request: {
     questions: WebviewApprovalQuestion[];
     requestId: string;
@@ -41,20 +84,36 @@ export interface WebviewApprovalCard {
   };
   resolved: boolean;
   sessionId?: string | null;
+  type: "approval";
+}
+
+export interface WebviewPendingAttachment {
+  attachment: {
+    dataBase64?: string | null;
+    fileId?: string | null;
+    kind: "file" | "image";
+    mimeType?: string | null;
+  };
+  id: string;
+  kind: "file" | "image";
+  label: string;
+  mimeType?: string | null;
+  path?: string | null;
 }
 
 export interface WebviewSessionSnapshot {
-  approvals: WebviewApprovalCard[];
   busy: boolean;
   conflictMessage?: string | null;
-  messages: WebviewMessageBlock[];
+  contextRatio?: number | null;
   model?: string | null;
   ownedByThisFrontend: boolean;
   owner: FrontendOwnerKind | null;
+  pendingAttachments: WebviewPendingAttachment[];
+  planFile?: WebviewPlanFileRef | null;
   planId?: string | null;
-  planState?: string | null;
+  planState?: WebviewPlanState | null;
   sessionId: string;
-  tools: WebviewToolCard[];
+  timeline: WebviewTimelineItem[];
 }
 
 export interface WebviewSessionTab {
@@ -74,6 +133,13 @@ export interface WebviewStateSnapshot {
   sessions: WebviewSessionTab[];
   uiMode: TomcatUiMode;
 }
+
+export type WebviewTimelineItem =
+  | WebviewApprovalCard
+  | WebviewMessageBlock
+  | WebviewPlanFileCard
+  | WebviewThinkingBlock
+  | WebviewToolCard;
 
 export type HostToWebviewFrame =
   | {
@@ -151,6 +217,21 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "pickAttachment";
+      data?: {
+        sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "removeAttachment";
+      data: {
+        attachmentId: string;
+        sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
       type: "setModel";
       data: {
         modelId: string;
@@ -164,6 +245,13 @@ export type WebviewIntent =
         action: "build" | "enter" | "exit";
         planId?: string | null;
         sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "openPlanFile";
+      data: {
+        path: string;
       };
     }
   | {

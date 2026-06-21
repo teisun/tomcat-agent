@@ -24,6 +24,7 @@ button,
 select,
 textarea {
   font: inherit;
+  color: inherit;
 }
 
 button,
@@ -42,7 +43,7 @@ textarea:focus-visible {
 .tc-shell {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   height: 100%;
   min-height: 100%;
   overflow: hidden;
@@ -50,11 +51,8 @@ textarea:focus-visible {
 }
 
 .tc-header,
-.tc-toolbar,
-.tc-panel__header,
 .tc-card__header,
-.tc-message__header,
-.tc-composer__footer {
+.tc-message__header {
   align-items: center;
   display: flex;
   gap: 8px;
@@ -66,7 +64,6 @@ textarea:focus-visible {
 }
 
 .tc-header h1,
-.tc-panel h2,
 .tc-empty-state h2,
 .tc-card h3 {
   margin: 0;
@@ -80,39 +77,31 @@ textarea:focus-visible {
   text-transform: uppercase;
 }
 
-.tc-toolbar,
 .tc-button-row,
-.tc-chip-row,
-.tc-session-rail {
+.tc-sessionbar,
+.tc-sessionbar__actions,
+.tc-composer__bar,
+.tc-attachment-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.tc-panel,
-.tc-composer,
 .tc-card,
 .tc-banner,
-.tc-message {
+.tc-message,
+.tc-thinking,
+.tc-active-plan,
+.tc-composer__surface {
   background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   border: 1px solid
     var(--vscode-editorWidget-border, var(--vscode-panel-border, rgba(127, 127, 127, 0.3)));
-  border-radius: 10px;
-}
-
-.tc-panel,
-.tc-composer,
-.tc-banner {
-  padding: 10px;
-}
-
-.tc-card,
-.tc-message {
-  padding: 10px 12px;
+  border-radius: 12px;
 }
 
 .tc-banner {
   color: var(--vscode-foreground);
+  padding: 10px 12px;
 }
 
 .tc-banner--warning {
@@ -120,19 +109,14 @@ textarea:focus-visible {
   background: var(--vscode-inputValidation-warningBackground, rgba(204, 167, 0, 0.12));
 }
 
-.tc-panel__header {
-  margin-bottom: 8px;
-}
-
-.tc-empty-inline,
 .tc-empty-state p,
 .tc-approval-question p {
   margin: 0;
 }
 
-.tc-empty-inline,
 .tc-composer__hint,
-.tc-session-tab__meta,
+.tc-active-plan__meta,
+.tc-plan-card__link span:last-child,
 .tc-message__header span,
 .tc-header__eyebrow {
   color: var(--vscode-descriptionForeground);
@@ -148,60 +132,52 @@ textarea:focus-visible {
   padding: 20px 14px;
 }
 
-.tc-session-tab {
-  align-items: center;
-  background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.15));
-  border: 1px solid transparent;
-  border-radius: 999px;
-  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-  cursor: pointer;
-  display: inline-flex;
-  gap: 4px;
-  max-width: 100%;
-  padding: 5px 10px;
+.tc-sessionbar {
+  align-items: flex-end;
 }
 
-.tc-session-tab--active {
-  border-color: var(--vscode-focusBorder);
-  background: var(--vscode-list-activeSelectionBackground, rgba(0, 122, 204, 0.18));
+.tc-sessionbar__field {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.tc-session-tab:hover,
+.tc-sessionbar__actions {
+  flex-shrink: 0;
+}
+
 .tc-button:hover:not(:disabled) {
   filter: brightness(1.06);
-}
-
-.tc-session-tab span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tc-control-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
 }
 
 .tc-field {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
 }
 
 .tc-field select,
-.tc-field textarea {
+.tc-composer textarea {
   background: var(--vscode-input-background);
   border: 1px solid var(--vscode-input-border, rgba(127, 127, 127, 0.3));
-  border-radius: 8px;
+  border-radius: 10px;
   color: var(--vscode-input-foreground);
   padding: 8px 10px;
   width: 100%;
 }
 
-.tc-field textarea {
-  min-height: 68px;
-  resize: vertical;
+.tc-field span:first-child {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+.tc-field--compact {
+  gap: 2px;
+}
+
+.tc-field--compact select {
+  min-width: 116px;
+  width: auto;
 }
 
 .tc-button {
@@ -213,7 +189,8 @@ textarea:focus-visible {
 }
 
 .tc-button:disabled,
-.tc-session-tab:disabled {
+.tc-icon-button:disabled,
+.tc-send-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -240,6 +217,7 @@ textarea:focus-visible {
   border-radius: 999px;
   display: inline-flex;
   gap: 4px;
+  line-height: 1.2;
   padding: 3px 9px;
 }
 
@@ -258,24 +236,40 @@ textarea:focus-visible {
   border-color: rgba(205, 92, 92, 0.32);
 }
 
+.tc-chip--attachment {
+  align-items: center;
+  background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.15));
+  color: inherit;
+  cursor: pointer;
+}
+
+.tc-chip__close {
+  opacity: 0.72;
+}
+
 .tc-stream {
-  display: flex;
   flex: 1 1 0;
-  flex-direction: column;
-  gap: 10px;
   min-height: 0;
   overflow: auto;
   padding-right: 2px;
 }
 
+.tc-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 .tc-message {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  padding: 12px;
 }
 
 .tc-message p,
-.tc-card pre {
+.tc-card pre,
+.tc-thinking pre {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
@@ -287,11 +281,7 @@ textarea:focus-visible {
 
 .tc-message--user {
   background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.18));
-  margin-left: 20px;
-}
-
-.tc-message--thinking {
-  border-left: 3px solid var(--vscode-textLink-foreground, #3794ff);
+  margin-left: 24px;
 }
 
 .tc-message--notice {
@@ -306,16 +296,62 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding: 12px;
 }
 
 .tc-approval-card {
   border-color: var(--vscode-inputValidation-warningBorder, #cca700);
 }
 
+.tc-plan-card__link,
+.tc-active-plan__link {
+  align-items: flex-start;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  text-align: left;
+}
+
+.tc-plan-card__link strong,
+.tc-active-plan__file {
+  font-weight: 600;
+}
+
 .tc-approval-question {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.tc-thinking {
+  overflow: hidden;
+}
+
+.tc-thinking__toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+.tc-thinking pre {
+  padding: 0 12px 12px;
+}
+
+.tc-active-plan {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 10px 12px;
 }
 
 .tc-composer {
@@ -325,11 +361,67 @@ textarea:focus-visible {
   gap: 8px;
 }
 
-.tc-composer__footer {
-  align-items: flex-start;
+.tc-composer__surface {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+}
+
+.tc-composer textarea {
+  line-height: 1.4;
+  min-height: 84px;
+  resize: vertical;
+}
+
+.tc-composer__bar {
+  align-items: flex-end;
+}
+
+.tc-composer__context {
+  color: var(--vscode-descriptionForeground);
+  margin-left: auto;
 }
 
 .tc-composer__hint {
-  flex: 1 1 auto;
   line-height: 1.35;
+  margin: 0;
+}
+
+.tc-icon-button,
+.tc-send-button {
+  align-items: center;
+  border: 1px solid transparent;
+  cursor: pointer;
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
+.tc-icon-button {
+  background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.15));
+  border-radius: 999px;
+}
+
+.tc-send-button {
+  background: var(--vscode-button-background);
+  border-radius: 999px;
+  color: var(--vscode-button-foreground);
+}
+
+@media (max-width: 420px) {
+  .tc-sessionbar__actions,
+  .tc-composer__bar {
+    width: 100%;
+  }
+
+  .tc-active-plan {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .tc-composer__context {
+    margin-left: 0;
+  }
 }

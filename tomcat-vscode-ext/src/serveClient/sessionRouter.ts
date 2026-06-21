@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 
 import { PARTICIPANT_ID } from "../constants";
 import type { TomcatMessenger } from "./TomcatMessenger";
-import type { ListSessionsScope, ResponseFrame } from "./wire";
+import type { GetMessagesParams, ListSessionsScope, ResponseFrame } from "./wire";
 
 export interface SessionSummary {
   busy: boolean;
@@ -26,6 +26,13 @@ export interface SessionStatePayload {
   planState?: string | null;
   sessionId: string;
   sessionKey?: string | null;
+}
+
+export interface SessionHistoryPayload {
+  header?: unknown;
+  messages: unknown[];
+  sessionId: string;
+  upToSeq?: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -192,6 +199,25 @@ export class SessionRouter {
       sessionId: payload.sessionId,
       sessionKey:
         typeof payload.sessionKey === "string" ? payload.sessionKey : null,
+    };
+  }
+
+  async getMessages(
+    sessionId?: string,
+    params: GetMessagesParams = {},
+  ): Promise<SessionHistoryPayload> {
+    const response = await this.messenger.sendGetMessages(sessionId, params);
+    const payload = response.payload;
+
+    if (!isRecord(payload) || typeof payload.sessionId !== "string") {
+      throw new Error("Tomcat get_messages payload is missing sessionId");
+    }
+
+    return {
+      header: payload.header,
+      messages: Array.isArray(payload.messages) ? payload.messages : [],
+      sessionId: payload.sessionId,
+      upToSeq: typeof payload.upToSeq === "string" ? payload.upToSeq : null,
     };
   }
 }

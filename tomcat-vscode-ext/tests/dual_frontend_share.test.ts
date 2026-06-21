@@ -89,6 +89,13 @@ describe("dual frontend bridge reuse", () => {
           sessionId: sessionId ?? "chat-1",
         };
       },
+      async getMessages(sessionId?: string) {
+        return {
+          messages: [],
+          sessionId: sessionId ?? "chat-1",
+          upToSeq: null,
+        };
+      },
       async listSessions() {
         return {
           activeSessionId: "web-1",

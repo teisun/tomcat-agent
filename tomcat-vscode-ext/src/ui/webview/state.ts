@@ -3,14 +3,16 @@ import type {
   ControlRequestFrame,
 } from "../../serveClient/protocol";
 import type {
+  SessionHistoryPayload,
   SessionListPayload,
   SessionStatePayload,
   SessionSummary,
 } from "../../serveClient/sessionRouter";
-import type { ServeEvent } from "../../serveClient/wire";
+import type { ServeEvent, ServePlanEvent } from "../../serveClient/wire";
 import {
   normalizePlanState,
   planEventState,
+  type ParticipantPlanState,
 } from "../participant/planState";
 import type {
   FrontendOwnerKind,
@@ -18,9 +20,14 @@ import type {
   TomcatUiMode,
   WebviewApprovalCard,
   WebviewMessageBlock,
+  WebviewPendingAttachment,
+  WebviewPlanFileCard,
+  WebviewPlanFileRef,
   WebviewSessionSnapshot,
   WebviewSessionTab,
   WebviewStateSnapshot,
+  WebviewThinkingBlock,
+  WebviewTimelineItem,
   WebviewToolCard,
 } from "./protocol";
 
@@ -28,8 +35,18 @@ function cloneSnapshot(snapshot: WebviewStateSnapshot): WebviewStateSnapshot {
   return JSON.parse(JSON.stringify(snapshot)) as WebviewStateSnapshot;
 }
 
+type SessionRuntimeState = {
+  activeAssistantId: string | null;
+  activeThinkingId: string | null;
+  historyHydrated: boolean;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isPlanEvent(event: ServeEvent): event is ServePlanEvent {
+  return event.type.startsWith("plan.");
 }
 
 function asText(value: unknown): string | undefined {
@@ -63,17 +80,18 @@ function parseAskQuestionRequest(frame: ControlRequestFrame): AskQuestionWireReq
 
 function createEmptySession(sessionId: string): WebviewSessionSnapshot {
   return {
-    approvals: [],
     busy: false,
     conflictMessage: null,
-    messages: [],
+    contextRatio: null,
     model: null,
     ownedByThisFrontend: false,
     owner: null,
+    pendingAttachments: [],
+    planFile: null,
     planId: null,
     planState: "chat",
     sessionId,
-    tools: [],
+    timeline: [],
   };
 }
 
@@ -91,21 +109,176 @@ function getAssistantDelta(
   return { delta, kind };
 }
 
-function ensureMessage(
+function createTimelineId(
   session: WebviewSessionSnapshot,
-  kind: WebviewMessageBlock["kind"],
-): WebviewMessageBlock {
-  const current = session.messages.at(-1);
-  if (current && current.kind === kind) {
-    return current;
+  prefix: string,
+  preferredId?: string | null,
+): string {
+  if (preferredId) {
+    return preferredId;
   }
-  const next: WebviewMessageBlock = {
-    id: `${session.sessionId}-${kind}-${session.messages.length + 1}`,
-    kind,
-    text: "",
+  return `${session.sessionId}-${prefix}-${session.timeline.length + 1}`;
+}
+
+function timelineFingerprint(item: WebviewTimelineItem): string {
+  switch (item.type) {
+    case "message":
+      return `${item.type}:${item.kind}:${item.text}`;
+    case "thinking":
+      return `${item.type}:${item.text}`;
+    case "tool":
+      return `${item.type}:${item.toolCallId}:${item.status}:${item.summary ?? ""}`;
+    case "approval":
+      return `${item.type}:${item.request.requestId}`;
+    case "plan":
+      return `${item.type}:${item.path}:${item.state ?? "unknown"}:${item.planId ?? ""}`;
+  }
+}
+
+function extractMessageText(content: unknown): string | undefined {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((entry) => {
+        if (typeof entry === "string") {
+          return entry;
+        }
+        if (!isRecord(entry)) {
+          return undefined;
+        }
+        if (typeof entry.text === "string") {
+          return entry.text;
+        }
+        switch (entry.type) {
+          case "input_image":
+          case "image":
+            return "[image attachment]";
+          case "input_file":
+          case "file":
+            return "[file attachment]";
+          default:
+            return undefined;
+        }
+      })
+      .filter((entry): entry is string => Boolean(entry));
+    return parts.length ? parts.join("\n") : undefined;
+  }
+  if (isRecord(content) && typeof content.text === "string") {
+    return content.text;
+  }
+  return asText(content);
+}
+
+function parseHistoryEntry(entry: unknown): WebviewTimelineItem | null {
+  if (!isRecord(entry) || typeof entry.type !== "string") {
+    return null;
+  }
+
+  if (entry.type === "message" && isRecord(entry.message)) {
+    const role = typeof entry.message.role === "string" ? entry.message.role : null;
+    const text = extractMessageText(entry.message.content);
+    if (!text) {
+      return null;
+    }
+    const id = typeof entry.id === "string" ? entry.id : `history-message-${text.length}`;
+    if (role === "user") {
+      return {
+        id,
+        kind: "user",
+        text,
+        type: "message",
+      } satisfies WebviewMessageBlock;
+    }
+    if (role === "assistant") {
+      return {
+        id,
+        kind: "assistant",
+        text,
+        type: "message",
+      } satisfies WebviewMessageBlock;
+    }
+    if (role === "tool") {
+      return {
+        id,
+        kind: "notice",
+        text,
+        type: "message",
+      } satisfies WebviewMessageBlock;
+    }
+  }
+
+  if (entry.type === "thinking_trace" && typeof entry.text === "string" && entry.text.trim()) {
+    return {
+      id: typeof entry.id === "string" ? entry.id : `thinking-${entry.text.length}`,
+      text: entry.text,
+      type: "thinking",
+    } satisfies WebviewThinkingBlock;
+  }
+
+  return null;
+}
+
+function createSessionRuntime(): SessionRuntimeState {
+  return {
+    activeAssistantId: null,
+    activeThinkingId: null,
+    historyHydrated: false,
   };
-  session.messages.push(next);
-  return next;
+}
+
+function clearStreaming(runtime: SessionRuntimeState): void {
+  runtime.activeAssistantId = null;
+  runtime.activeThinkingId = null;
+}
+
+function upsertPlanFile(
+  session: WebviewSessionSnapshot,
+  path: string,
+  state: ParticipantPlanState | null,
+  planId?: string | null,
+): WebviewPlanFileCard {
+  const existing = session.timeline.find(
+    (item): item is WebviewPlanFileCard => item.type === "plan" && item.path === path,
+  );
+  if (existing) {
+    existing.planId = planId ?? existing.planId ?? null;
+    existing.state = state ?? existing.state ?? null;
+    return existing;
+  }
+  const created: WebviewPlanFileCard = {
+    id: createTimelineId(session, "plan", path),
+    path,
+    planId: planId ?? null,
+    state,
+    type: "plan",
+  };
+  session.timeline.push(created);
+  return created;
+}
+
+function syncPlanRef(
+  session: WebviewSessionSnapshot,
+  path: string,
+  state: ParticipantPlanState | null,
+  planId?: string | null,
+): void {
+  session.planFile = {
+    path,
+    planId: planId ?? session.planId ?? null,
+    state,
+  } satisfies WebviewPlanFileRef;
+}
+
+function findTimelineItem<T extends WebviewTimelineItem["type"]>(
+  session: WebviewSessionSnapshot,
+  id: string,
+  type: T,
+): Extract<WebviewTimelineItem, { type: T }> | undefined {
+  return session.timeline.find(
+    (item): item is Extract<WebviewTimelineItem, { type: T }> => item.id === id && item.type === type,
+  );
 }
 
 function upsertTool(
@@ -113,18 +286,100 @@ function upsertTool(
   toolCallId: string,
   toolName: string,
 ): WebviewToolCard {
-  const existing = session.tools.find((tool) => tool.toolCallId === toolCallId);
+  const existing = session.timeline.find(
+    (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
+  );
   if (existing) {
     return existing;
   }
   const next: WebviewToolCard = {
+    id: createTimelineId(session, "tool", toolCallId),
     isError: false,
     status: "running",
     toolCallId,
     toolName,
+    type: "tool",
   };
-  session.tools.push(next);
+  session.timeline.push(next);
   return next;
+}
+
+function upsertApproval(
+  session: WebviewSessionSnapshot,
+  request: AskQuestionWireRequest,
+  sessionId?: string | null,
+): WebviewApprovalCard {
+  const existing = session.timeline.find(
+    (item): item is WebviewApprovalCard =>
+      item.type === "approval" && item.request.requestId === request.requestId,
+  );
+  if (existing) {
+    existing.request = request;
+    existing.resolved = false;
+    existing.sessionId = sessionId;
+    return existing;
+  }
+  const created: WebviewApprovalCard = {
+    id: createTimelineId(session, "approval", request.requestId),
+    request,
+    resolved: false,
+    sessionId,
+    type: "approval",
+  };
+  session.timeline.push(created);
+  return created;
+}
+
+function pushMessage(
+  session: WebviewSessionSnapshot,
+  kind: WebviewMessageBlock["kind"],
+  text: string,
+  preferredId?: string | null,
+): WebviewMessageBlock {
+  const next: WebviewMessageBlock = {
+    id: createTimelineId(session, kind, preferredId),
+    kind,
+    text,
+    type: "message",
+  };
+  session.timeline.push(next);
+  return next;
+}
+
+function appendStreamingMessage(
+  session: WebviewSessionSnapshot,
+  runtime: SessionRuntimeState,
+  kind: "assistant" | "thinking",
+  text: string,
+): WebviewMessageBlock | WebviewThinkingBlock {
+  if (kind === "assistant") {
+    const current = runtime.activeAssistantId
+      ? findTimelineItem(session, runtime.activeAssistantId, "message")
+      : undefined;
+    if (current && current.kind === "assistant") {
+      current.text += text;
+      return current;
+    }
+    const created = pushMessage(session, "assistant", text);
+    runtime.activeAssistantId = created.id;
+    return created;
+  }
+
+  const current = runtime.activeThinkingId
+    ? findTimelineItem(session, runtime.activeThinkingId, "thinking")
+    : undefined;
+  if (current) {
+    current.text += text;
+    return current;
+  }
+  const created: WebviewThinkingBlock = {
+    id: createTimelineId(session, "thinking"),
+    text,
+    type: "thinking",
+  };
+  session.timeline.push(created);
+  runtime.activeThinkingId = created.id;
+  return created;
 }
 
 function mapSessionToTab(
@@ -144,6 +399,7 @@ function mapSessionToTab(
 
 export class WebviewStateStore {
   private state: WebviewStateSnapshot;
+  private readonly runtimes = new Map<string, SessionRuntimeState>();
 
   constructor(uiMode: TomcatUiMode = "both") {
     this.state = {
@@ -206,6 +462,13 @@ export class WebviewStateStore {
     session.model = payload.model ?? null;
     session.planId = payload.planId ?? null;
     session.planState = normalizePlanState(payload.planState) ?? "chat";
+    if (session.planFile) {
+      session.planFile = {
+        ...session.planFile,
+        planId: session.planId ?? session.planFile.planId ?? null,
+        state: session.planState ?? session.planFile.state ?? null,
+      };
+    }
     session.owner = owner;
     session.ownedByThisFrontend = owner === frontend;
     this.syncTabOwnership(payload.sessionId, owner, frontend);
@@ -215,12 +478,47 @@ export class WebviewStateStore {
     this.ensureSession(sessionId).conflictMessage = message;
   }
 
+  setPendingAttachments(sessionId: string, attachments: WebviewPendingAttachment[]): void {
+    this.ensureSession(sessionId).pendingAttachments = [...attachments];
+  }
+
+  clearPendingAttachments(sessionId: string): void {
+    this.ensureSession(sessionId).pendingAttachments = [];
+  }
+
+  removePendingAttachment(sessionId: string, attachmentId: string): void {
+    const session = this.ensureSession(sessionId);
+    session.pendingAttachments = session.pendingAttachments.filter(
+      (attachment) => attachment.id !== attachmentId,
+    );
+  }
+
+  hydrateHistory(sessionId: string, history: SessionHistoryPayload): void {
+    const session = this.ensureSession(sessionId);
+    const runtime = this.ensureRuntime(sessionId);
+    const historyItems = history.messages
+      .map((entry) => parseHistoryEntry(entry))
+      .filter((entry): entry is WebviewTimelineItem => entry !== null);
+    if (!historyItems.length) {
+      runtime.historyHydrated = true;
+      return;
+    }
+
+    const existingFingerprints = new Set(historyItems.map((item) => timelineFingerprint(item)));
+    const liveOnly = session.timeline.filter((item) => !existingFingerprints.has(timelineFingerprint(item)));
+    session.timeline = [...historyItems, ...liveOnly];
+    runtime.historyHydrated = true;
+  }
+
   appendMessage(
     sessionId: string,
     kind: WebviewMessageBlock["kind"],
     text: string,
   ): void {
-    ensureMessage(this.ensureSession(sessionId), kind).text += text;
+    if (!text) {
+      return;
+    }
+    pushMessage(this.ensureSession(sessionId), kind, text);
   }
 
   setOwnership(
@@ -239,9 +537,9 @@ export class WebviewStateStore {
 
   resolveApproval(requestId: string): void {
     for (const session of Object.values(this.state.sessionViews)) {
-      for (const approval of session.approvals) {
-        if (approval.request.requestId === requestId) {
-          approval.resolved = true;
+      for (const item of session.timeline) {
+        if (item.type === "approval" && item.request.requestId === requestId) {
+          item.resolved = true;
         }
       }
     }
@@ -259,29 +557,60 @@ export class WebviewStateStore {
     const session = this.ensureSession(
       frame.sessionId ?? this.state.activeSessionId ?? "unknown",
     );
+    const runtime = this.ensureRuntime(session.sessionId);
     switch (frame.type) {
+      case "turn_start":
+      case "message_start":
+        clearStreaming(runtime);
+        return;
+      case "message_end":
+      case "turn_end":
+        clearStreaming(runtime);
+        return;
       case "agent_start":
         session.busy = true;
+        clearStreaming(runtime);
         return;
       case "agent_end":
         session.busy = false;
+        clearStreaming(runtime);
         if (frame.error) {
-          const message = ensureMessage(session, "error");
-          message.text += frame.error;
+          pushMessage(session, "error", frame.error);
         }
         return;
       case "agent_interrupted":
         session.busy = false;
-        ensureMessage(session, "notice").text += "Tomcat turn interrupted";
+        clearStreaming(runtime);
+        pushMessage(session, "notice", "Tomcat turn interrupted");
         return;
       case "llm_notice":
-        ensureMessage(session, "notice").text += frame.message;
+        pushMessage(session, "notice", frame.message);
         return;
       case "llm_error":
-        ensureMessage(
-          session,
-          "error",
-        ).text += `${frame.reason}: ${frame.errorMessage}`;
+        pushMessage(session, "error", `${frame.reason}: ${frame.errorMessage}`);
+        return;
+      case "extension_error":
+        pushMessage(session, "error", `${frame.event}: ${frame.error}`);
+        return;
+      case "context_metrics_update":
+        session.contextRatio = frame.contextUtilizationRatio;
+        return;
+      case "compaction_error":
+        pushMessage(session, "notice", `Context compaction failed: ${frame.error}`);
+        return;
+      case "auto_retry_start":
+        pushMessage(session, "notice", `Retrying after error: ${frame.errorMessage}`);
+        return;
+      case "auto_retry_end":
+        if (!frame.success) {
+          pushMessage(session, "notice", `Retry finished without success: ${frame.finalError ?? "unknown error"}`);
+        }
+        return;
+      case "sub_agent_start":
+        pushMessage(session, "notice", `Started ${frame.subagentType} sub-agent`);
+        return;
+      case "sub_agent_end":
+        pushMessage(session, "notice", `Sub-agent ${frame.subagentType} ${frame.outcome}`);
         return;
       case "message_update": {
         const delta = getAssistantDelta(frame);
@@ -289,15 +618,16 @@ export class WebviewStateStore {
           return;
         }
         if (delta.kind === "content_delta") {
-          ensureMessage(session, "assistant").text += delta.delta;
+          appendStreamingMessage(session, runtime, "assistant", delta.delta);
           return;
         }
         if (delta.kind === "thinking_delta") {
-          ensureMessage(session, "thinking").text += delta.delta;
+          appendStreamingMessage(session, runtime, "thinking", delta.delta);
         }
         return;
       }
       case "tool_execution_start": {
+        clearStreaming(runtime);
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.status = "running";
         tool.isError = false;
@@ -305,11 +635,13 @@ export class WebviewStateStore {
       }
       case "tool_call_streaming":
       case "tool_execution_update": {
+        clearStreaming(runtime);
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.status = "streaming";
         return;
       }
       case "tool_execution_end": {
+        clearStreaming(runtime);
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.display = frame.display ?? undefined;
         tool.isError = frame.isError;
@@ -317,25 +649,10 @@ export class WebviewStateStore {
         tool.summary = asText(frame.result);
         return;
       }
-      case "plan.create":
-      case "plan.update":
-      case "plan.build":
-      case "plan.review":
-      case "plan.code_review":
-      case "plan.verify":
-      case "plan.review.warning":
-      case "plan.code_review.warning":
-      case "plan.complete": {
-        const state = planEventState(frame);
-        if (state) {
-          session.planState = state;
-        }
-        if (frame.planId) {
-          session.planId = frame.planId;
-        }
-        return;
-      }
       default:
+        if (isPlanEvent(frame)) {
+          this.applyPlanEvent(session, frame);
+        }
         return;
     }
   }
@@ -349,15 +666,7 @@ export class WebviewStateStore {
       return;
     }
     const session = this.ensureSession(frame.sessionId ?? this.state.activeSessionId ?? "unknown");
-    const approval: WebviewApprovalCard = {
-      request,
-      resolved: false,
-      sessionId: frame.sessionId,
-    };
-    session.approvals = session.approvals.filter(
-      (entry) => entry.request.requestId !== request.requestId,
-    );
-    session.approvals.push(approval);
+    upsertApproval(session, request, frame.sessionId);
   }
 
   private ensureSession(sessionId: string): WebviewSessionSnapshot {
@@ -368,6 +677,64 @@ export class WebviewStateStore {
     const created = createEmptySession(sessionId);
     this.state.sessionViews[sessionId] = created;
     return created;
+  }
+
+  private ensureRuntime(sessionId: string): SessionRuntimeState {
+    const existing = this.runtimes.get(sessionId);
+    if (existing) {
+      return existing;
+    }
+    const created = createSessionRuntime();
+    this.runtimes.set(sessionId, created);
+    return created;
+  }
+
+  private applyPlanEvent(
+    session: WebviewSessionSnapshot,
+    event: ServePlanEvent,
+  ): void {
+    const state = planEventState(event);
+    if (state) {
+      session.planState = state;
+    }
+    if (event.planId) {
+      session.planId = event.planId;
+    }
+    if ("path" in event && typeof event.path === "string" && event.path.length > 0) {
+      const nextState = state ?? session.planState ?? null;
+      syncPlanRef(session, event.path, nextState, event.planId ?? session.planId ?? null);
+      upsertPlanFile(session, event.path, nextState, event.planId ?? session.planId ?? null);
+    } else if (session.planFile) {
+      session.planFile = {
+        ...session.planFile,
+        planId: event.planId ?? session.planFile.planId ?? null,
+        state: state ?? session.planFile.state ?? null,
+      };
+    }
+
+    switch (event.type) {
+      case "plan.review":
+      case "plan.code_review":
+        if (event.summary) {
+          pushMessage(session, "notice", `Tomcat plan review: ${event.summary}`);
+        }
+        return;
+      case "plan.verify":
+        if (event.verdict) {
+          pushMessage(session, "notice", `Tomcat plan verify: ${event.verdict}`);
+        }
+        return;
+      case "plan.review.warning":
+      case "plan.code_review.warning":
+        pushMessage(
+          session,
+          "notice",
+          `Tomcat plan warning: ${event.reason ?? "review needs attention"}`,
+        );
+        return;
+      default:
+        return;
+    }
   }
 
   private syncTabOwnership(

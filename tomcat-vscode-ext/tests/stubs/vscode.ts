@@ -14,6 +14,7 @@ let quickPickHandler: ((items: QuickPickItem[]) => any) | undefined;
 let inputBoxHandler: ((options: InputBoxOptions) => any) | undefined;
 let infoMessageHandler: ((message: string, items: string[]) => any) | undefined;
 let warningMessageHandler: ((message: string, items: string[]) => any) | undefined;
+let openDialogHandler: ((options: unknown) => Uri[] | Promise<Uri[] | undefined> | undefined) | undefined;
 let lastDiffCommand:
   | {
       original: Uri;
@@ -300,6 +301,9 @@ export const window = {
   async showWarningMessage(message: string, ...items: string[]): Promise<string | undefined> {
     return warningMessageHandler?.(message, items);
   },
+  async showOpenDialog(options: unknown): Promise<Uri[] | undefined> {
+    return openDialogHandler?.(options);
+  },
   async showQuickPick<T extends QuickPickItem>(
     items: readonly T[],
     _options?: unknown,
@@ -359,6 +363,7 @@ export const __testing = {
     inputBoxHandler = undefined;
     infoMessageHandler = undefined;
     warningMessageHandler = undefined;
+    openDialogHandler = undefined;
     lastDiffCommand = undefined;
     workspace.workspaceFolders = [{ uri: Uri.file("/workspace") }];
   },
@@ -380,6 +385,9 @@ export const __testing = {
   },
   setQuickPickHandler(handler: typeof quickPickHandler): void {
     quickPickHandler = handler;
+  },
+  setOpenDialogHandler(handler: typeof openDialogHandler): void {
+    openDialogHandler = handler;
   },
   setWarningMessageHandler(handler: typeof warningMessageHandler): void {
     warningMessageHandler = handler;
