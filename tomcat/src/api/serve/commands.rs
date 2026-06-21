@@ -11,15 +11,22 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 
 use crate::core::llm::{ChatMessage, ChatMessageContentPart};
+use crate::core::plan_runtime::PlanRuntimeError;
 use crate::AppError;
+use crate::{SessionManager, SessionMode};
 
 use super::control;
 use super::event_pump;
 use super::types::{
-    OutFrame, ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand,
-    ServeMessageParams,
+    ListSessionsScope, OutFrame, ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand,
+    ServeMessageParams, ServeSessionMode, SetPlanModeAction,
 };
 use super::{create_session_slot, register_slot_hooks, run_slot_turn, ServeState};
+
+enum TurnAck {
+    Accepted,
+    Payload(serde_json::Value),
+}
 
 pub(crate) async fn handle_command(
     state: Arc<ServeState>,
@@ -54,7 +61,7 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            start_turn(state, slot, id, input_message).await?;
+            start_turn(state, slot, id, input_message, TurnAck::Accepted).await?;
         }
         ServeCommand::Steer {
             id,
@@ -79,7 +86,7 @@ pub(crate) async fn handle_command(
                 )))?;
                 return Ok(());
             }
-            start_turn(state, slot, id, ChatMessage::steering(text)).await?;
+            start_turn(state, slot, id, ChatMessage::steering(text), TurnAck::Accepted).await?;
         }
         ServeCommand::FollowUp {
             id,
@@ -111,7 +118,7 @@ pub(crate) async fn handle_command(
                 )))?;
                 return Ok(());
             }
-            start_turn(state, slot, id, input_message).await?;
+            start_turn(state, slot, id, input_message, TurnAck::Accepted).await?;
         }
         ServeCommand::NewSession { id, params } => {
             if state.registry.len() >= state.registry.max_sessions() {
@@ -148,7 +155,31 @@ pub(crate) async fn handle_command(
             }
         }
         ServeCommand::SwitchSession { id, session_id } => {
-            if let Err(error) = state.registry.set_active_session(&session_id) {
+            if state.registry.get(&session_id).is_none() {
+                match open_existing_session_slot(Arc::clone(&state), &session_id).await {
+                    Ok(slot) => {
+                        let inserted_session_id = slot.session_id.clone();
+                        match state.registry.insert(Arc::clone(&slot)) {
+                            Ok(()) => register_slot_hooks(&state, &slot),
+                            Err(error) if is_config_error(&error, "too_many_sessions") => {
+                                send_error(&state, id, Some(session_id), "too_many_sessions")?;
+                                return Ok(());
+                            }
+                            Err(error) => return Err(error),
+                        }
+                        state.registry.set_active_session(&inserted_session_id)?;
+                    }
+                    Err(error) if is_config_error(&error, "unknown_session") => {
+                        send_error(&state, id, Some(session_id), "unknown_session")?;
+                        return Ok(());
+                    }
+                    Err(error) if is_config_error(&error, "too_many_sessions") => {
+                        send_error(&state, id, Some(session_id), "too_many_sessions")?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else if let Err(error) = state.registry.set_active_session(&session_id) {
                 if is_config_error(&error, "unknown_session") {
                     send_error(&state, id, Some(session_id), "unknown_session")?;
                     return Ok(());
@@ -202,21 +233,61 @@ pub(crate) async fn handle_command(
                 })),
             )))?;
         }
-        ServeCommand::ListSessions { id } => {
-            state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                id,
-                state.registry.active_session_id(),
-                Some(serde_json::json!({
-                    "activeSessionId": state.registry.active_session_id(),
-                    "sessions": state.registry.list().into_iter().map(|session| {
+        ServeCommand::ListSessions { id, scope } => match scope.unwrap_or(ListSessionsScope::Live) {
+            ListSessionsScope::Live => {
+                state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                    id,
+                    state.registry.active_session_id(),
+                    Some(serde_json::json!({
+                        "activeSessionId": state.registry.active_session_id(),
+                        "sessions": state.registry.list().into_iter().map(|session| {
+                            serde_json::json!({
+                                "sessionId": session.session_id,
+                                "busy": session.busy,
+                            })
+                        }).collect::<Vec<_>>()
+                    })),
+                )))?;
+            }
+            ListSessionsScope::Disk => {
+                let slot = resolve_active_slot(&state)?;
+                let sessions_dir = crate::resolve_sessions_dir(&state.cfg)?;
+                let session_manager = SessionManager::new_scoped(
+                    sessions_dir,
+                    slot.ctx
+                        .session_runtime
+                        .session
+                        .current_session_key()
+                        .to_string(),
+                );
+                let current_session_id = session_manager.current_session_id()?;
+                let sessions = session_manager
+                    .list_sessions()?
+                    .into_iter()
+                    .map(|(session_id, entry)| {
+                        let busy = state
+                            .registry
+                            .get(&session_id)
+                            .map(|live_slot| live_slot.is_busy())
+                            .unwrap_or(false);
                         serde_json::json!({
-                            "sessionId": session.session_id,
-                            "busy": session.busy,
+                            "sessionId": session_id,
+                            "updatedAt": entry.updated_at,
+                            "isCurrent": current_session_id.as_deref() == Some(entry.session_id.as_str()),
+                            "busy": busy,
                         })
-                    }).collect::<Vec<_>>()
-                })),
-            )))?;
-        }
+                    })
+                    .collect::<Vec<_>>();
+                state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                    id,
+                    current_session_id.clone(),
+                    Some(serde_json::json!({
+                        "activeSessionId": current_session_id,
+                        "sessions": sessions,
+                    })),
+                )))?;
+            }
+        },
         ServeCommand::GetState { id, session_id } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {
@@ -224,6 +295,17 @@ pub(crate) async fn handle_command(
             };
             let entry = slot.ctx.session_runtime.session.current_session_entry()?;
             let model = slot.ctx.effective_model(entry.as_ref());
+            let plan_state = slot.ctx.session_runtime.plan_runtime.mode();
+            let active_plan_id = plan_state
+                .active_plan_id()
+                .map(ToOwned::to_owned)
+                .or_else(|| slot.ctx.session_runtime.plan_runtime.active_planning_plan_id());
+            let active_plan_path = slot
+                .ctx
+                .session_runtime
+                .plan_runtime
+                .active_plan_path()
+                .map(|path| crate::infra::platform::format_home_path(&path));
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),
@@ -233,8 +315,116 @@ pub(crate) async fn handle_command(
                     "mode": match slot.mode { crate::SessionMode::Code => "code", crate::SessionMode::Claw => "claw" },
                     "cwd": slot.cwd,
                     "model": model,
+                    "planState": plan_state.as_str(),
+                    "planId": active_plan_id,
+                    "planPath": active_plan_path,
+                    "sessionKey": slot.ctx.session_runtime.session.current_session_key(),
                 })),
             )))?;
+        }
+        ServeCommand::SetPlanMode {
+            id,
+            session_id,
+            action,
+            plan_id,
+        } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
+            else {
+                return Ok(());
+            };
+            if slot.is_busy() {
+                send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
+                return Ok(());
+            }
+            match action {
+                SetPlanModeAction::Enter => match slot.ctx.session_runtime.plan_runtime.enter_planning()
+                {
+                    Ok(()) => {
+                        state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                            id,
+                            Some(slot.session_id.clone()),
+                            Some(plan_state_payload(&slot, None)),
+                        )))?;
+                    }
+                    Err(error) => {
+                        send_error(
+                            &state,
+                            id,
+                            Some(slot.session_id.clone()),
+                            normalize_plan_runtime_error_code(&error),
+                        )?;
+                    }
+                },
+                SetPlanModeAction::Exit => match slot.ctx.session_runtime.plan_runtime.exit_to_chat() {
+                    Ok(()) => {
+                        state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                            id,
+                            Some(slot.session_id.clone()),
+                            Some(plan_state_payload(&slot, None)),
+                        )))?;
+                    }
+                    Err(error) => {
+                        let error_code = match error {
+                            PlanRuntimeError::AlreadyInMode(_)
+                            | PlanRuntimeError::NotInPlanning(_) => "plan_state_conflict",
+                            _ => normalize_plan_runtime_error_code(&error),
+                        };
+                        send_error(
+                            &state,
+                            id,
+                            Some(slot.session_id.clone()),
+                            error_code,
+                        )?;
+                    }
+                },
+                SetPlanModeAction::Build => {
+                    let build_target = match plan_id {
+                        Some(target) => target,
+                        None => match slot.ctx.session_runtime.plan_runtime.default_build_target() {
+                            Ok(target) => target,
+                            Err(error) => {
+                                send_error(
+                                    &state,
+                                    id,
+                                    Some(slot.session_id.clone()),
+                                    normalize_plan_runtime_error_code(&error),
+                                )?;
+                                return Ok(());
+                            }
+                        },
+                    };
+                    match slot
+                        .ctx
+                        .session_runtime
+                        .plan_runtime
+                        .build_plan(&build_target, Some(slot.session_id.clone()))
+                    {
+                        Ok(outcome) => {
+                            let response_payload =
+                                plan_state_payload(&slot, Some(outcome.plan_path.to_string_lossy().to_string()));
+                            start_turn(
+                                Arc::clone(&state),
+                                slot,
+                                id,
+                                ChatMessage::user(format!(
+                                    "start building {}",
+                                    outcome.plan_path.to_string_lossy()
+                                )),
+                                TurnAck::Payload(response_payload),
+                            )
+                            .await?;
+                        }
+                        Err(error) => {
+                            send_error(
+                                &state,
+                                id,
+                                Some(slot.session_id.clone()),
+                                normalize_plan_runtime_error_code(&error),
+                            )?;
+                        }
+                    }
+                }
+            }
         }
         ServeCommand::SetModel {
             id,
@@ -258,6 +448,31 @@ pub(crate) async fn handle_command(
                 })),
             )))?;
         }
+        ServeCommand::ListModels { id } => {
+            let slot = resolve_active_slot(&state)?;
+            let models = slot
+                .ctx
+                .global_services
+                .model_catalog
+                .entries()
+                .into_iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "id": entry.id,
+                        "modelName": entry.model_name,
+                        "provider": entry.provider,
+                        "api": entry.api,
+                        "baseUrl": entry.base_url,
+                        "capabilities": entry.capabilities,
+                    })
+                })
+                .collect::<Vec<_>>();
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(serde_json::json!({ "models": models })),
+            )))?;
+        }
         ServeCommand::CloseSession { id, session_id } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {
@@ -273,6 +488,8 @@ pub(crate) async fn handle_command(
             control::ask_bridge(&state).clear_session(&slot.session_id);
             state.shared_event_bus.unregister_session_bus(&slot.session_id);
             slot.ctx.shutdown_completion_subscriber();
+            // Drop the root registration before reopening the same disk-backed session.
+            slot.ctx.agent_registry.unregister(&slot.session_id);
             state.registry.remove(&slot.session_id);
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
@@ -309,14 +526,105 @@ async fn resolve_slot_or_error(
     Ok(state.registry.get(&resolved))
 }
 
+fn resolve_active_slot(
+    state: &ServeState,
+) -> Result<Arc<super::registry::SessionSlot>, AppError> {
+    if let Some(active_session_id) = state.registry.active_session_id() {
+        if let Some(slot) = state.registry.get(&active_session_id) {
+            return Ok(slot);
+        }
+    }
+    state.registry
+        .list()
+        .into_iter()
+        .find_map(|summary| state.registry.get(&summary.session_id))
+        .ok_or_else(|| AppError::Config("unknown_session".to_string()))
+}
+
+async fn open_existing_session_slot(
+    state: Arc<ServeState>,
+    session_id: &str,
+) -> Result<Arc<super::registry::SessionSlot>, AppError> {
+    if state.registry.len() >= state.registry.max_sessions() {
+        return Err(AppError::Config("too_many_sessions".to_string()));
+    }
+    let base_slot = resolve_active_slot(&state)?;
+    let sessions_dir = crate::resolve_sessions_dir(&state.cfg)?;
+    let session_manager = SessionManager::new_scoped(
+        sessions_dir,
+        base_slot
+            .ctx
+            .session_runtime
+            .session
+            .current_session_key()
+            .to_string(),
+    );
+    let entry = match session_manager.switch_current_to_session_id(session_id) {
+        Ok(entry) => entry,
+        Err(AppError::Config(_)) => return Err(AppError::Config("unknown_session".to_string())),
+        Err(error) => return Err(error),
+    };
+    session_manager.pin_session(&entry.session_id);
+    create_session_slot(
+        state,
+        super::types::NewSessionParams {
+            cwd: entry.cwd.or_else(|| base_slot.cwd.clone()),
+            mode: Some(match base_slot.mode {
+                SessionMode::Code => ServeSessionMode::Code,
+                SessionMode::Claw => ServeSessionMode::Claw,
+            }),
+        },
+        false,
+    )
+    .await
+}
+
+fn plan_state_payload(
+    slot: &super::registry::SessionSlot,
+    plan_path_override: Option<String>,
+) -> serde_json::Value {
+    let plan_runtime = &slot.ctx.session_runtime.plan_runtime;
+    let plan_state = plan_runtime.mode();
+    let plan_id = plan_state
+        .active_plan_id()
+        .map(ToOwned::to_owned)
+        .or_else(|| plan_runtime.active_planning_plan_id());
+    let plan_path = plan_path_override.or_else(|| {
+        plan_runtime
+            .active_plan_path()
+            .map(|path| crate::infra::platform::format_home_path(&path))
+    });
+    serde_json::json!({
+        "sessionId": slot.session_id,
+        "planState": plan_state.as_str(),
+        "planId": plan_id,
+        "planPath": plan_path,
+        "sessionKey": slot.ctx.session_runtime.session.current_session_key(),
+    })
+}
+
+fn normalize_plan_runtime_error_code(error: &PlanRuntimeError) -> &'static str {
+    match error {
+        PlanRuntimeError::AlreadyInMode(_) => "plan_already_in_mode",
+        PlanRuntimeError::NotInPlanning(_) => "plan_state_conflict",
+        PlanRuntimeError::UnsafePlanId(_) | PlanRuntimeError::Io(_) => "plan_io_error",
+        PlanRuntimeError::BuildBlocked(_) => "plan_build_blocked",
+        PlanRuntimeError::BuildPlanNotFound { .. }
+        | PlanRuntimeError::BuildPlanPathNotFound { .. } => "plan_not_found",
+    }
+}
+
 async fn start_turn(
     state: Arc<ServeState>,
     slot: Arc<super::registry::SessionSlot>,
     id: Option<String>,
     input_message: ChatMessage,
+    ack: TurnAck,
 ) -> Result<(), AppError> {
     if !slot.mark_busy() {
-        send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
+        if id.is_some() {
+            send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
+        }
         return Ok(());
     }
 
@@ -327,11 +635,22 @@ async fn start_turn(
     }
 
     state.registry.set_active_session(&slot.session_id)?;
-    state.writer.send(OutFrame::Response(ResponseFrame::ok(
-        id,
-        Some(slot.session_id.clone()),
-        Some(serde_json::json!({ "accepted": true })),
-    )))?;
+    match ack {
+        TurnAck::Accepted => {
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(slot.session_id.clone()),
+                Some(serde_json::json!({ "accepted": true })),
+            )))?;
+        }
+        TurnAck::Payload(payload) => {
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(slot.session_id.clone()),
+                Some(payload),
+            )))?;
+        }
+    }
 
     let slot_for_task = Arc::clone(&slot);
     let state_for_task = Arc::clone(&state);

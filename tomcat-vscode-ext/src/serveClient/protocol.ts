@@ -3,7 +3,7 @@ import type {
   OutFrame,
   ResponseFrame,
   ServeCommand,
-  WireEvent,
+  ServeEvent,
 } from "./wire";
 
 export type ControlRequestFrame = Extract<ControlFrame, { type: "control_request" }>;
@@ -85,7 +85,7 @@ export function isControlFrame(value: unknown): value is ControlFrame {
   );
 }
 
-export function isWireEvent(value: unknown): value is WireEvent {
+export function isWireEvent(value: unknown): value is ServeEvent {
   return isRecord(value) && typeof value.type === "string" && !isResponseFrame(value) && !isControlFrame(value);
 }
 

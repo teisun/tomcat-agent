@@ -43,6 +43,15 @@ const EVENT_NAMES: &[&str] = &[
     wire::WIRE_AGENT_INTERRUPTED,
     wire::WIRE_SUB_AGENT_START,
     wire::WIRE_SUB_AGENT_END,
+    wire::WIRE_PLAN_CREATE,
+    wire::WIRE_PLAN_BUILD,
+    wire::WIRE_PLAN_UPDATE,
+    wire::WIRE_PLAN_REVIEW,
+    wire::WIRE_PLAN_CODE_REVIEW,
+    wire::WIRE_PLAN_VERIFY,
+    wire::WIRE_PLAN_REVIEW_WARNING,
+    wire::WIRE_PLAN_CODE_REVIEW_WARNING,
+    wire::WIRE_PLAN_COMPLETE,
 ];
 
 pub fn register_session_event_pump(

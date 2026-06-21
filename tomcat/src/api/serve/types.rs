@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::infra::events::WireEvent;
+use crate::infra::events::WireEvent as AgentWireEvent;
 
 /// `prompt` / `follow_up` 附件的逻辑类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -62,6 +62,23 @@ impl ServeSessionMode {
             Self::Claw => crate::SessionMode::Claw,
         }
     }
+}
+
+/// `list_sessions` 的可选枚举范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ListSessionsScope {
+    Live,
+    Disk,
+}
+
+/// `set_plan_mode` 的动作枚举。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SetPlanModeAction {
+    Enter,
+    Exit,
+    Build,
 }
 
 /// `new_session` 的可选参数。
@@ -126,12 +143,27 @@ pub enum ServeCommand {
         session_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
+    SetPlanMode {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        action: SetPlanModeAction,
+        #[serde(default, rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
     SetModel {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         model: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    ListModels {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     NewSession {
@@ -167,6 +199,8 @@ pub enum ServeCommand {
     ListSessions {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<ListSessionsScope>,
     },
     #[serde(rename_all = "camelCase")]
     Interrupt {
@@ -209,7 +243,9 @@ impl ServeCommand {
             | Self::Steer { id, .. }
             | Self::FollowUp { id, .. }
             | Self::GetState { id, .. }
+            | Self::SetPlanMode { id, .. }
             | Self::SetModel { id, .. }
+            | Self::ListModels { id, .. }
             | Self::NewSession { id, .. }
             | Self::SwitchSession { id, .. }
             | Self::GetMessages { id, .. }
@@ -228,6 +264,7 @@ impl ServeCommand {
             | Self::Steer { session_id, .. }
             | Self::FollowUp { session_id, .. }
             | Self::GetState { session_id, .. }
+            | Self::SetPlanMode { session_id, .. }
             | Self::SetModel { session_id, .. }
             | Self::GetMessages { session_id, .. }
             | Self::CloseSession { session_id, .. }
@@ -236,7 +273,7 @@ impl ServeCommand {
             | Self::ControlResponse { session_id, .. }
             | Self::ControlCancel { session_id, .. } => session_id.as_deref(),
             Self::SwitchSession { session_id, .. } => Some(session_id.as_str()),
-            Self::NewSession { .. } | Self::ListSessions { .. } => None,
+            Self::NewSession { .. } | Self::ListModels { .. } | Self::ListSessions { .. } => None,
         }
     }
 
@@ -262,7 +299,9 @@ impl ServeCommand {
             Self::Steer { .. } => "steer",
             Self::FollowUp { .. } => "follow_up",
             Self::GetState { .. } => "get_state",
+            Self::SetPlanMode { .. } => "set_plan_mode",
             Self::SetModel { .. } => "set_model",
+            Self::ListModels { .. } => "list_models",
             Self::NewSession { .. } => "new_session",
             Self::SwitchSession { .. } => "switch_session",
             Self::GetMessages { .. } => "get_messages",
@@ -274,6 +313,118 @@ impl ServeCommand {
             Self::ControlCancel { .. } => "control_cancel",
         }
     }
+}
+
+/// `plan.*` 自定义事件的 schema 入口。
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ServePlanEvent {
+    #[serde(rename = "plan.create")]
+    PlanCreate {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+    },
+    #[serde(rename = "plan.build")]
+    PlanBuild {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+    },
+    #[serde(rename = "plan.update")]
+    PlanUpdate {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+    },
+    #[serde(rename = "plan.review")]
+    PlanReview {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aborted: Option<bool>,
+    },
+    #[serde(rename = "plan.code_review")]
+    PlanCodeReview {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aborted: Option<bool>,
+    },
+    #[serde(rename = "plan.verify")]
+    PlanVerify {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        verdict: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aborted: Option<bool>,
+    },
+    #[serde(rename = "plan.review.warning")]
+    PlanReviewWarning {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rounds: Option<u32>,
+    },
+    #[serde(rename = "plan.code_review.warning")]
+    PlanCodeReviewWarning {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rounds: Option<u32>,
+    },
+    #[serde(rename = "plan.complete")]
+    PlanComplete {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ServeEvent {
+    Agent(AgentWireEvent),
+    Plan(ServePlanEvent),
 }
 
 /// 普通命令的 ack / error 响应。
@@ -420,7 +571,7 @@ impl ControlFrame {
 pub enum OutFrame {
     Response(ResponseFrame),
     Control(ControlFrame),
-    Event(#[schemars(with = "WireEvent")] Value),
+    Event(#[schemars(with = "ServeEvent")] Value),
 }
 
 impl OutFrame {

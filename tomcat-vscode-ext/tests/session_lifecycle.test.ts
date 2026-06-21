@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { initializeServe } from "../src/serveClient/initialize";
 import { SessionRouter } from "../src/serveClient/sessionRouter";
-import type { WireEvent } from "../src/serveClient/wire";
+import type { ServeEvent } from "../src/serveClient/wire";
 import {
   createRealServeMessenger,
   spawnScriptedOpenAiStreamServer,
@@ -11,17 +11,17 @@ import {
   sseFinish,
 } from "./serveTestUtils";
 
-function sessionOf(event: WireEvent): string | undefined {
-  return (event as WireEvent & { sessionId?: string }).sessionId;
+function sessionOf(event: ServeEvent): string | undefined {
+  return (event as ServeEvent & { sessionId?: string }).sessionId;
 }
 
 async function collectUntil(
-  messenger: { onEvent(listener: (event: WireEvent) => void): { dispose(): void } },
-  predicate: (events: WireEvent[]) => boolean,
+  messenger: { onEvent(listener: (event: ServeEvent) => void): { dispose(): void } },
+  predicate: (events: ServeEvent[]) => boolean,
   timeoutMs = 10_000,
-): Promise<WireEvent[]> {
+): Promise<ServeEvent[]> {
   return new Promise((resolve, reject) => {
-    const events: WireEvent[] = [];
+    const events: ServeEvent[] = [];
     const timer = setTimeout(() => {
       disposable.dispose();
       reject(new Error("timed out waiting for session lifecycle events"));

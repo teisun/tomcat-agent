@@ -643,8 +643,45 @@ impl ChatContext {
 
         {
             let appender_session = session.clone();
+            let plan_event_bus = event_bus.clone();
+            let plan_event_session_id = current_session_entry.session_id.clone();
             plan_runtime.attach_transcript_appender(Arc::new(move |extra| {
-                appender_session.append_custom_entry(extra)
+                let bus_payload = extra.clone();
+                appender_session.append_custom_entry(extra)?;
+                if let Some(event_name) = bus_payload
+                    .get("event")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|name| name.starts_with("plan."))
+                {
+                    let event_name = event_name.to_string();
+                    let mut payload = bus_payload;
+                    if let Some(obj) = payload.as_object_mut() {
+                        obj.remove("event");
+                        if let Some(plan_id) = obj.remove("plan_id") {
+                            obj.insert("planId".to_string(), plan_id);
+                        }
+                        obj.insert(
+                            "type".to_string(),
+                            serde_json::Value::String(event_name.clone()),
+                        );
+                        obj.insert(
+                            "sessionId".to_string(),
+                            serde_json::Value::String(plan_event_session_id.clone()),
+                        );
+                    }
+                    if let Err(error) = plan_event_bus.emit_sync(
+                        &event_name,
+                        crate::infra::EventContext::new(event_name.clone(), payload)
+                            .with_session_id(plan_event_session_id.clone()),
+                    ) {
+                        warn!(
+                            error = %error,
+                            event_name = %event_name,
+                            "plan transcript event emit failed"
+                        );
+                    }
+                }
+                Ok(())
             }));
         }
 

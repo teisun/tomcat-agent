@@ -18,7 +18,12 @@ import {
   normalizeAskQuestionResponse,
   parseAskQuestionRequest,
 } from "./protocol";
-import type { ResponseFrame, ServeCommand, WireEvent } from "./wire";
+import type {
+  ResponseFrame,
+  ServeCommand,
+  ServeEvent,
+  SetPlanModeAction,
+} from "./wire";
 
 export interface TomcatMessengerLogger {
   debug?(message: string): void;
@@ -35,6 +40,12 @@ export interface TomcatMessengerOptions {
   requestTimeoutMs?: number;
   logger?: TomcatMessengerLogger;
   spawnFactory?: typeof spawn;
+}
+
+export interface SetPlanModeRequest {
+  action: SetPlanModeAction;
+  planId?: string | null;
+  sessionId?: string | null;
 }
 
 export interface TomcatMessengerExit {
@@ -90,7 +101,7 @@ export class TomcatMessenger {
   private readonly controlRequestListeners = new Set<
     (frame: ControlRequestFrame) => void
   >();
-  private readonly eventListeners = new Set<(event: WireEvent) => void>();
+  private readonly eventListeners = new Set<(event: ServeEvent) => void>();
   private readonly exitListeners = new Set<(event: TomcatMessengerExit) => void>();
   private readonly frameErrorListeners = new Set<(error: Error) => void>();
   private readonly pendingControl = new Map<string, PendingControl>();
@@ -260,6 +271,45 @@ export class TomcatMessenger {
     });
   }
 
+  sendListModels(timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request(
+      {
+        type: "list_models",
+      },
+      timeoutMs,
+    );
+  }
+
+  sendSetModel(
+    sessionId: string | null | undefined,
+    model: string,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request(
+      {
+        model,
+        sessionId,
+        type: "set_model",
+      },
+      timeoutMs,
+    );
+  }
+
+  sendSetPlanMode(
+    command: SetPlanModeRequest,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request(
+      {
+        action: command.action,
+        planId: command.planId,
+        sessionId: command.sessionId,
+        type: "set_plan_mode",
+      },
+      timeoutMs,
+    );
+  }
+
   sendControlResponse(requestId: string, sessionId: string | null | undefined, payload: unknown): void {
     this.send({
       payload,
@@ -314,7 +364,7 @@ export class TomcatMessenger {
     });
   }
 
-  onEvent(listener: (event: WireEvent) => void): DisposableLike {
+  onEvent(listener: (event: ServeEvent) => void): DisposableLike {
     this.eventListeners.add(listener);
     return createDisposable(() => {
       this.eventListeners.delete(listener);

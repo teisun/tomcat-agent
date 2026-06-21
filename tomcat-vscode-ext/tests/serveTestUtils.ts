@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 
-import type { WireEvent } from "../src/serveClient/wire";
+import type { ServeEvent } from "../src/serveClient/wire";
 import { TomcatMessenger } from "../src/serveClient/TomcatMessenger";
 
 const execFileAsync = promisify(execFile);
@@ -25,6 +25,7 @@ export type ScriptedResponse = {
 };
 
 export type LlmApi = "openai" | "openai-responses";
+export type PlanFileState = "completed" | "executing" | "pending" | "planning";
 
 export function sseDelta(content: string): ScriptedPart {
   return {
@@ -135,11 +136,19 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true, 
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    ALL_PROXY: "",
     HOME: homePath,
+    HTTPS_PROXY: "",
+    HTTP_PROXY: "",
+    NO_PROXY: "127.0.0.1,localhost",
     OPENAI_API_KEY: "dummy-key",
     SHELL: "/bin/zsh",
     TOMCAT__CONTEXT__COMPACTION_MODEL: "gpt-5.4",
     TOMCAT__LLM__DEFAULT_MODEL: "gpt-5.4",
+    all_proxy: "",
+    https_proxy: "",
+    http_proxy: "",
+    no_proxy: "127.0.0.1,localhost",
   };
 
   return {
@@ -253,11 +262,11 @@ export async function createRealServeMessenger(
 
 export async function waitForEvent(
   messenger: TomcatMessenger,
-  predicate: (event: WireEvent) => boolean,
+  predicate: (event: ServeEvent) => boolean,
   timeoutMs = 10000,
-): Promise<WireEvent[]> {
+): Promise<ServeEvent[]> {
   return new Promise((resolve, reject) => {
-    const seen: WireEvent[] = [];
+    const seen: ServeEvent[] = [];
     const timer = setTimeout(() => {
       disposable.dispose();
       reject(new Error("timed out waiting for matching event"));
@@ -280,4 +289,47 @@ export async function readRequestJson(rawRequest: string): Promise<unknown> {
 
 export async function readConfigText(homePath: string): Promise<string> {
   return readFile(path.join(homePath, ".tomcat", "tomcat.config.toml"), "utf8");
+}
+
+export async function writePlanFile(
+  homePath: string,
+  planId: string,
+  state: PlanFileState = "planning",
+): Promise<string> {
+  const plansDir = path.join(homePath, ".tomcat", "plans");
+  await mkdir(plansDir, { recursive: true });
+  const planPath = path.join(plansDir, `${planId}.plan.md`);
+  await writeFile(
+    planPath,
+    `---
+plan_id: ${planId}
+goal: Stage A integration plan
+state: ${state}
+session_key: null
+session_id: null
+created_at: ${new Date().toISOString()}
+schema_version: 1
+todos:
+- id: step1
+  content: Do the thing
+  status: pending
+---
+## Goal
+
+Stage A integration plan
+
+## Plan
+
+1. Do the thing.
+
+## Todos Board
+
+<!-- todos-board:auto:begin -->
+### Todos
+- [ ] step1: Do the thing
+<!-- todos-board:auto:end -->
+`,
+    "utf8",
+  );
+  return planPath;
 }

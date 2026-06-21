@@ -2,15 +2,18 @@ import * as vscode from "vscode";
 
 import { PARTICIPANT_ID } from "../constants";
 import type { TomcatMessenger } from "./TomcatMessenger";
-import type { ResponseFrame } from "./wire";
+import type { ListSessionsScope, ResponseFrame } from "./wire";
 
 export interface SessionSummary {
   busy: boolean;
+  isCurrent: boolean;
   sessionId: string;
+  updatedAt: number | null;
 }
 
 export interface SessionListPayload {
   activeSessionId: string | null;
+  scope: ListSessionsScope;
   sessions: SessionSummary[];
 }
 
@@ -19,7 +22,10 @@ export interface SessionStatePayload {
   cwd?: string | null;
   mode?: string | null;
   model?: string | null;
+  planId?: string | null;
+  planState?: string | null;
   sessionId: string;
+  sessionKey?: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -130,8 +136,9 @@ export class SessionRouter {
     return isRecord(response.payload) ? response.payload.closed === true : response.success;
   }
 
-  async listSessions(): Promise<SessionListPayload> {
+  async listSessions(scope: ListSessionsScope = "live"): Promise<SessionListPayload> {
     const response = await this.messenger.request({
+      scope,
       type: "list_sessions",
     });
     const payload = response.payload;
@@ -139,6 +146,7 @@ export class SessionRouter {
     if (!isRecord(payload)) {
       return {
         activeSessionId: null,
+        scope,
         sessions: [],
       };
     }
@@ -146,12 +154,16 @@ export class SessionRouter {
     return {
       activeSessionId:
         typeof payload.activeSessionId === "string" ? payload.activeSessionId : null,
+      scope,
       sessions: Array.isArray(payload.sessions)
         ? payload.sessions
             .filter(isRecord)
             .map((session) => ({
               busy: session.busy === true,
+              isCurrent: session.isCurrent === true,
               sessionId: String(session.sessionId ?? ""),
+              updatedAt:
+                typeof session.updatedAt === "number" ? session.updatedAt : null,
             }))
             .filter((session) => session.sessionId.length > 0)
         : [],
@@ -174,7 +186,12 @@ export class SessionRouter {
       cwd: typeof payload.cwd === "string" ? payload.cwd : null,
       mode: typeof payload.mode === "string" ? payload.mode : null,
       model: typeof payload.model === "string" ? payload.model : null,
+      planId: typeof payload.planId === "string" ? payload.planId : null,
+      planState:
+        typeof payload.planState === "string" ? payload.planState : null,
       sessionId: payload.sessionId,
+      sessionKey:
+        typeof payload.sessionKey === "string" ? payload.sessionKey : null,
     };
   }
 }

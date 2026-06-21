@@ -36,3 +36,12 @@ fn parse_command_line_rejects_explicit_null_session_id() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn parse_command_line_accepts_stage_a_commands() {
+    parse_command_line(r#"{"type":"list_models","id":"u1"}"#).unwrap();
+    parse_command_line(
+        r#"{"type":"set_plan_mode","id":"u2","sessionId":"s1","action":"enter"}"#,
+    )
+    .unwrap();
+}

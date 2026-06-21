@@ -7,6 +7,8 @@ export interface GetMessagesParams {
   lastNTurns?: null | number;
   limit?: null | number;
 }
+export type ListSessionsScope = "live" | "disk";
+
 export type Message = any;
 
 export interface NewSessionParams {
@@ -21,10 +23,70 @@ export interface ServeAttachment {
 }
 export type ServeAttachmentKind = "image" | "file";
 
+export type ServeEvent = ServePlanEvent | WireEvent;
+
 export interface ServeMessageParams {
   attachments?: ServeAttachment[];
 }
+export type ServePlanEvent = {
+  aborted?: boolean | null;
+  planId?: null | string;
+  sessionId?: null | string;
+  summary?: null | string;
+  type: "plan.code_review";
+} | {
+  aborted?: boolean | null;
+  planId?: null | string;
+  sessionId?: null | string;
+  summary?: null | string;
+  type: "plan.review";
+} | {
+  aborted?: boolean | null;
+  planId?: null | string;
+  sessionId?: null | string;
+  type: "plan.verify";
+  verdict?: null | string;
+} | {
+  path?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  state?: null | string;
+  type: "plan.build";
+} | {
+  path?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  state?: null | string;
+  type: "plan.complete";
+} | {
+  path?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  state?: null | string;
+  type: "plan.create";
+} | {
+  path?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  state?: null | string;
+  type: "plan.update";
+} | {
+  planId?: null | string;
+  reason?: null | string;
+  rounds?: null | number;
+  sessionId?: null | string;
+  type: "plan.code_review.warning";
+} | {
+  planId?: null | string;
+  reason?: null | string;
+  rounds?: null | number;
+  sessionId?: null | string;
+  type: "plan.review.warning";
+};
+
 export type ServeSessionMode = "code" | "claw";
+
+export type SetPlanModeAction = "enter" | "exit" | "build";
 
 export type ToolDisplay = {
   file: string;
@@ -57,7 +119,7 @@ export type ControlFrame = {
   type: "control_response";
 };
 
-export type OutFrame = ControlFrame | ResponseFrame | WireEvent;
+export type OutFrame = ControlFrame | ResponseFrame | ServeEvent;
 
 export interface ResponseFrame {
   error?: null | string;
@@ -68,6 +130,12 @@ export interface ResponseFrame {
   type: string;
 }
 export type ServeCommand = {
+  action: SetPlanModeAction;
+  id?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  type: "set_plan_mode";
+} | {
   id?: null | string;
   model: string;
   sessionId?: null | string;
@@ -101,6 +169,10 @@ export type ServeCommand = {
   type: "steer";
 } | {
   id?: null | string;
+  scope?: ListSessionsScope | null;
+  type: "list_sessions";
+} | {
+  id?: null | string;
   sessionId: string;
   type: "switch_session";
 } | {
@@ -117,7 +189,7 @@ export type ServeCommand = {
   type: "interrupt";
 } | {
   id?: null | string;
-  type: "list_sessions";
+  type: "list_models";
 } | {
   payload?: any;
   requestId: string;

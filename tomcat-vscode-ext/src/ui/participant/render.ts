@@ -1,7 +1,11 @@
 import * as vscode from "vscode";
 
 import type { VsCodeIde } from "../../ide/VsCodeIde";
-import type { WireEvent } from "../../serveClient/wire";
+import type { ServeEvent, ServePlanEvent } from "../../serveClient/wire";
+import {
+  planEventState,
+  planStateProgressLabel,
+} from "./planState";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -27,7 +31,7 @@ function asText(value: unknown): string | undefined {
   }
 }
 
-function getAssistantDelta(event: WireEvent): { delta: string; kind: string } | undefined {
+function getAssistantDelta(event: ServeEvent): { delta: string; kind: string } | undefined {
   if (event.type !== "message_update" || !isRecord(event.assistantMessageEvent)) {
     return undefined;
   }
@@ -41,6 +45,10 @@ function getAssistantDelta(event: WireEvent): { delta: string; kind: string } | 
   return { delta, kind };
 }
 
+function isPlanEvent(event: ServeEvent): event is ServePlanEvent {
+  return event.type.startsWith("plan.");
+}
+
 export class ParticipantTurnRenderer {
   private hasShownThinkingNotice = false;
 
@@ -49,7 +57,12 @@ export class ParticipantTurnRenderer {
     private readonly stream: vscode.ChatResponseStream,
   ) {}
 
-  async render(event: WireEvent): Promise<void> {
+  async render(event: ServeEvent): Promise<void> {
+    if (isPlanEvent(event)) {
+      this.renderPlanEvent(event);
+      return;
+    }
+
     switch (event.type) {
       case "agent_start":
         this.stream.progress("Tomcat agent started");
@@ -105,8 +118,37 @@ export class ParticipantTurnRenderer {
     }
   }
 
+  private renderPlanEvent(event: ServePlanEvent): void {
+    const state = planEventState(event);
+    if (state) {
+      this.stream.progress(planStateProgressLabel(state, event.planId));
+    }
+
+    switch (event.type) {
+      case "plan.review":
+      case "plan.code_review":
+        if (event.summary) {
+          this.stream.progress(`Tomcat plan review: ${event.summary}`);
+        }
+        return;
+      case "plan.verify":
+        if (event.verdict) {
+          this.stream.progress(`Tomcat plan verify: ${event.verdict}`);
+        }
+        return;
+      case "plan.review.warning":
+      case "plan.code_review.warning":
+        this.stream.progress(
+          `Tomcat plan warning: ${event.reason ?? "review needs attention"}`,
+        );
+        return;
+      default:
+        return;
+    }
+  }
+
   private async renderToolEnd(
-    event: Extract<WireEvent, { type: "tool_execution_end" }>,
+    event: Extract<ServeEvent, { type: "tool_execution_end" }>,
   ): Promise<void> {
     const summary = asText(event.result);
     const outcome = event.isError ? "failed" : "finished";
