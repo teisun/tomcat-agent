@@ -325,6 +325,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
           return;
         }
+        this.stateStore.setActiveSession(sessionId);
+        this.stateStore.appendMessage(
+          sessionId,
+          "user",
+          intent.data.text,
+        );
+        await this.postState();
         const response = await this.deps.messenger.request({
           params: {
             attachments: [],
@@ -340,7 +347,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             response.error ?? `Tomcat ${intent.type} failed`,
           );
         }
-        this.stateStore.setActiveSession(sessionId);
         await this.refreshSessionState(sessionId);
         await this.postState();
         return;

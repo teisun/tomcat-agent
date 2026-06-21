@@ -1,0 +1,335 @@
+:root {
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--vscode-sideBar-background);
+  color: var(--vscode-sideBar-foreground, var(--vscode-foreground));
+}
+
+button,
+select,
+textarea {
+  font: inherit;
+}
+
+button,
+select,
+textarea {
+  outline: none;
+}
+
+button:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.tc-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 100%;
+  overflow: hidden;
+  padding: 10px;
+}
+
+.tc-header,
+.tc-toolbar,
+.tc-panel__header,
+.tc-card__header,
+.tc-message__header,
+.tc-composer__footer {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.tc-header {
+  align-items: flex-start;
+}
+
+.tc-header h1,
+.tc-panel h2,
+.tc-empty-state h2,
+.tc-card h3 {
+  margin: 0;
+}
+
+.tc-header__eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  margin: 0 0 4px;
+  opacity: 0.72;
+  text-transform: uppercase;
+}
+
+.tc-toolbar,
+.tc-button-row,
+.tc-chip-row,
+.tc-session-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tc-panel,
+.tc-composer,
+.tc-card,
+.tc-banner,
+.tc-message {
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid
+    var(--vscode-editorWidget-border, var(--vscode-panel-border, rgba(127, 127, 127, 0.3)));
+  border-radius: 10px;
+}
+
+.tc-panel,
+.tc-composer,
+.tc-banner {
+  padding: 10px;
+}
+
+.tc-card,
+.tc-message {
+  padding: 10px 12px;
+}
+
+.tc-banner {
+  color: var(--vscode-foreground);
+}
+
+.tc-banner--warning {
+  border-color: var(--vscode-inputValidation-warningBorder, #cca700);
+  background: var(--vscode-inputValidation-warningBackground, rgba(204, 167, 0, 0.12));
+}
+
+.tc-panel__header {
+  margin-bottom: 8px;
+}
+
+.tc-empty-inline,
+.tc-empty-state p,
+.tc-approval-question p {
+  margin: 0;
+}
+
+.tc-empty-inline,
+.tc-composer__hint,
+.tc-session-tab__meta,
+.tc-message__header span,
+.tc-header__eyebrow {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-empty-state {
+  align-items: flex-start;
+  border: 1px dashed var(--vscode-panel-border, rgba(127, 127, 127, 0.35));
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 20px 14px;
+}
+
+.tc-session-tab {
+  align-items: center;
+  background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.15));
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  cursor: pointer;
+  display: inline-flex;
+  gap: 4px;
+  max-width: 100%;
+  padding: 5px 10px;
+}
+
+.tc-session-tab--active {
+  border-color: var(--vscode-focusBorder);
+  background: var(--vscode-list-activeSelectionBackground, rgba(0, 122, 204, 0.18));
+}
+
+.tc-session-tab:hover,
+.tc-button:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.tc-session-tab span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tc-control-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tc-field select,
+.tc-field textarea {
+  background: var(--vscode-input-background);
+  border: 1px solid var(--vscode-input-border, rgba(127, 127, 127, 0.3));
+  border-radius: 8px;
+  color: var(--vscode-input-foreground);
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.tc-field textarea {
+  min-height: 68px;
+  resize: vertical;
+}
+
+.tc-button {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  min-height: 28px;
+  padding: 6px 10px;
+}
+
+.tc-button:disabled,
+.tc-session-tab:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.tc-button--primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.tc-button--secondary {
+  background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.15));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+
+.tc-button--ghost {
+  background: transparent;
+  border-color: var(--vscode-button-border, rgba(127, 127, 127, 0.25));
+  color: inherit;
+}
+
+.tc-chip {
+  background: rgba(127, 127, 127, 0.16);
+  border: 1px solid rgba(127, 127, 127, 0.2);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px 9px;
+}
+
+.tc-chip--success {
+  background: rgba(53, 132, 53, 0.18);
+  border-color: rgba(53, 132, 53, 0.28);
+}
+
+.tc-chip--warning {
+  background: rgba(204, 167, 0, 0.18);
+  border-color: rgba(204, 167, 0, 0.32);
+}
+
+.tc-chip--danger {
+  background: rgba(205, 92, 92, 0.18);
+  border-color: rgba(205, 92, 92, 0.32);
+}
+
+.tc-stream {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.tc-message {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tc-message p,
+.tc-card pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tc-message--assistant {
+  background: var(--vscode-editor-background);
+}
+
+.tc-message--user {
+  background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.18));
+  margin-left: 20px;
+}
+
+.tc-message--thinking {
+  border-left: 3px solid var(--vscode-textLink-foreground, #3794ff);
+}
+
+.tc-message--notice {
+  border-left: 3px solid var(--vscode-inputValidation-infoBorder, #3794ff);
+}
+
+.tc-message--error {
+  border-left: 3px solid var(--vscode-errorForeground, #f14c4c);
+}
+
+.tc-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tc-approval-card {
+  border-color: var(--vscode-inputValidation-warningBorder, #cca700);
+}
+
+.tc-approval-question {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tc-composer {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.tc-composer__footer {
+  align-items: flex-start;
+}
+
+.tc-composer__hint {
+  flex: 1 1 auto;
+  line-height: 1.35;
+}

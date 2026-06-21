@@ -10,7 +10,7 @@ export type FrontendOwnerKind = "participant" | "webview";
 
 export interface WebviewMessageBlock {
   id: string;
-  kind: "assistant" | "error" | "notice" | "thinking";
+  kind: "assistant" | "error" | "notice" | "thinking" | "user";
   text: string;
 }
 

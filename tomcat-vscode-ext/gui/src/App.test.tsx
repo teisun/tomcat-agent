@@ -92,7 +92,8 @@ describe("Tomcat webview App", () => {
     expect(screen.getByText("thinking...")).toBeTruthy();
     expect(screen.getByText("Proceed?")).toBeTruthy();
     expect(screen.getByText("edit (complete)")).toBeTruthy();
-    expect(screen.getByText("s1 * (webview)")).toBeTruthy();
+    expect(screen.getByTestId("session-tab").textContent).toContain("s1 *");
+    expect(screen.getByTestId("session-tab").textContent).toContain("(webview)");
   });
 
   it("posts prompt and approval intents", async () => {
@@ -154,7 +155,7 @@ describe("Tomcat webview App", () => {
       target: { value: "send this" },
     });
     fireEvent.click(screen.getByText("Send"));
-    fireEvent.click(screen.getByText("Yes"));
+    fireEvent.click(screen.getByText("Yes (Recommended)"));
 
     expect(
       postMessage.mock.calls.some(
@@ -167,6 +168,59 @@ describe("Tomcat webview App", () => {
         ([message]) =>
           message.type === "answerQuestion" &&
           message.data?.requestId === "r1",
+      ),
+    ).toBe(true);
+  });
+
+  it("submits the prompt on Enter without Shift", async () => {
+    const { postMessage } = mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            approvals: [],
+            busy: false,
+            conflictMessage: null,
+            messages: [],
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            tools: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-enter",
+    });
+
+    const textbox = screen.getByRole("textbox");
+    fireEvent.change(textbox, {
+      target: { value: "submit via enter" },
+    });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) =>
+          message.type === "prompt" && message.data?.text === "submit via enter",
       ),
     ).toBe(true);
   });
