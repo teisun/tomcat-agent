@@ -6,6 +6,12 @@
 !LICENSE
 !LICENSE.txt
 !LICENSE.md
+!gui/
+gui/**
+!gui/dist/
+!gui/dist/**
+!media/
+!media/**
 out/**/tests/**
 out/**/tests
 out/test/**

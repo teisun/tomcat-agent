@@ -17,12 +17,16 @@ const REQUIRED_FILES = [
   "LICENSE",
   "README.md",
   "package.json",
+  "gui/dist/index.js",
+  "media/tomcat.svg",
   "out/extension.js",
 ] as const;
 
 const DISALLOWED_PREFIXES = [
   ".vscode-test/",
   "e2e-harness/",
+  "gui/node_modules/",
+  "gui/src/",
   "node_modules/",
   "out/test/",
   "out/tests/",
@@ -36,6 +40,11 @@ const ROOT_ASSETS = [
   "LICENSE",
   "README.md",
   "package.json",
+] as const;
+
+const DIRECTORY_ASSETS = [
+  "gui/dist",
+  "media",
 ] as const;
 
 function run(command: string, args: string[], cwd: string, capture = false): string {
@@ -120,6 +129,20 @@ function copyFilteredOut(sourceRoot: string, targetRoot: string, relativePath = 
   }
 }
 
+function copyDirectory(sourcePath: string, targetPath: string): void {
+  fs.mkdirSync(targetPath, { recursive: true });
+  for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+    const sourceChild = path.join(sourcePath, entry.name);
+    const targetChild = path.join(targetPath, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectory(sourceChild, targetChild);
+      continue;
+    }
+    fs.mkdirSync(path.dirname(targetChild), { recursive: true });
+    fs.copyFileSync(sourceChild, targetChild);
+  }
+}
+
 export function preparePublishDirectory(extensionRoot: string): string {
   const publishRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tomcat-vsix-stage-"));
   for (const asset of ROOT_ASSETS) {
@@ -127,6 +150,9 @@ export function preparePublishDirectory(extensionRoot: string): string {
       path.join(extensionRoot, asset),
       path.join(publishRoot, asset),
     );
+  }
+  for (const asset of DIRECTORY_ASSETS) {
+    copyDirectory(path.join(extensionRoot, asset), path.join(publishRoot, asset));
   }
 
   const stagedOutRoot = path.join(publishRoot, "out");

@@ -42,14 +42,31 @@
 
 | 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 |------|------|------|------|----------|----------------|--------|
-| **SB1** 前端形态 | 富交互前端怎么搭 | 自建 React Webview：`contributes.views` + `WebviewViewProvider`（稳定） | 本仓 Phase 1 `ide/VsCodeIde.ts` 可复用；cline `WebviewProvider.ts`（注入+CSP）、continue `extensions/vscode/src/webviewProtocol.ts` | 稳定可上架；UI 完全自控；桥接核心复用 | ① fork `vscode-copilot-chat`：体量/许可/商标 + 招牌 UI 靠 proposed + 身份门禁（Phase 1 §10 已否决）→ 拒；② 继续堆原生 part：富交互（内联 diff/思考块/多会话 tab）表达力不足 → 拒 | 自己用 React 画一套，不去 fork Copilot 也不硬堆原生控件。 |
+| **SB1** 前端形态 | 富交互前端怎么搭 | 自建 **React Webview**：`contributes.views` + `WebviewViewProvider`（稳定）；VSCode 只提供宿主 API，不提供 UI 框架 | 本仓 Phase 1 `ide/VsCodeIde.ts` 可复用；cline `WebviewProvider.ts`（注入+CSP）、continue `extensions/vscode/src/webviewProtocol.ts` | 稳定可上架；UI 完全自控；桥接核心复用；与 `cline` / `continue` 的成熟路径同构 | ① fork `vscode-copilot-chat`：体量/许可/商标 + 招牌 UI 靠 proposed + 身份门禁（Phase 1 §10 已否决）→ 拒；② 继续堆原生 part：富交互（内联 diff/思考块/多会话 tab）表达力不足 → 拒 | VSCode 只给容器，不送框架；所以我们自己在 Webview 里跑 React。 |
 | **SB2** 与 participant 关系 | 两个前端如何共处、会话怎么分 | **默认并存**；共享桥接核心 + 单 serve；**共享同一项目 scope 会话池**（枚举共享、默认 last-active），单条 live 会话单前端归属；`tomcat.ui` 可选关其一 | 用户已确认 both_default + shared_pool；本仓 `TomcatMessenger`（单实例多会话）、`scope.rs:49`/`session_impl.rs:380`（scope 归组+列举）、serve `registry`（并发会话+`is_busy`） | 不浪费 Phase 1 成果；复刻 `tomcat code` 项目归组 UX；后端原生并发会话；`is_busy` 兜底防抢占 | ① 二选一（webview 取代 participant）：丢已交付原生入口 → 拒；② 完全隔离命名空间（各自 new_session、互不可见）：webview 看不到项目历史，丢用户要的归组 → 拒；③ 两前端同时驱动同一 live 会话：抢 busy/turn → 拒，故单活跃归属 | 两入口都留、看同一份项目会话；同一条对话不许俩面板一起发。 |
 | **SB3** webview↔host 协议 | 消息通道用什么格式 | typed postMessage `{messageId,done,content}`（学 continue），按需流式 | continue `webviewProtocol.ts`、`IpcMessenger.ts:37`（`{done}` 流）；cline ProtoBus 对照 | 与 serve NDJSON「一问一流答」同构；依赖最小；TS 类型直通 | cline 的 gRPC-over-postMessage（proto 编译 + ProtoBus）：引入 proto 工具链与代码生成，对单扩展偏重 → 拒 | 用最轻的"带 id 的消息+流式分块"，不上 gRPC 那套。 |
 | **SB4** 渲染数据流 | 流式如何高效渲染 + 保证与 vscode chat 同款富 UI | **双通道**：全量 `state` 快照 + `event` 透传（**原样携带 Phase 1 `WireEvent`**，含 `thinking_delta`/`tool`/`ask_question`） | cline `state.proto`(subscribeToState) + `ui.proto`(`ClineMessage.partial`)、`task/index.ts`(sendPartialMessage)；本仓直接复用 Phase 1 事件词汇 | 复用 participant 同源事件 → 思考/工具/审批/diff 体验等价；只 patch 不重画；背压只丢可重建 delta | 另造一套 UI 语义：重复造轮子且与 participant 漂移 → 拒；每次全量重渲染：大会话卡顿 → 拒 | 一条管整体快照（重连用），一条把后端事件原样传进来逐条画，所以富 UI 全有。 |
 | **SB5** CSP / 资源加载 | webview 安全与静态资源 | nonce + `asWebviewUri` + `localResourceRoots` + `retainContextWhenHidden` | cline `WebviewProvider.ts:101`(getNonce)、`:113`(CSP `script-src 'nonce-…'`) | 满足 webview 安全基线；隐藏不丢状态；与 cline 生产写法一致 | 放开 CSP（`unsafe-inline`/无 nonce）：安全审查不过、上架风险 → 拒 | 按 cline 那套安全头加载脚本，藏起来也不丢状态。 |
 | **SB6** diff / 编辑落地 | webview 里"看 diff + 改文件" | 复用 Phase 1 `ide/VsCodeIde.ts`：虚拟只读文档 + `vscode.diff` + `WorkspaceEdit` + 装饰；可选 continue 垂直流式 diff | 本仓 `ide/VsCodeIde.ts`（Phase 1 R5 已实现）；cline `VscodeDiffViewProvider.ts`；continue `VerticalDiffManager` | "看 diff"与"真改"同一份改动；Phase 1 已测；不重写 | webview 内自渲 diff 再回写：绕开 VSCode 编辑栈、与编辑器状态割裂 → 拒 | 改文件还走 Phase 1 那套稳的，webview 只触发它。 |
 | **SB7** 富 UI 控件 | 模型/plan/多会话怎么呈现 | 模型下拉(`set_model`) + plan 开关(`set_plan_mode`) + **多会话 tab**(`new/switch/close_session`) | 本仓 serve `types.rs`(new/switch/close_session 现成)、Stage A `set_plan_mode`/`list_models`；cline `togglePlanActMode`(单 task)、continue `ModeSelect.tsx` | 复用 Stage A 协议；多会话是 Tomcat 相对 cline 的优势 | 照搬 cline 单活跃 task：放弃 Tomcat 并发多会话能力 → 拒 | 顶部下拉选模型、开关切 plan、多个标签开多个会话。 |
-| **SB8** 前端构建 / 打包 | React 产物如何进 VSIX | React+Vite 独立构建，产物纳入 VSIX；更新打包暂存清单 | 本仓 `scripts/package-vsix.ts`（Phase 1 暂存式打包）、`.vscodeignore` | 与 cline/continue 同款（gui 独立构建）；打包脚本已是暂存式，扩展成本低 | 把 gui 源码塞进扩展 tsconfig 一起编：bundler/CSS/JSX 配置打架 → 拒 | gui 单独用 Vite 打包，产物拷进扩展包里。 |
+| **SB8** 前端构建 / 打包 | React 产物如何进 VSIX | **React+Vite** 独立构建，产物纳入 VSIX；更新打包暂存清单 | 本仓 `scripts/package-vsix.ts`（Phase 1 暂存式打包）、`.vscodeignore`；`cline` `webview-ui/vite.config.ts`、`continue` `gui/vite.config.ts` | 与 cline/continue 同款（gui 独立构建）；打包脚本已是暂存式，扩展成本低 | 把 gui 源码塞进扩展 tsconfig 一起编：bundler/CSS/JSX 配置打架 → 拒 | gui 单独用 Vite 打包，产物拷进扩展包里。 |
+
+### 3.1.1 补充裁决：Webview 应用框架
+
+> 专业：VSCode 对第三方扩展提供的是 **Webview 宿主 API**，例如 `WebviewViewProvider`、`postMessage`、`asWebviewUri`、`localResourceRoots`、CSP/nonce、`retainContextWhenHidden`。这些 API 解决的是"如何把一个前端页面安全嵌进 VSCode 并与扩展宿主通信"，**不提供 React/Vue/Svelte 之类 UI 框架**。因此 Stage B 的页面框架、构建工具与前端目录布局必须由 Tomcat 自行选型。本次裁决结合本仓 `SB1/SB3/SB8` 约束，以及 `cline` / `continue` 两个成熟 VSCode Webview 项目的实证。
+> 说人话：VSCode 只给我们一个"能装网页的容器 + 一条通信管道"，不会送一个官方前端框架。Tomcat 得自己决定这个网页是用 React 还是别的来写。
+
+| 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
+|------|------|------|------|----------|----------------|--------|
+| **FW1** Webview 页面框架 | Webview UI 用什么写；VSCode 有没有自带框架 | **Tomcat Stage B 采 `React + Vite` 独立 GUI sidecar；扩展宿主继续走现有 TS 构建与 `WebviewViewProvider`。开发实现直接参考 `cline` 的 provider/CSP/gui 构建方式与 `continue` 的 typed `postMessage` / gui-host 拆分；不走 Electron 独立桌面壳。** | `cline/apps/vscode/webview-ui/package.json`、`cline/apps/vscode/webview-ui/vite.config.ts`、`cline/apps/vscode/src/hosts/vscode/VscodeWebviewProvider.ts`；`continue/gui/package.json`、`continue/gui/vite.config.ts`、`continue/extensions/vscode/src/ContinueGUIWebviewViewProvider.ts`、`continue/extensions/vscode/src/webviewProtocol.ts` | `cline` 与 `continue` 都验证了"VSCode Webview + React + Vite + 独立 gui 包 + host provider 注入资源"这条路线；与本方案已拍板的 typed postMessage、CSP、安全装载、打包入 VSIX 完全同构；React 最适合消息流、工具卡、审批卡、会话 tab 这类状态化 UI | ① **Electron / 独立桌面壳**：我们做的是 VSCode 扩展，不是独立 App；额外引入 Electron 只会增加进程、打包、验收与调试复杂度，且与 `contributes.views` 形态不匹配 → 拒。② **纯 HTML + 原生 JS 不上框架**：初期能跑，但 `thinking` / `tool` / `approval` / `multisession` 状态管理、组件复用和 UI 自动化成本更高 → 拒。③ **Vue / Svelte 等其他框架**：技术上可行，但当前缺少本仓既有经验与直接可复用的竞品实证，收益不明显 → 本期不选。 | 不是"VSCode 给了一个 React 框架"，而是"VSCode 给了一个 iframe 容器，我们自己在里面跑 React 应用"；`cline` 和 `continue` 都是这么做的，所以 Tomcat 直接走同一路线最稳。 |
+
+开发参考边界：
+
+- **参考 `cline`**：`WebviewProvider` 的 HTML 注入、CSP/nonce、`retainContextWhenHidden`、`gui/` 独立 Vite 构建、打包后资源注入方式。
+- **参考 `continue`**：typed `postMessage` / `webviewProtocol`、`IdeMessenger` 风格的宿主-前端通信、`gui/` 与扩展宿主拆分、开发态/打包态资源切换。
+- **明确不照搬**：`cline` 的 gRPC/proto 总线、额外 Electron 壳、以及与本仓阶段边界不匹配的重型状态层。
+
+> 说人话：框架这件事就别再犹豫了，结论就是"**Webview 用 React + Vite，宿主继续是 VSCode 扩展**"。后面写代码时，provider/CSP/资源加载学 `cline`，协议和 gui/host 拆分学 `continue`，但不要把它们的重型通信栈和额外壳子一股脑搬进来。
 
 ### 3.2 实施点（五列）
 

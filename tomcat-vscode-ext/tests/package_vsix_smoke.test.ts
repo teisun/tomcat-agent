@@ -27,7 +27,10 @@ describe("VSIX packaging", () => {
         assertPublishableFiles(fileList);
         expect(fileList).toContain("README.md");
         expect(fileList).toContain("LICENSE");
+        expect(fileList).toContain("gui/dist/index.js");
+        expect(fileList).toContain("media/tomcat.svg");
         expect(fileList).not.toContain("src/extension.ts");
+        expect(fileList).not.toContain("gui/src/App.tsx");
         expect(fileList).not.toContain("tests/serve_e2e.test.ts");
 
         const stat = await fs.stat(packaged);

@@ -21,7 +21,7 @@ async function main(): Promise<void> {
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "tdev-"));
 
   try {
-    execFileSync("npm", ["run", "compile"], {
+    execFileSync("npm", ["run", "build"], {
       cwd: extensionDevelopmentPath,
       stdio: "inherit",
     });

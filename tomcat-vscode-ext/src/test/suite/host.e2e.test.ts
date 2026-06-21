@@ -3,10 +3,16 @@ import {
   assertApprovalDiffFlowViaChatUi,
   assertInterruptAndRestartFlow,
   assertInterruptAndRestartFlowViaChatUi,
+  assertModelSlashFlowViaChatUi,
   assertMultiSessionRouting,
   assertMultiSessionRoutingViaChatUi,
   assertParticipantHappyPath,
   assertParticipantHappyPathViaChatUi,
+  assertPlanSlashFlowViaChatUi,
+  assertWebviewDiffFlow,
+  assertWebviewMultiSessionFlow,
+  assertWebviewOwnershipFlow,
+  assertWebviewStreamingFlow,
   getTomcatExtensionApi,
 } from "./support/hostE2eScenario";
 
@@ -49,5 +55,35 @@ suite("Tomcat host E2E", () => {
   test("keeps chat-thread routing stable via the real chat UI", async () => {
     const api = await getTomcatExtensionApi();
     await assertMultiSessionRoutingViaChatUi(api);
+  });
+
+  test("runs /plan via the real chat UI", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertPlanSlashFlowViaChatUi(api);
+  });
+
+  test("runs /model via the real chat UI", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertModelSlashFlowViaChatUi(api);
+  });
+
+  test("streams in the Tomcat webview", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewStreamingFlow(api);
+  });
+
+  test("applies edits from the Tomcat webview", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewDiffFlow(api);
+  });
+
+  test("keeps multiple Tomcat webview sessions isolated", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewMultiSessionFlow(api);
+  });
+
+  test("enforces single-owner Tomcat webview sessions", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewOwnershipFlow(api);
   });
 });

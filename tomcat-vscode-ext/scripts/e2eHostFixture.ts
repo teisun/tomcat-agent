@@ -35,15 +35,29 @@ const fs = require("node:fs");
 const readline = require("node:readline");
 
 const editFilePath = ${JSON.stringify(editFilePath)};
+const MODEL_OPTIONS = ["fake-model", "gpt-5.4", "claude-4.6-sonnet"];
 const sessions = new Map();
 let sessionCounter = 1;
 let pendingApproval = null;
 let pendingInterrupt = null;
 let activeSessionId = null;
 
+function touchSession(session) {
+  session.updatedAt = Date.now();
+  return session;
+}
+
 function createSession() {
   const sessionId = \`session-\${sessionCounter++}\`;
-  sessions.set(sessionId, { busy: false, cwd: process.cwd(), mode: "code", model: "fake-model" });
+  sessions.set(sessionId, touchSession({
+    busy: false,
+    cwd: process.cwd(),
+    mode: "code",
+    model: MODEL_OPTIONS[0],
+    planId: null,
+    planState: "chat",
+    sessionKey: "fake-workspace",
+  }));
   if (!activeSessionId) {
     activeSessionId = sessionId;
   }
@@ -58,7 +72,15 @@ function send(frame) {
 
 function ensureSession(sessionId) {
   if (!sessions.has(sessionId)) {
-    sessions.set(sessionId, { busy: false, cwd: process.cwd(), mode: "code", model: "fake-model" });
+    sessions.set(sessionId, touchSession({
+      busy: false,
+      cwd: process.cwd(),
+      mode: "code",
+      model: MODEL_OPTIONS[0],
+      planId: null,
+      planState: "chat",
+      sessionKey: "fake-workspace",
+    }));
   }
   return sessions.get(sessionId);
 }
@@ -75,8 +97,18 @@ function emitMessageDelta(sessionId, delta) {
   });
 }
 
-function finishTurn(sessionId, error = null) {
+function emitPlanEvent(sessionId, type) {
   const session = ensureSession(sessionId);
+  send({
+    planId: session.planId,
+    sessionId,
+    state: session.planState,
+    type,
+  });
+}
+
+function finishTurn(sessionId, error = null) {
+  const session = touchSession(ensureSession(sessionId));
   session.busy = false;
   send({
     error,
@@ -87,7 +119,7 @@ function finishTurn(sessionId, error = null) {
 }
 
 function startTurn(sessionId) {
-  const session = ensureSession(sessionId);
+  const session = touchSession(ensureSession(sessionId));
   session.busy = true;
   activeSessionId = sessionId;
   send({
@@ -98,7 +130,7 @@ function startTurn(sessionId) {
 
 function handlePrompt(frame) {
   const sessionId = frame.sessionId || activeSessionId || createSession();
-  const session = ensureSession(sessionId);
+  const session = touchSession(ensureSession(sessionId));
   if (session.busy) {
     send({
       error: "busy",
@@ -249,6 +281,9 @@ function handleCommand(frame) {
               "close_session",
               "interrupt",
               "follow_up",
+              "list_models",
+              "set_model",
+              "set_plan_mode",
             ],
             protocolVersion: 1,
             sessionId,
@@ -276,10 +311,10 @@ function handleCommand(frame) {
     }
     case "switch_session": {
       activeSessionId = frame.sessionId;
-      ensureSession(activeSessionId);
+      touchSession(ensureSession(activeSessionId));
       send({
         id: frame.id,
-        payload: { sessionId: activeSessionId },
+        payload: { activeSessionId },
         sessionId: activeSessionId,
         success: true,
         type: "response",
@@ -293,7 +328,9 @@ function handleCommand(frame) {
           activeSessionId,
           sessions: [...sessions.entries()].map(([sessionId, session]) => ({
             busy: session.busy,
+            isCurrent: sessionId === activeSessionId,
             sessionId,
+            updatedAt: session.updatedAt,
           })),
         },
         success: true,
@@ -310,7 +347,10 @@ function handleCommand(frame) {
           cwd: session.cwd,
           mode: session.mode,
           model: session.model,
+          planId: session.planId,
+          planState: session.planState,
           sessionId,
+          sessionKey: session.sessionKey,
         },
         sessionId,
         success: true,
@@ -325,11 +365,84 @@ function handleCommand(frame) {
       }
       send({
         id: frame.id,
-        payload: { closed: true },
+        payload: { closed: true, sessionId: frame.sessionId },
         success: true,
         type: "response",
       });
       break;
+    case "list_models":
+      send({
+        id: frame.id,
+        payload: {
+          models: MODEL_OPTIONS.map((id) => ({ id })),
+        },
+        sessionId: activeSessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    case "set_model": {
+      const sessionId = frame.sessionId || activeSessionId || createSession();
+      const session = touchSession(ensureSession(sessionId));
+      session.model = frame.model;
+      send({
+        id: frame.id,
+        payload: { model: session.model, sessionId },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "set_plan_mode": {
+      const sessionId = frame.sessionId || activeSessionId || createSession();
+      const session = touchSession(ensureSession(sessionId));
+      if (frame.action === "enter") {
+        session.planState = "planning";
+        session.planId = session.planId || "fake-plan";
+        send({
+          id: frame.id,
+          payload: { planId: session.planId, planState: session.planState },
+          sessionId,
+          success: true,
+          type: "response",
+        });
+        emitPlanEvent(sessionId, "plan.create");
+        break;
+      }
+      if (frame.action === "exit") {
+        session.planState = "chat";
+        session.planId = null;
+        send({
+          id: frame.id,
+          payload: { planId: null, planState: "chat" },
+          sessionId,
+          success: true,
+          type: "response",
+        });
+        emitPlanEvent(sessionId, "plan.complete");
+        break;
+      }
+
+      session.planId = frame.planId || session.planId || "fake-plan";
+      session.planState = "executing";
+      send({
+        id: frame.id,
+        payload: {
+          planId: session.planId,
+          planPath: \`~/.tomcat/plans/\${session.planId}.plan.md\`,
+          planState: session.planState,
+        },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      emitPlanEvent(sessionId, "plan.build");
+      setTimeout(() => {
+        finishTurn(sessionId, null);
+      }, 10);
+      break;
+    }
     case "prompt":
     case "follow_up":
       handlePrompt(frame);

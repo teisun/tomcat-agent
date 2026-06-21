@@ -24,7 +24,9 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onChatParticipant:tomcat.tomcat"
+    "onChatParticipant:tomcat.tomcat",
+    "onCommand:tomcat.ui.focus",
+    "onView:tomcat.chatView"
   ],
   "contributes": {
     "commands": [
@@ -39,6 +41,10 @@
       {
         "command": "tomcat.session.list",
         "title": "Tomcat: List Sessions"
+      },
+      {
+        "command": "tomcat.ui.focus",
+        "title": "Tomcat: Focus Sidebar"
       }
     ],
     "chatParticipants": [
@@ -46,9 +52,37 @@
         "id": "tomcat.tomcat",
         "name": "tomcat",
         "fullName": "Tomcat",
-        "description": "Tomcat agent runtime backed by tomcat serve --stdio."
+        "description": "Tomcat agent runtime backed by tomcat serve --stdio.",
+        "commands": [
+          {
+            "name": "plan",
+            "description": "Enter, build, or exit Tomcat plan mode."
+          },
+          {
+            "name": "model",
+            "description": "Switch the active Tomcat model."
+          }
+        ]
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tomcat-sidebar",
+          "title": "Tomcat",
+          "icon": "media/tomcat.svg"
+        }
+      ]
+    },
+    "views": {
+      "tomcat-sidebar": [
+        {
+          "id": "tomcat.chatView",
+          "name": "Tomcat",
+          "type": "webview"
+        }
+      ]
+    },
     "languageModelChatProviders": [
       {
         "vendor": "tomcat-test",
@@ -75,22 +109,36 @@
           "type": "string",
           "default": "",
           "description": "Default working directory used when creating a new Tomcat session. Empty means the first workspace folder."
+        },
+        "tomcat.ui": {
+          "type": "string",
+          "enum": [
+            "both",
+            "participant",
+            "webview"
+          ],
+          "default": "both",
+          "description": "Choose whether Tomcat shows the native chat participant, the custom sidebar webview, or both."
         }
       }
     }
   },
   "scripts": {
     "clean": "rm -rf out dist .vscode-test .wire-tmp *.vsix",
+    "build:gui": "npm --prefix gui run build",
     "gen:wire": "tsx scripts/gen-wire.ts",
     "check:wire": "tsx scripts/gen-wire.ts --check",
     "compile": "tsc -p tsconfig.json",
-    "build": "npm run gen:wire && npm run compile",
+    "build": "npm run gen:wire && npm run build:gui && npm run compile",
     "watch": "npm run gen:wire && tsc -watch -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test:unit": "vitest run",
+    "test:unit:gui": "npm --prefix gui run test",
+    "test:unit": "vitest run && npm run test:unit:gui",
     "test:integration": "vitest run tests",
     "test:e2e:vscode-devhost": "tsx scripts/run-vscode-devhost.ts",
     "test:e2e:vscode-install": "tsx scripts/run-vscode-install-e2e.ts",
+    "test:e2e:webview-devhost": "tsx scripts/run-vscode-devhost.ts",
+    "test:e2e:webview-install": "tsx scripts/run-vscode-install-e2e.ts",
     "test": "npm run test:unit",
     "package:vsix": "tsx scripts/package-vsix.ts"
   },

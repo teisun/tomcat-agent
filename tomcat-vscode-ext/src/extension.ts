@@ -2,14 +2,18 @@ import * as vscode from "vscode";
 
 import {
   PARTICIPANT_ID,
+  TOMCAT_FOCUS_WEBVIEW_COMMAND,
   TEST_DEFAULT_CWD_ENV,
   TEST_EXTRA_ARGS_ENV,
   TEST_SUPPRESS_EXIT_PROMPT_ENV,
   TOMCAT_CONFIG_SECTION,
   TOMCAT_EXECUTABLE_NAME,
+  TOMCAT_UI_MODE_SETTING,
   TOMCAT_LIST_SESSIONS_COMMAND,
   TOMCAT_NEW_SESSION_COMMAND,
   TOMCAT_RESTART_COMMAND,
+  TOMCAT_WEBVIEW_CONTAINER_ID,
+  TOMCAT_WEBVIEW_ID,
 } from "./constants";
 import {
   resolveTomcatExecutable,
@@ -19,12 +23,21 @@ import { VsCodeIde } from "./ide/VsCodeIde";
 import { initializeServe, type InitializeResult } from "./serveClient/initialize";
 import { SessionRouter } from "./serveClient/sessionRouter";
 import { TomcatMessenger } from "./serveClient/TomcatMessenger";
-import type { WireEvent } from "./serveClient/wire";
+import type { ServeEvent } from "./serveClient/wire";
 import { createParticipantHandler } from "./ui/participant/handler";
 import {
   ParticipantCommands,
   type PendingQuestionSnapshot,
 } from "./ui/participant/commands";
+import { SessionOwnershipTracker } from "./ui/webview/ownership";
+import type {
+  FrontendOwnerKind,
+  TomcatUiMode,
+  WebviewIntent,
+} from "./ui/webview/protocol";
+import { TomcatWebviewViewProvider } from "./ui/webview/provider";
+
+export type { WebviewIntent } from "./ui/webview/protocol";
 
 let disposeRuntime: (() => void) | undefined;
 
@@ -61,15 +74,26 @@ export interface ObservedEventFilter {
   sessionId?: string;
   textIncludes?: string;
   timeoutMs?: number;
-  type?: WireEvent["type"];
+  type?: ServeEvent["type"];
 }
 
 export interface TomcatExtensionApi {
   __testing: {
     applyPreparedEdit(toolCallId: string): Promise<boolean>;
+    captureWebviewDom(): Promise<{
+      activeSessionId: string | null;
+      approvalCount: number;
+      hasConflict: boolean;
+      html: string;
+      messageTexts: string[];
+      sessionTabs: string[];
+      toolTitles: string[];
+    }>;
     clearObservedEvents(): void;
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
-    getObservedEvents(): WireEvent[];
+    focusWebview(): Promise<void>;
+    getObservedEvents(): ServeEvent[];
+    getOwnership(): Array<{ owner: FrontendOwnerKind; sessionId: string }>;
     getPendingQuestion(requestId?: string): PendingQuestionSnapshot | undefined;
     getPreparedChange(toolCallId: string): {
       displayPath: string;
@@ -79,12 +103,26 @@ export interface TomcatExtensionApi {
     } | undefined;
     getResolvedExecutable(): ResolvedTomcatExecutable;
     getSessionState(sessionId?: string): Promise<Awaited<ReturnType<SessionRouter["getState"]>>>;
-    listSessions(): Promise<Awaited<ReturnType<SessionRouter["listSessions"]>>>;
+    getWebviewState(): ReturnType<TomcatWebviewViewProvider["currentState"]>;
+    listSessions(
+      scope?: Parameters<SessionRouter["listSessions"]>[0],
+    ): Promise<Awaited<ReturnType<SessionRouter["listSessions"]>>>;
     openPreparedDiff(toolCallId: string): Promise<void>;
+    releaseSessionOwnership(
+      sessionId: string,
+      owner?: FrontendOwnerKind,
+    ): boolean;
     restartServe(): Promise<void>;
     runParticipantTurn(options: RunParticipantTurnOptions): Promise<RunParticipantTurnResult>;
-    waitForEvent(filter: ObservedEventFilter): Promise<WireEvent>;
+    sendWebviewIntent(
+      intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>,
+    ): Promise<void>;
+    setParticipantUiOverrides(
+      overrides: Parameters<ParticipantCommands["setUiOverrides"]>[0],
+    ): void;
+    waitForEvent(filter: ObservedEventFilter): Promise<ServeEvent>;
     waitForPendingQuestion(timeoutMs?: number): Promise<PendingQuestionSnapshot>;
+    waitForWebviewReady(timeoutMs?: number): Promise<void>;
   };
 }
 
@@ -94,7 +132,7 @@ function getEnvOverride(name: string): string | undefined {
 }
 
 function matchesObservedEvent(
-  event: WireEvent,
+  event: ServeEvent,
   filter: ObservedEventFilter,
 ): boolean {
   if (filter.type && event.type !== filter.type) {
@@ -111,6 +149,16 @@ function matchesObservedEvent(
 
 function getTomcatConfiguration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration(TOMCAT_CONFIG_SECTION);
+}
+
+function getTomcatUiMode(): TomcatUiMode {
+  const configured = getTomcatConfiguration().get<TomcatUiMode>(
+    TOMCAT_UI_MODE_SETTING,
+    "both",
+  );
+  return configured === "participant" || configured === "webview"
+    ? configured
+    : "both";
 }
 
 function isTomcatPathConfigured(): boolean {
@@ -197,11 +245,11 @@ export async function activate(
   const ide = new VsCodeIde();
   const commands = new ParticipantCommands(ide);
   commands.register(context);
-  const observedEvents: WireEvent[] = [];
+  const observedEvents: ServeEvent[] = [];
   const eventWaiters = new Set<{
     filter: ObservedEventFilter;
     reject(error: Error): void;
-    resolve(event: WireEvent): void;
+    resolve(event: ServeEvent): void;
     timeout: NodeJS.Timeout;
   }>();
   let resolvedExecutable = await resolveExecutable();
@@ -218,6 +266,7 @@ export async function activate(
     },
   });
   const sessionRouter = new SessionRouter(messenger, getDefaultCwd);
+  const ownership = new SessionOwnershipTracker();
 
   let initializePromise: Promise<InitializeResult> | undefined;
   let hasShownInitializationHint = false;
@@ -297,8 +346,27 @@ export async function activate(
     }
   };
 
+  const webviewProvider = new TomcatWebviewViewProvider({
+    extensionUri: context.extensionUri,
+    getDefaultCwd,
+    getUiMode: getTomcatUiMode,
+    ide,
+    initialize: ensureInitialized,
+    messenger,
+    ownership,
+    sessionRouter,
+  });
+
   const askQuestionHandler = messenger.registerAskQuestionHandler(
-    async (request, frame) => commands.askUser(request, frame.sessionId),
+    async (request, frame) => {
+      const owner = frame.sessionId
+        ? ownership.ownerOf(frame.sessionId)?.owner
+        : undefined;
+      if (owner === "webview") {
+        return webviewProvider.askUser(request, frame.sessionId);
+      }
+      return commands.askUser(request, frame.sessionId);
+    },
   );
   const stderrSubscription = messenger.onStderr((chunk) => {
     appendOutput(output, "stderr", chunk);
@@ -349,16 +417,30 @@ export async function activate(
 
   const participantHandler = createParticipantHandler({
     commands,
+    getUiMode: getTomcatUiMode,
     ide,
     initialize: ensureInitialized,
     messenger,
+    ownership,
     sessionRouter,
   });
-  const participant = vscode.chat.createChatParticipant(
-    PARTICIPANT_ID,
-    participantHandler,
-  );
-  participant.iconPath = new vscode.ThemeIcon("terminal");
+  let participant: vscode.ChatParticipant | undefined;
+  const syncParticipantRegistration = (): void => {
+    if (getTomcatUiMode() === "webview") {
+      participant?.dispose();
+      participant = undefined;
+      return;
+    }
+    if (participant) {
+      return;
+    }
+    participant = vscode.chat.createChatParticipant(
+      PARTICIPANT_ID,
+      participantHandler,
+    );
+    participant.iconPath = new vscode.ThemeIcon("terminal");
+  };
+  syncParticipantRegistration();
 
   const restartCommand = vscode.commands.registerCommand(
     TOMCAT_RESTART_COMMAND,
@@ -401,17 +483,56 @@ export async function activate(
       );
     },
   );
+  const focusWebviewCommand = vscode.commands.registerCommand(
+    TOMCAT_FOCUS_WEBVIEW_COMMAND,
+    async () => {
+      await vscode.commands.executeCommand(
+        `workbench.view.extension.${TOMCAT_WEBVIEW_CONTAINER_ID}`,
+      );
+      try {
+        await vscode.commands.executeCommand(`${TOMCAT_WEBVIEW_ID}.focus`);
+      } catch {
+        // Some host builds do not expose an auto-generated focus command for custom views.
+      }
+      webviewProvider.reveal();
+      await webviewProvider.waitUntilReady().catch(() => undefined);
+    },
+  );
+  const webviewRegistration = vscode.window.registerWebviewViewProvider(
+    TOMCAT_WEBVIEW_ID,
+    webviewProvider,
+    {
+      webviewOptions: {
+        retainContextWhenHidden: true,
+      },
+    },
+  );
   const configurationSubscription = vscode.workspace.onDidChangeConfiguration(
     (event) => {
       if (
         !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.path`) &&
         !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.serve.extraArgs`) &&
-        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.session.defaultCwd`)
+        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.session.defaultCwd`) &&
+        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.${TOMCAT_UI_MODE_SETTING}`)
       ) {
         return;
       }
 
       void (async () => {
+        const uiModeChanged = event.affectsConfiguration(
+          `${TOMCAT_CONFIG_SECTION}.${TOMCAT_UI_MODE_SETTING}`,
+        );
+        if (uiModeChanged) {
+          webviewProvider.setUiMode(getTomcatUiMode());
+          syncParticipantRegistration();
+        }
+        if (
+          !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.path`) &&
+          !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.serve.extraArgs`) &&
+          !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.session.defaultCwd`)
+        ) {
+          return;
+        }
         await applyRuntimeConfiguration();
         initializePromise = undefined;
         sessionRouter.clearBootstrapSessionId();
@@ -420,6 +541,7 @@ export async function activate(
           await ensureInitialized();
           await showInformationMessage("Tomcat settings changed. Restarted Tomcat serve.");
         }
+        webviewProvider.setUiMode(getTomcatUiMode());
       })().catch((error: unknown) => {
         appendOutput(output, "error", `config update failed: ${String(error)}`);
       });
@@ -429,14 +551,17 @@ export async function activate(
   context.subscriptions.push(
     output,
     ide,
-    participant,
     configurationSubscription,
     restartCommand,
     newSessionCommand,
     listSessionsCommand,
+    focusWebviewCommand,
+    webviewProvider,
+    webviewRegistration,
   );
 
   disposeRuntime = () => {
+    participant?.dispose();
     askQuestionHandler.dispose();
     observedEventSubscription.dispose();
     stderrSubscription.dispose();
@@ -448,18 +573,31 @@ export async function activate(
       eventWaiters.delete(waiter);
     }
     messenger.dispose();
+    webviewProvider.dispose();
     ide.dispose();
   };
 
   const api: TomcatExtensionApi = {
     __testing: {
       applyPreparedEdit: (toolCallId) => ide.applyPreparedEdit(toolCallId),
+      captureWebviewDom: async () => {
+        await webviewProvider.waitUntilReady();
+        return webviewProvider.captureDomSnapshot();
+      },
       clearObservedEvents: () => {
         observedEvents.length = 0;
       },
       executeCommand: (command, ...args) =>
         vscode.commands.executeCommand(command, ...args),
+      focusWebview: async () => {
+        await vscode.commands.executeCommand(TOMCAT_FOCUS_WEBVIEW_COMMAND);
+      },
       getObservedEvents: () => [...observedEvents],
+      getOwnership: () =>
+        [...ownership.snapshot().entries()].map(([sessionId, owner]) => ({
+          owner,
+          sessionId,
+        })),
       getPendingQuestion: (requestId?: string) => commands.getPendingQuestion(requestId),
       getPreparedChange: (toolCallId) => {
         const change = ide.getPreparedChange(toolCallId);
@@ -474,15 +612,18 @@ export async function activate(
         };
       },
       getResolvedExecutable: () => resolvedExecutable,
+      getWebviewState: () => webviewProvider.currentState(),
       getSessionState: async (sessionId?: string) => {
         await ensureInitialized();
         return sessionRouter.getState(sessionId);
       },
-      listSessions: async () => {
+      listSessions: async (scope = "live") => {
         await ensureInitialized();
-        return sessionRouter.listSessions();
+        return sessionRouter.listSessions(scope);
       },
       openPreparedDiff: (toolCallId) => ide.openPreparedDiff(toolCallId),
+      releaseSessionOwnership: (sessionId, owner) =>
+        ownership.release(sessionId, owner),
       restartServe: async () => {
         await vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND);
       },
@@ -578,13 +719,19 @@ export async function activate(
           tokenSource.dispose();
         }
       },
-      waitForEvent: async (filter: ObservedEventFilter): Promise<WireEvent> => {
+      sendWebviewIntent: async (intent) => {
+        await webviewProvider.dispatchTestIntent(intent);
+      },
+      setParticipantUiOverrides: (overrides) => {
+        commands.setUiOverrides(overrides);
+      },
+      waitForEvent: async (filter: ObservedEventFilter): Promise<ServeEvent> => {
         const existing = observedEvents.find((event) => matchesObservedEvent(event, filter));
         if (existing) {
           return existing;
         }
 
-        return new Promise<WireEvent>((resolve, reject) => {
+        return new Promise<ServeEvent>((resolve, reject) => {
           const timeout = setTimeout(() => {
             eventWaiters.delete(waiter);
             reject(
@@ -601,6 +748,9 @@ export async function activate(
           };
           eventWaiters.add(waiter);
         });
+      },
+      waitForWebviewReady: async (timeoutMs = 15_000) => {
+        await webviewProvider.waitUntilReady(timeoutMs);
       },
       waitForPendingQuestion: async (
         timeoutMs = 10_000,

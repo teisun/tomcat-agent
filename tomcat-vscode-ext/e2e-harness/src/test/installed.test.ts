@@ -6,10 +6,16 @@ type HostE2eHelper = {
   assertApprovalDiffFlowViaChatUi(api: unknown): Promise<void>;
   assertInterruptAndRestartFlow(api: unknown): Promise<void>;
   assertInterruptAndRestartFlowViaChatUi(api: unknown): Promise<void>;
+  assertModelSlashFlowViaChatUi(api: unknown): Promise<void>;
   assertMultiSessionRouting(api: unknown): Promise<void>;
   assertMultiSessionRoutingViaChatUi(api: unknown): Promise<void>;
   assertParticipantHappyPath(api: unknown): Promise<void>;
   assertParticipantHappyPathViaChatUi(api: unknown): Promise<void>;
+  assertPlanSlashFlowViaChatUi(api: unknown): Promise<void>;
+  assertWebviewDiffFlow(api: unknown): Promise<void>;
+  assertWebviewMultiSessionFlow(api: unknown): Promise<void>;
+  assertWebviewOwnershipFlow(api: unknown): Promise<void>;
+  assertWebviewStreamingFlow(api: unknown): Promise<void>;
   getTomcatExtensionApi(): Promise<unknown>;
 };
 
@@ -57,5 +63,35 @@ suite("Installed Tomcat extension", () => {
   test("keeps chat-thread routing stable via the real chat UI", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertMultiSessionRoutingViaChatUi(api);
+  });
+
+  test("runs /plan via the real chat UI", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertPlanSlashFlowViaChatUi(api);
+  });
+
+  test("runs /model via the real chat UI", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertModelSlashFlowViaChatUi(api);
+  });
+
+  test("streams in the Tomcat webview", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewStreamingFlow(api);
+  });
+
+  test("applies edits from the Tomcat webview", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewDiffFlow(api);
+  });
+
+  test("keeps multiple Tomcat webview sessions isolated", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewMultiSessionFlow(api);
+  });
+
+  test("enforces single-owner Tomcat webview sessions", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewOwnershipFlow(api);
   });
 });
