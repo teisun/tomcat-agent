@@ -50,7 +50,7 @@
 | **T2-P1-017** | PackageManager（统一包安装）                        | `DONE` | Tom   | `feature/plugin-function-surface`      | [tasks/T2-P1-017.md](./tasks/T2-P1-017.md) |
 | **T2-P1-018** | Agent Server 与 UI Gateway                    | `DONE` | Spike | `feature/agent-server-ui-gateway`      | [tasks/T2-P1-018.md](./tasks/T2-P1-018.md) |
 | **T2-P1-019** | Tomcat VSCode Chat 扩展                        | `PENDING_INTEGRATION` | Tom   | `feature/tomcat-vscode-extension`      | [tasks/T2-P1-019.md](./tasks/T2-P1-019.md) |
-| **T2-P1-020** | Tomcat VSCode Chat 扩展 Phase 2                | `TODO` | —     | `feature/tomcat-vscode-extension`      | [tasks/T2-P1-020.md](./tasks/T2-P1-020.md) |
+| **T2-P1-020** | Tomcat VSCode Chat 扩展 Phase 2                | `PENDING_INTEGRATION` | Tom   | `feature/tomcat-vscode-extension`      | [tasks/T2-P1-020.md](./tasks/T2-P1-020.md) |
 
 ## 5. 开放任务依赖（概览）
 

@@ -158,6 +158,25 @@
 - [ ] 会话结束时（`session_shutdown` 或用户退出）VM 正常关闭，资源完全释放
 - [ ] 典型有状态插件场景（git-checkpoint、todo、plan-mode、ssh 等）在长生命周期 VM 下可正确运行
 
+### Story 8c: Agent Server / UI Gateway
+**作为 IDE / GUI 宿主开发者**，我希望 Tomcat 能以标准化协议暴露给外部前端，让 VSCode 等宿主稳定复用对话、工具、审批与多会话能力。
+**验收标准**：
+- [ ] `tomcat serve --stdio` 以 NDJSON 协议暴露 `prompt` / `follow_up` / `steer` / `get_state` / `set_model` / `new_session` / `switch_session` / `get_messages` / `close_session` / `list_sessions` / `interrupt` 与 `ask_question` 回环
+- [ ] 宿主可同时驱动多个 `sessionId`，跨会话事件不串台；同一会话 busy 时返回明确错误，不静默吞消息
+- [ ] `initialize` capabilities、schema 导出（`--print-schema`）与 committed fixture 长期保持一致，供 IDE/GUI 宿主编译期发现协议漂移
+- [ ] 宿主可经 `prompt.params.attachments` 发送多模态输入，Tomcat 在真实回合中按用户消息 part 组装，而不是退化为纯文本
+- [ ] 坏输入 / EOF / ask_question 回答与取消等边界路径均有明确、可恢复且可审计的行为
+
+### Story 8d: VSCode Chat 扩展 Phase 2
+**作为 VSCode 用户**，我希望能在 `@tomcat` 聊天入口与自建 webview 面板中使用 `/plan`、`/model`、富工具卡/审批卡/思考块、多会话历史与 diff/edit 能力，并确保两个入口共享同一项目会话池而不互相抢占。
+**验收标准**：
+- [ ] `@tomcat` 原生聊天入口支持 `/plan`（enter / exit / build）与 `/model`，并通过稳定 VSCode API 接入，不依赖 proposed API
+- [ ] `tomcat serve` 新增 `set_plan_mode`、`list_models`、`get_state.planState`、`plan.*` 事件，以及 `list_sessions{scope:"disk"}` / 磁盘历史 `switch_session`，供 VSCode 前端驱动计划模式、模型切换和项目历史恢复
+- [ ] 自建 VSCode webview 基于 `WebviewViewProvider` + React + Vite 实现，协议走 typed `postMessage`，渲染语义复用 Phase 1 `WireEvent`（thinking/tool/approval/diff/session）
+- [ ] participant 与 webview 默认并存，共享同一 `TomcatMessenger`、单个 `tomcat serve` 进程与同一项目 scope 会话池；同一条 live 会话同一时刻仅允许一个前端驱动，非 owner 端只读并看到明确提示
+- [ ] webview 的“看 diff / 应用编辑”复用 VSCode 原生 `vscode.diff` + `WorkspaceEdit` 落地路径，不自建主编辑栈
+- [ ] 扩展需通过真实宿主与安装版 VSIX 验收：原生 chat UI、webview UI、共享会话池、owner 冲突、VSIX 打包入包与安装后资源加载均有自动化覆盖
+
 ### Story 9: 插件自举全闭环
 **作为用户**，我希望Agent能根据我的自然语言需求，自主生成、编译、加载插件，无需人工干预。
 **验收标准**：
