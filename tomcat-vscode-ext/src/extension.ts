@@ -1,17 +1,30 @@
 import * as vscode from "vscode";
 
+import {
+  PARTICIPANT_ID,
+  TEST_DEFAULT_CWD_ENV,
+  TEST_EXTRA_ARGS_ENV,
+  TEST_SUPPRESS_EXIT_PROMPT_ENV,
+  TOMCAT_CONFIG_SECTION,
+  TOMCAT_EXECUTABLE_NAME,
+  TOMCAT_LIST_SESSIONS_COMMAND,
+  TOMCAT_NEW_SESSION_COMMAND,
+  TOMCAT_RESTART_COMMAND,
+} from "./constants";
+import {
+  resolveTomcatExecutable,
+  type ResolvedTomcatExecutable,
+} from "./config/resolveTomcatExecutable";
 import { VsCodeIde } from "./ide/VsCodeIde";
 import { initializeServe, type InitializeResult } from "./serveClient/initialize";
 import { SessionRouter } from "./serveClient/sessionRouter";
 import { TomcatMessenger } from "./serveClient/TomcatMessenger";
+import type { WireEvent } from "./serveClient/wire";
 import { createParticipantHandler } from "./ui/participant/handler";
-import { ParticipantCommands } from "./ui/participant/commands";
-
-const PARTICIPANT_ID = "tomcat.tomcat";
-const TEST_PATH_ENV = "TOMCAT_VSCODE_TEST_PATH";
-const TEST_DEFAULT_CWD_ENV = "TOMCAT_VSCODE_TEST_DEFAULT_CWD";
-const TEST_EXTRA_ARGS_ENV = "TOMCAT_VSCODE_TEST_EXTRA_ARGS";
-const TEST_SUPPRESS_EXIT_PROMPT_ENV = "TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT";
+import {
+  ParticipantCommands,
+  type PendingQuestionSnapshot,
+} from "./ui/participant/commands";
 
 let disposeRuntime: (() => void) | undefined;
 
@@ -44,21 +57,34 @@ export interface RunParticipantTurnResult {
   stream: CapturedStreamEvent[];
 }
 
+export interface ObservedEventFilter {
+  sessionId?: string;
+  textIncludes?: string;
+  timeoutMs?: number;
+  type?: WireEvent["type"];
+}
+
 export interface TomcatExtensionApi {
   __testing: {
     applyPreparedEdit(toolCallId: string): Promise<boolean>;
+    clearObservedEvents(): void;
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
+    getObservedEvents(): WireEvent[];
+    getPendingQuestion(requestId?: string): PendingQuestionSnapshot | undefined;
     getPreparedChange(toolCallId: string): {
       displayPath: string;
       originalContent: string;
       proposedContent: string;
       toolCallId: string;
     } | undefined;
+    getResolvedExecutable(): ResolvedTomcatExecutable;
     getSessionState(sessionId?: string): Promise<Awaited<ReturnType<SessionRouter["getState"]>>>;
     listSessions(): Promise<Awaited<ReturnType<SessionRouter["listSessions"]>>>;
     openPreparedDiff(toolCallId: string): Promise<void>;
     restartServe(): Promise<void>;
     runParticipantTurn(options: RunParticipantTurnOptions): Promise<RunParticipantTurnResult>;
+    waitForEvent(filter: ObservedEventFilter): Promise<WireEvent>;
+    waitForPendingQuestion(timeoutMs?: number): Promise<PendingQuestionSnapshot>;
   };
 }
 
@@ -67,8 +93,33 @@ function getEnvOverride(name: string): string | undefined {
   return value && value.trim() ? value.trim() : undefined;
 }
 
-function getTomcatExecutable(): string {
-  return getEnvOverride(TEST_PATH_ENV) ?? getTomcatConfiguration().get<string>("path", "tomcat");
+function matchesObservedEvent(
+  event: WireEvent,
+  filter: ObservedEventFilter,
+): boolean {
+  if (filter.type && event.type !== filter.type) {
+    return false;
+  }
+  if (filter.sessionId && event.sessionId !== filter.sessionId) {
+    return false;
+  }
+  if (filter.textIncludes && !JSON.stringify(event).includes(filter.textIncludes)) {
+    return false;
+  }
+  return true;
+}
+
+function getTomcatConfiguration(): vscode.WorkspaceConfiguration {
+  return vscode.workspace.getConfiguration(TOMCAT_CONFIG_SECTION);
+}
+
+function isTomcatPathConfigured(): boolean {
+  const inspect = getTomcatConfiguration().inspect<string>("path");
+  return (
+    inspect?.globalValue !== undefined ||
+    inspect?.workspaceFolderValue !== undefined ||
+    inspect?.workspaceValue !== undefined
+  );
 }
 
 function getTomcatExtraArgs(): string[] {
@@ -105,10 +156,6 @@ async function showInformationMessage(message: string): Promise<void> {
   await vscode.window.showInformationMessage(message);
 }
 
-function getTomcatConfiguration(): vscode.WorkspaceConfiguration {
-  return vscode.workspace.getConfiguration("tomcat");
-}
-
 function getDefaultCwd(): string | undefined {
   const envOverride = getEnvOverride(TEST_DEFAULT_CWD_ENV);
   if (envOverride) {
@@ -121,6 +168,13 @@ function getDefaultCwd(): string | undefined {
   }
 
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+async function resolveExecutable(): Promise<ResolvedTomcatExecutable> {
+  return resolveTomcatExecutable({
+    configuredPath: getTomcatConfiguration().get<string>("path", TOMCAT_EXECUTABLE_NAME),
+    pathWasConfigured: isTomcatPathConfigured(),
+  });
 }
 
 function appendOutput(
@@ -143,10 +197,18 @@ export async function activate(
   const ide = new VsCodeIde();
   const commands = new ParticipantCommands(ide);
   commands.register(context);
+  const observedEvents: WireEvent[] = [];
+  const eventWaiters = new Set<{
+    filter: ObservedEventFilter;
+    reject(error: Error): void;
+    resolve(event: WireEvent): void;
+    timeout: NodeJS.Timeout;
+  }>();
+  let resolvedExecutable = await resolveExecutable();
 
   const messenger = new TomcatMessenger({
     cwd: getDefaultCwd(),
-    executable: getTomcatExecutable(),
+    executable: resolvedExecutable.executable,
     extraArgs: getTomcatExtraArgs(),
     logger: {
       debug: (message) => appendOutput(output, "debug", message),
@@ -158,6 +220,53 @@ export async function activate(
   const sessionRouter = new SessionRouter(messenger, getDefaultCwd);
 
   let initializePromise: Promise<InitializeResult> | undefined;
+  let hasShownInitializationHint = false;
+
+  const maybeShowExecutableWarning = async (): Promise<void> => {
+    if (resolvedExecutable.found || shouldSuppressExitPrompt()) {
+      return;
+    }
+
+    const selection = await vscode.window.showWarningMessage(
+      "Tomcat CLI was not found automatically. Install `tomcat` on your PATH or set tomcat.path if VS Code does not inherit your shell environment.",
+      "Open Settings",
+    );
+    if (selection === "Open Settings") {
+      await vscode.commands.executeCommand(
+        "workbench.action.openSettings",
+        `${TOMCAT_CONFIG_SECTION}.path`,
+      );
+    }
+  };
+
+  const maybeShowInitializationHint = async (): Promise<void> => {
+    if (hasShownInitializationHint || shouldSuppressExitPrompt()) {
+      return;
+    }
+
+    hasShownInitializationHint = true;
+    await vscode.window.showWarningMessage(
+      "Tomcat was found, but the runtime could not initialize. If this is your first time using Tomcat, run `tomcat init` once in a terminal and try again.",
+    );
+  };
+
+  const applyRuntimeConfiguration = async (): Promise<void> => {
+    resolvedExecutable = await resolveExecutable();
+    hasShownInitializationHint = false;
+    messenger.updateOptions({
+      cwd: getDefaultCwd(),
+      executable: resolvedExecutable.executable,
+      extraArgs: getTomcatExtraArgs(),
+    });
+    appendOutput(
+      output,
+      "info",
+      `tomcat executable: ${resolvedExecutable.executable} (${resolvedExecutable.source})`,
+    );
+    void maybeShowExecutableWarning();
+  };
+
+  await applyRuntimeConfiguration();
 
   const ensureInitialized = async (): Promise<InitializeResult> => {
     if (initializePromise) {
@@ -167,6 +276,7 @@ export async function activate(
     initializePromise = (async () => {
       messenger.start();
       const result = await initializeServe(messenger);
+      hasShownInitializationHint = false;
       if (result.sessionId) {
         sessionRouter.setBootstrapSessionId(result.sessionId);
       }
@@ -177,6 +287,12 @@ export async function activate(
       return await initializePromise;
     } catch (error) {
       initializePromise = undefined;
+      appendOutput(output, "error", `initialize failed: ${String(error)}`);
+      if (resolvedExecutable.found) {
+        void maybeShowInitializationHint();
+      } else {
+        void maybeShowExecutableWarning();
+      }
       throw error;
     }
   };
@@ -186,6 +302,17 @@ export async function activate(
   );
   const stderrSubscription = messenger.onStderr((chunk) => {
     appendOutput(output, "stderr", chunk);
+  });
+  const observedEventSubscription = messenger.onEvent((event) => {
+    observedEvents.push(event);
+    for (const waiter of [...eventWaiters]) {
+      if (!matchesObservedEvent(event, waiter.filter)) {
+        continue;
+      }
+      clearTimeout(waiter.timeout);
+      eventWaiters.delete(waiter);
+      waiter.resolve(event);
+    }
   });
   const frameErrorSubscription = messenger.onFrameError((error) => {
     appendOutput(output, "frame", error.message);
@@ -198,7 +325,14 @@ export async function activate(
       "exit",
       `code=${String(event.code)} signal=${String(event.signal)} stderr=${event.stderr.trim()}`,
     );
+    if (event.error) {
+      appendOutput(output, "error", event.error.message);
+    }
     if (shouldSuppressExitPrompt()) {
+      return;
+    }
+    if (!resolvedExecutable.found || event.error?.message.includes("ENOENT")) {
+      void maybeShowExecutableWarning();
       return;
     }
     void vscode.window
@@ -208,7 +342,7 @@ export async function activate(
       )
       .then((selection) => {
         if (selection === "Restart Tomcat") {
-          void vscode.commands.executeCommand("tomcat.restartServe");
+          void vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND);
         }
       });
   });
@@ -227,8 +361,9 @@ export async function activate(
   participant.iconPath = new vscode.ThemeIcon("terminal");
 
   const restartCommand = vscode.commands.registerCommand(
-    "tomcat.restartServe",
+    TOMCAT_RESTART_COMMAND,
     async () => {
+      await applyRuntimeConfiguration();
       messenger.restart();
       initializePromise = undefined;
       sessionRouter.clearBootstrapSessionId();
@@ -240,7 +375,7 @@ export async function activate(
   );
 
   const newSessionCommand = vscode.commands.registerCommand(
-    "tomcat.session.new",
+    TOMCAT_NEW_SESSION_COMMAND,
     async () => {
       await ensureInitialized();
       const sessionId = await sessionRouter.newSession();
@@ -249,7 +384,7 @@ export async function activate(
   );
 
   const listSessionsCommand = vscode.commands.registerCommand(
-    "tomcat.session.list",
+    TOMCAT_LIST_SESSIONS_COMMAND,
     async () => {
       await ensureInitialized();
       const payload = await sessionRouter.listSessions();
@@ -266,11 +401,36 @@ export async function activate(
       );
     },
   );
+  const configurationSubscription = vscode.workspace.onDidChangeConfiguration(
+    (event) => {
+      if (
+        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.path`) &&
+        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.serve.extraArgs`) &&
+        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.session.defaultCwd`)
+      ) {
+        return;
+      }
+
+      void (async () => {
+        await applyRuntimeConfiguration();
+        initializePromise = undefined;
+        sessionRouter.clearBootstrapSessionId();
+        if (messenger.isRunning) {
+          messenger.restart();
+          await ensureInitialized();
+          await showInformationMessage("Tomcat settings changed. Restarted Tomcat serve.");
+        }
+      })().catch((error: unknown) => {
+        appendOutput(output, "error", `config update failed: ${String(error)}`);
+      });
+    },
+  );
 
   context.subscriptions.push(
     output,
     ide,
     participant,
+    configurationSubscription,
     restartCommand,
     newSessionCommand,
     listSessionsCommand,
@@ -278,9 +438,15 @@ export async function activate(
 
   disposeRuntime = () => {
     askQuestionHandler.dispose();
+    observedEventSubscription.dispose();
     stderrSubscription.dispose();
     frameErrorSubscription.dispose();
     exitSubscription.dispose();
+    for (const waiter of [...eventWaiters]) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(new Error("Tomcat extension is shutting down"));
+      eventWaiters.delete(waiter);
+    }
     messenger.dispose();
     ide.dispose();
   };
@@ -288,8 +454,13 @@ export async function activate(
   const api: TomcatExtensionApi = {
     __testing: {
       applyPreparedEdit: (toolCallId) => ide.applyPreparedEdit(toolCallId),
+      clearObservedEvents: () => {
+        observedEvents.length = 0;
+      },
       executeCommand: (command, ...args) =>
         vscode.commands.executeCommand(command, ...args),
+      getObservedEvents: () => [...observedEvents],
+      getPendingQuestion: (requestId?: string) => commands.getPendingQuestion(requestId),
       getPreparedChange: (toolCallId) => {
         const change = ide.getPreparedChange(toolCallId);
         if (!change) {
@@ -302,6 +473,7 @@ export async function activate(
           toolCallId: change.toolCallId,
         };
       },
+      getResolvedExecutable: () => resolvedExecutable,
       getSessionState: async (sessionId?: string) => {
         await ensureInitialized();
         return sessionRouter.getState(sessionId);
@@ -312,7 +484,7 @@ export async function activate(
       },
       openPreparedDiff: (toolCallId) => ide.openPreparedDiff(toolCallId),
       restartServe: async () => {
-        await vscode.commands.executeCommand("tomcat.restartServe");
+        await vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND);
       },
       runParticipantTurn: async (
         options: RunParticipantTurnOptions,
@@ -405,6 +577,50 @@ export async function activate(
           }
           tokenSource.dispose();
         }
+      },
+      waitForEvent: async (filter: ObservedEventFilter): Promise<WireEvent> => {
+        const existing = observedEvents.find((event) => matchesObservedEvent(event, filter));
+        if (existing) {
+          return existing;
+        }
+
+        return new Promise<WireEvent>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            eventWaiters.delete(waiter);
+            reject(
+              new Error(
+                `Timed out waiting for Tomcat event ${JSON.stringify(filter)}`,
+              ),
+            );
+          }, filter.timeoutMs ?? 10_000);
+          const waiter = {
+            filter,
+            reject,
+            resolve,
+            timeout,
+          };
+          eventWaiters.add(waiter);
+        });
+      },
+      waitForPendingQuestion: async (
+        timeoutMs = 10_000,
+      ): Promise<PendingQuestionSnapshot> => {
+        const existing = commands.getPendingQuestion();
+        if (existing) {
+          return existing;
+        }
+
+        return new Promise<PendingQuestionSnapshot>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            subscription.dispose();
+            reject(new Error("Timed out waiting for a Tomcat approval prompt"));
+          }, timeoutMs);
+          const subscription = commands.onPendingQuestion((question) => {
+            clearTimeout(timeout);
+            subscription.dispose();
+            resolve(question);
+          });
+        });
       },
     },
   };

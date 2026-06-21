@@ -24,10 +24,7 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onChatParticipant:tomcat.tomcat",
-    "onCommand:tomcat.restartServe",
-    "onCommand:tomcat.session.new",
-    "onCommand:tomcat.session.list"
+    "onChatParticipant:tomcat.tomcat"
   ],
   "contributes": {
     "commands": [
@@ -50,6 +47,12 @@
         "name": "tomcat",
         "fullName": "Tomcat",
         "description": "Tomcat agent runtime backed by tomcat serve --stdio."
+      }
+    ],
+    "languageModelChatProviders": [
+      {
+        "vendor": "tomcat-test",
+        "displayName": "Tomcat Test Model Vendor"
       }
     ],
     "configuration": {
@@ -88,9 +91,8 @@
     "test:integration": "vitest run tests",
     "test:e2e:vscode-devhost": "tsx scripts/run-vscode-devhost.ts",
     "test:e2e:vscode-install": "tsx scripts/run-vscode-install-e2e.ts",
-    "test:e2e:cursor": "tsx scripts/run-cursor-compat-e2e.ts",
     "test": "npm run test:unit",
-    "package:vsix": "vsce package --no-dependencies"
+    "package:vsix": "tsx scripts/package-vsix.ts"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

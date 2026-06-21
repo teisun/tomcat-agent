@@ -1,4 +1,4 @@
-*
+**/*
 !out/**
 !package.json
 !README.md
@@ -6,3 +6,11 @@
 !LICENSE
 !LICENSE.txt
 !LICENSE.md
+out/**/tests/**
+out/**/tests
+out/test/**
+out/test
+out/tests/**
+out/tests
+out/**/*.test.js
+out/**/*.test.js.map

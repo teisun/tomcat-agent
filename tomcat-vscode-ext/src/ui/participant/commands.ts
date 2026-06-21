@@ -1,5 +1,10 @@
 import * as vscode from "vscode";
 
+import {
+  TOMCAT_ANSWER_COMMAND,
+  TOMCAT_APPLY_EDIT_COMMAND,
+  TOMCAT_OPEN_DIFF_COMMAND,
+} from "../../constants";
 import type {
   AskQuestionAnswer,
   AskQuestionResult,
@@ -19,6 +24,12 @@ type PendingQuestion = {
   resolve(response: AskQuestionWireResponse): void;
   sessionId?: string | null;
 };
+
+export interface PendingQuestionSnapshot {
+  questions: AskQuestionWireRequest["questions"];
+  requestId: string;
+  sessionId?: string | null;
+}
 
 type AnswerCommandArgs =
   | {
@@ -65,28 +76,42 @@ function renderAskQuestionMarkdown(request: AskQuestionWireRequest): string {
   return lines.join("\n");
 }
 
+function toPendingQuestionSnapshot(
+  request: AskQuestionWireRequest,
+  sessionId?: string | null,
+): PendingQuestionSnapshot {
+  return {
+    questions: request.questions,
+    requestId: request.requestId,
+    sessionId,
+  };
+}
+
 export class ParticipantCommands {
   private readonly activeTurns = new Map<string, TurnContext>();
   private readonly pendingQuestions = new Map<string, PendingQuestion>();
+  private readonly pendingQuestionListeners = new Set<
+    (question: PendingQuestionSnapshot) => void
+  >();
 
   constructor(private readonly ide: VsCodeIde) {}
 
   register(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
       vscode.commands.registerCommand(
-        "tomcat.answer",
+        TOMCAT_ANSWER_COMMAND,
         async (args: AnswerCommandArgs) => {
           await this.handleAnswerCommand(args);
         },
       ),
       vscode.commands.registerCommand(
-        "tomcat.openDiff",
+        TOMCAT_OPEN_DIFF_COMMAND,
         async (args: DiffCommandArgs) => {
           await this.ide.openPreparedDiff(args.toolCallId);
         },
       ),
       vscode.commands.registerCommand(
-        "tomcat.applyEdit",
+        TOMCAT_APPLY_EDIT_COMMAND,
         async (args: DiffCommandArgs) => {
           const applied = await this.ide.applyPreparedEdit(args.toolCallId);
           if (applied) {
@@ -109,6 +134,27 @@ export class ParticipantCommands {
     });
   }
 
+  getPendingQuestion(requestId?: string): PendingQuestionSnapshot | undefined {
+    if (requestId) {
+      const pending = this.pendingQuestions.get(requestId);
+      return pending ? toPendingQuestionSnapshot(pending.request, pending.sessionId) : undefined;
+    }
+
+    const firstPending = this.pendingQuestions.values().next().value as PendingQuestion | undefined;
+    return firstPending
+      ? toPendingQuestionSnapshot(firstPending.request, firstPending.sessionId)
+      : undefined;
+  }
+
+  onPendingQuestion(
+    listener: (question: PendingQuestionSnapshot) => void,
+  ): DisposableLike {
+    this.pendingQuestionListeners.add(listener);
+    return createDisposable(() => {
+      this.pendingQuestionListeners.delete(listener);
+    });
+  }
+
   async askUser(
     request: AskQuestionWireRequest,
     sessionId?: string | null,
@@ -124,6 +170,10 @@ export class ParticipantCommands {
         resolve,
         sessionId,
       });
+      const snapshot = toPendingQuestionSnapshot(request, sessionId);
+      for (const listener of this.pendingQuestionListeners) {
+        listener(snapshot);
+      }
     }).finally(() => {
       this.pendingQuestions.delete(request.requestId);
     });
@@ -148,20 +198,20 @@ export class ParticipantCommands {
               requestId: request.requestId,
             } satisfies AnswerCommandArgs,
           ],
-          command: "tomcat.answer",
+          command: TOMCAT_ANSWER_COMMAND,
           title: option.label,
         });
       }
       turn.stream.button({
         arguments: [{ kind: "skip", questionId: question.id, requestId: request.requestId } satisfies AnswerCommandArgs],
-        command: "tomcat.answer",
+        command: TOMCAT_ANSWER_COMMAND,
         title: "Skip",
       });
     }
 
     turn.stream.button({
       arguments: [{ kind: "picker", requestId: request.requestId } satisfies AnswerCommandArgs],
-      command: "tomcat.answer",
+      command: TOMCAT_ANSWER_COMMAND,
       title: request.questions.length === 1 ? "Other..." : "Answer Questions",
     });
 

@@ -6,6 +6,9 @@ const commandHandlers = new Map<string, CommandHandler>();
 const contentProviders = new Map<string, Provider>();
 const files = new Map<string, FileEntry>();
 const configuration = new Map<string, unknown>();
+const configurationListeners = new Set<
+  (event: { affectsConfiguration(section: string): boolean }) => void
+>();
 
 let quickPickHandler: ((items: QuickPickItem[]) => any) | undefined;
 let inputBoxHandler: ((options: InputBoxOptions) => any) | undefined;
@@ -251,7 +254,26 @@ export const workspace = {
         const value = configuration.get(`${section}.${key}`);
         return (value as T | undefined) ?? (defaultValue as T);
       },
+      inspect<T>(key: string): {
+        defaultValue?: T;
+        globalValue?: T;
+        workspaceFolderValue?: T;
+        workspaceValue?: T;
+      } {
+        const value = configuration.get(`${section}.${key}`) as T | undefined;
+        return {
+          globalValue: value,
+        };
+      },
     };
+  },
+  onDidChangeConfiguration(
+    listener: (event: { affectsConfiguration(section: string): boolean }) => void,
+  ): Disposable {
+    configurationListeners.add(listener);
+    return new Disposable(() => {
+      configurationListeners.delete(listener);
+    });
   },
   openTextDocument: async (uri: Uri): Promise<TextDocument> => {
     const provider = contentProviders.get(uri.scheme);
@@ -332,6 +354,7 @@ export const __testing = {
     contentProviders.clear();
     files.clear();
     configuration.clear();
+    configurationListeners.clear();
     quickPickHandler = undefined;
     inputBoxHandler = undefined;
     infoMessageHandler = undefined;
@@ -341,6 +364,13 @@ export const __testing = {
   },
   setConfiguration(key: string, value: unknown): void {
     configuration.set(key, value);
+    for (const listener of configurationListeners) {
+      listener({
+        affectsConfiguration(section: string): boolean {
+          return key === section || key.startsWith(`${section}.`);
+        },
+      });
+    }
   },
   setInfoMessageHandler(handler: typeof infoMessageHandler): void {
     infoMessageHandler = handler;

@@ -3,7 +3,41 @@ import * as fs from "node:fs/promises";
 
 import * as vscode from "vscode";
 
-import type { TomcatExtensionApi } from "../../../extension";
+import {
+  EXTENSION_ID,
+  TOMCAT_ANSWER_COMMAND,
+} from "../../../constants";
+import type { PendingQuestionSnapshot } from "../../../ui/participant/commands";
+import type {
+  ObservedEventFilter,
+  TomcatExtensionApi,
+} from "../../../extension";
+
+let dummyLanguageModelRegistration: vscode.Disposable | undefined;
+let hasWarmedChatUi = false;
+type LanguageModelRegistry = {
+  registerLanguageModelChatProvider(
+    vendor: string,
+    provider: {
+      provideLanguageModelChatInformation(
+        options: unknown,
+        token: vscode.CancellationToken,
+      ): vscode.ProviderResult<unknown[]>;
+      provideLanguageModelChatResponse(
+        model: unknown,
+        messages: readonly unknown[],
+        options: unknown,
+        progress: vscode.Progress<unknown>,
+        token: vscode.CancellationToken,
+      ): Thenable<void>;
+      provideTokenCount(
+        model: unknown,
+        text: string | unknown,
+        token: vscode.CancellationToken,
+      ): Thenable<number>;
+    },
+  ): vscode.Disposable;
+};
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -38,14 +72,115 @@ function getButton(
 }
 
 export async function getTomcatExtensionApi(): Promise<TomcatExtensionApi> {
+  if (!dummyLanguageModelRegistration) {
+    const registry = vscode.lm as unknown as LanguageModelRegistry;
+    dummyLanguageModelRegistration = registry.registerLanguageModelChatProvider(
+      "tomcat-test",
+      {
+        provideLanguageModelChatInformation: async () => [
+          {
+            capabilities: {},
+            family: "test",
+            id: "tomcat-e2e-model",
+            isDefault: true,
+            isUserSelectable: true,
+            maxInputTokens: 4_096,
+            maxOutputTokens: 4_096,
+            name: "tomcat-e2e-model",
+            version: "1.0.0",
+          },
+        ],
+        provideLanguageModelChatResponse: async () => undefined,
+        provideTokenCount: async () => 1,
+      },
+    );
+  }
+
   const extension = vscode.extensions.getExtension<TomcatExtensionApi>(
-    "tomcat.tomcat-vscode-ext",
+    EXTENSION_ID,
   );
 
   assert.ok(extension, "expected Tomcat extension to be discoverable");
   const exports = await extension.activate();
   assert.ok(extension.isActive, "expected Tomcat extension to activate");
+  await new Promise((resolve) => setTimeout(resolve, 2_000));
   return exports;
+}
+
+async function startChatQuery(
+  query: string,
+  options: {
+    blockOnResponse?: boolean;
+    newChat?: boolean;
+  } = {},
+): Promise<{ metadata?: { sessionId?: string } } | undefined> {
+  if (options.newChat) {
+    await vscode.commands.executeCommand(
+      "workbench.action.chat.triggerSetupAnonymousWithoutDialog",
+    );
+    await vscode.commands.executeCommand(
+      "workbench.action.chat.newChat",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  return new Promise<{ metadata?: { sessionId?: string } } | undefined>(
+    (resolve, reject) => {
+      setTimeout(() => {
+        void vscode.commands
+          .executeCommand<{ metadata?: { sessionId?: string } } | undefined>(
+            "workbench.action.chat.open",
+            {
+              blockOnResponse: options.blockOnResponse ?? false,
+              mode: "ask",
+              query,
+            },
+          )
+          .then(resolve, reject);
+      }, 0);
+    },
+  );
+}
+
+async function warmChatUi(): Promise<void> {
+  if (hasWarmedChatUi) {
+    return;
+  }
+
+  hasWarmedChatUi = true;
+  try {
+    await startChatQuery("@tomcat warm up", {
+      newChat: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  } catch {
+    // The warm-up request is best-effort; later assertions exercise the real checks.
+  }
+}
+
+async function waitForEvent(
+  api: TomcatExtensionApi,
+  filter: ObservedEventFilter,
+): Promise<void> {
+  await api.__testing.waitForEvent({
+    timeoutMs: 15_000,
+    ...filter,
+  });
+}
+
+async function answerPendingQuestion(
+  pending: PendingQuestionSnapshot,
+): Promise<void> {
+  const question = pending.questions[0];
+  const approveOption = question.options[0];
+  assert.ok(approveOption, "expected an approval option");
+  await vscode.commands.executeCommand(TOMCAT_ANSWER_COMMAND, {
+    kind: "direct",
+    optionId: approveOption.id,
+    pickedRecommended: !!approveOption.recommended,
+    questionId: question.id,
+    requestId: pending.requestId,
+  });
 }
 
 export async function assertParticipantHappyPath(
@@ -58,6 +193,25 @@ export async function assertParticipantHappyPath(
 
   assert.match(markdown, /hello from fake tomcat/i);
   assert.equal(typeof turn.result?.metadata?.sessionId, "string");
+}
+
+export async function assertParticipantHappyPathViaChatUi(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await warmChatUi();
+  api.__testing.clearObservedEvents();
+  await startChatQuery("@tomcat hello fake tomcat", {
+    newChat: true,
+  });
+  await waitForEvent(api, {
+    textIncludes: "hello from fake tomcat",
+    type: "message_update",
+  });
+  const completed = await api.__testing.waitForEvent({
+    timeoutMs: 15_000,
+    type: "agent_end",
+  });
+  assert.equal(typeof completed.sessionId, "string");
 }
 
 export async function assertApprovalDiffFlow(
@@ -90,6 +244,39 @@ export async function assertApprovalDiffFlow(
   await vscode.commands.executeCommand("workbench.action.closeAllEditors");
 }
 
+export async function assertApprovalDiffFlowViaChatUi(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await warmChatUi();
+  const editFile = requireEnv("TOMCAT_VSCODE_TEST_EDIT_FILE");
+  await fs.writeFile(editFile, "before\n", "utf8");
+  api.__testing.clearObservedEvents();
+
+  await startChatQuery("@tomcat approve edit", {
+    newChat: true,
+  });
+  const pending = await api.__testing.waitForPendingQuestion();
+  await answerPendingQuestion(pending);
+
+  const completed = await api.__testing.waitForEvent({
+    timeoutMs: 15_000,
+    type: "agent_end",
+  });
+  assert.equal(typeof completed.sessionId, "string");
+  await waitForEvent(api, { type: "tool_execution_end" });
+
+  const prepared = api.__testing.getPreparedChange("tool-edit-1");
+  assert.ok(prepared, "expected prepared change from real chat UI");
+  assert.equal(prepared.originalContent, "before\n");
+  assert.equal(prepared.proposedContent, "after\n");
+
+  await api.__testing.openPreparedDiff("tool-edit-1");
+  assert.equal(await api.__testing.applyPreparedEdit("tool-edit-1"), true);
+  assert.equal(await fs.readFile(editFile, "utf8"), "after\n");
+
+  await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+}
+
 export async function assertInterruptAndRestartFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -117,6 +304,41 @@ export async function assertInterruptAndRestartFlow(
     collectStreamText(afterRestart.stream, "markdown"),
     /hello from fake tomcat/i,
   );
+}
+
+export async function assertInterruptAndRestartFlowViaChatUi(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  api.__testing.clearObservedEvents();
+  await startChatQuery("@tomcat interrupt please", {
+    newChat: true,
+  });
+  await waitForEvent(api, {
+    textIncludes: "partial",
+    type: "message_update",
+  });
+
+  await vscode.commands.executeCommand("workbench.action.chat.cancel");
+  await waitForEvent(api, { type: "agent_interrupted" });
+  await waitForEvent(api, {
+    textIncludes: "interrupted",
+    type: "agent_end",
+  });
+
+  await api.__testing.restartServe();
+  api.__testing.clearObservedEvents();
+  await startChatQuery("@tomcat hello after restart", {
+    newChat: true,
+  });
+  await waitForEvent(api, {
+    textIncludes: "hello from fake tomcat",
+    type: "message_update",
+  });
+  const completed = await api.__testing.waitForEvent({
+    timeoutMs: 15_000,
+    type: "agent_end",
+  });
+  assert.equal(typeof completed.sessionId, "string");
 }
 
 export async function assertMultiSessionRouting(
@@ -155,5 +377,62 @@ export async function assertMultiSessionRouting(
   assert.ok(
     sessions.sessions.some((session) => session.sessionId === sessionBId),
     "expected session B to remain listed",
+  );
+}
+
+export async function assertMultiSessionRoutingViaChatUi(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  api.__testing.clearObservedEvents();
+  await startChatQuery("@tomcat thread A", {
+    newChat: true,
+  });
+  const sessionA = await api.__testing.waitForEvent({
+    timeoutMs: 15_000,
+    type: "agent_end",
+  });
+  const sessionAId = sessionA.sessionId;
+  assert.equal(typeof sessionAId, "string");
+
+  api.__testing.clearObservedEvents();
+  await startChatQuery("@tomcat follow up A", {
+    newChat: false,
+  });
+  const followUpA = await api.__testing.waitForEvent({
+    timeoutMs: 15_000,
+    type: "agent_end",
+  });
+  assert.equal(followUpA.sessionId, sessionAId);
+
+  api.__testing.clearObservedEvents();
+  await startChatQuery("@tomcat thread B", {
+    newChat: true,
+  });
+  const sessionB = await api.__testing.waitForEvent({
+    timeoutMs: 15_000,
+    type: "agent_end",
+  });
+  const sessionBId = sessionB.sessionId;
+  assert.equal(typeof sessionBId, "string");
+  assert.notEqual(sessionAId, sessionBId);
+
+  api.__testing.clearObservedEvents();
+  await startChatQuery("@tomcat follow up B", {
+    newChat: false,
+  });
+  const followUpB = await api.__testing.waitForEvent({
+    timeoutMs: 15_000,
+    type: "agent_end",
+  });
+  assert.equal(followUpB.sessionId, sessionBId);
+
+  const sessions = await api.__testing.listSessions();
+  assert.ok(
+    sessions.sessions.some((session) => session.sessionId === sessionAId),
+    "expected session A to remain listed after real chat UI",
+  );
+  assert.ok(
+    sessions.sessions.some((session) => session.sessionId === sessionBId),
+    "expected session B to remain listed after real chat UI",
   );
 }

@@ -9,7 +9,9 @@ import {
   createHostE2eFixture,
   resolveVsCodeCli,
   resolveVsCodeExecutable,
+  seedChatUserSettings,
 } from "./e2eHostFixture";
+import { packageVsix } from "./package-vsix";
 
 async function main(): Promise<void> {
   const extensionRoot = path.resolve(__dirname, "..");
@@ -24,23 +26,13 @@ async function main(): Promise<void> {
   try {
     await fs.mkdir(extensionsDir, { recursive: true });
     await fs.mkdir(userDataDir, { recursive: true });
+    await seedChatUserSettings(userDataDir);
 
-    execFileSync("npm", ["run", "compile"], {
-      cwd: extensionRoot,
-      stdio: "inherit",
-    });
     execFileSync("npx", ["tsc", "-p", "e2e-harness/tsconfig.json"], {
       cwd: extensionRoot,
       stdio: "inherit",
     });
-    execFileSync(
-      "npx",
-      ["vsce", "package", "--no-dependencies", "--out", vsixPath],
-      {
-        cwd: extensionRoot,
-        stdio: "inherit",
-      },
-    );
+    packageVsix({ extensionRoot, outPath: vsixPath });
     execFileSync(
       resolveVsCodeCli(),
       [

@@ -11,6 +11,24 @@ export interface HostE2eFixture {
   workspaceDir: string;
 }
 
+const CHAT_E2E_SETTINGS = {
+  "chat.allowAnonymousAccess": true,
+  "chat.disableAIFeatures": false,
+  "chat.mcp.discovery.enabled": false,
+  "chat.mcp.enabled": false,
+  "github.copilot.chat.githubMcpServer.enabled": false,
+} as const;
+
+export async function seedChatUserSettings(userDataDir: string): Promise<void> {
+  const settingsDir = path.join(userDataDir, "User");
+  await mkdir(settingsDir, { recursive: true });
+  await writeFile(
+    path.join(settingsDir, "settings.json"),
+    `${JSON.stringify(CHAT_E2E_SETTINGS, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 function buildFakeServeSource(editFilePath: string): string {
   return `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -393,16 +411,5 @@ export function resolveVsCodeExecutable(): string {
   return (
     process.env.VSCODE_EXECUTABLE_PATH ||
     "/Applications/Visual Studio Code.app/Contents/MacOS/Electron"
-  );
-}
-
-export function resolveCursorCli(): string {
-  return process.env.CURSOR_CLI_PATH || "cursor";
-}
-
-export function resolveCursorExecutable(): string {
-  return (
-    process.env.CURSOR_EXECUTABLE_PATH ||
-    "/Applications/Cursor.app/Contents/MacOS/Cursor"
   );
 }

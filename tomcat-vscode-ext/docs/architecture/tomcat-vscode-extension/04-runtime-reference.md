@@ -70,7 +70,6 @@ serve 可执行缺失/启动失败 → spawn error（扩展：引导用户配置
 | 协议事实源（Tomcat 侧，回指） | `tomcat` `src/api/serve/control.rs::tests`（握手/not_initialized/interrupt/unknown_command）、`writer.rs::tests`（轮转/合并/背压 notice 一次）、`ask_question.rs::tests`（control 回环/按会话路由）、`schema.rs::tests`（serve_dts 命名）、`tests/serve_stdio_e2e.rs` | ✅（Tomcat 现有） | 协议行为已被 Tomcat 自己测死，扩展直接信。 |
 | E2E（真实宿主 / VSCode Dev Host） | `E2E-VSCEXT-001`：真实 VSCode Dev Host 下执行一问一答、审批、diff、interrupt | ✅ | 不只测 test host，要在真的 VSCode 宿主里走主链路。 |
 | E2E（真实安装 / VSCode 本机） | `E2E-VSCEXT-002`：本地打包并安装扩展到 VSCode，再跑同一组宿主断言 | ✅ | 真装一遍，避免“开发宿主能跑、安装版翻车”。 |
-| E2E（Cursor 兼容运行） | `E2E-VSCEXT-003`：Cursor 以共享 VSCode 扩展目录的方式加载已安装扩展并跑宿主断言 | ✅ | Cursor 要真的跑，不只口头说兼容。 |
 | E2E（多会话真实交互） | `E2E-VSCEXT-004`：真实宿主里验证聊天线程到 `sessionId` 的稳定映射 | ✅ | 多会话不能只在集成里测，真实宿主也要看路由。 |
 | E2E（恢复/中断真实交互） | `E2E-VSCEXT-005`：真实宿主里验证 interrupt + restart 后继续可用 | ✅ | 真正站在用户角度验“挂了还能不能接着用”。 |
 | 文档 / 流程 | 本组架构文档、`docs/status/feature-tomcat-vscode-extension.md`、任务卡/看板状态与实际实现一致 | ✅ | 字、测试、流程三本账要对得上。 |
@@ -78,8 +77,7 @@ serve 可执行缺失/启动失败 → spawn error（扩展：引导用户配置
 补充口径：
 
 1. **VSCode 是“真实安装”强门禁**：因为本机已装 VSCode，且本任务产物本质是 VSCode 扩展，`E2E-VSCEXT-001/002` 视为本期强制验收项。
-2. **Cursor 是“真实运行”强兼容门禁**：官方文档明确支持 OpenVSX 安装与从 VSCode 导入扩展，但未明确承诺“本地 VSIX / 本地开发扩展 sideload”路径，因此 `E2E-VSCEXT-003` 先强制验证“Cursor 中真实可运行”，安装方式优先走官方支持路径；若实现期验证本地 sideload 稳定，再把该路径补写为正式步骤。
-3. **Cline / Continue 参考不只体现在实现，也体现在验收**：`Cline` 侧重点对齐 diff / 审批 / 原生宿主交互，`Continue` 侧重点对齐 NDJSON bridge、spawn 子进程与 IDE 宿主联调。
+2. **Cline / Continue 参考不只体现在实现，也体现在验收**：`Cline` 侧重点对齐 diff / 审批 / 原生宿主交互，`Continue` 侧重点对齐 NDJSON bridge、spawn 子进程与 IDE 宿主联调。
 
 ---
 

@@ -1,9 +1,8 @@
 import * as vscode from "vscode";
 
+import { PARTICIPANT_ID } from "../constants";
 import type { TomcatMessenger } from "./TomcatMessenger";
 import type { ResponseFrame } from "./wire";
-
-const PARTICIPANT_ID = "tomcat.tomcat";
 
 export interface SessionSummary {
   busy: boolean;

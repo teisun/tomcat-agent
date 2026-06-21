@@ -158,6 +158,30 @@ export class TomcatMessenger {
     this.start();
   }
 
+  updateOptions(options: Partial<TomcatMessengerOptions>): void {
+    if (options.cwd !== undefined) {
+      this.options.cwd = options.cwd;
+    }
+    if (options.env !== undefined) {
+      this.options.env = options.env;
+    }
+    if (options.executable !== undefined) {
+      this.options.executable = options.executable;
+    }
+    if (options.extraArgs !== undefined) {
+      this.options.extraArgs = options.extraArgs;
+    }
+    if (options.logger !== undefined) {
+      this.options.logger = options.logger;
+    }
+    if (options.requestTimeoutMs !== undefined) {
+      this.options.requestTimeoutMs = options.requestTimeoutMs;
+    }
+    if (options.spawnFactory !== undefined) {
+      this.options.spawnFactory = options.spawnFactory;
+    }
+  }
+
   dispose(): void {
     if (this.disposed) {
       return;
