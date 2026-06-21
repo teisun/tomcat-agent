@@ -1,6 +1,7 @@
 # Tomcat VSCode Chat 扩展技术方案：把 Tomcat 接入 VSCode 聊天体验的进程边界方案
 
 > 适用范围：用一个**独立、可上架、可安装**的 VSCode 扩展，spawn 已就绪的 `tomcat serve --stdio` 子进程，用 Tomcat 既有 NDJSON wire 协议桥接，把 Tomcat 的 agent loop / 工具 / 权限 / 多会话能力接入 VSCode 聊天体验；**全程只用稳定 API**，不依赖任何 proposed API。
+> 后续阶段：Phase 2（`/plan`·`/model` slash 命令补全 + serve 后端协议扩展 + 自建 Webview 富前端，与原生 participant 并存）见 [`tomcat-vscode-extension-phase2.md`](tomcat-vscode-extension-phase2.md)。本文为 Phase 2 的事实基线。
 > 上位规范：[`ARCHITECTURE_SPEC.md`](../../../tomcat/docs/openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。本方案按规范 §1–§10 拆为「总览（本文）+ 4 篇子文档」，文首「方案导图集」置于子文档之前、不占用 § 编号。
 > 标杆对照：Tomcat 服务端侧 [`agent-server-and-ui-gateway.md`](../../../tomcat/docs/architecture/agent-server-and-ui-gateway.md)（服务端能力）与本组文档（客户端接入）互补。
 > 单一事实源：协议与类型以 `tomcat/src/api/serve/types.rs` + `tomcat/src/infra/events/mod.rs` 为准；本组文档不复制定义，只描述「扩展侧如何消费」。
