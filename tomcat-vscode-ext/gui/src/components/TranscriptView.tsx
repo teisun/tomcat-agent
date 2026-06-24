@@ -1,4 +1,4 @@
-import type { WebviewTimelineItem } from "../types";
+import type { AskQuestionResult, WebviewTimelineItem } from "../types";
 import { ApprovalCard } from "./ApprovalCard";
 import { MessageBubble } from "./MessageBubble";
 import { PlanFileCard } from "./PlanFileCard";
@@ -6,23 +6,24 @@ import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCallCard } from "./ToolCallCard";
 
 export function TranscriptView({
+  busy,
   onAnswer,
   onApplyEdit,
   onOpenDiff,
   onOpenPlanFile,
   timeline,
 }: {
-  onAnswer(
-    requestId: string,
-    questionId: string,
-    optionId: string | null,
-    pickedRecommended: boolean,
-  ): void;
+  busy: boolean;
+  onAnswer(requestId: string, result: AskQuestionResult): void;
   onApplyEdit(toolCallId: string): void;
   onOpenDiff(toolCallId: string): void;
   onOpenPlanFile(path: string): void;
   timeline: WebviewTimelineItem[];
 }) {
+  const lastThinkingId = busy
+    ? [...timeline].reverse().find((item) => item.type === "thinking")?.id ?? null
+    : null;
+
   return (
     <section className="tc-transcript" aria-label="active-session">
       {timeline.map((item) => {
@@ -30,7 +31,13 @@ export function TranscriptView({
           case "message":
             return <MessageBubble item={item} key={item.id} />;
           case "thinking":
-            return <ThinkingBlock item={item} key={item.id} />;
+            return (
+              <ThinkingBlock
+                isStreaming={item.id === lastThinkingId}
+                item={item}
+                key={item.id}
+              />
+            );
           case "tool":
             return (
               <ToolCallCard

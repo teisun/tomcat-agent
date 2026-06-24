@@ -187,6 +187,8 @@ Pinned Composer
 - `AttachmentChips`：原生文件选择器返回的待发送附件以 chips 形式显示在输入框上方，可逐个移除。
 - `Composer`：底部固定，内部工具条集成 `+`、`Chat/Plan`、`Model`、`Ctx%` 与圆形发送按钮。
 
+实现细节下钻：如果要看这套聊天式 webview 在代码里如何拆到 `provider.ts` / `state.ts` / `gui/src/**`，以及自动滚动、thinking 顺序、工具卡折叠、composer 响应式这些交互具体落在哪些文件，请继续读 [`05-webview-ui-architecture.md`](05-webview-ui-architecture.md)。
+
 ### 3.6.3 计划文件与附件链路
 
 - plan 文件卡片同时出现在 transcript 内；点击文件名经 `openPlanFile` → `VsCodeIde.openTextDocument/showTextDocument` 打开 `.plan.md`。

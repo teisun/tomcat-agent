@@ -613,3 +613,382 @@ async fn serve_prompt_panic_isolation_emits_agent_end_error() {
         "expected panic-isolated agent_end, got {lines:?}"
     );
 }
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_with_stale_invalid_model_override_emits_single_agent_end_and_recovers() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "recovered".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+
+    slot.ctx
+        .session_runtime
+        .session
+        .switch_current_model(None, Some("totally-missing-model"))
+        .expect("seed stale model override");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("invalid-override-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "hello".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("error").and_then(serde_json::Value::as_str).is_some()
+    })
+    .await;
+    let error_ends = lines
+        .iter()
+        .filter(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").and_then(serde_json::Value::as_str).is_some()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        error_ends.len(),
+        1,
+        "invalid stale model override should emit exactly one terminal error event: {lines:?}"
+    );
+    assert!(
+        error_ends[0]
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|message| message.contains("totally-missing-model")),
+        "expected stale model error to mention the invalid override: {lines:?}"
+    );
+    assert!(
+        slot.turn_state.lock().is_some(),
+        "turn_state should be restored after pre-loop resolve failure"
+    );
+    for _ in 0..50 {
+        if !slot.is_busy() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    slot.ctx
+        .session_runtime
+        .session
+        .switch_current_model(None, Some("gpt-5.4"))
+        .expect("restore valid model");
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("invalid-override-2".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "recover".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let after_recovery_prompt = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("invalid-override-2")
+    })
+    .await;
+    let recovery_response = after_recovery_prompt
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("invalid-override-2")
+        })
+        .expect("recovery prompt response");
+    assert_eq!(
+        recovery_response["success"].as_bool(),
+        Some(true),
+        "recovery prompt should still be accepted: {after_recovery_prompt:?}"
+    );
+    let recovered = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if lines
+                .iter()
+                .filter(|line| {
+                    line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                })
+                .count()
+                >= 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+    let all_agent_ends = recovered
+        .iter()
+        .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end"))
+        .count();
+    assert_eq!(
+        all_agent_ends, 2,
+        "expected one failed + one recovered terminal event: {recovered:?}"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_end_and_recovers() {
+    let _api_key = install_test_api_key();
+    let first_stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "vision ok".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let second_stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "back on gpt".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_streams(vec![first_stream, second_stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("attachment-history-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "describe image".to_string(),
+            params: ServeMessageParams {
+                attachments: vec![ServeAttachment {
+                    kind: ServeAttachmentKind::Image,
+                    mime_type: None,
+                    data_base64: None,
+                    file_id: Some("file-vision".to_string()),
+                }],
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let after_first = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("error").and_then(serde_json::Value::as_str).is_none()
+    })
+    .await;
+    assert_eq!(
+        after_first
+            .iter()
+            .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end"))
+            .count(),
+        1
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetModel {
+            id: Some("set-deepseek".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "deepseek-v4-pro".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("attachment-history-2".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "follow up".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let deepseek_failure = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("error").and_then(serde_json::Value::as_str).is_some()
+    })
+    .await;
+    let deepseek_errors = deepseek_failure
+        .iter()
+        .filter(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").and_then(serde_json::Value::as_str).is_some()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        deepseek_errors.len(),
+        1,
+        "capability mismatch should emit exactly one terminal error event: {deepseek_failure:?}"
+    );
+    let error_text = deepseek_errors[0]
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        error_text.contains("provider/model 不支持"),
+        "expected capability mismatch error, got {error_text:?}"
+    );
+    assert!(
+        slot.turn_state.lock().is_some(),
+        "turn_state should be restored after capability validation failure"
+    );
+    for _ in 0..50 {
+        if !slot.is_busy() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetModel {
+            id: Some("set-back-gpt".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("attachment-history-3".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "recover".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let after_recovery_prompt = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("attachment-history-3")
+    })
+    .await;
+    let recovery_response = after_recovery_prompt
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("attachment-history-3")
+        })
+        .expect("recovery prompt response");
+    assert_eq!(
+        recovery_response["success"].as_bool(),
+        Some(true),
+        "recovery prompt should still be accepted: {after_recovery_prompt:?}"
+    );
+    let recovered = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if lines
+                .iter()
+                .filter(|line| {
+                    line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                })
+                .count()
+                >= 3
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+    let agent_end_total = recovered
+        .iter()
+        .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end"))
+        .count();
+    let agent_end_error_total = recovered
+        .iter()
+        .filter(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").and_then(serde_json::Value::as_str).is_some()
+        })
+        .count();
+    assert_eq!(
+        agent_end_total, 3,
+        "expected success + failure + recovery agent_end events: {recovered:?}"
+    );
+    assert_eq!(
+        agent_end_error_total, 1,
+        "only the deepseek capability mismatch turn should fail"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_set_model_rejects_invalid_id_without_mutating_session_override() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetModel {
+            id: Some("bad-model".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "deepseek".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("bad-model")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("bad-model"))
+        .expect("invalid model response");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("deepseek")),
+        "expected invalid model error to mention requested id: {response:?}"
+    );
+
+    let current = slot
+        .ctx
+        .session_runtime
+        .session
+        .current_session_entry()
+        .expect("read current session")
+        .expect("current session entry");
+    assert_eq!(
+        current.model_override, None,
+        "invalid set_model must not persist a bad model_override"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListModels {
+            id: Some("models-after-bad-set".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    let after = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("models-after-bad-set")
+    })
+    .await;
+    let list_models = after
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("models-after-bad-set")
+        })
+        .expect("list_models response after invalid set_model");
+    assert_eq!(list_models["success"].as_bool(), Some(true));
+}

@@ -33,6 +33,7 @@ import { SessionOwnershipTracker } from "./ui/webview/ownership";
 import type {
   FrontendOwnerKind,
   TomcatUiMode,
+  WebviewDomAction,
   WebviewIntent,
 } from "./ui/webview/protocol";
 import { TomcatWebviewViewProvider } from "./ui/webview/provider";
@@ -83,10 +84,34 @@ export interface TomcatExtensionApi {
     captureWebviewDom(): Promise<{
       activeSessionId: string | null;
       approvalCount: number;
+      composerControlMetrics: Record<
+        string,
+        {
+          top: number;
+          width: number;
+        }
+      >;
+      composerRowCount: number;
+      expandedThinkingCount: number;
+      expandedToolTitles: string[];
       hasConflict: boolean;
       html: string;
+      jumpToLatestVisible: boolean;
       messageTexts: string[];
       sessionTabs: string[];
+      streamMetrics: {
+        clientHeight: number;
+        distanceFromBottom: number;
+        scrollHeight: number;
+        scrollTop: number;
+      };
+      timelineKinds: string[];
+      toolBodyMetrics: Array<{
+        clientHeight: number;
+        expanded: boolean;
+        scrollHeight: number;
+        title: string;
+      }>;
       toolTitles: string[];
     }>;
     clearObservedEvents(): void;
@@ -114,6 +139,7 @@ export interface TomcatExtensionApi {
     ): boolean;
     restartServe(): Promise<void>;
     runParticipantTurn(options: RunParticipantTurnOptions): Promise<RunParticipantTurnResult>;
+    sendWebviewDomAction(action: WebviewDomAction): Promise<void>;
     sendWebviewIntent(
       intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>,
     ): Promise<void>;
@@ -721,6 +747,9 @@ export async function activate(
       },
       sendWebviewIntent: async (intent) => {
         await webviewProvider.dispatchTestIntent(intent);
+      },
+      sendWebviewDomAction: async (action) => {
+        await webviewProvider.dispatchTestDomAction(action);
       },
       setParticipantUiOverrides: (overrides) => {
         commands.setUiOverrides(overrides);

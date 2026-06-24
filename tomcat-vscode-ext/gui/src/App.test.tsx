@@ -71,8 +71,8 @@ describe("Tomcat webview App", () => {
             planState: "planning",
             sessionId: "s1",
             timeline: [
-              { id: "m1", kind: "assistant", text: "hello", type: "message" },
               { id: "m2", text: "thinking...", type: "thinking" },
+              { id: "m1", kind: "assistant", text: "hello", type: "message" },
               {
                 display: { file: "src/app.ts", kind: "file" },
                 id: "tool-card-1",
@@ -96,7 +96,10 @@ describe("Tomcat webview App", () => {
                   questions: [
                     {
                       id: "q1",
-                      options: [{ id: "yes", label: "Yes", recommended: true }],
+                      options: [
+                        { id: "yes", label: "Yes", recommended: true },
+                        { id: "no", label: "No" },
+                      ],
                       prompt: "Proceed?",
                     },
                   ],
@@ -119,9 +122,14 @@ describe("Tomcat webview App", () => {
     expect(screen.queryByText("thinking...")).toBeNull();
     fireEvent.click(screen.getByTestId("thinking-toggle"));
     expect(screen.getByText("thinking...")).toBeTruthy();
+    expect(screen.getByText("Questions")).toBeTruthy();
     expect(screen.getByText("Proceed?")).toBeTruthy();
     expect(screen.getByText("edit (complete)")).toBeTruthy();
+    expect(screen.queryByText("updated file")).toBeNull();
+    fireEvent.click(screen.getByTestId("tool-toggle"));
+    expect(screen.getByText("updated file")).toBeTruthy();
     expect(screen.getByTestId("session-option").textContent).toContain("s1");
+    expect(screen.queryByLabelText("Close active session")).toBeNull();
     expect(screen.getByTestId("plan-card").textContent).toContain("login-refactor.plan.md");
     expect(screen.getByTestId("build-plan").textContent).toContain("Build");
     expect(screen.getByTestId("attachment-chip").textContent).toContain("README.md");
@@ -191,7 +199,10 @@ describe("Tomcat webview App", () => {
                   questions: [
                     {
                       id: "q1",
-                      options: [{ id: "yes", label: "Yes", recommended: true }],
+                      options: [
+                        { id: "yes", label: "Yes", recommended: true },
+                        { id: "no", label: "No" },
+                      ],
                       prompt: "Proceed?",
                     },
                   ],
@@ -224,7 +235,8 @@ describe("Tomcat webview App", () => {
     fireEvent.click(screen.getByTestId("attachment-chip"));
     fireEvent.click(screen.getByLabelText("Open plan file"));
     fireEvent.click(screen.getByTestId("build-plan"));
-    fireEvent.click(screen.getByText("Yes (Recommended)"));
+    fireEvent.click(screen.getByTestId("approval-option-q1-yes"));
+    fireEvent.click(screen.getByTestId("approval-continue"));
 
     expect(
       postMessage.mock.calls.some(
@@ -236,7 +248,11 @@ describe("Tomcat webview App", () => {
       postMessage.mock.calls.some(
         ([message]) =>
           message.type === "answerQuestion" &&
-          message.data?.requestId === "r1",
+          message.data?.requestId === "r1" &&
+          message.data?.result?.cancelled === false &&
+          message.data?.result?.answers?.[0]?.questionId === "q1" &&
+          message.data?.result?.answers?.[0]?.optionIds?.[0] === "yes" &&
+          message.data?.result?.answers?.[0]?.pickedRecommended === true,
       ),
     ).toBe(true);
     expect(
@@ -275,6 +291,109 @@ describe("Tomcat webview App", () => {
         ([message]) =>
           message.type === "setPlanMode" &&
           message.data?.action === "build",
+      ),
+    ).toBe(true);
+  });
+
+  it("posts batched approval answers after all questions are selected", async () => {
+    const { postMessage } = mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            timeline: [
+              {
+                id: "approval-1",
+                request: {
+                  questions: [
+                    {
+                      id: "q1",
+                      options: [
+                        { id: "day", label: "Day", recommended: true },
+                        { id: "night", label: "Night" },
+                      ],
+                      prompt: "When do you prefer to code?",
+                    },
+                    {
+                      id: "q2",
+                      options: [
+                        { id: "ts", label: "TypeScript", recommended: true },
+                        { id: "rs", label: "Rust" },
+                      ],
+                      prompt: "Which language do you want to use?",
+                    },
+                  ],
+                  requestId: "r2",
+                  responseEvent: "response-2",
+                },
+                resolved: false,
+                sessionId: "s1",
+                type: "approval",
+              },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-batched-approval",
+    });
+
+    const continueButton = screen.getByTestId("approval-continue");
+    expect((continueButton as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByTestId("approval-option-q1-day"));
+    expect((continueButton as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByTestId("approval-option-q2-rs"));
+    expect((continueButton as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(continueButton);
+
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) =>
+          message.type === "answerQuestion" &&
+          message.data?.requestId === "r2" &&
+          message.data?.result?.cancelled === false &&
+          JSON.stringify(message.data?.result?.answers) ===
+            JSON.stringify([
+              {
+                optionIds: ["day"],
+                pickedRecommended: true,
+                questionId: "q1",
+              },
+              {
+                optionIds: ["rs"],
+                pickedRecommended: false,
+                questionId: "q2",
+              },
+            ]),
       ),
     ).toBe(true);
   });

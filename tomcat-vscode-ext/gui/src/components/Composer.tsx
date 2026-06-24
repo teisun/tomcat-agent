@@ -55,7 +55,7 @@ export function Composer({
           rows={4}
           value={prompt}
         />
-        <div className="tc-composer__bar">
+        <div className="tc-composer__bar" data-testid="composer-bar">
           <button
             aria-label="Add attachment"
             className="tc-icon-button"
@@ -67,7 +67,7 @@ export function Composer({
             +
           </button>
 
-          <label className="tc-field tc-field--compact">
+          <label className="tc-field tc-field--compact tc-field--mode">
             <span>Mode</span>
             <select
               aria-label="Tomcat chat mode"
@@ -81,9 +81,9 @@ export function Composer({
             </select>
           </label>
 
-          {planStatus ? <span className="tc-chip">{planStatus}</span> : null}
+          {planStatus ? <span className="tc-chip tc-composer__plan-status">{planStatus}</span> : null}
 
-          <label className="tc-field tc-field--compact">
+          <label className="tc-field tc-field--compact tc-field--model">
             <span>Model</span>
             <select
               aria-label="Tomcat model"

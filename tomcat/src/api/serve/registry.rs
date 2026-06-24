@@ -27,6 +27,7 @@ pub struct SessionSlot {
     pub mode: SessionMode,
     pub cwd: Option<String>,
     pub busy: AtomicBool,
+    pub terminal_emitted: AtomicBool,
     pub turn_state: Mutex<Option<SessionTurnState>>,
     pub run_task: Mutex<Option<JoinHandle<()>>>,
     pub listener_ids: Mutex<Vec<EventListenerId>>,
@@ -46,6 +47,7 @@ impl SessionSlot {
             mode,
             cwd,
             busy: AtomicBool::new(false),
+            terminal_emitted: AtomicBool::new(false),
             turn_state: Mutex::new(Some(turn_state)),
             run_task: Mutex::new(None),
             listener_ids: Mutex::new(Vec::new()),
@@ -64,6 +66,20 @@ impl SessionSlot {
 
     pub fn mark_idle(&self) {
         self.busy.store(false, Ordering::SeqCst);
+    }
+
+    pub fn reset_terminal_emitted(&self) {
+        self.terminal_emitted.store(false, Ordering::SeqCst);
+    }
+
+    pub fn mark_terminal_emitted(&self) {
+        self.terminal_emitted.store(true, Ordering::SeqCst);
+    }
+
+    pub fn mark_terminal_emitted_if_absent(&self) -> bool {
+        self.terminal_emitted
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 }
 

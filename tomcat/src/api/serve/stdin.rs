@@ -5,9 +5,8 @@ use tokio::io::AsyncBufReadExt;
 use crate::AppError;
 
 use super::commands::handle_command;
-use super::control::handle_stdin_eof;
 use super::ndjson::parse_command_line;
-use super::types::{OutFrame, ResponseFrame};
+use super::types::{OutFrame, ResponseFrame, ServeCommand};
 use super::ServeState;
 
 pub(crate) async fn run_stdio_loop(state: Arc<ServeState>) -> Result<(), AppError> {
@@ -22,10 +21,7 @@ pub(crate) async fn run_stdio_loop(state: Arc<ServeState>) -> Result<(), AppErro
         let command = match parse_command_line(trimmed) {
             Ok(command) => command,
             Err(error) => {
-                let message = match &error {
-                    AppError::Config(message) => message.clone(),
-                    _ => error.to_string(),
-                };
+                let message = render_command_error(&error);
                 state.writer.send(OutFrame::Response(ResponseFrame::error(
                     None,
                     None,
@@ -34,7 +30,35 @@ pub(crate) async fn run_stdio_loop(state: Arc<ServeState>) -> Result<(), AppErro
                 continue;
             }
         };
-        handle_command(Arc::clone(&state), command).await?;
+        dispatch_command(Arc::clone(&state), command).await?;
     }
-    handle_stdin_eof(state).await
+    Ok(())
+}
+
+pub(crate) async fn dispatch_command(
+    state: Arc<ServeState>,
+    command: ServeCommand,
+) -> Result<(), AppError> {
+    let command_id = command.command_id().map(ToOwned::to_owned);
+    let session_id = command.session_id().map(ToOwned::to_owned);
+    if let Err(error) = handle_command(Arc::clone(&state), command.clone()).await {
+        tracing::warn!(
+            command = command.wire_type(),
+            error = %error,
+            "serve command failed; returning error frame and keeping stdio loop alive"
+        );
+        state.writer.send(OutFrame::Response(ResponseFrame::error(
+            command_id,
+            session_id,
+            render_command_error(&error),
+        )))?;
+    }
+    Ok(())
+}
+
+fn render_command_error(error: &AppError) -> String {
+    match error {
+        AppError::Config(message) => message.clone(),
+        _ => error.to_string(),
+    }
 }

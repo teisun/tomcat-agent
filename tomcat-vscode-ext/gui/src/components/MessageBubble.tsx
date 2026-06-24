@@ -9,7 +9,11 @@ const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
 
 export function MessageBubble({ item }: { item: WebviewMessageBlock }) {
   return (
-    <article className={`tc-message tc-message--${item.kind}`}>
+    <article
+      className={`tc-message tc-message--${item.kind}`}
+      data-kind={item.kind}
+      data-testid="message-block"
+    >
       <div className="tc-message__header">
         <strong>{MESSAGE_LABELS[item.kind]}</strong>
         <span>{item.kind}</span>

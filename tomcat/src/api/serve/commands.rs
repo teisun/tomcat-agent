@@ -16,12 +16,11 @@ use crate::AppError;
 use crate::{SessionManager, SessionMode};
 
 use super::control;
-use super::event_pump;
 use super::types::{
     ListSessionsScope, OutFrame, ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand,
     ServeMessageParams, ServeSessionMode, SetPlanModeAction,
 };
-use super::{create_session_slot, register_slot_hooks, run_slot_turn, ServeState};
+use super::{cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState};
 
 enum TurnAck {
     Accepted,
@@ -435,6 +434,15 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
+            if let Err(error) = slot.ctx.global_services.model_catalog.lookup_explicit(&model) {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
             slot.ctx
                 .session_runtime
                 .session
@@ -478,19 +486,7 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
-            slot.ctx.session_runtime.cancel_token.lock().cancel();
-            slot.ctx.agent_registry.cascade_abort(&slot.session_id);
-            let handle = { slot.run_task.lock().take() };
-            if let Some(handle) = handle {
-                let _ = handle.await;
-            }
-            event_pump::unregister_session_event_pump(&slot);
-            control::ask_bridge(&state).clear_session(&slot.session_id);
-            state.shared_event_bus.unregister_session_bus(&slot.session_id);
-            slot.ctx.shutdown_completion_subscriber();
-            // Drop the root registration before reopening the same disk-backed session.
-            slot.ctx.agent_registry.unregister(&slot.session_id);
-            state.registry.remove(&slot.session_id);
+            cleanup_session_slot(&state, &slot, true, "close_session").await?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),
@@ -627,6 +623,7 @@ async fn start_turn(
         }
         return Ok(());
     }
+    slot.reset_terminal_emitted();
 
     let turn_token = tokio_util::sync::CancellationToken::new();
     {
@@ -663,18 +660,29 @@ async fn start_turn(
         .catch_unwind()
         .await;
         match result {
-            Ok(Ok(_outcome)) => {}
+            Ok(Ok(crate::AgentRunOutcome::Completed(_)))
+            | Ok(Ok(crate::AgentRunOutcome::Interrupted(_))) => {}
+            Ok(Ok(crate::AgentRunOutcome::Failed(error))) => {
+                emit_agent_end_once(
+                    &state_for_task,
+                    &slot_for_task,
+                    render_error_message(&error),
+                );
+            }
             Ok(Err(error)) => {
                 tracing::error!(session_id = %slot_for_task.session_id, error = %error, "serve session turn failed");
+                emit_agent_end_once(
+                    &state_for_task,
+                    &slot_for_task,
+                    render_error_message(&error),
+                );
             }
             Err(_) => {
-                let frame = OutFrame::Event(serde_json::json!({
-                    "type": "agent_end",
-                    "sessionId": slot_for_task.session_id,
-                    "messages": [],
-                    "error": "serve session task panicked"
-                }));
-                let _ = state_for_task.writer.send(frame);
+                emit_agent_end_once(
+                    &state_for_task,
+                    &slot_for_task,
+                    "serve session task panicked",
+                );
             }
         }
         slot_for_task.mark_idle();
@@ -689,6 +697,30 @@ fn rollback_created_session(slot: &super::registry::SessionSlot) -> Result<(), A
         .session_runtime
         .session
         .delete_session(&slot.session_id)
+}
+
+fn emit_agent_end_once(
+    state: &ServeState,
+    slot: &super::registry::SessionSlot,
+    error: impl Into<String>,
+) {
+    if !slot.mark_terminal_emitted_if_absent() {
+        return;
+    }
+    let frame = OutFrame::Event(serde_json::json!({
+        "type": "agent_end",
+        "sessionId": slot.session_id,
+        "messages": [],
+        "error": error.into(),
+    }));
+    let _ = state.writer.send(frame);
+}
+
+fn render_error_message(error: &AppError) -> String {
+    match error {
+        AppError::Config(message) => message.clone(),
+        _ => error.to_string(),
+    }
 }
 
 fn build_user_message(text: String, params: &ServeMessageParams) -> Result<ChatMessage, String> {

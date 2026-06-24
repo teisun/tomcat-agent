@@ -13,8 +13,8 @@ use tokio::io::AsyncWrite;
 use crate::api::chat::{ChatContext, ChatContextOverrides};
 use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::llm::{
-    Capabilities, ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmResolver, LlmScene,
-    ResolvedCall, StreamEvent,
+    ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmResolver, LlmScene, ResolvedCall,
+    StreamEvent,
 };
 use crate::{AppConfig, ServeConfig};
 
@@ -254,13 +254,19 @@ impl LlmProvider for RecordingMockLlm {
 }
 
 pub struct FixedResolver {
+    catalog: Arc<crate::core::llm::ModelCatalog>,
     provider: Arc<dyn LlmProvider>,
     default_model: String,
 }
 
 impl FixedResolver {
-    pub fn new(provider: Arc<dyn LlmProvider>, default_model: impl Into<String>) -> Self {
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        default_model: impl Into<String>,
+        catalog: Arc<crate::core::llm::ModelCatalog>,
+    ) -> Self {
         Self {
+            catalog,
             provider,
             default_model: default_model.into(),
         }
@@ -273,22 +279,18 @@ impl LlmResolver for FixedResolver {
         _scene: LlmScene,
         session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError> {
-        let model = session_override.unwrap_or(&self.default_model).to_string();
+        let entry = self
+            .catalog
+            .lookup_explicit(session_override.unwrap_or(&self.default_model))?;
         Ok(ResolvedCall {
             provider_impl: Arc::clone(&self.provider),
-            model,
-            api: "mock".to_string(),
-            provider: "mock".to_string(),
-            base_url: None,
+            model: entry.id,
+            api: entry.api,
+            provider: entry.provider,
+            base_url: entry.base_url,
             key_source: "test".to_string(),
             thinking_format: ThinkingFormat::Auto,
-            capabilities: Capabilities {
-                vision: true,
-                files: true,
-                tools: true,
-                reasoning: true,
-                web_search: false,
-            },
+            capabilities: entry.capabilities,
         })
     }
 }
@@ -363,7 +365,11 @@ async fn build_initialized_state_with_provider(
         .plan_runtime
         .attach_ask_question_panel(ask_panel);
     ctx.global_services.llm = Arc::clone(&provider);
-    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, "gpt-5.4"));
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(
+        provider,
+        "gpt-5.4",
+        Arc::clone(&ctx.global_services.model_catalog),
+    ));
 
     let context_budget_chars =
         crate::infra::config::compute_context_budget_chars(&ctx.config.context);

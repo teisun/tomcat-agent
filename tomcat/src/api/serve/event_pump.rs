@@ -61,12 +61,17 @@ pub fn register_session_event_pump(
     let mut ids = Vec::new();
     for event_name in EVENT_NAMES {
         let session_id = slot.session_id.clone();
+        let slot_for_listener = Arc::clone(slot);
+        let event_bus = Arc::clone(&slot.ctx.global_services.event_bus);
         let writer = writer.clone();
-        let id = slot.ctx.global_services.event_bus.on(
+        let id = event_bus.on(
             event_name,
             Box::new(move |ctx| {
                 if ctx.session_id.as_deref() != Some(session_id.as_str()) {
                     return Ok(());
+                }
+                if event_name == &wire::WIRE_AGENT_END {
+                    slot_for_listener.mark_terminal_emitted();
                 }
                 let _ = writer.send(OutFrame::Event(ctx.payload.clone()));
                 Ok(())

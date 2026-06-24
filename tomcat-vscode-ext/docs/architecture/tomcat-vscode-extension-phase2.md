@@ -1,7 +1,7 @@
 # Tomcat VSCode Chat 扩展 · Phase 2 技术方案：slash 命令补全（/plan·/model）与自建 Webview UI
 
 > 适用范围：在 Phase 1（`@tomcat` 原生 Chat Participant + UI 无关桥接核心，详见 [`tomcat-vscode-extension.md`](tomcat-vscode-extension.md)）已上架可用的基础上，分两阶段把 Tomcat 更完整的能力接入 VSCode：**Stage A** 用稳定 slash command 把 `/plan`（计划模式）、`/model`（切换模型）接进原生聊天，并为此**扩展 `tomcat serve` 后端协议**；**Stage B** 在同一桥接核心上自建 **React + Vite Webview**，做富交互前端。**两个前端默认并存**，共享单个 `tomcat serve` 进程，并**共享同一项目 scope 的会话池**（复用 `tomcat code` 的"按 git 项目根归组 + 默认恢复 last-active"逻辑）；同一条 live 会话同时只允许一个前端驱动（单活跃归属）。全程只用 VSCode **稳定 API**，不依赖任何 proposed API。
-> 上位规范：[`ARCHITECTURE_SPEC.md`](../../../tomcat/docs/openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。本方案按规范 §1–§10 拆为「总览（本文）+ 4 篇子文档」，文首「方案导图集」置于子文档之前、不占用 § 编号。
+> 上位规范：[`ARCHITECTURE_SPEC.md`](../../../tomcat/docs/openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。本方案按规范 §1–§10 拆为「总览（本文）+ 5 篇子文档」，文首「方案导图集」置于子文档之前、不占用 § 编号。
 > 与 Phase 1 关系：Phase 1 = 「桥接核心（层 2）+ 原生 participant（层 1-A）」已交付；Phase 2 **不重写桥接核心**，只新增「serve 后端能力 + slash 命令 + webview 前端（层 1-B）」。Phase 1 文档为本文的事实基线。
 > 单一事实源：协议与类型仍以 `tomcat/src/api/serve/types.rs` + `tomcat/src/infra/events/mod.rs` 为准；plan 模式行为以 `tomcat/src/core/plan_runtime/mod.rs` 为准；本组文档只描述「扩展侧如何消费 + serve 侧需补什么」。
 > 外部参考仓库（与本仓同级，位于 `/Users/yankeben/workspace/`，仅作证据引用、不进本仓）：`vscode/`（VSCode 本体）、`cline/`、`continue/`。
@@ -20,6 +20,7 @@
 | [`02-stage-a-slash-and-serve.md`](tomcat-vscode-extension-phase2/02-stage-a-slash-and-serve.md) | §3 落地选型与实施（Stage A） | §3.1 七列决策表（SA1–SA7）+ §3.2 五列实施点 + Stage A 拆节：扩展侧 slash 路由 + **Tomcat serve 后端扩展**（`set_plan_mode`/`list_models`/`get_state.planState`/`plan.*` 事件） | 要把 `/plan` `/model` 落地时按它对协议、按它改后端。 |
 | [`03-stage-b-webview.md`](tomcat-vscode-extension-phase2/03-stage-b-webview.md) | §3 落地选型与实施（Stage B） | §3.1 七列决策表（SB1–SB8）+ §3.2 五列实施点 + Stage B 拆节：双前端并存模型、webview 宿主/CSP、双通道 postMessage 协议、IDE 抽象与 diff、模型/plan/多会话 UI、打包影响 | 要自建 webview 时按它分层、对协议、建文件。 |
 | [`04-protocol-runtime.md`](tomcat-vscode-extension-phase2/04-protocol-runtime.md) | §4 协议 · §5 One-Glance · §6 配置 · §7 错误 · §8 测试 · §9 风险 · §10 历史 | 新 serve 命令/字段表 + webview 帧表 + jsonc 样例；扩展侧文件职责框图；配置/错误/测试矩阵/风险/否决留痕 | 实现/验收/排错时查它。 |
+| [`05-webview-ui-architecture.md`](tomcat-vscode-extension-phase2/05-webview-ui-architecture.md) | Stage B 实现下钻（补充） | 已落地 webview UI 的组件树、timeline 合并器、自动滚动、thinking/工具卡交互、composer 响应式与测试/验收对照表 | 想看“现在这套 UI 具体怎么实现”的时候读它。 |
 
 ---
 
@@ -145,4 +146,4 @@
 
 ## 一句话总结
 
-Phase 2 = 在 Phase 1 的桥接核心之上做两件并存的增量：**Stage A** 先给 `tomcat serve` 补 `set_plan_mode` / `list_models` 命令与 `get_state.planState` 字段（把早已存在的 `PlanRuntime` / `ModelCatalog` 暴露出来），再用稳定的 participant slash command 把 `/plan`、`/model` 接进原生聊天；**Stage B** 在同一桥接核心上自建 **React + Vite Webview** 做富交互前端，与原生 participant 默认并存、共享同一项目 scope 会话池（复用 `tomcat code` 的归组与 last-active 恢复），单条 live 会话单前端归属。VSCode 只提供 Webview 宿主 API，不提供 UI 框架；具体 UI 选型与开发打点参考 `cline` / `continue`，但不引入 Electron 桌面壳与重型 proto 总线。详细论证见上表四篇子文档。
+Phase 2 = 在 Phase 1 的桥接核心之上做两件并存的增量：**Stage A** 先给 `tomcat serve` 补 `set_plan_mode` / `list_models` 命令与 `get_state.planState` 字段（把早已存在的 `PlanRuntime` / `ModelCatalog` 暴露出来），再用稳定的 participant slash command 把 `/plan`、`/model` 接进原生聊天；**Stage B** 在同一桥接核心上自建 **React + Vite Webview** 做富交互前端，与原生 participant 默认并存、共享同一项目 scope 会话池（复用 `tomcat code` 的归组与 last-active 恢复），单条 live 会话单前端归属。VSCode 只提供 Webview 宿主 API，不提供 UI 框架；具体 UI 选型与开发打点参考 `cline` / `continue`，但不引入 Electron 桌面壳与重型 proto 总线。详细论证见上表五篇子文档。

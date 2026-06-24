@@ -9,6 +9,14 @@ import type { ParticipantPlanState } from "../participant/planState";
 export type TomcatUiMode = "both" | "participant" | "webview";
 export type FrontendOwnerKind = "participant" | "webview";
 
+export interface WebviewDomAction {
+  kind: "clickTestId" | "scrollToEdge" | "setRootWidth";
+  edge?: "bottom" | "top";
+  index?: number;
+  testId?: string;
+  widthPx?: number | null;
+}
+
 export interface WebviewMessageBlock {
   id: string;
   kind: "assistant" | "error" | "notice" | "user";
@@ -42,11 +50,13 @@ export type WebviewToolDisplay =
   | WebviewToolDisplayPlan
   | WebviewToolDisplayText;
 
+export type WebviewToolStatus = "complete" | "running" | "streaming";
+
 export interface WebviewToolCard {
   display?: WebviewToolDisplay;
   id: string;
   isError: boolean;
-  status: "complete" | "running" | "streaming";
+  status: WebviewToolStatus;
   summary?: string;
   toolCallId: string;
   toolName: string;
@@ -126,6 +136,10 @@ export type HostEventFrameContent =
   | ServeEvent
   | {
       type: "__test.capture_dom";
+    }
+  | {
+      action: WebviewDomAction;
+      type: "__test.dom_action";
     };
 
 export type HostToWebviewFrame =
@@ -261,10 +275,34 @@ export type WebviewIntent =
       data: {
         activeSessionId: string | null;
         approvalCount: number;
+        composerControlMetrics: Record<
+          string,
+          {
+            top: number;
+            width: number;
+          }
+        >;
+        composerRowCount: number;
+        expandedThinkingCount: number;
+        expandedToolTitles: string[];
         hasConflict: boolean;
         html: string;
+        jumpToLatestVisible: boolean;
         messageTexts: string[];
         sessionTabs: string[];
+        streamMetrics: {
+          clientHeight: number;
+          distanceFromBottom: number;
+          scrollHeight: number;
+          scrollTop: number;
+        };
+        timelineKinds: string[];
+        toolBodyMetrics: Array<{
+          clientHeight: number;
+          expanded: boolean;
+          scrollHeight: number;
+          title: string;
+        }>;
         toolTitles: string[];
       };
     };
@@ -345,7 +383,19 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         Array.isArray(value.data.toolTitles) &&
         typeof value.data.approvalCount === "number" &&
         typeof value.data.hasConflict === "boolean" &&
-        typeof value.data.html === "string"
+        typeof value.data.html === "string" &&
+        typeof value.data.jumpToLatestVisible === "boolean" &&
+        typeof value.data.expandedThinkingCount === "number" &&
+        typeof value.data.composerRowCount === "number" &&
+        Array.isArray(value.data.expandedToolTitles) &&
+        Array.isArray(value.data.timelineKinds) &&
+        isRecord(value.data.composerControlMetrics) &&
+        isRecord(value.data.streamMetrics) &&
+        typeof value.data.streamMetrics.scrollTop === "number" &&
+        typeof value.data.streamMetrics.scrollHeight === "number" &&
+        typeof value.data.streamMetrics.clientHeight === "number" &&
+        typeof value.data.streamMetrics.distanceFromBottom === "number" &&
+        Array.isArray(value.data.toolBodyMetrics)
       );
     default:
       return false;

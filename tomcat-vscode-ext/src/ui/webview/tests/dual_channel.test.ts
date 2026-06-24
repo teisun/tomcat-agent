@@ -48,6 +48,22 @@ describe("webview dual-channel state store", () => {
           message: {
             content: "older answer",
             role: "assistant",
+            thinking_text: "historic thinking",
+            tool_calls: [
+              {
+                function: { name: "load_skill" },
+                id: "hist-tool-1",
+              },
+            ],
+          },
+          type: "message",
+        },
+        {
+          id: "hist-tool-1-msg",
+          message: {
+            content: "<skill name=\"repo-archaeology-demo\" />",
+            role: "tool",
+            tool_call_id: "hist-tool-1",
           },
           type: "message",
         },
@@ -140,6 +156,19 @@ describe("webview dual-channel state store", () => {
     });
 
     const snapshot = store.snapshot();
+    const timeline = snapshot.sessionViews.s1.timeline;
+    const historicThinkingIndex = timeline.findIndex(
+      (item) => item.type === "thinking" && item.id === "hist-assistant-1-thinking",
+    );
+    const historicAssistantIndex = timeline.findIndex(
+      (item) => item.type === "message" && item.id === "hist-assistant-1",
+    );
+    const liveThinkingIndex = timeline.findIndex(
+      (item) => item.type === "thinking" && item.text === "thinking",
+    );
+    const liveAssistantIndex = timeline.findIndex(
+      (item) => item.type === "message" && item.kind === "assistant" && item.text === "hello",
+    );
     expect(snapshot.activeSessionId).toBe("s1");
     expect(snapshot.sessions[0]).toMatchObject({
       ownedByThisFrontend: true,
@@ -149,9 +178,17 @@ describe("webview dual-channel state store", () => {
     expect(snapshot.sessionViews.s1.timeline).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ kind: "user", text: "older prompt", type: "message" }),
+        expect.objectContaining({ id: "hist-assistant-1-thinking", text: "historic thinking", type: "thinking" }),
         expect.objectContaining({ kind: "assistant", text: "older answer", type: "message" }),
         expect.objectContaining({ kind: "assistant", text: "hello", type: "message" }),
         expect.objectContaining({ text: "thinking", type: "thinking" }),
+        expect.objectContaining({
+          status: "complete",
+          summary: "<skill name=\"repo-archaeology-demo\" />",
+          toolCallId: "hist-tool-1",
+          toolName: "load_skill",
+          type: "tool",
+        }),
         expect.objectContaining({
           display: { file: "src/app.ts", kind: "file" },
           status: "complete",
@@ -170,6 +207,10 @@ describe("webview dual-channel state store", () => {
         }),
       ]),
     );
+    expect(historicThinkingIndex).toBeGreaterThanOrEqual(0);
+    expect(historicAssistantIndex).toBeGreaterThan(historicThinkingIndex);
+    expect(liveThinkingIndex).toBeGreaterThanOrEqual(0);
+    expect(liveAssistantIndex).toBeGreaterThan(liveThinkingIndex);
     expect(snapshot.sessionViews.s1.planFile).toMatchObject({
       path: "/workspace/login.plan.md",
       planId: "plan-1",
@@ -180,6 +221,94 @@ describe("webview dual-channel state store", () => {
       id: "att-1",
       label: "README.md",
     });
+  });
+
+  it("deduplicates live assistant, thinking, and tool entries when history rehydrates", () => {
+    const store = new WebviewStateStore("both");
+
+    store.syncSessionList(
+      {
+        activeSessionId: "s1",
+        scope: "disk",
+        sessions: [{ busy: false, isCurrent: true, sessionId: "s1", updatedAt: 123 }],
+      },
+      new Map([["s1", "webview"]]),
+      "webview",
+    );
+
+    store.applyEvent({
+      assistantMessageEvent: {
+        delta: "live answer",
+        kind: "content_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      assistantMessageEvent: {
+        delta: "live thinking",
+        kind: "thinking_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      args: { path: "src/app.ts" },
+      sessionId: "s1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      type: "tool_execution_start",
+    });
+    store.applyEvent({
+      display: { file: "src/app.ts", kind: "file" },
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "hist-assistant-1",
+          message: {
+            content: "live answer",
+            reasoning_continuation: { fallback_text: "live thinking" },
+            role: "assistant",
+            tool_calls: [{ function: { name: "edit" }, id: "tool-1" }],
+          },
+          type: "message",
+        },
+        {
+          id: "hist-tool-1-msg",
+          message: {
+            content: "updated file",
+            role: "tool",
+            tool_call_id: "tool-1",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+      upToSeq: null,
+    });
+
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    expect(
+      timeline.filter(
+        (item) => item.type === "message" && item.kind === "assistant" && item.text === "live answer",
+      ),
+    ).toHaveLength(1);
+    expect(
+      timeline.filter((item) => item.type === "thinking" && item.text === "live thinking"),
+    ).toHaveLength(1);
+    expect(
+      timeline.filter((item) => item.type === "tool" && item.toolCallId === "tool-1"),
+    ).toHaveLength(1);
   });
 
   it("replaces session metadata idempotently from fresh state snapshots", () => {

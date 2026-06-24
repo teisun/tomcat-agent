@@ -1,4 +1,13 @@
 export type TomcatUiMode = "both" | "participant" | "webview";
+
+export interface WebviewDomAction {
+  kind: "clickTestId" | "scrollToEdge" | "setInputValue" | "setRootWidth";
+  edge?: "bottom" | "top";
+  index?: number;
+  testId?: string;
+  value?: string;
+  widthPx?: number | null;
+}
 export type FrontendOwnerKind = "participant" | "webview";
 
 export interface WebviewMessageBlock {
@@ -34,11 +43,13 @@ export type WebviewToolDisplay =
   | WebviewToolDisplayPlan
   | WebviewToolDisplayText;
 
+export type WebviewToolStatus = "complete" | "running" | "streaming";
+
 export interface WebviewToolCard {
   display?: WebviewToolDisplay;
   id: string;
   isError: boolean;
-  status: "complete" | "running" | "streaming";
+  status: WebviewToolStatus;
   summary?: string;
   toolCallId: string;
   toolName: string;
@@ -73,6 +84,21 @@ export interface WebviewApprovalQuestion {
   id: string;
   options: WebviewApprovalOption[];
   prompt: string;
+}
+
+export const CUSTOM_OPTION_ID = "__custom__";
+
+export interface AskQuestionAnswer {
+  customText?: string | null;
+  optionIds: string[];
+  pickedRecommended: boolean;
+  questionId: string;
+  skipped?: boolean;
+}
+
+export interface AskQuestionResult {
+  answers: AskQuestionAnswer[];
+  cancelled: boolean;
 }
 
 export interface WebviewApprovalCard {
@@ -148,6 +174,10 @@ export type HostToWebviewFrame =
         | {
             type: "__test.capture_dom";
           }
+        | {
+            action: WebviewDomAction;
+            type: "__test.dom_action";
+          }
         | Record<string, unknown>;
       messageId: string;
     }
@@ -163,16 +193,7 @@ export type WebviewIntent =
       type: "answerQuestion";
       data: {
         requestId: string;
-        result: {
-          answers: Array<{
-            customText?: string | null;
-            optionIds: string[];
-            pickedRecommended: boolean;
-            questionId: string;
-            skipped?: boolean;
-          }>;
-          cancelled: boolean;
-        };
+        result: AskQuestionResult;
       };
     }
   | {
@@ -260,10 +281,40 @@ export type WebviewIntent =
       data: {
         activeSessionId: string | null;
         approvalCount: number;
+        approvalInputTestIds: string[];
+        approvalOptionStates: Array<{
+          selected: boolean;
+          testId: string;
+        }>;
+        composerControlMetrics: Record<
+          string,
+          {
+            top: number;
+            width: number;
+          }
+        >;
+        composerRowCount: number;
+        disabledTestIds: string[];
+        expandedThinkingCount: number;
+        expandedToolTitles: string[];
         hasConflict: boolean;
         html: string;
+        jumpToLatestVisible: boolean;
         messageTexts: string[];
         sessionTabs: string[];
+        streamMetrics: {
+          clientHeight: number;
+          distanceFromBottom: number;
+          scrollHeight: number;
+          scrollTop: number;
+        };
+        timelineKinds: string[];
+        toolBodyMetrics: Array<{
+          clientHeight: number;
+          expanded: boolean;
+          scrollHeight: number;
+          title: string;
+        }>;
         toolTitles: string[];
       };
     };

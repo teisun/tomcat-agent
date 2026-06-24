@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import type { InitializeResult } from "../src/serveClient/initialize";
@@ -123,7 +123,7 @@ class FakeMessenger {
 
 function initializeResult(): InitializeResult {
   return {
-    capabilities: ["prompt", "list_models", "set_plan_mode"],
+    capabilities: ["ask_question", "prompt", "list_models", "set_plan_mode"],
     protocolVersion: 1,
     sessionId: "session-1",
   };
@@ -348,6 +348,217 @@ describe("webview provider integration", () => {
       "build",
       "exit",
     ]);
+
+    provider.dispose();
+  });
+
+  it("resolves batched askQuestion answers through the provider roundtrip", async () => {
+    const { provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+
+    const responsePromise = provider.askUser(
+      {
+        questions: [
+          {
+            id: "q1",
+            options: [
+              { id: "day", label: "Day", recommended: true },
+              { id: "night", label: "Night" },
+            ],
+            prompt: "When do you prefer to code?",
+          },
+          {
+            id: "q2",
+            options: [
+              { id: "ts", label: "TypeScript", recommended: true },
+              { id: "rs", label: "Rust" },
+            ],
+            prompt: "Which language do you want to use?",
+          },
+        ],
+        requestId: "ask-1",
+        responseEvent: "response-ask-1",
+      },
+      "session-1",
+    );
+
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          request: expect.objectContaining({ requestId: "ask-1" }),
+          resolved: false,
+          type: "approval",
+        }),
+      ]),
+    );
+
+    await provider.dispatchTestIntent({
+      data: {
+        requestId: "ask-1",
+        result: {
+          answers: [
+            {
+              optionIds: ["day"],
+              pickedRecommended: true,
+              questionId: "q1",
+            },
+            {
+              customText: "Rust",
+              optionIds: ["__custom__"],
+              pickedRecommended: false,
+              questionId: "q2",
+            },
+          ],
+          cancelled: false,
+        },
+      },
+      messageId: "answer-question-1",
+      type: "answerQuestion",
+    });
+
+    await expect(responsePromise).resolves.toEqual({
+      requestId: "ask-1",
+      result: {
+        answers: [
+          {
+            optionIds: ["day"],
+            pickedRecommended: true,
+            questionId: "q1",
+          },
+          {
+            customText: "Rust",
+            optionIds: ["__custom__"],
+            pickedRecommended: false,
+            questionId: "q2",
+          },
+        ],
+        cancelled: false,
+      },
+    });
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          request: expect.objectContaining({ requestId: "ask-1" }),
+          resolved: true,
+          type: "approval",
+        }),
+      ]),
+    );
+
+    provider.dispose();
+  });
+
+  it("resolves cancelled askQuestion answers through the provider roundtrip", async () => {
+    const { provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+
+    const responsePromise = provider.askUser(
+      {
+        questions: [
+          {
+            id: "q1",
+            options: [{ id: "yes", label: "Yes", recommended: true }],
+            prompt: "Proceed?",
+          },
+        ],
+        requestId: "ask-2",
+        responseEvent: "response-ask-2",
+      },
+      "session-1",
+    );
+
+    await provider.dispatchTestIntent({
+      data: {
+        requestId: "ask-2",
+        result: {
+          answers: [],
+          cancelled: true,
+        },
+      },
+      messageId: "answer-question-2",
+      type: "answerQuestion",
+    });
+
+    await expect(responsePromise).resolves.toEqual({
+      requestId: "ask-2",
+      result: {
+        answers: [],
+        cancelled: true,
+      },
+    });
+
+    provider.dispose();
+  });
+
+  it("surfaces prompt bridge timeouts as user-visible errors", async () => {
+    const { messenger, provider } = buildProvider();
+    vi.spyOn(messenger, "request").mockRejectedValue(
+      new Error("Timed out waiting for response prompt-timeout"),
+    );
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: {
+        sessionId: "session-1",
+        text: "will timeout",
+      },
+      messageId: "prompt-timeout-1",
+      type: "prompt",
+    });
+
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "error",
+          text: expect.stringContaining("Tomcat bridge is not responding"),
+          type: "message",
+        }),
+      ]),
+    );
+
+    provider.dispose();
+  });
+
+  it("surfaces setModel bridge exits as user-visible errors", async () => {
+    const { messenger, provider, sessionState } = buildProvider();
+    vi.spyOn(messenger, "sendSetModel").mockRejectedValue(
+      new Error("tomcat serve exited (code=1, signal=null)"),
+    );
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: {
+        modelId: "claude-4.6-sonnet",
+        sessionId: "session-1",
+      },
+      messageId: "set-model-error-1",
+      type: "setModel",
+    });
+
+    expect(sessionState.model).toBe("gpt-5.4");
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "error",
+          text: expect.stringContaining("Tomcat serve exited"),
+          type: "message",
+        }),
+      ]),
+    );
 
     provider.dispose();
   });

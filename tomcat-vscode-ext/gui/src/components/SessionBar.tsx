@@ -17,14 +17,12 @@ function formatSessionLabel(session: WebviewSessionTab): string {
 
 export function SessionBar({
   activeSessionId,
-  onCloseSession,
   onNewSession,
   onRefreshSessions,
   onSwitchSession,
   sessions,
 }: {
   activeSessionId: string | null;
-  onCloseSession(): void;
   onNewSession(): void;
   onRefreshSessions(): void;
   onSwitchSession(sessionId: string): void;
@@ -72,15 +70,6 @@ export function SessionBar({
           type="button"
         >
           Refresh
-        </button>
-        <button
-          aria-label="Close active session"
-          className="tc-button tc-button--ghost"
-          disabled={!activeSessionId}
-          onClick={onCloseSession}
-          type="button"
-        >
-          Close
         </button>
       </div>
     </section>

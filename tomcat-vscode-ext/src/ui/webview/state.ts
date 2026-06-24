@@ -120,18 +120,18 @@ function createTimelineId(
   return `${session.sessionId}-${prefix}-${session.timeline.length + 1}`;
 }
 
-function timelineFingerprint(item: WebviewTimelineItem): string {
+function timelineMergeKeys(item: WebviewTimelineItem): string[] {
   switch (item.type) {
     case "message":
-      return `${item.type}:${item.kind}:${item.text}`;
+      return [`message:id:${item.id}`, `message:text:${item.kind}:${item.text}`];
     case "thinking":
-      return `${item.type}:${item.text}`;
+      return [`thinking:id:${item.id}`, `thinking:text:${item.text}`];
     case "tool":
-      return `${item.type}:${item.toolCallId}:${item.status}:${item.summary ?? ""}`;
+      return [`tool:${item.toolCallId}`];
     case "approval":
-      return `${item.type}:${item.request.requestId}`;
+      return [`approval:${item.request.requestId}`];
     case "plan":
-      return `${item.type}:${item.path}:${item.state ?? "unknown"}:${item.planId ?? ""}`;
+      return [`plan:${item.path}:${item.planId ?? ""}:${item.state ?? "unknown"}`];
   }
 }
 
@@ -171,53 +171,123 @@ function extractMessageText(content: unknown): string | undefined {
   return asText(content);
 }
 
-function parseHistoryEntry(entry: unknown): WebviewTimelineItem | null {
+function extractThinkingText(message: Record<string, unknown>): string | undefined {
+  if (typeof message.thinking_text === "string" && message.thinking_text.trim()) {
+    return message.thinking_text;
+  }
+  if (
+    isRecord(message.reasoning_continuation) &&
+    typeof message.reasoning_continuation.fallback_text === "string" &&
+    message.reasoning_continuation.fallback_text.trim()
+  ) {
+    return message.reasoning_continuation.fallback_text;
+  }
+  return undefined;
+}
+
+function extractToolCallId(message: Record<string, unknown>): string | undefined {
+  return typeof message.tool_call_id === "string" ? message.tool_call_id : undefined;
+}
+
+function buildHistoryToolNameLookup(entries: unknown[]): Map<string, string> {
+  const lookup = new Map<string, string>();
+  for (const entry of entries) {
+    if (
+      !isRecord(entry) ||
+      entry.type !== "message" ||
+      !isRecord(entry.message) ||
+      entry.message.role !== "assistant" ||
+      !Array.isArray(entry.message.tool_calls)
+    ) {
+      continue;
+    }
+    for (const toolCall of entry.message.tool_calls) {
+      if (
+        !isRecord(toolCall) ||
+        typeof toolCall.id !== "string" ||
+        !isRecord(toolCall.function) ||
+        typeof toolCall.function.name !== "string"
+      ) {
+        continue;
+      }
+      lookup.set(toolCall.id, toolCall.function.name);
+    }
+  }
+  return lookup;
+}
+
+function parseHistoryEntry(
+  entry: unknown,
+  historyToolNames: Map<string, string>,
+): WebviewTimelineItem[] {
   if (!isRecord(entry) || typeof entry.type !== "string") {
-    return null;
+    return [];
   }
 
   if (entry.type === "message" && isRecord(entry.message)) {
     const role = typeof entry.message.role === "string" ? entry.message.role : null;
     const text = extractMessageText(entry.message.content);
-    if (!text) {
-      return null;
-    }
-    const id = typeof entry.id === "string" ? entry.id : `history-message-${text.length}`;
+    const id =
+      typeof entry.id === "string" ? entry.id : `history-message-${(text ?? role ?? "unknown").length}`;
     if (role === "user") {
-      return {
-        id,
-        kind: "user",
-        text,
-        type: "message",
-      } satisfies WebviewMessageBlock;
+      if (!text) {
+        return [];
+      }
+      return [
+        {
+          id,
+          kind: "user",
+          text,
+          type: "message",
+        } satisfies WebviewMessageBlock,
+      ];
     }
     if (role === "assistant") {
-      return {
-        id,
-        kind: "assistant",
-        text,
-        type: "message",
-      } satisfies WebviewMessageBlock;
+      const items: WebviewTimelineItem[] = [];
+      const thinkingText = extractThinkingText(entry.message);
+      if (thinkingText) {
+        items.push({
+          id: `${id}-thinking`,
+          text: thinkingText,
+          type: "thinking",
+        } satisfies WebviewThinkingBlock);
+      }
+      if (text) {
+        items.push({
+          id,
+          kind: "assistant",
+          text,
+          type: "message",
+        } satisfies WebviewMessageBlock);
+      }
+      return items;
     }
     if (role === "tool") {
-      return {
+      if (!text) {
+        return [];
+      }
+      const toolCallId = extractToolCallId(entry.message) ?? id;
+      return [{
         id,
-        kind: "notice",
-        text,
-        type: "message",
-      } satisfies WebviewMessageBlock;
+        isError: false,
+        status: "complete",
+        summary: text,
+        toolCallId,
+        toolName: historyToolNames.get(toolCallId) ?? "tool",
+        type: "tool",
+      } satisfies WebviewToolCard];
     }
   }
 
   if (entry.type === "thinking_trace" && typeof entry.text === "string" && entry.text.trim()) {
-    return {
+    return [{
       id: typeof entry.id === "string" ? entry.id : `thinking-${entry.text.length}`,
       text: entry.text,
       type: "thinking",
-    } satisfies WebviewThinkingBlock;
+    } satisfies WebviewThinkingBlock];
   }
 
-  return null;
+  return [];
 }
 
 function createSessionRuntime(): SessionRuntimeState {
@@ -279,6 +349,14 @@ function findTimelineItem<T extends WebviewTimelineItem["type"]>(
   return session.timeline.find(
     (item): item is Extract<WebviewTimelineItem, { type: T }> => item.id === id && item.type === type,
   );
+}
+
+function findTimelineIndex<T extends WebviewTimelineItem["type"]>(
+  session: WebviewSessionSnapshot,
+  id: string,
+  type: T,
+): number {
+  return session.timeline.findIndex((item) => item.id === id && item.type === type);
 }
 
 function upsertTool(
@@ -377,7 +455,14 @@ function appendStreamingMessage(
     text,
     type: "thinking",
   };
-  session.timeline.push(created);
+  const assistantIndex = runtime.activeAssistantId
+    ? findTimelineIndex(session, runtime.activeAssistantId, "message")
+    : -1;
+  if (assistantIndex >= 0) {
+    session.timeline.splice(assistantIndex, 0, created);
+  } else {
+    session.timeline.push(created);
+  }
   runtime.activeThinkingId = created.id;
   return created;
 }
@@ -496,16 +581,17 @@ export class WebviewStateStore {
   hydrateHistory(sessionId: string, history: SessionHistoryPayload): void {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
-    const historyItems = history.messages
-      .map((entry) => parseHistoryEntry(entry))
-      .filter((entry): entry is WebviewTimelineItem => entry !== null);
+    const historyToolNames = buildHistoryToolNameLookup(history.messages);
+    const historyItems = history.messages.flatMap((entry) => parseHistoryEntry(entry, historyToolNames));
     if (!historyItems.length) {
       runtime.historyHydrated = true;
       return;
     }
 
-    const existingFingerprints = new Set(historyItems.map((item) => timelineFingerprint(item)));
-    const liveOnly = session.timeline.filter((item) => !existingFingerprints.has(timelineFingerprint(item)));
+    const existingKeys = new Set(historyItems.flatMap((item) => timelineMergeKeys(item)));
+    const liveOnly = session.timeline.filter(
+      (item) => !timelineMergeKeys(item).some((key) => existingKeys.has(key)),
+    );
     session.timeline = [...historyItems, ...liveOnly];
     runtime.historyHydrated = true;
   }
@@ -546,7 +632,7 @@ export class WebviewStateStore {
   }
 
   applyEvent(frame: HostEventFrameContent): void {
-    if (frame.type === "__test.capture_dom") {
+    if (frame.type === "__test.capture_dom" || frame.type === "__test.dom_action") {
       return;
     }
     if ("subtype" in frame && frame.type === "control_request") {

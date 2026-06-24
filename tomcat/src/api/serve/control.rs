@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::AppError;
 
-use super::ask_question::ServeAskQuestionBridge;
+use super::cleanup_session_slot;
 use super::types::{ControlFrame, OutFrame, ResponseFrame, ServeCommand};
 use super::ServeState;
 
@@ -117,20 +117,15 @@ pub(crate) async fn handle_control_or_interrupt(
     }
 }
 
-pub(crate) async fn handle_stdin_eof(state: Arc<ServeState>) -> Result<(), AppError> {
-    for summary in state.registry.list() {
-        if let Some(slot) = state.registry.get(&summary.session_id) {
-            slot.ctx.session_runtime.cancel_token.lock().cancel();
-            slot.ctx.agent_registry.cascade_abort(&slot.session_id);
-        }
-    }
-    for summary in state.registry.list() {
-        if let Some(slot) = state.registry.get(&summary.session_id) {
-            let handle = { slot.run_task.lock().take() };
-            if let Some(handle) = handle {
-                let _ = handle.await;
-            }
-        }
+pub(crate) async fn shutdown_all_sessions(state: Arc<ServeState>) -> Result<(), AppError> {
+    let slots = state
+        .registry
+        .list()
+        .into_iter()
+        .filter_map(|summary| state.registry.get(&summary.session_id))
+        .collect::<Vec<_>>();
+    for slot in slots {
+        cleanup_session_slot(&state, &slot, false, "serve_stdio_shutdown").await?;
     }
     Ok(())
 }
@@ -152,10 +147,6 @@ pub(crate) fn ensure_initialized_or_error(
         "not_initialized",
     )))?;
     Ok(false)
-}
-
-pub(crate) fn ask_bridge(state: &ServeState) -> &ServeAskQuestionBridge {
-    &state.ask_question
 }
 
 fn is_config_error(error: &AppError, expected: &str) -> bool {

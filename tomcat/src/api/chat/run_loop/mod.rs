@@ -14,6 +14,7 @@ use crate::core::session::manager::{
     build_context_from_state, estimate_msg_chars, init_context_state,
 };
 use crate::infra::error::AppError;
+use crate::infra::events::AgentEvent;
 use crate::infra::ScopedEventEmitter;
 use crate::{AgentLoop, AgentLoopConfig, CheckpointKind};
 
@@ -626,6 +627,12 @@ pub async fn run_chat_turn_with_message(
             .session_runtime
             .session
             .persist_context_observability(context_state);
+        let error_message = error.to_string();
+        let _ = root_event_emitter.emit(AgentEvent::AgentStart);
+        let _ = root_event_emitter.emit(AgentEvent::AgentEnd {
+            messages: Vec::new(),
+            error: Some(error_message),
+        });
         return Ok(AgentRunOutcome::Failed(error));
     }
 

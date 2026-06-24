@@ -25,6 +25,7 @@ import {
   type HostEventFrameContent,
   type HostToWebviewFrame,
   type TomcatUiMode,
+  type WebviewDomAction,
   type WebviewPendingAttachment,
   type WebviewIntent,
 } from "./protocol";
@@ -106,6 +107,20 @@ function guessMimeType(filePath: string): string {
 
 function inferAttachmentKind(mimeType: string): "file" | "image" {
   return mimeType.startsWith("image/") ? "image" : "file";
+}
+
+function formatBridgeError(action: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("Timed out waiting for response")) {
+    return `Unable to ${action}: Tomcat bridge is not responding. Restart Tomcat and try again.`;
+  }
+  if (message.includes("tomcat serve exited")) {
+    return `Unable to ${action}: Tomcat serve exited. Restart Tomcat and try again.`;
+  }
+  if (message.includes("TomcatMessenger has been disposed")) {
+    return `Unable to ${action}: Tomcat bridge is unavailable. Restart Tomcat and try again.`;
+  }
+  return `Unable to ${action}: ${message}`;
 }
 
 export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -192,6 +207,15 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       messageId,
     });
     return pending;
+  }
+
+  async dispatchTestDomAction(action: WebviewDomAction): Promise<void> {
+    await this.waitUntilReady();
+    await this.postMessage({
+      channel: "event",
+      content: { action, type: "__test.dom_action" },
+      messageId: createHostFrameMessageId("webview-dom-action"),
+    });
   }
 
   reveal(preserveFocus = false): void {
@@ -372,19 +396,30 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           this.stateStore.clearPendingAttachments(sessionId);
         }
         await this.postState();
-        const response = await this.deps.messenger.request({
-          params: {
-            attachments: pendingAttachments.map((entry) => entry.attachment),
-          },
-          sessionId,
-          text: intent.data.text,
-          type: intent.type === "prompt" ? "prompt" : "steer",
-        });
-        if (!response.success) {
+        try {
+          const response = await this.deps.messenger.request({
+            params: {
+              attachments: pendingAttachments.map((entry) => entry.attachment),
+            },
+            sessionId,
+            text: intent.data.text,
+            type: intent.type === "prompt" ? "prompt" : "steer",
+          });
+          if (!response.success) {
+            this.stateStore.appendMessage(
+              sessionId,
+              "error",
+              response.error ?? `Tomcat ${intent.type} failed`,
+            );
+          }
+        } catch (error) {
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            response.error ?? `Tomcat ${intent.type} failed`,
+            formatBridgeError(
+              intent.type === "prompt" ? "send the message" : "send the steering message",
+              error,
+            ),
           );
         }
         await this.refreshSessionState(sessionId);
@@ -442,12 +477,20 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
           return;
         }
-        const response = await this.deps.messenger.sendSetModel(sessionId, intent.data.modelId);
-        if (!response.success) {
+        try {
+          const response = await this.deps.messenger.sendSetModel(sessionId, intent.data.modelId);
+          if (!response.success) {
+            this.stateStore.appendMessage(
+              sessionId,
+              "error",
+              response.error ?? "Unable to switch model",
+            );
+          }
+        } catch (error) {
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            response.error ?? "Unable to switch model",
+            formatBridgeError("switch models", error),
           );
         }
         await this.refreshModels();
@@ -462,16 +505,24 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
           return;
         }
-        const response = await this.deps.messenger.sendSetPlanMode({
-          action: intent.data.action,
-          planId: intent.data.planId,
-          sessionId,
-        });
-        if (!response.success) {
+        try {
+          const response = await this.deps.messenger.sendSetPlanMode({
+            action: intent.data.action,
+            planId: intent.data.planId,
+            sessionId,
+          });
+          if (!response.success) {
+            this.stateStore.appendMessage(
+              sessionId,
+              "error",
+              response.error ?? "Unable to change plan mode",
+            );
+          }
+        } catch (error) {
           this.stateStore.appendMessage(
             sessionId,
             "error",
-            response.error ?? "Unable to change plan mode",
+            formatBridgeError("change plan mode", error),
           );
         }
         await this.refreshSessionState(sessionId);
@@ -602,7 +653,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       this.stateStore.setAvailableModels([]);
       return;
     }
-    const response = await this.deps.messenger.sendListModels();
+    const response = await this.deps.messenger.sendListModels().catch(() => null);
+    if (!response) {
+      this.stateStore.setAvailableModels([]);
+      return;
+    }
     if (!response.success) {
       this.stateStore.setAvailableModels([]);
       return;

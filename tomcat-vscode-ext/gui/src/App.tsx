@@ -6,11 +6,14 @@ import { Composer } from "./components/Composer";
 import { SessionBar } from "./components/SessionBar";
 import { TranscriptView } from "./components/TranscriptView";
 import type {
+  AskQuestionResult,
   HostToWebviewFrame,
   VsCodeApiLike,
+  WebviewDomAction,
   WebviewIntent,
   WebviewStateSnapshot,
 } from "./types";
+import { useAutoScroll } from "./useAutoScroll";
 
 const EMPTY_STATE: WebviewStateSnapshot = {
   activeSessionId: null,
@@ -39,40 +42,167 @@ function postIntent(
 
 function buildDomSnapshot(state: WebviewStateSnapshot) {
   const root = document.getElementById("root");
+  const stream = document.querySelector<HTMLElement>('[data-testid="stream-container"]');
   const queryText = (selector: string) =>
     [...document.querySelectorAll(selector)].map((node) => node.textContent ?? "");
+  const composerMetricEntries = [
+    "attachment-add",
+    "mode-select",
+    "model-select",
+    "context-ratio",
+    "send-button",
+  ]
+    .map((testId) => {
+      const node = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
+      if (!node) {
+        return null;
+      }
+      const rect = node.getBoundingClientRect();
+      return [
+        testId,
+        {
+          top: rect.top,
+          width: rect.width,
+        },
+      ] as const;
+    })
+    .filter((entry): entry is readonly [string, { top: number; width: number }] => !!entry);
+  const composerControlMetrics = Object.fromEntries(composerMetricEntries);
+  const composerBar = document.querySelector<HTMLElement>('[data-testid="composer-bar"]');
+  const composerRowCount = composerBar
+    ? new Set(
+        [...composerBar.children]
+          .filter((node): node is HTMLElement => node instanceof HTMLElement)
+          .map((node) => Math.round(node.getBoundingClientRect().bottom)),
+      ).size
+    : 0;
+  const timelineKinds = [...document.querySelectorAll(".tc-transcript > *")].map((node) => {
+    if (!(node instanceof HTMLElement)) {
+      return "unknown";
+    }
+    if (node.dataset.testid === "message-block") {
+      return `message:${node.dataset.kind ?? "unknown"}`;
+    }
+    return node.dataset.testid ?? "unknown";
+  });
+  const toolBodyMetrics = [...document.querySelectorAll<HTMLElement>('[data-testid="tool-card"]')].map(
+    (card) => {
+      const title = card.querySelector('[data-testid="tool-title"]')?.textContent ?? "";
+      const body = card.querySelector<HTMLElement>('[data-testid="tool-body"]');
+      return {
+        clientHeight: body?.clientHeight ?? 0,
+        expanded: !!body,
+        scrollHeight: body?.scrollHeight ?? 0,
+        title,
+      };
+    },
+  );
+  const approvalOptionStates = [
+    ...document.querySelectorAll<HTMLElement>('[data-testid^="approval-option-"]'),
+  ].map((node) => ({
+    selected: node.getAttribute("aria-checked") === "true",
+    testId: node.dataset.testid ?? "",
+  }));
+  const approvalInputTestIds = [
+    ...document.querySelectorAll<HTMLElement>('[data-testid^="approval-custom-"]'),
+  ].map((node) => node.dataset.testid ?? "");
+  const disabledTestIds = [
+    ...document.querySelectorAll<HTMLElement>("[data-testid]"),
+  ]
+    .filter((node) => "disabled" in node && Boolean((node as HTMLButtonElement | HTMLInputElement).disabled))
+    .map((node) => node.dataset.testid ?? "");
   return {
     activeSessionId: state.activeSessionId,
     approvalCount: document.querySelectorAll('[data-testid="approval-card"]').length,
+    approvalInputTestIds,
+    approvalOptionStates,
+    composerControlMetrics,
+    composerRowCount,
+    disabledTestIds,
+    expandedThinkingCount: document.querySelectorAll('[data-testid="thinking-block"] pre').length,
+    expandedToolTitles: toolBodyMetrics.filter((entry) => entry.expanded).map((entry) => entry.title),
     hasConflict: !!document.querySelector('[data-testid="conflict-banner"]'),
     html: root?.innerHTML ?? "",
+    jumpToLatestVisible: !!document.querySelector('[data-testid="scroll-to-bottom"]'),
     messageTexts: queryText('[data-testid="message-text"]'),
     sessionTabs: queryText('[data-testid="session-option"]'),
+    streamMetrics: {
+      clientHeight: stream?.clientHeight ?? 0,
+      distanceFromBottom: stream
+        ? Math.max(0, stream.scrollHeight - stream.clientHeight - stream.scrollTop)
+        : 0,
+      scrollHeight: stream?.scrollHeight ?? 0,
+      scrollTop: stream?.scrollTop ?? 0,
+    },
+    timelineKinds,
+    toolBodyMetrics,
     toolTitles: queryText('[data-testid="tool-title"]'),
   };
+}
+
+function runDomAction(action: WebviewDomAction): void {
+  if (action.kind === "setRootWidth") {
+    const root = document.getElementById("root");
+    if (!root) {
+      return;
+    }
+    root.style.width =
+      typeof action.widthPx === "number" && action.widthPx > 0 ? `${action.widthPx}px` : "";
+    window.dispatchEvent(new Event("resize"));
+    return;
+  }
+
+  if (action.kind === "setInputValue") {
+    const target = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+      `[data-testid="${action.testId ?? ""}"]`,
+    );
+    if (!target) {
+      return;
+    }
+    const nextValue = action.value ?? "";
+    const descriptor = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(target),
+      "value",
+    );
+    descriptor?.set?.call(target, nextValue);
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    target.dispatchEvent(new Event("change", { bubbles: true }));
+    return;
+  }
+
+  if (action.kind === "clickTestId") {
+    const nodes = [
+      ...document.querySelectorAll<HTMLElement>(`[data-testid="${action.testId ?? ""}"]`),
+    ];
+    const resolvedIndex =
+      typeof action.index === "number" && action.index < 0
+        ? nodes.length + action.index
+        : (action.index ?? 0);
+    const target = nodes[resolvedIndex];
+    if (!target) {
+      return;
+    }
+    target.focus();
+    target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+    return;
+  }
+
+  const target = document.querySelector<HTMLElement>(`[data-testid="${action.testId ?? ""}"]`);
+  if (!target) {
+    return;
+  }
+  target.scrollTop = action.edge === "top" ? 0 : target.scrollHeight;
+  target.dispatchEvent(new Event("scroll", { bubbles: true }));
 }
 
 function answerQuestion(
   vscodeApi: VsCodeApiLike,
   requestId: string,
-  questionId: string,
-  optionId: string | null,
-  pickedRecommended: boolean,
+  result: AskQuestionResult,
 ): void {
   postIntent(vscodeApi, "answerQuestion", {
     requestId,
-    result: {
-      answers: [
-        {
-          customText: null,
-          optionIds: optionId ? [optionId] : [],
-          pickedRecommended,
-          questionId,
-          skipped: optionId === null,
-        },
-      ],
-      cancelled: false,
-    },
+    result,
   });
 }
 
@@ -109,6 +239,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [state, setState] = useState<WebviewStateSnapshot>(EMPTY_STATE);
   const [prompt, setPrompt] = useState("");
   const stateRef = useRef<WebviewStateSnapshot>(EMPTY_STATE);
+  const streamRef = useRef<HTMLElement | null>(null);
 
   const activeSession = useMemo(
     () =>
@@ -121,6 +252,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
   const activeApprovalCount =
     activeSession?.timeline.filter((item) => item.type === "approval" && !item.resolved).length ?? 0;
+  const activeTimeline = activeSession?.timeline ?? [];
+  const userMessageCount = activeTimeline.filter(
+    (item) => item.type === "message" && item.kind === "user",
+  ).length;
+  const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
   const readOnlyConflict = activeSession?.conflictMessage ?? null;
   const canPrompt = state.uiMode !== "participant" && !activeSession?.busy && !readOnlyConflict;
   const promptPlaceholder =
@@ -131,6 +267,12 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         : activeSession?.busy
           ? "Tomcat is responding..."
           : "Message Tomcat (Enter to send, Shift+Enter for newline)";
+  const { scrollToBottom, userHasScrolled } = useAutoScroll({
+    containerRef: streamRef,
+    contentKey: streamContentKey,
+    resetKey: activeSession?.sessionId ?? null,
+    userMessageCount,
+  });
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent<HostToWebviewFrame>) => {
@@ -156,6 +298,16 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           messageId: frame.messageId,
           type: "__test.dom_snapshot",
         });
+        return;
+      }
+      if (
+        frame.channel === "event" &&
+        typeof frame.content === "object" &&
+        frame.content !== null &&
+        "type" in frame.content &&
+        frame.content.type === "__test.dom_action"
+      ) {
+        runDomAction(frame.content.action);
       }
     };
 
@@ -180,13 +332,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     );
   };
 
-  const handleAnswerQuestion = (
-    requestId: string,
-    questionId: string,
-    optionId: string | null,
-    pickedRecommended: boolean,
-  ) => {
-    answerQuestion(vscodeApi, requestId, questionId, optionId, pickedRecommended);
+  const handleAnswerQuestion = (requestId: string, result: AskQuestionResult) => {
+    answerQuestion(vscodeApi, requestId, result);
   };
 
   const handleModeChange = (value: "chat" | "plan") => {
@@ -231,12 +378,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
       <SessionBar
         activeSessionId={activeSession?.sessionId ?? null}
-        onCloseSession={() =>
-          activeSession &&
-          postIntent(vscodeApi, "closeSession", {
-            sessionId: activeSession.sessionId,
-          })
-        }
         onNewSession={() => postIntent(vscodeApi, "newSession")}
         onRefreshSessions={() => postIntent(vscodeApi, "listSessions")}
         onSwitchSession={(sessionId) =>
@@ -258,41 +399,54 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         </section>
       ) : null}
 
-      <section className="tc-stream">
-        {activeSession ? (
-          activeSession.timeline.length || activeApprovalCount ? (
-            <TranscriptView
-              onAnswer={handleAnswerQuestion}
-              onApplyEdit={(toolCallId) =>
-                postIntent(vscodeApi, "applyEdit", {
-                  toolCallId,
-                })
-              }
-              onOpenDiff={(toolCallId) =>
-                postIntent(vscodeApi, "openDiff", {
-                  toolCallId,
-                })
-              }
-              onOpenPlanFile={(path) =>
-                postIntent(vscodeApi, "openPlanFile", {
-                  path,
-                })
-              }
-              timeline={activeSession.timeline}
-            />
+      <div className="tc-stream-shell">
+        <section className="tc-stream" data-testid="stream-container" ref={streamRef}>
+          {activeSession ? (
+            activeSession.timeline.length || activeApprovalCount ? (
+              <TranscriptView
+                busy={!!activeSession.busy}
+                onAnswer={handleAnswerQuestion}
+                onApplyEdit={(toolCallId) =>
+                  postIntent(vscodeApi, "applyEdit", {
+                    toolCallId,
+                  })
+                }
+                onOpenDiff={(toolCallId) =>
+                  postIntent(vscodeApi, "openDiff", {
+                    toolCallId,
+                  })
+                }
+                onOpenPlanFile={(path) =>
+                  postIntent(vscodeApi, "openPlanFile", {
+                    path,
+                  })
+                }
+                timeline={activeSession.timeline}
+              />
+            ) : (
+              <div className="tc-empty-state">
+                <h2>Ready to chat</h2>
+                <p>Use the composer below to talk with Tomcat, switch models, or enter plan mode.</p>
+              </div>
+            )
           ) : (
             <div className="tc-empty-state">
-              <h2>Ready to chat</h2>
-              <p>Use the composer below to talk with Tomcat, switch models, or enter plan mode.</p>
+              <h2>No active Tomcat session</h2>
+              <p>Create a new session or refresh the session list to start chatting.</p>
             </div>
-          )
-        ) : (
-          <div className="tc-empty-state">
-            <h2>No active Tomcat session</h2>
-            <p>Create a new session or refresh the session list to start chatting.</p>
-          </div>
-        )}
-      </section>
+          )}
+        </section>
+        {userHasScrolled ? (
+          <button
+            className="tc-scroll-jump"
+            data-testid="scroll-to-bottom"
+            onClick={scrollToBottom}
+            type="button"
+          >
+            Jump to latest
+          </button>
+        ) : null}
+      </div>
 
       <ActivePlanStrip
         canBuild={
