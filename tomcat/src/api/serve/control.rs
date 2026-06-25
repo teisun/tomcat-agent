@@ -39,6 +39,7 @@ pub(crate) async fn handle_control_or_interrupt(
                             "get_state",
                             "set_plan_mode",
                             "set_model",
+                        "set_thinking_level",
                             "list_models",
                             "new_session",
                             "switch_session",

@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -327,6 +328,20 @@ impl OpenAiResponsesProvider {
         self.configured_thinking_format.resolve_for_model(model)
     }
 
+    fn thinking_cfg_for_request<'a>(
+        &'a self,
+        request: &ChatRequest,
+    ) -> Cow<'a, crate::infra::config::ThinkingConfig> {
+        match request.thinking_level {
+            Some(level) => {
+                let mut cfg = self.thinking_cfg.clone();
+                cfg.level = level.as_str().to_string();
+                Cow::Owned(cfg)
+            }
+            None => Cow::Borrowed(&self.thinking_cfg),
+        }
+    }
+
     fn auth_header(&self) -> (&str, String) {
         ("Authorization", format!("Bearer {}", self.api_key))
     }
@@ -358,6 +373,7 @@ impl OpenAiResponsesProvider {
         let target_profile =
             crate::core::llm::replay_policy::ProviderCompatProfile::openai_responses(&model);
         let thinking_format = self.thinking_format_for_model(&model);
+        let thinking_cfg = self.thinking_cfg_for_request(request);
         let previous_response_id = if self.continuity_enabled
             && self.use_previous_response_id
             && allow_response_id_hint
@@ -411,10 +427,10 @@ impl OpenAiResponsesProvider {
         // T2-P0-006 P5：把 ThinkingLevel/format 翻成 Responses 期望的 `reasoning.effort` 对象。
         // 与 Completions 的 `reasoning_effort` 字段不同：Responses 走 `{reasoning: {effort: "low|medium|high"}}`。
         let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
-            &self.thinking_cfg,
+            &thinking_cfg,
             thinking_format,
         );
-        let include_reasoning_summary = self.thinking_cfg.enabled;
+        let include_reasoning_summary = thinking_cfg.enabled;
         let mut reasoning = serde_json::Map::new();
         if let Some(effort) = thinking_fields.reasoning_effort {
             reasoning.insert("effort".to_string(), Value::String(effort));

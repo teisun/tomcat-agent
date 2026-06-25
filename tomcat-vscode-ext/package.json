@@ -19,14 +19,13 @@
     "chat",
     "vscode"
   ],
+  "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.101.0"
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onChatParticipant:tomcat.tomcat",
-    "onCommand:tomcat.ui.focus",
-    "onView:tomcat.chatView"
+    "onChatParticipant:tomcat.tomcat"
   ],
   "contributes": {
     "commands": [
@@ -133,8 +132,8 @@
     "watch": "npm run gen:wire && tsc -watch -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test:unit:gui": "npm --prefix gui run test",
-    "test:unit": "vitest run && npm run test:unit:gui",
-    "test:integration": "vitest run tests",
+    "test:unit": "vitest run --maxWorkers 1 && npm run test:unit:gui",
+    "test:integration": "vitest run --maxWorkers 1 tests",
     "test:e2e:vscode-devhost": "tsx scripts/run-vscode-devhost.ts",
     "test:e2e:vscode-install": "tsx scripts/run-vscode-install-e2e.ts",
     "test:e2e:webview-devhost": "tsx scripts/run-vscode-devhost.ts",

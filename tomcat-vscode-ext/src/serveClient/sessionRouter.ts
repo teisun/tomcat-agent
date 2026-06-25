@@ -26,6 +26,7 @@ export interface SessionStatePayload {
   planState?: string | null;
   sessionId: string;
   sessionKey?: string | null;
+  thinkingLevel?: string | null;
 }
 
 export interface SessionHistoryPayload {
@@ -199,6 +200,8 @@ export class SessionRouter {
       sessionId: payload.sessionId,
       sessionKey:
         typeof payload.sessionKey === "string" ? payload.sessionKey : null,
+      thinkingLevel:
+        typeof payload.thinkingLevel === "string" ? payload.thinkingLevel : null,
     };
   }
 

@@ -191,6 +191,7 @@ async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std
         max_tokens: Some(96),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let resp = tokio::time::timeout(Duration::from_secs(120), provider.chat(req))
@@ -254,6 +255,7 @@ async fn openai_files_cli_single_turn_image_describe_real_api(
         max_tokens: Some(96),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let resp = tokio::time::timeout(Duration::from_secs(120), provider.chat(req))
@@ -342,6 +344,7 @@ async fn openai_files_tui_two_phase_pdf_describe_real_api() -> Result<(), Box<dy
         max_tokens: Some(96),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let resp = tokio::time::timeout(Duration::from_secs(120), provider.chat(req))

@@ -498,6 +498,37 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
+      case "setThinkingLevel": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSession(intent.data.sessionId ?? null);
+        if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        try {
+          const response = await this.deps.messenger.sendSetThinkingLevel(
+            sessionId,
+            intent.data.modelId,
+            intent.data.level,
+          );
+          if (!response.success) {
+            this.stateStore.appendMessage(
+              sessionId,
+              "error",
+              response.error ?? "Unable to change reasoning effort",
+            );
+          }
+        } catch (error) {
+          this.stateStore.appendMessage(
+            sessionId,
+            "error",
+            formatBridgeError("change reasoning effort", error),
+          );
+        }
+        await this.refreshSessionState(sessionId);
+        await this.postState();
+        return;
+      }
       case "setPlanMode": {
         await this.ensureInitialized();
         const sessionId = await this.ensureWebviewSession(intent.data.sessionId ?? null);

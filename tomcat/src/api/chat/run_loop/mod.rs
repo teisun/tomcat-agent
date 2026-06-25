@@ -559,6 +559,7 @@ pub async fn run_chat_turn_with_message(
     let main_provider = main_call.provider_impl.clone();
     let compaction_provider = compaction_call.provider_impl.clone();
     let model = main_call.model.clone();
+    let thinking_level = Some(ctx.global_services.model_thinking.get(&model));
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
 
@@ -643,6 +644,7 @@ pub async fn run_chat_turn_with_message(
         max_tool_rounds: usize::MAX,
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
         model,
+        thinking_level,
         session_id: session_id.clone(),
         tool_definitions: build_tool_definitions(ctx).await,
         context_config: context_config.clone(),

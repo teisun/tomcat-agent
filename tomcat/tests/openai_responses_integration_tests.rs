@@ -84,6 +84,7 @@ async fn test_openai_responses_chat_real_request_returns_ok(
         max_tokens: Some(16),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     tracing::info!("Arrange: AppConfig + models.toml fixture → resolver → Arc<dyn LlmProvider>");
@@ -116,6 +117,7 @@ async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
         max_tokens: Some(64),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
@@ -148,6 +150,7 @@ async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_r
         max_tokens: Some(16),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
@@ -183,6 +186,7 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
         max_tokens: Some(16),
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     tracing::info!("Arrange: ChatRequest(stream=true) → Responses SSE");
@@ -232,6 +236,7 @@ async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
             max_tokens: Some(256),
             stream: Some(true),
             model_override: None,
+            thinking_level: None,
             tools: None,
         };
         let mut stream = tokio::time::timeout(Duration::from_secs(60), async {
@@ -325,6 +330,7 @@ async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reas
         max_tokens: Some(64),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: Some(tools),
     };
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
@@ -377,6 +383,7 @@ async fn test_openai_responses_latest_user_language_behavior_opt_in(
         max_tokens: Some(256),
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let mut stream = tokio::time::timeout(Duration::from_secs(60), async move {
@@ -444,6 +451,7 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
         max_tokens: Some(96),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     tracing::info!(
@@ -533,6 +541,7 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
         max_tokens: Some(96),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     tracing::info!(

@@ -27,6 +27,7 @@ use std::path::Path;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use super::thinking_policy::ThinkingLevel;
 use crate::core::llm::openai_files::{FilePurpose, OpenAiFilesClient};
 use crate::infra::error::AppError;
 
@@ -727,6 +728,8 @@ pub struct ChatRequest {
     /// 会话级模型覆盖（不发给 API，仅用于选模型）。
     #[serde(skip)]
     pub model_override: Option<String>,
+    #[serde(skip)]
+    pub thinking_level: Option<ThinkingLevel>,
     /// OpenAI function calling: tool definitions sent to the model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<serde_json::Value>>,

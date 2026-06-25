@@ -24,10 +24,11 @@ use crate::infra::{
     AuditRecorder, AuditStore, DefaultEventBus, EventBus, FileAuditRecorder, TracingAuditRecorder,
 };
 use crate::{
-    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_plugins_dir,
-    resolve_sessions_dir, resolve_workspace_roots_paths, session_key_for_agent, AppConfig,
-    DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, PrimitiveExecutor, SessionEntry,
-    SessionManager, SessionMode, Tool, ToolExecutor, ToolRegistry,
+    resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_model_thinking_path,
+    resolve_plugins_dir, resolve_sessions_dir, resolve_workspace_roots_paths, session_key_for_agent,
+    AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, ModelThinkingStore,
+    PrimitiveExecutor, SessionEntry, SessionManager, SessionMode, ThinkingLevel, Tool, ToolExecutor,
+    ToolRegistry,
 };
 
 use crate::core::llm::LlmScene;
@@ -50,6 +51,7 @@ pub struct ChatContextOverrides {
     pub ask_question_panel: Option<Arc<dyn panels::AskQuestionPanel>>,
     pub fetch_http_client: Option<reqwest::Client>,
     pub shared_agent_registry: Option<Arc<crate::core::agent_registry::AgentRegistry>>,
+    pub shared_model_thinking: Option<Arc<ModelThinkingStore>>,
     pub skip_session_plugin_activation: bool,
     pub suppress_cli_output: bool,
     pub session_cwd_override: Option<std::path::PathBuf>,
@@ -71,6 +73,11 @@ impl ChatContextOverrides {
         registry: Arc<crate::core::agent_registry::AgentRegistry>,
     ) -> Self {
         self.shared_agent_registry = Some(registry);
+        self
+    }
+
+    pub fn with_shared_model_thinking(mut self, store: Arc<ModelThinkingStore>) -> Self {
+        self.shared_model_thinking = Some(store);
         self
     }
 
@@ -142,6 +149,14 @@ fn resolve_child_agent_compaction_runtime(
             (context_config, None)
         }
     }
+}
+
+fn build_model_thinking_store(config: &AppConfig) -> Result<Arc<ModelThinkingStore>, AppError> {
+    let default_level = ThinkingLevel::parse_or_medium(&config.llm.thinking.level).0;
+    Ok(Arc::new(ModelThinkingStore::load(
+        resolve_model_thinking_path(config)?,
+        default_level,
+    )?))
 }
 
 fn checkpoint_store_cache() -> &'static RwLock<
@@ -572,6 +587,10 @@ impl ChatContext {
         let agent_registry = overrides.shared_agent_registry.unwrap_or_else(|| {
             crate::core::agent_registry::AgentRegistry::new().attach_event_bus(event_bus.clone())
         });
+        let model_thinking = match overrides.shared_model_thinking.clone() {
+            Some(store) => store,
+            None => build_model_thinking_store(&config)?,
+        };
         let root_agent_guard = agent_registry
             .register_root(current_session_entry.session_id.clone())
             .map_err(|e| AppError::Config(format!("agent_registry root register 失败: {e}")))?;
@@ -696,6 +715,7 @@ impl ChatContext {
             llm: llm.clone(),
             model_catalog: model_catalog.clone(),
             llm_resolver: llm_resolver.clone(),
+            model_thinking,
             primitive: primitive.clone(),
             tool_registry: tool_registry.clone(),
             function_registry: function_registry.clone(),

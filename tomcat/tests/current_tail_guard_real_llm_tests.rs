@@ -261,6 +261,7 @@ async fn request_update_plan_args(
             max_tokens: Some(512),
             stream: Some(false),
             model_override: None,
+            thinking_level: None,
             tools: Some(tool_definitions.clone()),
         };
         let response = tokio::time::timeout(LLM_TIMEOUT, llm.chat(request))

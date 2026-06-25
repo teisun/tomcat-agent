@@ -161,6 +161,15 @@ pub enum ServeCommand {
         model: String,
     },
     #[serde(rename_all = "camelCase")]
+    SetThinkingLevel {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        model: String,
+        level: String,
+    },
+    #[serde(rename_all = "camelCase")]
     ListModels {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -245,6 +254,7 @@ impl ServeCommand {
             | Self::GetState { id, .. }
             | Self::SetPlanMode { id, .. }
             | Self::SetModel { id, .. }
+            | Self::SetThinkingLevel { id, .. }
             | Self::ListModels { id, .. }
             | Self::NewSession { id, .. }
             | Self::SwitchSession { id, .. }
@@ -266,6 +276,7 @@ impl ServeCommand {
             | Self::GetState { session_id, .. }
             | Self::SetPlanMode { session_id, .. }
             | Self::SetModel { session_id, .. }
+            | Self::SetThinkingLevel { session_id, .. }
             | Self::GetMessages { session_id, .. }
             | Self::CloseSession { session_id, .. }
             | Self::Interrupt { session_id, .. }
@@ -301,6 +312,7 @@ impl ServeCommand {
             Self::GetState { .. } => "get_state",
             Self::SetPlanMode { .. } => "set_plan_mode",
             Self::SetModel { .. } => "set_model",
+            Self::SetThinkingLevel { .. } => "set_thinking_level",
             Self::ListModels { .. } => "list_models",
             Self::NewSession { .. } => "new_session",
             Self::SwitchSession { .. } => "switch_session",

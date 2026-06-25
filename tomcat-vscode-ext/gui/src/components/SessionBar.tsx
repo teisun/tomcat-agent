@@ -18,22 +18,32 @@ function formatSessionLabel(session: WebviewSessionTab): string {
 export function SessionBar({
   activeSessionId,
   onNewSession,
-  onRefreshSessions,
+  ready,
   onSwitchSession,
   sessions,
 }: {
   activeSessionId: string | null;
   onNewSession(): void;
-  onRefreshSessions(): void;
+  ready: boolean;
   onSwitchSession(sessionId: string): void;
   sessions: WebviewSessionTab[];
 }) {
   return (
-    <section className="tc-sessionbar" aria-label="Session bar">
-      <label className="tc-field tc-field--compact tc-sessionbar__field">
+    <section className="tc-topbar" aria-label="Session bar">
+      <button
+        aria-label="Create new session"
+        className="tc-icon-button tc-topbar__new"
+        data-testid="new-session-button"
+        onClick={onNewSession}
+        type="button"
+      >
+        +
+      </button>
+      <label className="tc-field tc-field--compact tc-topbar__field">
         <span>Session</span>
         <select
           aria-label="Tomcat session"
+          className="tc-topbar__select"
           data-testid="session-select"
           onChange={(event) => {
             if (event.target.value) {
@@ -55,23 +65,12 @@ export function SessionBar({
           ))}
         </select>
       </label>
-
-      <div className="tc-sessionbar__actions">
-        <button
-          className="tc-button tc-button--secondary"
-          onClick={onNewSession}
-          type="button"
-        >
-          New
-        </button>
-        <button
-          className="tc-button tc-button--ghost"
-          onClick={onRefreshSessions}
-          type="button"
-        >
-          Refresh
-        </button>
-      </div>
+      <span
+        className={ready ? "tc-chip tc-chip--success" : "tc-chip tc-chip--warning"}
+        data-testid="connection-chip"
+      >
+        {ready ? "Connected" : "Connecting..."}
+      </span>
     </section>
   );
 }

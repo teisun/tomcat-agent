@@ -206,6 +206,7 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
                         model,
+                        thinking_level: None,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,

@@ -11,7 +11,9 @@
 use super::*;
 use crate::core::llm::tests::mocks::load_dotenv;
 use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, ChatRequest};
-use crate::core::llm::{Capabilities, Credential, ModelEntry};
+use crate::core::llm::{
+    thinking_policy::resolve_request_fields, Capabilities, Credential, ModelEntry, ThinkingLevel,
+};
 use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::LlmConfig;
 
@@ -27,6 +29,21 @@ fn deepseek_entry(api_key_env: &str) -> ModelEntry {
         context_window: None,
         cost: None,
         thinking_format: Some("deepseek".to_string()),
+    }
+}
+
+fn openai_entry(api_key_env: &str) -> ModelEntry {
+    ModelEntry {
+        id: "gpt-5.4".to_string(),
+        model_name: None,
+        api: "openai".to_string(),
+        provider: "openai".to_string(),
+        api_key_env: Some(api_key_env.to_string()),
+        base_url: Some("https://api.openai.com".to_string()),
+        capabilities: Capabilities::default(),
+        context_window: None,
+        cost: None,
+        thinking_format: Some("openai".to_string()),
     }
 }
 
@@ -82,6 +99,7 @@ fn openai_provider_effective_model_maps_catalog_id_to_model_name() {
         max_tokens: Some(10),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     assert_eq!(provider.effective_model(&request), "gpt-5.4");
@@ -197,6 +215,7 @@ async fn chat_real_request_response_print() {
         max_tokens: Some(10),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
 
@@ -211,4 +230,66 @@ async fn chat_real_request_response_print() {
             );
         }
     }
+}
+
+#[test]
+fn thinking_level_override_updates_openai_reasoning_effort() {
+    let entry = openai_entry("OPENAI_API_KEY");
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "openai".to_string(),
+        env_name: "OPENAI_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider = OpenAiProvider::new(&entry, &runtime, &credential).unwrap();
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user("hello")],
+        model: entry.request_model_name().to_string(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(false),
+        model_override: None,
+        thinking_level: Some(ThinkingLevel::Low),
+        tools: None,
+    };
+
+    let cfg = provider.thinking_cfg_for_request(&request);
+    let fields = resolve_request_fields(
+        &cfg,
+        provider.thinking_format_for_model(&provider.effective_model(&request)),
+    );
+
+    assert_eq!(cfg.level, "low");
+    assert_eq!(fields.reasoning_effort.as_deref(), Some("low"));
+}
+
+#[test]
+fn thinking_level_override_updates_deepseek_reasoning_effort() {
+    let entry = deepseek_entry("DEEPSEEK_API_KEY");
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "deepseek".to_string(),
+        env_name: "DEEPSEEK_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider = OpenAiProvider::new(&entry, &runtime, &credential).unwrap();
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user("hello")],
+        model: entry.request_model_name().to_string(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(false),
+        model_override: None,
+        thinking_level: Some(ThinkingLevel::Xhigh),
+        tools: None,
+    };
+
+    let cfg = provider.thinking_cfg_for_request(&request);
+    let fields = resolve_request_fields(
+        &cfg,
+        provider.thinking_format_for_model(&provider.effective_model(&request)),
+    );
+
+    assert_eq!(cfg.level, "xhigh");
+    assert_eq!(fields.reasoning_effort.as_deref(), Some("max"));
 }

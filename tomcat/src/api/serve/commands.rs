@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use futures_util::FutureExt;
 
-use crate::core::llm::{ChatMessage, ChatMessageContentPart};
+use crate::core::llm::{ChatMessage, ChatMessageContentPart, ThinkingLevel};
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::AppError;
 use crate::{SessionManager, SessionMode};
@@ -25,6 +25,16 @@ use super::{cleanup_session_slot, create_session_slot, register_slot_hooks, run_
 enum TurnAck {
     Accepted,
     Payload(serde_json::Value),
+}
+
+fn parse_serve_thinking_level(level: &str) -> Option<ThinkingLevel> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "low" => Some(ThinkingLevel::Low),
+        "medium" => Some(ThinkingLevel::Medium),
+        "high" => Some(ThinkingLevel::High),
+        "xhigh" => Some(ThinkingLevel::Xhigh),
+        _ => None,
+    }
 }
 
 pub(crate) async fn handle_command(
@@ -294,6 +304,7 @@ pub(crate) async fn handle_command(
             };
             let entry = slot.ctx.session_runtime.session.current_session_entry()?;
             let model = slot.ctx.effective_model(entry.as_ref());
+            let thinking_level = slot.ctx.global_services.model_thinking.get(&model);
             let plan_state = slot.ctx.session_runtime.plan_runtime.mode();
             let active_plan_id = plan_state
                 .active_plan_id()
@@ -314,6 +325,7 @@ pub(crate) async fn handle_command(
                     "mode": match slot.mode { crate::SessionMode::Code => "code", crate::SessionMode::Claw => "claw" },
                     "cwd": slot.cwd,
                     "model": model,
+                    "thinkingLevel": thinking_level.as_str(),
                     "planState": plan_state.as_str(),
                     "planId": active_plan_id,
                     "planPath": active_plan_path,
@@ -456,6 +468,48 @@ pub(crate) async fn handle_command(
                 })),
             )))?;
         }
+        ServeCommand::SetThinkingLevel {
+            id,
+            session_id,
+            model,
+            level,
+        } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
+            else {
+                return Ok(());
+            };
+            if let Err(error) = slot.ctx.global_services.model_catalog.lookup_explicit(&model) {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            let Some(parsed_level) = parse_serve_thinking_level(&level) else {
+                send_error(
+                    &state,
+                    id,
+                    Some(slot.session_id.clone()),
+                    "invalid_thinking_level",
+                )?;
+                return Ok(());
+            };
+            slot.ctx
+                .global_services
+                .model_thinking
+                .set(&model, parsed_level)?;
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(slot.session_id.clone()),
+                Some(serde_json::json!({
+                    "sessionId": slot.session_id,
+                    "model": model,
+                    "level": parsed_level.as_str(),
+                })),
+            )))?;
+        }
         ServeCommand::ListModels { id } => {
             let slot = resolve_active_slot(&state)?;
             let models = slot
@@ -519,7 +573,11 @@ async fn resolve_slot_or_error(
         }
         Err(error) => return Err(error),
     };
-    Ok(state.registry.get(&resolved))
+    let Some(slot) = state.registry.get(&resolved) else {
+        send_error(state, id, Some(resolved), "unknown_session")?;
+        return Ok(None);
+    };
+    Ok(Some(slot))
 }
 
 fn resolve_active_slot(

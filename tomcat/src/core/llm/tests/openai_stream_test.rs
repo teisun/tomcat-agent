@@ -718,6 +718,7 @@ fn stream_test_request() -> ChatRequest {
         max_tokens: Some(16),
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     }
 }

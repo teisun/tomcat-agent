@@ -121,6 +121,7 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
             max_tokens: Some(16),
             stream: Some(true),
             model_override: None,
+            thinking_level: None,
             tools: None,
         })
         .await

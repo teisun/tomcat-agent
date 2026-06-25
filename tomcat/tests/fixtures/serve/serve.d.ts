@@ -137,6 +137,12 @@ export type ServeCommand = {
   type: "set_plan_mode";
 } | {
   id?: null | string;
+  level: string;
+  model: string;
+  sessionId?: null | string;
+  type: "set_thinking_level";
+} | {
+  id?: null | string;
   model: string;
   sessionId?: null | string;
   type: "set_model";

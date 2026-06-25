@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
@@ -29,6 +30,9 @@ const ERROR_TEXT = [
   "- simulated stderr line 3: this is a fake error used to verify expanded error presentation",
 ].join("\n");
 
+const STATE_DIR = process.env.TOMCAT_FAKE_SERVE_STATE_DIR || os.tmpdir();
+const STATE_PATH = path.join(STATE_DIR, "manual-acceptance-fake-serve-state.json");
+
 const timers = new Set();
 const sessions = new Map();
 const pendingApprovals = new Map();
@@ -37,6 +41,99 @@ let activeSessionId = null;
 let askQuestionCounter = 1;
 let historyCounter = 1;
 let sessionCounter = 1;
+
+function defaultThinkingLevels() {
+  return {
+    "claude-4.6-sonnet": "medium",
+    "deepseek-v4-pro": "low",
+    "gpt-5.4": "high",
+    "manual-acceptance-model": "xhigh",
+  };
+}
+
+function normalizeThinkingLevels(value) {
+  return {
+    ...defaultThinkingLevels(),
+    ...(value && typeof value === "object" ? value : {}),
+  };
+}
+
+function currentThinkingLevel(session) {
+  return session.modelThinking?.[session.model] || null;
+}
+
+function normalizeSession(session) {
+  return {
+    busy: false,
+    cwd: typeof session?.cwd === "string" ? session.cwd : process.cwd(),
+    history: Array.isArray(session?.history) ? session.history : buildSeedHistory(),
+    mode: typeof session?.mode === "string" ? session.mode : "code",
+    model:
+      typeof session?.model === "string" && MODEL_OPTIONS.includes(session.model)
+        ? session.model
+        : MODEL_OPTIONS[0],
+    modelThinking: normalizeThinkingLevels(session?.modelThinking),
+    planId: session?.planId ?? null,
+    planPath: session?.planPath ?? null,
+    planState: typeof session?.planState === "string" ? session.planState : "chat",
+    sessionKey:
+      typeof session?.sessionKey === "string"
+        ? session.sessionKey
+        : "manual-acceptance-workspace",
+    updatedAt: typeof session?.updatedAt === "number" ? session.updatedAt : Date.now(),
+  };
+}
+
+function persistState() {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(
+      STATE_PATH,
+      `${JSON.stringify(
+        {
+          activeSessionId,
+          askQuestionCounter,
+          historyCounter,
+          sessionCounter,
+          sessions: Object.fromEntries(sessions.entries()),
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+  } catch (error) {
+    console.error(`[fake-serve] failed to persist state: ${String((error && error.message) || error)}`);
+  }
+}
+
+function loadState() {
+  if (!fs.existsSync(STATE_PATH)) {
+    return;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    activeSessionId =
+      typeof parsed.activeSessionId === "string" || parsed.activeSessionId === null
+        ? parsed.activeSessionId
+        : null;
+    askQuestionCounter =
+      typeof parsed.askQuestionCounter === "number" ? parsed.askQuestionCounter : askQuestionCounter;
+    historyCounter =
+      typeof parsed.historyCounter === "number" ? parsed.historyCounter : historyCounter;
+    sessionCounter =
+      typeof parsed.sessionCounter === "number" ? parsed.sessionCounter : sessionCounter;
+    sessions.clear();
+    for (const [sessionId, session] of Object.entries(parsed.sessions || {})) {
+      sessions.set(sessionId, normalizeSession(session));
+    }
+    if (!activeSessionId || !sessions.has(activeSessionId)) {
+      activeSessionId = sessions.keys().next().value || null;
+    }
+  } catch (error) {
+    console.error(`[fake-serve] failed to load state: ${String((error && error.message) || error)}`);
+  }
+}
 
 const ASK_QUESTION_REVERIFY_PATTERN = /ask question reverify/i;
 const ASK_QUESTION_PROMPTS = [
@@ -73,6 +170,7 @@ function createHistoryEntry(message) {
 function recordHistoryEntry(session, message) {
   const entry = createHistoryEntry(message);
   session.history.push(entry);
+  persistState();
   return entry;
 }
 
@@ -153,19 +251,14 @@ function touchSession(session) {
 
 function createSession() {
   const sessionId = `manual-session-${sessionCounter++}`;
-  const session = touchSession({
-    busy: false,
-    cwd: process.cwd(),
-    history: buildSeedHistory(),
-    mode: "code",
-    model: MODEL_OPTIONS[0],
-    planId: null,
-    planPath: null,
-    planState: "chat",
-    sessionKey: "manual-acceptance-workspace",
-  });
+  const session = touchSession(
+    normalizeSession({
+      history: buildSeedHistory(),
+    }),
+  );
   sessions.set(sessionId, session);
   activeSessionId = activeSessionId ?? sessionId;
+  persistState();
   return sessionId;
 }
 
@@ -287,6 +380,7 @@ function schedule(delayMs, callback) {
 function finishTurn(sessionId, error = null) {
   const session = touchSession(ensureSession(sessionId));
   session.busy = false;
+  persistState();
   send({
     error,
     messages: [],
@@ -299,6 +393,7 @@ function startTurn(sessionId) {
   const session = touchSession(ensureSession(sessionId));
   session.busy = true;
   activeSessionId = sessionId;
+  persistState();
   send({
     sessionId,
     type: "agent_start",
@@ -523,6 +618,7 @@ function handleCommand(frame) {
               "interrupt",
               "list_models",
               "set_model",
+              "set_thinking_level",
             ],
             protocolVersion: 1,
             sessionId,
@@ -555,6 +651,7 @@ function handleCommand(frame) {
       if (activeSessionId) {
         touchSession(ensureSession(activeSessionId));
       }
+      persistState();
       send({
         id: frame.id,
         payload: { activeSessionId },
@@ -594,6 +691,7 @@ function handleCommand(frame) {
           planState: session.planState,
           sessionId,
           sessionKey: session.sessionKey,
+          thinkingLevel: currentThinkingLevel(session),
         },
         sessionId,
         success: true,
@@ -630,6 +728,7 @@ function handleCommand(frame) {
           activeSessionId = [...sessions.keys()][0] ?? null;
         }
       }
+      persistState();
       send({
         id: frame.id,
         payload: { closed: true, sessionId: frame.sessionId },
@@ -652,9 +751,33 @@ function handleCommand(frame) {
       const sessionId = frame.sessionId || activeSessionId || createSession();
       const session = touchSession(ensureSession(sessionId));
       session.model = frame.model;
+      persistState();
       send({
         id: frame.id,
-        payload: { model: session.model, sessionId },
+        payload: {
+          model: session.model,
+          sessionId,
+          thinkingLevel: currentThinkingLevel(session),
+        },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      return;
+    }
+    case "set_thinking_level": {
+      const sessionId = frame.sessionId || activeSessionId || createSession();
+      const session = touchSession(ensureSession(sessionId));
+      session.modelThinking = normalizeThinkingLevels(session.modelThinking);
+      session.modelThinking[frame.model] = frame.level;
+      persistState();
+      send({
+        id: frame.id,
+        payload: {
+          level: frame.level,
+          model: frame.model,
+          sessionId,
+        },
         sessionId,
         success: true,
         type: "response",
@@ -697,7 +820,10 @@ function handleCommand(frame) {
   }
 }
 
-createSession();
+loadState();
+if (sessions.size === 0) {
+  createSession();
+}
 
 const rl = readline.createInterface({
   crlfDelay: Infinity,

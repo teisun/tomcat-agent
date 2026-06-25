@@ -42,6 +42,7 @@ async function main(): Promise<void> {
   const installRoot = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-manual-host-"));
   const artifactsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-manual-artifacts-"));
   const extensionsDir = path.join(installRoot, "extensions");
+  const fakeServeStateDir = path.join(installRoot, "fake-serve-state");
   const userDataDir = path.join(installRoot, "user-data");
   const workspaceDir = path.join(installRoot, "workspace");
   const screenshotsDir = path.join(artifactsRoot, "screenshots");
@@ -56,6 +57,7 @@ async function main(): Promise<void> {
 
   try {
     await fs.mkdir(extensionsDir, { recursive: true });
+    await fs.mkdir(fakeServeStateDir, { recursive: true });
     await fs.mkdir(userDataDir, { recursive: true });
     await fs.mkdir(workspaceDir, { recursive: true });
     await fs.mkdir(screenshotsDir, { recursive: true });
@@ -95,6 +97,7 @@ async function main(): Promise<void> {
         ...process.env,
         TOMCAT_ACCEPT_REPORT_PATH: reportPath,
         TOMCAT_ACCEPT_SCREENSHOTS_DIR: screenshotsDir,
+        TOMCAT_FAKE_SERVE_STATE_DIR: fakeServeStateDir,
         TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
         TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
       },

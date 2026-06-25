@@ -597,6 +597,7 @@ fn responses_build_request_body_uses_model_name_when_present() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -623,6 +624,7 @@ fn responses_build_request_body_maps_catalog_id_to_model_name() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -649,6 +651,7 @@ fn responses_build_request_body_without_model_name_uses_id() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -673,6 +676,7 @@ fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -705,6 +709,7 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -744,6 +749,7 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -773,6 +779,7 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -802,6 +809,7 @@ fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_su
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -827,6 +835,7 @@ fn responses_build_request_body_continuity_enabled_requests_encrypted_content() 
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -868,6 +877,7 @@ fn openai_responses_roundtrip_replays_reasoning_items() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -914,6 +924,7 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -971,6 +982,7 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body_with_hint(&req, true, false);
@@ -1615,6 +1627,7 @@ fn responses_stream_test_request() -> ChatRequest {
         max_tokens: Some(16),
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     }
 }

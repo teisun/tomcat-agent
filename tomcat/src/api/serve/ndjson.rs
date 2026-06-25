@@ -17,30 +17,15 @@ pub fn parse_command_line(line: &str) -> Result<super::types::ServeCommand, AppE
     let value: Value =
         serde_json::from_str(line).map_err(|error| AppError::Config(format!("parse_error: {error}")))?;
     reject_explicit_null_session_id(&value)?;
-    if let Some(command_type) = value.get("type").and_then(Value::as_str) {
-        if !matches!(
-            command_type,
-            "prompt"
-                | "steer"
-                | "follow_up"
-                | "get_state"
-                | "set_plan_mode"
-                | "set_model"
-                | "list_models"
-                | "new_session"
-                | "switch_session"
-                | "get_messages"
-                | "close_session"
-                | "list_sessions"
-                | "interrupt"
-                | "control_request"
-                | "control_response"
-                | "control_cancel"
-        ) {
-            return Err(AppError::Config(format!("unknown_command: {command_type}")));
-        }
-    }
-    serde_json::from_value(value).map_err(|error| AppError::Config(format!("parse_error: {error}")))
+    parse_command_value(value)
+}
+
+pub(crate) fn extract_response_refs(line: &str) -> (Option<String>, Option<String>) {
+    let value: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(_) => return (None, None),
+    };
+    extract_response_refs_from_value(&value)
 }
 
 fn reject_explicit_null_session_id(value: &Value) -> Result<(), AppError> {
@@ -56,4 +41,32 @@ fn reject_explicit_null_session_id(value: &Value) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+fn parse_command_value(value: Value) -> Result<super::types::ServeCommand, AppError> {
+    let command_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    serde_json::from_value(value).map_err(|error| map_command_parse_error(command_type.as_deref(), error))
+}
+
+fn map_command_parse_error(command_type: Option<&str>, error: serde_json::Error) -> AppError {
+    let message = error.to_string();
+    if command_type.is_some() && message.contains("unknown variant") {
+        return AppError::Config(format!("unknown_command: {}", command_type.unwrap()));
+    }
+    AppError::Config(format!("parse_error: {message}"))
+}
+
+fn extract_response_refs_from_value(value: &Value) -> (Option<String>, Option<String>) {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let session_id = value
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    (id, session_id)
 }

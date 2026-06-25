@@ -30,7 +30,7 @@ pub use config::{
     load_config, load_config_for_init, load_config_toml_file, resolve_agent_definition_dir,
     resolve_agent_dir,
     resolve_agent_trail_dir, resolve_assets_dir, resolve_audit_dir, resolve_checkpoints_dir,
-    resolve_dot_tomcat_temp_dir, resolve_log_dir, resolve_memory_dir, resolve_plans_dir,
+    resolve_dot_tomcat_temp_dir, resolve_log_dir, resolve_memory_dir, resolve_model_thinking_path, resolve_plans_dir,
     resolve_plugins_dir, resolve_sessions_dir, resolve_tmp_dir, resolve_workspace_dir,
     resolve_workspace_roots_paths, validate_config, AgentConfig, AppConfig, CheckpointConfig,
     ContextConfig, LlmConfig, LogConfig, PreflightConfig, PrimitiveConfig, ResumeHydrationMode,

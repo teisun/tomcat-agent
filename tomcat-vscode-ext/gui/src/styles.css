@@ -53,7 +53,6 @@ input:focus-visible {
   padding: 10px;
 }
 
-.tc-header,
 .tc-card__header,
 .tc-message__header {
   align-items: center;
@@ -62,27 +61,12 @@ input:focus-visible {
   justify-content: space-between;
 }
 
-.tc-header {
-  align-items: flex-start;
-}
-
-.tc-header h1,
 .tc-empty-state h2,
 .tc-card h3 {
   margin: 0;
 }
 
-.tc-header__eyebrow {
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  margin: 0 0 4px;
-  opacity: 0.72;
-  text-transform: uppercase;
-}
-
 .tc-button-row,
-.tc-sessionbar,
-.tc-sessionbar__actions,
 .tc-attachment-chips {
   display: flex;
   flex-wrap: wrap;
@@ -119,8 +103,7 @@ input:focus-visible {
 .tc-composer__hint,
 .tc-active-plan__meta,
 .tc-plan-card__link span:last-child,
-.tc-message__header span,
-.tc-header__eyebrow {
+.tc-message__header span {
   color: var(--vscode-descriptionForeground);
 }
 
@@ -134,17 +117,34 @@ input:focus-visible {
   padding: 20px 14px;
 }
 
-.tc-sessionbar {
-  align-items: flex-end;
+.tc-topbar {
+  align-items: center;
+  display: flex;
+  gap: 8px;
 }
 
-.tc-sessionbar__field {
+.tc-topbar__new {
+  flex-shrink: 0;
+}
+
+.tc-topbar__field {
   flex: 1 1 auto;
+  gap: 0;
   min-width: 0;
 }
 
-.tc-sessionbar__actions {
-  flex-shrink: 0;
+.tc-topbar__field > span:first-child {
+  display: none;
+}
+
+.tc-topbar__select {
+  height: 34px;
+  width: 100%;
+}
+
+.tc-topbar .tc-chip {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .tc-button:hover:not(:disabled) {
@@ -278,6 +278,13 @@ input:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.tc-transcript__spacer {
+  flex: 0 0 auto;
+  min-height: 0;
+  pointer-events: none;
+  width: 100%;
 }
 
 .tc-message {
@@ -564,7 +571,7 @@ input:focus-visible {
 
 .tc-composer__bar .tc-field select {
   height: 34px;
-  padding: 6px 10px;
+  padding: 6px 8px;
 }
 
 .tc-composer__context {
@@ -617,7 +624,8 @@ input:focus-visible {
 }
 
 .tc-field--mode {
-  flex: 0 0 68px;
+  flex: 0 0 58px;
+  min-width: 0;
 }
 
 .tc-field--mode select {
@@ -633,6 +641,16 @@ input:focus-visible {
 .tc-field--model select {
   min-width: 0;
   text-overflow: ellipsis;
+  width: 100%;
+}
+
+.tc-field--effort {
+  flex: 0 0 60px;
+  min-width: 0;
+}
+
+.tc-field--effort select {
+  min-width: 0;
   width: 100%;
 }
 
@@ -658,9 +676,14 @@ input:focus-visible {
 }
 
 @media (max-width: 420px) {
-  .tc-sessionbar__actions,
-  .tc-sessionbar {
+  .tc-topbar {
     width: 100%;
+  }
+
+  .tc-topbar .tc-chip {
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .tc-active-plan {
@@ -669,7 +692,11 @@ input:focus-visible {
   }
 
   .tc-field--mode {
-    flex-basis: 60px;
+    flex-basis: 52px;
+  }
+
+  .tc-field--effort {
+    flex-basis: 56px;
   }
 
   .tc-composer__bar {
@@ -678,6 +705,6 @@ input:focus-visible {
 
   .tc-composer__context {
     font-size: 11px;
-    max-width: 32px;
+    max-width: 24px;
   }
 }

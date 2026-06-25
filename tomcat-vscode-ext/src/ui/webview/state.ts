@@ -84,6 +84,7 @@ function createEmptySession(sessionId: string): WebviewSessionSnapshot {
     conflictMessage: null,
     contextRatio: null,
     model: null,
+    thinkingLevel: null,
     ownedByThisFrontend: false,
     owner: null,
     pendingAttachments: [],
@@ -545,6 +546,7 @@ export class WebviewStateStore {
     const session = this.ensureSession(payload.sessionId);
     session.busy = payload.busy;
     session.model = payload.model ?? null;
+    session.thinkingLevel = payload.thinkingLevel ?? null;
     session.planId = payload.planId ?? null;
     session.planState = normalizePlanState(payload.planState) ?? "chat";
     if (session.planFile) {

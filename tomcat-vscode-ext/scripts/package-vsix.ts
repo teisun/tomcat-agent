@@ -18,6 +18,7 @@ const REQUIRED_FILES = [
   "README.md",
   "package.json",
   "gui/dist/index.js",
+  "media/icon.png",
   "media/tomcat.svg",
   "out/extension.js",
 ] as const;

@@ -47,6 +47,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
         max_tokens: Some(64),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     tracing::info!("Arrange: 加载 .env，经 catalog/resolver 拿 Arc<dyn LlmProvider>");
@@ -83,6 +84,7 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
         max_tokens: Some(5),
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     tracing::info!("Arrange: ChatRequest(stream=true)");

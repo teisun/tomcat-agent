@@ -3,6 +3,7 @@
 mod append_message_chain;
 pub mod context_metrics;
 pub(crate) mod manager;
+mod model_thinking;
 pub(crate) mod resume_index;
 pub mod scope;
 pub(crate) mod store;
@@ -14,6 +15,7 @@ pub use manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, init_context_state, ApiUsage,
     CompactionResult, ContextState, MessageAppendSink, PlanEventKind, PlanEventRef, SessionManager,
 };
+pub use model_thinking::ModelThinkingStore;
 pub use scope::{
     fnv1a_hex, project_root, resolve_session_mode, session_key_for, session_key_for_agent,
     SessionMode,

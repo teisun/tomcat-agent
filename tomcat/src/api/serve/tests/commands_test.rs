@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use serial_test::serial;
 
-use crate::core::llm::{ChatMessageContent, ChatMessageContentPart, MessageKind, StreamEvent};
+use crate::core::llm::{
+    ChatMessageContent, ChatMessageContentPart, LlmProvider, MessageKind, StreamEvent,
+};
 
 async fn wait_for_line(
     buffer: &crate::api::serve::test_support::SharedWriterBuffer,
@@ -991,4 +993,268 @@ async fn serve_set_model_rejects_invalid_id_without_mutating_session_override() 
         })
         .expect("list_models response after invalid set_model");
     assert_eq!(list_models["success"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_set_thinking_level_roundtrips_in_get_state() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("effort-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-effort-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-effort-1")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-effort-1"))
+        .expect("get_state response");
+    let payload = response["payload"].clone();
+    assert_eq!(response["success"].as_bool(), Some(true));
+    assert_eq!(payload["model"].as_str(), Some("gpt-5.4"));
+    assert_eq!(payload["thinkingLevel"].as_str(), Some("xhigh"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_get_state_tracks_per_model_thinking_level_after_switching_models() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    for command in [
+        ServeCommand::SetThinkingLevel {
+            id: Some("effort-gpt".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".to_string(),
+            level: "low".to_string(),
+        },
+        ServeCommand::SetThinkingLevel {
+            id: Some("effort-deepseek".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "deepseek-v4-pro".to_string(),
+            level: "xhigh".to_string(),
+        },
+        ServeCommand::SetModel {
+            id: Some("switch-deepseek".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "deepseek-v4-pro".to_string(),
+        },
+        ServeCommand::GetState {
+            id: Some("state-deepseek".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+        ServeCommand::SetModel {
+            id: Some("switch-gpt".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".to_string(),
+        },
+        ServeCommand::GetState {
+            id: Some("state-gpt".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    ] {
+        handle_command(Arc::clone(&state), command).await.unwrap();
+    }
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-gpt")
+    })
+    .await;
+    let deepseek = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-deepseek"))
+        .expect("deepseek get_state");
+    let gpt = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-gpt"))
+        .expect("gpt get_state");
+
+    assert_eq!(deepseek["payload"]["model"].as_str(), Some("deepseek-v4-pro"));
+    assert_eq!(deepseek["payload"]["thinkingLevel"].as_str(), Some("xhigh"));
+    assert_eq!(gpt["payload"]["model"].as_str(), Some("gpt-5.4"));
+    assert_eq!(gpt["payload"]["thinkingLevel"].as_str(), Some("low"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_set_thinking_level_invalid_value_returns_error_without_breaking_loop() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("bad-effort".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".to_string(),
+            level: "turbo".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-after-bad-effort".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-bad-effort")
+    })
+    .await;
+    let error = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("bad-effort"))
+        .expect("bad effort response");
+    let state_after = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-bad-effort")
+        })
+        .expect("follow-up get_state response");
+
+    assert_eq!(error["success"].as_bool(), Some(false));
+    assert_eq!(error["error"].as_str(), Some("invalid_thinking_level"));
+    assert_eq!(state_after["success"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_set_thinking_level_persists_across_restart() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let provider: Arc<dyn LlmProvider> = Arc::new(DeterministicMockLlm::new(vec![]));
+    let (state, _buffer, temp, slot) = build_initialized_state_with_provider(temp, cfg.clone(), provider).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("persist-effort".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    drop(slot);
+    drop(state);
+
+    let provider: Arc<dyn LlmProvider> = Arc::new(DeterministicMockLlm::new(vec![]));
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-after-restart".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-restart")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-restart")
+        })
+        .expect("get_state after restart");
+    assert_eq!(response["payload"]["thinkingLevel"].as_str(), Some("xhigh"));
+}
+
+#[test]
+fn build_shared_model_thinking_uses_global_store_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.llm.thinking.level = "medium".to_string();
+    ensure_work_dir_structure(&cfg).expect("work dir");
+
+    let store = build_shared_model_thinking(&cfg).expect("shared model thinking");
+    let global_path = crate::resolve_model_thinking_path(&cfg).expect("global model thinking path");
+
+    assert_eq!(store.get("gpt-5.4"), crate::core::llm::ThinkingLevel::Medium);
+    assert!(global_path.exists(), "global model thinking store should be created");
+
+    let persisted = std::fs::read_to_string(&global_path).expect("read global model thinking store");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&persisted).expect("parse global model thinking store");
+    assert_eq!(parsed["models"].as_object().map(|models| models.len()), Some(0));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_passes_per_model_thinking_level_to_main_loop_request() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "hello".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("prompt-effort".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-with-effort".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "say hello".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+
+    let captured = requests.0.lock();
+    assert_eq!(captured.len(), 1, "expected exactly one recorded LLM request");
+    assert_eq!(captured[0].thinking_level, Some(crate::core::llm::ThinkingLevel::Xhigh));
 }

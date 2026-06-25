@@ -35,6 +35,7 @@ pub use replay_policy::{
 };
 pub use resolver::{DefaultLlmResolver, LlmResolver, LlmScene, ResolvedCall};
 pub use token_usage::SessionTokenUsage;
+pub use thinking_policy::ThinkingLevel;
 #[allow(unused_imports)]
 pub use types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,

@@ -12,6 +12,8 @@ export function MessageBubble({ item }: { item: WebviewMessageBlock }) {
     <article
       className={`tc-message tc-message--${item.kind}`}
       data-kind={item.kind}
+      data-message-id={item.id}
+      data-message-kind={item.kind}
       data-testid="message-block"
     >
       <div className="tc-message__header">

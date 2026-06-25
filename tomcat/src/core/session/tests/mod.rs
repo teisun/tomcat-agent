@@ -14,6 +14,7 @@
 
 mod resume_index_test;
 mod scope_test;
+mod model_thinking_test;
 mod store_test;
 mod transcript_header_test;
 mod transcript_lookup_test;

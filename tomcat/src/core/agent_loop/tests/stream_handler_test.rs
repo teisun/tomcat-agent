@@ -67,6 +67,7 @@ fn make_request() -> ChatRequest {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     }
 }

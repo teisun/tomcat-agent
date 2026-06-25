@@ -43,12 +43,15 @@ function postIntent(
 function buildDomSnapshot(state: WebviewStateSnapshot) {
   const root = document.getElementById("root");
   const stream = document.querySelector<HTMLElement>('[data-testid="stream-container"]');
+  const userMessages = document.querySelectorAll<HTMLElement>('[data-message-kind="user"]');
+  const latestUserMessage = userMessages[userMessages.length - 1] ?? null;
   const queryText = (selector: string) =>
     [...document.querySelectorAll(selector)].map((node) => node.textContent ?? "");
   const composerMetricEntries = [
     "attachment-add",
     "mode-select",
     "model-select",
+    "thinking-level-select",
     "context-ratio",
     "send-button",
   ]
@@ -111,6 +114,8 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   ]
     .filter((node) => "disabled" in node && Boolean((node as HTMLButtonElement | HTMLInputElement).disabled))
     .map((node) => node.dataset.testid ?? "");
+  const streamRect = stream?.getBoundingClientRect();
+  const latestUserRect = latestUserMessage?.getBoundingClientRect();
   return {
     activeSessionId: state.activeSessionId,
     approvalCount: document.querySelectorAll('[data-testid="approval-card"]').length,
@@ -124,7 +129,10 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     hasConflict: !!document.querySelector('[data-testid="conflict-banner"]'),
     html: root?.innerHTML ?? "",
     jumpToLatestVisible: !!document.querySelector('[data-testid="scroll-to-bottom"]'),
+    latestUserTopWithinStream:
+      streamRect && latestUserRect ? latestUserRect.top - streamRect.top : null,
     messageTexts: queryText('[data-testid="message-text"]'),
+    overflowAnchor: stream?.style.overflowAnchor ?? null,
     sessionTabs: queryText('[data-testid="session-option"]'),
     streamMetrics: {
       clientHeight: stream?.clientHeight ?? 0,
@@ -213,6 +221,20 @@ function buildContextLabel(contextRatio?: number | null): string {
   return `Ctx ${Math.round(contextRatio * 100)}%`;
 }
 
+function normalizeThinkingLevel(
+  thinkingLevel?: string | null,
+): "" | "high" | "low" | "medium" | "xhigh" {
+  switch (thinkingLevel) {
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+      return thinkingLevel;
+    default:
+      return "";
+  }
+}
+
 function currentModeValue(planState?: string | null): "chat" | "plan" {
   return planState && planState !== "chat" ? "plan" : "chat";
 }
@@ -240,6 +262,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [prompt, setPrompt] = useState("");
   const stateRef = useRef<WebviewStateSnapshot>(EMPTY_STATE);
   const streamRef = useRef<HTMLElement | null>(null);
+  const transcriptRef = useRef<HTMLElement | null>(null);
 
   const activeSession = useMemo(
     () =>
@@ -267,8 +290,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         : activeSession?.busy
           ? "Tomcat is responding..."
           : "Message Tomcat (Enter to send, Shift+Enter for newline)";
-  const { scrollToBottom, userHasScrolled } = useAutoScroll({
+  const { bottomSpacerHeight, scrollToLatest, userHasScrolled } = useAutoScroll({
     containerRef: streamRef,
+    contentRef: transcriptRef,
     contentKey: streamContentKey,
     resetKey: activeSession?.sessionId ?? null,
     userMessageCount,
@@ -307,7 +331,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         "type" in frame.content &&
         frame.content.type === "__test.dom_action"
       ) {
-        runDomAction(frame.content.action);
+        runDomAction(frame.content.action as WebviewDomAction);
       }
     };
 
@@ -364,22 +388,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
   return (
     <main className="tc-shell">
-      <header className="tc-header">
-        <div>
-          <p className="tc-header__eyebrow">Tomcat Chat</p>
-          <h1>Tomcat</h1>
-        </div>
-        <span
-          className={state.ready ? "tc-chip tc-chip--success" : "tc-chip tc-chip--warning"}
-        >
-          {state.ready ? "Connected" : "Connecting..."}
-        </span>
-      </header>
-
       <SessionBar
         activeSessionId={activeSession?.sessionId ?? null}
         onNewSession={() => postIntent(vscodeApi, "newSession")}
-        onRefreshSessions={() => postIntent(vscodeApi, "listSessions")}
+        ready={state.ready}
         onSwitchSession={(sessionId) =>
           postIntent(vscodeApi, "switchSession", {
             sessionId,
@@ -405,6 +417,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             activeSession.timeline.length || activeApprovalCount ? (
               <TranscriptView
                 busy={!!activeSession.busy}
+                bottomSpacerHeight={bottomSpacerHeight}
                 onAnswer={handleAnswerQuestion}
                 onApplyEdit={(toolCallId) =>
                   postIntent(vscodeApi, "applyEdit", {
@@ -422,6 +435,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                   })
                 }
                 timeline={activeSession.timeline}
+                transcriptRef={transcriptRef}
               />
             ) : (
               <div className="tc-empty-state">
@@ -432,7 +446,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           ) : (
             <div className="tc-empty-state">
               <h2>No active Tomcat session</h2>
-              <p>Create a new session or refresh the session list to start chatting.</p>
+              <p>Create a new session to start chatting.</p>
             </div>
           )}
         </section>
@@ -440,7 +454,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           <button
             className="tc-scroll-jump"
             data-testid="scroll-to-bottom"
-            onClick={scrollToBottom}
+            onClick={scrollToLatest}
             type="button"
           >
             Jump to latest
@@ -481,6 +495,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         contextLabel={buildContextLabel(activeSession?.contextRatio)}
         modeValue={currentModeValue(activeSession?.planState)}
         modelValue={activeSession?.model ?? ""}
+        thinkingLevelValue={normalizeThinkingLevel(activeSession?.thinkingLevel)}
         onAddAttachment={() =>
           postIntent(vscodeApi, "pickAttachment", {
             sessionId: activeSession?.sessionId ?? null,
@@ -493,6 +508,16 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           }
           postIntent(vscodeApi, "setModel", {
             modelId,
+            sessionId: activeSession.sessionId,
+          });
+        }}
+        onThinkingLevelChange={(level) => {
+          if (!activeSession || !activeSession.model || !level) {
+            return;
+          }
+          postIntent(vscodeApi, "setThinkingLevel", {
+            level,
+            modelId: activeSession.model,
             sessionId: activeSession.sessionId,
           });
         }}

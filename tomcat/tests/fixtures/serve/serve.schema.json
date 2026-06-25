@@ -198,6 +198,40 @@
       {
         "type": "object",
         "required": [
+          "level",
+          "model",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "level": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_thinking_level"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
           "type"
         ],
         "properties": {

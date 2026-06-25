@@ -97,7 +97,9 @@ export interface TomcatExtensionApi {
       hasConflict: boolean;
       html: string;
       jumpToLatestVisible: boolean;
+      latestUserTopWithinStream: number | null;
       messageTexts: string[];
+      overflowAnchor: string | null;
       sessionTabs: string[];
       streamMetrics: {
         clientHeight: number;
@@ -464,7 +466,7 @@ export async function activate(
       PARTICIPANT_ID,
       participantHandler,
     );
-    participant.iconPath = new vscode.ThemeIcon("terminal");
+    participant.iconPath = vscode.Uri.joinPath(context.extensionUri, "media", "icon.png");
   };
   syncParticipantRegistration();
 

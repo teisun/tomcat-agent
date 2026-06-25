@@ -296,6 +296,23 @@ export class TomcatMessenger {
     );
   }
 
+  sendSetThinkingLevel(
+    sessionId: string | null | undefined,
+    model: string,
+    level: "high" | "low" | "medium" | "xhigh",
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request(
+      {
+        level,
+        model,
+        sessionId,
+        type: "set_thinking_level",
+      },
+      timeoutMs,
+    );
+  }
+
   sendSetPlanMode(
     command: SetPlanModeRequest,
     timeoutMs = this.timeoutMs(),

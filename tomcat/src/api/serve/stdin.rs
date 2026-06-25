@@ -5,7 +5,7 @@ use tokio::io::AsyncBufReadExt;
 use crate::AppError;
 
 use super::commands::handle_command;
-use super::ndjson::parse_command_line;
+use super::ndjson::{extract_response_refs, parse_command_line};
 use super::types::{OutFrame, ResponseFrame, ServeCommand};
 use super::ServeState;
 
@@ -22,9 +22,10 @@ pub(crate) async fn run_stdio_loop(state: Arc<ServeState>) -> Result<(), AppErro
             Ok(command) => command,
             Err(error) => {
                 let message = render_command_error(&error);
+                let (id, session_id) = extract_response_refs(trimmed);
                 state.writer.send(OutFrame::Response(ResponseFrame::error(
-                    None,
-                    None,
+                    id,
+                    session_id,
                     message,
                 )))?;
                 continue;

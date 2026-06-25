@@ -28,6 +28,7 @@ describe("VSIX packaging", () => {
         expect(fileList).toContain("README.md");
         expect(fileList).toContain("LICENSE");
         expect(fileList).toContain("gui/dist/index.js");
+        expect(fileList).toContain("media/icon.png");
         expect(fileList).toContain("media/tomcat.svg");
         expect(fileList).not.toContain("src/extension.ts");
         expect(fileList).not.toContain("gui/src/App.tsx");

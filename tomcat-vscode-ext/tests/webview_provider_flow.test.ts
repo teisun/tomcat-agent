@@ -20,14 +20,21 @@ const __testing = (
 type MutableSessionState = {
   busy: boolean;
   model: string;
+  modelThinking: Record<string, string | null>;
   planId: string | null;
   planPath: string | null;
   planState: string;
+  thinkingLevel: string | null;
 };
 
 class FakeMessenger {
   readonly requestCalls: Array<Record<string, unknown>> = [];
   readonly setPlanModeCalls: Array<Record<string, unknown>> = [];
+  readonly setThinkingLevelCalls: Array<{
+    level: string;
+    model: string;
+    sessionId: string | null | undefined;
+  }> = [];
   private readonly listeners = new Set<(event: Record<string, unknown>) => void>();
 
   constructor(private readonly sessionState: MutableSessionState) {}
@@ -67,8 +74,26 @@ class FakeMessenger {
 
   async sendSetModel(_sessionId: string | null | undefined, model: string) {
     this.sessionState.model = model;
+    this.sessionState.thinkingLevel = this.sessionState.modelThinking[model] ?? null;
     return {
       payload: { model },
+      success: true,
+      type: "response",
+    };
+  }
+
+  async sendSetThinkingLevel(
+    sessionId: string | null | undefined,
+    model: string,
+    level: "high" | "low" | "medium" | "xhigh",
+  ) {
+    this.setThinkingLevelCalls.push({ level, model, sessionId });
+    this.sessionState.modelThinking[model] = level;
+    if (this.sessionState.model === model) {
+      this.sessionState.thinkingLevel = level;
+    }
+    return {
+      payload: { level, model },
       success: true,
       type: "response",
     };
@@ -123,7 +148,13 @@ class FakeMessenger {
 
 function initializeResult(): InitializeResult {
   return {
-    capabilities: ["ask_question", "prompt", "list_models", "set_plan_mode"],
+    capabilities: [
+      "ask_question",
+      "prompt",
+      "list_models",
+      "set_plan_mode",
+      "set_thinking_level",
+    ],
     protocolVersion: 1,
     sessionId: "session-1",
   };
@@ -135,9 +166,14 @@ function buildProvider() {
   const sessionState: MutableSessionState = {
     busy: false,
     model: "gpt-5.4",
+    modelThinking: {
+      "claude-4.6-sonnet": "low",
+      "gpt-5.4": "high",
+    },
     planId: null,
     planPath: null,
     planState: "chat",
+    thinkingLevel: "high",
   };
   const messenger = new FakeMessenger(sessionState);
   const sessionRouter = {
@@ -178,6 +214,7 @@ function buildProvider() {
         planId: sessionState.planId,
         planState: sessionState.planState,
         sessionId: sessionId ?? "session-1",
+        thinkingLevel: sessionState.thinkingLevel,
       };
     },
     async listSessions() {
@@ -559,6 +596,80 @@ describe("webview provider integration", () => {
         }),
       ]),
     );
+
+    provider.dispose();
+  });
+
+  it("roundtrips setThinkingLevel through provider refresh", async () => {
+    const { messenger, provider, sessionState } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: {
+        level: "xhigh",
+        modelId: "gpt-5.4",
+        sessionId: "session-1",
+      },
+      messageId: "set-thinking-level-1",
+      type: "setThinkingLevel",
+    });
+
+    expect(messenger.setThinkingLevelCalls).toEqual([
+      {
+        level: "xhigh",
+        model: "gpt-5.4",
+        sessionId: "session-1",
+      },
+    ]);
+    expect(sessionState.thinkingLevel).toBe("xhigh");
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      model: "gpt-5.4",
+      thinkingLevel: "xhigh",
+    });
+
+    provider.dispose();
+  });
+
+  it("updates thinkingLevel from getState when switching models", async () => {
+    const { provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      model: "gpt-5.4",
+      thinkingLevel: "high",
+    });
+
+    await provider.dispatchTestIntent({
+      data: {
+        modelId: "claude-4.6-sonnet",
+        sessionId: "session-1",
+      },
+      messageId: "set-model-1",
+      type: "setModel",
+    });
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      model: "claude-4.6-sonnet",
+      thinkingLevel: "low",
+    });
+
+    await provider.dispatchTestIntent({
+      data: {
+        modelId: "gpt-5.4",
+        sessionId: "session-1",
+      },
+      messageId: "set-model-2",
+      type: "setModel",
+    });
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      model: "gpt-5.4",
+      thinkingLevel: "high",
+    });
 
     provider.dispose();
   });

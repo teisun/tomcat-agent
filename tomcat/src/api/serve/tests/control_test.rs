@@ -104,6 +104,7 @@ async fn serve_initialize_control_request_sets_ready_state() {
         "get_state",
         "set_plan_mode",
         "set_model",
+        "set_thinking_level",
         "list_models",
         "new_session",
         "switch_session",

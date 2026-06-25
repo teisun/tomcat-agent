@@ -65,6 +65,7 @@ pub(super) async fn run_reasoning_loop(
             max_tokens: None,
             stream: Some(true),
             model_override: None,
+            thinking_level: agent.config.thinking_level,
             tools: Some(agent.config.tool_definitions.clone()),
         };
 

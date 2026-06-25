@@ -29,6 +29,7 @@ type TomcatApi = {
         string,
         {
           model?: string | null;
+          thinkingLevel?: string | null;
           timeline: Array<{
             kind?: string;
             text?: string;
@@ -129,13 +130,49 @@ suite("Tomcat model switch reverify", () => {
     const closeButtonAbsent =
       !hydrated.html.includes("Close active session") && !hydrated.html.includes(">Close<");
 
-    const initialState = api.__testing.getWebviewState();
-    assert.ok(initialState.activeSessionId, "expected an active webview session");
+    const initialState = await waitForWebviewState(
+      api,
+      (state) => {
+        const sessionId = state.activeSessionId;
+        if (!sessionId) {
+          return undefined;
+        }
+        return state.sessionViews[sessionId]?.model ? state : undefined;
+      },
+      10_000,
+    );
+    const sessionId = initialState.activeSessionId;
+    assert.ok(sessionId, "expected an active webview session");
+
+    await api.__testing.sendWebviewIntent({
+      data: {
+        level: "xhigh",
+        modelId: "gpt-5.4",
+        sessionId,
+      },
+      messageId: "model-switch-gpt-effort-xhigh",
+      type: "setThinkingLevel",
+    });
+    const gptRaised = await waitForWebviewState(
+      api,
+      (state) => {
+        const activeId = state.activeSessionId;
+        if (!activeId) {
+          return undefined;
+        }
+        const session = state.sessionViews[activeId];
+        return session?.model === "gpt-5.4" && session.thinkingLevel === "xhigh"
+          ? state
+          : undefined;
+      },
+      10_000,
+    );
+    screenshots.push(await captureScreenshot("02-gpt-effort-xhigh.png"));
 
     await api.__testing.sendWebviewIntent({
       data: {
         modelId: "deepseek-v4-pro",
-        sessionId: initialState.activeSessionId,
+        sessionId,
       },
       messageId: "model-switch-to-deepseek",
       type: "setModel",
@@ -143,104 +180,139 @@ suite("Tomcat model switch reverify", () => {
     const deepseekState = await waitForWebviewState(
       api,
       (state) => {
-        const sessionId = state.activeSessionId;
-        if (!sessionId) {
+        const activeId = state.activeSessionId;
+        if (!activeId) {
           return undefined;
         }
-        return state.sessionViews[sessionId]?.model === "deepseek-v4-pro"
+        return state.sessionViews[activeId]?.model === "deepseek-v4-pro"
           ? state
           : undefined;
       },
       10_000,
     );
-    screenshots.push(await captureScreenshot("02-model-switched-deepseek.png"));
-
-    api.__testing.clearObservedEvents();
     await api.__testing.sendWebviewIntent({
       data: {
-        sessionId: deepseekState.activeSessionId,
-        text: "trigger capability mismatch",
+        level: "medium",
+        modelId: "deepseek-v4-pro",
+        sessionId,
       },
-      messageId: "model-switch-capability-mismatch",
-      type: "prompt",
+      messageId: "model-switch-deepseek-effort-medium",
+      type: "setThinkingLevel",
     });
-    await api.__testing.waitForEvent({
-      timeoutMs: 15_000,
-      type: "agent_end",
-    });
-    const mismatchState = await waitForWebviewState(
+    const deepseekRaised = await waitForWebviewState(
       api,
       (state) => {
-        const sessionId = state.activeSessionId;
-        if (!sessionId) {
+        const activeId = state.activeSessionId;
+        if (!activeId) {
           return undefined;
         }
-        const session = state.sessionViews[sessionId];
-        if (!session) {
-          return undefined;
-        }
-        return session.timeline.some(
-          (item) =>
-            item.type === "message" &&
-            item.kind === "error" &&
-            typeof item.text === "string" &&
-            /provider\/model 不支持 vision/i.test(item.text),
-        )
+        const current = state.sessionViews[activeId];
+        return current?.model === "deepseek-v4-pro" && current.thinkingLevel === "medium"
           ? state
           : undefined;
       },
       10_000,
     );
-    screenshots.push(await captureScreenshot("03-capability-mismatch-visible.png"));
+    screenshots.push(await captureScreenshot("03-deepseek-effort-medium.png"));
+
+    await api.__testing.sendWebviewIntent({
+      data: {
+        modelId: "gpt-5.4",
+        sessionId,
+      },
+      messageId: "model-switch-back-to-gpt",
+      type: "setModel",
+    });
+    const gptRestored = await waitForWebviewState(
+      api,
+      (state) => {
+        const activeId = state.activeSessionId;
+        if (!activeId) {
+          return undefined;
+        }
+        const current = state.sessionViews[activeId];
+        return current?.model === "gpt-5.4" && current.thinkingLevel === "xhigh"
+          ? state
+          : undefined;
+      },
+      10_000,
+    );
+    screenshots.push(await captureScreenshot("04-gpt-effort-restored.png"));
 
     await api.__testing.restartServe();
     await api.__testing.waitForWebviewReady(20_000);
     await pause(500);
-    api.__testing.clearObservedEvents();
+    const restartRecovered = await waitForWebviewState(
+      api,
+      (state) => {
+        const activeId = state.activeSessionId;
+        if (!activeId) {
+          return undefined;
+        }
+        const current = state.sessionViews[activeId];
+        return current?.model === "gpt-5.4" && current.thinkingLevel === "xhigh"
+          ? state
+          : undefined;
+      },
+      15_000,
+    );
+    screenshots.push(await captureScreenshot("05-after-restart-gpt-effort.png"));
+
     await api.__testing.sendWebviewIntent({
       data: {
-        text: "after restart prompt",
+        modelId: "deepseek-v4-pro",
+        sessionId: restartRecovered.activeSessionId,
       },
-      messageId: "model-switch-after-restart",
-      type: "prompt",
+      messageId: "model-switch-after-restart-to-deepseek",
+      type: "setModel",
     });
-    await api.__testing.waitForEvent({
-      textIncludes: "Manual acceptance reply for prompt: after restart prompt",
-      timeoutMs: 15_000,
-      type: "message_update",
-    });
-    const restartRecovered = await waitForDom(
+    const restartDeepseek = await waitForWebviewState(
       api,
-      (snapshot) =>
-        snapshot.messageTexts.some((text) => /after restart prompt/i.test(text))
-          ? snapshot
-          : undefined,
+      (state) => {
+        const activeId = state.activeSessionId;
+        if (!activeId) {
+          return undefined;
+        }
+        const current = state.sessionViews[activeId];
+        return current?.model === "deepseek-v4-pro" && current.thinkingLevel === "medium"
+          ? state
+          : undefined;
+      },
       10_000,
     );
-    screenshots.push(await captureScreenshot("04-after-restart-recovered.png"));
+    screenshots.push(await captureScreenshot("06-after-restart-deepseek-effort.png"));
 
     const report = {
       artifactsRoot: path.dirname(reportPath),
       checks: {
-        capabilityMismatch: {
-          passed: mismatchState.sessionViews[mismatchState.activeSessionId ?? ""]?.timeline.some(
-            (item) =>
-              item.type === "message" &&
-              item.kind === "error" &&
-              typeof item.text === "string" &&
-              /provider\/model 不支持 vision/i.test(item.text),
-          ) === true,
-        },
         closeButtonRemoved: {
           passed: closeButtonAbsent,
         },
-        modelSwitch: {
+        deepseekEffort: {
           passed:
-            deepseekState.sessionViews[deepseekState.activeSessionId ?? ""]?.model ===
-            "deepseek-v4-pro",
+            deepseekRaised.sessionViews[deepseekRaised.activeSessionId ?? ""]?.model ===
+              "deepseek-v4-pro" &&
+            deepseekRaised.sessionViews[deepseekRaised.activeSessionId ?? ""]?.thinkingLevel ===
+              "medium",
         },
-        restart: {
-          passed: restartRecovered.messageTexts.some((text) => /after restart prompt/i.test(text)),
+        gptEffort: {
+          passed:
+            gptRaised.sessionViews[gptRaised.activeSessionId ?? ""]?.model === "gpt-5.4" &&
+            gptRaised.sessionViews[gptRaised.activeSessionId ?? ""]?.thinkingLevel === "xhigh",
+        },
+        perModelRestore: {
+          passed:
+            gptRestored.sessionViews[gptRestored.activeSessionId ?? ""]?.thinkingLevel ===
+              "xhigh" &&
+            deepseekState.sessionViews[deepseekState.activeSessionId ?? ""]?.model ===
+              "deepseek-v4-pro",
+        },
+        restartPersistence: {
+          passed:
+            restartRecovered.sessionViews[restartRecovered.activeSessionId ?? ""]?.thinkingLevel ===
+              "xhigh" &&
+            restartDeepseek.sessionViews[restartDeepseek.activeSessionId ?? ""]?.thinkingLevel ===
+              "medium",
         },
       },
       screenshots,

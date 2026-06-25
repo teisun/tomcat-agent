@@ -133,6 +133,7 @@ fn chat_request_serialize_snake_case() {
         max_tokens: Some(100),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let j = serde_json::to_string(&req).unwrap();
@@ -161,6 +162,7 @@ fn chat_request_serializes_hydrate_recovered_tool_round_for_openai_wire() {
         max_tokens: None,
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let j = serde_json::to_value(&req).unwrap();

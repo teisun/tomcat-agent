@@ -41,14 +41,12 @@ describe("extension manifest contract", () => {
     expect(participant).not.toHaveProperty("modes");
   });
 
-  it("declares the participant, command, and webview activation events", async () => {
+  it("declares the explicit chat participant activation event", async () => {
     const manifest = await readManifest();
 
     expect(manifest.activationEvents).toEqual(
       expect.arrayContaining([
         `onChatParticipant:${PARTICIPANT_ID}`,
-        "onCommand:tomcat.ui.focus",
-        "onView:tomcat.chatView",
       ]),
     );
   });

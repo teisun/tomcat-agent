@@ -15,9 +15,11 @@ export function Composer({
   contextLabel,
   modeValue,
   modelValue,
+  thinkingLevelValue,
   onAddAttachment,
   onModeChange,
   onModelChange,
+  onThinkingLevelChange,
   onPromptChange,
   onPromptKeyDown,
   onSubmit,
@@ -30,9 +32,11 @@ export function Composer({
   contextLabel: string;
   modeValue: "chat" | "plan";
   modelValue: string;
+  thinkingLevelValue: "" | "high" | "low" | "medium" | "xhigh";
   onAddAttachment(): void;
   onModeChange(value: "chat" | "plan"): void;
   onModelChange(value: string): void;
+  onThinkingLevelChange(value: "high" | "low" | "medium" | "xhigh" | ""): void;
   onPromptChange(value: string): void;
   onPromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
   onSubmit(): void;
@@ -98,6 +102,27 @@ export function Composer({
                   {model}
                 </option>
               ))}
+            </select>
+          </label>
+
+          <label className="tc-field tc-field--compact tc-field--effort">
+            <span>Effort</span>
+            <select
+              aria-label="Tomcat reasoning effort"
+              data-testid="thinking-level-select"
+              disabled={!canPrompt || !modelValue}
+              onChange={(event) =>
+                onThinkingLevelChange(
+                  event.target.value as "high" | "low" | "medium" | "xhigh" | "",
+                )
+              }
+              value={thinkingLevelValue}
+            >
+              <option value="">Effort</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="xhigh">Xhigh</option>
             </select>
           </label>
 

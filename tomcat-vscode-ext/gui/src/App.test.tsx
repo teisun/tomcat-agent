@@ -46,6 +46,7 @@ describe("Tomcat webview App", () => {
             conflictMessage: null,
             contextRatio: 0.42,
             model: "gpt-5.4",
+            thinkingLevel: "high",
             ownedByThisFrontend: true,
             owner: "webview",
             pendingAttachments: [
@@ -228,6 +229,9 @@ describe("Tomcat webview App", () => {
     fireEvent.change(screen.getByTestId("model-select"), {
       target: { value: "claude-4.6-sonnet" },
     });
+    fireEvent.change(screen.getByTestId("thinking-level-select"), {
+      target: { value: "xhigh" },
+    });
     fireEvent.change(screen.getByTestId("mode-select"), {
       target: { value: "chat" },
     });
@@ -260,6 +264,14 @@ describe("Tomcat webview App", () => {
         ([message]) =>
           message.type === "setModel" &&
           message.data?.modelId === "claude-4.6-sonnet",
+      ),
+    ).toBe(true);
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) =>
+          message.type === "setThinkingLevel" &&
+          message.data?.level === "xhigh" &&
+          message.data?.modelId === "gpt-5.4",
       ),
     ).toBe(true);
     expect(
@@ -495,5 +507,140 @@ describe("Tomcat webview App", () => {
     expect(
       screen.getByText("This session is currently owned by the Tomcat participant."),
     ).toBeTruthy();
+  });
+
+  it("renders the top bar without legacy title or refresh button", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "medium",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-topbar",
+    });
+
+    expect(screen.getByTestId("new-session-button").textContent).toBe("+");
+    expect(screen.getByTestId("connection-chip").textContent).toContain("Connected");
+    expect(screen.queryByText("Tomcat")).toBeNull();
+    expect(screen.queryByRole("button", { name: /refresh/i })).toBeNull();
+  });
+
+  it("updates the thinking level select from session state", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-thinking-gpt",
+    });
+
+    expect((screen.getByTestId("thinking-level-select") as HTMLSelectElement).value).toBe(
+      "high",
+    );
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            updatedAt: 2,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "claude-4.6-sonnet",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "low",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-thinking-claude",
+    });
+
+    expect((screen.getByTestId("thinking-level-select") as HTMLSelectElement).value).toBe(
+      "low",
+    );
   });
 });

@@ -132,6 +132,7 @@ export interface WebviewSessionSnapshot {
   conflictMessage?: string | null;
   contextRatio?: number | null;
   model?: string | null;
+  thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
   owner: FrontendOwnerKind | null;
   pendingAttachments: WebviewPendingAttachment[];
@@ -261,6 +262,15 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "setThinkingLevel";
+      data: {
+        level: "high" | "low" | "medium" | "xhigh";
+        modelId: string;
+        sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
       type: "setPlanMode";
       data: {
         action: "build" | "enter" | "exit";
@@ -300,7 +310,9 @@ export type WebviewIntent =
         hasConflict: boolean;
         html: string;
         jumpToLatestVisible: boolean;
+        latestUserTopWithinStream: number | null;
         messageTexts: string[];
+        overflowAnchor: string | null;
         sessionTabs: string[];
         streamMetrics: {
           clientHeight: number;

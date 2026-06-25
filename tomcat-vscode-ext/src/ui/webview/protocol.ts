@@ -96,6 +96,7 @@ export interface WebviewSessionSnapshot {
   conflictMessage?: string | null;
   contextRatio?: number | null;
   model?: string | null;
+  thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
   owner: FrontendOwnerKind | null;
   pendingAttachments: WebviewPendingAttachment[];
@@ -240,6 +241,15 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "setThinkingLevel";
+      data: {
+        level: "high" | "low" | "medium" | "xhigh";
+        modelId: string;
+        sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
       type: "setPlanMode";
       data: {
         action: "build" | "enter" | "exit";
@@ -288,7 +298,9 @@ export type WebviewIntent =
         hasConflict: boolean;
         html: string;
         jumpToLatestVisible: boolean;
+        latestUserTopWithinStream: number | null;
         messageTexts: string[];
+        overflowAnchor: string | null;
         sessionTabs: string[];
         streamMetrics: {
           clientHeight: number;
@@ -350,6 +362,15 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       return value.data === undefined || isRecord(value.data);
     case "setModel":
       return isRecord(value.data) && isString(value.data.modelId);
+    case "setThinkingLevel":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.modelId) &&
+        (value.data.level === "low" ||
+          value.data.level === "medium" ||
+          value.data.level === "high" ||
+          value.data.level === "xhigh")
+      );
     case "setPlanMode":
       return (
         isRecord(value.data) &&
@@ -385,6 +406,9 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         typeof value.data.hasConflict === "boolean" &&
         typeof value.data.html === "string" &&
         typeof value.data.jumpToLatestVisible === "boolean" &&
+        (value.data.latestUserTopWithinStream === null ||
+          typeof value.data.latestUserTopWithinStream === "number") &&
+        (value.data.overflowAnchor === null || typeof value.data.overflowAnchor === "string") &&
         typeof value.data.expandedThinkingCount === "number" &&
         typeof value.data.composerRowCount === "number" &&
         Array.isArray(value.data.expandedToolTitles) &&
