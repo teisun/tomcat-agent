@@ -20,6 +20,75 @@ async function emitState(frame: HostToWebviewFrame) {
   });
 }
 
+function mockScrollableTranscript({
+  scrollHeight,
+  scrollTop,
+  userBottom,
+  userTop,
+}: {
+  scrollHeight: number;
+  scrollTop: number;
+  userBottom: number;
+  userTop: number;
+}) {
+  const stream = screen.getByTestId("stream-container");
+  const transcript = screen.getByLabelText("active-session");
+  const userMessage = screen.getAllByTestId("message-block").find(
+    (node) => node.getAttribute("data-kind") === "user",
+  );
+
+  if (!userMessage) {
+    throw new Error("Expected a user message in the transcript");
+  }
+
+  Object.defineProperty(stream, "clientHeight", {
+    configurable: true,
+    get: () => 100,
+  });
+  Object.defineProperty(stream, "scrollHeight", {
+    configurable: true,
+    get: () => scrollHeight,
+  });
+  Object.defineProperty(stream, "scrollTop", {
+    configurable: true,
+    get: () => scrollTop,
+  });
+  Object.defineProperty(transcript, "scrollHeight", {
+    configurable: true,
+    get: () => scrollHeight,
+  });
+
+  (stream as HTMLElement).getBoundingClientRect = vi.fn(
+    () => ({ top: 0, bottom: 100, height: 100, left: 0, right: 0, width: 0, x: 0, y: 0 }) as DOMRect,
+  );
+  (transcript as HTMLElement).getBoundingClientRect = vi.fn(
+    () =>
+      ({
+        top: -scrollTop,
+        bottom: scrollHeight - scrollTop,
+        height: scrollHeight,
+        left: 0,
+        right: 0,
+        width: 0,
+        x: 0,
+        y: -scrollTop,
+      }) as DOMRect,
+  );
+  (userMessage as HTMLElement).getBoundingClientRect = vi.fn(
+    () =>
+      ({
+        top: userTop,
+        bottom: userBottom,
+        height: userBottom - userTop,
+        left: 0,
+        right: 0,
+        width: 0,
+        x: 0,
+        y: userTop,
+      }) as DOMRect,
+  );
+}
+
 describe("Tomcat webview App", () => {
   it("renders transcript timeline, plan UI, attachments, and context ratio", async () => {
     mount();
@@ -641,6 +710,92 @@ describe("Tomcat webview App", () => {
 
     expect((screen.getByTestId("thinking-level-select") as HTMLSelectElement).value).toBe(
       "low",
+    );
+  });
+
+  it("shows a sticky prompt and live cluster for the active turn", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: true,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: true,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [
+              {
+                id: "user-1",
+                kind: "user",
+                text: "今天美国那边有什么有趣的新闻",
+                type: "message",
+              },
+              {
+                id: "thinking-1",
+                text: "先整理美国热点新闻，再决定是否需要补 fetch。",
+                type: "thinking",
+              },
+              {
+                id: "tool-1",
+                isError: false,
+                status: "complete",
+                summary: "已完成第一轮搜索",
+                toolCallId: "tool-1",
+                toolName: "web_search",
+                type: "tool",
+              },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-live-cluster",
+    });
+
+    expect(screen.getByTestId("live-cluster")).toBeTruthy();
+    expect(screen.getByTestId("thinking-summary").textContent).toContain("先整理美国热点新闻");
+    expect(
+      document.querySelector(".tc-thinking pre")?.textContent,
+    ).toBeFalsy();
+
+    mockScrollableTranscript({
+      scrollHeight: 320,
+      scrollTop: 220,
+      userBottom: -160,
+      userTop: -200,
+    });
+    fireEvent.scroll(screen.getByTestId("stream-container"));
+
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
+      "今天美国那边有什么有趣的新闻",
+    );
+
+    fireEvent.click(screen.getByTestId("thinking-toggle"));
+    expect(document.querySelector(".tc-thinking pre")?.textContent).toContain(
+      "先整理美国热点新闻，再决定是否需要补 fetch。",
     );
   });
 });

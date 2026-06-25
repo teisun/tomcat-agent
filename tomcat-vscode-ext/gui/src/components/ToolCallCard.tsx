@@ -72,7 +72,7 @@ export function ToolCallCard({
         <span className="tc-tool-card__caret">{collapsed ? "▸" : "▾"}</span>
       </button>
       {collapsed ? null : (
-        <div className="tc-tool-card__body" data-testid="tool-body">
+        <div className="tc-tool-card__body" data-scrollable="true" data-testid="tool-body">
           {item.summary ? <pre>{item.summary}</pre> : null}
           {item.display?.kind === "file" ? (
             <div className="tc-button-row">

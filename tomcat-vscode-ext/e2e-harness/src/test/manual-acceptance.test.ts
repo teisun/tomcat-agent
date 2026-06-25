@@ -30,6 +30,7 @@ type TomcatApi = {
       messageTexts: string[];
       overflowAnchor: string | null;
       sessionTabs: string[];
+      stickyPromptText: string | null;
       streamMetrics: {
         clientHeight: number;
         distanceFromBottom: number;
@@ -138,6 +139,14 @@ async function waitForWebviewState<T>(
   throw new Error("Timed out waiting for webview state to match the expected condition");
 }
 
+function isFollowingLatestLiveContent(snapshot: DomSnapshot): boolean {
+  return (
+    snapshot.streamMetrics.distanceFromBottom <= 16 &&
+    !snapshot.jumpToLatestVisible &&
+    snapshot.overflowAnchor === "none"
+  );
+}
+
 async function sendDomAction(
   api: TomcatApi,
   action: Parameters<TomcatApi["__testing"]["sendWebviewDomAction"]>[0],
@@ -200,16 +209,7 @@ suite("Tomcat manual acceptance", () => {
     await pause(300);
     const following = await waitForDom(
       api,
-      (snapshot) => {
-        const top = snapshot.latestUserTopWithinStream;
-        if (top === null || top < -2 || top > 16) {
-          return undefined;
-        }
-        if (snapshot.jumpToLatestVisible || snapshot.overflowAnchor !== "none") {
-          return undefined;
-        }
-        return snapshot;
-      },
+      (snapshot) => (isFollowingLatestLiveContent(snapshot) ? snapshot : undefined),
       5_000,
     );
     screenshots.push(await captureScreenshot("02-autoscroll-following.png"));
@@ -518,10 +518,7 @@ suite("Tomcat manual acceptance", () => {
           passed:
             jumpVisible.jumpToLatestVisible &&
             !backAtBottom.jumpToLatestVisible &&
-            following.latestUserTopWithinStream !== null &&
-            following.latestUserTopWithinStream >= -2 &&
-            following.latestUserTopWithinStream <= 16 &&
-            following.overflowAnchor === "none",
+            isFollowingLatestLiveContent(following),
         },
         composer: {
           passed: true,

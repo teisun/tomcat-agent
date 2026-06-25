@@ -302,6 +302,7 @@ export type WebviewIntent =
         messageTexts: string[];
         overflowAnchor: string | null;
         sessionTabs: string[];
+        stickyPromptText: string | null;
         streamMetrics: {
           clientHeight: number;
           distanceFromBottom: number;
@@ -409,6 +410,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         (value.data.latestUserTopWithinStream === null ||
           typeof value.data.latestUserTopWithinStream === "number") &&
         (value.data.overflowAnchor === null || typeof value.data.overflowAnchor === "string") &&
+        (value.data.stickyPromptText === null || typeof value.data.stickyPromptText === "string") &&
         typeof value.data.expandedThinkingCount === "number" &&
         typeof value.data.composerRowCount === "number" &&
         Array.isArray(value.data.expandedToolTitles) &&

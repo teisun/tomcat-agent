@@ -314,6 +314,7 @@ export type WebviewIntent =
         messageTexts: string[];
         overflowAnchor: string | null;
         sessionTabs: string[];
+        stickyPromptText: string | null;
         streamMetrics: {
           clientHeight: number;
           distanceFromBottom: number;

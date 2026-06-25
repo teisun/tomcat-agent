@@ -29,6 +29,44 @@ export function TranscriptView({
   const lastThinkingId = busy
     ? [...timeline].reverse().find((item) => item.type === "thinking")?.id ?? null
     : null;
+  const latestUserIndex = timeline.reduce(
+    (lastIndex, item, index) =>
+      item.type === "message" && item.kind === "user" ? index : lastIndex,
+    -1,
+  );
+
+  const renderTimelineItem = (item: WebviewTimelineItem) => {
+    switch (item.type) {
+      case "message":
+        return <MessageBubble item={item} key={item.id} />;
+      case "thinking":
+        return (
+          <ThinkingBlock
+            isStreaming={item.id === lastThinkingId}
+            item={item}
+            key={item.id}
+          />
+        );
+      case "tool":
+        return (
+          <ToolCallCard
+            item={item}
+            key={item.id}
+            onApplyEdit={onApplyEdit}
+            onOpenDiff={onOpenDiff}
+          />
+        );
+      case "plan":
+        return <PlanFileCard item={item} key={item.id} onOpenPlanFile={onOpenPlanFile} />;
+      case "approval":
+        return <ApprovalCard item={item} key={item.id} onAnswer={onAnswer} />;
+    }
+  };
+
+  const leadingTimeline =
+    busy && latestUserIndex >= 0 ? timeline.slice(0, latestUserIndex + 1) : timeline;
+  const liveClusterTimeline =
+    busy && latestUserIndex >= 0 ? timeline.slice(latestUserIndex + 1) : [];
 
   return (
     <section
@@ -36,33 +74,12 @@ export function TranscriptView({
       aria-label="active-session"
       ref={transcriptRef}
     >
-      {timeline.map((item) => {
-        switch (item.type) {
-          case "message":
-            return <MessageBubble item={item} key={item.id} />;
-          case "thinking":
-            return (
-              <ThinkingBlock
-                isStreaming={item.id === lastThinkingId}
-                item={item}
-                key={item.id}
-              />
-            );
-          case "tool":
-            return (
-              <ToolCallCard
-                item={item}
-                key={item.id}
-                onApplyEdit={onApplyEdit}
-                onOpenDiff={onOpenDiff}
-              />
-            );
-          case "plan":
-            return <PlanFileCard item={item} key={item.id} onOpenPlanFile={onOpenPlanFile} />;
-          case "approval":
-            return <ApprovalCard item={item} key={item.id} onAnswer={onAnswer} />;
-        }
-      })}
+      {leadingTimeline.map(renderTimelineItem)}
+      {liveClusterTimeline.length ? (
+        <div className="tc-live-cluster" data-testid="live-cluster">
+          {liveClusterTimeline.map(renderTimelineItem)}
+        </div>
+      ) : null}
       <div
         aria-hidden="true"
         className="tc-transcript__spacer"

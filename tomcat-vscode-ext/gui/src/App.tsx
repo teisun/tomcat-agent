@@ -4,12 +4,14 @@ import { ActivePlanStrip } from "./components/ActivePlanStrip";
 import { AttachmentChips } from "./components/AttachmentChips";
 import { Composer } from "./components/Composer";
 import { SessionBar } from "./components/SessionBar";
+import { StickyUserPrompt } from "./components/StickyUserPrompt";
 import { TranscriptView } from "./components/TranscriptView";
 import type {
   AskQuestionResult,
   HostToWebviewFrame,
   VsCodeApiLike,
   WebviewDomAction,
+  WebviewMessageBlock,
   WebviewIntent,
   WebviewStateSnapshot,
 } from "./types";
@@ -72,6 +74,8 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     .filter((entry): entry is readonly [string, { top: number; width: number }] => !!entry);
   const composerControlMetrics = Object.fromEntries(composerMetricEntries);
   const composerBar = document.querySelector<HTMLElement>('[data-testid="composer-bar"]');
+  const stickyPromptText =
+    document.querySelector<HTMLElement>('[data-testid="sticky-user-prompt-text"]')?.textContent ?? null;
   const composerRowCount = composerBar
     ? new Set(
         [...composerBar.children]
@@ -134,6 +138,7 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     messageTexts: queryText('[data-testid="message-text"]'),
     overflowAnchor: stream?.style.overflowAnchor ?? null,
     sessionTabs: queryText('[data-testid="session-option"]'),
+    stickyPromptText,
     streamMetrics: {
       clientHeight: stream?.clientHeight ?? 0,
       distanceFromBottom: stream
@@ -276,6 +281,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const activeApprovalCount =
     activeSession?.timeline.filter((item) => item.type === "approval" && !item.resolved).length ?? 0;
   const activeTimeline = activeSession?.timeline ?? [];
+  const latestUserMessage = [...activeTimeline]
+    .reverse()
+    .find((item): item is WebviewMessageBlock => item.type === "message" && item.kind === "user") ?? null;
+  const latestUserMessageText = latestUserMessage?.text ?? null;
+  const lastTimelineItem = activeTimeline.at(-1);
+  const lastItemIsLatestUser =
+    lastTimelineItem?.type === "message" && lastTimelineItem.kind === "user";
   const userMessageCount = activeTimeline.filter(
     (item) => item.type === "message" && item.kind === "user",
   ).length;
@@ -290,10 +302,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         : activeSession?.busy
           ? "Tomcat is responding..."
           : "Message Tomcat (Enter to send, Shift+Enter for newline)";
-  const { bottomSpacerHeight, scrollToLatest, userHasScrolled } = useAutoScroll({
+  const { bottomSpacerHeight, latestUserScrolledPast, scrollToLatest, userHasScrolled } = useAutoScroll({
     containerRef: streamRef,
     contentRef: transcriptRef,
     contentKey: streamContentKey,
+    lastItemIsLatestUser,
     resetKey: activeSession?.sessionId ?? null,
     userMessageCount,
   });
@@ -413,6 +426,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
       <div className="tc-stream-shell">
         <section className="tc-stream" data-testid="stream-container" ref={streamRef}>
+          {latestUserScrolledPast && latestUserMessageText ? (
+            <StickyUserPrompt text={latestUserMessageText} />
+          ) : null}
           {activeSession ? (
             activeSession.timeline.length || activeApprovalCount ? (
               <TranscriptView

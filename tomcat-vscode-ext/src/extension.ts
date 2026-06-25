@@ -101,6 +101,7 @@ export interface TomcatExtensionApi {
       messageTexts: string[];
       overflowAnchor: string | null;
       sessionTabs: string[];
+      stickyPromptText: string | null;
       streamMetrics: {
         clientHeight: number;
         distanceFromBottom: number;

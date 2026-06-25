@@ -33,19 +33,22 @@ class ResizeObserverMock {
 
 function Fixture({
   contentKey,
+  lastItemIsLatestUser,
   resetKey,
   userMessageCount,
 }: {
   contentKey: string;
+  lastItemIsLatestUser: boolean;
   resetKey: string | null;
   userMessageCount: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const { bottomSpacerHeight, scrollToLatest, userHasScrolled } = useAutoScroll({
+  const { bottomSpacerHeight, latestUserScrolledPast, scrollToLatest, userHasScrolled } = useAutoScroll({
     containerRef,
     contentRef,
     contentKey,
+    lastItemIsLatestUser,
     resetKey,
     userMessageCount,
   });
@@ -68,6 +71,7 @@ function Fixture({
       </div>
       <span data-testid="spacer-height">{bottomSpacerHeight}</span>
       <span data-testid="scroll-state">{userHasScrolled ? "paused" : "following"}</span>
+      <span data-testid="sticky-state">{latestUserScrolledPast ? "sticky" : "inline"}</span>
       <button onClick={scrollToLatest} type="button">
         Jump
       </button>
@@ -85,9 +89,14 @@ describe("useAutoScroll", () => {
     vi.unstubAllGlobals();
   });
 
-  it("follows content growth until the user scrolls away, then resets on the next user message", () => {
+  it("reveals the latest user briefly, then follows the bottom once the turn overflows", () => {
     const { rerender } = render(
-      <Fixture contentKey="initial" resetKey="s1" userMessageCount={1} />,
+      <Fixture
+        contentKey="initial"
+        lastItemIsLatestUser={false}
+        resetKey="s1"
+        userMessageCount={0}
+      />,
     );
     const root = screen.getByTestId("scroll-root");
     const content = screen.getByTestId("scroll-content");
@@ -147,11 +156,17 @@ describe("useAutoScroll", () => {
         }) as DOMRect,
     );
 
-    act(() => {
-      fireEvent.click(screen.getByText("Jump"));
-    });
+    rerender(
+      <Fixture
+        contentKey="user-1"
+        lastItemIsLatestUser={true}
+        resetKey="s1"
+        userMessageCount={1}
+      />,
+    );
     expect(scrollTop).toBe(120);
     expect(screen.getByTestId("spacer-height").textContent).toBe("40");
+    expect(screen.getByTestId("sticky-state").textContent).toBe("inline");
 
     act(() => {
       fireEvent.scroll(root);
@@ -160,19 +175,27 @@ describe("useAutoScroll", () => {
     expect(root.style.overflowAnchor).toBe("none");
 
     baseContentHeight = 260;
-    rerender(<Fixture contentKey="stream-1" resetKey="s1" userMessageCount={1} />);
+    rerender(
+      <Fixture
+        contentKey="stream-1"
+        lastItemIsLatestUser={false}
+        resetKey="s1"
+        userMessageCount={1}
+      />,
+    );
     act(() => {
       ResizeObserverMock.latest().callback([], {} as ResizeObserver);
     });
-    expect(scrollTop).toBe(120);
+    expect(scrollTop).toBe(160);
     expect(screen.getByTestId("spacer-height").textContent).toBe("0");
     expect(screen.getByTestId("scroll-state").textContent).toBe("following");
+    expect(screen.getByTestId("sticky-state").textContent).toBe("sticky");
     act(() => {
       fireEvent.scroll(root);
     });
     expect(screen.getByTestId("scroll-state").textContent).toBe("following");
 
-    scrollTop = 40;
+    scrollTop = 60;
     act(() => {
       fireEvent.scroll(root);
     });
@@ -183,18 +206,24 @@ describe("useAutoScroll", () => {
     act(() => {
       ResizeObserverMock.latest().callback([], {} as ResizeObserver);
     });
-    expect(scrollTop).toBe(40);
+    expect(scrollTop).toBe(60);
 
-    baseContentHeight = 180;
-    rerender(<Fixture contentKey="initial" resetKey="s1" userMessageCount={2} />);
-    expect(scrollTop).toBe(120);
+    act(() => {
+      fireEvent.click(screen.getByText("Jump"));
+    });
+    expect(scrollTop).toBe(220);
     expect(screen.getByTestId("scroll-state").textContent).toBe("following");
     expect(root.style.overflowAnchor).toBe("none");
   });
 
   it("resets follow mode when the session changes", () => {
     const { rerender } = render(
-      <Fixture contentKey="initial" resetKey="s1" userMessageCount={1} />,
+      <Fixture
+        contentKey="initial"
+        lastItemIsLatestUser={false}
+        resetKey="s1"
+        userMessageCount={1}
+      />,
     );
     const root = screen.getByTestId("scroll-root");
     const content = screen.getByTestId("scroll-content");
@@ -259,8 +288,15 @@ describe("useAutoScroll", () => {
     expect(screen.getByTestId("scroll-state").textContent).toBe("paused");
     expect(root.style.overflowAnchor).toBe("auto");
 
-    rerender(<Fixture contentKey="initial" resetKey="s2" userMessageCount={1} />);
-    expect(scrollTop).toBe(120);
+    rerender(
+      <Fixture
+        contentKey="initial"
+        lastItemIsLatestUser={false}
+        resetKey="s2"
+        userMessageCount={1}
+      />,
+    );
+    expect(scrollTop).toBe(80);
     expect(screen.getByTestId("scroll-state").textContent).toBe("following");
     expect(root.style.overflowAnchor).toBe("none");
   });
