@@ -40,6 +40,7 @@ fn save_and_load_store_roundtrip() {
             compaction_tokens_freed: None,
             tool_result_chars_persisted: None,
             last_checkpoint_id: None,
+            title: None,
         },
     );
     save_store(&path, &store).unwrap();

@@ -625,6 +625,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         busy: session.busy,
         isCurrent: session.isCurrent,
         sessionId: session.sessionId,
+        title: session.title,
         updatedAt: session.updatedAt,
       })),
     };

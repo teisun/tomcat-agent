@@ -8,6 +8,7 @@ export interface SessionSummary {
   busy: boolean;
   isCurrent: boolean;
   sessionId: string;
+  title: string | null;
   updatedAt: number | null;
 }
 
@@ -170,6 +171,10 @@ export class SessionRouter {
               busy: session.busy === true,
               isCurrent: session.isCurrent === true,
               sessionId: String(session.sessionId ?? ""),
+              title:
+                typeof session.title === "string" && session.title.length > 0
+                  ? session.title
+                  : null,
               updatedAt:
                 typeof session.updatedAt === "number" ? session.updatedAt : null,
             }))

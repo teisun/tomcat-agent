@@ -30,6 +30,8 @@ type TomcatApi = {
       messageTexts: string[];
       overflowAnchor: string | null;
       sessionTabs: string[];
+      sessionGroupHeaders: string[];
+      sessionMoreButtons: string[];
       stickyPromptText: string | null;
       streamMetrics: {
         clientHeight: number;
@@ -504,6 +506,22 @@ suite("Tomcat manual acceptance", () => {
     );
     screenshots.push(await captureScreenshot("15-after-restart-recovered.png"));
 
+    await sendDomAction(api, {
+      index: -1,
+      kind: "clickTestId",
+      testId: "session-select",
+    });
+    const sessionList = await waitForDom(
+      api,
+      (snapshot) => (snapshot.sessionGroupHeaders.length > 0 ? snapshot : undefined),
+      5_000,
+    );
+    screenshots.push(await captureScreenshot("16-session-dropdown.png"));
+    const sessionListPassed =
+      sessionList.sessionTabs.length > 0 &&
+      sessionList.sessionTabs.every((label) => !/^\d+_[0-9a-f]+$/.test(label.trim())) &&
+      sessionList.sessionGroupHeaders.some((header) => /Today|Yesterday|Last 7 days|Last 30 days|Older/i.test(header));
+
     const toolScrollMetric = toolExpanded.toolBodyMetrics.find((entry) =>
       /search_workspace/i.test(entry.title),
     );
@@ -565,6 +583,9 @@ suite("Tomcat manual acceptance", () => {
             hydrated.html.includes("Connected") &&
             hydrated.html.includes("new-session-button") &&
             !hydrated.html.includes("Refresh"),
+        },
+        sessionList: {
+          passed: sessionListPassed,
         },
         toolcards: {
           passed:

@@ -90,6 +90,53 @@ function mockScrollableTranscript({
 }
 
 describe("Tomcat webview App", () => {
+  it("shows a loading state while serve is connecting", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: null,
+        availableModels: [],
+        ready: false,
+        sessions: [],
+        sessionViews: {},
+        uiMode: "both",
+      },
+      messageId: "state-loading",
+    });
+
+    expect(screen.getByTestId("loading-state").textContent).toContain("Connecting");
+    expect(screen.queryByText("No active Tomcat session")).toBeNull();
+    expect(screen.getByTestId("connection-chip").getAttribute("aria-label")).toContain(
+      "Connecting",
+    );
+    expect(screen.getByTestId("connection-chip").className).toContain(
+      "tc-conn-light--connecting",
+    );
+  });
+
+  it("shows Ready to chat when connected but no active session", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: null,
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [],
+        sessionViews: {},
+        uiMode: "both",
+      },
+      messageId: "state-ready-empty",
+    });
+
+    expect(screen.getByText("Ready to chat")).toBeTruthy();
+    expect(screen.queryByText("No active Tomcat session")).toBeNull();
+    expect(screen.queryByTestId("loading-state")).toBeNull();
+  });
+
   it("renders transcript timeline, plan UI, attachments, and context ratio", async () => {
     mount();
 
@@ -106,6 +153,7 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             owner: "webview",
             sessionId: "s1",
+            title: null,
             updatedAt: 1,
           },
         ],
@@ -198,7 +246,8 @@ describe("Tomcat webview App", () => {
     expect(screen.queryByText("updated file")).toBeNull();
     fireEvent.click(screen.getByTestId("tool-toggle"));
     expect(screen.getByText("updated file")).toBeTruthy();
-    expect(screen.getByTestId("session-option").textContent).toContain("s1");
+    fireEvent.click(screen.getByTestId("session-select"));
+    expect(screen.getByTestId("session-option").textContent).toContain("New session");
     expect(screen.queryByLabelText("Close active session")).toBeNull();
     expect(screen.getByTestId("plan-card").textContent).toContain("login-refactor.plan.md");
     expect(screen.getByTestId("build-plan").textContent).toContain("Build");
@@ -222,6 +271,7 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             owner: "webview",
             sessionId: "s1",
+            title: null,
             updatedAt: 1,
           },
         ],
@@ -392,6 +442,7 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             owner: "webview",
             sessionId: "s1",
+            title: null,
             updatedAt: 1,
           },
         ],
@@ -495,6 +546,7 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             owner: "webview",
             sessionId: "s1",
+            title: null,
             updatedAt: 1,
           },
         ],
@@ -549,6 +601,7 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: false,
             owner: "participant",
             sessionId: "locked-session",
+            title: null,
             updatedAt: 1,
           },
         ],
@@ -594,6 +647,7 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             owner: "webview",
             sessionId: "s1",
+            title: null,
             updatedAt: 1,
           },
         ],
@@ -620,9 +674,18 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByTestId("new-session-button").textContent).toBe("+");
-    expect(screen.getByTestId("connection-chip").textContent).toContain("Connected");
+    expect(screen.getByTestId("connection-chip").getAttribute("aria-label")).toContain(
+      "Connected",
+    );
+    expect(screen.getByTestId("connection-chip").className).toContain(
+      "tc-conn-light--connected",
+    );
     expect(screen.queryByText("Tomcat")).toBeNull();
     expect(screen.queryByRole("button", { name: /refresh/i })).toBeNull();
+
+    const topbar = screen.getByLabelText("Session bar");
+    expect(topbar.firstElementChild).toBe(screen.getByTestId("connection-chip"));
+    expect(topbar.lastElementChild).toBe(screen.getByTestId("new-session-button"));
   });
 
   it("updates the thinking level select from session state", async () => {
@@ -641,6 +704,7 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             owner: "webview",
             sessionId: "s1",
+            title: null,
             updatedAt: 1,
           },
         ],
@@ -683,6 +747,7 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             owner: "webview",
             sessionId: "s1",
+            title: null,
             updatedAt: 2,
           },
         ],
@@ -729,6 +794,7 @@ describe("Tomcat webview App", () => {
             ownedByThisFrontend: true,
             owner: "webview",
             sessionId: "s1",
+            title: null,
             updatedAt: 1,
           },
         ],
@@ -797,5 +863,265 @@ describe("Tomcat webview App", () => {
     expect(document.querySelector(".tc-thinking pre")?.textContent).toContain(
       "先整理美国热点新闻，再决定是否需要补 fetch。",
     );
+  });
+
+  it("shows the session title instead of the raw sessionId in the dropdown", async () => {
+    mount();
+    const now = Date.now();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "1781621492962_3ee132361e6832e6",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "1781621492962_3ee132361e6832e6",
+            title: "帮我重构 session 列表",
+            updatedAt: now,
+          },
+        ],
+        sessionViews: {
+          "1781621492962_3ee132361e6832e6": {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "1781621492962_3ee132361e6832e6",
+            thinkingLevel: "medium",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-title",
+    });
+
+    expect(screen.getByTestId("session-select").textContent).toContain(
+      "帮我重构 session 列表",
+    );
+    expect(screen.getByTestId("session-select").textContent).not.toContain(
+      "1781621492962",
+    );
+
+    fireEvent.click(screen.getByTestId("session-select"));
+    expect(screen.getByTestId("session-option").textContent).toContain(
+      "帮我重构 session 列表",
+    );
+  });
+
+  it("falls back to New session when title is empty or whitespace", async () => {
+    mount();
+    const now = Date.now();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "empty-session",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "empty-session",
+            title: null,
+            updatedAt: now,
+          },
+          {
+            busy: false,
+            isCurrent: false,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "whitespace-session",
+            title: "   ",
+            updatedAt: now - 1000,
+          },
+        ],
+        sessionViews: {
+          "empty-session": {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "empty-session",
+            thinkingLevel: "medium",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-empty-title",
+    });
+
+    expect(screen.getByTestId("session-select").textContent).toContain("New session");
+    expect(screen.getByTestId("session-select").textContent).not.toContain("empty-session");
+
+    fireEvent.click(screen.getByTestId("session-select"));
+    const options = screen.getAllByTestId("session-option").map((o) => o.textContent);
+    expect(options[0]).toContain("New session");
+    expect(options[1]).toContain("New session");
+    expect(options.every((o) => !o?.includes("whitespace-session"))).toBe(true);
+  });
+
+  it("caps each group at 6 and reveals more on click", async () => {
+    mount();
+    const now = Date.now();
+    const sessions = Array.from({ length: 7 }, (_, index) => ({
+      busy: false,
+      isCurrent: index === 0,
+      ownedByThisFrontend: true,
+      owner: "webview" as const,
+      sessionId: `s${index}`,
+      title: `topic ${index}`,
+      updatedAt: now - index * 1000,
+    }));
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s0",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions,
+        sessionViews: {
+          s0: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s0",
+            thinkingLevel: "medium",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-cap",
+    });
+
+    fireEvent.click(screen.getByTestId("session-select"));
+    expect(screen.getAllByTestId("session-option").length).toBe(6);
+    expect(screen.getByTestId("session-more").textContent).toContain("Show 1 more");
+
+    fireEvent.click(screen.getByTestId("session-more"));
+    expect(screen.getAllByTestId("session-option").length).toBe(7);
+    expect(screen.queryByTestId("session-more")).toBeNull();
+  });
+
+  it("groups sessions by date with section headers", async () => {
+    mount();
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "today-s",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "today-s",
+            title: "today topic",
+            updatedAt: now - 60_000,
+          },
+          {
+            busy: false,
+            isCurrent: false,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "yesterday-s",
+            title: "yesterday topic",
+            updatedAt: now - day - 60_000,
+          },
+          {
+            busy: false,
+            isCurrent: false,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "last7-s",
+            title: "last7 topic",
+            updatedAt: now - 4 * day,
+          },
+          {
+            busy: false,
+            isCurrent: false,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "last30-s",
+            title: "last30 topic",
+            updatedAt: now - 20 * day,
+          },
+          {
+            busy: false,
+            isCurrent: false,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "older-s",
+            title: "older topic",
+            updatedAt: now - 400 * day,
+          },
+        ],
+        sessionViews: {
+          "today-s": {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "today-s",
+            thinkingLevel: "medium",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-groups",
+    });
+
+    fireEvent.click(screen.getByTestId("session-select"));
+    const headers = screen.getAllByTestId("session-group-header").map((h) => h.textContent);
+    expect(headers).toEqual([
+      "Today",
+      "Yesterday",
+      "Last 7 days",
+      "Last 30 days",
+      "Older",
+    ]);
   });
 });

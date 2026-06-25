@@ -279,11 +279,18 @@ pub(crate) async fn handle_command(
                             .get(&session_id)
                             .map(|live_slot| live_slot.is_busy())
                             .unwrap_or(false);
+                        let title = entry.title.clone().or_else(|| {
+                            // 惰性回填：无持久化 title 时从 transcript 首条 user message 派生，不落盘。
+                            let path = session_manager.transcript_path(&session_id);
+                            crate::core::session::transcript::read_first_user_message_text(&path, 200)
+                                .map(|text| crate::core::session::manager::derive_title_from_user_message(&text))
+                        }).or_else(|| Some("New session".to_string()));
                         serde_json::json!({
                             "sessionId": session_id,
                             "updatedAt": entry.updated_at,
                             "isCurrent": current_session_id.as_deref() == Some(entry.session_id.as_str()),
                             "busy": busy,
+                            "title": title,
                         })
                     })
                     .collect::<Vec<_>>();

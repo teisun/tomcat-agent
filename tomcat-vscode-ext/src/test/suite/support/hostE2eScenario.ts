@@ -743,11 +743,16 @@ export async function assertWebviewMultiSessionFlow(
   );
   await waitForEvent(api, { sessionId: sessionB!, type: "agent_end" });
 
-  const snapshot = await api.__testing.captureWebviewDom();
+  // SessionBar renders sessions in a collapsed dropdown; the options only
+  // exist in the DOM when the dropdown is open. Assert against webview state
+  // (the source of truth for multi-session isolation) instead of the DOM.
+  const sessions = stateB.sessions.map((tab) => tab.sessionId);
   assert.ok(
-    snapshot.sessionTabs.length >= 2,
-    "expected the webview DOM to render multiple session tabs",
+    sessions.length >= 2,
+    "expected the webview state to track multiple sessions",
   );
+  assert.ok(sessions.includes(sessionA!), "expected session A to remain tracked");
+  assert.ok(sessions.includes(sessionB!), "expected session B to be tracked");
 }
 
 export async function assertWebviewOwnershipFlow(

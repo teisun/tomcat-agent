@@ -62,11 +62,26 @@ function currentThinkingLevel(session) {
   return session.modelThinking?.[session.model] || null;
 }
 
+function deriveTitleFromHistory(history) {
+  const firstUser = history.find((entry) => entry?.type === "message" && entry?.message?.role === "user");
+  const text = firstUser?.message?.content ?? "";
+  const firstLine = String(text)
+    .split("\n")
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!firstLine) {
+    return null;
+  }
+  const chars = [...firstLine];
+  return chars.length > 40 ? `${chars.slice(0, 40).join("")}\u{2026}` : firstLine;
+}
+
 function normalizeSession(session) {
+  const history = Array.isArray(session?.history) ? session.history : buildSeedHistory();
   return {
     busy: false,
     cwd: typeof session?.cwd === "string" ? session.cwd : process.cwd(),
-    history: Array.isArray(session?.history) ? session.history : buildSeedHistory(),
+    history,
     mode: typeof session?.mode === "string" ? session.mode : "code",
     model:
       typeof session?.model === "string" && MODEL_OPTIONS.includes(session.model)
@@ -80,6 +95,9 @@ function normalizeSession(session) {
       typeof session?.sessionKey === "string"
         ? session.sessionKey
         : "manual-acceptance-workspace",
+    title: typeof session?.title === "string" && session.title.length > 0
+      ? session.title
+      : deriveTitleFromHistory(history),
     updatedAt: typeof session?.updatedAt === "number" ? session.updatedAt : Date.now(),
   };
 }
@@ -670,6 +688,7 @@ function handleCommand(frame) {
             busy: session.busy,
             isCurrent: sessionId === activeSessionId,
             sessionId,
+            title: session.title ?? null,
             updatedAt: session.updatedAt,
           })),
         },

@@ -292,6 +292,40 @@ pub fn read_header(path: &Path) -> Result<SessionHeader, AppError> {
     Ok(header)
 }
 
+/// 流式扫描 transcript 前 `max_lines` 行，返回首条 `role:user` message 的 content 文本。
+/// 用于 list_sessions 时给老会话（无持久化 title）惰性回填标题，不落盘。
+/// 找不到返回 None；调用方自行兜底。
+pub fn read_first_user_message_text(path: &Path, max_lines: usize) -> Option<String> {
+    let f = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(f);
+    for (idx, line) in reader.lines().enumerate() {
+        if idx >= max_lines {
+            break;
+        }
+        let line = line.ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("message") {
+            continue;
+        }
+        let message = value.get("message")?;
+        if message.get("role").and_then(|v| v.as_str()) != Some("user") {
+            continue;
+        }
+        return message
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+    None
+}
+
 fn parse_entry_line(line: &str, stats: &mut TranscriptReadStats) -> Option<TranscriptEntry> {
     let trimmed = line.trim();
     if trimmed.is_empty() {

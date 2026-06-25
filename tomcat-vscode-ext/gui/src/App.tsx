@@ -138,6 +138,8 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     messageTexts: queryText('[data-testid="message-text"]'),
     overflowAnchor: stream?.style.overflowAnchor ?? null,
     sessionTabs: queryText('[data-testid="session-option"]'),
+    sessionGroupHeaders: queryText('[data-testid="session-group-header"]'),
+    sessionMoreButtons: queryText('[data-testid="session-more"]'),
     stickyPromptText,
     streamMetrics: {
       clientHeight: stream?.clientHeight ?? 0,
@@ -459,10 +461,15 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 <p>Use the composer below to talk with Tomcat, switch models, or enter plan mode.</p>
               </div>
             )
-          ) : (
+          ) : state.ready ? (
             <div className="tc-empty-state">
-              <h2>No active Tomcat session</h2>
-              <p>Create a new session to start chatting.</p>
+              <h2>Ready to chat</h2>
+              <p>Use the composer below to talk with Tomcat, switch models, or enter plan mode.</p>
+            </div>
+          ) : (
+            <div className="tc-empty-state tc-empty-state--loading" data-testid="loading-state">
+              <span className="tc-spinner" aria-hidden="true" />
+              <p>Connecting…</p>
             </div>
           )}
         </section>

@@ -30,6 +30,28 @@ static APPEND_SEQ: AtomicU64 = AtomicU64::new(0);
 static SESSION_ID_SEQ: AtomicU64 = AtomicU64::new(0);
 const VALIDATE_TAIL_CAP: usize = 64;
 const SESSIONS_FILE: &str = "sessions.json";
+const TITLE_MAX_CHARS: usize = 40;
+
+/// 从首条 user message 文本派生会话标题：取首个非空行、trim、超过 40 字符截断加省略号；
+/// 全空则回退 "New session"。纯函数，无副作用，便于单测。
+pub fn derive_title_from_user_message(text: &str) -> String {
+    let first_line = text
+        .lines()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty());
+    match first_line {
+        Some(line) => {
+            let count = line.chars().count();
+            if count > TITLE_MAX_CHARS {
+                let truncated: String = line.chars().take(TITLE_MAX_CHARS).collect();
+                format!("{truncated}\u{2026}")
+            } else {
+                line.to_string()
+            }
+        }
+        None => "New session".to_string(),
+    }
+}
 
 struct AppendInFlightGuard {
     counter: Arc<AtomicUsize>,
@@ -291,6 +313,7 @@ impl SessionManager {
             compaction_tokens_freed: None,
             tool_result_chars_persisted: None,
             last_checkpoint_id: None,
+            title: None,
         };
         self.with_store_mut(|store| {
             store.sessions.insert(session_id.clone(), entry.clone());
@@ -395,6 +418,83 @@ impl SessionManager {
             if let Some(entry) = store.sessions.get_mut(&session_id) {
                 entry.updated_at = Utc::now().timestamp_millis();
                 f(entry);
+            }
+            Ok(())
+        })
+    }
+
+    /// 首条 user message 写入后，若当前会话尚无 title，则派生并持久化一次。
+    /// 已有 title 直接返回，永不覆盖；非 user message 直接返回。保证标题稳定。
+    fn ensure_title_from_message(&self, message: &serde_json::Value) -> Result<(), AppError> {
+        let session_key = self.current_session_key().to_string();
+        self.ensure_title_for_session_key(&session_key, message)
+    }
+
+    /// 按 sessionKey 派生并持久化 title（首条 user、无 title 时才写）。
+    fn ensure_title_for_session_key(
+        &self,
+        session_key: &str,
+        message: &serde_json::Value,
+    ) -> Result<(), AppError> {
+        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role != "user" {
+            return Ok(());
+        }
+        let store = self.load_store()?;
+        let session_id = match self.resolve_active_session_id(&store, session_key) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        if store
+            .sessions
+            .get(&session_id)
+            .and_then(|entry| entry.title.as_ref())
+            .is_some()
+        {
+            return Ok(());
+        }
+        let text = message
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let title = derive_title_from_user_message(text);
+        self.update_session(session_key, |entry| {
+            if entry.title.is_none() {
+                entry.title = Some(title.clone());
+            }
+        })
+    }
+
+    /// 按 session_id 派生并持久化 title（插件多实例路由路径）。
+    fn ensure_title_for_session_id(
+        &self,
+        session_id: &str,
+        message: &serde_json::Value,
+    ) -> Result<(), AppError> {
+        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role != "user" {
+            return Ok(());
+        }
+        let needs_title = self
+            .load_store()?
+            .sessions
+            .get(session_id)
+            .and_then(|entry| entry.title.as_ref())
+            .is_none();
+        if !needs_title {
+            return Ok(());
+        }
+        let text = message
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let title = derive_title_from_user_message(text);
+        self.with_store_mut(|store| {
+            if let Some(entry) = store.sessions.get_mut(session_id) {
+                if entry.title.is_none() {
+                    entry.updated_at = Utc::now().timestamp_millis();
+                    entry.title = Some(title.clone());
+                }
             }
             Ok(())
         })
@@ -518,6 +618,7 @@ impl SessionManager {
             let id = generate_entry_id();
             let now = iso_ts_now()?;
             let sync = Self::message_sync_level(&message);
+            let message_for_title = message.clone();
             let entry = TranscriptEntry::Message(MessageEntry {
                 id: Some(id.clone()),
                 parent_id: None,
@@ -525,6 +626,7 @@ impl SessionManager {
                 message,
             });
             append_entry_with_sync(&path, &entry, sync)?;
+            let _ = self.ensure_title_from_message(&message_for_title);
             Ok(id)
         })
     }
@@ -566,6 +668,7 @@ impl SessionManager {
             let id = generate_entry_id();
             let now = iso_ts_now()?;
             let sync = Self::message_sync_level(&message);
+            let message_for_title = message.clone();
             let entry = TranscriptEntry::Message(MessageEntry {
                 id: Some(id.clone()),
                 parent_id: None,
@@ -573,6 +676,7 @@ impl SessionManager {
                 message,
             });
             append_entry_with_sync(&path, &entry, sync)?;
+            let _ = self.ensure_title_for_session_id(session_id, &message_for_title);
             Ok(id)
         })
     }

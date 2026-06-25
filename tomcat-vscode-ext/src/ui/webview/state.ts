@@ -479,6 +479,7 @@ function mapSessionToTab(
     ownedByThisFrontend,
     owner,
     sessionId: session.sessionId,
+    title: session.title,
     updatedAt: session.updatedAt,
   };
 }
@@ -842,6 +843,7 @@ export class WebviewStateStore {
       ownedByThisFrontend: owner === frontend,
       owner,
       sessionId,
+      title: null,
       updatedAt: null,
     });
   }

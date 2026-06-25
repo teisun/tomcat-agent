@@ -71,6 +71,9 @@ pub struct SessionEntry {
     /// 最近一次会话级 restore 成功落到的 checkpoint（仅 TurnEnd/Interrupt）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_checkpoint_id: Option<String>,
+    /// 会话标题：首条 user message 首行截断 ≤40 字符生成一次、持久化、永不覆盖。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// 从路径加载 SessionStore；文件不存在或为空时返回空 store。

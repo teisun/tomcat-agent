@@ -15,6 +15,7 @@ describe("webview dual-channel state store", () => {
             busy: false,
             isCurrent: true,
             sessionId: "s1",
+            title: null,
             updatedAt: 123,
           },
         ],
@@ -230,7 +231,7 @@ describe("webview dual-channel state store", () => {
       {
         activeSessionId: "s1",
         scope: "disk",
-        sessions: [{ busy: false, isCurrent: true, sessionId: "s1", updatedAt: 123 }],
+        sessions: [{ busy: false, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
       },
       new Map([["s1", "webview"]]),
       "webview",

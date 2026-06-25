@@ -149,6 +149,7 @@ export interface WebviewSessionTab {
   ownedByThisFrontend: boolean;
   owner: FrontendOwnerKind | null;
   sessionId: string;
+  title: string | null;
   updatedAt: number | null;
 }
 
@@ -314,6 +315,8 @@ export type WebviewIntent =
         messageTexts: string[];
         overflowAnchor: string | null;
         sessionTabs: string[];
+        sessionGroupHeaders: string[];
+        sessionMoreButtons: string[];
         stickyPromptText: string | null;
         streamMetrics: {
           clientHeight: number;
