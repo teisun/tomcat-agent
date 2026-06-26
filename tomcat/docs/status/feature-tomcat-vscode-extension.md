@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-26 22:45 +0800 | DOING | feature/tomcat-vscode-extension | — |
+| Tom | 2026-06-27 00:15 +0800 | DOING | feature/tomcat-vscode-extension | — |
 
 ### ✅ DONE
 - [x] **[P1]** 认领 `T2-P1-020`，任务卡 / 看板索引已切到 `DOING / Tom`；依赖例外已按用户显式要求记录。
@@ -13,8 +13,11 @@
 - [x] **[P1]** 更新交付文档：status、`T2-P1-020` 任务卡、看板索引与 Stage B webview 架构文档已同步到最新实现事实。
 - [x] **[P1]** 按 `/commit-with-status` 完成本地合规提交（聊天式 webview 重构 + 文档同步）。
 - [x] **[P2]** 修复 macOS login bash 下 `tomcat init` / `install.sh` 写入 PATH 后新终端仍找不到 `tomcat`：`auto_add_to_path` 改为 PATH 写 `.bashrc` 并确保 `.bash_profile` source `.bashrc`，`install.sh` 同步补齐。
+- [x] **[P1]** 2026-06-26 误删事故后恢复可执行计划：`.cursor/plans/transcript-ui-restore.plan.md`（仿 VSCode Chat 重做 transcript，52 todo，含 utility-flash 默认模型配置）。
+- [x] **[P1]** 新增 Agent 安全规则 `tomcat/.cursor/rules/no-rm-rf.mdc`（禁止 `rm -rf "$VAR"` 跨命令边界等事故形态，alwaysApply）。
 
 ### 🔄 IN PROGRESS
+- [ ] **[P1]** 按 `transcript-ui-restore.plan.md` 执行 transcript UI 仿 VSCode Chat 重做（上午未提交工作已丢失，从干净基线重建）。
 - [ ] **[P1]** 推送 `feature/tomcat-vscode-extension` 远端后，将 `T2-P1-020` 前移到 `PENDING_INTEGRATION` 并走集成合并流程。
 
 ### 🔌 INTERFACE (当前口径)
