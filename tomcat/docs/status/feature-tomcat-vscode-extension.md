@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-22 12:45 +0800 | DOING | feature/tomcat-vscode-extension | — |
+| Tom | 2026-06-26 22:45 +0800 | DOING | feature/tomcat-vscode-extension | — |
 
 ### ✅ DONE
 - [x] **[P1]** 认领 `T2-P1-020`，任务卡 / 看板索引已切到 `DOING / Tom`；依赖例外已按用户显式要求记录。
@@ -12,6 +12,7 @@
 - [x] **[P1]** 真实桌面 UI 验收已完成：打开 Tomcat 侧栏、真实发送消息、切模型 `fake-model -> gpt-5.4`、`Chat -> Plan -> Build -> Chat`、打开 `.plan.md` 文件、添加附件并发送、观察 `Ctx 42% -> 58%`，全程不依赖内部注入。
 - [x] **[P1]** 更新交付文档：status、`T2-P1-020` 任务卡、看板索引与 Stage B webview 架构文档已同步到最新实现事实。
 - [x] **[P1]** 按 `/commit-with-status` 完成本地合规提交（聊天式 webview 重构 + 文档同步）。
+- [x] **[P2]** 修复 macOS login bash 下 `tomcat init` / `install.sh` 写入 PATH 后新终端仍找不到 `tomcat`：`auto_add_to_path` 改为 PATH 写 `.bashrc` 并确保 `.bash_profile` source `.bashrc`，`install.sh` 同步补齐。
 
 ### 🔄 IN PROGRESS
 - [ ] **[P1]** 推送 `feature/tomcat-vscode-extension` 远端后，将 `T2-P1-020` 前移到 `PENDING_INTEGRATION` 并走集成合并流程。

@@ -191,33 +191,61 @@ fn auto_add_to_path(bin_dir: &Path) -> bool {
     let Some(home) = crate::infra::platform::home_dir() else {
         return false;
     };
-    let profile = if shell.contains("zsh") {
-        home.join(".zshrc")
-    } else if shell.contains("bash") {
-        let bp = home.join(".bash_profile");
-        if bp.exists() {
-            bp
-        } else {
-            home.join(".bashrc")
-        }
-    } else {
-        home.join(".profile")
-    };
     let export_line = format!("export PATH=\"{}:$PATH\"", bin_dir.display());
-    if let Ok(content) = std::fs::read_to_string(&profile) {
-        if content.contains(&export_line) {
+
+    if shell.contains("zsh") {
+        return append_export_once(&home.join(".zshrc"), &export_line);
+    }
+
+    if shell.contains("bash") {
+        // macOS 的 login bash 只读 .bash_profile/.profile（不读 .bashrc），而 Linux 交互式
+        // 终端通常只读 .bashrc。为同时覆盖两类场景：把 export 写进 .bashrc（交互式 shell 的
+        // 单一来源），再确保 .bash_profile 会 source .bashrc（覆盖 login shell）。
+        let wrote_bashrc = append_export_once(&home.join(".bashrc"), &export_line);
+        let linked_profile = ensure_bash_profile_sources_bashrc(&home);
+        return wrote_bashrc || linked_profile;
+    }
+
+    append_export_once(&home.join(".profile"), &export_line)
+}
+
+/// 幂等地把一行 export 追加到指定 shell 启动脚本；已存在同序 export 则跳过。
+fn append_export_once(profile: &Path, export_line: &str) -> bool {
+    if let Ok(content) = std::fs::read_to_string(profile) {
+        if content.contains(export_line) {
             return true;
         }
     }
     let mut f = match std::fs::OpenOptions::new()
         .append(true)
         .create(true)
-        .open(&profile)
+        .open(profile)
     {
         Ok(f) => f,
         Err(_) => return false,
     };
     writeln!(f, "\n# Added by tomcat init\n{}", export_line).is_ok()
+}
+
+/// 确保 `~/.bash_profile` 会 source `~/.bashrc`，使 macOS 上的 login bash 也能加载写入 .bashrc 的 PATH。
+/// 若 .bash_profile 已包含任意引用 .bashrc 的语句则视为已就绪，不重复注入。
+fn ensure_bash_profile_sources_bashrc(home: &Path) -> bool {
+    let bash_profile = home.join(".bash_profile");
+    let source_snippet = "[ -r \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"";
+    if let Ok(content) = std::fs::read_to_string(&bash_profile) {
+        if content.contains(".bashrc") {
+            return true;
+        }
+    }
+    let mut f = match std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&bash_profile)
+    {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    writeln!(f, "\n# Added by tomcat init\n{}", source_snippet).is_ok()
 }
 
 /// 与 `tomcat doctor` 相同的逐项检查。`skip_api_key` 为 true 时（用于 `tomcat init` 第二步）不输出 .env 权限与 OPENAI_API_KEY 相关行。

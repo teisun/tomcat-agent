@@ -288,6 +288,25 @@ ensure_path_config() {
       } >> "${profile}"
       echo "已写入 ${profile}，新开终端将自动生效。"
     fi
+    # macOS 的 login bash 只读 .bash_profile/.profile（不读 .bashrc）。当 PATH 写进
+    # .bashrc 时，确保 .bash_profile 会 source .bashrc，否则新开的 login 终端找不到 tomcat。
+    case "${SHELL:-}" in
+      *bash)
+        if [ "${profile}" = "$HOME/.bashrc" ]; then
+          bash_profile="$HOME/.bash_profile"
+          if [ -f "${bash_profile}" ] && grep -Fqs ".bashrc" "${bash_profile}" 2>/dev/null; then
+            :
+          else
+            {
+              echo ""
+              echo "# tomcat (install.sh)"
+              echo '[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"'
+            } >> "${bash_profile}"
+            echo "已让 ${bash_profile} 加载 .bashrc，覆盖 macOS 的 login shell。"
+          fi
+        fi
+        ;;
+    esac
     echo "当前终端请执行: source \"${profile}\"  或重新打开终端。"
   else
     echo "当前终端可直接执行: \"${INSTALL_DIR}/tomcat\" init"
