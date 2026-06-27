@@ -3,15 +3,23 @@ import * as path from "node:path";
 import * as http from "node:http";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 
+import { resolveCargoCommand } from "../scripts/resolveCargoCommand";
 import type { ServeEvent } from "../src/serveClient/wire";
 import { TomcatMessenger } from "../src/serveClient/TomcatMessenger";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(__dirname, "..", "..");
 const tomcatRoot = path.resolve(repoRoot, "tomcat");
-const tomcatBinary = path.resolve(tomcatRoot, "target", "debug", "tomcat");
+const cargoTargetDir = process.env.CARGO_TARGET_DIR
+  ? path.resolve(process.env.CARGO_TARGET_DIR)
+  : path.resolve(tomcatRoot, "target");
+const tomcatBinary = path.resolve(
+  cargoTargetDir,
+  "debug",
+  process.platform === "win32" ? "tomcat.exe" : "tomcat",
+);
 
 let buildPromise: Promise<void> | undefined;
 
@@ -92,10 +100,13 @@ export function responsesCompleted(status = "completed"): ScriptedPart {
 }
 
 export async function ensureTomcatBinary(): Promise<string> {
-  buildPromise ??= execFileAsync("cargo", ["build", "--quiet", "--bin", "tomcat"], {
+  buildPromise ??= execFileAsync(resolveCargoCommand(), ["build", "--quiet", "--bin", "tomcat"], {
     cwd: tomcatRoot,
   }).then(() => undefined);
   await buildPromise;
+  if (!(await stat(tomcatBinary).then(() => true).catch(() => false))) {
+    throw new Error(`tomcat binary not found after build: ${tomcatBinary}`);
+  }
   return tomcatBinary;
 }
 

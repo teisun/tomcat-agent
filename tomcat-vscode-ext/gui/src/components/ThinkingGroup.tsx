@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { WebviewMessageBlock, WebviewToolCard } from "../types";
 import { MessageBubble } from "./MessageBubble";
+import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolRow } from "./ToolRow";
 import type { AssistantResponseGroup } from "./sessionList/groupTimelineByAssistantResponse";
 
@@ -100,11 +101,7 @@ export function ThinkingGroup({
         </button>
         {collapsed ? null : (
           <>
-            {thinking?.text ? (
-              <pre className="tc-thinking-box__body" data-testid="thinking-group-body">
-                {thinking.text}
-              </pre>
-            ) : null}
+            {thinking ? <ThinkingBlock item={thinking} variant="embedded" /> : null}
             {tools.map((tool: WebviewToolCard) => (
               <ToolRow
                 item={tool}

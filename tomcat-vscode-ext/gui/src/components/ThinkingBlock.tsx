@@ -18,9 +18,11 @@ function summarizeThinking(text: string): string | null {
 export function ThinkingBlock({
   isStreaming = false,
   item,
+  variant = "standalone",
 }: {
   isStreaming?: boolean;
   item: WebviewThinkingBlock;
+  variant?: "embedded" | "standalone";
 }) {
   const [collapsed, setCollapsed] = useState(true);
   const summary = useMemo(() => summarizeThinking(item.text), [item.text]);
@@ -28,6 +30,14 @@ export function ThinkingBlock({
   useEffect(() => {
     setCollapsed(true);
   }, [item.id]);
+
+  if (variant === "embedded") {
+    return item.text ? (
+      <pre className="tc-thinking-box__body" data-testid="thinking-group-body">
+        {item.text}
+      </pre>
+    ) : null;
+  }
 
   return (
     <section

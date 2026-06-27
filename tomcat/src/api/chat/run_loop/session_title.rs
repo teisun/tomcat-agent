@@ -28,6 +28,13 @@ pub(crate) fn maybe_spawn_semantic_session_title(
         }
         let session_key = session.current_session_key().to_string();
         let rule_title = crate::core::session::manager::derive_title_from_user_message(text);
+        let Ok(Some(current_entry)) = session.get_session(&session_key) else {
+            break;
+        };
+        let current_title = current_entry.title.as_deref().unwrap_or("");
+        if !current_title.is_empty() && !is_rule_derived_title(current_title, text) {
+            break;
+        }
         let user_text = text.to_string();
         let session = session.clone();
         tokio::spawn(async move {

@@ -158,6 +158,8 @@ pub mod wire {
     pub const WIRE_SESSION_TITLE_UPDATED: &str = "session.title_updated";
     /// `todos` 工具写入 session scratchpad 后推送。
     pub const WIRE_SESSION_TODOS: &str = "session.todos";
+    /// turn 折叠标题异步 utility 覆盖后推送。
+    pub const WIRE_TURN_SUMMARY_UPDATED: &str = "turn.summary_updated";
 
     // --- ExtensionEvent ---
     pub const WIRE_STARTUP: &str = "startup";
@@ -304,6 +306,10 @@ pub enum AgentEvent {
         message: Message,
         #[serde(rename = "toolResults")]
         tool_results: Vec<Message>,
+        #[serde(rename = "assistantMessageId", skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<String>,
+        #[serde(rename = "toolCallIds", skip_serializing_if = "Vec::is_empty", default)]
+        tool_call_ids: Vec<String>,
         #[serde(rename = "summaryTitle", skip_serializing_if = "Option::is_none")]
         summary_title: Option<String>,
     },

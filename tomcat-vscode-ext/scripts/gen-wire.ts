@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 
+import { resolveCargoCommand } from "./resolveCargoCommand";
+
 const extensionRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(extensionRoot, "..");
 const tomcatCliRoot = path.resolve(repoRoot, "tomcat");
@@ -10,8 +12,9 @@ const targetFile = path.resolve(targetDir, "wire.d.ts");
 const checkOnly = process.argv.includes("--check");
 
 function runPrintSchema(): string {
+  const cargoCommand = resolveCargoCommand();
   const result = spawnSync(
-    "cargo",
+    cargoCommand,
     ["run", "--bin", "tomcat", "--", "serve", "--print-schema"],
     {
       cwd: tomcatCliRoot,
@@ -20,8 +23,14 @@ function runPrintSchema(): string {
     },
   );
 
+  if (result.error) {
+    throw new Error(`failed to spawn cargo: ${result.error.message}`);
+  }
   if (result.status !== 0) {
-    process.stderr.write(result.stderr);
+    const stderr = result.stderr || result.stdout || "";
+    if (stderr) {
+      process.stderr.write(stderr);
+    }
     throw new Error("failed to run `cargo run --bin tomcat -- serve --print-schema`");
   }
 

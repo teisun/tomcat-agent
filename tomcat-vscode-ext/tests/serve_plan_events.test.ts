@@ -33,6 +33,12 @@ describe("real tomcat serve plan event forwarding", () => {
           event.type === "plan.build" &&
           event.sessionId === init.sessionId,
       );
+      const agentEnd = waitForEvent(
+        runtime.messenger,
+        (event) =>
+          event.type === "agent_end" &&
+          event.sessionId === init.sessionId,
+      );
 
       await runtime.messenger.sendSetPlanMode({
         action: "build",
@@ -40,6 +46,7 @@ describe("real tomcat serve plan event forwarding", () => {
         sessionId: init.sessionId,
       });
       const events = await planBuild;
+      await agentEnd;
       const buildEvent = events.find(
         (event) =>
           event.type === "plan.build" && event.sessionId === init.sessionId,

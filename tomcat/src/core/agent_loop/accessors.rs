@@ -52,6 +52,7 @@ impl AgentLoop {
             llm,
             primitive,
             emitter,
+            session_manager: None,
             config_backend: None,
             bash_task_registry: None,
             web_fetch_runtime: None,
@@ -127,6 +128,15 @@ impl AgentLoop {
         self
     }
 
+    /// 注入 session manager，用于 turn 摘要异步回写 transcript 元数据。
+    pub fn with_session_manager(
+        mut self,
+        session: crate::core::session::manager::SessionManager,
+    ) -> Self {
+        self.session_manager = Some(session);
+        self
+    }
+
     /// P1：注入 `ChatContext` 持有的 session 级共享 `follow_up_queue`。
     ///
     /// 不调用此方法时保持原有"单次 AgentLoop 私有 queue"语义（向后兼容
@@ -183,6 +193,7 @@ impl AgentLoop {
             llm,
             primitive,
             emitter,
+            session_manager: None,
             config_backend: None,
             bash_task_registry: None,
             web_fetch_runtime: None,

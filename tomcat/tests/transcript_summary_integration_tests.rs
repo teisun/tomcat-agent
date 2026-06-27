@@ -14,9 +14,11 @@ mod common;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use tomcat::core::llm::{ChatMessage, StreamEvent};
@@ -25,10 +27,13 @@ use tomcat::core::plan_runtime::file_store::{
 };
 use tomcat::core::plan_runtime::{PlanRuntime, TranscriptAppender};
 use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
+use tomcat::core::llm::thinking_policy::ThinkingFormat;
 use tomcat::{
-    wire, AgentLoop, AgentLoopConfig, AgentRunOutcome, AppError, BashResult, ChatRequest,
-    ChatResponse, ChatResponseChoice, DirEntry, EditFileResult, EditOperation, EventBus,
-    EventContext, LlmProvider, PrimitiveExecutor, PrimitiveOperation, WriteFileResult,
+    wire, run_chat_turn, init_context_state, AgentLoop, AgentLoopConfig, AgentRunOutcome,
+    AppConfig, AppError, BashResult, Capabilities, ChatContext, ChatRequest, ChatResponse,
+    ChatResponseChoice, DirEntry, EditFileResult, EditOperation, EventBus, EventContext,
+    LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall,
+    WriteFileResult,
 };
 use tracing::info;
 
@@ -79,6 +84,7 @@ impl LlmProvider for MainStreamLlm {
 struct TitleChatLlm {
     title: String,
     fail: bool,
+    call_count: AtomicUsize,
 }
 
 impl TitleChatLlm {
@@ -86,13 +92,19 @@ impl TitleChatLlm {
         Self {
             title: title.into(),
             fail: false,
+            call_count: AtomicUsize::new(0),
         }
     }
     fn failing() -> Self {
         Self {
             title: String::new(),
             fail: true,
+            call_count: AtomicUsize::new(0),
         }
+    }
+
+    fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::Relaxed)
     }
 }
 
@@ -102,6 +114,7 @@ impl LlmProvider for TitleChatLlm {
         "mock-title"
     }
     async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+        self.call_count.fetch_add(1, Ordering::Relaxed);
         if self.fail {
             return Err(AppError::Llm("title mock failure".to_string()));
         }
@@ -207,6 +220,88 @@ fn default_config(session_id: &str, title: Arc<dyn LlmProvider>) -> AgentLoopCon
     }
 }
 
+struct SceneResolver {
+    main: Arc<dyn LlmProvider>,
+    title: Arc<dyn LlmProvider>,
+    main_model: String,
+    title_model: String,
+}
+
+impl SceneResolver {
+    fn new(
+        main: Arc<dyn LlmProvider>,
+        title: Arc<dyn LlmProvider>,
+        main_model: impl Into<String>,
+        title_model: impl Into<String>,
+    ) -> Self {
+        Self {
+            main,
+            title,
+            main_model: main_model.into(),
+            title_model: title_model.into(),
+        }
+    }
+}
+
+impl LlmResolver for SceneResolver {
+    fn resolve(
+        &self,
+        scene: LlmScene,
+        _session_override: Option<&str>,
+    ) -> Result<ResolvedCall, AppError> {
+        let (provider_impl, model) = match scene {
+            LlmScene::Title => (Arc::clone(&self.title), self.title_model.clone()),
+            _ => (Arc::clone(&self.main), self.main_model.clone()),
+        };
+        Ok(ResolvedCall {
+            provider_impl,
+            model,
+            api: "mock".to_string(),
+            provider: "mock".to_string(),
+            base_url: None,
+            key_source: "test".to_string(),
+            thinking_format: ThinkingFormat::Openai,
+            capabilities: Capabilities::default(),
+        })
+    }
+}
+
+fn deterministic_chat_context_fixture(env_key: &str) -> (tempfile::TempDir, ChatContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+    common::apply_openai_responses_test_config(&mut cfg, env_key, None);
+    // SAFETY: 测试使用独立 env key，作用域结束后显式清理。
+    unsafe { std::env::set_var(env_key, "stub") };
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let session_key = ctx
+        .session_runtime
+        .session
+        .current_session_key()
+        .to_string();
+    ctx.session_runtime
+        .session
+        .create_session(&session_key, None)
+        .unwrap();
+    (dir, ctx)
+}
+
+fn install_scene_resolver(
+    ctx: &mut ChatContext,
+    main: Arc<dyn LlmProvider>,
+    title: Arc<dyn LlmProvider>,
+    default_model: &str,
+    title_model: &str,
+) {
+    ctx.global_services.llm = main.clone();
+    ctx.global_services.llm_resolver = Arc::new(SceneResolver::new(
+        main,
+        title,
+        default_model,
+        title_model,
+    ));
+}
+
 /// 纯文本收敛流（一轮 text-only 回合）。
 fn text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
     vec![
@@ -245,35 +340,73 @@ fn thinking_read_tool_stream(n_reads: usize) -> Vec<Result<StreamEvent, AppError
     events
 }
 
-/// 订阅 `turn_end`，按到达顺序记录每条 TurnEnd 的 `summaryTitle`。
-fn capture_turn_end_summaries(bus: &dyn EventBus) -> Arc<Mutex<Vec<Option<String>>>> {
-    let captured: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+fn thinking_single_read_tool_stream(path: &str) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "Let me inspect that file.".to_string(),
+        }),
+        Ok(StreamEvent::ReasoningSnapshot {
+            thinking_text: Some("Inspecting the requested file before answering.".to_string()),
+            reasoning_continuation: None,
+            continuity: None,
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("read-1".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(format!(r#"{{"path":"{}"}}"#, path)),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ]
+}
+
+#[derive(Debug, Default, Clone)]
+struct TurnSummaryCapture {
+    turn_end_payloads: Vec<serde_json::Value>,
+    turn_summary_updated_payloads: Vec<serde_json::Value>,
+}
+
+/// 订阅 `turn_end` / `turn.summary_updated`，记录完整 payload 供断言。
+fn capture_turn_summary_events(bus: &dyn EventBus) -> Arc<Mutex<TurnSummaryCapture>> {
+    let captured: Arc<Mutex<TurnSummaryCapture>> =
+        Arc::new(Mutex::new(TurnSummaryCapture::default()));
     let cap = Arc::clone(&captured);
     bus.on(
         wire::WIRE_TURN_END,
         Box::new(move |ctx: EventContext| {
-            let title = ctx
-                .payload
-                .get("summaryTitle")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            cap.lock().unwrap().push(title);
+            cap.lock()
+                .unwrap()
+                .turn_end_payloads
+                .push(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+    let cap = Arc::clone(&captured);
+    bus.on(
+        wire::WIRE_TURN_SUMMARY_UPDATED,
+        Box::new(move |ctx: EventContext| {
+            cap.lock()
+                .unwrap()
+                .turn_summary_updated_payloads
+                .push(ctx.payload.clone());
             Ok(())
         }),
     );
     captured
 }
 
-/// 跑一轮主循环并返回捕获到的 TurnEnd `summaryTitle` 序列。
+/// 跑一轮主循环并返回捕获到的 turn summary 相关事件。
 async fn run_and_collect_summaries(
     main_streams: Vec<Vec<Result<StreamEvent, AppError>>>,
     title: Arc<dyn LlmProvider>,
     session_id: &str,
-) -> Vec<Option<String>> {
+) -> TurnSummaryCapture {
     let llm = Arc::new(MainStreamLlm::new(main_streams));
     let primitive = Arc::new(MockPrimitive);
     let event_bus: Arc<dyn EventBus> = Arc::new(tomcat::DefaultEventBus::new());
-    let captured = capture_turn_end_summaries(&*event_bus);
+    let captured = capture_turn_summary_events(&*event_bus);
     let config = default_config(session_id, title);
     let mut agent = AgentLoop::new(
         llm,
@@ -293,16 +426,12 @@ async fn run_and_collect_summaries(
         matches!(outcome, AgentRunOutcome::Completed(_)),
         "AgentLoop::run 应 Completed，实际: {outcome:?}"
     );
-    let summaries = captured.lock().unwrap().clone();
-    summaries
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let result = captured.lock().unwrap().clone();
+    result
 }
 
 // ─── HOME 隔离 fixture（tests 4-6 共享，进程内串行） ────────────────────────
-
-fn home_lock() -> &'static Mutex<()> {
-    static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-    M.get_or_init(|| Mutex::new(()))
-}
 
 fn setup_home() -> PathBuf {
     let p = std::env::temp_dir().join(format!(
@@ -347,15 +476,15 @@ fn attach_transcript_spy(rt: &PlanRuntime) -> Arc<Mutex<Vec<serde_json::Value>>>
 
 // ─── Tests 1-3：TurnEnd summary_title ───────────────────────────────────────
 
-/// thinking + 一个 read tool 在场 → TurnEnd 携带 utility 模型生成的 `summary_title`。
+/// thinking + 一个 read tool 在场 → TurnEnd 立即带规则占位；稍后 emit `turn.summary_updated`。
 #[tokio::test]
-async fn turnend_emits_summary_title_when_thinking_and_tool_present() {
+async fn turnend_emits_fallback_title_then_turn_summary_updated_emits_semantic_title() {
     common::setup_logging();
-    info!(target: "test", phase = "arrange", "mock main 流式 thinking+content+1 read tool_call；title provider 返回 Reviewed 2 files");
-    let title = Arc::new(TitleChatLlm::ok("Reviewed 2 files"));
+    info!(target: "test", phase = "arrange", "mock main 流式 thinking+content+1 read tool_call；title provider 返回更自然的 utility 标题");
+    let title = Arc::new(TitleChatLlm::ok("Reviewed requested file"));
 
     info!(target: "test", phase = "act", "驱动 AgentLoop::run 跑一轮工具回合 + 一轮 text 收敛");
-    let summaries = run_and_collect_summaries(
+    let captured = run_and_collect_summaries(
         vec![
             thinking_read_tool_stream(1),
             text_stream("Done reviewing."),
@@ -365,10 +494,30 @@ async fn turnend_emits_summary_title_when_thinking_and_tool_present() {
     )
     .await;
 
-    info!(target: "test", phase = "assert", " TurnEnd summary_title 序列 = {:?}", summaries);
+    info!(target: "test", phase = "assert", " turn summary 相关事件 = {:?}", captured);
+    let turn_end_titles: Vec<Option<String>> = captured
+        .turn_end_payloads
+        .iter()
+        .map(|payload| {
+            payload
+                .get("summaryTitle")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .collect();
     assert!(
-        summaries.iter().any(|s| s.as_deref() == Some("Reviewed 2 files")),
-        "工具回合 TurnEnd 应携带 summary_title=Some(\"Reviewed 2 files\")，实际: {summaries:?}"
+        turn_end_titles
+            .iter()
+            .any(|title| title.as_deref() == Some("Read path=/file_0")),
+        "工具回合 TurnEnd 应立即携带规则占位标题，实际: {turn_end_titles:?}"
+    );
+    assert!(
+        captured.turn_summary_updated_payloads.iter().any(|payload| {
+            payload.get("summaryTitle").and_then(|v| v.as_str())
+                == Some("Reviewed requested file")
+        }),
+        "utility 标题完成后应 emit turn.summary_updated=Reviewed requested file，实际: {:?}",
+        captured.turn_summary_updated_payloads
     );
 }
 
@@ -380,9 +529,19 @@ async fn turnend_summary_title_none_when_no_thinking_no_tool() {
     let title = Arc::new(TitleChatLlm::ok("should not be used"));
 
     info!(target: "test", phase = "act", "驱动 AgentLoop::run 跑一轮 text-only 回合");
-    let summaries =
+    let captured =
         run_and_collect_summaries(vec![text_stream("Hello there.")], title, "sess-summary-none")
             .await;
+    let summaries: Vec<Option<String>> = captured
+        .turn_end_payloads
+        .iter()
+        .map(|payload| {
+            payload
+                .get("summaryTitle")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .collect();
 
     info!(target: "test", phase = "assert", " TurnEnd summary_title 序列 = {:?}", summaries);
     assert_eq!(
@@ -395,9 +554,14 @@ async fn turnend_summary_title_none_when_no_thinking_no_tool() {
         "无 thinking 无 tool 时 summary_title 必须为 None，实际: {:?}",
         summaries[0]
     );
+    assert!(
+        captured.turn_summary_updated_payloads.is_empty(),
+        "text-only 回合不应 emit turn.summary_updated，实际: {:?}",
+        captured.turn_summary_updated_payloads
+    );
 }
 
-/// title provider 失败 → 回退规则摘要（2 read → "Reviewed 2 files"）。
+/// title provider 失败 → TurnEnd 保留规则摘要，且不再补发 `turn.summary_updated`。
 #[tokio::test]
 async fn turnend_summary_title_falls_back_to_rule_on_utility_failure() {
     common::setup_logging();
@@ -405,7 +569,7 @@ async fn turnend_summary_title_falls_back_to_rule_on_utility_failure() {
     let title = Arc::new(TitleChatLlm::failing());
 
     info!(target: "test", phase = "act", "驱动 AgentLoop::run 跑一轮 2-tool 回合 + 一轮 text 收敛");
-    let summaries = run_and_collect_summaries(
+    let captured = run_and_collect_summaries(
         vec![
             thinking_read_tool_stream(2),
             text_stream("Done reviewing."),
@@ -414,6 +578,16 @@ async fn turnend_summary_title_falls_back_to_rule_on_utility_failure() {
         "sess-summary-fallback",
     )
     .await;
+    let summaries: Vec<Option<String>> = captured
+        .turn_end_payloads
+        .iter()
+        .map(|payload| {
+            payload
+                .get("summaryTitle")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .collect();
 
     info!(target: "test", phase = "assert", " TurnEnd summary_title 序列 = {:?}", summaries);
     assert!(
@@ -422,15 +596,111 @@ async fn turnend_summary_title_falls_back_to_rule_on_utility_failure() {
             .any(|s| s.as_deref() == Some("Reviewed 2 files")),
         "utility 失败应回退规则摘要 \"Reviewed 2 files\"，实际: {summaries:?}"
     );
+    assert!(
+        captured.turn_summary_updated_payloads.is_empty(),
+        "utility 失败时不应再 emit turn.summary_updated，实际: {:?}",
+        captured.turn_summary_updated_payloads
+    );
+}
+
+/// `turn.summary_updated` 生成后应回写 assistant message `summary_title`，reload 不丢。
+#[tokio::test]
+#[serial]
+async fn turn_summary_updated_persists_summary_title_into_assistant_message() {
+    common::setup_logging();
+    let env_key = "OPENAI_API_KEY_TRANSCRIPT_SUMMARY_PERSIST";
+    let (work_dir, mut ctx) = deterministic_chat_context_fixture(env_key);
+    let file_path = work_dir.path().join("review-me.txt");
+    std::fs::write(&file_path, "hello from transcript summary persistence test").unwrap();
+
+    let main = Arc::new(MainStreamLlm::new(vec![
+        thinking_single_read_tool_stream(&file_path.to_string_lossy()),
+        text_stream("Done."),
+    ]));
+    let title = Arc::new(TitleChatLlm::ok("Reviewed requested file"));
+    install_scene_resolver(
+        &mut ctx,
+        main,
+        title.clone(),
+        "gpt-5.4",
+        "utility-flash",
+    );
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
+        .expect("init_context_state");
+
+    info!(target: "test", phase = "act", "run_chat_turn 触发 read 工具回合与异步 turn summary rewrite");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        run_chat_turn(
+            &ctx,
+            "请查看这个文件",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 8s")
+    .expect("run_chat_turn should succeed");
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "run_chat_turn 应 Completed，实际: {outcome:?}"
+    );
+
+    let persisted = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let entries = ctx.session_runtime.session.get_entries(32).unwrap();
+            let found = entries.iter().find_map(|entry| match entry {
+                tomcat::TranscriptEntry::Message(message_entry) => {
+                    let role = message_entry
+                        .message
+                        .get("role")
+                        .and_then(|v| v.as_str());
+                    let has_tool_calls = message_entry
+                        .message
+                        .get("tool_calls")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|arr| !arr.is_empty());
+                    let summary_title = message_entry
+                        .message
+                        .get("summary_title")
+                        .and_then(|v| v.as_str());
+                    if role == Some("assistant") && has_tool_calls {
+                        summary_title.map(str::to_string)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            });
+            match found {
+                Some(title) if title == "Reviewed requested file" => break title,
+                Some(title) => {
+                    info!(target: "test", phase = "poll", "assistant summary_title currently = {:?}", title);
+                }
+                None => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("assistant summary_title should be persisted");
+
+    info!(target: "test", phase = "assert", "persisted assistant summary_title = {:?}", persisted);
+    assert_eq!(persisted, "Reviewed requested file");
+
+    unsafe { std::env::remove_var(env_key) };
+    drop(work_dir);
 }
 
 // ─── Tests 4-5：plan.todos / session.todos transcript 事件 ──────────────────
 
 /// `update_plan` 执行后 transcript 出现 `event=plan.todos` 且 `todos` 数组非空。
 #[tokio::test]
+#[serial]
 async fn update_plan_emits_plan_todos_event() {
     common::setup_logging();
-    let _g = home_lock().lock().unwrap();
     info!(target: "test", phase = "arrange", "隔离 HOME + PlanRuntime + transcript spy；create_plan 并提升到 executing");
     let home = setup_home();
     let rt = PlanRuntime::new("session-a");
@@ -496,9 +766,9 @@ async fn update_plan_emits_plan_todos_event() {
 
 /// `todos` 工具执行后 transcript 出现 `event=session.todos` 且 `todos` 数组非空。
 #[tokio::test]
+#[serial]
 async fn todos_tool_emits_session_todos_event() {
     common::setup_logging();
-    let _g = home_lock().lock().unwrap();
     info!(target: "test", phase = "arrange", "隔离 HOME + PlanRuntime（Chat 模式）+ transcript spy");
     let home = setup_home();
     let rt = PlanRuntime::new("session-a");
@@ -553,23 +823,156 @@ async fn get_state_contains_plan_and_session_todos() {
     // 真实断言已落 lib 单测路径（commands_test.rs）。
 }
 
-// ─── Test 7：session.title_updated 异步（fire-and-forget，留 ignore 指向 lib 单测） ─
+// ─── Test 7-8：session.title_updated 异步 ────────────────────────────────────
 
 /// 首条 user 后异步 utility 模型生成 session 标题并 emit `session.title_updated`。
-///
-/// 该路径由 `run_loop::maybe_spawn_semantic_session_title` 以 `tokio::spawn`
-/// fire-and-forget 触发，断言需在 `run_chat_turn` 返回后轮询 spawned task 完成，
-/// 时序偏 racy；且需装配完整 `ChatContext`（模型解析 / 工具定义 / 落盘 runtimes）。
-/// 其**确定性语义**（占位可被语义 title 覆盖一次、语义 title 不被后续 append 回退）
-/// 已落地为 lib 单测 `is_rule_derived_title_distinguishes_placeholder_from_semantic`
-/// 与 `placeholder_title_is_replaced_by_semantic_then_preserved`（见
-/// `tomcat/src/core/session/manager/tests/append_test.rs`）；异步 emit 的进程内
-/// 复刻可后续以 `tomcat/tests/agent_loop_tests.rs` 的 `run_chat_turn` harness 为模板。
 #[tokio::test]
-#[ignore = "确定性语义已由 append_test.rs 两个 lib 单测覆盖；异步 emit spawn 时序 racy，留作 stretch"]
+#[serial]
 async fn session_title_updated_emitted_after_first_user() {
     common::setup_logging();
-    info!(target: "test", phase = "arrange", "skipped: 语义见 append_test.rs 两单测；异步 emit 留 stretch");
-    // 占位：异步 emit 复刻应装配 ChatContext（agent_loop_tests::deterministic_chat_context_fixture
-    // 模板）+ 订阅 WIRE_SESSION_TITLE_UPDATED，run_chat_turn 后轮询事件。
+    let env_key = "OPENAI_API_KEY_TRANSCRIPT_SUMMARY_TITLE_EMIT";
+    let (work_dir, mut ctx) = deterministic_chat_context_fixture(env_key);
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = Arc::clone(&captured);
+    ctx.global_services.event_bus.on(
+        wire::WIRE_SESSION_TITLE_UPDATED,
+        Box::new(move |ctx: EventContext| {
+            if let Some(title) = ctx.payload.get("title").and_then(|v| v.as_str()) {
+                cap.lock().unwrap().push(title.to_string());
+            }
+            Ok(())
+        }),
+    );
+    let main = Arc::new(MainStreamLlm::new(vec![text_stream("Done.")]));
+    let title = Arc::new(TitleChatLlm::ok("Semantic session title"));
+    install_scene_resolver(
+        &mut ctx,
+        main,
+        title.clone(),
+        "gpt-5.4",
+        "utility-flash",
+    );
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
+        .expect("init_context_state");
+
+    info!(target: "test", phase = "act", "run_chat_turn 写入首条 user，并等待异步 title event");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "请帮我整理 transcript UI",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn should succeed");
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "run_chat_turn 应 Completed，实际: {outcome:?}"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if !captured.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("session.title_updated should arrive");
+
+    info!(target: "test", phase = "assert", "captured session.title_updated = {:?}", captured.lock().unwrap());
+    assert_eq!(
+        captured.lock().unwrap().clone(),
+        vec!["Semantic session title".to_string()],
+        "首条 user 后应异步 emit 语义 session 标题"
+    );
+    let title_on_disk = ctx
+        .session_runtime
+        .session
+        .current_session_entry()
+        .unwrap()
+        .and_then(|entry| entry.title)
+        .unwrap_or_default();
+    assert_eq!(title_on_disk, "Semantic session title");
+
+    unsafe { std::env::remove_var(env_key) };
+    drop(work_dir);
+}
+
+/// 已存在用户自定义标题时，不应再白跑 utility LLM 或 emit `session.title_updated`。
+#[tokio::test]
+#[serial]
+async fn session_title_updated_skips_when_custom_title_already_exists() {
+    common::setup_logging();
+    let env_key = "OPENAI_API_KEY_TRANSCRIPT_SUMMARY_TITLE_SKIP";
+    let (work_dir, mut ctx) = deterministic_chat_context_fixture(env_key);
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = Arc::clone(&captured);
+    ctx.global_services.event_bus.on(
+        wire::WIRE_SESSION_TITLE_UPDATED,
+        Box::new(move |ctx: EventContext| {
+            if let Some(title) = ctx.payload.get("title").and_then(|v| v.as_str()) {
+                cap.lock().unwrap().push(title.to_string());
+            }
+            Ok(())
+        }),
+    );
+    let session_key = ctx.session_runtime.session.current_session_key().to_string();
+    ctx.session_runtime
+        .session
+        .update_session(&session_key, |entry| {
+            entry.title = Some("User custom title".to_string());
+        })
+        .unwrap();
+    let main = Arc::new(MainStreamLlm::new(vec![text_stream("Done.")]));
+    let title = Arc::new(TitleChatLlm::ok("Should not be called"));
+    install_scene_resolver(
+        &mut ctx,
+        main,
+        title.clone(),
+        "gpt-5.4",
+        "utility-flash",
+    );
+    let system_text = "system prompt";
+    let mut state = init_context_state(&ctx.session_runtime.session, &ctx.config.context, system_text)
+        .expect("init_context_state");
+
+    info!(target: "test", phase = "act", "run_chat_turn 在已有自定义标题的 session 内追加首条 user");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "这条消息不应触发语义标题生成",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn should succeed");
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "run_chat_turn 应 Completed，实际: {outcome:?}"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    info!(target: "test", phase = "assert", "captured session.title_updated = {:?}", captured.lock().unwrap());
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "已有自定义标题时不应 emit session.title_updated"
+    );
+    assert_eq!(
+        title.call_count(),
+        0,
+        "已有自定义标题时不应调用 utility title provider"
+    );
+
+    unsafe { std::env::remove_var(env_key) };
+    drop(work_dir);
 }

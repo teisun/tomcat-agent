@@ -274,6 +274,7 @@ pub struct AgentLoop {
     pub(super) llm: Arc<dyn LlmProvider>,
     pub(super) primitive: Arc<dyn PrimitiveExecutor>,
     pub(super) emitter: ScopedEventEmitter,
+    pub(super) session_manager: Option<crate::core::session::manager::SessionManager>,
     /// 可选 `config_get` / `config_set` 后端（plan §6 / PR-7）。
     ///
     /// 注入路径：`ChatContext::from_config` 在创建 `AgentLoop` 前构造
@@ -349,6 +350,8 @@ pub(super) struct ToolCallAccumulator {
 ///
 /// - `tool_results`：按 `tool_calls` 顺序排列的 `Message`（供 `TurnEnd` 事件使用）；
 ///   包含 `block_tool_calls == true` 时注入的 blocked 占位文本。
+/// - `assistant_message_id`：本轮带 `tool_calls` 的 assistant transcript `MessageEntry.id`；
+///   供异步 turn summary 覆盖事件与 transcript 回写定位目标 message。
 /// - `steered == true`：本轮至少有 **1** 个 tool 执行完毕后被 steering queue 打断
 ///   （queue 非空 → `messages.extend(q.drain(..)) + break`）。调用方应 `continue`
 ///   下一轮 reasoning loop，让下一次 LLM 请求携带 steering 消息。
@@ -357,6 +360,7 @@ pub(super) struct ToolCallAccumulator {
 /// 读取；Phase 4 测试将按 `steered / tool_results.len()` 做断言。
 #[allow(dead_code)]
 pub(super) struct DispatchOutcome {
+    pub(super) assistant_message_id: Option<String>,
     pub(super) tool_results: Vec<crate::infra::events::Message>,
     pub(super) steered: bool,
 }

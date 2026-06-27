@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import { routeWireEventType } from "../../../serveClient/sessionRouter";
 import { isWebviewIntent } from "../protocol";
 import {
   buildToolCallToAssistantMap,
@@ -32,7 +31,7 @@ describe("WebviewStateStore wire routing", () => {
     ]);
   });
 
-  it("maps turn_end summaryTitle onto thinking block", () => {
+  it("maps turn_end summaryTitle onto the matching tool group", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applyEvent({
@@ -41,11 +40,20 @@ describe("WebviewStateStore wire routing", () => {
       sessionId: "s1",
       type: "message_update",
     });
+    store.applyEvent({
+      args: { path: "/tmp/a.rs" },
+      sessionId: "s1",
+      toolCallId: "tc-1",
+      toolName: "read",
+      type: "tool_execution_start",
+    });
 
     store.applyEvent({
+      assistantMessageId: "server-assistant-1",
       sessionId: "s1",
       summaryTitle: "Reviewed 2 files",
-      toolResults: [],
+      toolCallIds: ["tc-1"],
+      toolResults: [{}],
       turnIndex: 0,
       message: {},
       type: "turn_end",
@@ -56,6 +64,37 @@ describe("WebviewStateStore wire routing", () => {
       .sessionViews.s1.timeline.find((item) => item.type === "thinking");
     expect(thinking?.type === "thinking" ? thinking.summaryTitle : null).toBe(
       "Reviewed 2 files",
+    );
+  });
+
+  it("maps turn.summary_updated onto a live tool-only group", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      args: { command: "git status" },
+      sessionId: "s1",
+      toolCallId: "tc-live",
+      toolName: "bash",
+      type: "tool_execution_start",
+    });
+
+    store.applyEvent({
+      sessionId: "s1",
+      summaryTitle: "Reviewed repository status",
+      toolCallIds: ["tc-live"],
+      turnIndex: 1,
+      type: "turn.summary_updated",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    const thinking = session.timeline.find((item) => item.type === "thinking");
+    const tool = session.timeline.find((item) => item.type === "tool");
+    expect(thinking?.type === "thinking" ? thinking.summaryTitle : null).toBe(
+      "Reviewed repository status",
+    );
+    expect(thinking?.type === "thinking" ? thinking.assistantMessageId : undefined).toBe(
+      tool?.type === "tool" ? tool.assistantMessageId : undefined,
     );
   });
 
@@ -144,6 +183,47 @@ describe("history tool attribution", () => {
     expect(tool?.type === "tool" ? tool.args : undefined).toEqual({ command: "ls" });
   });
 
+  it("hydrates persisted summary_title even when assistant had no thinking_text", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-1",
+          message: {
+            role: "assistant",
+            summary_title: "Reviewed 2 files",
+            tool_calls: [
+              {
+                function: { arguments: "{\"path\":\"/tmp/a.rs\"}", name: "read" },
+                id: "tc-1",
+              },
+            ],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-result-1",
+          message: {
+            content: "file content",
+            role: "tool",
+            tool_call_id: "tc-1",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const thinking = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item) => item.type === "thinking");
+    expect(thinking?.type === "thinking" ? thinking.summaryTitle : null).toBe(
+      "Reviewed 2 files",
+    );
+    expect(thinking?.type === "thinking" ? thinking.text : undefined).toBe("");
+  });
+
   it("live tool_execution_start writes activeAssistantId and args", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
@@ -201,15 +281,6 @@ describe("history tool attribution", () => {
     expect(bashTool?.type === "tool" ? bashTool.assistantMessageId : undefined).toBe(
       readTool?.type === "tool" ? readTool.assistantMessageId : undefined,
     );
-  });
-});
-
-describe("routeWireEventType", () => {
-  it("recognizes new wire events", () => {
-    expect(routeWireEventType("plan.todos")).toBe("plan_todos");
-    expect(routeWireEventType("session.todos")).toBe("session_todos");
-    expect(routeWireEventType("session.title_updated")).toBe("session_title");
-    expect(routeWireEventType("turn_end")).toBe("turn_end");
   });
 });
 

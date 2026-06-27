@@ -7,8 +7,8 @@ import type {
   SessionListPayload,
   SessionStatePayload,
   SessionSummary,
-  WebviewTodo,
 } from "../../serveClient/sessionRouter";
+import { isRecord, parseTodos } from "../../shared/todos";
 import type { ServeEvent, ServePlanEvent } from "../../serveClient/wire";
 import {
   normalizePlanState,
@@ -41,10 +41,6 @@ type SessionRuntimeState = {
   activeThinkingId: string | null;
   historyHydrated: boolean;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 function isPlanEvent(event: ServeEvent): event is ServePlanEvent {
   return event.type.startsWith("plan.");
@@ -189,6 +185,13 @@ function extractThinkingText(message: Record<string, unknown>): string | undefin
   return undefined;
 }
 
+function extractSummaryTitle(message: Record<string, unknown>): string | undefined {
+  if (typeof message.summary_title === "string" && message.summary_title.trim()) {
+    return message.summary_title.trim();
+  }
+  return undefined;
+}
+
 function extractToolCallId(message: Record<string, unknown>): string | undefined {
   return typeof message.tool_call_id === "string" ? message.tool_call_id : undefined;
 }
@@ -284,34 +287,6 @@ function buildHistoryToolArgsLookup(entries: unknown[]): Map<string, Record<stri
   return lookup;
 }
 
-function parseTodoStatus(value: unknown): WebviewTodo["status"] | null {
-  switch (value) {
-    case "pending":
-    case "in_progress":
-    case "completed":
-    case "cancelled":
-      return value;
-    default:
-      return null;
-  }
-}
-
-function parseTodos(value: unknown): WebviewTodo[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  return value.flatMap((entry) => {
-    if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.content !== "string") {
-      return [];
-    }
-    const status = parseTodoStatus(entry.status);
-    if (!status) {
-      return [];
-    }
-    return [{ content: entry.content, id: entry.id, status }];
-  });
-}
-
 function parseToolArgs(value: unknown): Record<string, unknown> | undefined {
   if (isRecord(value)) {
     return value;
@@ -361,12 +336,13 @@ function parseHistoryEntry(
         Array.isArray(entry.message.tool_calls) && entry.message.tool_calls.length > 0;
       const assistantMessageId = hasToolCalls ? id : undefined;
       const thinkingText = extractThinkingText(entry.message);
-      if (thinkingText) {
+      const summaryTitle = extractSummaryTitle(entry.message) ?? null;
+      if (hasToolCalls || thinkingText) {
         items.push({
           assistantMessageId,
           id: `${id}-thinking`,
-          summaryTitle: null,
-          text: thinkingText,
+          summaryTitle,
+          text: thinkingText ?? "",
           type: "thinking",
         } satisfies WebviewThinkingBlock);
       }
@@ -485,6 +461,120 @@ function findTimelineIndex<T extends WebviewTimelineItem["type"]>(
   return session.timeline.findIndex((item) => item.id === id && item.type === type);
 }
 
+function ensureActiveAssistantGroupId(
+  session: WebviewSessionSnapshot,
+  runtime: SessionRuntimeState,
+): string {
+  if (runtime.activeAssistantId) {
+    return runtime.activeAssistantId;
+  }
+  const createdId = createTimelineId(session, "assistant-group");
+  runtime.activeAssistantId = createdId;
+  return createdId;
+}
+
+function findThinkingByAssistantMessageId(
+  session: WebviewSessionSnapshot,
+  assistantMessageId: string,
+): WebviewThinkingBlock | undefined {
+  return [...session.timeline].reverse().find(
+    (item): item is WebviewThinkingBlock =>
+      item.type === "thinking" && item.assistantMessageId === assistantMessageId,
+  );
+}
+
+function ensureThinkingBlockForAssistantMessage(
+  session: WebviewSessionSnapshot,
+  runtime: SessionRuntimeState,
+  assistantMessageId: string,
+): WebviewThinkingBlock {
+  const current = runtime.activeThinkingId
+    ? findTimelineItem(session, runtime.activeThinkingId, "thinking")
+    : undefined;
+  if (current && current.assistantMessageId === assistantMessageId) {
+    return current;
+  }
+
+  const existing = findThinkingByAssistantMessageId(session, assistantMessageId);
+  if (existing) {
+    runtime.activeThinkingId = existing.id;
+    return existing;
+  }
+
+  const created: WebviewThinkingBlock = {
+    assistantMessageId,
+    id: createTimelineId(session, "thinking"),
+    summaryTitle: null,
+    text: "",
+    type: "thinking",
+  };
+  const assistantIndex = findTimelineIndex(session, assistantMessageId, "message");
+  if (assistantIndex >= 0) {
+    session.timeline.splice(assistantIndex, 0, created);
+  } else {
+    session.timeline.push(created);
+  }
+  runtime.activeThinkingId = created.id;
+  return created;
+}
+
+function ensureThinkingBlock(
+  session: WebviewSessionSnapshot,
+  runtime: SessionRuntimeState,
+): WebviewThinkingBlock {
+  const assistantMessageId = ensureActiveAssistantGroupId(session, runtime);
+  return ensureThinkingBlockForAssistantMessage(session, runtime, assistantMessageId);
+}
+
+function findAssistantGroupIdForToolCallIds(
+  session: WebviewSessionSnapshot,
+  toolCallIds: string[],
+): string | undefined {
+  for (const toolCallId of toolCallIds) {
+    const tool = session.timeline.find(
+      (item): item is WebviewToolCard =>
+        item.type === "tool" && item.toolCallId === toolCallId && !!item.assistantMessageId,
+    );
+    if (tool?.assistantMessageId) {
+      return tool.assistantMessageId;
+    }
+  }
+  return undefined;
+}
+
+function applySummaryTitleToGroup(
+  session: WebviewSessionSnapshot,
+  runtime: SessionRuntimeState,
+  summaryTitle: string,
+  options: {
+    assistantMessageId?: string | null;
+    toolCallIds?: string[];
+  },
+): void {
+  const assistantMessageId =
+    findAssistantGroupIdForToolCallIds(session, options.toolCallIds ?? []) ??
+    (typeof options.assistantMessageId === "string" && options.assistantMessageId.length > 0
+      ? options.assistantMessageId
+      : undefined) ??
+    runtime.activeAssistantId ??
+    [...session.timeline]
+      .reverse()
+      .find(
+        (item): item is WebviewThinkingBlock =>
+          item.type === "thinking" && !!item.assistantMessageId,
+      )
+      ?.assistantMessageId;
+  if (!assistantMessageId) {
+    return;
+  }
+  const thinking = ensureThinkingBlockForAssistantMessage(
+    session,
+    runtime,
+    assistantMessageId,
+  );
+  thinking.summaryTitle = summaryTitle;
+}
+
 function upsertTool(
   session: WebviewSessionSnapshot,
   toolCallId: string,
@@ -564,36 +654,16 @@ function appendStreamingMessage(
       current.text += text;
       return current;
     }
-    const created = pushMessage(session, "assistant", text);
+    const preferredId = runtime.activeAssistantId ?? undefined;
+    const created = pushMessage(session, "assistant", text, preferredId);
     created.assistantMessageId = created.id;
     runtime.activeAssistantId = created.id;
     return created;
   }
 
-  const current = runtime.activeThinkingId
-    ? findTimelineItem(session, runtime.activeThinkingId, "thinking")
-    : undefined;
-  if (current) {
-    current.text += text;
-    return current;
-  }
-  const created: WebviewThinkingBlock = {
-    assistantMessageId: runtime.activeAssistantId ?? undefined,
-    id: createTimelineId(session, "thinking"),
-    summaryTitle: null,
-    text,
-    type: "thinking",
-  };
-  const assistantIndex = runtime.activeAssistantId
-    ? findTimelineIndex(session, runtime.activeAssistantId, "message")
-    : -1;
-  if (assistantIndex >= 0) {
-    session.timeline.splice(assistantIndex, 0, created);
-  } else {
-    session.timeline.push(created);
-  }
-  runtime.activeThinkingId = created.id;
-  return created;
+  const current = ensureThinkingBlock(session, runtime);
+  current.text += text;
+  return current;
 }
 
 function mapSessionToTab(
@@ -795,16 +865,18 @@ export class WebviewStateStore {
             ? frame.summaryTitle
             : null;
         if (summaryTitle) {
-          const thinking =
-            (runtime.activeThinkingId
-              ? findTimelineItem(session, runtime.activeThinkingId, "thinking")
-              : undefined) ??
-            [...session.timeline].reverse().find(
-              (item): item is WebviewThinkingBlock => item.type === "thinking",
-            );
-          if (thinking) {
-            thinking.summaryTitle = summaryTitle;
-          }
+          applySummaryTitleToGroup(session, runtime, summaryTitle, {
+            assistantMessageId:
+              "assistantMessageId" in frame && typeof frame.assistantMessageId === "string"
+                ? frame.assistantMessageId
+                : undefined,
+            toolCallIds:
+              "toolCallIds" in frame && Array.isArray(frame.toolCallIds)
+                ? frame.toolCallIds.filter(
+                    (toolCallId): toolCallId is string => typeof toolCallId === "string",
+                  )
+                : [],
+          });
         }
         clearStreaming(runtime);
         return;
@@ -869,8 +941,9 @@ export class WebviewStateStore {
         return;
       }
       case "tool_execution_start": {
-        const activeAssistantId = runtime.activeAssistantId;
         clearThinkingStreaming(runtime);
+        const activeAssistantId = ensureActiveAssistantGroupId(session, runtime);
+        ensureThinkingBlockForAssistantMessage(session, runtime, activeAssistantId);
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.status = "running";
         tool.isError = false;
@@ -880,8 +953,9 @@ export class WebviewStateStore {
       }
       case "tool_call_streaming":
       case "tool_execution_update": {
-        const activeAssistantId = runtime.activeAssistantId;
         clearThinkingStreaming(runtime);
+        const activeAssistantId = ensureActiveAssistantGroupId(session, runtime);
+        ensureThinkingBlockForAssistantMessage(session, runtime, activeAssistantId);
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.status = "streaming";
         if ("args" in frame) {
@@ -892,11 +966,14 @@ export class WebviewStateStore {
       }
       case "tool_execution_end": {
         clearThinkingStreaming(runtime);
+        const activeAssistantId = ensureActiveAssistantGroupId(session, runtime);
+        ensureThinkingBlockForAssistantMessage(session, runtime, activeAssistantId);
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.display = frame.display ?? undefined;
         tool.isError = frame.isError;
         tool.status = "complete";
         tool.summary = asText(frame.result);
+        tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
         return;
       }
       case "plan.todos":
@@ -917,6 +994,28 @@ export class WebviewStateStore {
         if (tab) {
           tab.title = title;
         }
+        return;
+      }
+      case "turn.summary_updated": {
+        const summaryTitle =
+          "summaryTitle" in frame && typeof frame.summaryTitle === "string"
+            ? frame.summaryTitle
+            : null;
+        if (!summaryTitle) {
+          return;
+        }
+        applySummaryTitleToGroup(session, runtime, summaryTitle, {
+          assistantMessageId:
+            "assistantMessageId" in frame && typeof frame.assistantMessageId === "string"
+              ? frame.assistantMessageId
+              : undefined,
+          toolCallIds:
+            "toolCallIds" in frame && Array.isArray(frame.toolCallIds)
+              ? frame.toolCallIds.filter(
+                  (toolCallId): toolCallId is string => typeof toolCallId === "string",
+                )
+              : [],
+        });
         return;
       }
       default:

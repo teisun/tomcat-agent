@@ -447,6 +447,7 @@ pub enum ServeEvent {
     Agent(AgentWireEvent),
     Plan(ServePlanEvent),
     Session(ServeSessionEvent),
+    Turn(ServeTurnEvent),
 }
 
 /// `session.*` 自定义事件的 schema 入口（`session.todos` / `session.title_updated`）。
@@ -469,6 +470,25 @@ pub enum ServeSessionEvent {
         session_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+    },
+}
+
+/// `turn.*` 自定义事件的 schema 入口（当前仅 `turn.summary_updated`）。
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ServeTurnEvent {
+    #[serde(rename = "turn.summary_updated")]
+    TurnSummaryUpdated {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "turnIndex", skip_serializing_if = "Option::is_none")]
+        turn_index: Option<usize>,
+        #[serde(rename = "assistantMessageId", skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<String>,
+        #[serde(rename = "toolCallIds", skip_serializing_if = "Option::is_none")]
+        tool_call_ids: Option<Vec<String>>,
+        #[serde(rename = "summaryTitle", skip_serializing_if = "Option::is_none")]
+        summary_title: Option<String>,
     },
 }
 

@@ -25,6 +25,7 @@ use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, To
 
 use super::steering_injection::inject_steering_messages;
 use super::tool_exec;
+use super::turn_summary;
 use super::types::{AgentLoop, DispatchOutcome, LoopError, ToolCallInfo};
 
 fn plugin_tool_model_text(result: &serde_json::Value) -> String {
@@ -127,7 +128,8 @@ pub(super) async fn run_tool_calls(
     }
 
     // ── 2. push assistant_with_tool_calls ──
-    {
+    let summary_title = turn_summary::resolve_turn_summary_title(tool_calls);
+    let assistant_message_id = {
         let tc_json: Vec<serde_json::Value> = tool_calls
             .iter()
             .zip(persisted_arguments.iter())
@@ -154,6 +156,7 @@ pub(super) async fn run_tool_calls(
                     tc_json,
                 )
                 .with_completion_metadata(finish_reason, error_message, error_code)
+                .with_summary_title(summary_title.clone())
                 .with_reasoning_state(
                     thinking_text,
                     reasoning_continuation,
@@ -161,7 +164,8 @@ pub(super) async fn run_tool_calls(
                 ),
             )
             .map_err(LoopError::Fatal)?;
-    }
+        messages.last().and_then(|message| message.msg_id.clone())
+    };
 
     let mut tool_results: Vec<Message> = Vec::new();
     let mut steered = false;
@@ -183,6 +187,7 @@ pub(super) async fn run_tool_calls(
         }
         agent.block_tool_calls = false;
         return Ok(DispatchOutcome {
+            assistant_message_id,
             tool_results,
             steered,
         });
@@ -388,6 +393,7 @@ pub(super) async fn run_tool_calls(
     }
 
     Ok(DispatchOutcome {
+        assistant_message_id,
         tool_results,
         steered,
     })

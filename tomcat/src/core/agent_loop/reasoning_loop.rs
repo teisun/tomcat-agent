@@ -175,18 +175,24 @@ pub(super) async fn run_reasoning_loop(
         )
         .await?;
 
-        let summary_title = turn_summary::resolve_turn_summary_title(
+        let summary_title = turn_summary::resolve_turn_summary_title(&tool_calls);
+        let tool_call_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
+        turn_summary::maybe_spawn_turn_summary_update(
             agent,
-            thinking_text.as_deref(),
+            dispatch.assistant_message_id.as_deref(),
+            turn_index,
+            thinking_text.clone(),
             &tool_calls,
-        )
-        .await;
+            summary_title.as_deref(),
+        );
 
         // No synchronous cascade here; L0/L1/L2 handled at timing ⑤
         agent.emit_event(AgentEvent::TurnEnd {
             turn_index,
             message: Message(serde_json::json!({})),
             tool_results: dispatch.tool_results,
+            assistant_message_id: dispatch.assistant_message_id,
+            tool_call_ids,
             summary_title,
         });
 

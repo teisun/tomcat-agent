@@ -24,9 +24,11 @@ pub use store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESS
 pub use transcript::{
     append_entry, append_line, insert_entry_after_message_id,
     mark_message_entries_after_anchor_superseded, read_entries_tail, read_header,
-    remove_branch_summary_entry_by_id, rewrite_message_text_entries_by_id,
+    remove_branch_summary_entry_by_id, rewrite_message_summary_titles_by_id,
+    rewrite_message_text_entries_by_id,
     set_branch_summary_entry_is_boundary_true, write_header, BranchSummaryEntry, MessageEntry,
-    MessageTextRewrite, SessionHeader, ThinkingTraceEntry, TranscriptEntry,
+    MessageSummaryTitleRewrite, MessageTextRewrite, SessionHeader, ThinkingTraceEntry,
+    TranscriptEntry,
 };
 
 #[cfg(test)]

@@ -23,7 +23,7 @@ export interface ServeAttachment {
 }
 export type ServeAttachmentKind = "image" | "file";
 
-export type ServeEvent = ServePlanEvent | ServeSessionEvent | WireEvent;
+export type ServeEvent = ServePlanEvent | ServeSessionEvent | ServeTurnEvent | WireEvent;
 
 export interface ServeMessageParams {
   attachments?: ServeAttachment[];
@@ -106,6 +106,15 @@ export interface ServeTodoItem {
   id: string;
   status: string;
 }
+export type ServeTurnEvent = {
+  assistantMessageId?: null | string;
+  sessionId?: null | string;
+  summaryTitle?: null | string;
+  toolCallIds?: null | string[];
+  turnIndex?: null | number;
+  type: "turn.summary_updated";
+};
+
 export type SetPlanModeAction = "enter" | "exit" | "build";
 
 export type ToolDisplay = {
@@ -255,6 +264,14 @@ export type WireEvent = ({
   message: Message;
   type: "message_update";
 } | {
+  assistantMessageId?: null | string;
+  message: Message;
+  summaryTitle?: null | string;
+  toolCallIds?: string[];
+  toolResults: Message[];
+  turnIndex: number;
+  type: "turn_end";
+} | {
   attempt: number;
   delayMs: number;
   errorMessage: string;
@@ -346,12 +363,6 @@ export type WireEvent = ({
   finishReason: string;
   message: string;
   type: "llm_notice";
-} | {
-  message: Message;
-  summaryTitle?: null | string;
-  toolResults: Message[];
-  turnIndex: number;
-  type: "turn_end";
 } | {
   message: Message;
   type: "message_end";

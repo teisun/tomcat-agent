@@ -276,6 +276,12 @@ pub struct MessageTextRewrite {
     pub new_content: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct MessageSummaryTitleRewrite {
+    pub message_id: String,
+    pub summary_title: String,
+}
+
 /// 从路径流式读取首行并解析为 SessionHeader；文件不存在或空返回错误。
 pub fn read_header(path: &Path) -> Result<SessionHeader, AppError> {
     let f = std::fs::File::open(path).map_err(AppError::Io)?;
@@ -708,6 +714,88 @@ pub fn rewrite_message_text_entries_by_id(
     if changed == 0 {
         return Err(AppError::Config(
             "transcript: no message entry matched rewrite ids".to_string(),
+        ));
+    }
+
+    let mut content = out.join("\n");
+    content.push('\n');
+    write_file_atomic(path, content.as_bytes())?;
+    let _ = rebuild_resume_index_from_lines(path, &out)?;
+    Ok(changed)
+}
+
+/// 按 `message.id` 批量重写 `message.summary_title`。
+///
+/// 非 message 行与未命中的行保持原样；命中但不是对象结构的 message 会被跳过。
+/// 返回实际改写的 message 行数；若一个都没改到则返回错误，便于调用方记录漂移。
+pub fn rewrite_message_summary_titles_by_id(
+    path: &Path,
+    rewrites: &[MessageSummaryTitleRewrite],
+) -> Result<usize, AppError> {
+    if rewrites.is_empty() {
+        return Ok(0);
+    }
+
+    let rewrite_map: std::collections::HashMap<&str, &str> = rewrites
+        .iter()
+        .map(|r| (r.message_id.as_str(), r.summary_title.as_str()))
+        .collect();
+
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let reader = BufReader::new(f);
+    let lines: Vec<String> = reader
+        .lines()
+        .map(|r| r.map_err(AppError::Io))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(AppError::Config("transcript 文件为空".to_string()));
+    }
+
+    let mut changed = 0usize;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    out.push(lines[0].clone());
+
+    for line in lines.into_iter().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push(line);
+            continue;
+        }
+
+        let replaced = match serde_json::from_str::<TranscriptEntry>(trimmed) {
+            Ok(TranscriptEntry::Message(mut me)) => {
+                if let Some(message_id) = me.id.as_deref() {
+                    if let Some(summary_title) = rewrite_map.get(message_id) {
+                        if let Some(obj) = me.message.as_object_mut() {
+                            obj.insert(
+                                "summary_title".to_string(),
+                                serde_json::json!(summary_title),
+                            );
+                            changed += 1;
+                            Some(serde_json::to_string(&TranscriptEntry::Message(me))?)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(json) = replaced {
+            out.push(json);
+        } else {
+            out.push(line);
+        }
+    }
+
+    if changed == 0 {
+        return Err(AppError::Config(
+            "transcript: no message entry matched summary title rewrite ids".to_string(),
         ));
     }
 

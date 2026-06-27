@@ -92,10 +92,10 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     }
     return node.dataset.testid ?? "unknown";
   });
-  const toolBodyMetrics = [...document.querySelectorAll<HTMLElement>('[data-testid="tool-card"]')].map(
-    (card) => {
-      const title = card.querySelector('[data-testid="tool-title"]')?.textContent ?? "";
-      const body = card.querySelector<HTMLElement>('[data-testid="tool-body"]');
+  const toolBodyMetrics = [...document.querySelectorAll<HTMLElement>('[data-testid="tool-row"]')].map(
+    (row) => {
+      const title = row.querySelector('[data-testid="tool-row-label"]')?.textContent ?? "";
+      const body = row.querySelector<HTMLElement>('[data-testid="tool-row-body"]');
       return {
         clientHeight: body?.clientHeight ?? 0,
         expanded: !!body,
@@ -184,7 +184,7 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     },
     timelineKinds,
     toolBodyMetrics,
-    toolTitles: queryText('[data-testid="tool-title"]'),
+    toolTitles: queryText('[data-testid="tool-row-label"]'),
     assistantResponseGroups: transcriptGroups.length,
     groupFoldTitles,
     userPromptPill,

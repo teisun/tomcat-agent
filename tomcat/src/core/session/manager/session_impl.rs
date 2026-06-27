@@ -17,8 +17,9 @@ use crate::core::session::store::{
 use crate::core::session::transcript::{
     append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
     mark_message_entries_after_anchor_superseded, read_entries_tail, read_header, write_header,
-    BranchSummaryEntry, CustomEntry, LabelEntry, MessageEntry, ModelChangeEntry, SessionHeader,
-    SessionInfoEntry, SyncLevel, ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry,
+    rewrite_message_summary_titles_by_id, BranchSummaryEntry, CustomEntry, LabelEntry,
+    MessageEntry, MessageSummaryTitleRewrite, ModelChangeEntry, SessionHeader, SessionInfoEntry,
+    SyncLevel, ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
@@ -747,6 +748,27 @@ impl SessionManager {
                 extra,
             });
             append_entry(&path, &entry)
+        })
+    }
+
+    /// 按 `message.id` 重写指定 session transcript 中 assistant message 的 `summary_title`。
+    ///
+    /// 用于异步 utility 标题生成完成后，覆盖先前持久化的规则占位标题。
+    pub fn rewrite_message_summary_title_in_session(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        summary_title: &str,
+    ) -> Result<usize, AppError> {
+        let path = self.transcript_path(session_id);
+        self.with_transcript_lock(&path, || {
+            rewrite_message_summary_titles_by_id(
+                &path,
+                &[MessageSummaryTitleRewrite {
+                    message_id: message_id.to_string(),
+                    summary_title: summary_title.to_string(),
+                }],
+            )
         })
     }
 

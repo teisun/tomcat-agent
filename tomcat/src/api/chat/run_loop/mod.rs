@@ -703,6 +703,7 @@ pub async fn run_chat_turn_with_message(
     agent_loop = agent_loop.with_web_fetch_runtime(ctx.global_services.web_fetch_runtime.clone());
     agent_loop = agent_loop.with_web_search_runtime(ctx.global_services.web_search_runtime.clone());
     agent_loop = agent_loop.with_todos_runtime(ctx.session_runtime.todos_runtime.clone());
+    agent_loop = agent_loop.with_session_manager(ctx.session_runtime.session.clone());
     agent_loop =
         agent_loop.with_shared_follow_up_queue(ctx.session_runtime.follow_up_queue.clone());
     agent_loop = agent_loop.with_shared_steering_queue(ctx.session_runtime.steering_queue.clone());

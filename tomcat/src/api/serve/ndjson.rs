@@ -53,8 +53,8 @@ fn parse_command_value(value: Value) -> Result<super::types::ServeCommand, AppEr
 
 fn map_command_parse_error(command_type: Option<&str>, error: serde_json::Error) -> AppError {
     let message = error.to_string();
-    if command_type.is_some() && message.contains("unknown variant") {
-        return AppError::Config(format!("unknown_command: {}", command_type.unwrap()));
+    if let Some(command_type) = command_type.filter(|_| message.contains("unknown variant")) {
+        return AppError::Config(format!("unknown_command: {command_type}"));
     }
     AppError::Config(format!("parse_error: {message}"))
 }

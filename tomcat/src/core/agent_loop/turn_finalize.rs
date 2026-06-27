@@ -21,8 +21,6 @@ use crate::core::session::manager::estimated_tokens_from_chars;
 use crate::infra::events::{AgentEvent, Message};
 
 use super::types::AgentLoop;
-use super::turn_summary;
-
 /// 处理 text-only 回合的全部副作用：消息落盘、timing ⑤、收束事件发射。
 ///
 /// **必须在 `tool_calls.is_empty()` 分支调用，且仅调用一次**——重复调用会重复
@@ -45,12 +43,6 @@ pub(super) async fn finalize_turn_after_text(
     if let Some(ref mut ctx_state) = agent.context_state {
         ctx_state.on_message_appended(content_buf.len());
     }
-    let summary_title = turn_summary::resolve_turn_summary_title(
-        agent,
-        thinking_text.as_deref(),
-        &[],
-    )
-    .await;
     agent.push_message(
         messages,
         ChatMessage::assistant(content_buf)
@@ -129,7 +121,9 @@ pub(super) async fn finalize_turn_after_text(
         turn_index,
         message: Message(serde_json::json!({})),
         tool_results: vec![],
-        summary_title,
+        assistant_message_id: None,
+        tool_call_ids: vec![],
+        summary_title: None,
     });
     Ok(())
 }

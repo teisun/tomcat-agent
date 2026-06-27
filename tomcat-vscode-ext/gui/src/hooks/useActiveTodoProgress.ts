@@ -3,7 +3,7 @@ import type { WebviewPlanState, WebviewTodo } from "../types";
 export interface ActiveTodoProgress {
   current: number;
   isComplete: boolean;
-  phase: "completed" | "created" | "starting" | "updated";
+  phase: "completed" | "starting" | "updated";
   title: string;
   total: number;
 }
@@ -59,5 +59,5 @@ export function shouldShowProgressRow(
   progress: ActiveTodoProgress | null,
   busy: boolean,
 ): boolean {
-  return busy && (progress !== null || busy);
+  return busy;
 }
