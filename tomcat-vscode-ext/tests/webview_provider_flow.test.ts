@@ -19,12 +19,18 @@ const __testing = (
 
 type MutableSessionState = {
   busy: boolean;
+  contextRatio: number | null;
   model: string;
   modelThinking: Record<string, string | null>;
   planId: string | null;
   planPath: string | null;
   planState: string;
   thinkingLevel: string | null;
+};
+
+type BuildProviderOptions = {
+  historyMessages?: unknown[];
+  sessionState?: Partial<MutableSessionState>;
 };
 
 class FakeMessenger {
@@ -160,11 +166,12 @@ function initializeResult(): InitializeResult {
   };
 }
 
-function buildProvider() {
+function buildProvider(options: BuildProviderOptions = {}) {
   __testing.reset();
 
   const sessionState: MutableSessionState = {
     busy: false,
+    contextRatio: null,
     model: "gpt-5.4",
     modelThinking: {
       "claude-4.6-sonnet": "low",
@@ -174,6 +181,7 @@ function buildProvider() {
     planPath: null,
     planState: "chat",
     thinkingLevel: "high",
+    ...options.sessionState,
   };
   const messenger = new FakeMessenger(sessionState);
   const sessionRouter = {
@@ -185,7 +193,7 @@ function buildProvider() {
     },
     async getMessages(sessionId?: string) {
       return {
-        messages: [
+        messages: options.historyMessages ?? [
           {
             id: "hist-user-1",
             message: {
@@ -210,8 +218,10 @@ function buildProvider() {
     async getState(sessionId?: string) {
       return {
         busy: sessionState.busy,
+        contextRatio: sessionState.contextRatio,
         model: sessionState.model,
         planId: sessionState.planId,
+        planPath: sessionState.planPath,
         planState: sessionState.planState,
         sessionId: sessionId ?? "session-1",
         thinkingLevel: sessionState.thinkingLevel,
@@ -385,6 +395,189 @@ describe("webview provider integration", () => {
       "build",
       "exit",
     ]);
+
+    provider.dispose();
+  });
+
+  it("restores an active plan card and context ratio from getState on ready", async () => {
+    const { provider } = buildProvider({
+      sessionState: {
+        contextRatio: 0.42,
+        planId: "plan-1",
+        planPath: "/workspace/plans/plan-1.plan.md",
+        planState: "executing",
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+
+    const session = provider.currentState().sessionViews["session-1"];
+    const planCards = session?.timeline.filter((item) => item.type === "plan");
+    expect(session).toMatchObject({
+      contextRatio: 0.42,
+      planFile: {
+        path: "/workspace/plans/plan-1.plan.md",
+        planId: "plan-1",
+        state: "executing",
+      },
+      planId: "plan-1",
+      planState: "executing",
+    });
+    expect(planCards).toHaveLength(1);
+
+    provider.dispose();
+  });
+
+  it("replays custom plan history into one card while keeping current state truth", async () => {
+    const { provider } = buildProvider({
+      historyMessages: [
+        {
+          event: "plan.create",
+          id: "hist-plan-create",
+          path: "/workspace/plans/plan-1.plan.md",
+          plan_id: "plan-1",
+          state: "planning",
+          type: "custom",
+        },
+        {
+          event: "plan.review",
+          id: "hist-plan-review",
+          plan_id: "plan-1",
+          summary: "looks good",
+          type: "custom",
+        },
+        {
+          event: "plan.verify",
+          id: "hist-plan-verify",
+          plan_id: "plan-1",
+          type: "custom",
+          verdict: "pass",
+        },
+      ],
+      sessionState: {
+        planId: "plan-1",
+        planPath: "/workspace/plans/plan-1.plan.md",
+        planState: "executing",
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+
+    const session = provider.currentState().sessionViews["session-1"];
+    const planCards = session?.timeline.filter((item) => item.type === "plan");
+    const notices = session?.timeline.filter(
+      (item) => item.type === "message" && item.kind === "notice",
+    );
+    expect(planCards).toHaveLength(1);
+    expect(planCards?.[0]).toMatchObject({
+      path: "/workspace/plans/plan-1.plan.md",
+      planId: "plan-1",
+      state: "executing",
+    });
+    expect(notices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: "Tomcat plan review: looks good" }),
+        expect.objectContaining({ text: "Tomcat plan verify: pass" }),
+      ]),
+    );
+
+    provider.dispose();
+  });
+
+  it("converges plan state from cross-owner transition events", async () => {
+    const { messenger, provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+
+    messenger.emit({
+      sessionId: "session-1",
+      type: "plan.enter",
+    });
+    messenger.emit({
+      path: "/workspace/plans/plan-1.plan.md",
+      planId: "plan-1",
+      sessionId: "session-1",
+      state: "executing",
+      type: "plan.build",
+    });
+    messenger.emit({
+      path: "/workspace/plans/plan-1.plan.md",
+      planId: "plan-1",
+      sessionId: "session-1",
+      state: "pending",
+      type: "plan.pending",
+    });
+    messenger.emit({
+      path: "/workspace/plans/plan-1.plan.md",
+      planId: "plan-1",
+      sessionId: "session-1",
+      state: "completed",
+      type: "plan.complete",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const session = provider.currentState().sessionViews["session-1"];
+    expect(session).toMatchObject({
+      planFile: {
+        path: "/workspace/plans/plan-1.plan.md",
+        state: "chat",
+      },
+      planId: null,
+      planState: "chat",
+    });
+    expect(
+      session?.timeline.filter(
+        (item) => item.type === "plan" && item.path === "/workspace/plans/plan-1.plan.md",
+      ),
+    ).toHaveLength(1);
+
+    provider.dispose();
+  });
+
+  it("reconciles terminal plan events back to getState truth", async () => {
+    const { messenger, provider, sessionState } = buildProvider({
+      sessionState: {
+        planId: "plan-1",
+        planPath: "/workspace/plans/plan-1.plan.md",
+        planState: "executing",
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+
+    sessionState.planId = null;
+    sessionState.planPath = null;
+    sessionState.planState = "chat";
+    messenger.emit({
+      path: "/workspace/plans/plan-1.plan.md",
+      planId: "plan-1",
+      sessionId: "session-1",
+      state: "completed",
+      type: "plan.complete",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const session = provider.currentState().sessionViews["session-1"];
+    expect(session).toMatchObject({
+      planFile: {
+        path: "/workspace/plans/plan-1.plan.md",
+        state: "chat",
+      },
+      planId: null,
+      planState: "chat",
+    });
 
     provider.dispose();
   });

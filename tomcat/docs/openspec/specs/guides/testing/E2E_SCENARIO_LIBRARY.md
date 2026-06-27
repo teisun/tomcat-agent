@@ -260,7 +260,7 @@
 | E2E-VSCEXT-007 | 自动 | `test_packaged_vsix_contains_gui_dist_and_installed_webview_loads` | 用户安装打包后的 VSIX 后，participant 与 webview 都能正常加载和使用 | 执行 VSIX 打包 → 安装版 harness 启动 VSCode → 打开 chat UI 与 webview | 包内含 `gui/dist`、不含 `gui/src`；安装版 participant 与 webview 都可加载；webview 无 CSP/资源加载错误 |
 | E2E-VSCEXT-008 | 自动 | `test_webview_protocol_and_bridge_reuse_contract` | 宿主与 webview 的 typed `postMessage` 协议稳定，且 participant / webview 共用同一 `TomcatMessenger` 核心 | 运行扩展级集成 + 宿主 E2E；同时订阅 participant / webview | `messageId` / `state` / `event` 协议语义稳定；未知 id 安全丢弃；同一 `TomcatMessenger` 实例同时服务两个前端，核心行为不漂移 |
 
-## Story 8e — VSCode webview transcript 仿 Chat 体验（8 条）
+## Story 8e — VSCode webview transcript 仿 Chat 体验（11 条）
 
 > 对应 [User_Stories.md](../../User_Stories.md) Story 8e；自动化入口 `tomcat-vscode-ext/e2e-harness/src/test/manual-acceptance.test.ts` / `installed.test.ts` + `gui/src/App.test.tsx` 单元测试。
 
@@ -274,6 +274,9 @@
 | E2E-VSCEXT-014 | 自动 | `test_user_webview_session_title_async_update` | 首条 user 后 session 标题从占位更新为 LLM 标题 | 新建 session → 发送首条 user 消息 | `sessionTitleUpdated=true`；SessionBar 标题从规则占位变为 LLM 生成标题 |
 | E2E-VSCEXT-015 | 自动 | `test_user_webview_left_guide_line_and_ellipsis_above_group` | 折叠组视觉对齐 VSCode（竖线 + 阐述在折叠头上方） | 触发含阐述 + thinking + tool 的回合 | `leftGuideLine=true`；`ellipsisAboveGroupHeader=true`（阐述在折叠头上方可见） |
 | E2E-VSCEXT-016 | 自动 | `test_user_webview_shimmer_while_summary_title_pending` | streaming 且 summaryTitle 未就绪时 header shimmer | 触发 thinking+tool 流式回合 | 折叠 header 含 shimmer class；summaryTitle 就绪后 shimmer 消失 |
+| E2E-VSCEXT-017 | 自动 | `test_user_webview_switch_session_restores_plan_card_and_ctx` | 用户切到别的 session 再切回时，已有 active plan 的 transcript 状态能恢复，不需要重新等 live 事件 | webview 新建 session A → 触发带 `planPath` / `Ctx%` 的 transcript 场景 → 新建 session B → 切回 session A | DOM：`planCardCount===1`、`ctxLabel` 恢复、`planStateText` 与当前 `get_state.planState` 一致；Plan `Build` 控件仍可用；不得生成重复 plan 卡 |
+| E2E-VSCEXT-018 | 自动 | `test_user_webview_reload_replays_plan_history_without_duplicate_card` | 用户 reload webview 后，plan 历史证据（review/verify）能从 `get_messages` 重放回来 | 触发含 custom `plan.review` / `plan.verify` / `plan.pending` 的回合 → 模拟 webview reload → 等待 bootstrap 完成 | DOM：`planNoticeReplayed=true`；review / verify notice 重新出现且各仅 1 次；`planCardCount===1`；plan footer 状态取 `get_state` 当前真相而不是旧历史 |
+| E2E-VSCEXT-019 | 自动 | `test_user_webview_cross_owner_observes_plan_transitions_and_terminal_truth` | participant 持有会话时，webview 作为观察端仍能看到 plan enter/build/exit 与终态收敛 | participant 创建并持有 session → webview 切到该 session（只读）→ participant 触发 `plan.enter` / `plan.build` / `plan.exit` 生命周期 | 观察态 DOM：`hasConflict=true`，footer 依次显示 `Plan: planning` / `Plan: executing` / `null`；timeline 中同一路径始终单张 plan 卡；终态后 state 与 `get_state` 收敛，不残留 completed/pending 漂移 |
 
 ---
 

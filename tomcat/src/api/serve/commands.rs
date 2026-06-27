@@ -317,14 +317,17 @@ pub(crate) async fn handle_command(
                 .active_plan_id()
                 .map(ToOwned::to_owned)
                 .or_else(|| slot.ctx.session_runtime.plan_runtime.active_planning_plan_id());
-            let active_plan_path_raw = slot
-                .ctx
-                .session_runtime
-                .plan_runtime
-                .active_plan_path();
+            let active_plan_path_raw = if plan_state.is_plan_attached() {
+                slot.ctx.session_runtime.plan_runtime.active_plan_path()
+            } else {
+                None
+            };
             let active_plan_path = active_plan_path_raw
                 .as_ref()
                 .map(|path| crate::infra::platform::format_home_path(path));
+            let context_utilization_ratio = entry
+                .as_ref()
+                .and_then(|session| session.context_utilization_ratio);
             let session_todos = crate::core::tools::plan_tool::shared_todo_ops::items_json(
                 &slot
                     .ctx
@@ -356,6 +359,7 @@ pub(crate) async fn handle_command(
                     "planPath": active_plan_path,
                     "planTodos": plan_todos,
                     "sessionTodos": session_todos,
+                    "contextUtilizationRatio": context_utilization_ratio,
                     "sessionKey": slot.ctx.session_runtime.session.current_session_key(),
                 })),
             )))?;

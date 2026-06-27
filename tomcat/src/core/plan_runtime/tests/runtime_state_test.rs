@@ -41,6 +41,71 @@ fn exit_to_chat_when_already_chat_errors() {
 }
 
 #[test]
+fn enter_and_exit_write_transition_events() {
+    let rt = PlanRuntime::new("sess-1");
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let events = events.clone();
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            events.lock().push(extra);
+            Ok(())
+        }));
+    }
+
+    rt.enter_planning().unwrap();
+    rt.exit_to_chat().unwrap();
+
+    let events = events.lock();
+    assert_eq!(events[0]["event"], crate::infra::wire::WIRE_PLAN_ENTER);
+    assert_eq!(events[0]["state"], "planning");
+    assert_eq!(events[1]["event"], crate::infra::wire::WIRE_PLAN_EXIT);
+    assert_eq!(events[1]["state"], "chat");
+}
+
+#[test]
+fn completed_and_pending_modes_emit_transition_events() {
+    let rt = PlanRuntime::new("sess-1");
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let events = events.clone();
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            events.lock().push(extra);
+            Ok(())
+        }));
+    }
+
+    rt.set_mode_completed("done-1".into());
+    rt.set_mode_pending("done-1".into());
+
+    let events = events.lock();
+    assert_eq!(events[0]["event"], crate::infra::wire::WIRE_PLAN_COMPLETE);
+    assert_eq!(events[0]["plan_id"], "done-1");
+    assert_eq!(events[0]["state"], "completed");
+    assert_eq!(events[1]["event"], crate::infra::wire::WIRE_PLAN_PENDING);
+    assert_eq!(events[1]["plan_id"], "done-1");
+    assert_eq!(events[1]["state"], "pending");
+}
+
+#[test]
+fn finalize_completed_to_chat_does_not_emit_event() {
+    let rt = PlanRuntime::new("sess-1");
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let events = events.clone();
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            events.lock().push(extra);
+            Ok(())
+        }));
+    }
+
+    rt.set_mode_completed("done-1".into());
+    events.lock().clear();
+
+    assert_eq!(rt.finalize_completed_to_chat().as_deref(), Some("done-1"));
+    assert!(events.lock().is_empty());
+}
+
+#[test]
 fn recover_in_initial_chat_is_noop() {
     let rt = PlanRuntime::new("sess-1");
     rt.recover().unwrap();

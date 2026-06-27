@@ -227,7 +227,10 @@ fn persist_context_observability_writes_sessions_json() {
             compaction_tokens_freed: 12345,
             tool_result_chars_persisted: 999,
         },
-        live: Default::default(),
+        live: super::super::types::ContextLiveMetrics {
+            context_utilization_ratio: 0.42,
+            ..Default::default()
+        },
     };
     mgr.persist_context_observability(&state).unwrap();
 
@@ -244,6 +247,7 @@ fn persist_context_observability_writes_sessions_json() {
         entry.tool_result_chars_persisted,
         Some(state.session_obs.tool_result_chars_persisted as u64)
     );
+    assert_eq!(entry.context_utilization_ratio, Some(0.42));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -277,7 +281,10 @@ fn persist_context_observability_stays_on_pinned_session_after_external_repoint(
             compaction_tokens_freed: 12345,
             tool_result_chars_persisted: 999,
         },
-        live: Default::default(),
+        live: super::super::types::ContextLiveMetrics {
+            context_utilization_ratio: 0.42,
+            ..Default::default()
+        },
     };
     mgr.persist_context_observability(&state).unwrap();
 
@@ -292,9 +299,11 @@ fn persist_context_observability_stays_on_pinned_session_after_external_repoint(
     assert_eq!(original_entry.compaction_count, Some(7));
     assert_eq!(original_entry.compaction_tokens_freed, Some(12345));
     assert_eq!(original_entry.tool_result_chars_persisted, Some(999));
+    assert_eq!(original_entry.context_utilization_ratio, Some(0.42));
     assert_eq!(hijacked_entry.compaction_count, None);
     assert_eq!(hijacked_entry.compaction_tokens_freed, None);
     assert_eq!(hijacked_entry.tool_result_chars_persisted, None);
+    assert_eq!(hijacked_entry.context_utilization_ratio, None);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

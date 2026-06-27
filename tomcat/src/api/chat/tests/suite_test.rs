@@ -269,6 +269,7 @@ fn effective_model_uses_session_override() {
         compaction_count: None,
         compaction_tokens_freed: None,
         tool_result_chars_persisted: None,
+        context_utilization_ratio: None,
         last_checkpoint_id: None,
         title: None,
     };
@@ -296,6 +297,7 @@ fn effective_model_uses_global_when_no_override() {
         compaction_count: None,
         compaction_tokens_freed: None,
         tool_result_chars_persisted: None,
+        context_utilization_ratio: None,
         last_checkpoint_id: None,
         title: None,
     };

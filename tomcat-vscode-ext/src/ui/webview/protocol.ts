@@ -319,6 +319,7 @@ export type WebviewIntent =
         composerFooterPlanStatus: string | null;
         composerPlanStatusInBarCount: number;
         composerRowCount: number;
+        ctxLabel: string | null;
         expandedThinkingCount: number;
         expandedToolTitles: string[];
         fileChipTopWithinStream: number | null;
@@ -354,6 +355,8 @@ export type WebviewIntent =
         planCardCount: number;
         planFooterSameRow: boolean;
         planCardTodoCountText: string | null;
+        planNoticeReplayed: boolean;
+        planStateText: string | null;
         progressRow: boolean;
         planTodos: number;
         todoWidgetExpanded: boolean;
@@ -468,6 +471,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         Array.isArray(value.data.expandedToolTitles) &&
         Array.isArray(value.data.timelineKinds) &&
         isRecord(value.data.composerControlMetrics) &&
+        (value.data.ctxLabel === null || typeof value.data.ctxLabel === "string") &&
         isRecord(value.data.streamMetrics) &&
         typeof value.data.streamMetrics.scrollTop === "number" &&
         typeof value.data.streamMetrics.scrollHeight === "number" &&
@@ -481,6 +485,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         typeof value.data.planCardCount === "number" &&
         (value.data.planCardTodoCountText === null ||
           typeof value.data.planCardTodoCountText === "string") &&
+        typeof value.data.planNoticeReplayed === "boolean" &&
+        (value.data.planStateText === null || typeof value.data.planStateText === "string") &&
         typeof value.data.progressRow === "boolean" &&
         typeof value.data.planTodos === "number" &&
         typeof value.data.todoWidgetExpanded === "boolean" &&

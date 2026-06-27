@@ -21,10 +21,12 @@ export interface SessionListPayload {
 
 export interface SessionStatePayload {
   busy: boolean;
+  contextRatio?: number | null;
   cwd?: string | null;
   mode?: string | null;
   model?: string | null;
   planId?: string | null;
+  planPath?: string | null;
   planState?: string | null;
   planTodos?: WebviewTodo[];
   sessionId: string;
@@ -201,10 +203,15 @@ export class SessionRouter {
 
     return {
       busy: payload.busy === true,
+      contextRatio:
+        typeof payload.contextUtilizationRatio === "number"
+          ? payload.contextUtilizationRatio
+          : null,
       cwd: typeof payload.cwd === "string" ? payload.cwd : null,
       mode: typeof payload.mode === "string" ? payload.mode : null,
       model: typeof payload.model === "string" ? payload.model : null,
       planId: typeof payload.planId === "string" ? payload.planId : null,
+      planPath: typeof payload.planPath === "string" ? payload.planPath : null,
       planState:
         typeof payload.planState === "string" ? payload.planState : null,
       planTodos: parseTodos(payload.planTodos),

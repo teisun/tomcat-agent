@@ -825,6 +825,12 @@
           "type"
         ],
         "properties": {
+          "assistantMessageId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "message": {
             "$ref": "#/definitions/Message"
           },
@@ -833,6 +839,12 @@
               "string",
               "null"
             ]
+          },
+          "toolCallIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "toolResults": {
             "type": "array",
@@ -1867,6 +1879,9 @@
           },
           {
             "$ref": "#/definitions/ServeSessionEvent"
+          },
+          {
+            "$ref": "#/definitions/ServeTurnEvent"
           }
         ]
       },
@@ -1945,6 +1960,82 @@
                 "type": "string",
                 "enum": [
                   "plan.build"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.enter"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.exit"
                 ]
               }
             }
@@ -2225,6 +2316,44 @@
               "type"
             ],
             "properties": {
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.pending"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
               "planId": {
                 "type": [
                   "string",
@@ -2335,6 +2464,60 @@
             "type": "string"
           }
         }
+      },
+      "ServeTurnEvent": {
+        "description": "`turn.*` 自定义事件的 schema 入口（当前仅 `turn.summary_updated`）。",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "assistantMessageId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summaryTitle": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "toolCallIds": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "turnIndex": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "turn.summary_updated"
+                ]
+              }
+            }
+          }
+        ]
       },
       "ToolDisplay": {
         "description": "工具执行成功后给 CLI/TUI 的结构化展示提示。",
@@ -2479,6 +2662,12 @@
               "type"
             ],
             "properties": {
+              "assistantMessageId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "message": {
                 "$ref": "#/definitions/Message"
               },
@@ -2487,6 +2676,12 @@
                   "string",
                   "null"
                 ]
+              },
+              "toolCallIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               },
               "toolResults": {
                 "type": "array",

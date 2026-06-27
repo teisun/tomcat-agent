@@ -58,9 +58,14 @@ export function planEventState(
       return "executing";
     case "plan.complete":
       return "completed";
+    case "plan.pending":
+      return "pending";
+    case "plan.enter":
     case "plan.create":
     case "plan.update":
       return "planning";
+    case "plan.exit":
+      return "chat";
     default:
       return null;
   }

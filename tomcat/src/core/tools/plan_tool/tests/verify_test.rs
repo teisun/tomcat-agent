@@ -48,8 +48,14 @@ async fn verify_event_in_transcript() {
         .iter()
         .find(|v| v["event"] == "plan.verify")
         .expect("缺少 plan.verify 事件");
+    let complete_event = events
+        .iter()
+        .find(|v| v["event"] == crate::infra::wire::WIRE_PLAN_COMPLETE)
+        .expect("缺少 plan.complete 事件");
     assert_eq!(verify_event["plan_id"], plan_id);
     assert_eq!(verify_event["verdict"], "pass");
+    assert_eq!(complete_event["plan_id"], plan_id);
+    assert_eq!(complete_event["state"], "completed");
     cleanup_home(&home);
 }
 

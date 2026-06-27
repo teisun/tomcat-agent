@@ -174,6 +174,8 @@
 - [ ] `tomcat serve` 新增 `set_plan_mode`、`list_models`、`get_state.planState`、`plan.*` 事件，以及 `list_sessions{scope:"disk"}` / 磁盘历史 `switch_session`，供 VSCode 前端驱动计划模式、模型切换和项目历史恢复
 - [ ] 自建 VSCode webview 基于 `WebviewViewProvider` + React + Vite 实现，协议走 typed `postMessage`，渲染语义复用 Phase 1 `WireEvent`（thinking/tool/approval/diff/session）
 - [ ] participant 与 webview 默认并存，共享同一 `TomcatMessenger`、单个 `tomcat serve` 进程与同一项目 scope 会话池；同一条 live 会话同一时刻仅允许一个前端驱动，非 owner 端只读并看到明确提示
+- [ ] webview 在切换回已有活动 plan 的 session 时，可仅凭 `get_state.planPath` / `contextUtilizationRatio` 恢复 plan 卡、`Ctx%` 与 `Build` 可用态；不得依赖额外 live `plan.*` 才“补出来”
+- [ ] participant 持有会话时，webview 作为观察端仍能通过 `plan.enter` / `plan.build` / `plan.pending` / `plan.complete` / `plan.exit` 与终态 `get_state` reconcile 保持 plan footer、plan 卡与后端当前真相一致
 - [ ] webview 的“看 diff / 应用编辑”复用 VSCode 原生 `vscode.diff` + `WorkspaceEdit` 落地路径，不自建主编辑栈
 - [ ] 扩展需通过真实宿主与安装版 VSIX 验收：原生 chat UI、webview UI、共享会话池、owner 冲突、VSIX 打包入包与安装后资源加载均有自动化覆盖
 
@@ -186,9 +188,11 @@
 - [ ] plan executing 或 chat 有 in_progress session todo 时，live cluster 末尾显示进度行 `(current/total) title`；PlanFileCard 同步渲染 planTodos
 - [ ] 后端 `LlmScene::Title`（默认 `utility-flash`）异步生成 turn 折叠标题与 session 标题；占位优先 + 失败静默回退规则摘要，不阻塞 UI
 - [ ] wire 事件：`TurnEnd.summaryTitle`、`session.title_updated`、`plan.todos`、`session.todos`；`get_state` 含 planTodos/sessionTodos
+- [ ] 切会话 / reload / 跨 owner 观察三条路径下，plan 卡始终按 `path` 唯一；`Ctx%`、plan footer 状态与 review/verify notice 能通过 `get_state` + `get_messages` 重建，且终态事件后 state 以当前真相为准，不得出现重复卡或 completed/pending 漂移
 
 **验收标准（P1）**：
 - [ ] E2E 覆盖：userPromptPill、assistantNoCard、assistantResponseGroups、groupFoldTitles、toolRowFlat、toolRowExpandable、fileChipOpen、progressRow、sessionTitleUpdated
+- [ ] E2E 覆盖：切回带 active plan 的 session 可恢复单张 plan 卡与 `Ctx%`；reload 后 custom `plan.review` / `plan.verify` notice 可重放；participant 持有 session 时 webview 观察态对 `plan.enter/build/exit` 与终态 reconcile 保持一致
 - [ ] 单元测试覆盖 `groupTimelineByAssistantResponse`、`useActiveTodoProgress`、ThinkingGroup 懒渲染、ToolRow 差异化编排
 
 ### Story 9: 插件自举全闭环

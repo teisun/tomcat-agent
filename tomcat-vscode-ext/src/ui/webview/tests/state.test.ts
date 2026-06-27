@@ -284,6 +284,187 @@ describe("history tool attribution", () => {
   });
 });
 
+describe("session state hydration", () => {
+  it("hydrates plan cards and context ratio from get_state without duplicating cards", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applySessionState(
+      {
+        busy: false,
+        contextRatio: 0.42,
+        model: "gpt-5.4",
+        planId: "plan-1",
+        planPath: "/workspace/plan-a.plan.md",
+        planState: "planning",
+        sessionId: "s1",
+      },
+      null,
+      "webview",
+    );
+
+    store.applyEvent({
+      path: "/workspace/plan-a.plan.md",
+      planId: "plan-1",
+      sessionId: "s1",
+      state: "executing",
+      type: "plan.build",
+    });
+    store.applySessionState(
+      {
+        busy: false,
+        model: "gpt-5.4",
+        planId: "plan-1",
+        planPath: "/workspace/plan-a.plan.md",
+        planState: "pending",
+        sessionId: "s1",
+      },
+      null,
+      "webview",
+    );
+    store.applySessionState(
+      {
+        busy: false,
+        model: "gpt-5.4",
+        planId: null,
+        planPath: null,
+        planState: "chat",
+        sessionId: "s1",
+      },
+      null,
+      "webview",
+    );
+
+    const session = store.snapshot().sessionViews.s1;
+    const planCards = session.timeline.filter(
+      (item) => item.type === "plan" && item.path === "/workspace/plan-a.plan.md",
+    );
+    expect(planCards).toHaveLength(1);
+    expect(session.contextRatio).toBe(0.42);
+    expect(session.planFile).toMatchObject({
+      path: "/workspace/plan-a.plan.md",
+      planId: "plan-1",
+      state: "chat",
+    });
+    expect(planCards[0]).toMatchObject({
+      path: "/workspace/plan-a.plan.md",
+      planId: "plan-1",
+      state: "chat",
+    });
+  });
+});
+
+describe("custom history replay", () => {
+  it("replays plan custom entries into one card and preserves current state", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applySessionState(
+      {
+        busy: false,
+        model: "gpt-5.4",
+        planId: "plan-1",
+        planPath: "/workspace/plan-a.plan.md",
+        planState: "executing",
+        sessionId: "s1",
+      },
+      null,
+      "webview",
+    );
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          event: "plan.enter",
+          id: "enter-1",
+          state: "planning",
+          type: "custom",
+        },
+        {
+          event: "plan.create",
+          id: "create-1",
+          path: "/workspace/plan-a.plan.md",
+          plan_id: "plan-1",
+          state: "planning",
+          type: "custom",
+        },
+        {
+          event: "plan.update",
+          id: "update-1",
+          path: "/workspace/plan-a.plan.md",
+          plan_id: "plan-1",
+          state: "planning",
+          type: "custom",
+        },
+        {
+          event: "plan.pending",
+          id: "pending-1",
+          path: "/workspace/plan-a.plan.md",
+          plan_id: "plan-1",
+          state: "pending",
+          type: "custom",
+        },
+        {
+          event: "plan.complete",
+          id: "complete-1",
+          path: "/workspace/plan-a.plan.md",
+          plan_id: "plan-1",
+          state: "completed",
+          type: "custom",
+        },
+        {
+          event: "plan.review",
+          id: "review-1",
+          plan_id: "plan-1",
+          summary: "looks good",
+          type: "custom",
+        },
+        {
+          event: "plan.verify",
+          id: "verify-1",
+          plan_id: "plan-1",
+          type: "custom",
+          verdict: "pass",
+        },
+        {
+          event: "plan.review.warning",
+          id: "warn-1",
+          plan_id: "plan-1",
+          reason: "rounds_exhausted",
+          type: "custom",
+        },
+        {
+          event: "plan.exit",
+          id: "exit-1",
+          state: "chat",
+          type: "custom",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    const planCards = session.timeline.filter(
+      (item) => item.type === "plan" && item.path === "/workspace/plan-a.plan.md",
+    );
+    const notices = session.timeline.filter(
+      (item) => item.type === "message" && item.kind === "notice",
+    );
+    expect(planCards).toHaveLength(1);
+    expect(planCards[0]).toMatchObject({
+      path: "/workspace/plan-a.plan.md",
+      planId: "plan-1",
+      state: "executing",
+    });
+    expect(notices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: "Tomcat plan review: looks good" }),
+        expect.objectContaining({ text: "Tomcat plan verify: pass" }),
+        expect.objectContaining({ text: "Tomcat plan warning: rounds_exhausted" }),
+      ]),
+    );
+  });
+});
+
 describe("openFile intent protocol", () => {
   it("accepts openFile intent shape", () => {
     expect(

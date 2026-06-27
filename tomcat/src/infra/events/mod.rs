@@ -133,8 +133,14 @@ pub mod wire {
     pub const WIRE_PLAN_CREATE: &str = "plan.create";
     /// `/plan build` 成功把 plan 绑定到当前 runtime 并把盘 state 切到 `executing`。
     pub const WIRE_PLAN_BUILD: &str = "plan.build";
+    /// `/plan` 进入 Planning 模式。
+    pub const WIRE_PLAN_ENTER: &str = "plan.enter";
+    /// `/plan exit` 退回 Chat 模式。
+    pub const WIRE_PLAN_EXIT: &str = "plan.exit";
     /// `update_plan` 成功写盘（普通更新 / reopen / finalize 收口都复用此事件）。
     pub const WIRE_PLAN_UPDATE: &str = "plan.update";
+    /// 已完成 / 中断后的 plan 被 reopen 到 `pending`。
+    pub const WIRE_PLAN_PENDING: &str = "plan.pending";
     /// reviewer 子 Agent 返回（含 `aborted: true` 分支）。
     pub const WIRE_PLAN_REVIEW: &str = "plan.review";
     /// verifier 前 code reviewer 子 Agent 返回。

@@ -111,6 +111,17 @@ function inferAttachmentKind(mimeType: string): "file" | "image" {
   return mimeType.startsWith("image/") ? "image" : "file";
 }
 
+function shouldReconcileSessionState(event: ServeEvent): boolean {
+  return (
+    event.type === "agent_end" ||
+    event.type === "agent_interrupted" ||
+    event.type === "turn_end" ||
+    event.type === "plan.complete" ||
+    event.type === "plan.exit" ||
+    event.type === "plan.pending"
+  );
+}
+
 type PlanMetadataCacheEntry = {
   mtimeMs: number;
   overview?: string;
@@ -291,6 +302,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   resetOpenFileObserved(): void {
     this.openFileObserved = false;
+  }
+
+  resetForTestReload(): void {
+    this.isReady = false;
+    this.openFileObserved = false;
+    this.planMetadataCache.clear();
+    this.stateStore.resetForReload();
   }
 
   async dispatchTestDomAction(action: WebviewDomAction): Promise<void> {
@@ -689,6 +707,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         this.deps.ownership.ownerOf(event.sessionId)?.owner ?? null,
         "webview",
       );
+      if (shouldReconcileSessionState(event)) {
+        await this.refreshSessionState(event.sessionId);
+      }
     }
     await this.postEvent(event);
     await this.postState();

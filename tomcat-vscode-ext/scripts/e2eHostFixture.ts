@@ -64,6 +64,7 @@ function createSession() {
   const sessionId = \`session-\${sessionCounter++}\`;
   sessions.set(sessionId, touchSession({
     busy: false,
+    contextRatio: null,
     cwd: process.cwd(),
     history: [],
     mode: "code",
@@ -89,6 +90,7 @@ function ensureSession(sessionId) {
   if (!sessions.has(sessionId)) {
     sessions.set(sessionId, touchSession({
       busy: false,
+      contextRatio: null,
       cwd: process.cwd(),
       history: [],
       mode: "code",
@@ -263,12 +265,53 @@ function emitMessageDelta(sessionId, delta) {
 
 function emitPlanEvent(sessionId, type) {
   const session = ensureSession(sessionId);
-  send({
+  const payload = {
     path: session.planPath,
     planId: session.planId,
     sessionId,
     state: session.planState,
     type,
+  };
+  send(payload);
+  session.history.push({
+    event: type,
+    id: \`h-\${historyCounter++}\`,
+    path: session.planPath,
+    plan_id: session.planId,
+    state: session.planState,
+    type: "custom",
+  });
+}
+
+function emitCustomPlanEvent(sessionId, type, extra = {}) {
+  const session = ensureSession(sessionId);
+  const pathValue = Object.prototype.hasOwnProperty.call(extra, "path")
+    ? extra.path
+    : session.planPath;
+  const planIdValue = Object.prototype.hasOwnProperty.call(extra, "planId")
+    ? extra.planId
+    : session.planId;
+  const stateValue = Object.prototype.hasOwnProperty.call(extra, "state")
+    ? extra.state
+    : session.planState;
+  const historyExtra = { ...extra };
+  delete historyExtra.planId;
+  send({
+    ...extra,
+    path: pathValue,
+    planId: planIdValue,
+    sessionId,
+    state: stateValue,
+    type,
+  });
+  session.history.push({
+    ...historyExtra,
+    event: type,
+    id: \`h-\${historyCounter++}\`,
+    path: pathValue,
+    plan_id: planIdValue,
+    state: stateValue,
+    type: "custom",
   });
 }
 
@@ -285,6 +328,8 @@ function recordHistoryMessage(sessionId, role, content) {
 }
 
 function emitContextMetrics(sessionId, ratio = 0.42) {
+  const session = touchSession(ensureSession(sessionId));
+  session.contextRatio = ratio;
   send({
     compactionCount: 0,
     compactionTokensFreed: 0,
@@ -477,13 +522,7 @@ function handlePrompt(frame) {
     session.planId = "transcript-ui-showcase";
     session.planPath = planPath;
     session.planState = "planning";
-    send({
-      path: planPath,
-      planId: session.planId,
-      sessionId,
-      state: session.planState,
-      type: "plan.create",
-    });
+    emitPlanEvent(sessionId, "plan.create");
     const planTodos = [
       { id: "t1", content: "Read the file", status: "completed" },
       { id: "t2", content: "Render the transcript UI", status: "in_progress" },
@@ -519,6 +558,56 @@ function handlePrompt(frame) {
     } else {
       finishTranscriptTurn();
     }
+    return;
+  }
+
+  if (text.includes("plan replay")) {
+    session.planId = "history-plan";
+    session.planPath = path.join(process.cwd(), "plans", "history-plan.plan.md");
+    fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
+    fs.writeFileSync(session.planPath, "# History plan\\n\\n- Review\\n- Verify\\n", "utf8");
+    session.planState = "pending";
+    emitPlanEvent(sessionId, "plan.create");
+    emitPlanEvent(sessionId, "plan.build");
+    emitCustomPlanEvent(sessionId, "plan.review", { summary: "looks good" });
+    emitCustomPlanEvent(sessionId, "plan.verify", { verdict: "pass" });
+    emitPlanEvent(sessionId, "plan.pending");
+    emitMessageDelta(sessionId, "I replayed the plan review and verify history.");
+    recordHistoryMessage(
+      sessionId,
+      "assistant",
+      "I replayed the plan review and verify history.",
+    );
+    emitContextMetrics(sessionId, 0.62);
+    finishTurn(sessionId, null);
+    return;
+  }
+
+  if (text.includes("cross owner plan")) {
+    session.planId = "participant-plan";
+    session.planPath = path.join(process.cwd(), "plans", "participant-plan.plan.md");
+    fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
+    fs.writeFileSync(session.planPath, "# Participant plan\\n\\n- Enter\\n- Build\\n- Exit\\n", "utf8");
+    session.planState = "planning";
+    emitPlanEvent(sessionId, "plan.enter");
+    setTimeout(() => {
+      session.planState = "executing";
+      emitPlanEvent(sessionId, "plan.build");
+    }, 1000);
+    setTimeout(() => {
+      const lastPlanId = session.planId;
+      const lastPlanPath = session.planPath;
+      session.planState = "chat";
+      emitCustomPlanEvent(sessionId, "plan.exit", {
+        path: lastPlanPath,
+        planId: lastPlanId,
+        state: "chat",
+      });
+      session.planId = null;
+      session.planPath = null;
+      recordHistoryMessage(sessionId, "assistant", "participant plan lifecycle finished");
+      finishTurn(sessionId, null);
+    }, 2000);
     return;
   }
 
@@ -685,10 +774,12 @@ function handleCommand(frame) {
         id: frame.id,
         payload: {
           busy: session.busy,
+          contextUtilizationRatio: session.contextRatio,
           cwd: session.cwd,
           mode: session.mode,
           model: session.model,
           planId: session.planId,
+          planPath: session.planPath,
           planState: session.planState,
           planTodos: session.planTodos ?? [],
           sessionId,
@@ -775,12 +866,13 @@ function handleCommand(frame) {
           success: true,
           type: "response",
         });
-        emitPlanEvent(sessionId, "plan.create");
+        emitPlanEvent(sessionId, "plan.enter");
         break;
       }
       if (frame.action === "exit") {
+        const lastPlanId = session.planId;
+        const lastPlanPath = session.planPath;
         session.planState = "chat";
-        session.planId = null;
         send({
           id: frame.id,
           payload: { planId: null, planState: "chat" },
@@ -788,7 +880,13 @@ function handleCommand(frame) {
           success: true,
           type: "response",
         });
-        emitPlanEvent(sessionId, "plan.complete");
+        emitCustomPlanEvent(sessionId, "plan.exit", {
+          path: lastPlanPath,
+          planId: lastPlanId,
+          state: "chat",
+        });
+        session.planId = null;
+        session.planPath = null;
         break;
       }
 

@@ -1138,6 +1138,16 @@ async fn serve_get_state_contains_plan_and_session_todos() {
 
     tracing::info!(target: "test", phase = "assert", test = "serve_get_state_contains_plan_and_session_todos");
     assert_eq!(response["success"].as_bool(), Some(true));
+    assert!(payload.get("planPath").is_some(), "get_state payload must include planPath");
+    assert!(
+        payload.get("contextUtilizationRatio").is_some(),
+        "get_state payload must include contextUtilizationRatio"
+    );
+    assert!(payload["planPath"].is_null(), "no active plan => planPath null");
+    assert!(
+        payload["contextUtilizationRatio"].is_null(),
+        "fresh session without persisted metrics => contextUtilizationRatio null"
+    );
     // planTodos 字段必须存在且为数组（当前无 active plan → 空数组）。
     let plan_todos = payload["planTodos"]
         .as_array()
@@ -1151,6 +1161,87 @@ async fn serve_get_state_contains_plan_and_session_todos() {
     assert_eq!(session_todos[0]["id"].as_str(), Some("st-1"));
     assert_eq!(session_todos[0]["content"].as_str(), Some("wire session todos"));
     assert_eq!(session_todos[0]["status"].as_str(), Some("in_progress"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
+    use crate::core::plan_runtime::file_store::{
+        write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+        PLAN_FILE_SCHEMA_VERSION,
+    };
+
+    let _api_key = install_test_api_key();
+    let (state, buffer, temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let session_mgr = &slot.ctx.session_runtime.session;
+    session_mgr
+        .update_session(session_mgr.current_session_key(), |entry| {
+            entry.context_utilization_ratio = Some(0.42);
+        })
+        .unwrap();
+    slot.ctx
+        .session_runtime
+        .plan_runtime
+        .enter_planning()
+        .expect("enter planning");
+    let plan_path = temp.path().join("active.plan.md");
+    let plan = PlanFile {
+        frontmatter: PlanFileFrontmatter {
+            plan_id: "plan-1".into(),
+            goal: "Restore active plan".into(),
+            state: PlanFileState::Planning,
+            session_key: None,
+            session_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            schema_version: PLAN_FILE_SCHEMA_VERSION,
+            todos: vec![TodoItem {
+                id: "todo-1".into(),
+                content: "restore".into(),
+                status: TodoStatus::Pending,
+            }],
+            unknown: serde_yaml::Mapping::new(),
+        },
+        body: "## Plan\n- restore".into(),
+    };
+    write_plan(&plan_path, &plan, slot.ctx.session_runtime.plan_runtime.lock_timeout_ms())
+        .expect("write temp plan");
+    slot.ctx
+        .session_runtime
+        .plan_runtime
+        .set_active_planning_plan("plan-1".into(), plan_path.clone());
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-active-plan".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-active-plan")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-active-plan"))
+        .expect("get_state response");
+    let payload = response["payload"].clone();
+
+    assert_eq!(
+        payload["planPath"].as_str(),
+        Some(plan_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(payload["contextUtilizationRatio"].as_f64(), Some(0.42));
+    assert_eq!(payload["planState"].as_str(), Some("planning"));
+    let plan_todos = payload["planTodos"]
+        .as_array()
+        .expect("get_state payload must include planTodos array");
+    assert_eq!(plan_todos.len(), 1);
+    assert_eq!(plan_todos[0]["id"].as_str(), Some("todo-1"));
+    assert_eq!(plan_todos[0]["status"].as_str(), Some("pending"));
 }
 
 #[tokio::test]

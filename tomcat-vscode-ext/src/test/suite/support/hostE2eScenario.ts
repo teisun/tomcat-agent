@@ -237,8 +237,11 @@ async function waitForWebviewDomSnapshot<T>(
         planCardTodoCountText: lastSnapshot.planCardTodoCountText,
         composerFooterPlanStatus: lastSnapshot.composerFooterPlanStatus,
         composerPlanStatusInBarCount: lastSnapshot.composerPlanStatusInBarCount,
+        ctxLabel: lastSnapshot.ctxLabel,
         fileChipTopWithinStream: lastSnapshot.fileChipTopWithinStream,
         fileChipVisible: lastSnapshot.fileChipVisible,
+        planNoticeReplayed: lastSnapshot.planNoticeReplayed,
+        planStateText: lastSnapshot.planStateText,
         progressRow: lastSnapshot.progressRow,
         planTodos: lastSnapshot.planTodos,
         todoWidgetVisible: lastSnapshot.todoWidgetVisible,
@@ -855,6 +858,291 @@ export async function assertWebviewOwnershipFlow(
   assert.equal(state.sessionViews[sessionId!]?.conflictMessage, null);
 }
 
+export async function assertWebviewSessionSwitchRestoreFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: "webview-restore-new-session-a",
+      type: "newSession",
+    }),
+  );
+  const sessionA = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId: sessionA,
+        text: "transcript ui",
+      },
+      messageId: "webview-restore-plan-seed",
+      type: "prompt",
+    }),
+  );
+  const initial = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionA &&
+      snapshot.ctxLabel === "Ctx 55%" &&
+      snapshot.planCardCount === 1 &&
+      snapshot.planStateText === "Plan: planning"
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.match(initial.html, /data-testid="build-plan"/u);
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: "webview-restore-new-session-b",
+      type: "newSession",
+    }),
+  );
+  const sessionB = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId || activeSessionId === sessionA) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+  );
+  assert.notEqual(sessionA, sessionB);
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId: sessionA },
+      messageId: "webview-restore-switch-back",
+      type: "switchSession",
+    }),
+  );
+  const restored = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionA &&
+      snapshot.ctxLabel === "Ctx 55%" &&
+      snapshot.planCardCount === 1 &&
+      snapshot.planStateText === "Plan: planning"
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.match(restored.html, /data-testid="build-plan"/u);
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("switch-restore");
+  }
+}
+
+export async function assertWebviewReloadReplayFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: "webview-reload-new-session",
+      type: "newSession",
+    }),
+  );
+  const sessionId = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        text: "plan replay",
+      },
+      messageId: "webview-reload-plan-replay",
+      type: "prompt",
+    }),
+  );
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.ctxLabel === "Ctx 62%" &&
+      snapshot.planCardCount === 1 &&
+      snapshot.planNoticeReplayed &&
+      snapshot.planStateText === "Plan: pending"
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+
+  await api.__testing.reloadWebview();
+  const reloaded = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.ctxLabel === "Ctx 62%" &&
+      snapshot.planCardCount === 1 &&
+      snapshot.planNoticeReplayed &&
+      snapshot.planStateText === "Plan: pending"
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.equal(
+    reloaded.messageTexts.filter((text) => text === "Tomcat plan review: looks good").length,
+    1,
+  );
+  assert.equal(
+    reloaded.messageTexts.filter((text) => text === "Tomcat plan verify: pass").length,
+    1,
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("reload-replay");
+  }
+}
+
+export async function assertWebviewCrossOwnerPlanFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  const participantTurn = await api.__testing.runParticipantTurn({
+    prompt: "participant owner",
+  });
+  const sessionId = participantTurn.result?.metadata?.sessionId;
+  assert.equal(typeof sessionId, "string");
+
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId },
+      messageId: "webview-cross-owner-switch",
+      type: "switchSession",
+    }),
+  );
+  await waitForWebviewState(
+    api,
+    (candidate) => {
+      const activeSessionId = candidate.activeSessionId;
+      if (activeSessionId !== sessionId) {
+        return undefined;
+      }
+      return candidate.sessionViews[sessionId!]?.conflictMessage ? candidate : undefined;
+    },
+  );
+  const planPath = "/workspace/plans/participant-plan.plan.md";
+  await api.__testing.injectServeEvent({
+    sessionId: sessionId!,
+    state: "planning",
+    type: "plan.enter",
+  });
+  await api.__testing.injectServeEvent({
+    path: planPath,
+    planId: "participant-plan",
+    sessionId: sessionId!,
+    state: "planning",
+    type: "plan.create",
+  });
+
+  const planning = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.hasConflict &&
+      snapshot.planCardCount === 1 &&
+      snapshot.planStateText === "Plan: planning"
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.equal(planning.planStateText, "Plan: planning");
+
+  await api.__testing.injectServeEvent({
+    path: planPath,
+    planId: "participant-plan",
+    sessionId: sessionId!,
+    state: "executing",
+    type: "plan.build",
+  });
+  const executing = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.hasConflict &&
+      snapshot.planCardCount === 1 &&
+      snapshot.planStateText === "Plan: executing"
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.equal(executing.planStateText, "Plan: executing");
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("cross-owner");
+  }
+
+  await api.__testing.injectServeEvent({
+    path: planPath,
+    planId: "participant-plan",
+    sessionId: sessionId!,
+    state: "chat",
+    type: "plan.exit",
+  });
+  const settled = await waitForWebviewState(
+    api,
+    (candidate) => {
+      const session = sessionId ? candidate.sessionViews[sessionId] : undefined;
+      if (!session) {
+        return undefined;
+      }
+      return session.planState === "chat" && session.planFile?.state === "chat"
+        ? session
+        : undefined;
+    },
+    20_000,
+  );
+  assert.ok(settled.planFile?.path?.endsWith("/plans/participant-plan.plan.md"));
+
+  const exited = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.hasConflict &&
+      snapshot.planCardCount === 1 &&
+      snapshot.planStateText === null
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.equal(exited.planStateText, null);
+}
+
 function transcriptVisualArtifactPath(filename: string): string {
   const dir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR || "/tmp";
   return path.join(dir, filename);
@@ -863,9 +1151,12 @@ function transcriptVisualArtifactPath(filename: string): string {
 function captureTranscriptVisual(
   name:
     | "collapsed"
+    | "cross-owner"
     | "expanded"
     | "file-chip"
     | "progress"
+    | "reload-replay"
+    | "switch-restore"
     | "todo-expanded"
     | "tool-icons"
     | "tool-icons-bottom",

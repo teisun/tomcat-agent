@@ -131,7 +131,7 @@ function timelineMergeKeys(item: WebviewTimelineItem): string[] {
     case "approval":
       return [`approval:${item.request.requestId}`];
     case "plan":
-      return [`plan:${item.path}:${item.planId ?? ""}:${item.state ?? "unknown"}`];
+      return [`plan:${item.path}`];
   }
 }
 
@@ -302,14 +302,70 @@ function parseToolArgs(value: unknown): Record<string, unknown> | undefined {
   return undefined;
 }
 
-function parseHistoryEntry(
+function applyHistoryPlanCustomEntry(
+  session: WebviewSessionSnapshot,
+  entry: Record<string, unknown>,
+): void {
+  const eventName = typeof entry.event === "string" ? entry.event : null;
+  if (!eventName?.startsWith("plan.")) {
+    return;
+  }
+  const preferredId = typeof entry.id === "string" ? entry.id : null;
+  const planId = typeof entry.plan_id === "string" ? entry.plan_id : null;
+  const path = typeof entry.path === "string" ? entry.path : null;
+  const state =
+    normalizePlanState(entry.state) ??
+    planEventState({ type: eventName } as ServePlanEvent);
+
+  switch (eventName) {
+    case "plan.create":
+    case "plan.build":
+    case "plan.update":
+    case "plan.complete":
+    case "plan.pending":
+      if (!path) {
+        return;
+      }
+      upsertPlanFile(session, path, state, planId);
+      return;
+    case "plan.review":
+    case "plan.code_review":
+      if (typeof entry.summary === "string" && entry.summary.length > 0) {
+        pushMessage(session, "notice", `Tomcat plan review: ${entry.summary}`, preferredId);
+      }
+      return;
+    case "plan.verify":
+      if (typeof entry.verdict === "string" && entry.verdict.length > 0) {
+        pushMessage(session, "notice", `Tomcat plan verify: ${entry.verdict}`, preferredId);
+      }
+      return;
+    case "plan.review.warning":
+    case "plan.code_review.warning":
+      pushMessage(
+        session,
+        "notice",
+        `Tomcat plan warning: ${
+          typeof entry.reason === "string" && entry.reason.length > 0
+            ? entry.reason
+            : "review needs attention"
+        }`,
+        preferredId,
+      );
+      return;
+    default:
+      return;
+  }
+}
+
+function applyHistoryEntry(
+  session: WebviewSessionSnapshot,
   entry: unknown,
   historyToolNames: Map<string, string>,
   toolCallToAssistant: Map<string, string>,
   historyToolArgs: Map<string, Record<string, unknown>>,
-): WebviewTimelineItem[] {
+): void {
   if (!isRecord(entry) || typeof entry.type !== "string") {
-    return [];
+    return;
   }
 
   if (entry.type === "message" && isRecord(entry.message)) {
@@ -319,26 +375,24 @@ function parseHistoryEntry(
       typeof entry.id === "string" ? entry.id : `history-message-${(text ?? role ?? "unknown").length}`;
     if (role === "user") {
       if (!text) {
-        return [];
+        return;
       }
-      return [
-        {
-          id,
-          kind: "user",
-          text,
-          type: "message",
-        } satisfies WebviewMessageBlock,
-      ];
+      session.timeline.push({
+        id,
+        kind: "user",
+        text,
+        type: "message",
+      } satisfies WebviewMessageBlock);
+      return;
     }
     if (role === "assistant") {
-      const items: WebviewTimelineItem[] = [];
       const hasToolCalls =
         Array.isArray(entry.message.tool_calls) && entry.message.tool_calls.length > 0;
       const assistantMessageId = hasToolCalls ? id : undefined;
       const thinkingText = extractThinkingText(entry.message);
       const summaryTitle = extractSummaryTitle(entry.message) ?? null;
       if (hasToolCalls || thinkingText) {
-        items.push({
+        session.timeline.push({
           assistantMessageId,
           id: `${id}-thinking`,
           summaryTitle,
@@ -347,7 +401,7 @@ function parseHistoryEntry(
         } satisfies WebviewThinkingBlock);
       }
       if (text) {
-        items.push({
+        session.timeline.push({
           assistantMessageId,
           id,
           kind: "assistant",
@@ -355,15 +409,15 @@ function parseHistoryEntry(
           type: "message",
         } satisfies WebviewMessageBlock);
       }
-      return items;
+      return;
     }
     if (role === "tool") {
       if (!text) {
-        return [];
+        return;
       }
       const toolCallId = extractToolCallId(entry.message) ?? id;
       const args = historyToolArgs.get(toolCallId);
-      return [{
+      session.timeline.push({
         args,
         assistantMessageId: toolCallToAssistant.get(toolCallId),
         id,
@@ -373,19 +427,45 @@ function parseHistoryEntry(
         toolCallId,
         toolName: historyToolNames.get(toolCallId) ?? "tool",
         type: "tool",
-      } satisfies WebviewToolCard];
+      } satisfies WebviewToolCard);
+      return;
     }
   }
 
   if (entry.type === "thinking_trace" && typeof entry.text === "string" && entry.text.trim()) {
-    return [{
+    session.timeline.push({
       id: typeof entry.id === "string" ? entry.id : `thinking-${entry.text.length}`,
       text: entry.text,
       type: "thinking",
-    } satisfies WebviewThinkingBlock];
+    } satisfies WebviewThinkingBlock);
+    return;
   }
 
-  return [];
+  if (entry.type === "custom") {
+    applyHistoryPlanCustomEntry(session, entry);
+  }
+}
+
+function mergeCurrentPlanCardsIntoHistory(
+  historySession: WebviewSessionSnapshot,
+  liveSession: WebviewSessionSnapshot,
+): void {
+  for (const item of liveSession.timeline) {
+    if (item.type !== "plan") {
+      continue;
+    }
+    const card = upsertPlanFile(historySession, item.path, item.state, item.planId ?? null);
+    card.title = item.title;
+    card.overview = item.overview;
+  }
+  if (liveSession.planFile?.path) {
+    upsertPlanFile(
+      historySession,
+      liveSession.planFile.path,
+      liveSession.planFile.state,
+      liveSession.planFile.planId ?? liveSession.planId ?? null,
+    );
+  }
 }
 
 function createSessionRuntime(): SessionRuntimeState {
@@ -713,6 +793,19 @@ export class WebviewStateStore {
     this.state.uiMode = mode;
   }
 
+  resetForReload(): void {
+    const uiMode = this.state.uiMode;
+    this.runtimes.clear();
+    this.state = {
+      activeSessionId: null,
+      availableModels: [],
+      ready: false,
+      sessionViews: {},
+      sessions: [],
+      uiMode,
+    };
+  }
+
   setActiveSession(sessionId: string | null): void {
     this.state.activeSessionId = sessionId;
     if (sessionId) {
@@ -750,12 +843,31 @@ export class WebviewStateStore {
     session.planState = normalizePlanState(payload.planState) ?? "chat";
     session.planTodos = payload.planTodos ?? session.planTodos;
     session.sessionTodos = payload.sessionTodos ?? session.sessionTodos;
-    if (session.planFile) {
+    if (payload.contextRatio !== undefined) {
+      session.contextRatio = payload.contextRatio ?? null;
+    }
+    if (typeof payload.planPath === "string" && payload.planPath.length > 0) {
+      syncPlanRef(
+        session,
+        payload.planPath,
+        session.planState ?? null,
+        session.planId ?? null,
+      );
+      upsertPlanFile(
+        session,
+        payload.planPath,
+        session.planState ?? null,
+        session.planId ?? null,
+      );
+    } else if (session.planFile) {
+      const nextState = session.planState ?? session.planFile.state ?? null;
+      const nextPlanId = session.planId ?? session.planFile.planId ?? null;
       session.planFile = {
         ...session.planFile,
-        planId: session.planId ?? session.planFile.planId ?? null,
-        state: session.planState ?? session.planFile.state ?? null,
+        planId: nextPlanId,
+        state: nextState,
       };
+      upsertPlanFile(session, session.planFile.path, nextState, nextPlanId);
     }
     session.owner = owner;
     session.ownedByThisFrontend = owner === frontend;
@@ -787,9 +899,18 @@ export class WebviewStateStore {
     const historyToolNames = buildHistoryToolNameLookup(history.messages);
     const toolCallToAssistant = buildToolCallToAssistantMap(history.messages);
     const historyToolArgs = buildHistoryToolArgsLookup(history.messages);
-    const historyItems = history.messages.flatMap((entry) =>
-      parseHistoryEntry(entry, historyToolNames, toolCallToAssistant, historyToolArgs),
-    );
+    const historySession = createEmptySession(sessionId);
+    for (const entry of history.messages) {
+      applyHistoryEntry(
+        historySession,
+        entry,
+        historyToolNames,
+        toolCallToAssistant,
+        historyToolArgs,
+      );
+    }
+    mergeCurrentPlanCardsIntoHistory(historySession, session);
+    const historyItems = historySession.timeline;
     if (!historyItems.length) {
       runtime.historyHydrated = true;
       return;
@@ -822,8 +943,13 @@ export class WebviewStateStore {
     const session = this.ensureSession(sessionId);
     session.owner = owner;
     session.ownedByThisFrontend = owner === frontend;
-    if (owner !== frontend) {
+    if (owner === null || owner === frontend) {
       session.conflictMessage = null;
+    } else if (!session.conflictMessage) {
+      session.conflictMessage =
+        owner === "participant"
+          ? "This session is currently owned by the Tomcat participant."
+          : "This session is currently owned by the Tomcat webview.";
     }
     this.syncTabOwnership(sessionId, owner, frontend);
   }

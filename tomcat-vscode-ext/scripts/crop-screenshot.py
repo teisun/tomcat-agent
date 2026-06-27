@@ -30,9 +30,12 @@ except ImportError:
 
 NAMES = (
     "tomcat-vsix-visual-collapsed.png",
+    "tomcat-vsix-visual-cross-owner.png",
     "tomcat-vsix-visual-expanded.png",
     "tomcat-vsix-visual-file-chip.png",
     "tomcat-vsix-visual-progress.png",
+    "tomcat-vsix-visual-reload-replay.png",
+    "tomcat-vsix-visual-switch-restore.png",
     "tomcat-vsix-visual-tool-icons.png",
     "tomcat-vsix-visual-tool-icons-bottom.png",
     "tomcat-vsix-visual-todo-expanded.png",

@@ -318,6 +318,7 @@ impl SessionManager {
             compaction_count: None,
             compaction_tokens_freed: None,
             tool_result_chars_persisted: None,
+            context_utilization_ratio: None,
             last_checkpoint_id: None,
             title: None,
         };
@@ -539,6 +540,7 @@ impl SessionManager {
             e.compaction_tokens_freed = Some(state.session_obs.compaction_tokens_freed as u64);
             e.tool_result_chars_persisted =
                 Some(state.session_obs.tool_result_chars_persisted as u64);
+            e.context_utilization_ratio = Some(state.live.context_utilization_ratio);
         })
     }
 

@@ -353,6 +353,28 @@ pub enum ServePlanEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         state: Option<String>,
     },
+    #[serde(rename = "plan.enter")]
+    PlanEnter {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+    },
+    #[serde(rename = "plan.exit")]
+    PlanExit {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+    },
     #[serde(rename = "plan.update")]
     PlanUpdate {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
@@ -421,6 +443,17 @@ pub enum ServePlanEvent {
     },
     #[serde(rename = "plan.complete")]
     PlanComplete {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+    },
+    #[serde(rename = "plan.pending")]
+    PlanPending {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]

@@ -13,9 +13,12 @@ type HostE2eHelper = {
   assertParticipantHappyPathViaChatUi(api: unknown): Promise<void>;
   assertPlanSlashFlowViaChatUi(api: unknown): Promise<void>;
   assertTranscriptUiFlow(api: unknown): Promise<void>;
+  assertWebviewCrossOwnerPlanFlow(api: unknown): Promise<void>;
   assertWebviewDiffFlow(api: unknown): Promise<void>;
   assertWebviewMultiSessionFlow(api: unknown): Promise<void>;
   assertWebviewOwnershipFlow(api: unknown): Promise<void>;
+  assertWebviewReloadReplayFlow(api: unknown): Promise<void>;
+  assertWebviewSessionSwitchRestoreFlow(api: unknown): Promise<void>;
   assertWebviewStreamingFlow(api: unknown): Promise<void>;
   getTomcatExtensionApi(): Promise<unknown>;
 };
@@ -94,6 +97,21 @@ suite("Installed Tomcat extension", () => {
   test("enforces single-owner Tomcat webview sessions", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewOwnershipFlow(api);
+  });
+
+  test("restores plan cards and Ctx after switching sessions", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewSessionSwitchRestoreFlow(api);
+  });
+
+  test("replays plan history after a webview reload", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewReloadReplayFlow(api);
+  });
+
+  test("keeps cross-owner plan state in sync in the webview", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewCrossOwnerPlanFlow(api);
   });
 
   test("renders the transcript UI groups, tool rows, file chips, and progress", async () => {

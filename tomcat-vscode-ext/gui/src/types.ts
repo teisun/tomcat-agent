@@ -323,6 +323,7 @@ export type WebviewIntent =
         composerFooterPlanStatus: string | null;
         composerPlanStatusInBarCount: number;
         composerRowCount: number;
+        ctxLabel: string | null;
         disabledTestIds: string[];
         expandedThinkingCount: number;
         expandedToolTitles: string[];
@@ -359,6 +360,8 @@ export type WebviewIntent =
         planCardCount: number;
         planFooterSameRow: boolean;
         planCardTodoCountText: string | null;
+        planNoticeReplayed: boolean;
+        planStateText: string | null;
         progressRow: boolean;
         planTodos: number;
         todoWidgetExpanded: boolean;

@@ -10,8 +10,11 @@ import {
   assertParticipantHappyPathViaChatUi,
   assertPlanSlashFlowViaChatUi,
   assertWebviewDiffFlow,
+  assertWebviewCrossOwnerPlanFlow,
   assertWebviewMultiSessionFlow,
   assertWebviewOwnershipFlow,
+  assertWebviewReloadReplayFlow,
+  assertWebviewSessionSwitchRestoreFlow,
   assertWebviewStreamingFlow,
   getTomcatExtensionApi,
 } from "./support/hostE2eScenario";
@@ -85,5 +88,20 @@ suite("Tomcat host E2E", () => {
   test("enforces single-owner Tomcat webview sessions", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewOwnershipFlow(api);
+  });
+
+  test("restores plan cards and Ctx after switching sessions", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewSessionSwitchRestoreFlow(api);
+  });
+
+  test("replays plan history after a webview reload", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewReloadReplayFlow(api);
+  });
+
+  test("keeps cross-owner plan state in sync in the webview", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewCrossOwnerPlanFlow(api);
   });
 });

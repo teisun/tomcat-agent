@@ -208,9 +208,13 @@ fn extension_event_tool_hooks_use_tool_call_tool_result_wire_names() {
 }
 
 #[test]
-fn wire_plan_build_and_update_constants_are_stable() {
+fn wire_plan_transition_constants_are_stable() {
     assert_eq!(wire::WIRE_PLAN_BUILD, "plan.build");
+    assert_eq!(wire::WIRE_PLAN_ENTER, "plan.enter");
+    assert_eq!(wire::WIRE_PLAN_EXIT, "plan.exit");
+    assert_eq!(wire::WIRE_PLAN_PENDING, "plan.pending");
     assert_eq!(wire::WIRE_PLAN_UPDATE, "plan.update");
+    assert_eq!(wire::WIRE_PLAN_COMPLETE, "plan.complete");
 }
 
 #[test]

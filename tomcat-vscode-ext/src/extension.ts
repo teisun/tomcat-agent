@@ -30,11 +30,12 @@ import {
   type PendingQuestionSnapshot,
 } from "./ui/participant/commands";
 import { SessionOwnershipTracker } from "./ui/webview/ownership";
-import type {
-  FrontendOwnerKind,
-  TomcatUiMode,
-  WebviewDomAction,
-  WebviewIntent,
+import {
+  createHostFrameMessageId,
+  type FrontendOwnerKind,
+  type TomcatUiMode,
+  type WebviewDomAction,
+  type WebviewIntent,
 } from "./ui/webview/protocol";
 import { TomcatWebviewViewProvider } from "./ui/webview/provider";
 
@@ -94,6 +95,7 @@ export interface TomcatExtensionApi {
       composerFooterPlanStatus: string | null;
       composerPlanStatusInBarCount: number;
       composerRowCount: number;
+      ctxLabel: string | null;
       expandedThinkingCount: number;
       expandedToolTitles: string[];
       fileChipTopWithinStream: number | null;
@@ -129,6 +131,8 @@ export interface TomcatExtensionApi {
       planCardCount: number;
       planFooterSameRow: boolean;
       planCardTodoCountText: string | null;
+      planNoticeReplayed: boolean;
+      planStateText: string | null;
       progressRow: boolean;
       planTodos: number;
       todoWidgetExpanded: boolean;
@@ -159,6 +163,7 @@ export interface TomcatExtensionApi {
     getResolvedExecutable(): ResolvedTomcatExecutable;
     getSessionState(sessionId?: string): Promise<Awaited<ReturnType<SessionRouter["getState"]>>>;
     getWebviewState(): ReturnType<TomcatWebviewViewProvider["currentState"]>;
+    injectServeEvent(event: ServeEvent): Promise<void>;
     listSessions(
       scope?: Parameters<SessionRouter["listSessions"]>[0],
     ): Promise<Awaited<ReturnType<SessionRouter["listSessions"]>>>;
@@ -167,6 +172,7 @@ export interface TomcatExtensionApi {
       sessionId: string,
       owner?: FrontendOwnerKind,
     ): boolean;
+    reloadWebview(): Promise<void>;
     restartServe(): Promise<void>;
     runParticipantTurn(options: RunParticipantTurnOptions): Promise<RunParticipantTurnResult>;
     sendWebviewDomAction(action: WebviewDomAction): Promise<void>;
@@ -308,6 +314,17 @@ export async function activate(
     resolve(event: ServeEvent): void;
     timeout: NodeJS.Timeout;
   }>();
+  const recordObservedEvent = (event: ServeEvent) => {
+    observedEvents.push(event);
+    for (const waiter of [...eventWaiters]) {
+      if (!matchesObservedEvent(event, waiter.filter)) {
+        continue;
+      }
+      clearTimeout(waiter.timeout);
+      eventWaiters.delete(waiter);
+      waiter.resolve(event);
+    }
+  };
   let resolvedExecutable = await resolveExecutable();
 
   const messenger = new TomcatMessenger({
@@ -428,15 +445,7 @@ export async function activate(
     appendOutput(output, "stderr", chunk);
   });
   const observedEventSubscription = messenger.onEvent((event) => {
-    observedEvents.push(event);
-    for (const waiter of [...eventWaiters]) {
-      if (!matchesObservedEvent(event, waiter.filter)) {
-        continue;
-      }
-      clearTimeout(waiter.timeout);
-      eventWaiters.delete(waiter);
-      waiter.resolve(event);
-    }
+    recordObservedEvent(event);
   });
   const frameErrorSubscription = messenger.onFrameError((error) => {
     appendOutput(output, "frame", error.message);
@@ -677,6 +686,14 @@ export async function activate(
       },
       getResolvedExecutable: () => resolvedExecutable,
       getWebviewState: () => webviewProvider.currentState(),
+      injectServeEvent: async (event) => {
+        recordObservedEvent(event);
+        await (
+          webviewProvider as unknown as {
+            handleServeEvent(frame: ServeEvent): Promise<void>;
+          }
+        ).handleServeEvent(event);
+      },
       getSessionState: async (sessionId?: string) => {
         await ensureInitialized();
         return sessionRouter.getState(sessionId);
@@ -688,6 +705,13 @@ export async function activate(
       openPreparedDiff: (toolCallId) => ide.openPreparedDiff(toolCallId),
       releaseSessionOwnership: (sessionId, owner) =>
         ownership.release(sessionId, owner),
+      reloadWebview: async () => {
+        webviewProvider.resetForTestReload();
+        await webviewProvider.dispatchTestIntent({
+          messageId: createHostFrameMessageId("webview-ready"),
+          type: "ready",
+        });
+      },
       restartServe: async () => {
         await vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND);
       },

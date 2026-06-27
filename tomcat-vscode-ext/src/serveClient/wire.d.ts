@@ -69,6 +69,24 @@ export type ServePlanEvent = {
   planId?: null | string;
   sessionId?: null | string;
   state?: null | string;
+  type: "plan.enter";
+} | {
+  path?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  state?: null | string;
+  type: "plan.exit";
+} | {
+  path?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  state?: null | string;
+  type: "plan.pending";
+} | {
+  path?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  state?: null | string;
   type: "plan.update";
 } | {
   planId?: null | string;

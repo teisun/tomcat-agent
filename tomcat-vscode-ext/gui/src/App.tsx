@@ -142,6 +142,8 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   );
   const toolRowEl = document.querySelector<HTMLElement>('[data-testid="tool-row"]');
   const fileChipEl = document.querySelector<HTMLElement>('[data-testid="file-chip"]');
+  const ctxLabel =
+    document.querySelector<HTMLElement>('[data-testid="context-ratio"]')?.textContent ?? null;
   const planCardTodoCountText =
     document.querySelector<HTMLElement>('[data-testid="plan-todos-count"]')?.textContent ?? null;
   const viewPlanButton = document.querySelector<HTMLElement>('[data-testid="view-plan"]');
@@ -178,6 +180,11 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     !!fileChipRect &&
     fileChipRect.bottom > streamRect.top &&
     fileChipRect.top < streamRect.bottom;
+  const planNoticeReplayed = queryText('[data-testid="message-text"]').some((text) =>
+    text.startsWith("Tomcat plan review:") ||
+    text.startsWith("Tomcat plan verify:") ||
+    text.startsWith("Tomcat plan warning:"),
+  );
   let userPromptPill = false;
   if (userPillEl && streamRect) {
     const pillRect = userPillEl.getBoundingClientRect();
@@ -194,6 +201,7 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     composerFooterPlanStatus,
     composerPlanStatusInBarCount,
     composerRowCount,
+    ctxLabel,
     disabledTestIds,
     expandedThinkingCount: document.querySelectorAll('[data-testid="thinking-block"] pre').length,
     expandedToolTitles: toolBodyMetrics.filter((entry) => entry.expanded).map((entry) => entry.title),
@@ -229,6 +237,8 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     planCardCount: document.querySelectorAll('[data-testid="plan-card"]').length,
     planFooterSameRow,
     planCardTodoCountText,
+    planNoticeReplayed,
+    planStateText: composerFooterPlanStatus,
     progressRow: !!document.querySelector('[data-testid="progress-row"]'),
     planTodos: document.querySelectorAll('[data-testid^="plan-todo-"]').length,
     todoWidgetExpanded: !!todoWidgetList,

@@ -35,7 +35,14 @@ async function main(): Promise<void> {
     ...fixture.env,
     TOMCAT_E2E_SCREENSHOT: "1",
     TOMCAT_E2E_CAPTURE_PROGRESS: process.env.TOMCAT_E2E_CAPTURE_PROGRESS ?? "1",
-    TOMCAT_E2E_GREP: process.env.TOMCAT_E2E_GREP ?? "transcript UI",
+    TOMCAT_E2E_GREP:
+      process.env.TOMCAT_E2E_GREP
+      ?? [
+        "restores plan cards and Ctx after switching sessions",
+        "replays plan history after a webview reload",
+        "keeps cross-owner plan state in sync in the webview",
+        "renders the transcript UI groups, tool rows, file chips, and progress",
+      ].join("|"),
     TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS:
       process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS ?? "1500",
     TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: artifactsDir,
