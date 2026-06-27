@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-28 06:45 +0800 | DOING | feature/tomcat-vscode-extension | — |
+| Tom | 2026-06-28 07:10 +0800 | DOING | feature/tomcat-vscode-extension | — |
 
 ### ✅ DONE
 - [x] **[P1]** 认领 `T2-P1-020`，任务卡 / 看板索引已切到 `DOING / Tom`；依赖例外已按用户显式要求记录。
@@ -31,6 +31,8 @@
 - [x] **[P1]** 2026-06-27 Transcript UI 事件接缝整改（planPath / contextRatio / custom `plan.*` history replay / plan transition wire）已落地：后端补 `plan.enter` / `plan.exit` / `plan.pending` / `plan.complete` 事件与 `get_state.contextUtilizationRatio` / `planPath`，前端改为按 `plan.path` 全局单卡收敛并在终态事件后回读 `get_state` 真相；期间发现并修复 cross-owner 观察态 bug（`setOwnership()` 错误清空 `conflictMessage`，导致只读会话误显示可 `Build`）。
 - [x] **[P1]** 2026-06-27 剩余全量 gate 已补跑完成：提权后 `cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`cargo test --lib -- --nocapture`、`./scripts/run-integration-tests.sh integration`、`npm run test:unit`、`npm run test:integration`、`npm run test:e2e:vscode-install`、`TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR=/tmp/tomcat-vsix-verify-artifacts npm run verify:vsix` 全部通过；期间同步修正 1 个受新 `planPath` 语义影响的旧后端测试 `create_plan_multiple_times_overrides_active_planning_id_and_binding_path`。
 - [x] **[P1]** 2026-06-27 `verify:vsix` 进一步补齐计划验收口径：默认增跑 `switch restore` / `reload replay` / `cross-owner` / `transcript UI` 四条安装态用例，并新增三张场景裁剪图 `switch-restore` / `reload-replay` / `cross-owner`，用于人工目视确认 `planCard + Ctx + footer planState` 与自动断言中的 `planCardCount===1` 一致。
+- [x] **[P2]** 2026-06-28 清理 `tomcat-vscode-ext` / `gui` 的 `npm audit` 告警：根包通过 `overrides` 升级 `mocha` 传递依赖 `diff` / `serialize-javascript`，GUI 显式锁定 `esbuild@0.28.1` 并刷新 `vite`，两侧 `npm audit` 均为 0 vulnerabilities。
+- [x] **[P2]** 2026-06-28 修复 serve 集成测试套跑偶发超时：新增 `warmTomcatBinaryForSuite()` 在 `beforeAll` 预热 `cargo build --bin tomcat`，避免首个真实 serve 用例把编译冷启动挤进 30s 测试预算；`npm run test:unit` → 主包 94 + GUI 82 全绿。
 
 ### 🔄 IN PROGRESS
 - [ ] **[P1]** 推送 `feature/tomcat-vscode-extension` 远端后，将 `T2-P1-020` 前移到 `PENDING_INTEGRATION` 并走集成合并流程。
@@ -51,7 +53,8 @@
   - `./scripts/run-integration-tests.sh integration-openai-responses-wire`
   - `./scripts/run-integration-tests.sh integration-real-llm`
 - Extension：
-  - `npm run test:unit` → **exit 0**（主包 `31` files / `84` tests + GUI `14` files / `75` tests 全绿）
+  - `npm audit`（`tomcat-vscode-ext` + `gui`）→ **0 vulnerabilities**
+  - `npm run test:unit` → **exit 0**（主包 `31` files / `94` tests + GUI `14` files / `82` tests 全绿）
   - `npm run test:integration` → **exit 0**
   - `npm --prefix gui run test`
   - `npm run build`

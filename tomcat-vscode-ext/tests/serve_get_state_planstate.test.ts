@@ -7,8 +7,11 @@ import {
   sseDelta,
   sseDone,
   sseFinish,
+  warmTomcatBinaryForSuite,
   writePlanFile,
 } from "./serveTestUtils";
+
+warmTomcatBinaryForSuite();
 
 describe("real tomcat serve state integration", () => {
   it("reflects planState, planId, and sessionKey through get_state", async () => {

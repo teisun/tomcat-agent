@@ -5,7 +5,10 @@ import { SessionRouter } from "../src/serveClient/sessionRouter";
 import {
   createRealServeMessenger,
   spawnScriptedOpenAiStreamServer,
+  warmTomcatBinaryForSuite,
 } from "./serveTestUtils";
+
+warmTomcatBinaryForSuite();
 
 describe("real tomcat serve scoped session listing", () => {
   it("lists disk-backed project history with isCurrent markers", async () => {

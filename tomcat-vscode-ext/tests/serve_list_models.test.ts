@@ -4,7 +4,10 @@ import { initializeServe } from "../src/serveClient/initialize";
 import {
   createRealServeMessenger,
   spawnScriptedOpenAiStreamServer,
+  warmTomcatBinaryForSuite,
 } from "./serveTestUtils";
+
+warmTomcatBinaryForSuite();
 
 describe("real tomcat serve model integration", () => {
   it("lists models and persists the selected model in get_state", async () => {

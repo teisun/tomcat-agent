@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { initializeServe } from "../src/serveClient/initialize";
+import type { ServeEvent } from "../src/serveClient/wire";
 import {
   createRealServeMessenger,
   spawnScriptedOpenAiStreamServer,
@@ -8,8 +9,11 @@ import {
   sseDone,
   sseFinish,
   waitForEvent,
+  warmTomcatBinaryForSuite,
   writePlanFile,
 } from "./serveTestUtils";
+
+warmTomcatBinaryForSuite();
 
 describe("real tomcat serve plan event forwarding", () => {
   it("forwards plan events through the stdio event pump", async () => {
@@ -48,7 +52,7 @@ describe("real tomcat serve plan event forwarding", () => {
       const events = await planBuild;
       await agentEnd;
       const buildEvent = events.find(
-        (event) =>
+        (event): event is Extract<ServeEvent, { type: "plan.build" }> =>
           event.type === "plan.build" && event.sessionId === init.sessionId,
       );
 

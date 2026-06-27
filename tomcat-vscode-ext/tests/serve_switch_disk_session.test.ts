@@ -9,7 +9,10 @@ import {
   sseDone,
   sseFinish,
   waitForEvent,
+  warmTomcatBinaryForSuite,
 } from "./serveTestUtils";
+
+warmTomcatBinaryForSuite();
 
 describe("real tomcat serve disk session switching", () => {
   it("rehydrates a disk-only session and continues the conversation", async () => {

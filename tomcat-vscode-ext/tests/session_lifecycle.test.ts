@@ -9,7 +9,10 @@ import {
   sseDelta,
   sseDone,
   sseFinish,
+  warmTomcatBinaryForSuite,
 } from "./serveTestUtils";
+
+warmTomcatBinaryForSuite();
 
 function sessionOf(event: ServeEvent): string | undefined {
   return (event as ServeEvent & { sessionId?: string }).sessionId;

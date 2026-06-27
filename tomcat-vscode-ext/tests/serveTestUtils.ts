@@ -5,6 +5,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 
+import { beforeAll } from "vitest";
+
 import { resolveCargoCommand } from "../scripts/resolveCargoCommand";
 import type { ServeEvent } from "../src/serveClient/wire";
 import { TomcatMessenger } from "../src/serveClient/TomcatMessenger";
@@ -108,6 +110,12 @@ export async function ensureTomcatBinary(): Promise<string> {
     throw new Error(`tomcat binary not found after build: ${tomcatBinary}`);
   }
   return tomcatBinary;
+}
+
+export function warmTomcatBinaryForSuite(timeoutMs = 120_000): void {
+  beforeAll(async () => {
+    await ensureTomcatBinary();
+  }, timeoutMs);
 }
 
 export async function setupServeFixture(

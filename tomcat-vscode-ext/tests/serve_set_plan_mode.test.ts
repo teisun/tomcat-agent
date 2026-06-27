@@ -8,8 +8,11 @@ import {
   sseDone,
   sseFinish,
   waitForEvent,
+  warmTomcatBinaryForSuite,
   writePlanFile,
 } from "./serveTestUtils";
+
+warmTomcatBinaryForSuite();
 
 describe("real tomcat serve plan integration", () => {
   it("supports enter, build, and exit semantics with stable error codes", async () => {

@@ -8,7 +8,10 @@ import {
   sseDone,
   sseFinish,
   waitForEvent,
+  warmTomcatBinaryForSuite,
 } from "./serveTestUtils";
+
+warmTomcatBinaryForSuite();
 
 describe("real tomcat serve happy path", () => {
   it("streams a prompt roundtrip over stdio", async () => {

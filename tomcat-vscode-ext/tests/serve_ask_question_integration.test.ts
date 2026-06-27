@@ -9,7 +9,10 @@ import {
   responsesTextDelta,
   spawnScriptedOpenAiStreamServer,
   waitForEvent,
+  warmTomcatBinaryForSuite,
 } from "./serveTestUtils";
+
+warmTomcatBinaryForSuite();
 
 const ASK_QUESTION_ARGS = JSON.stringify({
   questions: [
