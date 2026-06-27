@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 
-import { ActivePlanStrip } from "./components/ActivePlanStrip";
 import { AttachmentChips } from "./components/AttachmentChips";
 import { Composer } from "./components/Composer";
 import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
+import { TodoListWidget } from "./components/TodoListWidget";
 import { TranscriptView } from "./components/TranscriptView";
 import type {
   AskQuestionResult,
@@ -74,6 +74,12 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     .filter((entry): entry is readonly [string, { top: number; width: number }] => !!entry);
   const composerControlMetrics = Object.fromEntries(composerMetricEntries);
   const composerBar = document.querySelector<HTMLElement>('[data-testid="composer-bar"]');
+  const composerFooterPlanStatus =
+    document.querySelector<HTMLElement>('[data-testid="composer-plan-status-footer"]')?.textContent ??
+    null;
+  const composerPlanStatusInBarCount = document.querySelectorAll(
+    ".tc-composer__bar .tc-composer__plan-status",
+  ).length;
   const stickyPromptText =
     document.querySelector<HTMLElement>('[data-testid="sticky-user-prompt-text"]')?.textContent ?? null;
   const composerRowCount = composerBar
@@ -121,6 +127,10 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   const transcriptGroups = document.querySelectorAll<HTMLElement>(
     '[data-testid="thinking-group"]',
   );
+  const todoWidget = document.querySelector<HTMLElement>('[data-testid="todo-widget"]');
+  const todoWidgetList = document.querySelector<HTMLElement>('[data-testid="todo-widget-list"]');
+  const todoWidgetTitle =
+    document.querySelector<HTMLElement>('[data-testid="todo-widget-title"]')?.textContent ?? null;
   const groupFoldTitles = [
     ...document.querySelectorAll<HTMLElement>('[data-testid="thinking-group-title"]'),
   ].map((node) => node.textContent ?? "");
@@ -131,6 +141,20 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     '[data-testid="message-block"].tc-message--assistant',
   );
   const toolRowEl = document.querySelector<HTMLElement>('[data-testid="tool-row"]');
+  const fileChipEl = document.querySelector<HTMLElement>('[data-testid="file-chip"]');
+  const planCardTodoCountText =
+    document.querySelector<HTMLElement>('[data-testid="plan-todos-count"]')?.textContent ?? null;
+  const viewPlanButton = document.querySelector<HTMLElement>('[data-testid="view-plan"]');
+  const buildPlanButton = document.querySelector<HTMLElement>('[data-testid="build-plan"]');
+  const planFooterSameRow =
+    !!viewPlanButton &&
+    !!buildPlanButton &&
+    Math.abs(
+      viewPlanButton.getBoundingClientRect().top +
+        viewPlanButton.getBoundingClientRect().height / 2 -
+        (buildPlanButton.getBoundingClientRect().top +
+          buildPlanButton.getBoundingClientRect().height / 2),
+    ) <= 6;
   let ellipsisAboveGroupHeader = false;
   transcriptGroups.forEach((group) => {
     const preamble = group.querySelector<HTMLElement>(".tc-message--assistant");
@@ -146,6 +170,14 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   });
   const streamRect = stream?.getBoundingClientRect();
   const latestUserRect = latestUserMessage?.getBoundingClientRect();
+  const fileChipRect = fileChipEl?.getBoundingClientRect();
+  const fileChipTopWithinStream =
+    streamRect && fileChipRect ? fileChipRect.top - streamRect.top : null;
+  const fileChipVisible =
+    !!streamRect &&
+    !!fileChipRect &&
+    fileChipRect.bottom > streamRect.top &&
+    fileChipRect.top < streamRect.bottom;
   let userPromptPill = false;
   if (userPillEl && streamRect) {
     const pillRect = userPillEl.getBoundingClientRect();
@@ -159,10 +191,14 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     approvalInputTestIds,
     approvalOptionStates,
     composerControlMetrics,
+    composerFooterPlanStatus,
+    composerPlanStatusInBarCount,
     composerRowCount,
     disabledTestIds,
     expandedThinkingCount: document.querySelectorAll('[data-testid="thinking-block"] pre').length,
     expandedToolTitles: toolBodyMetrics.filter((entry) => entry.expanded).map((entry) => entry.title),
+    fileChipTopWithinStream,
+    fileChipVisible,
     hasConflict: !!document.querySelector('[data-testid="conflict-banner"]'),
     html: root?.innerHTML ?? "",
     jumpToLatestVisible: !!document.querySelector('[data-testid="scroll-to-bottom"]'),
@@ -190,8 +226,15 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     userPromptPill,
     assistantNoCard:
       !!assistantMessageEl && !assistantMessageEl.classList.contains("tc-card"),
+    planCardCount: document.querySelectorAll('[data-testid="plan-card"]').length,
+    planFooterSameRow,
+    planCardTodoCountText,
     progressRow: !!document.querySelector('[data-testid="progress-row"]'),
     planTodos: document.querySelectorAll('[data-testid^="plan-todo-"]').length,
+    todoWidgetExpanded: !!todoWidgetList,
+    todoWidgetItemCount: document.querySelectorAll('[data-testid="todo-widget-item"]').length,
+    todoWidgetTitle,
+    todoWidgetVisible: !!todoWidget,
     toolRowFlat: !!toolRowEl && !toolRowEl.closest(".tc-card"),
     toolRowExpandable: !!document.querySelector('[data-testid="tool-row-toggle"]'),
     ellipsisAboveGroupHeader,
@@ -202,6 +245,15 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
 }
 
 function runDomAction(action: WebviewDomAction): void {
+  const resolveActionTarget = (): HTMLElement | null => {
+    const nodes = [...document.querySelectorAll<HTMLElement>(`[data-testid="${action.testId ?? ""}"]`)];
+    const resolvedIndex =
+      typeof action.index === "number" && action.index < 0
+        ? nodes.length + action.index
+        : (action.index ?? 0);
+    return nodes[resolvedIndex] ?? null;
+  };
+
   if (action.kind === "setRootWidth") {
     const root = document.getElementById("root");
     if (!root) {
@@ -231,15 +283,21 @@ function runDomAction(action: WebviewDomAction): void {
     return;
   }
 
+  if (action.kind === "scrollIntoView") {
+    const target = resolveActionTarget();
+    if (!target) {
+      return;
+    }
+    target.scrollIntoView({
+      block: action.scrollBlock ?? "center",
+      inline: "nearest",
+    });
+    window.dispatchEvent(new Event("scroll"));
+    return;
+  }
+
   if (action.kind === "clickTestId") {
-    const nodes = [
-      ...document.querySelectorAll<HTMLElement>(`[data-testid="${action.testId ?? ""}"]`),
-    ];
-    const resolvedIndex =
-      typeof action.index === "number" && action.index < 0
-        ? nodes.length + action.index
-        : (action.index ?? 0);
-    const target = nodes[resolvedIndex];
+    const target = resolveActionTarget();
     if (!target) {
       return;
     }
@@ -342,14 +400,18 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
   const readOnlyConflict = activeSession?.conflictMessage ?? null;
   const canPrompt = state.uiMode !== "participant" && !activeSession?.busy && !readOnlyConflict;
+  const canBuildPlan =
+    !!activeSession &&
+    !readOnlyConflict &&
+    !!activeSession.planFile &&
+    activeSession.planFile.state !== "executing" &&
+    (activeSession.planFile.state === "planning" || activeSession.planFile.state === "pending");
   const promptPlaceholder =
     state.uiMode === "participant"
       ? "Set `tomcat.ui` to `both` or `webview` to chat here."
       : readOnlyConflict
         ? "This live session is currently read-only in the webview."
-        : activeSession?.busy
-          ? "Tomcat is responding..."
-          : "Message Tomcat (Enter to send, Shift+Enter for newline)";
+        : "Message Tomcat (Enter to send, Shift+Enter for newline)";
   const { bottomSpacerHeight, latestUserScrolledPast, scrollToLatest, userHasScrolled } = useAutoScroll({
     containerRef: streamRef,
     contentRef: transcriptRef,
@@ -503,6 +565,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                     path,
                   })
                 }
+                canBuildPlan={canBuildPlan}
+                onBuildPlan={handleBuildPlan}
                 planState={activeSession.planState}
                 planTodos={activeSession.planTodos ?? []}
                 sessionTodos={activeSession.sessionTodos ?? []}
@@ -539,21 +603,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         ) : null}
       </div>
 
-      <ActivePlanStrip
-        canBuild={
-          !!activeSession &&
-          !readOnlyConflict &&
-          !!activeSession.planFile &&
-          activeSession.planFile.state !== "executing" &&
-          (activeSession.planFile.state === "planning" || activeSession.planFile.state === "pending")
-        }
-        onBuild={handleBuildPlan}
-        onOpenPlanFile={(path) =>
-          postIntent(vscodeApi, "openPlanFile", {
-            path,
-          })
-        }
-        planFile={activeSession?.planFile}
+      <TodoListWidget
+        busy={!!activeSession?.busy}
+        planState={activeSession?.planState}
+        planTodos={activeSession?.planTodos ?? []}
+        sessionTodos={activeSession?.sessionTodos ?? []}
       />
 
       <AttachmentChips

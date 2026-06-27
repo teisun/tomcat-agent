@@ -1,7 +1,7 @@
 import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { useActiveTodoProgress } from "./useActiveTodoProgress";
+import { selectActiveTodoSource, useActiveTodoProgress } from "./useActiveTodoProgress";
 
 describe("useActiveTodoProgress", () => {
   it("uses planTodos during plan executing", () => {
@@ -19,6 +19,7 @@ describe("useActiveTodoProgress", () => {
     );
 
     expect(result.current).toMatchObject({
+      activeTodo: { content: "Test", id: "2", status: "in_progress" },
       current: 2,
       total: 3,
       title: "Test",
@@ -49,6 +50,17 @@ describe("useActiveTodoProgress", () => {
     );
 
     expect(result.current).toBeNull();
+  });
+
+  it("selects planTodos as the active source in plan mode", () => {
+    expect(
+      selectActiveTodoSource({
+        busy: true,
+        planState: "planning",
+        planTodos: [{ content: "Plan", id: "1", status: "pending" }],
+        sessionTodos: [{ content: "Chat", id: "2", status: "in_progress" }],
+      }),
+    ).toEqual([{ content: "Plan", id: "1", status: "pending" }]);
   });
 
   it("computes current as completed+1 when in_progress exists", () => {

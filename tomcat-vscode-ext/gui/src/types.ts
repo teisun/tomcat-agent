@@ -1,9 +1,10 @@
 export type TomcatUiMode = "both" | "participant" | "webview";
 
 export interface WebviewDomAction {
-  kind: "clickTestId" | "scrollToEdge" | "setInputValue" | "setRootWidth";
+  kind: "clickTestId" | "scrollIntoView" | "scrollToEdge" | "setInputValue" | "setRootWidth";
   edge?: "bottom" | "top";
   index?: number;
+  scrollBlock?: "center" | "end" | "nearest" | "start";
   testId?: string;
   value?: string;
   widthPx?: number | null;
@@ -82,6 +83,8 @@ export interface WebviewPlanFileRef {
 
 export interface WebviewPlanFileCard extends WebviewPlanFileRef {
   id: string;
+  overview?: string;
+  title?: string;
   type: "plan";
 }
 
@@ -317,10 +320,14 @@ export type WebviewIntent =
             width: number;
           }
         >;
+        composerFooterPlanStatus: string | null;
+        composerPlanStatusInBarCount: number;
         composerRowCount: number;
         disabledTestIds: string[];
         expandedThinkingCount: number;
         expandedToolTitles: string[];
+        fileChipTopWithinStream: number | null;
+        fileChipVisible: boolean;
         hasConflict: boolean;
         html: string;
         jumpToLatestVisible: boolean;
@@ -349,8 +356,15 @@ export type WebviewIntent =
         groupFoldTitles: string[];
         userPromptPill: boolean;
         assistantNoCard: boolean;
+        planCardCount: number;
+        planFooterSameRow: boolean;
+        planCardTodoCountText: string | null;
         progressRow: boolean;
         planTodos: number;
+        todoWidgetExpanded: boolean;
+        todoWidgetItemCount: number;
+        todoWidgetTitle: string | null;
+        todoWidgetVisible: boolean;
         toolRowFlat: boolean;
         toolRowExpandable: boolean;
         ellipsisAboveGroupHeader: boolean;

@@ -28,11 +28,16 @@ async function main(): Promise<void> {
   const fixture = await createHostE2eFixture();
 
   await fs.mkdir(artifactsDir, { recursive: true });
+  await clearVisualArtifacts(artifactsDir);
 
   const verifyEnv: NodeJS.ProcessEnv = {
+    ...process.env,
     ...fixture.env,
     TOMCAT_E2E_SCREENSHOT: "1",
-    TOMCAT_E2E_GREP: "transcript UI",
+    TOMCAT_E2E_CAPTURE_PROGRESS: process.env.TOMCAT_E2E_CAPTURE_PROGRESS ?? "1",
+    TOMCAT_E2E_GREP: process.env.TOMCAT_E2E_GREP ?? "transcript UI",
+    TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS:
+      process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS ?? "1500",
     TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: artifactsDir,
   };
 
@@ -101,6 +106,15 @@ async function cropScreenshots(extensionRoot: string, artifactsDir: string): Pro
   } catch (error) {
     console.warn(`crop-screenshot.py failed (screenshots may still be readable as full-frame): ${String(error)}`);
   }
+}
+
+async function clearVisualArtifacts(artifactsDir: string): Promise<void> {
+  const entries = await fs.readdir(artifactsDir, { withFileTypes: true });
+  await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && /^tomcat-vsix-visual-.*\.png$/u.test(entry.name))
+      .map((entry) => fs.rm(path.join(artifactsDir, entry.name), { force: true })),
+  );
 }
 
 main().catch((error) => {

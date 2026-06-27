@@ -20,7 +20,7 @@ export function fileChipIconClass(path: string): string {
     case "yaml":
     case "yml":
     case "toml":
-      return "codicon-settings-gear";
+      return "codicon-gear";
     default:
       return "codicon-file";
   }

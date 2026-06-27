@@ -22,8 +22,10 @@ import {
 export function TranscriptView({
   busy,
   bottomSpacerHeight = 0,
+  canBuildPlan,
   onAnswer,
   onApplyEdit,
+  onBuildPlan,
   onOpenDiff,
   onOpenFile,
   onOpenPlanFile,
@@ -35,8 +37,10 @@ export function TranscriptView({
 }: {
   busy: boolean;
   bottomSpacerHeight?: number;
+  canBuildPlan: boolean;
   onAnswer(requestId: string, result: AskQuestionResult): void;
   onApplyEdit(toolCallId: string): void;
+  onBuildPlan(): void;
   onOpenDiff(toolCallId: string): void;
   onOpenFile(path: string): void;
   onOpenPlanFile(path: string): void;
@@ -102,8 +106,10 @@ export function TranscriptView({
       case "plan":
         return (
           <PlanFileCard
+            canBuild={canBuildPlan}
             item={item}
             key={item.id}
+            onBuild={onBuildPlan}
             onOpenPlanFile={onOpenPlanFile}
             planTodos={planTodos}
           />

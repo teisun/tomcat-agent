@@ -114,22 +114,24 @@ function renderFlatContent(
     case "hashline_edit":
       if (filePath) {
         return (
-          <>
-            {buildFlatLabel(item).replace(/ file$/, "")}{" "}
+          <span className="tc-tool-row__inline">
+            <span className="tc-tool-row__text">
+              {buildFlatLabel(item).replace(/ file$/, "")}
+            </span>
             <FileChip onOpenFile={onOpenFile} path={filePath} />
-          </>
+          </span>
         );
       }
-      return buildFlatLabel(item);
+      return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
     case "bash": {
       const command = firstLine(asString(args.command)) ?? "command";
       return (
-        <>
-          {isRunning(item) ? "Running" : "Ran"}{" "}
+        <span className="tc-tool-row__inline">
+          <span className="tc-tool-row__text">{isRunning(item) ? "Running" : "Ran"}</span>
           <code className="tc-tool-row__cmd" data-testid="tool-row-cmd">
             {command}
           </code>
-        </>
+        </span>
       );
     }
     case "grep": {
@@ -139,19 +141,22 @@ function renderFlatContent(
       const glob = asString(args.glob) ?? asString(args.path);
       if (glob) {
         return (
-          <>
-            {buildFlatLabel(item)}
-            {suffix} <FileChip onOpenFile={onOpenFile} path={glob} />
-          </>
+          <span className="tc-tool-row__inline">
+            <span className="tc-tool-row__text">
+              {buildFlatLabel(item)}
+              {suffix}
+            </span>
+            <FileChip onOpenFile={onOpenFile} path={glob} />
+          </span>
         );
       }
-      return `${buildFlatLabel(item)}${suffix}`;
+      return <span className="tc-tool-row__text">{`${buildFlatLabel(item)}${suffix}`}</span>;
     }
     case "search_workspace":
     case "web_search":
     case "web_fetch":
     default:
-      return buildFlatLabel(item);
+      return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
   }
 }
 

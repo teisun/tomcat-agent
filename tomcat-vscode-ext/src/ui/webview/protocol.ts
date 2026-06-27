@@ -10,9 +10,10 @@ export type TomcatUiMode = "both" | "participant" | "webview";
 export type FrontendOwnerKind = "participant" | "webview";
 
 export interface WebviewDomAction {
-  kind: "clickTestId" | "scrollToEdge" | "setRootWidth";
+  kind: "clickTestId" | "scrollIntoView" | "scrollToEdge" | "setRootWidth";
   edge?: "bottom" | "top";
   index?: number;
+  scrollBlock?: "center" | "end" | "nearest" | "start";
   testId?: string;
   widthPx?: number | null;
 }
@@ -82,6 +83,8 @@ export interface WebviewPlanFileRef {
 
 export interface WebviewPlanFileCard extends WebviewPlanFileRef {
   id: string;
+  overview?: string;
+  title?: string;
   type: "plan";
 }
 
@@ -313,9 +316,13 @@ export type WebviewIntent =
             width: number;
           }
         >;
+        composerFooterPlanStatus: string | null;
+        composerPlanStatusInBarCount: number;
         composerRowCount: number;
         expandedThinkingCount: number;
         expandedToolTitles: string[];
+        fileChipTopWithinStream: number | null;
+        fileChipVisible: boolean;
         hasConflict: boolean;
         html: string;
         jumpToLatestVisible: boolean;
@@ -344,8 +351,15 @@ export type WebviewIntent =
         groupFoldTitles: string[];
         userPromptPill: boolean;
         assistantNoCard: boolean;
+        planCardCount: number;
+        planFooterSameRow: boolean;
+        planCardTodoCountText: string | null;
         progressRow: boolean;
         planTodos: number;
+        todoWidgetExpanded: boolean;
+        todoWidgetItemCount: number;
+        todoWidgetTitle: string | null;
+        todoWidgetVisible: boolean;
         toolRowFlat: boolean;
         toolRowExpandable: boolean;
         ellipsisAboveGroupHeader: boolean;
@@ -464,8 +478,15 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         Array.isArray(value.data.groupFoldTitles) &&
         typeof value.data.userPromptPill === "boolean" &&
         typeof value.data.assistantNoCard === "boolean" &&
+        typeof value.data.planCardCount === "number" &&
+        (value.data.planCardTodoCountText === null ||
+          typeof value.data.planCardTodoCountText === "string") &&
         typeof value.data.progressRow === "boolean" &&
         typeof value.data.planTodos === "number" &&
+        typeof value.data.todoWidgetExpanded === "boolean" &&
+        typeof value.data.todoWidgetItemCount === "number" &&
+        (value.data.todoWidgetTitle === null || typeof value.data.todoWidgetTitle === "string") &&
+        typeof value.data.todoWidgetVisible === "boolean" &&
         typeof value.data.toolRowFlat === "boolean" &&
         typeof value.data.toolRowExpandable === "boolean" &&
         typeof value.data.ellipsisAboveGroupHeader === "boolean" &&

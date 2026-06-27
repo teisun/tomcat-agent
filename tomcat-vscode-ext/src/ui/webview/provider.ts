@@ -28,6 +28,8 @@ import {
   type WebviewDomAction,
   type WebviewPendingAttachment,
   type WebviewIntent,
+  type WebviewPlanFileCard,
+  type WebviewStateSnapshot,
 } from "./protocol";
 import { SessionOwnershipTracker } from "./ownership";
 import { TomcatSessionPool } from "./sessionPool";
@@ -109,6 +111,78 @@ function inferAttachmentKind(mimeType: string): "file" | "image" {
   return mimeType.startsWith("image/") ? "image" : "file";
 }
 
+type PlanMetadataCacheEntry = {
+  mtimeMs: number;
+  overview?: string;
+  title?: string;
+};
+
+function stripYamlQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+export function parsePlanFrontmatter(
+  text: string,
+): Pick<WebviewPlanFileCard, "overview" | "title"> {
+  const normalized = text.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---\n")) {
+    return {};
+  }
+
+  const metadata: Pick<WebviewPlanFileCard, "overview" | "title"> = {};
+  for (const line of normalized.slice(4).split("\n")) {
+    if (line.trim() === "---") {
+      break;
+    }
+    const match = line.match(/^([A-Za-z][\w-]*):\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+    const [, key, rawValue] = match;
+    const value = stripYamlQuotes(rawValue);
+    if (!value) {
+      continue;
+    }
+    if (key === "name") {
+      metadata.title = value;
+    } else if (key === "overview") {
+      metadata.overview = value;
+    }
+  }
+  return metadata;
+}
+
+export async function readPlanMetadata(
+  filePath: string,
+  cache: Map<string, PlanMetadataCacheEntry>,
+): Promise<Pick<WebviewPlanFileCard, "overview" | "title">> {
+  try {
+    const stat = await fs.promises.stat(filePath);
+    const cached = cache.get(filePath);
+    if (cached && cached.mtimeMs === stat.mtimeMs) {
+      return cached;
+    }
+
+    const text = await fs.promises.readFile(filePath, "utf8");
+    const metadata = parsePlanFrontmatter(text);
+    cache.set(filePath, {
+      ...metadata,
+      mtimeMs: stat.mtimeMs,
+    });
+    return metadata;
+  } catch {
+    cache.delete(filePath);
+    return {};
+  }
+}
+
 function formatBridgeError(action: string, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("Timed out waiting for response")) {
@@ -126,6 +200,7 @@ function formatBridgeError(action: string, error: unknown): string {
 export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly domSnapshots = new PendingMessageTracker<DomSnapshot>();
   private readonly pendingQuestions = new Map<string, PendingQuestion>();
+  private readonly planMetadataCache = new Map<string, PlanMetadataCacheEntry>();
   private readonly readyWaiters = new Set<{
     reject(error: Error): void;
     resolve(): void;
@@ -678,11 +753,39 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (!this.view || !this.isReady) {
       return;
     }
+    const snapshot = await this.enrichPlanCards(this.stateStore.snapshot());
     await this.postMessage({
       channel: "state",
-      content: this.stateStore.snapshot(),
+      content: snapshot,
       messageId: createHostFrameMessageId("state"),
     });
+  }
+
+  private async enrichPlanCards(snapshot: WebviewStateSnapshot): Promise<WebviewStateSnapshot> {
+    const sessions = Object.values(snapshot.sessionViews);
+    await Promise.all(
+      sessions.map(async (session) => {
+        const planCards = session.timeline.filter(
+          (item): item is WebviewPlanFileCard => item.type === "plan",
+        );
+        await Promise.all(
+          planCards.map(async (item) => {
+            const metadata = await readPlanMetadata(item.path, this.planMetadataCache);
+            if (metadata.title) {
+              item.title = metadata.title;
+            } else {
+              delete item.title;
+            }
+            if (metadata.overview) {
+              item.overview = metadata.overview;
+            } else {
+              delete item.overview;
+            }
+          }),
+        );
+      }),
+    );
+    return snapshot;
   }
 
   private refreshHtml(): void {

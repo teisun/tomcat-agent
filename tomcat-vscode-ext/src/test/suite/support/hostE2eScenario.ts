@@ -232,8 +232,19 @@ async function waitForWebviewDomSnapshot<T>(
         groupFoldTitles: lastSnapshot.groupFoldTitles,
         userPromptPill: lastSnapshot.userPromptPill,
         assistantNoCard: lastSnapshot.assistantNoCard,
+        planCardCount: lastSnapshot.planCardCount,
+        planFooterSameRow: lastSnapshot.planFooterSameRow,
+        planCardTodoCountText: lastSnapshot.planCardTodoCountText,
+        composerFooterPlanStatus: lastSnapshot.composerFooterPlanStatus,
+        composerPlanStatusInBarCount: lastSnapshot.composerPlanStatusInBarCount,
+        fileChipTopWithinStream: lastSnapshot.fileChipTopWithinStream,
+        fileChipVisible: lastSnapshot.fileChipVisible,
         progressRow: lastSnapshot.progressRow,
         planTodos: lastSnapshot.planTodos,
+        todoWidgetVisible: lastSnapshot.todoWidgetVisible,
+        todoWidgetExpanded: lastSnapshot.todoWidgetExpanded,
+        todoWidgetItemCount: lastSnapshot.todoWidgetItemCount,
+        todoWidgetTitle: lastSnapshot.todoWidgetTitle,
         toolRowFlat: lastSnapshot.toolRowFlat,
         toolRowExpandable: lastSnapshot.toolRowExpandable,
         ellipsisAboveGroupHeader: lastSnapshot.ellipsisAboveGroupHeader,
@@ -849,6 +860,20 @@ function transcriptVisualArtifactPath(filename: string): string {
   return path.join(dir, filename);
 }
 
+function captureTranscriptVisual(
+  name: "collapsed" | "expanded" | "file-chip" | "progress" | "todo-expanded",
+): void {
+  try {
+    execSync(
+      `screencapture -x ${JSON.stringify(
+        transcriptVisualArtifactPath(`tomcat-vsix-visual-${name}.png`),
+      )}`,
+    );
+  } catch {
+    /* screencapture unavailable in this environment */
+  }
+}
+
 export async function assertTranscriptUiFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -882,18 +907,81 @@ export async function assertTranscriptUiFlow(
       type: "prompt",
     }),
   );
+  const busyTodo = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.progressRow && candidate.todoWidgetVisible && candidate.planCardCount > 0
+        ? candidate
+        : undefined,
+  );
+  assert.ok(
+    busyTodo.todoWidgetVisible,
+    "expected the docked todo widget while the transcript flow is still busy",
+  );
+  assert.equal(
+    busyTodo.composerPlanStatusInBarCount,
+    0,
+    `expected no inline plan-status chip in composer bar, got ${busyTodo.composerPlanStatusInBarCount}`,
+  );
+  assert.equal(
+    busyTodo.composerFooterPlanStatus,
+    "Plan: planning",
+    `expected plan status to render in the composer footer, got ${busyTodo.composerFooterPlanStatus}`,
+  );
+  assert.ok(busyTodo.planFooterSameRow, "expected View Plan and Build to stay on one row");
+  assert.ok(
+    !busyTodo.html.includes("Tomcat is responding..."),
+    "expected busy hint text to be removed from the composer",
+  );
+  if (process.env.TOMCAT_E2E_CAPTURE_PROGRESS === "1") {
+    assert.ok(
+      busyTodo.progressRow,
+      "expected a visible progress row while the transcript flow is still busy",
+    );
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("progress");
+  }
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "todo-widget-toggle",
+  });
+  const expandedTodo = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.todoWidgetVisible &&
+      candidate.todoWidgetExpanded &&
+      candidate.todoWidgetItemCount >= 4
+        ? candidate
+        : undefined,
+  );
+  assert.equal(
+    expandedTodo.todoWidgetTitle,
+    "Todos (2/4)",
+    `expected expanded todo widget title, got ${expandedTodo.todoWidgetTitle}`,
+  );
+  assert.ok(
+    expandedTodo.todoWidgetItemCount >= 4,
+    `expected at least 4 todo rows, got ${expandedTodo.todoWidgetItemCount}`,
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("todo-expanded");
+  }
   await waitForEvent(api, { type: "agent_end" });
 
   const collapsed = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
       candidate.assistantResponseGroups >= 1 &&
-      candidate.planTodos > 0 &&
+      candidate.planCardCount >= 1 &&
+      !candidate.progressRow &&
+      !candidate.todoWidgetVisible &&
       candidate.userPromptPill &&
       candidate.assistantNoCard &&
       candidate.ellipsisAboveGroupHeader &&
       candidate.sessionTitleUpdated &&
-      candidate.groupFoldTitles.some((title) => title.trim().length > 0)
+      candidate.groupFoldTitles.some((title) => title.trim().length > 0) &&
+      candidate.planCardTodoCountText === "4 todos"
         ? candidate
         : undefined,
   );
@@ -918,21 +1006,44 @@ export async function assertTranscriptUiFlow(
     "expected the assistant preamble above the group header",
   );
   assert.ok(
-    collapsed.progressRow || collapsed.planTodos > 0,
-    "expected a progress row or plan todos",
+    collapsed.planCardCount >= 1,
+    "expected a visible plan card after the turn completed",
+  );
+  assert.equal(
+    collapsed.planCardTodoCountText,
+    "4 todos",
+    `expected the merged plan card todo count, got ${collapsed.planCardTodoCountText}`,
+  );
+  assert.equal(
+    collapsed.composerPlanStatusInBarCount,
+    0,
+    `expected plan status to stay out of the composer bar, got ${collapsed.composerPlanStatusInBarCount}`,
+  );
+  assert.equal(
+    collapsed.composerFooterPlanStatus,
+    "Plan: planning",
+    `expected plan status footer text, got ${collapsed.composerFooterPlanStatus}`,
+  );
+  assert.ok(collapsed.planFooterSameRow, "expected the merged plan footer to stay on one row");
+  assert.ok(
+    !collapsed.html.includes("Tomcat is responding..."),
+    "expected no responding hint after the composer cleanup",
+  );
+  assert.equal(collapsed.todoWidgetVisible, false, "expected no docked todo widget after the turn completes");
+  assert.equal(collapsed.progressRow, false, "expected no inline progress row after the turn completes");
+  assert.ok(
+    collapsed.html.includes("View Plan"),
+    "expected the merged plan card footer to include View Plan",
   );
   assert.ok(
     collapsed.sessionTitleUpdated,
     "expected a session.title_updated event to be observed",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    try {
-      execSync(`screencapture -x ${JSON.stringify(transcriptVisualArtifactPath("tomcat-vsix-visual-collapsed.png"))}`);
-    } catch {
-      /* screencapture unavailable in this environment */
-    }
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("collapsed");
   }
-
+  await api.__testing.focusWebview();
   await api.__testing.sendWebviewDomAction({
     kind: "clickTestId",
     testId: "thinking-group-toggle",
@@ -964,11 +1075,35 @@ export async function assertTranscriptUiFlow(
     `expected no tool-call cards after grouping fix, got ${expanded.toolCardCount}`,
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    try {
-      execSync(`screencapture -x ${JSON.stringify(transcriptVisualArtifactPath("tomcat-vsix-visual-expanded.png"))}`);
-    } catch {
-      /* screencapture unavailable in this environment */
-    }
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("expanded");
+  }
+
+  await api.__testing.sendWebviewDomAction({
+    kind: "scrollIntoView",
+    scrollBlock: "center",
+    testId: "file-chip",
+  });
+  const fileChipReady = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.fileChipVisible &&
+      typeof candidate.fileChipTopWithinStream === "number" &&
+      candidate.fileChipTopWithinStream > 40 &&
+      candidate.fileChipTopWithinStream < 380
+        ? candidate
+        : undefined,
+  );
+  assert.ok(fileChipReady.fileChipVisible, "expected the file chip to be visible before the close-up screenshot");
+  assert.ok(
+    typeof fileChipReady.fileChipTopWithinStream === "number" &&
+      fileChipReady.fileChipTopWithinStream > 40 &&
+      fileChipReady.fileChipTopWithinStream < 380,
+    `expected file chip to be near the upper viewport, got ${fileChipReady.fileChipTopWithinStream}`,
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("file-chip");
   }
 
   await api.__testing.sendWebviewDomAction({

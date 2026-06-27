@@ -6,56 +6,73 @@ function basename(filePath: string): string {
   return segments[segments.length - 1] || filePath;
 }
 
-function todoStatusClass(status: WebviewTodo["status"]): string {
-  return `tc-plan-todo--${status.replace("_", "-")}`;
+function todoCountLabel(count: number): string {
+  return `${count} ${count === 1 ? "todo" : "todos"}`;
 }
 
 export function PlanFileCard({
+  canBuild,
   item,
+  onBuild,
   onOpenPlanFile,
   planTodos = [],
 }: {
+  canBuild: boolean;
   item: WebviewPlanFileCard;
+  onBuild(): void;
   onOpenPlanFile(path: string): void;
   planTodos?: WebviewTodo[];
 }) {
+  const fileName = basename(item.path);
+  const title = item.title?.trim() || fileName;
+  const buildAllowed =
+    canBuild && (item.state === "planning" || item.state === "pending");
+
   return (
     <section className="tc-card tc-plan-card" data-testid="plan-card">
-      <div className="tc-card__header">
-        <h3>Plan file</h3>
-        <span className="tc-chip">{item.state ? `Plan: ${item.state}` : "Plan"}</span>
+      <div className="tc-plan-card__file-row">
+        <span aria-hidden="true" className="tc-plan-card__file-icon codicon codicon-list-tree" />
+        <span className="tc-plan-card__file-name" data-testid="plan-card-file-name">
+          {fileName}
+        </span>
       </div>
       <button
         aria-label="Open plan file"
-        className="tc-plan-card__link"
+        className="tc-plan-card__title"
+        data-testid="plan-card-title"
         onClick={() => onOpenPlanFile(item.path)}
         type="button"
       >
-        <strong>{basename(item.path)}</strong>
-        <span>{item.path}</span>
+        {title}
       </button>
-      {planTodos.length ? (
-        <ul className="tc-plan-todos" data-testid="plan-todos">
-          {planTodos.map((todo) => (
-            <li
-              className={`tc-plan-todo ${todoStatusClass(todo.status)}`}
-              data-testid={`plan-todo-${todo.status}`}
-              key={todo.id}
-            >
-              <span aria-hidden="true" className="tc-plan-todo__checkbox">
-                {todo.status === "completed"
-                  ? "☑"
-                  : todo.status === "in_progress"
-                    ? "◔"
-                    : todo.status === "cancelled"
-                      ? "☒"
-                      : "☐"}
-              </span>
-              <span>{todo.content}</span>
-            </li>
-          ))}
-        </ul>
+      {item.overview ? (
+        <p className="tc-plan-card__overview" data-testid="plan-card-overview">
+          {item.overview}
+        </p>
       ) : null}
+      <div className="tc-plan-card__todos-count" data-testid="plan-todos-count">
+        {todoCountLabel(planTodos.length)}
+      </div>
+      <div className="tc-plan-card__footer">
+        <button
+          aria-label="View plan file"
+          className="tc-plan-card__footer-link"
+          data-testid="view-plan"
+          onClick={() => onOpenPlanFile(item.path)}
+          type="button"
+        >
+          View Plan
+        </button>
+        <button
+          className="tc-button tc-button--primary"
+          data-testid="build-plan"
+          disabled={!buildAllowed}
+          onClick={onBuild}
+          type="button"
+        >
+          Build
+        </button>
+      </div>
     </section>
   );
 }

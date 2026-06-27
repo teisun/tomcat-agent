@@ -91,9 +91,13 @@ export interface TomcatExtensionApi {
           width: number;
         }
       >;
+      composerFooterPlanStatus: string | null;
+      composerPlanStatusInBarCount: number;
       composerRowCount: number;
       expandedThinkingCount: number;
       expandedToolTitles: string[];
+      fileChipTopWithinStream: number | null;
+      fileChipVisible: boolean;
       hasConflict: boolean;
       html: string;
       jumpToLatestVisible: boolean;
@@ -122,8 +126,15 @@ export interface TomcatExtensionApi {
       groupFoldTitles: string[];
       userPromptPill: boolean;
       assistantNoCard: boolean;
+      planCardCount: number;
+      planFooterSameRow: boolean;
+      planCardTodoCountText: string | null;
       progressRow: boolean;
       planTodos: number;
+      todoWidgetExpanded: boolean;
+      todoWidgetItemCount: number;
+      todoWidgetTitle: string | null;
+      todoWidgetVisible: boolean;
       toolRowFlat: boolean;
       toolRowExpandable: boolean;
       ellipsisAboveGroupHeader: boolean;

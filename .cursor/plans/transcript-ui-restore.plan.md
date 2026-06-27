@@ -4,162 +4,163 @@ overview: 仿 VSCode Chat 重做 Tomcat transcript：用户消息改右侧 pill 
 todos:
   - id: spec-stories
     content: "§1: 核对/补充 User_Stories.md——transcript 体验优化相关 P0/P1 故事（pill 消息、工具折叠摘要、plan todo 进度）验收标准与当前实现一致"
-    status: pending
+    status: completed
   - id: spec-scenarios
     content: "§1: 补充 E2E_SCENARIO_LIBRARY.md——新增场景：工具按 assistant message 折叠分组、tool 扁平行可展开看结果、read 文件 chip 点击打开、bash Ran<cmd>、plan todo 进度行"
-    status: pending
+    status: completed
   - id: be-utility-model-default
-    content: "utility 模型默认配置（title_generator 前置依赖）：models_toml.rs MANAGED_MODELS 末尾新增 utility-flash 条目（model_name=deepseek-v4-flash，复用 DEEPSEEK_API_KEY，api=openai/provider=deepseek/base_url=https://api.deepseek.com/thinking_format=deepseek，基线已核实 MANAGED_MODELS 在 L59-106）；LlmConfig::default() 的 title_model 从 None 改 Some(\"utility-flash\")（llm.rs:426）；更新模块顶部注释 L3-6 受管条目列表 + defaults_test.rs:44 断言（None→Some(\"utility-flash\")）；init.rs 新建配置经 ..Default::default() 自动带 title_model（双保险，无需额外改 init.rs）；核查 AppConfig::default() 后 resolve(Title) 的测试是否报 utility-flash not found，必要时修正。本机 ~/.tomcat 配置不改，用户后续 tomcat init 自动生成"
-    status: pending
+    content: utility 模型默认配置（title_generator 前置依赖）：models_toml.rs MANAGED_MODELS 末尾新增 utility-flash 条目（model_name=deepseek-v4-flash，复用 DEEPSEEK_API_KEY，api=openai/provider=deepseek/base_url=https://api.deepseek.com/thinking_format=deepseek，基线已核实 MANAGED_MODELS 在 L59-106）；LlmConfig::default() 的 title_model 从 None 改 Some("utility-flash")（llm.rs:426）；更新模块顶部注释 L3-6 受管条目列表 + defaults_test.rs:44 断言（None→Some("utility-flash")）；init.rs 新建配置经 ..Default::default() 自动带 title_model（双保险，无需额外改 init.rs）；核查 AppConfig::default() 后 resolve(Title) 的测试是否报 utility-flash not found，必要时修正。本机 ~/.tomcat 配置不改，用户后续 tomcat init 自动生成
+    status: completed
   - id: be-summary-mod
     content: 新建 tomcat/src/core/summary/mod.rs + title_generator.rs：call_utility 内部函数（复用 preheat.rs:642-682 ChatRequest 模式，基线已核实）；generate_turn_summary + generate_session_title + fallback_turn_summary（规则）+ 超时（tokio::time::timeout 8s）回退
+    status: completed
   - id: be-summary-prompt
     content: prompt 模板：turn 仿 VSCode generateTitleViaLLM(chatThinkingContentPart.ts:1261-1351，≤10 词/过去时/首词过去式动词/多文件 'Reviewed N files')；session 仿 panel/title.tsx:18-39(3-6 词/sentence case/不加引号)；模型走 LlmScene::Title(对标 copilot-utility-small，基线 resolver.rs:201-204 title_model 已定义未调用)
-    status: pending
+    status: completed
   - id: be-summary-unit-test
     content: 后端单测 tomcat/src/core/summary/tests/title_generator_test.rs：mock LlmProvider（实现 trait），测 generate_turn_summary 成功/失败回退规则/超时回退/prompt 含 tool 信息；generate_session_title 成功/失败/超时；命名 测试对象_状态_预期结果 + AAA + tracing 三节点日志
-    status: pending
+    status: completed
   - id: be-turnend-thinking-snapshot
     content: reasoning_loop.rs TurnStart 记录本轮 thinking 文本快照（供 generate_turn_summary 输入）
-    status: pending
+    status: completed
   - id: be-turnend-emit
     content: "reasoning_loop.rs TurnEnd：dispatch_tool_calls 完成后，tokio::spawn 调 generate_turn_summary（不阻塞主循环），结果加进 TurnEnd payload summary_title: Option<String>"
-    status: pending
+    status: completed
   - id: be-turnend-unit-test
     content: 后端单测 reasoning_loop/tests：断言 TurnEnd 事件携带 summary_title；有 thinking/tool 时触发生成；无 thinking/tool 时 summary_title=None
-    status: pending
+    status: completed
   - id: be-session-title-semantic
     content: session_impl.rs：ensure_title_for_session_key 保留同步规则占位（derive_title_from_user_message，基线 L35-54 已存在）；title 覆盖语义从"永不"改"仅当 title 仍为规则占位时允许覆盖一次"
-    status: pending
+    status: completed
   - id: be-session-title-spawn
     content: run_loop/mod.rs（基线 tomcat/src/api/chat/run_loop/mod.rs，已核实存在）：首条 user 消息处理完后调 title_generator::generate_session_title，成功且当前 title 仍是占位时 session_manager.update_session 覆盖；保持 SessionManager 纯同步
-    status: pending
+    status: completed
   - id: be-session-title-emit
-    content: "新建 wire 常量 WIRE_SESSION_TITLE_UPDATED=\"session.title_updated\"（落 tomcat/src/infra/events/mod.rs，基线已核实：wire 常量在此不在 serve/events）；event_pump.rs（基线 L15+ 已 import WIRE_*）订阅转发；run_loop 异步覆盖成功后 emit_event payload {sessionId, title}（仅占位时）"
-    status: pending
+    content: 新建 wire 常量 WIRE_SESSION_TITLE_UPDATED="session.title_updated"（落 tomcat/src/infra/events/mod.rs，基线已核实：wire 常量在此不在 serve/events）；event_pump.rs（基线 L15+ 已 import WIRE_*）订阅转发；run_loop 异步覆盖成功后 emit_event payload {sessionId, title}（仅占位时）
+    status: completed
   - id: be-session-title-unit-test
     content: 后端单测：首条 user 后 title 为规则占位→异步 LLM 成功后覆盖且 emit session.title_updated；title 已被改→不覆盖不 emit；LLM 失败→保留占位不 emit 不报错
-    status: pending
+    status: completed
   - id: be-wire-plan-todos
     content: "新建 wire 常量 WIRE_PLAN_TODOS（落 tomcat/src/infra/events/mod.rs，基线已核实当前无此常量需新建，非原计划所说'已有未 emit'）；update_plan/create_plan 工具执行后 emit plan.todos（payload: sessionId/planId/todos[]）；get_state 响应加 planTodos"
-    status: pending
+    status: completed
   - id: be-wire-session-todos
-    content: "新建 wire 常量 WIRE_SESSION_TODOS（落 tomcat/src/infra/events/mod.rs）；todos 工具执行后 emit session.todos；get_state 加 sessionTodos"
-    status: pending
+    content: 新建 wire 常量 WIRE_SESSION_TODOS（落 tomcat/src/infra/events/mod.rs）；todos 工具执行后 emit session.todos；get_state 加 sessionTodos
+    status: completed
   - id: be-wire-todos-unit-test
     content: 后端单测：update_plan/create_plan/todos 工具执行后 emit 对应事件且 payload 含 todos[]；get_state 含 planTodos/sessionTodos；emit 频率每次工具执行一条（不逐字符）
-    status: pending
+    status: completed
   - id: be-wire-summary-title
     content: TurnEnd 事件 payload 加 summary_title 字段到 serve/types.rs + wire.d.ts（基线 WebviewThinkingBlock 在 protocol.ts L27、WebviewToolCard L55，已核实）
-    status: pending
+    status: completed
   - id: fe-wire-protocol
     content: "protocol.ts（基线 L27 WebviewThinkingBlock/L55 WebviewToolCard，已核实）：WebviewThinkingBlock 加 summaryTitle: string|null；WebviewToolCard 加 assistantMessageId?: string（归属到哪条 assistant message）+ args?: Record<string,unknown>（供 ToolRow 派生 Ran<cmd>/Searched query 等扁平标题；wire tool_execution_start 已带 args，history tool_calls[].arguments 也有，summary 是完整结果不能当标题）；WebviewSessionSnapshot 加 planTodos/sessionTodos: WebviewTodo[]；WebviewTodo={id,content,status}；SessionTab title 已有，事件更新即可"
-    status: pending
+    status: completed
   - id: fe-wire-state
-    content: "state.ts（基线 L39 activeAssistantId/L193 buildHistoryToolNameLookup/L220 parseHistoryEntry，已核实）：plan.todos/session.todos 事件 upsert planTodos/sessionTodos；TurnEnd summary_title 映射到对应 thinking 条目 summaryTitle；session.title_updated 事件 upsert 对应 session tab 的 title；新增 openFile intent 处理；**tool 归属回填**——parseHistoryEntry 新建 buildToolCallToAssistantMap（tool_calls[].id → assistant message id，仿 buildHistoryToolNameLookup 同款模式），tool result 查表回填 assistantMessageId；live 模式 appendStreamingMessage 记 activeAssistantId（基线已有 L39/L443），tool_execution_start 把它写到 tool card.assistantMessageId；**args 回填**——live tool_execution_start.args + history tool_calls[].arguments 写到 tool card.args"
-    status: pending
+    content: state.ts（基线 L39 activeAssistantId/L193 buildHistoryToolNameLookup/L220 parseHistoryEntry，已核实）：plan.todos/session.todos 事件 upsert planTodos/sessionTodos；TurnEnd summary_title 映射到对应 thinking 条目 summaryTitle；session.title_updated 事件 upsert 对应 session tab 的 title；新增 openFile intent 处理；**tool 归属回填**——parseHistoryEntry 新建 buildToolCallToAssistantMap（tool_calls[].id → assistant message id，仿 buildHistoryToolNameLookup 同款模式），tool result 查表回填 assistantMessageId；live 模式 appendStreamingMessage 记 activeAssistantId（基线已有 L39/L443），tool_execution_start 把它写到 tool card.assistantMessageId；**args 回填**——live tool_execution_start.args + history tool_calls[].arguments 写到 tool card.args
+    status: completed
   - id: fe-wire-sessionRouter
     content: sessionRouter.ts（基线 tomcat-vscode-ext/src/serveClient/sessionRouter.ts，已核实存在）：TurnEnd summary_title → thinking summaryTitle；plan.todos/session.todos → state；session.title_updated → upsert session tab title（SessionBar + 当前会话头部 re-render）；openFile intent 路由
-    status: pending
+    status: completed
   - id: fe-wire-extension
     content: extension.ts（基线 tomcat-vscode-ext/src/extension.ts，已核实存在）：openFile intent → vscode.workspace.openTextDocument + window.showTextDocument；DomSnapshot 类型同步
-    status: pending
+    status: completed
   - id: fe-wire-unit-test
     content: 前端单测 state/tests：plan.todos/session.todos 事件 upsert 正确；summaryTitle 映射到正确 thinking；session.title_updated 事件更新对应 session tab title；openFile intent 产出
-    status: pending
+    status: completed
   - id: fe-group-fn
     content: 新建 gui/src/components/sessionList/groupTimelineByAssistantResponse.ts（纯函数）+ 单测：同 assistantMessageId 的 tool 归一组、一条 assistant message 的阐述+thinking+tools 成一组、收束阐述（无 tool）独立、markdown 触发 finalize、未归属 tool 单独成组、空 timeline
-    status: pending
+    status: completed
   - id: fe-group-view
     content: TranscriptView.tsx（基线已存在）：leading + liveCluster 都先 groupTimelineByAssistantResponse 再 render；组用 ThinkingGroup，非组项沿用 MessageBubble/PlanFileCard/ApprovalCard
-    status: pending
+    status: completed
   - id: fe-thinkinggroup-comp
     content: 新建 ThinkingGroup.tsx：折叠 header 显示 summaryTitle 或回退"Tomcat·Thinking"+首行摘要；streaming+summaryTitle=null 时 shimmer；折叠态懒渲染（不创建 tool DOM）；阐述 MessageBubble 在折叠头外上方独立渲染；展开态 ThinkingBlock + ToolRow 扁平行列表（含左侧竖线）；完成态默认折叠/streaming 展开
-    status: pending
+    status: completed
   - id: fe-thinkinggroup-unit-test
     content: 前端单测：一组 thinking+2tool 折叠成一块 header 显示 summaryTitle；折叠态 queryAllByTestId(tool-row) 为空（懒渲染）；展开见 thinking+2 个 ToolRow；summaryTitle=null+streaming 有 shimmer class；回退 header 文案
-    status: pending
+    status: completed
   - id: fe-msg-user-pill
     content: MessageBubble.tsx user（基线已存在）：去 header，右侧 pill 气泡；styles.css .tc-message--user（基线 L520，已核实）改 margin-left:auto/max-width:90%/requestBubbleBackground/cornerRadius
-    status: pending
+    status: completed
   - id: fe-msg-assistant-nocard
     content: MessageBubble.tsx assistant：去 header（无 Tomcat/assistant 标签）无框纯 markdown 流；styles.css .tc-message--assistant 去背景边框、.rendered-markdown 排版（line-height 1.5em/p margin 0 0 16px）
-    status: pending
+    status: completed
   - id: fe-msg-styles-keys
     content: styles.css 新增 @keyframes tc-title-shimmer + .tc-thinking__title--shimmer；error/notice 保留左边框
-    status: pending
+    status: completed
   - id: fe-msg-unit-test
     content: 前端单测：user pill（无 You/user header、右对齐、requestBubbleBackground）；assistant 无卡片（无 header 无背景）；error/notice 左边框保留
-    status: pending
+    status: completed
   - id: fe-filechip-comp
     content: 新建 FileChip.tsx：.tc-file-chip（边框/圆角/padding 对齐 chatInlineAnchorWidget.css）+ codicon 近似图标（按扩展名映射）+ 点击 postIntent openFile
-    status: pending
+    status: completed
   - id: fe-filechip-styles
     content: styles.css .tc-file-chip + .tc-file-chip__icon + .tc-file-chip__label + :hover
-    status: pending
+    status: completed
   - id: fe-filechip-unit-test
     content: 前端单测：FileChip 渲染 + 点击触发 openFile intent（path 正确）；扩展名→codicon 映射
-    status: pending
+    status: completed
   - id: fe-progress-hook
     content: 新建 gui/src/hooks/useActiveTodoProgress.ts：按 planState 选 planTodos（planning/executing/pending/completed）或 sessionTodos（chat 且有 in_progress）；算 {title,current,total,phase,isComplete}（仿 ChatTodoListWidget.updateTitleElement）+ 单测
-    status: pending
+    status: completed
   - id: fe-progress-row
     content: 新建 ProgressRow.tsx：spinner（isComplete→check）+ {title} ({current}/{total}) + shimmer（!isComplete）；无 todo 数据+busy 回退 Working… shimmer；!busy 不渲染；挂 live cluster 末尾
-    status: pending
+    status: completed
   - id: fe-progress-styles
     content: styles.css .tc-progress-row 轻量样式（flex/13px/descriptionForeground，仿 .progress-container）+ shimmer 动画
-    status: pending
+    status: completed
   - id: fe-progress-unit-test
     content: 前端单测 useActiveTodoProgress + ProgressRow：plan executing 选 planTodos/chat 选 sessionTodos/皆空 null；current/total 计算（有 in_progress→completed+1）；有数据显示 (N/M)+spinner；无数据+busy 回退 Working…；!busy 不渲染
-    status: pending
+    status: completed
   - id: fe-planfilecard-todos
     content: PlanFileCard.tsx（基线 gui/src/components/PlanFileCard.tsx，已核实存在）渲染 planTodos 列表（复选+状态色），复用同一份 planTodos state（与 ProgressRow 共用，不重复下发）
-    status: pending
+    status: completed
   - id: fe-planfilecard-unit-test
     content: 前端单测：PlanFileCard 渲染 planTodos 各状态项（pending/in_progress/completed/cancelled）+ 状态色 class
-    status: pending
+    status: completed
   - id: fe-toolrow-comp
     content: 新建 gui/src/components/ToolRow.tsx：按 toolName 差异化编排扁平行——read/grep `Read [FileChip]`/`Searched ..., N results`、bash `Ran <cmd>`/`Running <cmd>`、web_search `Searched "query"`、web_fetch `Fetched {url}`、默认 toolName+summary 首行；图标 codicon-book/search/terminal/globe/tools；无 border 无卡片 padding；**所有 tool 行点击 chevron 展开看结果**（read 看文件内容、bash 看 pre 输出、web_search 看 hits markdown 列表、默认看 raw result）；完成默认折叠/streaming 默认展开
-    status: pending
+    status: completed
   - id: fe-toolrow-styles
     content: styles.css：.tc-tool-row 扁平行(flex/13px/descriptionForeground/无 border) + .tc-thinking-tool-wrapper::before 左侧竖线(mask 首尾断开) + .tc-thinking-icon 绝对定位 + 行内 check/loading 隐藏 + .tc-tool-row__body 展开结果区轻量背景(非大卡片 border/padding/圆角)
-    status: pending
+    status: completed
   - id: fe-toolrow-unit-test
     content: 前端单测 ToolRow：read 行 `Read [FileChip]` 且 FileChip 点击 openFile + 展开见文件内容；bash 行 `Ran <cmd>` 展开见 pre 输出无打开终端按钮；web_search 行 `Searched "query"` 展开见 hits markdown 列表(非裸 JSON)；默认行展开见 raw result；完成态行内无 check 图标；完成默认折叠/streaming 默认展开
-    status: pending
+    status: completed
   - id: int-test-design
     content: §2 集成测试设计：列出本次新增对外能力（utility 摘要/session 标题异步/plan.todos/session.todos emit/openFile），对照 tests/ 确认黑盒覆盖；仅通过 pub API
-    status: pending
+    status: completed
   - id: int-test-code
     content: §2 编写集成测试代码（tomcat/tests/ 或对应 integration binary）：端到端断言 reasoning_loop 一轮后 TurnEnd 含 summary_title；首条 user 后 session title 异步覆盖；update_plan/todos 执行后事件 emit；含失败/超时回退路径
-    status: pending
+    status: completed
   - id: int-test-run
     content: §2 验证：RUST_LOG=tomcat=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1 通过（按规范模板 B 串行回退；正式走脚本）
-    status: pending
+    status: completed
   - id: e2e-test-design
     content: §3 E2E 设计：对照 E2E_SCENARIO_LIBRARY 新增场景，在 e2e-harness manual-acceptance.test.ts / installed.test.ts 编写 test_user_* 用例
-    status: pending
+    status: completed
   - id: e2e-test-code
     content: §3 编写 E2E：captureWebviewDom 抓 assistantResponseGroups/groupFoldTitles/userPromptPill/assistantNoCard/progressRow/planTodos/toolRowFlat/toolRowExpandable/fileChipOpen；断言同 assistant message 的 tool 折叠一组+折叠态无 tool DOM+展开 tool 扁平行非卡片+read FileChip 点击 openFile+bash 可展开+plan executing 进度行 (N/M)
-    status: pending
+    status: completed
   - id: e2e-test-run
     content: §3 验证：npm run test:e2e:vscode-install 全绿（14+ 项，含新增）
-    status: pending
+    status: completed
   - id: verify-build-static
     content: §4-1 构建与静态检查：cargo build --release + cargo clippy --all-targets -- -D warnings + cargo test --lib 通过
-    status: pending
+    status: completed
   - id: verify-integration
     content: §4-3 集成测试：./scripts/run-integration-tests.sh integration（按 test-groups.sh 分组）通过；若新增 integration binary 先更新 test-groups.sh
-    status: pending
+    status: completed
   - id: verify-unit-frontend
     content: §4 前端：npm run test:unit（src 63+ + gui 31+ 含新增）全绿
-    status: pending
+    status: completed
   - id: verify-vsix
     content: §4 打 VSIX 装最新 VSCode：视觉确认 user pill/assistant 无框/thinking+tool 折叠摘要+shimmer/tool 扁平行(非大卡片)可点开看结果/read FileChip 点击打开/bash Ran<cmd>/plan 进度行 (N/M)/PlanFileCard todos；cliclick kp:f8 + screencapture + PIL 裁剪 + Read 裁剪图
-    status: pending
+    status: completed
   - id: verify-doc-status
     content: §4 更新 docs/status/feature-tomcat-vscode-extension.md：Cov% + 本次验收结论（按 STATUS_GUIDE）
-    status: pending
+    status: completed
 isProject: true
 ---
 

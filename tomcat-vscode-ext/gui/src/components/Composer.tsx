@@ -85,8 +85,6 @@ export function Composer({
             </select>
           </label>
 
-          {planStatus ? <span className="tc-chip tc-composer__plan-status">{planStatus}</span> : null}
-
           <label className="tc-field tc-field--compact tc-field--model">
             <span>Model</span>
             <select
@@ -142,7 +140,16 @@ export function Composer({
           </button>
         </div>
       </div>
-      <p className="tc-composer__hint">{promptPlaceholder}</p>
+      {planStatus ? (
+        <div className="tc-composer__footer" data-testid="composer-footer">
+          <span
+            className="tc-chip tc-composer__plan-status"
+            data-testid="composer-plan-status-footer"
+          >
+            {planStatus}
+          </span>
+        </div>
+      ) : null}
     </section>
   );
 }

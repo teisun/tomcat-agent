@@ -77,7 +77,7 @@ input:focus-visible {
 .tc-banner,
 .tc-message,
 .tc-thinking,
-.tc-active-plan,
+.tc-todo-widget,
 .tc-composer__surface {
   background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
   border: 1px solid
@@ -100,9 +100,9 @@ input:focus-visible {
   margin: 0;
 }
 
-.tc-composer__hint,
-.tc-active-plan__meta,
-.tc-plan-card__link span:last-child,
+.tc-composer__footer,
+.tc-plan-card__file-name,
+.tc-plan-card__overview,
 .tc-message__header span {
   color: var(--vscode-descriptionForeground);
 }
@@ -569,22 +569,82 @@ input:focus-visible {
   gap: 18px;
 }
 
-.tc-plan-card__link,
-.tc-active-plan__link {
-  align-items: flex-start;
+.tc-plan-card {
+  gap: 12px;
+  padding: 14px;
+}
+
+.tc-plan-card__file-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.tc-plan-card__file-icon {
+  color: var(--vscode-descriptionForeground);
+  flex: 0 0 auto;
+  font-size: 14px;
+}
+
+.tc-plan-card__file-name {
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.tc-plan-card__title {
   background: transparent;
   border: 0;
+  color: inherit;
   cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.2;
   padding: 0;
   text-align: left;
 }
 
-.tc-plan-card__link strong,
-.tc-active-plan__file {
-  font-weight: 600;
+.tc-plan-card__overview {
+  line-height: 1.5;
+  margin: 0;
+}
+
+.tc-plan-card__todos-count {
+  align-items: center;
+  align-self: flex-start;
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  border-radius: 999px;
+  color: var(--vscode-foreground);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  min-height: 0;
+  padding: 6px 10px;
+}
+
+.tc-plan-card__footer {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.tc-plan-card__footer-link {
+  background: transparent;
+  border: 0;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  flex: 1 1 auto;
+  padding: 0;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.tc-plan-card__footer .tc-button {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .tc-approval-question {
@@ -825,43 +885,71 @@ input:focus-visible {
 }
 
 .tc-thinking-icon {
+  align-items: center;
   color: var(--vscode-descriptionForeground);
-  left: 5px;
+  display: inline-flex;
+  font-size: 16px;
+  justify-content: center;
+  left: 0;
+  line-height: 1;
   position: absolute;
-  top: 9px;
+  top: 3px;
+  width: 16px;
 }
 
 .tc-tool-row {
   display: flex;
   flex-direction: column;
   font-size: 13px;
-  gap: 4px;
+  gap: 3px;
 }
 
 .tc-tool-row__header {
-  align-items: center;
+  align-items: flex-start;
   display: flex;
-  gap: 6px;
+  gap: 8px;
+  min-height: 20px;
 }
 
 .tc-tool-row__toggle {
   align-items: center;
+  align-self: flex-start;
   background: transparent;
   border: 0;
   color: var(--vscode-descriptionForeground);
   cursor: pointer;
   display: inline-flex;
   flex: 0 0 auto;
-  padding: 2px 0;
+  line-height: 1;
+  padding: 1px 0 0;
 }
 
 .tc-tool-row__label {
+  align-items: flex-start;
+  display: flex;
   flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  line-height: 1.3;
   min-width: 0;
+  padding-top: 1px;
 }
 
 .tc-tool-row__caret {
   flex: 0 0 auto;
+}
+
+.tc-tool-row__inline {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.tc-tool-row__text {
+  min-width: 0;
 }
 
 .tc-tool-row .codicon-check,
@@ -888,11 +976,16 @@ input:focus-visible {
 }
 
 .tc-tool-row__cmd {
+  align-items: center;
   background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.12));
   border-radius: 3px;
+  display: inline-flex;
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 0.95em;
+  line-height: 1.2;
+  min-height: 18px;
   padding: 0 4px;
+  vertical-align: middle;
   white-space: pre-wrap;
 }
 
@@ -905,8 +998,10 @@ input:focus-visible {
   display: inline-flex;
   font-size: var(--vscode-chat-font-size-body-s, 12px);
   gap: 4px;
-  padding: 1px 3px;
-  vertical-align: baseline;
+  line-height: 1.2;
+  min-height: 18px;
+  padding: 0 4px;
+  vertical-align: middle;
 }
 
 .tc-file-chip:hover {
@@ -915,9 +1010,14 @@ input:focus-visible {
 
 .tc-file-chip__icon {
   flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1em;
+  vertical-align: middle;
 }
 
 .tc-file-chip__label {
+  display: inline-block;
+  line-height: 1.15;
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -958,39 +1058,126 @@ input:focus-visible {
   color: transparent;
 }
 
-.tc-plan-todos {
+.tc-todo-widget {
+  border-bottom: none;
+  border-radius: 12px 12px 0 0;
+  gap: 2px;
+  overflow: hidden;
+  padding: 4px 3px;
+}
+
+.tc-todo-widget__toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  list-style: none;
-  margin: 0;
+  justify-content: space-between;
   padding: 0;
+  width: 100%;
 }
 
-.tc-plan-todo {
-  align-items: flex-start;
+.tc-todo-widget__title-section {
+  align-items: center;
   display: flex;
-  font-size: 13px;
-  gap: 8px;
+  flex: 1 1 auto;
+  font-size: 12px;
+  gap: 6px;
+  min-width: 0;
+  text-align: left;
 }
 
-.tc-plan-todo--pending {
+.tc-todo-widget__title {
+  line-height: 22px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tc-todo-widget__chevron,
+.tc-todo-widget__list-icon,
+.tc-todo-widget__status,
+.tc-todo-widget__spinner {
+  flex: 0 0 auto;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.tc-todo-widget__list-icon {
   color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  margin-right: 3px;
 }
 
-.tc-plan-todo--in-progress {
+.tc-todo-widget__status--pending {
   color: var(--vscode-foreground);
 }
 
-.tc-plan-todo--completed {
-  color: var(--vscode-descriptionForeground);
-  opacity: 0.85;
+.tc-todo-widget__status--in-progress {
+  color: var(--vscode-charts-blue);
 }
 
-.tc-plan-todo--cancelled {
+.tc-todo-widget__status--completed {
+  color: var(--vscode-charts-green);
+}
+
+.tc-todo-widget__status--cancelled {
   color: var(--vscode-errorForeground);
-  opacity: 0.8;
-  text-decoration: line-through;
+}
+
+.tc-todo-widget__working {
+  align-items: center;
+  color: var(--vscode-descriptionForeground);
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+  min-height: 22px;
+}
+
+.tc-todo-widget--working .tc-todo-widget__spinner {
+  animation: tc-tool-spin 1s linear infinite;
+}
+
+.tc-todo-widget--working .tc-todo-widget__title {
+  animation: tc-title-shimmer 2s linear infinite;
+  background: linear-gradient(
+    90deg,
+    var(--vscode-descriptionForeground) 0%,
+    var(--vscode-foreground) 50%,
+    var(--vscode-descriptionForeground) 100%
+  );
+  background-clip: text;
+  background-size: 200% 100%;
+  color: transparent;
+}
+
+.tc-todo-widget__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  max-height: 138px;
+  overflow: auto;
+  padding: 0;
+}
+
+.tc-todo-widget__item {
+  align-items: center;
+  border-radius: 4px;
+  display: flex;
+  font-size: 13px;
+  gap: 6px;
+  min-height: 22px;
+  padding: 0 3px;
+}
+
+.tc-todo-widget__item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tc-tool-card__toggle {
@@ -1045,14 +1232,6 @@ input:focus-visible {
   overflow: auto;
 }
 
-.tc-active-plan {
-  align-items: center;
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  padding: 10px 12px;
-}
-
 .tc-composer {
   display: flex;
   flex-direction: column;
@@ -1105,15 +1284,19 @@ input:focus-visible {
 }
 
 .tc-composer__plan-status {
-  flex: 0 0 auto;
+  background: rgba(127, 127, 127, 0.1);
+  border-color: rgba(127, 127, 127, 0.18);
   font-size: 11px;
+  opacity: 0.88;
   padding-inline: 7px;
   white-space: nowrap;
 }
 
-.tc-composer__hint {
-  line-height: 1.35;
-  margin: 0;
+.tc-composer__footer {
+  align-items: center;
+  display: flex;
+  min-height: 18px;
+  padding-left: 2px;
 }
 
 .tc-icon-button,
@@ -1204,11 +1387,6 @@ input:focus-visible {
     max-width: 110px;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .tc-active-plan {
-    align-items: flex-start;
-    flex-direction: column;
   }
 
   .tc-field--mode {

@@ -30,6 +30,13 @@ export async function seedChatUserSettings(userDataDir: string): Promise<void> {
 }
 
 function buildFakeServeSource(editFilePath: string): string {
+  const transcriptPlanMarkdown = JSON.stringify(`---
+name: Transcript UI Showcase
+overview: Review the transcript UI polish and confirm the merged plan card before building.
+---
+
+# Transcript UI showcase
+`);
   return `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -43,6 +50,10 @@ let historyCounter = 1;
 let pendingApproval = null;
 let pendingInterrupt = null;
 let activeSessionId = null;
+const transcriptProgressDelayMs = Math.max(
+  0,
+  Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "250"),
+);
 
 function touchSession(session) {
   session.updatedAt = Date.now();
@@ -288,7 +299,7 @@ function handlePrompt(frame) {
     });
     const planPath = path.join(process.cwd(), "plans", "transcript-ui-showcase.plan.md");
     fs.mkdirSync(path.dirname(planPath), { recursive: true });
-    fs.writeFileSync(planPath, "# Transcript UI showcase\\n", "utf8");
+    fs.writeFileSync(planPath, ${transcriptPlanMarkdown}, "utf8");
     session.planId = "transcript-ui-showcase";
     session.planPath = planPath;
     session.planState = "planning";
@@ -302,6 +313,8 @@ function handlePrompt(frame) {
     const planTodos = [
       { id: "t1", content: "Read the file", status: "completed" },
       { id: "t2", content: "Render the transcript UI", status: "in_progress" },
+      { id: "t3", content: "Verify the screenshot crop", status: "pending" },
+      { id: "t4", content: "Review the merged plan card", status: "pending" },
     ];
     session.planTodos = planTodos;
     send({
@@ -322,9 +335,16 @@ function handlePrompt(frame) {
       turnIndex: 1,
       type: "turn_end",
     });
-    emitContextMetrics(sessionId, 0.55);
-    recordHistoryMessage(sessionId, "assistant", "I will read the file and refresh the plan.");
-    finishTurn(sessionId, null);
+    const finishTranscriptTurn = () => {
+      emitContextMetrics(sessionId, 0.55);
+      recordHistoryMessage(sessionId, "assistant", "I will read the file and refresh the plan.");
+      finishTurn(sessionId, null);
+    };
+    if (transcriptProgressDelayMs > 0) {
+      setTimeout(finishTranscriptTurn, transcriptProgressDelayMs);
+    } else {
+      finishTranscriptTurn();
+    }
     return;
   }
 

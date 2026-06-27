@@ -51,7 +51,8 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Ran cargo test");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Ran");
+    expect(screen.getByTestId("tool-row-cmd").textContent).toBe("cargo test");
     expect(screen.queryByTestId("tool-row-body")).toBeNull();
     fireEvent.click(screen.getByTestId("tool-row-toggle"));
     expect(screen.getByTestId("tool-row-result").textContent).toBe("test output");
