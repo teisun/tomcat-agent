@@ -162,6 +162,8 @@ describe("Tomcat webview App", () => {
             busy: false,
             conflictMessage: null,
             contextRatio: 0.42,
+            hasMoreHistory: true,
+            historyLoading: true,
             model: "gpt-5.4",
             thinkingLevel: "high",
             ownedByThisFrontend: true,
@@ -189,6 +191,12 @@ describe("Tomcat webview App", () => {
             planState: "planning",
             sessionId: "s1",
             timeline: [
+              {
+                coveredCount: 12,
+                id: "boundary-1",
+                summary: "Earlier turns were compacted.",
+                type: "boundary",
+              },
               { id: "m2", text: "thinking...", type: "thinking" },
               { id: "m1", kind: "assistant", text: "hello", type: "message" },
               {
@@ -237,6 +245,8 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByText("hello")).toBeTruthy();
+    expect(screen.getByTestId("history-loader").textContent).toContain("Loading earlier");
+    expect(screen.getByTestId("boundary-block").textContent).toContain("Earlier history summary");
     expect(screen.queryByText("thinking...")).toBeNull();
     fireEvent.click(screen.getByTestId("thinking-toggle"));
     expect(screen.getByText("thinking...")).toBeTruthy();
@@ -253,6 +263,535 @@ describe("Tomcat webview App", () => {
     expect(screen.getByTestId("build-plan").textContent).toContain("Build");
     expect(screen.getByTestId("attachment-chip").textContent).toContain("README.md");
     expect(screen.getByTestId("context-ratio").textContent).toContain("Ctx 42%");
+  });
+
+  it("requests older history when the transcript is underfilled or scrolled near the top", async () => {
+    const { postMessage } = mount();
+    const stream = screen.getByTestId("stream-container");
+    let scrollTop = 0;
+
+    Object.defineProperty(stream, "clientHeight", {
+      configurable: true,
+      get: () => 100,
+    });
+    Object.defineProperty(stream, "scrollHeight", {
+      configurable: true,
+      get: () => 40,
+    });
+    Object.defineProperty(stream, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            hasMoreHistory: true,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            timeline: [
+              { id: "m-user", kind: "user", text: "hello", type: "message" },
+              { id: "m-assistant", kind: "assistant", text: "world", type: "message" },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-underfill",
+    });
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { sessionId: "s1" },
+        type: "loadOlderHistory",
+      }),
+    );
+
+    postMessage.mockClear();
+    scrollTop = 12;
+    act(() => {
+      fireEvent.scroll(stream);
+    });
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { sessionId: "s1" },
+        type: "loadOlderHistory",
+      }),
+    );
+
+    postMessage.mockClear();
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            timeline: [
+              { id: "m-user", kind: "user", text: "hello", type: "message" },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-no-more-history",
+    });
+    scrollTop = 8;
+    act(() => {
+      fireEvent.scroll(stream);
+    });
+    expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps requesting older history when the restored timeline is still empty", async () => {
+    const { postMessage } = mount();
+    const stream = screen.getByTestId("stream-container");
+
+    Object.defineProperty(stream, "clientHeight", {
+      configurable: true,
+      get: () => 100,
+    });
+    Object.defineProperty(stream, "scrollHeight", {
+      configurable: true,
+      get: () => 0,
+    });
+    Object.defineProperty(stream, "scrollTop", {
+      configurable: true,
+      get: () => 0,
+      set: () => undefined,
+    });
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            hasMoreHistory: true,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-empty-history",
+    });
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { sessionId: "s1" },
+        type: "loadOlderHistory",
+      }),
+    );
+  });
+
+  it("keeps top-pagination alive when older pages still do not advance the visible oldest item", async () => {
+    const { postMessage } = mount();
+    const stream = screen.getByTestId("stream-container");
+    let scrollTop = 60;
+
+    Object.defineProperty(stream, "clientHeight", {
+      configurable: true,
+      get: () => 100,
+    });
+    Object.defineProperty(stream, "scrollHeight", {
+      configurable: true,
+      get: () => 220,
+    });
+    Object.defineProperty(stream, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            hasMoreHistory: true,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-top-pagination-ready",
+    });
+
+    postMessage.mockClear();
+    scrollTop = 0;
+    act(() => {
+      fireEvent.scroll(stream);
+    });
+    expect(postMessage).toHaveBeenCalledTimes(1);
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            hasMoreHistory: true,
+            historyLoading: true,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-top-pagination-loading",
+    });
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            hasMoreHistory: true,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-top-pagination-still-buffered",
+    });
+
+    const loadOlderCalls = postMessage.mock.calls.filter(
+      ([message]) => message?.type === "loadOlderHistory",
+    );
+    expect(loadOlderCalls).toHaveLength(2);
+  });
+
+  it("stops bootstrap underfill requests at the safety cap", async () => {
+    const { postMessage } = mount();
+    const stream = screen.getByTestId("stream-container");
+    let scrollTop = 0;
+
+    Object.defineProperty(stream, "clientHeight", {
+      configurable: true,
+      get: () => 100,
+    });
+    Object.defineProperty(stream, "scrollHeight", {
+      configurable: true,
+      get: () => 80,
+    });
+    Object.defineProperty(stream, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+
+    for (let index = 0; index < 6; index += 1) {
+      await emitState({
+        channel: "state",
+        content: {
+          activeSessionId: "s1",
+          availableModels: ["gpt-5.4"],
+          ready: true,
+          sessions: [
+            {
+              busy: false,
+              isCurrent: true,
+              ownedByThisFrontend: true,
+              owner: "webview",
+              sessionId: "s1",
+              title: null,
+              updatedAt: 1,
+            },
+          ],
+          sessionViews: {
+            s1: {
+              busy: false,
+              conflictMessage: null,
+              hasMoreHistory: true,
+              historyLoading: true,
+              model: "gpt-5.4",
+              ownedByThisFrontend: true,
+              owner: "webview",
+              pendingAttachments: [],
+              planId: null,
+              planState: "chat",
+              sessionId: "s1",
+              timeline: [{ id: `m-${index}`, kind: "assistant", text: "chunk", type: "message" }],
+            },
+          },
+          uiMode: "both",
+        },
+        messageId: `state-underfill-loading-${index}`,
+      });
+
+      await emitState({
+        channel: "state",
+        content: {
+          activeSessionId: "s1",
+          availableModels: ["gpt-5.4"],
+          ready: true,
+          sessions: [
+            {
+              busy: false,
+              isCurrent: true,
+              ownedByThisFrontend: true,
+              owner: "webview",
+              sessionId: "s1",
+              title: null,
+              updatedAt: 1,
+            },
+          ],
+          sessionViews: {
+            s1: {
+              busy: false,
+              conflictMessage: null,
+              hasMoreHistory: true,
+              historyLoading: false,
+              model: "gpt-5.4",
+              ownedByThisFrontend: true,
+              owner: "webview",
+              pendingAttachments: [],
+              planId: null,
+              planState: "chat",
+              sessionId: "s1",
+              timeline: [{ id: `m-${index}`, kind: "assistant", text: "chunk", type: "message" }],
+            },
+          },
+          uiMode: "both",
+        },
+        messageId: `state-underfill-cap-${index}`,
+      });
+    }
+
+    const loadOlderCalls = postMessage.mock.calls.filter(
+      ([message]) => message?.type === "loadOlderHistory",
+    );
+    expect(loadOlderCalls).toHaveLength(4);
+  });
+
+  it("hides the subtle history loader when loading finishes", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            hasMoreHistory: true,
+            historyLoading: true,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-loader-on",
+    });
+
+    expect(screen.getByTestId("history-loader")).toBeTruthy();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            timeline: [{ id: "m1", kind: "assistant", text: "done", type: "message" }],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-loader-off",
+    });
+
+    expect(screen.queryByTestId("history-loader")).toBeNull();
   });
 
   it("posts prompt and composer action intents", async () => {

@@ -15,6 +15,7 @@ type HostE2eHelper = {
   assertTranscriptUiFlow(api: unknown): Promise<void>;
   assertWebviewCrossOwnerPlanFlow(api: unknown): Promise<void>;
   assertWebviewDiffFlow(api: unknown): Promise<void>;
+  assertWebviewGiantGroupLazyLoadFlow(api: unknown): Promise<void>;
   assertWebviewMultiSessionFlow(api: unknown): Promise<void>;
   assertWebviewOwnershipFlow(api: unknown): Promise<void>;
   assertWebviewReloadReplayFlow(api: unknown): Promise<void>;
@@ -107,6 +108,11 @@ suite("Installed Tomcat extension", () => {
   test("replays plan history after a webview reload", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewReloadReplayFlow(api);
+  });
+
+  test("lazy loads a giant historical tool group without rendering half a group", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewGiantGroupLazyLoadFlow(api);
   });
 
   test("keeps cross-owner plan state in sync in the webview", async () => {

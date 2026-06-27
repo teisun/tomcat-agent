@@ -27,6 +27,13 @@ export interface WebviewThinkingBlock {
   type: "thinking";
 }
 
+export interface WebviewBoundaryBlock {
+  coveredCount?: number | null;
+  id: string;
+  summary?: string | null;
+  type: "boundary";
+}
+
 export interface WebviewTodo {
   content: string;
   id: string;
@@ -145,6 +152,8 @@ export interface WebviewSessionSnapshot {
   busy: boolean;
   conflictMessage?: string | null;
   contextRatio?: number | null;
+  hasMoreHistory?: boolean;
+  historyLoading?: boolean;
   model?: string | null;
   planTodos: WebviewTodo[];
   sessionTodos: WebviewTodo[];
@@ -180,6 +189,7 @@ export interface WebviewStateSnapshot {
 
 export type WebviewTimelineItem =
   | WebviewApprovalCard
+  | WebviewBoundaryBlock
   | WebviewMessageBlock
   | WebviewPlanFileCard
   | WebviewThinkingBlock
@@ -238,6 +248,13 @@ export type WebviewIntent =
   | {
       messageId: string;
       type: "listSessions" | "ready";
+    }
+  | {
+      messageId: string;
+      type: "loadOlderHistory";
+      data: {
+        sessionId: string;
+      };
     }
   | {
       messageId: string;
@@ -330,6 +347,7 @@ export type WebviewIntent =
         fileChipTopWithinStream: number | null;
         fileChipVisible: boolean;
         hasConflict: boolean;
+        historyLoaderVisible: boolean;
         html: string;
         jumpToLatestVisible: boolean;
         latestUserTopWithinStream: number | null;

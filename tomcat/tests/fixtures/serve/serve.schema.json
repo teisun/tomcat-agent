@@ -502,6 +502,12 @@
         "description": "`get_messages` 的分页/裁剪参数。",
         "type": "object",
         "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "lastNTurns": {
             "type": [
               "integer",

@@ -34,11 +34,13 @@ class ResizeObserverMock {
 function Fixture({
   contentKey,
   lastItemIsLatestUser,
+  oldestItemKey = "earlier-1",
   resetKey,
   userMessageCount,
 }: {
   contentKey: string;
   lastItemIsLatestUser: boolean;
+  oldestItemKey?: string | null;
   resetKey: string | null;
   userMessageCount: number;
 }) {
@@ -49,6 +51,7 @@ function Fixture({
     contentRef,
     contentKey,
     lastItemIsLatestUser,
+    oldestItemKey,
     resetKey,
     userMessageCount,
   });
@@ -299,5 +302,93 @@ describe("useAutoScroll", () => {
     expect(scrollTop).toBe(80);
     expect(screen.getByTestId("scroll-state").textContent).toBe("following");
     expect(root.style.overflowAnchor).toBe("none");
+  });
+
+  it("preserves the viewport anchor when older history is prepended", () => {
+    const { rerender } = render(
+      <Fixture
+        contentKey="initial"
+        lastItemIsLatestUser={false}
+        oldestItemKey="older-1"
+        resetKey="s1"
+        userMessageCount={1}
+      />,
+    );
+    const root = screen.getByTestId("scroll-root");
+    const content = screen.getByTestId("scroll-content");
+    const userAnchor = screen.getByTestId("user-anchor");
+
+    let baseContentHeight = 180;
+    let scrollTop = 40;
+    const currentSpacerHeight = () =>
+      Number.parseFloat(screen.getByTestId("transcript-spacer").style.height || "0");
+
+    Object.defineProperty(root, "clientHeight", {
+      configurable: true,
+      get: () => 100,
+    });
+    Object.defineProperty(root, "scrollHeight", {
+      configurable: true,
+      get: () => baseContentHeight + currentSpacerHeight(),
+    });
+    Object.defineProperty(root, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(content, "scrollHeight", {
+      configurable: true,
+      get: () => baseContentHeight + currentSpacerHeight(),
+    });
+    root.getBoundingClientRect = vi.fn(
+      () => ({ top: 0, bottom: 100, height: 100, left: 0, right: 0, width: 0, x: 0, y: 0 }) as DOMRect,
+    );
+    content.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: -scrollTop,
+          bottom: baseContentHeight - scrollTop,
+          height: baseContentHeight,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: -scrollTop,
+        }) as DOMRect,
+    );
+    userAnchor.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: 120 - scrollTop,
+          bottom: 150 - scrollTop,
+          height: 30,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: 120 - scrollTop,
+        }) as DOMRect,
+    );
+
+    act(() => {
+      fireEvent.scroll(root);
+    });
+    expect(screen.getByTestId("scroll-state").textContent).toBe("paused");
+
+    baseContentHeight = 240;
+    rerender(
+      <Fixture
+        contentKey="prepended"
+        lastItemIsLatestUser={false}
+        oldestItemKey="older-0"
+        resetKey="s1"
+        userMessageCount={1}
+      />,
+    );
+
+    expect(scrollTop).toBe(140);
+    expect(screen.getByTestId("scroll-state").textContent).toBe("paused");
   });
 });

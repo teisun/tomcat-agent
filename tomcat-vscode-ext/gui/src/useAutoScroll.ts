@@ -14,6 +14,7 @@ type UseAutoScrollOptions = {
   contentRef: RefObject<HTMLElement | null>;
   contentKey: string;
   lastItemIsLatestUser: boolean;
+  oldestItemKey: string | null;
   resetKey: string | null;
   userMessageCount: number;
 };
@@ -61,6 +62,7 @@ export function useAutoScroll({
   contentRef,
   contentKey,
   lastItemIsLatestUser,
+  oldestItemKey,
   resetKey,
   userMessageCount,
 }: UseAutoScrollOptions) {
@@ -71,6 +73,9 @@ export function useAutoScroll({
   const bottomSpacerHeightRef = useRef(0);
   const modeRef = useRef<ScrollMode>("followBottom");
   const pendingScrollActionRef = useRef<PendingScrollAction | null>(null);
+  const previousOldestItemKeyRef = useRef<string | null>(oldestItemKey);
+  const previousScrollHeightRef = useRef(0);
+  const skipAutoLayoutUntilRef = useRef(0);
   const userHasScrolledRef = useRef(false);
   const previousUserMessageCountRef = useRef(userMessageCount);
 
@@ -190,6 +195,10 @@ export function useAutoScroll({
   };
 
   const updateAutoScrollLayout = () => {
+    if (Date.now() < skipAutoLayoutUntilRef.current) {
+      updateStickyPromptState();
+      return;
+    }
     if (modeRef.current === "paused") {
       updateStickyPromptState();
       return;
@@ -227,9 +236,11 @@ export function useAutoScroll({
   useLayoutEffect(() => {
     modeRef.current = "followBottom";
     pendingScrollActionRef.current = null;
+    previousOldestItemKeyRef.current = oldestItemKey;
     syncUserHasScrolled(false);
     syncBottomSpacerHeight(0);
     scrollToBottom(true);
+    previousScrollHeightRef.current = containerRef.current?.scrollHeight ?? 0;
   }, [resetKey]);
 
   useLayoutEffect(() => {
@@ -242,7 +253,32 @@ export function useAutoScroll({
   }, [lastItemIsLatestUser, userMessageCount]);
 
   useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      previousOldestItemKeyRef.current = oldestItemKey;
+      return;
+    }
+    const previousOldestItemKey = previousOldestItemKeyRef.current;
+    if (
+      previousOldestItemKey &&
+      oldestItemKey &&
+      oldestItemKey !== previousOldestItemKey
+    ) {
+      const delta = container.scrollHeight - previousScrollHeightRef.current;
+      if (delta > 0) {
+        skipAutoLayoutUntilRef.current = Date.now() + 120;
+        pendingScrollActionRef.current = null;
+        setScrollTop(container, container.scrollTop + delta);
+        updateStickyPromptState();
+      }
+    }
+    previousOldestItemKeyRef.current = oldestItemKey;
+    previousScrollHeightRef.current = container.scrollHeight;
+  }, [containerRef, oldestItemKey]);
+
+  useLayoutEffect(() => {
     updateAutoScrollLayout();
+    previousScrollHeightRef.current = containerRef.current?.scrollHeight ?? 0;
   }, [contentKey]);
 
   useLayoutEffect(() => {
@@ -260,6 +296,7 @@ export function useAutoScroll({
       setScrollTop(container, pendingAction.top);
     }
     updateStickyPromptState();
+    previousScrollHeightRef.current = container.scrollHeight;
   }, [bottomSpacerHeight, containerRef]);
 
   useEffect(() => {

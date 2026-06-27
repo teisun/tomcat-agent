@@ -26,6 +26,9 @@ const EMPTY_STATE: WebviewStateSnapshot = {
   uiMode: "both",
 };
 
+const MAX_BOOTSTRAP_FILL_REQUESTS = 4;
+const TOP_HISTORY_THRESHOLD_PX = 24;
+
 function createMessageId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -208,6 +211,7 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     fileChipTopWithinStream,
     fileChipVisible,
     hasConflict: !!document.querySelector('[data-testid="conflict-banner"]'),
+    historyLoaderVisible: !!document.querySelector('[data-testid="history-loader"]'),
     html: root?.innerHTML ?? "",
     jumpToLatestVisible: !!document.querySelector('[data-testid="scroll-to-bottom"]'),
     latestUserTopWithinStream:
@@ -397,6 +401,20 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const activeApprovalCount =
     activeSession?.timeline.filter((item) => item.type === "approval" && !item.resolved).length ?? 0;
   const activeTimeline = activeSession?.timeline ?? [];
+  const oldestTimelineItemId = activeTimeline[0]?.id ?? null;
+  const bootstrapFillRef = useRef<{ requestCount: number; sessionId: string | null }>({
+    requestCount: 0,
+    sessionId: null,
+  });
+  const topPaginationRef = useRef<{
+    active: boolean;
+    anchorOldestItemId: string | null;
+    sessionId: string | null;
+  }>({
+    active: false,
+    anchorOldestItemId: null,
+    sessionId: null,
+  });
   const latestUserMessage = [...activeTimeline]
     .reverse()
     .find((item): item is WebviewMessageBlock => item.type === "message" && item.kind === "user") ?? null;
@@ -427,6 +445,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     contentRef: transcriptRef,
     contentKey: streamContentKey,
     lastItemIsLatestUser,
+    oldestItemKey: oldestTimelineItemId,
     resetKey: activeSession?.sessionId ?? null,
     userMessageCount,
   });
@@ -519,6 +538,102 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     });
   };
 
+  const requestOlderHistory = () => {
+    if (
+      !activeSession?.sessionId ||
+      activeSession.historyLoading === true ||
+      activeSession.hasMoreHistory !== true
+    ) {
+      return;
+    }
+    postIntent(vscodeApi, "loadOlderHistory", {
+      sessionId: activeSession.sessionId,
+    });
+  };
+
+  useEffect(() => {
+    if (bootstrapFillRef.current.sessionId !== (activeSession?.sessionId ?? null)) {
+      bootstrapFillRef.current = {
+        requestCount: 0,
+        sessionId: activeSession?.sessionId ?? null,
+      };
+    }
+    if (topPaginationRef.current.sessionId !== (activeSession?.sessionId ?? null)) {
+      topPaginationRef.current = {
+        active: false,
+        anchorOldestItemId: null,
+        sessionId: activeSession?.sessionId ?? null,
+      };
+    }
+  }, [activeSession?.sessionId]);
+
+  useEffect(() => {
+    const stream = streamRef.current;
+    if (!stream || !activeSession?.sessionId) {
+      return;
+    }
+    if (activeSession.historyLoading === true) {
+      return;
+    }
+    if (activeSession.hasMoreHistory !== true) {
+      topPaginationRef.current.active = false;
+      topPaginationRef.current.anchorOldestItemId = null;
+      return;
+    }
+    const renderableNonEmpty = activeTimeline.length > 0 || activeApprovalCount > 0;
+    if (!renderableNonEmpty) {
+      requestOlderHistory();
+      return;
+    }
+    if (topPaginationRef.current.active) {
+      if (oldestTimelineItemId === topPaginationRef.current.anchorOldestItemId) {
+        requestOlderHistory();
+        return;
+      }
+      topPaginationRef.current.active = false;
+      topPaginationRef.current.anchorOldestItemId = null;
+    }
+    if (stream.scrollHeight < stream.clientHeight * 0.9) {
+      if (bootstrapFillRef.current.requestCount >= MAX_BOOTSTRAP_FILL_REQUESTS) {
+        return;
+      }
+      bootstrapFillRef.current.requestCount += 1;
+      requestOlderHistory();
+      return;
+    }
+    bootstrapFillRef.current.requestCount = 0;
+  }, [
+    activeApprovalCount,
+    activeSession?.hasMoreHistory,
+    activeSession?.historyLoading,
+    activeSession?.sessionId,
+    activeTimeline.length,
+  ]);
+
+  useEffect(() => {
+    const stream = streamRef.current;
+    if (!stream) {
+      return;
+    }
+    const handleScroll = () => {
+      const nearTop = stream.scrollTop <= TOP_HISTORY_THRESHOLD_PX;
+      topPaginationRef.current.active = nearTop;
+      topPaginationRef.current.anchorOldestItemId = nearTop ? oldestTimelineItemId : null;
+      if (nearTop) {
+        requestOlderHistory();
+      }
+    };
+    stream.addEventListener("scroll", handleScroll);
+    return () => {
+      stream.removeEventListener("scroll", handleScroll);
+    };
+  }, [
+    activeSession?.hasMoreHistory,
+    activeSession?.historyLoading,
+    activeSession?.sessionId,
+    oldestTimelineItemId,
+  ]);
+
   return (
     <main className="tc-shell">
       <SessionBar
@@ -546,11 +661,21 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
       <div className="tc-stream-shell">
         <section className="tc-stream" data-testid="stream-container" ref={streamRef}>
+          <div className="tc-history-loader-slot">
+            {activeSession?.historyLoading ? (
+              <span className="tc-history-loader" data-testid="history-loader">
+                Loading earlier…
+              </span>
+            ) : null}
+          </div>
           {latestUserScrolledPast && latestUserMessageText ? (
             <StickyUserPrompt text={latestUserMessageText} />
           ) : null}
           {activeSession ? (
-            activeSession.timeline.length || activeApprovalCount ? (
+            activeSession.timeline.length ||
+            activeApprovalCount ||
+            activeSession.historyLoading ||
+            activeSession.hasMoreHistory ? (
               <TranscriptView
                 busy={!!activeSession.busy}
                 bottomSpacerHeight={bottomSpacerHeight}

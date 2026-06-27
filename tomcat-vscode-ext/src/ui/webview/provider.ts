@@ -35,6 +35,8 @@ import { SessionOwnershipTracker } from "./ownership";
 import { TomcatSessionPool } from "./sessionPool";
 import { WebviewStateStore } from "./state";
 
+const HISTORY_PAGE_ENTRIES = 40;
+
 type PendingQuestion = {
   request: AskQuestionWireRequest;
   resolve(response: AskQuestionWireResponse): void;
@@ -447,6 +449,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       case "listSessions":
         await this.refreshSessions();
         return;
+      case "loadOlderHistory":
+        await this.loadOlderHistory(intent.data.sessionId);
+        return;
       case "newSession": {
         await this.ensureInitialized();
         const sessionId = await this.sessionPool.createSession(
@@ -858,12 +863,39 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       return;
     }
     const history = await this.deps.sessionRouter.getMessages(sessionId, {
-      lastNTurns: 12,
+      limit: HISTORY_PAGE_ENTRIES,
     }).catch(() => null);
     if (!history) {
       return;
     }
     this.stateStore.hydrateHistory(sessionId, history);
+  }
+
+  private async loadOlderHistory(sessionId: string): Promise<void> {
+    if (typeof this.deps.sessionRouter.getMessages !== "function") {
+      return;
+    }
+    const session = this.currentState().sessionViews[sessionId];
+    if (!session?.hasMoreHistory || session.historyLoading !== false) {
+      return;
+    }
+    const cursor = this.stateStore.getOldestHistoryCursor(sessionId);
+    if (!cursor) {
+      return;
+    }
+    this.stateStore.setHistoryLoading(sessionId, true);
+    await this.postState();
+    const history = await this.deps.sessionRouter.getMessages(sessionId, {
+      cursor,
+      limit: HISTORY_PAGE_ENTRIES,
+    }).catch(() => null);
+    if (!history) {
+      this.stateStore.setHistoryLoading(sessionId, false);
+      await this.postState();
+      return;
+    }
+    this.stateStore.prependHistory(sessionId, history);
+    await this.postState();
   }
 
   private async readPendingAttachment(uri: vscode.Uri): Promise<WebviewPendingAttachment> {

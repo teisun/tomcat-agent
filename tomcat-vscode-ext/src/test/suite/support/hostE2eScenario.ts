@@ -240,6 +240,7 @@ async function waitForWebviewDomSnapshot<T>(
         ctxLabel: lastSnapshot.ctxLabel,
         fileChipTopWithinStream: lastSnapshot.fileChipTopWithinStream,
         fileChipVisible: lastSnapshot.fileChipVisible,
+        historyLoaderVisible: lastSnapshot.historyLoaderVisible,
         planNoticeReplayed: lastSnapshot.planNoticeReplayed,
         planStateText: lastSnapshot.planStateText,
         progressRow: lastSnapshot.progressRow,
@@ -1026,6 +1027,132 @@ export async function assertWebviewReloadReplayFlow(
     await api.__testing.focusWebview();
     captureTranscriptVisual("reload-replay");
   }
+}
+
+export async function assertWebviewGiantGroupLazyLoadFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: "webview-giant-group-new-session",
+      type: "newSession",
+    }),
+  );
+  const sessionId = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+  );
+
+  const runPrompt = async (text: string, messageId: string) => {
+    api.__testing.clearObservedEvents();
+    await api.__testing.sendWebviewIntent(
+      buildWebviewIntent({
+        data: { sessionId, text },
+        messageId,
+        type: "prompt",
+      }),
+    );
+    await waitForEvent(api, { sessionId, type: "agent_end" });
+  };
+
+  await runPrompt("giant tool history", "webview-giant-group-showcase");
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.groupFoldTitles.some((title) => title.includes("Giant history tool group"))
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+
+  for (let index = 0; index < 12; index += 1) {
+    await runPrompt(
+      `hello fake tomcat follow up ${index + 1}`,
+      `webview-giant-group-follow-up-${index + 1}`,
+    );
+  }
+
+  await api.__testing.reloadWebview();
+  const reloaded = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.messageTexts.some((text) => text.includes("hello from fake tomcat")) &&
+      snapshot.toolRowCount === 0
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.equal(
+    reloaded.toolRowCount,
+    0,
+    "expected no partial tool rows to render before the user expands the recovered group",
+  );
+
+  await api.__testing.sendWebviewDomAction({
+    edge: "top",
+    kind: "scrollToEdge",
+    testId: "stream-container",
+  });
+  const loading = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.historyLoaderVisible &&
+      snapshot.toolRowCount === 0
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(loading.historyLoaderVisible, "expected the subtle top loader while chasing the giant group");
+  assert.equal(loading.toolRowCount, 0, "expected no partial tool rows while older pages are still loading");
+
+  const restored = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      !snapshot.historyLoaderVisible &&
+      snapshot.groupFoldTitles.some((title) => title.includes("Giant history tool group"))
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    restored.groupFoldTitles.some((title) => title.includes("Giant history tool group")),
+    "expected the giant tool group header to appear once the head arrives",
+  );
+
+  await api.__testing.sendWebviewDomAction({
+    index: -1,
+    kind: "clickTestId",
+    testId: "thinking-group-toggle",
+  });
+  const expanded = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.toolTitles.length >= 90
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    expanded.toolTitles.length >= 90,
+    `expected nearly the full giant group after expansion, got ${expanded.toolTitles.length} tool rows`,
+  );
 }
 
 export async function assertWebviewCrossOwnerPlanFlow(

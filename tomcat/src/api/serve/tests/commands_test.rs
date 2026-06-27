@@ -1,4 +1,5 @@
 use super::*;
+use base64::Engine as _;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -21,6 +22,41 @@ async fn wait_for_line(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     read_ndjson_lines(buffer)
+}
+
+fn append_history_message(
+    slot: &Arc<crate::api::serve::SessionSlot>,
+    role: &str,
+    content: &str,
+) -> String {
+    slot.ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::json!({
+                "role": role,
+                "content": content,
+            }),
+        )
+        .expect("append history message")
+}
+
+fn payload_message_ids(response: &serde_json::Value) -> Vec<String> {
+    response["payload"]["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn decode_cursor(cursor: &str) -> serde_json::Value {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(cursor.as_bytes())
+        .expect("decode cursor");
+    serde_json::from_slice(&bytes).expect("parse cursor json")
 }
 
 #[tokio::test]
@@ -578,6 +614,331 @@ async fn serve_get_messages_uptoseq_is_null_placeholder() {
         .expect("get_messages response");
     assert!(response["payload"].get("upToSeq").is_some());
     assert!(response["payload"]["upToSeq"].is_null());
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_get_messages_returns_cursor_metadata_and_continuous_pages() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    append_history_message(&slot, "user", "first");
+    append_history_message(&slot, "assistant", "second");
+    append_history_message(&slot, "user", "third");
+    append_history_message(&slot, "assistant", "fourth");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-page-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                limit: Some(2),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-page-1")
+    })
+    .await;
+    let first = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-page-1"))
+        .expect("first get_messages response");
+    let first_page_ids = payload_message_ids(first);
+    assert_eq!(first_page_ids.len(), 2);
+    assert_eq!(first["payload"]["hasMore"].as_bool(), Some(true));
+    let next_cursor = first["payload"]["nextCursor"]
+        .as_str()
+        .expect("next cursor");
+    let decoded = decode_cursor(next_cursor);
+    assert_eq!(decoded["boundaryId"].as_str(), Some(first_page_ids[0].as_str()));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-page-2".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                cursor: Some(next_cursor.to_string()),
+                limit: Some(2),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-page-2")
+    })
+    .await;
+    let second = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-page-2"))
+        .expect("second get_messages response");
+    assert_eq!(payload_message_ids(second).len(), 2);
+    assert_eq!(second["payload"]["hasMore"].as_bool(), Some(false));
+    assert!(second["payload"]["nextCursor"].is_null());
+    let all_ids = [payload_message_ids(second), first_page_ids].concat();
+    assert_eq!(all_ids.len(), 4);
+    assert_eq!(all_ids.iter().collect::<std::collections::HashSet<_>>().len(), 4);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_get_messages_relocates_stale_cursor_by_boundary_id() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let first_id = append_history_message(&slot, "user", "first");
+    let second_id = append_history_message(&slot, "assistant", "second");
+    let third_id = append_history_message(&slot, "user", "third");
+    append_history_message(&slot, "assistant", "fourth");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-relocate-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                limit: Some(2),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-relocate-1")
+    })
+    .await;
+    let first = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-relocate-1"))
+        .expect("first get_messages response");
+    let next_cursor = first["payload"]["nextCursor"]
+        .as_str()
+        .expect("next cursor")
+        .to_string();
+
+    let transcript_path = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&slot.session_id);
+    crate::core::session::transcript::insert_entry_after_message_id(
+        &transcript_path,
+        &second_id,
+        &crate::core::session::transcript::TranscriptEntry::Custom(
+            crate::core::session::transcript::CustomEntry {
+                id: Some("inserted-before-third".to_string()),
+                parent_id: None,
+                timestamp: "2025-01-01T00:00:02.500Z".to_string(),
+                extra: serde_json::json!({
+                    "event": "history.inserted"
+                }),
+            },
+        ),
+    )
+    .expect("insert before cursor boundary");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-relocate-2".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                cursor: Some(next_cursor),
+                limit: Some(2),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-relocate-2")
+    })
+    .await;
+    let second = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-relocate-2"))
+        .expect("second get_messages response");
+    let ids = payload_message_ids(second);
+    assert_eq!(ids, vec![second_id, "inserted-before-third".to_string()]);
+    assert!(!ids.contains(&first_id));
+    assert!(!ids.contains(&third_id));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_get_messages_uses_best_effort_when_boundary_id_disappears() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    append_history_message(&slot, "user", "first");
+    append_history_message(&slot, "assistant", "second");
+    let third_id = append_history_message(&slot, "user", "third");
+    append_history_message(&slot, "assistant", "fourth");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-best-effort-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                limit: Some(2),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-best-effort-1")
+    })
+    .await;
+    let first = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-best-effort-1"))
+        .expect("first get_messages response");
+    let next_cursor = first["payload"]["nextCursor"]
+        .as_str()
+        .expect("next cursor")
+        .to_string();
+
+    let transcript_path = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&slot.session_id);
+    let lines = std::fs::read_to_string(&transcript_path)
+        .expect("read transcript")
+        .lines()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let rewritten = lines
+        .into_iter()
+        .map(|line| {
+            if line.contains(&format!("\"id\":\"{third_id}\"")) {
+                serde_json::to_string(&crate::core::session::transcript::TranscriptEntry::Custom(
+                    crate::core::session::transcript::CustomEntry {
+                        id: Some("replacement-entry".to_string()),
+                        parent_id: None,
+                        timestamp: "2025-01-01T00:00:03.000Z".to_string(),
+                        extra: serde_json::json!({
+                            "event": "history.rewritten"
+                        }),
+                    },
+                ))
+                .expect("serialize replacement")
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&transcript_path, rewritten).expect("rewrite transcript");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-best-effort-2".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                cursor: Some(next_cursor),
+                limit: Some(2),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-best-effort-2")
+    })
+    .await;
+    let second = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-best-effort-2"))
+        .expect("second get_messages response");
+    assert_eq!(second.get("success").and_then(serde_json::Value::as_bool), Some(true));
+    let ids = payload_message_ids(second);
+    assert!(!ids.is_empty());
+    assert!(!ids.contains(&third_id));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_get_messages_returns_boundary_entries_without_truncation() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    append_history_message(&slot, "user", "before boundary");
+    let transcript_path = slot
+        .ctx
+        .session_runtime
+        .session
+        .transcript_path(&slot.session_id);
+    crate::core::session::transcript::append_entry(
+        &transcript_path,
+        &crate::core::session::transcript::TranscriptEntry::BranchSummary(
+            crate::core::session::transcript::BranchSummaryEntry {
+                id: Some("boundary-1".to_string()),
+                parent_id: None,
+                timestamp: "2025-01-01T00:00:02.000Z".to_string(),
+                summary: Some("Earlier turns were summarized".to_string()),
+                covered_start_id: None,
+                covered_end_id: None,
+                covered_count: Some(4),
+                is_boundary: Some(true),
+                preheat_compaction_id: None,
+                estimated_covered_tokens_before: None,
+                estimated_summary_tokens: None,
+                estimated_tokens_saved: None,
+                error: None,
+                attempts: None,
+            },
+        ),
+    )
+    .expect("append boundary entry");
+    append_history_message(&slot, "assistant", "after boundary");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetMessages {
+            id: Some("gm-boundary".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            params: GetMessagesParams {
+                limit: Some(4),
+                ..GetMessagesParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("gm-boundary")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-boundary"))
+        .expect("get_messages response");
+    let entries = response["payload"]["messages"]
+        .as_array()
+        .expect("messages array");
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[1]["type"].as_str(), Some("branch_summary"));
+    assert_eq!(entries[1]["id"].as_str(), Some("boundary-1"));
+    assert_eq!(entries[2]["message"]["content"].as_str(), Some("after boundary"));
 }
 
 #[tokio::test]

@@ -153,4 +153,22 @@ describe("groupTimelineByAssistantResponse", () => {
       "tool-web",
     ]);
   });
+
+  it("keeps one assistantMessageId grouped even when the preamble arrives after tools", () => {
+    const timeline: WebviewTimelineItem[] = [
+      tool("tool-1", "tc-1", "a1"),
+      thinking("t1", "a1", "late thinking"),
+      assistantMessage("a1-msg", "Late preamble", "a1"),
+    ];
+
+    const grouped = groupTimelineByAssistantResponse(timeline);
+    expect(grouped).toHaveLength(1);
+    expect(grouped[0]).toMatchObject({
+      assistantMessageId: "a1",
+      preamble: { id: "a1-msg" },
+      thinking: { id: "t1" },
+      tools: [{ id: "tool-1" }],
+      type: "assistant-response-group",
+    });
+  });
 });

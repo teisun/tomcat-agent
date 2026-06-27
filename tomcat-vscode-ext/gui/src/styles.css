@@ -435,6 +435,19 @@ input:focus-visible {
   padding-right: 2px;
 }
 
+.tc-history-loader-slot {
+  align-items: center;
+  display: flex;
+  height: 20px;
+  justify-content: center;
+}
+
+.tc-history-loader {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  opacity: 0.8;
+}
+
 .tc-sticky-prompt {
   align-items: center;
   backdrop-filter: blur(6px);
@@ -496,6 +509,26 @@ input:focus-visible {
   min-height: 0;
   pointer-events: none;
   width: 100%;
+}
+
+.tc-boundary {
+  background: color-mix(in srgb, var(--vscode-sideBar-background) 92%, transparent);
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.25));
+  border-radius: 10px;
+  color: var(--vscode-descriptionForeground);
+  padding: 8px 10px;
+}
+
+.tc-boundary__summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tc-boundary__body {
+  margin-top: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tc-message {

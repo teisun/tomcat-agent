@@ -99,6 +99,8 @@ pub struct GetMessagesParams {
     pub last_n_turns: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// UI 通过 stdin 发送给 `tomcat serve` 的命令帧。

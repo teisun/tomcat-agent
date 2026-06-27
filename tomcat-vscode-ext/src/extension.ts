@@ -101,6 +101,7 @@ export interface TomcatExtensionApi {
       fileChipTopWithinStream: number | null;
       fileChipVisible: boolean;
       hasConflict: boolean;
+      historyLoaderVisible: boolean;
       html: string;
       jumpToLatestVisible: boolean;
       latestUserTopWithinStream: number | null;

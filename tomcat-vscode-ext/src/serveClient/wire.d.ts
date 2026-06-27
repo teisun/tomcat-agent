@@ -4,6 +4,7 @@
 export type AssistantMessageEvent = any;
 
 export interface GetMessagesParams {
+  cursor?: null | string;
   lastNTurns?: null | number;
   limit?: null | number;
 }

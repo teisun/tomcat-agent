@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import type { InitializeResult } from "../src/serveClient/initialize";
+import type { SessionHistoryPayload } from "../src/serveClient/sessionRouter";
 import { SessionOwnershipTracker } from "../src/ui/webview/ownership";
 import { TomcatWebviewViewProvider } from "../src/ui/webview/provider";
 
@@ -29,7 +30,13 @@ type MutableSessionState = {
 };
 
 type BuildProviderOptions = {
+  getMessagesImpl?: (
+    sessionId?: string,
+    params?: { cursor?: string | null; limit?: number },
+  ) => Promise<SessionHistoryPayload>;
+  getStateImpl?: (sessionId?: string) => Promise<Record<string, unknown>>;
   historyMessages?: unknown[];
+  historyResponses?: Record<string, SessionHistoryPayload>;
   sessionState?: Partial<MutableSessionState>;
 };
 
@@ -166,6 +173,14 @@ function initializeResult(): InitializeResult {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((innerResolve) => {
+    resolve = innerResolve;
+  });
+  return { promise, resolve };
+}
+
 function buildProvider(options: BuildProviderOptions = {}) {
   __testing.reset();
 
@@ -184,6 +199,10 @@ function buildProvider(options: BuildProviderOptions = {}) {
     ...options.sessionState,
   };
   const messenger = new FakeMessenger(sessionState);
+  const historyCalls: Array<{
+    params?: { cursor?: string | null; limit?: number };
+    sessionId?: string;
+  }> = [];
   const sessionRouter = {
     buildResultMetadata(sessionId: string) {
       return { sessionId };
@@ -191,31 +210,44 @@ function buildProvider(options: BuildProviderOptions = {}) {
     async closeSession() {
       return true;
     },
-    async getMessages(sessionId?: string) {
+    async getMessages(sessionId?: string, params?: { cursor?: string | null; limit?: number }) {
+      historyCalls.push({ params, sessionId });
+      if (options.getMessagesImpl) {
+        return options.getMessagesImpl(sessionId, params);
+      }
+      const response =
+        (params?.cursor ? options.historyResponses?.[params.cursor] : options.historyResponses?.__latest__) ??
+        ({
+          messages: options.historyMessages ?? [
+            {
+              id: "hist-user-1",
+              message: {
+                content: "restored prompt",
+                role: "user",
+              },
+              type: "message",
+            },
+            {
+              id: "hist-assistant-1",
+              message: {
+                content: "restored answer",
+                role: "assistant",
+              },
+              type: "message",
+            },
+          ],
+          sessionId: sessionId ?? "session-1",
+          upToSeq: null,
+        } satisfies SessionHistoryPayload);
       return {
-        messages: options.historyMessages ?? [
-          {
-            id: "hist-user-1",
-            message: {
-              content: "restored prompt",
-              role: "user",
-            },
-            type: "message",
-          },
-          {
-            id: "hist-assistant-1",
-            message: {
-              content: "restored answer",
-              role: "assistant",
-            },
-            type: "message",
-          },
-        ],
-        sessionId: sessionId ?? "session-1",
-        upToSeq: null,
+        ...response,
+        sessionId: response.sessionId ?? sessionId ?? "session-1",
       };
     },
     async getState(sessionId?: string) {
+      if (options.getStateImpl) {
+        return options.getStateImpl(sessionId);
+      }
       return {
         busy: sessionState.busy,
         contextRatio: sessionState.contextRatio,
@@ -274,7 +306,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
     sessionRouter: sessionRouter as never,
   });
 
-  return { messenger, provider, sessionState };
+  return { historyCalls, messenger, provider, sessionState };
 }
 
 describe("webview provider integration", () => {
@@ -335,6 +367,378 @@ describe("webview provider integration", () => {
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toHaveLength(0);
 
     provider.dispose();
+  });
+
+  it("prepends older history pages with cursor pagination", async () => {
+    const { historyCalls, provider } = buildProvider({
+      historyResponses: {
+        __latest__: {
+          hasMore: true,
+          messages: [
+            {
+              id: "hist-user-2",
+              message: { content: "second prompt", role: "user" },
+              type: "message",
+            },
+            {
+              id: "hist-assistant-2",
+              message: { content: "second answer", role: "assistant" },
+              type: "message",
+            },
+          ],
+          nextCursor: "cursor-1",
+          sessionId: "session-1",
+        },
+        "cursor-1": {
+          hasMore: false,
+          messages: [
+            {
+              id: "hist-user-1",
+              message: { content: "first prompt", role: "user" },
+              type: "message",
+            },
+            {
+              id: "hist-assistant-1",
+              message: { content: "first answer", role: "assistant" },
+              type: "message",
+            },
+          ],
+          nextCursor: null,
+          sessionId: "session-1",
+        },
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-history-pages",
+      type: "ready",
+    });
+
+    expect(historyCalls[0]).toMatchObject({
+      params: { limit: 40 },
+      sessionId: "session-1",
+    });
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      hasMoreHistory: true,
+      historyLoading: false,
+    });
+
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "older-history-1",
+      type: "loadOlderHistory",
+    });
+
+    expect(historyCalls[1]).toMatchObject({
+      params: { cursor: "cursor-1", limit: 40 },
+      sessionId: "session-1",
+    });
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      hasMoreHistory: false,
+      historyLoading: false,
+    });
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "user", text: "first prompt", type: "message" }),
+        expect.objectContaining({ kind: "assistant", text: "first answer", type: "message" }),
+        expect.objectContaining({ kind: "user", text: "second prompt", type: "message" }),
+        expect.objectContaining({ kind: "assistant", text: "second answer", type: "message" }),
+      ]),
+    );
+  });
+
+  it("falls back to single-page history when the server omits cursor metadata", async () => {
+    const { historyCalls, provider } = buildProvider({
+      historyResponses: {
+        __latest__: {
+          messages: [
+            {
+              id: "hist-user-1",
+              message: { content: "single prompt", role: "user" },
+              type: "message",
+            },
+          ],
+          sessionId: "session-1",
+        },
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-old-server",
+      type: "ready",
+    });
+
+    expect(historyCalls).toHaveLength(1);
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      hasMoreHistory: false,
+      historyLoading: false,
+    });
+  });
+
+  it("restores current state before deferred history resolves during bootstrap", async () => {
+    const historyResponse = deferred<SessionHistoryPayload>();
+    const { provider } = buildProvider({
+      getMessagesImpl: async () => historyResponse.promise,
+      getStateImpl: async (sessionId) => ({
+        busy: false,
+        contextRatio: 0.42,
+        model: "gpt-5.4",
+        planId: "plan-1",
+        planPath: "/workspace/plans/plan-1.plan.md",
+        planState: "executing",
+        sessionId: sessionId ?? "session-1",
+        thinkingLevel: "high",
+      }),
+    });
+
+    const readyPromise = provider.dispatchTestIntent({
+      messageId: "ready-state-first",
+      type: "ready",
+    });
+
+    for (let i = 0; i < 20; i += 1) {
+      if (provider.currentState().sessionViews["session-1"]) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      contextRatio: 0.42,
+      planId: "plan-1",
+      planState: "executing",
+    });
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "/workspace/plans/plan-1.plan.md",
+          planId: "plan-1",
+          state: "executing",
+          type: "plan",
+        }),
+      ]),
+    );
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.some(
+        (item) => item.type === "message" && item.kind === "user",
+      ),
+    ).toBe(false);
+
+    historyResponse.resolve({
+      messages: [
+        {
+          id: "hist-user-1",
+          message: { content: "restored prompt", role: "user" },
+          type: "message",
+        },
+      ],
+      sessionId: "session-1",
+    });
+    await readyPromise;
+
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "user", text: "restored prompt", type: "message" }),
+      ]),
+    );
+  });
+
+  it("guards against duplicate in-flight older-history requests", async () => {
+    const olderResponse = deferred<SessionHistoryPayload>();
+    const { historyCalls, provider } = buildProvider({
+      getMessagesImpl: async (_sessionId, params) => {
+        if (params?.cursor === "cursor-1") {
+          return olderResponse.promise;
+        }
+        return {
+          hasMore: true,
+          messages: [
+            {
+              id: "hist-user-2",
+              message: { content: "second prompt", role: "user" },
+              type: "message",
+            },
+          ],
+          nextCursor: "cursor-1",
+          sessionId: "session-1",
+        };
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-inflight-guard",
+      type: "ready",
+    });
+
+    const first = provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "older-inflight-1",
+      type: "loadOlderHistory",
+    });
+    const second = provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "older-inflight-2",
+      type: "loadOlderHistory",
+    });
+
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve();
+    }
+
+    expect(
+      historyCalls.filter((call) => call.params?.cursor === "cursor-1"),
+    ).toHaveLength(1);
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      historyLoading: true,
+    });
+
+    olderResponse.resolve({
+      hasMore: false,
+      messages: [
+        {
+          id: "hist-user-1",
+          message: { content: "first prompt", role: "user" },
+          type: "message",
+        },
+      ],
+      nextCursor: null,
+      sessionId: "session-1",
+    });
+
+    await Promise.all([first, second]);
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      hasMoreHistory: false,
+      historyLoading: false,
+    });
+  });
+
+  it("replays historical plan notices without overwriting current plan state", async () => {
+    const { provider } = buildProvider({
+      historyResponses: {
+        __latest__: {
+          hasMore: true,
+          messages: [],
+          nextCursor: "cursor-plan",
+          sessionId: "session-1",
+        },
+        "cursor-plan": {
+          hasMore: false,
+          messages: [
+            {
+              event: "plan.review",
+              id: "review-1",
+              plan_id: "plan-1",
+              summary: "looks good",
+              type: "custom",
+            },
+          ],
+          nextCursor: null,
+          sessionId: "session-1",
+        },
+      },
+      sessionState: {
+        planId: "plan-1",
+        planPath: "/workspace/plans/plan-1.plan.md",
+        planState: "executing",
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-plan-replay",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "older-plan-replay",
+      type: "loadOlderHistory",
+    });
+
+    const session = provider.currentState().sessionViews["session-1"];
+    expect(session).toMatchObject({
+      planId: "plan-1",
+      planState: "executing",
+    });
+    expect(session?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "notice",
+          text: "Tomcat plan review: looks good",
+          type: "message",
+        }),
+      ]),
+    );
+  });
+
+  it("preserves live events that arrive while older history is still loading", async () => {
+    const olderResponse = deferred<SessionHistoryPayload>();
+    const { messenger, provider } = buildProvider({
+      getMessagesImpl: async (_sessionId, params) => {
+        if (params?.cursor === "cursor-live") {
+          return olderResponse.promise;
+        }
+        return {
+          hasMore: true,
+          messages: [
+            {
+              id: "hist-user-2",
+              message: { content: "second prompt", role: "user" },
+              type: "message",
+            },
+          ],
+          nextCursor: "cursor-live",
+          sessionId: "session-1",
+        };
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-live-paginate",
+      type: "ready",
+    });
+
+    const loadingOlder = provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "older-live-paginate",
+      type: "loadOlderHistory",
+    });
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve();
+    }
+
+    messenger.emit({
+      assistantMessageEvent: { delta: "live answer", kind: "content_delta" },
+      message: {},
+      sessionId: "session-1",
+      type: "message_update",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "assistant", text: "live answer", type: "message" }),
+      ]),
+    );
+
+    olderResponse.resolve({
+      hasMore: false,
+      messages: [
+        {
+          id: "hist-user-1",
+          message: { content: "first prompt", role: "user" },
+          type: "message",
+        },
+      ],
+      nextCursor: null,
+      sessionId: "session-1",
+    });
+    await loadingOlder;
+
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "assistant", text: "live answer", type: "message" }),
+        expect.objectContaining({ kind: "user", text: "first prompt", type: "message" }),
+        expect.objectContaining({ kind: "user", text: "second prompt", type: "message" }),
+      ]),
+    );
   });
 
   it("tracks enter, build, and exit plan state through provider intents", async () => {

@@ -7,6 +7,7 @@ import type {
   WebviewTodo,
 } from "../types";
 import { ApprovalCard } from "./ApprovalCard";
+import { BoundaryBlock } from "./BoundaryBlock";
 import { MessageBubble } from "./MessageBubble";
 import { PlanFileCard } from "./PlanFileCard";
 import { ProgressRow } from "./ProgressRow";
@@ -83,6 +84,8 @@ export function TranscriptView({
 
   const renderTimelineItem = (item: WebviewTimelineItem) => {
     switch (item.type) {
+      case "boundary":
+        return <BoundaryBlock item={item} key={item.id} />;
       case "message":
         return <MessageBubble item={item} key={item.id} />;
       case "thinking":

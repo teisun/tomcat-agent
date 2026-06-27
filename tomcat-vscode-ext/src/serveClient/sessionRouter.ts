@@ -42,8 +42,10 @@ export interface WebviewTodo {
 }
 
 export interface SessionHistoryPayload {
+  hasMore?: boolean;
   header?: unknown;
   messages: unknown[];
+  nextCursor?: string | null;
   sessionId: string;
   upToSeq?: string | null;
 }
@@ -236,8 +238,10 @@ export class SessionRouter {
     }
 
     return {
+      hasMore: payload.hasMore === true,
       header: payload.header,
       messages: Array.isArray(payload.messages) ? payload.messages : [],
+      nextCursor: typeof payload.nextCursor === "string" ? payload.nextCursor : null,
       sessionId: payload.sessionId,
       upToSeq: typeof payload.upToSeq === "string" ? payload.upToSeq : null,
     };

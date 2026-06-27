@@ -50,6 +50,11 @@ let historyCounter = 1;
 let pendingApproval = null;
 let pendingInterrupt = null;
 let activeSessionId = null;
+const debugGetMessages = process.env.TOMCAT_E2E_DEBUG_GET_MESSAGES === "1";
+const historyPageDelayMs = Math.max(
+  0,
+  Number(process.env.TOMCAT_E2E_HISTORY_PAGE_DELAY_MS || "120"),
+);
 const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "250"),
@@ -251,6 +256,45 @@ function buildToolIconShowcaseTools() {
   ];
 }
 
+function buildGiantHistoryTools() {
+  const workspaceDir = process.cwd();
+  const sourcePath = path.join(workspaceDir, "src", "app.tsx");
+  return Array.from({ length: 100 }, (_, index) => {
+    const batch = index + 1;
+    switch (index % 4) {
+      case 0:
+        return {
+          toolCallId: \`tc-giant-read-\${batch}\`,
+          toolName: "read",
+          args: { path: sourcePath },
+          display: { file: sourcePath, kind: "file" },
+          result: \`Read src/app.tsx batch \${batch}\`,
+        };
+      case 1:
+        return {
+          toolCallId: \`tc-giant-bash-\${batch}\`,
+          toolName: "bash",
+          args: { command: \`echo batch-\${batch}\` },
+          result: \`Ran batch \${batch}\`,
+        };
+      case 2:
+        return {
+          toolCallId: \`tc-giant-search-\${batch}\`,
+          toolName: "web_search",
+          args: { query: \`batch \${batch} history loading\` },
+          result: \`Found history batch \${batch}\`,
+        };
+      default:
+        return {
+          toolCallId: \`tc-giant-list-\${batch}\`,
+          toolName: "list_dir",
+          args: { path: workspaceDir },
+          result: \`Listed workspace batch \${batch}\`,
+        };
+    }
+  });
+}
+
 function emitMessageDelta(sessionId, delta) {
   send({
     assistantMessageEvent: {
@@ -322,6 +366,40 @@ function recordHistoryMessage(sessionId, role, content) {
     message: {
       content,
       role,
+    },
+    type: "message",
+  });
+}
+
+function recordHistoryAssistantWithTools(sessionId, content, tools, summaryTitle) {
+  const session = touchSession(ensureSession(sessionId));
+  session.history.push({
+    id: \`h-\${historyCounter++}\`,
+    message: {
+      content,
+      role: "assistant",
+      summary_title: summaryTitle || undefined,
+      tool_calls: tools.map((tool) => ({
+        function: {
+          arguments: JSON.stringify(tool.args || {}),
+          name: tool.toolName,
+        },
+        id: tool.toolCallId,
+        type: "function",
+      })),
+    },
+    type: "message",
+  });
+}
+
+function recordHistoryToolResult(sessionId, tool) {
+  const session = touchSession(ensureSession(sessionId));
+  session.history.push({
+    id: \`h-\${historyCounter++}\`,
+    message: {
+      content: tool.result,
+      role: "tool",
+      tool_call_id: tool.toolCallId,
     },
     type: "message",
   });
@@ -442,7 +520,8 @@ function handlePrompt(frame) {
       sessionId,
       type: "message_update",
     });
-    for (const tool of buildToolIconShowcaseTools()) {
+    const showcaseTools = buildToolIconShowcaseTools();
+    for (const tool of showcaseTools) {
       emitCompletedTool(sessionId, tool);
     }
     send({
@@ -453,7 +532,51 @@ function handlePrompt(frame) {
       type: "turn_end",
     });
     emitContextMetrics(sessionId, 0.31);
-    recordHistoryMessage(sessionId, "assistant", "I prepared a built-in tool icon showcase.");
+    recordHistoryAssistantWithTools(
+      sessionId,
+      "I prepared a built-in tool icon showcase.",
+      showcaseTools,
+      "Built-in tool icons",
+    );
+    for (const tool of showcaseTools) {
+      recordHistoryToolResult(sessionId, tool);
+    }
+    finishTurn(sessionId, null);
+    return;
+  }
+
+  if (text.includes("giant tool history")) {
+    emitMessageDelta(sessionId, "I prepared a giant historical tool group.");
+    send({
+      assistantMessageEvent: {
+        delta: "Keep loading older pages until the whole group is ready.",
+        kind: "thinking_delta",
+      },
+      message: {},
+      sessionId,
+      type: "message_update",
+    });
+    const giantTools = buildGiantHistoryTools();
+    for (const tool of giantTools) {
+      emitCompletedTool(sessionId, tool);
+    }
+    send({
+      message: {},
+      summaryTitle: "Giant history tool group",
+      toolResults: [],
+      turnIndex: 1,
+      type: "turn_end",
+    });
+    emitContextMetrics(sessionId, 0.34);
+    recordHistoryAssistantWithTools(
+      sessionId,
+      "I prepared a giant historical tool group.",
+      giantTools,
+      "Giant history tool group",
+    );
+    for (const tool of giantTools) {
+      recordHistoryToolResult(sessionId, tool);
+    }
     finishTurn(sessionId, null);
     return;
   }
@@ -795,7 +918,48 @@ function handleCommand(frame) {
     case "get_messages": {
       const sessionId = frame.sessionId || activeSessionId;
       const session = ensureSession(sessionId);
-      send({
+      const rawLimit =
+        frame.params && Object.prototype.hasOwnProperty.call(frame.params, "limit")
+          ? frame.params.limit
+          : frame.limit;
+      const parsedLimit =
+        typeof rawLimit === "number"
+          ? rawLimit
+          : Number.parseInt(String(rawLimit ?? ""), 10);
+      const requestedLimit = parsedLimit > 0 ? parsedLimit : session.history.length;
+      const rawCursor =
+        frame.params && Object.prototype.hasOwnProperty.call(frame.params, "cursor")
+          ? frame.params.cursor
+          : frame.cursor;
+      const requestedCursor =
+        typeof rawCursor === "string" || typeof rawCursor === "number"
+          ? Number.parseInt(String(rawCursor), 10)
+          : NaN;
+      const endExclusive =
+        Number.isInteger(requestedCursor) && requestedCursor > 0
+          ? Math.min(requestedCursor, session.history.length)
+          : session.history.length;
+      const start = Math.max(0, endExclusive - requestedLimit);
+      const messages = session.history.slice(start, endExclusive);
+      const hasMore = start > 0;
+      if (debugGetMessages) {
+        console.error(
+          "[fake-serve:get_messages]",
+          JSON.stringify({
+            endExclusive,
+            hasMore,
+            messageCount: messages.length,
+            rawCursor,
+            rawLimit,
+            requestedCursor,
+            requestedLimit,
+            sessionId,
+            start,
+            total: session.history.length,
+          }),
+        );
+      }
+      const response = {
         id: frame.id,
         payload: {
           header: {
@@ -804,14 +968,21 @@ function handleCommand(frame) {
             type: "session",
             version: 3,
           },
-          messages: session.history,
+          hasMore,
+          messages,
+          nextCursor: hasMore ? String(start) : null,
           sessionId,
           upToSeq: null,
         },
         sessionId,
         success: true,
         type: "response",
-      });
+      };
+      if (Number.isInteger(requestedCursor) && requestedCursor > 0 && historyPageDelayMs > 0) {
+        setTimeout(() => send(response), historyPageDelayMs);
+      } else {
+        send(response);
+      }
       break;
     }
     case "close_session":

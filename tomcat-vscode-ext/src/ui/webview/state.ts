@@ -20,6 +20,7 @@ import type {
   HostEventFrameContent,
   TomcatUiMode,
   WebviewApprovalCard,
+  WebviewBoundaryBlock,
   WebviewMessageBlock,
   WebviewPendingAttachment,
   WebviewPlanFileCard,
@@ -39,7 +40,11 @@ function cloneSnapshot(snapshot: WebviewStateSnapshot): WebviewStateSnapshot {
 type SessionRuntimeState = {
   activeAssistantId: string | null;
   activeThinkingId: string | null;
+  hasMoreHistory: boolean;
   historyHydrated: boolean;
+  historyEntries: unknown[];
+  historyLoading: boolean;
+  oldestHistoryCursor: string | null;
 };
 
 function isPlanEvent(event: ServeEvent): event is ServePlanEvent {
@@ -80,6 +85,8 @@ function createEmptySession(sessionId: string): WebviewSessionSnapshot {
     busy: false,
     conflictMessage: null,
     contextRatio: null,
+    hasMoreHistory: false,
+    historyLoading: false,
     model: null,
     planTodos: [],
     sessionTodos: [],
@@ -130,6 +137,8 @@ function timelineMergeKeys(item: WebviewTimelineItem): string[] {
       return [`tool:${item.toolCallId}`];
     case "approval":
       return [`approval:${item.request.requestId}`];
+    case "boundary":
+      return [`boundary:${item.id}`];
     case "plan":
       return [`plan:${item.path}`];
   }
@@ -368,6 +377,19 @@ function applyHistoryEntry(
     return;
   }
 
+  if (entry.type === "branch_summary") {
+    if (entry.isBoundary !== true) {
+      return;
+    }
+    session.timeline.push({
+      coveredCount: typeof entry.coveredCount === "number" ? entry.coveredCount : null,
+      id: typeof entry.id === "string" ? entry.id : `boundary-${session.timeline.length + 1}`,
+      summary: typeof entry.summary === "string" ? entry.summary : null,
+      type: "boundary",
+    } satisfies WebviewBoundaryBlock);
+    return;
+  }
+
   if (entry.type === "message" && isRecord(entry.message)) {
     const role = typeof entry.message.role === "string" ? entry.message.role : null;
     const text = extractMessageText(entry.message.content);
@@ -472,8 +494,59 @@ function createSessionRuntime(): SessionRuntimeState {
   return {
     activeAssistantId: null,
     activeThinkingId: null,
+    hasMoreHistory: false,
     historyHydrated: false,
+    historyEntries: [],
+    historyLoading: false,
+    oldestHistoryCursor: null,
   };
+}
+
+function historyEntryKey(entry: unknown): string {
+  if (isRecord(entry) && typeof entry.id === "string") {
+    return `id:${entry.id}`;
+  }
+  try {
+    return `json:${JSON.stringify(entry)}`;
+  } catch {
+    return `fallback:${String(entry)}`;
+  }
+}
+
+function mergeHistoryEntries(older: unknown[], newer: unknown[]): unknown[] {
+  const seen = new Set<string>();
+  const merged: unknown[] = [];
+  for (const entry of [...older, ...newer]) {
+    const key = historyEntryKey(entry);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(entry);
+  }
+  return merged;
+}
+
+function isHistoryChildEntry(entry: unknown): boolean {
+  if (!isRecord(entry) || typeof entry.type !== "string") {
+    return false;
+  }
+  if (entry.type === "thinking_trace") {
+    return true;
+  }
+  return (
+    entry.type === "message" &&
+    isRecord(entry.message) &&
+    entry.message.role === "tool"
+  );
+}
+
+function trimLeadingHistoryEntries(entries: unknown[]): unknown[] {
+  let start = 0;
+  while (start < entries.length && isHistoryChildEntry(entries[start])) {
+    start += 1;
+  }
+  return start === 0 ? entries : entries.slice(start);
 }
 
 function clearStreaming(runtime: SessionRuntimeState): void {
@@ -894,34 +967,40 @@ export class WebviewStateStore {
   }
 
   hydrateHistory(sessionId: string, history: SessionHistoryPayload): void {
+    this.appendLatestHistory(sessionId, history);
+  }
+
+  appendLatestHistory(sessionId: string, history: SessionHistoryPayload): void {
+    const runtime = this.ensureRuntime(sessionId);
+    runtime.historyEntries = Array.isArray(history.messages) ? [...history.messages] : [];
+    runtime.oldestHistoryCursor = history.nextCursor ?? null;
+    runtime.hasMoreHistory = history.hasMore === true && typeof history.nextCursor === "string";
+    runtime.historyLoading = false;
+    this.rebuildHistoryTimeline(sessionId);
+  }
+
+  prependHistory(sessionId: string, history: SessionHistoryPayload): void {
+    this.prependOlderHistory(sessionId, history);
+  }
+
+  prependOlderHistory(sessionId: string, history: SessionHistoryPayload): void {
+    const runtime = this.ensureRuntime(sessionId);
+    runtime.historyEntries = mergeHistoryEntries(history.messages, runtime.historyEntries);
+    runtime.oldestHistoryCursor = history.nextCursor ?? null;
+    runtime.hasMoreHistory = history.hasMore === true && typeof history.nextCursor === "string";
+    runtime.historyLoading = false;
+    this.rebuildHistoryTimeline(sessionId);
+  }
+
+  setHistoryLoading(sessionId: string, loading: boolean): void {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
-    const historyToolNames = buildHistoryToolNameLookup(history.messages);
-    const toolCallToAssistant = buildToolCallToAssistantMap(history.messages);
-    const historyToolArgs = buildHistoryToolArgsLookup(history.messages);
-    const historySession = createEmptySession(sessionId);
-    for (const entry of history.messages) {
-      applyHistoryEntry(
-        historySession,
-        entry,
-        historyToolNames,
-        toolCallToAssistant,
-        historyToolArgs,
-      );
-    }
-    mergeCurrentPlanCardsIntoHistory(historySession, session);
-    const historyItems = historySession.timeline;
-    if (!historyItems.length) {
-      runtime.historyHydrated = true;
-      return;
-    }
+    runtime.historyLoading = loading;
+    session.historyLoading = loading;
+  }
 
-    const existingKeys = new Set(historyItems.flatMap((item) => timelineMergeKeys(item)));
-    const liveOnly = session.timeline.filter(
-      (item) => !timelineMergeKeys(item).some((key) => existingKeys.has(key)),
-    );
-    session.timeline = [...historyItems, ...liveOnly];
-    runtime.historyHydrated = true;
+  getOldestHistoryCursor(sessionId: string): string | null {
+    return this.ensureRuntime(sessionId).oldestHistoryCursor;
   }
 
   appendMessage(
@@ -1182,6 +1261,35 @@ export class WebviewStateStore {
     const created = createSessionRuntime();
     this.runtimes.set(sessionId, created);
     return created;
+  }
+
+  private rebuildHistoryTimeline(sessionId: string): void {
+    const session = this.ensureSession(sessionId);
+    const runtime = this.ensureRuntime(sessionId);
+    const renderableEntries = trimLeadingHistoryEntries(runtime.historyEntries);
+    const historyToolNames = buildHistoryToolNameLookup(renderableEntries);
+    const toolCallToAssistant = buildToolCallToAssistantMap(renderableEntries);
+    const historyToolArgs = buildHistoryToolArgsLookup(renderableEntries);
+    const historySession = createEmptySession(sessionId);
+    for (const entry of renderableEntries) {
+      applyHistoryEntry(
+        historySession,
+        entry,
+        historyToolNames,
+        toolCallToAssistant,
+        historyToolArgs,
+      );
+    }
+    mergeCurrentPlanCardsIntoHistory(historySession, session);
+    const historyItems = historySession.timeline;
+    const existingKeys = new Set(historyItems.flatMap((item) => timelineMergeKeys(item)));
+    const liveOnly = session.timeline.filter(
+      (item) => !timelineMergeKeys(item).some((key) => existingKeys.has(key)),
+    );
+    session.timeline = [...historyItems, ...liveOnly];
+    session.hasMoreHistory = runtime.hasMoreHistory;
+    session.historyLoading = runtime.historyLoading;
+    runtime.historyHydrated = true;
   }
 
   private applyPlanEvent(

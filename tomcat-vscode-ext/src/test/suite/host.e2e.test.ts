@@ -11,6 +11,7 @@ import {
   assertPlanSlashFlowViaChatUi,
   assertWebviewDiffFlow,
   assertWebviewCrossOwnerPlanFlow,
+  assertWebviewGiantGroupLazyLoadFlow,
   assertWebviewMultiSessionFlow,
   assertWebviewOwnershipFlow,
   assertWebviewReloadReplayFlow,
@@ -98,6 +99,11 @@ suite("Tomcat host E2E", () => {
   test("replays plan history after a webview reload", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewReloadReplayFlow(api);
+  });
+
+  test("lazy loads a giant historical tool group without rendering half a group", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewGiantGroupLazyLoadFlow(api);
   });
 
   test("keeps cross-owner plan state in sync in the webview", async () => {

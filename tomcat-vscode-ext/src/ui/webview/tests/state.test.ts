@@ -463,9 +463,170 @@ describe("custom history replay", () => {
       ]),
     );
   });
+
+  it("drops leading orphan tool entries until the assistant head arrives", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      hasMore: true,
+      messages: [
+        {
+          id: "tool-result-1",
+          message: {
+            content: "output",
+            role: "tool",
+            tool_call_id: "tc-1",
+          },
+          type: "message",
+        },
+      ],
+      nextCursor: "cursor-1",
+      sessionId: "s1",
+    });
+
+    expect(store.snapshot().sessionViews.s1.timeline).toEqual([]);
+
+    store.prependOlderHistory("s1", {
+      hasMore: false,
+      messages: [
+        {
+          id: "assistant-1",
+          message: {
+            role: "assistant",
+            tool_calls: [
+              {
+                function: { arguments: "{\"command\":\"ls\"}", name: "bash" },
+                id: "tc-1",
+              },
+            ],
+          },
+          type: "message",
+        },
+      ],
+      nextCursor: null,
+      sessionId: "s1",
+    });
+
+    const tool = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item) => item.type === "tool");
+    expect(tool?.type).toBe("tool");
+    expect(tool?.type === "tool" ? tool.assistantMessageId : undefined).toBe("assistant-1");
+  });
+
+  it("keeps current plan state authoritative after prepending older plan history", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applySessionState(
+      {
+        busy: false,
+        model: "gpt-5.4",
+        planId: "plan-1",
+        planPath: "/workspace/plan-a.plan.md",
+        planState: "executing",
+        sessionId: "s1",
+      },
+      null,
+      "webview",
+    );
+
+    store.hydrateHistory("s1", {
+      messages: [],
+      sessionId: "s1",
+    });
+    store.prependOlderHistory("s1", {
+      hasMore: false,
+      messages: [
+        {
+          event: "plan.create",
+          id: "create-1",
+          path: "/workspace/plan-a.plan.md",
+          plan_id: "plan-1",
+          state: "planning",
+          type: "custom",
+        },
+        {
+          event: "plan.review",
+          id: "review-1",
+          plan_id: "plan-1",
+          summary: "looks good",
+          type: "custom",
+        },
+      ],
+      nextCursor: null,
+      sessionId: "s1",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    const planCard = session.timeline.find(
+      (item) => item.type === "plan" && item.path === "/workspace/plan-a.plan.md",
+    );
+    const notice = session.timeline.find(
+      (item) => item.type === "message" && item.kind === "notice",
+    );
+    expect(planCard).toMatchObject({
+      path: "/workspace/plan-a.plan.md",
+      planId: "plan-1",
+      state: "executing",
+    });
+    expect(notice).toMatchObject({
+      kind: "notice",
+      text: "Tomcat plan review: looks good",
+      type: "message",
+    });
+  });
+
+  it("renders only boundary branch summaries and hides preheat summaries", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "summary-preheat",
+          isBoundary: false,
+          summary: "preheat",
+          type: "branch_summary",
+        },
+        {
+          coveredCount: 8,
+          id: "summary-boundary",
+          isBoundary: true,
+          summary: "Earlier turns were summarized.",
+          type: "branch_summary",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const boundaries = store
+      .snapshot()
+      .sessionViews.s1.timeline.filter((item) => item.type === "boundary");
+    expect(boundaries).toEqual([
+      {
+        coveredCount: 8,
+        id: "summary-boundary",
+        summary: "Earlier turns were summarized.",
+        type: "boundary",
+      },
+    ]);
+  });
 });
 
 describe("openFile intent protocol", () => {
+  it("accepts loadOlderHistory intent shape", () => {
+    expect(
+      isWebviewIntent({
+        data: {
+          sessionId: "s1",
+        },
+        messageId: "load-older-1",
+        type: "loadOlderHistory",
+      }),
+    ).toBe(true);
+  });
+
   it("accepts openFile intent shape", () => {
     expect(
       isWebviewIntent({

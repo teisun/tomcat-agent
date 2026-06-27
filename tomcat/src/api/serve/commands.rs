@@ -8,8 +8,13 @@
 
 use std::sync::Arc;
 
+use base64::Engine as _;
 use futures_util::FutureExt;
+use serde::{Deserialize, Serialize};
 
+use crate::core::session::transcript::{
+    entry_id, find_entry_line_offset, read_entry_at_offset, TranscriptPage,
+};
 use crate::core::llm::{ChatMessage, ChatMessageContentPart, ThinkingLevel};
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::AppError;
@@ -25,6 +30,65 @@ use super::{cleanup_session_slot, create_session_slot, register_slot_hooks, run_
 enum TurnAck {
     Accepted,
     Payload(serde_json::Value),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GetMessagesCursor {
+    offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boundary_id: Option<String>,
+}
+
+fn decode_get_messages_cursor(cursor: &str) -> Result<GetMessagesCursor, AppError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(cursor.as_bytes())
+        .map_err(|error| AppError::Config(format!("invalid get_messages cursor: {error}")))?;
+    serde_json::from_slice::<GetMessagesCursor>(&bytes)
+        .map_err(|error| AppError::Config(format!("invalid get_messages cursor payload: {error}")))
+}
+
+fn encode_get_messages_cursor(
+    offset: u64,
+    boundary_id: Option<&str>,
+) -> Result<String, AppError> {
+    let cursor = GetMessagesCursor {
+        offset,
+        boundary_id: boundary_id.map(ToString::to_string),
+    };
+    let bytes = serde_json::to_vec(&cursor)
+        .map_err(|error| AppError::Config(format!("serialize get_messages cursor failed: {error}")))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+fn resolve_cursor_offset(
+    session: &SessionManager,
+    session_id: &str,
+    cursor: &GetMessagesCursor,
+) -> Result<u64, AppError> {
+    let Some(boundary_id) = cursor.boundary_id.as_deref() else {
+        return Ok(cursor.offset);
+    };
+    let transcript_path = session.transcript_path(session_id);
+    if let Some(entry) = read_entry_at_offset(&transcript_path, cursor.offset)? {
+        if entry_id(&entry) == Some(boundary_id) {
+            return Ok(cursor.offset);
+        }
+    }
+    if let Some(relocated_offset) = find_entry_line_offset(&transcript_path, boundary_id)? {
+        return Ok(relocated_offset);
+    }
+    Ok(cursor.offset)
+}
+
+fn encode_next_cursor(page: &TranscriptPage) -> Result<Option<String>, AppError> {
+    if !page.has_more {
+        return Ok(None);
+    }
+    let Some(offset) = page.next_cursor_offset else {
+        return Ok(None);
+    };
+    encode_get_messages_cursor(offset, page.entries.first().and_then(entry_id)).map(Some)
 }
 
 fn parse_serve_thinking_level(level: &str) -> Option<ThinkingLevel> {
@@ -218,25 +282,45 @@ pub(crate) async fn handle_command(
                 .ctx
                 .session_runtime
                 .session
-                .read_session_header()
+                .read_session_header_for_session(&slot.session_id)
                 .map_err(|error| {
                     AppError::Config(format!("read session header failed: {error}"))
                 })?;
-            let entries = slot
+            let cursor = params
+                .cursor
+                .as_deref()
+                .map(decode_get_messages_cursor)
+                .transpose()?;
+            let before = cursor
+                .as_ref()
+                .map(|cursor| {
+                    resolve_cursor_offset(
+                        &slot.ctx.session_runtime.session,
+                        &slot.session_id,
+                        cursor,
+                    )
+                })
+                .transpose()?;
+            let page = slot
                 .ctx
                 .session_runtime
                 .session
-                .get_entries(cap)
+                .get_entries_before_for_session(&slot.session_id, cap, before)
                 .map_err(|error| {
                     AppError::Config(format!("read session entries failed: {error}"))
                 })?;
+            let next_cursor = encode_next_cursor(&page).map_err(|error| {
+                AppError::Config(format!("encode get_messages cursor failed: {error}"))
+            })?;
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),
                 Some(serde_json::json!({
                     "sessionId": slot.session_id,
                     "header": header,
-                    "messages": entries,
+                    "messages": page.entries,
+                    "nextCursor": next_cursor,
+                    "hasMore": page.has_more,
                     // TODO(next): wire up real seq/upToSeq when Phase-2 visibility resync lands.
                     "upToSeq": serde_json::Value::Null
                 })),

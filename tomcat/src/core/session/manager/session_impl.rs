@@ -16,10 +16,11 @@ use crate::core::session::store::{
 };
 use crate::core::session::transcript::{
     append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
-    mark_message_entries_after_anchor_superseded, read_entries_tail, read_header, write_header,
-    rewrite_message_summary_titles_by_id, BranchSummaryEntry, CustomEntry, LabelEntry,
-    MessageEntry, MessageSummaryTitleRewrite, ModelChangeEntry, SessionHeader, SessionInfoEntry,
-    SyncLevel, ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry,
+    mark_message_entries_after_anchor_superseded, read_entries_tail, read_entries_tail_before,
+    read_header, write_header, rewrite_message_summary_titles_by_id, BranchSummaryEntry,
+    CustomEntry, LabelEntry, MessageEntry, MessageSummaryTitleRewrite, ModelChangeEntry,
+    SessionHeader, SessionInfoEntry, SyncLevel, ThinkingLevelChangeEntry, ThinkingTraceEntry,
+    TranscriptEntry, TranscriptPage,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
@@ -902,6 +903,17 @@ impl SessionManager {
         read_entries_tail(&path, cap)
     }
 
+    pub fn get_entries_before(
+        &self,
+        cap: usize,
+        before: Option<u64>,
+    ) -> Result<TranscriptPage, AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        read_entries_tail_before(&path, cap, before)
+    }
+
     /// get_entry 代理到当前会话 transcript。
     pub fn get_entry(&self, id: &str) -> Result<Option<TranscriptEntry>, AppError> {
         let path = self
@@ -947,6 +959,18 @@ impl SessionManager {
             return Err(AppError::Config(format!("会话不存在: {session_id}")));
         }
         read_entries_tail(&self.transcript_path(session_id), cap)
+    }
+
+    pub fn get_entries_before_for_session(
+        &self,
+        session_id: &str,
+        cap: usize,
+        before: Option<u64>,
+    ) -> Result<TranscriptPage, AppError> {
+        if self.get_session_by_id(session_id)?.is_none() {
+            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+        }
+        read_entries_tail_before(&self.transcript_path(session_id), cap, before)
     }
 
     pub fn get_entry_for_session(
