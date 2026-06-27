@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-27 14:55 +0800 | DOING | feature/tomcat-vscode-extension | — |
+| Tom | 2026-06-27 16:42 +0800 | DOING | feature/tomcat-vscode-extension | — |
 
 ### ✅ DONE
 - [x] **[P1]** 认领 `T2-P1-020`，任务卡 / 看板索引已切到 `DOING / Tom`；依赖例外已按用户显式要求记录。
@@ -26,6 +26,7 @@
 - [x] **[P1]** 2026-06-27 第二轮自查：修复 bash/web_search 变"卡片"根因 bug（`state.ts` tool 事件误调 `clearStreaming` 清掉 `activeAssistantId` → 同轮第 2+ 工具 `assistantMessageId` 丢失 → 孤立 → `ToolCallCard`；改用 `clearThinkingStreaming` 只清 `activeThinkingId`）+ 孤立 tool 兜底由 `ToolCallCard` 改 `ToolRow`；E2E `assertTranscriptUiFlow` 加 `toolRowCount>=3` + `toolCardCount===0` 回归断言；补全 3 项 🟡 缺口（ThinkingGroup 折叠头 check/loading 图标 + spin、shimmer 改 `summaryTitle===null && isStreaming`、ToolRow grep `N results`/search_workspace 分支/web_search 结构化/edit 图标 + bash `<code>cmd</code>`）；gui 67 项单测全绿、ext tsc 干净、`verify:vsix` E2E ✔（read/bash/web_search 三工具均扁平行、零卡片）。详见 `.cursor/plans/transcript-ui-restore-progress.md`"卡片根因修复"节。
 - [x] **[P1]** 2026-06-27 第三轮 transcript UI polish：webview 正式引入 `@vscode/codicons`（`vite base:"./"` 打包 `dist/codicon.ttf`，FileChip / tool / progress / todo 图标恢复）、`FileChip` 基线对齐修正、底部新增仿 VSCode 的停靠 Todo widget（折叠 `Render the transcript UI (2/4)`、展开 `Todos (2/4)` + radio icon 列表）、`PlanFileCard` 与原 `Build` strip 合并为 Cursor 风卡片（标题/描述来自 `.plan.md` frontmatter，footer `View Plan` + `Build`），并新增 provider frontmatter 缓存读取、`TodoListWidget`/`PlanFileCard`/`provider` 单测；`npm --prefix gui run test` 72 passing、`npm run lint` 通过、`npm run verify:vsix` 1 passing，新增裁剪图 `progress` / `todo-expanded` / `collapsed` / `expanded` 四张。
 - [x] **[P1]** 2026-06-27 第四轮 transcript UI polish follow-up：收敛折叠态口径（`collapsed` 在 turn 结束后无 todo widget / 无内联 progress；`progress` 保留忙碌态内联 progress + 停靠 todo widget）、Composer 去掉 `Tomcat is responding...` 并将 `Plan: planning` 下移到 footer、Plan 卡 footer 同行与 `4 todos` 轻量 pill、`verify:vsix` 启动前清空旧 visual 产物并新增 `file-chip` 近景（`scrollIntoView` + 可视区断言）、`ToolRow` 扁平行 inline 组与固定图标列对齐（Read/chip、Ran/code、Searched 文本）；`npm --prefix gui run test` 74 passing、`npm run lint` 通过、`npm run verify:vsix` 1 passing，裁剪图 `collapsed` / `progress` / `todo-expanded` / `expanded` / `file-chip` 五张。
+- [x] **[P1]** 2026-06-27 内置工具 icon 验收：`ToolRow` 补齐 19 个 built-in 工具的 codicon 与可读 label（`load_skill` / `list_dir` / `config_*` / `create_plan` / `update_plan` / `todos` / `ask_question` / task 系列等）；E2E fixture 新增 `tool icon showcase` 场景并断言 `toolRowCount>=19`，`verify:vsix` 产出 `tool-icons` / `tool-icons-bottom` 两张裁剪图便于一次性目视验收。
 
 ### 🔄 IN PROGRESS
 - [ ] **[P1]** `cargo clippy --all-targets -- -D warnings` 仍有 `openai_responses/stream.rs` 预存 lint，与本次改动无关。
@@ -42,7 +43,7 @@
   - `cargo clippy --all-targets -- -D warnings`
   - `cargo test --lib -- --nocapture`
   - `./scripts/run-integration-tests.sh integration`（以 crate `.env` 运行，`NO_PROXY=127.0.0.1,localhost`，`OPENAI_API_KEY` 设本地 mock 占位以驱动 `test_user_chat_skill_list_reload_use` 的本地 mock OpenAI server）→ **exit 0，parallel + serial 全绿**；`serve_schema_fixture` 漂移已通过重生成 `tests/fixtures/serve/serve.schema.json` / `serve.d.ts` 修复；`real_mimo_web_search` 与 `test_user_background_bash_multiple_timeout_slices_real_llm_cli` 为 flaky 真 网络 / 真 LLM 用例（本次通过，非本次改动引入）。
-  - §4 verify-vsix 视觉验收：`TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR=<dir> npm run verify:vsix` → 1 passing + 裁剪图视觉确认；脚本启动前清空 `<dir>/tomcat-vsix-visual-*.png` 旧产物；E2E 含 `toolRowCount>=3` + `toolCardCount===0`、`todoWidgetVisible`（progress 态）/ `!todoWidgetVisible`（collapsed 态）、`todoWidgetExpanded`、`todoWidgetItemCount>=4`、`planCardCount>=1`、`planCardTodoCountText==="4 todos"`、`planFooterSameRow`、`composerFooterPlanStatus==="Plan: planning"`、`fileChipVisible` + `fileChipTopWithinStream` 近景断言；产物 `<dir>/tomcat-vsix-visual-{collapsed,progress,todo-expanded,expanded,file-chip}-cropped.png`（`screencapture` 需 VSCode 窗口可见，若被其它全屏 app 遮挡会捕获到遮挡窗口，此时以 E2E DOM 断言为功能验收铁证）。
+  - §4 verify-vsix 视觉验收：`TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR=<dir> npm run verify:vsix` → 1 passing + 裁剪图视觉确认；脚本启动前清空 `<dir>/tomcat-vsix-visual-*.png` 旧产物；E2E 含 `toolRowCount>=3` + `toolCardCount===0`、`todoWidgetVisible`（progress 态）/ `!todoWidgetVisible`（collapsed 态）、`todoWidgetExpanded`、`todoWidgetItemCount>=4`、`planCardCount>=1`、`planCardTodoCountText==="4 todos"`、`planFooterSameRow`、`composerFooterPlanStatus==="Plan: planning"`、`fileChipVisible` + `fileChipTopWithinStream` 近景断言；独立 `tool icon showcase` 场景断言 `toolRowCount>=19` 并产出 `<dir>/tomcat-vsix-visual-{collapsed,progress,todo-expanded,expanded,file-chip,tool-icons,tool-icons-bottom}-cropped.png`（`screencapture` 需 VSCode 窗口可见，若被其它全屏 app 遮挡会捕获到遮挡窗口，此时以 E2E DOM 断言为功能验收铁证）。
   - `./scripts/run-integration-tests.sh integration-openai-responses-wire`
   - `./scripts/run-integration-tests.sh integration-real-llm`
 - Extension：

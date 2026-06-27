@@ -33,11 +33,15 @@ NAMES = (
     "tomcat-vsix-visual-expanded.png",
     "tomcat-vsix-visual-file-chip.png",
     "tomcat-vsix-visual-progress.png",
+    "tomcat-vsix-visual-tool-icons.png",
+    "tomcat-vsix-visual-tool-icons-bottom.png",
     "tomcat-vsix-visual-todo-expanded.png",
 )
 
 HEIGHTS = {
     "tomcat-vsix-visual-file-chip.png": 640,
+    "tomcat-vsix-visual-tool-icons.png": 1050,
+    "tomcat-vsix-visual-tool-icons-bottom.png": 1050,
 }
 
 

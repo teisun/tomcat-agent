@@ -861,7 +861,14 @@ function transcriptVisualArtifactPath(filename: string): string {
 }
 
 function captureTranscriptVisual(
-  name: "collapsed" | "expanded" | "file-chip" | "progress" | "todo-expanded",
+  name:
+    | "collapsed"
+    | "expanded"
+    | "file-chip"
+    | "progress"
+    | "todo-expanded"
+    | "tool-icons"
+    | "tool-icons-bottom",
 ): void {
   try {
     execSync(
@@ -1118,4 +1125,100 @@ export async function assertTranscriptUiFlow(
     opened.fileChipOpen,
     "expected clicking a file chip to trigger an openFile intent",
   );
+
+  api.__testing.clearObservedEvents();
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: "webview-tool-icons-new-session",
+      type: "newSession",
+    }),
+  );
+  const toolIconSessionId = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+  );
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId: toolIconSessionId, text: "tool icon showcase" },
+      messageId: "webview-tool-icons-prompt",
+      type: "prompt",
+    }),
+  );
+  await waitForEvent(api, { sessionId: toolIconSessionId, type: "agent_end" });
+  const toolIconCollapsed = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.assistantResponseGroups >= 1 &&
+      candidate.groupFoldTitles.some((title) => title.includes("Built-in tool icons"))
+        ? candidate
+        : undefined,
+  );
+  assert.ok(
+    toolIconCollapsed.groupFoldTitles.some((title) => title.includes("Built-in tool icons")),
+    "expected the tool icon showcase group title",
+  );
+  await api.__testing.focusWebview();
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "thinking-group-toggle",
+  });
+  let toolIconExpanded = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) => (candidate.toolRowCount >= 16 ? candidate : undefined),
+  );
+  if (toolIconExpanded.toolRowCount < 19) {
+    await api.__testing.sendWebviewDomAction({
+      kind: "clickTestId",
+      testId: "thinking-group-toggle",
+      index: -1,
+    });
+    toolIconExpanded = await waitForWebviewDomSnapshot(
+      api,
+      (candidate) => (candidate.toolRowCount >= 19 ? candidate : undefined),
+    );
+  }
+  assert.ok(
+    toolIconExpanded.toolRowCount >= 19,
+    `expected all built-in tool rows in the showcase, got ${toolIconExpanded.toolRowCount}`,
+  );
+  assert.ok(
+    toolIconExpanded.html.includes("Loaded skill sdk"),
+    "expected the showcase to include load_skill",
+  );
+  assert.ok(
+    toolIconExpanded.html.includes("Read config llm.default_model"),
+    "expected the showcase to include config_get",
+  );
+  assert.ok(
+    toolIconExpanded.html.includes("Created plan Tool icon showcase"),
+    "expected the showcase to include create_plan",
+  );
+  assert.ok(
+    toolIconExpanded.html.includes("Asked question"),
+    "expected the showcase to include ask_question",
+  );
+  await api.__testing.sendWebviewDomAction({
+    edge: "top",
+    kind: "scrollToEdge",
+    testId: "stream-container",
+  });
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("tool-icons");
+    await api.__testing.sendWebviewDomAction({
+      edge: "bottom",
+      kind: "scrollToEdge",
+      testId: "stream-container",
+    });
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("tool-icons-bottom");
+  }
 }

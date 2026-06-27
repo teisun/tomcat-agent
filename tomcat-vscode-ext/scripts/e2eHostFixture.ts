@@ -102,6 +102,153 @@ function ensureSession(sessionId) {
   return sessions.get(sessionId);
 }
 
+function emitCompletedTool(sessionId, tool) {
+  send({
+    args: tool.args || {},
+    sessionId,
+    toolCallId: tool.toolCallId,
+    toolName: tool.toolName,
+    type: "tool_execution_start",
+  });
+  send({
+    display: tool.display,
+    isError: false,
+    result: tool.result,
+    sessionId,
+    toolCallId: tool.toolCallId,
+    toolName: tool.toolName,
+    type: "tool_execution_end",
+  });
+}
+
+function buildToolIconShowcaseTools() {
+  const workspaceDir = process.cwd();
+  const outputPath = path.join(workspaceDir, "output.txt");
+  const sourcePath = path.join(workspaceDir, "src", "app.tsx");
+  const showcasePlanPath = path.join(workspaceDir, "plans", "tool-icon-showcase.plan.md");
+  return [
+    {
+      toolCallId: "tc-showcase-read",
+      toolName: "read",
+      args: { path: editFilePath },
+      display: { file: editFilePath, kind: "file" },
+      result: "Read edit-target.txt",
+    },
+    {
+      toolCallId: "tc-showcase-load-skill",
+      toolName: "load_skill",
+      args: { name: "sdk" },
+      result: "Loaded skill sdk",
+    },
+    {
+      toolCallId: "tc-showcase-write",
+      toolName: "write",
+      args: { path: outputPath },
+      display: { file: outputPath, kind: "file" },
+      result: "Created output.txt",
+    },
+    {
+      toolCallId: "tc-showcase-edit",
+      toolName: "edit",
+      args: { path: sourcePath },
+      display: { file: sourcePath, kind: "file" },
+      result: "Edited src/app.tsx",
+    },
+    {
+      toolCallId: "tc-showcase-hashline-edit",
+      toolName: "hashline_edit",
+      args: { path: sourcePath },
+      display: { file: sourcePath, kind: "file" },
+      result: "Edited line anchors in src/app.tsx",
+    },
+    {
+      toolCallId: "tc-showcase-bash",
+      toolName: "bash",
+      args: { command: "npm run test" },
+      result: "Tests passed",
+    },
+    {
+      toolCallId: "tc-showcase-task-output",
+      toolName: "task_output",
+      args: { task_id: "task-1" },
+      result: "task-1 log tail",
+    },
+    {
+      toolCallId: "tc-showcase-task-stop",
+      toolName: "task_stop",
+      args: { task_id: "task-1" },
+      result: "Stopped task-1",
+    },
+    {
+      toolCallId: "tc-showcase-task-list",
+      toolName: "task_list",
+      args: {},
+      result: "task-1 running",
+    },
+    {
+      toolCallId: "tc-showcase-list-dir",
+      toolName: "list_dir",
+      args: { path: workspaceDir },
+      result: "plans\\nsrc\\nREADME.md",
+    },
+    {
+      toolCallId: "tc-showcase-search-files",
+      toolName: "search_files",
+      args: { path: "src", pattern: "ToolRow" },
+      result: "src/components/ToolRow.tsx:1",
+    },
+    {
+      toolCallId: "tc-showcase-web-search",
+      toolName: "web_search",
+      args: { query: "codicon list tree" },
+      result: "Found 2 results.\\n- codicon reference\\n- vscode icon docs",
+    },
+    {
+      toolCallId: "tc-showcase-web-fetch",
+      toolName: "web_fetch",
+      args: { url: "https://example.com/icons" },
+      result: "Fetched https://example.com/icons",
+    },
+    {
+      toolCallId: "tc-showcase-config-get",
+      toolName: "config_get",
+      args: { key: "llm.default_model" },
+      result: "gpt-5.4",
+    },
+    {
+      toolCallId: "tc-showcase-config-set",
+      toolName: "config_set",
+      args: { key: "log.level", value: "debug" },
+      result: "Updated log.level",
+    },
+    {
+      toolCallId: "tc-showcase-create-plan",
+      toolName: "create_plan",
+      args: { goal: "Tool icon showcase" },
+      result: "Created plan tool-icon-showcase",
+    },
+    {
+      toolCallId: "tc-showcase-update-plan",
+      toolName: "update_plan",
+      args: { plan_id: "tool-icon-showcase" },
+      display: { kind: "plan", plan: showcasePlanPath },
+      result: "Updated plan tool-icon-showcase",
+    },
+    {
+      toolCallId: "tc-showcase-todos",
+      toolName: "todos",
+      args: { upsert: [{ id: "todo-1", content: "Review icons", status: "in_progress" }] },
+      result: "Updated todos",
+    },
+    {
+      toolCallId: "tc-showcase-ask-question",
+      toolName: "ask_question",
+      args: { questions: [{ id: "q1", prompt: "Ship the icon set?" }] },
+      result: "Asked question",
+    },
+  ];
+}
+
 function emitMessageDelta(sessionId, delta) {
   send({
     assistantMessageEvent: {
@@ -236,6 +383,33 @@ function handlePrompt(frame) {
       emitContextMetrics(sessionId, 0.36);
       finishTurn(sessionId, null);
     }, 1000);
+    return;
+  }
+
+  if (text.includes("tool icon showcase")) {
+    emitMessageDelta(sessionId, "I prepared a built-in tool icon showcase.");
+    send({
+      assistantMessageEvent: {
+        delta: "Review every built-in tool row and icon in one place.",
+        kind: "thinking_delta",
+      },
+      message: {},
+      sessionId,
+      type: "message_update",
+    });
+    for (const tool of buildToolIconShowcaseTools()) {
+      emitCompletedTool(sessionId, tool);
+    }
+    send({
+      message: {},
+      summaryTitle: "Built-in tool icons",
+      toolResults: [],
+      turnIndex: 1,
+      type: "turn_end",
+    });
+    emitContextMetrics(sessionId, 0.31);
+    recordHistoryMessage(sessionId, "assistant", "I prepared a built-in tool icon showcase.");
+    finishTurn(sessionId, null);
     return;
   }
 

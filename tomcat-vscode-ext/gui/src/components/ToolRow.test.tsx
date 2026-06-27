@@ -190,4 +190,51 @@ describe("ToolRow", () => {
 
     expect(document.querySelector(".tc-thinking-tool-wrapper .codicon-edit")).toBeTruthy();
   });
+
+  it("maps additional built-in tools to readable labels and distinct icons", () => {
+    const { rerender } = render(
+      <ToolRow
+        item={buildTool({
+          args: { name: "sdk" },
+          summary: "Loaded skill",
+          toolName: "load_skill",
+        })}
+        onApplyEdit={vi.fn()}
+        onOpenDiff={vi.fn()}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Loaded skill sdk");
+    expect(document.querySelector(".tc-thinking-tool-wrapper .codicon-book")).toBeTruthy();
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/src" },
+          summary: "src\nREADME.md",
+          toolName: "list_dir",
+        })}
+        onApplyEdit={vi.fn()}
+        onOpenDiff={vi.fn()}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Listed /workspace/src");
+    expect(document.querySelector(".tc-thinking-tool-wrapper .codicon-folder")).toBeTruthy();
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { key: "log.level", value: "debug" },
+          summary: "Updated log.level",
+          toolName: "config_set",
+        })}
+        onApplyEdit={vi.fn()}
+        onOpenDiff={vi.fn()}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Updated config log.level");
+    expect(document.querySelector(".tc-thinking-tool-wrapper .codicon-gear")).toBeTruthy();
+  });
 });

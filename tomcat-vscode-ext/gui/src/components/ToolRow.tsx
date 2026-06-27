@@ -40,12 +40,17 @@ function countResults(summary: string | undefined): number | null {
 function toolIconClass(toolName: string): string {
   switch (toolName) {
     case "read":
+    case "load_skill":
       return "codicon-book";
     case "grep":
+    case "search_files":
     case "web_search":
     case "search_workspace":
       return "codicon-search";
     case "bash":
+    case "task_output":
+    case "task_list":
+    case "task_stop":
       return "codicon-terminal";
     case "web_fetch":
       return "codicon-globe";
@@ -53,6 +58,15 @@ function toolIconClass(toolName: string): string {
     case "write":
     case "hashline_edit":
       return "codicon-edit";
+    case "list_dir":
+      return "codicon-folder";
+    case "config_get":
+    case "config_set":
+      return "codicon-gear";
+    case "create_plan":
+    case "update_plan":
+    case "todos":
+      return "codicon-list-tree";
     default:
       return "codicon-tools";
   }
@@ -65,13 +79,35 @@ function buildFlatLabel(item: WebviewToolCard): string {
   switch (item.toolName) {
     case "read":
       return running ? "Reading file" : "Read";
+    case "load_skill": {
+      const name = asString(args.name) ?? "skill";
+      return running ? `Loading skill ${name}` : `Loaded skill ${name}`;
+    }
     case "grep": {
       const query = asString(args.pattern) ?? asString(args.query) ?? "pattern";
       return running ? `Searching ${query}` : `Searched ${query}`;
     }
+    case "search_files": {
+      const query = asString(args.pattern) ?? asString(args.query) ?? asString(args.path) ?? "files";
+      return running ? `Searching files for ${query}` : `Searched files for ${query}`;
+    }
     case "bash": {
       const command = firstLine(asString(args.command)) ?? "command";
       return running ? `Running ${command}` : `Ran ${command}`;
+    }
+    case "task_output": {
+      const taskId = asString(args.task_id) ?? "task";
+      return running ? `Reading output ${taskId}` : `Read output ${taskId}`;
+    }
+    case "task_stop": {
+      const taskId = asString(args.task_id) ?? "task";
+      return running ? `Stopping ${taskId}` : `Stopped ${taskId}`;
+    }
+    case "task_list":
+      return running ? "Listing tasks" : "Listed tasks";
+    case "list_dir": {
+      const dir = asString(args.path) ?? "directory";
+      return running ? `Listing ${dir}` : `Listed ${dir}`;
     }
     case "web_search": {
       const query = asString(args.query) ?? "query";
@@ -88,6 +124,26 @@ function buildFlatLabel(item: WebviewToolCard): string {
       const url = asString(args.url) ?? "url";
       return running ? `Fetching ${url}` : `Fetched ${url}`;
     }
+    case "config_get": {
+      const key = asString(args.key) ?? "config";
+      return running ? `Reading config ${key}` : `Read config ${key}`;
+    }
+    case "config_set": {
+      const key = asString(args.key) ?? "config";
+      return running ? `Updating config ${key}` : `Updated config ${key}`;
+    }
+    case "create_plan": {
+      const goal = asString(args.goal) ?? "plan";
+      return running ? `Creating plan ${goal}` : `Created plan ${goal}`;
+    }
+    case "update_plan": {
+      const planId = asString(args.plan_id) ?? asString(args.planId) ?? "plan";
+      return running ? `Updating plan ${planId}` : `Updated plan ${planId}`;
+    }
+    case "todos":
+      return running ? "Updating todos" : "Updated todos";
+    case "ask_question":
+      return running ? "Asking question" : "Asked question";
     case "edit":
     case "write":
     case "hashline_edit":
