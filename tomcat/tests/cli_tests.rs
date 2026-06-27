@@ -1062,6 +1062,90 @@ fn test_init_path_export_idempotent_in_shell_profile() {
     );
 }
 
+/// bash 场景下，init 会让 login shell 同时加载 .profile 与 .bashrc，避免截断通用环境变量。
+#[test]
+fn test_init_bash_profile_sources_profile_and_bashrc() {
+    common::setup_logging();
+    let _span = info_span!("test_init_bash_profile_sources_profile_and_bashrc").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join(".profile");
+    let bash_profile = dir.path().join(".bash_profile");
+    let bashrc = dir.path().join(".bashrc");
+    fs::write(&profile, ". \"$HOME/.cargo/env\"\n").unwrap();
+
+    cmd()
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/bash")
+        .assert()
+        .success();
+
+    let bash_profile_content =
+        fs::read_to_string(&bash_profile).expect(".bash_profile should be created under HOME");
+    assert!(
+        bash_profile_content.contains("[ -r \"$HOME/.profile\" ] && . \"$HOME/.profile\"")
+            && bash_profile_content.contains("[ -r \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\""),
+        "expected .bash_profile to source .profile and .bashrc, got: {}",
+        trunc(&bash_profile_content, 400)
+    );
+
+    let bashrc_content = fs::read_to_string(&bashrc).expect(".bashrc should be created under HOME");
+    assert!(
+        bashrc_content.contains("export PATH="),
+        "expected PATH block in .bashrc, got: {}",
+        trunc(&bashrc_content, 400)
+    );
+}
+
+/// bash 场景下，重复 init 不应重复注入 .bash_profile 的 source 语句或 .bashrc 的 PATH。
+#[test]
+fn test_init_bash_profile_source_idempotent() {
+    common::setup_logging();
+    let _span = info_span!("test_init_bash_profile_source_idempotent").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join(".profile");
+    let bash_profile = dir.path().join(".bash_profile");
+    let bashrc = dir.path().join(".bashrc");
+    fs::write(&profile, ". \"$HOME/.cargo/env\"\n").unwrap();
+
+    for _ in 0..2 {
+        cmd()
+            .args(["init"])
+            .env("HOME", dir.path())
+            .env("SHELL", "/bin/bash")
+            .assert()
+            .success();
+    }
+
+    let bash_profile_content = fs::read_to_string(&bash_profile).unwrap();
+    assert_eq!(
+        bash_profile_content
+            .matches("[ -r \"$HOME/.profile\" ] && . \"$HOME/.profile\"")
+            .count(),
+        1,
+        "expected single .profile source in .bash_profile, got: {}",
+        trunc(&bash_profile_content, 400)
+    );
+    assert_eq!(
+        bash_profile_content
+            .matches("[ -r \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"")
+            .count(),
+        1,
+        "expected single .bashrc source in .bash_profile, got: {}",
+        trunc(&bash_profile_content, 400)
+    );
+
+    let bashrc_content = fs::read_to_string(&bashrc).unwrap();
+    assert_eq!(
+        bashrc_content.matches("export PATH=").count(),
+        1,
+        "expected single PATH export in .bashrc, got: {}",
+        trunc(&bashrc_content, 400)
+    );
+}
+
 // ────────────────────── config ──────────────────────
 
 /// [config get 无参] 输出完整配置内容

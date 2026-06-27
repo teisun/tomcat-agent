@@ -252,6 +252,36 @@ detect_profile() {
   esac
 }
 
+ensure_bash_profile_sources_common_env() {
+  local bash_profile profile_snippet bashrc_snippet need_profile need_bashrc
+  bash_profile="$HOME/.bash_profile"
+  profile_snippet='[ -r "$HOME/.profile" ] && . "$HOME/.profile"'
+  bashrc_snippet='[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"'
+  need_profile=1
+  need_bashrc=1
+
+  if [ -f "${bash_profile}" ] && grep -Fqs "${profile_snippet}" "${bash_profile}" 2>/dev/null; then
+    need_profile=0
+  fi
+  if [ -f "${bash_profile}" ] && grep -Fqs "${bashrc_snippet}" "${bash_profile}" 2>/dev/null; then
+    need_bashrc=0
+  fi
+  if [ "${need_profile}" -eq 0 ] && [ "${need_bashrc}" -eq 0 ]; then
+    return 0
+  fi
+
+  {
+    echo ""
+    echo "# tomcat (install.sh)"
+    if [ "${need_profile}" -eq 1 ]; then
+      echo "${profile_snippet}"
+    fi
+    if [ "${need_bashrc}" -eq 1 ]; then
+      echo "${bashrc_snippet}"
+    fi
+  } >> "${bash_profile}"
+}
+
 ensure_path_config() {
   local profile export_line do_append answer
   export_line='export PATH="$HOME/.local/bin:$PATH"'
@@ -288,22 +318,14 @@ ensure_path_config() {
       } >> "${profile}"
       echo "已写入 ${profile}，新开终端将自动生效。"
     fi
-    # macOS 的 login bash 只读 .bash_profile/.profile（不读 .bashrc）。当 PATH 写进
-    # .bashrc 时，确保 .bash_profile 会 source .bashrc，否则新开的 login 终端找不到 tomcat。
+    # macOS 的 login bash 会优先读 .bash_profile（存在时不再继续读 .profile）。当 PATH
+    # 写进 .bashrc 时，需确保 .bash_profile 同时加载 .profile 与 .bashrc，避免截断用户
+    # 已放在 .profile 的通用环境变量（如 Rust 的 ~/.cargo/env）。
     case "${SHELL:-}" in
       *bash)
         if [ "${profile}" = "$HOME/.bashrc" ]; then
-          bash_profile="$HOME/.bash_profile"
-          if [ -f "${bash_profile}" ] && grep -Fqs ".bashrc" "${bash_profile}" 2>/dev/null; then
-            :
-          else
-            {
-              echo ""
-              echo "# tomcat (install.sh)"
-              echo '[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"'
-            } >> "${bash_profile}"
-            echo "已让 ${bash_profile} 加载 .bashrc，覆盖 macOS 的 login shell。"
-          fi
+          ensure_bash_profile_sources_common_env
+          echo "已让 $HOME/.bash_profile 同时加载 .profile 和 .bashrc，覆盖 macOS 的 login shell。"
         fi
         ;;
     esac
