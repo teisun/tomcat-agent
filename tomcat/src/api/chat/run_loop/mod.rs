@@ -31,6 +31,7 @@ mod cleanup;
 mod input;
 mod persist;
 mod rehydrate;
+mod session_title;
 mod thinking_persist;
 mod workspace_state;
 
@@ -38,6 +39,7 @@ use self::background::spawn_completion_subscriber;
 use self::cleanup::ensure_session;
 use self::persist::push_turn_message;
 use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
+use self::session_title::maybe_spawn_semantic_session_title;
 use self::workspace_state::compute_workspace_state;
 
 #[cfg(test)]
@@ -556,9 +558,16 @@ pub async fn run_chat_turn_with_message(
         .get_session(ctx.session_runtime.session.current_session_key())?;
     let main_call = ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
     let compaction_call = ctx.resolve_call(LlmScene::Compaction, entry.as_ref())?;
+    // Title 模型解析软失败：utility-flash 未配置/未解析时静默回退规则占位，不阻塞主 chat 流（计划 §212）。
+    let title_call = ctx.resolve_call(LlmScene::Title, entry.as_ref()).ok();
     let main_provider = main_call.provider_impl.clone();
     let compaction_provider = compaction_call.provider_impl.clone();
+    let title_provider = title_call.as_ref().map(|c| c.provider_impl.clone());
     let model = main_call.model.clone();
+    let title_model = title_call
+        .as_ref()
+        .map(|c| c.model.clone())
+        .unwrap_or_default();
     let thinking_level = Some(ctx.global_services.model_thinking.get(&model));
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
@@ -588,6 +597,18 @@ pub async fn run_chat_turn_with_message(
         &planned_messages,
         context_state,
     )?;
+    if let Some(title_provider_arc) = title_provider.as_ref() {
+        if !title_model.is_empty() {
+            maybe_spawn_semantic_session_title(
+                &ctx.session_runtime.session,
+                &appended_messages,
+                title_provider_arc.clone(),
+                title_model.clone(),
+                root_event_emitter.clone(),
+                session_id.clone(),
+            );
+        }
+    }
     info!(
         target: "tomcat_chat_diag",
         phase = "chat_after_user_append",
@@ -649,6 +670,8 @@ pub async fn run_chat_turn_with_message(
         tool_definitions: build_tool_definitions(ctx).await,
         context_config: context_config.clone(),
         compaction_provider: Some(compaction_provider.clone()),
+        title_provider: title_provider.clone(),
+        title_model,
         agent_trail_dir: ctx
             .scope_services
             .agent_trail_dir

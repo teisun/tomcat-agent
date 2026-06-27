@@ -423,7 +423,7 @@ impl Default for LlmConfig {
         Self {
             default_model: default_llm_model(),
             vision_model: None,
-            title_model: None,
+            title_model: Some("utility-flash".to_string()),
             #[cfg(test)]
             provider: "openai-responses".to_string(),
             #[cfg(test)]

@@ -118,8 +118,41 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   ]
     .filter((node) => "disabled" in node && Boolean((node as HTMLButtonElement | HTMLInputElement).disabled))
     .map((node) => node.dataset.testid ?? "");
+  const transcriptGroups = document.querySelectorAll<HTMLElement>(
+    '[data-testid="thinking-group"]',
+  );
+  const groupFoldTitles = [
+    ...document.querySelectorAll<HTMLElement>('[data-testid="thinking-group-title"]'),
+  ].map((node) => node.textContent ?? "");
+  const userPillEl = document.querySelector<HTMLElement>(
+    '[data-testid="message-block"].tc-message--user',
+  );
+  const assistantMessageEl = document.querySelector<HTMLElement>(
+    '[data-testid="message-block"].tc-message--assistant',
+  );
+  const toolRowEl = document.querySelector<HTMLElement>('[data-testid="tool-row"]');
+  let ellipsisAboveGroupHeader = false;
+  transcriptGroups.forEach((group) => {
+    const preamble = group.querySelector<HTMLElement>(".tc-message--assistant");
+    const toggle = group.querySelector<HTMLElement>(
+      '[data-testid="thinking-group-toggle"]',
+    );
+    if (preamble && toggle) {
+      const position = toggle.compareDocumentPosition(preamble);
+      if (position & Node.DOCUMENT_POSITION_PRECEDING) {
+        ellipsisAboveGroupHeader = true;
+      }
+    }
+  });
   const streamRect = stream?.getBoundingClientRect();
   const latestUserRect = latestUserMessage?.getBoundingClientRect();
+  let userPromptPill = false;
+  if (userPillEl && streamRect) {
+    const pillRect = userPillEl.getBoundingClientRect();
+    const leftGap = pillRect.left - streamRect.left;
+    const rightGap = streamRect.right - pillRect.right;
+    userPromptPill = leftGap > rightGap + 1;
+  }
   return {
     activeSessionId: state.activeSessionId,
     approvalCount: document.querySelectorAll('[data-testid="approval-card"]').length,
@@ -152,6 +185,19 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     timelineKinds,
     toolBodyMetrics,
     toolTitles: queryText('[data-testid="tool-title"]'),
+    assistantResponseGroups: transcriptGroups.length,
+    groupFoldTitles,
+    userPromptPill,
+    assistantNoCard:
+      !!assistantMessageEl && !assistantMessageEl.classList.contains("tc-card"),
+    progressRow: !!document.querySelector('[data-testid="progress-row"]'),
+    planTodos: document.querySelectorAll('[data-testid^="plan-todo-"]').length,
+    toolRowFlat: !!toolRowEl && !toolRowEl.closest(".tc-card"),
+    toolRowExpandable: !!document.querySelector('[data-testid="tool-row-toggle"]'),
+    ellipsisAboveGroupHeader,
+    leftGuideLine: !!document.querySelector(".tc-thinking-tool-wrapper"),
+    toolRowCount: document.querySelectorAll('[data-testid="tool-row"]').length,
+    toolCardCount: document.querySelectorAll('[data-testid="tool-card"]').length,
   };
 }
 
@@ -447,11 +493,19 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                     toolCallId,
                   })
                 }
+                onOpenFile={(path) =>
+                  postIntent(vscodeApi, "openFile", {
+                    path,
+                  })
+                }
                 onOpenPlanFile={(path) =>
                   postIntent(vscodeApi, "openPlanFile", {
                     path,
                   })
                 }
+                planState={activeSession.planState}
+                planTodos={activeSession.planTodos ?? []}
+                sessionTodos={activeSession.sessionTodos ?? []}
                 timeline={activeSession.timeline}
                 transcriptRef={transcriptRef}
               />

@@ -31,7 +31,7 @@ use crate::infra::events::{AgentEvent, Message};
 
 use super::steering_injection::inject_follow_up_messages;
 use super::types::{unix_ts_ms, AgentLoop, LoopError, ToolCallInfo};
-use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize};
+use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize, turn_summary};
 
 pub(super) async fn run_reasoning_loop(
     agent: &mut AgentLoop,
@@ -150,6 +150,7 @@ pub(super) async fn run_reasoning_loop(
                 reasoning_continuation.clone(),
                 continuity.clone(),
             )
+            .await
             .map_err(LoopError::Fatal)?;
             return Ok(final_text);
         }
@@ -174,11 +175,19 @@ pub(super) async fn run_reasoning_loop(
         )
         .await?;
 
+        let summary_title = turn_summary::resolve_turn_summary_title(
+            agent,
+            thinking_text.as_deref(),
+            &tool_calls,
+        )
+        .await;
+
         // No synchronous cascade here; L0/L1/L2 handled at timing ⑤
         agent.emit_event(AgentEvent::TurnEnd {
             turn_index,
             message: Message(serde_json::json!({})),
             tool_results: dispatch.tool_results,
+            summary_title,
         });
 
         if dispatch.steered {

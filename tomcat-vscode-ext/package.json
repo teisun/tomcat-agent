@@ -139,7 +139,8 @@
     "test:e2e:webview-devhost": "tsx scripts/run-vscode-devhost.ts",
     "test:e2e:webview-install": "tsx scripts/run-vscode-install-e2e.ts",
     "test": "npm run test:unit",
-    "package:vsix": "tsx scripts/package-vsix.ts"
+    "package:vsix": "tsx scripts/package-vsix.ts",
+    "verify:vsix": "tsx scripts/run-vscode-verify-vsix.ts"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",

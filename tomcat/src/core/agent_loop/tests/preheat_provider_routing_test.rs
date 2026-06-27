@@ -154,6 +154,7 @@ async fn run_timing5_try_start_case(
         None,
         None,
     )
+    .await
     .unwrap();
     assert_preheat_completed(&mut agent).await;
 
@@ -270,6 +271,7 @@ async fn timing5_try_restart_uses_compaction_provider_after_exhausted_pending() 
         None,
         None,
     )
+    .await
     .unwrap();
     assert_preheat_completed(&mut agent).await;
 

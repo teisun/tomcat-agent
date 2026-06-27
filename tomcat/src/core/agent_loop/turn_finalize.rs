@@ -21,6 +21,7 @@ use crate::core::session::manager::estimated_tokens_from_chars;
 use crate::infra::events::{AgentEvent, Message};
 
 use super::types::AgentLoop;
+use super::turn_summary;
 
 /// 处理 text-only 回合的全部副作用：消息落盘、timing ⑤、收束事件发射。
 ///
@@ -29,7 +30,7 @@ use super::types::AgentLoop;
 ///
 /// `content_buf`：本轮 delta 累积。`turn_index`：作为 `TurnEnd` 的 turn 序号。
 #[allow(clippy::too_many_arguments)]
-pub(super) fn finalize_turn_after_text(
+pub(super) async fn finalize_turn_after_text(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
     content_buf: &str,
@@ -44,6 +45,12 @@ pub(super) fn finalize_turn_after_text(
     if let Some(ref mut ctx_state) = agent.context_state {
         ctx_state.on_message_appended(content_buf.len());
     }
+    let summary_title = turn_summary::resolve_turn_summary_title(
+        agent,
+        thinking_text.as_deref(),
+        &[],
+    )
+    .await;
     agent.push_message(
         messages,
         ChatMessage::assistant(content_buf)
@@ -122,6 +129,7 @@ pub(super) fn finalize_turn_after_text(
         turn_index,
         message: Message(serde_json::json!({})),
         tool_results: vec![],
+        summary_title,
     });
     Ok(())
 }

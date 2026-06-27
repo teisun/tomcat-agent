@@ -260,6 +260,21 @@
 | E2E-VSCEXT-007 | 自动 | `test_packaged_vsix_contains_gui_dist_and_installed_webview_loads` | 用户安装打包后的 VSIX 后，participant 与 webview 都能正常加载和使用 | 执行 VSIX 打包 → 安装版 harness 启动 VSCode → 打开 chat UI 与 webview | 包内含 `gui/dist`、不含 `gui/src`；安装版 participant 与 webview 都可加载；webview 无 CSP/资源加载错误 |
 | E2E-VSCEXT-008 | 自动 | `test_webview_protocol_and_bridge_reuse_contract` | 宿主与 webview 的 typed `postMessage` 协议稳定，且 participant / webview 共用同一 `TomcatMessenger` 核心 | 运行扩展级集成 + 宿主 E2E；同时订阅 participant / webview | `messageId` / `state` / `event` 协议语义稳定；未知 id 安全丢弃；同一 `TomcatMessenger` 实例同时服务两个前端，核心行为不漂移 |
 
+## Story 8e — VSCode webview transcript 仿 Chat 体验（8 条）
+
+> 对应 [User_Stories.md](../../User_Stories.md) Story 8e；自动化入口 `tomcat-vscode-ext/e2e-harness/src/test/manual-acceptance.test.ts` / `installed.test.ts` + `gui/src/App.test.tsx` 单元测试。
+
+| 编号 | 验收 | 用例名 | 用户意图 | 操作序列 | 必须断言 |
+| --- | --- | --- | --- | --- | --- |
+| E2E-VSCEXT-009 | 自动 | `test_user_webview_user_prompt_pill_and_assistant_no_card` | 用户发送消息后看到 VSCode Chat 风格布局 | 打开 webview → 发送 user prompt → 等待 assistant 回复 | DOM：`userPromptPill=true`（右对齐 pill、无 header）；`assistantNoCard=true`（无卡片边框/标签）；error/notice 保留左边框 |
+| E2E-VSCEXT-010 | 自动 | `test_user_webview_thinking_tool_fold_groups_by_assistant_response` | 用户看到同 assistant message 的 tool 折叠为一组 | 触发含 thinking + 多 tool 的回合 | `assistantResponseGroups>=1`；折叠态 `toolRowFlat` 无 tool DOM（懒渲染）；展开后见 `toolRowFlat` 扁平行非大卡片；`groupFoldTitles` 含 LLM 摘要或回退标题 |
+| E2E-VSCEXT-011 | 自动 | `test_user_webview_tool_row_read_filechip_open` | 用户点击 read 行 FileChip 打开文件 | 触发 read 工具回合 → 展开 tool 行 → 点击 FileChip | `fileChipOpen=true`；宿主打开对应文件 tab |
+| E2E-VSCEXT-012 | 自动 | `test_user_webview_bash_tool_row_ran_command_expandable` | 用户看到 bash 折叠为 Ran \<cmd\> 且可展开输出 | 触发 bash 工具回合 | `toolRowFlat` 含 `Ran` 前缀；`toolRowExpandable=true`；无"打开终端"按钮 |
+| E2E-VSCEXT-013 | 自动 | `test_user_webview_plan_executing_progress_row` | Plan 执行时底部显示 todo 进度 (N/M) | 进入 plan executing → 观察 live cluster 末尾 | `progressRow=true`；显示 `(current/total)` + 当前 todo title；PlanFileCard 同步 `planTodos` |
+| E2E-VSCEXT-014 | 自动 | `test_user_webview_session_title_async_update` | 首条 user 后 session 标题从占位更新为 LLM 标题 | 新建 session → 发送首条 user 消息 | `sessionTitleUpdated=true`；SessionBar 标题从规则占位变为 LLM 生成标题 |
+| E2E-VSCEXT-015 | 自动 | `test_user_webview_left_guide_line_and_ellipsis_above_group` | 折叠组视觉对齐 VSCode（竖线 + 阐述在折叠头上方） | 触发含阐述 + thinking + tool 的回合 | `leftGuideLine=true`；`ellipsisAboveGroupHeader=true`（阐述在折叠头上方可见） |
+| E2E-VSCEXT-016 | 自动 | `test_user_webview_shimmer_while_summary_title_pending` | streaming 且 summaryTitle 未就绪时 header shimmer | 触发 thinking+tool 流式回合 | 折叠 header 含 shimmer class；summaryTitle 就绪后 shimmer 消失 |
+
 ---
 
 ## Story 8b — 长生命周期 VM 与有状态插件（5 条）

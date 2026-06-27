@@ -1098,6 +1098,63 @@ async fn serve_get_state_tracks_per_model_thinking_level_after_switching_models(
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_get_state_contains_plan_and_session_todos() {
+    use crate::core::plan_runtime::file_store::{TodoItem, TodoStatus};
+
+    tracing::info!(target: "test", phase = "arrange", test = "serve_get_state_contains_plan_and_session_todos");
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    // 注入一条 session scratchpad todo，使 get_state 的 sessionTodos 非空。
+    slot.ctx
+        .session_runtime
+        .plan_runtime
+        .replace_session_todos(vec![TodoItem {
+            id: "st-1".to_string(),
+            content: "wire session todos".to_string(),
+            status: TodoStatus::InProgress,
+        }]);
+
+    tracing::info!(target: "test", phase = "act", test = "serve_get_state_contains_plan_and_session_todos");
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-todos".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-todos")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-todos"))
+        .expect("get_state response");
+    let payload = response["payload"].clone();
+
+    tracing::info!(target: "test", phase = "assert", test = "serve_get_state_contains_plan_and_session_todos");
+    assert_eq!(response["success"].as_bool(), Some(true));
+    // planTodos 字段必须存在且为数组（当前无 active plan → 空数组）。
+    let plan_todos = payload["planTodos"]
+        .as_array()
+        .expect("get_state payload must include planTodos array");
+    assert!(plan_todos.is_empty(), "no active plan => planTodos empty");
+    // sessionTodos 必须回显注入的 in_progress 项。
+    let session_todos = payload["sessionTodos"]
+        .as_array()
+        .expect("get_state payload must include sessionTodos array");
+    assert_eq!(session_todos.len(), 1);
+    assert_eq!(session_todos[0]["id"].as_str(), Some("st-1"));
+    assert_eq!(session_todos[0]["content"].as_str(), Some("wire session todos"));
+    assert_eq!(session_todos[0]["status"].as_str(), Some("in_progress"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_set_thinking_level_invalid_value_returns_error_without_breaking_loop() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;

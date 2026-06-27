@@ -1,11 +1,23 @@
 import type { RefObject } from "react";
 
-import type { AskQuestionResult, WebviewTimelineItem } from "../types";
+import type {
+  AskQuestionResult,
+  WebviewPlanState,
+  WebviewTimelineItem,
+  WebviewTodo,
+} from "../types";
 import { ApprovalCard } from "./ApprovalCard";
 import { MessageBubble } from "./MessageBubble";
 import { PlanFileCard } from "./PlanFileCard";
+import { ProgressRow } from "./ProgressRow";
 import { ThinkingBlock } from "./ThinkingBlock";
-import { ToolCallCard } from "./ToolCallCard";
+import { ThinkingGroup } from "./ThinkingGroup";
+import { ToolRow } from "./ToolRow";
+import {
+  groupTimelineByAssistantResponse,
+  type AssistantResponseGroup,
+  type GroupedTimelineEntry,
+} from "./sessionList/groupTimelineByAssistantResponse";
 
 export function TranscriptView({
   busy,
@@ -13,7 +25,11 @@ export function TranscriptView({
   onAnswer,
   onApplyEdit,
   onOpenDiff,
+  onOpenFile,
   onOpenPlanFile,
+  planState,
+  planTodos = [],
+  sessionTodos = [],
   timeline,
   transcriptRef,
 }: {
@@ -22,7 +38,11 @@ export function TranscriptView({
   onAnswer(requestId: string, result: AskQuestionResult): void;
   onApplyEdit(toolCallId: string): void;
   onOpenDiff(toolCallId: string): void;
+  onOpenFile(path: string): void;
   onOpenPlanFile(path: string): void;
+  planState?: WebviewPlanState | null;
+  planTodos?: WebviewTodo[];
+  sessionTodos?: WebviewTodo[];
   timeline: WebviewTimelineItem[];
   transcriptRef?: RefObject<HTMLElement | null>;
 }) {
@@ -34,6 +54,28 @@ export function TranscriptView({
       item.type === "message" && item.kind === "user" ? index : lastIndex,
     -1,
   );
+
+  const renderGroupedItem = (item: GroupedTimelineEntry) => {
+    if ("type" in item && item.type === "assistant-response-group") {
+      const group = item as AssistantResponseGroup;
+      const isStreaming =
+        busy &&
+        (group.thinking?.id === lastThinkingId ||
+          group.tools.some((tool) => tool.status !== "complete"));
+      return (
+        <ThinkingGroup
+          group={group}
+          isStreaming={isStreaming}
+          key={`group-${group.assistantMessageId}`}
+          onApplyEdit={onApplyEdit}
+          onOpenDiff={onOpenDiff}
+          onOpenFile={onOpenFile}
+        />
+      );
+    }
+
+    return renderTimelineItem(item as WebviewTimelineItem);
+  };
 
   const renderTimelineItem = (item: WebviewTimelineItem) => {
     switch (item.type) {
@@ -49,18 +91,43 @@ export function TranscriptView({
         );
       case "tool":
         return (
-          <ToolCallCard
+          <ToolRow
             item={item}
             key={item.id}
             onApplyEdit={onApplyEdit}
             onOpenDiff={onOpenDiff}
+            onOpenFile={onOpenFile}
           />
         );
       case "plan":
-        return <PlanFileCard item={item} key={item.id} onOpenPlanFile={onOpenPlanFile} />;
+        return (
+          <PlanFileCard
+            item={item}
+            key={item.id}
+            onOpenPlanFile={onOpenPlanFile}
+            planTodos={planTodos}
+          />
+        );
       case "approval":
         return <ApprovalCard item={item} key={item.id} onAnswer={onAnswer} />;
     }
+  };
+
+  const renderCluster = (clusterTimeline: WebviewTimelineItem[], showProgress: boolean) => {
+    const grouped = groupTimelineByAssistantResponse(clusterTimeline);
+    return (
+      <>
+        {grouped.map(renderGroupedItem)}
+        {showProgress ? (
+          <ProgressRow
+            busy={busy}
+            planState={planState}
+            planTodos={planTodos}
+            sessionTodos={sessionTodos}
+          />
+        ) : null}
+      </>
+    );
   };
 
   const leadingTimeline =
@@ -74,10 +141,10 @@ export function TranscriptView({
       aria-label="active-session"
       ref={transcriptRef}
     >
-      {leadingTimeline.map(renderTimelineItem)}
+      {renderCluster(leadingTimeline, false)}
       {liveClusterTimeline.length ? (
         <div className="tc-live-cluster" data-testid="live-cluster">
-          {liveClusterTimeline.map(renderTimelineItem)}
+          {renderCluster(liveClusterTimeline, true)}
         </div>
       ) : null}
       <div

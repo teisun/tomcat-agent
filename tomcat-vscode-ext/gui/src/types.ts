@@ -11,6 +11,7 @@ export interface WebviewDomAction {
 export type FrontendOwnerKind = "participant" | "webview";
 
 export interface WebviewMessageBlock {
+  assistantMessageId?: string;
   id: string;
   kind: "assistant" | "error" | "notice" | "user";
   text: string;
@@ -18,9 +19,17 @@ export interface WebviewMessageBlock {
 }
 
 export interface WebviewThinkingBlock {
+  assistantMessageId?: string;
   id: string;
+  summaryTitle?: string | null;
   text: string;
   type: "thinking";
+}
+
+export interface WebviewTodo {
+  content: string;
+  id: string;
+  status: "cancelled" | "completed" | "in_progress" | "pending";
 }
 
 export interface WebviewToolDisplayFile {
@@ -46,6 +55,8 @@ export type WebviewToolDisplay =
 export type WebviewToolStatus = "complete" | "running" | "streaming";
 
 export interface WebviewToolCard {
+  args?: Record<string, unknown>;
+  assistantMessageId?: string;
   display?: WebviewToolDisplay;
   id: string;
   isError: boolean;
@@ -132,6 +143,8 @@ export interface WebviewSessionSnapshot {
   conflictMessage?: string | null;
   contextRatio?: number | null;
   model?: string | null;
+  planTodos: WebviewTodo[];
+  sessionTodos: WebviewTodo[];
   thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
   owner: FrontendOwnerKind | null;
@@ -281,7 +294,7 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
-      type: "openPlanFile";
+      type: "openFile" | "openPlanFile";
       data: {
         path: string;
       };
@@ -332,6 +345,18 @@ export type WebviewIntent =
           title: string;
         }>;
         toolTitles: string[];
+        assistantResponseGroups: number;
+        groupFoldTitles: string[];
+        userPromptPill: boolean;
+        assistantNoCard: boolean;
+        progressRow: boolean;
+        planTodos: number;
+        toolRowFlat: boolean;
+        toolRowExpandable: boolean;
+        ellipsisAboveGroupHeader: boolean;
+        leftGuideLine: boolean;
+        toolRowCount: number;
+        toolCardCount: number;
       };
     };
 

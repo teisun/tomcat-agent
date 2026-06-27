@@ -228,6 +228,106 @@ function handlePrompt(frame) {
     return;
   }
 
+  if (text.includes("transcript ui")) {
+    const readPath = editFilePath;
+    emitMessageDelta(sessionId, "I will read the file and refresh the plan.");
+    send({
+      assistantMessageEvent: {
+        delta: "Deciding which file to inspect for the transcript UI showcase.",
+        kind: "thinking_delta",
+      },
+      message: {},
+      sessionId,
+      type: "message_update",
+    });
+    send({
+      args: { path: readPath },
+      sessionId,
+      toolCallId: "tc-transcript-read",
+      toolName: "read",
+      type: "tool_execution_start",
+    });
+    send({
+      display: { file: readPath, kind: "file" },
+      isError: false,
+      result: "fake file contents for transcript ui showcase",
+      sessionId,
+      toolCallId: "tc-transcript-read",
+      toolName: "read",
+      type: "tool_execution_end",
+    });
+    send({
+      args: { command: "git status --short" },
+      sessionId,
+      toolCallId: "tc-transcript-bash",
+      toolName: "bash",
+      type: "tool_execution_start",
+    });
+    send({
+      isError: false,
+      result: "M src/app.tsx\\n M README.md\\n?? plans/transcript-ui-showcase.plan.md",
+      sessionId,
+      toolCallId: "tc-transcript-bash",
+      toolName: "bash",
+      type: "tool_execution_end",
+    });
+    send({
+      args: { query: "vscode chat thinking collapsible" },
+      sessionId,
+      toolCallId: "tc-transcript-web-search",
+      toolName: "web_search",
+      type: "tool_execution_start",
+    });
+    send({
+      isError: false,
+      result: "Found 3 results.\\n- vscode/chatThinkingContentPart.ts\\n- chatCollapsibleContentPart.ts\\n- chatToolInvocationPart.ts",
+      sessionId,
+      toolCallId: "tc-transcript-web-search",
+      toolName: "web_search",
+      type: "tool_execution_end",
+    });
+    const planPath = path.join(process.cwd(), "plans", "transcript-ui-showcase.plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    fs.writeFileSync(planPath, "# Transcript UI showcase\\n", "utf8");
+    session.planId = "transcript-ui-showcase";
+    session.planPath = planPath;
+    session.planState = "planning";
+    send({
+      path: planPath,
+      planId: session.planId,
+      sessionId,
+      state: session.planState,
+      type: "plan.create",
+    });
+    const planTodos = [
+      { id: "t1", content: "Read the file", status: "completed" },
+      { id: "t2", content: "Render the transcript UI", status: "in_progress" },
+    ];
+    session.planTodos = planTodos;
+    send({
+      planId: session.planId,
+      sessionId,
+      todos: planTodos,
+      type: "plan.todos",
+    });
+    send({
+      sessionId,
+      title: "Transcript UI Showcase",
+      type: "session.title_updated",
+    });
+    send({
+      message: {},
+      summaryTitle: "Reviewed 1 file",
+      toolResults: [],
+      turnIndex: 1,
+      type: "turn_end",
+    });
+    emitContextMetrics(sessionId, 0.55);
+    recordHistoryMessage(sessionId, "assistant", "I will read the file and refresh the plan.");
+    finishTurn(sessionId, null);
+    return;
+  }
+
   const responseText = attachmentCount
     ? \`hello from fake tomcat (\${attachmentCount} attachments)\`
     : "hello from fake tomcat";
@@ -396,8 +496,10 @@ function handleCommand(frame) {
           model: session.model,
           planId: session.planId,
           planState: session.planState,
+          planTodos: session.planTodos ?? [],
           sessionId,
           sessionKey: session.sessionKey,
+          sessionTodos: session.sessionTodos ?? [],
         },
         sessionId,
         success: true,

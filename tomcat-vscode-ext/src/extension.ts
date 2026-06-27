@@ -118,6 +118,20 @@ export interface TomcatExtensionApi {
         title: string;
       }>;
       toolTitles: string[];
+      assistantResponseGroups: number;
+      groupFoldTitles: string[];
+      userPromptPill: boolean;
+      assistantNoCard: boolean;
+      progressRow: boolean;
+      planTodos: number;
+      toolRowFlat: boolean;
+      toolRowExpandable: boolean;
+      ellipsisAboveGroupHeader: boolean;
+      leftGuideLine: boolean;
+      toolRowCount: number;
+      toolCardCount: number;
+      fileChipOpen: boolean;
+      sessionTitleUpdated: boolean;
     }>;
     clearObservedEvents(): void;
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
@@ -613,10 +627,18 @@ export async function activate(
       applyPreparedEdit: (toolCallId) => ide.applyPreparedEdit(toolCallId),
       captureWebviewDom: async () => {
         await webviewProvider.waitUntilReady();
-        return webviewProvider.captureDomSnapshot();
+        const dom = await webviewProvider.captureDomSnapshot();
+        return {
+          ...dom,
+          fileChipOpen: webviewProvider.getOpenFileObserved(),
+          sessionTitleUpdated: observedEvents.some(
+            (event) => (event as { type: string }).type === "session.title_updated",
+          ),
+        };
       },
       clearObservedEvents: () => {
         observedEvents.length = 0;
+        webviewProvider.resetOpenFileObserved();
       },
       executeCommand: (command, ...args) =>
         vscode.commands.executeCommand(command, ...args),

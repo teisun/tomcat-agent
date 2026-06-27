@@ -514,12 +514,34 @@ input:focus-visible {
 }
 
 .tc-message--assistant {
-  background: var(--vscode-editor-background);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  width: 100%;
+}
+
+.tc-message--assistant .rendered-markdown {
+  line-height: 1.5em;
+}
+
+.tc-message--assistant .rendered-markdown p {
+  margin: 0 0 16px;
 }
 
 .tc-message--user {
-  background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.18));
-  margin-left: 24px;
+  background: var(--vscode-chat-requestBubbleBackground, var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.18)));
+  border-radius: var(--vscode-cornerRadius-xLarge, 8px);
+  margin-left: auto;
+  max-width: 90%;
+  padding: 8px 12px;
+}
+
+.tc-message--user .message-text {
+  margin: 0;
+}
+
+.tc-message--user .message-text p {
+  margin: 0;
 }
 
 .tc-message--notice {
@@ -703,6 +725,272 @@ input:focus-visible {
 
 .tc-thinking pre {
   padding: 0 12px 12px;
+}
+
+@keyframes tc-title-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+.tc-thinking__title--shimmer {
+  animation: tc-title-shimmer 2s linear infinite;
+  background: linear-gradient(
+    90deg,
+    var(--vscode-descriptionForeground) 0%,
+    var(--vscode-foreground) 50%,
+    var(--vscode-descriptionForeground) 100%
+  );
+  background-clip: text;
+  background-size: 200% 100%;
+  color: transparent;
+}
+
+.tc-thinking-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tc-thinking-box__header {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  display: flex;
+  font-size: 13px;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 4px 0;
+  width: 100%;
+}
+
+.tc-thinking-box__lead {
+  align-items: center;
+  display: inline-flex;
+  flex: 1 1 auto;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tc-thinking-box__status {
+  flex: 0 0 auto;
+}
+
+.tc-thinking-box__caret {
+  flex: 0 0 auto;
+}
+
+.tc-codicon-spin {
+  animation: tc-codicon-spin 1s linear infinite;
+}
+
+@keyframes tc-codicon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tc-thinking-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: relative;
+}
+
+.tc-thinking-box__body {
+  margin: 0;
+  padding: 0 0 0 24px;
+  white-space: pre-wrap;
+}
+
+.tc-thinking-tool-wrapper {
+  padding-left: 24px;
+  position: relative;
+}
+
+.tc-thinking-tool-wrapper::before {
+  background: var(--vscode-panel-border, rgba(127, 127, 127, 0.35));
+  bottom: 0;
+  content: "";
+  left: 8px;
+  mask-image: linear-gradient(to bottom, transparent 0, #000 8px, #000 calc(100% - 8px), transparent 100%);
+  position: absolute;
+  top: 0;
+  width: 1px;
+}
+
+.tc-thinking-icon {
+  color: var(--vscode-descriptionForeground);
+  left: 5px;
+  position: absolute;
+  top: 9px;
+}
+
+.tc-tool-row {
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  gap: 4px;
+}
+
+.tc-tool-row__header {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.tc-tool-row__toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 2px 0;
+}
+
+.tc-tool-row__label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tc-tool-row__caret {
+  flex: 0 0 auto;
+}
+
+.tc-tool-row .codicon-check,
+.tc-tool-row .codicon-loading {
+  display: none;
+}
+
+.tc-tool-row__body {
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
+  border-left: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.25));
+  margin-left: 18px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 8px 10px;
+}
+
+.tc-tool-row__body pre {
+  margin: 0;
+}
+
+.tc-tool-row__hits {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.tc-tool-row__cmd {
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.12));
+  border-radius: 3px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.95em;
+  padding: 0 4px;
+  white-space: pre-wrap;
+}
+
+.tc-file-chip {
+  align-items: center;
+  background: transparent;
+  border: 0.5px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.35));
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: var(--vscode-chat-font-size-body-s, 12px);
+  gap: 4px;
+  padding: 1px 3px;
+  vertical-align: baseline;
+}
+
+.tc-file-chip:hover {
+  background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.12));
+}
+
+.tc-file-chip__icon {
+  flex: 0 0 auto;
+}
+
+.tc-file-chip__label {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tc-progress-row {
+  align-items: center;
+  color: var(--vscode-descriptionForeground);
+  display: flex;
+  font-size: 13px;
+  gap: 8px;
+  padding: 6px 0;
+}
+
+.tc-progress-row p {
+  margin: 0;
+}
+
+.tc-progress-row__spinner {
+  flex: 0 0 auto;
+}
+
+.tc-progress-row--shimmer .tc-progress-row__spinner {
+  animation: tc-tool-spin 1s linear infinite;
+}
+
+.tc-progress-row--shimmer p {
+  animation: tc-title-shimmer 2s linear infinite;
+  background: linear-gradient(
+    90deg,
+    var(--vscode-descriptionForeground) 0%,
+    var(--vscode-foreground) 50%,
+    var(--vscode-descriptionForeground) 100%
+  );
+  background-clip: text;
+  background-size: 200% 100%;
+  color: transparent;
+}
+
+.tc-plan-todos {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tc-plan-todo {
+  align-items: flex-start;
+  display: flex;
+  font-size: 13px;
+  gap: 8px;
+}
+
+.tc-plan-todo--pending {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-plan-todo--in-progress {
+  color: var(--vscode-foreground);
+}
+
+.tc-plan-todo--completed {
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.85;
+}
+
+.tc-plan-todo--cancelled {
+  color: var(--vscode-errorForeground);
+  opacity: 0.8;
+  text-decoration: line-through;
 }
 
 .tc-tool-card__toggle {

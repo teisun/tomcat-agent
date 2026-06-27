@@ -242,9 +242,9 @@ describe("Tomcat webview App", () => {
     expect(screen.getByText("thinking...")).toBeTruthy();
     expect(screen.getByText("Questions")).toBeTruthy();
     expect(screen.getByText("Proceed?")).toBeTruthy();
-    expect(screen.getByText("edit (complete)")).toBeTruthy();
+    expect(screen.getByTestId("file-chip").textContent).toContain("app.ts");
     expect(screen.queryByText("updated file")).toBeNull();
-    fireEvent.click(screen.getByTestId("tool-toggle"));
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
     expect(screen.getByText("updated file")).toBeTruthy();
     fireEvent.click(screen.getByTestId("session-select"));
     expect(screen.getByTestId("session-option").textContent).toContain("New session");

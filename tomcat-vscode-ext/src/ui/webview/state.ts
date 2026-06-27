@@ -7,6 +7,7 @@ import type {
   SessionListPayload,
   SessionStatePayload,
   SessionSummary,
+  WebviewTodo,
 } from "../../serveClient/sessionRouter";
 import type { ServeEvent, ServePlanEvent } from "../../serveClient/wire";
 import {
@@ -84,6 +85,8 @@ function createEmptySession(sessionId: string): WebviewSessionSnapshot {
     conflictMessage: null,
     contextRatio: null,
     model: null,
+    planTodos: [],
+    sessionTodos: [],
     thinkingLevel: null,
     ownedByThisFrontend: false,
     owner: null,
@@ -217,9 +220,118 @@ function buildHistoryToolNameLookup(entries: unknown[]): Map<string, string> {
   return lookup;
 }
 
+export function buildToolCallToAssistantMap(entries: unknown[]): Map<string, string> {
+  const lookup = new Map<string, string>();
+  for (const entry of entries) {
+    if (
+      !isRecord(entry) ||
+      entry.type !== "message" ||
+      !isRecord(entry.message) ||
+      entry.message.role !== "assistant" ||
+      !Array.isArray(entry.message.tool_calls)
+    ) {
+      continue;
+    }
+    const assistantId = typeof entry.id === "string" ? entry.id : undefined;
+    if (!assistantId) {
+      continue;
+    }
+    for (const toolCall of entry.message.tool_calls) {
+      if (!isRecord(toolCall) || typeof toolCall.id !== "string") {
+        continue;
+      }
+      lookup.set(toolCall.id, assistantId);
+    }
+  }
+  return lookup;
+}
+
+function buildHistoryToolArgsLookup(entries: unknown[]): Map<string, Record<string, unknown>> {
+  const lookup = new Map<string, Record<string, unknown>>();
+  for (const entry of entries) {
+    if (
+      !isRecord(entry) ||
+      entry.type !== "message" ||
+      !isRecord(entry.message) ||
+      entry.message.role !== "assistant" ||
+      !Array.isArray(entry.message.tool_calls)
+    ) {
+      continue;
+    }
+    for (const toolCall of entry.message.tool_calls) {
+      if (
+        !isRecord(toolCall) ||
+        typeof toolCall.id !== "string" ||
+        !isRecord(toolCall.function)
+      ) {
+        continue;
+      }
+      const rawArgs = toolCall.function.arguments;
+      if (typeof rawArgs === "string") {
+        try {
+          const parsed = JSON.parse(rawArgs) as unknown;
+          if (isRecord(parsed)) {
+            lookup.set(toolCall.id, parsed);
+          }
+        } catch {
+          // ignore malformed tool arguments
+        }
+      } else if (isRecord(rawArgs)) {
+        lookup.set(toolCall.id, rawArgs);
+      }
+    }
+  }
+  return lookup;
+}
+
+function parseTodoStatus(value: unknown): WebviewTodo["status"] | null {
+  switch (value) {
+    case "pending":
+    case "in_progress":
+    case "completed":
+    case "cancelled":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function parseTodos(value: unknown): WebviewTodo[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.content !== "string") {
+      return [];
+    }
+    const status = parseTodoStatus(entry.status);
+    if (!status) {
+      return [];
+    }
+    return [{ content: entry.content, id: entry.id, status }];
+  });
+}
+
+function parseToolArgs(value: unknown): Record<string, unknown> | undefined {
+  if (isRecord(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return isRecord(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 function parseHistoryEntry(
   entry: unknown,
   historyToolNames: Map<string, string>,
+  toolCallToAssistant: Map<string, string>,
+  historyToolArgs: Map<string, Record<string, unknown>>,
 ): WebviewTimelineItem[] {
   if (!isRecord(entry) || typeof entry.type !== "string") {
     return [];
@@ -245,16 +357,22 @@ function parseHistoryEntry(
     }
     if (role === "assistant") {
       const items: WebviewTimelineItem[] = [];
+      const hasToolCalls =
+        Array.isArray(entry.message.tool_calls) && entry.message.tool_calls.length > 0;
+      const assistantMessageId = hasToolCalls ? id : undefined;
       const thinkingText = extractThinkingText(entry.message);
       if (thinkingText) {
         items.push({
+          assistantMessageId,
           id: `${id}-thinking`,
+          summaryTitle: null,
           text: thinkingText,
           type: "thinking",
         } satisfies WebviewThinkingBlock);
       }
       if (text) {
         items.push({
+          assistantMessageId,
           id,
           kind: "assistant",
           text,
@@ -268,7 +386,10 @@ function parseHistoryEntry(
         return [];
       }
       const toolCallId = extractToolCallId(entry.message) ?? id;
+      const args = historyToolArgs.get(toolCallId);
       return [{
+        args,
+        assistantMessageId: toolCallToAssistant.get(toolCallId),
         id,
         isError: false,
         status: "complete",
@@ -301,6 +422,10 @@ function createSessionRuntime(): SessionRuntimeState {
 
 function clearStreaming(runtime: SessionRuntimeState): void {
   runtime.activeAssistantId = null;
+  runtime.activeThinkingId = null;
+}
+
+function clearThinkingStreaming(runtime: SessionRuntimeState): void {
   runtime.activeThinkingId = null;
 }
 
@@ -440,6 +565,7 @@ function appendStreamingMessage(
       return current;
     }
     const created = pushMessage(session, "assistant", text);
+    created.assistantMessageId = created.id;
     runtime.activeAssistantId = created.id;
     return created;
   }
@@ -452,7 +578,9 @@ function appendStreamingMessage(
     return current;
   }
   const created: WebviewThinkingBlock = {
+    assistantMessageId: runtime.activeAssistantId ?? undefined,
     id: createTimelineId(session, "thinking"),
+    summaryTitle: null,
     text,
     type: "thinking",
   };
@@ -550,6 +678,8 @@ export class WebviewStateStore {
     session.thinkingLevel = payload.thinkingLevel ?? null;
     session.planId = payload.planId ?? null;
     session.planState = normalizePlanState(payload.planState) ?? "chat";
+    session.planTodos = payload.planTodos ?? session.planTodos;
+    session.sessionTodos = payload.sessionTodos ?? session.sessionTodos;
     if (session.planFile) {
       session.planFile = {
         ...session.planFile,
@@ -585,7 +715,11 @@ export class WebviewStateStore {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
     const historyToolNames = buildHistoryToolNameLookup(history.messages);
-    const historyItems = history.messages.flatMap((entry) => parseHistoryEntry(entry, historyToolNames));
+    const toolCallToAssistant = buildToolCallToAssistantMap(history.messages);
+    const historyToolArgs = buildHistoryToolArgsLookup(history.messages);
+    const historyItems = history.messages.flatMap((entry) =>
+      parseHistoryEntry(entry, historyToolNames, toolCallToAssistant, historyToolArgs),
+    );
     if (!historyItems.length) {
       runtime.historyHydrated = true;
       return;
@@ -653,9 +787,28 @@ export class WebviewStateStore {
         clearStreaming(runtime);
         return;
       case "message_end":
-      case "turn_end":
         clearStreaming(runtime);
         return;
+      case "turn_end": {
+        const summaryTitle =
+          "summaryTitle" in frame && typeof frame.summaryTitle === "string"
+            ? frame.summaryTitle
+            : null;
+        if (summaryTitle) {
+          const thinking =
+            (runtime.activeThinkingId
+              ? findTimelineItem(session, runtime.activeThinkingId, "thinking")
+              : undefined) ??
+            [...session.timeline].reverse().find(
+              (item): item is WebviewThinkingBlock => item.type === "thinking",
+            );
+          if (thinking) {
+            thinking.summaryTitle = summaryTitle;
+          }
+        }
+        clearStreaming(runtime);
+        return;
+      }
       case "agent_start":
         session.busy = true;
         clearStreaming(runtime);
@@ -716,26 +869,54 @@ export class WebviewStateStore {
         return;
       }
       case "tool_execution_start": {
-        clearStreaming(runtime);
+        const activeAssistantId = runtime.activeAssistantId;
+        clearThinkingStreaming(runtime);
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.status = "running";
         tool.isError = false;
+        tool.args = parseToolArgs(frame.args) ?? tool.args;
+        tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
         return;
       }
       case "tool_call_streaming":
       case "tool_execution_update": {
-        clearStreaming(runtime);
+        const activeAssistantId = runtime.activeAssistantId;
+        clearThinkingStreaming(runtime);
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.status = "streaming";
+        if ("args" in frame) {
+          tool.args = parseToolArgs(frame.args) ?? tool.args;
+        }
+        tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
         return;
       }
       case "tool_execution_end": {
-        clearStreaming(runtime);
+        clearThinkingStreaming(runtime);
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.display = frame.display ?? undefined;
         tool.isError = frame.isError;
         tool.status = "complete";
         tool.summary = asText(frame.result);
+        return;
+      }
+      case "plan.todos":
+        session.planTodos = parseTodos("todos" in frame ? frame.todos : undefined);
+        return;
+      case "session.todos":
+        session.sessionTodos = parseTodos("todos" in frame ? frame.todos : undefined);
+        return;
+      case "session.title_updated": {
+        const title =
+          "title" in frame && typeof frame.title === "string" ? frame.title : null;
+        if (!title) {
+          return;
+        }
+        const tab = this.state.sessions.find(
+          (entry) => entry.sessionId === session.sessionId,
+        );
+        if (tab) {
+          tab.title = title;
+        }
         return;
       }
       default:

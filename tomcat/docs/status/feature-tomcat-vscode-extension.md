@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-27 00:15 +0800 | DOING | feature/tomcat-vscode-extension | — |
+| Tom | 2026-06-27 11:00 +0800 | DOING | feature/tomcat-vscode-extension | — |
 
 ### ✅ DONE
 - [x] **[P1]** 认领 `T2-P1-020`，任务卡 / 看板索引已切到 `DOING / Tom`；依赖例外已按用户显式要求记录。
@@ -15,9 +15,18 @@
 - [x] **[P2]** 修复 macOS login bash 下 `tomcat init` / `install.sh` 写入 PATH 后新终端仍找不到 `tomcat`：`auto_add_to_path` 改为 PATH 写 `.bashrc` 并确保 `.bash_profile` source `.bashrc`，`install.sh` 同步补齐。
 - [x] **[P1]** 2026-06-26 误删事故后恢复可执行计划：`.cursor/plans/transcript-ui-restore.plan.md`（仿 VSCode Chat 重做 transcript，52 todo，含 utility-flash 默认模型配置）。
 - [x] **[P1]** 新增 Agent 安全规则 `tomcat/.cursor/rules/no-rm-rf.mdc`（禁止 `rm -rf "$VAR"` 跨命令边界等事故形态，alwaysApply）。
+- [x] **[P1]** Transcript UI 仿 VSCode Chat（`transcript-ui-restore.plan.md`）：后端 `core/summary` utility 摘要、`TurnEnd.summaryTitle`、`session.title_updated` / `plan.todos` / `session.todos` wire；前端 ThinkingGroup / ToolRow / FileChip / ProgressRow / user pill / assistant 无框；`utility-flash` 默认 title 模型。
+- [x] **[P1]** 后端单测：`cargo test --lib` 1935 passed（含 `summary::` 6 项、`models_toml` 5 项）。
+- [x] **[P1]** 前端单测：GUI 67 项 + webview state 9 项全绿。
+- [x] **[P1]** §2 Rust 集成测试 `transcript_summary_integration_tests`（575 行 / 7 用例，mock LlmProvider 黑盒）：`TurnEnd.summaryTitle` 三路径（Some/None/utility 失败回退）、`plan.todos`/`session.todos` emit、`get_state` `planTodos`/`sessionTodos`、session title 异步覆盖；登记 `test-groups.sh` PARALLEL；`cargo test --test` → 5 passed; 2 ignored。
+- [x] **[P1]** §3 VSCode 扩展 E2E：`npm run test:e2e:vscode-install` → **15 passing (49s), exit 0**，含 `assertTranscriptUiFlow`（user pill / assistant 无框 / thinking+tool 折叠摘要 / tool 扁平行+竖线+可展开 / FileChip / plan 进度 / PlanFileCard todos / `session.title_updated`）。
+- [x] **[P1]** §4 verify-vsix 视觉验收：新增 `run-vscode-verify-vsix.ts` + `crop-screenshot.py` + `verify:vsix` script + 截图路径 env 化（`TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR`）；`npm run verify:vsix` → 1 passing + 裁剪图视觉确认 8 项 checklist（user pill / assistant 无框 / 折叠摘要 / tool 扁平行+竖线 / FileChip / bash / plan 进度 / PlanFileCard todos）。
+- [x] **[P1]** §4 verify-integration：`./scripts/run-integration-tests.sh integration` → **exit 0，parallel + serial 全绿**；期间发现并修复 `serve_schema_fixture` 漂移（重生成 `tests/fixtures/serve/serve.schema.json` / `serve.d.ts`）；`transcript_summary_integration_tests` 5 passed/2 ignored、`cli_tests` 108 passed/0 failed、`serve_print_schema_matches_fixture` ok。
+- [x] **[P1]** Wave 3 只读 Review：reviewer 结论 §2/§3/§4-vsix 测试有效性基本成立、无明确 bug；唯一实质性缺口为 §2 test 7 异步 `session.title_updated` emit 无活跃覆盖（已记为 stretch），低风险项见 `.cursor/plans/transcript-ui-restore-progress.md`。
+- [x] **[P1]** 2026-06-27 第二轮自查：修复 bash/web_search 变"卡片"根因 bug（`state.ts` tool 事件误调 `clearStreaming` 清掉 `activeAssistantId` → 同轮第 2+ 工具 `assistantMessageId` 丢失 → 孤立 → `ToolCallCard`；改用 `clearThinkingStreaming` 只清 `activeThinkingId`）+ 孤立 tool 兜底由 `ToolCallCard` 改 `ToolRow`；E2E `assertTranscriptUiFlow` 加 `toolRowCount>=3` + `toolCardCount===0` 回归断言；补全 3 项 🟡 缺口（ThinkingGroup 折叠头 check/loading 图标 + spin、shimmer 改 `summaryTitle===null && isStreaming`、ToolRow grep `N results`/search_workspace 分支/web_search 结构化/edit 图标 + bash `<code>cmd</code>`）；gui 67 项单测全绿、ext tsc 干净、`verify:vsix` E2E ✔（read/bash/web_search 三工具均扁平行、零卡片）。详见 `.cursor/plans/transcript-ui-restore-progress.md`"卡片根因修复"节。
 
 ### 🔄 IN PROGRESS
-- [ ] **[P1]** 按 `transcript-ui-restore.plan.md` 执行 transcript UI 仿 VSCode Chat 重做（上午未提交工作已丢失，从干净基线重建）。
+- [ ] **[P1]** `cargo clippy --all-targets -- -D warnings` 仍有 `openai_responses/stream.rs` 预存 lint，与本次改动无关。
 - [ ] **[P1]** 推送 `feature/tomcat-vscode-extension` 远端后，将 `T2-P1-020` 前移到 `PENDING_INTEGRATION` 并走集成合并流程。
 
 ### 🔌 INTERFACE (当前口径)
@@ -30,7 +39,8 @@
   - `cargo build --release`
   - `cargo clippy --all-targets -- -D warnings`
   - `cargo test --lib -- --nocapture`
-  - `./scripts/run-integration-tests.sh integration`（以 crate `.env` 运行，并显式设置 `NO_PROXY=127.0.0.1,localhost`；期间发现 `serve_schema_fixture` 漂移，刷新 fixture 后补跑 `integration-serial` 全绿）
+  - `./scripts/run-integration-tests.sh integration`（以 crate `.env` 运行，`NO_PROXY=127.0.0.1,localhost`，`OPENAI_API_KEY` 设本地 mock 占位以驱动 `test_user_chat_skill_list_reload_use` 的本地 mock OpenAI server）→ **exit 0，parallel + serial 全绿**；`serve_schema_fixture` 漂移已通过重生成 `tests/fixtures/serve/serve.schema.json` / `serve.d.ts` 修复；`real_mimo_web_search` 与 `test_user_background_bash_multiple_timeout_slices_real_llm_cli` 为 flaky 真 网络 / 真 LLM 用例（本次通过，非本次改动引入）。
+  - §4 verify-vsix 视觉验收：`TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR=<dir> npm run verify:vsix` → 1 passing + 裁剪图视觉确认 8 项 checklist；E2E 含 `toolRowCount>=3` + `toolCardCount===0` 回归断言（read/bash/web_search 三工具均扁平行、零卡片）；产物 `<dir>/tomcat-vsix-visual-{collapsed,expanded}-cropped.png`（`screencapture` 需 VSCode 窗口可见，若被其它全屏 app 遮挡会捕获到遮挡窗口，此时以 E2E DOM 断言为功能验收铁证）。
   - `./scripts/run-integration-tests.sh integration-openai-responses-wire`
   - `./scripts/run-integration-tests.sh integration-real-llm`
 - Extension：

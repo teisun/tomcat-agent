@@ -192,6 +192,11 @@ pub fn execute(
         "path": event_payload.path,
         "state": event_payload.state,
     }));
+    runtime.write_transcript_custom(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_TODOS,
+        "plan_id": plan_id,
+        "todos": super::shared_todo_ops::items_json(&plan.frontmatter.todos),
+    }));
 
     Ok(serde_json::json!({
         "plan_id": plan_id,

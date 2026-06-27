@@ -52,6 +52,9 @@ const EVENT_NAMES: &[&str] = &[
     wire::WIRE_PLAN_REVIEW_WARNING,
     wire::WIRE_PLAN_CODE_REVIEW_WARNING,
     wire::WIRE_PLAN_COMPLETE,
+    wire::WIRE_PLAN_TODOS,
+    wire::WIRE_SESSION_TITLE_UPDATED,
+    wire::WIRE_SESSION_TODOS,
 ];
 
 pub fn register_session_event_pump(

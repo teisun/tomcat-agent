@@ -8,6 +8,8 @@ const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
 };
 
 export function MessageBubble({ item }: { item: WebviewMessageBlock }) {
+  const showHeader = item.kind !== "user" && item.kind !== "assistant";
+
   return (
     <article
       className={`tc-message tc-message--${item.kind}`}
@@ -16,11 +18,17 @@ export function MessageBubble({ item }: { item: WebviewMessageBlock }) {
       data-message-kind={item.kind}
       data-testid="message-block"
     >
-      <div className="tc-message__header">
-        <strong>{MESSAGE_LABELS[item.kind]}</strong>
-        <span>{item.kind}</span>
+      {showHeader ? (
+        <div className="tc-message__header">
+          <strong>{MESSAGE_LABELS[item.kind]}</strong>
+          <span>{item.kind}</span>
+        </div>
+      ) : null}
+      <div className="message-text rendered-markdown" data-testid="message-text">
+        {item.text.split("\n\n").map((paragraph, index) => (
+          <p key={`${item.id}-${index}`}>{paragraph}</p>
+        ))}
       </div>
-      <p data-testid="message-text">{item.text}</p>
     </article>
   );
 }

@@ -430,6 +430,15 @@ pub enum ServePlanEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         state: Option<String>,
     },
+    #[serde(rename = "plan.todos")]
+    PlanTodos {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        todos: Option<Vec<ServeTodoItem>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -437,6 +446,38 @@ pub enum ServePlanEvent {
 pub enum ServeEvent {
     Agent(AgentWireEvent),
     Plan(ServePlanEvent),
+    Session(ServeSessionEvent),
+}
+
+/// `session.*` 自定义事件的 schema 入口（`session.todos` / `session.title_updated`）。
+///
+/// 仅用于 `tomcat serve --print-schema` / fixture 导出，不影响运行时 event bus 发射路径
+/// （运行时经 `write_transcript_custom` / `emit_payload` 以字符串常量发射）。
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ServeSessionEvent {
+    #[serde(rename = "session.todos")]
+    SessionTodos {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        todos: Option<Vec<ServeTodoItem>>,
+    },
+    #[serde(rename = "session.title_updated")]
+    SessionTitleUpdated {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+}
+
+/// plan / session todo 项的 wire schema 形状，与 `shared_todo_ops::items_json` 运行时输出一致。
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ServeTodoItem {
+    pub id: String,
+    pub content: String,
+    pub status: String,
 }
 
 /// 普通命令的 ack / error 响应。

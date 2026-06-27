@@ -211,6 +211,8 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         tool_definitions: tool_defs,
                         context_config,
                         compaction_provider,
+                        title_provider: None,
+                        title_model: String::new(),
                         agent_trail_dir,
                         read_file_state,
                         openai_files_runtime,

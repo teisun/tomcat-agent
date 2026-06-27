@@ -137,6 +137,7 @@ mod stream_handler;
 mod tool_dispatcher;
 mod tool_exec;
 mod turn_finalize;
+mod turn_summary;
 mod types;
 
 #[cfg(test)]

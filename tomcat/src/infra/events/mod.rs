@@ -154,6 +154,10 @@ pub mod wire {
     pub const WIRE_PLAN_PANEL: &str = "plan.panel";
     /// PlanRuntime `mode → completed` 派生时落痕。
     pub const WIRE_PLAN_COMPLETE: &str = "plan.complete";
+    /// session 标题异步 LLM 覆盖后推送。
+    pub const WIRE_SESSION_TITLE_UPDATED: &str = "session.title_updated";
+    /// `todos` 工具写入 session scratchpad 后推送。
+    pub const WIRE_SESSION_TODOS: &str = "session.todos";
 
     // --- ExtensionEvent ---
     pub const WIRE_STARTUP: &str = "startup";
@@ -300,6 +304,8 @@ pub enum AgentEvent {
         message: Message,
         #[serde(rename = "toolResults")]
         tool_results: Vec<Message>,
+        #[serde(rename = "summaryTitle", skip_serializing_if = "Option::is_none")]
+        summary_title: Option<String>,
     },
     MessageStart {
         message: Message,

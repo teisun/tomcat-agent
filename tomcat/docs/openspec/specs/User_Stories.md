@@ -177,6 +177,20 @@
 - [ ] webview 的“看 diff / 应用编辑”复用 VSCode 原生 `vscode.diff` + `WorkspaceEdit` 落地路径，不自建主编辑栈
 - [ ] 扩展需通过真实宿主与安装版 VSIX 验收：原生 chat UI、webview UI、共享会话池、owner 冲突、VSIX 打包入包与安装后资源加载均有自动化覆盖
 
+### Story 8e: VSCode webview transcript 仿 Chat 体验（Phase 2+）
+**作为 VSCode 用户**，我希望侧栏 transcript 的视觉与交互对齐 VSCode Chat：用户消息右侧 pill、assistant 无框 markdown 流、thinking+tool 按 assistant response 折叠分组、utility 模型生成自然语言折叠标题、bash 折叠为 "Ran \<cmd\>"、plan/session todo 进度行、read 文件 chip 可点击打开。
+**验收标准（P0）**：
+- [ ] user 消息渲染为右侧 pill 气泡，无 "You/user" header；assistant 消息无卡片边框/标签，纯 markdown 流；error/notice 保留左边框
+- [ ] 同一条 assistant message 的 thinking + 多个 tool_calls 折叠为一组（ThinkingGroup）；折叠 header 显示 LLM 生成的 `summaryTitle`（如 "Reviewed 3 files"），streaming 且标题未就绪时 shimmer；折叠态不创建 tool DOM（懒渲染）
+- [ ] tool 行渲染为扁平行（ToolRow），非大卡片；read/grep 行含 FileChip 点击 `openFile`；bash 行显示 `Ran <cmd>` 可展开看输出，无"打开终端"按钮；完成态默认折叠、streaming 默认展开
+- [ ] plan executing 或 chat 有 in_progress session todo 时，live cluster 末尾显示进度行 `(current/total) title`；PlanFileCard 同步渲染 planTodos
+- [ ] 后端 `LlmScene::Title`（默认 `utility-flash`）异步生成 turn 折叠标题与 session 标题；占位优先 + 失败静默回退规则摘要，不阻塞 UI
+- [ ] wire 事件：`TurnEnd.summaryTitle`、`session.title_updated`、`plan.todos`、`session.todos`；`get_state` 含 planTodos/sessionTodos
+
+**验收标准（P1）**：
+- [ ] E2E 覆盖：userPromptPill、assistantNoCard、assistantResponseGroups、groupFoldTitles、toolRowFlat、toolRowExpandable、fileChipOpen、progressRow、sessionTitleUpdated
+- [ ] 单元测试覆盖 `groupTimelineByAssistantResponse`、`useActiveTodoProgress`、ThinkingGroup 懒渲染、ToolRow 差异化编排
+
 ### Story 9: 插件自举全闭环
 **作为用户**，我希望Agent能根据我的自然语言需求，自主生成、编译、加载插件，无需人工干预。
 **验收标准**：

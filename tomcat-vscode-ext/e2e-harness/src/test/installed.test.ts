@@ -12,6 +12,7 @@ type HostE2eHelper = {
   assertParticipantHappyPath(api: unknown): Promise<void>;
   assertParticipantHappyPathViaChatUi(api: unknown): Promise<void>;
   assertPlanSlashFlowViaChatUi(api: unknown): Promise<void>;
+  assertTranscriptUiFlow(api: unknown): Promise<void>;
   assertWebviewDiffFlow(api: unknown): Promise<void>;
   assertWebviewMultiSessionFlow(api: unknown): Promise<void>;
   assertWebviewOwnershipFlow(api: unknown): Promise<void>;
@@ -93,5 +94,10 @@ suite("Installed Tomcat extension", () => {
   test("enforces single-owner Tomcat webview sessions", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewOwnershipFlow(api);
+  });
+
+  test("renders the transcript UI groups, tool rows, file chips, and progress", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertTranscriptUiFlow(api);
   });
 });

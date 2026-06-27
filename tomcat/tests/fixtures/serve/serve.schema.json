@@ -828,6 +828,12 @@
           "message": {
             "$ref": "#/definitions/Message"
           },
+          "summaryTitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "toolResults": {
             "type": "array",
             "items": {
@@ -1858,6 +1864,9 @@
           },
           {
             "$ref": "#/definitions/ServePlanEvent"
+          },
+          {
+            "$ref": "#/definitions/ServeSessionEvent"
           }
         ]
       },
@@ -2209,8 +2218,123 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "todos": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/definitions/ServeTodoItem"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.todos"
+                ]
+              }
+            }
           }
         ]
+      },
+      "ServeSessionEvent": {
+        "description": "`session.*` 自定义事件的 schema 入口（`session.todos` / `session.title_updated`）。\n\n仅用于 `tomcat serve --print-schema` / fixture 导出，不影响运行时 event bus 发射路径 （运行时经 `write_transcript_custom` / `emit_payload` 以字符串常量发射）。",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "todos": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/definitions/ServeTodoItem"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session.todos"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session.title_updated"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "ServeTodoItem": {
+        "description": "plan / session todo 项的 wire schema 形状，与 `shared_todo_ops::items_json` 运行时输出一致。",
+        "type": "object",
+        "required": [
+          "content",
+          "id",
+          "status"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
       },
       "ToolDisplay": {
         "description": "工具执行成功后给 CLI/TUI 的结构化展示提示。",
@@ -2357,6 +2481,12 @@
             "properties": {
               "message": {
                 "$ref": "#/definitions/Message"
+              },
+              "summaryTitle": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "toolResults": {
                 "type": "array",

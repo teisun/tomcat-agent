@@ -23,7 +23,7 @@ export interface ServeAttachment {
 }
 export type ServeAttachmentKind = "image" | "file";
 
-export type ServeEvent = ServePlanEvent | WireEvent;
+export type ServeEvent = ServePlanEvent | ServeSessionEvent | WireEvent;
 
 export interface ServeMessageParams {
   attachments?: ServeAttachment[];
@@ -82,10 +82,30 @@ export type ServePlanEvent = {
   rounds?: null | number;
   sessionId?: null | string;
   type: "plan.review.warning";
+} | {
+  planId?: null | string;
+  sessionId?: null | string;
+  todos?: ServeTodoItem[] | null;
+  type: "plan.todos";
+};
+
+export type ServeSessionEvent = {
+  sessionId?: null | string;
+  title?: null | string;
+  type: "session.title_updated";
+} | {
+  sessionId?: null | string;
+  todos?: ServeTodoItem[] | null;
+  type: "session.todos";
 };
 
 export type ServeSessionMode = "code" | "claw";
 
+export interface ServeTodoItem {
+  content: string;
+  id: string;
+  status: string;
+}
 export type SetPlanModeAction = "enter" | "exit" | "build";
 
 export type ToolDisplay = {
@@ -328,6 +348,7 @@ export type WireEvent = ({
   type: "llm_notice";
 } | {
   message: Message;
+  summaryTitle?: null | string;
   toolResults: Message[];
   turnIndex: number;
   type: "turn_end";

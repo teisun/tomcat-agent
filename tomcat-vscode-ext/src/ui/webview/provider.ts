@@ -136,6 +136,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private readonly eventSubscription: { dispose(): void };
   private initialized?: InitializeResult;
   private isReady = false;
+  private openFileObserved = false;
   private messageSubscription?: vscode.Disposable;
   private uiMode: TomcatUiMode;
   private view?: vscode.WebviewView;
@@ -207,6 +208,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       messageId,
     });
     return pending;
+  }
+
+  getOpenFileObserved(): boolean {
+    return this.openFileObserved;
+  }
+
+  resetOpenFileObserved(): void {
+    this.openFileObserved = false;
   }
 
   async dispatchTestDomAction(action: WebviewDomAction): Promise<void> {
@@ -565,6 +574,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         return;
       case "applyEdit":
         await this.deps.ide.applyPreparedEdit(intent.data.toolCallId);
+        return;
+      case "openFile":
+        this.openFileObserved = true;
+        await this.deps.ide.showFile(intent.data.path);
         return;
       case "openPlanFile":
         await this.deps.ide.showFile(intent.data.path);

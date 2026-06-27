@@ -41,7 +41,7 @@ fn llm_files_default_expires_after_seconds_is_86400() {
     let cfg = AppConfig::default();
     assert_eq!(cfg.llm.files.expires_after_seconds, 86_400);
     assert_eq!(cfg.llm.vision_model, None);
-    assert_eq!(cfg.llm.title_model, None);
+    assert_eq!(cfg.llm.title_model.as_deref(), Some("utility-flash"));
 }
 
 #[test]

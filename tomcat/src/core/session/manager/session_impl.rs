@@ -32,6 +32,11 @@ const VALIDATE_TAIL_CAP: usize = 64;
 const SESSIONS_FILE: &str = "sessions.json";
 const TITLE_MAX_CHARS: usize = 40;
 
+/// 判断当前 title 是否仍为由首条 user 消息规则派生的占位。
+pub fn is_rule_derived_title(title: &str, user_text: &str) -> bool {
+    title == derive_title_from_user_message(user_text)
+}
+
 /// 从首条 user message 文本派生会话标题：取首个非空行、trim、超过 40 字符截断加省略号；
 /// 全空则回退 "New session"。纯函数，无副作用，便于单测。
 pub fn derive_title_from_user_message(text: &str) -> String {
@@ -424,7 +429,7 @@ impl SessionManager {
     }
 
     /// 首条 user message 写入后，若当前会话尚无 title，则派生并持久化一次。
-    /// 已有 title 直接返回，永不覆盖；非 user message 直接返回。保证标题稳定。
+    /// 已有非占位 title 直接返回；非 user message 直接返回。
     fn ensure_title_from_message(&self, message: &serde_json::Value) -> Result<(), AppError> {
         let session_key = self.current_session_key().to_string();
         self.ensure_title_for_session_key(&session_key, message)
@@ -440,6 +445,10 @@ impl SessionManager {
         if role != "user" {
             return Ok(());
         }
+        let text = message
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let store = self.load_store()?;
         let session_id = match self.resolve_active_session_id(&store, session_key) {
             Some(id) => id,
@@ -449,17 +458,18 @@ impl SessionManager {
             .sessions
             .get(&session_id)
             .and_then(|entry| entry.title.as_ref())
-            .is_some()
+            .is_some_and(|title| !is_rule_derived_title(title, text))
         {
             return Ok(());
         }
-        let text = message
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
         let title = derive_title_from_user_message(text);
         self.update_session(session_key, |entry| {
-            if entry.title.is_none() {
+            if entry.title.is_none()
+                || entry
+                    .title
+                    .as_ref()
+                    .is_some_and(|existing| is_rule_derived_title(existing, text))
+            {
                 entry.title = Some(title.clone());
             }
         })

@@ -1,5 +1,7 @@
 import * as assert from "node:assert/strict";
+import { execSync } from "node:child_process";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 
 import * as vscode from "vscode";
 
@@ -211,15 +213,41 @@ async function waitForWebviewDomSnapshot<T>(
   timeoutMs = 15_000,
 ): Promise<T> {
   const startedAt = Date.now();
+  let lastSnapshot:
+    | Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>>
+    | undefined;
   while (Date.now() - startedAt < timeoutMs) {
     const snapshot = await api.__testing.captureWebviewDom();
+    lastSnapshot = snapshot;
     const result = predicate(snapshot);
     if (result !== undefined) {
       return result;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("Timed out waiting for webview DOM to match the expected condition");
+  const dbg = lastSnapshot
+    ? {
+        activeSessionId: lastSnapshot.activeSessionId,
+        assistantResponseGroups: lastSnapshot.assistantResponseGroups,
+        groupFoldTitles: lastSnapshot.groupFoldTitles,
+        userPromptPill: lastSnapshot.userPromptPill,
+        assistantNoCard: lastSnapshot.assistantNoCard,
+        progressRow: lastSnapshot.progressRow,
+        planTodos: lastSnapshot.planTodos,
+        toolRowFlat: lastSnapshot.toolRowFlat,
+        toolRowExpandable: lastSnapshot.toolRowExpandable,
+        ellipsisAboveGroupHeader: lastSnapshot.ellipsisAboveGroupHeader,
+        leftGuideLine: lastSnapshot.leftGuideLine,
+        sessionTitleUpdated: lastSnapshot.sessionTitleUpdated,
+        timelineKinds: lastSnapshot.timelineKinds,
+        messageTexts: lastSnapshot.messageTexts,
+        toolTitles: lastSnapshot.toolTitles,
+        html: (lastSnapshot.html ?? "").slice(0, 4000),
+      }
+    : undefined;
+  throw new Error(
+    `Timed out waiting for webview DOM to match the expected condition. lastSnapshot=${JSON.stringify(dbg)}`,
+  );
 }
 
 async function answerPendingQuestion(
@@ -814,4 +842,145 @@ export async function assertWebviewOwnershipFlow(
     },
   );
   assert.equal(state.sessionViews[sessionId!]?.conflictMessage, null);
+}
+
+function transcriptVisualArtifactPath(filename: string): string {
+  const dir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR || "/tmp";
+  return path.join(dir, filename);
+}
+
+export async function assertTranscriptUiFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: "webview-transcript-new-session",
+      type: "newSession",
+    }),
+  );
+  const sessionId = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId, text: "transcript ui showcase" },
+      messageId: "webview-transcript-prompt",
+      type: "prompt",
+    }),
+  );
+  await waitForEvent(api, { type: "agent_end" });
+
+  const collapsed = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.assistantResponseGroups >= 1 &&
+      candidate.planTodos > 0 &&
+      candidate.userPromptPill &&
+      candidate.assistantNoCard &&
+      candidate.ellipsisAboveGroupHeader &&
+      candidate.sessionTitleUpdated &&
+      candidate.groupFoldTitles.some((title) => title.trim().length > 0)
+        ? candidate
+        : undefined,
+  );
+  assert.ok(
+    collapsed.assistantResponseGroups >= 1,
+    "expected at least one assistant response group",
+  );
+  assert.ok(
+    collapsed.groupFoldTitles.some((title) => title.trim().length > 0),
+    "expected a non-empty group fold title",
+  );
+  assert.ok(
+    collapsed.userPromptPill,
+    "expected a right-aligned user prompt pill",
+  );
+  assert.ok(
+    collapsed.assistantNoCard,
+    "expected an assistant message without a card border",
+  );
+  assert.ok(
+    collapsed.ellipsisAboveGroupHeader,
+    "expected the assistant preamble above the group header",
+  );
+  assert.ok(
+    collapsed.progressRow || collapsed.planTodos > 0,
+    "expected a progress row or plan todos",
+  );
+  assert.ok(
+    collapsed.sessionTitleUpdated,
+    "expected a session.title_updated event to be observed",
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    try {
+      execSync(`screencapture -x ${JSON.stringify(transcriptVisualArtifactPath("tomcat-vsix-visual-collapsed.png"))}`);
+    } catch {
+      /* screencapture unavailable in this environment */
+    }
+  }
+
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "thinking-group-toggle",
+  });
+  const expanded = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.toolRowFlat && candidate.leftGuideLine ? candidate : undefined,
+  );
+  assert.ok(
+    expanded.toolRowFlat,
+    "expected a flat tool row not wrapped in a card",
+  );
+  assert.ok(
+    expanded.toolRowExpandable,
+    "expected an expandable tool row chevron",
+  );
+  assert.ok(
+    expanded.leftGuideLine,
+    "expected the thinking-tool guide line wrapper",
+  );
+  assert.ok(
+    expanded.toolRowCount >= 3,
+    `expected at least 3 flat tool rows (read/bash/web_search), got ${expanded.toolRowCount}`,
+  );
+  assert.equal(
+    expanded.toolCardCount,
+    0,
+    `expected no tool-call cards after grouping fix, got ${expanded.toolCardCount}`,
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    try {
+      execSync(`screencapture -x ${JSON.stringify(transcriptVisualArtifactPath("tomcat-vsix-visual-expanded.png"))}`);
+    } catch {
+      /* screencapture unavailable in this environment */
+    }
+  }
+
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "file-chip",
+  });
+  const opened = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) => (candidate.fileChipOpen ? candidate : undefined),
+  );
+  assert.ok(
+    opened.fileChipOpen,
+    "expected clicking a file chip to trigger an openFile intent",
+  );
 }

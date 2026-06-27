@@ -238,6 +238,14 @@ impl AgentLoop {
             .unwrap_or_else(|| Arc::clone(&self.llm))
     }
 
+    /// 返回 title / utility 路径应使用的 provider。
+    pub(super) fn title_provider(&self) -> Arc<dyn LlmProvider> {
+        self.config
+            .title_provider
+            .clone()
+            .unwrap_or_else(|| Arc::clone(&self.llm))
+    }
+
     pub(super) fn persist_message_if_needed(
         &self,
         msg: &mut ChatMessage,

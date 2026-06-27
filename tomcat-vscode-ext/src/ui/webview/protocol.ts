@@ -18,6 +18,7 @@ export interface WebviewDomAction {
 }
 
 export interface WebviewMessageBlock {
+  assistantMessageId?: string;
   id: string;
   kind: "assistant" | "error" | "notice" | "user";
   text: string;
@@ -25,9 +26,17 @@ export interface WebviewMessageBlock {
 }
 
 export interface WebviewThinkingBlock {
+  assistantMessageId?: string;
   id: string;
+  summaryTitle?: string | null;
   text: string;
   type: "thinking";
+}
+
+export interface WebviewTodo {
+  content: string;
+  id: string;
+  status: "cancelled" | "completed" | "in_progress" | "pending";
 }
 
 export interface WebviewToolDisplayFile {
@@ -53,6 +62,8 @@ export type WebviewToolDisplay =
 export type WebviewToolStatus = "complete" | "running" | "streaming";
 
 export interface WebviewToolCard {
+  args?: Record<string, unknown>;
+  assistantMessageId?: string;
   display?: WebviewToolDisplay;
   id: string;
   isError: boolean;
@@ -96,6 +107,8 @@ export interface WebviewSessionSnapshot {
   conflictMessage?: string | null;
   contextRatio?: number | null;
   model?: string | null;
+  planTodos: WebviewTodo[];
+  sessionTodos: WebviewTodo[];
   thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
   owner: FrontendOwnerKind | null;
@@ -268,6 +281,13 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "openFile";
+      data: {
+        path: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "openPlanFile";
       data: {
         path: string;
@@ -320,6 +340,18 @@ export type WebviewIntent =
           title: string;
         }>;
         toolTitles: string[];
+        assistantResponseGroups: number;
+        groupFoldTitles: string[];
+        userPromptPill: boolean;
+        assistantNoCard: boolean;
+        progressRow: boolean;
+        planTodos: number;
+        toolRowFlat: boolean;
+        toolRowExpandable: boolean;
+        ellipsisAboveGroupHeader: boolean;
+        leftGuideLine: boolean;
+        toolRowCount: number;
+        toolCardCount: number;
       };
     };
 
@@ -390,6 +422,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "openDiff":
     case "applyEdit":
       return isRecord(value.data) && isString(value.data.toolCallId);
+    case "openFile":
     case "openPlanFile":
       return isRecord(value.data) && isString(value.data.path);
     case "removeAttachment":
@@ -426,7 +459,19 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         typeof value.data.streamMetrics.scrollHeight === "number" &&
         typeof value.data.streamMetrics.clientHeight === "number" &&
         typeof value.data.streamMetrics.distanceFromBottom === "number" &&
-        Array.isArray(value.data.toolBodyMetrics)
+        Array.isArray(value.data.toolBodyMetrics) &&
+        typeof value.data.assistantResponseGroups === "number" &&
+        Array.isArray(value.data.groupFoldTitles) &&
+        typeof value.data.userPromptPill === "boolean" &&
+        typeof value.data.assistantNoCard === "boolean" &&
+        typeof value.data.progressRow === "boolean" &&
+        typeof value.data.planTodos === "number" &&
+        typeof value.data.toolRowFlat === "boolean" &&
+        typeof value.data.toolRowExpandable === "boolean" &&
+        typeof value.data.ellipsisAboveGroupHeader === "boolean" &&
+        typeof value.data.leftGuideLine === "boolean" &&
+        typeof value.data.toolRowCount === "number" &&
+        typeof value.data.toolCardCount === "number"
       );
     default:
       return false;

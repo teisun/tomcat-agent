@@ -670,7 +670,7 @@ impl ChatContext {
                 if let Some(event_name) = bus_payload
                     .get("event")
                     .and_then(serde_json::Value::as_str)
-                    .filter(|name| name.starts_with("plan."))
+                    .filter(|name| name.starts_with("plan.") || name.starts_with("session."))
                 {
                     let event_name = event_name.to_string();
                     let mut payload = bus_payload;

@@ -233,6 +233,11 @@ pub async fn execute(
         "path": event_payload.path,
         "state": event_payload.state,
     }));
+    runtime.write_transcript_custom(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_TODOS,
+        "plan_id": target_plan_id,
+        "todos": items_json(&plan.frontmatter.todos),
+    }));
 
     Ok(serde_json::json!({
         "plan_id": target_plan_id,

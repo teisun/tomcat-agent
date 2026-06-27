@@ -25,9 +25,17 @@ export interface SessionStatePayload {
   model?: string | null;
   planId?: string | null;
   planState?: string | null;
+  planTodos?: WebviewTodo[];
   sessionId: string;
   sessionKey?: string | null;
+  sessionTodos?: WebviewTodo[];
   thinkingLevel?: string | null;
+}
+
+export interface WebviewTodo {
+  content: string;
+  id: string;
+  status: "cancelled" | "completed" | "in_progress" | "pending";
 }
 
 export interface SessionHistoryPayload {
@@ -35,6 +43,49 @@ export interface SessionHistoryPayload {
   messages: unknown[];
   sessionId: string;
   upToSeq?: string | null;
+}
+
+function parseTodoStatus(value: unknown): WebviewTodo["status"] | null {
+  switch (value) {
+    case "pending":
+    case "in_progress":
+    case "completed":
+    case "cancelled":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function parseTodos(value: unknown): WebviewTodo[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry.id !== "string" || typeof entry.content !== "string") {
+      return [];
+    }
+    const status = parseTodoStatus(entry.status);
+    if (!status) {
+      return [];
+    }
+    return [{ content: entry.content, id: entry.id, status }];
+  });
+}
+
+export function routeWireEventType(type: string): "plan_todos" | "session_todos" | "session_title" | "turn_end" | null {
+  switch (type) {
+    case "plan.todos":
+      return "plan_todos";
+    case "session.todos":
+      return "session_todos";
+    case "session.title_updated":
+      return "session_title";
+    case "turn_end":
+      return "turn_end";
+    default:
+      return null;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -202,9 +253,11 @@ export class SessionRouter {
       planId: typeof payload.planId === "string" ? payload.planId : null,
       planState:
         typeof payload.planState === "string" ? payload.planState : null,
+      planTodos: parseTodos(payload.planTodos),
       sessionId: payload.sessionId,
       sessionKey:
         typeof payload.sessionKey === "string" ? payload.sessionKey : null,
+      sessionTodos: parseTodos(payload.sessionTodos),
       thinkingLevel:
         typeof payload.thinkingLevel === "string" ? payload.thinkingLevel : null,
     };

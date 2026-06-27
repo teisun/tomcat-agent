@@ -9,6 +9,11 @@ export async function run(): Promise<void> {
     timeout: 60000,
   });
 
+  const grep = process.env.TOMCAT_E2E_GREP;
+  if (grep) {
+    mocha.grep(new RegExp(grep));
+  }
+
   mocha.addFile(path.resolve(__dirname, "installed.test.js"));
 
   await new Promise<void>((resolve, reject) => {

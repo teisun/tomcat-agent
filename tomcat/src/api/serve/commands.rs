@@ -323,6 +323,23 @@ pub(crate) async fn handle_command(
                 .plan_runtime
                 .active_plan_path()
                 .map(|path| crate::infra::platform::format_home_path(&path));
+            let session_todos = crate::core::tools::plan_tool::shared_todo_ops::items_json(
+                &slot
+                    .ctx
+                    .session_runtime
+                    .plan_runtime
+                    .snapshot_session_todos(),
+            );
+            let plan_todos = active_plan_path
+                .as_ref()
+                .and_then(|_| slot.ctx.session_runtime.plan_runtime.active_plan_path())
+                .and_then(|path| crate::core::plan_runtime::file_store::read_plan(&path).ok())
+                .map(|plan| {
+                    crate::core::tools::plan_tool::shared_todo_ops::items_json(
+                        &plan.frontmatter.todos,
+                    )
+                })
+                .unwrap_or_default();
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 Some(slot.session_id.clone()),
@@ -336,6 +353,8 @@ pub(crate) async fn handle_command(
                     "planState": plan_state.as_str(),
                     "planId": active_plan_id,
                     "planPath": active_plan_path,
+                    "planTodos": plan_todos,
+                    "sessionTodos": session_todos,
                     "sessionKey": slot.ctx.session_runtime.session.current_session_key(),
                 })),
             )))?;

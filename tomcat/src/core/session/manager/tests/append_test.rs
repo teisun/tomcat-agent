@@ -162,3 +162,54 @@ fn append_non_user_message_does_not_set_title() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn is_rule_derived_title_distinguishes_placeholder_from_semantic() {
+    let text = "帮我重构 session 列表的标题逻辑";
+    let placeholder = derive_title_from_user_message(text);
+    assert!(is_rule_derived_title(&placeholder, text));
+    // 语义 title 与规则派生串不同 → 非占位。
+    assert!(!is_rule_derived_title("Refactor session list titles", text));
+    // 不同 user 文本派生出不同占位，对原文本不成立。
+    assert!(!is_rule_derived_title(&placeholder, "完全不同的另一条消息"));
+}
+
+#[test]
+fn placeholder_title_is_replaced_by_semantic_then_preserved() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key().to_string();
+    mgr.create_session(&key, None).unwrap();
+
+    let user_text = "帮我重构 session 列表的标题逻辑";
+    mgr.append_message(serde_json::json!({
+        "role": "user",
+        "content": user_text,
+    }))
+    .unwrap();
+    let entry = mgr.current_session_entry().unwrap().unwrap();
+    assert_eq!(entry.title.as_deref(), Some(user_text));
+    assert!(is_rule_derived_title(entry.title.as_deref().unwrap(), user_text));
+
+    // 模拟异步 LLM 语义 title 覆盖占位（与 maybe_spawn_semantic_session_title 写回路径一致）。
+    mgr.update_session(&key, |e| {
+        e.title = Some("Refactor session list titles".to_string());
+    })
+    .unwrap();
+    let after = mgr.current_session_entry().unwrap().unwrap();
+    assert_eq!(after.title.as_deref(), Some("Refactor session list titles"));
+    assert!(!is_rule_derived_title(after.title.as_deref().unwrap(), user_text));
+
+    // 语义 title 写入后，后续同文本 user append 不应回退为规则占位。
+    mgr.append_message(serde_json::json!({
+        "role": "user",
+        "content": user_text,
+    }))
+    .unwrap();
+    let final_entry = mgr.current_session_entry().unwrap().unwrap();
+    assert_eq!(final_entry.title.as_deref(), Some("Refactor session list titles"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -27,6 +27,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   read_tool_tests
   resume_hydration_tests
   skill_tool_tests
+  transcript_summary_integration_tests
 )
 
 TOMCAT_INTEGRATION_SERIAL_TESTS=(
