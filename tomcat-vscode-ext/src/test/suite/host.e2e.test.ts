@@ -9,9 +9,11 @@ import {
   assertParticipantHappyPath,
   assertParticipantHappyPathViaChatUi,
   assertPlanSlashFlowViaChatUi,
+  assertWebviewAnswerCardFlow,
   assertWebviewDiffFlow,
   assertWebviewCrossOwnerPlanFlow,
   assertWebviewGiantGroupLazyLoadFlow,
+  assertWebviewInterruptFlow,
   assertWebviewMultiSessionFlow,
   assertWebviewOwnershipFlow,
   assertWebviewReloadReplayFlow,
@@ -79,6 +81,16 @@ suite("Tomcat host E2E", () => {
   test("applies edits from the Tomcat webview", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewDiffFlow(api);
+  });
+
+  test("renders ask_question answers in the Tomcat webview transcript", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewAnswerCardFlow(api);
+  });
+
+  test("resets interrupted Tomcat webview sessions back to send mode", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewInterruptFlow(api);
   });
 
   test("keeps multiple Tomcat webview sessions isolated", async () => {

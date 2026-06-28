@@ -365,7 +365,7 @@ function applyHistoryPlanCustomEntry(
     case "plan.code_review.warning":
       pushMessage(
         session,
-        "notice",
+        "warn",
         `Tomcat plan warning: ${
           typeof entry.reason === "string" && entry.reason.length > 0
             ? entry.reason
@@ -806,6 +806,36 @@ function pushMessage(
   return next;
 }
 
+function effectiveBusy(busy: boolean, interrupted: boolean | null | undefined): boolean {
+  return busy && interrupted !== true;
+}
+
+function messageExistsAtTail(
+  session: WebviewSessionSnapshot,
+  kind: WebviewMessageBlock["kind"],
+  text: string,
+): boolean {
+  const last = session.timeline.at(-1);
+  return last?.type === "message" && last.kind === kind && last.text === text;
+}
+
+function toolResultWasInterrupted(result: unknown): boolean {
+  return typeof result === "string" && result.trim() === "[interrupted]";
+}
+
+function markRunningToolsInterrupted(session: WebviewSessionSnapshot): void {
+  for (const item of session.timeline) {
+    if (item.type !== "tool") {
+      continue;
+    }
+    if (item.status === "running" || item.status === "streaming") {
+      item.status = "interrupted";
+      item.isError = false;
+      item.summary = "Interrupted";
+    }
+  }
+}
+
 function appendStreamingMessage(
   session: WebviewSessionSnapshot,
   runtime: SessionRuntimeState,
@@ -838,7 +868,7 @@ function mapSessionToTab(
   ownedByThisFrontend: boolean,
 ): WebviewSessionTab {
   return {
-    busy: session.busy,
+    busy: effectiveBusy(session.busy, session.interrupted),
     isCurrent: session.isCurrent,
     ownedByThisFrontend,
     owner,
@@ -922,7 +952,7 @@ export class WebviewStateStore {
     frontend: FrontendOwnerKind,
   ): void {
     const session = this.ensureSession(payload.sessionId);
-    session.busy = payload.busy;
+    session.busy = effectiveBusy(payload.busy, payload.interrupted);
     session.model = payload.model ?? null;
     session.thinkingLevel = payload.thinkingLevel ?? null;
     session.planId = payload.planId ?? null;
@@ -1106,14 +1136,17 @@ export class WebviewStateStore {
       case "agent_end":
         session.busy = false;
         clearStreaming(runtime);
-        if (frame.error) {
+        if (frame.error && frame.error !== "interrupted") {
           pushMessage(session, "error", frame.error);
         }
         return;
       case "agent_interrupted":
         session.busy = false;
         clearStreaming(runtime);
-        pushMessage(session, "notice", "Tomcat turn interrupted");
+        markRunningToolsInterrupted(session);
+        if (!messageExistsAtTail(session, "warn", "Tomcat turn interrupted")) {
+          pushMessage(session, "warn", "Tomcat turn interrupted");
+        }
         return;
       case "llm_notice":
         pushMessage(session, "notice", frame.message);
@@ -1189,8 +1222,8 @@ export class WebviewStateStore {
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.display = frame.display ?? undefined;
         tool.isError = frame.isError;
-        tool.status = "complete";
-        tool.summary = asText(frame.result);
+        tool.status = toolResultWasInterrupted(frame.result) ? "interrupted" : "complete";
+        tool.summary = toolResultWasInterrupted(frame.result) ? "Interrupted" : asText(frame.result);
         tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
         return;
       }
@@ -1369,7 +1402,7 @@ export class WebviewStateStore {
       case "plan.code_review.warning":
         pushMessage(
           session,
-          "notice",
+          "warn",
           `Tomcat plan warning: ${event.reason ?? "review needs attention"}`,
         );
         return;

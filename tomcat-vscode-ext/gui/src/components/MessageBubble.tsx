@@ -5,6 +5,7 @@ const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
   error: "Error",
   notice: "Notice",
   user: "You",
+  warn: "Warn",
 };
 
 export function MessageBubble({ item }: { item: WebviewMessageBlock }) {

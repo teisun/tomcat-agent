@@ -337,6 +337,7 @@ pub(crate) async fn handle_command(
                             serde_json::json!({
                                 "sessionId": session.session_id,
                                 "busy": session.busy,
+                                "interrupted": session.interrupted,
                             })
                         }).collect::<Vec<_>>()
                     })),
@@ -363,6 +364,11 @@ pub(crate) async fn handle_command(
                             .get(&session_id)
                             .map(|live_slot| live_slot.is_busy())
                             .unwrap_or(false);
+                        let interrupted = state
+                            .registry
+                            .get(&session_id)
+                            .map(|live_slot| live_slot.is_interrupted())
+                            .unwrap_or(false);
                         let title = entry.title.clone().or_else(|| {
                             // 惰性回填：无持久化 title 时从 transcript 首条 user message 派生，不落盘。
                             let path = session_manager.transcript_path(&session_id);
@@ -374,6 +380,7 @@ pub(crate) async fn handle_command(
                             "updatedAt": entry.updated_at,
                             "isCurrent": current_session_id.as_deref() == Some(entry.session_id.as_str()),
                             "busy": busy,
+                            "interrupted": interrupted,
                             "title": title,
                         })
                     })
@@ -434,6 +441,7 @@ pub(crate) async fn handle_command(
                 Some(serde_json::json!({
                     "sessionId": slot.session_id,
                     "busy": slot.is_busy(),
+                    "interrupted": slot.is_interrupted(),
                     "mode": match slot.mode { crate::SessionMode::Code => "code", crate::SessionMode::Claw => "claw" },
                     "cwd": slot.cwd,
                     "model": model,

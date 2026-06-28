@@ -25,7 +25,7 @@ pub(in super::super) async fn handle_write(
     }
     let result = ctx
         .primitive
-        .write_file(path, content, overwrite, AGENT_PLUGIN_ID)
+        .write_file_with_cancel(path, content, overwrite, ctx.cancel, AGENT_PLUGIN_ID)
         .await;
     match result {
         Ok(r) => {

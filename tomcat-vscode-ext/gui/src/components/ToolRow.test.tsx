@@ -283,4 +283,56 @@ describe("ToolRow", () => {
     expect(screen.getByTestId("answer-option-style").textContent).toContain("Run-and-gun");
     expect(screen.queryByText('"optionIds":["run-gun"]')).toBeNull();
   });
+
+  it("accepts snake_case ask_question results from the transcript", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: {
+            questions: [
+              {
+                id: "deploy_target",
+                options: [{ id: "staging", label: "Staging" }],
+                prompt: "Deploy where?",
+              },
+            ],
+          },
+          summary: JSON.stringify({
+            answers: [
+              {
+                option_ids: ["staging"],
+                picked_recommended: false,
+                question_id: "deploy_target",
+              },
+            ],
+            cancelled: false,
+          }),
+          toolName: "ask_question",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("answer-card-question").textContent).toContain("Deploy where?");
+    expect(screen.getByTestId("answer-option-deploy_target").textContent).toContain("Staging");
+  });
+
+  it("stops showing the running indicator for interrupted tools", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/a.rs" },
+          status: "interrupted",
+          summary: "[interrupted]",
+          toolName: "edit",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Interrupted edit");
+    expect(screen.getByTestId("tool-row-body").textContent).toContain("Interrupted");
+  });
 });

@@ -22,6 +22,7 @@ const __testing = (
 type MutableSessionState = {
   busy: boolean;
   contextRatio: number | null;
+  interrupted: boolean;
   model: string;
   modelThinking: Record<string, string | null>;
   planId: string | null;
@@ -190,6 +191,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
   const sessionState: MutableSessionState = {
     busy: false,
     contextRatio: null,
+    interrupted: false,
     model: "gpt-5.4",
     modelThinking: {
       "claude-4.6-sonnet": "low",
@@ -254,6 +256,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
       return {
         busy: sessionState.busy,
         contextRatio: sessionState.contextRatio,
+        interrupted: sessionState.interrupted,
         model: sessionState.model,
         planId: sessionState.planId,
         planPath: sessionState.planPath,
@@ -1212,6 +1215,40 @@ describe("webview provider integration", () => {
       planId: null,
       planState: "chat",
     });
+
+    provider.dispose();
+  });
+
+  it("reconciles interrupted sessions back to an idle webview state", async () => {
+    const { messenger, provider, sessionState } = buildProvider({
+      sessionState: {
+        busy: true,
+        interrupted: false,
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-interrupted",
+      type: "ready",
+    });
+    expect(provider.currentState().sessionViews["session-1"]?.busy).toBe(true);
+
+    sessionState.interrupted = true;
+    messenger.emit({
+      partialTextLen: 0,
+      sessionId: "session-1",
+      toolResultsCount: 1,
+      type: "agent_interrupted",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const session = provider.currentState().sessionViews["session-1"];
+    expect(session?.busy).toBe(false);
+    expect(session?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "warn", text: "Tomcat turn interrupted", type: "message" }),
+      ]),
+    );
 
     provider.dispose();
   });

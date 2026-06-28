@@ -12,10 +12,12 @@ type HostE2eHelper = {
   assertParticipantHappyPath(api: unknown): Promise<void>;
   assertParticipantHappyPathViaChatUi(api: unknown): Promise<void>;
   assertPlanSlashFlowViaChatUi(api: unknown): Promise<void>;
+  assertWebviewAnswerCardFlow(api: unknown): Promise<void>;
   assertTranscriptUiFlow(api: unknown): Promise<void>;
   assertWebviewCrossOwnerPlanFlow(api: unknown): Promise<void>;
   assertWebviewDiffFlow(api: unknown): Promise<void>;
   assertWebviewGiantGroupLazyLoadFlow(api: unknown): Promise<void>;
+  assertWebviewInterruptFlow(api: unknown): Promise<void>;
   assertWebviewMultiSessionFlow(api: unknown): Promise<void>;
   assertWebviewOwnershipFlow(api: unknown): Promise<void>;
   assertWebviewReloadReplayFlow(api: unknown): Promise<void>;
@@ -88,6 +90,16 @@ suite("Installed Tomcat extension", () => {
   test("applies edits from the Tomcat webview", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewDiffFlow(api);
+  });
+
+  test("renders ask_question answers in the Tomcat webview transcript", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewAnswerCardFlow(api);
+  });
+
+  test("resets interrupted Tomcat webview sessions back to send mode", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewInterruptFlow(api);
   });
 
   test("keeps multiple Tomcat webview sessions isolated", async () => {

@@ -89,6 +89,7 @@ use crate::infra::error::AppError;
 use crate::infra::PrimitiveConfig;
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::core::permission::PermissionGate;
 
@@ -292,7 +293,19 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         overwrite: bool,
         plugin_id: &str,
     ) -> Result<WriteFileResult, AppError> {
-        write_edit::write_file_impl(self, path, content, overwrite, plugin_id).await
+        let cancel = CancellationToken::new();
+        write_edit::write_file_impl(self, path, content, overwrite, &cancel, plugin_id).await
+    }
+
+    async fn write_file_with_cancel(
+        &self,
+        path: &str,
+        content: &str,
+        overwrite: bool,
+        cancel: &CancellationToken,
+        plugin_id: &str,
+    ) -> Result<WriteFileResult, AppError> {
+        write_edit::write_file_impl(self, path, content, overwrite, cancel, plugin_id).await
     }
 
     async fn edit_file(
@@ -301,7 +314,18 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         edits: Vec<EditOperation>,
         plugin_id: &str,
     ) -> Result<EditFileResult, AppError> {
-        write_edit::edit_file_impl(self, path, edits, plugin_id).await
+        let cancel = CancellationToken::new();
+        write_edit::edit_file_impl(self, path, edits, &cancel, plugin_id).await
+    }
+
+    async fn edit_file_with_cancel(
+        &self,
+        path: &str,
+        edits: Vec<EditOperation>,
+        cancel: &CancellationToken,
+        plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        write_edit::edit_file_impl(self, path, edits, cancel, plugin_id).await
     }
 
     async fn hashline_edit(
@@ -310,7 +334,18 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         segments: Vec<crate::core::tools::primitive::HashlineSegment>,
         plugin_id: &str,
     ) -> Result<EditFileResult, AppError> {
-        hashline_edit::hashline_edit_impl(self, path, segments, plugin_id).await
+        let cancel = CancellationToken::new();
+        hashline_edit::hashline_edit_impl(self, path, segments, &cancel, plugin_id).await
+    }
+
+    async fn hashline_edit_with_cancel(
+        &self,
+        path: &str,
+        segments: Vec<crate::core::tools::primitive::HashlineSegment>,
+        cancel: &CancellationToken,
+        plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        hashline_edit::hashline_edit_impl(self, path, segments, cancel, plugin_id).await
     }
 
     async fn execute_bash(

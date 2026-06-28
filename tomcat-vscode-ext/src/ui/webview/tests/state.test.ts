@@ -372,6 +372,24 @@ describe("history tool attribution", () => {
 });
 
 describe("session state hydration", () => {
+  it("treats interrupted get_state payloads as idle for UI purposes", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applySessionState(
+      {
+        busy: true,
+        interrupted: true,
+        model: "gpt-5.4",
+        sessionId: "s1",
+      },
+      null,
+      "webview",
+    );
+
+    expect(store.snapshot().sessionViews.s1.busy).toBe(false);
+  });
+
   it("hydrates plan cards and context ratio from get_state without duplicating cards", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
@@ -438,6 +456,43 @@ describe("session state hydration", () => {
       planId: "plan-1",
       state: "chat",
     });
+  });
+
+  it("marks running tools interrupted and deduplicates the warn card", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applyEvent({
+      args: { path: "src/app.ts" },
+      sessionId: "s1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      type: "tool_execution_start",
+    });
+
+    store.applyEvent({
+      partialTextLen: 0,
+      sessionId: "s1",
+      toolResultsCount: 0,
+      type: "agent_interrupted",
+    });
+    store.applyEvent({
+      partialTextLen: 0,
+      sessionId: "s1",
+      toolResultsCount: 0,
+      type: "agent_interrupted",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    const tool = session.timeline.find((item) => item.type === "tool");
+    const warnings = session.timeline.filter(
+      (item) => item.type === "message" && item.kind === "warn",
+    );
+    expect(tool).toMatchObject({
+      status: "interrupted",
+      summary: "Interrupted",
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ text: "Tomcat turn interrupted" });
   });
 });
 
@@ -536,6 +591,9 @@ describe("custom history replay", () => {
     const notices = session.timeline.filter(
       (item) => item.type === "message" && item.kind === "notice",
     );
+    const warnings = session.timeline.filter(
+      (item) => item.type === "message" && item.kind === "warn",
+    );
     expect(planCards).toHaveLength(1);
     expect(planCards[0]).toMatchObject({
       path: "/workspace/plan-a.plan.md",
@@ -546,6 +604,10 @@ describe("custom history replay", () => {
       expect.arrayContaining([
         expect.objectContaining({ text: "Tomcat plan review: looks good" }),
         expect.objectContaining({ text: "Tomcat plan verify: pass" }),
+      ]),
+    );
+    expect(warnings).toEqual(
+      expect.arrayContaining([
         expect.objectContaining({ text: "Tomcat plan warning: rounds_exhausted" }),
       ]),
     );

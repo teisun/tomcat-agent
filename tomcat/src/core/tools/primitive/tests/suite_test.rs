@@ -13,6 +13,7 @@ use crate::infra::{
 use serial_test::serial;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 fn temp_primitive_config(_dir: &Path) -> PrimitiveConfig {
     PrimitiveConfig::default()
@@ -199,6 +200,31 @@ async fn write_file_success() {
 }
 
 #[tokio::test]
+async fn write_file_with_cancel_skips_disk_write() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let f = dir.join("cancel-write.txt");
+    std::fs::write(&f, "old").unwrap();
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let result = exec
+        .write_file_with_cancel(&path_str, "new", true, &cancel, "p1")
+        .await
+        .expect("cancelled write should return a structured non-write result");
+    assert!(!result.written);
+    assert_eq!(result.bytes_written, 0);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "old");
+}
+
+#[tokio::test]
 async fn write_file_user_denied_returns_permission_and_audit() {
     let dir = std::env::temp_dir().join("tomcat_exec_deny");
     std::fs::create_dir_all(&dir).unwrap();
@@ -265,6 +291,69 @@ async fn edit_file_success() {
     );
     let _ = std::fs::remove_file(&f);
     let _ = std::fs::remove_dir(&dir);
+}
+
+#[tokio::test]
+async fn edit_file_with_cancel_skips_disk_write() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let f = dir.join("cancel-edit.txt");
+    std::fs::write(&f, "line1\nline2\nline3\n").unwrap();
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let edits = vec![EditOperation {
+        operation_type: EditOperationType::Replace,
+        start_line: Some(2),
+        end_line: Some(2),
+        old_content: Some("line2".to_string()),
+        new_content: "changed".to_string(),
+    }];
+    let result = exec
+        .edit_file_with_cancel(&path_str, edits, &cancel, "p1")
+        .await
+        .expect("cancelled edit should return a structured non-apply result");
+    assert!(!result.applied);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "line1\nline2\nline3\n");
+}
+
+#[tokio::test]
+async fn hashline_edit_with_cancel_skips_disk_write() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let f = dir.join("cancel-hashline.txt");
+    std::fs::write(&f, "alpha\nbeta\ngamma\n").unwrap();
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+
+    let segment = crate::core::tools::primitive::HashlineSegment {
+        op: crate::core::tools::primitive::HashlineOp::Replace,
+        start_line: 2,
+        start_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        end_line: 2,
+        end_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        lines: "changed\n".to_string(),
+    };
+    let result = exec
+        .hashline_edit_with_cancel(&path_str, vec![segment], &cancel, "p1")
+        .await
+        .expect("cancelled hashline_edit should return a structured non-apply result");
+    assert!(!result.applied);
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "alpha\nbeta\ngamma\n");
 }
 
 #[tokio::test]

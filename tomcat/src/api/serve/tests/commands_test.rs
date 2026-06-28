@@ -1459,6 +1459,79 @@ async fn serve_get_state_tracks_per_model_thinking_level_after_switching_models(
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_get_state_reports_interrupted_alongside_busy() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    slot.busy.store(true, Ordering::SeqCst);
+    slot.ctx.session_runtime.cancel_token.lock().cancel();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-interrupted".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-interrupted")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-interrupted"))
+        .expect("get_state response");
+    let payload = response["payload"].clone();
+
+    assert_eq!(payload["busy"].as_bool(), Some(true));
+    assert_eq!(payload["interrupted"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_list_sessions_live_reports_interrupted_flag() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    slot.busy.store(true, Ordering::SeqCst);
+    slot.ctx.session_runtime.cancel_token.lock().cancel();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListSessions {
+            id: Some("list-live-interrupted".to_string()),
+            scope: Some(ListSessionsScope::Live),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-live-interrupted")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str)
+                == Some("list-live-interrupted")
+        })
+        .expect("list_sessions response");
+    let sessions = response["payload"]["sessions"]
+        .as_array()
+        .expect("sessions array");
+    let current = sessions
+        .iter()
+        .find(|entry| entry["sessionId"].as_str() == Some(slot.session_id.as_str()))
+        .expect("current session summary");
+
+    assert_eq!(current["busy"].as_bool(), Some(true));
+    assert_eq!(current["interrupted"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_get_state_contains_plan_and_session_todos() {
     use crate::core::plan_runtime::file_store::{TodoItem, TodoStatus};
 

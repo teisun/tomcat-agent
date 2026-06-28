@@ -68,6 +68,10 @@ impl SessionSlot {
         self.busy.store(false, Ordering::SeqCst);
     }
 
+    pub fn is_interrupted(&self) -> bool {
+        self.ctx.session_runtime.cancel_token.lock().is_cancelled()
+    }
+
     pub fn reset_terminal_emitted(&self) {
         self.terminal_emitted.store(false, Ordering::SeqCst);
     }
@@ -88,6 +92,7 @@ impl SessionSlot {
 pub struct SessionSummary {
     pub session_id: String,
     pub busy: bool,
+    pub interrupted: bool,
 }
 
 /// 进程内 `sessionId -> SessionSlot` 的注册表。
@@ -184,6 +189,7 @@ impl ChatContextRegistry {
                 self.get(&session_id).map(|slot| SessionSummary {
                     session_id,
                     busy: slot.is_busy(),
+                    interrupted: slot.is_interrupted(),
                 })
             })
             .collect()

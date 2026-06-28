@@ -643,6 +643,233 @@ export async function assertWebviewStreamingFlow(
   );
 }
 
+export async function assertWebviewInterruptFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        text: "interrupt please",
+      },
+      messageId: "webview-interrupt-1",
+      type: "prompt",
+    }),
+  );
+  await waitForEvent(api, {
+    textIncludes: "partial",
+    type: "message_update",
+  });
+  const sessionId = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.busy ? activeSessionId : undefined;
+    },
+    20_000,
+  );
+  await api.__testing.injectServeEvent({
+    args: { path: "src/app.ts" },
+    sessionId,
+    toolCallId: "interrupt-tool-1",
+    toolName: "edit",
+    type: "tool_execution_start",
+  });
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes('data-testid="stop-button"') &&
+      snapshot.html.includes('data-testid="tool-row-running-indicator"')
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId },
+      messageId: "webview-interrupt-stop",
+      type: "interrupt",
+    }),
+  );
+  await waitForEvent(api, { type: "agent_interrupted" });
+  await waitForEvent(api, {
+    textIncludes: "interrupted",
+    type: "agent_end",
+  });
+
+  const settled = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes('data-testid="send-button"') &&
+      !snapshot.html.includes('data-testid="stop-button"') &&
+      !snapshot.html.includes('data-testid="tool-row-running-indicator"') &&
+      snapshot.messageTexts.filter((text) => text === "Tomcat turn interrupted").length === 1 &&
+      snapshot.html.includes("tc-message--warn")
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    settled.html.includes("Interrupted"),
+    "expected interrupted tool rows to render an interrupted summary instead of a spinner",
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: "webview-interrupt-new-session",
+      type: "newSession",
+    }),
+  );
+  const otherSessionId = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId || activeSessionId === sessionId) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+    20_000,
+  );
+  assert.notEqual(otherSessionId, sessionId);
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId },
+      messageId: "webview-interrupt-switch-back",
+      type: "switchSession",
+    }),
+  );
+  const restored = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes('data-testid="send-button"') &&
+      !snapshot.html.includes('data-testid="stop-button"') &&
+      !snapshot.html.includes('data-testid="tool-row-running-indicator"') &&
+      snapshot.messageTexts.filter((text) => text === "Tomcat turn interrupted").length === 1
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    restored.html.includes("Interrupted"),
+    "expected interrupted state to stay restored after switching away and back",
+  );
+}
+
+export async function assertWebviewAnswerCardFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: "webview-answer-card-session",
+      type: "newSession",
+    }),
+  );
+  const sessionId = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+    20_000,
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        text: "answer card showcase",
+      },
+      messageId: "webview-answer-card-1",
+      type: "prompt",
+    }),
+  );
+  const approval = await waitForWebviewState(
+    api,
+    (state) => {
+      const session = state.sessionViews[sessionId];
+      if (!session) {
+        return undefined;
+      }
+      const pending = session?.timeline.find(
+        (
+          item,
+        ): item is Extract<typeof session.timeline[number], { type: "approval" }> =>
+          item.type === "approval" && !item.resolved,
+      );
+      return pending ? { pending } : undefined;
+    },
+    20_000,
+  );
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        requestId: approval.pending.request.requestId,
+        result: {
+          answers: [
+            {
+              optionIds: ["staging"],
+              pickedRecommended: true,
+              questionId: approval.pending.request.questions[0].id,
+              skipped: false,
+            },
+          ],
+          cancelled: false,
+        },
+      },
+      messageId: "webview-answer-card-approve",
+      type: "answerQuestion",
+    }),
+  );
+
+  await waitForEvent(api, { type: "tool_execution_end" });
+  await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.toolTitles.some((title) => /Asked question/i.test(title))
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "tool-row-toggle",
+  });
+  const snapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.html.includes('data-testid="answer-card"') &&
+      candidate.html.includes("Deploy where?") &&
+      candidate.html.includes("Staging")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.doesNotMatch(snapshot.html, /"optionIds"\s*:/u);
+}
+
 export async function assertWebviewDiffFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {

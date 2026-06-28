@@ -471,24 +471,51 @@ function handlePrompt(frame) {
     ? frame.params.attachments.length
     : 0;
   recordHistoryMessage(sessionId, "user", text);
+  if (text.includes("answer card showcase")) {
+    const requestId = \`ask-answer-\${sessionId}\`;
+    const request = {
+      questions: [
+        {
+          id: "deploy-target",
+          options: [
+            { id: "staging", label: "Staging", recommended: true },
+            { id: "production", label: "Production", recommended: false },
+          ],
+          prompt: "Deploy where?",
+        },
+      ],
+      requestId,
+      responseEvent: \`plan.ask_question.response.\${requestId}\`,
+    };
+    pendingApproval = { kind: "answer-card", request, requestId, sessionId };
+    send({
+      payload: request,
+      requestId,
+      sessionId,
+      subtype: "ask_question",
+      type: "control_request",
+    });
+    return;
+  }
   if (text.includes("approve edit")) {
     const requestId = \`ask-\${sessionId}\`;
-    pendingApproval = { requestId, sessionId };
+    const request = {
+      questions: [
+        {
+          id: "approve-edit",
+          options: [
+            { id: "approve", label: "Approve", recommended: true },
+            { id: "reject", label: "Reject", recommended: false },
+          ],
+          prompt: "Approve the edit?",
+        },
+      ],
+      requestId,
+      responseEvent: \`plan.ask_question.response.\${requestId}\`,
+    };
+    pendingApproval = { kind: "edit-approval", request, requestId, sessionId };
     send({
-      payload: {
-        questions: [
-          {
-            id: "approve-edit",
-            options: [
-              { id: "approve", label: "Approve", recommended: true },
-              { id: "reject", label: "Reject", recommended: false },
-            ],
-            prompt: "Approve the edit?",
-          },
-        ],
-        requestId,
-        responseEvent: \`plan.ask_question.response.\${requestId}\`,
-      },
+      payload: request,
       requestId,
       sessionId,
       subtype: "ask_question",
@@ -770,10 +797,37 @@ function handleControlResponse(frame) {
     return;
   }
 
-  const sessionId = pendingApproval.sessionId;
-  const answers = frame.payload && frame.payload.result && Array.isArray(frame.payload.result.answers)
-    ? frame.payload.result.answers
-    : [];
+  const pending = pendingApproval;
+  pendingApproval = null;
+  const sessionId = pending.sessionId;
+  const result =
+    frame.payload && frame.payload.result && typeof frame.payload.result === "object"
+      ? frame.payload.result
+      : { answers: [], cancelled: false };
+  if (pending.kind === "answer-card") {
+    const tool = {
+      args: { questions: pending.request.questions },
+      result,
+      toolCallId: \`tool-ask-\${pending.requestId}\`,
+      toolName: "ask_question",
+    };
+    emitCompletedTool(sessionId, tool);
+    send({
+      message: {},
+      summaryTitle: "Asked question",
+      toolResults: [],
+      turnIndex: 1,
+      type: "turn_end",
+    });
+    emitMessageDelta(sessionId, "Recorded your answer.");
+    recordHistoryAssistantWithTools(sessionId, "Recorded your answer.", [tool], "Asked question");
+    recordHistoryToolResult(sessionId, tool);
+    emitContextMetrics(sessionId, 0.49);
+    finishTurn(sessionId, null);
+    return;
+  }
+
+  const answers = Array.isArray(result.answers) ? result.answers : [];
   const firstAnswer = answers[0] || {};
   const pickedApprove = Array.isArray(firstAnswer.optionIds) && firstAnswer.optionIds.includes("approve");
 
@@ -806,8 +860,6 @@ function handleControlResponse(frame) {
     recordHistoryMessage(sessionId, "assistant", "edit rejected");
     finishTurn(sessionId, null);
   }
-
-  pendingApproval = null;
 }
 
 function handleInterrupt(frame) {

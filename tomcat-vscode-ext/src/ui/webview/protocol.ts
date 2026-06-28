@@ -21,7 +21,7 @@ export interface WebviewDomAction {
 export interface WebviewMessageBlock {
   assistantMessageId?: string;
   id: string;
-  kind: "assistant" | "error" | "notice" | "user";
+  kind: "assistant" | "error" | "notice" | "user" | "warn";
   text: string;
   type: "message";
 }
@@ -67,7 +67,7 @@ export type WebviewToolDisplay =
   | WebviewToolDisplayPlan
   | WebviewToolDisplayText;
 
-export type WebviewToolStatus = "complete" | "running" | "streaming";
+export type WebviewToolStatus = "complete" | "interrupted" | "running" | "streaming";
 
 export interface WebviewToolCard {
   args?: Record<string, unknown>;

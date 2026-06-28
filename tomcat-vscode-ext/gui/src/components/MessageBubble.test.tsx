@@ -64,5 +64,18 @@ describe("MessageBubble", () => {
       />,
     );
     expect(screen.getByTestId("message-block").className).toContain("tc-message--notice");
+
+    rerender(
+      <MessageBubble
+        item={{
+          id: "w1",
+          kind: "warn",
+          text: "careful",
+          type: "message",
+        }}
+      />,
+    );
+    expect(screen.getByTestId("message-block").className).toContain("tc-message--warn");
+    expect(screen.getByText("Warn")).toBeTruthy();
   });
 });

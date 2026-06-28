@@ -30,7 +30,14 @@ function filePathForTool(item: WebviewToolCard): string | undefined {
 }
 
 export function isRunning(item: WebviewToolCard): boolean {
-  return item.status !== "complete" && !item.isError;
+  return (item.status === "running" || item.status === "streaming") && !item.isError;
+}
+
+function formatToolSummary(summary: string | undefined): string | undefined {
+  if (!summary) {
+    return undefined;
+  }
+  return summary.trim() === "[interrupted]" ? "Interrupted" : summary;
 }
 
 function isReadLikeTool(toolName: string): boolean {
@@ -100,6 +107,9 @@ function toolIconClass(toolName: string): string {
 export function buildFlatLabel(item: WebviewToolCard): string {
   const args = item.args ?? {};
   const running = isRunning(item);
+  if (item.status === "interrupted") {
+    return `Interrupted ${humanizeToolName(item.toolName)}`;
+  }
 
   switch (item.toolName) {
     case "read":
@@ -252,14 +262,69 @@ function parseAskQuestionResult(summary: string | undefined): AskQuestionResult 
     return null;
   }
   try {
-    const parsed = JSON.parse(summary) as AskQuestionResult;
+    const parsed = JSON.parse(summary) as {
+      answers?: unknown[];
+      cancelled?: unknown;
+    };
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.answers)) {
       return null;
     }
     if (typeof parsed.cancelled !== "boolean") {
       return null;
     }
-    return parsed;
+    const answers = parsed.answers.map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+      const answer = entry as Record<string, unknown>;
+      const questionId =
+        typeof answer.questionId === "string"
+          ? answer.questionId
+          : typeof answer.question_id === "string"
+            ? answer.question_id
+            : null;
+      const optionIds = Array.isArray(answer.optionIds)
+        ? answer.optionIds
+        : Array.isArray(answer.option_ids)
+          ? answer.option_ids
+          : null;
+      const pickedRecommended =
+        typeof answer.pickedRecommended === "boolean"
+          ? answer.pickedRecommended
+          : typeof answer.picked_recommended === "boolean"
+            ? answer.picked_recommended
+            : null;
+      const customText =
+        typeof answer.customText === "string" || answer.customText === null
+          ? answer.customText
+          : typeof answer.custom_text === "string" || answer.custom_text === null
+            ? answer.custom_text
+            : undefined;
+      const skipped =
+        typeof answer.skipped === "boolean" ? answer.skipped : undefined;
+      if (
+        !questionId ||
+        !optionIds ||
+        !optionIds.every((optionId) => typeof optionId === "string") ||
+        typeof pickedRecommended !== "boolean"
+      ) {
+        return null;
+      }
+      return {
+        customText: customText ?? undefined,
+        optionIds,
+        pickedRecommended,
+        questionId,
+        skipped,
+      };
+    });
+    if (answers.some((entry) => entry === null)) {
+      return null;
+    }
+    return {
+      answers: answers.filter((entry): entry is AskQuestionResult["answers"][number] => entry !== null),
+      cancelled: parsed.cancelled,
+    };
   } catch {
     return null;
   }
@@ -352,7 +417,7 @@ function renderExpandedBody(item: WebviewToolCard): ReactNode {
 
   return (
     <>
-      {item.summary ? <pre data-testid="tool-row-result">{item.summary}</pre> : null}
+      {item.summary ? <pre data-testid="tool-row-result">{formatToolSummary(item.summary)}</pre> : null}
       {item.display?.kind === "plan" ? <pre>{item.display.plan}</pre> : null}
       {item.display?.kind === "text" && item.display.text !== item.summary ? (
         <pre>{item.display.text}</pre>

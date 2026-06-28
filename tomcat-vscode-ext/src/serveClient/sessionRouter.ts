@@ -7,6 +7,7 @@ import type { GetMessagesParams, ListSessionsScope, ResponseFrame } from "./wire
 
 export interface SessionSummary {
   busy: boolean;
+  interrupted?: boolean;
   isCurrent: boolean;
   sessionId: string;
   title: string | null;
@@ -23,6 +24,7 @@ export interface SessionStatePayload {
   busy: boolean;
   contextRatio?: number | null;
   cwd?: string | null;
+  interrupted?: boolean;
   mode?: string | null;
   model?: string | null;
   planId?: string | null;
@@ -178,6 +180,7 @@ export class SessionRouter {
             .filter(isRecord)
             .map((session) => ({
               busy: session.busy === true,
+              interrupted: session.interrupted === true,
               isCurrent: session.isCurrent === true,
               sessionId: String(session.sessionId ?? ""),
               title:
@@ -210,6 +213,7 @@ export class SessionRouter {
           ? payload.contextUtilizationRatio
           : null,
       cwd: typeof payload.cwd === "string" ? payload.cwd : null,
+      interrupted: payload.interrupted === true,
       mode: typeof payload.mode === "string" ? payload.mode : null,
       model: typeof payload.model === "string" ? payload.model : null,
       planId: typeof payload.planId === "string" ? payload.planId : null,
