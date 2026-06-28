@@ -6,6 +6,33 @@ function basename(filePath: string): string {
   return segments[segments.length - 1] || filePath;
 }
 
+function prettifyPlanToken(value: string): string {
+  return value
+    .replace(/^plan_/, "")
+    .replace(/_[0-9a-f]{8}$/i, "")
+    .replace(/_/g, " ")
+    .trim();
+}
+
+function derivePlanTitle(item: WebviewPlanFileCard, fileName: string): string {
+  const explicitTitle = item.title?.trim();
+  if (explicitTitle && explicitTitle !== fileName) {
+    return explicitTitle;
+  }
+
+  const overviewTitle = item.overview?.trim().split("\n")[0]?.trim();
+  if (overviewTitle) {
+    return overviewTitle.length > 96 ? `${overviewTitle.slice(0, 93).trimEnd()}...` : overviewTitle;
+  }
+
+  const prettyPlanId = item.planId ? prettifyPlanToken(item.planId) : "";
+  if (prettyPlanId) {
+    return prettyPlanId;
+  }
+
+  return fileName;
+}
+
 function todoCountLabel(count: number): string {
   return `${count} ${count === 1 ? "todo" : "todos"}`;
 }
@@ -19,23 +46,29 @@ export function PlanFileCard({
 }: {
   canBuild: boolean;
   item: WebviewPlanFileCard;
-  onBuild(): void;
+  onBuild(planId: string | null, path: string): void;
   onOpenPlanFile(path: string): void;
   planTodos?: WebviewTodo[];
 }) {
   const fileName = basename(item.path);
-  const title = item.title?.trim() || fileName;
+  const title = derivePlanTitle(item, fileName);
   const buildAllowed =
     canBuild && (item.state === "planning" || item.state === "pending");
 
   return (
     <section className="tc-card tc-plan-card" data-testid="plan-card">
-      <div className="tc-plan-card__file-row">
+      <button
+        aria-label="Open plan file"
+        className="tc-plan-card__file-row"
+        data-testid="plan-card-file-link"
+        onClick={() => onOpenPlanFile(item.path)}
+        type="button"
+      >
         <span aria-hidden="true" className="tc-plan-card__file-icon codicon codicon-list-tree" />
         <span className="tc-plan-card__file-name" data-testid="plan-card-file-name">
           {fileName}
         </span>
-      </div>
+      </button>
       <button
         aria-label="Open plan file"
         className="tc-plan-card__title"
@@ -67,7 +100,7 @@ export function PlanFileCard({
           className="tc-button tc-button--primary"
           data-testid="build-plan"
           disabled={!buildAllowed}
-          onClick={onBuild}
+          onClick={() => onBuild(item.planId ?? null, item.path)}
           type="button"
         >
           Build

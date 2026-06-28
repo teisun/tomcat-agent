@@ -11,6 +11,7 @@ function formatPlanStatus(planState?: WebviewPlanState | null): string | null {
 
 export function Composer({
   availableModels,
+  busy = false,
   canPrompt,
   contextLabel,
   modeValue,
@@ -22,12 +23,14 @@ export function Composer({
   onThinkingLevelChange,
   onPromptChange,
   onPromptKeyDown,
+  onInterrupt,
   onSubmit,
   planState,
   prompt,
   promptPlaceholder,
 }: {
   availableModels: string[];
+  busy?: boolean;
   canPrompt: boolean;
   contextLabel: string;
   modeValue: "chat" | "plan";
@@ -39,6 +42,7 @@ export function Composer({
   onThinkingLevelChange(value: "high" | "low" | "medium" | "xhigh" | ""): void;
   onPromptChange(value: string): void;
   onPromptKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void;
+  onInterrupt?(): void;
   onSubmit(): void;
   planState?: WebviewPlanState | null;
   prompt: string;
@@ -129,14 +133,14 @@ export function Composer({
           </span>
 
           <button
-            aria-label="Send prompt"
+            aria-label={busy ? "Stop" : "Send prompt"}
             className="tc-send-button"
-            data-testid="send-button"
-            disabled={!prompt.trim() || !canPrompt}
-            onClick={onSubmit}
+            data-testid={busy ? "stop-button" : "send-button"}
+            disabled={busy ? false : !prompt.trim() || !canPrompt}
+            onClick={busy ? onInterrupt : onSubmit}
             type="button"
           >
-            ↑
+            {busy ? <span aria-hidden="true" className="codicon codicon-stop" /> : "↑"}
           </button>
         </div>
       </div>

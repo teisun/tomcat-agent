@@ -33,7 +33,9 @@ build/
 .vscode/
 
 ### Cursor ###
-/.cursor/
+/.cursor/plans/
+node_modules/
+test-stuff/
 
 ### Env (API keys, do not commit) ###
 .env

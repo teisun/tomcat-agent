@@ -227,3 +227,10 @@ fn create_plan_derived_id_passes_safety_check() {
     let id = create_plan::derive_plan_id("");
     crate::core::plan_runtime::safety::assert_plan_id_safe(&id).unwrap();
 }
+
+#[test]
+fn create_plan_derived_id_collapses_underscore_runs() {
+    let id = create_plan::derive_plan_id("test stuff --- md !!! html");
+    assert!(id.starts_with("plan_test_stuff_md_html_"), "实际 id: {id}");
+    assert!(!id.contains("___"), "不应出现连续下划线: {id}");
+}

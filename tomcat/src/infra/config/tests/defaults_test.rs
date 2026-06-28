@@ -64,6 +64,12 @@ fn plugin_config_defaults_are_wired_into_app_config() {
 }
 
 #[test]
+fn ask_question_timeout_defaults_to_no_timeout() {
+    let cfg = AppConfig::default();
+    assert_eq!(cfg.ask_question.timeout_ms, 0);
+}
+
+#[test]
 fn plugin_config_toml_overrides_parse_correctly() {
     let toml_src = r#"
 [plugin]

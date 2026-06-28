@@ -75,6 +75,7 @@ export function useAutoScroll({
   const pendingScrollActionRef = useRef<PendingScrollAction | null>(null);
   const previousOldestItemKeyRef = useRef<string | null>(oldestItemKey);
   const previousScrollHeightRef = useRef(0);
+  const revealSettledRef = useRef(false);
   const skipAutoLayoutUntilRef = useRef(0);
   const userHasScrolledRef = useRef(false);
   const previousUserMessageCountRef = useRef(userMessageCount);
@@ -158,6 +159,24 @@ export function useAutoScroll({
     setScrollTop(container, container.scrollHeight);
   };
 
+  const shrinkRevealSpacer = () => {
+    const container = containerRef.current;
+    const content = contentRef.current;
+    if (!container || !content) {
+      return;
+    }
+
+    const metrics = latestTurnMetrics(container, content, bottomSpacerHeightRef.current);
+    if (!metrics) {
+      return;
+    }
+
+    const nextSpacerHeight = Math.max(0, container.clientHeight - metrics.latestTurnHeight);
+    if (nextSpacerHeight < bottomSpacerHeightRef.current) {
+      syncBottomSpacerHeight(nextSpacerHeight);
+    }
+  };
+
   const revealLatestUser = () => {
     const container = containerRef.current;
     const content = contentRef.current;
@@ -173,25 +192,20 @@ export function useAutoScroll({
       return;
     }
 
-    if (metrics.latestTurnHeight > container.clientHeight) {
-      modeRef.current = "followBottom";
-      scrollToBottom(true);
-      syncUserHasScrolled(false);
-      return;
-    }
-
     const nextSpacerHeight = Math.max(0, container.clientHeight - metrics.latestTurnHeight);
     const spacerChanged = nextSpacerHeight !== bottomSpacerHeightRef.current;
     syncBottomSpacerHeight(nextSpacerHeight);
     syncUserHasScrolled(false);
 
     if (spacerChanged) {
+      revealSettledRef.current = false;
       pendingScrollActionRef.current = { kind: "userTop", top: metrics.userTop };
       return;
     }
 
     pendingScrollActionRef.current = null;
     setScrollTop(container, metrics.userTop);
+    revealSettledRef.current = true;
   };
 
   const updateAutoScrollLayout = () => {
@@ -206,6 +220,11 @@ export function useAutoScroll({
 
     if (modeRef.current === "revealUser") {
       if (pendingScrollActionRef.current?.kind === "userTop") {
+        return;
+      }
+      if (revealSettledRef.current) {
+        shrinkRevealSpacer();
+        updateStickyPromptState();
         return;
       }
       revealLatestUser();
@@ -237,6 +256,7 @@ export function useAutoScroll({
     modeRef.current = "followBottom";
     pendingScrollActionRef.current = null;
     previousOldestItemKeyRef.current = oldestItemKey;
+    revealSettledRef.current = false;
     syncUserHasScrolled(false);
     syncBottomSpacerHeight(0);
     scrollToBottom(true);
@@ -246,6 +266,7 @@ export function useAutoScroll({
   useLayoutEffect(() => {
     if (userMessageCount > previousUserMessageCountRef.current && lastItemIsLatestUser) {
       modeRef.current = "revealUser";
+      revealSettledRef.current = false;
       syncUserHasScrolled(false);
       revealLatestUser();
     }
@@ -294,6 +315,7 @@ export function useAutoScroll({
       setScrollTop(container, container.scrollHeight);
     } else {
       setScrollTop(container, pendingAction.top);
+      revealSettledRef.current = true;
     }
     updateStickyPromptState();
     previousScrollHeightRef.current = container.scrollHeight;
@@ -374,6 +396,11 @@ export function useAutoScroll({
     }
 
     const observer = new ResizeObserver(() => {
+      if (modeRef.current === "revealUser" && revealSettledRef.current) {
+        shrinkRevealSpacer();
+        updateStickyPromptState();
+        return;
+      }
       updateAutoScrollLayout();
       updateStickyPromptState();
     });

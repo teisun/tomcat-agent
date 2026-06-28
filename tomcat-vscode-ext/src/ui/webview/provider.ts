@@ -25,6 +25,7 @@ import {
   type HostEventFrameContent,
   type HostToWebviewFrame,
   type TomcatUiMode,
+  type WebviewApprovalCard,
   type WebviewDomAction,
   type WebviewPendingAttachment,
   type WebviewIntent,
@@ -377,6 +378,19 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return this.stateStore.snapshot();
   }
 
+  private lookupApprovalSessionId(requestId: string): string | null {
+    for (const session of Object.values(this.currentState().sessionViews)) {
+      const approval = session.timeline.find(
+        (item): item is WebviewApprovalCard =>
+          item.type === "approval" && item.request.requestId === requestId,
+      );
+      if (approval) {
+        return approval.sessionId ?? session.sessionId;
+      }
+    }
+    return null;
+  }
+
   private async bootstrap(): Promise<void> {
     await this.ensureInitialized();
     await this.refreshModels();
@@ -396,9 +410,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       await this.selectSession(preferredSessionId);
       return;
     }
-    this.stateStore.setActiveSession(preferredSessionId);
     await this.refreshSessionState(preferredSessionId);
     await this.refreshSessionHistory(preferredSessionId);
+    this.stateStore.setActiveSession(preferredSessionId);
     await this.postState();
   }
 
@@ -530,6 +544,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           );
         }
         await this.refreshSessionState(sessionId);
+        await this.refreshSessions();
         await this.postState();
         return;
       }
@@ -638,7 +653,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       }
       case "setPlanMode": {
         await this.ensureInitialized();
-        const sessionId = await this.ensureWebviewSession(intent.data.sessionId ?? null);
+        const sessionId = await this.ensureWebviewSessionWithoutHistory(
+          intent.data.sessionId ?? null,
+        );
         if (!sessionId) {
           await this.postState();
           return;
@@ -675,14 +692,49 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         return;
       case "openFile":
         this.openFileObserved = true;
-        await this.deps.ide.showFile(intent.data.path);
+        try {
+          await this.deps.ide.showFile(intent.data.path);
+        } catch (error) {
+          const sessionId = this.currentState().activeSessionId;
+          if (sessionId) {
+            this.stateStore.appendMessage(
+              sessionId,
+              "error",
+              formatBridgeError(`open file ${intent.data.path}`, error),
+            );
+            await this.postState();
+          }
+        }
         return;
       case "openPlanFile":
-        await this.deps.ide.showFile(intent.data.path);
+        try {
+          await this.deps.ide.showFile(intent.data.path);
+        } catch (error) {
+          const sessionId = this.currentState().activeSessionId;
+          if (sessionId) {
+            this.stateStore.appendMessage(
+              sessionId,
+              "error",
+              formatBridgeError(`open plan file ${intent.data.path}`, error),
+            );
+            await this.postState();
+          }
+        }
         return;
       case "answerQuestion": {
         const pending = this.pendingQuestions.get(intent.data.requestId);
         if (!pending) {
+          const sessionId =
+            this.lookupApprovalSessionId(intent.data.requestId)
+            ?? this.currentState().activeSessionId;
+          if (sessionId) {
+            this.stateStore.appendMessage(
+              sessionId,
+              "notice",
+              "This question is no longer active. Please ask again if you still need it.",
+            );
+            await this.postState();
+          }
           return;
         }
         pending.resolve(
@@ -757,6 +809,32 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       return null;
     }
     await this.selectSession(target);
+    return target;
+  }
+
+  private async ensureWebviewSessionWithoutHistory(
+    sessionId: string | null,
+  ): Promise<string | null> {
+    const target = sessionId ?? this.currentState().activeSessionId;
+    if (!target) {
+      const created = await this.sessionPool.createSession(this.deps.getDefaultCwd());
+      if (!this.claimWebviewOwner(created)) {
+        return null;
+      }
+      this.stateStore.setActiveSession(created);
+      await this.sessionPool.switchTo(created);
+      await this.refreshSessions();
+      return created;
+    }
+
+    if (!this.claimWebviewOwner(target)) {
+      return null;
+    }
+
+    this.stateStore.setActiveSession(target);
+    if (this.deps.ownership.ownerOf(target)?.owner === "webview") {
+      await this.sessionPool.switchTo(target);
+    }
     return target;
   }
 
@@ -971,6 +1049,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.refreshSessionState(sessionId);
     await this.refreshSessionHistory(sessionId);
     await this.refreshSessions();
+    this.stateStore.setActiveSession(sessionId);
     await this.postState();
   }
 

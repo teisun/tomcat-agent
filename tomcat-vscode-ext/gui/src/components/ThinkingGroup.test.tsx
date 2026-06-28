@@ -53,8 +53,6 @@ describe("ThinkingGroup", () => {
     render(
       <ThinkingGroup
         group={buildGroup()}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -67,8 +65,6 @@ describe("ThinkingGroup", () => {
     render(
       <ThinkingGroup
         group={buildGroup()}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -80,8 +76,6 @@ describe("ThinkingGroup", () => {
     render(
       <ThinkingGroup
         group={buildGroup()}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -116,8 +110,6 @@ describe("ThinkingGroup", () => {
           ],
         })}
         isStreaming
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -127,7 +119,7 @@ describe("ThinkingGroup", () => {
     );
   });
 
-  it("falls back to Tomcat · Thinking when summaryTitle missing and not streaming", () => {
+  it("falls back to a clean tool-derived title when summaryTitle is missing", () => {
     render(
       <ThinkingGroup
         group={buildGroup({
@@ -139,13 +131,42 @@ describe("ThinkingGroup", () => {
             type: "thinking",
           },
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
 
-    expect(screen.getByTestId("thinking-group-title").textContent).toContain("Tomcat · Thinking");
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe("Reviewed 2 files");
+  });
+
+  it("replaces raw tool-argument summary titles with a clean tool label", () => {
+    render(
+      <ThinkingGroup
+        group={buildGroup({
+          thinking: {
+            assistantMessageId: "assistant-1",
+            id: "think-1",
+            summaryTitle: 'ask_question {"questions":[{"id":"style"}]}',
+            text: "Need the user to choose a direction.",
+            type: "thinking",
+          },
+          tools: [
+            {
+              assistantMessageId: "assistant-1",
+              id: "tool-1",
+              isError: false,
+              status: "complete",
+              summary: '{"answers":[],"cancelled":true}',
+              toolCallId: "tc-1",
+              toolName: "ask_question",
+              type: "tool",
+            },
+          ],
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe("Asked question");
   });
 
   it("shows a loading status icon while streaming and a check when done", () => {
@@ -153,8 +174,6 @@ describe("ThinkingGroup", () => {
       <ThinkingGroup
         group={buildGroup()}
         isStreaming
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -166,8 +185,6 @@ describe("ThinkingGroup", () => {
     rerender(
       <ThinkingGroup
         group={buildGroup()}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -191,8 +208,6 @@ describe("ThinkingGroup", () => {
           tools: [],
         })}
         isStreaming
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );

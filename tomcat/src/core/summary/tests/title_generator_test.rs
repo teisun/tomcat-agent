@@ -207,3 +207,15 @@ fn fallback_turn_summary_multiple_reads_uses_file_count() {
     info!(target: "test", phase = "assert");
     assert_eq!(title, "Reviewed 2 files");
 }
+
+#[test]
+fn fallback_turn_summary_avoids_raw_json_for_ask_question() {
+    let tools = vec![ToolSnapshot {
+        tool_name: "ask_question".into(),
+        summary: r#"questions=1"#.into(),
+    }];
+
+    let title = fallback_turn_summary(&tools);
+
+    assert_eq!(title, "Asked question");
+}

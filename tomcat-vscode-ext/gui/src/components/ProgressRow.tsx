@@ -1,52 +1,29 @@
-import type { ActiveTodoProgress } from "../hooks/useActiveTodoProgress";
-import { shouldShowProgressRow, useActiveTodoProgress } from "../hooks/useActiveTodoProgress";
-import type { WebviewPlanState, WebviewTodo } from "../types";
-
 export function ProgressRow({
   busy,
-  planState,
-  planTodos,
-  sessionTodos,
+  hasActiveThinking,
+  hasRunningTool,
+  hasStreamingText,
+  hasTodos,
 }: {
   busy: boolean;
-  planState?: WebviewPlanState | null;
-  planTodos: WebviewTodo[];
-  sessionTodos: WebviewTodo[];
+  hasActiveThinking: boolean;
+  hasRunningTool: boolean;
+  hasStreamingText: boolean;
+  hasTodos: boolean;
 }) {
-  const progress = useActiveTodoProgress({
-    busy,
-    planState,
-    planTodos,
-    sessionTodos,
-  });
-
-  if (!shouldShowProgressRow(progress, busy)) {
+  if (!busy || hasActiveThinking || hasRunningTool || hasStreamingText || hasTodos) {
     return null;
   }
 
-  if (!progress) {
-    return (
-      <div className="tc-progress-row tc-progress-row--shimmer" data-testid="progress-row">
-        <span aria-hidden="true" className="tc-progress-row__spinner codicon codicon-loading" />
-        <p>Working…</p>
-      </div>
-    );
-  }
-
   return (
-    <div
-      className={`tc-progress-row${progress.isComplete ? "" : " tc-progress-row--shimmer"}`}
-      data-testid="progress-row"
-    >
+    <div className="tc-progress-row tc-progress-row--shimmer" data-testid="progress-row">
       <span
         aria-hidden="true"
-        className={`tc-progress-row__spinner codicon ${
-          progress.isComplete ? "codicon-check" : "codicon-loading"
-        }`}
-      />
-      <p data-testid="progress-row-text">
-        {progress.title} ({progress.current}/{progress.total})
-      </p>
+        className="tc-thinking__dots tc-progress-row__dots"
+        data-testid="progress-row-dots"
+      >
+        ...
+      </span>
     </div>
   );
 }

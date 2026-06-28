@@ -82,16 +82,20 @@ impl CreatePlanArgs {
 /// hash 输入混入当前 ms 时间戳，避免同一 goal 在毫秒内重复 create 产生同 id。
 /// 派生结果通过 `assert_plan_id_safe` 校验。
 pub fn derive_plan_id(goal: &str) -> String {
-    let slug: String = goal
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
+    let mut slug = String::new();
+    let mut last_was_underscore = false;
+    for c in goal.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            last_was_underscore = false;
+            continue;
+        }
+        if !last_was_underscore {
+            slug.push('_');
+            last_was_underscore = true;
+        }
+    }
+    let slug = slug
         .trim_matches('_')
         .chars()
         .take(40)

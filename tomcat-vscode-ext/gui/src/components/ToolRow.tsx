@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
-import type { WebviewToolCard } from "../types";
+import type { AskQuestionResult, WebviewApprovalQuestion, WebviewToolCard } from "../types";
+import { AnswerCard } from "./AnswerCard";
 import { FileChip } from "./FileChip";
 
 function firstLine(value: string | undefined): string | undefined {
@@ -18,8 +19,32 @@ function humanizeToolName(toolName: string): string {
   return toolName.replace(/_/g, " ");
 }
 
-function isRunning(item: WebviewToolCard): boolean {
+function basename(filePath: string): string {
+  const normalized = filePath.replace(/\\/g, "/");
+  return normalized.split("/").pop() || filePath;
+}
+
+function filePathForTool(item: WebviewToolCard): string | undefined {
+  const args = item.args ?? {};
+  return item.display?.kind === "file" ? item.display.file : asString(args.path);
+}
+
+export function isRunning(item: WebviewToolCard): boolean {
   return item.status !== "complete" && !item.isError;
+}
+
+function isReadLikeTool(toolName: string): boolean {
+  return ["read", "read_file", "grep", "search_files"].includes(toolName);
+}
+
+function isEditLikeTool(toolName: string): boolean {
+  return ["edit", "edit_file", "hashline_edit", "str_replace", "write", "write_file"].includes(
+    toolName,
+  );
+}
+
+function isCommandLikeTool(toolName: string): boolean {
+  return ["bash", "shell", "execute_command"].includes(toolName);
 }
 
 function countResults(summary: string | undefined): number | null {
@@ -72,13 +97,13 @@ function toolIconClass(toolName: string): string {
   }
 }
 
-function buildFlatLabel(item: WebviewToolCard): string {
+export function buildFlatLabel(item: WebviewToolCard): string {
   const args = item.args ?? {};
   const running = isRunning(item);
 
   switch (item.toolName) {
     case "read":
-      return running ? "Reading file" : "Read";
+      return running ? "Reading file" : "Read file";
     case "load_skill": {
       const name = asString(args.name) ?? "skill";
       return running ? `Loading skill ${name}` : `Loaded skill ${name}`;
@@ -133,12 +158,10 @@ function buildFlatLabel(item: WebviewToolCard): string {
       return running ? `Updating config ${key}` : `Updated config ${key}`;
     }
     case "create_plan": {
-      const goal = asString(args.goal) ?? "plan";
-      return running ? `Creating plan ${goal}` : `Created plan ${goal}`;
+      return running ? "Creating plan" : "Created plan";
     }
     case "update_plan": {
-      const planId = asString(args.plan_id) ?? asString(args.planId) ?? "plan";
-      return running ? `Updating plan ${planId}` : `Updated plan ${planId}`;
+      return running ? "Updating plan" : "Updated plan";
     }
     case "todos":
       return running ? "Updating todos" : "Updated todos";
@@ -147,9 +170,98 @@ function buildFlatLabel(item: WebviewToolCard): string {
     case "edit":
     case "write":
     case "hashline_edit":
-      return running ? "Editing file" : "Edited";
+      return running ? "Editing file" : "Edited file";
     default:
       return `${humanizeToolName(item.toolName)}${running ? "…" : ""}`;
+  }
+}
+
+export function buildGroupTitleFromTool(item: WebviewToolCard): string {
+  const filePath = filePathForTool(item);
+  if (filePath && (item.toolName === "read" || item.toolName === "read_file")) {
+    return `${buildFlatLabel(item)} ${basename(filePath)}`;
+  }
+  if (filePath && isEditLikeTool(item.toolName)) {
+    return `${buildFlatLabel(item)} ${basename(filePath)}`;
+  }
+  return buildFlatLabel(item);
+}
+
+export function buildToolCollectionTitle(tools: WebviewToolCard[]): string {
+  if (tools.length === 1) {
+    return buildGroupTitleFromTool(tools[0]);
+  }
+
+  if (tools.every((tool) => isReadLikeTool(tool.toolName))) {
+    return `Reviewed ${tools.length} files`;
+  }
+  if (tools.every((tool) => isEditLikeTool(tool.toolName))) {
+    return `Edited ${tools.length} files`;
+  }
+  if (tools.every((tool) => isCommandLikeTool(tool.toolName))) {
+    return tools.length === 1 ? buildGroupTitleFromTool(tools[0]) : `Executed ${tools.length} commands`;
+  }
+
+  return `Used ${tools.length} tools`;
+}
+
+export function hasMeaningfulContent(item: WebviewToolCard): boolean {
+  if (item.summary?.trim()) {
+    return true;
+  }
+  if (!item.display) {
+    return false;
+  }
+  if (item.display.kind === "file") {
+    return true;
+  }
+  if (item.display.kind === "plan") {
+    return Boolean(item.display.plan.trim());
+  }
+  if (item.display.kind === "text") {
+    return Boolean(item.display.text.trim());
+  }
+  return false;
+}
+
+function parseApprovalQuestions(args: Record<string, unknown> | undefined): WebviewApprovalQuestion[] | null {
+  const questions = args?.questions;
+  if (!Array.isArray(questions)) {
+    return null;
+  }
+  const parsed = questions.filter(
+    (question): question is WebviewApprovalQuestion =>
+      typeof question === "object" &&
+      question !== null &&
+      typeof question.id === "string" &&
+      typeof question.prompt === "string" &&
+      Array.isArray(question.options) &&
+      question.options.every(
+        (option) =>
+          typeof option === "object" &&
+          option !== null &&
+          typeof option.id === "string" &&
+          typeof option.label === "string",
+      ),
+  );
+  return parsed.length === questions.length ? parsed : null;
+}
+
+function parseAskQuestionResult(summary: string | undefined): AskQuestionResult | null {
+  if (!summary) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(summary) as AskQuestionResult;
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.answers)) {
+      return null;
+    }
+    if (typeof parsed.cancelled !== "boolean") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
   }
 }
 
@@ -158,10 +270,7 @@ function renderFlatContent(
   onOpenFile: (path: string) => void,
 ): ReactNode {
   const args = item.args ?? {};
-  const filePath =
-    item.display?.kind === "file"
-      ? item.display.file
-      : asString(args.path);
+  const filePath = filePathForTool(item);
 
   switch (item.toolName) {
     case "read":
@@ -216,11 +325,15 @@ function renderFlatContent(
   }
 }
 
-function renderExpandedBody(
-  item: WebviewToolCard,
-  onApplyEdit: (toolCallId: string) => void,
-  onOpenDiff: (toolCallId: string) => void,
-): ReactNode {
+function renderExpandedBody(item: WebviewToolCard): ReactNode {
+  if (item.toolName === "ask_question") {
+    const questions = parseApprovalQuestions(item.args);
+    const result = parseAskQuestionResult(item.summary);
+    if (questions && result) {
+      return <AnswerCard questions={questions} result={result} />;
+    }
+  }
+
   if (item.toolName === "web_search" && item.summary) {
     const lines = item.summary
       .split("\n")
@@ -240,24 +353,6 @@ function renderExpandedBody(
   return (
     <>
       {item.summary ? <pre data-testid="tool-row-result">{item.summary}</pre> : null}
-      {item.display?.kind === "file" ? (
-        <div className="tc-button-row">
-          <button
-            className="tc-button tc-button--secondary"
-            onClick={() => onOpenDiff(item.toolCallId)}
-            type="button"
-          >
-            Open Diff
-          </button>
-          <button
-            className="tc-button tc-button--primary"
-            onClick={() => onApplyEdit(item.toolCallId)}
-            type="button"
-          >
-            Apply Edit
-          </button>
-        </div>
-      ) : null}
       {item.display?.kind === "plan" ? <pre>{item.display.plan}</pre> : null}
       {item.display?.kind === "text" && item.display.text !== item.summary ? (
         <pre>{item.display.text}</pre>
@@ -268,16 +363,13 @@ function renderExpandedBody(
 
 export function ToolRow({
   item,
-  onApplyEdit,
-  onOpenDiff,
   onOpenFile,
 }: {
   item: WebviewToolCard;
-  onApplyEdit(toolCallId: string): void;
-  onOpenDiff(toolCallId: string): void;
   onOpenFile(path: string): void;
 }) {
-  const shouldExpandByDefault = item.isError || item.status !== "complete";
+  const contentVisible = hasMeaningfulContent(item);
+  const shouldExpandByDefault = item.isError || (item.status !== "complete" && contentVisible);
   const [collapsed, setCollapsed] = useState(!shouldExpandByDefault);
   const [userInteracted, setUserInteracted] = useState(false);
 
@@ -302,24 +394,35 @@ export function ToolRow({
         <div className="tc-tool-row__header">
           <span className="tc-tool-row__label" data-testid="tool-row-label">
             {renderFlatContent(item, onOpenFile)}
+            {isRunning(item) ? (
+              <span
+                aria-hidden="true"
+                className="tc-thinking__dots tc-tool-row__running"
+                data-testid="tool-row-running-indicator"
+              >
+                ...
+              </span>
+            ) : null}
           </span>
-          <button
-            aria-expanded={!collapsed}
-            aria-label={collapsed ? "Expand tool result" : "Collapse tool result"}
-            className="tc-tool-row__toggle"
-            data-testid="tool-row-toggle"
-            onClick={() => {
-              setUserInteracted(true);
-              setCollapsed((value) => !value);
-            }}
-            type="button"
-          >
-            <span className="tc-tool-row__caret">{collapsed ? "▸" : "▾"}</span>
-          </button>
+          {contentVisible ? (
+            <button
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? "Expand tool result" : "Collapse tool result"}
+              className="tc-tool-row__toggle"
+              data-testid="tool-row-toggle"
+              onClick={() => {
+                setUserInteracted(true);
+                setCollapsed((value) => !value);
+              }}
+              type="button"
+            >
+              <span className="tc-tool-row__caret">{collapsed ? "▸" : "▾"}</span>
+            </button>
+          ) : null}
         </div>
-        {collapsed ? null : (
+        {collapsed || !contentVisible ? null : (
           <div className="tc-tool-row__body" data-testid="tool-row-body">
-            {renderExpandedBody(item, onApplyEdit, onOpenDiff)}
+            {renderExpandedBody(item)}
           </div>
         )}
       </div>

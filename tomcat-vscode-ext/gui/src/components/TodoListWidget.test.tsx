@@ -31,8 +31,8 @@ describe("TodoListWidget", () => {
     ).toBeTruthy();
   });
 
-  it("falls back to Working… without todo data", () => {
-    render(
+  it("stays hidden without todo data", () => {
+    const { container } = render(
       <TodoListWidget
         busy
         planState="chat"
@@ -41,7 +41,7 @@ describe("TodoListWidget", () => {
       />,
     );
 
-    expect(screen.getByTestId("todo-widget-title").textContent).toBe("Working…");
+    expect(container.innerHTML).toBe("");
   });
 
   it("stays hidden when the session is idle", () => {

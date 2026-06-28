@@ -337,6 +337,7 @@ export type WebviewIntent =
         composerPlanStatusInBarCount: number;
         composerRowCount: number;
         ctxLabel: string | null;
+        disabledTestIds: string[];
         expandedThinkingCount: number;
         expandedToolTitles: string[];
         fileChipTopWithinStream: number | null;

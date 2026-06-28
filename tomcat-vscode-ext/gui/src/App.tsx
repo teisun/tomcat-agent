@@ -428,12 +428,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
   const readOnlyConflict = activeSession?.conflictMessage ?? null;
   const canPrompt = state.uiMode !== "participant" && !activeSession?.busy && !readOnlyConflict;
-  const canBuildPlan =
-    !!activeSession &&
-    !readOnlyConflict &&
-    !!activeSession.planFile &&
-    activeSession.planFile.state !== "executing" &&
-    (activeSession.planFile.state === "planning" || activeSession.planFile.state === "pending");
+  const canBuildPlan = !!activeSession && !activeSession.busy && !readOnlyConflict;
   const promptPlaceholder =
     state.uiMode === "participant"
       ? "Set `tomcat.ui` to `both` or `webview` to chat here."
@@ -527,13 +522,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     });
   };
 
-  const handleBuildPlan = () => {
+  const handleBuildPlan = (planId: string | null, _path: string) => {
     if (!activeSession) {
       return;
     }
     postIntent(vscodeApi, "setPlanMode", {
       action: "build",
-      planId: activeSession.planId ?? null,
+      planId,
       sessionId: activeSession.sessionId,
     });
   };
@@ -680,16 +675,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 busy={!!activeSession.busy}
                 bottomSpacerHeight={bottomSpacerHeight}
                 onAnswer={handleAnswerQuestion}
-                onApplyEdit={(toolCallId) =>
-                  postIntent(vscodeApi, "applyEdit", {
-                    toolCallId,
-                  })
-                }
-                onOpenDiff={(toolCallId) =>
-                  postIntent(vscodeApi, "openDiff", {
-                    toolCallId,
-                  })
-                }
                 onOpenFile={(path) =>
                   postIntent(vscodeApi, "openFile", {
                     path,
@@ -757,6 +742,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
       <Composer
         availableModels={state.availableModels}
+        busy={!!activeSession?.busy}
         canPrompt={canPrompt}
         contextLabel={buildContextLabel(activeSession?.contextRatio)}
         modeValue={currentModeValue(activeSession?.planState)}
@@ -789,6 +775,14 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         }}
         onPromptChange={setPrompt}
         onPromptKeyDown={handlePromptKeyDown}
+        onInterrupt={() => {
+          if (!activeSession?.sessionId) {
+            return;
+          }
+          postIntent(vscodeApi, "interrupt", {
+            sessionId: activeSession.sessionId,
+          });
+        }}
         onSubmit={() =>
           submitPrompt(
             vscodeApi,

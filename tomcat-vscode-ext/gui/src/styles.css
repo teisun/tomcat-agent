@@ -76,7 +76,6 @@ input:focus-visible {
 .tc-card,
 .tc-banner,
 .tc-message,
-.tc-thinking,
 .tc-todo-widget,
 .tc-composer__surface {
   background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
@@ -432,7 +431,49 @@ input:focus-visible {
 .tc-stream {
   height: 100%;
   overflow: auto;
-  padding-right: 2px;
+  padding-right: 10px;
+  scrollbar-color: color-mix(
+      in srgb,
+      var(--vscode-scrollbarSlider-background, rgba(127, 127, 127, 0.38)) 82%,
+      transparent
+    )
+    transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.tc-stream::-webkit-scrollbar {
+  background: transparent;
+  width: 10px;
+}
+
+.tc-stream::-webkit-scrollbar-track,
+.tc-stream::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.tc-stream::-webkit-scrollbar-thumb {
+  background: color-mix(
+    in srgb,
+    var(--vscode-scrollbarSlider-background, rgba(127, 127, 127, 0.38)) 82%,
+    transparent
+  );
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.tc-stream::-webkit-scrollbar-thumb:hover {
+  background: color-mix(
+    in srgb,
+    var(
+      --vscode-scrollbarSlider-hoverBackground,
+      var(--vscode-scrollbarSlider-background, rgba(127, 127, 127, 0.5))
+    )
+      88%,
+    transparent
+  );
+  background-clip: padding-box;
 }
 
 .tc-history-loader-slot {
@@ -596,6 +637,22 @@ input:focus-visible {
   border-color: var(--vscode-inputValidation-warningBorder, #cca700);
 }
 
+.tc-answer-card {
+  border-color: var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  gap: 10px;
+  padding: 12px;
+}
+
+.tc-answer-card__questions {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.tc-answer-card__option {
+  cursor: default;
+}
+
 .tc-approval-questions {
   display: flex;
   flex-direction: column;
@@ -603,20 +660,26 @@ input:focus-visible {
 }
 
 .tc-plan-card {
-  gap: 12px;
+  gap: 10px;
   padding: 14px;
 }
 
 .tc-plan-card__file-row {
   align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
   display: flex;
   gap: 8px;
+  padding: 0;
+  text-align: left;
+  width: fit-content;
 }
 
 .tc-plan-card__file-icon {
-  color: var(--vscode-descriptionForeground);
   flex: 0 0 auto;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .tc-plan-card__file-name {
@@ -629,16 +692,21 @@ input:focus-visible {
   border: 0;
   color: inherit;
   cursor: pointer;
-  font-size: 30px;
-  font-weight: 700;
+  font-size: 18px;
+  font-weight: 600;
   line-height: 1.2;
   padding: 0;
   text-align: left;
 }
 
 .tc-plan-card__overview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
   line-height: 1.5;
   margin: 0;
+  overflow: hidden;
 }
 
 .tc-plan-card__todos-count {
@@ -700,42 +768,50 @@ input:focus-visible {
 .tc-approval-options {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .tc-approval-option {
   align-items: center;
   background: transparent;
-  border: 1px solid var(--vscode-button-border, rgba(127, 127, 127, 0.25));
-  border-radius: 12px;
+  border: 0;
+  border-radius: 8px;
   cursor: pointer;
   display: flex;
   gap: 12px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   text-align: left;
   width: 100%;
 }
 
+.tc-approval-option:hover {
+  background: color-mix(
+    in srgb,
+    var(--vscode-list-activeSelectionBackground, rgba(55, 148, 255, 0.16)) 68%,
+    transparent
+  );
+}
+
 .tc-approval-option--selected {
   background: var(--vscode-list-activeSelectionBackground, rgba(55, 148, 255, 0.16));
-  border-color: var(--vscode-button-background);
+}
+
+.tc-approval-option--selected:hover {
+  background: var(--vscode-list-activeSelectionBackground, rgba(55, 148, 255, 0.16));
 }
 
 .tc-approval-option__code {
   align-items: center;
-  border: 1px solid var(--vscode-button-border, rgba(127, 127, 127, 0.25));
-  border-radius: 8px;
+  color: var(--vscode-descriptionForeground);
   display: inline-flex;
-  flex: 0 0 38px;
-  font-weight: 700;
-  height: 38px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 500;
   justify-content: center;
 }
 
 .tc-approval-option__code--selected {
-  background: var(--vscode-button-background);
-  border-color: var(--vscode-button-background);
-  color: var(--vscode-button-foreground);
+  color: var(--vscode-foreground);
 }
 
 .tc-approval-option__content {
@@ -748,8 +824,8 @@ input:focus-visible {
 }
 
 .tc-approval-option__label {
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 500;
   line-height: 1.3;
 }
 
@@ -771,18 +847,29 @@ input:focus-visible {
 }
 
 .tc-thinking {
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .tc-thinking__toggle {
   align-items: center;
   background: transparent;
   border: 0;
+  color: var(--vscode-descriptionForeground);
   cursor: pointer;
   display: flex;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 4px 0;
   width: 100%;
+}
+
+.tc-thinking__lead {
+  align-items: center;
+  display: inline-flex;
+  flex: 1 1 auto;
+  gap: 6px;
+  min-width: 0;
 }
 
 .tc-thinking__heading {
@@ -794,10 +881,20 @@ input:focus-visible {
   min-width: 0;
 }
 
+.tc-thinking__status {
+  flex: 0 0 auto;
+}
+
 .tc-thinking__title {
   align-items: center;
   display: inline-flex;
   gap: 2px;
+  min-width: 0;
+}
+
+.tc-thinking__caret {
+  color: var(--vscode-descriptionForeground);
+  flex: 0 0 auto;
 }
 
 .tc-thinking__summary {
@@ -816,8 +913,10 @@ input:focus-visible {
   animation: tc-thinking-pulse 1s ease-in-out infinite;
 }
 
-.tc-thinking pre {
-  padding: 0 12px 12px;
+.tc-thinking__body {
+  margin: 0;
+  padding: 0 0 0 22px;
+  white-space: pre-wrap;
 }
 
 @keyframes tc-title-shimmer {
@@ -983,6 +1082,11 @@ input:focus-visible {
 
 .tc-tool-row__text {
   min-width: 0;
+}
+
+.tc-tool-row__running {
+  color: var(--vscode-descriptionForeground);
+  flex: 0 0 auto;
 }
 
 .tc-tool-row .codicon-check,

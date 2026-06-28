@@ -125,7 +125,7 @@ pub struct AskQuestionConfig {
 }
 
 fn default_ask_question_timeout_ms() -> u64 {
-    300_000
+    0
 }
 
 impl Default for AskQuestionConfig {

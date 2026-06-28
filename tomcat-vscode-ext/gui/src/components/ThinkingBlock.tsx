@@ -39,6 +39,10 @@ export function ThinkingBlock({
     ) : null;
   }
 
+  const statusIconClass = isStreaming
+    ? "tc-thinking__status codicon codicon-loading tc-codicon-spin"
+    : "tc-thinking__status codicon codicon-check";
+
   return (
     <section
       className={`tc-thinking${isStreaming ? " tc-thinking--streaming" : ""}`}
@@ -51,28 +55,41 @@ export function ThinkingBlock({
         onClick={() => setCollapsed((value) => !value)}
         type="button"
       >
-        <span className="tc-thinking__heading">
-          <span className="tc-thinking__title">
-            <span>Tomcat · Thinking</span>
-            {isStreaming ? (
-              <span
-                aria-hidden="true"
-                className="tc-thinking__dots"
-                data-testid="thinking-streaming-indicator"
-              >
-                ...
+        <span className="tc-thinking__lead">
+          <span
+            aria-hidden="true"
+            className={statusIconClass}
+            data-testid="thinking-status"
+          />
+          <span className="tc-thinking__heading">
+            <span
+              className={`tc-thinking__title${isStreaming ? " tc-thinking__title--shimmer" : ""}`}
+            >
+              <span>Tomcat · Thinking</span>
+              {isStreaming ? (
+                <span
+                  aria-hidden="true"
+                  className="tc-thinking__dots"
+                  data-testid="thinking-streaming-indicator"
+                >
+                  ...
+                </span>
+              ) : null}
+            </span>
+            {collapsed && summary ? (
+              <span className="tc-thinking__summary" data-testid="thinking-summary">
+                {summary}
               </span>
             ) : null}
           </span>
-          {collapsed && isStreaming && summary ? (
-            <span className="tc-thinking__summary" data-testid="thinking-summary">
-              {summary}
-            </span>
-          ) : null}
         </span>
-        <span>{collapsed ? "▸" : "▾"}</span>
+        <span className="tc-thinking__caret">{collapsed ? "▸" : "▾"}</span>
       </button>
-      {collapsed ? null : <pre>{item.text}</pre>}
+      {collapsed ? null : (
+        <pre className="tc-thinking__body" data-testid="thinking-body">
+          {item.text}
+        </pre>
+      )}
     </section>
   );
 }

@@ -725,6 +725,16 @@ export async function assertWebviewDiffFlow(
   );
 
   await waitForEvent(api, { type: "tool_execution_end" });
+  const snapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === activeSessionId && candidate.toolRowCount > 0
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.doesNotMatch(snapshot.html, /Open Diff/u);
+  assert.doesNotMatch(snapshot.html, /Apply Edit/u);
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: { toolCallId: "tool-edit-1" },
@@ -907,6 +917,11 @@ export async function assertWebviewSessionSwitchRestoreFlow(
     20_000,
   );
   assert.match(initial.html, /data-testid="build-plan"/u);
+  assert.ok(!initial.disabledTestIds.includes("build-plan"), "expected Build to be enabled");
+  assert.ok(
+    initial.messageTexts.some((text) => /transcript ui/i.test(text)),
+    "expected session A transcript to be visible before switching away",
+  );
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -947,6 +962,11 @@ export async function assertWebviewSessionSwitchRestoreFlow(
     20_000,
   );
   assert.match(restored.html, /data-testid="build-plan"/u);
+  assert.ok(!restored.disabledTestIds.includes("build-plan"), "expected restored Build to be enabled");
+  assert.ok(
+    restored.messageTexts.some((text) => /transcript ui/i.test(text)),
+    "expected session A transcript to remain visible after switching back",
+  );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
     captureTranscriptVisual("switch-restore");
@@ -1335,7 +1355,7 @@ export async function assertTranscriptUiFlow(
   const busyTodo = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.progressRow && candidate.todoWidgetVisible && candidate.planCardCount > 0
+      !candidate.progressRow && candidate.todoWidgetVisible && candidate.planCardCount > 0
         ? candidate
         : undefined,
   );
@@ -1359,9 +1379,10 @@ export async function assertTranscriptUiFlow(
     "expected busy hint text to be removed from the composer",
   );
   if (process.env.TOMCAT_E2E_CAPTURE_PROGRESS === "1") {
-    assert.ok(
+    assert.equal(
       busyTodo.progressRow,
-      "expected a visible progress row while the transcript flow is still busy",
+      false,
+      "expected no inline progress row once the docked todo widget owns the busy state",
     );
     await api.__testing.focusWebview();
     captureTranscriptVisual("progress");
@@ -1616,7 +1637,7 @@ export async function assertTranscriptUiFlow(
     "expected the showcase to include config_get",
   );
   assert.ok(
-    toolIconExpanded.html.includes("Created plan Tool icon showcase"),
+    toolIconExpanded.html.includes("Created plan"),
     "expected the showcase to include create_plan",
   );
   assert.ok(

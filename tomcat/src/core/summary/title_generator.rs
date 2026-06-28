@@ -66,6 +66,9 @@ pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
         let t = &tools[0];
         return match t.tool_name.as_str() {
             "read" | "read_file" | "grep" | "search_files" => format!("Read {}", t.summary),
+            "write" | "write_file" | "edit" | "edit_file" | "str_replace" => {
+                "Edited file".to_string()
+            }
             "bash" | "shell" | "execute_command" => {
                 let cmd = t
                     .summary
@@ -73,7 +76,14 @@ pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
                     .unwrap_or(&t.summary);
                 format!("Ran {cmd}")
             }
-            other => format!("{other} {}", t.summary),
+            "ask_question" => "Asked question".to_string(),
+            "create_plan" => "Created plan".to_string(),
+            "update_plan" => "Updated plan".to_string(),
+            "todos" => "Updated todos".to_string(),
+            "web_search" => "Searched web".to_string(),
+            "web_fetch" => "Fetched url".to_string(),
+            "search_workspace" => "Searched workspace".to_string(),
+            other => format!("Used {}", other.replace('_', " ")),
         };
     }
 

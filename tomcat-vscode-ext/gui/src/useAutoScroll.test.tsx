@@ -92,7 +92,7 @@ describe("useAutoScroll", () => {
     vi.unstubAllGlobals();
   });
 
-  it("reveals the latest user briefly, then follows the bottom once the turn overflows", () => {
+  it("reveals the latest user once and keeps it pinned while streamed content grows", () => {
     const { rerender } = render(
       <Fixture
         contentKey="initial"
@@ -189,14 +189,29 @@ describe("useAutoScroll", () => {
     act(() => {
       ResizeObserverMock.latest().callback([], {} as ResizeObserver);
     });
-    expect(scrollTop).toBe(160);
+    expect(scrollTop).toBe(120);
     expect(screen.getByTestId("spacer-height").textContent).toBe("0");
     expect(screen.getByTestId("scroll-state").textContent).toBe("following");
-    expect(screen.getByTestId("sticky-state").textContent).toBe("sticky");
+    expect(screen.getByTestId("sticky-state").textContent).toBe("inline");
     act(() => {
       fireEvent.scroll(root);
     });
     expect(screen.getByTestId("scroll-state").textContent).toBe("following");
+
+    baseContentHeight = 280;
+    rerender(
+      <Fixture
+        contentKey="stream-2"
+        lastItemIsLatestUser={false}
+        resetKey="s1"
+        userMessageCount={1}
+      />,
+    );
+    act(() => {
+      ResizeObserverMock.latest().callback([], {} as ResizeObserver);
+    });
+    expect(scrollTop).toBe(120);
+    expect(screen.getByTestId("spacer-height").textContent).toBe("0");
 
     scrollTop = 60;
     act(() => {

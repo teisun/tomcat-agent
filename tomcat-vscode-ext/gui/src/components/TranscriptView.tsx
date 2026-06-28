@@ -1,5 +1,6 @@
-import type { RefObject } from "react";
+import { Fragment, type RefObject } from "react";
 
+import { selectActiveTodoSource } from "../hooks/useActiveTodoProgress";
 import type {
   AskQuestionResult,
   WebviewPlanState,
@@ -25,9 +26,7 @@ export function TranscriptView({
   bottomSpacerHeight = 0,
   canBuildPlan,
   onAnswer,
-  onApplyEdit,
   onBuildPlan,
-  onOpenDiff,
   onOpenFile,
   onOpenPlanFile,
   planState,
@@ -40,9 +39,7 @@ export function TranscriptView({
   bottomSpacerHeight?: number;
   canBuildPlan: boolean;
   onAnswer(requestId: string, result: AskQuestionResult): void;
-  onApplyEdit(toolCallId: string): void;
-  onBuildPlan(): void;
-  onOpenDiff(toolCallId: string): void;
+  onBuildPlan(planId: string | null, path: string): void;
   onOpenFile(path: string): void;
   onOpenPlanFile(path: string): void;
   planState?: WebviewPlanState | null;
@@ -63,6 +60,19 @@ export function TranscriptView({
   const renderGroupedItem = (item: GroupedTimelineEntry) => {
     if ("type" in item && item.type === "assistant-response-group") {
       const group = item as AssistantResponseGroup;
+      const hasMeaningfulThinking = Boolean(group.thinking?.text.trim());
+      if (group.tools.length === 1 && !hasMeaningfulThinking) {
+        return (
+          <Fragment key={`group-tool-${group.assistantMessageId}`}>
+            {group.preamble ? <MessageBubble item={group.preamble} key={`${group.preamble.id}-solo`} /> : null}
+            <ToolRow
+              item={group.tools[0]}
+              key={`group-tool-row-${group.tools[0].id}`}
+              onOpenFile={onOpenFile}
+            />
+          </Fragment>
+        );
+      }
       const isStreaming =
         busy &&
         (group.thinking?.id === lastThinkingId ||
@@ -72,8 +82,6 @@ export function TranscriptView({
           group={group}
           isStreaming={isStreaming}
           key={`group-${group.assistantMessageId}`}
-          onApplyEdit={onApplyEdit}
-          onOpenDiff={onOpenDiff}
           onOpenFile={onOpenFile}
         />
       );
@@ -101,8 +109,6 @@ export function TranscriptView({
           <ToolRow
             item={item}
             key={item.id}
-            onApplyEdit={onApplyEdit}
-            onOpenDiff={onOpenDiff}
             onOpenFile={onOpenFile}
           />
         );
@@ -124,15 +130,31 @@ export function TranscriptView({
 
   const renderCluster = (clusterTimeline: WebviewTimelineItem[], showProgress: boolean) => {
     const grouped = groupTimelineByAssistantResponse(clusterTimeline);
+    const hasActiveThinking = clusterTimeline.some((item) => item.type === "thinking");
+    const hasRunningTool = clusterTimeline.some(
+      (item) => item.type === "tool" && item.status !== "complete",
+    );
+    const hasStreamingText = clusterTimeline.some(
+      (item) => item.type === "message" && item.kind === "assistant",
+    );
+    const hasTodos = Boolean(
+      selectActiveTodoSource({
+        busy,
+        planState,
+        planTodos,
+        sessionTodos,
+      })?.length,
+    );
     return (
       <>
         {grouped.map(renderGroupedItem)}
         {showProgress ? (
           <ProgressRow
             busy={busy}
-            planState={planState}
-            planTodos={planTodos}
-            sessionTodos={sessionTodos}
+            hasActiveThinking={hasActiveThinking}
+            hasRunningTool={hasRunningTool}
+            hasStreamingText={hasStreamingText}
+            hasTodos={hasTodos}
           />
         ) : null}
       </>

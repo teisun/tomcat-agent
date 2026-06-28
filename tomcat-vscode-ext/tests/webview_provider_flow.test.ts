@@ -5,6 +5,7 @@ import type { InitializeResult } from "../src/serveClient/initialize";
 import type { SessionHistoryPayload } from "../src/serveClient/sessionRouter";
 import { SessionOwnershipTracker } from "../src/ui/webview/ownership";
 import { TomcatWebviewViewProvider } from "../src/ui/webview/provider";
+import type { IdeHost } from "../src/ui/webview/types";
 
 const __testing = (
   vscode as typeof vscode & {
@@ -37,6 +38,8 @@ type BuildProviderOptions = {
   getStateImpl?: (sessionId?: string) => Promise<Record<string, unknown>>;
   historyMessages?: unknown[];
   historyResponses?: Record<string, SessionHistoryPayload>;
+  ideOverrides?: Partial<IdeHost>;
+  listSessionsImpl?: () => Promise<Record<string, unknown>>;
   sessionState?: Partial<MutableSessionState>;
 };
 
@@ -260,6 +263,9 @@ function buildProvider(options: BuildProviderOptions = {}) {
       };
     },
     async listSessions() {
+      if (options.listSessionsImpl) {
+        return options.listSessionsImpl();
+      }
       return {
         activeSessionId: "session-1",
         scope: "disk" as const,
@@ -299,6 +305,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
       }),
       rememberToolStart: async () => undefined,
       showFile: async () => undefined,
+      ...options.ideOverrides,
     } as never,
     initialize: async () => initializeResult(),
     messenger: messenger as never,
@@ -365,6 +372,108 @@ describe("webview provider integration", () => {
       ]),
     );
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toHaveLength(0);
+
+    provider.dispose();
+  });
+
+  it("refreshes the session list after a prompt so generated titles appear", async () => {
+    let listSessionsCalls = 0;
+    const { provider } = buildProvider({
+      listSessionsImpl: async () => {
+        listSessionsCalls += 1;
+        return {
+          activeSessionId: "session-1",
+          scope: "disk",
+          sessions: [
+            {
+              busy: false,
+              isCurrent: true,
+              sessionId: "session-1",
+              title: listSessionsCalls >= 2 ? "Transcript cleanup plan" : undefined,
+              updatedAt: Date.now(),
+            },
+          ],
+        };
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-title-refresh",
+      type: "ready",
+    });
+    const callsAfterReady = listSessionsCalls;
+
+    await provider.dispatchTestIntent({
+      data: {
+        sessionId: "session-1",
+        text: "Generate a better title",
+      },
+      messageId: "prompt-title-refresh",
+      type: "prompt",
+    });
+
+    expect(listSessionsCalls).toBeGreaterThan(callsAfterReady);
+    expect(provider.currentState().sessions[0]?.title).toBe("Transcript cleanup plan");
+    provider.dispose();
+  });
+
+  it("keeps the user-selected session active when listSessions reports another running session", async () => {
+    let listSessionsCalls = 0;
+    const { messenger, provider } = buildProvider({
+      listSessionsImpl: async () => {
+        listSessionsCalls += 1;
+        return {
+          activeSessionId: listSessionsCalls >= 2 ? "session-2" : "session-1",
+          scope: "disk",
+          sessions: [
+            {
+              busy: false,
+              isCurrent: listSessionsCalls < 2,
+              sessionId: "session-1",
+              title: "Session A",
+              updatedAt: 1,
+            },
+            {
+              busy: true,
+              isCurrent: listSessionsCalls >= 2,
+              sessionId: "session-2",
+              title: "Session B",
+              updatedAt: 2,
+            },
+          ],
+        };
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-keep-active-session",
+      type: "ready",
+    });
+
+    expect(provider.currentState().activeSessionId).toBe("session-1");
+
+    await provider.dispatchTestIntent({
+      data: {
+        sessionId: "session-1",
+        text: "stay on A",
+      },
+      messageId: "prompt-keep-active-session",
+      type: "prompt",
+    });
+
+    expect(messenger.requestCalls).toContainEqual(
+      expect.objectContaining({
+        sessionId: "session-1",
+        text: "stay on A",
+        type: "prompt",
+      }),
+    );
+    expect(provider.currentState().activeSessionId).toBe("session-1");
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "user", text: "stay on A", type: "message" }),
+      ]),
+    );
 
     provider.dispose();
   });
@@ -799,6 +908,89 @@ describe("webview provider integration", () => {
       "build",
       "exit",
     ]);
+
+    provider.dispose();
+  });
+
+  it("appends an error message when opening a file fails", async () => {
+    const { provider } = buildProvider({
+      ideOverrides: {
+        showFile: vi.fn().mockRejectedValue(new Error("boom")),
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-open-file-error",
+      type: "ready",
+    });
+
+    await provider.dispatchTestIntent({
+      data: { path: "/workspace/missing.ts" },
+      messageId: "open-file-error",
+      type: "openFile",
+    });
+
+    const timeline = provider.currentState().sessionViews["session-1"]?.timeline ?? [];
+    expect(timeline.at(-1)).toMatchObject({
+      kind: "error",
+      text: expect.stringContaining("open file /workspace/missing.ts"),
+      type: "message",
+    });
+
+    provider.dispose();
+  });
+
+  it("shows a notice when answering an expired question", async () => {
+    const { provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-stale-question",
+      type: "ready",
+    });
+
+    await provider.dispatchTestIntent({
+      data: {
+        requestId: "missing-request",
+        result: {
+          answers: [],
+          cancelled: false,
+        },
+        sessionId: "session-1",
+      },
+      messageId: "answer-stale-question",
+      type: "answerQuestion",
+    });
+
+    const timeline = provider.currentState().sessionViews["session-1"]?.timeline ?? [];
+    expect(timeline.at(-1)).toMatchObject({
+      kind: "notice",
+      text: "This question is no longer active. Please ask again if you still need it.",
+      type: "message",
+    });
+
+    provider.dispose();
+  });
+
+  it("changes plan mode without reloading history", async () => {
+    const { historyCalls, provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-1",
+      type: "ready",
+    });
+    expect(historyCalls).toHaveLength(1);
+
+    await provider.dispatchTestIntent({
+      data: {
+        action: "enter",
+        sessionId: "session-1",
+      },
+      messageId: "plan-enter-no-history",
+      type: "setPlanMode",
+    });
+
+    expect(historyCalls).toHaveLength(1);
+    expect(provider.currentState().sessionViews["session-1"]?.planState).toBe("planning");
 
     provider.dispose();
   });

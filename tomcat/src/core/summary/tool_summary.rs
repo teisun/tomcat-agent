@@ -37,7 +37,34 @@ pub fn one_line_summary(tool_name: &str, args: &Value) -> String {
             }
             out
         }
-        _ => args.to_string().replace('\n', " "),
+        "ask_question" => format!(
+            "questions={}",
+            args.get("questions")
+                .and_then(Value::as_array)
+                .map(|items| items.len())
+                .unwrap_or(0)
+        ),
+        "create_plan" => key_value_summary(args, "goal")
+            .or_else(|| key_value_summary(args, "path"))
+            .unwrap_or_else(|| "goal=plan".to_string()),
+        "update_plan" => key_value_summary(args, "plan_id")
+            .or_else(|| key_value_summary(args, "planId"))
+            .or_else(|| count_summary(args, "todos", "todos"))
+            .unwrap_or_else(|| "plan=update".to_string()),
+        "todos" => count_summary(args, "todos", "todos").unwrap_or_else(|| "todos=0".to_string()),
+        "web_search" => key_value_summary(args, "query")
+            .or_else(|| key_value_summary(args, "search_term"))
+            .unwrap_or_else(|| "query=search".to_string()),
+        "search_workspace" | "search_files" | "grep" => key_value_summary(args, "query")
+            .or_else(|| key_value_summary(args, "pattern"))
+            .or_else(|| key_value_summary(args, "path"))
+            .unwrap_or_else(|| "query=search".to_string()),
+        "web_fetch" => key_value_summary(args, "url").unwrap_or_else(|| "url=fetch".to_string()),
+        "list_dir" => key_value_summary(args, "path").unwrap_or_else(|| "path=.".to_string()),
+        "config_get" | "config_set" => {
+            key_value_summary(args, "key").unwrap_or_else(|| "key=config".to_string())
+        }
+        _ => summarize_known_key(args).unwrap_or_else(|| args.to_string().replace('\n', " ")),
     };
     if matches!(tool_name, "bash" | "shell" | "execute_command") {
         summary
@@ -83,6 +110,39 @@ fn bash_command_for_terminal(text: &str) -> String {
     } else {
         lines.join(" ")
     }
+}
+
+fn key_value_summary(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{key}={value}"))
+}
+
+fn count_summary(args: &Value, key: &str, label: &str) -> Option<String> {
+    args.get(key)
+        .and_then(Value::as_array)
+        .map(|items| format!("{label}={}", items.len()))
+}
+
+fn summarize_known_key(args: &Value) -> Option<String> {
+    for key in [
+        "path",
+        "url",
+        "goal",
+        "query",
+        "pattern",
+        "key",
+        "plan_id",
+        "planId",
+        "command",
+    ] {
+        if let Some(summary) = key_value_summary(args, key) {
+            return Some(summary);
+        }
+    }
+    count_summary(args, "questions", "questions").or_else(|| count_summary(args, "todos", "todos"))
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {

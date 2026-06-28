@@ -410,9 +410,9 @@ function applyHistoryEntry(
     if (role === "assistant") {
       const hasToolCalls =
         Array.isArray(entry.message.tool_calls) && entry.message.tool_calls.length > 0;
-      const assistantMessageId = hasToolCalls ? id : undefined;
       const thinkingText = extractThinkingText(entry.message);
       const summaryTitle = extractSummaryTitle(entry.message) ?? null;
+      const assistantMessageId = hasToolCalls || Boolean(thinkingText) ? id : undefined;
       if (hasToolCalls || thinkingText) {
         session.timeline.push({
           assistantMessageId,
@@ -898,7 +898,7 @@ export class WebviewStateStore {
         ownership.get(session.sessionId) === frontend,
       ),
     );
-    if (payload.activeSessionId) {
+    if (!this.state.activeSessionId && payload.activeSessionId) {
       this.setActiveSession(payload.activeSessionId);
     }
   }

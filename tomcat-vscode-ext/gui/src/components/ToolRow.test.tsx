@@ -26,8 +26,6 @@ describe("ToolRow", () => {
           args: { path: "/workspace/README.md" },
           display: { file: "/workspace/README.md", kind: "file" },
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={onOpenFile}
       />,
     );
@@ -45,8 +43,6 @@ describe("ToolRow", () => {
           summary: "test output",
           toolName: "bash",
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -68,8 +64,6 @@ describe("ToolRow", () => {
           summary: "Rust async book\nTokio tutorial",
           toolName: "web_search",
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -83,8 +77,6 @@ describe("ToolRow", () => {
     const { rerender } = render(
       <ToolRow
         item={buildTool({ status: "complete" })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -92,9 +84,7 @@ describe("ToolRow", () => {
 
     rerender(
       <ToolRow
-        item={buildTool({ status: "streaming" })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
+        item={buildTool({ status: "streaming", summary: "partial output" })}
         onOpenFile={vi.fn()}
       />,
     );
@@ -105,8 +95,6 @@ describe("ToolRow", () => {
     render(
       <ToolRow
         item={buildTool()}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -123,8 +111,6 @@ describe("ToolRow", () => {
           summary: "M file",
           toolName: "bash",
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -143,8 +129,6 @@ describe("ToolRow", () => {
           summary: "Found 2 results\nfile.rs:10:foo\nfile.rs:20:foo",
           toolName: "grep",
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -163,8 +147,6 @@ describe("ToolRow", () => {
           summary: "hit",
           toolName: "search_workspace",
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -182,13 +164,30 @@ describe("ToolRow", () => {
           display: { file: "/workspace/a.rs", kind: "file" },
           toolName: "edit",
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
 
     expect(document.querySelector(".tc-thinking-tool-wrapper .codicon-edit")).toBeTruthy();
+  });
+
+  it("keeps file tool content but removes webview diff/apply buttons", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/a.rs" },
+          display: { file: "/workspace/a.rs", kind: "file" },
+          summary: "updated file",
+          toolName: "edit",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-result").textContent).toBe("updated file");
+    expect(screen.queryByRole("button", { name: "Open Diff" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Apply Edit" })).toBeNull();
   });
 
   it("maps additional built-in tools to readable labels and distinct icons", () => {
@@ -199,8 +198,6 @@ describe("ToolRow", () => {
           summary: "Loaded skill",
           toolName: "load_skill",
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -214,8 +211,6 @@ describe("ToolRow", () => {
           summary: "src\nREADME.md",
           toolName: "list_dir",
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
@@ -229,12 +224,63 @@ describe("ToolRow", () => {
           summary: "Updated log.level",
           toolName: "config_set",
         })}
-        onApplyEdit={vi.fn()}
-        onOpenDiff={vi.fn()}
         onOpenFile={vi.fn()}
       />,
     );
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Updated config log.level");
     expect(document.querySelector(".tc-thinking-tool-wrapper .codicon-gear")).toBeTruthy();
+  });
+
+  it("keeps running tools with no content collapsed and hides the toggle", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/new-file.ts" },
+          status: "streaming",
+          summary: undefined,
+          toolName: "write",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("tool-row-toggle")).toBeNull();
+    expect(screen.queryByTestId("tool-row-body")).toBeNull();
+    expect(screen.getByTestId("tool-row-running-indicator").textContent).toBe("...");
+  });
+
+  it("renders ask_question results as an answer card instead of raw JSON", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: {
+            questions: [
+              {
+                id: "style",
+                options: [{ id: "run-gun", label: "Run-and-gun", recommended: true }],
+                prompt: "Which style?",
+              },
+            ],
+          },
+          summary: JSON.stringify({
+            answers: [
+              {
+                optionIds: ["run-gun"],
+                pickedRecommended: true,
+                questionId: "style",
+              },
+            ],
+            cancelled: false,
+          }),
+          toolName: "ask_question",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("answer-card").textContent).toContain("Answers");
+    expect(screen.getByTestId("answer-option-style").textContent).toContain("Run-and-gun");
+    expect(screen.queryByText('"optionIds":["run-gun"]')).toBeNull();
   });
 });

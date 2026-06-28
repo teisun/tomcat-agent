@@ -22,9 +22,6 @@ function statusClass(status: WebviewTodo["status"]): string {
 }
 
 function collapsedTitle(progress: ReturnType<typeof useActiveTodoProgress>): string {
-  if (!progress) {
-    return "Working…";
-  }
   if (progress.isComplete || !progress.activeTodo) {
     return `Todos (${progress.current}/${progress.total})`;
   }
@@ -66,22 +63,7 @@ export function TodoListWidget({
   }
 
   if (!progress) {
-    return (
-      <section
-        className="tc-todo-widget tc-todo-widget--working"
-        data-testid="todo-widget"
-      >
-        <div className="tc-todo-widget__working">
-          <span
-            aria-hidden="true"
-            className="tc-todo-widget__spinner codicon codicon-loading"
-          />
-          <span className="tc-todo-widget__title" data-testid="todo-widget-title">
-            Working…
-          </span>
-        </div>
-      </section>
-    );
+    return null;
   }
 
   const title = expanded

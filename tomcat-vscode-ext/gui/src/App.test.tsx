@@ -247,9 +247,10 @@ describe("Tomcat webview App", () => {
     expect(screen.getByText("hello")).toBeTruthy();
     expect(screen.getByTestId("history-loader").textContent).toContain("Loading earlier");
     expect(screen.getByTestId("boundary-block").textContent).toContain("Earlier history summary");
-    expect(screen.queryByText("thinking...")).toBeNull();
+    expect(screen.getByTestId("thinking-summary").textContent).toContain("thinking...");
+    expect(screen.queryByTestId("thinking-body")).toBeNull();
     fireEvent.click(screen.getByTestId("thinking-toggle"));
-    expect(screen.getByText("thinking...")).toBeTruthy();
+    expect(screen.getByTestId("thinking-body").textContent).toContain("thinking...");
     expect(screen.getByText("Questions")).toBeTruthy();
     expect(screen.getByText("Proceed?")).toBeTruthy();
     expect(screen.getByTestId("file-chip").textContent).toContain("app.ts");
@@ -455,6 +456,59 @@ describe("Tomcat webview App", () => {
         type: "loadOlderHistory",
       }),
     );
+  });
+
+  it("keeps Build enabled for a restored planning card even when activeSession.planFile is null", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: "Restored plan session",
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "planning",
+            sessionId: "s1",
+            timeline: [
+              {
+                id: "plan-card-1",
+                path: "/workspace/restored.plan.md",
+                planId: "plan-restored",
+                state: "planning",
+                type: "plan",
+              },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-restored-plan-build",
+    });
+
+    expect((screen.getByTestId("build-plan") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("keeps top-pagination alive when older pages still do not advance the visible oldest item", async () => {
@@ -895,7 +949,7 @@ describe("Tomcat webview App", () => {
     });
     fireEvent.click(screen.getByLabelText("Add attachment"));
     fireEvent.click(screen.getByTestId("attachment-chip"));
-    fireEvent.click(screen.getByLabelText("Open plan file"));
+    fireEvent.click(screen.getByTestId("plan-card-title"));
     fireEvent.click(screen.getByTestId("build-plan"));
     fireEvent.click(screen.getByTestId("approval-option-q1-yes"));
     fireEvent.click(screen.getByTestId("approval-continue"));
@@ -960,7 +1014,8 @@ describe("Tomcat webview App", () => {
       postMessage.mock.calls.some(
         ([message]) =>
           message.type === "setPlanMode" &&
-          message.data?.action === "build",
+          message.data?.action === "build" &&
+          message.data?.planId === "plan-1",
       ),
     ).toBe(true);
   });

@@ -126,6 +126,62 @@ describe("WebviewStateStore wire routing", () => {
 
     expect(store.snapshot().sessions[0]?.title).toBe("Fix transcript UI");
   });
+
+  it("does not override an existing active session during session list refresh", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.syncSessionList(
+      {
+        activeSessionId: "s2",
+        scope: "disk",
+        sessions: [
+          {
+            busy: false,
+            isCurrent: false,
+            sessionId: "s1",
+            title: "Session A",
+            updatedAt: 1,
+          },
+          {
+            busy: true,
+            isCurrent: true,
+            sessionId: "s2",
+            title: "Session B",
+            updatedAt: 2,
+          },
+        ],
+      },
+      new Map(),
+      "webview",
+    );
+
+    expect(store.snapshot().activeSessionId).toBe("s1");
+  });
+
+  it("adopts the server active session when the webview has none yet", () => {
+    const store = new WebviewStateStore();
+
+    store.syncSessionList(
+      {
+        activeSessionId: "s2",
+        scope: "disk",
+        sessions: [
+          {
+            busy: true,
+            isCurrent: true,
+            sessionId: "s2",
+            title: "Session B",
+            updatedAt: 2,
+          },
+        ],
+      },
+      new Map(),
+      "webview",
+    );
+
+    expect(store.snapshot().activeSessionId).toBe("s2");
+  });
 });
 
 describe("history tool attribution", () => {
@@ -222,6 +278,37 @@ describe("history tool attribution", () => {
       "Reviewed 2 files",
     );
     expect(thinking?.type === "thinking" ? thinking.text : undefined).toBe("");
+  });
+
+  it("assigns assistantMessageId for history thinking-only turns", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-thinking-1",
+          message: {
+            content: "Done.",
+            thinking_text: "Inspect the existing plan mode history flow.",
+            role: "assistant",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    const thinking = session.timeline.find((item) => item.type === "thinking");
+    const assistant = session.timeline.find(
+      (item) => item.type === "message" && item.kind === "assistant",
+    );
+    expect(thinking?.type === "thinking" ? thinking.assistantMessageId : undefined).toBe(
+      "assistant-thinking-1",
+    );
+    expect(assistant?.type === "message" ? assistant.assistantMessageId : undefined).toBe(
+      "assistant-thinking-1",
+    );
   });
 
   it("live tool_execution_start writes activeAssistantId and args", () => {

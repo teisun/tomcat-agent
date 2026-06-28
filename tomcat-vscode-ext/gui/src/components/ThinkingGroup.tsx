@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { WebviewMessageBlock, WebviewToolCard } from "../types";
 import { MessageBubble } from "./MessageBubble";
 import { ThinkingBlock } from "./ThinkingBlock";
-import { ToolRow } from "./ToolRow";
+import { buildToolCollectionTitle, ToolRow } from "./ToolRow";
 import type { AssistantResponseGroup } from "./sessionList/groupTimelineByAssistantResponse";
 
 function summarizeThinking(text: string): string | null {
@@ -19,13 +19,24 @@ function summarizeThinking(text: string): string | null {
     : firstMeaningfulLine;
 }
 
+function isDirtySummaryTitle(summaryTitle: string, tools: WebviewToolCard[]): boolean {
+  if (/[{\[]/.test(summaryTitle) || /\b(path|command)=/.test(summaryTitle)) {
+    return true;
+  }
+  const normalized = summaryTitle.trim().toLowerCase();
+  return tools.some((tool) => normalized.startsWith(tool.toolName.toLowerCase()));
+}
+
 function groupHeaderTitle(
   group: AssistantResponseGroup,
   isStreaming: boolean,
 ): { shimmer: boolean; text: string } {
   const summaryTitle = group.thinking?.summaryTitle ?? null;
-  if (summaryTitle) {
+  if (summaryTitle && !isDirtySummaryTitle(summaryTitle, group.tools)) {
     return { shimmer: false, text: summaryTitle };
+  }
+  if (group.tools.length > 0) {
+    return { shimmer: isStreaming, text: buildToolCollectionTitle(group.tools) };
   }
   if (isStreaming) {
     const fallback = summarizeThinking(group.thinking?.text ?? "") ?? "Tomcat · Thinking";
@@ -41,14 +52,10 @@ function groupHeaderTitle(
 export function ThinkingGroup({
   group,
   isStreaming = false,
-  onApplyEdit,
-  onOpenDiff,
   onOpenFile,
 }: {
   group: AssistantResponseGroup;
   isStreaming?: boolean;
-  onApplyEdit(toolCallId: string): void;
-  onOpenDiff(toolCallId: string): void;
   onOpenFile(path: string): void;
 }) {
   const streaming = isStreaming && group.tools.some((tool) => tool.status !== "complete");
@@ -106,8 +113,6 @@ export function ThinkingGroup({
               <ToolRow
                 item={tool}
                 key={tool.id}
-                onApplyEdit={onApplyEdit}
-                onOpenDiff={onOpenDiff}
                 onOpenFile={onOpenFile}
               />
             ))}

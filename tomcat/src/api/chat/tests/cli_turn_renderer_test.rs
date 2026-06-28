@@ -491,11 +491,10 @@ fn one_line_summary_handles_known_and_unknown_tools() {
         one_line_summary("bash", &json!({"command": "ls -la\nrm -rf"})),
         "command=ls -la rm -rf"
     );
-    let unknown = one_line_summary("custom", &json!({"k": "v"}));
-    assert!(
-        unknown.contains("\"k\""),
-        "未知工具应回退 JSON 串联: {}",
-        unknown
+    assert_eq!(one_line_summary("custom", &json!({"k": "v"})), "k=v");
+    assert_eq!(
+        one_line_summary("ask_question", &json!({"questions": [{"id": "q1"}]})),
+        "questions=1"
     );
 }
 

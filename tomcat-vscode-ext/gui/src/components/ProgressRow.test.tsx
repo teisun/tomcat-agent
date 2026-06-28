@@ -4,45 +4,56 @@ import { describe, expect, it } from "vitest";
 import { ProgressRow } from "../components/ProgressRow";
 
 describe("ProgressRow", () => {
-  it("shows title with N/M and spinner when progress exists", () => {
+  it("renders a minimal dots placeholder while busy with no richer activity", () => {
     render(
       <ProgressRow
         busy
-        planState="executing"
-        planTodos={[
-          { content: "Run tests", id: "1", status: "completed" },
-          { content: "Verify", id: "2", status: "in_progress" },
-        ]}
-        sessionTodos={[]}
+        hasActiveThinking={false}
+        hasRunningTool={false}
+        hasStreamingText={false}
+        hasTodos={false}
       />,
     );
 
-    expect(screen.getByTestId("progress-row-text").textContent).toBe("Verify (2/2)");
+    expect(screen.getByTestId("progress-row-dots").textContent).toBe("...");
   });
 
-  it("falls back to Working… when busy without todo data", () => {
-    render(
+  it("stays hidden when a more specific signal exists", () => {
+    const { rerender } = render(
       <ProgressRow
         busy
-        planState="chat"
-        planTodos={[]}
-        sessionTodos={[]}
+        hasActiveThinking
+        hasRunningTool={false}
+        hasStreamingText={false}
+        hasTodos={false}
       />,
     );
 
-    expect(screen.getByTestId("progress-row").textContent).toContain("Working…");
+    expect(screen.queryByTestId("progress-row")).toBeNull();
+
+    rerender(
+      <ProgressRow
+        busy
+        hasActiveThinking={false}
+        hasRunningTool
+        hasStreamingText={false}
+        hasTodos={false}
+      />,
+    );
+    expect(screen.queryByTestId("progress-row")).toBeNull();
   });
 
   it("does not render when not busy", () => {
-    const { container } = render(
+    render(
       <ProgressRow
         busy={false}
-        planState="executing"
-        planTodos={[{ content: "A", id: "1", status: "in_progress" }]}
-        sessionTodos={[]}
+        hasActiveThinking={false}
+        hasRunningTool={false}
+        hasStreamingText={false}
+        hasTodos={false}
       />,
     );
 
-    expect(container.innerHTML).toBe("");
+    expect(screen.queryByTestId("progress-row")).toBeNull();
   });
 });
