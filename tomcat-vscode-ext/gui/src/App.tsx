@@ -149,6 +149,8 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     document.querySelector<HTMLElement>('[data-testid="context-ratio"]')?.textContent ?? null;
   const planCardTodoCountText =
     document.querySelector<HTMLElement>('[data-testid="plan-todos-count"]')?.textContent ?? null;
+  const planCardTitleText =
+    document.querySelector<HTMLElement>('[data-testid="plan-card-title"]')?.textContent ?? null;
   const viewPlanButton = document.querySelector<HTMLElement>('[data-testid="view-plan"]');
   const buildPlanButton = document.querySelector<HTMLElement>('[data-testid="build-plan"]');
   const planFooterSameRow =
@@ -241,6 +243,7 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     planCardCount: document.querySelectorAll('[data-testid="plan-card"]').length,
     planFooterSameRow,
     planCardTodoCountText,
+    planCardTitleText,
     planNoticeReplayed,
     planStateText: composerFooterPlanStatus,
     progressRow: !!document.querySelector('[data-testid="progress-row"]'),

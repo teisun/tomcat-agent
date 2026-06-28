@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isWebviewIntent } from "../protocol";
+import { isWebviewIntent, type WebviewPlanFileCard } from "../protocol";
 import {
   buildToolCallToAssistantMap,
   WebviewStateStore,
@@ -697,6 +697,144 @@ describe("custom history replay", () => {
         summary: "Earlier turns were summarized.",
         type: "boundary",
       },
+    ]);
+  });
+});
+
+describe("plan.todos routing", () => {
+  it("routes live plan.todos onto the matching card by planId without cross-talk", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      path: "/workspace/plan-a.plan.md",
+      planId: "plan-a",
+      sessionId: "s1",
+      state: "planning",
+      type: "plan.create",
+    });
+    store.applyEvent({
+      path: "/workspace/plan-b.plan.md",
+      planId: "plan-b",
+      sessionId: "s1",
+      state: "planning",
+      type: "plan.create",
+    });
+    store.applyEvent({
+      planId: "plan-a",
+      sessionId: "s1",
+      todos: [
+        { content: "A step 1", id: "a1", status: "pending" },
+        { content: "A step 2", id: "a2", status: "in_progress" },
+      ],
+      type: "plan.todos",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    const findCard = (planId: string) =>
+      session.timeline.find(
+        (item): item is WebviewPlanFileCard =>
+          item.type === "plan" && item.planId === planId,
+      );
+    expect(findCard("plan-a")?.todos).toEqual([
+      { content: "A step 1", id: "a1", status: "pending" },
+      { content: "A step 2", id: "a2", status: "in_progress" },
+    ]);
+    expect(findCard("plan-b")?.todos).toBeUndefined();
+    expect(session.planTodos).toHaveLength(2);
+  });
+
+  it("attaches plan.todos to the card during history replay", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applySessionState(
+      {
+        busy: false,
+        model: "gpt-5.4",
+        planId: "plan-a",
+        planPath: "/workspace/plan-a.plan.md",
+        planState: "planning",
+        sessionId: "s1",
+      },
+      null,
+      "webview",
+    );
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          event: "plan.create",
+          id: "create-1",
+          path: "/workspace/plan-a.plan.md",
+          plan_id: "plan-a",
+          state: "planning",
+          type: "custom",
+        },
+        {
+          event: "plan.todos",
+          id: "todos-1",
+          plan_id: "plan-a",
+          todos: [
+            { content: "history step", id: "h1", status: "pending" },
+          ],
+          type: "custom",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    const card = session.timeline.find(
+      (item): item is WebviewPlanFileCard =>
+        item.type === "plan" && item.planId === "plan-a",
+    );
+    expect(card?.todos).toEqual([
+      { content: "history step", id: "h1", status: "pending" },
+    ]);
+    expect(session.planTodos).toEqual([
+      { content: "history step", id: "h1", status: "pending" },
+    ]);
+  });
+
+  it("does not overwrite existing live planTodos when history has no todos for the active plan", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applySessionState(
+      {
+        busy: false,
+        model: "gpt-5.4",
+        planId: "plan-a",
+        planPath: "/workspace/plan-a.plan.md",
+        planState: "planning",
+        sessionId: "s1",
+      },
+      null,
+      "webview",
+    );
+    store.applyEvent({
+      planId: "plan-a",
+      sessionId: "s1",
+      todos: [{ content: "live step", id: "l1", status: "pending" }],
+      type: "plan.todos",
+    });
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          event: "plan.create",
+          id: "create-1",
+          path: "/workspace/plan-a.plan.md",
+          plan_id: "plan-a",
+          state: "planning",
+          type: "custom",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    expect(session.planTodos).toEqual([
+      { content: "live step", id: "l1", status: "pending" },
     ]);
   });
 });

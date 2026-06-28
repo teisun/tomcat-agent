@@ -912,6 +912,44 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
+  it("routes plan.todos events onto the matching plan card", async () => {
+    const { messenger, provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-plan-todos",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: {
+        action: "enter",
+        sessionId: "session-1",
+      },
+      messageId: "plan-enter-todos",
+      type: "setPlanMode",
+    });
+
+    messenger.emit({
+      planId: "plan-1",
+      sessionId: "session-1",
+      todos: [
+        { content: "Setup canvas", id: "t1", status: "pending" },
+        { content: "Implement physics", id: "t2", status: "in_progress" },
+        { content: "Verify in browser", id: "t3", status: "pending" },
+      ],
+      type: "plan.todos",
+    });
+
+    const session = provider.currentState().sessionViews["session-1"];
+    const planCard = session.timeline.find(
+      (item) => item.type === "plan" && item.planId === "plan-1",
+    );
+    expect(planCard).toMatchObject({ type: "plan" });
+    expect((planCard as { todos?: unknown[] }).todos).toHaveLength(3);
+    expect(session.planTodos).toHaveLength(3);
+
+    provider.dispose();
+  });
+
   it("appends an error message when opening a file fails", async () => {
     const { provider } = buildProvider({
       ideOverrides: {

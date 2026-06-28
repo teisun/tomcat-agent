@@ -133,6 +133,7 @@ export interface TomcatExtensionApi {
       planCardCount: number;
       planFooterSameRow: boolean;
       planCardTodoCountText: string | null;
+      planCardTitleText: string | null;
       planNoticeReplayed: boolean;
       planStateText: string | null;
       progressRow: boolean;

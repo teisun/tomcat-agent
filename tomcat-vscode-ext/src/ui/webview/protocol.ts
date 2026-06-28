@@ -92,6 +92,7 @@ export interface WebviewPlanFileCard extends WebviewPlanFileRef {
   id: string;
   overview?: string;
   title?: string;
+  todos?: WebviewTodo[];
   type: "plan";
 }
 
@@ -374,6 +375,7 @@ export type WebviewIntent =
         planCardCount: number;
         planFooterSameRow: boolean;
         planCardTodoCountText: string | null;
+        planCardTitleText: string | null;
         planNoticeReplayed: boolean;
         planStateText: string | null;
         progressRow: boolean;

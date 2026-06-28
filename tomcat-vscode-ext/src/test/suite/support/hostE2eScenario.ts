@@ -1015,6 +1015,8 @@ export async function assertWebviewReloadReplayFlow(
       snapshot.activeSessionId === sessionId &&
       snapshot.ctxLabel === "Ctx 62%" &&
       snapshot.planCardCount === 1 &&
+      snapshot.planCardTodoCountText === "3 todos" &&
+      snapshot.planCardTitleText === "Replay the plan review and verify history" &&
       snapshot.planNoticeReplayed &&
       snapshot.planStateText === "Plan: pending"
         ? snapshot
@@ -1029,6 +1031,8 @@ export async function assertWebviewReloadReplayFlow(
       snapshot.activeSessionId === sessionId &&
       snapshot.ctxLabel === "Ctx 62%" &&
       snapshot.planCardCount === 1 &&
+      snapshot.planCardTodoCountText === "3 todos" &&
+      snapshot.planCardTitleText === "Replay the plan review and verify history" &&
       snapshot.planNoticeReplayed &&
       snapshot.planStateText === "Plan: pending"
         ? snapshot

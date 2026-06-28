@@ -154,4 +154,54 @@ describe("PlanFileCard", () => {
       "Create a classic Sega-style run-and-gun game in a single HTML file.",
     );
   });
+
+  it("prefers the card's own todos count over the session planTodos prop", () => {
+    render(
+      <PlanFileCard
+        canBuild
+        item={{
+          id: "plan-4",
+          path: "/tmp/own.plan.md",
+          planId: "p4",
+          state: "planning",
+          todos: [
+            { content: "Own 1", id: "o1", status: "pending" },
+            { content: "Own 2", id: "o2", status: "in_progress" },
+          ],
+          type: "plan",
+        }}
+        onBuild={() => undefined}
+        onOpenPlanFile={() => undefined}
+        planTodos={[
+          { content: "Session 1", id: "s1", status: "pending" },
+          { content: "Session 2", id: "s2", status: "pending" },
+          { content: "Session 3", id: "s3", status: "pending" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("plan-todos-count").textContent).toBe("2 todos");
+  });
+
+  it("falls back to session planTodos when the card has no todos of its own", () => {
+    render(
+      <PlanFileCard
+        canBuild
+        item={{
+          id: "plan-5",
+          path: "/tmp/fallback.plan.md",
+          planId: "p5",
+          state: "planning",
+          type: "plan",
+        }}
+        onBuild={() => undefined}
+        onOpenPlanFile={() => undefined}
+        planTodos={[
+          { content: "Session 1", id: "s1", status: "pending" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("plan-todos-count").textContent).toBe("1 todo");
+  });
 });

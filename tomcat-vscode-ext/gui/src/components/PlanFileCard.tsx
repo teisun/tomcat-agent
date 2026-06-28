@@ -84,7 +84,7 @@ export function PlanFileCard({
         </p>
       ) : null}
       <div className="tc-plan-card__todos-count" data-testid="plan-todos-count">
-        {todoCountLabel(planTodos.length)}
+        {todoCountLabel(item.todos?.length ?? planTodos.length)}
       </div>
       <div className="tc-plan-card__footer">
         <button

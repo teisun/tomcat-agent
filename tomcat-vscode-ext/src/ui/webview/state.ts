@@ -337,6 +337,19 @@ function applyHistoryPlanCustomEntry(
       }
       upsertPlanFile(session, path, state, planId);
       return;
+    case "plan.todos": {
+      if (!planId) {
+        return;
+      }
+      const card = session.timeline.find(
+        (item): item is WebviewPlanFileCard =>
+          item.type === "plan" && item.planId === planId,
+      );
+      if (card) {
+        card.todos = parseTodos(entry.todos);
+      }
+      return;
+    }
     case "plan.review":
     case "plan.code_review":
       if (typeof entry.summary === "string" && entry.summary.length > 0) {
@@ -1181,9 +1194,22 @@ export class WebviewStateStore {
         tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
         return;
       }
-      case "plan.todos":
-        session.planTodos = parseTodos("todos" in frame ? frame.todos : undefined);
+      case "plan.todos": {
+        const todos = parseTodos("todos" in frame ? frame.todos : undefined);
+        session.planTodos = todos;
+        const planId =
+          "planId" in frame && typeof frame.planId === "string" ? frame.planId : null;
+        if (planId) {
+          const card = session.timeline.find(
+            (item): item is WebviewPlanFileCard =>
+              item.type === "plan" && item.planId === planId,
+          );
+          if (card) {
+            card.todos = todos;
+          }
+        }
         return;
+      }
       case "session.todos":
         session.sessionTodos = parseTodos("todos" in frame ? frame.todos : undefined);
         return;
@@ -1287,6 +1313,18 @@ export class WebviewStateStore {
       (item) => !timelineMergeKeys(item).some((key) => existingKeys.has(key)),
     );
     session.timeline = [...historyItems, ...liveOnly];
+    if (session.planTodos.length === 0 && session.planId) {
+      const activeCard = session.timeline.find(
+        (item): item is WebviewPlanFileCard =>
+          item.type === "plan" &&
+          item.planId === session.planId &&
+          Array.isArray(item.todos) &&
+          item.todos.length > 0,
+      );
+      if (activeCard?.todos) {
+        session.planTodos = activeCard.todos;
+      }
+    }
     session.hasMoreHistory = runtime.hasMoreHistory;
     session.historyLoading = runtime.historyLoading;
     runtime.historyHydrated = true;

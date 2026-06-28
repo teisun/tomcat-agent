@@ -688,10 +688,32 @@ function handlePrompt(frame) {
     session.planId = "history-plan";
     session.planPath = path.join(process.cwd(), "plans", "history-plan.plan.md");
     fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
-    fs.writeFileSync(session.planPath, "# History plan\\n\\n- Review\\n- Verify\\n", "utf8");
+    fs.writeFileSync(
+      session.planPath,
+      "---\\ngoal: Replay the plan review and verify history\\noverview: Confirm the merged plan card after reload.\\n---\\n\\n# History plan\\n\\n- Review\\n- Verify\\n",
+      "utf8",
+    );
     session.planState = "pending";
     emitPlanEvent(sessionId, "plan.create");
     emitPlanEvent(sessionId, "plan.build");
+    const replayTodos = [
+      { id: "rp-1", content: "Review the plan", status: "completed" },
+      { id: "rp-2", content: "Verify the plan", status: "in_progress" },
+      { id: "rp-3", content: "Confirm the merged card", status: "pending" },
+    ];
+    send({
+      planId: session.planId,
+      sessionId,
+      todos: replayTodos,
+      type: "plan.todos",
+    });
+    session.history.push({
+      event: "plan.todos",
+      id: \`h-\${historyCounter++}\`,
+      plan_id: session.planId,
+      todos: replayTodos,
+      type: "custom",
+    });
     emitCustomPlanEvent(sessionId, "plan.review", { summary: "looks good" });
     emitCustomPlanEvent(sessionId, "plan.verify", { verdict: "pass" });
     emitPlanEvent(sessionId, "plan.pending");

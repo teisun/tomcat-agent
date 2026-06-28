@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import * as vscode from "vscode";
@@ -142,6 +143,29 @@ function stripYamlQuotes(value: string): string {
   return trimmed;
 }
 
+function expandHomePath(filePath: string): string {
+  if (filePath === "~") {
+    return os.homedir();
+  }
+  if (filePath.startsWith("~/")) {
+    return path.join(os.homedir(), filePath.slice(2));
+  }
+  if (filePath.startsWith("$HOME/")) {
+    return path.join(os.homedir(), filePath.slice("$HOME/".length));
+  }
+  return filePath;
+}
+
+const PLAN_TITLE_MAX = 96;
+
+function truncatePlanTitle(value: string): string {
+  const firstLine = value.split("\n")[0]?.trim() ?? "";
+  if (firstLine.length <= PLAN_TITLE_MAX) {
+    return firstLine;
+  }
+  return `${firstLine.slice(0, PLAN_TITLE_MAX - 3).trimEnd()}...`;
+}
+
 export function parsePlanFrontmatter(
   text: string,
 ): Pick<WebviewPlanFileCard, "overview" | "title"> {
@@ -150,6 +174,7 @@ export function parsePlanFrontmatter(
     return {};
   }
 
+  let goalValue: string | undefined;
   const metadata: Pick<WebviewPlanFileCard, "overview" | "title"> = {};
   for (const line of normalized.slice(4).split("\n")) {
     if (line.trim() === "---") {
@@ -164,11 +189,16 @@ export function parsePlanFrontmatter(
     if (!value) {
       continue;
     }
-    if (key === "name") {
+    if (key === "title" || key === "name") {
       metadata.title = value;
+    } else if (key === "goal") {
+      goalValue = value;
     } else if (key === "overview") {
       metadata.overview = value;
     }
+  }
+  if (!metadata.title && goalValue) {
+    metadata.title = truncatePlanTitle(goalValue);
   }
   return metadata;
 }
@@ -177,14 +207,15 @@ export async function readPlanMetadata(
   filePath: string,
   cache: Map<string, PlanMetadataCacheEntry>,
 ): Promise<Pick<WebviewPlanFileCard, "overview" | "title">> {
+  const resolvedPath = expandHomePath(filePath);
   try {
-    const stat = await fs.promises.stat(filePath);
+    const stat = await fs.promises.stat(resolvedPath);
     const cached = cache.get(filePath);
     if (cached && cached.mtimeMs === stat.mtimeMs) {
       return cached;
     }
 
-    const text = await fs.promises.readFile(filePath, "utf8");
+    const text = await fs.promises.readFile(resolvedPath, "utf8");
     const metadata = parsePlanFrontmatter(text);
     cache.set(filePath, {
       ...metadata,

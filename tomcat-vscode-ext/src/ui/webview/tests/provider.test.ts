@@ -36,6 +36,50 @@ todos:
     });
   });
 
+  it("falls back to goal as title when name/title are absent", () => {
+    const parsed = parsePlanFrontmatter(`---
+goal: 在 test-stuff/ 下创建经典世嘉 OutRun 风格赛车网页游戏
+draft: ...
+---
+# body
+`);
+
+    expect(parsed).toEqual({
+      title: "在 test-stuff/ 下创建经典世嘉 OutRun 风格赛车网页游戏",
+    });
+  });
+
+  it("truncates a long goal to the first line and 96 chars", () => {
+    const longGoal = "目标".repeat(60);
+    const parsed = parsePlanFrontmatter(`---
+goal: ${longGoal}
+---
+`);
+    expect(parsed.title).toBeDefined();
+    expect(parsed.title!.length).toBeLessThanOrEqual(96);
+    expect(parsed.title!.endsWith("...")).toBe(true);
+  });
+
+  it("prefers explicit title/name over goal", () => {
+    const byTitle = parsePlanFrontmatter(`---
+title: Explicit Title
+goal: some goal
+---
+`);
+    expect(byTitle.title).toBe("Explicit Title");
+
+    const byName = parsePlanFrontmatter(`---
+name: Named Plan
+goal: some goal
+---
+`);
+    expect(byName.title).toBe("Named Plan");
+  });
+
+  it("returns empty metadata when there is no frontmatter", () => {
+    expect(parsePlanFrontmatter("# just a body\nno frontmatter here")).toEqual({});
+  });
+
   it("reads metadata from disk and refreshes the cache when the file changes", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-plan-metadata-"));
     tempDirs.push(dir);
@@ -74,5 +118,29 @@ overview: Updated overview.
       overview: "Updated overview.",
       title: "Updated Title",
     });
+  });
+
+  it("expands ~ in the plan path before reading from disk", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-plan-home-"));
+    tempDirs.push(dir);
+    const previousHome = process.env.HOME;
+    process.env.HOME = dir;
+    try {
+      const planPath = path.join(dir, "demo.plan.md");
+      await fs.writeFile(
+        planPath,
+        `---
+goal: Home-expanded plan
+---
+`,
+        "utf8",
+      );
+
+      const cache = new Map<string, { mtimeMs: number; overview?: string; title?: string }>();
+      const metadata = await readPlanMetadata("~/demo.plan.md", cache);
+      expect(metadata).toEqual({ title: "Home-expanded plan" });
+    } finally {
+      process.env.HOME = previousHome;
+    }
   });
 });
