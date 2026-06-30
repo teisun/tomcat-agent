@@ -35,6 +35,7 @@
 - [`session-modes.md`](./session-modes.md)
 - [`session-storage.md`](./session-storage.md)
 - [`chat-resume-hydration.md`](./chat-resume-hydration.md)
+- [`transcript-stable-id-and-stream-reconciliation.md`](./transcript-stable-id-and-stream-reconciliation.md)：assistant 稳定 `entry.id` 如何贯穿 streaming / transcript / history replay，并为 webview `upsert-by-id` 提供协议锚点。
 - [`context-management.md`](./context-management.md)
 - [`agent-loop.md`](./agent-loop.md)
 - [`interrupt-and-cancellation.md`](./interrupt-and-cancellation.md)

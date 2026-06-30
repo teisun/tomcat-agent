@@ -625,17 +625,20 @@ input:focus-visible {
 }
 
 .tc-message--notice {
-  border-color: var(--vscode-inputValidation-infoBorder, #3794ff);
+  border-color: transparent;
+  border-left-color: var(--vscode-inputValidation-infoBorder, #3794ff);
   border-left-width: 3px;
 }
 
 .tc-message--error {
-  border-color: var(--vscode-errorForeground, #f14c4c);
+  border-color: transparent;
+  border-left-color: var(--vscode-errorForeground, #f14c4c);
   border-left-width: 3px;
 }
 
 .tc-message--warn {
-  border-color: var(--vscode-inputValidation-warningBorder, #cca700);
+  border-color: transparent;
+  border-left-color: var(--vscode-inputValidation-warningBorder, #cca700);
   border-left-width: 3px;
 }
 

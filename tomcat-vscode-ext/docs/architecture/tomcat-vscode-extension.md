@@ -4,6 +4,7 @@
 > 后续阶段：Phase 2（`/plan`·`/model` slash 命令补全 + serve 后端协议扩展 + 自建 Webview 富前端，与原生 participant 并存）见 [`tomcat-vscode-extension-phase2.md`](tomcat-vscode-extension-phase2.md)。本文为 Phase 2 的事实基线。
 > 上位规范：[`ARCHITECTURE_SPEC.md`](../../../tomcat/docs/openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。本方案按规范 §1–§10 拆为「总览（本文）+ 4 篇子文档」，文首「方案导图集」置于子文档之前、不占用 § 编号。
 > 标杆对照：Tomcat 服务端侧 [`agent-server-and-ui-gateway.md`](../../../tomcat/docs/architecture/agent-server-and-ui-gateway.md)（服务端能力）与本组文档（客户端接入）互补。
+> transcript 稳定 id / webview reload 切回错乱的专项 companion 见 [`webview-transcript-stable-id-upsert.md`](./webview-transcript-stable-id-upsert.md) 与服务端主方案 [`../../../tomcat/docs/architecture/transcript-stable-id-and-stream-reconciliation.md`](../../../tomcat/docs/architecture/transcript-stable-id-and-stream-reconciliation.md)。
 > 单一事实源：协议与类型以 `tomcat/src/api/serve/types.rs` + `tomcat/src/infra/events/mod.rs` 为准；本组文档不复制定义，只描述「扩展侧如何消费」。
 > 外部参考仓库（与本仓同级，位于 `/Users/yankeben/workspace/`，仅作证据引用、不进本仓）：`vscode/`（VSCode 本体 + 内置 `extensions/copilot/`）、`cline/`、`continue/`。
 

@@ -3,6 +3,7 @@
 > 总览见 [`../tomcat-vscode-extension-phase2.md`](../tomcat-vscode-extension-phase2.md)（含定位、阅读顺序与文首导图集）。
 > 本文对应 [`ARCHITECTURE_SPEC.md`](../../../../tomcat/docs/openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 的 **§4 协议**、**§5 One-Glance Map**、**§6 配置**、**§7 错误模型**、**§8 测试矩阵**、**§9 风险**、**§10 历史决策**。
 > 上游设计见 [`02-stage-a-slash-and-serve.md`](02-stage-a-slash-and-serve.md)（serve 命令语义）与 [`03-stage-b-webview.md`](03-stage-b-webview.md)（webview 通道）。
+> transcript 稳定 id / `assistantMessageId` 的专项消费方案见 [`../webview-transcript-stable-id-upsert.md`](../webview-transcript-stable-id-upsert.md)；本文保留 Phase 2 运行时字段总表的定位。
 > 单一事实源：serve 协议类型 `tomcat/src/api/serve/types.rs`（`ServeCommand`/`ResponseFrame`/`OutFrame`）、capabilities `tomcat/src/api/serve/control.rs`、事件白名单 `tomcat/src/api/serve/event_pump.rs`。本文字段表与 Phase 1 [`../tomcat-vscode-extension/03-protocol-and-file-map.md`](../tomcat-vscode-extension/03-protocol-and-file-map.md) §4 互补（Phase 1 命令不在此重复）。
 
 ---
