@@ -28,7 +28,7 @@ If `tomcat` is already on your `PATH`, you usually do **not** need to configure
 2. Install the generated VSIX:
 
    ```bash
-   code --install-extension /path/to/tomcat-vscode-ext-0.1.0.vsix --force
+   code --install-extension /path/to/tomcat-vscode-ext-0.1.1.vsix --force
    ```
 
 3. Reload VS Code.

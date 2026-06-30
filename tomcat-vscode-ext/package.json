@@ -2,7 +2,7 @@
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat",
   "description": "Tomcat chat participant for VS Code.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "tomcat",
   "license": "MIT",
   "repository": {
