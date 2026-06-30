@@ -88,6 +88,7 @@ describe("webview dual-channel state store", () => {
     ]);
 
     store.applyEvent({
+      assistantMessageId: "live-assistant-1",
       assistantMessageEvent: {
         delta: "hello",
         kind: "content_delta",
@@ -97,6 +98,7 @@ describe("webview dual-channel state store", () => {
       type: "message_update",
     });
     store.applyEvent({
+      assistantMessageId: "live-assistant-1",
       assistantMessageEvent: {
         delta: "thinking",
         kind: "thinking_delta",
@@ -238,6 +240,7 @@ describe("webview dual-channel state store", () => {
     );
 
     store.applyEvent({
+      assistantMessageId: "hist-assistant-1",
       assistantMessageEvent: {
         delta: "live answer",
         kind: "content_delta",
@@ -247,6 +250,7 @@ describe("webview dual-channel state store", () => {
       type: "message_update",
     });
     store.applyEvent({
+      assistantMessageId: "hist-assistant-1",
       assistantMessageEvent: {
         delta: "live thinking",
         kind: "thinking_delta",
@@ -310,6 +314,330 @@ describe("webview dual-channel state store", () => {
     expect(
       timeline.filter((item) => item.type === "tool" && item.toolCallId === "tool-1"),
     ).toHaveLength(1);
+  });
+
+  it("ignores late deltas after message_end clears the current stream", () => {
+    const store = new WebviewStateStore("both");
+
+    store.syncSessionList(
+      {
+        activeSessionId: "s1",
+        scope: "disk",
+        sessions: [{ busy: false, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
+      },
+      new Map([["s1", "webview"]]),
+      "webview",
+    );
+
+    store.applyEvent({
+      assistantMessageId: "assistant-1",
+      assistantMessageEvent: {
+        delta: "live answer",
+        kind: "content_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      assistantMessageId: "assistant-1",
+      assistantMessageEvent: {
+        delta: "live thinking",
+        kind: "thinking_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      assistantMessageId: "assistant-1",
+      message: {},
+      sessionId: "s1",
+      type: "message_end",
+    });
+    store.applyEvent({
+      assistantMessageId: "assistant-1",
+      assistantMessageEvent: {
+        delta: " SHOULD NOT APPEND",
+        kind: "content_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      assistantMessageId: "assistant-1",
+      assistantMessageEvent: {
+        delta: " SHOULD NOT APPEND",
+        kind: "thinking_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    const assistant = timeline.find(
+      (item) => item.type === "message" && item.kind === "assistant",
+    );
+    const thinking = timeline.find((item) => item.type === "thinking");
+    expect(assistant).toMatchObject({ text: "live answer", type: "message" });
+    expect(thinking).toMatchObject({ text: "live thinking", type: "thinking" });
+  });
+
+  it("keeps repeated history hydration idempotent after live entries have already converged by id", () => {
+    const store = new WebviewStateStore("both");
+
+    store.syncSessionList(
+      {
+        activeSessionId: "s1",
+        scope: "disk",
+        sessions: [{ busy: false, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
+      },
+      new Map([["s1", "webview"]]),
+      "webview",
+    );
+
+    store.applyEvent({
+      assistantMessageId: "hist-assistant-1",
+      assistantMessageEvent: {
+        delta: "live answer",
+        kind: "content_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      assistantMessageId: "hist-assistant-1",
+      assistantMessageEvent: {
+        delta: "live thinking",
+        kind: "thinking_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+
+    const history = {
+      messages: [
+        {
+          id: "hist-assistant-1",
+          message: {
+            content: "live answer",
+            reasoning_continuation: { fallback_text: "live thinking" },
+            role: "assistant",
+          },
+          type: "message" as const,
+        },
+      ],
+      sessionId: "s1",
+      upToSeq: null,
+    };
+
+    store.hydrateHistory("s1", history);
+    const firstTimeline = store.snapshot().sessionViews.s1.timeline;
+    store.hydrateHistory("s1", history);
+    const secondTimeline = store.snapshot().sessionViews.s1.timeline;
+
+    expect(secondTimeline).toEqual(firstTimeline);
+  });
+
+  it("keeps in-flight assistant tails at the end until disk catches up, then converges in place", () => {
+    const store = new WebviewStateStore("both");
+
+    store.syncSessionList(
+      {
+        activeSessionId: "s1",
+        scope: "disk",
+        sessions: [{ busy: true, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
+      },
+      new Map([["s1", "webview"]]),
+      "webview",
+    );
+    store.applySessionState(
+      {
+        busy: true,
+        model: "gpt-5.4",
+        planId: null,
+        planState: "chat",
+        sessionId: "s1",
+      },
+      "webview",
+      "webview",
+    );
+
+    const olderHistory = {
+      messages: [
+        {
+          id: "older-user-1",
+          message: {
+            content: "older prompt",
+            role: "user",
+          },
+          type: "message" as const,
+        },
+        {
+          id: "older-assistant-1",
+          message: {
+            content: "older answer",
+            role: "assistant",
+          },
+          type: "message" as const,
+        },
+      ],
+      sessionId: "s1",
+      upToSeq: null,
+    };
+    store.hydrateHistory("s1", olderHistory);
+
+    store.applyEvent({
+      assistantMessageId: "live-assistant-1",
+      assistantMessageEvent: {
+        delta: "live thinking",
+        kind: "thinking_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      assistantMessageId: "live-assistant-1",
+      assistantMessageEvent: {
+        delta: "live answer",
+        kind: "content_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      args: { path: "src/app.ts" },
+      sessionId: "s1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      type: "tool_execution_start",
+    });
+
+    store.hydrateHistory("s1", olderHistory);
+    expect(store.snapshot().sessionViews.s1.timeline).toEqual([
+      {
+        id: "older-user-1",
+        kind: "user",
+        text: "older prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "older-assistant-1",
+        id: "older-assistant-1",
+        kind: "assistant",
+        text: "older answer",
+        type: "message",
+      },
+      {
+        assistantMessageId: "live-assistant-1",
+        id: "live-assistant-1-thinking",
+        summaryTitle: null,
+        text: "live thinking",
+        type: "thinking",
+      },
+      {
+        assistantMessageId: "live-assistant-1",
+        id: "live-assistant-1",
+        kind: "assistant",
+        text: "live answer",
+        type: "message",
+      },
+      {
+        args: { path: "src/app.ts" },
+        assistantMessageId: "live-assistant-1",
+        id: "tool-1",
+        isError: false,
+        status: "running",
+        toolCallId: "tool-1",
+        toolName: "edit",
+        type: "tool",
+      },
+    ]);
+
+    store.hydrateHistory("s1", {
+      messages: [
+        ...olderHistory.messages,
+        {
+          id: "live-assistant-1",
+          message: {
+            content: "live answer",
+            reasoning_continuation: { fallback_text: "live thinking" },
+            role: "assistant",
+            tool_calls: [
+              {
+                function: { arguments: "{\"path\":\"src/app.ts\"}", name: "edit" },
+                id: "tool-1",
+              },
+            ],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-result-1",
+          message: {
+            content: "updated file",
+            role: "tool",
+            tool_call_id: "tool-1",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+      upToSeq: null,
+    });
+
+    const finalTimeline = store.snapshot().sessionViews.s1.timeline;
+    expect(finalTimeline).toEqual([
+      {
+        id: "older-user-1",
+        kind: "user",
+        text: "older prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "older-assistant-1",
+        id: "older-assistant-1",
+        kind: "assistant",
+        text: "older answer",
+        type: "message",
+      },
+      {
+        assistantMessageId: "live-assistant-1",
+        id: "live-assistant-1-thinking",
+        summaryTitle: null,
+        text: "live thinking",
+        type: "thinking",
+      },
+      {
+        assistantMessageId: "live-assistant-1",
+        id: "live-assistant-1",
+        kind: "assistant",
+        text: "live answer",
+        type: "message",
+      },
+      {
+        args: { path: "src/app.ts" },
+        assistantMessageId: "live-assistant-1",
+        id: "tool-result-1",
+        isError: false,
+        status: "complete",
+        summary: "updated file",
+        toolCallId: "tool-1",
+        toolName: "edit",
+        type: "tool",
+      },
+    ]);
+    expect(finalTimeline.filter((item) => item.id === "live-assistant-1")).toHaveLength(1);
+    expect(
+      finalTimeline.filter((item) => item.type === "thinking" && item.id === "live-assistant-1-thinking"),
+    ).toHaveLength(1);
+    expect(finalTimeline.filter((item) => item.type === "tool" && item.toolCallId === "tool-1")).toHaveLength(1);
   });
 
   it("replaces session metadata idempotently from fresh state snapshots", () => {

@@ -47,6 +47,7 @@ const MODEL_OPTIONS = ["fake-model", "gpt-5.4", "claude-4.6-sonnet"];
 const sessions = new Map();
 let sessionCounter = 1;
 let historyCounter = 1;
+let assistantMessageCounter = 1;
 let pendingApproval = null;
 let pendingInterrupt = null;
 let activeSessionId = null;
@@ -74,6 +75,7 @@ function createSession() {
     history: [],
     mode: "code",
     model: MODEL_OPTIONS[0],
+    pendingAssistantMessageId: null,
     planId: null,
     planPath: null,
     planState: "chat",
@@ -100,6 +102,7 @@ function ensureSession(sessionId) {
       history: [],
       mode: "code",
       model: MODEL_OPTIONS[0],
+      pendingAssistantMessageId: null,
       planId: null,
       planPath: null,
       planState: "chat",
@@ -107,6 +110,21 @@ function ensureSession(sessionId) {
     }));
   }
   return sessions.get(sessionId);
+}
+
+function nextAssistantMessageId() {
+  return \`assistant-\${assistantMessageCounter++}\`;
+}
+
+function ensurePendingAssistantMessageId(session) {
+  if (!session.pendingAssistantMessageId) {
+    session.pendingAssistantMessageId = nextAssistantMessageId();
+  }
+  return session.pendingAssistantMessageId;
+}
+
+function clearPendingAssistantMessageId(sessionId) {
+  ensureSession(sessionId).pendingAssistantMessageId = null;
 }
 
 function emitCompletedTool(sessionId, tool) {
@@ -296,7 +314,10 @@ function buildGiantHistoryTools() {
 }
 
 function emitMessageDelta(sessionId, delta) {
+  const session = touchSession(ensureSession(sessionId));
+  const assistantMessageId = ensurePendingAssistantMessageId(session);
   send({
+    assistantMessageId,
     assistantMessageEvent: {
       delta,
       kind: "content_delta",
@@ -305,6 +326,18 @@ function emitMessageDelta(sessionId, delta) {
     sessionId,
     type: "message_update",
   });
+}
+
+function emitTurnEnd(sessionId, frame = {}) {
+  const session = touchSession(ensureSession(sessionId));
+  const assistantMessageId = ensurePendingAssistantMessageId(session);
+  send({
+    assistantMessageId,
+    sessionId,
+    ...frame,
+    type: "turn_end",
+  });
+  return assistantMessageId;
 }
 
 function emitPlanEvent(sessionId, type) {
@@ -362,7 +395,10 @@ function emitCustomPlanEvent(sessionId, type, extra = {}) {
 function recordHistoryMessage(sessionId, role, content) {
   const session = touchSession(ensureSession(sessionId));
   session.history.push({
-    id: \`h-\${historyCounter++}\`,
+    id:
+      role === "assistant"
+        ? ensurePendingAssistantMessageId(session)
+        : \`h-\${historyCounter++}\`,
     message: {
       content,
       role,
@@ -374,7 +410,7 @@ function recordHistoryMessage(sessionId, role, content) {
 function recordHistoryAssistantWithTools(sessionId, content, tools, summaryTitle) {
   const session = touchSession(ensureSession(sessionId));
   session.history.push({
-    id: \`h-\${historyCounter++}\`,
+    id: ensurePendingAssistantMessageId(session),
     message: {
       content,
       role: "assistant",
@@ -423,6 +459,7 @@ function emitContextMetrics(sessionId, ratio = 0.42) {
 
 function finishTurn(sessionId, error = null) {
   const session = touchSession(ensureSession(sessionId));
+  clearPendingAssistantMessageId(sessionId);
   session.busy = false;
   send({
     error,
@@ -434,6 +471,7 @@ function finishTurn(sessionId, error = null) {
 
 function startTurn(sessionId) {
   const session = touchSession(ensureSession(sessionId));
+  clearPendingAssistantMessageId(sessionId);
   session.busy = true;
   activeSessionId = sessionId;
   send({
@@ -543,6 +581,7 @@ function handlePrompt(frame) {
         delta: "Review every built-in tool row and icon in one place.",
         kind: "thinking_delta",
       },
+      assistantMessageId: ensurePendingAssistantMessageId(session),
       message: {},
       sessionId,
       type: "message_update",
@@ -551,12 +590,11 @@ function handlePrompt(frame) {
     for (const tool of showcaseTools) {
       emitCompletedTool(sessionId, tool);
     }
-    send({
+    emitTurnEnd(sessionId, {
       message: {},
       summaryTitle: "Built-in tool icons",
       toolResults: [],
       turnIndex: 1,
-      type: "turn_end",
     });
     emitContextMetrics(sessionId, 0.31);
     recordHistoryAssistantWithTools(
@@ -579,6 +617,7 @@ function handlePrompt(frame) {
         delta: "Keep loading older pages until the whole group is ready.",
         kind: "thinking_delta",
       },
+      assistantMessageId: ensurePendingAssistantMessageId(session),
       message: {},
       sessionId,
       type: "message_update",
@@ -587,12 +626,11 @@ function handlePrompt(frame) {
     for (const tool of giantTools) {
       emitCompletedTool(sessionId, tool);
     }
-    send({
+    emitTurnEnd(sessionId, {
       message: {},
       summaryTitle: "Giant history tool group",
       toolResults: [],
       turnIndex: 1,
-      type: "turn_end",
     });
     emitContextMetrics(sessionId, 0.34);
     recordHistoryAssistantWithTools(
@@ -616,6 +654,7 @@ function handlePrompt(frame) {
         delta: "Deciding which file to inspect for the transcript UI showcase.",
         kind: "thinking_delta",
       },
+      assistantMessageId: ensurePendingAssistantMessageId(session),
       message: {},
       sessionId,
       type: "message_update",
@@ -686,25 +725,30 @@ function handlePrompt(frame) {
       todos: planTodos,
       type: "plan.todos",
     });
+    emitCustomPlanEvent(sessionId, "plan.review.warning", {
+      reason: "rounds_exhausted",
+    });
     send({
       sessionId,
       title: "Transcript UI Showcase",
       type: "session.title_updated",
     });
-    send({
+    emitTurnEnd(sessionId, {
       message: {},
       summaryTitle: "Reviewed 1 file",
       toolResults: [],
       turnIndex: 1,
-      type: "turn_end",
     });
     const finishTranscriptTurn = () => {
       emitContextMetrics(sessionId, 0.55);
       recordHistoryMessage(sessionId, "assistant", "I will read the file and refresh the plan.");
       finishTurn(sessionId, null);
     };
-    if (transcriptProgressDelayMs > 0) {
-      setTimeout(finishTranscriptTurn, transcriptProgressDelayMs);
+    const finishDelayMs = text.includes("switch back order")
+      ? Math.max(transcriptProgressDelayMs, 1200)
+      : transcriptProgressDelayMs;
+    if (finishDelayMs > 0) {
+      setTimeout(finishTranscriptTurn, finishDelayMs);
     } else {
       finishTranscriptTurn();
     }
@@ -812,14 +856,13 @@ function handleControlResponse(frame) {
       toolName: "ask_question",
     };
     emitCompletedTool(sessionId, tool);
-    send({
+    emitMessageDelta(sessionId, "Recorded your answer.");
+    emitTurnEnd(sessionId, {
       message: {},
       summaryTitle: "Asked question",
       toolResults: [],
       turnIndex: 1,
-      type: "turn_end",
     });
-    emitMessageDelta(sessionId, "Recorded your answer.");
     recordHistoryAssistantWithTools(sessionId, "Recorded your answer.", [tool], "Asked question");
     recordHistoryToolResult(sessionId, tool);
     emitContextMetrics(sessionId, 0.49);

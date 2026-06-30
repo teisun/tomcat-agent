@@ -527,7 +527,7 @@ describe("webview provider integration", () => {
     });
 
     expect(historyCalls[0]).toMatchObject({
-      params: { limit: 40 },
+      params: { limit: 80 },
       sessionId: "session-1",
     });
     expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
@@ -542,7 +542,7 @@ describe("webview provider integration", () => {
     });
 
     expect(historyCalls[1]).toMatchObject({
-      params: { cursor: "cursor-1", limit: 40 },
+      params: { cursor: "cursor-1", limit: 80 },
       sessionId: "session-1",
     });
     expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
@@ -818,6 +818,7 @@ describe("webview provider integration", () => {
     }
 
     messenger.emit({
+      assistantMessageId: "live-assistant-1",
       assistantMessageEvent: { delta: "live answer", kind: "content_delta" },
       message: {},
       sessionId: "session-1",
@@ -851,6 +852,345 @@ describe("webview provider integration", () => {
         expect.objectContaining({ kind: "user", text: "second prompt", type: "message" }),
       ]),
     );
+  });
+
+  it("drops stale latest-history responses when a newer refresh wins after switching away and back", async () => {
+    const firstSessionAResponse = deferred<SessionHistoryPayload>();
+    const secondSessionAResponse = deferred<SessionHistoryPayload>();
+    let sessionALatestCalls = 0;
+
+    const { historyCalls, provider } = buildProvider({
+      getMessagesImpl: async (sessionId, params) => {
+        if (params?.cursor) {
+          throw new Error("unexpected older-history request");
+        }
+        if (sessionId === "session-1") {
+          sessionALatestCalls += 1;
+          return sessionALatestCalls === 1
+            ? firstSessionAResponse.promise
+            : secondSessionAResponse.promise;
+        }
+        return {
+          hasMore: false,
+          messages: [
+            {
+              id: "hist-session-b-1",
+              message: { content: "session B ready", role: "assistant" },
+              type: "message",
+            },
+          ],
+          nextCursor: null,
+          sessionId: "session-2",
+        };
+      },
+      getStateImpl: async (sessionId) => ({
+        busy: false,
+        contextRatio: null,
+        interrupted: false,
+        model: "gpt-5.4",
+        planId: null,
+        planPath: null,
+        planState: "chat",
+        sessionId: sessionId ?? "session-1",
+        thinkingLevel: "high",
+      }),
+      listSessionsImpl: async () => ({
+        activeSessionId: "session-1",
+        scope: "disk" as const,
+        sessions: [
+          { busy: false, isCurrent: true, sessionId: "session-1", updatedAt: 1 },
+          { busy: false, isCurrent: false, sessionId: "session-2", updatedAt: 2 },
+        ],
+      }),
+    });
+
+    const readyPromise = provider.dispatchTestIntent({
+      messageId: "ready-stale-latest-history",
+      type: "ready",
+    });
+
+    for (let i = 0; i < 20; i += 1) {
+      if (provider.currentState().sessions.length >= 2) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-2" },
+      messageId: "switch-stale-latest-to-b",
+      type: "switchSession",
+    });
+
+    const switchBackPromise = provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "switch-stale-latest-back-to-a",
+      type: "switchSession",
+    });
+
+    for (let i = 0; i < 20; i += 1) {
+      if (historyCalls.filter((call) => call.sessionId === "session-1" && !call.params?.cursor).length >= 2) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    firstSessionAResponse.resolve({
+      hasMore: false,
+      messages: [
+        {
+          id: "hist-session-a-stale",
+          message: { content: "stale history should be dropped", role: "assistant" },
+          type: "message",
+        },
+      ],
+      nextCursor: null,
+      sessionId: "session-1",
+    });
+    secondSessionAResponse.resolve({
+      hasMore: false,
+      messages: [
+        {
+          id: "hist-session-a-fresh",
+          message: { content: "fresh history wins", role: "assistant" },
+          type: "message",
+        },
+      ],
+      nextCursor: null,
+      sessionId: "session-1",
+    });
+
+    await Promise.all([readyPromise, switchBackPromise]);
+
+    const timeline = provider.currentState().sessionViews["session-1"]?.timeline ?? [];
+    expect(
+      timeline.some(
+        (item) =>
+          item.type === "message" &&
+          item.kind === "assistant" &&
+          item.text === "stale history should be dropped",
+      ),
+    ).toBe(false);
+    expect(
+      timeline.some(
+        (item) =>
+          item.type === "message" &&
+          item.kind === "assistant" &&
+          item.text === "fresh history wins",
+      ),
+    ).toBe(true);
+  });
+
+  it("drops stale older-history pages after a newer session refresh rebuilds the view", async () => {
+    const olderResponse = deferred<SessionHistoryPayload>();
+    let sessionALatestCalls = 0;
+
+    const { provider } = buildProvider({
+      getMessagesImpl: async (sessionId, params) => {
+        if (sessionId === "session-2") {
+          return {
+            hasMore: false,
+            messages: [],
+            nextCursor: null,
+            sessionId: "session-2",
+          };
+        }
+        if (params?.cursor === "cursor-1") {
+          return olderResponse.promise;
+        }
+        sessionALatestCalls += 1;
+        return sessionALatestCalls === 1
+          ? {
+              hasMore: true,
+              messages: [
+                {
+                  id: "hist-session-a-latest-1",
+                  message: { content: "latest page before switch", role: "user" },
+                  type: "message",
+                },
+              ],
+              nextCursor: "cursor-1",
+              sessionId: "session-1",
+            }
+          : {
+              hasMore: false,
+              messages: [
+                {
+                  id: "hist-session-a-latest-2",
+                  message: { content: "rebuilt after switch back", role: "user" },
+                  type: "message",
+                },
+              ],
+              nextCursor: null,
+              sessionId: "session-1",
+            };
+      },
+      getStateImpl: async (sessionId) => ({
+        busy: false,
+        contextRatio: null,
+        interrupted: false,
+        model: "gpt-5.4",
+        planId: null,
+        planPath: null,
+        planState: "chat",
+        sessionId: sessionId ?? "session-1",
+        thinkingLevel: "high",
+      }),
+      listSessionsImpl: async () => ({
+        activeSessionId: "session-1",
+        scope: "disk" as const,
+        sessions: [
+          { busy: false, isCurrent: true, sessionId: "session-1", updatedAt: 1 },
+          { busy: false, isCurrent: false, sessionId: "session-2", updatedAt: 2 },
+        ],
+      }),
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-stale-older-history",
+      type: "ready",
+    });
+
+    const loadOlderPromise = provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "load-stale-older-history",
+      type: "loadOlderHistory",
+    });
+
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve();
+    }
+
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-2" },
+      messageId: "switch-stale-older-to-b",
+      type: "switchSession",
+    });
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "switch-stale-older-back-to-a",
+      type: "switchSession",
+    });
+
+    olderResponse.resolve({
+      hasMore: false,
+      messages: [
+        {
+          id: "hist-session-a-stale-older",
+          message: { content: "stale older page", role: "user" },
+          type: "message",
+        },
+      ],
+      nextCursor: null,
+      sessionId: "session-1",
+    });
+    await loadOlderPromise;
+
+    const session = provider.currentState().sessionViews["session-1"];
+    const timeline = session?.timeline ?? [];
+    expect(session).toMatchObject({
+      hasMoreHistory: false,
+      historyLoading: false,
+    });
+    expect(
+      timeline.some(
+        (item) => item.type === "message" && item.kind === "user" && item.text === "stale older page",
+      ),
+    ).toBe(false);
+    expect(
+      timeline.some(
+        (item) =>
+          item.type === "message" &&
+          item.kind === "user" &&
+          item.text === "rebuilt after switch back",
+      ),
+    ).toBe(true);
+  });
+
+  it("routes live events into their own session bucket while another session stays visible", async () => {
+    const { messenger, provider } = buildProvider({
+      getMessagesImpl: async (sessionId) => ({
+        hasMore: false,
+        messages: [],
+        nextCursor: null,
+        sessionId: sessionId ?? "session-1",
+      }),
+      getStateImpl: async (sessionId) => ({
+        busy: false,
+        contextRatio: null,
+        interrupted: false,
+        model: "gpt-5.4",
+        planId: null,
+        planPath: null,
+        planState: "chat",
+        sessionId: sessionId ?? "session-1",
+        thinkingLevel: "high",
+      }),
+      listSessionsImpl: async () => ({
+        activeSessionId: "session-1",
+        scope: "disk" as const,
+        sessions: [
+          { busy: false, isCurrent: true, sessionId: "session-1", updatedAt: 1 },
+          { busy: false, isCurrent: false, sessionId: "session-2", updatedAt: 2 },
+        ],
+      }),
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-cross-session-routing",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-2" },
+      messageId: "switch-cross-session-to-b",
+      type: "switchSession",
+    });
+
+    messenger.emit({
+      assistantMessageId: "assistant-live-a",
+      assistantMessageEvent: {
+        delta: "session A live event",
+        kind: "content_delta",
+      },
+      message: {},
+      sessionId: "session-1",
+      type: "message_update",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(provider.currentState().activeSessionId).toBe("session-2");
+    expect(
+      provider.currentState().sessionViews["session-2"]?.timeline.some(
+        (item) =>
+          item.type === "message" &&
+          item.kind === "assistant" &&
+          item.text === "session A live event",
+      ),
+    ).toBe(false);
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.some(
+        (item) =>
+          item.type === "message" &&
+          item.kind === "assistant" &&
+          item.text === "session A live event",
+      ),
+    ).toBe(true);
+
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "switch-cross-session-back-to-a",
+      type: "switchSession",
+    });
+
+    expect(provider.currentState().activeSessionId).toBe("session-1");
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.some(
+        (item) =>
+          item.type === "message" &&
+          item.kind === "assistant" &&
+          item.text === "session A live event",
+      ),
+    ).toBe(true);
   });
 
   it("tracks enter, build, and exit plan state through provider intents", async () => {

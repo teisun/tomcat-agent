@@ -43,11 +43,13 @@ pub(super) async fn finalize_turn_after_text(
     if let Some(ref mut ctx_state) = agent.context_state {
         ctx_state.on_message_appended(content_buf.len());
     }
-    agent.push_message(
+    let forced_id = agent.take_or_mint_pending_assistant_entry_id();
+    let assistant_message_id = agent.push_message_with_forced_id(
         messages,
         ChatMessage::assistant(content_buf)
             .with_completion_metadata(finish_reason, error_message, error_code)
             .with_reasoning_state(thinking_text, reasoning_continuation, continuity),
+        &forced_id,
     )?;
 
     // Timing ⑤: L0 → try_restart → check_after_reply → try_start → metrics
@@ -121,7 +123,7 @@ pub(super) async fn finalize_turn_after_text(
         turn_index,
         message: Message(serde_json::json!({})),
         tool_results: vec![],
-        assistant_message_id: None,
+        assistant_message_id: Some(assistant_message_id),
         tool_call_ids: vec![],
         summary_title: None,
     });

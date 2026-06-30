@@ -874,10 +874,14 @@
       {
         "type": "object",
         "required": [
+          "assistantMessageId",
           "message",
           "type"
         ],
         "properties": {
+          "assistantMessageId": {
+            "type": "string"
+          },
           "message": {
             "$ref": "#/definitions/Message"
           },
@@ -893,12 +897,16 @@
         "type": "object",
         "required": [
           "assistantMessageEvent",
+          "assistantMessageId",
           "message",
           "type"
         ],
         "properties": {
           "assistantMessageEvent": {
             "$ref": "#/definitions/AssistantMessageEvent"
+          },
+          "assistantMessageId": {
+            "type": "string"
           },
           "message": {
             "$ref": "#/definitions/Message"
@@ -914,10 +922,14 @@
       {
         "type": "object",
         "required": [
+          "assistantMessageId",
           "message",
           "type"
         ],
         "properties": {
+          "assistantMessageId": {
+            "type": "string"
+          },
           "message": {
             "$ref": "#/definitions/Message"
           },
@@ -2711,10 +2723,14 @@
           {
             "type": "object",
             "required": [
+              "assistantMessageId",
               "message",
               "type"
             ],
             "properties": {
+              "assistantMessageId": {
+                "type": "string"
+              },
               "message": {
                 "$ref": "#/definitions/Message"
               },
@@ -2730,12 +2746,16 @@
             "type": "object",
             "required": [
               "assistantMessageEvent",
+              "assistantMessageId",
               "message",
               "type"
             ],
             "properties": {
               "assistantMessageEvent": {
                 "$ref": "#/definitions/AssistantMessageEvent"
+              },
+              "assistantMessageId": {
+                "type": "string"
               },
               "message": {
                 "$ref": "#/definitions/Message"
@@ -2751,10 +2771,14 @@
           {
             "type": "object",
             "required": [
+              "assistantMessageId",
               "message",
               "type"
             ],
             "properties": {
+              "assistantMessageId": {
+                "type": "string"
+              },
               "message": {
                 "$ref": "#/definitions/Message"
               },

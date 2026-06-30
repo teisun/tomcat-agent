@@ -610,6 +610,7 @@ impl SessionManager {
         &self,
         message: serde_json::Value,
         chain_violation_is_invariant: bool,
+        forced_id: Option<&str>,
     ) -> Result<String, AppError> {
         self.append_in_flight.fetch_add(1, Ordering::SeqCst);
         let _guard = AppendInFlightGuard {
@@ -629,7 +630,9 @@ impl SessionManager {
                     Err(AppError::Config(err.to_string()))
                 };
             }
-            let id = generate_entry_id();
+            let id = forced_id
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(generate_entry_id);
             let now = iso_ts_now()?;
             let sync = Self::message_sync_level(&message);
             let message_for_title = message.clone();
@@ -648,13 +651,22 @@ impl SessionManager {
     // 同一 transcript 文件通过 per-file mutex 串行化；不同 transcript 仍可并行追加。
     /// 追加 message 到当前会话的 transcript；返回新行的 `MessageEntry.id`（§5.7 MessageId）。
     pub fn append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
-        self.append_message_internal(message, true)
+        self.append_message_internal(message, true, None)
+    }
+
+    /// 以指定的 transcript `MessageEntry.id` 追加当前会话消息。
+    pub fn append_message_with_id(
+        &self,
+        message: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        self.append_message_internal(message, true, Some(forced_id))
     }
 
     /// 追加 message（dispatcher/插件路径：校验失败返回 Err 而非 panic）。
     /// 返回新行的 `MessageEntry.id`（§5.7 MessageId）。
     pub fn try_append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
-        self.append_message_internal(message, false)
+        self.append_message_internal(message, false, None)
     }
 
     /// 追加 message 到指定 session 的 transcript（插件多实例路由）。
@@ -1032,6 +1044,14 @@ impl SessionManager {
 impl MessageAppendSink for SessionManager {
     fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
         SessionManager::append_message(self, value)
+    }
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        SessionManager::append_message_with_id(self, value, forced_id)
     }
 }
 

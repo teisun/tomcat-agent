@@ -118,8 +118,17 @@ pub(super) async fn run_reasoning_loop(
                 if let Some(ref mut ctx_state) = agent.context_state {
                     ctx_state.on_message_appended(content_buf.len());
                 }
-                messages.push(ChatMessage::assistant(&content_buf));
+                let forced_id = agent.take_or_mint_pending_assistant_entry_id();
+                agent
+                    .push_message_with_forced_id(
+                        messages,
+                        ChatMessage::assistant(&content_buf),
+                        &forced_id,
+                    )
+                    .map_err(LoopError::Fatal)?;
                 final_text.push_str(&content_buf);
+            } else {
+                agent.clear_pending_assistant_entry_id();
             }
             return Err(agent.make_aborted(messages, final_text));
         }

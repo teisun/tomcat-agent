@@ -19,6 +19,11 @@ fn serve_dts_preserves_wire_event_session_id() {
     let dts = serve_dts();
     assert!(dts.contains("export type WireEvent = "));
     assert!(dts.contains("sessionId?: null | string;"));
+    assert!(dts.contains("type: \"message_update\";"));
+    assert!(dts.contains("type: \"message_start\";"));
+    assert!(dts.contains("type: \"message_end\";"));
+    assert!(dts.matches("assistantMessageId: string;").count() >= 3);
+    assert!(dts.contains("assistantMessageId?: null | string;"));
 }
 
 #[test]
@@ -40,6 +45,7 @@ fn serve_emitted_event_validates_against_generated_schema() {
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
             event: AgentEvent::MessageUpdate {
+                assistant_message_id: "a1".to_string(),
                 message: Message(json!({
                     "role": "assistant",
                     "content": "partial"

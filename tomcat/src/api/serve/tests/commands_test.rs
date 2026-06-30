@@ -179,6 +179,67 @@ async fn serve_prompt_unknown_session_returns_error() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_prompt_emits_assistant_message_id_on_stream_and_turn_end() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "hello stable id".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-stable-id".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "hello".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+
+    let message_start_id = lines
+        .iter()
+        .find(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("message_start"))
+        .and_then(|line| line.get("assistantMessageId"))
+        .and_then(serde_json::Value::as_str)
+        .expect("message_start assistantMessageId");
+    let message_update_id = lines
+        .iter()
+        .find(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("message_update"))
+        .and_then(|line| line.get("assistantMessageId"))
+        .and_then(serde_json::Value::as_str)
+        .expect("message_update assistantMessageId");
+    let message_end_id = lines
+        .iter()
+        .find(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("message_end"))
+        .and_then(|line| line.get("assistantMessageId"))
+        .and_then(serde_json::Value::as_str)
+        .expect("message_end assistantMessageId");
+    let turn_end_id = lines
+        .iter()
+        .find(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("turn_end"))
+        .and_then(|line| line.get("assistantMessageId"))
+        .and_then(serde_json::Value::as_str)
+        .expect("turn_end assistantMessageId");
+
+    assert_eq!(message_update_id, message_start_id);
+    assert_eq!(message_end_id, message_start_id);
+    assert_eq!(turn_end_id, message_start_id);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_new_session_rejects_when_registry_is_full() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) =

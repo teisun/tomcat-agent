@@ -35,6 +35,7 @@ describe("WebviewStateStore wire routing", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applyEvent({
+      assistantMessageId: "server-assistant-1",
       assistantMessageEvent: { delta: "thinking", kind: "thinking_delta" },
       message: {},
       sessionId: "s1",
@@ -71,6 +72,13 @@ describe("WebviewStateStore wire routing", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
 
+    store.applyEvent({
+      assistantMessageId: "live-assistant-1",
+      assistantMessageEvent: { delta: "thinking", kind: "thinking_delta" },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
     store.applyEvent({
       args: { command: "git status" },
       sessionId: "s1",
@@ -315,6 +323,7 @@ describe("history tool attribution", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applyEvent({
+      assistantMessageId: "live-assistant-1",
       assistantMessageEvent: { delta: "working", kind: "content_delta" },
       message: {},
       sessionId: "s1",
@@ -339,6 +348,7 @@ describe("history tool attribution", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applyEvent({
+      assistantMessageId: "live-assistant-1",
       assistantMessageEvent: { delta: "working", kind: "content_delta" },
       message: {},
       sessionId: "s1",
@@ -368,6 +378,105 @@ describe("history tool attribution", () => {
     expect(bashTool?.type === "tool" ? bashTool.assistantMessageId : undefined).toBe(
       readTool?.type === "tool" ? readTool.assistantMessageId : undefined,
     );
+  });
+
+  it("converges idle timelines exactly onto persisted disk entries without leftovers", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      assistantMessageId: "assistant-1",
+      assistantMessageEvent: { delta: "trace", kind: "thinking_delta" },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      assistantMessageId: "assistant-1",
+      assistantMessageEvent: { delta: "final answer", kind: "content_delta" },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      args: { path: "src/app.ts" },
+      sessionId: "s1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      type: "tool_execution_start",
+    });
+    store.applyEvent({
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-1",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+    store.applyEvent({
+      assistantMessageId: "assistant-1",
+      message: {},
+      sessionId: "s1",
+      type: "message_end",
+    });
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-1",
+          message: {
+            content: "final answer",
+            reasoning_continuation: { fallback_text: "trace" },
+            role: "assistant",
+            tool_calls: [
+              {
+                function: { arguments: "{\"path\":\"src/app.ts\"}", name: "edit" },
+                id: "tool-1",
+              },
+            ],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-result-1",
+          message: {
+            content: "updated file",
+            role: "tool",
+            tool_call_id: "tool-1",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    expect(store.snapshot().sessionViews.s1.timeline).toEqual([
+      {
+        assistantMessageId: "assistant-1",
+        id: "assistant-1-thinking",
+        summaryTitle: null,
+        text: "trace",
+        type: "thinking",
+      },
+      {
+        assistantMessageId: "assistant-1",
+        id: "assistant-1",
+        kind: "assistant",
+        text: "final answer",
+        type: "message",
+      },
+      {
+        args: { path: "src/app.ts" },
+        assistantMessageId: "assistant-1",
+        id: "tool-result-1",
+        isError: false,
+        status: "complete",
+        summary: "updated file",
+        toolCallId: "tool-1",
+        toolName: "edit",
+        type: "tool",
+      },
+    ]);
   });
 });
 

@@ -64,7 +64,9 @@ pub fn one_line_summary(tool_name: &str, args: &Value) -> String {
         "config_get" | "config_set" => {
             key_value_summary(args, "key").unwrap_or_else(|| "key=config".to_string())
         }
-        _ => summarize_known_key(args).unwrap_or_else(|| args.to_string().replace('\n', " ")),
+        _ => summarize_known_key(args)
+            .or_else(|| object_field_summary(args))
+            .unwrap_or_else(|| args.to_string().replace('\n', " ")),
     };
     if matches!(tool_name, "bash" | "shell" | "execute_command") {
         summary
@@ -143,6 +145,28 @@ fn summarize_known_key(args: &Value) -> Option<String> {
         }
     }
     count_summary(args, "questions", "questions").or_else(|| count_summary(args, "todos", "todos"))
+}
+
+fn object_field_summary(args: &Value) -> Option<String> {
+    let object = args.as_object()?;
+    if object.is_empty() {
+        return None;
+    }
+    let parts = object
+        .iter()
+        .map(|(key, value)| format!("{key}={}", scalar_value_summary(value)))
+        .collect::<Vec<_>>();
+    Some(parts.join(" "))
+}
+
+fn scalar_value_summary(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.lines().map(str::trim).collect::<Vec<_>>().join(" "),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Null => "null".to_string(),
+        _ => value.to_string().replace('\n', " "),
+    }
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {

@@ -14,6 +14,7 @@ type HostE2eHelper = {
   assertPlanSlashFlowViaChatUi(api: unknown): Promise<void>;
   assertWebviewAnswerCardFlow(api: unknown): Promise<void>;
   assertTranscriptUiFlow(api: unknown): Promise<void>;
+  assertTranscriptSwitchBackOrder(api: unknown): Promise<void>;
   assertWebviewCrossOwnerPlanFlow(api: unknown): Promise<void>;
   assertWebviewDiffFlow(api: unknown): Promise<void>;
   assertWebviewGiantGroupLazyLoadFlow(api: unknown): Promise<void>;
@@ -120,6 +121,11 @@ suite("Installed Tomcat extension", () => {
   test("replays plan history after a webview reload", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewReloadReplayFlow(api);
+  });
+
+  test("keeps transcript thinking and tool order stable after switching away and back", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertTranscriptSwitchBackOrder(api);
   });
 
   test("lazy loads a giant historical tool group without rendering half a group", async () => {

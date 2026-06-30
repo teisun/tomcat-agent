@@ -321,14 +321,20 @@ pub enum AgentEvent {
     },
     MessageStart {
         message: Message,
+        #[serde(rename = "assistantMessageId")]
+        assistant_message_id: String,
     },
     MessageUpdate {
         message: Message,
+        #[serde(rename = "assistantMessageId")]
+        assistant_message_id: String,
         #[serde(rename = "assistantMessageEvent")]
         assistant_message_event: AssistantMessageEvent,
     },
     MessageEnd {
         message: Message,
+        #[serde(rename = "assistantMessageId")]
+        assistant_message_id: String,
     },
     /// LLM 终局错误（如 Responses `response.failed` / 顶层 `error` / `content_filter`）。
     LlmError {

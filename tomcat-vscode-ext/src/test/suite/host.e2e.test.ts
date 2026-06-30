@@ -19,6 +19,7 @@ import {
   assertWebviewReloadReplayFlow,
   assertWebviewSessionSwitchRestoreFlow,
   assertWebviewStreamingFlow,
+  assertTranscriptSwitchBackOrder,
   getTomcatExtensionApi,
 } from "./support/hostE2eScenario";
 
@@ -111,6 +112,11 @@ suite("Tomcat host E2E", () => {
   test("replays plan history after a webview reload", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewReloadReplayFlow(api);
+  });
+
+  test("keeps transcript thinking and tool order stable after switching away and back", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertTranscriptSwitchBackOrder(api);
   });
 
   test("lazy loads a giant historical tool group without rendering half a group", async () => {

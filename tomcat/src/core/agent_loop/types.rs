@@ -319,6 +319,13 @@ pub struct AgentLoop {
     pub(super) cancel_token: CancellationToken,
     pub(super) context_state: Option<ContextState>,
     pub(super) block_tool_calls: bool,
+    /// 本轮正在 streaming 的 assistant 预分配 transcript `MessageEntry.id`。
+    ///
+    /// 粒度：**每条 assistant message / 每轮 `run_chat_stream` 独占一个**。
+    /// - `stream_handler::run_chat_stream` 在发 `MessageStart` 前 mint；
+    /// - text-only / tool-call / abort-partial 三条收束路径消费并复用为落盘 id；
+    /// - 若本轮在落盘前失败/取消，则必须显式清空，避免串到下一轮。
+    pub(super) pending_assistant_entry_id: Option<String>,
     /// 本次 reasoning loop 是否因为 `max_tool_rounds` 触顶而结束；用于阻止外层
     /// conversation loop 再把共享 `follow_up_queue` 续进一个新 attempt，绕过硬预算。
     pub(super) reasoning_turn_budget_exhausted: bool,

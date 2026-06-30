@@ -280,8 +280,17 @@ export type WireEvent = ({
   type: "tool_call_streaming";
 } | {
   assistantMessageEvent: AssistantMessageEvent;
+  assistantMessageId: string;
   message: Message;
   type: "message_update";
+} | {
+  assistantMessageId: string;
+  message: Message;
+  type: "message_end";
+} | {
+  assistantMessageId: string;
+  message: Message;
+  type: "message_start";
 } | {
   assistantMessageId?: null | string;
   message: Message;
@@ -382,12 +391,6 @@ export type WireEvent = ({
   finishReason: string;
   message: string;
   type: "llm_notice";
-} | {
-  message: Message;
-  type: "message_end";
-} | {
-  message: Message;
-  type: "message_start";
 } | {
   originalChars: number;
   persistedPath: string;

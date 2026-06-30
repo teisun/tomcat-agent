@@ -1200,6 +1200,214 @@ export async function assertWebviewSessionSwitchRestoreFlow(
   }
 }
 
+export async function assertTranscriptSwitchBackOrder(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: "webview-switch-order-new-session-a",
+      type: "newSession",
+    }),
+  );
+  const sessionA = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: "webview-switch-order-new-session-b",
+      type: "newSession",
+    }),
+  );
+  const sessionB = await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId || activeSessionId === sessionA) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+  );
+  assert.notEqual(sessionA, sessionB);
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId: sessionA },
+      messageId: "webview-switch-order-prime-a",
+      type: "switchSession",
+    }),
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId: sessionA,
+        text: "transcript ui switch back order",
+      },
+      messageId: "webview-switch-order-seed",
+      type: "prompt",
+    }),
+  );
+
+  await waitForWebviewState(
+    api,
+    (state) => {
+      const session = state.sessionViews[sessionA];
+      if (!session || state.activeSessionId !== sessionA || !session.busy) {
+        return undefined;
+      }
+      const thinkingBlocks = session.timeline.filter(
+        (item) => item.type === "thinking" && item.text.trim().length > 0,
+      );
+      const tools = session.timeline.filter((item) => item.type === "tool");
+      const warnings = session.timeline.filter(
+        (item) =>
+          item.type === "message" &&
+          item.kind === "warn" &&
+          item.text === "Tomcat plan warning: rounds_exhausted",
+      );
+      return thinkingBlocks.length === 1 && tools.length >= 3 && warnings.length === 1
+        ? state
+        : undefined;
+    },
+    20_000,
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId: sessionB },
+      messageId: "webview-switch-order-to-b",
+      type: "switchSession",
+    }),
+  );
+
+  const whileViewingB = await waitForWebviewState(
+    api,
+    (state) =>
+      state.activeSessionId === sessionB && state.sessionViews[sessionA]?.busy ? state : undefined,
+    20_000,
+  );
+  assert.equal(
+    whileViewingB.sessionViews[sessionA]?.busy,
+    true,
+    "expected session A to still be busy when switching away",
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId: sessionA },
+      messageId: "webview-switch-order-back-to-a",
+      type: "switchSession",
+    }),
+  );
+
+  const restoredState = await waitForWebviewState(
+    api,
+    (state) => {
+      const session = state.sessionViews[sessionA];
+      if (!session || state.activeSessionId !== sessionA || session.busy) {
+        return undefined;
+      }
+      return state;
+    },
+    20_000,
+  );
+  const restoredTimeline = restoredState.sessionViews[sessionA]?.timeline ?? [];
+  const thinkingBlocks = restoredTimeline.filter(
+    (
+      item,
+    ): item is Extract<(typeof restoredTimeline)[number], { type: "thinking" }> =>
+      item.type === "thinking",
+  );
+  const assistantMessages = restoredTimeline.filter(
+    (item) => item.type === "message" && ("kind" in item ? item.kind === "assistant" : false),
+  );
+  const warningMessages = restoredTimeline.filter(
+    (item) =>
+      item.type === "message" &&
+      ("kind" in item ? item.kind === "warn" : false) &&
+      item.text === "Tomcat plan warning: rounds_exhausted",
+  );
+  const tools = restoredTimeline.filter(
+    (item): item is Extract<(typeof restoredTimeline)[number], { type: "tool" }> =>
+      item.type === "tool",
+  );
+
+  assert.equal(thinkingBlocks.length, 1, "expected exactly one thinking block after switching back");
+  assert.ok(
+    thinkingBlocks[0]?.text.trim().length,
+    "expected the restored thinking block to keep its streamed text",
+  );
+  assert.equal(
+    assistantMessages.length,
+    1,
+    "expected exactly one assistant message after switching back",
+  );
+  assert.equal(
+    warningMessages.length,
+    1,
+    "expected exactly one plan warning message after switching back",
+  );
+  assert.equal(
+    tools.length,
+    3,
+    `expected 3 transcript tools after switching back, got ${tools.length}`,
+  );
+  assert.deepEqual(
+    tools.map((item) => item.toolCallId),
+    ["tc-transcript-read", "tc-transcript-bash", "tc-transcript-web-search"],
+  );
+
+  const firstAssistantMessage = assistantMessages[0] as
+    | { assistantMessageId?: string }
+    | undefined;
+  const assistantMessageIds = new Set(
+    [
+      thinkingBlocks[0]?.assistantMessageId,
+      firstAssistantMessage?.assistantMessageId,
+      ...tools.map((item) => item.assistantMessageId),
+    ].filter((value): value is string => typeof value === "string" && value.length > 0),
+  );
+  assert.equal(
+    assistantMessageIds.size,
+    1,
+    `expected one shared assistantMessageId, got ${JSON.stringify([...assistantMessageIds])}`,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const restoredDom = await api.__testing.captureWebviewDom();
+  assert.equal(
+    restoredDom.groupFoldTitles.filter((title) => title === "Reviewed 1 file").length,
+    1,
+    "expected one summary title after switching back",
+  );
+  assert.equal(
+    restoredDom.messageTexts.filter((text) => text === "Tomcat plan warning: rounds_exhausted").length,
+    1,
+    "expected one warning card after switching back",
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("switch-order");
+  }
+}
+
 export async function assertWebviewReloadReplayFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -1534,6 +1742,7 @@ function captureTranscriptVisual(
     | "file-chip"
     | "progress"
     | "reload-replay"
+    | "switch-order"
     | "switch-restore"
     | "todo-expanded"
     | "tool-icons"

@@ -37,7 +37,7 @@ import { SessionOwnershipTracker } from "./ownership";
 import { TomcatSessionPool } from "./sessionPool";
 import { WebviewStateStore } from "./state";
 
-const HISTORY_PAGE_ENTRIES = 40;
+const HISTORY_PAGE_ENTRIES = 80;
 
 type PendingQuestion = {
   request: AskQuestionWireRequest;
@@ -244,6 +244,7 @@ function formatBridgeError(action: string, error: unknown): string {
 
 export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly domSnapshots = new PendingMessageTracker<DomSnapshot>();
+  private readonly historyFetchGen = new Map<string, number>();
   private readonly pendingQuestions = new Map<string, PendingQuestion>();
   private readonly planMetadataCache = new Map<string, PlanMetadataCacheEntry>();
   private readonly readyWaiters = new Set<{
@@ -967,13 +968,27 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     );
   }
 
+  private bumpHistoryFetchGen(sessionId: string): number {
+    const next = (this.historyFetchGen.get(sessionId) ?? 0) + 1;
+    this.historyFetchGen.set(sessionId, next);
+    return next;
+  }
+
+  private currentHistoryFetchGen(sessionId: string): number {
+    return this.historyFetchGen.get(sessionId) ?? 0;
+  }
+
   private async refreshSessionHistory(sessionId: string): Promise<void> {
     if (typeof this.deps.sessionRouter.getMessages !== "function") {
       return;
     }
+    const fetchGen = this.bumpHistoryFetchGen(sessionId);
     const history = await this.deps.sessionRouter.getMessages(sessionId, {
       limit: HISTORY_PAGE_ENTRIES,
     }).catch(() => null);
+    if (this.currentHistoryFetchGen(sessionId) !== fetchGen) {
+      return;
+    }
     if (!history) {
       return;
     }
@@ -992,12 +1007,16 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (!cursor) {
       return;
     }
+    const fetchGen = this.currentHistoryFetchGen(sessionId);
     this.stateStore.setHistoryLoading(sessionId, true);
     await this.postState();
     const history = await this.deps.sessionRouter.getMessages(sessionId, {
       cursor,
       limit: HISTORY_PAGE_ENTRIES,
     }).catch(() => null);
+    if (this.currentHistoryFetchGen(sessionId) !== fetchGen) {
+      return;
+    }
     if (!history) {
       this.stateStore.setHistoryLoading(sessionId, false);
       await this.postState();

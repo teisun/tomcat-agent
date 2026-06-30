@@ -49,6 +49,7 @@ describe("backpressure notice integration", () => {
     for (const delta of ["a", "b", "c", "d"]) {
       child.emitStdout(
         `${JSON.stringify({
+          assistantMessageId: "assistant-1",
           assistantMessageEvent: { delta, kind: "content_delta" },
           message: {},
           sessionId: "s1",

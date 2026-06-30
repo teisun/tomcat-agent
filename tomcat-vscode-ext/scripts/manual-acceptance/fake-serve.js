@@ -39,6 +39,7 @@ const pendingApprovals = new Map();
 
 let activeSessionId = null;
 let askQuestionCounter = 1;
+let assistantMessageCounter = 1;
 let historyCounter = 1;
 let sessionCounter = 1;
 
@@ -88,6 +89,7 @@ function normalizeSession(session) {
         ? session.model
         : MODEL_OPTIONS[0],
     modelThinking: normalizeThinkingLevels(session?.modelThinking),
+    pendingAssistantMessageId: session?.pendingAssistantMessageId ?? null,
     planId: session?.planId ?? null,
     planPath: session?.planPath ?? null,
     planState: typeof session?.planState === "string" ? session.planState : "chat",
@@ -186,7 +188,14 @@ function createHistoryEntry(message) {
 }
 
 function recordHistoryEntry(session, message) {
-  const entry = createHistoryEntry(message);
+  const entry =
+    message && message.role === "assistant"
+      ? {
+          id: ensurePendingAssistantMessageId(session),
+          message,
+          type: "message",
+        }
+      : createHistoryEntry(message);
   session.history.push(entry);
   persistState();
   return entry;
@@ -288,8 +297,25 @@ function ensureSession(sessionId) {
   return sessions.get(sessionId);
 }
 
+function nextAssistantMessageId() {
+  return `assistant-${assistantMessageCounter++}`;
+}
+
+function ensurePendingAssistantMessageId(session) {
+  if (!session.pendingAssistantMessageId) {
+    session.pendingAssistantMessageId = nextAssistantMessageId();
+  }
+  return session.pendingAssistantMessageId;
+}
+
+function clearPendingAssistantMessageId(session) {
+  session.pendingAssistantMessageId = null;
+}
+
 function emitMessageDelta(sessionId, kind, delta) {
+  const session = touchSession(ensureSession(sessionId));
   send({
+    assistantMessageId: ensurePendingAssistantMessageId(session),
     assistantMessageEvent: {
       delta,
       kind,
@@ -397,6 +423,7 @@ function schedule(delayMs, callback) {
 
 function finishTurn(sessionId, error = null) {
   const session = touchSession(ensureSession(sessionId));
+  clearPendingAssistantMessageId(session);
   session.busy = false;
   persistState();
   send({
@@ -409,6 +436,7 @@ function finishTurn(sessionId, error = null) {
 
 function startTurn(sessionId) {
   const session = touchSession(ensureSession(sessionId));
+  clearPendingAssistantMessageId(session);
   session.busy = true;
   activeSessionId = sessionId;
   persistState();

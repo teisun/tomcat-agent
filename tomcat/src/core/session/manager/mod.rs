@@ -24,6 +24,15 @@ pub trait MessageAppendSink: Send + Sync {
         &self,
         value: serde_json::Value,
     ) -> Result<String, crate::infra::error::AppError>;
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, crate::infra::error::AppError> {
+        let _ = forced_id;
+        self.append_message(value)
+    }
 }
 
 const BRANCH_MAX_ENTRIES: usize = 2000;

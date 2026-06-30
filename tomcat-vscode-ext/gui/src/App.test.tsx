@@ -1459,6 +1459,119 @@ describe("Tomcat webview App", () => {
     );
   });
 
+  it("drives send stop state from busy instead of inferring from transcript tail", async () => {
+    mount();
+
+    const danglingTimeline = [
+      {
+        assistantMessageId: "assistant-1",
+        id: "assistant-1-thinking",
+        summaryTitle: null,
+        text: "stale thinking",
+        type: "thinking" as const,
+      },
+      {
+        assistantMessageId: "assistant-1",
+        id: "assistant-1",
+        kind: "assistant" as const,
+        text: "previous answer",
+        type: "message" as const,
+      },
+      {
+        id: "warn-1",
+        kind: "warn" as const,
+        text: "Tomcat turn interrupted",
+        type: "message" as const,
+      },
+    ];
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: true,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: "Busy session",
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: true,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: danglingTimeline,
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-busy-tail",
+    });
+
+    expect(screen.getByTestId("stop-button")).toBeTruthy();
+    expect(screen.queryByTestId("send-button")).toBeNull();
+    expect(screen.getByTestId("session-select").textContent).toContain("running");
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: "Busy session",
+            updatedAt: 2,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: danglingTimeline,
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-idle-tail",
+    });
+
+    expect(screen.getByTestId("send-button")).toBeTruthy();
+    expect(screen.queryByTestId("stop-button")).toBeNull();
+    expect(screen.getByTestId("session-select").textContent).not.toContain("running");
+  });
+
   it("shows the session title instead of the raw sessionId in the dropdown", async () => {
     mount();
     const now = Date.now();
