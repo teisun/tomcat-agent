@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -28,6 +29,7 @@ import {
   type TomcatUiMode,
   type WebviewApprovalCard,
   type WebviewDomAction,
+  type WebviewMessageBlock,
   type WebviewPendingAttachment,
   type WebviewIntent,
   type WebviewPlanFileCard,
@@ -49,6 +51,8 @@ type DomSnapshot = Extract<
   WebviewIntent,
   { type: "__test.dom_snapshot" }
 >["data"];
+
+type UserSubmitKind = "prompt" | "steer";
 
 export interface TomcatWebviewProviderDeps {
   extensionUri: vscode.Uri;
@@ -410,6 +414,91 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return this.stateStore.snapshot();
   }
 
+  private pendingAttachmentsForSession(sessionId: string): WebviewPendingAttachment[] {
+    return this.currentState().sessionViews[sessionId]?.pendingAttachments ?? [];
+  }
+
+  private lookupRetryableUserMessage(
+    sessionId: string,
+    messageId: string,
+  ): { submitKind: UserSubmitKind; text: string } | null {
+    const session = this.currentState().sessionViews[sessionId];
+    const message = session?.timeline.find(
+      (item): item is WebviewMessageBlock =>
+        item.type === "message" && item.kind === "user" && item.id === messageId,
+    );
+    if (
+      !message ||
+      message.deliveryState !== "failed" ||
+      message.retryable !== true ||
+      (message.submitKind !== "prompt" && message.submitKind !== "steer")
+    ) {
+      return null;
+    }
+    return {
+      submitKind: message.submitKind,
+      text: message.text,
+    };
+  }
+
+  private async sendUserMessage(
+    sessionId: string,
+    submitKind: UserSubmitKind,
+    text: string,
+    options?: {
+      messageId?: string;
+      retrying?: boolean;
+    },
+  ): Promise<void> {
+    const userMessageId = options?.messageId ?? randomUUID();
+    const pendingAttachments =
+      submitKind === "prompt" ? this.pendingAttachmentsForSession(sessionId) : [];
+    this.stateStore.setActiveSession(sessionId);
+    if (options?.retrying) {
+      this.stateStore.markLocalUserMessagePending(sessionId, userMessageId);
+    } else {
+      this.stateStore.appendLocalUserMessage(sessionId, text, {
+        messageId: userMessageId,
+        submitKind,
+      });
+    }
+    await this.postState();
+    try {
+      const response = await this.deps.messenger.request({
+        params: {
+          attachments: pendingAttachments.map((entry) => entry.attachment),
+          userMessageId,
+        },
+        sessionId,
+        text,
+        type: submitKind,
+      });
+      if (!response.success) {
+        this.stateStore.markLocalUserMessageFailed(
+          sessionId,
+          userMessageId,
+          response.error ?? `Tomcat ${submitKind} failed`,
+          true,
+        );
+      } else if (pendingAttachments.length) {
+        this.stateStore.clearPendingAttachments(sessionId);
+      }
+    } catch (error) {
+      this.stateStore.markLocalUserMessageFailed(
+        sessionId,
+        userMessageId,
+        formatBridgeError(
+          submitKind === "prompt" ? "send the message" : "send the steering message",
+          error,
+        ),
+        false,
+      );
+    }
+    await this.refreshSessionState(sessionId);
+    await this.refreshSessions();
+    await this.postState();
+  }
+
   private lookupApprovalSessionId(requestId: string): string | null {
     for (const session of Object.values(this.currentState().sessionViews)) {
       const approval = session.timeline.find(
@@ -535,49 +624,24 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
           return;
         }
-        const pendingAttachments =
-          intent.type === "prompt"
-            ? this.currentState().sessionViews[sessionId]?.pendingAttachments ?? []
-            : [];
-        this.stateStore.setActiveSession(sessionId);
-        this.stateStore.appendMessage(
-          sessionId,
-          "user",
-          intent.data.text,
-        );
-        if (pendingAttachments.length) {
-          this.stateStore.clearPendingAttachments(sessionId);
+        await this.sendUserMessage(sessionId, intent.type, intent.data.text);
+        return;
+      }
+      case "retryUserMessage": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSession(intent.data.sessionId);
+        if (!sessionId) {
+          await this.postState();
+          return;
         }
-        await this.postState();
-        try {
-          const response = await this.deps.messenger.request({
-            params: {
-              attachments: pendingAttachments.map((entry) => entry.attachment),
-            },
-            sessionId,
-            text: intent.data.text,
-            type: intent.type === "prompt" ? "prompt" : "steer",
-          });
-          if (!response.success) {
-            this.stateStore.appendMessage(
-              sessionId,
-              "error",
-              response.error ?? `Tomcat ${intent.type} failed`,
-            );
-          }
-        } catch (error) {
-          this.stateStore.appendMessage(
-            sessionId,
-            "error",
-            formatBridgeError(
-              intent.type === "prompt" ? "send the message" : "send the steering message",
-              error,
-            ),
-          );
+        const retry = this.lookupRetryableUserMessage(sessionId, intent.data.messageId);
+        if (!retry) {
+          return;
         }
-        await this.refreshSessionState(sessionId);
-        await this.refreshSessions();
-        await this.postState();
+        await this.sendUserMessage(sessionId, retry.submitKind, retry.text, {
+          messageId: intent.data.messageId,
+          retrying: true,
+        });
         return;
       }
       case "pickAttachment": {
@@ -989,7 +1053,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (this.currentHistoryFetchGen(sessionId) !== fetchGen) {
       return;
     }
-    if (!history) {
+    if (!history || history.sessionId !== sessionId) {
       return;
     }
     this.stateStore.hydrateHistory(sessionId, history);
@@ -1017,7 +1081,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (this.currentHistoryFetchGen(sessionId) !== fetchGen) {
       return;
     }
-    if (!history) {
+    if (!history || history.sessionId !== sessionId) {
       this.stateStore.setHistoryLoading(sessionId, false);
       await this.postState();
       return;

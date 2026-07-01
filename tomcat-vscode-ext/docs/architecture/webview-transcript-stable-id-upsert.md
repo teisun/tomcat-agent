@@ -1,6 +1,6 @@
 # Webview Transcript：稳定 ID 与 Upsert-by-ID 渲染
 
-> 适用范围：`tomcat-vscode-ext` 的 webview / provider / state store 如何消费后端新增的 `assistantMessageId`，把当前“history + live 拼接再去重”的 timeline 模型改成“单一时间线 + 稳定键 upsert”的渲染模型。
+> 适用范围：`tomcat-vscode-ext` 的 webview / provider / state store 如何消费后端新增的 `assistantMessageId` / `userMessageId`，把当前“history + live 拼接再去重”的 timeline 模型改成“单一时间线 + 稳定键 upsert”的渲染模型。
 > 上位规范：[`ARCHITECTURE_SPEC.md`](../../../tomcat/docs/openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。本文 `## 1`–`## 10` 与规范 §1–§10 一一对应；文首导读置于 `## 1` 之前、不占用 § 编号。
 > 上游主方案：[`../../../tomcat/docs/architecture/transcript-stable-id-and-stream-reconciliation.md`](../../../tomcat/docs/architecture/transcript-stable-id-and-stream-reconciliation.md)。**协议字段真相以主方案 + [`../../src/serveClient/wire.d.ts`](../../src/serveClient/wire.d.ts) 为准**，本文只回答“扩展侧怎么消费它”。
 > 关联文档：[`tomcat-vscode-extension-phase2/05-webview-ui-architecture.md`](./tomcat-vscode-extension-phase2/05-webview-ui-architecture.md)、[`tomcat-vscode-extension-phase2/04-protocol-runtime.md`](./tomcat-vscode-extension-phase2/04-protocol-runtime.md)、[`tomcat-vscode-extension.md`](./tomcat-vscode-extension.md)。
@@ -10,12 +10,13 @@
 > 3. host 生命周期与历史加载时机以 [`../../src/ui/webview/provider.ts`](../../src/ui/webview/provider.ts) 为准；
 > 4. 渲染分组以 [`../../gui/src/components/sessionList/groupTimelineByAssistantResponse.ts`](../../gui/src/components/sessionList/groupTimelineByAssistantResponse.ts) 为准。
 >
-> 本文回答四件事：
+> 本文回答五件事：
 >
-> 1. **为什么现有 webview 会出现“一堆空 thinking 行”？** 因为 live assistant/thinking 用临时 id，history 用 `entry.id`，`state.ts` 只能靠文本去重并在 `rebuildHistoryTimeline()` 末尾把对不上的 live 条目追加回去。
-> 2. **有了 `assistantMessageId` 之后，前端最重要的变化是什么？** 不是“多了一个字段”，而是 assistant / thinking / tool / approval 都能各自找到稳定键，`applyEvent` 和 `hydrateHistory` 可以走同一个 upsert 模型。
+> 1. **为什么切回 busy 会话会把旧 user 甩到当前页尾？** 因为旧实现把“这条不在最近 80 条里”误判成“它一定是 live 尾巴”，`rebuildHistoryTimeline()` 会把窗口外旧条目错追加到末尾。
+> 2. **有了 `assistantMessageId` / `userMessageId` 之后，前端最重要的变化是什么？** 不是“多了两个字段”，而是 assistant / thinking / tool / approval / 未落盘 user 都能各自找到稳定键，`applyEvent` 和 `hydrateHistory` 可以走同一个 upsert 模型。
 > 3. **工具卡和审批卡怎么处理？** 工具卡继续用 `toolCallId` 作为逻辑稳定键；审批卡继续用 `requestId`；assistant/thinking 才切到 `assistantMessageId`。
-> 4. **切走再切回时，旧流量怎么挡？谁需要 `epoch`？** 分三层：① 稳定 id 让晚到的 **live 事件**按身份证幂等 upsert、天然无害（不需要 epoch）；② 「完成态守卫」防 `message_end` 之后散落的 delta 重复 append；③ `epoch`（历史请求代际）**只**拦「前端自己发起的异步 `getMessages` 回来晚了、覆盖新界面」。后端不发 epoch，晚到的 live 事件也不带 epoch（详见 §3.2.3）。
+> 4. **“乐观 user” 这个词还成立吗？** 不成立。现在只有“未落盘的在途 user 消息”：它从回车那一刻就拿稳定 id，将来磁盘命中同一个 `entry.id` 原地收敛，不再有“临时壳”和“真身”两套东西。
+> 5. **切走再切回时，旧流量怎么挡？谁需要 `epoch`？** 分三层：① 稳定 id 让晚到的 **live 事件**按身份证幂等 upsert、天然无害（不需要 epoch）；② `rebuildHistoryTimeline()` 只回灌 runtime 明确跟踪的在途实体，不再按“在不在最近 80 条里”猜尾巴；③ `epoch`（历史请求代际）**只**拦「前端自己发起的异步 `getMessages` 回来晚了、覆盖新界面」。后端不发 epoch，晚到的 live 事件也不带 epoch（详见 §3.2.3）。
 
 **一句话定位**：后端主方案负责“身份证从哪来”，本文负责“拿到身份证以后，webview 不再靠长相认人”。
 
@@ -140,11 +141,13 @@ tomcat serve stdout event / get_messages history
 | 术语 | 语义 | 数据载体 | 行为约束 | 说人话 |
 |------|------|----------|----------|--------|
 | `assistantMessageId` | assistant 逻辑实体的稳定身份 | live `message_*` / `turn_end` 事件；history assistant `entry.id` | 同一条 assistant 在 live 与 history 中必须完全相等 | assistant 的正式身份证。 |
+| `userMessageId` | user / steer / follow_up 在前端出生时铸造的稳定身份 | webview `prompt` / `steer` / `retryUserMessage` intent；history user `entry.id` | 前端显示这条 user 气泡时就必须已存在；落盘后 `entry.id` 必须与之相等 | user 这边也有正式身份证，而且是出生即定。 |
 | `thinking id` | thinking UI 块的稳定身份 | 前端派生：`${assistantMessageId}-thinking` | 仅由 assistant 身份派生；不单独从 wire 获取 | 思考块跟着 assistant 走。 |
 | `toolCallId` | tool UI 实体的稳定身份 | `tool_execution_*` 事件、history tool role message 的 `tool_call_id` | tool card 的 upsert pivot；不切到 transcript tool `entry.id` | 工具卡继续按工具调用 id 认人。 |
 | `requestId` | approval UI 实体的稳定身份 | `control_request.ask_question` | approval 卡继续按它去重/更新 | 提问/审批卡自己的身份证。 |
 | `WebviewTimelineItem.id` | UI 渲染用的稳定 `id` 字段 | `protocol.ts` 里的各类 timeline item | assistant/thinking/approval 直接等于逻辑实体键；tool 至少要可稳定映射回 `toolCallId` | UI 这一行最终叫啥。 |
 | `entity key` | state store 用来做 upsert 的逻辑键 | `state.ts` 内部归一化规则 | live `applyEvent` 与 history `hydrateHistory` 必须共用 | 真正决定“是不是同一个东西”的键。 |
+| `in-flight user` | 已显示、已有稳定 id、但磁盘还没有的 user 气泡 | `state.ts` runtime `localUserMessageIds` + timeline item | 只要 runtime 仍在跟踪，就能跨 rebuild 保留；一旦 history 命中同 id，原地收敛并解除跟踪 | 不是“乐观壳”，就是这条消息本人，只是暂时还没写进文件。 |
 | `completion guard`（完成态守卫） | 决定一条 delta 该不该被 append | **复用 `state.ts` 既有的 `runtime` 在流 id**，不另建并行 map | `content_delta/thinking_delta(E)` 仅当 `E === runtime 当前在流 id` 时才 append；`message_end(E)` 经 `clearStreaming` 清空在流 id 后，散落 delta(E) 自然落空被忽略 | 收尾后飘来的半句话别重复贴。对标 vscode `isComplete` / cline `seq`，但零新增状态。 |
 | `epoch`（历史请求代际） | 前端本地为每个会话维护的代际号，**用途收窄**：只给「前端自己发起的异步 `getMessages`」做代际门闩 | `provider.ts` runtime 里的前端本地整数，从 1 起；**后端完全不知道、不发送它** | 切会话 / 切回 / 重拉历史时加 1；异步历史返回时若其捕获代际 ≠ 当前代际则丢弃。**不用来拦 live 事件** | 只管「你切走时发出的那次拉历史回来晚了别覆盖新界面」，不管直播包。对标 opencode `generations` / continue `AbortController`。 |
 | `single timeline` | 不再维护“live 列表 + history 列表”两套数据 | `session.timeline` | 所有入口最终都落在同一数组 / 同一实体图上 | 以后只有一份聊天记录，不玩双轨并行。 |
@@ -176,8 +179,9 @@ tomcat serve stdout event / get_messages history
 | --- | --- | --- | --- | --- | --- | --- |
 | F1 时间线模型 | state store 维护一条 timeline 还是两条（live/history） | **采用单一 `session.timeline`，live 与 history 都按稳定键 upsert 到这一份上**。 | 本仓：`tomcat-vscode-ext/src/ui/webview/state.ts`、`tomcat-vscode-ext/src/ui/webview/provider.ts`；外部：`agent/continue + gui/src/redux/slices/sessionSlice.ts`、`agent/vscode + src/vs/workbench/contrib/chat/common/model/chatModel.ts` | 设计：一份实体图，多个输入源；理由：切会话、reload、loadOlderHistory 都不再是“两个列表怎么拼”，而是“同一实体怎么补全”。 | 现状 `rebuildHistoryTimeline = [...historyItems, ...liveOnly]` 拒因：哪怕只错一个 thinking 文本，就会把 live 残留整片甩回末尾。 | 以后只有一份聊天记录，直播和历史都往这份里写。 |
 | F2 assistant / thinking 身份 | assistant 与 thinking 用什么键对齐 live / history | **assistant 直接用 `assistantMessageId` / history `entry.id`；thinking 固定派生 `${assistantMessageId}-thinking`**。 | 本仓：`tomcat-vscode-ext/src/ui/webview/state.ts`、`tomcat-vscode-ext/src/ui/webview/protocol.ts`；外部：`agent/opencode + packages/app/src/context/server-session.ts` | 设计：assistant 是一等实体，thinking 是从属视图块；理由：assistant 身份从后端来，thinking 规则在前后端文档里固定一次即可。 | 继续沿用 `createTimelineId(session, "assistant-group")` / `thinking-N` 拒因：reload 后永远不可能命中历史同一条。 | assistant 自己一张证，thinking 用“这张证 + 后缀”。 |
+| F2b user 身份 | user prompt / steer / follow_up 该由谁 mint 身份 | **采用“出生地铸造”规则：assistant 出生在后端 → 后端 mint `assistantMessageId`；user 出生在前端 → 前端 mint `userMessageId`，后端按 forced-id 原样落盘**。 | 本仓：`tomcat-vscode-ext/src/ui/webview/provider.ts`、`tomcat-vscode-ext/src/ui/webview/state.ts`；外部：`agent/opencode + packages/opencode/src/id/id.ts` | 设计：谁先把实体展示出来，谁就负责第一次起名；理由：这样前端不需要临时 id，也不需要 ack 后 swap。 | “让后端到 `start_turn` 再给 user 起名”拒因：气泡已经显示了，前端只能先造临时 id，等于把旧问题原样留着；“单独加 user_message 广播事件”拒因：那是多端同步需求，不是这次稳定 id 的必要前提。 | user 这边别再搞占位符，从回车那一刻就用将来会落盘的同一个 id。 |
 | F3 tool 身份 | tool card 是按 transcript tool `entry.id` 还是按 `toolCallId` | **采用 `toolCallId` 继续作为 tool UI 的稳定键，并把 `assistantMessageId` 作为归组锚点**。 | 本仓：`tomcat-vscode-ext/src/ui/webview/state.ts`、`tomcat-vscode-ext/gui/src/components/sessionList/groupTimelineByAssistantResponse.ts`；外部：`agent/cline + apps/vscode/src/sdk/task-proxy.ts` | 设计：tool 从 start/update/end 到 history 都围绕同一 `toolCallId`；理由：tool transcript entry 是最终结果，不适合作为 live 阶段主键。 | “tool 改按 transcript entry.id”拒因：start/update 阶段还没有那条最终 tool message；“tool 再建一张映射表”拒因：复杂且无收益。 | 工具卡本来就认 `toolCallId`，别折腾。 |
-| F4 history 重建算法 | rebuild 时是 concat/filter，还是按 id 收敛 | **采用 `rebuildHistoryTimeline()` 以磁盘 history 为有序基底，再按 entity key 把 live 条目 upsert 进去；删除文本兜底与 `liveOnly` 拼接**。 | 本仓：`tomcat-vscode-ext/src/ui/webview/state.ts`；外部：`agent/opencode + packages/tui/src/context/sync.tsx` | 设计：历史决定顺序，live 决定当前未落盘尾巴；理由：稳定键一旦到位，“谁先来”不再决定“是不是新条目”。 | “继续保留 `timelineMergeKeys(message:text/thinking:text)`”拒因：文本不是身份，thinking 尤其不可靠。 | 不再按“像不像”去重，而是按“是不是同一个 id”更新。 |
+| F4 history 重建算法 | rebuild 时按什么标准保留 live 尾巴 | **采用“精准版 scalpel”**：磁盘部分全部按 history 重建；内存里只回灌 runtime 正在跟踪的在途实体（streaming assistant / thinking / running tool / pending approval / in-flight user）；其它不在 history 页里的旧条目一律视为“窗口外已落盘项”丢弃。 | 本仓：`tomcat-vscode-ext/src/ui/webview/state.ts`；外部：`agent/opencode + packages/tui/src/context/sync.tsx` | 设计：判据从“位置”改成“状态”；理由：busy 会话切回时要保住当前流式轮，但不能把窗口外旧 user 甩到末尾。 | “只要不在最近 80 条里就当 live 尾巴”拒因：这是本次旧 user 漂尾的直接根因；“切走时一刀全清”拒因：idle 会话没问题，但 busy 会话会把当前流式轮误杀掉。 | 不是拿大锤把现场全清，而是用手术刀只留下 runtime 真正在追的那点活尾巴。 |
 | F5 切会话与旧事件 | 只有稳定 id 够不够，还要不要挡晚到事件 | **三层：① live 事件靠稳定 id 幂等 upsert（晚到无害）；② `message_end` 后用「完成态守卫」忽略散落 delta；③ `epoch` 只给前端自己发起的异步 `getMessages` 做代际门闩**。后端不发 epoch。 | 本仓：`tomcat-vscode-ext/src/ui/webview/provider.ts`、`tomcat-vscode-ext/src/ui/webview/state.ts`；外部：`opencode server-session.ts(generations)`、`vscode chatModel.ts(isComplete)`、`cline messageReducer.ts(seq)` | 设计：晚到的 live 事件是「无害」不是「陈旧」，用幂等 upsert 处理（opencode/vscode 范式）；epoch 收窄到唯一破坏性竞态——在途历史拉取覆盖新界面。 | “逐事件 epoch（provider 给每条 live 事件盖代际）”拒因：盖章方≠产出方，晚到事件会被盖新代际，门闩失效；“只看 `sessionId`”拒因：切回同会话 sessionId 不变，但在途旧 `getMessages` 仍会覆盖。 | live 事件认身份证就够；要拦的是「切走时那次拉历史回来晚了别覆盖新界面」。 |
 | F6 展示分组职责 | `groupTimelineByAssistantResponse.ts` 要不要继续承担补救职责 | **保留它的展示职责，但移除它对重复/错位输入的隐式兜底预期**。 | 本仓：`tomcat-vscode-ext/gui/src/components/sessionList/groupTimelineByAssistantResponse.ts`；外部：`agent/vscode + src/vs/workbench/contrib/chat/common/model/chatViewModel.ts` | 设计：grouping 只做“如何把 assistant + thinking + tools 摆成一组”；理由：数据正确性应由 state store 保证，而不是由渲染层顺手修补。 | “让 collectGroup 继续扫描整条 timeline 帮我们补救乱序”拒因：这会把渲染层和状态层搅在一起，bug 更隐蔽。 | 分组函数只负责摆盘，不负责补锅。 |
 
@@ -186,7 +190,7 @@ tomcat serve stdout event / get_messages history
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
 | FE1 协议消费升级 | `message_*` / `turn_end` 消费 `assistantMessageId`；thinking 派生 id；tool 继续用 `toolCallId` | `tomcat-vscode-ext/src/serveClient/wire.d.ts`、`tomcat-vscode-ext/src/ui/webview/state.ts`、`tomcat-vscode-ext/src/ui/webview/protocol.ts` | 见 §8 `FE-T1` / `FE-T2` | 先把“拿什么当身份证”定死。 |
-| FE2 单一 timeline + upsert | `applyEvent`、`hydrateHistory`、`rebuildHistoryTimeline` 全部按 entity key upsert；删除文本兜底与 `liveOnly` 拼接 | `tomcat-vscode-ext/src/ui/webview/state.ts` | 见 §8 `FE-T3` / `FE-T4` | 以后不再拼两份列表，只更新一份。 |
+| FE2 单一 timeline + upsert | `applyEvent`、`hydrateHistory`、`rebuildHistoryTimeline` 全部按 entity key upsert；`appendLatestHistory` 改 merge；重建时只保留 runtime 在途尾巴 | `tomcat-vscode-ext/src/ui/webview/state.ts` | 见 §8 `FE-T3` / `FE-T4` | 以后不再拼两份列表，只更新一份，而且不会再把窗口外旧 user 甩到末尾。 |
 | FE3 完成态守卫 + 历史请求代际门闩 | 完成态守卫：`content_delta/thinking_delta` 仅当其 `assistantMessageId === runtime 在流 id` 时 append（复用既有 `clearStreaming`，零新增状态）；历史代际门闩：`provider.ts` 给每个会话维护 `epoch`，`getMessages`/`loadOlderHistory` 调用时闭包捕获代际、返回时比对，过期则不交给 `hydrateHistory`/`prependHistory` | `tomcat-vscode-ext/src/ui/webview/provider.ts`、`tomcat-vscode-ext/src/ui/webview/state.ts` | 见 §8 `FE-T5` / `FE-T5b` | 收尾后别重复贴；切走时发出的旧拉取回来晚了别覆盖。 |
 | FE4 渲染层对齐 | `groupTimelineByAssistantResponse.ts` 继续按 `assistantMessageId` 分组；`TranscriptView` / `ThinkingBlock` / `ToolRow` 不再依赖“重复项后来被隐藏”的隐式行为 | `tomcat-vscode-ext/gui/src/components/sessionList/groupTimelineByAssistantResponse.ts`、`tomcat-vscode-ext/gui/src/components/TranscriptView.tsx` | 见 §8 `FE-T6` | UI 负责展示，不再背着修数据的锅。 |
 | FE5 验收链路 | 单测、provider flow、E2E、installed VSIX 切走切回路径都锁住 | `tomcat-vscode-ext/src/ui/webview/tests/state.test.ts`、`tomcat-vscode-ext/tests/webview_provider_flow.test.ts`、`tomcat-vscode-ext/src/test/suite/support/hostE2eScenario.ts`、`tomcat-vscode-ext/e2e-harness/src/test/installed.test.ts` | 见 §8 `FE-T7` / `E2E-T1` | 用户怎么复现，我们就怎么把它测死。 |
@@ -205,16 +209,32 @@ history entry ──┘
 
 #### 3.2.2 重建只决定顺序，不决定身份
 
-> 专业：`rebuildHistoryTimeline()` 仍以 history 决定“当前可见顺序”，但不再借由文本去重来决定“谁是谁”。身份已经由 entity key 决定，重建只负责“把同 key 的 live 尾巴收进正确位置”。
+> 专业：`rebuildHistoryTimeline()` 仍以 history 决定“当前可见顺序”，但不再借由文本去重来决定“谁是谁”。身份已经由 entity key 决定，重建只负责“把同 key 的 live 尾巴收进正确位置”。这里的关键不是“它在不在最近 80 条里”，而是“runtime 此刻有没有明确跟踪它仍在途”。
 >
 > 说人话：排序归排序，认人归认人，这两件事以后分开。
 
 ```text
-historyItems (order source)
-   │
-   ├─ by key 命中 live assistant/thinking/tool → 覆盖/补全
-   └─ by key 未命中但 live 仍在跑          → 追加为进行中尾巴
+切回 busy 会话时：
+  磁盘部分             = 全部按 history 重建（这就是“以磁盘为准”）
+  内存 live 尾巴       = 只保留 runtime 正在追踪的那一小段
+
+旧（错）：
+  不在最近 80 条里  -> 当成 live 尾巴 -> 甩到末尾
+
+新（对）：
+  runtime 说它仍在流式/未落盘 -> 才保留
+  其它不在 history 页里的项   -> 一律当窗口外旧条目丢弃
 ```
+
+`idle` 会话和 `busy` 会话的差别也在这里：
+
+```text
+              idle 会话                      busy 会话
+一刀全清       看起来能工作                   会误杀当前流式轮
+精准版 scalpel 没尾巴可保留，结果一样          既保住当前轮，也不让旧 user 漂尾
+```
+
+所以这里不是“切走时彻底清空”与“不清空”二选一，而是：**磁盘部分全部重拉 + 只保留 runtime 在追的 live 尾巴**。
 
 #### 3.2.3 切走切回的三层防线（含 `epoch` 链路 ASCII 图）
 

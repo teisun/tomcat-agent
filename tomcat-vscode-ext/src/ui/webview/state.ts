@@ -44,7 +44,18 @@ type SessionRuntimeState = {
   hasMoreHistory: boolean;
   historyEntries: unknown[];
   historyLoading: boolean;
+  localUserMessageIds: Set<string>;
   oldestHistoryCursor: string | null;
+};
+
+type UserSubmitKind = "prompt" | "steer";
+
+type AppendMessageOptions = {
+  deliveryError?: string | null;
+  deliveryState?: "failed" | "pending";
+  preferredId?: string | null;
+  retryable?: boolean;
+  submitKind?: UserSubmitKind;
 };
 
 function isPlanEvent(event: ServeEvent): event is ServePlanEvent {
@@ -548,6 +559,7 @@ function createSessionRuntime(): SessionRuntimeState {
     hasMoreHistory: false,
     historyEntries: [],
     historyLoading: false,
+    localUserMessageIds: new Set<string>(),
     oldestHistoryCursor: null,
   };
 }
@@ -818,6 +830,7 @@ function pushMessage(
   kind: WebviewMessageBlock["kind"],
   text: string,
   preferredId?: string | null,
+  options: AppendMessageOptions = {},
 ): WebviewMessageBlock {
   const next: WebviewMessageBlock = {
     id: createTimelineId(session, kind, preferredId),
@@ -825,8 +838,67 @@ function pushMessage(
     text,
     type: "message",
   };
+  if (options.deliveryError !== undefined) {
+    next.deliveryError = options.deliveryError;
+  }
+  if (options.deliveryState) {
+    next.deliveryState = options.deliveryState;
+  }
+  if (options.retryable !== undefined) {
+    next.retryable = options.retryable;
+  }
+  if (options.submitKind) {
+    next.submitKind = options.submitKind;
+  }
   session.timeline.push(next);
   return next;
+}
+
+function liveAssistantGroupIds(runtime: SessionRuntimeState): Set<string> {
+  const ids = new Set<string>();
+  if (runtime.activeAssistantId) {
+    ids.add(runtime.activeAssistantId);
+  }
+  if (runtime.streamingAssistantId) {
+    ids.add(runtime.streamingAssistantId);
+  }
+  return ids;
+}
+
+function shouldRetainLiveTimelineItem(
+  item: WebviewTimelineItem,
+  runtime: SessionRuntimeState,
+  assistantGroupIds: Set<string>,
+): boolean {
+  switch (item.type) {
+    case "message":
+      if (item.kind === "user") {
+        return runtime.localUserMessageIds.has(item.id);
+      }
+      return (
+        item.kind === "assistant" &&
+        typeof item.assistantMessageId === "string" &&
+        assistantGroupIds.has(item.assistantMessageId)
+      );
+    case "thinking":
+      return (
+        runtime.activeThinkingId === item.id ||
+        (typeof item.assistantMessageId === "string" &&
+          assistantGroupIds.has(item.assistantMessageId))
+      );
+    case "tool":
+      return (
+        item.status === "running" ||
+        item.status === "streaming" ||
+        (typeof item.assistantMessageId === "string" &&
+          assistantGroupIds.has(item.assistantMessageId))
+      );
+    case "approval":
+      return !item.resolved;
+    case "boundary":
+    case "plan":
+      return false;
+  }
 }
 
 function effectiveBusy(busy: boolean, interrupted: boolean | null | undefined): boolean {
@@ -1036,7 +1108,10 @@ export class WebviewStateStore {
 
   appendLatestHistory(sessionId: string, history: SessionHistoryPayload): void {
     const runtime = this.ensureRuntime(sessionId);
-    runtime.historyEntries = Array.isArray(history.messages) ? [...history.messages] : [];
+    runtime.historyEntries = mergeHistoryEntries(
+      runtime.historyEntries,
+      Array.isArray(history.messages) ? history.messages : [],
+    );
     runtime.oldestHistoryCursor = history.nextCursor ?? null;
     runtime.hasMoreHistory = history.hasMore === true && typeof history.nextCursor === "string";
     runtime.historyLoading = false;
@@ -1071,11 +1146,66 @@ export class WebviewStateStore {
     sessionId: string,
     kind: WebviewMessageBlock["kind"],
     text: string,
+    options: AppendMessageOptions = {},
   ): void {
     if (!text) {
       return;
     }
-    pushMessage(this.ensureSession(sessionId), kind, text);
+    pushMessage(this.ensureSession(sessionId), kind, text, options.preferredId, options);
+  }
+
+  appendLocalUserMessage(
+    sessionId: string,
+    text: string,
+    options: {
+      messageId: string;
+      submitKind: UserSubmitKind;
+    },
+  ): void {
+    const session = this.ensureSession(sessionId);
+    const runtime = this.ensureRuntime(sessionId);
+    pushMessage(session, "user", text, options.messageId, {
+      deliveryState: "pending",
+      submitKind: options.submitKind,
+    });
+    runtime.localUserMessageIds.add(options.messageId);
+  }
+
+  markLocalUserMessageFailed(
+    sessionId: string,
+    messageId: string,
+    error: string,
+    retryable: boolean,
+  ): void {
+    const session = this.ensureSession(sessionId);
+    const runtime = this.ensureRuntime(sessionId);
+    const message = session.timeline.find(
+      (item): item is WebviewMessageBlock =>
+        item.type === "message" && item.kind === "user" && item.id === messageId,
+    );
+    if (!message) {
+      return;
+    }
+    message.deliveryError = error;
+    message.deliveryState = "failed";
+    message.retryable = retryable;
+    runtime.localUserMessageIds.add(messageId);
+  }
+
+  markLocalUserMessagePending(sessionId: string, messageId: string): void {
+    const session = this.ensureSession(sessionId);
+    const runtime = this.ensureRuntime(sessionId);
+    const message = session.timeline.find(
+      (item): item is WebviewMessageBlock =>
+        item.type === "message" && item.kind === "user" && item.id === messageId,
+    );
+    if (!message) {
+      return;
+    }
+    delete message.deliveryError;
+    message.deliveryState = "pending";
+    delete message.retryable;
+    runtime.localUserMessageIds.add(messageId);
   }
 
   setOwnership(
@@ -1388,17 +1518,30 @@ export class WebviewStateStore {
     }
     mergeCurrentPlanCardsIntoHistory(historySession, session);
     const existingKeys = new Set(historySession.timeline.map((item) => timelineEntityKey(item)));
+    const assistantGroupIds = liveAssistantGroupIds(runtime);
+    const nextLocalUserMessageIds = new Set<string>();
     for (const item of session.timeline) {
       if (item.type === "plan") {
         continue;
       }
       const key = timelineEntityKey(item);
+      const trackedLocalUserMessage =
+        item.type === "message" &&
+        item.kind === "user" &&
+        runtime.localUserMessageIds.has(item.id);
       if (existingKeys.has(key)) {
+        continue;
+      }
+      if (!shouldRetainLiveTimelineItem(item, runtime, assistantGroupIds)) {
         continue;
       }
       upsertTimelineItem(historySession, item);
       existingKeys.add(key);
+      if (trackedLocalUserMessage) {
+        nextLocalUserMessageIds.add(item.id);
+      }
     }
+    runtime.localUserMessageIds = nextLocalUserMessageIds;
     session.timeline = historySession.timeline;
     if (session.planTodos.length === 0 && session.planId) {
       const activeCard = session.timeline.find(

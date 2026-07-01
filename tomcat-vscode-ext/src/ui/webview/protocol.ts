@@ -20,8 +20,12 @@ export interface WebviewDomAction {
 
 export interface WebviewMessageBlock {
   assistantMessageId?: string;
+  deliveryError?: string | null;
+  deliveryState?: "failed" | "pending";
   id: string;
   kind: "assistant" | "error" | "notice" | "user" | "warn";
+  retryable?: boolean;
+  submitKind?: "prompt" | "steer";
   text: string;
   type: "message";
 }
@@ -260,6 +264,14 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "retryUserMessage";
+      data: {
+        messageId: string;
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "removeAttachment";
       data: {
         attachmentId: string;
@@ -454,6 +466,12 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       );
     case "newSession":
       return value.data === undefined || isRecord(value.data);
+    case "retryUserMessage":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.messageId) &&
+        isString(value.data.sessionId)
+      );
     case "loadOlderHistory":
       return isRecord(value.data) && isString(value.data.sessionId);
     case "switchSession":

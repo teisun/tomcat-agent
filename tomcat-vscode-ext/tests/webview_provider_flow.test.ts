@@ -41,6 +41,7 @@ type BuildProviderOptions = {
   historyResponses?: Record<string, SessionHistoryPayload>;
   ideOverrides?: Partial<IdeHost>;
   listSessionsImpl?: () => Promise<Record<string, unknown>>;
+  requestImpl?: (command: Record<string, unknown>) => Promise<Record<string, unknown>>;
   sessionState?: Partial<MutableSessionState>;
 };
 
@@ -54,7 +55,10 @@ class FakeMessenger {
   }> = [];
   private readonly listeners = new Set<(event: Record<string, unknown>) => void>();
 
-  constructor(private readonly sessionState: MutableSessionState) {}
+  constructor(
+    private readonly sessionState: MutableSessionState,
+    private readonly requestImpl?: (command: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  ) {}
 
   emit(event: Record<string, unknown>): void {
     for (const listener of this.listeners) {
@@ -73,6 +77,9 @@ class FakeMessenger {
 
   async request(command: Record<string, unknown>) {
     this.requestCalls.push(command);
+    if (this.requestImpl) {
+      return this.requestImpl(command);
+    }
     return {
       payload: { accepted: true },
       sessionId: String(command.sessionId ?? "session-1"),
@@ -203,7 +210,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
     thinkingLevel: "high",
     ...options.sessionState,
   };
-  const messenger = new FakeMessenger(sessionState);
+  const messenger = new FakeMessenger(sessionState, options.requestImpl);
   const historyCalls: Array<{
     params?: { cursor?: string | null; limit?: number };
     sessionId?: string;
@@ -356,21 +363,33 @@ describe("webview provider integration", () => {
       type: "prompt",
     });
 
-    expect(messenger.requestCalls).toEqual(
+    const promptRequest = messenger.requestCalls.find((call) => call.type === "prompt");
+    expect(promptRequest).toEqual(
+      expect.objectContaining({
+        params: {
+          attachments: [
+            expect.objectContaining({
+              dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
+              kind: "image",
+              mimeType: "image/png",
+            }),
+          ],
+          userMessageId: expect.any(String),
+        },
+        sessionId: "session-1",
+        text: "send with attachment",
+        type: "prompt",
+      }),
+    );
+    const userMessageId = (promptRequest?.params as { userMessageId?: string } | undefined)?.userMessageId;
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          params: {
-            attachments: [
-              expect.objectContaining({
-                dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
-                kind: "image",
-                mimeType: "image/png",
-              }),
-            ],
-          },
-          sessionId: "session-1",
+          deliveryState: "pending",
+          id: userMessageId,
+          kind: "user",
           text: "send with attachment",
-          type: "prompt",
+          type: "message",
         }),
       ]),
     );
@@ -479,6 +498,91 @@ describe("webview provider integration", () => {
     );
 
     provider.dispose();
+  });
+
+  it("keeps rejected user bubbles inline and retries them with the same stable id", async () => {
+    let requestCount = 0;
+    const { messenger, provider } = buildProvider({
+      requestImpl: async (command) => {
+        requestCount += 1;
+        return requestCount === 1
+          ? {
+              error: "busy",
+              sessionId: String(command.sessionId ?? "session-1"),
+              success: false,
+              type: "response",
+            }
+          : {
+              payload: { accepted: true },
+              sessionId: String(command.sessionId ?? "session-1"),
+              success: true,
+              type: "response",
+            };
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-retry-user-message",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: {
+        sessionId: "session-1",
+        text: "retry me",
+      },
+      messageId: "prompt-retry-user-message",
+      type: "prompt",
+    });
+
+    const failedSession = provider.currentState().sessionViews["session-1"];
+    const failedUserMessage = failedSession?.timeline.find(
+      (item) => item.type === "message" && item.kind === "user" && item.text === "retry me",
+    );
+    expect(failedUserMessage).toMatchObject({
+      deliveryError: "busy",
+      deliveryState: "failed",
+      retryable: true,
+      submitKind: "prompt",
+      text: "retry me",
+      type: "message",
+    });
+    expect(
+      failedSession?.timeline.some((item) => item.type === "message" && item.kind === "error"),
+    ).toBe(false);
+
+    const firstPromptRequest = messenger.requestCalls.find((call) => call.type === "prompt");
+    const firstUserMessageId = (
+      firstPromptRequest?.params as { userMessageId?: string } | undefined
+    )?.userMessageId;
+    expect(failedUserMessage?.id).toBe(firstUserMessageId);
+
+    await provider.dispatchTestIntent({
+      data: {
+        messageId: String(firstUserMessageId),
+        sessionId: "session-1",
+      },
+      messageId: "retry-user-message",
+      type: "retryUserMessage",
+    });
+
+    const retriedRequests = messenger.requestCalls.filter((call) => call.type === "prompt");
+    expect(retriedRequests).toHaveLength(2);
+    expect(
+      (
+        retriedRequests[1]?.params as { userMessageId?: string } | undefined
+      )?.userMessageId,
+    ).toBe(firstUserMessageId);
+    const retriedUserMessages =
+      provider.currentState().sessionViews["session-1"]?.timeline.filter(
+        (item) => item.type === "message" && item.kind === "user" && item.text === "retry me",
+      ) ?? [];
+    expect(retriedUserMessages).toHaveLength(1);
+    expect(retriedUserMessages[0]).toMatchObject({
+      deliveryState: "pending",
+      id: firstUserMessageId,
+      text: "retry me",
+      type: "message",
+    });
   });
 
   it("prepends older history pages with cursor pagination", async () => {
@@ -1105,6 +1209,194 @@ describe("webview provider integration", () => {
           item.text === "rebuilt after switch back",
       ),
     ).toBe(true);
+  });
+
+  it("drops latest-history payloads whose sessionId does not match the requested session", async () => {
+    const { provider } = buildProvider({
+      getMessagesImpl: async () => ({
+        hasMore: false,
+        messages: [
+          {
+            id: "wrong-session-history",
+            message: { content: "should be ignored", role: "assistant" },
+            type: "message",
+          },
+        ],
+        nextCursor: null,
+        sessionId: "session-2",
+      }),
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-history-session-guard",
+      type: "ready",
+    });
+
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual([]);
+  });
+
+  it("drops older-history payloads whose sessionId does not match the requested session", async () => {
+    const { provider } = buildProvider({
+      getMessagesImpl: async (_sessionId, params) => {
+        if (params?.cursor === "cursor-1") {
+          return {
+            hasMore: false,
+            messages: [
+              {
+                id: "wrong-older-history",
+                message: { content: "should be ignored", role: "user" },
+                type: "message",
+              },
+            ],
+            nextCursor: null,
+            sessionId: "session-2",
+          };
+        }
+        return {
+          hasMore: true,
+          messages: [
+            {
+              id: "latest-history",
+              message: { content: "latest history", role: "user" },
+              type: "message",
+            },
+          ],
+          nextCursor: "cursor-1",
+          sessionId: "session-1",
+        };
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-older-session-guard",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "load-older-session-guard",
+      type: "loadOlderHistory",
+    });
+
+    const session = provider.currentState().sessionViews["session-1"];
+    expect(session).toMatchObject({
+      hasMoreHistory: true,
+      historyLoading: false,
+    });
+    expect(
+      session?.timeline.some(
+        (item) => item.type === "message" && item.kind === "user" && item.text === "latest history",
+      ),
+    ).toBe(true);
+    expect(
+      session?.timeline.some(
+        (item) =>
+          item.type === "message" && item.kind === "user" && item.text === "should be ignored",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps older loaded user history ahead of the live tail when switching back to a busy session", async () => {
+    const olderMessages = Array.from({ length: 5 }, (_, index) => ({
+      id: `older-user-${index + 1}`,
+      message: { content: `ghost prompt ${index + 1}`, role: "user" },
+      type: "message" as const,
+    }));
+    const recentMessages = Array.from({ length: 80 }, (_, index) => ({
+      id: `recent-${index + 1}`,
+      message: {
+        content: `recent message ${index + 1}`,
+        role: index % 2 === 0 ? "user" : "assistant",
+      },
+      type: "message" as const,
+    }));
+    const { messenger, provider } = buildProvider({
+      getMessagesImpl: async (sessionId, params) => {
+        if (sessionId === "session-2") {
+          return {
+            hasMore: false,
+            messages: [],
+            nextCursor: null,
+            sessionId: "session-2",
+          };
+        }
+        if (params?.cursor === "cursor-older-a") {
+          return {
+            hasMore: false,
+            messages: olderMessages,
+            nextCursor: null,
+            sessionId: "session-1",
+          };
+        }
+        return {
+          hasMore: true,
+          messages: recentMessages,
+          nextCursor: "cursor-older-a",
+          sessionId: "session-1",
+        };
+      },
+      getStateImpl: async (sessionId) => ({
+        busy: sessionId === "session-1",
+        contextRatio: null,
+        interrupted: false,
+        model: "gpt-5.4",
+        planId: null,
+        planPath: null,
+        planState: "chat",
+        sessionId: sessionId ?? "session-1",
+        thinkingLevel: "high",
+      }),
+      listSessionsImpl: async () => ({
+        activeSessionId: "session-1",
+        scope: "disk" as const,
+        sessions: [
+          { busy: true, isCurrent: true, sessionId: "session-1", updatedAt: 1 },
+          { busy: false, isCurrent: false, sessionId: "session-2", updatedAt: 2 },
+        ],
+      }),
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-busy-switch-back-order",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "load-busy-switch-back-order",
+      type: "loadOlderHistory",
+    });
+
+    messenger.emit({
+      assistantMessageId: "live-tail-a",
+      assistantMessageEvent: {
+        delta: "still streaming",
+        kind: "content_delta",
+      },
+      message: {},
+      sessionId: "session-1",
+      type: "message_update",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-2" },
+      messageId: "switch-busy-order-to-b",
+      type: "switchSession",
+    });
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "switch-busy-order-back-to-a",
+      type: "switchSession",
+    });
+
+    const texts = (provider.currentState().sessionViews["session-1"]?.timeline ?? []).flatMap((item) =>
+      item.type === "message" ? [item.text] : [],
+    );
+    const lastOlderIndex = texts.lastIndexOf("ghost prompt 5");
+    const liveTailIndex = texts.lastIndexOf("still streaming");
+    expect(texts.slice(0, 5)).toEqual(olderMessages.map((entry) => entry.message.content));
+    expect(lastOlderIndex).toBeGreaterThanOrEqual(0);
+    expect(liveTailIndex).toBe(texts.length - 1);
+    expect(lastOlderIndex).toBeLessThan(liveTailIndex);
   });
 
   it("routes live events into their own session bucket while another session stays visible", async () => {
@@ -1739,7 +2031,7 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
-  it("surfaces prompt bridge timeouts as user-visible errors", async () => {
+  it("surfaces prompt bridge timeouts on the inline failed user bubble", async () => {
     const { messenger, provider } = buildProvider();
     vi.spyOn(messenger, "request").mockRejectedValue(
       new Error("Timed out waiting for response prompt-timeout"),
@@ -1758,15 +2050,17 @@ describe("webview provider integration", () => {
       type: "prompt",
     });
 
-    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: "error",
-          text: expect.stringContaining("Tomcat bridge is not responding"),
-          type: "message",
-        }),
-      ]),
+    const timeoutMessage = provider.currentState().sessionViews["session-1"]?.timeline.find(
+      (item) => item.type === "message" && item.kind === "user" && item.text === "will timeout",
     );
+    expect(timeoutMessage).toMatchObject({
+      deliveryError: expect.stringContaining("Tomcat bridge is not responding"),
+      deliveryState: "failed",
+      retryable: false,
+      submitKind: "prompt",
+      text: "will timeout",
+      type: "message",
+    });
 
     provider.dispose();
   });

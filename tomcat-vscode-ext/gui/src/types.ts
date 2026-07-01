@@ -13,8 +13,12 @@ export type FrontendOwnerKind = "participant" | "webview";
 
 export interface WebviewMessageBlock {
   assistantMessageId?: string;
+  deliveryError?: string | null;
+  deliveryState?: "failed" | "pending";
   id: string;
   kind: "assistant" | "error" | "notice" | "user" | "warn";
+  retryable?: boolean;
+  submitKind?: "prompt" | "steer";
   text: string;
   type: "message";
 }
@@ -277,6 +281,14 @@ export type WebviewIntent =
       type: "pickAttachment";
       data?: {
         sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "retryUserMessage";
+      data: {
+        messageId: string;
+        sessionId: string;
       };
     }
   | {

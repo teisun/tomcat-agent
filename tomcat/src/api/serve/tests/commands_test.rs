@@ -59,6 +59,42 @@ fn decode_cursor(cursor: &str) -> serde_json::Value {
     serde_json::from_slice(&bytes).expect("parse cursor json")
 }
 
+fn session_message_entries(
+    slot: &Arc<crate::api::serve::SessionSlot>,
+) -> Vec<crate::core::session::transcript::MessageEntry> {
+    slot.ctx
+        .session_runtime
+        .session
+        .get_entries_for_session(&slot.session_id, 256)
+        .expect("read session entries")
+        .into_iter()
+        .filter_map(|entry| match entry {
+            crate::core::session::transcript::TranscriptEntry::Message(message) => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+fn count_message_entries_with_id(
+    slot: &Arc<crate::api::serve::SessionSlot>,
+    message_id: &str,
+) -> usize {
+    session_message_entries(slot)
+        .into_iter()
+        .filter(|entry| entry.id.as_deref() == Some(message_id))
+        .count()
+}
+
+fn latest_user_entry(
+    slot: &Arc<crate::api::serve::SessionSlot>,
+) -> crate::core::session::transcript::MessageEntry {
+    session_message_entries(slot)
+        .into_iter()
+        .rev()
+        .find(|entry| entry.message.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        .expect("latest user entry")
+}
+
 #[tokio::test]
 #[serial(env_lock)]
 async fn serve_command_routes_by_session_id() {
@@ -417,6 +453,7 @@ async fn serve_prompt_with_image_attachment_builds_multimodal_message() {
                     data_base64: None,
                     file_id: Some("file-vision".to_string()),
                 }],
+                ..ServeMessageParams::default()
             },
         },
     )
@@ -477,6 +514,7 @@ async fn serve_follow_up_with_attachment_queues_multimodal_message_when_busy() {
                     data_base64: None,
                     file_id: Some("file-follow-up".to_string()),
                 }],
+                user_message_id: Some("follow-up-fixed-id".to_string()),
             },
         },
     )
@@ -495,6 +533,7 @@ async fn serve_follow_up_with_attachment_queues_multimodal_message_when_busy() {
 
     let queue = slot.ctx.session_runtime.follow_up_queue.lock();
     assert_eq!(queue.len(), 1, "expected one queued follow_up");
+    assert_eq!(queue[0].msg_id.as_deref(), Some("follow-up-fixed-id"));
     let Some(ChatMessageContent::Parts(parts)) = &queue[0].content else {
         panic!(
             "expected queued multimodal follow_up, got {:?}",
@@ -509,6 +548,8 @@ async fn serve_follow_up_with_attachment_queues_multimodal_message_when_busy() {
             ..
         } if file_id == "file-follow-up"
     ));
+    drop(queue);
+    assert_eq!(count_message_entries_with_id(&slot, "follow-up-fixed-id"), 1);
 }
 
 #[tokio::test]
@@ -534,6 +575,7 @@ async fn serve_prompt_invalid_attachment_returns_error() {
                     data_base64: Some("Zm9v".to_string()),
                     file_id: None,
                 }],
+                ..ServeMessageParams::default()
             },
         },
     )
@@ -559,6 +601,48 @@ async fn serve_prompt_invalid_attachment_returns_error() {
         requests.0.lock().is_empty(),
         "invalid attachment should not reach LLM"
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_uses_requested_user_message_id_for_transcript_and_context() {
+    let _api_key = install_test_api_key();
+    let stream = vec![Ok(StreamEvent::FinishReason {
+        reason: "stop".to_string(),
+    })];
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("fixed-user-id-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "plain text".to_string(),
+            params: ServeMessageParams {
+                user_message_id: Some("user-fixed-id".to_string()),
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+
+    let captured = requests.0.lock();
+    let user_message = captured[0]
+        .messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
+        .expect("user message");
+    assert_eq!(user_message.msg_id.as_deref(), Some("user-fixed-id"));
+    drop(captured);
+    assert_eq!(count_message_entries_with_id(&slot, "user-fixed-id"), 1);
 }
 
 #[tokio::test]
@@ -599,6 +683,81 @@ async fn serve_prompt_without_attachments_falls_back_to_user_text() {
         &user_message.content,
         Some(ChatMessageContent::Text(text)) if text == "plain text"
     ));
+    assert!(
+        user_message
+            .msg_id
+            .as_deref()
+            .is_some_and(|message_id| !message_id.is_empty())
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_blank_user_message_id_falls_back_to_generated_entry_id() {
+    let _api_key = install_test_api_key();
+    let stream = vec![Ok(StreamEvent::FinishReason {
+        reason: "stop".to_string(),
+    })];
+    let (state, _buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("blank-user-id".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "blank id".to_string(),
+            params: ServeMessageParams {
+                user_message_id: Some("   ".to_string()),
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let entry = latest_user_entry(&slot);
+    assert_ne!(entry.id.as_deref(), Some("   "));
+    assert!(entry.id.as_deref().is_some_and(|message_id| !message_id.trim().is_empty()));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_duplicate_user_message_id_falls_back_to_generated_entry_id() {
+    let _api_key = install_test_api_key();
+    let stream = vec![Ok(StreamEvent::FinishReason {
+        reason: "stop".to_string(),
+    })];
+    let (state, _buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    slot.ctx
+        .session_runtime
+        .session
+        .append_message_with_id(
+            serde_json::json!({
+                "role": "user",
+                "content": "existing",
+            }),
+            "dup-user-id",
+        )
+        .expect("seed duplicate id");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("duplicate-user-id".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "new text".to_string(),
+            params: ServeMessageParams {
+                user_message_id: Some("dup-user-id".to_string()),
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let entry = latest_user_entry(&slot);
+    assert_ne!(entry.id.as_deref(), Some("dup-user-id"));
+    assert_eq!(count_message_entries_with_id(&slot, "dup-user-id"), 1);
 }
 
 #[tokio::test]
@@ -624,6 +783,7 @@ async fn serve_steer_ignores_attachments() {
                     data_base64: None,
                     file_id: Some("ignored-file".to_string()),
                 }],
+                user_message_id: Some("steer-fixed-id".to_string()),
             },
         },
     )
@@ -646,6 +806,48 @@ async fn serve_steer_ignores_attachments() {
         &steering_message.content,
         Some(ChatMessageContent::Text(text)) if text == "just steer"
     ));
+    assert_eq!(steering_message.msg_id.as_deref(), Some("steer-fixed-id"));
+    drop(captured);
+    assert_eq!(count_message_entries_with_id(&slot, "steer-fixed-id"), 1);
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_busy_steer_queues_and_persists_requested_user_message_id() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    slot.busy.store(true, Ordering::SeqCst);
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Steer {
+            id: Some("steer-busy".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "redirect".to_string(),
+            params: ServeMessageParams {
+                user_message_id: Some("steer-busy-fixed-id".to_string()),
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("steer-busy")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("steer-busy"))
+        .expect("queued steer response");
+    assert_eq!(response["payload"]["queued"].as_bool(), Some(true));
+
+    let queue = slot.ctx.session_runtime.steering_queue.lock();
+    assert_eq!(queue.len(), 1, "expected one queued steering message");
+    assert_eq!(queue[0].msg_id.as_deref(), Some("steer-busy-fixed-id"));
+    drop(queue);
+    assert_eq!(count_message_entries_with_id(&slot, "steer-busy-fixed-id"), 1);
 }
 
 #[tokio::test]
@@ -1200,6 +1402,7 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
                     data_base64: None,
                     file_id: Some("file-vision".to_string()),
                 }],
+                ..ServeMessageParams::default()
             },
         },
     )

@@ -392,19 +392,34 @@ function emitCustomPlanEvent(sessionId, type, extra = {}) {
   });
 }
 
-function recordHistoryMessage(sessionId, role, content) {
+function recordHistoryMessage(sessionId, role, content, forcedId = null) {
   const session = touchSession(ensureSession(sessionId));
   session.history.push({
     id:
-      role === "assistant"
+      forcedId ||
+      (role === "assistant"
         ? ensurePendingAssistantMessageId(session)
-        : \`h-\${historyCounter++}\`,
+        : "h-" + historyCounter++),
     message: {
       content,
       role,
     },
     type: "message",
   });
+}
+
+function seedTranscriptSwitchBackHistory(sessionId) {
+  const session = touchSession(ensureSession(sessionId));
+  if (session.seededSwitchBackHistory) {
+    return;
+  }
+  session.seededSwitchBackHistory = true;
+  for (let index = 0; index < 5; index += 1) {
+    recordHistoryMessage(sessionId, "user", "ghost prompt " + String(index + 1));
+  }
+  for (let index = 0; index < 81; index += 1) {
+    recordHistoryMessage(sessionId, "user", "history filler " + String(index + 1));
+  }
 }
 
 function recordHistoryAssistantWithTools(sessionId, content, tools, summaryTitle) {
@@ -508,7 +523,14 @@ function handlePrompt(frame) {
   const attachmentCount = Array.isArray(frame.params && frame.params.attachments)
     ? frame.params.attachments.length
     : 0;
-  recordHistoryMessage(sessionId, "user", text);
+  const userMessageId =
+    frame.params && typeof frame.params.userMessageId === "string"
+      ? frame.params.userMessageId
+      : null;
+  if (text.includes("switch back order")) {
+    seedTranscriptSwitchBackHistory(sessionId);
+  }
+  recordHistoryMessage(sessionId, "user", text, userMessageId);
   if (text.includes("answer card showcase")) {
     const requestId = \`ask-answer-\${sessionId}\`;
     const request = {
@@ -745,7 +767,7 @@ function handlePrompt(frame) {
       finishTurn(sessionId, null);
     };
     const finishDelayMs = text.includes("switch back order")
-      ? Math.max(transcriptProgressDelayMs, 1200)
+      ? Math.max(transcriptProgressDelayMs, 9000)
       : transcriptProgressDelayMs;
     if (finishDelayMs > 0) {
       setTimeout(finishTranscriptTurn, finishDelayMs);

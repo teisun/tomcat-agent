@@ -27,6 +27,13 @@ fn serve_dts_preserves_wire_event_session_id() {
 }
 
 #[test]
+fn serve_dts_includes_user_message_id_on_message_params() {
+    let dts = serve_dts();
+    assert!(dts.contains("export interface ServeMessageParams {"));
+    assert!(dts.contains("userMessageId?: null | string;"));
+}
+
+#[test]
 fn build_schema_bundle_includes_wire_event() {
     let value = serde_json::to_value(build_schema_bundle()).expect("serialize schema bundle");
     assert!(value.get("wire_event").is_some(), "wire_event root missing");

@@ -39,11 +39,13 @@ pub struct ServeAttachment {
 pub struct ServeMessageParams {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<ServeAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<String>,
 }
 
 impl ServeMessageParams {
     pub fn is_empty(&self) -> bool {
-        self.attachments.is_empty()
+        self.attachments.is_empty() && self.user_message_id.is_none()
     }
 }
 

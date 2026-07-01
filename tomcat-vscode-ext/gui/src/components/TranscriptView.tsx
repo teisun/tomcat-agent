@@ -29,6 +29,7 @@ export function TranscriptView({
   onBuildPlan,
   onOpenFile,
   onOpenPlanFile,
+  onRetryUserMessage,
   planState,
   planTodos = [],
   sessionTodos = [],
@@ -42,6 +43,7 @@ export function TranscriptView({
   onBuildPlan(planId: string | null, path: string): void;
   onOpenFile(path: string): void;
   onOpenPlanFile(path: string): void;
+  onRetryUserMessage?(messageId: string): void;
   planState?: WebviewPlanState | null;
   planTodos?: WebviewTodo[];
   sessionTodos?: WebviewTodo[];
@@ -64,7 +66,13 @@ export function TranscriptView({
       if (group.tools.length === 1 && !hasMeaningfulThinking) {
         return (
           <Fragment key={`group-tool-${group.assistantMessageId}`}>
-            {group.preamble ? <MessageBubble item={group.preamble} key={`${group.preamble.id}-solo`} /> : null}
+            {group.preamble ? (
+              <MessageBubble
+                item={group.preamble}
+                key={`${group.preamble.id}-solo`}
+                onRetry={onRetryUserMessage}
+              />
+            ) : null}
             <ToolRow
               item={group.tools[0]}
               key={`group-tool-row-${group.tools[0].id}`}
@@ -95,7 +103,7 @@ export function TranscriptView({
       case "boundary":
         return <BoundaryBlock item={item} key={item.id} />;
       case "message":
-        return <MessageBubble item={item} key={item.id} />;
+        return <MessageBubble item={item} key={item.id} onRetry={onRetryUserMessage} />;
       case "thinking":
         return (
           <ThinkingBlock

@@ -688,6 +688,15 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                     path,
                   })
                 }
+                onRetryUserMessage={(messageId) => {
+                  if (!activeSession?.sessionId || !canPrompt) {
+                    return;
+                  }
+                  postIntent(vscodeApi, "retryUserMessage", {
+                    messageId,
+                    sessionId: activeSession.sessionId,
+                  });
+                }}
                 canBuildPlan={canBuildPlan}
                 onBuildPlan={handleBuildPlan}
                 planState={activeSession.planState}

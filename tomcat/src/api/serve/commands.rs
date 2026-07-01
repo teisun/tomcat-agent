@@ -134,24 +134,27 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
+            let input_message = persist_turn_input_message(&slot, input_message, &params)?;
             start_turn(state, slot, id, input_message, TurnAck::Accepted).await?;
         }
         ServeCommand::Steer {
             id,
             session_id,
             text,
-            params: _,
+            params,
         } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {
                 return Ok(());
             };
+            let input_message =
+                persist_turn_input_message(&slot, ChatMessage::steering(text), &params)?;
             if slot.is_busy() {
                 slot.ctx
                     .session_runtime
                     .steering_queue
                     .lock()
-                    .push(ChatMessage::steering(text));
+                    .push(input_message);
                 state.writer.send(OutFrame::Response(ResponseFrame::ok(
                     id,
                     Some(slot.session_id.clone()),
@@ -159,7 +162,7 @@ pub(crate) async fn handle_command(
                 )))?;
                 return Ok(());
             }
-            start_turn(state, slot, id, ChatMessage::steering(text), TurnAck::Accepted).await?;
+            start_turn(state, slot, id, input_message, TurnAck::Accepted).await?;
         }
         ServeCommand::FollowUp {
             id,
@@ -178,6 +181,7 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
+            let input_message = persist_turn_input_message(&slot, input_message, &params)?;
             if slot.is_busy() {
                 slot.ctx
                     .session_runtime
@@ -915,6 +919,47 @@ fn build_user_message(text: String, params: &ServeMessageParams) -> Result<ChatM
         parts.push(parse_attachment_part(attachment)?);
     }
     Ok(ChatMessage::user_with_parts(parts))
+}
+
+fn normalized_user_message_id(params: &ServeMessageParams) -> Option<&str> {
+    params
+        .user_message_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+}
+
+fn persist_turn_input_message(
+    slot: &Arc<super::registry::SessionSlot>,
+    mut message: ChatMessage,
+    params: &ServeMessageParams,
+) -> Result<ChatMessage, AppError> {
+    let row_id = if let Some(forced_id) = normalized_user_message_id(params) {
+        if slot
+            .ctx
+            .session_runtime
+            .session
+            .get_entry_for_session(&slot.session_id, forced_id)?
+            .is_none()
+        {
+            slot.ctx
+                .session_runtime
+                .session
+                .append_message_with_id(serde_json::to_value(&message)?, forced_id)?
+        } else {
+            slot.ctx
+                .session_runtime
+                .session
+                .append_message(serde_json::to_value(&message)?)?
+        }
+    } else {
+        slot.ctx
+            .session_runtime
+            .session
+            .append_message(serde_json::to_value(&message)?)?
+    };
+    message.msg_id = Some(row_id);
+    Ok(message)
 }
 
 fn parse_attachment_part(attachment: &ServeAttachment) -> Result<ChatMessageContentPart, String> {

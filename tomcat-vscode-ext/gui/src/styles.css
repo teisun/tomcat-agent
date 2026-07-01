@@ -624,6 +624,40 @@ input:focus-visible {
   margin: 0;
 }
 
+.tc-message__status {
+  align-items: center;
+  color: var(--vscode-descriptionForeground);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.tc-message--user-pending {
+  opacity: 0.8;
+}
+
+.tc-message--user-failed {
+  border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground, #f14c4c));
+}
+
+.tc-message--user-failed .tc-message__status {
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.tc-message__retry {
+  background: transparent;
+  border: none;
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.tc-message__retry:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-focusBorder));
+}
+
 .tc-message--notice {
   border-color: transparent;
   border-left-color: var(--vscode-inputValidation-infoBorder, #3794ff);

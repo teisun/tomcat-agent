@@ -443,6 +443,163 @@ describe("webview dual-channel state store", () => {
     expect(secondTimeline).toEqual(firstTimeline);
   });
 
+  it("drops stale persisted user items that are not tracked as in-flight during rebuild", () => {
+    const store = new WebviewStateStore("both");
+
+    store.syncSessionList(
+      {
+        activeSessionId: "s1",
+        scope: "disk",
+        sessions: [{ busy: true, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
+      },
+      new Map([["s1", "webview"]]),
+      "webview",
+    );
+    store.applySessionState(
+      {
+        busy: true,
+        model: "gpt-5.4",
+        planId: null,
+        planState: "chat",
+        sessionId: "s1",
+      },
+      "webview",
+      "webview",
+    );
+
+    store.appendMessage("s1", "user", "ghost prompt", {
+      preferredId: "ghost-user-1",
+    });
+    store.applyEvent({
+      assistantMessageId: "live-assistant-1",
+      assistantMessageEvent: {
+        delta: "live answer",
+        kind: "content_delta",
+      },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "recent-user-1",
+          message: {
+            content: "recent prompt",
+            role: "user",
+          },
+          type: "message" as const,
+        },
+      ],
+      sessionId: "s1",
+      upToSeq: null,
+    });
+
+    expect(store.snapshot().sessionViews.s1.timeline).toEqual([
+      {
+        id: "recent-user-1",
+        kind: "user",
+        text: "recent prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "live-assistant-1",
+        id: "live-assistant-1",
+        kind: "assistant",
+        text: "live answer",
+        type: "message",
+      },
+    ]);
+  });
+
+  it("keeps in-flight user bubbles until history catches up, then converges them by id", () => {
+    const store = new WebviewStateStore("both");
+
+    store.syncSessionList(
+      {
+        activeSessionId: "s1",
+        scope: "disk",
+        sessions: [{ busy: false, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
+      },
+      new Map([["s1", "webview"]]),
+      "webview",
+    );
+    store.applySessionState(
+      {
+        busy: false,
+        model: "gpt-5.4",
+        planId: null,
+        planState: "chat",
+        sessionId: "s1",
+      },
+      "webview",
+      "webview",
+    );
+
+    const baseHistory = {
+      messages: [
+        {
+          id: "older-assistant-1",
+          message: {
+            content: "older answer",
+            role: "assistant",
+          },
+          type: "message" as const,
+        },
+      ],
+      sessionId: "s1",
+      upToSeq: null,
+    };
+    store.hydrateHistory("s1", baseHistory);
+    store.appendLocalUserMessage("s1", "draft prompt", {
+      messageId: "user-fixed-id",
+      submitKind: "prompt",
+    });
+
+    store.hydrateHistory("s1", baseHistory);
+    let timeline = store.snapshot().sessionViews.s1.timeline;
+    expect(timeline.filter((item) => item.type === "message" && item.id === "user-fixed-id")).toHaveLength(1);
+    expect(
+      timeline.find((item) => item.type === "message" && item.id === "user-fixed-id"),
+    ).toMatchObject({
+      deliveryState: "pending",
+      id: "user-fixed-id",
+      kind: "user",
+      text: "draft prompt",
+      type: "message",
+    });
+
+    store.hydrateHistory("s1", {
+      messages: [
+        ...baseHistory.messages,
+        {
+          id: "user-fixed-id",
+          message: {
+            content: "draft prompt",
+            role: "user",
+          },
+          type: "message" as const,
+        },
+      ],
+      sessionId: "s1",
+      upToSeq: null,
+    });
+
+    timeline = store.snapshot().sessionViews.s1.timeline;
+    const userMessages = timeline.filter(
+      (item): item is Extract<(typeof timeline)[number], { type: "message" }> =>
+        item.type === "message" && item.id === "user-fixed-id",
+    );
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0]).toEqual({
+      id: "user-fixed-id",
+      kind: "user",
+      text: "draft prompt",
+      type: "message",
+    });
+  });
+
   it("keeps in-flight assistant tails at the end until disk catches up, then converges in place", () => {
     const store = new WebviewStateStore("both");
 

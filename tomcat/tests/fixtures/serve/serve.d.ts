@@ -28,6 +28,7 @@ export type ServeEvent = ServePlanEvent | ServeSessionEvent | ServeTurnEvent | W
 
 export interface ServeMessageParams {
   attachments?: ServeAttachment[];
+  userMessageId?: null | string;
 }
 export type ServePlanEvent = {
   aborted?: boolean | null;

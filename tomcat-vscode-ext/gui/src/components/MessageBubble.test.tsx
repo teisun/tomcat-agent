@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { MessageBubble } from "./MessageBubble";
@@ -77,5 +77,48 @@ describe("MessageBubble", () => {
     );
     expect(screen.getByTestId("message-block").className).toContain("tc-message--warn");
     expect(screen.getByText("Warn")).toBeTruthy();
+  });
+
+  it("renders failed user status with retry", () => {
+    let retriedMessageId: string | null = null;
+    render(
+      <MessageBubble
+        item={{
+          deliveryError: "Session is busy",
+          deliveryState: "failed",
+          id: "u-failed",
+          kind: "user",
+          retryable: true,
+          submitKind: "prompt",
+          text: "Retry me",
+          type: "message",
+        }}
+        onRetry={(messageId) => {
+          retriedMessageId = messageId;
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("user-message-status").textContent).toContain("Session is busy");
+    fireEvent.click(screen.getByTestId("retry-user-message"));
+    expect(retriedMessageId).toBe("u-failed");
+  });
+
+  it("renders pending user status", () => {
+    render(
+      <MessageBubble
+        item={{
+          deliveryState: "pending",
+          id: "u-pending",
+          kind: "user",
+          submitKind: "steer",
+          text: "Hold on",
+          type: "message",
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("user-message-status").textContent).toContain("Sending...");
+    expect(screen.queryByTestId("retry-user-message")).toBeNull();
   });
 });

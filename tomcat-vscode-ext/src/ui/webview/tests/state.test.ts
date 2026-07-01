@@ -1008,6 +1008,72 @@ describe("plan.todos routing", () => {
       { content: "live step", id: "l1", status: "pending" },
     ]);
   });
+
+  it("merges refreshed latest history into already-loaded older pages", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      hasMore: true,
+      messages: [
+        {
+          id: "recent-1",
+          message: {
+            content: "recent prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+      ],
+      nextCursor: "cursor-1",
+      sessionId: "s1",
+    });
+    store.prependHistory("s1", {
+      hasMore: false,
+      messages: [
+        {
+          id: "older-1",
+          message: {
+            content: "older prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+      ],
+      nextCursor: null,
+      sessionId: "s1",
+    });
+
+    store.hydrateHistory("s1", {
+      hasMore: false,
+      messages: [
+        {
+          id: "recent-1",
+          message: {
+            content: "recent prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+        {
+          id: "recent-2",
+          message: {
+            content: "new recent prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+      ],
+      nextCursor: null,
+      sessionId: "s1",
+    });
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.map((item) =>
+        item.type === "message" ? item.id : item.type,
+      ),
+    ).toEqual(["older-1", "recent-1", "recent-2"]);
+  });
 });
 
 describe("openFile intent protocol", () => {
@@ -1029,6 +1095,19 @@ describe("openFile intent protocol", () => {
         data: { path: "/tmp/file.rs" },
         messageId: "open-1",
         type: "openFile",
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts retryUserMessage intent shape", () => {
+    expect(
+      isWebviewIntent({
+        data: {
+          messageId: "user-1",
+          sessionId: "s1",
+        },
+        messageId: "retry-1",
+        type: "retryUserMessage",
       }),
     ).toBe(true);
   });
