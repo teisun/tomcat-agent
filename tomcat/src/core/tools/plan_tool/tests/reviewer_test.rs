@@ -80,7 +80,6 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
             _plan_text: &str,
             _kind: ReviewKind,
             _allow_review_edit: bool,
-            _abort: std::sync::Arc<AtomicBool>,
         ) -> ReviewSummary {
             use crate::core::plan_runtime::file_store::{plan_path_for_id, with_advisory_lock};
             let path = plan_path_for_id(plan_id).unwrap();
@@ -234,43 +233,38 @@ async fn reviewer_writes_warning_event_on_second_round() {
 }
 
 #[tokio::test]
-async fn reviewer_dispatch_passes_through_abort_signal() {
+async fn reviewer_dispatch_invokes_mock_without_abort_param() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
 
-    struct AbortPeekMock {
-        saw_signal: std::sync::Arc<AtomicBool>,
+    struct CallTrackingMock {
+        called: std::sync::Arc<AtomicBool>,
     }
     #[async_trait]
-    impl ReviewerDispatcher for AbortPeekMock {
+    impl ReviewerDispatcher for CallTrackingMock {
         async fn dispatch(
             &self,
             _plan_id: &str,
             _plan_text: &str,
             _kind: ReviewKind,
             _allow_review_edit: bool,
-            abort: std::sync::Arc<AtomicBool>,
         ) -> ReviewSummary {
-            self.saw_signal.store(true, Ordering::Release);
-            if abort.load(Ordering::Acquire) {
-                ReviewSummary::aborted_with("aborted by parent cascade")
-            } else {
-                ok_review()
-            }
+            self.called.store(true, Ordering::Release);
+            ok_review()
         }
     }
-    let saw = std::sync::Arc::new(AtomicBool::new(false));
-    rt.attach_reviewer(std::sync::Arc::new(AbortPeekMock {
-        saw_signal: std::sync::Arc::clone(&saw),
+    let called = std::sync::Arc::new(AtomicBool::new(false));
+    rt.attach_reviewer(std::sync::Arc::new(CallTrackingMock {
+        called: std::sync::Arc::clone(&called),
     }));
     rt.enter_planning().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
     assert!(
-        saw.load(Ordering::Acquire),
-        "dispatcher 未收到 abort signal"
+        called.load(Ordering::Acquire),
+        "dispatcher 未被调用"
     );
     assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(false));
     cleanup_home(&home);

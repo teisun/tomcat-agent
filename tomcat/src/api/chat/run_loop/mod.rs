@@ -463,6 +463,15 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             *guard = CancellationToken::new();
             guard.clone()
         };
+        ctx.agent_registry
+            .rearm_root(
+                &ctx.session_runtime
+                    .session
+                    .current_session_id()?
+                    .ok_or_else(|| AppError::Config("无当前会话".to_string()))?,
+                turn_token.child_token(),
+            )
+            .map_err(|error| AppError::Config(format!("agent_registry root rearm 失败: {error}")))?;
 
         let next_system_text = build_system_text(ctx, context_budget_chars).await;
         sync_context_state_system_prompt_len(

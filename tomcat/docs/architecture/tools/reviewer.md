@@ -216,7 +216,7 @@
 #### 4.2.5 RV-E：abort、轮次与深度
 
 - **交付**：`spawn_depth = parent + 1`；超 `MAX_SPAWN_DEPTH` 在 **dispatch** 前拒（若未来允许 reviewer 链式调用）；`max_review_rounds` 超限 → **warning + 不阻塞**（不切 mode，不拒绝 `create_plan`，留 `transcript.plan.review.warning`）。
-- **abort**：父 `abort_signal` → 子 reviewer 间隙检查并退出 → `create_plan` 仍返回成功但 `ToolResult.review` 标 `aborted`，文件保留。
+- **abort**：父 turn / root handle 的 `CancellationToken` 被 cancel 后，reviewer 子 token 立即跟着取消 → `create_plan` 仍返回成功但 `ToolResult.review` 标 `aborted`，文件保留。
 
 **说人话**：审稿算一层子 Agent，卡住能 abort，审太多次只是 warning，不挡用户后续 `/plan build`。
 
@@ -318,7 +318,7 @@ impl PlanRuntime {
    │  PlanRuntime::dispatch_reviewer（RV13）                                          │
    │      │                                                                          │
    │      └── AgentRegistry::spawn_subagent_internal                                  │
-   │              ├─ register(child handle, abort_signal)                            │
+   │              ├─ register(child handle, cancel_token)                            │
    │              ├─ new child AgentLoop（SubagentType::Reviewer, role=Leaf, RV16）    │
    │              ├─ child.run([build_review_prompt(plan)]).await   ← reviewer 在此跑 │
    │              ├─ unregister(child handle)                                        │
@@ -523,7 +523,7 @@ impl PlanRuntime {
 
 ### 8.3 abort 语义
 
-- 父 Agent 收到 abort → `CascadeAbort` 触发 reviewer `abort_signal`，reviewer 在 reasoning 间隙退出。
+- 父 Agent 收到 abort → `CascadeAbort` cancel root token，reviewer 子 `CancellationToken` 立即跟着取消，并在 reasoning / tool await 间隙退出。
 - reviewer abort / 超时 / 解析失败 → `create_plan` **仍返回成功**（落盘已成功），但 `ToolResult.review` 标 `aborted: true` 且 `summary = "<aborted>"`，transcript 追加 `plan.review.warning` 摘要；**不**切 mode，**不**让 `/plan build` 失败。
 
 **说人话**：单次审稿：Pending→Running→Returned 或 Aborted；父停则子停；审稿挂了/超时也不挡用户后续 `/plan build`，摘要标个 aborted 就行。
@@ -568,7 +568,7 @@ impl PlanRuntime {
 | 单元：改稿守卫 | `reviewer_body_diff_guard_allows_body_change`、`reviewer_body_diff_guard_rejects_frontmatter_change`、`reviewer_subagent_must_target_plan_files` | DONE | 改稿可动正文任意段；路径外或 frontmatter 越界直接拒。 |
 | 单元：防递归 / 防套娃 | `reviewer_blocks_create_plan_subagent`（[`tool_exec.rs`](../../../src/core/agent_loop/tool_exec.rs)） | DONE | reviewer 不能调 create_plan。 |
 | 单元：max_review_rounds | `reviewer_round_count_warns_after_threshold`、`reviewer_writes_warning_event_on_second_round` | DONE | 超限只 warning；事件 `plan.review.warning` 含 rounds。 |
-| 单元：CascadeAbort | `reviewer_dispatch_passes_through_abort_signal`、`dispatch_reviewer_releases_plan_lock_before_spawn`（间接） | DONE | 父 abort 子也得 abort。 |
+| 单元：CascadeAbort | `parent_turn_token_cancel_propagates_to_spawned_child_tokens`、`dispatch_reviewer_releases_plan_lock_before_spawn`（间接） | DONE | 父 abort 子也得 abort。 |
 | 单元：max_turns 默认 64 | `reviewer_max_turns_default_is_64` | DONE | 默认 64，transcript 落实际 turns。 |
 | 单元：输出契约非 gate | `create_plan_succeeds_even_when_reviewer_aborts` | DONE | reviewer aborted 不挡 `create_plan` 落盘 / `/plan build`。 |
 | 集成：真 LLM | `inprocess_full_plan_path_with_real_llm`（[`tests/plan_real_llm_inprocess_tests.rs`](../../../tests/plan_real_llm_inprocess_tests.rs)） | DONE（需 `OPENAI_API_KEY`） | 主 LLM + 真 reviewer 子 LLM 跑完 PLAN→EXEC→Completed。 |

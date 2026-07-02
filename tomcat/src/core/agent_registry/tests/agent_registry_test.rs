@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::core::agent_loop::SubagentType;
@@ -86,10 +87,7 @@ async fn cascade_abort_propagates_to_descendants() {
     let join = tokio::spawn(async move {
         reg_clone
             .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
-                // 等到 abort_signal 翻起
-                while !ctx.abort_signal.load(Ordering::Relaxed) {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
+                ctx.cancel_token.cancelled().await;
                 SubagentOutcome {
                     child_session_id: ctx.child_session_id,
                     subagent_type: ctx.subagent_type,
@@ -143,7 +141,7 @@ async fn max_spawn_depth_enforced() {
         subagent_type: SubagentType::Reviewer,
         spawn_depth: 1,
         parent_session_id: Some("root".into()),
-        abort_signal: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cancel_token: Mutex::new(CancellationToken::new()),
         children: Mutex::new(Vec::new()),
     });
     reg.register(depth1_handle).unwrap();
@@ -347,7 +345,7 @@ async fn subagent_panic_does_not_kill_parent() {
     // 父侧 active count 已回到 1（panic 路径也走 unregister）
     assert_eq!(reg.active_count(), 1);
 
-    // 父 abort_signal 未被污染
+    // 父 token 未被污染
     let parent = reg.handles.read().get("root").cloned().unwrap();
     assert!(!parent.is_aborted());
 
@@ -438,6 +436,79 @@ async fn parent_aborted_blocks_new_spawn() {
         .await
         .unwrap_err();
     matches!(err, SpawnError::ParentAborted(_));
+}
+
+#[tokio::test]
+async fn rearm_root_replaces_cancelled_token_and_allows_new_spawn() {
+    let reg = fresh_registry();
+    let _g = reg.register_root_for_test("root").unwrap();
+    reg.cascade_abort("root");
+    assert!(
+        reg.handles
+            .read()
+            .get("root")
+            .expect("root")
+            .is_aborted(),
+        "cascade_abort 后 root token 应已取消"
+    );
+
+    reg.rearm_root("root", CancellationToken::new())
+        .expect("rearm root");
+    let parent = reg.handles.read().get("root").cloned().unwrap();
+    assert!(!parent.is_aborted(), "rearm_root 后 root token 应恢复未取消");
+
+    let outcome = reg
+        .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+            SubagentOutcome {
+                child_session_id: ctx.child_session_id,
+                subagent_type: ctx.subagent_type,
+                outcome_label: SubagentOutcomeLabel::Completed,
+                error_message: None,
+            }
+        })
+        .await
+        .expect("spawn after rearm should succeed");
+    assert_eq!(outcome.outcome_label, SubagentOutcomeLabel::Completed);
+}
+
+#[tokio::test]
+async fn parent_turn_token_cancel_propagates_to_spawned_child_tokens() {
+    let reg = fresh_registry();
+    let _g = reg.register_root_for_test("root").unwrap();
+    let turn_token = CancellationToken::new();
+    reg.rearm_root("root", turn_token.child_token())
+        .expect("rearm root with turn token");
+
+    let reg_clone = Arc::clone(&reg);
+    let join = tokio::spawn(async move {
+        reg_clone
+            .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+                ctx.cancel_token.cancelled().await;
+                SubagentOutcome {
+                    child_session_id: ctx.child_session_id,
+                    subagent_type: ctx.subagent_type,
+                    outcome_label: SubagentOutcomeLabel::Interrupted,
+                    error_message: Some("turn token cancelled".into()),
+                }
+            })
+            .await
+    });
+
+    let mut waited = Duration::from_secs(2);
+    while reg.active_count() != 2 && waited > Duration::ZERO {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        waited = waited.saturating_sub(Duration::from_millis(5));
+    }
+    assert_eq!(reg.active_count(), 2, "子应已注册");
+    turn_token.cancel();
+
+    let outcome = tokio::time::timeout(Duration::from_secs(2), join)
+        .await
+        .expect("timeout waiting for child")
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.outcome_label, SubagentOutcomeLabel::Interrupted);
+    assert_eq!(reg.active_count(), 1, "子结束后只剩 root");
 }
 
 #[tokio::test]

@@ -109,7 +109,6 @@ impl ReviewerDispatcher for QueueReviewer {
         _plan_text: &str,
         kind: ReviewKind,
         _allow_review_edit: bool,
-        _abort_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> ReviewSummary {
         self.call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -144,7 +143,6 @@ impl VerifierDispatcher for QueueVerifier {
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        _abort_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> VerifySummary {
         self.call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

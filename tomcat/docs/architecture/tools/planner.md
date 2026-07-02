@@ -9,7 +9,7 @@
 当前 `/plan` 命令族的稳定契约如下：
 
 - `/plan build` 现在允许省略目标；默认源顺序为 `active_planning_plan_id -> Pending { id } -> active_plan_path`；
-- `/plan exit` 允许 `Planning / Pending -> Chat`，但不写事件，也不清 `active_planning_plan_id` / `active_plan_path`；
+- `/plan exit` 允许 `Planning / Pending -> Chat`；若当前是 **idle 的 `Executing`**，则先把盘上的 plan `executing -> pending`，再退回 `Chat`，用于救回已卡死会话；
 - `/plan build` 是唯一会写 active binding 的动作；
 - `Completed` 不是稳定可见模式：all-completed 后会立即回到 `Chat(retain)`，CLI prompt 仍显示 `u[Chat]>`；
 - 文档中凡提到 `PlanMode`，实现名请以 `PlanState` 为准；`mode.rs` 已由 `state.rs` 接管。
@@ -21,7 +21,7 @@
 |------|----------|
 | `/plan` | 进入 `Planning`；不写盘，不写事件。 |
 | `/plan build [target]` | 若省略 target，默认源顺序为 `active_planning_plan_id -> Pending { id } -> active_plan_path`；成功后写 binding + `plan.build`。 |
-| `/plan exit` | 仅切 `Planning / Pending -> Chat`；不写事件，不清 retain 字段。 |
+| `/plan exit` | `Planning / Pending` 直接回 `Chat`；`Executing + idle` 先 `demote_to_pending_on_cancel()` 再回 `Chat`；不清 retain 字段。 |
 
 ### 当前可见状态
 
@@ -29,7 +29,7 @@
 
 末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
 
-**说人话**：PLAN 模式是会话开关，EXEC 模式是 PLAN 结束后用户拍板开干的状态——`/plan` 进 PLAN、`/plan exit` 退出回 CHAT、`/plan build <plan_id/path>` 进 EXEC；完成由 runtime 自动派生（全 todos completed），中断由 cancel_token 自动转 pending。进 PLAN/EXEC 模式后，runtime 给 LLM **在 system 区段尾部**注一段 reminder、把 catalog 切到模式集，并通过统一 prompt helper 对外显示 `u[Plan:planning]>` / `u[Plan:executing]>` 等 CLI prompt。
+**说人话**：PLAN 模式是会话开关，EXEC 模式是 PLAN 结束后用户拍板开干的状态——`/plan` 进 PLAN、`/plan build <plan_id/path>` 进 EXEC；正常 `/plan exit` 从 `Planning / Pending` 直接回 CHAT，若某个会话已经卡在 **idle 的 `Executing`**，也允许把它先降回 `pending` 再退 CHAT，避免 UI 一直撞 `plan_state_conflict`。进 PLAN/EXEC 模式后，runtime 给 LLM **在 system 区段尾部**注一段 reminder、把 catalog 切到模式集，并通过统一 prompt helper 对外显示 `u[Plan:planning]>` / `u[Plan:executing]>` 等 CLI prompt。
 
 ---
 

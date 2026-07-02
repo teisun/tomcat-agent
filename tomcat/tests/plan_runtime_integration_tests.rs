@@ -9,8 +9,8 @@
 //! - **不**真正连 LLM provider；reviewer 用 mock dispatcher、ask_question 用 mock panel。
 #![allow(clippy::await_holding_lock)]
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use tomcat::core::plan_runtime::file_store::{
@@ -99,7 +99,6 @@ impl ReviewerDispatcher for AcceptReviewer {
         _plan_text: &str,
         _kind: ReviewKind,
         _allow_review_edit: bool,
-        _abort: Arc<AtomicBool>,
     ) -> ReviewSummary {
         ReviewSummary {
             aborted: false,
@@ -119,7 +118,6 @@ impl VerifierDispatcher for AcceptVerifier {
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        _abort: Arc<AtomicBool>,
     ) -> VerifySummary {
         VerifySummary {
             checks: vec![VerifyCheck {

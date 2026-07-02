@@ -37,7 +37,7 @@ Layer 3  Reasoning Loop
 
 - **设计模式**：三层嵌套循环（Conversation → Attempt → Reasoning），职责分离；消息统一使用 `ChatMessage`，无需在 LLM 边界做类型转换。`MessageKind` 枚举区分 Normal/Steering/CompactionSummary 等内部语义。
 - **关键权衡**：System Prompt 与工具定义由**调用方**（如 chat）拼装并注入：AgentLoop 只接受已拼好的 `initial_messages`（含首条 System 若需要）和构造时传入的 `config.tool_definitions`，不在 Loop 内再拼 system，便于多调用方复用同一 Loop 逻辑。Transcript 持久化由调用方在 `run()` 返回后根据 `AgentRunResult` 自行 append 并写入 Session，AgentLoop 不依赖 SessionManager。
-- **线程安全/并发**：`steering_queue`、`follow_up_queue` 为 `Arc<Mutex<Vec<ChatMessage>>>`，`abort_signal` 为 `Arc<AtomicBool>`；`steer()`、`follow_up()`、`abort()` 可从其他线程调用，`run()` 内读队列与信号，无数据竞争。流式 delta 通过 `EventBus` 的 `message_update` 事件推送，调用方（如 `chat.rs`）通过 `event_bus.on("message_update", ...)` 订阅。
+- **线程安全/并发**：`steering_queue`、`follow_up_queue` 为 `Arc<Mutex<Vec<ChatMessage>>>`，`cancel_token` 为 `CancellationToken`；`steer()`、`follow_up()`、`abort()` 可从其他线程调用，`run()` 内读队列与取消信号，无数据竞争。流式 delta 通过 `EventBus` 的 `message_update` 事件推送，调用方（如 `chat.rs`）通过 `event_bus.on("message_update", ...)` 订阅。
 
 ## 3. 核心 API 与数据结构 (API Definitions)
 
@@ -46,11 +46,11 @@ Layer 3  Reasoning Loop
 - **ToolCallInfo**：`{ id, name, arguments }`，仅在流式积累 + 工具执行阶段使用的临时类型。
 - **AgentLoopConfig**：`max_attempts`（默认 4，跟随 `[llm].agent_max_attempts`）、`max_tool_rounds`（默认 `usize::MAX`，由 token 预算与工具轮次逻辑兜底）、`retry_base_delay_ms`（默认 500ms，跟随 `[llm].agent_retry_base_delay_ms`，实际等待带 `±20%` jitter 且封顶 8s）、`model`、`session_id`、`tool_definitions: Vec<serde_json::Value>`（由调用方 `build_tool_definitions()` 等生成）、`context_config`。
 - **AgentRunResult**：`{ final_text: String, new_messages: Vec<ChatMessage> }`，run 成功时最后一轮 LLM 文本回复及本次产生的所有新消息。
-- **AgentLoop::new(llm, primitive, event_bus, config, abort_signal)**：标准构造函数；内部创建默认的 steering_queue、follow_up_queue。
+- **AgentLoop::new(llm, primitive, event_bus, config, cancel_token)**：标准构造函数；内部创建默认的 steering_queue、follow_up_queue。
 - **AgentLoop::run(&mut self, initial_messages: Vec<ChatMessage>) -> Result<AgentRunResult, AppError>**：主入口；执行第一层 Conversation Loop（含 FollowUp 检查）、第二层 Attempt Loop（重试与 classify_error）、第三层 Reasoning Loop（LLM 流式 + 工具执行 + Steering/Abort 检查）。
 - **AgentLoop::steer(&self, msg: String)**：向 steering_queue 推入 `ChatMessage::steering(msg)`；第三层每工具执行完后检查，非空则注入并跳过剩余工具进入下一轮 LLM。
 - **AgentLoop::follow_up(&self, msg: String)**：向 follow_up_queue 推入 `ChatMessage::user(msg)`；第一层循环尾部检查，非空则 drain 追加到 messages 并 continue。
-- **AgentLoop::abort(&self)**：将 `abort_signal` 置为 true；第三层每工具执行前检查，为 true 则返回 `Err` 并发布 agent_end(interrupted)。
+- **AgentLoop::abort(&self)**：调用 `cancel_token.cancel()`；第三层每工具执行前检查取消状态，命中后返回中断结果并发布 `agent_end(interrupted)`。
 - **LoopError**（内部）：`Retryable(AppError)`、`Fatal(AppError)`、`Aborted`；`classify_error(AppError)` 不再靠字符串猜测，而是优先基于结构化 `LlmError { stage, http_status, summary }` 判定：`401` → Fatal，`is_context_overflow(&AppError)`（如 `http_status=400 + context_length_exceeded`）→ Retryable 并触发 L3 截断，其余 `400` → Fatal，`429/500/502/503/504` 与传输阶段错误 → Retryable。
 
 ### 3.2 上下文管理 API（TASK-17）

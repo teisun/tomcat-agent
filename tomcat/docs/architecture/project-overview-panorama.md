@@ -158,7 +158,7 @@ sequenceDiagram
 │   max_attempts / max_tool_rounds / retry_base_delay / tool_definitions        │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ 运行时状态                                                                      │
-│   steering_queue / follow_up_queue / abort_signal / on_stream_delta           │
+│   steering_queue / follow_up_queue / cancel_token / on_stream_delta           │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │ 外部桥接                                                                        │
 │   tool 执行（execute_tool / dispatch）──► HostApiDispatcher 或 4 原语              │

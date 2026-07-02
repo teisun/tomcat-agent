@@ -35,19 +35,19 @@
 | 术语 | 语义（人话） | 数据载体 | 行为约束 | 说人话 |
 |------|--------------|----------|----------|--------|
 | **Reviewer（Plan 审稿）** | `create_plan` 后读计划/仓库，给**顾问摘要** | `ReviewSummary(kind=plan)` + `transcript.plan.review` | **不进** EXEC gate；可改 plan（`allow_review_edit`） | 开工前的挑刺员，不当法官。 |
-| **Code Reviewer（EXEC 代码审查）** | 全部 todo `completed` 后、Verifier 前，读 diff/代码给**只读结论** | `ReviewSummary(kind=code, verdict=...)` + `transcript.plan.code_review` | **严格只读**；`pass` 同回合直连 verifier，非 `pass` 回主 Agent 修 | 完工前的代码二审，只提问题不动手改。 |
-| **Verifier（验证）** | code review 通过或被跳过后，用**可复现命令**证明交付物可用 | `VerifySummary` + `transcript.plan.verify` | 默认**只读项目** + `bash` 跑检查；输出含 **Command run / Output observed** | 最后的验货员，专找「最后 20%」。 |
+| **Code Reviewer（EXEC 代码审查）** | 全部 todo `completed` 后、Verifier 前，读 diff/代码给**只读结论** | `ReviewSummary(kind=code, verdict=...)` + `transcript.plan.code_review` | **严格只读**；`pass` 同回合直连 verifier；`aborted` 视为 reviewer 不可用并继续 verifier；只有真 findings（`fail/partial`）才回主 Agent 修 | 完工前的代码二审，只提问题不动手改。 |
+| **Verifier（验证）** | code review 通过、被跳过、或 `aborted` 后，用**可复现命令**证明交付物可用 | `VerifySummary` + `transcript.plan.verify` | 默认**只读项目** + `bash` 跑检查；输出含 **Command run / Output observed** | 最后的验货员，专找「最后 20%」。 |
 | **Mini 验证** | 执行单步后的快速自检 | 主 Agent prompt / SOP（无独立子 Agent） | 如 `file_read` 非空、`exit code == 0` | 每步顺手看一眼，不另开子进程。 |
 | **Inline 验证** | 执行过程中穿插跑测试/构建 | 主 Agent `bash` + executor reminder | 不阻塞 `mode=completed` 除非配置 gate | 边干边测，Codex execute 模板风格。 |
 | **CI / 脚本验证** | 人/流水线触发的确定性检查 | `pi_agent_rust/verify` → `scripts/e2e/run_all.sh` 等 | **非** LLM 子 Agent | 机器跑全套测试，和对话解耦。 |
 | **Verdict gate** | 验证结果阻塞「任务完成」叙事 | `VERDICT: PASS\|FAIL`（GenericAgent）/ Stop hook `preventContinuation`（cc-fork） | Tomcat **默认不做** gate（对齐 reviewer 顾问原则） | 验不过就不让喊完工。 |
-| **`mode=completed` 派生** | EXEC 下全部 plan todo `completed` 后 runtime 自动收口 | `update_plan` → `code review?` → `verify` → `set_mode_completed` | code review 非 `pass` 时先停留 EXEC；`verify_gate=gate` + verify fail 时也停留 EXEC | 勾全后不会立刻回 CHAT，要先过完收口链路。 |
+| **`mode=completed` 派生** | EXEC 下全部 plan todo `completed` 后 runtime 自动收口 | `update_plan` → `code review?` → `verify` → `set_mode_completed` | code review 只有真 findings（非 `pass` 且非 `aborted`）才先停留 EXEC；`verify_gate=gate` + verify fail 时也停留 EXEC | 勾全后不会立刻回 CHAT，要先过完收口链路。 |
 
 **时间点钉死**：
 
 - **Reviewer 触发点**：`create_plan` 落盘成功后（PLAN 阶段，**早于** `/plan build`）。
 - **Code Reviewer 触发点（现行）**：最后一次 `update_plan` 使全部 todo `completed` 之后，若 `code_review_rounds < max_code_review_rounds`（默认 1）则先跑 read-only code review。
-- **Verifier 触发点（现行）**：code review `pass` 的同一回合，或 code-review rounds 用尽后，进入 verifier；与 plan reviewer（`create_plan -> review`）**正交**。
+- **Verifier 触发点（现行）**：code review `pass` / `aborted` 的同一回合，或 code-review rounds 用尽后，进入 verifier；与 plan reviewer（`create_plan -> review`）**正交**。
 
 ---
 
@@ -594,7 +594,7 @@ sequenceDiagram
 | EXEC + code_reviewing | `all_completed` 且还有 code-review rounds | runtime 同步 spawn read-only code reviewer | 代码二审中。 |
 | EXEC + verifying | code review `pass`，或 rounds 用尽被跳过 | runtime 同步 spawn verifier | 验货中。 |
 | COMPLETED | code review 已通过/跳过，且 verifier 不阻断 completed | 留下 `plan.code_review?` / `plan.verify` 事件供回放 | 回 CHAT。 |
-| EXEC（code review 非 pass） | code reviewer verdict != pass | **停留** EXEC；主 Agent 收 `tool_result.code_review` 后自行 reopen / 新增 todo 修复 | 代码审查打回，主 Agent 接力修。 |
+| EXEC（code review 真 findings） | code reviewer `verdict != pass` 且 `aborted == false` | **停留** EXEC；主 Agent 收 `tool_result.code_review` 后自行 reopen / 新增 todo 修复 | 代码审查真打回，主 Agent 接力修。 |
 | EXEC（gate 失败） | `[plan].verify_gate="gate"` 且 verifier verdict=fail | **停留** EXEC；todos 仍全 completed；主 Agent 收 tool result.verify 后自行 `update_plan` 退 todo | 验货被拦下，主 Agent 自己接力修。 |
 
 ---

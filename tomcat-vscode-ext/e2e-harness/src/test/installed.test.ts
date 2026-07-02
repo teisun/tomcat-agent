@@ -12,6 +12,7 @@ type HostE2eHelper = {
   assertParticipantHappyPath(api: unknown): Promise<void>;
   assertParticipantHappyPathViaChatUi(api: unknown): Promise<void>;
   assertPlanSlashFlowViaChatUi(api: unknown): Promise<void>;
+  assertWebviewPlanModeSwitchFlow(api: unknown): Promise<void>;
   assertWebviewAnswerCardFlow(api: unknown): Promise<void>;
   assertTranscriptUiFlow(api: unknown): Promise<void>;
   assertTranscriptSwitchBackOrder(api: unknown): Promise<void>;
@@ -76,6 +77,11 @@ suite("Installed Tomcat extension", () => {
   test("runs /plan via the real chat UI", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertPlanSlashFlowViaChatUi(api);
+  });
+
+  test("switches an executing plan back to chat in the webview", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewPlanModeSwitchFlow(api);
   });
 
   test("runs /model via the real chat UI", async () => {

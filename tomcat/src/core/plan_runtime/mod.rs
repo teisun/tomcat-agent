@@ -714,14 +714,12 @@ impl PlanRuntime {
             Err(e) => return review::ReviewSummary::aborted_with(format!("read plan 失败: {e}")),
         };
 
-        let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut summary = dispatcher
             .dispatch(
                 plan_id,
                 &plan_text,
                 review::ReviewKind::Plan,
                 allow_review_edit,
-                cascade,
             )
             .await;
         if rounds > 1 {
@@ -784,14 +782,12 @@ impl PlanRuntime {
             }
         };
 
-        let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
         dispatcher
             .dispatch(
                 plan_id,
                 &plan_text,
                 review::ReviewKind::Code,
                 false,
-                cascade,
             )
             .await
     }
@@ -818,8 +814,7 @@ impl PlanRuntime {
             Err(e) => return verify::VerifySummary::aborted_with(format!("read plan 失败: {e}")),
         };
 
-        let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        dispatcher.dispatch(plan_id, &plan_text, cascade).await
+        dispatcher.dispatch(plan_id, &plan_text).await
     }
 
     pub(crate) fn resolved_plan_path(&self, plan_id: &str) -> Result<PathBuf, String> {
@@ -1310,7 +1305,7 @@ pub struct BuildPlanOutcome {
 /// **契约**：
 /// - 调用方（`PlanRuntime::dispatch_reviewer`）保证：调度时 plan 文件 advisory lock 已 release（RV14）。
 /// - dispatch 内部应通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`]
-///   构造子 `AgentLoop`，把 `abort_signal` 透传给 `AgentLoopConfig`。
+///   构造子 `AgentLoop`，并把 `SubagentSpawnContext.cancel_token` 直接透传给 `AgentLoop::new`。
 /// - 返回 `ReviewSummary`：成功 / aborted / parse_failed 都用同一形态承载。
 /// - **不**写父 transcript（reviewer 子 Agent 持独立 session_id；transcript 隔离 D11）。
 #[async_trait]
@@ -1321,7 +1316,6 @@ pub trait ReviewerDispatcher: Send + Sync {
         plan_text: &str,
         kind: review::ReviewKind,
         allow_review_edit: bool,
-        abort_signal: Arc<std::sync::atomic::AtomicBool>,
     ) -> review::ReviewSummary;
 }
 
@@ -1330,7 +1324,7 @@ pub trait ReviewerDispatcher: Send + Sync {
 /// **契约**：
 /// - 调用方（`PlanRuntime::dispatch_verifier`）保证：调度时 plan 文件 advisory lock 已 release。
 /// - dispatch 内部应通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`]
-///   构造子 `AgentLoop`，把 `abort_signal` 透传给 `AgentLoopConfig`。
+///   构造子 `AgentLoop`，并把 `SubagentSpawnContext.cancel_token` 直接透传给 `AgentLoop::new`。
 /// - 返回 `VerifySummary`：成功 / aborted / parse_failed 都用同一形态承载。
 /// - **不**写父 transcript（verifier 子 Agent 持独立 session_id；transcript 隔离）。
 #[async_trait]
@@ -1339,7 +1333,6 @@ pub trait VerifierDispatcher: Send + Sync {
         &self,
         plan_id: &str,
         plan_text: &str,
-        abort_signal: Arc<std::sync::atomic::AtomicBool>,
     ) -> verify::VerifySummary;
 }
 

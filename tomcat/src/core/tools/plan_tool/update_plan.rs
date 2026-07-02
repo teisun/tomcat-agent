@@ -171,6 +171,21 @@ pub async fn execute(
                 .await?;
                 verify_json = verify_payload;
                 state_after
+            } else if code_review_summary.aborted {
+                warnings.push(
+                    "code review 未能执行(aborted)，按 reviewer 不可用处理，转交 verifier"
+                        .into(),
+                );
+                let (state_after, verify_payload) = run_verifier_after_code_review(
+                    runtime,
+                    &target_plan_id,
+                    &path,
+                    &mut plan,
+                    &mut warnings,
+                )
+                .await?;
+                verify_json = verify_payload;
+                state_after
             } else {
                 warnings.push(format!(
                     "code review verdict={}，plan 保持 executing，等待主 Agent 修复或重新 complete",

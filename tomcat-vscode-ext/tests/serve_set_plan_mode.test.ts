@@ -97,6 +97,13 @@ describe("real tomcat serve plan integration", () => {
         ),
       ).toBe(true);
       expect(endEvents.at(-1)?.type).toBe("agent_end");
+
+      const exitAfterExecuting = await runtime.messenger.sendSetPlanMode({
+        action: "exit",
+        sessionId: init.sessionId,
+      });
+      expect(exitAfterExecuting.success).toBe(true);
+      expect(exitAfterExecuting.payload?.planState).toBe("chat");
     } finally {
       await runtime.cleanup();
       await server.close();

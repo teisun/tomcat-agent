@@ -9,6 +9,7 @@ import {
   assertParticipantHappyPath,
   assertParticipantHappyPathViaChatUi,
   assertPlanSlashFlowViaChatUi,
+  assertWebviewPlanModeSwitchFlow,
   assertWebviewAnswerCardFlow,
   assertWebviewDiffFlow,
   assertWebviewCrossOwnerPlanFlow,
@@ -67,6 +68,11 @@ suite("Tomcat host E2E", () => {
   test("runs /plan via the real chat UI", async () => {
     const api = await getTomcatExtensionApi();
     await assertPlanSlashFlowViaChatUi(api);
+  });
+
+  test("switches an executing plan back to chat in the webview", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewPlanModeSwitchFlow(api);
   });
 
   test("runs /model via the real chat UI", async () => {

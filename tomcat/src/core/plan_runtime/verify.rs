@@ -7,13 +7,10 @@
 //! - `VERIFIER_MAX_TURNS` 固定 64，不进 TOML。
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, SubagentType,
@@ -269,7 +266,6 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         &self,
         plan_id: &str,
         plan_text: &str,
-        _abort_signal: Arc<AtomicBool>,
     ) -> VerifySummary {
         let Some(deps) = self.deps.as_ref() else {
             return VerifySummary::aborted_with(format!(
@@ -342,19 +338,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                 SubagentType::Verifier,
                 move |spawn_ctx| async move {
                     let child_session_id = spawn_ctx.child_session_id.clone();
-                    let cancel_token = CancellationToken::new();
-
-                    let token_for_watcher = cancel_token.clone();
-                    let abort_clone = Arc::clone(&spawn_ctx.abort_signal);
-                    let watcher = tokio::spawn(async move {
-                        loop {
-                            if abort_clone.load(std::sync::atomic::Ordering::Acquire) {
-                                token_for_watcher.cancel();
-                                return;
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    });
+                    let cancel_token = spawn_ctx.cancel_token.clone();
 
                     let cfg = AgentLoopConfig {
                         max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
@@ -392,7 +376,6 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         ChatMessage::user(&initial_user_message),
                     ];
                     let run_outcome = agent_loop.run(initial_messages).await;
-                    watcher.abort();
 
                     let (summary, label) = build_summary_from_outcome(
                         origin,

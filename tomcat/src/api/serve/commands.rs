@@ -493,28 +493,48 @@ pub(crate) async fn handle_command(
                         )?;
                     }
                 },
-                SetPlanModeAction::Exit => match slot.ctx.session_runtime.plan_runtime.exit_to_chat() {
-                    Ok(()) => {
-                        state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                            id,
-                            Some(slot.session_id.clone()),
-                            Some(plan_state_payload(&slot, None)),
-                        )))?;
+                SetPlanModeAction::Exit => {
+                    let exit_result = if matches!(
+                        slot.ctx.session_runtime.plan_runtime.mode(),
+                        crate::core::plan_runtime::PlanState::Executing { .. }
+                    ) {
+                        match slot
+                            .ctx
+                            .session_runtime
+                            .plan_runtime
+                            .demote_to_pending_on_cancel()
+                        {
+                            Ok(Some(_)) | Ok(None) => {
+                                slot.ctx.session_runtime.plan_runtime.exit_to_chat()
+                            }
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        slot.ctx.session_runtime.plan_runtime.exit_to_chat()
+                    };
+                    match exit_result {
+                        Ok(()) => {
+                            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                                id,
+                                Some(slot.session_id.clone()),
+                                Some(plan_state_payload(&slot, None)),
+                            )))?;
+                        }
+                        Err(error) => {
+                            let error_code = match error {
+                                PlanRuntimeError::AlreadyInMode(_)
+                                | PlanRuntimeError::NotInPlanning(_) => "plan_state_conflict",
+                                _ => normalize_plan_runtime_error_code(&error),
+                            };
+                            send_error(
+                                &state,
+                                id,
+                                Some(slot.session_id.clone()),
+                                error_code,
+                            )?;
+                        }
                     }
-                    Err(error) => {
-                        let error_code = match error {
-                            PlanRuntimeError::AlreadyInMode(_)
-                            | PlanRuntimeError::NotInPlanning(_) => "plan_state_conflict",
-                            _ => normalize_plan_runtime_error_code(&error),
-                        };
-                        send_error(
-                            &state,
-                            id,
-                            Some(slot.session_id.clone()),
-                            error_code,
-                        )?;
-                    }
-                },
+                }
                 SetPlanModeAction::Build => {
                     let build_target = match plan_id {
                         Some(target) => target,
@@ -814,6 +834,16 @@ async fn start_turn(
     {
         let mut guard = slot.ctx.session_runtime.cancel_token.lock();
         *guard = turn_token.clone();
+    }
+    if let Err(error) = slot
+        .ctx
+        .agent_registry
+        .rearm_root(&slot.session_id, turn_token.child_token())
+    {
+        slot.mark_idle();
+        return Err(AppError::Config(format!(
+            "agent_registry root rearm 失败: {error}"
+        )));
     }
 
     state.registry.set_active_session(&slot.session_id)?;

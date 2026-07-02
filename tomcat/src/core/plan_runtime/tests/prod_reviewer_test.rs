@@ -1,6 +1,3 @@
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-
 use super::super::file_store::{
     write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
@@ -16,15 +13,7 @@ use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
 #[tokio::test]
 async fn prod_reviewer_stub_returns_aborted_with_origin() {
     let d = ProdReviewerDispatcher::stub("test_origin");
-    let r = d
-        .dispatch(
-            "demo",
-            "noop",
-            ReviewKind::Plan,
-            true,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await;
+    let r = d.dispatch("demo", "noop", ReviewKind::Plan, true).await;
     assert!(r.aborted);
     assert!(r.summary.contains("test_origin"));
     assert!(!r.applied_changes);

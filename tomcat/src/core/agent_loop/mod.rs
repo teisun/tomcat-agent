@@ -25,7 +25,7 @@
 //! │ 运行时状态                                                                     │
 //! │   steering_queue  ─► Mutex<Vec<ChatMessage>>（跨线程注入 steering）            │
 //! │   follow_up_queue ─► Mutex<Vec<ChatMessage>>（同上下文追问）                  │
-//! │   abort_signal    ─► AtomicBool（Ctrl+C 中断）                                │
+//! │   cancel_token    ─► CancellationToken（Ctrl+C / interrupt 中断）            │
 //! │   （流式 delta 通过 EventBus message_update 事件推送到渲染层）                 │
 //! └──────────────────────────────────────────────────────────────────────────────┘
 //! ```

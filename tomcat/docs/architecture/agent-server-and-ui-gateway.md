@@ -86,8 +86,8 @@
    ┌────────────┴─────────────┐                              │ control 回环（带 sessionId）
    ▼ s1                       ▼ s2     （多会话各一 AgentLoop run，进程级 Arc 服务共享）
 ┌─ ChatContext(s1) ─┐  ┌─ ChatContext(s2) ─┐                 │
-│ AgentLoop.run()   │  │ AgentLoop.run()   │  abort_signal_1/2 各自独立
-│ cancel_token_1    │  │ cancel_token_2    │  （AgentRegistry 已登记，cascade_abort 可用）
+│ AgentLoop.run()   │  │ AgentLoop.run()   │  turn/root token_1/2 各自独立
+│ cancel_token_1    │  │ cancel_token_2    │  （每回合 `rearm_root` 后主/子 Agent 共享同一中断真相）
 └────────┬──────────┘  └────────┬──────────┘                 ▼
          │ emit AgentEvent       │ emit AgentEvent           （既有路径，不改）
          ▼                       ▼

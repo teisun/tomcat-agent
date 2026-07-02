@@ -205,6 +205,158 @@ async function waitForWebviewState<T>(
   throw new Error("Timed out waiting for webview state to match the expected condition");
 }
 
+async function waitForWebviewBootstrapSettled(
+  api: TomcatExtensionApi,
+  timeoutMs = 40_000,
+): Promise<void> {
+  await waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (!activeSessionId) {
+        return undefined;
+      }
+      const activeSessionInList = state.sessions.some(
+        (session) => session.sessionId === activeSessionId,
+      );
+      return activeSessionInList && state.sessionViews[activeSessionId]
+        ? state
+        : undefined;
+    },
+    timeoutMs,
+  );
+}
+
+async function claimActiveWebviewSession(
+  api: TomcatExtensionApi,
+  messageId: string,
+  timeoutMs = 20_000,
+): Promise<string> {
+  await waitForWebviewBootstrapSettled(api);
+  const sessionId = api.__testing.getWebviewState().activeSessionId;
+  assert.ok(sessionId, "expected a bootstrapped active session before claiming ownership");
+  api.__testing.releaseSessionOwnership(sessionId);
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId },
+      messageId,
+      type: "switchSession",
+    }),
+  );
+  await waitForWebviewState(
+    api,
+    (state) =>
+      state.activeSessionId === sessionId
+      && state.sessionViews[sessionId]?.ownedByThisFrontend
+        ? state
+        : undefined,
+    timeoutMs,
+  );
+  return sessionId;
+}
+
+async function claimDifferentWebviewSession(
+  api: TomcatExtensionApi,
+  currentSessionId: string,
+  messageId: string,
+  timeoutMs = 20_000,
+): Promise<string> {
+  await waitForWebviewBootstrapSettled(api);
+  const candidate = api.__testing
+    .getWebviewState()
+    .sessions.find((session) => session.sessionId !== currentSessionId)
+    ?.sessionId;
+  if (candidate) {
+    api.__testing.releaseSessionOwnership(candidate);
+    await api.__testing.sendWebviewIntent(
+      buildWebviewIntent({
+        data: { sessionId: candidate },
+        messageId,
+        type: "switchSession",
+      }),
+    );
+    await waitForWebviewState(
+      api,
+      (state) =>
+        state.activeSessionId === candidate
+        && state.sessionViews[candidate]?.ownedByThisFrontend
+          ? state
+          : undefined,
+      timeoutMs,
+    );
+    return candidate;
+  }
+
+  const knownSessionIds = new Set(
+    api.__testing.getWebviewState().sessions.map((session) => session.sessionId),
+  );
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId: `${messageId}-new`,
+      type: "newSession",
+    }),
+  );
+  return waitForWebviewState(
+    api,
+    (state) => {
+      const activeSessionId = state.activeSessionId;
+      if (
+        !activeSessionId
+        || activeSessionId === currentSessionId
+        || knownSessionIds.has(activeSessionId)
+      ) {
+        return undefined;
+      }
+      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
+        ? activeSessionId
+        : undefined;
+    },
+    timeoutMs,
+  );
+}
+
+async function createFreshWebviewSession(
+  api: TomcatExtensionApi,
+  messageId: string,
+  timeoutMs = 20_000,
+): Promise<string> {
+  await waitForWebviewBootstrapSettled(api);
+  const knownSessionIds = new Set(
+    api.__testing.getWebviewState().sessions.map((session) => session.sessionId),
+  );
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      messageId,
+      type: "newSession",
+    }),
+  );
+  const sessionId = await waitForWebviewState(
+    api,
+    (state) =>
+      state.sessions.find((session) => !knownSessionIds.has(session.sessionId))
+        ?.sessionId,
+    timeoutMs,
+  );
+  api.__testing.releaseSessionOwnership(sessionId);
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId },
+      messageId: `${messageId}-claim`,
+      type: "switchSession",
+    }),
+  );
+  await waitForWebviewState(
+    api,
+    (state) =>
+      state.activeSessionId === sessionId
+      && state.sessionViews[sessionId]?.ownedByThisFrontend
+        ? state
+        : undefined,
+    timeoutMs,
+  );
+  return sessionId;
+}
+
 async function waitForWebviewDomSnapshot<T>(
   api: TomcatExtensionApi,
   predicate: Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>> extends infer Snapshot
@@ -575,6 +727,76 @@ export async function assertPlanSlashFlowViaChatUi(
   assert.equal(state.planState, "chat");
 }
 
+export async function assertWebviewPlanModeSwitchFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const sessionId = await claimActiveWebviewSession(
+    api,
+    "webview-plan-mode-claim",
+    20_000,
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { action: "enter", sessionId },
+      messageId: "webview-plan-mode-enter",
+      type: "setPlanMode",
+    }),
+  );
+  await waitForWebviewState(
+    api,
+    (state) => {
+      const session = state.sessionViews[sessionId];
+      return session?.planState === "planning" ? session : undefined;
+    },
+    20_000,
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { action: "build", planId: "fake-plan", sessionId },
+      messageId: "webview-plan-mode-build",
+      type: "setPlanMode",
+    }),
+  );
+  await waitForEvent(api, { sessionId, type: "agent_end" });
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.planStateText === "Plan: executing"
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { action: "exit", sessionId },
+      messageId: "webview-plan-mode-exit",
+      type: "setPlanMode",
+    }),
+  );
+
+  const settled = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes('data-testid="send-button"') &&
+      !snapshot.html.includes('data-testid="stop-button"') &&
+      snapshot.planStateText === null
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    !settled.timelineKinds.includes("error"),
+    "executing 切回 Chat 后不应出现 error 气泡/错误消息"
+  );
+}
+
 export async function assertModelSlashFlowViaChatUi(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -616,6 +838,7 @@ export async function assertWebviewStreamingFlow(
 ): Promise<void> {
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
+  await waitForWebviewBootstrapSettled(api);
   api.__testing.clearObservedEvents();
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -648,10 +871,15 @@ export async function assertWebviewInterruptFlow(
 ): Promise<void> {
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
+  const sessionId = await claimActiveWebviewSession(
+    api,
+    "webview-interrupt-claim",
+  );
   api.__testing.clearObservedEvents();
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: {
+        sessionId,
         text: "interrupt please",
       },
       messageId: "webview-interrupt-1",
@@ -662,15 +890,9 @@ export async function assertWebviewInterruptFlow(
     textIncludes: "partial",
     type: "message_update",
   });
-  const sessionId = await waitForWebviewState(
+  await waitForWebviewState(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.busy ? activeSessionId : undefined;
-    },
+    (state) => (state.sessionViews[sessionId]?.busy ? state : undefined),
     20_000,
   );
   await api.__testing.injectServeEvent({
@@ -721,23 +943,10 @@ export async function assertWebviewInterruptFlow(
     "expected the interrupted session to keep its tool row after returning to send mode",
   );
 
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-interrupt-new-session",
-      type: "newSession",
-    }),
-  );
-  const otherSessionId = await waitForWebviewState(
+  const otherSessionId = await claimDifferentWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId || activeSessionId === sessionId) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    sessionId,
+    "webview-interrupt-switch-away",
     20_000,
   );
   assert.notEqual(otherSessionId, sessionId);
@@ -773,23 +982,9 @@ export async function assertWebviewAnswerCardFlow(
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-answer-card-session",
-      type: "newSession",
-    }),
-  );
-  const sessionId = await waitForWebviewState(
+  const sessionId = await claimActiveWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    "webview-answer-card-claim",
     20_000,
   );
 
@@ -877,24 +1072,9 @@ export async function assertWebviewDiffFlow(
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
-
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-diff-session",
-      type: "newSession",
-    }),
-  );
-  const sessionId = await waitForWebviewState(
+  const sessionId = await claimActiveWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    "webview-diff-claim",
   );
 
   await api.__testing.sendWebviewIntent(
@@ -983,15 +1163,7 @@ export async function assertWebviewMultiSessionFlow(
 ): Promise<void> {
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-new-session-a",
-      type: "newSession",
-    }),
-  );
-  const stateA = api.__testing.getWebviewState();
-  const sessionA = stateA.activeSessionId;
-  assert.ok(sessionA, "expected session A");
+  const sessionA = await createFreshWebviewSession(api, "webview-new-session-a");
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -1002,15 +1174,8 @@ export async function assertWebviewMultiSessionFlow(
   );
   await waitForEvent(api, { sessionId: sessionA!, type: "agent_end" });
 
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-new-session-b",
-      type: "newSession",
-    }),
-  );
+  const sessionB = await createFreshWebviewSession(api, "webview-new-session-b");
   const stateB = api.__testing.getWebviewState();
-  const sessionB = stateB.activeSessionId;
-  assert.ok(sessionB, "expected session B");
   assert.notEqual(sessionA, sessionB);
 
   await api.__testing.sendWebviewIntent(
@@ -1102,23 +1267,9 @@ export async function assertWebviewSessionSwitchRestoreFlow(
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
 
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-restore-new-session-a",
-      type: "newSession",
-    }),
-  );
-  const sessionA = await waitForWebviewState(
+  const sessionA = await createFreshWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    "webview-restore-new-session-a",
   );
 
   await api.__testing.sendWebviewIntent(
@@ -1149,23 +1300,9 @@ export async function assertWebviewSessionSwitchRestoreFlow(
     "expected session A transcript to be visible before switching away",
   );
 
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-restore-new-session-b",
-      type: "newSession",
-    }),
-  );
-  const sessionB = await waitForWebviewState(
+  const sessionB = await createFreshWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId || activeSessionId === sessionA) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    "webview-restore-new-session-b",
   );
   assert.notEqual(sessionA, sessionB);
 
@@ -1206,42 +1343,14 @@ export async function assertTranscriptSwitchBackOrder(
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
 
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-switch-order-new-session-a",
-      type: "newSession",
-    }),
-  );
-  const sessionA = await waitForWebviewState(
+  const sessionA = await createFreshWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    "webview-switch-order-new-session-a",
   );
 
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-switch-order-new-session-b",
-      type: "newSession",
-    }),
-  );
-  const sessionB = await waitForWebviewState(
+  const sessionB = await createFreshWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId || activeSessionId === sessionA) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    "webview-switch-order-new-session-b",
   );
   assert.notEqual(sessionA, sessionB);
 
@@ -1454,24 +1563,9 @@ export async function assertWebviewReloadReplayFlow(
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
-
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-reload-new-session",
-      type: "newSession",
-    }),
-  );
-  const sessionId = await waitForWebviewState(
+  const sessionId = await createFreshWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    "webview-reload-new-session",
   );
 
   await api.__testing.sendWebviewIntent(
@@ -1534,24 +1628,9 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
-
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-giant-group-new-session",
-      type: "newSession",
-    }),
-  );
-  const sessionId = await waitForWebviewState(
+  const sessionId = await createFreshWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    "webview-giant-group-new-session",
   );
 
   const runPrompt = async (text: string, messageId: string) => {
@@ -1805,24 +1884,9 @@ export async function assertTranscriptUiFlow(
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
   api.__testing.clearObservedEvents();
-
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-transcript-new-session",
-      type: "newSession",
-    }),
-  );
-  const sessionId = await waitForWebviewState(
+  const sessionId = await createFreshWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    "webview-transcript-new-session",
   );
 
   await api.__testing.sendWebviewIntent(
@@ -2046,23 +2110,9 @@ export async function assertTranscriptUiFlow(
   );
 
   api.__testing.clearObservedEvents();
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      messageId: "webview-tool-icons-new-session",
-      type: "newSession",
-    }),
-  );
-  const toolIconSessionId = await waitForWebviewState(
+  const toolIconSessionId = await createFreshWebviewSession(
     api,
-    (state) => {
-      const activeSessionId = state.activeSessionId;
-      if (!activeSessionId) {
-        return undefined;
-      }
-      return state.sessionViews[activeSessionId]?.ownedByThisFrontend
-        ? activeSessionId
-        : undefined;
-    },
+    "webview-tool-icons-new-session",
   );
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({

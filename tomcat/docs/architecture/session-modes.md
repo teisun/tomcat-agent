@@ -131,7 +131,7 @@
 
 ### 2.4 tomcat 现状评估（已具备 vs 待建）
 
-已具备（可复用）：tokio(full) runtime；`AgentRegistry` 已能并发 `tokio::spawn` 子 agent（限流 `MAX_CONCURRENT_AGENTS=16`、级联 `abort_signal`）；`AgentLoop` 实例化 + `CancellationToken`；`BashTaskRegistry` 后台任务 + lifecycle→follow-up；`SessionManager` 的 `sessions.json` 原子写（`write_mutex`）。
+已具备（可复用）：tokio(full) runtime；`AgentRegistry` 已能并发 `tokio::spawn` 子 agent（限流 `MAX_CONCURRENT_AGENTS=16`、级联 `CancellationToken`）；`AgentLoop` 实例化 + `CancellationToken`；`BashTaskRegistry` 后台任务 + lifecycle→follow-up；`SessionManager` 的 `sessions.json` 原子写（`write_mutex`）。
 
 待建（本方案核心改造）：
 

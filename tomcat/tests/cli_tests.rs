@@ -29,8 +29,20 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[allow(deprecated)]
 fn cmd() -> Command {
     let mut c = Command::cargo_bin("tomcat").expect("binary tomcat should exist");
-    // 避免宿主环境 TOMCAT__LLM__DEFAULT_MODEL 覆盖临时 HOME 下的 tomcat.config.toml
-    c.env_remove("TOMCAT__LLM__DEFAULT_MODEL");
+    // 避免宿主环境或并行测试残留的 TOMCAT__* 覆盖子进程自己的临时 work_dir/config。
+    for key in [
+        "TOMCAT__LLM__DEFAULT_MODEL",
+        "TOMCAT__CONTEXT__COMPACTION_MODEL",
+        "TOMCAT__LLM__PROVIDER",
+        "TOMCAT__LLM__API_BASE",
+        "TOMCAT__LLM__API_KEY_ENV",
+        "TOMCAT__CONFIG_PATH",
+        "TOMCAT__STORAGE__WORK_DIR",
+        "TOMCAT__STORAGE__SESSIONS_DIR",
+        "TOMCAT__AGENT__ID",
+    ] {
+        c.env_remove(key);
+    }
     c
 }
 
@@ -1609,6 +1621,7 @@ fn test_chat_without_config_exits_with_error() {
 /// 验证：exit 0 且 stdout 包含"对话模式"banner 或模型信息或 agent prompt
 /// 意义：TASK-02 10.1——chat 端到端可用；INTEGRATION_TEST_SPEC：无 key 不得 ignore
 #[test]
+#[serial(env_lock)]
 fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -1814,6 +1827,7 @@ fn test_session_delete_via_cli_removes_session() {
 /// 验证：exit 0（即使会话不存在也不崩溃）
 /// 意义：TASK-02 10.6——session archive 端到端可用
 #[test]
+#[serial(env_lock)]
 fn test_session_archive_exits_ok() {
     common::setup_logging();
     let _span = info_span!("test_session_archive_exits_ok").entered();
@@ -2254,6 +2268,7 @@ fn test_ensure_embedded_assets_tolerates_existing_assets_files() {
 /// 验证：exit 0；stdout 非空
 /// 要求：DEEPSEEK_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
 #[test]
+#[serial(env_lock)]
 fn test_user_asks_pi_a_question() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2297,6 +2312,7 @@ fn test_user_asks_pi_a_question() {
 /// 验证：exit 0；stdout 含"所有权"或"ownership"
 /// 要求：DEEPSEEK_API_KEY 环境变量已设置
 #[test]
+#[serial(env_lock)]
 fn test_user_asks_pi_technical_question() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2343,6 +2359,7 @@ fn test_user_asks_pi_technical_question() {
 /// 验证：exit 0；stdout 含 hello_from_pi（或明显命令执行结果）
 /// 意义：工具调用 E2E 门禁，保证 execute_bash 被真实调用
 #[test]
+#[serial(env_lock)]
 fn test_user_asks_pi_to_run_bash_command() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2395,6 +2412,7 @@ fn test_user_asks_pi_to_run_bash_command() {
 /// 验证：exit 0；stderr 含 `[tool] read` 且包含 not found 语义，并且不退化为 `✗ failed`
 /// 要求：DEEPSEEK_API_KEY 环境变量已设置
 #[test]
+#[serial(env_lock)]
 fn test_user_sees_read_failure_reason_in_tool_line() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2588,6 +2606,7 @@ fn load_background_bash_p1_real_llm_transcript(fx: &BackgroundBashP1RealLlmFixtu
 ///
 /// 意义：P1 门禁——这条用例是真 LLM + 真 CLI `chat_loop` 黑盒，不是仅测 tool 层。
 #[test]
+#[serial(env_lock)]
 fn test_user_background_bash_autofeed_real_llm_cli() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2676,6 +2695,7 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
 /// 意义：P1 第二条真门禁——真正覆盖 `block=true` 等待路径、
 /// transcript 中的真实 tool_call，以及 `new_output` 唤醒后的收尾。
 #[test]
+#[serial(env_lock)]
 fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2792,6 +2812,7 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 /// - 真实产物 `multi_timeout_done.txt` 存在且内容正确；
 /// - stdout 最终包含 `MULTI_TIMEOUT_OK`。
 #[test]
+#[serial(env_lock)]
 fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2930,6 +2951,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
 ///
 /// 意义：锁定“批次边界 midturn drain”本身，而不是沿用既有 finish-only between-turns auto-feed。
 #[test]
+#[serial(env_lock)]
 fn test_user_background_bash_midturn_followup_real_llm_cli() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -3071,6 +3093,7 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
 /// - transcript 的 `role=user` 消息不含 `waiting_for_output`；
 /// - transcript 中不出现 `task_stop` / `task_list`。
 #[test]
+#[serial(env_lock)]
 fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -3196,6 +3219,7 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
 /// 验证：exit 0；`{CARGO_MANIFEST_DIR}/workspace-temp/e2e_cli013_hello/hello_e2e.txt` 存在且内容含 Hello E2E（或 stdout 含写入/创建确认）
 /// 意义：scratch 走 `workspace-temp/`（INTEGRATION_TEST_SPEC §2.3），避免提示词里的「workspace 目录」被模型误解为 crate 下 `workspace/` 子目录
 #[test]
+#[serial(env_lock)]
 fn test_user_asks_pi_to_write_hello_world_bash() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -4102,6 +4126,7 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
 /// 验证：exit 0；stdout 含 AI 回复
 /// 要求：DEEPSEEK_API_KEY 已设置
 #[test]
+#[serial(env_lock)]
 fn test_user_chats_with_llm_gets_streaming_response() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -4148,6 +4173,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
 /// 验证：exit 0；stdout 非空
 /// 要求：DEEPSEEK_API_KEY 已设置
 #[test]
+#[serial(env_lock)]
 fn test_user_receives_nonempty_llm_response() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -4354,6 +4380,7 @@ fn test_user_deletes_session() {
 /// 用户意图：归档刚创建的会话
 /// 验证：exit 0；stdout 含"已归档"
 #[test]
+#[serial(env_lock)]
 fn test_user_archives_session() {
     common::setup_logging();
     let _span = info_span!("test_user_archives_session").entered();
@@ -4825,6 +4852,7 @@ fn test_user_init_then_doctor_roundtrip() {
 /// 验证：exit 0；进程正常退出（不崩溃）
 /// 要求：DEEPSEEK_API_KEY 已设置
 #[test]
+#[serial(env_lock)]
 fn test_user_chat_resumes_last_session() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -6470,6 +6498,7 @@ async fn test_run_chat_turn_rejects_multimodal_message_on_text_model_before_prov
 }
 
 #[tokio::test]
+#[serial(env_lock)]
 async fn test_model_switch_keeps_ctx_metrics_continuous_across_turns() {
     common::setup_logging();
     let _span = info_span!("test_model_switch_keeps_ctx_metrics_continuous_across_turns").entered();
@@ -6659,6 +6688,7 @@ fn test_session_model_override_persists_across_chat_context_restart() {
 /// 验证：exit 0 且 stdout 包含非空 AI 回复文本（需 DEEPSEEK_API_KEY；无 key 时 panic，符合规范）
 /// 意义：TASK-14 T1-P1-005 E2E 门禁——验证 AgentLoop::run() 已完整接入 tomcat chat 交互链路（E2E_TEST_SPEC §6）
 #[test]
+#[serial(env_lock)]
 fn test_user_chat_non_interactive_with_prompt_flag() {
     common::setup_logging();
     common::load_deepseek_test_env();

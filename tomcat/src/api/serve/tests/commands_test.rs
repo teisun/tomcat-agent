@@ -1796,6 +1796,201 @@ async fn serve_list_sessions_live_reports_interrupted_flag() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_interrupt_rearms_root_token_before_next_turn_can_spawn_subagents() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "after interrupt".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+
+    crate::api::serve::control::handle_control_or_interrupt(
+        Arc::clone(&state),
+        ServeCommand::Interrupt {
+            id: Some("interrupt-rearm".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let blocked = slot
+        .ctx
+        .agent_registry
+        .spawn_subagent_internal(
+            &slot.session_id,
+            crate::core::agent_loop::SubagentType::Reviewer,
+            |ctx| async move {
+                crate::core::agent_registry::SubagentOutcome {
+                    child_session_id: ctx.child_session_id,
+                    subagent_type: ctx.subagent_type,
+                    outcome_label: crate::core::agent_registry::SubagentOutcomeLabel::Completed,
+                    error_message: None,
+                }
+            },
+        )
+        .await
+        .expect_err("interrupt 后、rearm 前应拒绝派生子 Agent");
+    assert!(
+        matches!(blocked, crate::core::agent_registry::SpawnError::ParentAborted(_)),
+        "实际错误 = {blocked:?}"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-after-interrupt".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "hello again".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+    for _ in 0..50 {
+        if !slot.is_busy() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !slot.is_busy(),
+        "第二回合结束后 session 应回到 idle，才能验证 rearm 结果"
+    );
+    assert!(
+        !slot.ctx.session_runtime.cancel_token.lock().is_cancelled(),
+        "start_turn 应已安装新的 turn token"
+    );
+
+    let outcome = slot
+        .ctx
+        .agent_registry
+        .spawn_subagent_internal(
+            &slot.session_id,
+            crate::core::agent_loop::SubagentType::Reviewer,
+            |ctx| async move {
+                crate::core::agent_registry::SubagentOutcome {
+                    child_session_id: ctx.child_session_id,
+                    subagent_type: ctx.subagent_type,
+                    outcome_label: crate::core::agent_registry::SubagentOutcomeLabel::Completed,
+                    error_message: None,
+                }
+            },
+        )
+        .await
+        .expect("start_turn rearm 后应可再次派生子 Agent");
+    assert_eq!(
+        outcome.outcome_label,
+        crate::core::agent_registry::SubagentOutcomeLabel::Completed
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_to_chat() {
+    use crate::core::plan_runtime::file_store::{
+        read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+        PLAN_FILE_SCHEMA_VERSION,
+    };
+
+    let _api_key = install_test_api_key();
+    let (state, buffer, temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    slot.ctx
+        .session_runtime
+        .plan_runtime
+        .enter_planning()
+        .expect("enter planning");
+    let plan_path = temp.path().join("exit-executing.plan.md");
+    let plan = PlanFile {
+        frontmatter: PlanFileFrontmatter {
+            plan_id: "plan-exit".into(),
+            goal: "leave executing safely".into(),
+            state: PlanFileState::Planning,
+            session_key: None,
+            session_id: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            schema_version: PLAN_FILE_SCHEMA_VERSION,
+            todos: vec![TodoItem {
+                id: "todo-1".into(),
+                content: "ship it".into(),
+                status: TodoStatus::Pending,
+            }],
+            unknown: serde_yaml::Mapping::new(),
+        },
+        body: "## Plan\n- pending".into(),
+    };
+    write_plan(&plan_path, &plan, slot.ctx.session_runtime.plan_runtime.lock_timeout_ms())
+        .expect("write temp plan");
+    slot.ctx
+        .session_runtime
+        .plan_runtime
+        .set_active_planning_plan("plan-exit".into(), plan_path.clone());
+    slot.ctx
+        .session_runtime
+        .plan_runtime
+        .build_plan(
+            plan_path.to_str().expect("utf8 plan path"),
+            Some(slot.session_id.clone()),
+        )
+        .expect("build plan into executing");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetPlanMode {
+            id: Some("exit-executing".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            action: SetPlanModeAction::Exit,
+            plan_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("exit-executing")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("exit-executing"))
+        .expect("exit response");
+    assert_eq!(
+        response.get("success").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        response["payload"]["planState"].as_str(),
+        Some("chat"),
+        "executing+idle 退出后应回到 chat"
+    );
+
+    let disk_plan = read_plan(&plan_path).expect("read demoted plan");
+    assert_eq!(
+        disk_plan.frontmatter.state,
+        PlanFileState::Pending,
+        "退出 chat 前必须先把盘上的 executing 降级成 pending"
+    );
+    assert!(
+        matches!(
+            slot.ctx.session_runtime.plan_runtime.mode(),
+            crate::core::plan_runtime::PlanState::Chat
+        ),
+        "runtime 也应回到 Chat"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_get_state_contains_plan_and_session_todos() {
     use crate::core::plan_runtime::file_store::{TodoItem, TodoStatus};
 
