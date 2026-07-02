@@ -600,6 +600,124 @@ describe("webview dual-channel state store", () => {
     });
   });
 
+  it("drops confirmed user bubbles outside the latest window but restores them when older history loads", () => {
+    const store = new WebviewStateStore("both");
+
+    store.syncSessionList(
+      {
+        activeSessionId: "s1",
+        scope: "disk",
+        sessions: [{ busy: false, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
+      },
+      new Map([["s1", "webview"]]),
+      "webview",
+    );
+    store.applySessionState(
+      {
+        busy: false,
+        model: "gpt-5.4",
+        planId: null,
+        planState: "chat",
+        sessionId: "s1",
+      },
+      "webview",
+      "webview",
+    );
+
+    const latestWindowMessages = Array.from({ length: 80 }, (_, index) => ({
+      id: `recent-user-${index + 1}`,
+      message: {
+        content: `recent prompt ${index + 1}`,
+        role: "user",
+      },
+      type: "message" as const,
+    }));
+
+    store.hydrateHistory("s1", {
+      hasMore: true,
+      messages: latestWindowMessages,
+      nextCursor: "older-cursor",
+      sessionId: "s1",
+      upToSeq: null,
+    });
+
+    store.appendLocalUserMessage("s1", "older confirmed prompt", {
+      messageId: "older-confirmed-user",
+      submitKind: "prompt",
+    });
+    store.markLocalUserMessageConfirmed("s1", "older-confirmed-user");
+
+    store.appendLocalUserMessage("s1", "latest confirmed prompt", {
+      messageId: "latest-confirmed-user",
+      submitKind: "prompt",
+    });
+    store.markLocalUserMessageConfirmed("s1", "latest-confirmed-user");
+
+    store.hydrateHistory("s1", {
+      hasMore: true,
+      messages: [
+        ...latestWindowMessages.slice(1),
+        {
+          id: "latest-confirmed-user",
+          message: {
+            content: "latest confirmed prompt",
+            role: "user",
+          },
+          type: "message" as const,
+        },
+      ],
+      nextCursor: "older-cursor",
+      sessionId: "s1",
+      upToSeq: null,
+    });
+
+    let timeline = store.snapshot().sessionViews.s1.timeline;
+    expect(
+      timeline.some((item) => item.type === "message" && item.id === "older-confirmed-user"),
+    ).toBe(false);
+    const latestUserMessages = timeline.filter(
+      (item): item is Extract<(typeof timeline)[number], { type: "message" }> =>
+        item.type === "message" && item.id === "latest-confirmed-user",
+    );
+    expect(latestUserMessages).toHaveLength(1);
+    expect(latestUserMessages[0]).toEqual({
+      id: "latest-confirmed-user",
+      kind: "user",
+      text: "latest confirmed prompt",
+      type: "message",
+    });
+
+    store.prependHistory("s1", {
+      hasMore: false,
+      messages: [
+        {
+          id: "older-confirmed-user",
+          message: {
+            content: "older confirmed prompt",
+            role: "user",
+          },
+          type: "message" as const,
+        },
+      ],
+      nextCursor: null,
+      sessionId: "s1",
+      upToSeq: null,
+    });
+
+    timeline = store.snapshot().sessionViews.s1.timeline;
+    const olderUserMessages = timeline.filter(
+      (item): item is Extract<(typeof timeline)[number], { type: "message" }> =>
+        item.type === "message" && item.id === "older-confirmed-user",
+    );
+    expect(olderUserMessages).toHaveLength(1);
+    expect(olderUserMessages[0]).toEqual({
+      id: "older-confirmed-user",
+      kind: "user",
+      text: "older confirmed prompt",
+      type: "message",
+    });
+  });
+
   it("keeps in-flight assistant tails at the end until disk catches up, then converges in place", () => {
     const store = new WebviewStateStore("both");
 

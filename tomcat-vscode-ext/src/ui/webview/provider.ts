@@ -480,8 +480,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           response.error ?? `Tomcat ${submitKind} failed`,
           true,
         );
-      } else if (pendingAttachments.length) {
-        this.stateStore.clearPendingAttachments(sessionId);
+      } else {
+        this.stateStore.markLocalUserMessageConfirmed(sessionId, userMessageId);
+        if (pendingAttachments.length) {
+          this.stateStore.clearPendingAttachments(sessionId);
+        }
       }
     } catch (error) {
       this.stateStore.markLocalUserMessageFailed(

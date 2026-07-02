@@ -382,17 +382,19 @@ describe("webview provider integration", () => {
       }),
     );
     const userMessageId = (promptRequest?.params as { userMessageId?: string } | undefined)?.userMessageId;
-    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          deliveryState: "pending",
-          id: userMessageId,
-          kind: "user",
-          text: "send with attachment",
-          type: "message",
-        }),
-      ]),
+    const sentUserMessage = provider.currentState().sessionViews["session-1"]?.timeline.find(
+      (item) => item.type === "message" && item.id === userMessageId,
     );
+    expect(sentUserMessage).toMatchObject({
+      id: userMessageId,
+      kind: "user",
+      submitKind: "prompt",
+      text: "send with attachment",
+      type: "message",
+    });
+    expect(sentUserMessage).not.toHaveProperty("deliveryError");
+    expect(sentUserMessage).not.toHaveProperty("deliveryState");
+    expect(sentUserMessage).not.toHaveProperty("retryable");
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toHaveLength(0);
 
     provider.dispose();
@@ -578,11 +580,58 @@ describe("webview provider integration", () => {
       ) ?? [];
     expect(retriedUserMessages).toHaveLength(1);
     expect(retriedUserMessages[0]).toMatchObject({
-      deliveryState: "pending",
       id: firstUserMessageId,
+      kind: "user",
+      submitKind: "prompt",
       text: "retry me",
       type: "message",
     });
+    expect(retriedUserMessages[0]).not.toHaveProperty("deliveryError");
+    expect(retriedUserMessages[0]).not.toHaveProperty("deliveryState");
+    expect(retriedUserMessages[0]).not.toHaveProperty("retryable");
+  });
+
+  it("clears sending immediately for queued steering messages", async () => {
+    const { messenger, provider } = buildProvider({
+      requestImpl: async (command) => ({
+        payload: { queued: true },
+        sessionId: String(command.sessionId ?? "session-1"),
+        success: true,
+        type: "response",
+      }),
+      sessionState: {
+        busy: true,
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-queued-steer",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: {
+        sessionId: "session-1",
+        text: "keep going",
+      },
+      messageId: "steer-queued-message",
+      type: "steer",
+    });
+
+    const steerRequest = messenger.requestCalls.find((call) => call.type === "steer");
+    const userMessageId = (steerRequest?.params as { userMessageId?: string } | undefined)?.userMessageId;
+    const steerMessage = provider.currentState().sessionViews["session-1"]?.timeline.find(
+      (item) => item.type === "message" && item.id === userMessageId,
+    );
+    expect(steerMessage).toMatchObject({
+      id: userMessageId,
+      kind: "user",
+      submitKind: "steer",
+      text: "keep going",
+      type: "message",
+    });
+    expect(steerMessage).not.toHaveProperty("deliveryError");
+    expect(steerMessage).not.toHaveProperty("deliveryState");
+    expect(steerMessage).not.toHaveProperty("retryable");
   });
 
   it("prepends older history pages with cursor pagination", async () => {

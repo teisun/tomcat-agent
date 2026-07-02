@@ -873,7 +873,10 @@ function shouldRetainLiveTimelineItem(
   switch (item.type) {
     case "message":
       if (item.kind === "user") {
-        return runtime.localUserMessageIds.has(item.id);
+        return (
+          runtime.localUserMessageIds.has(item.id) &&
+          (item.deliveryState === "pending" || item.deliveryState === "failed")
+        );
       }
       return (
         item.kind === "assistant" &&
@@ -1206,6 +1209,22 @@ export class WebviewStateStore {
     message.deliveryState = "pending";
     delete message.retryable;
     runtime.localUserMessageIds.add(messageId);
+  }
+
+  markLocalUserMessageConfirmed(sessionId: string, messageId: string): void {
+    const session = this.ensureSession(sessionId);
+    const runtime = this.ensureRuntime(sessionId);
+    runtime.localUserMessageIds.delete(messageId);
+    const message = session.timeline.find(
+      (item): item is WebviewMessageBlock =>
+        item.type === "message" && item.kind === "user" && item.id === messageId,
+    );
+    if (!message) {
+      return;
+    }
+    delete message.deliveryState;
+    delete message.deliveryError;
+    delete message.retryable;
   }
 
   setOwnership(

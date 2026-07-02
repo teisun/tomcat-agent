@@ -1076,6 +1076,111 @@ describe("plan.todos routing", () => {
   });
 });
 
+describe("local user message delivery state", () => {
+  it("retains pending and failed user bubbles during rebuild but drops confirmed ones", () => {
+    const store = new WebviewStateStore("both");
+    store.setActiveSession("s1");
+    store.applySessionState(
+      {
+        busy: false,
+        model: "gpt-5.4",
+        planId: null,
+        planState: "chat",
+        sessionId: "s1",
+      },
+      "webview",
+      "webview",
+    );
+
+    const baseHistory = {
+      messages: [
+        {
+          id: "older-assistant-1",
+          message: {
+            content: "older answer",
+            role: "assistant",
+          },
+          type: "message" as const,
+        },
+      ],
+      sessionId: "s1",
+      upToSeq: null,
+    };
+
+    store.hydrateHistory("s1", baseHistory);
+    store.appendLocalUserMessage("s1", "draft prompt", {
+      messageId: "user-fixed-id",
+      submitKind: "prompt",
+    });
+
+    store.hydrateHistory("s1", baseHistory);
+    let userMessage = store.snapshot().sessionViews.s1.timeline.find(
+      (item) => item.type === "message" && item.id === "user-fixed-id",
+    );
+    expect(userMessage).toMatchObject({
+      deliveryState: "pending",
+      id: "user-fixed-id",
+      kind: "user",
+      text: "draft prompt",
+      type: "message",
+    });
+
+    store.markLocalUserMessageFailed("s1", "user-fixed-id", "busy", true);
+    store.hydrateHistory("s1", baseHistory);
+    userMessage = store.snapshot().sessionViews.s1.timeline.find(
+      (item) => item.type === "message" && item.id === "user-fixed-id",
+    );
+    expect(userMessage).toMatchObject({
+      deliveryError: "busy",
+      deliveryState: "failed",
+      id: "user-fixed-id",
+      kind: "user",
+      retryable: true,
+      text: "draft prompt",
+      type: "message",
+    });
+
+    store.markLocalUserMessageConfirmed("s1", "user-fixed-id");
+    userMessage = store.snapshot().sessionViews.s1.timeline.find(
+      (item) => item.type === "message" && item.id === "user-fixed-id",
+    );
+    expect(userMessage).toMatchObject({
+      id: "user-fixed-id",
+      kind: "user",
+      text: "draft prompt",
+      type: "message",
+    });
+    expect(userMessage).not.toHaveProperty("deliveryError");
+    expect(userMessage).not.toHaveProperty("deliveryState");
+    expect(userMessage).not.toHaveProperty("retryable");
+
+    store.hydrateHistory("s1", baseHistory);
+    expect(
+      store
+        .snapshot()
+        .sessionViews.s1.timeline.some(
+          (item) => item.type === "message" && item.id === "user-fixed-id",
+        ),
+    ).toBe(false);
+  });
+
+  it("clears local user tracking even when the bubble is already gone", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    const runtime = (
+      store as unknown as {
+        ensureRuntime(sessionId: string): { localUserMessageIds: Set<string> };
+      }
+    ).ensureRuntime("s1");
+    runtime.localUserMessageIds.add("missing-user-id");
+
+    store.markLocalUserMessageConfirmed("s1", "missing-user-id");
+
+    expect(runtime.localUserMessageIds.has("missing-user-id")).toBe(false);
+  });
+});
+
 describe("openFile intent protocol", () => {
   it("accepts loadOlderHistory intent shape", () => {
     expect(
