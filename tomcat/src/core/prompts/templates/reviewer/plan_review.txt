@@ -30,7 +30,7 @@ Output contract (must be the final assistant message, exact format):
 findings:
   - { severity: nit|suggestion|concern, area: "<short label>", note: "<one-line concrete remark>" }
   - ...
-summary: <review opinion — what you found and overall assessment, <= 600 chars>
+summary: <concise, focused review opinion; put concrete issues in findings; do not pad for length or worry about truncation>
 changes_summary: <what you changed and why; use "none" if read-only or no edits>
 applied_changes: <true | false>
 </review>

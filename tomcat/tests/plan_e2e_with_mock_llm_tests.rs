@@ -179,6 +179,18 @@ fn fail_code_review() -> ReviewSummary {
     }
 }
 
+fn long_multibyte_code_review(summary: String) -> ReviewSummary {
+    ReviewSummary {
+        kind: ReviewKind::Code,
+        aborted: false,
+        verdict: Some("pass".into()),
+        summary,
+        changes_summary: "none".into(),
+        applied_changes: false,
+        ..Default::default()
+    }
+}
+
 fn pass_verify() -> VerifySummary {
     VerifySummary {
         checks: vec![VerifyCheck {
@@ -713,5 +725,51 @@ async fn h9_code_review_non_pass_returns_to_main_then_second_completion_skips_re
             .load(std::sync::atomic::Ordering::Relaxed),
         1
     );
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn h10_code_review_long_multibyte_summary_round_trips_without_truncation() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let (rt, _panel, _ckpt) = build_runtime_with_spies();
+    rt.set_max_code_review_rounds(1);
+    let long_summary = "修".repeat(250);
+    let reviewer = Arc::new(QueueReviewer::new(vec![long_multibyte_code_review(
+        long_summary.clone(),
+    )]));
+    let verifier = Arc::new(QueueVerifier::new(vec![pass_verify()]));
+    rt.attach_reviewer(reviewer);
+    rt.attach_verifier(verifier);
+
+    rt.enter_planning().unwrap();
+    let out = create_plan::execute(
+        &rt,
+        create_plan::CreatePlanArgs {
+            goal: "g".into(),
+            draft: "ok".into(),
+            todos: vec![
+                create_plan::TodoArg {
+                    id: "t1".into(),
+                    content: "a".into(),
+                    status: TodoStatus::Pending,
+                },
+                create_plan::TodoArg {
+                    id: "t2".into(),
+                    content: "b".into(),
+                    status: TodoStatus::Pending,
+                },
+            ],
+        },
+    )
+    .unwrap();
+    let plan_id = out["plan_id"].as_str().unwrap().to_string();
+    promote_to_exec(&rt, &plan_id);
+
+    let out = complete_all_plan_todos(&rt, &plan_id).await;
+    assert_eq!(out["code_review"]["summary"], long_summary);
+    assert_eq!(out["verify"]["verdict"], "pass");
+    assert_eq!(out["plan_state_after"], "completed");
+
     cleanup_home(&home);
 }

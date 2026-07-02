@@ -76,7 +76,7 @@ pub enum SpawnError {
     ParentNotFound(String),
     #[error("父 Agent {0} 已被请求 abort，拒绝派生新子")]
     ParentAborted(String),
-    #[error("子 Agent run() panic：{0}")]
+    #[error("子 Agent 执行或结果解析阶段 panic：{0}")]
     Panic(String),
     #[error("子 spawn 内部错误: {0}")]
     Internal(String),
@@ -357,6 +357,7 @@ impl AgentRegistry {
         };
 
         // panic 隔离：tokio::spawn + JoinHandle.await，JoinError(panic) → SpawnError::Panic
+        // （覆盖 child run() 本体或 spawn 收尾/结果解析阶段的 panic）
         let join = tokio::spawn(async move { spawn(ctx).await });
         let outcome_result = join.await;
 

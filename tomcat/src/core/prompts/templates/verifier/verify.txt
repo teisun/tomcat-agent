@@ -51,9 +51,9 @@ checks:
   - name: "<short label>"
     command: "<exact command or read/search description>"
     result: pass|fail|skip
-    output_excerpt: "<short evidence snippet>"
+    output_excerpt: "<short, evidence-rich snippet>"
 verdict: pass|fail|partial|aborted
-summary: <what you verified, what failed/skipped, and why>
+summary: <concise, focused verification summary covering what you verified and what failed/skipped>
 </verify>
 
 Rules:
@@ -61,4 +61,4 @@ Rules:
 2. Use `result: skip` for environment blocks or missing commands; do not fake a pass.
 3. `verdict: fail` is reserved for observed failures. Use `partial` when the checks are
    inconclusive but not failed.
-4. Keep `summary` under 600 chars and each `output_excerpt` under 500 chars.
+4. Keep the summary concise and focused. Keep output excerpts short and evidence-rich. Put concrete issues in checks. Do not pad for length, and do not worry about truncation.

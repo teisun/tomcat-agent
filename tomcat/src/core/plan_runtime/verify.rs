@@ -126,16 +126,10 @@ fn normalize_summary(summary: &mut VerifySummary) -> Option<()> {
     ) {
         return None;
     }
-    if summary.summary.len() > 600 {
-        summary.summary.truncate(600);
-    }
     for check in &mut summary.checks {
         check.result = check.result.trim().to_ascii_lowercase();
         if !matches!(check.result.as_str(), "pass" | "fail" | "skip") {
             return None;
-        }
-        if check.output_excerpt.len() > 500 {
-            check.output_excerpt.truncate(500);
         }
     }
     Some(())
@@ -547,8 +541,5 @@ fn append_budget_exhausted_note(summary: &mut String, turns_limit: u32) {
     } else if !summary.contains(&note) {
         summary.push(' ');
         summary.push_str(&note);
-    }
-    if summary.len() > 600 {
-        summary.truncate(600);
     }
 }

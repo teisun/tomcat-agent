@@ -381,7 +381,7 @@ impl PlanRuntime {
 |------|------|------|--------|
 | `kind` | `ReviewKind` (`plan \| code`) | 本次 reviewer 的运行形态 | 这是 plan 审稿还是 code 审查。 |
 | `findings` | `Vec<Finding { severity, area, note }>` | 离散挑刺清单；`severity ∈ {nit, suggestion, concern}`；`area` 为自由短标签（不限 plan 专用枚举） | 一条条挑刺记下来。 |
-| `summary` | `String`（≤ 600 字符） | 审稿意见总评（发现了什么、整体判断） | 审稿意见一句话。 |
+| `summary` | `String`（建议简明聚焦；runtime 不做固定字符上限截断） | 审稿意见总评（发现了什么、整体判断） | 审稿意见一句话，但别依赖硬截断。 |
 | `changes_summary` | `String` | 本轮实际修改内容与理由；只读或未改时解析为 `"none"` | 改了什么、为什么改。 |
 | `applied_changes` | `bool` | 本轮 reviewer 是否调用过任一写工具（`edit` / `update_plan` 等，由 runtime 守卫范围） | 有没有真动过笔。 |
 | `verdict` | `Option<String>` | 仅 `Code` 时使用：`pass \| fail \| partial \| aborted`；`Plan` 永远为 `None` | code review 给个明确结论。 |

@@ -49,13 +49,13 @@ fn parse_review_block_unclosed_returns_none() {
 }
 
 #[test]
-fn parse_review_block_truncates_summary_to_600() {
+fn parse_review_block_preserves_long_summary_intact() {
     let body = "a".repeat(800);
     let text = format!(
         "<review>\nsummary: {body}\nchanges_summary: none\napplied_changes: false\n</review>"
     );
     let r = parse_review_block(&text).unwrap();
-    assert_eq!(r.summary.len(), 600);
+    assert_eq!(r.summary, body);
 }
 
 #[test]
@@ -66,6 +66,30 @@ fn parse_review_block_with_findings() {
     assert_eq!(r.findings[0].severity, "nit");
     assert_eq!(r.findings[1].area, "todos");
     assert_eq!(r.summary, "see findings");
+}
+
+#[test]
+fn parse_review_block_preserves_multibyte_summary_without_panic() {
+    let body = "修".repeat(250);
+    let text = format!(
+        "<review>\nsummary: {body}\nchanges_summary: none\napplied_changes: false\n</review>"
+    );
+    let r = parse_review_block(&text).unwrap();
+    assert_eq!(r.summary, body);
+    assert_eq!(r.summary.chars().count(), 250);
+}
+
+#[test]
+fn parse_review_block_preserves_findings_alongside_long_summary() {
+    let body = "审".repeat(240);
+    let text = format!(
+        "<review>\nfindings:\n  - {{ severity: concern, area: \"logic\", note: \"missing branch\" }}\n  - {{ severity: suggestion, area: \"tests\", note: \"add regression coverage\" }}\nsummary: {body}\nchanges_summary: none\napplied_changes: false\n</review>"
+    );
+    let r = parse_review_block(&text).unwrap();
+    assert_eq!(r.summary, body);
+    assert_eq!(r.findings.len(), 2);
+    assert_eq!(r.findings[0].area, "logic");
+    assert_eq!(r.findings[1].area, "tests");
 }
 
 #[test]

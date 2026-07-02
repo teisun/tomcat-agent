@@ -495,13 +495,13 @@ checks:
     output_excerpt: "test result: ok. 42 passed"
     result: pass   # pass | fail | skip
 verdict: pass      # pass | fail | partial | aborted
-summary: "≤600 chars"
+summary: "concise, focused verification summary"
 ```
 
 | 字段 | 约束 | 说人话 |
 |------|------|--------|
 | `checks[].command` | `result=pass` 必填；缺则 runtime 单条降 `skip` + warning；关键 build/test 全 `skip` → `verdict=partial`（详 §10） | 没命令别说过；单条漏不诛连。 |
-| `checks[].output_excerpt` | ≤ 500 chars；超长尾部截断（保留命令最后若干行 + `…[truncated]` 尾注） | 输出别撑爆 transcript。 |
+| `checks[].output_excerpt` | 建议短小且证据充分；runtime 不再对 verifier 返回做固定字符上限截断 | 输出要有证据，但不要靠硬截断控体积。 |
 | `verdict` | `aborted`：parse 失败 / 达到 `VERIFIER_MAX_TURNS` 预算仍未正常收口 / parent abort；其他四态见 §4.1.1 Q1 | 验货中断。 |
 | transcript / tool result | `plan.verify` 事件与 `update_plan.verify` 共用 runtime `normalize_for_gate()` 之后的最终 `VerifySummary` | 审计口径和当轮推理口径一致。 |
 | Tool result 挂载 | `update_plan` 成功 JSON 增加 `verify: VerifySummary \| null` | 主 Agent 一眼看见验货结果。 |
