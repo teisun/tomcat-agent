@@ -7,6 +7,7 @@ mod model_thinking;
 pub(crate) mod resume_index;
 pub mod scope;
 pub(crate) mod store;
+pub(crate) mod subagent_transcript;
 pub mod transcript;
 
 pub(crate) use append_message_chain::find_dangling_tail_tool_call_ids;

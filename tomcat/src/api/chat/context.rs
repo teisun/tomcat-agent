@@ -651,6 +651,7 @@ impl ChatContext {
                 context_config: child_agent_context_config.clone(),
                 read_file_state: read_file_state.clone(),
                 openai_files_runtime: openai_files_runtime.clone(),
+                web_fetch_runtime: web_fetch_runtime.clone(),
                 agent_workspace_dir: agent_workspace_dir.clone(),
                 skill_set: skill_set.clone(),
                 skills_config: config.skills.clone(),

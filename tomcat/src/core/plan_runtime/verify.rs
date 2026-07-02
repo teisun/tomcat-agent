@@ -2,7 +2,7 @@
 //!
 //! 设计口径：
 //! - 通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`] 派发；
-//! - 工具白名单固定为 `{read, search_files, list_dir, bash}`；
+//! - 工具白名单固定为 `{read, search_files, list_dir, bash, web_fetch}`；
 //! - 输出必须是 `<verify>...</verify>` block，解析为 [`VerifySummary`]；
 //! - `VERIFIER_MAX_TURNS` 固定 64，不进 TOML。
 
@@ -30,7 +30,8 @@ use crate::infra::event_bus::EventBus;
 pub const VERIFIER_MAX_TURNS: u32 = 64;
 
 /// verifier 子 Agent allowed tools 硬白名单。
-pub(crate) const VERIFIER_ALLOWED_TOOLS: &[&str] = &["read", "search_files", "list_dir", "bash"];
+pub(crate) const VERIFIER_ALLOWED_TOOLS: &[&str] =
+    &["read", "search_files", "list_dir", "bash", "web_fetch"];
 
 pub(crate) fn verifier_allowed_tools_with_policy(expose_skills: bool) -> Vec<&'static str> {
     let mut tools = VERIFIER_ALLOWED_TOOLS.to_vec();
@@ -234,6 +235,7 @@ pub struct ProdVerifierDeps {
     pub context_config: ContextConfig,
     pub read_file_state: Arc<ReadFileState>,
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
+    pub web_fetch_runtime: Arc<crate::core::tools::web_fetch::WebFetchRuntime>,
     pub agent_workspace_dir: std::path::PathBuf,
     pub skill_set: Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>,
     pub skills_config: crate::infra::config::SkillsConfig,
@@ -294,6 +296,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             crate::infra::config::compute_context_budget_chars(&context_config);
         let read_file_state = Arc::clone(&deps.read_file_state);
         let openai_files_runtime = deps.openai_files_runtime.clone();
+        let web_fetch_runtime = Arc::clone(&deps.web_fetch_runtime);
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
         let expose_skills =
@@ -333,6 +336,15 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                 move |spawn_ctx| async move {
                     let child_session_id = spawn_ctx.child_session_id.clone();
                     let cancel_token = spawn_ctx.cancel_token.clone();
+                    let transcript_root = agent_trail_dir.clone();
+                    let transcript_sink =
+                        crate::core::session::subagent_transcript::open_subagent_transcript(
+                            &transcript_root,
+                            &child_session_id,
+                            SubagentType::Verifier,
+                            &model,
+                            &parent_session_id_for_closure,
+                        );
 
                     let cfg = AgentLoopConfig {
                         max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
@@ -351,7 +363,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         read_file_state,
                         openai_files_runtime,
                         checkpoint_store,
-                        message_append_sink: None,
+                        message_append_sink: transcript_sink,
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::Verifier,
@@ -364,7 +376,8 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         },
                     };
                     let mut agent_loop =
-                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone());
+                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone())
+                            .with_web_fetch_runtime(web_fetch_runtime);
                     let initial_messages = vec![
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),
@@ -376,6 +389,12 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         &child_session_id,
                         turns_limit,
                         run_outcome,
+                    );
+                    let mut summary = summary;
+                    crate::core::session::subagent_transcript::append_subagent_transcript_hint(
+                        &mut summary.summary,
+                        &transcript_root,
+                        &child_session_id,
                     );
                     let _ = tx.send(summary.clone());
 

@@ -172,6 +172,15 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                 move |spawn_ctx| async move {
                     let child_session_id = spawn_ctx.child_session_id.clone();
                     let cancel_token = spawn_ctx.cancel_token.clone();
+                    let transcript_root = agent_trail_dir.clone();
+                    let transcript_sink =
+                        crate::core::session::subagent_transcript::open_subagent_transcript(
+                            &transcript_root,
+                            &child_session_id,
+                            SubagentType::Reviewer,
+                            &model,
+                            &parent_session_id_for_closure,
+                        );
 
                     let mut system_text = format!(
                         "{}\n(max_turns budget: {} reasoning turns)\n",
@@ -199,7 +208,7 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         read_file_state,
                         openai_files_runtime,
                         checkpoint_store,
-                        message_append_sink: None,
+                        message_append_sink: transcript_sink,
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::Reviewer,
@@ -225,6 +234,12 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         &child_session_id,
                         turns_limit,
                         run_outcome,
+                    );
+                    let mut summary = summary;
+                    crate::core::session::subagent_transcript::append_subagent_transcript_hint(
+                        &mut summary.summary,
+                        &transcript_root,
+                        &child_session_id,
                     );
                     let _ = tx.send(summary.clone());
 

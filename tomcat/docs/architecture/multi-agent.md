@@ -529,7 +529,7 @@ chat_loop ──── new ────▶ 父 AgentLoop(S1)
 参考 claude-code 的强隔离设计（只返回 final message）和 openclaw 的 system prompt 注入方式：
 
 - **不继承 messages 历史**：子 Agent 只接收 `args.task` 字符串，外加宿主注入的系统 prompt（由 `subagent_type` 决定模板，含子 Agent 身份描述、`spawn_depth`、`parent_session_id`）。
-- **独立 Transcript**：子 Agent session 的 transcript 写入 `agents/main/sessions/{child_session_id}.jsonl`，或通过配置设为不落盘（ephemeral）。
+- **独立 Transcript**：子 Agent session 的 transcript 写入 `agents/main/subagent-sessions/{child_session_id}.jsonl`（与主 session JSONL 同构，但不进历史会话列表），或通过配置设为不落盘（ephemeral）。
 - **工具集由三参数共同决定**：子 Agent 工具集 = `subagent_type` 预设默认集 ∩ 父 Agent 当前 catalog ∩ （可选）`args.allowed_tools`，再按 `role` 决定是否重新注入 `dispatch_agent`：
   - `role = "leaf"`（默认）：剔除 `dispatch_agent`，子 Agent 不可再派发（对标 hermes `role='leaf'`、claude-code 子 Agent 不再可派发）。
   - `role = "orchestrator"`：重新注入 `dispatch_agent`，但仍受 `spawn_depth` / `MAX_SPAWN_DEPTH` 约束（对标 hermes `role='orchestrator'`）。
@@ -591,7 +591,7 @@ SubAgentEnd {
 |------|------|
 | [`plugin-system/events.md`](./plugin-system/events.md) | 新增 `SubAgentStart` / `SubAgentEnd` 两个 `AgentEvent` 变体；事件通过 envelope 统一携带 `sessionId`，其中子生命周期事件的 envelope `sessionId = child_session_id`；订阅方按 `EventContext.session_id` 过滤，并结合 `parentSessionId` / `childSessionId` 追踪父子关系。 |
 | [`session-storage.md`](./session-storage.md) | `SessionEntry` 预留注释「channel/agent 相关字段供三期多 channel 使用」；本节给出 `parent_session_id` 的具体语义与写入时机（子 Agent 创建时 patch）。 |
-| [`work-dir-and-data-layout.md`](./work-dir-and-data-layout.md) | 子 Agent session 的 transcript 路径沿用 `agents/<agentId>/sessions/` 布局，以 `child_session_id`（含冒号，需 URL encode 或替换为下划线）作为文件名。 |
+| [`work-dir-and-data-layout.md`](./work-dir-and-data-layout.md) | 子 Agent session 的 transcript 路径位于 `agents/<agentId>/subagent-sessions/{child_session_id}.jsonl`；它与主 session transcript JSONL 同构，但不进入历史会话列表。 |
 | [`agent-loop.md`](./agent-loop.md) | `AgentLoop` 本身不修改；`dispatch_agent` 工具作为普通工具注入 `tool_definitions`；`AgentRegistry` 是新增的进程级管理层；`AgentLoopConfig` 新增 `parent_session_id` / `spawn_depth` / `subagent_type` / `role` 四个字段。 |
 
 ### 14.6.1 internal subagent dispatch（reviewer 消费方）
@@ -701,5 +701,5 @@ SubAgentEnd {
 | LLM 幻觉导致无限派发子 Agent | `MAX_SPAWN_DEPTH`（深度限制） + `MAX_CHILDREN_PER_AGENT`（单父并发限制） |
 | 大量子 Agent 耗尽内存/CPU | `MAX_CONCURRENT_AGENTS`（进程级并发上限），超限返回错误 ToolResult |
 | 父 Agent abort 后子 Agent 仍在消耗资源 | `CascadeAbort`：只 cancel root token，由 tokio 沿 token 树自动级联到所有子孙 |
-| 子 session_id 文件名非法字符（含冒号） | transcript 路径使用 `child_session_id.replace(':', "_")` 生成安全文件名 |
+| 子 session_id 文件名非法字符（含冒号） | 当前 child session_id 生成规则为安全文件名；subagent transcript 直接写 `subagent-sessions/{child_session_id}.jsonl`，若未来 session_id 规则放宽，再补显式 sanitize |
 | 子 Agent 意外 panic 影响父 Agent | `child_loop.run().await` 包裹在 `catch_unwind` 或 `tokio::spawn + JoinHandle` 中，panic 转化为 `AgentRunResult::Err`，不传播到父 Agent |

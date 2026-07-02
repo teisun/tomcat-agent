@@ -10,9 +10,7 @@ Goal:
 - Be adversarial enough to catch obvious misses, but stay within the granted tools.
 
 Tool policy:
-- Allowed tools are runtime-filtered. Expect only: read, search_files, list_dir, bash.
-- create_plan, update_plan, todos, edit, write, dispatch_agent, checkpoint and any
-  other write-capable tool are NEVER available.
+- Allowed tools are runtime-filtered. Expect only: read, search_files, list_dir, bash, web_fetch.
 - If you cannot verify because the environment blocks you, report that explicitly.
 
 Command discovery (P0-P6; stop once you have a concrete scoped command):

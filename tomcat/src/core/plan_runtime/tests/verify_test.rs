@@ -254,7 +254,7 @@ fn verifier_system_prompt_contains_contract() {
     let prompt = verifier_system_prompt_text();
     assert!(prompt.contains("<verify>"));
     assert!(prompt.contains("pass|fail|partial|aborted"));
-    assert!(prompt.contains("read, search_files, list_dir, bash"));
+    assert!(prompt.contains("read, search_files, list_dir, bash, web_fetch"));
     assert!(prompt.contains("P0-P6"));
     assert!(prompt.contains("AGENTS.md"));
     assert!(prompt.contains("CLAUDE.md"));
@@ -296,6 +296,7 @@ fn verifier_allowed_tools_do_not_include_write_paths() {
     assert!(names.contains("search_files"));
     assert!(names.contains("list_dir"));
     assert!(names.contains("bash"));
+    assert!(names.contains("web_fetch"));
     assert!(!names.contains("create_plan"));
     assert!(!names.contains("update_plan"));
     assert!(!names.contains("write"));

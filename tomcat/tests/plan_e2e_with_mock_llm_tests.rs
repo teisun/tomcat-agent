@@ -21,20 +21,34 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
+use tomcat::core::agent_registry::AgentRegistry;
 use tomcat::core::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, write_plan, PlanFileState, TodoStatus,
+    plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
+    TodoItem, TodoStatus,
 };
 use tomcat::core::plan_runtime::panels::{TodosPanel, TodosPanelSnapshot};
+use tomcat::core::plan_runtime::prod_reviewer::{ProdReviewerDeps, ProdReviewerDispatcher};
 use tomcat::core::plan_runtime::review::{ReviewKind, ReviewSummary};
 use tomcat::core::plan_runtime::state::PlanState;
-use tomcat::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
+use tomcat::core::plan_runtime::verify::{
+    ProdVerifierDeps, ProdVerifierDispatcher, VerifyCheck, VerifySummary,
+};
 use tomcat::core::plan_runtime::{PlanRuntime, ReviewerDispatcher, VerifierDispatcher};
+use tomcat::core::skill::SkillSet;
 use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
+use tomcat::core::tools::pipeline::read_state::ReadFileState;
+use tomcat::core::tools::web_fetch::WebFetchRuntime;
 use tomcat::core::{
     CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
     CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions, RetentionPolicy,
+};
+use tomcat::{
+    AppConfig, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig,
+    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, LlmProvider, NoopStore,
+    PrimitiveExecutor, PrimitiveOperation, ReadResult, SearchFilesArgs, SearchFilesOutput,
+    SessionHeader, StreamEvent, TranscriptEntry, WriteFileResult,
 };
 
 // ─── 共享 fixture 与 spy ───────────────────────────────────────────────────
@@ -153,6 +167,213 @@ impl VerifierDispatcher for QueueVerifier {
             summaries.remove(0)
         }
     }
+}
+
+struct ScriptedLlm {
+    streams: Mutex<Vec<Vec<Result<StreamEvent, AppError>>>>,
+}
+
+impl ScriptedLlm {
+    fn new(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> Self {
+        Self {
+            streams: Mutex::new(streams),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ScriptedLlm {
+    fn provider_name(&self) -> &str {
+        "mock"
+    }
+
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+        Err(AppError::Llm("mock chat not used".to_string()))
+    }
+
+    async fn chat_stream(
+        &self,
+        _req: ChatRequest,
+    ) -> Result<
+        Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+        AppError,
+    > {
+        let mut guard = self.streams.lock();
+        if guard.is_empty() {
+            return Err(AppError::Llm("ScriptedLlm: no more streams".to_string()));
+        }
+        let events = guard.remove(0);
+        drop(guard);
+        Ok(Box::new(tokio_stream::iter(events)))
+    }
+
+    fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+        Ok(0)
+    }
+}
+
+struct UnusedPrimitive;
+
+#[async_trait]
+impl PrimitiveExecutor for UnusedPrimitive {
+    async fn read(
+        &self,
+        _path: &str,
+        _offset: Option<u64>,
+        _limit: Option<u64>,
+        _line_numbers: bool,
+        _hashline: bool,
+        _plugin_id: &str,
+    ) -> Result<ReadResult, AppError> {
+        unreachable!("测试脚本不应走 primitive.read")
+    }
+
+    async fn read_file(&self, _path: &str, _plugin_id: &str) -> Result<String, AppError> {
+        unreachable!("测试脚本不应走 primitive.read_file")
+    }
+
+    async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
+        unreachable!("测试脚本不应走 primitive.list_dir")
+    }
+
+    async fn write_file(
+        &self,
+        _path: &str,
+        _content: &str,
+        _overwrite: bool,
+        _plugin_id: &str,
+    ) -> Result<WriteFileResult, AppError> {
+        unreachable!("测试脚本不应走 primitive.write_file")
+    }
+
+    async fn edit_file(
+        &self,
+        _path: &str,
+        _edits: Vec<EditOperation>,
+        _plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        unreachable!("测试脚本不应走 primitive.edit_file")
+    }
+
+    async fn execute_bash(
+        &self,
+        command: &str,
+        _cwd: Option<&str>,
+        _plugin_id: &str,
+        _argv: Option<&[String]>,
+        _timeout_ms_override: Option<u64>,
+    ) -> Result<BashResult, AppError> {
+        Ok(BashResult {
+            stdout: format!("mock bash ok: {command}"),
+            ..Default::default()
+        })
+    }
+
+    async fn hashline_edit(
+        &self,
+        _path: &str,
+        _segments: Vec<tomcat::core::tools::primitive::HashlineSegment>,
+        _plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        unreachable!("测试脚本不应走 primitive.hashline_edit")
+    }
+
+    async fn search_files(
+        &self,
+        _args: SearchFilesArgs,
+        _plugin_id: &str,
+    ) -> Result<SearchFilesOutput, AppError> {
+        unreachable!("测试脚本不应走 primitive.search_files")
+    }
+
+    async fn require_user_confirmation(
+        &self,
+        _operation: PrimitiveOperation,
+        _preview: &str,
+        _plugin_id: &str,
+    ) -> Result<bool, AppError> {
+        unreachable!("测试脚本不应走 primitive.require_user_confirmation")
+    }
+}
+
+fn scripted_text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: text.to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]
+}
+
+fn scripted_tool_call_stream(
+    tool_name: &str,
+    tool_call_id: &str,
+    arguments_json: &str,
+) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some(tool_call_id.to_string()),
+            name: Some(tool_name.to_string()),
+            arguments_delta: Some(arguments_json.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ]
+}
+
+fn write_test_plan(plan_id: &str, body: &str) {
+    let path = plan_path_for_id(plan_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    write_plan(
+        &path,
+        &PlanFile {
+            frontmatter: PlanFileFrontmatter {
+                plan_id: plan_id.to_string(),
+                goal: "goal".to_string(),
+                state: PlanFileState::Planning,
+                session_key: Some("session-a".into()),
+                session_id: Some("sid-a".into()),
+                created_at: "2026-07-02T00:00:00Z".into(),
+                schema_version: 1,
+                todos: vec![TodoItem {
+                    id: "t1".into(),
+                    content: "step 1".into(),
+                    status: TodoStatus::Pending,
+                }],
+                unknown: Default::default(),
+            },
+            body: body.to_string(),
+        },
+        1000,
+    )
+    .unwrap();
+}
+
+fn subagent_transcript_path(agent_trail_dir: &std::path::Path, child_session_id: &str) -> PathBuf {
+    agent_trail_dir
+        .join("subagent-sessions")
+        .join(format!("{child_session_id}.jsonl"))
+}
+
+fn transcript_lines(path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn transcript_message_count(path: &std::path::Path) -> usize {
+    transcript_lines(path)
+        .into_iter()
+        .skip(1)
+        .filter_map(|line| serde_json::from_str::<TranscriptEntry>(&line).ok())
+        .filter(|entry| matches!(entry, TranscriptEntry::Message(_)))
+        .count()
 }
 
 fn pass_code_review() -> ReviewSummary {
@@ -770,6 +991,188 @@ async fn h10_code_review_long_multibyte_summary_round_trips_without_truncation()
     assert_eq!(out["code_review"]["summary"], long_summary);
     assert_eq!(out["verify"]["verdict"], "pass");
     assert_eq!(out["plan_state_after"], "completed");
+
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn h11_prod_verifier_persists_child_transcript_and_keeps_child_id_aligned() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let (rt, _panel, _ckpt) = build_runtime_with_spies();
+    let plan_id = "persist_verifier_plan";
+    write_test_plan(plan_id, "## Goal\nship verifier\n");
+
+    let agent_trail_dir = home.join(".tomcat").join("agents").join("main");
+    std::fs::create_dir_all(&agent_trail_dir).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::new(vec![
+        scripted_tool_call_stream("bash", "call_bash_1", r#"{"command":"printf verifier-proof"}"#),
+        scripted_text_stream(
+            r#"<verify>
+checks:
+  - name: verifier smoke
+    command: bash printf verifier-proof
+    result: pass
+    output_excerpt: "mock bash ok: printf verifier-proof"
+verdict: pass
+summary: verifier child completed
+</verify>"#,
+        ),
+    ]));
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let registry = AgentRegistry::new();
+    let _root_guard = registry.register_root("parent-verifier").unwrap();
+    let web_fetch_runtime = Arc::new(
+        WebFetchRuntime::new(&AppConfig::default(), agent_trail_dir.join("tool-results")).unwrap(),
+    );
+    let dispatcher = ProdVerifierDispatcher::new(
+        "test_verifier",
+        ProdVerifierDeps {
+            agent_registry: registry.clone(),
+            parent_session_id: "parent-verifier".into(),
+            llm,
+            compaction_provider: None,
+            primitive,
+            event_bus,
+            agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+            checkpoint_store: Arc::new(NoopStore),
+            context_config: ContextConfig::default(),
+            read_file_state: Arc::new(ReadFileState::default()),
+            openai_files_runtime: None,
+            web_fetch_runtime,
+            agent_workspace_dir: workspace.path().to_path_buf(),
+            skill_set: Arc::new(RwLock::new(SkillSet::default())),
+            skills_config: AppConfig::default().skills,
+            plan_runtime: Arc::downgrade(&rt),
+            model: "gpt-5.4-xhigh".into(),
+        },
+    );
+
+    let summary = dispatcher.dispatch(plan_id, "## Goal\nship verifier\n").await;
+    assert_eq!(summary.verdict, "pass");
+    assert!(!summary.child_session_id.is_empty());
+
+    let transcript_path = subagent_transcript_path(&agent_trail_dir, &summary.child_session_id);
+    assert!(transcript_path.exists(), "missing {transcript_path:?}");
+    assert!(
+        summary
+            .summary
+            .contains(&format!("subagent-sessions/{}.jsonl", summary.child_session_id))
+    );
+
+    let lines = transcript_lines(&transcript_path);
+    assert!(lines.len() >= 5, "transcript should contain header/meta/multi-turn messages");
+    let header: SessionHeader = serde_json::from_str(&lines[0]).unwrap();
+    assert_eq!(header.id, summary.child_session_id);
+    assert!(lines[1].contains("\"subagent.transcript.meta\""));
+    assert!(lines[1].contains("\"subagent_type\":\"verifier\""));
+    assert!(
+        transcript_message_count(&transcript_path) >= 3,
+        "expected assistant tool-call + tool + final assistant messages"
+    );
+    assert!(
+        lines.iter()
+            .any(|line| line.contains("mock bash ok: printf verifier-proof"))
+    );
+
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn h12_prod_reviewer_persists_plan_and_code_review_child_transcripts() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let (rt, _panel, _ckpt) = build_runtime_with_spies();
+    let plan_id = "persist_reviewer_plan";
+    write_test_plan(plan_id, "## Goal\nship reviewer\n");
+
+    let agent_trail_dir = home.join(".tomcat").join("agents").join("main");
+    std::fs::create_dir_all(&agent_trail_dir).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::new(vec![
+        scripted_text_stream(
+            r#"<review>
+summary: plan review complete
+changes_summary: none
+applied_changes: false
+</review>"#,
+        ),
+        scripted_text_stream(
+            r#"<review>
+verdict: pass
+summary: code review complete
+changes_summary: none
+applied_changes: false
+</review>"#,
+        ),
+    ]));
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let registry = AgentRegistry::new();
+    let _root_guard = registry.register_root("parent-reviewer").unwrap();
+    let dispatcher = ProdReviewerDispatcher::new(
+        "test_reviewer",
+        ProdReviewerDeps {
+            agent_registry: registry.clone(),
+            parent_session_id: "parent-reviewer".into(),
+            llm,
+            compaction_provider: None,
+            primitive,
+            event_bus,
+            agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+            checkpoint_store: Arc::new(NoopStore),
+            context_config: ContextConfig::default(),
+            read_file_state: Arc::new(ReadFileState::default()),
+            openai_files_runtime: None,
+            agent_workspace_dir: workspace.path().to_path_buf(),
+            skill_set: Arc::new(RwLock::new(SkillSet::default())),
+            skills_config: AppConfig::default().skills,
+            plan_runtime: Arc::downgrade(&rt),
+            model: "gpt-5.4-xhigh".into(),
+            max_turns: 8,
+        },
+    );
+
+    let plan_summary = dispatcher
+        .dispatch(plan_id, "## Goal\nship reviewer\n", ReviewKind::Plan, true)
+        .await;
+    let code_summary = dispatcher
+        .dispatch(plan_id, "## Goal\nship reviewer\n", ReviewKind::Code, false)
+        .await;
+
+    assert_eq!(plan_summary.kind, ReviewKind::Plan);
+    assert_eq!(code_summary.kind, ReviewKind::Code);
+    assert!(!plan_summary.child_session_id.is_empty());
+    assert!(!code_summary.child_session_id.is_empty());
+    assert_ne!(plan_summary.child_session_id, code_summary.child_session_id);
+
+    let plan_path = subagent_transcript_path(&agent_trail_dir, &plan_summary.child_session_id);
+    let code_path = subagent_transcript_path(&agent_trail_dir, &code_summary.child_session_id);
+    assert!(plan_path.exists(), "missing {plan_path:?}");
+    assert!(code_path.exists(), "missing {code_path:?}");
+    assert!(
+        plan_summary
+            .summary
+            .contains(&format!("subagent-sessions/{}.jsonl", plan_summary.child_session_id))
+    );
+    assert!(
+        code_summary
+            .summary
+            .contains(&format!("subagent-sessions/{}.jsonl", code_summary.child_session_id))
+    );
+
+    let plan_header: SessionHeader =
+        serde_json::from_str(&transcript_lines(&plan_path).first().unwrap().clone()).unwrap();
+    let code_header: SessionHeader =
+        serde_json::from_str(&transcript_lines(&code_path).first().unwrap().clone()).unwrap();
+    assert_eq!(plan_header.id, plan_summary.child_session_id);
+    assert_eq!(code_header.id, code_summary.child_session_id);
+    assert!(transcript_lines(&plan_path)[1].contains("\"subagent_type\":\"reviewer\""));
+    assert!(transcript_lines(&code_path)[1].contains("\"subagent_type\":\"reviewer\""));
+    assert!(transcript_message_count(&plan_path) >= 1);
+    assert!(transcript_message_count(&code_path) >= 1);
 
     cleanup_home(&home);
 }

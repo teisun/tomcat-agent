@@ -43,12 +43,12 @@ pub(super) fn reviewer_allowed_tools_description_with_policy(
 }
 
 pub(super) fn is_verifier_whitelisted_tool(name: &str, expose_skills: bool) -> bool {
-    matches!(name, "read" | "search_files" | "list_dir" | "bash")
+    matches!(name, "read" | "search_files" | "list_dir" | "bash" | "web_fetch")
         || (expose_skills && name == "load_skill")
 }
 
 pub(super) fn verifier_allowed_tools_description(expose_skills: bool) -> String {
-    let mut desc = "read/search_files/list_dir/bash".to_string();
+    let mut desc = "read/search_files/list_dir/bash/web_fetch".to_string();
     if expose_skills {
         desc.push_str("/load_skill");
     }

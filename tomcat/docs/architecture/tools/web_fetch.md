@@ -17,7 +17,7 @@
 > 2. **工具配置类型已移位**：`src/infra/config/types.rs` → [`src/infra/config/types/tools.rs`](../../../src/infra/config/types/tools.rs)；聚合结构为 `ToolsConfig { read, write, bash }`。`ToolsWebFetchConfig` 应作为新子表加进 `ToolsConfig`。
 > 3. **权限锚点仍有效**：[`permission/types.rs::PermissionScope`](../../../src/core/permission/types.rs) 当前仍为五值（`Read/Write/Bash/BashApproval/Forbidden`）、[`primitive/types.rs::PrimitiveOperation`](../../../src/core/tools/primitive/types.rs) 仍为四值（`Read/Write/Edit/Bash`）、[`gate.rs::PermissionGate`](../../../src/core/permission/gate.rs) 仍是 `check` + `check_bash` 两法——PR-WF-D 的「新增第六值 `Domain` + `check_domain`」方案**与当前代码一致，可照常落地**。新增的 [`permission/url_like.rs`](../../../src/core/permission/url_like.rs)（`is_url_like` http/https 判定）可供 `validate.rs` 复用。
 > 4. **新依赖**：`Cargo.toml` 当前**无** `moka`（无 LRU 工具）与 `html2md`——PR-WF-S 的缓存与 HTML→Markdown 须各自新增依赖；`reqwest 0.12` / `xxhash-rust(xxh32)` 已在。
-> 5. **新增的子 Agent 工具白名单门闩**（重构引入）：[`tool_exec/guard.rs`](../../../src/core/agent_loop/tool_exec/guard.rs) 的 `is_reviewer_whitelisted_tool` / `is_verifier_whitelisted_tool` 会**拒绝**白名单外的任何工具。`web_fetch` 默认**不在**白名单内——PR-WF-A 须显式决定：reviewer/verifier 子 Agent 是否允许抓取外部 URL（多数审查场景应**保持禁止**，则无需改 guard；若放开则在此二函数补名）。
+> 5. **新增的子 Agent 工具白名单门闩**（重构引入）：[`tool_exec/guard.rs`](../../../src/core/agent_loop/tool_exec/guard.rs) 的 `is_reviewer_whitelisted_tool` / `is_verifier_whitelisted_tool` 会**拒绝**白名单外的任何工具。当前口径是：`web_fetch` 仍**不对 reviewer 开放**，但已对 **verifier** 开放，用于抓取静态网页证据；若后续要扩到 reviewer，再在 guard 白名单中补名并同步 prompt 文案。
 
 ---
 
