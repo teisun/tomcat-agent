@@ -1057,11 +1057,16 @@ fn parse_attachment_part(attachment: &ServeAttachment) -> Result<ChatMessageCont
                 ChatMessageContentPart::file_file_id(file_id, attachment.filename.clone())
                     .map_err(|error| format!("invalid_attachment: {error}"))
             } else {
-                let filename = attachment.filename.clone().ok_or_else(|| {
-                    "invalid_attachment: file attachment requires filename".to_string()
-                })?;
                 let mime_type = attachment.mime_type.clone().ok_or_else(|| {
                     "invalid_attachment: file attachment requires mimeType".to_string()
+                })?;
+                if !mime_type.eq_ignore_ascii_case("application/pdf") {
+                    return Err(format!(
+                        "invalid_attachment: file attachments only support application/pdf; use kind=image for images (got {mime_type})"
+                    ));
+                }
+                let filename = attachment.filename.clone().ok_or_else(|| {
+                    "invalid_attachment: file attachment requires filename".to_string()
                 })?;
                 let data = attachment.data_base64.clone().ok_or_else(|| {
                     "invalid_attachment: file attachment requires dataBase64".to_string()

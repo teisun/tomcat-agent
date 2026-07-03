@@ -332,9 +332,9 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
             "attachments": [
                 {
                     "kind": "file",
-                    "filename": "notes.md",
-                    "mimeType": "text/markdown",
-                    "dataBase64": "IyBoaQ=="
+                    "filename": "notes.pdf",
+                    "mimeType": "application/pdf",
+                    "dataBase64": "JVBERi0xLjQK"
                 }
             ]
         }
@@ -365,12 +365,60 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
     assert_eq!(content[0]["type"].as_str(), Some("input_text"));
     assert_eq!(content[0]["text"].as_str(), Some("summarize attached file"));
     assert_eq!(content[1]["type"].as_str(), Some("input_file"));
-    assert_eq!(content[1]["filename"].as_str(), Some("notes.md"));
+    assert_eq!(content[1]["filename"].as_str(), Some("notes.pdf"));
     assert_eq!(
         content[1]["file_data"].as_str(),
-        Some("data:text/markdown;base64,IyBoaQ==")
+        Some("data:application/pdf;base64,JVBERi0xLjQK")
     );
     assert!(content[1].get("file_id").is_none());
+}
+
+#[test]
+#[serial]
+fn serve_prompt_with_non_pdf_file_attachment_returns_error() {
+    common::setup_logging();
+    let server = spawn_scripted_openai_stream_server(vec![]);
+    let fx = setup_serve_fixture(&server.base_url);
+    configure_openai_responses_fixture(&fx, &server.base_url);
+    let mut child = spawn_serve_child(&fx);
+    let session_id = initialize(&mut child);
+
+    child.send_value(&json!({
+        "type": "prompt",
+        "id": "file-e2e-bad-mime",
+        "sessionId": session_id,
+        "text": "summarize attached file",
+        "params": {
+            "attachments": [
+                {
+                    "kind": "file",
+                    "filename": "notes.md",
+                    "mimeType": "text/markdown",
+                    "dataBase64": "IyBoaQ=="
+                }
+            ]
+        }
+    }));
+
+    let frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("id").and_then(|v| v.as_str()) == Some("file-e2e-bad-mime")
+    });
+    let response = frames
+        .iter()
+        .find(|value| value.get("id").and_then(|v| v.as_str()) == Some("file-e2e-bad-mime"))
+        .expect("bad mime response");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(
+        response["error"].as_str(),
+        Some(
+            "invalid_attachment: file attachments only support application/pdf; use kind=image for images (got text/markdown)"
+        )
+    );
+    assert_eq!(
+        server.captured_requests().len(),
+        0,
+        "non-pdf file attachments should not reach the responses API"
+    );
 }
 
 #[test]
@@ -390,8 +438,8 @@ fn serve_prompt_with_inline_file_attachment_missing_filename_returns_error() {
             "attachments": [
                 {
                     "kind": "file",
-                    "mimeType": "text/markdown",
-                    "dataBase64": "IyBoaQ=="
+                    "mimeType": "application/pdf",
+                    "dataBase64": "JVBERi0xLjQK"
                 }
             ]
         }

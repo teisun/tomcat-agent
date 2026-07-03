@@ -41,6 +41,10 @@ import { WebviewStateStore } from "./state";
 
 const HISTORY_PAGE_ENTRIES = 80;
 
+export const ATTACHMENT_OPEN_DIALOG_FILTERS: Record<string, string[]> = {
+  "PDF & Images": ["png", "jpg", "jpeg", "gif", "webp", "pdf"],
+};
+
 type PendingQuestion = {
   request: AskQuestionWireRequest;
   resolve(response: AskQuestionWireResponse): void;
@@ -117,6 +121,16 @@ function guessMimeType(filePath: string): string {
 
 function inferAttachmentKind(mimeType: string): "file" | "image" {
   return mimeType.startsWith("image/") ? "image" : "file";
+}
+
+export function buildAttachmentOpenDialogOptions(): vscode.OpenDialogOptions {
+  return {
+    canSelectFiles: true,
+    canSelectFolders: false,
+    canSelectMany: true,
+    openLabel: "Attach to Tomcat",
+    filters: ATTACHMENT_OPEN_DIALOG_FILTERS,
+  };
 }
 
 function shouldReconcileSessionState(event: ServeEvent): boolean {
@@ -654,12 +668,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
           return;
         }
-        const picks = await vscode.window.showOpenDialog({
-          canSelectFiles: true,
-          canSelectFolders: false,
-          canSelectMany: true,
-          openLabel: "Attach to Tomcat",
-        });
+        const picks = await vscode.window.showOpenDialog(buildAttachmentOpenDialogOptions());
         if (!picks?.length) {
           return;
         }

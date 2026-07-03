@@ -6,7 +6,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("vscode", () => ({}));
 
-import { parsePlanFrontmatter, readPlanMetadata } from "../provider";
+import {
+  ATTACHMENT_OPEN_DIALOG_FILTERS,
+  buildAttachmentOpenDialogOptions,
+  parsePlanFrontmatter,
+  readPlanMetadata,
+} from "../provider";
 
 describe("plan metadata helpers", () => {
   const tempDirs: string[] = [];
@@ -142,5 +147,17 @@ goal: Home-expanded plan
     } finally {
       process.env.HOME = previousHome;
     }
+  });
+});
+
+describe("attachment picker options", () => {
+  it("limits selectable attachments to pdf and supported image types", () => {
+    expect(buildAttachmentOpenDialogOptions()).toEqual({
+      canSelectFiles: true,
+      canSelectFolders: false,
+      canSelectMany: true,
+      filters: ATTACHMENT_OPEN_DIALOG_FILTERS,
+      openLabel: "Attach to Tomcat",
+    });
   });
 });

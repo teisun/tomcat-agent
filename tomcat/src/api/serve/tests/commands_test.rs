@@ -753,8 +753,8 @@ async fn serve_prompt_file_attachment_without_filename_returns_error() {
                 attachments: vec![ServeAttachment {
                     kind: ServeAttachmentKind::File,
                     filename: None,
-                    mime_type: Some("text/markdown".to_string()),
-                    data_base64: Some("IyBoaQ==".to_string()),
+                    mime_type: Some("application/pdf".to_string()),
+                    data_base64: Some("JVBERi0xLjQK".to_string()),
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -787,6 +787,58 @@ async fn serve_prompt_file_attachment_without_filename_returns_error() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_prompt_non_pdf_file_attachment_returns_error() {
+    let _api_key = install_test_api_key();
+    let stream = vec![Ok(StreamEvent::FinishReason {
+        reason: "stop".to_string(),
+    })];
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("bad-file-type".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "bad file type".to_string(),
+            params: ServeMessageParams {
+                attachments: vec![ServeAttachment {
+                    kind: ServeAttachmentKind::File,
+                    filename: Some("notes.md".to_string()),
+                    mime_type: Some("text/markdown".to_string()),
+                    data_base64: Some("IyBoaQ==".to_string()),
+                    file_id: None,
+                }],
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("bad-file-type")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("bad-file-type"))
+        .expect("non-pdf file attachment response");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(
+        response["error"].as_str(),
+        Some(
+            "invalid_attachment: file attachments only support application/pdf; use kind=image for images (got text/markdown)"
+        )
+    );
+    assert!(
+        requests.0.lock().is_empty(),
+        "non-pdf file attachment should not reach LLM"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
     let _api_key = install_test_api_key();
     let stream = vec![Ok(StreamEvent::FinishReason {
@@ -804,9 +856,9 @@ async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
             params: ServeMessageParams {
                 attachments: vec![ServeAttachment {
                     kind: ServeAttachmentKind::File,
-                    filename: Some("notes.md".to_string()),
-                    mime_type: Some("text/markdown".to_string()),
-                    data_base64: Some("IyBoaQ==".to_string()),
+                    filename: Some("notes.pdf".to_string()),
+                    mime_type: Some("application/pdf".to_string()),
+                    data_base64: Some("JVBERi0xLjQK".to_string()),
                     file_id: None,
                 }],
                 ..ServeMessageParams::default()
@@ -843,7 +895,9 @@ async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
         &parts[1],
         ChatMessageContentPart::InputFile {
             source: FileSource::Inline(ref inline),
-        } if inline.filename == "notes.md" && inline.mime_type == "text/markdown" && !inline.data.is_empty()
+        } if inline.filename == "notes.pdf"
+            && inline.mime_type == "application/pdf"
+            && inline.data == "JVBERi0xLjQK"
     ));
 }
 

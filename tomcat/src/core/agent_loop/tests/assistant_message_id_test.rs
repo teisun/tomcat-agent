@@ -13,6 +13,9 @@ use crate::infra::{wire, DefaultEventBus, EventContext};
 
 use super::mocks::{MockLlmProvider, MockPrimitiveExecutor};
 
+type CapturedIds = Arc<Mutex<Vec<String>>>;
+type AssistantIdCapture = (CapturedIds, CapturedIds);
+
 fn create_session_manager() -> (tempfile::TempDir, SessionManager) {
     let dir = tempfile::tempdir().unwrap();
     let mgr = SessionManager::new(dir.path().to_path_buf());
@@ -23,7 +26,7 @@ fn create_session_manager() -> (tempfile::TempDir, SessionManager) {
 
 fn capture_assistant_ids(
     event_bus: &Arc<DefaultEventBus>,
-) -> (Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>) {
+) -> AssistantIdCapture {
     let message_start_ids = Arc::new(Mutex::new(Vec::<String>::new()));
     let turn_end_ids = Arc::new(Mutex::new(Vec::<String>::new()));
 
