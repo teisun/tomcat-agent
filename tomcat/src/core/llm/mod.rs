@@ -34,14 +34,14 @@ pub use replay_policy::{
     ProviderCompatProfile, ReplayAcceptance, ReplayAction,
 };
 pub use resolver::{DefaultLlmResolver, LlmResolver, LlmScene, ResolvedCall};
-pub use token_usage::SessionTokenUsage;
 pub use thinking_policy::ThinkingLevel;
+pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]
 pub use types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ChatResponse, ChatResponseChoice, ContinuityMetadata, MessageKind, ProviderRefs,
-    ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent, ThinkingSource,
-    TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+    ChatResponse, ChatResponseChoice, ContinuityMetadata, FileSource, ImageSource, MessageKind,
+    ProviderRefs, ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent,
+    ThinkingSource, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
 
 #[cfg(test)]

@@ -1099,6 +1099,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return {
       attachment: {
         dataBase64: Buffer.from(bytes).toString("base64"),
+        filename: path.basename(uri.fsPath),
         kind: inferAttachmentKind(mimeType),
         mimeType,
       },

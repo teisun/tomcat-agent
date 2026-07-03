@@ -143,6 +143,7 @@ export interface WebviewPendingAttachment {
   attachment: {
     dataBase64?: string | null;
     fileId?: string | null;
+    filename?: string | null;
     kind: "file" | "image";
     mimeType?: string | null;
   };

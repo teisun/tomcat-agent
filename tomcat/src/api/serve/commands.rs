@@ -12,11 +12,11 @@ use base64::Engine as _;
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 
+use crate::core::llm::{ChatMessage, ChatMessageContentPart, ThinkingLevel};
+use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::transcript::{
     entry_id, find_entry_line_offset, read_entry_at_offset, TranscriptPage,
 };
-use crate::core::llm::{ChatMessage, ChatMessageContentPart, ThinkingLevel};
-use crate::core::plan_runtime::PlanRuntimeError;
 use crate::AppError;
 use crate::{SessionManager, SessionMode};
 
@@ -25,7 +25,9 @@ use super::types::{
     ListSessionsScope, OutFrame, ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand,
     ServeMessageParams, ServeSessionMode, SetPlanModeAction,
 };
-use super::{cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState};
+use super::{
+    cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
+};
 
 enum TurnAck {
     Accepted,
@@ -48,16 +50,14 @@ fn decode_get_messages_cursor(cursor: &str) -> Result<GetMessagesCursor, AppErro
         .map_err(|error| AppError::Config(format!("invalid get_messages cursor payload: {error}")))
 }
 
-fn encode_get_messages_cursor(
-    offset: u64,
-    boundary_id: Option<&str>,
-) -> Result<String, AppError> {
+fn encode_get_messages_cursor(offset: u64, boundary_id: Option<&str>) -> Result<String, AppError> {
     let cursor = GetMessagesCursor {
         offset,
         boundary_id: boundary_id.map(ToString::to_string),
     };
-    let bytes = serde_json::to_vec(&cursor)
-        .map_err(|error| AppError::Config(format!("serialize get_messages cursor failed: {error}")))?;
+    let bytes = serde_json::to_vec(&cursor).map_err(|error| {
+        AppError::Config(format!("serialize get_messages cursor failed: {error}"))
+    })?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
@@ -330,36 +330,37 @@ pub(crate) async fn handle_command(
                 })),
             )))?;
         }
-        ServeCommand::ListSessions { id, scope } => match scope.unwrap_or(ListSessionsScope::Live) {
-            ListSessionsScope::Live => {
-                state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                    id,
-                    state.registry.active_session_id(),
-                    Some(serde_json::json!({
-                        "activeSessionId": state.registry.active_session_id(),
-                        "sessions": state.registry.list().into_iter().map(|session| {
-                            serde_json::json!({
-                                "sessionId": session.session_id,
-                                "busy": session.busy,
-                                "interrupted": session.interrupted,
-                            })
-                        }).collect::<Vec<_>>()
-                    })),
-                )))?;
-            }
-            ListSessionsScope::Disk => {
-                let slot = resolve_active_slot(&state)?;
-                let sessions_dir = crate::resolve_sessions_dir(&state.cfg)?;
-                let session_manager = SessionManager::new_scoped(
-                    sessions_dir,
-                    slot.ctx
-                        .session_runtime
-                        .session
-                        .current_session_key()
-                        .to_string(),
-                );
-                let current_session_id = session_manager.current_session_id()?;
-                let sessions = session_manager
+        ServeCommand::ListSessions { id, scope } => {
+            match scope.unwrap_or(ListSessionsScope::Live) {
+                ListSessionsScope::Live => {
+                    state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                        id,
+                        state.registry.active_session_id(),
+                        Some(serde_json::json!({
+                            "activeSessionId": state.registry.active_session_id(),
+                            "sessions": state.registry.list().into_iter().map(|session| {
+                                serde_json::json!({
+                                    "sessionId": session.session_id,
+                                    "busy": session.busy,
+                                    "interrupted": session.interrupted,
+                                })
+                            }).collect::<Vec<_>>()
+                        })),
+                    )))?;
+                }
+                ListSessionsScope::Disk => {
+                    let slot = resolve_active_slot(&state)?;
+                    let sessions_dir = crate::resolve_sessions_dir(&state.cfg)?;
+                    let session_manager = SessionManager::new_scoped(
+                        sessions_dir,
+                        slot.ctx
+                            .session_runtime
+                            .session
+                            .current_session_key()
+                            .to_string(),
+                    );
+                    let current_session_id = session_manager.current_session_id()?;
+                    let sessions = session_manager
                     .list_sessions()?
                     .into_iter()
                     .map(|(session_id, entry)| {
@@ -389,16 +390,17 @@ pub(crate) async fn handle_command(
                         })
                     })
                     .collect::<Vec<_>>();
-                state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                    id,
-                    current_session_id.clone(),
-                    Some(serde_json::json!({
-                        "activeSessionId": current_session_id,
-                        "sessions": sessions,
-                    })),
-                )))?;
+                    state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                        id,
+                        current_session_id.clone(),
+                        Some(serde_json::json!({
+                            "activeSessionId": current_session_id,
+                            "sessions": sessions,
+                        })),
+                    )))?;
+                }
             }
-        },
+        }
         ServeCommand::GetState { id, session_id } => {
             let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
             else {
@@ -411,7 +413,12 @@ pub(crate) async fn handle_command(
             let active_plan_id = plan_state
                 .active_plan_id()
                 .map(ToOwned::to_owned)
-                .or_else(|| slot.ctx.session_runtime.plan_runtime.active_planning_plan_id());
+                .or_else(|| {
+                    slot.ctx
+                        .session_runtime
+                        .plan_runtime
+                        .active_planning_plan_id()
+                });
             let active_plan_path_raw = if plan_state.is_plan_attached() {
                 slot.ctx.session_runtime.plan_runtime.active_plan_path()
             } else {
@@ -475,24 +482,25 @@ pub(crate) async fn handle_command(
                 return Ok(());
             }
             match action {
-                SetPlanModeAction::Enter => match slot.ctx.session_runtime.plan_runtime.enter_planning()
-                {
-                    Ok(()) => {
-                        state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                            id,
-                            Some(slot.session_id.clone()),
-                            Some(plan_state_payload(&slot, None)),
-                        )))?;
+                SetPlanModeAction::Enter => {
+                    match slot.ctx.session_runtime.plan_runtime.enter_planning() {
+                        Ok(()) => {
+                            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                                id,
+                                Some(slot.session_id.clone()),
+                                Some(plan_state_payload(&slot, None)),
+                            )))?;
+                        }
+                        Err(error) => {
+                            send_error(
+                                &state,
+                                id,
+                                Some(slot.session_id.clone()),
+                                normalize_plan_runtime_error_code(&error),
+                            )?;
+                        }
                     }
-                    Err(error) => {
-                        send_error(
-                            &state,
-                            id,
-                            Some(slot.session_id.clone()),
-                            normalize_plan_runtime_error_code(&error),
-                        )?;
-                    }
-                },
+                }
                 SetPlanModeAction::Exit => {
                     let exit_result = if matches!(
                         slot.ctx.session_runtime.plan_runtime.mode(),
@@ -526,30 +534,27 @@ pub(crate) async fn handle_command(
                                 | PlanRuntimeError::NotInPlanning(_) => "plan_state_conflict",
                                 _ => normalize_plan_runtime_error_code(&error),
                             };
-                            send_error(
-                                &state,
-                                id,
-                                Some(slot.session_id.clone()),
-                                error_code,
-                            )?;
+                            send_error(&state, id, Some(slot.session_id.clone()), error_code)?;
                         }
                     }
                 }
                 SetPlanModeAction::Build => {
                     let build_target = match plan_id {
                         Some(target) => target,
-                        None => match slot.ctx.session_runtime.plan_runtime.default_build_target() {
-                            Ok(target) => target,
-                            Err(error) => {
-                                send_error(
-                                    &state,
-                                    id,
-                                    Some(slot.session_id.clone()),
-                                    normalize_plan_runtime_error_code(&error),
-                                )?;
-                                return Ok(());
+                        None => {
+                            match slot.ctx.session_runtime.plan_runtime.default_build_target() {
+                                Ok(target) => target,
+                                Err(error) => {
+                                    send_error(
+                                        &state,
+                                        id,
+                                        Some(slot.session_id.clone()),
+                                        normalize_plan_runtime_error_code(&error),
+                                    )?;
+                                    return Ok(());
+                                }
                             }
-                        },
+                        }
                     };
                     match slot
                         .ctx
@@ -558,8 +563,10 @@ pub(crate) async fn handle_command(
                         .build_plan(&build_target, Some(slot.session_id.clone()))
                     {
                         Ok(outcome) => {
-                            let response_payload =
-                                plan_state_payload(&slot, Some(outcome.plan_path.to_string_lossy().to_string()));
+                            let response_payload = plan_state_payload(
+                                &slot,
+                                Some(outcome.plan_path.to_string_lossy().to_string()),
+                            );
                             start_turn(
                                 Arc::clone(&state),
                                 slot,
@@ -593,7 +600,12 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
-            if let Err(error) = slot.ctx.global_services.model_catalog.lookup_explicit(&model) {
+            if let Err(error) = slot
+                .ctx
+                .global_services
+                .model_catalog
+                .lookup_explicit(&model)
+            {
                 send_error(
                     &state,
                     id,
@@ -625,7 +637,12 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
-            if let Err(error) = slot.ctx.global_services.model_catalog.lookup_explicit(&model) {
+            if let Err(error) = slot
+                .ctx
+                .global_services
+                .model_catalog
+                .lookup_explicit(&model)
+            {
                 send_error(
                     &state,
                     id,
@@ -727,15 +744,14 @@ async fn resolve_slot_or_error(
     Ok(Some(slot))
 }
 
-fn resolve_active_slot(
-    state: &ServeState,
-) -> Result<Arc<super::registry::SessionSlot>, AppError> {
+fn resolve_active_slot(state: &ServeState) -> Result<Arc<super::registry::SessionSlot>, AppError> {
     if let Some(active_session_id) = state.registry.active_session_id() {
         if let Some(slot) = state.registry.get(&active_session_id) {
             return Ok(slot);
         }
     }
-    state.registry
+    state
+        .registry
         .list()
         .into_iter()
         .find_map(|summary| state.registry.get(&summary.session_id))
@@ -1013,32 +1029,31 @@ fn parse_attachment_part(attachment: &ServeAttachment) -> Result<ChatMessageCont
                 ChatMessageContentPart::image_file_id(file_id)
                     .map_err(|error| format!("invalid_attachment: {error}"))
             } else {
-                let mime_type = attachment
-                    .mime_type
-                    .clone()
-                    .ok_or_else(|| "invalid_attachment: image attachment requires mimeType".to_string())?;
-                let data = attachment
-                    .data_base64
-                    .clone()
-                    .ok_or_else(|| "invalid_attachment: image attachment requires dataBase64".to_string())?;
+                let mime_type = attachment.mime_type.clone().ok_or_else(|| {
+                    "invalid_attachment: image attachment requires mimeType".to_string()
+                })?;
+                let data = attachment.data_base64.clone().ok_or_else(|| {
+                    "invalid_attachment: image attachment requires dataBase64".to_string()
+                })?;
                 ChatMessageContentPart::image_base64_data(mime_type, data)
                     .map_err(|error| format!("invalid_attachment: {error}"))
             }
         }
         ServeAttachmentKind::File => {
             if let Some(file_id) = attachment.file_id.clone() {
-                ChatMessageContentPart::file_file_id(file_id, None)
+                ChatMessageContentPart::file_file_id(file_id, attachment.filename.clone())
                     .map_err(|error| format!("invalid_attachment: {error}"))
             } else {
-                let mime_type = attachment
-                    .mime_type
-                    .clone()
-                    .ok_or_else(|| "invalid_attachment: file attachment requires mimeType".to_string())?;
-                let data = attachment
-                    .data_base64
-                    .clone()
-                    .ok_or_else(|| "invalid_attachment: file attachment requires dataBase64".to_string())?;
-                ChatMessageContentPart::file_base64_data(None, mime_type, data)
+                let filename = attachment.filename.clone().ok_or_else(|| {
+                    "invalid_attachment: file attachment requires filename".to_string()
+                })?;
+                let mime_type = attachment.mime_type.clone().ok_or_else(|| {
+                    "invalid_attachment: file attachment requires mimeType".to_string()
+                })?;
+                let data = attachment.data_base64.clone().ok_or_else(|| {
+                    "invalid_attachment: file attachment requires dataBase64".to_string()
+                })?;
+                ChatMessageContentPart::file_base64_data(filename, mime_type, data)
                     .map_err(|error| format!("invalid_attachment: {error}"))
             }
         }

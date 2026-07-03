@@ -1942,8 +1942,8 @@ fn user_file_file_id_renders_file_id_field() {
     let (_ins, input) = build_responses_input_test(&[msg]);
     let content = &input[0]["content"];
     assert_eq!(content[0]["type"], "input_file");
-    assert_eq!(content[0]["filename"], "notes.pdf");
     assert_eq!(content[0]["file_id"], "file-xyz");
+    assert!(content[0].get("filename").is_none());
     assert!(content[0].get("file_data").is_none());
 }
 

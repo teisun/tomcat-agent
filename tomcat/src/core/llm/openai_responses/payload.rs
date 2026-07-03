@@ -22,7 +22,7 @@ use crate::core::llm::replay_policy::{
 };
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatResponse,
-    ChatResponseChoice, ReasoningContinuation, ReasoningFormat,
+    ChatResponseChoice, FileSource, ImageSource, ReasoningContinuation, ReasoningFormat,
 };
 
 pub(super) const MAX_OUTPUT_TOKENS_NOTICE: &str = "达到 max_output_tokens，回答可能未完成";
@@ -380,44 +380,39 @@ fn extract_text(content: &Option<ChatMessageContent>) -> Option<String> {
 
 /// 把单个 [`ChatMessageContentPart`] 翻译成 Responses 协议的 `content[i]` JSON。
 ///
-/// `file_id` 通道优先（已上传），否则走 inline `data:` URL；两个通道都缺时退化为
-/// 形状最小的占位（`{type: input_image}` / `{type: input_file}`，由上游 API 报错）。
+/// 类型层已确保：图片/文件的 inline 与 file_id 通道二选一，不存在“半条 part”占位。
 fn part_to_responses_value(p: &ChatMessageContentPart) -> Value {
     match p {
         ChatMessageContentPart::InputText { text } => {
             json!({"type": "input_text", "text": text})
         }
-        ChatMessageContentPart::InputImage {
-            mime_type,
-            data,
-            file_id,
-            detail,
-        } => {
+        ChatMessageContentPart::InputImage { source, detail } => {
             let mut v = json!({"type": "input_image"});
-            if let Some(id) = file_id {
-                v["file_id"] = Value::String(id.clone());
-            } else if let (Some(mt), Some(b64)) = (mime_type, data) {
-                v["image_url"] = Value::String(format!("data:{};base64,{}", mt, b64));
+            match source {
+                ImageSource::Inline(inline) => {
+                    v["image_url"] =
+                        Value::String(format!("data:{};base64,{}", inline.mime_type, inline.data));
+                }
+                ImageSource::Uploaded(uploaded) => {
+                    v["file_id"] = Value::String(uploaded.file_id.clone());
+                }
             }
             if let Some(d) = detail {
                 v["detail"] = Value::String(d.clone());
             }
             v
         }
-        ChatMessageContentPart::InputFile {
-            filename,
-            mime_type,
-            data,
-            file_id,
-        } => {
+        ChatMessageContentPart::InputFile { source } => {
             let mut v = json!({"type": "input_file"});
-            if let Some(name) = filename {
-                v["filename"] = Value::String(name.clone());
-            }
-            if let Some(id) = file_id {
-                v["file_id"] = Value::String(id.clone());
-            } else if let (Some(b64), Some(mt)) = (data, mime_type) {
-                v["file_data"] = Value::String(format!("data:{};base64,{}", mt, b64));
+            match source {
+                FileSource::Inline(inline) => {
+                    v["filename"] = Value::String(inline.filename.clone());
+                    v["file_data"] =
+                        Value::String(format!("data:{};base64,{}", inline.mime_type, inline.data));
+                }
+                FileSource::Uploaded(uploaded) => {
+                    v["file_id"] = Value::String(uploaded.file_id.clone());
+                }
             }
             v
         }

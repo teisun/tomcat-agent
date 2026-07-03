@@ -575,6 +575,12 @@
               "null"
             ]
           },
+          "filename": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "kind": {
             "$ref": "#/definitions/ServeAttachmentKind"
           },

@@ -1,13 +1,14 @@
 use super::*;
 use base64::Engine as _;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serial_test::serial;
 
 use crate::core::llm::{
-    ChatMessageContent, ChatMessageContentPart, LlmProvider, MessageKind, StreamEvent,
+    ChatMessageContent, ChatMessageContentPart, FileSource, ImageSource, LlmProvider, MessageKind,
+    StreamEvent,
 };
 
 async fn wait_for_line(
@@ -91,7 +92,13 @@ fn latest_user_entry(
     session_message_entries(slot)
         .into_iter()
         .rev()
-        .find(|entry| entry.message.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        .find(|entry| {
+            entry
+                .message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                == Some("user")
+        })
         .expect("latest user entry")
 }
 
@@ -330,7 +337,10 @@ async fn serve_new_session_rejects_when_registry_is_full() {
         .expect("read current session after rejection")
         .expect("current session should still exist");
     assert_eq!(state.registry.len(), 1, "registry should remain unchanged");
-    assert_eq!(after_ids, before_ids, "rejected new_session must not create transcript files");
+    assert_eq!(
+        after_ids, before_ids,
+        "rejected new_session must not create transcript files"
+    );
     assert_eq!(
         after_current.session_id, before_current.session_id,
         "rejected new_session must not repoint current session"
@@ -449,6 +459,7 @@ async fn serve_prompt_with_image_attachment_builds_multimodal_message() {
             params: ServeMessageParams {
                 attachments: vec![ServeAttachment {
                     kind: ServeAttachmentKind::Image,
+                    filename: None,
                     mime_type: None,
                     data_base64: None,
                     file_id: Some("file-vision".to_string()),
@@ -487,10 +498,9 @@ async fn serve_prompt_with_image_attachment_builds_multimodal_message() {
     assert!(matches!(
         &parts[1],
         ChatMessageContentPart::InputImage {
-            file_id: Some(file_id),
-            data: None,
+            source: ImageSource::Uploaded(ref uploaded),
             ..
-        } if file_id == "file-vision"
+        } if uploaded.file_id == "file-vision"
     ));
 }
 
@@ -510,6 +520,7 @@ async fn serve_follow_up_with_attachment_queues_multimodal_message_when_busy() {
             params: ServeMessageParams {
                 attachments: vec![ServeAttachment {
                     kind: ServeAttachmentKind::Image,
+                    filename: None,
                     mime_type: None,
                     data_base64: None,
                     file_id: Some("file-follow-up".to_string()),
@@ -543,13 +554,15 @@ async fn serve_follow_up_with_attachment_queues_multimodal_message_when_busy() {
     assert!(matches!(
         &parts[1],
         ChatMessageContentPart::InputImage {
-            file_id: Some(file_id),
-            data: None,
+            source: ImageSource::Uploaded(ref uploaded),
             ..
-        } if file_id == "file-follow-up"
+        } if uploaded.file_id == "file-follow-up"
     ));
     drop(queue);
-    assert_eq!(count_message_entries_with_id(&slot, "follow-up-fixed-id"), 1);
+    assert_eq!(
+        count_message_entries_with_id(&slot, "follow-up-fixed-id"),
+        1
+    );
 }
 
 #[tokio::test]
@@ -571,6 +584,7 @@ async fn serve_prompt_invalid_attachment_returns_error() {
             params: ServeMessageParams {
                 attachments: vec![ServeAttachment {
                     kind: ServeAttachmentKind::Image,
+                    filename: None,
                     mime_type: None,
                     data_base64: Some("Zm9v".to_string()),
                     file_id: None,
@@ -588,9 +602,7 @@ async fn serve_prompt_invalid_attachment_returns_error() {
     .await;
     let response = lines
         .iter()
-        .find(|line| {
-            line.get("id").and_then(serde_json::Value::as_str) == Some("bad-attachment")
-        })
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("bad-attachment"))
         .expect("invalid attachment response");
     assert_eq!(response["success"].as_bool(), Some(false));
     assert_eq!(
@@ -601,6 +613,120 @@ async fn serve_prompt_invalid_attachment_returns_error() {
         requests.0.lock().is_empty(),
         "invalid attachment should not reach LLM"
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_file_attachment_without_filename_returns_error() {
+    let _api_key = install_test_api_key();
+    let stream = vec![Ok(StreamEvent::FinishReason {
+        reason: "stop".to_string(),
+    })];
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("bad-file-attachment".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "bad file".to_string(),
+            params: ServeMessageParams {
+                attachments: vec![ServeAttachment {
+                    kind: ServeAttachmentKind::File,
+                    filename: None,
+                    mime_type: Some("text/markdown".to_string()),
+                    data_base64: Some("IyBoaQ==".to_string()),
+                    file_id: None,
+                }],
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("bad-file-attachment")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("bad-file-attachment")
+        })
+        .expect("invalid file attachment response");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(
+        response["error"].as_str(),
+        Some("invalid_attachment: file attachment requires filename")
+    );
+    assert!(
+        requests.0.lock().is_empty(),
+        "invalid file attachment should not reach LLM"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
+    let _api_key = install_test_api_key();
+    let stream = vec![Ok(StreamEvent::FinishReason {
+        reason: "stop".to_string(),
+    })];
+    let (state, buffer, _temp, slot, requests) =
+        build_initialized_state_with_recorded_streams(vec![stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("file-inline-1".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "summarize file".to_string(),
+            params: ServeMessageParams {
+                attachments: vec![ServeAttachment {
+                    kind: ServeAttachmentKind::File,
+                    filename: Some("notes.md".to_string()),
+                    mime_type: Some("text/markdown".to_string()),
+                    data_base64: Some("IyBoaQ==".to_string()),
+                    file_id: None,
+                }],
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+
+    let captured = requests.0.lock();
+    let user_message = captured[0]
+        .messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, crate::core::llm::ChatMessageRole::User))
+        .expect("user message");
+    let Some(ChatMessageContent::Parts(parts)) = &user_message.content else {
+        panic!(
+            "expected multimodal parts user message, got {:?}",
+            user_message.content
+        );
+    };
+    assert_eq!(parts.len(), 2, "expected text + file parts");
+    assert!(matches!(
+        &parts[0],
+        ChatMessageContentPart::InputText { text } if text == "summarize file"
+    ));
+    assert!(matches!(
+        &parts[1],
+        ChatMessageContentPart::InputFile {
+            source: FileSource::Inline(ref inline),
+        } if inline.filename == "notes.md" && inline.mime_type == "text/markdown" && !inline.data.is_empty()
+    ));
 }
 
 #[tokio::test]
@@ -683,12 +809,10 @@ async fn serve_prompt_without_attachments_falls_back_to_user_text() {
         &user_message.content,
         Some(ChatMessageContent::Text(text)) if text == "plain text"
     ));
-    assert!(
-        user_message
-            .msg_id
-            .as_deref()
-            .is_some_and(|message_id| !message_id.is_empty())
-    );
+    assert!(user_message
+        .msg_id
+        .as_deref()
+        .is_some_and(|message_id| !message_id.is_empty()));
 }
 
 #[tokio::test]
@@ -717,7 +841,10 @@ async fn serve_prompt_blank_user_message_id_falls_back_to_generated_entry_id() {
 
     let entry = latest_user_entry(&slot);
     assert_ne!(entry.id.as_deref(), Some("   "));
-    assert!(entry.id.as_deref().is_some_and(|message_id| !message_id.trim().is_empty()));
+    assert!(entry
+        .id
+        .as_deref()
+        .is_some_and(|message_id| !message_id.trim().is_empty()));
 }
 
 #[tokio::test]
@@ -779,6 +906,7 @@ async fn serve_steer_ignores_attachments() {
             params: ServeMessageParams {
                 attachments: vec![ServeAttachment {
                     kind: ServeAttachmentKind::Image,
+                    filename: None,
                     mime_type: None,
                     data_base64: None,
                     file_id: Some("ignored-file".to_string()),
@@ -847,7 +975,10 @@ async fn serve_busy_steer_queues_and_persists_requested_user_message_id() {
     assert_eq!(queue.len(), 1, "expected one queued steering message");
     assert_eq!(queue[0].msg_id.as_deref(), Some("steer-busy-fixed-id"));
     drop(queue);
-    assert_eq!(count_message_entries_with_id(&slot, "steer-busy-fixed-id"), 1);
+    assert_eq!(
+        count_message_entries_with_id(&slot, "steer-busy-fixed-id"),
+        1
+    );
 }
 
 #[tokio::test]
@@ -918,7 +1049,10 @@ async fn serve_get_messages_returns_cursor_metadata_and_continuous_pages() {
         .as_str()
         .expect("next cursor");
     let decoded = decode_cursor(next_cursor);
-    assert_eq!(decoded["boundaryId"].as_str(), Some(first_page_ids[0].as_str()));
+    assert_eq!(
+        decoded["boundaryId"].as_str(),
+        Some(first_page_ids[0].as_str())
+    );
 
     handle_command(
         Arc::clone(&state),
@@ -948,7 +1082,13 @@ async fn serve_get_messages_returns_cursor_metadata_and_continuous_pages() {
     assert!(second["payload"]["nextCursor"].is_null());
     let all_ids = [payload_message_ids(second), first_page_ids].concat();
     assert_eq!(all_ids.len(), 4);
-    assert_eq!(all_ids.iter().collect::<std::collections::HashSet<_>>().len(), 4);
+    assert_eq!(
+        all_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        4
+    );
 }
 
 #[tokio::test]
@@ -1132,7 +1272,10 @@ async fn serve_get_messages_uses_best_effort_when_boundary_id_disappears() {
         .iter()
         .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("gm-best-effort-2"))
         .expect("second get_messages response");
-    assert_eq!(second.get("success").and_then(serde_json::Value::as_bool), Some(true));
+    assert_eq!(
+        second.get("success").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
     let ids = payload_message_ids(second);
     assert!(!ids.is_empty());
     assert!(!ids.contains(&third_id));
@@ -1201,7 +1344,10 @@ async fn serve_get_messages_returns_boundary_entries_without_truncation() {
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[1]["type"].as_str(), Some("branch_summary"));
     assert_eq!(entries[1]["id"].as_str(), Some("boundary-1"));
-    assert_eq!(entries[2]["message"]["content"].as_str(), Some("after boundary"));
+    assert_eq!(
+        entries[2]["message"]["content"].as_str(),
+        Some("after boundary")
+    );
 }
 
 #[tokio::test]
@@ -1274,14 +1420,20 @@ async fn serve_prompt_with_stale_invalid_model_override_emits_single_agent_end_a
 
     let lines = wait_for_line(&buffer, |line| {
         line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-            && line.get("error").and_then(serde_json::Value::as_str).is_some()
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
     })
     .await;
     let error_ends = lines
         .iter()
         .filter(|line| {
             line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-                && line.get("error").and_then(serde_json::Value::as_str).is_some()
+                && line
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -1398,6 +1550,7 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
             params: ServeMessageParams {
                 attachments: vec![ServeAttachment {
                     kind: ServeAttachmentKind::Image,
+                    filename: None,
                     mime_type: None,
                     data_base64: None,
                     file_id: Some("file-vision".to_string()),
@@ -1410,7 +1563,10 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
     .unwrap();
     let after_first = wait_for_line(&buffer, |line| {
         line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-            && line.get("error").and_then(serde_json::Value::as_str).is_none()
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
     })
     .await;
     assert_eq!(
@@ -1445,14 +1601,20 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
 
     let deepseek_failure = wait_for_line(&buffer, |line| {
         line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-            && line.get("error").and_then(serde_json::Value::as_str).is_some()
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
     })
     .await;
     let deepseek_errors = deepseek_failure
         .iter()
         .filter(|line| {
             line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-                && line.get("error").and_then(serde_json::Value::as_str).is_some()
+                && line
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -1541,7 +1703,10 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
         .iter()
         .filter(|line| {
             line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-                && line.get("error").and_then(serde_json::Value::as_str).is_some()
+                && line
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
         })
         .count();
     assert_eq!(
@@ -1715,7 +1880,10 @@ async fn serve_get_state_tracks_per_model_thinking_level_after_switching_models(
         .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-gpt"))
         .expect("gpt get_state");
 
-    assert_eq!(deepseek["payload"]["model"].as_str(), Some("deepseek-v4-pro"));
+    assert_eq!(
+        deepseek["payload"]["model"].as_str(),
+        Some("deepseek-v4-pro")
+    );
     assert_eq!(deepseek["payload"]["thinkingLevel"].as_str(), Some("xhigh"));
     assert_eq!(gpt["payload"]["model"].as_str(), Some("gpt-5.4"));
     assert_eq!(gpt["payload"]["thinkingLevel"].as_str(), Some("low"));
@@ -1745,7 +1913,9 @@ async fn serve_get_state_reports_interrupted_alongside_busy() {
     .await;
     let response = lines
         .iter()
-        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-interrupted"))
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("state-interrupted")
+        })
         .expect("get_state response");
     let payload = response["payload"].clone();
 
@@ -1778,8 +1948,7 @@ async fn serve_list_sessions_live_reports_interrupted_flag() {
     let response = lines
         .iter()
         .find(|line| {
-            line.get("id").and_then(serde_json::Value::as_str)
-                == Some("list-live-interrupted")
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-live-interrupted")
         })
         .expect("list_sessions response");
     let sessions = response["payload"]["sessions"]
@@ -1836,7 +2005,10 @@ async fn serve_interrupt_rearms_root_token_before_next_turn_can_spawn_subagents(
         .await
         .expect_err("interrupt 后、rearm 前应拒绝派生子 Agent");
     assert!(
-        matches!(blocked, crate::core::agent_registry::SpawnError::ParentAborted(_)),
+        matches!(
+            blocked,
+            crate::core::agent_registry::SpawnError::ParentAborted(_)
+        ),
         "实际错误 = {blocked:?}"
     );
 
@@ -1929,8 +2101,12 @@ async fn serve_set_plan_mode_exit_demotes_idle_executing_plan_before_returning_t
         },
         body: "## Plan\n- pending".into(),
     };
-    write_plan(&plan_path, &plan, slot.ctx.session_runtime.plan_runtime.lock_timeout_ms())
-        .expect("write temp plan");
+    write_plan(
+        &plan_path,
+        &plan,
+        slot.ctx.session_runtime.plan_runtime.lock_timeout_ms(),
+    )
+    .expect("write temp plan");
     slot.ctx
         .session_runtime
         .plan_runtime
@@ -2031,12 +2207,18 @@ async fn serve_get_state_contains_plan_and_session_todos() {
 
     tracing::info!(target: "test", phase = "assert", test = "serve_get_state_contains_plan_and_session_todos");
     assert_eq!(response["success"].as_bool(), Some(true));
-    assert!(payload.get("planPath").is_some(), "get_state payload must include planPath");
+    assert!(
+        payload.get("planPath").is_some(),
+        "get_state payload must include planPath"
+    );
     assert!(
         payload.get("contextUtilizationRatio").is_some(),
         "get_state payload must include contextUtilizationRatio"
     );
-    assert!(payload["planPath"].is_null(), "no active plan => planPath null");
+    assert!(
+        payload["planPath"].is_null(),
+        "no active plan => planPath null"
+    );
     assert!(
         payload["contextUtilizationRatio"].is_null(),
         "fresh session without persisted metrics => contextUtilizationRatio null"
@@ -2052,7 +2234,10 @@ async fn serve_get_state_contains_plan_and_session_todos() {
         .expect("get_state payload must include sessionTodos array");
     assert_eq!(session_todos.len(), 1);
     assert_eq!(session_todos[0]["id"].as_str(), Some("st-1"));
-    assert_eq!(session_todos[0]["content"].as_str(), Some("wire session todos"));
+    assert_eq!(
+        session_todos[0]["content"].as_str(),
+        Some("wire session todos")
+    );
     assert_eq!(session_todos[0]["status"].as_str(), Some("in_progress"));
 }
 
@@ -2096,8 +2281,12 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
         },
         body: "## Plan\n- restore".into(),
     };
-    write_plan(&plan_path, &plan, slot.ctx.session_runtime.plan_runtime.lock_timeout_ms())
-        .expect("write temp plan");
+    write_plan(
+        &plan_path,
+        &plan,
+        slot.ctx.session_runtime.plan_runtime.lock_timeout_ms(),
+    )
+    .expect("write temp plan");
     slot.ctx
         .session_runtime
         .plan_runtime
@@ -2119,7 +2308,9 @@ async fn serve_get_state_includes_active_plan_path_and_context_ratio() {
     .await;
     let response = lines
         .iter()
-        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-active-plan"))
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("state-active-plan")
+        })
         .expect("get_state response");
     let payload = response["payload"].clone();
 
@@ -2191,7 +2382,8 @@ async fn serve_set_thinking_level_persists_across_restart() {
     let temp = tempfile::tempdir().expect("tempdir");
     let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
     let provider: Arc<dyn LlmProvider> = Arc::new(DeterministicMockLlm::new(vec![]));
-    let (state, _buffer, temp, slot) = build_initialized_state_with_provider(temp, cfg.clone(), provider).await;
+    let (state, _buffer, temp, slot) =
+        build_initialized_state_with_provider(temp, cfg.clone(), provider).await;
 
     handle_command(
         Arc::clone(&state),
@@ -2244,13 +2436,23 @@ fn build_shared_model_thinking_uses_global_store_path() {
     let store = build_shared_model_thinking(&cfg).expect("shared model thinking");
     let global_path = crate::resolve_model_thinking_path(&cfg).expect("global model thinking path");
 
-    assert_eq!(store.get("gpt-5.4"), crate::core::llm::ThinkingLevel::Medium);
-    assert!(global_path.exists(), "global model thinking store should be created");
+    assert_eq!(
+        store.get("gpt-5.4"),
+        crate::core::llm::ThinkingLevel::Medium
+    );
+    assert!(
+        global_path.exists(),
+        "global model thinking store should be created"
+    );
 
-    let persisted = std::fs::read_to_string(&global_path).expect("read global model thinking store");
+    let persisted =
+        std::fs::read_to_string(&global_path).expect("read global model thinking store");
     let parsed: serde_json::Value =
         serde_json::from_str(&persisted).expect("parse global model thinking store");
-    assert_eq!(parsed["models"].as_object().map(|models| models.len()), Some(0));
+    assert_eq!(
+        parsed["models"].as_object().map(|models| models.len()),
+        Some(0)
+    );
 }
 
 #[tokio::test]
@@ -2296,6 +2498,13 @@ async fn serve_prompt_passes_per_model_thinking_level_to_main_loop_request() {
     .await;
 
     let captured = requests.0.lock();
-    assert_eq!(captured.len(), 1, "expected exactly one recorded LLM request");
-    assert_eq!(captured[0].thinking_level, Some(crate::core::llm::ThinkingLevel::Xhigh));
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected exactly one recorded LLM request"
+    );
+    assert_eq!(
+        captured[0].thinking_level,
+        Some(crate::core::llm::ThinkingLevel::Xhigh)
+    );
 }

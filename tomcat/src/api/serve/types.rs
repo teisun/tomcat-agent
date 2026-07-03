@@ -26,6 +26,8 @@ pub enum ServeAttachmentKind {
 pub struct ServeAttachment {
     pub kind: ServeAttachmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_base64: Option<String>,

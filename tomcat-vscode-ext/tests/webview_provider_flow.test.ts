@@ -349,6 +349,9 @@ describe("webview provider integration", () => {
       type: "pickAttachment",
     });
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments[0]).toMatchObject({
+      attachment: {
+        filename: "diagram.png",
+      },
       kind: "image",
       label: "diagram.png",
       mimeType: "image/png",
@@ -370,6 +373,7 @@ describe("webview provider integration", () => {
           attachments: [
             expect.objectContaining({
               dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
+              filename: "diagram.png",
               kind: "image",
               mimeType: "image/png",
             }),

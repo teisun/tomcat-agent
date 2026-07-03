@@ -9,8 +9,8 @@
 
 use super::super::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ContinuityMetadata, ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent,
-    ThinkingSource, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+    ContinuityMetadata, FileSource, ImageSource, ReasoningContinuation, ReasoningFormat,
+    ReplayRequirement, StreamEvent, ThinkingSource, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
 use crate::core::llm::openai_files::OpenAiFilesClient;
 
@@ -329,9 +329,7 @@ fn content_part_serde_roundtrip_image_b64() {
     assert!(matches!(
         back,
         ChatMessageContentPart::InputImage {
-            mime_type: Some(_),
-            data: Some(_),
-            file_id: None,
+            source: ImageSource::Inline(_),
             ..
         }
     ));
@@ -358,11 +356,8 @@ fn content_part_serde_roundtrip_file_id() {
     assert!(matches!(
         back,
         ChatMessageContentPart::InputFile {
-            file_id: Some(id),
-            filename: Some(name),
-            data: None,
-            mime_type: None,
-        } if id == "file-xyz" && name == "a.pdf"
+            source: FileSource::Uploaded(ref uploaded),
+        } if uploaded.file_id == "file-xyz" && uploaded.filename.as_deref() == Some("a.pdf")
     ));
 }
 
@@ -411,17 +406,47 @@ fn file_base64_data_roundtrip() {
     use base64::Engine;
 
     let data = base64::engine::general_purpose::STANDARD.encode(b"hello pdf");
-    let p = ChatMessageContentPart::file_base64_data(
-        Some("a.pdf".to_string()),
-        "application/pdf",
-        data.clone(),
-    )
-    .unwrap();
+    let p =
+        ChatMessageContentPart::file_base64_data("a.pdf", "application/pdf", data.clone()).unwrap();
     let j = serde_json::to_value(&p).unwrap();
     assert_eq!(j["type"], "input_file");
     assert_eq!(j["filename"], "a.pdf");
     assert_eq!(j["mime_type"], "application/pdf");
     assert_eq!(j["file_b64"], data);
+}
+
+#[test]
+fn content_part_serde_rejects_inline_file_without_filename() {
+    let err = serde_json::from_value::<ChatMessageContentPart>(serde_json::json!({
+        "type": "input_file",
+        "mime_type": "application/pdf",
+        "file_b64": "UERG"
+    }))
+    .expect_err("inline file without filename should be rejected");
+    assert!(err.to_string().contains("did not match any variant"));
+}
+
+#[test]
+fn content_part_serde_rejects_input_file_with_both_channels() {
+    let err = serde_json::from_value::<ChatMessageContentPart>(serde_json::json!({
+        "type": "input_file",
+        "filename": "a.pdf",
+        "mime_type": "application/pdf",
+        "file_b64": "UERG",
+        "file_id": "file-123"
+    }))
+    .expect_err("input_file with both inline and file_id should be rejected");
+    assert!(err.to_string().contains("did not match any variant"));
+}
+
+#[test]
+fn content_part_serde_rejects_input_file_with_no_source() {
+    let err = serde_json::from_value::<ChatMessageContentPart>(serde_json::json!({
+        "type": "input_file",
+        "filename": "a.pdf"
+    }))
+    .expect_err("input_file without inline data or file_id should be rejected");
+    assert!(err.to_string().contains("did not match any variant"));
 }
 
 #[test]

@@ -278,10 +278,11 @@ async fn tool_exec_image_result_injects_into_next_user_message_parts() {
     );
     match &follow_ups[0] {
         crate::core::llm::ChatMessageContentPart::InputImage {
-            mime_type, data, ..
+            source: crate::core::llm::ImageSource::Inline(inline),
+            ..
         } => {
-            assert_eq!(mime_type.as_deref(), Some("image/png"));
-            assert!(data.as_ref().map(|s| !s.is_empty()).unwrap_or(false));
+            assert_eq!(inline.mime_type, "image/png");
+            assert!(!inline.data.is_empty());
         }
         other => panic!("expected InputImage variant, got {:?}", other),
     }
@@ -318,14 +319,11 @@ async fn tool_exec_pdf_result_injects_into_next_user_message_parts() {
     assert_eq!(follow_ups.len(), 1, "exactly one InputFile part expected");
     match &follow_ups[0] {
         crate::core::llm::ChatMessageContentPart::InputFile {
-            filename,
-            mime_type,
-            data,
-            ..
+            source: crate::core::llm::FileSource::Inline(inline),
         } => {
-            assert_eq!(filename.as_deref(), Some("notes.pdf"));
-            assert_eq!(mime_type.as_deref(), Some("application/pdf"));
-            assert!(data.as_ref().map(|s| !s.is_empty()).unwrap_or(false));
+            assert_eq!(inline.filename, "notes.pdf");
+            assert_eq!(inline.mime_type, "application/pdf");
+            assert!(!inline.data.is_empty());
         }
         other => panic!("expected InputFile variant, got {:?}", other),
     }
@@ -417,17 +415,10 @@ async fn tool_exec_pdf_oversize_uses_cached_file_id_when_runtime_available() {
     assert_eq!(follow_ups.len(), 1);
     match &follow_ups[0] {
         crate::core::llm::ChatMessageContentPart::InputFile {
-            file_id,
-            data,
-            filename,
-            ..
+            source: crate::core::llm::FileSource::Uploaded(uploaded),
         } => {
-            assert_eq!(file_id.as_deref(), Some("file-cached-pdf"));
-            assert!(
-                data.is_none(),
-                "upload path should use file_id not inline base64"
-            );
-            assert_eq!(filename.as_deref(), Some("oversize.pdf"));
+            assert_eq!(uploaded.file_id, "file-cached-pdf");
+            assert_eq!(uploaded.filename.as_deref(), Some("oversize.pdf"));
         }
         other => panic!("expected InputFile(file_id), got {:?}", other),
     }

@@ -243,9 +243,112 @@ fn serve_prompt_with_attachment_roundtrip() {
     assert_eq!(requests.len(), 1, "expected one responses API request");
     let body = extract_json_body(&requests[0]);
     let input = body["input"].as_array().expect("responses input array");
-    let content = input[0]["content"].as_array().expect("responses content array");
+    let content = input[0]["content"]
+        .as_array()
+        .expect("responses content array");
     assert_eq!(content[0]["type"].as_str(), Some("input_text"));
     assert_eq!(content[0]["text"].as_str(), Some("describe attached image"));
     assert_eq!(content[1]["type"].as_str(), Some("input_image"));
     assert_eq!(content[1]["file_id"].as_str(), Some("file-vision"));
+}
+
+#[test]
+#[serial]
+fn serve_prompt_with_inline_file_attachment_roundtrip() {
+    common::setup_logging();
+    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+        responses_sse_delta("file ok"),
+        responses_sse_completed(),
+    ])]);
+    let fx = setup_serve_fixture(&server.base_url);
+    configure_openai_responses_fixture(&fx, &server.base_url);
+    let mut child = spawn_serve_child(&fx);
+    let session_id = initialize(&mut child);
+
+    child.send_value(&json!({
+        "type": "prompt",
+        "id": "file-e2e-1",
+        "sessionId": session_id,
+        "text": "summarize attached file",
+        "params": {
+            "attachments": [
+                {
+                    "kind": "file",
+                    "filename": "notes.md",
+                    "mimeType": "text/markdown",
+                    "dataBase64": "IyBoaQ=="
+                }
+            ]
+        }
+    }));
+
+    let frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
+    });
+    assert!(
+        frames.iter().any(|value| {
+            value.get("type").and_then(|v| v.as_str()) == Some("message_update")
+                && value
+                    .get("assistantMessageEvent")
+                    .and_then(|v| v.get("delta"))
+                    .and_then(|v| v.as_str())
+                    == Some("file ok")
+        }),
+        "expected file attachment prompt to reach agent_end, got {frames:?}"
+    );
+
+    let requests = server.captured_requests();
+    assert_eq!(requests.len(), 1, "expected one responses API request");
+    let body = extract_json_body(&requests[0]);
+    let input = body["input"].as_array().expect("responses input array");
+    let content = input[0]["content"]
+        .as_array()
+        .expect("responses content array");
+    assert_eq!(content[0]["type"].as_str(), Some("input_text"));
+    assert_eq!(content[0]["text"].as_str(), Some("summarize attached file"));
+    assert_eq!(content[1]["type"].as_str(), Some("input_file"));
+    assert_eq!(content[1]["filename"].as_str(), Some("notes.md"));
+    assert_eq!(
+        content[1]["file_data"].as_str(),
+        Some("data:text/markdown;base64,IyBoaQ==")
+    );
+    assert!(content[1].get("file_id").is_none());
+}
+
+#[test]
+#[serial]
+fn serve_prompt_with_inline_file_attachment_missing_filename_returns_error() {
+    common::setup_logging();
+    let fx = setup_serve_fixture("http://127.0.0.1:1");
+    let mut child = spawn_serve_child(&fx);
+    let session_id = initialize(&mut child);
+
+    child.send_value(&json!({
+        "type": "prompt",
+        "id": "file-e2e-missing-name",
+        "sessionId": session_id,
+        "text": "summarize attached file",
+        "params": {
+            "attachments": [
+                {
+                    "kind": "file",
+                    "mimeType": "text/markdown",
+                    "dataBase64": "IyBoaQ=="
+                }
+            ]
+        }
+    }));
+
+    let frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("id").and_then(|v| v.as_str()) == Some("file-e2e-missing-name")
+    });
+    let response = frames
+        .iter()
+        .find(|value| value.get("id").and_then(|v| v.as_str()) == Some("file-e2e-missing-name"))
+        .expect("missing filename response");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(
+        response["error"].as_str(),
+        Some("invalid_attachment: file attachment requires filename")
+    );
 }

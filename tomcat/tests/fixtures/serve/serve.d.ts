@@ -19,6 +19,7 @@ export interface NewSessionParams {
 export interface ServeAttachment {
   dataBase64?: null | string;
   fileId?: null | string;
+  filename?: null | string;
   kind: ServeAttachmentKind;
   mimeType?: null | string;
 }
