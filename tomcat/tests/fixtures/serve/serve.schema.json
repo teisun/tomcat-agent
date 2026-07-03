@@ -810,6 +810,21 @@
         }
       },
       {
+        "description": "会话已真正回到 idle，可再次接收新的 prompt。\n\n与 `AgentEnd` 的区别： - `AgentEnd` 表示本次 attempt / 会话流已给出终态结果； - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。\n\n该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。",
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "agent_idle"
+            ]
+          }
+        }
+      },
+      {
         "type": "object",
         "required": [
           "timestamp",
@@ -2654,6 +2669,21 @@
                 "type": "string",
                 "enum": [
                   "agent_end"
+                ]
+              }
+            }
+          },
+          {
+            "description": "会话已真正回到 idle，可再次接收新的 prompt。\n\n与 `AgentEnd` 的区别： - `AgentEnd` 表示本次 attempt / 会话流已给出终态结果； - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。\n\n该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。",
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent_idle"
                 ]
               }
             }

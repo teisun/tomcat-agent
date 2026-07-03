@@ -17,6 +17,7 @@ use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::transcript::{
     entry_id, find_entry_line_offset, read_entry_at_offset, TranscriptPage,
 };
+use crate::infra::events::{AgentEvent, WireEvent};
 use crate::AppError;
 use crate::{SessionManager, SessionMode};
 
@@ -917,6 +918,7 @@ async fn start_turn(
             }
         }
         slot_for_task.mark_idle();
+        emit_agent_idle(&state_for_task, &slot_for_task);
         *slot_for_task.run_task.lock() = None;
     });
     *slot.run_task.lock() = Some(handle);
@@ -944,6 +946,17 @@ fn emit_agent_end_once(
         "messages": [],
         "error": error.into(),
     }));
+    let _ = state.writer.send(frame);
+}
+
+fn emit_agent_idle(state: &ServeState, slot: &super::registry::SessionSlot) {
+    let frame = OutFrame::Event(
+        serde_json::to_value(WireEvent {
+            session_id: Some(slot.session_id.clone()),
+            event: AgentEvent::AgentIdle,
+        })
+        .expect("agent_idle wire event should serialize"),
+    );
     let _ = state.writer.send(frame);
 }
 

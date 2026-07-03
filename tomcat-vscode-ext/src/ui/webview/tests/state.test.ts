@@ -499,6 +499,66 @@ describe("session state hydration", () => {
     expect(store.snapshot().sessionViews.s1.busy).toBe(false);
   });
 
+  it("keeps busy unchanged when trustBusy is false while still hydrating metadata", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applyEvent({
+      sessionId: "s1",
+      type: "agent_start",
+    });
+
+    store.applySessionState(
+      {
+        busy: false,
+        contextRatio: 0.42,
+        interrupted: false,
+        model: "gpt-5.4",
+        planId: "plan-1",
+        planPath: "/workspace/plan-a.plan.md",
+        planState: "executing",
+        sessionId: "s1",
+        thinkingLevel: "high",
+      },
+      null,
+      "webview",
+      { trustBusy: false },
+    );
+
+    const session = store.snapshot().sessionViews.s1;
+    expect(session.busy).toBe(true);
+    expect(session.contextRatio).toBe(0.42);
+    expect(session.model).toBe("gpt-5.4");
+    expect(session.planId).toBe("plan-1");
+    expect(session.planState).toBe("executing");
+  });
+
+  it("treats agent_idle as the only event that returns the session to idle", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      sessionId: "s1",
+      type: "agent_start",
+    });
+    store.applyEvent({
+      error: null,
+      messages: [],
+      sessionId: "s1",
+      type: "agent_end",
+    });
+
+    expect(store.snapshot().sessionViews.s1.busy).toBe(true);
+
+    store.applyEvent({
+      sessionId: "s1",
+      type: "agent_idle",
+    });
+
+    const snapshot = store.snapshot();
+    expect(snapshot.sessionViews.s1.busy).toBe(false);
+    expect(snapshot.sessions.find((session) => session.sessionId === "s1")?.busy).toBe(false);
+  });
+
   it("hydrates plan cards and context ratio from get_state without duplicating cards", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");

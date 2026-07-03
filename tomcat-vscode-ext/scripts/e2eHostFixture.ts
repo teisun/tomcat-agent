@@ -482,6 +482,10 @@ function finishTurn(sessionId, error = null) {
     sessionId,
     type: "agent_end",
   });
+  send({
+    sessionId,
+    type: "agent_idle",
+  });
 }
 
 function startTurn(sessionId) {

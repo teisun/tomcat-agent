@@ -420,6 +420,8 @@ export type WireEvent = ({
   turnIndex: number;
   type: "turn_start";
 } | {
+  type: "agent_idle";
+} | {
   type: "agent_start";
 }) & {
   sessionId?: null | string;

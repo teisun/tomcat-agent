@@ -19,6 +19,7 @@ fn serve_dts_preserves_wire_event_session_id() {
     let dts = serve_dts();
     assert!(dts.contains("export type WireEvent = "));
     assert!(dts.contains("sessionId?: null | string;"));
+    assert!(dts.contains("type: \"agent_idle\";"));
     assert!(dts.contains("type: \"message_update\";"));
     assert!(dts.contains("type: \"message_start\";"));
     assert!(dts.contains("type: \"message_end\";"));
@@ -97,6 +98,11 @@ fn serve_emitted_event_validates_against_generated_schema() {
             },
         })
         .expect("agent_end sample"),
+        serde_json::to_value(WireEvent {
+            session_id: Some("s1".to_string()),
+            event: AgentEvent::AgentIdle,
+        })
+        .expect("agent_idle sample"),
     ];
 
     for sample in samples {

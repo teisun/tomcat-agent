@@ -76,6 +76,10 @@ pub mod wire {
     // --- AgentEvent（`#[serde(tag = "type", rename_all = "snake_case")]` 下的线格式名）---
     pub const WIRE_AGENT_START: &str = "agent_start";
     pub const WIRE_AGENT_END: &str = "agent_end";
+    /// `AgentEvent::AgentIdle` 的 JSON `type`：整轮任务真正收敛、会话已回到 idle。
+    /// 与 `agent_end` 的区别是：后者可能先于最外层任务尾声发出，前者只在 `mark_idle()`
+    /// 之后发，用作 UI「可再次发送」的权威信号。
+    pub const WIRE_AGENT_IDLE: &str = "agent_idle";
     pub const WIRE_TURN_START: &str = "turn_start";
     pub const WIRE_TURN_END: &str = "turn_end";
     pub const WIRE_MESSAGE_START: &str = "message_start";
@@ -301,6 +305,14 @@ pub enum AgentEvent {
         messages: Vec<Message>,
         error: Option<String>,
     },
+    /// 会话已真正回到 idle，可再次接收新的 prompt。
+    ///
+    /// 与 `AgentEnd` 的区别：
+    /// - `AgentEnd` 表示本次 attempt / 会话流已给出终态结果；
+    /// - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。
+    ///
+    /// 该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。
+    AgentIdle,
     TurnStart {
         #[serde(rename = "turnIndex")]
         turn_index: usize,

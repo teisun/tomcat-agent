@@ -497,7 +497,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         false,
       );
     }
-    await this.refreshSessionState(sessionId);
+    await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessions();
     await this.postState();
   }
@@ -534,7 +534,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       await this.selectSession(preferredSessionId);
       return;
     }
-    await this.refreshSessionState(preferredSessionId);
+    await this.refreshSessionState(preferredSessionId, { trustBusy: true });
     await this.refreshSessionHistory(preferredSessionId);
     this.stateStore.setActiveSession(preferredSessionId);
     await this.postState();
@@ -609,7 +609,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.refreshSessions();
           const fallback = this.sessionPool.pickDefaultSession(this.currentStateToSessionList());
           if (fallback) {
-            await this.refreshSessionState(fallback);
+            await this.refreshSessionState(fallback, { trustBusy: true });
             await this.refreshSessionHistory(fallback);
             this.stateStore.setActiveSession(fallback);
           } else {
@@ -715,7 +715,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           );
         }
         await this.refreshModels();
-        await this.refreshSessionState(sessionId);
+        await this.refreshSessionState(sessionId, { trustBusy: true });
         await this.postState();
         return;
       }
@@ -746,7 +746,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             formatBridgeError("change reasoning effort", error),
           );
         }
-        await this.refreshSessionState(sessionId);
+        await this.refreshSessionState(sessionId, { trustBusy: true });
         await this.postState();
         return;
       }
@@ -779,7 +779,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             formatBridgeError("change plan mode", error),
           );
         }
-        await this.refreshSessionState(sessionId);
+        await this.refreshSessionState(sessionId, { trustBusy: true });
         await this.postState();
         return;
       }
@@ -864,7 +864,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         "webview",
       );
       if (shouldReconcileSessionState(event)) {
-        await this.refreshSessionState(event.sessionId);
+        await this.refreshSessionState(event.sessionId, { trustBusy: false });
       }
     }
     await this.postEvent(event);
@@ -1023,7 +1023,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.postState();
   }
 
-  private async refreshSessionState(sessionId: string): Promise<void> {
+  private async refreshSessionState(
+    sessionId: string,
+    options: {
+      trustBusy?: boolean;
+    } = {},
+  ): Promise<void> {
     const state = await this.deps.sessionRouter.getState(sessionId).catch(() => null);
     if (!state) {
       return;
@@ -1032,6 +1037,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       state,
       this.deps.ownership.ownerOf(sessionId)?.owner ?? null,
       "webview",
+      { trustBusy: options.trustBusy ?? true },
     );
   }
 
@@ -1164,7 +1170,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (this.deps.ownership.ownerOf(sessionId)?.owner === "webview") {
       await this.sessionPool.switchTo(sessionId);
     }
-    await this.refreshSessionState(sessionId);
+    await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessionHistory(sessionId);
     await this.refreshSessions();
     this.stateStore.setActiveSession(sessionId);
@@ -1177,7 +1183,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (claimed) {
       await this.sessionPool.switchTo(sessionId);
     }
-    await this.refreshSessionState(sessionId);
+    await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessionHistory(sessionId);
     await this.refreshSessions();
     // Keep the user-selected session visible even when it cannot be claimed.

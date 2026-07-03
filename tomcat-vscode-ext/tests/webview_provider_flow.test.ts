@@ -1904,7 +1904,7 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
-  it("reconciles interrupted sessions back to an idle webview state", async () => {
+  it("keeps interrupted sessions busy until agent_idle arrives, then returns to idle", async () => {
     const { messenger, provider, sessionState } = buildProvider({
       sessionState: {
         busy: true,
@@ -1927,13 +1927,97 @@ describe("webview provider integration", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const session = provider.currentState().sessionViews["session-1"];
-    expect(session?.busy).toBe(false);
+    let session = provider.currentState().sessionViews["session-1"];
+    expect(session?.busy).toBe(true);
     expect(session?.timeline).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ kind: "warn", text: "Tomcat turn interrupted", type: "message" }),
       ]),
     );
+
+    messenger.emit({
+      sessionId: "session-1",
+      type: "agent_idle",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    session = provider.currentState().sessionViews["session-1"];
+    expect(session?.busy).toBe(false);
+
+    provider.dispose();
+  });
+
+  it("keeps busy true across stale agent_end get_state reconciles until agent_idle arrives", async () => {
+    const { messenger, provider, sessionState } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-agent-idle-success",
+      type: "ready",
+    });
+    messenger.emit({
+      sessionId: "session-1",
+      type: "agent_start",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(provider.currentState().sessionViews["session-1"]?.busy).toBe(true);
+
+    sessionState.busy = true;
+    messenger.emit({
+      error: null,
+      messages: [],
+      sessionId: "session-1",
+      type: "agent_end",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(provider.currentState().sessionViews["session-1"]?.busy).toBe(true);
+
+    messenger.emit({
+      sessionId: "session-1",
+      type: "agent_idle",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const snapshot = provider.currentState();
+    expect(snapshot.sessionViews["session-1"]?.busy).toBe(false);
+    expect(snapshot.sessions.find((session) => session.sessionId === "session-1")?.busy).toBe(false);
+
+    provider.dispose();
+  });
+
+  it("does not resurrect busy when a late agent_end arrives after agent_idle", async () => {
+    const { messenger, provider, sessionState } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-agent-idle-late-end",
+      type: "ready",
+    });
+    messenger.emit({
+      sessionId: "session-1",
+      type: "agent_start",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    messenger.emit({
+      sessionId: "session-1",
+      type: "agent_idle",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(provider.currentState().sessionViews["session-1"]?.busy).toBe(false);
+
+    sessionState.busy = true;
+    messenger.emit({
+      error: null,
+      messages: [],
+      sessionId: "session-1",
+      type: "agent_end",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const snapshot = provider.currentState();
+    expect(snapshot.sessionViews["session-1"]?.busy).toBe(false);
+    expect(snapshot.sessions.find((session) => session.sessionId === "session-1")?.busy).toBe(false);
 
     provider.dispose();
   });

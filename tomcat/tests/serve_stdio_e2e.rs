@@ -45,6 +45,19 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     .expect("write openai-responses models override");
 }
 
+fn count_event(frames: &[serde_json::Value], event_type: &str) -> usize {
+    frames
+        .iter()
+        .filter(|value| value.get("type").and_then(|v| v.as_str()) == Some(event_type))
+        .count()
+}
+
+fn first_event_index(frames: &[serde_json::Value], event_type: &str) -> Option<usize> {
+    frames
+        .iter()
+        .position(|value| value.get("type").and_then(|v| v.as_str()) == Some(event_type))
+}
+
 fn responses_sse_delta(content: &str) -> ScriptedPart {
     ScriptedPart {
         delay_ms: 0,
@@ -83,11 +96,21 @@ fn serve_stdio_user_roundtrip_e2e() {
     }));
 
     let frames = child.recv_until(Duration::from_secs(5), |value| {
-        value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     for value in &frames {
         assert_ndjson_line(value);
     }
+    assert_eq!(count_event(&frames, "agent_end"), 1, "expected one agent_end: {frames:?}");
+    assert_eq!(
+        count_event(&frames, "agent_idle"),
+        1,
+        "expected one agent_idle: {frames:?}"
+    );
+    assert!(
+        first_event_index(&frames, "agent_end") < first_event_index(&frames, "agent_idle"),
+        "agent_idle must arrive after agent_end: {frames:?}"
+    );
     assert!(
         frames.iter().any(|value| {
             value.get("type").and_then(|v| v.as_str()) == Some("message_update")
@@ -99,6 +122,19 @@ fn serve_stdio_user_roundtrip_e2e() {
         }),
         "expected streamed reply, got {frames:?}"
     );
+    child.send_value(&json!({
+        "type": "get_state",
+        "id": "state-after-idle",
+        "sessionId": session_id
+    }));
+    let state_frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("id").and_then(|v| v.as_str()) == Some("state-after-idle")
+    });
+    let state_response = state_frames
+        .iter()
+        .find(|value| value.get("id").and_then(|v| v.as_str()) == Some("state-after-idle"))
+        .expect("state-after-idle response");
+    assert_eq!(state_response["payload"]["busy"].as_bool(), Some(false));
 
     let output = child.wait_for_exit(Duration::from_secs(5));
     assert!(
@@ -141,7 +177,7 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
         "sessionId": session_id.clone()
     }));
     frames.extend(child.recv_until(Duration::from_secs(5), |value| {
-        value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
             && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.as_str())
     }));
 
@@ -161,6 +197,28 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
             && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.as_str())
             && value.get("error").and_then(|v| v.as_str()) == Some("interrupted")
     }));
+    assert!(frames.iter().any(|value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
+            && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.as_str())
+    }));
+    assert!(
+        first_event_index(&frames, "agent_interrupted") < first_event_index(&frames, "agent_end")
+            && first_event_index(&frames, "agent_end") < first_event_index(&frames, "agent_idle"),
+        "interrupt path should settle as agent_interrupted -> agent_end -> agent_idle: {frames:?}"
+    );
+    child.send_value(&json!({
+        "type": "get_state",
+        "id": "state-after-interrupt-idle",
+        "sessionId": session_id
+    }));
+    let state_frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("id").and_then(|v| v.as_str()) == Some("state-after-interrupt-idle")
+    });
+    let state_response = state_frames
+        .iter()
+        .find(|value| value.get("id").and_then(|v| v.as_str()) == Some("state-after-interrupt-idle"))
+        .expect("state-after-interrupt-idle response");
+    assert_eq!(state_response["payload"]["busy"].as_bool(), Some(false));
 }
 
 #[test]

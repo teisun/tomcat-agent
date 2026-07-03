@@ -1046,9 +1046,17 @@ export class WebviewStateStore {
     payload: SessionStatePayload,
     owner: FrontendOwnerKind | null,
     frontend: FrontendOwnerKind,
+    options: {
+      trustBusy?: boolean;
+    } = {},
   ): void {
     const session = this.ensureSession(payload.sessionId);
-    session.busy = effectiveBusy(payload.busy, payload.interrupted);
+    const trustBusy = options.trustBusy ?? true;
+    const nextBusy = effectiveBusy(payload.busy, payload.interrupted);
+    if (trustBusy) {
+      session.busy = nextBusy;
+      this.syncTabBusy(payload.sessionId, nextBusy);
+    }
     session.model = payload.model ?? null;
     session.thinkingLevel = payload.thinkingLevel ?? null;
     session.planId = payload.planId ?? null;
@@ -1314,22 +1322,26 @@ export class WebviewStateStore {
       }
       case "agent_start":
         session.busy = true;
+        this.syncTabBusy(session.sessionId, true);
         clearActiveAssistant(runtime);
         return;
       case "agent_end":
-        session.busy = false;
         clearActiveAssistant(runtime);
         if (frame.error && frame.error !== "interrupted") {
           pushMessage(session, "error", frame.error);
         }
         return;
       case "agent_interrupted":
-        session.busy = false;
         clearActiveAssistant(runtime);
         markRunningToolsInterrupted(session);
         if (!messageExistsAtTail(session, "warn", "Tomcat turn interrupted")) {
           pushMessage(session, "warn", "Tomcat turn interrupted");
         }
+        return;
+      case "agent_idle":
+        session.busy = false;
+        this.syncTabBusy(session.sessionId, false);
+        clearActiveAssistant(runtime);
         return;
       case "llm_notice":
         pushMessage(session, "notice", frame.message);
@@ -1656,6 +1668,23 @@ export class WebviewStateStore {
       isCurrent: false,
       ownedByThisFrontend: owner === frontend,
       owner,
+      sessionId,
+      title: null,
+      updatedAt: null,
+    });
+  }
+
+  private syncTabBusy(sessionId: string, busy: boolean): void {
+    const existing = this.state.sessions.find((session) => session.sessionId === sessionId);
+    if (existing) {
+      existing.busy = busy;
+      return;
+    }
+    this.state.sessions.push({
+      busy,
+      isCurrent: false,
+      ownedByThisFrontend: false,
+      owner: null,
       sessionId,
       title: null,
       updatedAt: null,

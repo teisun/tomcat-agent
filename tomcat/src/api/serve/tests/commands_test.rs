@@ -25,6 +25,17 @@ async fn wait_for_line(
     read_ndjson_lines(buffer)
 }
 
+fn count_event(lines: &[serde_json::Value], event_type: &str) -> usize {
+    lines.iter()
+        .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some(event_type))
+        .count()
+}
+
+fn first_event_index(lines: &[serde_json::Value], event_type: &str) -> Option<usize> {
+    lines.iter()
+        .position(|line| line.get("type").and_then(serde_json::Value::as_str) == Some(event_type))
+}
+
 fn append_history_message(
     slot: &Arc<crate::api::serve::SessionSlot>,
     role: &str,
@@ -405,6 +416,113 @@ async fn serve_prompt_drives_agent_run() {
                     == Some(session_id.as_str())
         }),
         "expected agent_end, got {lines:?}"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "hello".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-idle".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "say hello".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
+    })
+    .await;
+    assert_eq!(count_event(&lines, "agent_end"), 1, "expected one agent_end: {lines:?}");
+    assert_eq!(count_event(&lines, "agent_idle"), 1, "expected one agent_idle: {lines:?}");
+    assert!(
+        first_event_index(&lines, "agent_end") < first_event_index(&lines, "agent_idle"),
+        "agent_idle must arrive after agent_end: {lines:?}"
+    );
+    assert!(
+        !slot.is_busy(),
+        "observing agent_idle implies slot should already be idle"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-after-idle".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-idle")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-idle"))
+        .expect("state-after-idle response");
+    assert_eq!(response["payload"]["busy"].as_bool(), Some(false));
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial(env_lock)]
+async fn serve_prompt_with_precancelled_turn_emits_agent_idle_once() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "should never finish normally".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-precancel".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "interrupt immediately".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    slot.ctx.session_runtime.cancel_token.lock().cancel();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
+    })
+    .await;
+    assert_eq!(count_event(&lines, "agent_idle"), 1, "expected one agent_idle: {lines:?}");
+    let interrupted_end = lines.iter().find(|line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line.get("error").and_then(serde_json::Value::as_str) == Some("interrupted")
+    });
+    assert!(
+        interrupted_end.is_some(),
+        "precancelled turn should terminate as interrupted: {lines:?}"
+    );
+    assert!(
+        !slot.is_busy(),
+        "precancelled interrupted turn should leave the slot idle"
     );
 }
 
@@ -1384,6 +1502,100 @@ async fn serve_prompt_panic_isolation_emits_agent_end_error() {
         }),
         "expected panic-isolated agent_end, got {lines:?}"
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_panic_isolation_emits_agent_idle_once() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_panicking_provider().await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("panic-idle".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "panic".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
+    })
+    .await;
+    assert_eq!(count_event(&lines, "agent_end"), 1, "expected one panic agent_end: {lines:?}");
+    assert_eq!(count_event(&lines, "agent_idle"), 1, "expected one panic agent_idle: {lines:?}");
+    assert!(
+        first_event_index(&lines, "agent_end") < first_event_index(&lines, "agent_idle"),
+        "panic path should emit agent_idle after agent_end: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line.get("error").and_then(serde_json::Value::as_str)
+                    == Some("serve session task panicked")
+        }),
+        "panic path should still surface the panic agent_end: {lines:?}"
+    );
+    assert!(!slot.is_busy(), "panic path should restore the slot to idle");
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_with_invalid_model_override_emits_agent_idle_once() {
+    let _api_key = install_test_api_key();
+    let stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "recovered".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+
+    slot.ctx
+        .session_runtime
+        .session
+        .switch_current_model(None, Some("totally-missing-model"))
+        .expect("seed stale model override");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("invalid-override-idle".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "hello".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
+    })
+    .await;
+    assert_eq!(count_event(&lines, "agent_end"), 1, "expected one failed agent_end: {lines:?}");
+    assert_eq!(count_event(&lines, "agent_idle"), 1, "expected one failed agent_idle: {lines:?}");
+    assert!(
+        first_event_index(&lines, "agent_end") < first_event_index(&lines, "agent_idle"),
+        "failed pre-loop resolve should still emit agent_idle after agent_end: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|message| message.contains("totally-missing-model"))
+        }),
+        "failed path should mention the invalid override in agent_end: {lines:?}"
+    );
+    assert!(!slot.is_busy(), "failed path should restore the slot to idle");
 }
 
 #[tokio::test]
