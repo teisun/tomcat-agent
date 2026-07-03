@@ -74,7 +74,7 @@ describe("extension manifest contract", () => {
 
   it("declares the Tomcat webview container and view", async () => {
     const manifest = await readManifest();
-    const containers = manifest.contributes?.viewsContainers?.activitybar ?? [];
+    const containers = manifest.contributes?.viewsContainers?.secondarySidebar ?? [];
     const views = manifest.contributes?.views?.["tomcat-sidebar"] ?? [];
 
     expect(containers).toEqual(
