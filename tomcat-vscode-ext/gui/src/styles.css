@@ -1489,6 +1489,7 @@ input:focus-visible {
   flex-direction: column;
   flex: 0 0 auto;
   gap: 8px;
+  margin-inline: -6px;
 }
 
 .tc-composer__surface {
@@ -1506,15 +1507,15 @@ input:focus-visible {
 }
 
 .tc-composer__editor {
-  background: var(--vscode-input-background);
-  border: 1px solid var(--vscode-input-border, rgba(127, 127, 127, 0.3));
-  border-radius: 4px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
   color: var(--vscode-input-foreground);
   line-height: 1.45;
   min-height: 84px;
   outline: none;
   overflow-wrap: anywhere;
-  padding: 8px 10px;
+  padding: 4px 2px;
   white-space: pre-wrap;
 }
 
@@ -1526,11 +1527,20 @@ input:focus-visible {
   margin-top: 0.8em;
 }
 
+.tc-composer__editor p.is-editor-empty:first-child {
+  position: relative;
+}
+
 .tc-composer__editor p.is-editor-empty:first-child::before {
   color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground));
   content: attr(data-placeholder);
-  float: left;
+  left: 0;
+  max-width: 100%;
   pointer-events: none;
+  position: absolute;
+  text-overflow: ellipsis;
+  top: 0;
+  white-space: nowrap;
 }
 
 .tc-composer__editor .tc-chip--reference {
@@ -1546,12 +1556,18 @@ input:focus-visible {
   align-items: center;
   display: flex;
   flex-wrap: nowrap;
-  gap: 6px;
+  gap: 2px;
   overflow: hidden;
 }
 
 .tc-composer__bar .tc-field {
+  border-radius: 4px;
   gap: 0;
+}
+
+.tc-composer__bar .tc-field:hover,
+.tc-composer__bar .tc-field:focus-within {
+  background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.12));
 }
 
 .tc-composer__bar .tc-field > span:first-child {
@@ -1559,9 +1575,27 @@ input:focus-visible {
 }
 
 .tc-composer__bar .tc-field select {
-  border-radius: 4px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  color: var(--vscode-foreground);
   height: 34px;
-  padding: 6px 8px;
+  padding: 4px 6px;
+}
+
+.tc-composer__bar .tc-field select:focus,
+.tc-composer__bar .tc-field select:focus-visible {
+  box-shadow: none;
+  outline: none;
+  outline-offset: 0;
+}
+
+.tc-composer__bar-sep {
+  align-self: center;
+  color: var(--vscode-descriptionForeground);
+  flex: 0 0 auto;
+  opacity: 0.4;
+  pointer-events: none;
 }
 
 .tc-composer__context {
@@ -1583,10 +1617,11 @@ input:focus-visible {
 }
 
 .tc-notice {
-  border-radius: 9px;
+  background: transparent;
+  border-radius: 0;
   font-size: 11px;
   line-height: 1.35;
-  padding: 4px 8px;
+  padding: 0;
 }
 
 .tc-notice--left {
@@ -1603,7 +1638,6 @@ input:focus-visible {
 }
 
 .tc-notice--info {
-  background: rgba(127, 127, 127, 0.08);
   color: var(--vscode-descriptionForeground);
 }
 
@@ -1613,20 +1647,28 @@ input:focus-visible {
     var(--vscode-focusBorder, #3794ff) 14%,
     transparent
   );
+  border-radius: 5px;
   color: var(--vscode-foreground);
   font-weight: 600;
+  padding: 4px 8px;
 }
 
 .tc-notice--plan {
-  background: var(--vscode-badge-background, rgba(77, 170, 252, 0.16));
-  color: var(--vscode-badge-foreground, var(--vscode-foreground));
+  color: var(--vscode-foreground);
+  font-weight: 500;
 }
 
 .tc-notice--warning {
   background: var(--vscode-inputValidation-warningBackground, rgba(204, 167, 0, 0.12));
+  border-radius: 5px;
   color: var(--vscode-foreground);
   flex: 1 1 auto;
+  padding: 4px 8px;
   white-space: normal;
+}
+
+.tc-notice__tip {
+  font-weight: 600;
 }
 
 .tc-icon-button,
@@ -1643,6 +1685,22 @@ input:focus-visible {
 .tc-icon-button {
   background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.15));
   border-radius: 999px;
+}
+
+.tc-composer__bar .tc-icon-button {
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.tc-composer__bar .tc-icon-button:hover:not(:disabled),
+.tc-composer__bar .tc-icon-button:focus-visible {
+  background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.12));
+  border-radius: 6px;
+  color: var(--vscode-foreground);
 }
 
 .tc-send-button {

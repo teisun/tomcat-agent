@@ -633,7 +633,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                     className={`tc-notice tc-notice--${dragNotice.tone} tc-notice--left`}
                     data-testid="composer-notice-drag"
                   >
-                    {dragNotice.text}
+                    {dragNotice.tone === "info" ? (
+                      <>
+                        <strong className="tc-notice__tip">Tip:</strong> {dragNotice.text}
+                      </>
+                    ) : (
+                      dragNotice.text
+                    )}
                   </span>
                 ) : null}
                 {planNotice ? (
@@ -658,6 +664,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           >
             +
           </button>
+          <span aria-hidden="true" className="tc-composer__bar-sep">
+            |
+          </span>
 
           <label className="tc-field tc-field--compact tc-field--mode">
             <span>Mode</span>
@@ -672,6 +681,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <option value="plan">Plan</option>
             </select>
           </label>
+          <span aria-hidden="true" className="tc-composer__bar-sep">
+            |
+          </span>
 
           <label className="tc-field tc-field--compact tc-field--model">
             <span>Model</span>
@@ -690,6 +702,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               ))}
             </select>
           </label>
+          <span aria-hidden="true" className="tc-composer__bar-sep">
+            |
+          </span>
 
           <label className="tc-field tc-field--compact tc-field--effort">
             <span>Effort</span>

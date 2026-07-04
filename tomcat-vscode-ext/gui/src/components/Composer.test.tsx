@@ -99,7 +99,8 @@ describe("Composer", () => {
     expect(
       [...notices.children].map((node) => (node as HTMLElement).dataset.testid),
     ).toEqual(["composer-notice-drag", "composer-notice-plan"]);
-    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("拖文件请按住 Shift");
+    expect(screen.getByText("Tip:", { selector: "strong" }).className).toContain("tc-notice__tip");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
     expect(screen.getByTestId("composer-notice-drag").className).toContain("tc-notice--left");
     expect(screen.getByTestId("composer-notice-drag").getAttribute("aria-hidden")).toBe("true");
     expect(screen.getByTestId("composer-notice-plan").className).toContain("tc-notice--right");
@@ -215,7 +216,7 @@ describe("Composer", () => {
       },
     } as unknown as DataTransfer;
 
-    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
 
     fireEvent.dragOver(surface, { dataTransfer });
     expect(surface.className).toContain("tc-composer__surface--drop-active");
@@ -224,7 +225,7 @@ describe("Composer", () => {
     fireEvent.drop(surface, { dataTransfer });
     expect(onResolveDrop).toHaveBeenCalledWith(["file:///workspace/src/app.ts"]);
     expect(surface.className).not.toContain("tc-composer__surface--drop-active");
-    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
   });
 
   it("prevents default on dragenter and hides the Shift hint once content exists", () => {
@@ -239,7 +240,7 @@ describe("Composer", () => {
 
     fireEvent(surface, enterEvent);
     expect(enterEvent.defaultPrevented).toBe(true);
-    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
 
     act(() => {
       ref.current?.insertReference({
