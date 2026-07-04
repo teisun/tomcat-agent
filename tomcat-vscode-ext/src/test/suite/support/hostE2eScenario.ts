@@ -1759,14 +1759,33 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
 export async function assertWebviewCrossOwnerPlanFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
+  for (const ownership of api.__testing.getOwnership()) {
+    if (ownership.owner === "webview") {
+      api.__testing.releaseSessionOwnership(ownership.sessionId, "webview");
+    }
+  }
+
   const participantTurn = await api.__testing.runParticipantTurn({
     prompt: "participant owner",
   });
+  assert.equal(
+    participantTurn.result?.errorDetails?.message,
+    undefined,
+    "expected the participant turn to claim its session before the webview switches in",
+  );
   const sessionId = participantTurn.result?.metadata?.sessionId;
   assert.equal(typeof sessionId, "string");
 
+  await api.__testing.reloadWebview();
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
+  await waitForWebviewState(
+    api,
+    (candidate) =>
+      candidate.sessions.some((session) => session.sessionId === sessionId)
+        ? candidate
+        : undefined,
+  );
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: { sessionId },
@@ -1777,10 +1796,12 @@ export async function assertWebviewCrossOwnerPlanFlow(
   await waitForWebviewState(
     api,
     (candidate) => {
-      const activeSessionId = candidate.activeSessionId;
-      if (activeSessionId !== sessionId) {
-        return undefined;
-      }
+      return candidate.activeSessionId === sessionId ? candidate : undefined;
+    },
+  );
+  await waitForWebviewState(
+    api,
+    (candidate) => {
       return candidate.sessionViews[sessionId!]?.conflictMessage ? candidate : undefined;
     },
   );
@@ -2019,6 +2040,21 @@ export async function assertWebviewFileDropReferenceFlow(
   await vscode.window.showTextDocument(document, { preview: false });
   await pause(300);
 
+  const idleSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.html.includes('data-testid="composer-dnd-hint"') &&
+      candidate.html.includes("拖文件请按住 Shift")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    idleSnapshot.html.includes("拖文件请按住 Shift"),
+    "expected the idle composer to teach the Shift drag requirement",
+  );
+
   await api.__testing.sendWebviewDomAction({
     kind: "dragOverTestId",
     testId: "composer-surface",
@@ -2027,7 +2063,8 @@ export async function assertWebviewFileDropReferenceFlow(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
-      candidate.html.includes("tc-composer__surface--drop-active")
+      candidate.html.includes("tc-composer__surface--drop-active") &&
+      candidate.html.includes("松手加入上下文")
         ? candidate
         : undefined,
     20_000,
@@ -2035,6 +2072,10 @@ export async function assertWebviewFileDropReferenceFlow(
   assert.ok(
     dragSnapshot.html.includes("tc-composer__surface--drop-active"),
     "expected composer surface to show the drag-over highlight",
+  );
+  assert.ok(
+    dragSnapshot.html.includes("松手加入上下文"),
+    "expected the active drag hint to confirm the drop target",
   );
   captureTranscriptVisual("file-drop-reference-hover", "sidebar", "drop-context.md");
   await api.__testing.sendWebviewDomAction({
@@ -2086,6 +2127,101 @@ export async function assertWebviewFileDropReferenceFlow(
     "expected distinct file drops to remain while duplicate file drops dedupe away",
   );
   captureTranscriptVisual("file-drop-reference", "sidebar", "drop-context.md");
+}
+
+export async function assertWebviewPickContextFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-pick-context-new-session",
+  );
+
+  const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
+  const imagePath = path.join(workspaceDir, "pick-context-image.png");
+  const codePath = path.join(workspaceDir, "pick-context.ts");
+  const folderPath = path.join(workspaceDir, "pick-context-folder");
+  await fs.writeFile(imagePath, "png-bytes", "utf8");
+  await fs.writeFile(codePath, "export const pickContext = true;\n", "utf8");
+  await fs.mkdir(folderPath, { recursive: true });
+
+  const baselineSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  const baselineAttachmentCount =
+    (baselineSnapshot.html.match(/data-testid="attachment-chip"/gu) ?? []).length;
+  const baselineReferenceCount =
+    (baselineSnapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
+
+  api.__testing.setOpenDialogHandler(() => [
+    vscode.Uri.file(imagePath),
+    vscode.Uri.file(codePath),
+    vscode.Uri.file(folderPath),
+  ]);
+
+  try {
+    await api.__testing.sendWebviewDomAction({
+      kind: "clickTestId",
+      testId: "attachment-add",
+    });
+
+    const snapshot = await waitForWebviewDomSnapshot(
+      api,
+      (candidate) => {
+        const attachmentCount = (candidate.html.match(/data-testid="attachment-chip"/gu) ?? []).length;
+        const referenceCount = (candidate.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
+        return (
+          candidate.activeSessionId === sessionId &&
+          attachmentCount === baselineAttachmentCount + 1 &&
+          referenceCount === baselineReferenceCount + 2 &&
+          candidate.html.includes("pick-context-image.png") &&
+          candidate.html.includes("pick-context.ts") &&
+          candidate.html.includes("pick-context-folder/")
+        )
+          ? candidate
+          : undefined;
+      },
+      20_000,
+    );
+
+    assert.equal(
+      (snapshot.html.match(/data-testid="attachment-chip"/gu) ?? []).length,
+      baselineAttachmentCount + 1,
+      "expected the picker to add exactly one pending attachment",
+    );
+    assert.equal(
+      (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length,
+      baselineReferenceCount + 2,
+      "expected the picker to add two context reference chips",
+    );
+
+    const settled = await waitForWebviewState(
+      api,
+      (state) => {
+        const view = state.sessionViews[sessionId];
+        if (!view || view.pendingAttachments.length !== 1) {
+          return undefined;
+        }
+        return {
+          attachments: view.pendingAttachments,
+        };
+      },
+      20_000,
+    );
+
+    assert.equal(settled.attachments[0]?.label, "pick-context-image.png");
+    assert.equal(settled.attachments[0]?.kind, "image");
+  } finally {
+    api.__testing.setOpenDialogHandler(undefined);
+  }
 }
 
 function transcriptVisualArtifactPath(filename: string): string {

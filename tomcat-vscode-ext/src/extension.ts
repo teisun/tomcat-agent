@@ -188,6 +188,13 @@ export interface TomcatExtensionApi {
     sendWebviewIntent(
       intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>,
     ): Promise<void>;
+    setOpenDialogHandler(
+      handler:
+        | ((
+            options: vscode.OpenDialogOptions,
+          ) => Thenable<readonly vscode.Uri[] | undefined> | readonly vscode.Uri[] | undefined)
+        | undefined,
+    ): void;
     setParticipantUiOverrides(
       overrides: Parameters<ParticipantCommands["setUiOverrides"]>[0],
     ): void;
@@ -469,6 +476,11 @@ export async function activate(
     }
   };
 
+  let testOpenDialogHandler:
+    | ((
+        options: vscode.OpenDialogOptions,
+      ) => Thenable<readonly vscode.Uri[] | undefined> | readonly vscode.Uri[] | undefined)
+    | undefined;
   const webviewProvider = new TomcatWebviewViewProvider({
     extensionUri: context.extensionUri,
     getDefaultCwd,
@@ -478,6 +490,8 @@ export async function activate(
     messenger,
     ownership,
     sessionRouter,
+    showOpenDialog: (options) =>
+      testOpenDialogHandler?.(options) ?? vscode.window.showOpenDialog(options),
   });
   const selectionCodeLensProvider = new TomcatSelectionCodeLensProvider();
   let selectionCodeLensTimer: ReturnType<typeof setTimeout> | undefined;
@@ -945,6 +959,9 @@ export async function activate(
       },
       sendWebviewDomAction: async (action) => {
         await webviewProvider.dispatchTestDomAction(action);
+      },
+      setOpenDialogHandler: (handler) => {
+        testOpenDialogHandler = handler;
       },
       setParticipantUiOverrides: (overrides) => {
         commands.setUiOverrides(overrides);

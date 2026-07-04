@@ -313,7 +313,7 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
-      type: "pickAttachment";
+      type: "pickContext";
       data?: {
         sessionId?: string | null;
       };

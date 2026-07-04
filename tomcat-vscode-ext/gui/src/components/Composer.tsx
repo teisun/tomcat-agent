@@ -55,7 +55,7 @@ function extractUriExtension(uri: string): string | null {
   }
 }
 
-function buildAttachmentHint(capabilities?: string[]): string | null {
+function buildPickerHint(capabilities?: string[]): string | null {
   if (!capabilities) {
     return null;
   }
@@ -65,12 +65,12 @@ function buildAttachmentHint(capabilities?: string[]): string | null {
     return null;
   }
   if (!supportsVision && !supportsFiles) {
-    return "当前模型不支持图片/PDF 附件；新附件发送时会提示切换模型。";
+    return "当前模型不支持图片/PDF 附件；图片/PDF 会先加入待发送列表，发送时会提示切换模型。";
   }
   if (!supportsVision) {
-    return "当前模型不支持图片附件；新图片发送时会提示切换模型。";
+    return "当前模型不支持图片附件；图片会先加入待发送列表，发送时会提示切换模型。";
   }
-  return "当前模型不支持 PDF 附件；新 PDF 发送时会提示切换模型。";
+  return "当前模型不支持 PDF 附件；PDF 会先加入待发送列表，发送时会提示切换模型。";
 }
 
 function buildDropHint(capabilities: string[] | undefined, uris: string[]): string | null {
@@ -88,13 +88,13 @@ function buildDropHint(capabilities: string[] | undefined, uris: string[]): stri
   });
   const includesPdf = uris.some((uri) => extractUriExtension(uri) === ".pdf");
   if (includesImage && !supportsVision && includesPdf && !supportsFiles) {
-    return "当前模型不支持图片/PDF 附件；当前拖入会作为文件引用插入。";
+    return "当前模型不支持图片/PDF 附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
   }
   if (includesImage && !supportsVision) {
-    return "当前模型不支持图片附件；当前拖入会作为文件引用插入。";
+    return "当前模型不支持图片附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
   }
   if (includesPdf && !supportsFiles) {
-    return "当前模型不支持 PDF 附件；当前拖入会作为文件引用插入。";
+    return "当前模型不支持 PDF 附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
   }
   return null;
 }
@@ -333,7 +333,7 @@ interface ComposerProps {
   modeValue: "chat" | "plan";
   modelValue: string;
   thinkingLevelValue: "" | "high" | "low" | "medium" | "xhigh";
-  onAddAttachment(): void;
+  onPickContext(): void;
   onDraftChange(draft: ComposerDraft): void;
   onModeChange(value: "chat" | "plan"): void;
   onModelChange(value: string): void;
@@ -353,7 +353,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   modeValue,
   modelValue,
   thinkingLevelValue,
-  onAddAttachment,
+  onPickContext,
   onDraftChange,
   onModeChange,
   onModelChange,
@@ -442,6 +442,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         view.dispatch(view.state.tr.insertText(text));
         return true;
       },
+      handleDrop(_view, event) {
+        const uris = event.dataTransfer ? extractDropUris(event.dataTransfer) : [];
+        if (!uris.length) {
+          return false;
+        }
+        event.preventDefault();
+        return true;
+      },
     },
     content: {
       content: [
@@ -519,6 +527,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setDropActive(true);
   };
 
+  const handleDragEnter = (event: DragEvent<HTMLDivElement>) => {
+    if (!canPrompt) {
+      return;
+    }
+    event.preventDefault();
+  };
+
   const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
     if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
       return;
@@ -546,12 +561,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setDropActive(false);
   };
 
-  const handleAddAttachment = () => {
-    const hint = buildAttachmentHint(modelCapabilities);
+  const handlePickContext = () => {
+    const hint = buildPickerHint(modelCapabilities);
     if (hint) {
       setCapabilityHint(hint);
     }
-    onAddAttachment();
+    onPickContext();
   };
 
   return (
@@ -560,18 +575,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         className={`tc-composer__surface${dropActive ? " tc-composer__surface--drop-active" : ""}`}
         data-testid="composer-surface"
         onDragEnd={handleDragEnd}
+        onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
       >
         <EditorContent editor={editor} />
+        {canPrompt && (dropActive || !draft.hasContent) ? (
+          <div
+            aria-hidden="true"
+            className={`tc-composer__hint${dropActive ? " tc-composer__hint--active" : ""}`}
+            data-testid="composer-dnd-hint"
+          >
+            {dropActive ? "松手加入上下文" : "拖文件请按住 Shift"}
+          </div>
+        ) : null}
         <div className="tc-composer__bar" data-testid="composer-bar">
           <button
-            aria-label="Add attachment"
+            aria-label="添加文件/文件夹/图片"
             className="tc-icon-button"
             data-testid="attachment-add"
             disabled={!canPrompt}
-            onClick={handleAddAttachment}
+            onClick={handlePickContext}
+            title="添加文件/文件夹/图片"
             type="button"
           >
             +
@@ -659,7 +685,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       {capabilityHint ? (
         <div className="tc-composer__footer">
           <span
-            className="tc-chip tc-chip--warning tc-composer__hint"
+            className="tc-chip tc-chip--warning tc-composer__capability-hint"
             data-testid="composer-capability-hint"
           >
             {capabilityHint}

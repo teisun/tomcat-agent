@@ -347,7 +347,7 @@ describe("webview provider integration", () => {
 
     await provider.dispatchTestIntent({
       messageId: "pick-1",
-      type: "pickAttachment",
+      type: "pickContext",
     });
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments[0]).toMatchObject({
       attachment: {
@@ -402,6 +402,95 @@ describe("webview provider integration", () => {
     expect(sentUserMessage).not.toHaveProperty("retryable");
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toHaveLength(0);
 
+    provider.dispose();
+  });
+
+  it("routes mixed picker selections into attachments and references", async () => {
+    const { provider } = buildProvider();
+    __testing.registerFile("/workspace/diagram.png", "png-bytes");
+    __testing.registerFile("/workspace/src/app.ts", "export const answer = 42;\n");
+    __testing.registerDirectory("/workspace/src/folder");
+    __testing.registerFile("/outside/log.txt", "outside-log");
+    __testing.setOpenDialogHandler(() => [
+      vscode.Uri.file("/workspace/diagram.png"),
+      vscode.Uri.file("/workspace/src/app.ts"),
+      vscode.Uri.file("/workspace/src/folder"),
+      vscode.Uri.file("/outside/log.txt"),
+    ]);
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-pick-context",
+      type: "ready",
+    });
+
+    const postInsertReference = vi
+      .spyOn(provider, "postInsertReference")
+      .mockResolvedValue(undefined);
+
+    await provider.dispatchTestIntent({
+      messageId: "pick-context-1",
+      type: "pickContext",
+    });
+
+    expect(postInsertReference).toHaveBeenCalledTimes(3);
+    expect(postInsertReference).toHaveBeenNthCalledWith(
+      1,
+      "session-1",
+      {
+        kind: "file",
+        label: "app.ts",
+        path: "src/app.ts",
+        type: "reference",
+      },
+    );
+    expect(postInsertReference).toHaveBeenNthCalledWith(
+      2,
+      "session-1",
+      {
+        kind: "file",
+        label: "folder/",
+        path: "src/folder/",
+        type: "reference",
+      },
+    );
+    expect(postInsertReference).toHaveBeenNthCalledWith(
+      3,
+      "session-1",
+      {
+        kind: "file",
+        label: "log.txt",
+        path: "/outside/log.txt",
+        type: "reference",
+      },
+    );
+    expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([
+      expect.objectContaining({
+        attachment: expect.objectContaining({
+          dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
+          filename: "diagram.png",
+          kind: "image",
+          mimeType: "image/png",
+        }),
+        kind: "image",
+        label: "diagram.png",
+        mimeType: "image/png",
+        path: "/workspace/diagram.png",
+      }),
+    ]);
+
+    const attachmentId = provider.currentState().sessionViews["session-1"]?.pendingAttachments[0]?.id;
+    expect(attachmentId).toBeTruthy();
+
+    await provider.dispatchTestIntent({
+      data: {
+        attachmentId: attachmentId ?? "missing-attachment-id",
+        sessionId: "session-1",
+      },
+      messageId: "remove-picked-attachment",
+      type: "removeAttachment",
+    });
+
+    expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([]);
     provider.dispose();
   });
 
@@ -465,9 +554,10 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
-  it("normalizes dropped uris into file references before inserting them", async () => {
+  it("routes dropped uris into matching reference and attachment channels", async () => {
     const { provider } = buildProvider();
     __testing.registerFile("/workspace/src/app.ts", "export const answer = 42;\n");
+    __testing.registerFile("/workspace/assets/mockup.png", "png-bytes");
     __testing.registerDirectory("/workspace/src/folder");
 
     await provider.dispatchTestIntent({
@@ -484,15 +574,15 @@ describe("webview provider integration", () => {
         sessionId: "session-1",
         uris: [
           vscode.Uri.file("/workspace/src/app.ts").toString(),
+          vscode.Uri.file("/workspace/assets/mockup.png").toString(),
           vscode.Uri.file("/workspace/src/folder").toString(),
-          vscode.Uri.file("/outside/log.txt").toString(),
         ],
       },
       messageId: "drop-1",
       type: "resolveDrop",
     });
 
-    expect(postInsertReference).toHaveBeenCalledTimes(3);
+    expect(postInsertReference).toHaveBeenCalledTimes(2);
     expect(postInsertReference).toHaveBeenNthCalledWith(
       1,
       "session-1",
@@ -513,16 +603,20 @@ describe("webview provider integration", () => {
         type: "reference",
       },
     );
-    expect(postInsertReference).toHaveBeenNthCalledWith(
-      3,
-      "session-1",
-      {
-        kind: "file",
-        label: "log.txt",
-        path: "/outside/log.txt",
-        type: "reference",
-      },
-    );
+    expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toEqual([
+      expect.objectContaining({
+        attachment: expect.objectContaining({
+          dataBase64: Buffer.from("png-bytes", "utf8").toString("base64"),
+          filename: "mockup.png",
+          kind: "image",
+          mimeType: "image/png",
+        }),
+        kind: "image",
+        label: "mockup.png",
+        mimeType: "image/png",
+        path: "/workspace/assets/mockup.png",
+      }),
+    ]);
 
     provider.dispose();
   });

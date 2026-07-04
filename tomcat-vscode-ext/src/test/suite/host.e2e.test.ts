@@ -14,6 +14,7 @@ import {
   assertWebviewDiffFlow,
   assertWebviewCrossOwnerPlanFlow,
   assertWebviewFileDropReferenceFlow,
+  assertWebviewPickContextFlow,
   assertWebviewGiantGroupLazyLoadFlow,
   assertWebviewInterruptFlow,
   assertWebviewMultiSessionFlow,
@@ -145,5 +146,10 @@ suite("Tomcat host E2E", () => {
   test("deduplicates dropped file references in the webview composer", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewFileDropReferenceFlow(api);
+  });
+
+  test("routes smart picker selections into attachments and context chips", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewPickContextFlow(api);
   });
 });

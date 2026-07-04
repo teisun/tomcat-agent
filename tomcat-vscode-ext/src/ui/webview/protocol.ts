@@ -264,7 +264,7 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
-      type: "pickAttachment";
+      type: "pickContext";
       data?: {
         sessionId?: string | null;
       };
@@ -476,7 +476,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "ready":
     case "listSessions":
       return true;
-    case "pickAttachment":
+    case "pickContext":
       return value.data === undefined || isRecord(value.data);
     case "prompt":
     case "steer":

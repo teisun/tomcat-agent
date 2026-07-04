@@ -889,8 +889,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         modelValue={activeSession?.model ?? ""}
         thinkingLevelValue={normalizeThinkingLevel(activeSession?.thinkingLevel)}
         ref={composerRef}
-        onAddAttachment={() =>
-          postIntent(vscodeApi, "pickAttachment", {
+        onPickContext={() =>
+          postIntent(vscodeApi, "pickContext", {
             sessionId: activeSession?.sessionId ?? null,
           })
         }

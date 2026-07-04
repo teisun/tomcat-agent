@@ -37,16 +37,12 @@ import {
   type WebviewReference,
   type WebviewStateSnapshot,
 } from "./protocol";
-import { resolveUriToFileReference } from "./contextReferences";
+import { buildFileReference } from "./contextReferences";
 import { SessionOwnershipTracker } from "./ownership";
 import { TomcatSessionPool } from "./sessionPool";
 import { WebviewStateStore } from "./state";
 
 const HISTORY_PAGE_ENTRIES = 80;
-
-export const ATTACHMENT_OPEN_DIALOG_FILTERS: Record<string, string[]> = {
-  "PDF & Images": ["png", "jpg", "jpeg", "gif", "webp", "pdf"],
-};
 
 type PendingQuestion = {
   request: AskQuestionWireRequest;
@@ -70,6 +66,9 @@ export interface TomcatWebviewProviderDeps {
   messenger: TomcatMessenger;
   ownership: SessionOwnershipTracker;
   sessionRouter: SessionRouter;
+  showOpenDialog?(
+    options: vscode.OpenDialogOptions,
+  ): Thenable<readonly vscode.Uri[] | undefined> | readonly vscode.Uri[] | undefined;
 }
 
 function getNonce(): string {
@@ -146,13 +145,55 @@ function inferAttachmentKind(mimeType: string): "file" | "image" {
   return mimeType.startsWith("image/") ? "image" : "file";
 }
 
+type PickedUriKind = "attachment" | "reference";
+
+type PickedUriMetadata = {
+  isDirectory: boolean;
+  mimeType: string;
+};
+
+type ResolvedPickedUri =
+  | {
+      attachment: WebviewPendingAttachment;
+      kind: "attachment";
+    }
+  | {
+      kind: "reference";
+      reference: WebviewReference;
+    };
+
+function isAttachmentMimeType(mimeType: string): boolean {
+  return mimeType === "application/pdf" || mimeType.startsWith("image/");
+}
+
+function classifyPickedUriMetadata(metadata: PickedUriMetadata): PickedUriKind {
+  if (metadata.isDirectory) {
+    return "reference";
+  }
+  return isAttachmentMimeType(metadata.mimeType) ? "attachment" : "reference";
+}
+
+async function readPickedUriMetadata(uri: vscode.Uri): Promise<PickedUriMetadata> {
+  const stat = await vscode.workspace.fs.stat(uri).then(
+    (value) => value,
+    () => null,
+  );
+  return {
+    isDirectory: stat?.type === vscode.FileType.Directory,
+    mimeType: guessMimeType(uri.fsPath || uri.path),
+  };
+}
+
+export async function classifyPickedUri(uri: vscode.Uri): Promise<PickedUriKind> {
+  return classifyPickedUriMetadata(await readPickedUriMetadata(uri));
+}
+
 export function buildAttachmentOpenDialogOptions(): vscode.OpenDialogOptions {
   return {
     canSelectFiles: true,
-    canSelectFolders: false,
+    canSelectFolders: true,
     canSelectMany: true,
-    openLabel: "Attach to Tomcat",
-    filters: ATTACHMENT_OPEN_DIALOG_FILTERS,
+    openLabel: "Add to Tomcat",
   };
 }
 
@@ -458,6 +499,63 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return this.currentState().sessionViews[sessionId]?.pendingAttachments ?? [];
   }
 
+  private async showOpenDialog(
+    options: vscode.OpenDialogOptions,
+  ): Promise<readonly vscode.Uri[] | undefined> {
+    return this.deps.showOpenDialog?.(options) ?? vscode.window.showOpenDialog(options);
+  }
+
+  private async resolvePickedUri(uri: vscode.Uri): Promise<ResolvedPickedUri> {
+    const metadata = await readPickedUriMetadata(uri);
+    if (classifyPickedUriMetadata(metadata) === "attachment") {
+      return {
+        attachment: await this.readPendingAttachment(uri, metadata.mimeType),
+        kind: "attachment",
+      };
+    }
+    return {
+      kind: "reference",
+      reference: buildFileReference(uri, {
+        isDirectory: metadata.isDirectory,
+      }),
+    };
+  }
+
+  private async ingestPickedUris(
+    sessionId: string,
+    uris: readonly vscode.Uri[],
+  ): Promise<void> {
+    const resolved = (
+      await Promise.all(
+        uris.map(async (uri) => {
+          try {
+            return await this.resolvePickedUri(uri);
+          } catch {
+            return null;
+          }
+        }),
+      )
+    ).filter((entry): entry is ResolvedPickedUri => entry !== null);
+    if (!resolved.length) {
+      return;
+    }
+
+    const existing = this.currentState().sessionViews[sessionId]?.pendingAttachments ?? [];
+    const nextAttachments = [...existing];
+    for (const entry of resolved) {
+      if (entry.kind === "reference") {
+        await this.postInsertReference(sessionId, entry.reference);
+        continue;
+      }
+      nextAttachments.push(entry.attachment);
+    }
+
+    if (nextAttachments.length !== existing.length) {
+      this.stateStore.setPendingAttachments(sessionId, nextAttachments);
+      await this.postState();
+    }
+  }
+
   private lookupRetryableUserMessage(
     sessionId: string,
     messageId: string,
@@ -714,34 +812,29 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
           return;
         }
+        const uris: vscode.Uri[] = [];
         for (const rawUri of intent.data.uris) {
           try {
-            const uri = vscode.Uri.parse(rawUri);
-            const reference = await resolveUriToFileReference(uri);
-            await this.postInsertReference(sessionId, reference);
+            uris.push(vscode.Uri.parse(rawUri));
           } catch {
             // Ignore malformed drop payload entries; the editor keeps the rest.
           }
         }
+        await this.ingestPickedUris(sessionId, uris);
         return;
       }
-      case "pickAttachment": {
+      case "pickContext": {
         await this.ensureInitialized();
         const sessionId = await this.ensureWebviewSession(intent.data?.sessionId ?? null);
         if (!sessionId) {
           await this.postState();
           return;
         }
-        const picks = await vscode.window.showOpenDialog(buildAttachmentOpenDialogOptions());
+        const picks = await this.showOpenDialog(buildAttachmentOpenDialogOptions());
         if (!picks?.length) {
           return;
         }
-        const attachments = await Promise.all(
-          picks.map(async (uri) => this.readPendingAttachment(uri)),
-        );
-        const existing = this.currentState().sessionViews[sessionId]?.pendingAttachments ?? [];
-        this.stateStore.setPendingAttachments(sessionId, [...existing, ...attachments]);
-        await this.postState();
+        await this.ingestPickedUris(sessionId, picks);
         return;
       }
       case "removeAttachment": {
@@ -1181,9 +1274,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.postState();
   }
 
-  private async readPendingAttachment(uri: vscode.Uri): Promise<WebviewPendingAttachment> {
+  private async readPendingAttachment(
+    uri: vscode.Uri,
+    mimeType = guessMimeType(uri.fsPath || uri.path),
+  ): Promise<WebviewPendingAttachment> {
     const bytes = await vscode.workspace.fs.readFile(uri);
-    const mimeType = guessMimeType(uri.fsPath);
     return {
       attachment: {
         dataBase64: Buffer.from(bytes).toString("base64"),

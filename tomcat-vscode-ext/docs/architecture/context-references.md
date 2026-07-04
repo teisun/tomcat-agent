@@ -3,7 +3,7 @@
 > 适用范围：`tomcat-vscode-ext` 新增两类“上下文引用”能力：
 >
 > 1. 编辑器选区通过 `Add to Tomcat Chat` 注入到聊天输入框；
-> 2. 文件通过拖拽注入到聊天输入框；
+> 2. 文件/文件夹通过智能 `+` 与 `Shift` 拖拽注入到聊天输入框；
 > 3. 两者都以**内联原子 chip + 有序 segments** 进入 transcript、webview UI 与 LLM payload。
 >
 > 单一事实源：
@@ -62,16 +62,18 @@ segments = [
 ### 2.1 目标
 
 1. 选中文本后，用户可以通过 CodeLens / 右键菜单 / 快捷键把选区放进聊天输入框。
-2. 用户可以把文件拖到输入框里，形成文件引用 chip。
-3. 输入框里的引用是可见、可 hover、可删除、可回放的。
-4. transcript 历史回放后，用户消息仍然保持引用 chip，而不是退化成一整段纯文本。
-5. 发给 LLM 时，引用顺序必须与用户输入顺序一致。
+2. 用户可以点 `+` 选择任意文件/文件夹；图片/PDF 进附件，其他文件/文件夹进上下文 chip。
+3. 用户按住 `Shift` 从 VS Code Explorer 拖工作区文件到输入框时，行为与 `+` 共用同一套分类逻辑。
+4. 输入框里的引用是可见、可 hover、可删除、可回放的。
+5. transcript 历史回放后，用户消息仍然保持引用 chip，而不是退化成一整段纯文本。
+6. 发给 LLM 时，引用顺序必须与用户输入顺序一致。
 
 ### 2.2 非目标
 
-1. 不在这次里做真正的二进制附件复用系统；文件拖拽这里只传**文件路径引用**，不是把文件内容整包塞进 transcript。
-2. 不在这次里引入富文本格式化能力；composer 仍然只是“纯文本 + 原子 chip”。
-3. 不在这次里把 Completions 变成真正多模态；Completions 仍是 text-only，引用只会被 flatten 成文本。
+1. 不在这次里绕过 VS Code webview 沙箱；侧边栏 webview 的**非 Shift 拖拽**和**外部文件直接拖入取路径**都不是扩展能修的。
+2. 不在这次里做 `@` 内联搜索；本期可靠入口是智能 `+`，不是再引入一套异步搜索系统。
+3. 不在这次里引入富文本格式化能力；composer 仍然只是“纯文本 + 原子 chip”。
+4. 不在这次里把 Completions 变成真正多模态；Completions 仍是 text-only，引用只会被 flatten 成文本。
 
 ---
 
@@ -89,12 +91,13 @@ VS Code 编辑器 / Explorer / 外部拖拽
         │   └─ keybinding
         │
         └─ 文件入口
-            └─ webview drop -> resolveDrop intent
+            ├─ composer "+" -> pickContext intent
+            └─ Shift + Explorer drop -> resolveDrop intent
                          │
                          ▼
 ┌─ src/extension.ts / src/ui/webview/provider.ts ─────────────────────────────┐
-│ 1. 归一化成 WebviewReference                                                │
-│ 2. post insertReference 事件到 webview                                      │
+│ 1. classifyPickedUri(uri): 图片/PDF -> 附件, 其他 -> 上下文引用             │
+│ 2. 引用 -> postInsertReference；附件 -> pendingAttachments + postState       │
 └────────────────────────────────────┬─────────────────────────────────────────┘
                                      ▼
 ┌─ gui/src/components/Composer.tsx (TipTap) ──────────────────────────────────┐
@@ -233,33 +236,81 @@ Composer.tsx
 
 这里有三个用户入口，但底层只有一个命令和一套 reference 构造逻辑，所以不会出现“CodeLens 插进去的格式”和“右键插进去的格式”不一致。
 
-### 5.2 文件拖拽
+### 5.2 文件/文件夹入口：智能 `+` 与 `Shift` 拖拽共用同一分类器
+
+先说结论：**一个 URI 最终是附件还是上下文引用，不取决于入口，而取决于它是什么。**
 
 ```text
-用户把文件拖到 composer
-  │
-  ▼
-Composer.tsx
-  │  解析 dataTransfer
-  │  resourceurls / application/vnd.code.uri-list / CodeFiles / text/uri-list / files
-  │  去重后发 resolveDrop intent
-  ▼
-provider.ts
-  │  Uri.parse(...)
-  │  buildFileReference(uri)
-  │  postInsertReference(sessionId, reference)
-  ▼
-App.tsx + Composer.tsx
-  ▼
-用户看到 file chip
+共享分类器 classifyPickedUri(uri) [host]
+  ├─ 目录                    -> reference
+  ├─ 图片(.png/.jpg/.gif/...) -> attachment(kind=image, base64)
+  ├─ PDF                     -> attachment(kind=file, base64)
+  └─ 其他文件(.ts/.md/...)    -> reference
 ```
 
-这里故意把职责拆成两半：
+两个入口都只做“拿到 URI”，然后把决定权交给 host：
 
-1. **webview** 负责“浏览器拖拽 MIME 怎么解析”；
-2. **host** 负责“路径怎么归一、最终引用长什么样”。
+```text
+入口 A: "+"
+  Composer.tsx -> pickContext
+               -> provider.ts showOpenDialog(任意文件/文件夹)
+               -> classifyPickedUri(uri)
 
-这样做的好处是：拖拽来源可以很多，但文件引用长相始终只有一种。
+入口 B: Shift 拖拽
+  Composer.tsx -> extractDropUris(dataTransfer)
+               -> resolveDrop
+               -> provider.ts classifyPickedUri(uri)
+```
+
+最终分流：
+
+```text
+reference  -> buildFileReference(...) -> postInsertReference(sessionId, reference)
+attachment -> readPendingAttachment(...) -> pendingAttachments[] -> postState()
+```
+
+这带来三个直接结果：
+
+1. `+` 现在是**可靠主入口**。它能选任意文件/文件夹，也能处理工作区外文件，因为 `showOpenDialog` 在 host 侧能拿到绝对路径。
+2. 拖图片不再变成“废引用”。拖拽和 `+` 复用同一分类器后，图片/PDF 会走附件通道，代码/目录走上下文通道。
+3. 附件限制不会再误伤普通文件引用。非图片/非 PDF 文件现在根本不进 `parse_attachment_part`，而是走 `ServeContentSegment -> ContextReference`。
+
+#### 为什么拖拽仍然必须按住 `Shift`
+
+这不是我们故意设计得别扭，而是 VS Code 对侧边栏 webview 的平台护栏：
+
+```text
+整窗发生拖拽时:
+  没按 Shift -> webview iframe pointerEvents = none
+  按住 Shift -> webview iframe pointerEvents = auto
+```
+
+对应到现象就是：
+
+```text
+没按 Shift
+  -> iframe 收不到 dragenter / dragover / drop
+  -> composer 不可能高亮
+  -> resolveDrop 也不可能触发
+```
+
+这个切换由 VS Code 内部的 `WebviewWindowDragMonitor` 做，扩展侧没有可关闭的开关，也没有“webview 最外层 drop API”可以绕过去。
+
+#### 为什么外部文件拖不进来，但 `+` 可以
+
+```text
+Explorer(工作区内) 拖拽:
+  text/uri-list 里有 file:///...    -> webview 能解析到 URI
+
+Finder/桌面/别的 App 拖拽:
+  沙箱把 file.path / text/uri-list 抹掉 -> webview 拿不到路径
+```
+
+而“上下文引用”本质上必须拿到路径，才能后续 `read` / `open` / hover 展示。所以：
+
+1. **工作区内文件**：可以按住 `Shift` 走拖拽，也可以走 `+`；
+2. **工作区外文件/文件夹**：只能走 `+`；
+3. **我们不会尝试从 webview 最外层绕过沙箱**，因为 VS Code 没给扩展开放那条 API。
 
 ---
 
@@ -309,9 +360,9 @@ segments[] + projection text
 
 [`../../src/ui/webview/provider.ts`](../../src/ui/webview/provider.ts) 负责三件事：
 
-1. 接 intent：`prompt`、`resolveDrop`、`retryUserMessage` 等；
-2. 发 event：`insertReference`；
-3. 把前端 `segments` 透传给 serve。
+1. 接 intent：`prompt`、`pickContext`、`resolveDrop`、`retryUserMessage` 等；
+2. 在 host 侧统一做 `classifyPickedUri` 分流；
+3. 引用走 `insertReference`，附件走 `pendingAttachments`，提交时再把前端 `segments` 透传给 serve。
 
 ASCII 图：
 
@@ -319,7 +370,8 @@ ASCII 图：
 webview intent
    │
    ├─ prompt      -> messenger.request({ text, params: { segments } })
-   ├─ resolveDrop -> buildFileReference -> postInsertReference
+   ├─ pickContext -> showOpenDialog -> classifyPickedUri -> reference|attachment
+   ├─ resolveDrop -> classifyPickedUri -> reference|attachment
    └─ retry       -> 复用失败消息上的 segments 再发一次
 ```
 
@@ -440,8 +492,9 @@ chip label  -> 一律用文件名（目录保留尾部 /）
 
 1. `protocol.test.ts`：`segments` / `resolveDrop` / `insertReference` 结构校验；
 2. `state.test.ts` / `dual_channel.test.ts`：历史消息中的 `input_reference` 回放成 segments；
-3. `webview_provider_flow.test.ts`：prompt `segments` 透传、drop 归一、manifest 合同；
-4. `Composer.test.tsx`：引用插入去重、拖拽 URI 解析；
+3. `provider.test.ts`：`classifyPickedUri`、`pickContext` 选框参数、图片/PDF/目录/普通文件分流；
+4. `webview_provider_flow.test.ts`：prompt `segments` 透传、`pickContext` 混选分流、drop 归一、manifest 合同；
+5. `Composer.test.tsx`：引用插入去重、拖拽 URI 解析、`Shift` hint 三态、editor drop 抑制双处理；
 5. `MessageBubble.test.tsx` / `ReferenceChip.test.tsx`：历史 chip 渲染与 hover title；
 6. `App.test.tsx`：`insertReference` 事件进入 composer，reference-only prompt 可发送。
 
@@ -450,7 +503,8 @@ chip label  -> 一律用文件名（目录保留尾部 /）
 已新增两条真实宿主链路：
 
 1. **选区命令链路**：真实编辑器选区 -> `tomcat.addSelectionToChat` -> webview chip -> 点击发送 -> reload 后历史回放仍是 chip；
-2. **文件拖拽链路**：`resolveDrop` 意图 -> file chip -> 重复 drop 去重。
+2. **文件入口链路**：`showOpenDialog` stub 驱动 `pickContext` -> 图片进附件、代码/文件夹进 chip；
+3. **文件拖拽链路**：`resolveDrop` 意图 -> 图片进附件、文件/目录进 chip，并验证重复 drop 不双插。
 
 ### 10.3 验收命令
 
@@ -485,11 +539,13 @@ TOMCAT_E2E_GREP='editor selections|dropped file references' npm run test:e2e:web
 
 这次选择的判断标准不是“最轻”，而是“能不能把语义做对”。
 
-### 11.2 drop 数据源很脏
+### 11.2 webview 拖拽有平台边界
 
-不同拖拽来源带来的 MIME 不一样，所以 webview 侧必须做多来源解析。
+这里的脏，不只是 MIME 杂，而是**平台直接拦事件/抹路径**：
 
-这也是为什么我们把解析逻辑独立放在 `Composer.tsx`，并用纯函数单测锁死。
+1. `WebviewWindowDragMonitor` 会在非 `Shift` 拖拽时让 iframe `pointerEvents = none`；
+2. 外部文件拖入 webview 时，沙箱不会把真实路径交给页面；
+3. 所以我们必须把“拖拽解析”和“host 分类”拆开，并保留 `+` 作为稳定兜底入口。
 
 ### 11.3 Completions 仍非真多模态
 

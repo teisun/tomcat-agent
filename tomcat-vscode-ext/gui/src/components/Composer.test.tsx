@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, createEvent, fireEvent, render, screen } from "@testing-library/react";
 import { createRef } from "react";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -8,7 +8,7 @@ function renderComposer({
   busy = false,
   canPrompt = true,
   modelCapabilities = ["vision", "files"],
-  onAddAttachment = vi.fn(),
+  onPickContext = vi.fn(),
   onInterrupt = vi.fn(),
   onDraftChange = vi.fn(),
   onResolveDrop = vi.fn(),
@@ -18,7 +18,7 @@ function renderComposer({
   busy?: boolean;
   canPrompt?: boolean;
   modelCapabilities?: string[];
-  onAddAttachment?: () => void;
+  onPickContext?: () => void;
   onDraftChange?: (draft: { hasContent: boolean; segments: unknown[]; text: string }) => void;
   onResolveDrop?: (uris: string[]) => void;
   onInterrupt?: () => void;
@@ -36,7 +36,7 @@ function renderComposer({
       modeValue="plan"
       modelValue="gpt-5.4"
       thinkingLevelValue="high"
-      onAddAttachment={onAddAttachment}
+      onPickContext={onPickContext}
       onDraftChange={onDraftChange}
       onModeChange={vi.fn()}
       onModelChange={vi.fn()}
@@ -72,6 +72,10 @@ beforeAll(() => {
   Object.defineProperty(Range.prototype, "getClientRects", {
     configurable: true,
     value: () => [],
+  });
+  Object.defineProperty(Document.prototype, "elementFromPoint", {
+    configurable: true,
+    value: () => document.body,
   });
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
     configurable: true,
@@ -197,30 +201,90 @@ describe("Composer", () => {
       },
     } as unknown as DataTransfer;
 
+    expect(screen.getByTestId("composer-dnd-hint").textContent).toBe("拖文件请按住 Shift");
+
     fireEvent.dragOver(surface, { dataTransfer });
     expect(surface.className).toContain("tc-composer__surface--drop-active");
+    expect(screen.getByTestId("composer-dnd-hint").textContent).toBe("松手加入上下文");
 
     fireEvent.drop(surface, { dataTransfer });
     expect(onResolveDrop).toHaveBeenCalledWith(["file:///workspace/src/app.ts"]);
     expect(surface.className).not.toContain("tc-composer__surface--drop-active");
+    expect(screen.getByTestId("composer-dnd-hint").textContent).toBe("拖文件请按住 Shift");
   });
 
-  it("shows a light hint before opening attachments on text-only models", () => {
-    const onAddAttachment = vi.fn();
+  it("prevents default on dragenter and hides the Shift hint once content exists", () => {
+    const { ref } = renderComposer();
+    const surface = screen.getByTestId("composer-surface");
+    const enterEvent = createEvent.dragEnter(surface, {
+      dataTransfer: {
+        files: [],
+        getData: () => "",
+      },
+    });
+
+    fireEvent(surface, enterEvent);
+    expect(enterEvent.defaultPrevented).toBe(true);
+    expect(screen.getByTestId("composer-dnd-hint").textContent).toBe("拖文件请按住 Shift");
+
+    act(() => {
+      ref.current?.insertReference({
+        kind: "file",
+        label: "app.ts",
+        lineEnd: null,
+        lineStart: null,
+        path: "app.ts",
+        text: null,
+        type: "reference",
+      });
+    });
+
+    expect(screen.queryByTestId("composer-dnd-hint")).toBeNull();
+  });
+
+  it("suppresses raw editor drops and forwards file uris once", () => {
+    const { onResolveDrop, ref } = renderComposer();
+    const textbox = screen.getByTestId("composer-input");
+    const dataTransfer = {
+      files: [],
+      getData(type: string) {
+        if (type === "text/plain") {
+          return "file:///workspace/src/app.ts";
+        }
+        if (type === "text/uri-list") {
+          return "file:///workspace/src/app.ts";
+        }
+        return "";
+      },
+    } as unknown as DataTransfer;
+
+    fireEvent.drop(textbox, { dataTransfer });
+
+    expect(onResolveDrop).toHaveBeenCalledTimes(1);
+    expect(onResolveDrop).toHaveBeenCalledWith(["file:///workspace/src/app.ts"]);
+    expect(ref.current?.getDraft()).toEqual({
+      hasContent: false,
+      segments: [],
+      text: "",
+    });
+  });
+
+  it("shows a light hint before opening the mixed picker on text-only models", () => {
+    const onPickContext = vi.fn();
     renderComposer({
       modelCapabilities: ["reasoning"],
-      onAddAttachment,
+      onPickContext,
     });
 
     fireEvent.click(screen.getByTestId("attachment-add"));
 
-    expect(onAddAttachment).toHaveBeenCalledTimes(1);
+    expect(onPickContext).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("composer-capability-hint").textContent).toContain(
       "当前模型不支持图片/PDF 附件",
     );
   });
 
-  it("warns when unsupported image drops are inserted as references", () => {
+  it("warns when unsupported image drops still add an attachment", () => {
     const { onResolveDrop } = renderComposer({
       modelCapabilities: ["files"],
     });
@@ -239,7 +303,7 @@ describe("Composer", () => {
 
     expect(onResolveDrop).toHaveBeenCalledWith(["file:///workspace/assets/mockup.png"]);
     expect(screen.getByTestId("composer-capability-hint").textContent).toContain(
-      "当前模型不支持图片附件",
+      "当前模型不支持图片附件；拖入后会先加入待发送列表",
     );
   });
 

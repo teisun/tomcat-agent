@@ -31,6 +31,16 @@ describe("webview protocol helpers", () => {
     expect(
       isWebviewIntent({
         data: {
+          sessionId: "s1",
+        },
+        messageId: "pick-1",
+        type: "pickContext",
+      }),
+    ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: {
           segments: [
             { text: "Inspect ", type: "text" },
             {
@@ -60,6 +70,13 @@ describe("webview protocol helpers", () => {
   });
 
   it("rejects malformed intents", () => {
+    expect(
+      isWebviewIntent({
+        data: {},
+        messageId: "legacy-pick-1",
+        type: "pickAttachment",
+      }),
+    ).toBe(false);
     expect(
       isWebviewIntent({
         data: {},

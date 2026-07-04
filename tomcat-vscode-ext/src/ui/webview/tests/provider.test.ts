@@ -2,17 +2,26 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("vscode", () => ({}));
+import { afterEach, describe, expect, it } from "vitest";
+import * as vscode from "vscode";
 
 import {
-  ATTACHMENT_OPEN_DIALOG_FILTERS,
   buildAttachmentOpenDialogOptions,
+  classifyPickedUri,
   parseModelCatalog,
   parsePlanFrontmatter,
   readPlanMetadata,
 } from "../provider";
+
+const __testing = (
+  vscode as typeof vscode & {
+    __testing: {
+      registerDirectory(dirPath: string): void;
+      registerFile(filePath: string, text: string): void;
+      reset(): void;
+    };
+  }
+).__testing;
 
 describe("plan metadata helpers", () => {
   const tempDirs: string[] = [];
@@ -152,14 +161,30 @@ goal: Home-expanded plan
 });
 
 describe("attachment picker options", () => {
-  it("limits selectable attachments to pdf and supported image types", () => {
+  it("allows any file or folder and updates the action label", () => {
     expect(buildAttachmentOpenDialogOptions()).toEqual({
       canSelectFiles: true,
-      canSelectFolders: false,
+      canSelectFolders: true,
       canSelectMany: true,
-      filters: ATTACHMENT_OPEN_DIALOG_FILTERS,
-      openLabel: "Attach to Tomcat",
+      openLabel: "Add to Tomcat",
     });
+  });
+});
+
+describe("picked uri classification", () => {
+  it("routes directories to references and images/pdf to attachments", async () => {
+    __testing.reset();
+    __testing.registerDirectory("/workspace/src/folder");
+    __testing.registerFile("/workspace/assets/mockup.png", "png");
+    __testing.registerFile("/workspace/specs/notes.pdf", "%PDF");
+    __testing.registerFile("/workspace/src/app.ts", "export const answer = 42;\n");
+    __testing.registerFile("/workspace/tmp/blob.bin", "raw");
+
+    await expect(classifyPickedUri(vscode.Uri.file("/workspace/src/folder"))).resolves.toBe("reference");
+    await expect(classifyPickedUri(vscode.Uri.file("/workspace/assets/mockup.png"))).resolves.toBe("attachment");
+    await expect(classifyPickedUri(vscode.Uri.file("/workspace/specs/notes.pdf"))).resolves.toBe("attachment");
+    await expect(classifyPickedUri(vscode.Uri.file("/workspace/src/app.ts"))).resolves.toBe("reference");
+    await expect(classifyPickedUri(vscode.Uri.file("/workspace/tmp/blob.bin"))).resolves.toBe("reference");
   });
 });
 

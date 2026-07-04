@@ -1121,6 +1121,39 @@ fn build_user_message_accepts_reference_only_segments() {
     ));
 }
 
+#[test]
+fn build_user_message_accepts_non_pdf_file_references_without_attachment_validation() {
+    let params = ServeMessageParams {
+        segments: vec![ServeContentSegment::Reference {
+            reference: ServeContextReference {
+                kind: ServeContextRefKind::File,
+                path: "src/app.ts".to_string(),
+                label: "app.ts".to_string(),
+                line_start: None,
+                line_end: None,
+                text: None,
+            },
+        }],
+        ..ServeMessageParams::default()
+    };
+
+    let message = crate::api::serve::commands::build_user_message(String::new(), &params)
+        .expect("non-PDF file references should stay on the context-reference path");
+    let parts = match message.content {
+        Some(ChatMessageContent::Parts(parts)) => parts,
+        other => panic!("expected multipart content, got {other:?}"),
+    };
+
+    assert_eq!(parts.len(), 1);
+    assert!(matches!(
+        &parts[0],
+        ChatMessageContentPart::InputReference { reference }
+            if reference.ref_kind == ContextRefKind::File
+                && reference.path == "src/app.ts"
+                && reference.label == "app.ts"
+    ));
+}
+
 #[tokio::test]
 #[serial(env_lock)]
 async fn serve_prompt_blank_user_message_id_falls_back_to_generated_entry_id() {

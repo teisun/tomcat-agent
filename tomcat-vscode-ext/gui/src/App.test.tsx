@@ -977,7 +977,7 @@ describe("Tomcat webview App", () => {
     fireEvent.change(screen.getByTestId("mode-select"), {
       target: { value: "chat" },
     });
-    fireEvent.click(screen.getByLabelText("Add attachment"));
+    fireEvent.click(screen.getByLabelText("添加文件/文件夹/图片"));
     fireEvent.click(screen.getByTestId("attachment-chip"));
     fireEvent.click(screen.getByTestId("plan-card-title"));
     fireEvent.click(screen.getByTestId("build-plan"));
@@ -1024,7 +1024,7 @@ describe("Tomcat webview App", () => {
       ),
     ).toBe(true);
     expect(
-      postMessage.mock.calls.some(([message]) => message.type === "pickAttachment"),
+      postMessage.mock.calls.some(([message]) => message.type === "pickContext"),
     ).toBe(true);
     expect(
       postMessage.mock.calls.some(
