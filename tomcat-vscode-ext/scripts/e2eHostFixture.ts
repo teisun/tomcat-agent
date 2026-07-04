@@ -392,6 +392,43 @@ function emitCustomPlanEvent(sessionId, type, extra = {}) {
   });
 }
 
+function normalizeHistoryContent(text, segments) {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return text;
+  }
+  const normalized = segments
+    .map((segment) => {
+      if (!segment || typeof segment !== "object") {
+        return null;
+      }
+      if (segment.type === "text" && typeof segment.text === "string") {
+        return {
+          text: segment.text,
+          type: "input_text",
+        };
+      }
+      if (
+        segment.type === "reference"
+        && (segment.kind === "selection" || segment.kind === "file")
+        && typeof segment.path === "string"
+        && typeof segment.label === "string"
+      ) {
+        return {
+          label: segment.label,
+          line_end: typeof segment.lineEnd === "number" ? segment.lineEnd : undefined,
+          line_start: typeof segment.lineStart === "number" ? segment.lineStart : undefined,
+          path: segment.path,
+          ref_kind: segment.kind,
+          text: typeof segment.text === "string" ? segment.text : undefined,
+          type: "input_reference",
+        };
+      }
+      return null;
+    })
+    .filter(Boolean);
+  return normalized.length > 0 ? normalized : text;
+}
+
 function recordHistoryMessage(sessionId, role, content, forcedId = null) {
   const session = touchSession(ensureSession(sessionId));
   session.history.push({
@@ -527,6 +564,9 @@ function handlePrompt(frame) {
   const attachmentCount = Array.isArray(frame.params && frame.params.attachments)
     ? frame.params.attachments.length
     : 0;
+  const segments = Array.isArray(frame.params && frame.params.segments)
+    ? frame.params.segments
+    : null;
   const userMessageId =
     frame.params && typeof frame.params.userMessageId === "string"
       ? frame.params.userMessageId
@@ -534,7 +574,7 @@ function handlePrompt(frame) {
   if (text.includes("switch back order")) {
     seedTranscriptSwitchBackHistory(sessionId);
   }
-  recordHistoryMessage(sessionId, "user", text, userMessageId);
+  recordHistoryMessage(sessionId, "user", normalizeHistoryContent(text, segments), userMessageId);
   if (text.includes("answer card showcase")) {
     const requestId = \`ask-answer-\${sessionId}\`;
     const request = {

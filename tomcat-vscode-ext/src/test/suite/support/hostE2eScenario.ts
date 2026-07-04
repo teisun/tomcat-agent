@@ -1,5 +1,5 @@
 import * as assert from "node:assert/strict";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -7,6 +7,8 @@ import * as vscode from "vscode";
 
 import {
   EXTENSION_ID,
+  TEST_DEFAULT_CWD_ENV,
+  TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
   TOMCAT_ANSWER_COMMAND,
 } from "../../../constants";
 import type { PendingQuestionSnapshot } from "../../../ui/participant/commands";
@@ -47,6 +49,24 @@ function requireEnv(name: string): string {
   assert.ok(value, `expected ${name} to be defined for host E2E`);
   return value;
 }
+
+async function pause(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type MacWindowInfo = {
+  bounds: {
+    height: number;
+    width: number;
+    x: number;
+    y: number;
+  };
+  ownerName: string;
+  windowName: string;
+  windowNumber: number;
+};
+
+type CaptureRegion = "editor" | "sidebar" | "window";
 
 function collectStreamText(
   stream: Awaited<ReturnType<TomcatExtensionApi["__testing"]["runParticipantTurn"]>>["stream"],
@@ -1851,9 +1871,290 @@ export async function assertWebviewCrossOwnerPlanFlow(
   assert.equal(exited.planStateText, null);
 }
 
+export async function assertWebviewSelectionReferenceFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-selection-reference-new-session",
+  );
+
+  const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
+  const filePath = path.join(workspaceDir, "selection-context.ts");
+  await fs.writeFile(
+    filePath,
+    [
+      "const alpha = 1;",
+      "const beta = 2;",
+      "const gamma = alpha + beta;",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  await vscode.workspace
+    .getConfiguration("editor")
+    .update("codeLens", true, vscode.ConfigurationTarget.Global);
+  await pause(150);
+  editor.selection = new vscode.Selection(
+    new vscode.Position(1, 0),
+    new vscode.Position(2, document.lineAt(2).text.length),
+  );
+  await pause(1_100);
+  captureTranscriptVisual("selection-reference-codelens", "editor", "selection-context.ts");
+
+  await api.__testing.executeCommand(TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND);
+
+  const composerSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) => {
+      const chipCount = (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
+      const sendDisabled = /data-testid="send-button"[^>]*disabled/u.test(snapshot.html);
+      return (
+        snapshot.activeSessionId === sessionId &&
+        chipCount === 1 &&
+        snapshot.html.includes(`title="${filePath}:2-3"`) &&
+        !sendDisabled
+      )
+        ? snapshot
+        : undefined;
+    },
+    20_000,
+  );
+  assert.ok(
+    composerSnapshot.html.includes("selection-context.ts:2-3"),
+    "expected the composer chip label to include the selected file and lines",
+  );
+  captureTranscriptVisual("selection-reference-composer", "sidebar", "selection-context.ts");
+
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "send-button",
+  });
+  await waitForEvent(api, { sessionId, type: "agent_end" });
+
+  await api.__testing.reloadWebview();
+
+  type RestoredReferenceSegment = {
+    lineEnd?: number | null;
+    lineStart?: number | null;
+    path?: string;
+    type: string;
+  };
+  const restoredMessage = await waitForWebviewState(
+    api,
+    (state) => {
+      const timeline = state.sessionViews[sessionId]?.timeline ?? [];
+      const userMessage = [...timeline]
+        .reverse()
+        .find((item) => item.type === "message" && "kind" in item && item.kind === "user");
+      const segments =
+        userMessage && "segments" in userMessage
+          ? (userMessage.segments as RestoredReferenceSegment[] | undefined)
+          : undefined;
+      return segments?.some(
+        (segment: RestoredReferenceSegment) =>
+          segment.type === "reference" &&
+          segment.path === filePath &&
+          segment.lineStart === 2 &&
+          segment.lineEnd === 3,
+      )
+        ? { segments }
+        : undefined;
+    },
+    20_000,
+  );
+  assert.ok(
+    restoredMessage.segments?.some(
+      (segment: RestoredReferenceSegment) =>
+        segment.type === "reference" &&
+        segment.path === filePath &&
+        segment.lineStart === 2 &&
+        segment.lineEnd === 3,
+    ),
+    "expected the reloaded transcript to preserve the selection reference segment",
+  );
+
+  const restoredSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes('data-testid="history-reference-chip"') &&
+      snapshot.html.includes(`title="${filePath}:2-3"`)
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    restoredSnapshot.messageTexts.some((text) => text.includes("selection-context.ts:2-3")),
+    "expected the restored transcript bubble to render the selection reference label",
+  );
+  captureTranscriptVisual("selection-reference-history", "sidebar", "selection-context.ts");
+}
+
+export async function assertWebviewFileDropReferenceFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-file-drop-reference-new-session",
+  );
+
+  const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
+  const filePath = path.join(workspaceDir, "drop-context.md");
+  const secondFilePath = path.join(workspaceDir, "drop-context-2.md");
+  await fs.writeFile(filePath, "# dropped context\n", "utf8");
+  await fs.writeFile(secondFilePath, "## another dropped context\n", "utf8");
+  const fileUri = vscode.Uri.file(filePath).toString();
+  const secondFileUri = vscode.Uri.file(secondFilePath).toString();
+  const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+  await vscode.window.showTextDocument(document, { preview: false });
+  await pause(300);
+
+  await api.__testing.sendWebviewDomAction({
+    kind: "dragOverTestId",
+    testId: "composer-surface",
+  });
+  const dragSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.html.includes("tc-composer__surface--drop-active")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    dragSnapshot.html.includes("tc-composer__surface--drop-active"),
+    "expected composer surface to show the drag-over highlight",
+  );
+  captureTranscriptVisual("file-drop-reference-hover", "sidebar", "drop-context.md");
+  await api.__testing.sendWebviewDomAction({
+    kind: "dragLeaveTestId",
+    testId: "composer-surface",
+  });
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        uris: [fileUri, secondFileUri],
+      },
+      messageId: "webview-file-drop-reference-1",
+      type: "resolveDrop",
+    }),
+  );
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        uris: [fileUri],
+      },
+      messageId: "webview-file-drop-reference-2",
+      type: "resolveDrop",
+    }),
+  );
+
+  const snapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) => {
+      const chipCount = (candidate.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
+      return (
+        candidate.activeSessionId === sessionId &&
+        chipCount === 2 &&
+        candidate.html.includes(`title="${filePath}"`) &&
+        candidate.html.includes(`title="${secondFilePath}"`) &&
+        candidate.html.includes("drop-context.md")
+        && candidate.html.includes("drop-context-2.md")
+      )
+        ? candidate
+        : undefined;
+    },
+    20_000,
+  );
+  assert.equal(
+    (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length,
+    2,
+    "expected distinct file drops to remain while duplicate file drops dedupe away",
+  );
+  captureTranscriptVisual("file-drop-reference", "sidebar", "drop-context.md");
+}
+
 function transcriptVisualArtifactPath(filename: string): string {
   const dir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR || "/tmp";
   return path.join(dir, filename);
+}
+
+function locateMacosWindowScriptPath(): string {
+  return path.resolve(__dirname, "../../../../scripts/find-macos-window.swift");
+}
+
+function resolveCaptureRect(
+  bounds: MacWindowInfo["bounds"],
+  region: CaptureRegion,
+): { height: number; width: number; x: number; y: number } {
+  if (region === "window") {
+    return bounds;
+  }
+
+  const topInset = region === "editor"
+    ? Math.min(52, Math.max(18, Math.round(bounds.height * 0.03)))
+    : Math.min(86, Math.max(62, Math.round(bounds.height * 0.09)));
+  const bottomInset = 28;
+  const usableHeight = Math.max(240, bounds.height - topInset - bottomInset);
+
+  if (region === "sidebar") {
+    const width = Math.min(440, Math.max(360, Math.round(bounds.width * 0.36)));
+    return {
+      height: usableHeight,
+      width,
+      x: bounds.x + bounds.width - width - 16,
+      y: bounds.y + topInset,
+    };
+  }
+
+  const width = Math.min(760, Math.max(560, Math.round(bounds.width * 0.48)));
+  return {
+    height: Math.min(700, usableHeight),
+    width,
+    x: bounds.x + Math.max(80, Math.round(bounds.width * 0.28)),
+    y: bounds.y + topInset,
+  };
+}
+
+function tryResolveVsCodeWindow(appName: string): MacWindowInfo | null {
+  return tryResolveVsCodeWindowWithTitle(appName);
+}
+
+function tryResolveVsCodeWindowWithTitle(
+  appName: string,
+  titleHint?: string,
+): MacWindowInfo | null {
+  try {
+    const args = [locateMacosWindowScriptPath(), appName];
+    if (titleHint && titleHint.trim().length > 0) {
+      args.push("--title", titleHint);
+    }
+    const raw = execFileSync(
+      "swift",
+      args,
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim();
+    return raw ? JSON.parse(raw) as MacWindowInfo : null;
+  } catch {
+    return null;
+  }
 }
 
 function captureTranscriptVisual(
@@ -1861,21 +2162,48 @@ function captureTranscriptVisual(
     | "collapsed"
     | "cross-owner"
     | "expanded"
+    | "file-drop-reference"
+    | "file-drop-reference-hover"
     | "file-chip"
     | "progress"
     | "reload-replay"
+    | "selection-reference-codelens"
+    | "selection-reference-composer"
+    | "selection-reference-history"
     | "switch-order"
     | "switch-restore"
     | "todo-expanded"
     | "tool-icons"
     | "tool-icons-bottom",
+  region: CaptureRegion = "window",
+  titleHint?: string,
 ): void {
   try {
-    execSync(
-      `screencapture -x ${JSON.stringify(
-        transcriptVisualArtifactPath(`tomcat-vsix-visual-${name}.png`),
-      )}`,
-    );
+    const appName = vscode.env.appName || "Visual Studio Code";
+    execFileSync("open", ["-a", appName], {
+      stdio: "ignore",
+      timeout: 2_000,
+    });
+    execSync("sleep 0.35");
+    const targetPath = transcriptVisualArtifactPath(`tomcat-vsix-visual-${name}.png`);
+    const windowInfo = tryResolveVsCodeWindowWithTitle(appName, titleHint) ?? tryResolveVsCodeWindow(appName);
+    if (windowInfo) {
+      const rect = resolveCaptureRect(windowInfo.bounds, region);
+      execFileSync(
+        "screencapture",
+        [
+          "-x",
+          "-R",
+          `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)},${Math.round(rect.height)}`,
+          targetPath,
+        ],
+        { stdio: "ignore" },
+      );
+      return;
+    }
+    execFileSync("screencapture", ["-x", targetPath], {
+      stdio: "ignore",
+    });
   } catch {
     /* screencapture unavailable in this environment */
   }

@@ -13,11 +13,13 @@ import {
   assertWebviewAnswerCardFlow,
   assertWebviewDiffFlow,
   assertWebviewCrossOwnerPlanFlow,
+  assertWebviewFileDropReferenceFlow,
   assertWebviewGiantGroupLazyLoadFlow,
   assertWebviewInterruptFlow,
   assertWebviewMultiSessionFlow,
   assertWebviewOwnershipFlow,
   assertWebviewReloadReplayFlow,
+  assertWebviewSelectionReferenceFlow,
   assertWebviewSessionSwitchRestoreFlow,
   assertWebviewStreamingFlow,
   assertTranscriptSwitchBackOrder,
@@ -133,5 +135,15 @@ suite("Tomcat host E2E", () => {
   test("keeps cross-owner plan state in sync in the webview", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewCrossOwnerPlanFlow(api);
+  });
+
+  test("adds editor selections to the webview composer and rehydrates them from history", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewSelectionReferenceFlow(api);
+  });
+
+  test("deduplicates dropped file references in the webview composer", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewFileDropReferenceFlow(api);
   });
 });

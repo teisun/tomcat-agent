@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { HostToWebviewFrame, VsCodeApiLike } from "./types";
@@ -19,6 +19,34 @@ async function emitState(frame: HostToWebviewFrame) {
     window.dispatchEvent(new MessageEvent("message", { data: frame }));
   });
 }
+
+beforeAll(() => {
+  const emptyRect = () => ({
+    bottom: 0,
+    height: 0,
+    left: 0,
+    right: 0,
+    toJSON() {
+      return {};
+    },
+    top: 0,
+    width: 0,
+    x: 0,
+    y: 0,
+  });
+  Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: emptyRect,
+  });
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => [],
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  });
+});
 
 function mockScrollableTranscript({
   scrollHeight,
@@ -934,8 +962,10 @@ describe("Tomcat webview App", () => {
       messageId: "state-2",
     });
 
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "send this" },
+    fireEvent.paste(screen.getByTestId("composer-input"), {
+      clipboardData: {
+        getData: (type: string) => (type === "text/plain" ? "send this" : ""),
+      },
     });
     fireEvent.click(screen.getByTestId("send-button"));
     fireEvent.change(screen.getByTestId("model-select"), {
@@ -1165,9 +1195,11 @@ describe("Tomcat webview App", () => {
       messageId: "state-enter",
     });
 
-    const textbox = screen.getByRole("textbox");
-    fireEvent.change(textbox, {
-      target: { value: "submit via enter" },
+    const textbox = screen.getByTestId("composer-input");
+    fireEvent.paste(textbox, {
+      clipboardData: {
+        getData: (type: string) => (type === "text/plain" ? "submit via enter" : ""),
+      },
     });
     fireEvent.keyDown(textbox, { key: "Enter" });
 
@@ -1830,5 +1862,473 @@ describe("Tomcat webview App", () => {
       "Last 30 days",
       "Older",
     ]);
+  });
+
+  it("accepts insertReference events and sends reference-only prompts", async () => {
+    const { postMessage } = mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-reference-only",
+    });
+
+    await emitState({
+      channel: "event",
+      content: {
+        reference: {
+          kind: "file",
+          label: "app.ts",
+          path: "src/app.ts",
+          type: "reference",
+        },
+        sessionId: "s1",
+        type: "insertReference",
+      },
+      messageId: "event-insert-reference",
+    });
+
+    expect(screen.getByTestId("composer-reference-chip").textContent).toContain("app.ts");
+
+    fireEvent.click(screen.getByTestId("send-button"));
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          segments: [
+            {
+              kind: "file",
+              label: "app.ts",
+              lineEnd: null,
+              lineStart: null,
+              path: "src/app.ts",
+              text: null,
+              type: "reference",
+            },
+            {
+              text: " ",
+              type: "text",
+            },
+          ],
+          sessionId: "s1",
+          text: "app.ts ",
+          userMessageId: expect.any(String),
+        }),
+        type: "prompt",
+      }),
+    );
+  });
+
+  it("keeps composer content until a sent prompt is confirmed, then clears it", async () => {
+    const { postMessage } = mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-clear-success",
+    });
+
+    const textbox = screen.getByTestId("composer-input");
+    fireEvent.paste(textbox, {
+      clipboardData: {
+        getData: (type: string) => (type === "text/plain" ? "send this" : ""),
+      },
+    });
+    fireEvent.click(screen.getByTestId("send-button"));
+
+    expect(textbox.textContent).toContain("send this");
+
+    const promptMessage = postMessage.mock.calls.find(([message]) => message.type === "prompt")?.[0];
+    const userMessageId = promptMessage?.data?.userMessageId;
+    expect(typeof userMessageId).toBe("string");
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 2,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [
+              {
+                id: userMessageId,
+                kind: "user",
+                text: "send this",
+                type: "message",
+              },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-clear-success-confirmed",
+    });
+
+    expect(screen.getByTestId("composer-input").textContent?.trim()).toBe("");
+  });
+
+  it("keeps composer content when a sent prompt fails", async () => {
+    const { postMessage } = mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-clear-failed",
+    });
+
+    const textbox = screen.getByTestId("composer-input");
+    fireEvent.paste(textbox, {
+      clipboardData: {
+        getData: (type: string) => (type === "text/plain" ? "keep me" : ""),
+      },
+    });
+    fireEvent.click(screen.getByTestId("send-button"));
+
+    const promptMessage = postMessage.mock.calls.find(([message]) => message.type === "prompt")?.[0];
+    const userMessageId = promptMessage?.data?.userMessageId;
+    expect(typeof userMessageId).toBe("string");
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 2,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [
+              {
+                deliveryError: "busy",
+                deliveryState: "failed",
+                id: userMessageId,
+                kind: "user",
+                retryable: true,
+                text: "keep me",
+                type: "message",
+              },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-clear-failed-result",
+    });
+
+    expect(screen.getByTestId("composer-input").textContent).toContain("keep me");
+  });
+
+  it("preserves composer content when the session flips to read-only", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-readonly-before",
+    });
+
+    const textbox = screen.getByTestId("composer-input");
+    fireEvent.paste(textbox, {
+      clipboardData: {
+        getData: (type: string) => (type === "text/plain" ? "keep this draft" : ""),
+      },
+    });
+    expect(textbox.textContent).toContain("keep this draft");
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 2,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: "This live session is currently read-only in the webview.",
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-readonly-after",
+    });
+
+    expect(screen.getByTestId("conflict-banner").textContent).toContain("read-only");
+    expect(screen.getByTestId("composer-input").textContent).toContain("keep this draft");
+  });
+
+  it("ignores malformed insertReference events without a concrete session id", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-invalid-insert-ref",
+    });
+
+    await emitState({
+      channel: "event",
+      content: {
+        reference: {
+          kind: "file",
+          label: "app.ts",
+          path: "src/app.ts",
+          type: "reference",
+        },
+        sessionId: null,
+        type: "insertReference",
+      } as HostToWebviewFrame["content"],
+      messageId: "event-invalid-insert-reference",
+    });
+
+    expect(screen.queryByTestId("composer-reference-chip")).toBeNull();
   });
 });

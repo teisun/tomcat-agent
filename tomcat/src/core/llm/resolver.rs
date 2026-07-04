@@ -100,6 +100,7 @@ pub fn capability_requirements_for_messages(messages: &[ChatMessage]) -> Capabil
         if let Some(ChatMessageContent::Parts(parts)) = &message.content {
             for part in parts {
                 match part {
+                    ChatMessageContentPart::InputReference { .. } => {}
                     ChatMessageContentPart::InputImage { .. } => {
                         requirements.vision = true;
                     }

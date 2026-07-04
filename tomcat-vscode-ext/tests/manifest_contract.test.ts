@@ -13,7 +13,10 @@ type Manifest = {
     configuration?: {
       properties?: Record<string, unknown>;
     };
+    commands?: Array<Record<string, unknown>>;
     chatParticipants?: Array<Record<string, unknown>>;
+    keybindings?: Array<Record<string, unknown>>;
+    menus?: Record<string, Array<Record<string, unknown>>>;
     views?: Record<string, Array<Record<string, unknown>>>;
     viewsContainers?: Record<string, Array<Record<string, unknown>>>;
   };
@@ -47,6 +50,7 @@ describe("extension manifest contract", () => {
     expect(manifest.activationEvents).toEqual(
       expect.arrayContaining([
         `onChatParticipant:${PARTICIPANT_ID}`,
+        "onStartupFinished",
       ]),
     );
   });
@@ -101,5 +105,43 @@ describe("extension manifest contract", () => {
 
     expect(uiSetting?.default).toBe("both");
     expect(uiSetting?.enum).toEqual(["both", "participant", "webview"]);
+  });
+
+  it("registers add-to-chat commands and affordances", async () => {
+    const manifest = await readManifest();
+    const commands = manifest.contributes?.commands ?? [];
+    const editorMenus = manifest.contributes?.menus?.["editor/context"] ?? [];
+    const explorerMenus = manifest.contributes?.menus?.["explorer/context"] ?? [];
+    const keybindings = manifest.contributes?.keybindings ?? [];
+
+    expect(commands).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ command: "tomcat.addSelectionToChat" }),
+        expect.objectContaining({ command: "tomcat.addFileToChat" }),
+      ]),
+    );
+    expect(editorMenus).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ command: "tomcat.addSelectionToChat" }),
+      ]),
+    );
+    expect(explorerMenus).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ command: "tomcat.addFileToChat" }),
+      ]),
+    );
+    const explorerAddFileMenu = explorerMenus.find(
+      (entry: { command?: string; when?: string }) => entry.command === "tomcat.addFileToChat",
+    );
+    expect(explorerAddFileMenu?.when).toBeUndefined();
+    expect(keybindings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          command: "tomcat.addSelectionToChat",
+          key: "ctrl+alt+a",
+          mac: "cmd+alt+a",
+        }),
+      ]),
+    );
   });
 });

@@ -10,7 +10,9 @@
 
 use super::*;
 use crate::core::llm::tests::mocks::load_dotenv;
-use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, ChatRequest};
+use crate::core::llm::types::{
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ContextReference,
+};
 use crate::core::llm::{
     thinking_policy::resolve_request_fields, Capabilities, Credential, ModelEntry, ThinkingLevel,
 };
@@ -151,7 +153,7 @@ fn is_retriable_returns_false_for_non_llm_error() {
     )));
 }
 
-/// Completions 路径不支持多模态附件：含非 InputText part 的 messages 必须立刻拒绝，
+/// Completions 路径不支持图片 / 文件附件：归一化阶段必须立刻拒绝，
 /// 错误文案必须把诊断指向 `provider=openai-responses` 以引导调用方迁移；并且要
 /// **不可重试**（不被 `is_retriable` 命中），避免在 Agent Loop 的退避循环里反复打。
 #[test]
@@ -169,7 +171,7 @@ fn parts_with_image_returns_structured_error() {
         ChatMessageContentPart::text("see this:"),
         part,
     ])];
-    let err = reject_multimodal_parts(&msgs).expect_err("应拒绝多模态 part");
+    let err = normalize_for_completions(&msgs).expect_err("应拒绝多模态 part");
     let s = err.to_string();
     assert!(
         s.contains("openai-responses"),
@@ -185,6 +187,30 @@ fn parts_with_image_returns_structured_error() {
         !OpenAiProvider::is_retriable(&err),
         "多模态拒绝错误必须是不可重试的"
     );
+}
+
+#[test]
+fn normalize_for_completions_flattens_references_into_text() {
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("before "),
+        ChatMessageContentPart::reference(ContextReference::selection(
+            "src/lib.rs",
+            "lib.rs:10-12",
+            Some(10),
+            Some(12),
+            Some("fn hello() {}".to_string()),
+        )),
+        ChatMessageContentPart::text(" after"),
+    ])];
+    let normalized = normalize_for_completions(&msgs).expect("normalize");
+    let normalized = normalized.as_ref();
+    assert_eq!(normalized.len(), 1);
+    assert!(matches!(
+        &normalized[0].content,
+        Some(ChatMessageContent::Text(text))
+            if text
+                == "before <selection file=\"src/lib.rs\" lines=\"10-12\">\nfn hello() {}\n</selection> after"
+    ));
 }
 
 /// 依赖 DEEPSEEK_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。

@@ -18,11 +18,13 @@ type HostE2eHelper = {
   assertTranscriptSwitchBackOrder(api: unknown): Promise<void>;
   assertWebviewCrossOwnerPlanFlow(api: unknown): Promise<void>;
   assertWebviewDiffFlow(api: unknown): Promise<void>;
+  assertWebviewFileDropReferenceFlow(api: unknown): Promise<void>;
   assertWebviewGiantGroupLazyLoadFlow(api: unknown): Promise<void>;
   assertWebviewInterruptFlow(api: unknown): Promise<void>;
   assertWebviewMultiSessionFlow(api: unknown): Promise<void>;
   assertWebviewOwnershipFlow(api: unknown): Promise<void>;
   assertWebviewReloadReplayFlow(api: unknown): Promise<void>;
+  assertWebviewSelectionReferenceFlow(api: unknown): Promise<void>;
   assertWebviewSessionSwitchRestoreFlow(api: unknown): Promise<void>;
   assertWebviewStreamingFlow(api: unknown): Promise<void>;
   getTomcatExtensionApi(): Promise<unknown>;
@@ -142,6 +144,16 @@ suite("Installed Tomcat extension", () => {
   test("keeps cross-owner plan state in sync in the webview", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewCrossOwnerPlanFlow(api);
+  });
+
+  test("adds editor selections to the webview composer and rehydrates them from history", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewSelectionReferenceFlow(api);
+  });
+
+  test("deduplicates dropped file references in the webview composer", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewFileDropReferenceFlow(api);
   });
 
   test("renders the transcript UI groups, tool rows, file chips, and progress", async () => {

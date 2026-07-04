@@ -66,7 +66,99 @@ pub enum ChatMessageContent {
     Parts(Vec<ChatMessageContentPart>),
 }
 
-/// 单条 content part：文本 / 图片 / 文件 三态枚举，wire 由 provider 适配层翻译。
+/// 上下文引用类型：选区快照 or 文件路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRefKind {
+    Selection,
+    File,
+}
+
+/// 结构化上下文引用，既用于 transcript 落盘，也用于发送前投影成 LLM 可读文本。
+///
+/// 外部 JSON 形态保持扁平，便于 transcript 直接落盘与回放：
+///
+/// ```json
+/// {
+///   "type": "input_reference",
+///   "ref_kind": "selection",
+///   "path": "src/app.ts",
+///   "label": "app.ts:10-18",
+///   "line_start": 10,
+///   "line_end": 18,
+///   "text": "const answer = 42;"
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextReference {
+    pub ref_kind: ContextRefKind,
+    pub path: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl ContextReference {
+    pub fn selection(
+        path: impl Into<String>,
+        label: impl Into<String>,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
+        text: Option<String>,
+    ) -> Self {
+        Self {
+            ref_kind: ContextRefKind::Selection,
+            path: path.into(),
+            label: label.into(),
+            line_start,
+            line_end,
+            text,
+        }
+    }
+
+    pub fn file(path: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            ref_kind: ContextRefKind::File,
+            path: path.into(),
+            label: label.into(),
+            line_start: None,
+            line_end: None,
+            text: None,
+        }
+    }
+
+    pub fn to_prompt_text(&self) -> String {
+        match self.ref_kind {
+            ContextRefKind::Selection => {
+                let lines_attr = match (self.line_start, self.line_end) {
+                    (Some(start), Some(end)) if start == end => format!(" lines=\"{start}\""),
+                    (Some(start), Some(end)) => format!(" lines=\"{start}-{end}\""),
+                    (Some(start), None) => format!(" lines=\"{start}\""),
+                    _ => String::new(),
+                };
+                let text = self.text.as_deref().unwrap_or_default();
+                let escaped_path = self
+                    .path
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('\"', "&quot;");
+                format!(
+                    "<selection file=\"{}\"{}>\n{}\n</selection>",
+                    escaped_path, lines_attr, text
+                )
+            }
+            ContextRefKind::File => format!("[file reference] {}", self.path),
+        }
+    }
+}
+
+/// 单条 content part：文本 / 引用 / 图片 / 文件 四态枚举，wire 由 provider 适配层翻译。
 ///
 /// 设计原则：把「inline base64」与「已知 file_id 引用」拆成 sum type，让非法状态
 /// （如内联文件缺 filename、两条通道同时出现、两条通道都缺）无法通过类型层表达。
@@ -75,6 +167,7 @@ pub enum ChatMessageContent {
 ///
 /// ```json
 /// {"type": "input_text",  "text": "..."}
+/// {"type": "input_reference", "ref_kind": "file", "path": "src/app.ts", "label": "app.ts"}
 /// {"type": "input_image", "mime_type": "image/png", "image_b64": "...", "detail": "high"}
 /// {"type": "input_image", "file_id": "file-abc"}
 /// {"type": "input_file",  "filename": "x.pdf", "mime_type": "application/pdf", "file_b64": "..."}
@@ -85,6 +178,11 @@ pub enum ChatMessageContent {
 pub enum ChatMessageContentPart {
     /// 文本片段。
     InputText { text: String },
+    /// 结构化上下文引用：选区快照或文件路径。
+    InputReference {
+        #[serde(flatten)]
+        reference: ContextReference,
+    },
     /// 图片：inline base64 或已知 file_id（二选一）。
     InputImage {
         #[serde(flatten)]
@@ -156,6 +254,10 @@ impl ChatMessageContentPart {
     /// 文本片段。
     pub fn text(s: impl Into<String>) -> Self {
         Self::InputText { text: s.into() }
+    }
+
+    pub fn reference(reference: ContextReference) -> Self {
+        Self::InputReference { reference }
     }
 
     /// inline 图片 helper（PR-RJ-0 重构）：从磁盘路径直接构造 `InputImage`。
@@ -390,24 +492,12 @@ impl ChatMessageContentPart {
     pub(crate) fn estimated_chars(&self) -> usize {
         match self {
             Self::InputText { text } => text.chars().count(),
+            Self::InputReference { reference } => reference.to_prompt_text().chars().count(),
             Self::InputImage { .. } => IMAGE_CHAR_ESTIMATE,
             Self::InputFile { .. } => FILE_CHAR_ESTIMATE,
         }
     }
 
-    /// 仅 `InputText` 返回文本视图，其它变体返回 `None`（用于角色降级与 system/assistant
-    /// 文本提取）。
-    pub(crate) fn as_text(&self) -> Option<&str> {
-        match self {
-            Self::InputText { text } => Some(text),
-            _ => None,
-        }
-    }
-
-    /// 是否非文本变体；Completions 入口用它做结构化拒绝。
-    pub fn is_non_text(&self) -> bool {
-        !matches!(self, Self::InputText { .. })
-    }
 }
 
 /// 仅供测试 / 已知 base64 字符串场景：解码并返回字节长度。

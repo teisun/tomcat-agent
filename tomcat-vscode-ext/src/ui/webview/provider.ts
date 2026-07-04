@@ -18,7 +18,7 @@ import {
 } from "../../serveClient/protocol";
 import type { SessionRouter } from "../../serveClient/sessionRouter";
 import type { TomcatMessenger } from "../../serveClient/TomcatMessenger";
-import type { ServeEvent } from "../../serveClient/wire";
+import type { ServeContentSegment, ServeEvent } from "../../serveClient/wire";
 import {
   createHostFrameMessageId,
   isWebviewIntent,
@@ -30,11 +30,14 @@ import {
   type WebviewApprovalCard,
   type WebviewDomAction,
   type WebviewMessageBlock,
+  type WebviewMessageSegment,
   type WebviewPendingAttachment,
   type WebviewIntent,
   type WebviewPlanFileCard,
+  type WebviewReference,
   type WebviewStateSnapshot,
 } from "./protocol";
+import { resolveUriToFileReference } from "./contextReferences";
 import { SessionOwnershipTracker } from "./ownership";
 import { TomcatSessionPool } from "./sessionPool";
 import { WebviewStateStore } from "./state";
@@ -278,6 +281,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private openFileObserved = false;
   private messageSubscription?: vscode.Disposable;
   private uiMode: TomcatUiMode;
+  private visibilitySubscription?: vscode.Disposable;
   private view?: vscode.WebviewView;
 
   constructor(private readonly deps: TomcatWebviewProviderDeps) {
@@ -291,6 +295,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   dispose(): void {
     this.messageSubscription?.dispose();
+    this.visibilitySubscription?.dispose();
     this.eventSubscription.dispose();
     this.domSnapshots.rejectAll(new Error("Tomcat webview disposed"));
     for (const waiter of [...this.readyWaiters]) {
@@ -313,10 +318,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     };
     view.webview.html = this.renderHtml(view.webview);
     this.messageSubscription?.dispose();
+    this.visibilitySubscription?.dispose();
     this.messageSubscription = view.webview.onDidReceiveMessage((message: unknown) => {
       void this.handleWebviewMessage(message);
     });
-    view.onDidChangeVisibility(() => {
+    this.visibilitySubscription = view.onDidChangeVisibility(() => {
       if (view.visible) {
         void this.postState();
       }
@@ -435,7 +441,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private lookupRetryableUserMessage(
     sessionId: string,
     messageId: string,
-  ): { submitKind: UserSubmitKind; text: string } | null {
+  ): { segments?: WebviewMessageSegment[]; submitKind: UserSubmitKind; text: string } | null {
     const session = this.currentState().sessionViews[sessionId];
     const message = session?.timeline.find(
       (item): item is WebviewMessageBlock =>
@@ -450,6 +456,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       return null;
     }
     return {
+      segments: message.segments,
       submitKind: message.submitKind,
       text: message.text,
     };
@@ -459,6 +466,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     sessionId: string,
     submitKind: UserSubmitKind,
     text: string,
+    segments?: WebviewMessageSegment[],
     options?: {
       messageId?: string;
       retrying?: boolean;
@@ -473,6 +481,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     } else {
       this.stateStore.appendLocalUserMessage(sessionId, text, {
         messageId: userMessageId,
+        segments,
         submitKind,
       });
     }
@@ -481,6 +490,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       const response = await this.deps.messenger.request({
         params: {
           attachments: pendingAttachments.map((entry) => entry.attachment),
+          segments: segments as ServeContentSegment[] | undefined,
           userMessageId,
         },
         sessionId,
@@ -641,7 +651,15 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           await this.postState();
           return;
         }
-        await this.sendUserMessage(sessionId, intent.type, intent.data.text);
+        await this.sendUserMessage(
+          sessionId,
+          intent.type,
+          intent.data.text,
+          intent.data.segments,
+          {
+            messageId: intent.data.userMessageId,
+          },
+        );
         return;
       }
       case "retryUserMessage": {
@@ -655,10 +673,36 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         if (!retry) {
           return;
         }
-        await this.sendUserMessage(sessionId, retry.submitKind, retry.text, {
-          messageId: intent.data.messageId,
-          retrying: true,
-        });
+        await this.sendUserMessage(
+          sessionId,
+          retry.submitKind,
+          retry.text,
+          retry.segments,
+          {
+            messageId: intent.data.messageId,
+            retrying: true,
+          },
+        );
+        return;
+      }
+      case "resolveDrop": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSessionWithoutHistory(
+          intent.data.sessionId ?? null,
+        );
+        if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        for (const rawUri of intent.data.uris) {
+          try {
+            const uri = vscode.Uri.parse(rawUri);
+            const reference = await resolveUriToFileReference(uri);
+            await this.postInsertReference(sessionId, reference);
+          } catch {
+            // Ignore malformed drop payload entries; the editor keeps the rest.
+          }
+        }
         return;
       }
       case "pickAttachment": {
@@ -970,6 +1014,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       channel: "state",
       content: snapshot,
       messageId: createHostFrameMessageId("state"),
+    });
+  }
+
+  async postInsertReference(sessionId: string, reference: WebviewReference): Promise<void> {
+    await this.postEvent({
+      reference,
+      sessionId,
+      type: "insertReference",
     });
   }
 

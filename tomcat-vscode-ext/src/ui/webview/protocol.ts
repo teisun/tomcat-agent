@@ -3,14 +3,16 @@ import type {
   AskQuestionWireRequest,
   ControlRequestFrame,
 } from "../../serveClient/protocol";
-import type { ServeAttachment, ServeEvent } from "../../serveClient/wire";
+import type { ServeAttachment, ServeContentSegment, ServeEvent } from "../../serveClient/wire";
 import type { ParticipantPlanState } from "../participant/planState";
 
 export type TomcatUiMode = "both" | "participant" | "webview";
 export type FrontendOwnerKind = "participant" | "webview";
+export type WebviewMessageSegment = ServeContentSegment;
+export type WebviewReference = Extract<ServeContentSegment, { type: "reference" }>;
 
 export interface WebviewDomAction {
-  kind: "clickTestId" | "scrollIntoView" | "scrollToEdge" | "setRootWidth";
+  kind: "clickTestId" | "dragOverTestId" | "dragLeaveTestId" | "scrollIntoView" | "scrollToEdge" | "setRootWidth";
   edge?: "bottom" | "top";
   index?: number;
   scrollBlock?: "center" | "end" | "nearest" | "start";
@@ -25,6 +27,7 @@ export interface WebviewMessageBlock {
   id: string;
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
+  segments?: WebviewMessageSegment[];
   submitKind?: "prompt" | "steer";
   text: string;
   type: "message";
@@ -168,6 +171,11 @@ export type HostEventFrameContent =
   | ControlRequestFrame
   | ServeEvent
   | {
+      reference: WebviewReference;
+      sessionId?: string | null;
+      type: "insertReference";
+    }
+  | {
       type: "__test.capture_dom";
     }
   | {
@@ -245,10 +253,12 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
-      type: "prompt";
+      type: "prompt" | "steer";
       data: {
+        segments?: WebviewMessageSegment[];
         sessionId?: string | null;
         text: string;
+        userMessageId?: string;
       };
     }
   | {
@@ -306,17 +316,17 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
-      type: "steer";
+      type: "openFile";
       data: {
-        sessionId?: string | null;
-        text: string;
+        path: string;
       };
     }
   | {
       messageId: string;
-      type: "openFile";
+      type: "resolveDrop";
       data: {
-        path: string;
+        sessionId?: string | null;
+        uris: string[];
       };
     }
   | {
@@ -421,6 +431,32 @@ function isAskQuestionResultShape(value: unknown): value is AskQuestionResult {
   );
 }
 
+function isWebviewReferenceShape(value: unknown): value is WebviewReference {
+  return (
+    isRecord(value) &&
+    value.type === "reference" &&
+    (value.kind === "selection" || value.kind === "file") &&
+    isString(value.label) &&
+    isString(value.path) &&
+    (value.lineStart === undefined || value.lineStart === null || typeof value.lineStart === "number") &&
+    (value.lineEnd === undefined || value.lineEnd === null || typeof value.lineEnd === "number") &&
+    (value.text === undefined || value.text === null || isString(value.text))
+  );
+}
+
+function isWebviewMessageSegmentShape(value: unknown): value is WebviewMessageSegment {
+  if (!isRecord(value) || !isString(value.type)) {
+    return false;
+  }
+  if (value.type === "text") {
+    return isString(value.text);
+  }
+  if (value.type === "reference") {
+    return isWebviewReferenceShape(value);
+  }
+  return false;
+}
+
 export function isHostToWebviewFrame(value: unknown): value is HostToWebviewFrame {
   return (
     isRecord(value) &&
@@ -443,7 +479,14 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       return value.data === undefined || isRecord(value.data);
     case "prompt":
     case "steer":
-      return isRecord(value.data) && isString(value.data.text);
+      return (
+        isRecord(value.data) &&
+        isString(value.data.text) &&
+        (value.data.userMessageId === undefined || isString(value.data.userMessageId)) &&
+        (value.data.segments === undefined ||
+          (Array.isArray(value.data.segments) &&
+            value.data.segments.every(isWebviewMessageSegmentShape)))
+      );
     case "interrupt":
       return value.data === undefined || isRecord(value.data);
     case "setModel":
@@ -483,6 +526,12 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "openFile":
     case "openPlanFile":
       return isRecord(value.data) && isString(value.data.path);
+    case "resolveDrop":
+      return (
+        isRecord(value.data) &&
+        Array.isArray(value.data.uris) &&
+        value.data.uris.every(isString)
+      );
     case "removeAttachment":
       return isRecord(value.data) && isString(value.data.attachmentId);
     case "answerQuestion":

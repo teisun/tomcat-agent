@@ -371,7 +371,12 @@ pub(super) async fn run_tool_calls(
             let parts_chars: usize = follow_up_parts
                 .iter()
                 .map(|p| match p {
-                    crate::core::llm::ChatMessageContentPart::InputText { text } => text.len(),
+                    crate::core::llm::ChatMessageContentPart::InputText { text } => {
+                        text.chars().count()
+                    }
+                    crate::core::llm::ChatMessageContentPart::InputReference { reference } => {
+                        reference.to_prompt_text().chars().count()
+                    }
                     crate::core::llm::ChatMessageContentPart::InputImage { .. } => 3600,
                     crate::core::llm::ChatMessageContentPart::InputFile { .. } => 8000,
                 })

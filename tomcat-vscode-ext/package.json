@@ -25,7 +25,8 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onChatParticipant:tomcat.tomcat"
+    "onChatParticipant:tomcat.tomcat",
+    "onStartupFinished"
   ],
   "contributes": {
     "commands": [
@@ -44,6 +45,18 @@
       {
         "command": "tomcat.ui.focus",
         "title": "Tomcat: Focus Sidebar"
+      },
+      {
+        "category": "Tomcat",
+        "command": "tomcat.addSelectionToChat",
+        "icon": "$(comment-add)",
+        "title": "Add Selection to Tomcat Chat"
+      },
+      {
+        "category": "Tomcat",
+        "command": "tomcat.addFileToChat",
+        "icon": "$(file-add)",
+        "title": "Add File to Tomcat Chat"
       }
     ],
     "chatParticipants": [
@@ -82,6 +95,29 @@
         }
       ]
     },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "tomcat.addSelectionToChat",
+          "group": "navigation@20",
+          "when": "editorHasSelection && editorTextFocus"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "tomcat.addFileToChat",
+          "group": "navigation@20"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "tomcat.addSelectionToChat",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
     "languageModelChatProviders": [
       {
         "vendor": "tomcat-test",

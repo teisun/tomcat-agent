@@ -500,6 +500,7 @@ describe("webview dual-channel state store", () => {
       {
         id: "recent-user-1",
         kind: "user",
+        segments: [{ text: "recent prompt", type: "text" }],
         text: "recent prompt",
         type: "message",
       },
@@ -595,6 +596,7 @@ describe("webview dual-channel state store", () => {
     expect(userMessages[0]).toEqual({
       id: "user-fixed-id",
       kind: "user",
+      segments: [{ text: "draft prompt", type: "text" }],
       text: "draft prompt",
       type: "message",
     });
@@ -683,6 +685,7 @@ describe("webview dual-channel state store", () => {
     expect(latestUserMessages[0]).toEqual({
       id: "latest-confirmed-user",
       kind: "user",
+      segments: [{ text: "latest confirmed prompt", type: "text" }],
       text: "latest confirmed prompt",
       type: "message",
     });
@@ -713,6 +716,7 @@ describe("webview dual-channel state store", () => {
     expect(olderUserMessages[0]).toEqual({
       id: "older-confirmed-user",
       kind: "user",
+      segments: [{ text: "older confirmed prompt", type: "text" }],
       text: "older confirmed prompt",
       type: "message",
     });
@@ -799,6 +803,7 @@ describe("webview dual-channel state store", () => {
       {
         id: "older-user-1",
         kind: "user",
+        segments: [{ text: "older prompt", type: "text" }],
         text: "older prompt",
         type: "message",
       },
@@ -872,6 +877,7 @@ describe("webview dual-channel state store", () => {
       {
         id: "older-user-1",
         kind: "user",
+        segments: [{ text: "older prompt", type: "text" }],
         text: "older prompt",
         type: "message",
       },

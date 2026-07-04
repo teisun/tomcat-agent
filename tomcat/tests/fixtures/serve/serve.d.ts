@@ -25,10 +25,26 @@ export interface ServeAttachment {
 }
 export type ServeAttachmentKind = "image" | "file";
 
+export type ServeContentSegment = {
+  kind: ServeContextRefKind;
+  label: string;
+  lineEnd?: null | number;
+  lineStart?: null | number;
+  path: string;
+  text?: null | string;
+  type: "reference";
+} | {
+  text: string;
+  type: "text";
+};
+
+export type ServeContextRefKind = "selection" | "file";
+
 export type ServeEvent = ServePlanEvent | ServeSessionEvent | ServeTurnEvent | WireEvent;
 
 export interface ServeMessageParams {
   attachments?: ServeAttachment[];
+  segments?: ServeContentSegment[];
   userMessageId?: null | string;
 }
 export type ServePlanEvent = {

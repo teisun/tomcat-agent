@@ -9,8 +9,9 @@
 
 use super::super::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ContinuityMetadata, FileSource, ImageSource, ReasoningContinuation, ReasoningFormat,
-    ReplayRequirement, StreamEvent, ThinkingSource, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+    ContextRefKind, ContextReference, ContinuityMetadata, FileSource, ImageSource,
+    ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent, ThinkingSource,
+    TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
 use crate::core::llm::openai_files::OpenAiFilesClient;
 
@@ -313,6 +314,78 @@ fn content_part_serde_roundtrip_text() {
     assert_eq!(j["text"], "hi");
     let back: ChatMessageContentPart = serde_json::from_value(j).unwrap();
     assert!(matches!(back, ChatMessageContentPart::InputText { text } if text == "hi"));
+}
+
+#[test]
+fn context_reference_selection_to_prompt_text_wraps_snapshot() {
+    let reference = ContextReference::selection(
+        "src/app.ts",
+        "app.ts:10-12",
+        Some(10),
+        Some(12),
+        Some("const answer = 42;".to_string()),
+    );
+    assert_eq!(
+        reference.to_prompt_text(),
+        "<selection file=\"src/app.ts\" lines=\"10-12\">\nconst answer = 42;\n</selection>"
+    );
+}
+
+#[test]
+fn context_reference_selection_to_prompt_text_escapes_path_quotes() {
+    let reference = ContextReference::selection(
+        "src/with\"quote\".ts",
+        "with\"quote\".ts:1",
+        Some(1),
+        Some(1),
+        Some("const answer = 42;".to_string()),
+    );
+    assert_eq!(
+        reference.to_prompt_text(),
+        "<selection file=\"src/with&quot;quote&quot;.ts\" lines=\"1\">\nconst answer = 42;\n</selection>"
+    );
+}
+
+#[test]
+fn context_reference_file_to_prompt_text_mentions_path() {
+    let reference = ContextReference::file("src/app.ts", "app.ts");
+    assert_eq!(reference.to_prompt_text(), "[file reference] src/app.ts");
+}
+
+#[test]
+fn content_part_serde_roundtrip_reference() {
+    let reference = ContextReference::selection(
+        "src/app.ts",
+        "app.ts:10-12",
+        Some(10),
+        Some(12),
+        Some("const answer = 42;".to_string()),
+    );
+    let p = ChatMessageContentPart::reference(reference.clone());
+    let j = serde_json::to_value(&p).unwrap();
+    assert_eq!(j["type"], "input_reference");
+    assert_eq!(j["ref_kind"], "selection");
+    assert_eq!(j["path"], "src/app.ts");
+    assert_eq!(j["label"], "app.ts:10-12");
+    assert_eq!(j["line_start"], 10);
+    assert_eq!(j["line_end"], 12);
+    assert_eq!(j["text"], "const answer = 42;");
+    let back: ChatMessageContentPart = serde_json::from_value(j).unwrap();
+    assert!(matches!(
+        back,
+        ChatMessageContentPart::InputReference { reference: ContextReference {
+            ref_kind: ContextRefKind::Selection,
+            path,
+            label,
+            line_start: Some(10),
+            line_end: Some(12),
+            text: Some(text),
+        } } if path == "src/app.ts" && label == "app.ts:10-12" && text == "const answer = 42;"
+    ));
+    assert_eq!(
+        p.estimated_chars(),
+        reference.to_prompt_text().chars().count()
+    );
 }
 
 #[test]

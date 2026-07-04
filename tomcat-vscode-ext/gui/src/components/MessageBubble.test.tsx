@@ -121,4 +121,37 @@ describe("MessageBubble", () => {
     expect(screen.getByTestId("user-message-status").textContent).toContain("Sending...");
     expect(screen.queryByTestId("retry-user-message")).toBeNull();
   });
+
+  it("renders interleaved history reference chips with hover titles", () => {
+    render(
+      <MessageBubble
+        item={{
+          id: "u-ref",
+          kind: "user",
+          segments: [
+            { text: "Please inspect ", type: "text" },
+            {
+              kind: "selection",
+              label: "app.ts:3-5",
+              lineEnd: 5,
+              lineStart: 3,
+              path: "src/app.ts",
+              text: "const answer = 42;",
+              type: "reference",
+            },
+            { text: " before editing.", type: "text" },
+          ],
+          text: "Please inspect app.ts:3-5 before editing.",
+          type: "message",
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("message-text").textContent).toContain(
+      "Please inspect app.ts:3-5 before editing.",
+    );
+    expect(screen.getByTestId("history-reference-chip").getAttribute("title")).toBe(
+      "src/app.ts:3-5",
+    );
+  });
 });

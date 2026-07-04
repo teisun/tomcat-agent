@@ -31,7 +31,20 @@ fn serve_dts_preserves_wire_event_session_id() {
 fn serve_dts_includes_user_message_id_on_message_params() {
     let dts = serve_dts();
     assert!(dts.contains("export interface ServeMessageParams {"));
+    assert!(dts.contains("segments?: ServeContentSegment[];"));
     assert!(dts.contains("userMessageId?: null | string;"));
+}
+
+#[test]
+fn serve_dts_includes_context_reference_types() {
+    let dts = serve_dts();
+    assert!(dts.contains("export type ServeContextRefKind = \"selection\" | \"file\";"));
+    assert!(dts.contains("export type ServeContentSegment = "));
+    assert!(dts.contains("kind: ServeContextRefKind;"));
+    assert!(dts.contains("label: string;"));
+    assert!(dts.contains("path: string;"));
+    assert!(dts.contains("type: \"reference\";"));
+    assert!(dts.contains("type: \"text\";"));
 }
 
 #[test]

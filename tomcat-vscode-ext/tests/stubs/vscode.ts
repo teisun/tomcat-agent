@@ -1,6 +1,6 @@
 type CommandHandler = (...args: any[]) => any;
 type Provider = { provideTextDocumentContent(uri: Uri): string };
-type FileEntry = { text: string };
+type FileEntry = { text: string; type: number };
 
 const commandHandlers = new Map<string, CommandHandler>();
 const contentProviders = new Map<string, Provider>();
@@ -29,6 +29,27 @@ export class Disposable {
 
   dispose(): void {
     this.callback();
+  }
+}
+
+export class EventEmitter<T = void> {
+  private readonly listeners = new Set<(value: T) => void>();
+
+  readonly event = (listener: (value: T) => void): Disposable => {
+    this.listeners.add(listener);
+    return new Disposable(() => {
+      this.listeners.delete(listener);
+    });
+  };
+
+  fire(value: T): void {
+    for (const listener of this.listeners) {
+      listener(value);
+    }
+  }
+
+  dispose(): void {
+    this.listeners.clear();
   }
 }
 
@@ -66,6 +87,13 @@ export class Selection extends Range {}
 
 export class ThemeIcon {
   constructor(public readonly id: string) {}
+}
+
+export class CodeLens {
+  constructor(
+    public readonly range: Range,
+    public readonly command?: { command: string; title: string },
+  ) {}
 }
 
 export class Uri {
@@ -113,6 +141,11 @@ export class Uri {
   }
 }
 
+export const FileType = {
+  File: 1,
+  Directory: 2,
+} as const;
+
 export class WorkspaceEdit {
   readonly entries: Array<
     | { type: "replace"; uri: Uri; range: Range; text: string }
@@ -156,7 +189,7 @@ class TextDocument {
 
   setText(text: string): void {
     this.text = text;
-    files.set(this.uri.toString(), { text });
+    files.set(this.uri.toString(), { text, type: FileType.File });
   }
 
   get lineCount(): number {
@@ -172,7 +205,7 @@ class TextDocument {
   }
 
   async save(): Promise<boolean> {
-    files.set(this.uri.toString(), { text: this.text });
+    files.set(this.uri.toString(), { text: this.text, type: FileType.File });
     return true;
   }
 }
@@ -216,6 +249,14 @@ export const commands = {
 };
 
 export const workspace = {
+  asRelativePath(resource: string | Uri): string {
+    const raw = typeof resource === "string" ? resource : resource.fsPath;
+    const normalized = raw.replace(/\\/g, "/");
+    const workspaceRoot = "/workspace";
+    return normalized.startsWith(`${workspaceRoot}/`)
+      ? normalized.slice(workspaceRoot.length + 1)
+      : raw;
+  },
   fs: {
     async readFile(uri: Uri): Promise<Uint8Array> {
       const entry = files.get(uri.toString());
@@ -224,28 +265,31 @@ export const workspace = {
       }
       return Buffer.from(entry.text, "utf8");
     },
-    async stat(uri: Uri): Promise<{ size: number }> {
+    async stat(uri: Uri): Promise<{ size: number; type: number }> {
       const entry = files.get(uri.toString());
       if (!entry) {
         throw new FileSystemError(`File not found: ${uri.toString()}`);
       }
-      return { size: entry.text.length };
+      return { size: entry.text.length, type: entry.type };
     },
   },
   async applyEdit(edit: WorkspaceEdit): Promise<boolean> {
     for (const entry of edit.entries) {
       if (entry.type === "createFile") {
-        files.set(entry.uri.toString(), { text: "" });
+        files.set(entry.uri.toString(), { text: "", type: FileType.File });
         continue;
       }
 
       if (entry.type === "insert") {
         const current = files.get(entry.uri.toString())?.text ?? "";
-        files.set(entry.uri.toString(), { text: `${entry.text}${current}` });
+        files.set(entry.uri.toString(), {
+          text: `${entry.text}${current}`,
+          type: FileType.File,
+        });
         continue;
       }
 
-      files.set(entry.uri.toString(), { text: entry.text });
+      files.set(entry.uri.toString(), { text: entry.text, type: FileType.File });
     }
     return true;
   },
@@ -295,6 +339,12 @@ export const workspace = {
 };
 
 export const window = {
+  activeTextEditor: undefined as
+    | {
+        document: TextDocument;
+        selection: Selection;
+      }
+    | undefined,
   async showInformationMessage(message: string, ...items: string[]): Promise<string | undefined> {
     return infoMessageHandler?.(message, items);
   },
@@ -351,7 +401,10 @@ export const __testing = {
     return files.get(Uri.file(filePath).toString())?.text;
   },
   registerFile(filePath: string, text: string): void {
-    files.set(Uri.file(filePath).toString(), { text });
+    files.set(Uri.file(filePath).toString(), { text, type: FileType.File });
+  },
+  registerDirectory(dirPath: string): void {
+    files.set(Uri.file(dirPath).toString(), { text: "", type: FileType.Directory });
   },
   reset(): void {
     commandHandlers.clear();
@@ -365,6 +418,7 @@ export const __testing = {
     warningMessageHandler = undefined;
     openDialogHandler = undefined;
     lastDiffCommand = undefined;
+    window.activeTextEditor = undefined;
     workspace.workspaceFolders = [{ uri: Uri.file("/workspace") }];
   },
   setConfiguration(key: string, value: unknown): void {

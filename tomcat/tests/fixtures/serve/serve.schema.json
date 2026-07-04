@@ -600,6 +600,83 @@
           "file"
         ]
       },
+      "ServeContentSegment": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "type"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "label",
+              "path",
+              "type"
+            ],
+            "properties": {
+              "kind": {
+                "$ref": "#/definitions/ServeContextRefKind"
+              },
+              "label": {
+                "type": "string"
+              },
+              "lineEnd": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "lineStart": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "path": {
+                "type": "string"
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reference"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "ServeContextRefKind": {
+        "type": "string",
+        "enum": [
+          "selection",
+          "file"
+        ]
+      },
       "ServeMessageParams": {
         "description": "发送给 `prompt` / `follow_up` / `steer` 的附加参数。",
         "type": "object",
@@ -608,6 +685,12 @@
             "type": "array",
             "items": {
               "$ref": "#/definitions/ServeAttachment"
+            }
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ServeContentSegment"
             }
           },
           "userMessageId": {

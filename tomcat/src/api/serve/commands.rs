@@ -12,7 +12,9 @@ use base64::Engine as _;
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 
-use crate::core::llm::{ChatMessage, ChatMessageContentPart, ThinkingLevel};
+use crate::core::llm::{
+    ChatMessage, ChatMessageContentPart, ContextRefKind, ContextReference, ThinkingLevel,
+};
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::transcript::{
     entry_id, find_entry_line_offset, read_entry_at_offset, TranscriptPage,
@@ -24,7 +26,8 @@ use crate::{SessionManager, SessionMode};
 use super::control;
 use super::types::{
     ListSessionsScope, OutFrame, ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand,
-    ServeMessageParams, ServeSessionMode, SetPlanModeAction,
+    ServeContentSegment, ServeContextRefKind, ServeContextReference, ServeMessageParams,
+    ServeSessionMode, SetPlanModeAction,
 };
 use super::{
     cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
@@ -967,13 +970,49 @@ fn render_error_message(error: &AppError) -> String {
     }
 }
 
-fn build_user_message(text: String, params: &ServeMessageParams) -> Result<ChatMessage, String> {
-    if params.attachments.is_empty() {
+fn to_context_ref_kind(kind: ServeContextRefKind) -> ContextRefKind {
+    match kind {
+        ServeContextRefKind::Selection => ContextRefKind::Selection,
+        ServeContextRefKind::File => ContextRefKind::File,
+    }
+}
+
+fn to_context_reference(reference: &ServeContextReference) -> ContextReference {
+    ContextReference {
+        ref_kind: to_context_ref_kind(reference.kind),
+        path: reference.path.clone(),
+        label: reference.label.clone(),
+        line_start: reference.line_start,
+        line_end: reference.line_end,
+        text: reference.text.clone(),
+    }
+}
+
+pub(crate) fn build_user_message(
+    text: String,
+    params: &ServeMessageParams,
+) -> Result<ChatMessage, String> {
+    if params.segments.is_empty() && params.attachments.is_empty() {
         return Ok(ChatMessage::user(text));
     }
 
-    let mut parts = Vec::with_capacity(1 + params.attachments.len());
-    parts.push(ChatMessageContentPart::text(text));
+    let mut parts = Vec::with_capacity(
+        params.segments.len().max(1) + params.attachments.len(),
+    );
+    if params.segments.is_empty() {
+        parts.push(ChatMessageContentPart::text(text));
+    } else {
+        for segment in &params.segments {
+            match segment {
+                ServeContentSegment::Text { text } => {
+                    parts.push(ChatMessageContentPart::text(text.clone()));
+                }
+                ServeContentSegment::Reference { reference } => {
+                    parts.push(ChatMessageContentPart::reference(to_context_reference(reference)));
+                }
+            }
+        }
+    }
     for attachment in &params.attachments {
         parts.push(parse_attachment_part(attachment)?);
     }

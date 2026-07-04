@@ -58,6 +58,19 @@ fn first_event_index(frames: &[serde_json::Value], event_type: &str) -> Option<u
         .position(|value| value.get("type").and_then(|v| v.as_str()) == Some(event_type))
 }
 
+fn transcript_entries(fx: &ServeFixture, session_id: &str) -> Vec<serde_json::Value> {
+    let config_path = fx.home_path.join(".tomcat").join("tomcat.config.toml");
+    let cfg = tomcat::load_config_toml_file(&config_path).expect("load config");
+    let path = tomcat::resolve_sessions_dir(&cfg)
+        .expect("resolve sessions dir")
+        .join(format!("{session_id}.jsonl"));
+    fs::read_to_string(path)
+        .expect("read transcript")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse transcript line"))
+        .collect()
+}
+
 fn responses_sse_delta(content: &str) -> ScriptedPart {
     ScriptedPart {
         delay_ms: 0,
@@ -283,7 +296,7 @@ fn serve_prompt_with_attachment_roundtrip() {
     }));
 
     let frames = child.recv_until(Duration::from_secs(5), |value| {
-        value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     assert!(
         frames.iter().any(|value| {
@@ -371,6 +384,139 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
         Some("data:application/pdf;base64,JVBERi0xLjQK")
     );
     assert!(content[1].get("file_id").is_none());
+}
+
+#[test]
+#[serial]
+fn serve_prompt_with_context_reference_segments_roundtrip() {
+    common::setup_logging();
+    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+        responses_sse_delta("context ok"),
+        responses_sse_completed(),
+    ])]);
+    let fx = setup_serve_fixture(&server.base_url);
+    configure_openai_responses_fixture(&fx, &server.base_url);
+    let mut child = spawn_serve_child(&fx);
+    let session_id = initialize(&mut child);
+
+    child.send_value(&json!({
+        "type": "prompt",
+        "id": "refs-e2e-1",
+        "sessionId": session_id,
+        "text": "",
+        "params": {
+            "segments": [
+                {
+                    "type": "text",
+                    "text": "before "
+                },
+                {
+                    "type": "reference",
+                    "kind": "selection",
+                    "path": "src/lib.rs",
+                    "label": "lib.rs:10-12",
+                    "lineStart": 10,
+                    "lineEnd": 12,
+                    "text": "fn hello() {}"
+                },
+                {
+                    "type": "text",
+                    "text": " after "
+                },
+                {
+                    "type": "reference",
+                    "kind": "file",
+                    "path": "docs/guide.md",
+                    "label": "guide.md"
+                }
+            ]
+        }
+    }));
+
+    let frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
+    });
+    assert!(
+        frames.iter().any(|value| {
+            value.get("type").and_then(|v| v.as_str()) == Some("message_update")
+                && value
+                    .get("assistantMessageEvent")
+                    .and_then(|v| v.get("delta"))
+                    .and_then(|v| v.as_str())
+                    == Some("context ok")
+        }),
+        "expected reference prompt to reach agent_end, got {frames:?}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|value| value.get("type").and_then(|v| v.as_str()) == Some("agent_end")),
+        "expected agent_end before reading transcript, got {frames:?}"
+    );
+
+    child.send_value(&json!({
+        "type": "get_state",
+        "id": "state-context-reference",
+        "sessionId": session_id
+    }));
+    let state_frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("id").and_then(|v| v.as_str()) == Some("state-context-reference")
+    });
+    let state_response = state_frames
+        .iter()
+        .find(|value| value.get("id").and_then(|v| v.as_str()) == Some("state-context-reference"))
+        .expect("state-context-reference response");
+    let transcript_session_id = state_response["payload"]["sessionId"]
+        .as_str()
+        .or_else(|| state_response["sessionId"].as_str())
+        .unwrap_or(session_id.as_str());
+
+    let requests = server.captured_requests();
+    assert_eq!(requests.len(), 1, "expected one responses API request");
+    let body = extract_json_body(&requests[0]);
+    let input = body["input"].as_array().expect("responses input array");
+    let content = input[0]["content"]
+        .as_array()
+        .expect("responses content array");
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"].as_str(), Some("input_text"));
+    assert_eq!(
+        content[0]["text"].as_str(),
+        Some(
+            "before <selection file=\"src/lib.rs\" lines=\"10-12\">\nfn hello() {}\n</selection> after [file reference] docs/guide.md"
+        )
+    );
+
+    let transcript = transcript_entries(&fx, transcript_session_id);
+    let user_entry = transcript
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry.get("type").and_then(|value| value.as_str()) == Some("message")
+                && entry
+                    .get("message")
+                    .and_then(|message| message.get("role"))
+                    .and_then(|value| value.as_str())
+                    == Some("user")
+        })
+        .expect("latest user transcript entry");
+    let parts = user_entry["message"]["content"]
+        .as_array()
+        .expect("user transcript content parts");
+    assert_eq!(parts[0]["type"].as_str(), Some("input_text"));
+    assert_eq!(parts[0]["text"].as_str(), Some("before "));
+    assert_eq!(parts[1]["type"].as_str(), Some("input_reference"));
+    assert_eq!(parts[1]["ref_kind"].as_str(), Some("selection"));
+    assert_eq!(parts[1]["path"].as_str(), Some("src/lib.rs"));
+    assert_eq!(parts[1]["line_start"].as_u64(), Some(10));
+    assert_eq!(parts[1]["line_end"].as_u64(), Some(12));
+    assert_eq!(parts[1]["text"].as_str(), Some("fn hello() {}"));
+    assert_eq!(parts[2]["type"].as_str(), Some("input_text"));
+    assert_eq!(parts[2]["text"].as_str(), Some(" after "));
+    assert_eq!(parts[3]["type"].as_str(), Some("input_reference"));
+    assert_eq!(parts[3]["ref_kind"].as_str(), Some("file"));
+    assert_eq!(parts[3]["path"].as_str(), Some("docs/guide.md"));
+    assert_eq!(parts[3]["label"].as_str(), Some("guide.md"));
 }
 
 #[test]

@@ -1,4 +1,5 @@
-import type { WebviewMessageBlock } from "../types";
+import { ReferenceChip } from "./ReferenceChip";
+import type { WebviewMessageBlock, WebviewMessageSegment } from "../types";
 
 const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
   assistant: "Tomcat",
@@ -19,6 +20,8 @@ export function MessageBubble({
   const isFailedUserMessage = item.kind === "user" && item.deliveryState === "failed";
   const isPendingUserMessage = item.kind === "user" && item.deliveryState === "pending";
   const showRetry = isFailedUserMessage && item.retryable === true && typeof onRetry === "function";
+  const segments: WebviewMessageSegment[] =
+    item.segments?.length ? item.segments : [{ text: item.text, type: "text" }];
 
   return (
     <article
@@ -36,9 +39,19 @@ export function MessageBubble({
         </div>
       ) : null}
       <div className="message-text rendered-markdown" data-testid="message-text">
-        {item.text.split("\n\n").map((paragraph, index) => (
-          <p key={`${item.id}-${index}`}>{paragraph}</p>
-        ))}
+        {segments.map((segment, index) =>
+          segment.type === "text" ? (
+            <span className="tc-message__text-segment" key={`${item.id}-text-${index}`}>
+              {segment.text}
+            </span>
+          ) : (
+            <ReferenceChip
+              key={`${item.id}-reference-${index}`}
+              reference={segment}
+              testId="history-reference-chip"
+            />
+          ),
+        )}
       </div>
       {isPendingUserMessage ? (
         <div className="tc-message__status" data-testid="user-message-status">

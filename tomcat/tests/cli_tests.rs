@@ -1027,16 +1027,13 @@ fn test_workspace_add_cwd_e2e() {
         .assert()
         .success();
 
-    // `std::env::current_dir` 为进程全局；若将来 cli_tests 改为多线程并行，需改为子进程或串行策略，避免与其它用例竞态。
-    let prev = std::env::current_dir().unwrap();
-    std::env::set_current_dir(proj.path()).unwrap();
     cmd()
         .args(["workspace", "add", "--cwd"])
+        .current_dir(proj.path())
         .env("HOME", home.path())
         .assert()
         .success()
         .stdout(predicate::str::contains("已添加工作区"));
-    std::env::set_current_dir(&prev).unwrap();
 
     let list_assert = cmd()
         .args(["workspace", "list"])
@@ -4412,6 +4409,7 @@ fn test_user_archives_session() {
 /// 用户意图：按当前固定 session key 搜索会话
 /// 验证：exit 0
 #[test]
+#[serial(env_lock)]
 fn test_user_searches_sessions_by_keyword() {
     common::setup_logging();
     let _span = info_span!("test_user_searches_sessions_by_keyword").entered();

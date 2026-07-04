@@ -22,6 +22,7 @@ import type {
   WebviewApprovalCard,
   WebviewBoundaryBlock,
   WebviewMessageBlock,
+  WebviewMessageSegment,
   WebviewPendingAttachment,
   WebviewPlanFileCard,
   WebviewPlanFileRef,
@@ -55,6 +56,7 @@ type AppendMessageOptions = {
   deliveryState?: "failed" | "pending";
   preferredId?: string | null;
   retryable?: boolean;
+  segments?: WebviewMessageSegment[];
   submitKind?: UserSubmitKind;
 };
 
@@ -180,38 +182,109 @@ function upsertTimelineItem(session: WebviewSessionSnapshot, item: WebviewTimeli
   session.timeline.push(cloneTimelineItem(item));
 }
 
-function extractMessageText(content: unknown): string | undefined {
+function pushTextSegment(segments: WebviewMessageSegment[], text: string): void {
+  if (!text) {
+    return;
+  }
+  const last = segments.at(-1);
+  if (last?.type === "text") {
+    last.text += text;
+    return;
+  }
+  segments.push({
+    text,
+    type: "text",
+  });
+}
+
+function contentToMessageSegments(content: unknown): WebviewMessageSegment[] | undefined {
   if (typeof content === "string") {
-    return content;
+    return content ? [{ text: content, type: "text" }] : undefined;
   }
   if (Array.isArray(content)) {
-    const parts = content
-      .map((entry) => {
-        if (typeof entry === "string") {
-          return entry;
-        }
-        if (!isRecord(entry)) {
-          return undefined;
-        }
-        if (typeof entry.text === "string") {
-          return entry.text;
-        }
-        switch (entry.type) {
-          case "input_image":
-          case "image":
-            return "[image attachment]";
-          case "input_file":
-          case "file":
-            return "[file attachment]";
-          default:
-            return undefined;
-        }
-      })
-      .filter((entry): entry is string => Boolean(entry));
-    return parts.length ? parts.join("\n") : undefined;
+    const segments: WebviewMessageSegment[] = [];
+    for (const entry of content) {
+      if (typeof entry === "string") {
+        pushTextSegment(segments, entry);
+        continue;
+      }
+      if (!isRecord(entry)) {
+        continue;
+      }
+      switch (entry.type) {
+        case "input_text":
+        case "text":
+          if (typeof entry.text === "string") {
+            pushTextSegment(segments, entry.text);
+          }
+          break;
+        case "input_reference":
+          if (
+            (entry.ref_kind === "selection" || entry.ref_kind === "file") &&
+            typeof entry.path === "string" &&
+            typeof entry.label === "string"
+          ) {
+            segments.push({
+              kind: entry.ref_kind,
+              label: entry.label,
+              lineEnd: typeof entry.line_end === "number" ? entry.line_end : null,
+              lineStart: typeof entry.line_start === "number" ? entry.line_start : null,
+              path: entry.path,
+              text: typeof entry.text === "string" ? entry.text : null,
+              type: "reference",
+            });
+          }
+          break;
+        case "input_image":
+        case "image":
+          pushTextSegment(segments, "[image attachment]");
+          break;
+        case "input_file":
+        case "file":
+          pushTextSegment(segments, "[file attachment]");
+          break;
+        default:
+          if (typeof entry.text === "string") {
+            pushTextSegment(segments, entry.text);
+          }
+          break;
+      }
+    }
+    return segments.length ? segments : undefined;
   }
-  if (isRecord(content) && typeof content.text === "string") {
-    return content.text;
+  if (isRecord(content)) {
+    if (
+      content.type === "input_reference" &&
+      (content.ref_kind === "selection" || content.ref_kind === "file") &&
+      typeof content.path === "string" &&
+      typeof content.label === "string"
+    ) {
+      return [
+        {
+          kind: content.ref_kind,
+          label: content.label,
+          lineEnd: typeof content.line_end === "number" ? content.line_end : null,
+          lineStart: typeof content.line_start === "number" ? content.line_start : null,
+          path: content.path,
+          text: typeof content.text === "string" ? content.text : null,
+          type: "reference",
+        },
+      ];
+    }
+    if (typeof content.text === "string") {
+      return [{ text: content.text, type: "text" }];
+    }
+  }
+  return undefined;
+}
+
+function extractMessageText(content: unknown): string | undefined {
+  const segments = contentToMessageSegments(content);
+  if (segments?.length) {
+    const text = segments
+      .map((segment) => (segment.type === "text" ? segment.text : segment.label))
+      .join("");
+    return text || undefined;
   }
   return asText(content);
 }
@@ -460,9 +533,11 @@ function applyHistoryEntry(
       if (!text) {
         return;
       }
+      const segments = contentToMessageSegments(entry.message.content);
       session.timeline.push({
         id,
         kind: "user",
+        segments,
         text,
         type: "message",
       } satisfies WebviewMessageBlock);
@@ -850,6 +925,9 @@ function pushMessage(
   if (options.submitKind) {
     next.submitKind = options.submitKind;
   }
+  if (options.segments?.length) {
+    next.segments = options.segments.map((segment) => ({ ...segment }));
+  }
   session.timeline.push(next);
   return next;
 }
@@ -1170,6 +1248,7 @@ export class WebviewStateStore {
     text: string,
     options: {
       messageId: string;
+      segments?: WebviewMessageSegment[];
       submitKind: UserSubmitKind;
     },
   ): void {
@@ -1177,6 +1256,7 @@ export class WebviewStateStore {
     const runtime = this.ensureRuntime(sessionId);
     pushMessage(session, "user", text, options.messageId, {
       deliveryState: "pending",
+      segments: options.segments,
       submitKind: options.submitKind,
     });
     runtime.localUserMessageIds.add(options.messageId);
@@ -1265,7 +1345,11 @@ export class WebviewStateStore {
   }
 
   applyEvent(frame: HostEventFrameContent): void {
-    if (frame.type === "__test.capture_dom" || frame.type === "__test.dom_action") {
+    if (
+      frame.type === "__test.capture_dom" ||
+      frame.type === "__test.dom_action" ||
+      frame.type === "insertReference"
+    ) {
       return;
     }
     if ("subtype" in frame && frame.type === "control_request") {

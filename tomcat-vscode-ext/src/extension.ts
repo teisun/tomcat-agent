@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 
 import {
+  TOMCAT_ADD_FILE_TO_CHAT_COMMAND,
+  TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
   PARTICIPANT_ID,
   TOMCAT_FOCUS_WEBVIEW_COMMAND,
   TEST_DEFAULT_CWD_ENV,
@@ -37,6 +39,10 @@ import {
   type WebviewDomAction,
   type WebviewIntent,
 } from "./ui/webview/protocol";
+import {
+  buildSelectionReference,
+  resolveUriToFileReference,
+} from "./ui/webview/contextReferences";
 import { TomcatWebviewViewProvider } from "./ui/webview/provider";
 
 export type { WebviewIntent } from "./ui/webview/protocol";
@@ -212,6 +218,39 @@ function matchesObservedEvent(
   return true;
 }
 
+const CODELENS_REFRESH_DEBOUNCE_MS = 150;
+
+export class TomcatSelectionCodeLensProvider implements vscode.CodeLensProvider, vscode.Disposable {
+  private readonly changeEmitter = new vscode.EventEmitter<void>();
+
+  readonly onDidChangeCodeLenses = this.changeEmitter.event;
+
+  dispose(): void {
+    this.changeEmitter.dispose();
+  }
+
+  refresh(): void {
+    this.changeEmitter.fire();
+  }
+
+  provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.uri.toString() !== document.uri.toString()) {
+      return [];
+    }
+    const reference = buildSelectionReference(editor);
+    if (!reference) {
+      return [];
+    }
+    return [
+      new vscode.CodeLens(new vscode.Range(editor.selection.start.line, 0, editor.selection.start.line, 0), {
+        command: TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
+        title: "Add to Tomcat Chat",
+      }),
+    ];
+  }
+}
+
 function getTomcatConfiguration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration(TOMCAT_CONFIG_SECTION);
 }
@@ -267,6 +306,14 @@ async function showInformationMessage(message: string): Promise<void> {
   }
 
   await vscode.window.showInformationMessage(message);
+}
+
+async function showWarningMessage(message: string): Promise<void> {
+  if (shouldSuppressExitPrompt()) {
+    return;
+  }
+
+  await vscode.window.showWarningMessage(message);
 }
 
 function getDefaultCwd(): string | undefined {
@@ -432,6 +479,30 @@ export async function activate(
     ownership,
     sessionRouter,
   });
+  const selectionCodeLensProvider = new TomcatSelectionCodeLensProvider();
+  let selectionCodeLensTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleSelectionCodeLensRefresh = () => {
+    if (selectionCodeLensTimer) {
+      clearTimeout(selectionCodeLensTimer);
+    }
+    selectionCodeLensTimer = setTimeout(() => {
+      selectionCodeLensProvider.refresh();
+    }, CODELENS_REFRESH_DEBOUNCE_MS);
+  };
+
+  const focusWebviewSurface = async (): Promise<string | null> => {
+    await vscode.commands.executeCommand(
+      `workbench.view.extension.${TOMCAT_WEBVIEW_CONTAINER_ID}`,
+    );
+    try {
+      await vscode.commands.executeCommand(`${TOMCAT_WEBVIEW_ID}.focus`);
+    } catch {
+      // Some host builds do not expose an auto-generated focus command for custom views.
+    }
+    webviewProvider.reveal();
+    await webviewProvider.waitUntilReady().catch(() => undefined);
+    return webviewProvider.currentState().activeSessionId;
+  };
 
   const askQuestionHandler = messenger.registerAskQuestionHandler(
     async (request, frame) => {
@@ -554,16 +625,51 @@ export async function activate(
   const focusWebviewCommand = vscode.commands.registerCommand(
     TOMCAT_FOCUS_WEBVIEW_COMMAND,
     async () => {
-      await vscode.commands.executeCommand(
-        `workbench.view.extension.${TOMCAT_WEBVIEW_CONTAINER_ID}`,
-      );
-      try {
-        await vscode.commands.executeCommand(`${TOMCAT_WEBVIEW_ID}.focus`);
-      } catch {
-        // Some host builds do not expose an auto-generated focus command for custom views.
+      await focusWebviewSurface();
+    },
+  );
+  const addSelectionToChatCommand = vscode.commands.registerCommand(
+    TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
+    async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        await showWarningMessage("Open an editor and select some text first.");
+        return;
       }
-      webviewProvider.reveal();
-      await webviewProvider.waitUntilReady().catch(() => undefined);
+      const reference = buildSelectionReference(editor);
+      if (!reference) {
+        await showWarningMessage("Select some text before adding it to Tomcat Chat.");
+        return;
+      }
+      const sessionId = await focusWebviewSurface();
+      if (!sessionId) {
+        await showWarningMessage("Tomcat sidebar is not ready yet. Please try again.");
+        return;
+      }
+      await webviewProvider.postInsertReference(sessionId, reference);
+    },
+  );
+  const addFileToChatCommand = vscode.commands.registerCommand(
+    TOMCAT_ADD_FILE_TO_CHAT_COMMAND,
+    async (uri?: vscode.Uri, selectedUris?: vscode.Uri[]) => {
+      const targets = Array.isArray(selectedUris) && selectedUris.length > 0
+        ? selectedUris
+        : uri
+          ? [uri]
+          : [];
+      if (!targets.length) {
+        await showWarningMessage("Choose a file or folder in the explorer first.");
+        return;
+      }
+      const sessionId = await focusWebviewSurface();
+      if (!sessionId) {
+        await showWarningMessage("Tomcat sidebar is not ready yet. Please try again.");
+        return;
+      }
+      for (const target of targets) {
+        const reference = await resolveUriToFileReference(target);
+        await webviewProvider.postInsertReference(sessionId, reference);
+      }
     },
   );
   const webviewRegistration = vscode.window.registerWebviewViewProvider(
@@ -615,6 +721,16 @@ export async function activate(
       });
     },
   );
+  const codeLensRegistration = vscode.languages.registerCodeLensProvider(
+    [{ scheme: "file" }, { scheme: "vscode-remote" }, { scheme: "untitled" }],
+    selectionCodeLensProvider,
+  );
+  const selectionChangeSubscription = vscode.window.onDidChangeTextEditorSelection(() => {
+    scheduleSelectionCodeLensRefresh();
+  });
+  const activeEditorSubscription = vscode.window.onDidChangeActiveTextEditor(() => {
+    scheduleSelectionCodeLensRefresh();
+  });
 
   context.subscriptions.push(
     output,
@@ -624,9 +740,23 @@ export async function activate(
     newSessionCommand,
     listSessionsCommand,
     focusWebviewCommand,
+    addSelectionToChatCommand,
+    addFileToChatCommand,
     webviewProvider,
     webviewRegistration,
+    codeLensRegistration,
+    selectionChangeSubscription,
+    activeEditorSubscription,
+    selectionCodeLensProvider,
+    {
+      dispose() {
+        if (selectionCodeLensTimer) {
+          clearTimeout(selectionCodeLensTimer);
+        }
+      },
+    },
   );
+  scheduleSelectionCodeLensRefresh();
 
   disposeRuntime = () => {
     participant?.dispose();

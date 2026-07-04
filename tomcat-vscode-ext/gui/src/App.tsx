@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AttachmentChips } from "./components/AttachmentChips";
-import { Composer } from "./components/Composer";
+import { Composer, type ComposerDraft, type ComposerHandle } from "./components/Composer";
 import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
 import { TodoListWidget } from "./components/TodoListWidget";
 import { TranscriptView } from "./components/TranscriptView";
+import { isWebviewReference } from "./contextReferences";
 import type {
   AskQuestionResult,
   HostToWebviewFrame,
@@ -13,6 +14,7 @@ import type {
   WebviewDomAction,
   WebviewMessageBlock,
   WebviewIntent,
+  WebviewReference,
   WebviewStateSnapshot,
 } from "./types";
 import { useAutoScroll } from "./useAutoScroll";
@@ -28,6 +30,17 @@ const EMPTY_STATE: WebviewStateSnapshot = {
 
 const MAX_BOOTSTRAP_FILL_REQUESTS = 4;
 const TOP_HISTORY_THRESHOLD_PX = 24;
+const EMPTY_DRAFT: ComposerDraft = {
+  hasContent: false,
+  segments: [],
+  text: "",
+};
+
+interface PendingComposerSubmission {
+  draft: ComposerDraft;
+  messageId: string;
+  sessionId: string | null;
+}
 
 function createMessageId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -43,6 +56,55 @@ function postIntent(
     messageId: createMessageId(type),
     type,
   } as WebviewIntent);
+}
+
+function draftsEqual(left: ComposerDraft, right: ComposerDraft): boolean {
+  return (
+    left.hasContent === right.hasContent &&
+    left.text === right.text &&
+    JSON.stringify(left.segments) === JSON.stringify(right.segments)
+  );
+}
+
+function isInsertReferenceEvent(
+  content: HostToWebviewFrame["content"],
+): content is {
+  reference: WebviewReference;
+  sessionId: string;
+  type: "insertReference";
+} {
+  return (
+    !!content &&
+    typeof content === "object" &&
+    "type" in content &&
+    content.type === "insertReference" &&
+    "sessionId" in content &&
+    typeof content.sessionId === "string" &&
+    "reference" in content &&
+    isWebviewReference(content.reference)
+  );
+}
+
+function resolvePendingComposerSubmission(
+  snapshot: WebviewStateSnapshot,
+  pending: PendingComposerSubmission,
+): {
+  message: WebviewMessageBlock;
+  sessionId: string;
+} | null {
+  const candidateSessionIds = pending.sessionId
+    ? [pending.sessionId]
+    : Object.keys(snapshot.sessionViews);
+  for (const sessionId of candidateSessionIds) {
+    const message = snapshot.sessionViews[sessionId]?.timeline.find(
+      (item): item is WebviewMessageBlock =>
+        item.type === "message" && item.kind === "user" && item.id === pending.messageId,
+    );
+    if (message) {
+      return { message, sessionId };
+    }
+  }
+  return null;
 }
 
 function buildDomSnapshot(state: WebviewStateSnapshot) {
@@ -323,6 +385,20 @@ function runDomAction(action: WebviewDomAction): void {
     return;
   }
 
+  if (action.kind === "dragOverTestId" || action.kind === "dragLeaveTestId") {
+    const target = resolveActionTarget();
+    if (!target) {
+      return;
+    }
+    const eventName = action.kind === "dragOverTestId" ? "dragover" : "dragleave";
+    const dragEvent = new DragEvent(eventName, {
+      bubbles: true,
+      cancelable: true,
+    });
+    target.dispatchEvent(dragEvent);
+    return;
+  }
+
   const target = document.querySelector<HTMLElement>(`[data-testid="${action.testId ?? ""}"]`);
   if (!target) {
     return;
@@ -369,26 +445,35 @@ function currentModeValue(planState?: string | null): "chat" | "plan" {
 
 function submitPrompt(
   vscodeApi: VsCodeApiLike,
-  prompt: string,
+  composer: ComposerHandle | null,
   activeSessionId: string | null | undefined,
   canPrompt: boolean,
-  setPrompt: (next: string) => void,
+  onSubmitted: (pending: PendingComposerSubmission) => void,
 ): void {
-  const text = prompt.trim();
-  if (!canPrompt || !text) {
+  const draft = composer?.getDraft() ?? EMPTY_DRAFT;
+  if (!canPrompt || !draft.hasContent) {
     return;
   }
+  const userMessageId = createMessageId("user");
+  onSubmitted({
+    draft,
+    messageId: userMessageId,
+    sessionId: activeSessionId ?? null,
+  });
   postIntent(vscodeApi, "prompt", {
     sessionId: activeSessionId ?? null,
-    text,
+    segments: draft.segments,
+    text: draft.text,
+    userMessageId,
   });
-  setPrompt("");
 }
 
 export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [state, setState] = useState<WebviewStateSnapshot>(EMPTY_STATE);
-  const [prompt, setPrompt] = useState("");
   const stateRef = useRef<WebviewStateSnapshot>(EMPTY_STATE);
+  const composerRef = useRef<ComposerHandle | null>(null);
+  const pendingInsertionsRef = useRef<Array<{ reference: WebviewReference; sessionId: string }>>([]);
+  const pendingComposerSubmissionRef = useRef<PendingComposerSubmission | null>(null);
   const streamRef = useRef<HTMLElement | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
 
@@ -432,12 +517,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const readOnlyConflict = activeSession?.conflictMessage ?? null;
   const canPrompt = state.uiMode !== "participant" && !activeSession?.busy && !readOnlyConflict;
   const canBuildPlan = !!activeSession && !activeSession.busy && !readOnlyConflict;
-  const promptPlaceholder =
-    state.uiMode === "participant"
-      ? "Set `tomcat.ui` to `both` or `webview` to chat here."
-      : readOnlyConflict
-        ? "This live session is currently read-only in the webview."
-        : "Message Tomcat (Enter to send, Shift+Enter for newline)";
   const { bottomSpacerHeight, latestUserScrolledPast, scrollToLatest, userHasScrolled } = useAutoScroll({
     containerRef: streamRef,
     contentRef: transcriptRef,
@@ -447,6 +526,44 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     resetKey: activeSession?.sessionId ?? null,
     userMessageCount,
   });
+
+  const flushPendingInsertions = () => {
+    const activeSessionId = stateRef.current.activeSessionId;
+    if (!composerRef.current || !activeSessionId) {
+      return;
+    }
+    const remaining: Array<{ reference: WebviewReference; sessionId: string }> = [];
+    for (const insertion of pendingInsertionsRef.current) {
+      if (insertion.sessionId !== activeSessionId) {
+        remaining.push(insertion);
+        continue;
+      }
+      composerRef.current.insertReference(insertion.reference);
+    }
+    pendingInsertionsRef.current = remaining;
+  };
+
+  useEffect(() => {
+    const pending = pendingComposerSubmissionRef.current;
+    const composer = composerRef.current;
+    if (!pending || !composer) {
+      return;
+    }
+    const resolved = resolvePendingComposerSubmission(state, pending);
+    if (!resolved || resolved.message.deliveryState === "pending") {
+      return;
+    }
+    pendingComposerSubmissionRef.current = null;
+    if (resolved.message.deliveryState === "failed") {
+      return;
+    }
+    if (state.activeSessionId !== resolved.sessionId) {
+      return;
+    }
+    if (draftsEqual(composer.getDraft(), pending.draft)) {
+      composer.clear();
+    }
+  }, [state]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent<HostToWebviewFrame>) => {
@@ -458,6 +575,22 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         stateRef.current = frame.content;
         setState(frame.content);
         vscodeApi.setState?.(frame.content);
+        flushPendingInsertions();
+        return;
+      }
+      if (
+        frame.channel === "event" &&
+        isInsertReferenceEvent(frame.content)
+      ) {
+        const insertion = {
+          reference: frame.content.reference,
+          sessionId: frame.content.sessionId,
+        };
+        if (composerRef.current && insertion.sessionId === stateRef.current.activeSessionId) {
+          composerRef.current.insertReference(insertion.reference);
+        } else {
+          pendingInsertionsRef.current.push(insertion);
+        }
         return;
       }
       if (
@@ -492,19 +625,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     };
   }, [vscodeApi]);
 
-  const handlePromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== "Enter" || event.shiftKey) {
-      return;
-    }
-    event.preventDefault();
-    submitPrompt(
-      vscodeApi,
-      prompt,
-      activeSession?.sessionId,
-      canPrompt,
-      setPrompt,
-    );
-  };
+  useEffect(() => {
+    flushPendingInsertions();
+  }, [state.activeSessionId]);
 
   const handleAnswerQuestion = (requestId: string, result: AskQuestionResult) => {
     answerQuestion(vscodeApi, requestId, result);
@@ -760,11 +883,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         modeValue={currentModeValue(activeSession?.planState)}
         modelValue={activeSession?.model ?? ""}
         thinkingLevelValue={normalizeThinkingLevel(activeSession?.thinkingLevel)}
+        ref={composerRef}
         onAddAttachment={() =>
           postIntent(vscodeApi, "pickAttachment", {
             sessionId: activeSession?.sessionId ?? null,
           })
         }
+        onDraftChange={() => undefined}
         onModeChange={handleModeChange}
         onModelChange={(modelId) => {
           if (!activeSession || !modelId) {
@@ -785,8 +910,12 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             sessionId: activeSession.sessionId,
           });
         }}
-        onPromptChange={setPrompt}
-        onPromptKeyDown={handlePromptKeyDown}
+        onResolveDrop={(uris) =>
+          postIntent(vscodeApi, "resolveDrop", {
+            sessionId: activeSession?.sessionId ?? null,
+            uris,
+          })
+        }
         onInterrupt={() => {
           if (!activeSession?.sessionId) {
             return;
@@ -798,15 +927,15 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         onSubmit={() =>
           submitPrompt(
             vscodeApi,
-            prompt,
+            composerRef.current,
             activeSession?.sessionId,
             canPrompt,
-            setPrompt,
+            (pending) => {
+              pendingComposerSubmissionRef.current = pending;
+            },
           )
         }
         planState={activeSession?.planState}
-        prompt={prompt}
-        promptPlaceholder={promptPlaceholder}
       />
     </main>
   );

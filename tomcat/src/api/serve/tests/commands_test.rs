@@ -7,8 +7,8 @@ use std::time::Duration;
 use serial_test::serial;
 
 use crate::core::llm::{
-    ChatMessageContent, ChatMessageContentPart, FileSource, ImageSource, LlmProvider, MessageKind,
-    StreamEvent,
+    ChatMessageContent, ChatMessageContentPart, ContextRefKind, FileSource, ImageSource,
+    LlmProvider, MessageKind, StreamEvent,
 };
 
 async fn wait_for_line(
@@ -644,6 +644,7 @@ async fn serve_follow_up_with_attachment_queues_multimodal_message_when_busy() {
                     file_id: Some("file-follow-up".to_string()),
                 }],
                 user_message_id: Some("follow-up-fixed-id".to_string()),
+                ..ServeMessageParams::default()
             },
         },
     )
@@ -987,6 +988,125 @@ async fn serve_prompt_without_attachments_falls_back_to_user_text() {
         .is_some_and(|message_id| !message_id.is_empty()));
 }
 
+#[test]
+fn serve_message_params_segments_make_payload_non_empty() {
+    let params = ServeMessageParams {
+        segments: vec![ServeContentSegment::Reference {
+            reference: ServeContextReference {
+                kind: ServeContextRefKind::File,
+                path: "src/lib.rs".to_string(),
+                label: "lib.rs".to_string(),
+                line_start: None,
+                line_end: None,
+                text: None,
+            },
+        }],
+        ..ServeMessageParams::default()
+    };
+    assert!(!params.is_empty());
+}
+
+#[test]
+fn build_user_message_preserves_segment_order_and_appends_attachments() {
+    let params = ServeMessageParams {
+        segments: vec![
+            ServeContentSegment::Text {
+                text: "before ".to_string(),
+            },
+            ServeContentSegment::Reference {
+                reference: ServeContextReference {
+                    kind: ServeContextRefKind::Selection,
+                    path: "src/lib.rs".to_string(),
+                    label: "lib.rs:10-12".to_string(),
+                    line_start: Some(10),
+                    line_end: Some(12),
+                    text: Some("fn hello() {}".to_string()),
+                },
+            },
+            ServeContentSegment::Text {
+                text: " after".to_string(),
+            },
+        ],
+        attachments: vec![ServeAttachment {
+            kind: ServeAttachmentKind::Image,
+            filename: None,
+            mime_type: None,
+            data_base64: None,
+            file_id: Some("image-file-id".to_string()),
+        }],
+        ..ServeMessageParams::default()
+    };
+
+    let message = crate::api::serve::commands::build_user_message(
+        "fallback text".to_string(),
+        &params,
+    )
+    .expect("build message");
+    let parts = match message.content {
+        Some(ChatMessageContent::Parts(parts)) => parts,
+        other => panic!("expected multipart content, got {other:?}"),
+    };
+
+    assert!(matches!(
+        &parts[0],
+        ChatMessageContentPart::InputText { text } if text == "before "
+    ));
+    assert!(matches!(
+        &parts[1],
+        ChatMessageContentPart::InputReference { reference }
+            if reference.ref_kind == ContextRefKind::Selection
+                && reference.path == "src/lib.rs"
+                && reference.label == "lib.rs:10-12"
+                && reference.line_start == Some(10)
+                && reference.line_end == Some(12)
+                && reference.text.as_deref() == Some("fn hello() {}")
+    ));
+    assert!(matches!(
+        &parts[2],
+        ChatMessageContentPart::InputText { text } if text == " after"
+    ));
+    assert!(matches!(
+        &parts[3],
+        ChatMessageContentPart::InputImage {
+            source: ImageSource::Uploaded(uploaded),
+            ..
+        } if uploaded.file_id == "image-file-id"
+    ));
+}
+
+#[test]
+fn build_user_message_accepts_reference_only_segments() {
+    let params = ServeMessageParams {
+        segments: vec![ServeContentSegment::Reference {
+            reference: ServeContextReference {
+                kind: ServeContextRefKind::File,
+                path: "README.md".to_string(),
+                label: "README.md".to_string(),
+                line_start: None,
+                line_end: None,
+                text: None,
+            },
+        }],
+        ..ServeMessageParams::default()
+    };
+
+    let message =
+        crate::api::serve::commands::build_user_message(String::new(), &params)
+            .expect("build message");
+    let parts = match message.content {
+        Some(ChatMessageContent::Parts(parts)) => parts,
+        other => panic!("expected multipart content, got {other:?}"),
+    };
+    assert_eq!(parts.len(), 1);
+    assert!(matches!(
+        &parts[0],
+        ChatMessageContentPart::InputReference { reference }
+            if reference.ref_kind == ContextRefKind::File
+                && reference.path == "README.md"
+                && reference.label == "README.md"
+    ));
+}
+
 #[tokio::test]
 #[serial(env_lock)]
 async fn serve_prompt_blank_user_message_id_falls_back_to_generated_entry_id() {
@@ -1084,6 +1204,7 @@ async fn serve_steer_ignores_attachments() {
                     file_id: Some("ignored-file".to_string()),
                 }],
                 user_message_id: Some("steer-fixed-id".to_string()),
+                ..ServeMessageParams::default()
             },
         },
     )

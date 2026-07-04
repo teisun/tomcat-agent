@@ -1,7 +1,32 @@
 export type TomcatUiMode = "both" | "participant" | "webview";
+export type WebviewReferenceKind = "selection" | "file";
+
+export type WebviewMessageSegment =
+  | {
+      text: string;
+      type: "text";
+    }
+  | {
+      kind: WebviewReferenceKind;
+      label: string;
+      lineEnd?: number | null;
+      lineStart?: number | null;
+      path: string;
+      text?: string | null;
+      type: "reference";
+    };
+
+export type WebviewReference = Extract<WebviewMessageSegment, { type: "reference" }>;
 
 export interface WebviewDomAction {
-  kind: "clickTestId" | "scrollIntoView" | "scrollToEdge" | "setInputValue" | "setRootWidth";
+  kind:
+    | "clickTestId"
+    | "dragOverTestId"
+    | "dragLeaveTestId"
+    | "scrollIntoView"
+    | "scrollToEdge"
+    | "setInputValue"
+    | "setRootWidth";
   edge?: "bottom" | "top";
   index?: number;
   scrollBlock?: "center" | "end" | "nearest" | "start";
@@ -18,6 +43,7 @@ export interface WebviewMessageBlock {
   id: string;
   kind: "assistant" | "error" | "notice" | "user" | "warn";
   retryable?: boolean;
+  segments?: WebviewMessageSegment[];
   submitKind?: "prompt" | "steer";
   text: string;
   type: "message";
@@ -206,6 +232,11 @@ export type HostToWebviewFrame =
       channel: "event";
       content:
         | {
+            reference: WebviewReference;
+            sessionId?: string | null;
+            type: "insertReference";
+          }
+        | {
             type: "__test.capture_dom";
           }
         | {
@@ -273,8 +304,10 @@ export type WebviewIntent =
       messageId: string;
       type: "prompt" | "steer";
       data: {
+        segments?: WebviewMessageSegment[];
         sessionId?: string | null;
         text: string;
+        userMessageId?: string;
       };
     }
   | {
@@ -331,6 +364,14 @@ export type WebviewIntent =
       type: "openFile" | "openPlanFile";
       data: {
         path: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "resolveDrop";
+      data: {
+        sessionId?: string | null;
+        uris: string[];
       };
     }
   | {

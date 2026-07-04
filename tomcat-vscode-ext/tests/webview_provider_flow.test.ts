@@ -10,6 +10,7 @@ import type { IdeHost } from "../src/ui/webview/types";
 const __testing = (
   vscode as typeof vscode & {
     __testing: {
+      registerDirectory(dirPath: string): void;
       registerFile(filePath: string, text: string): void;
       reset(): void;
       setOpenDialogHandler(
@@ -400,6 +401,128 @@ describe("webview provider integration", () => {
     expect(sentUserMessage).not.toHaveProperty("deliveryState");
     expect(sentUserMessage).not.toHaveProperty("retryable");
     expect(provider.currentState().sessionViews["session-1"]?.pendingAttachments).toHaveLength(0);
+
+    provider.dispose();
+  });
+
+  it("passes ordered message segments through prompt requests and optimistic history", async () => {
+    const { messenger, provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-segments",
+      type: "ready",
+    });
+
+    const segments = [
+      { text: "Inspect ", type: "text" as const },
+      {
+        kind: "selection" as const,
+        label: "app.ts:3-5",
+        lineEnd: 5,
+        lineStart: 3,
+        path: "app.ts",
+        text: "const answer = 42;",
+        type: "reference" as const,
+      },
+      { text: " carefully", type: "text" as const },
+    ];
+
+    await provider.dispatchTestIntent({
+      data: {
+        segments,
+        sessionId: "session-1",
+        text: "Inspect app.ts:3-5 carefully",
+      },
+      messageId: "prompt-segments",
+      type: "prompt",
+    });
+
+    const promptRequest = messenger.requestCalls.find((call) => call.type === "prompt");
+    expect(promptRequest).toEqual(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          segments,
+        }),
+        sessionId: "session-1",
+        text: "Inspect app.ts:3-5 carefully",
+      }),
+    );
+
+    const userMessageId = (promptRequest?.params as { userMessageId?: string } | undefined)?.userMessageId;
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.find(
+        (item) => item.type === "message" && item.id === userMessageId,
+      ),
+    ).toMatchObject({
+      id: userMessageId,
+      kind: "user",
+      segments,
+      submitKind: "prompt",
+      text: "Inspect app.ts:3-5 carefully",
+      type: "message",
+    });
+
+    provider.dispose();
+  });
+
+  it("normalizes dropped uris into file references before inserting them", async () => {
+    const { provider } = buildProvider();
+    __testing.registerFile("/workspace/src/app.ts", "export const answer = 42;\n");
+    __testing.registerDirectory("/workspace/src/folder");
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-drop",
+      type: "ready",
+    });
+
+    const postInsertReference = vi
+      .spyOn(provider, "postInsertReference")
+      .mockResolvedValue(undefined);
+
+    await provider.dispatchTestIntent({
+      data: {
+        sessionId: "session-1",
+        uris: [
+          vscode.Uri.file("/workspace/src/app.ts").toString(),
+          vscode.Uri.file("/workspace/src/folder").toString(),
+          vscode.Uri.file("/outside/log.txt").toString(),
+        ],
+      },
+      messageId: "drop-1",
+      type: "resolveDrop",
+    });
+
+    expect(postInsertReference).toHaveBeenCalledTimes(3);
+    expect(postInsertReference).toHaveBeenNthCalledWith(
+      1,
+      "session-1",
+      {
+        kind: "file",
+        label: "app.ts",
+        path: "src/app.ts",
+        type: "reference",
+      },
+    );
+    expect(postInsertReference).toHaveBeenNthCalledWith(
+      2,
+      "session-1",
+      {
+        kind: "file",
+        label: "folder/",
+        path: "src/folder/",
+        type: "reference",
+      },
+    );
+    expect(postInsertReference).toHaveBeenNthCalledWith(
+      3,
+      "session-1",
+      {
+        kind: "file",
+        label: "log.txt",
+        path: "/outside/log.txt",
+        type: "reference",
+      },
+    );
 
     provider.dispose();
   });

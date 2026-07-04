@@ -10,24 +10,51 @@ describe("webview protocol helpers", () => {
   it("accepts valid host and webview frames", () => {
     expect(
       isHostToWebviewFrame({
-        channel: "state",
+        channel: "event",
         content: {
-          activeSessionId: "s1",
-          availableModels: [],
-          ready: true,
-          sessionViews: {},
-          sessions: [],
-          uiMode: "both",
+          reference: {
+            kind: "selection",
+            label: "app.ts:1-2",
+            lineEnd: 2,
+            lineStart: 1,
+            path: "app.ts",
+            text: "const x = 1;",
+            type: "reference",
+          },
+          sessionId: "s1",
+          type: "insertReference",
         },
-        messageId: "state-1",
+        messageId: "event-1",
       }),
     ).toBe(true);
 
     expect(
       isWebviewIntent({
-        data: { text: "hello" },
+        data: {
+          segments: [
+            { text: "Inspect ", type: "text" },
+            {
+              kind: "file",
+              label: "app.ts",
+              path: "app.ts",
+              type: "reference",
+            },
+          ],
+          text: "Inspect app.ts",
+        },
         messageId: "prompt-1",
         type: "prompt",
+      }),
+    ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: {
+          sessionId: "s1",
+          uris: ["file:///workspace/app.ts"],
+        },
+        messageId: "drop-1",
+        type: "resolveDrop",
       }),
     ).toBe(true);
   });
@@ -38,6 +65,32 @@ describe("webview protocol helpers", () => {
         data: {},
         messageId: "prompt-1",
         type: "prompt",
+      }),
+    ).toBe(false);
+    expect(
+      isWebviewIntent({
+        data: {
+          segments: [
+            {
+              kind: "file",
+              label: 123,
+              path: "app.ts",
+              type: "reference",
+            },
+          ],
+          text: "bad",
+        },
+        messageId: "prompt-2",
+        type: "prompt",
+      }),
+    ).toBe(false);
+    expect(
+      isWebviewIntent({
+        data: {
+          uris: ["file:///workspace/app.ts", 42],
+        },
+        messageId: "drop-2",
+        type: "resolveDrop",
       }),
     ).toBe(false);
     expect(

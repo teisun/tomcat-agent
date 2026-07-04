@@ -39,9 +39,9 @@ pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]
 pub use types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ChatResponse, ChatResponseChoice, ContinuityMetadata, FileSource, ImageSource, MessageKind,
-    ProviderRefs, ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent,
-    ThinkingSource, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+    ChatResponse, ChatResponseChoice, ContextRefKind, ContextReference, ContinuityMetadata,
+    FileSource, ImageSource, MessageKind, ProviderRefs, ReasoningContinuation, ReasoningFormat,
+    ReplayRequirement, StreamEvent, ThinkingSource, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
 
 #[cfg(test)]

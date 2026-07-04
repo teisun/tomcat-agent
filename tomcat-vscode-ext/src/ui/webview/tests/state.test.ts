@@ -1136,6 +1136,109 @@ describe("plan.todos routing", () => {
   });
 });
 
+describe("reference segment hydration", () => {
+  it("rehydrates user history with interleaved text and reference segments", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "hist-user-ref",
+          message: {
+            content: [
+              { text: "Inspect ", type: "input_text" },
+              {
+                label: "app.ts:3-5",
+                line_end: 5,
+                line_start: 3,
+                path: "app.ts",
+                ref_kind: "selection",
+                text: "const answer = 42;",
+                type: "input_reference",
+              },
+              { text: " please", type: "input_text" },
+            ],
+            role: "user",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+      upToSeq: null,
+    });
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "hist-user-ref",
+      ),
+    ).toMatchObject({
+      id: "hist-user-ref",
+      kind: "user",
+      segments: [
+        { text: "Inspect ", type: "text" },
+        {
+          kind: "selection",
+          label: "app.ts:3-5",
+          lineEnd: 5,
+          lineStart: 3,
+          path: "app.ts",
+          text: "const answer = 42;",
+          type: "reference",
+        },
+        { text: " please", type: "text" },
+      ],
+      text: "Inspect app.ts:3-5 please",
+      type: "message",
+    });
+  });
+
+  it("keeps optimistic user message segments for reference-only prompts", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.appendLocalUserMessage("s1", "app.ts", {
+      messageId: "local-ref-only",
+      segments: [
+        {
+          kind: "file",
+          label: "app.ts",
+          lineEnd: null,
+          lineStart: null,
+          path: "app.ts",
+          text: null,
+          type: "reference",
+        },
+      ],
+      submitKind: "prompt",
+    });
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.find(
+        (item) => item.type === "message" && item.id === "local-ref-only",
+      ),
+    ).toMatchObject({
+      deliveryState: "pending",
+      id: "local-ref-only",
+      kind: "user",
+      segments: [
+        {
+          kind: "file",
+          label: "app.ts",
+          lineEnd: null,
+          lineStart: null,
+          path: "app.ts",
+          text: null,
+          type: "reference",
+        },
+      ],
+      submitKind: "prompt",
+      text: "app.ts",
+      type: "message",
+    });
+  });
+});
+
 describe("local user message delivery state", () => {
   it("retains pending and failed user bubbles during rebuild but drops confirmed ones", () => {
     const store = new WebviewStateStore("both");

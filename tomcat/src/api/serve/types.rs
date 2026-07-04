@@ -35,10 +35,45 @@ pub struct ServeAttachment {
     pub file_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ServeContextRefKind {
+    Selection,
+    File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServeContextReference {
+    pub kind: ServeContextRefKind,
+    pub path: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServeContentSegment {
+    Text {
+        text: String,
+    },
+    Reference {
+        #[serde(flatten)]
+        reference: ServeContextReference,
+    },
+}
+
 /// 发送给 `prompt` / `follow_up` / `steer` 的附加参数。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ServeMessageParams {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<ServeContentSegment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<ServeAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,7 +82,7 @@ pub struct ServeMessageParams {
 
 impl ServeMessageParams {
     pub fn is_empty(&self) -> bool {
-        self.attachments.is_empty() && self.user_message_id.is_none()
+        self.segments.is_empty() && self.attachments.is_empty() && self.user_message_id.is_none()
     }
 }
 

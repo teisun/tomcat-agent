@@ -15,7 +15,8 @@ use super::*;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::tests::mocks::{MockHttpServer, ScriptedHttpResponse};
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContentPart, ChatRequest, StreamEvent, ThinkingSource,
+    ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, StreamEvent,
+    ThinkingSource,
 };
 use crate::core::llm::{Capabilities, Credential, ModelEntry};
 use crate::infra::error::{
@@ -1906,6 +1907,32 @@ fn user_image_b64_renders_input_image_data_url() {
 }
 
 #[test]
+fn user_references_flatten_into_single_input_text_and_keep_attachments_afterwards() {
+    let msg = ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("before "),
+        ChatMessageContentPart::reference(ContextReference::selection(
+            "src/lib.rs",
+            "lib.rs:10-12",
+            Some(10),
+            Some(12),
+            Some("fn hello() {}".to_string()),
+        )),
+        ChatMessageContentPart::text(" between "),
+        ChatMessageContentPart::reference(ContextReference::file("docs/guide.md", "guide.md")),
+        ChatMessageContentPart::image_file_id("img-file").expect("image file id"),
+    ]);
+    let (_ins, input) = build_responses_input_test(&[msg]);
+    let content = &input[0]["content"];
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(
+        content[0]["text"],
+        "before <selection file=\"src/lib.rs\" lines=\"10-12\">\nfn hello() {}\n</selection> between [file reference] docs/guide.md"
+    );
+    assert_eq!(content[1]["type"], "input_image");
+    assert_eq!(content[1]["file_id"], "img-file");
+}
+
+#[test]
 fn user_file_b64_renders_input_file_data_url() {
     // 一段最小合法 base64（解码后仅 "PDF"），不真发 API；只断言 wire 形状。
     let pdf_b64 = "UERG"; // base64("PDF")
@@ -1915,11 +1942,13 @@ fn user_file_b64_renders_input_file_data_url() {
     let msg = ChatMessage::user_with_parts(vec![part]);
     let (_ins, input) = build_responses_input_test(&[msg]);
     let content = &input[0]["content"];
-    assert_eq!(content[0]["type"], "input_file");
-    assert_eq!(content[0]["filename"], "sample.pdf");
-    let data = content[0]["file_data"].as_str().expect("file_data present");
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"], "");
+    assert_eq!(content[1]["type"], "input_file");
+    assert_eq!(content[1]["filename"], "sample.pdf");
+    let data = content[1]["file_data"].as_str().expect("file_data present");
     assert_eq!(data, "data:application/pdf;base64,UERG");
-    assert!(content[0].get("file_id").is_none());
+    assert!(content[1].get("file_id").is_none());
 }
 
 #[test]
@@ -1929,9 +1958,11 @@ fn user_image_file_id_renders_file_id_field() {
     let msg = ChatMessage::user_with_parts(vec![part]);
     let (_ins, input) = build_responses_input_test(&[msg]);
     let content = &input[0]["content"];
-    assert_eq!(content[0]["type"], "input_image");
-    assert_eq!(content[0]["file_id"], "file-abc");
-    assert!(content[0].get("image_url").is_none());
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"], "");
+    assert_eq!(content[1]["type"], "input_image");
+    assert_eq!(content[1]["file_id"], "file-abc");
+    assert!(content[1].get("image_url").is_none());
 }
 
 #[test]
@@ -1941,10 +1972,12 @@ fn user_file_file_id_renders_file_id_field() {
     let msg = ChatMessage::user_with_parts(vec![part]);
     let (_ins, input) = build_responses_input_test(&[msg]);
     let content = &input[0]["content"];
-    assert_eq!(content[0]["type"], "input_file");
-    assert_eq!(content[0]["file_id"], "file-xyz");
-    assert!(content[0].get("filename").is_none());
-    assert!(content[0].get("file_data").is_none());
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"], "");
+    assert_eq!(content[1]["type"], "input_file");
+    assert_eq!(content[1]["file_id"], "file-xyz");
+    assert!(content[1].get("filename").is_none());
+    assert!(content[1].get("file_data").is_none());
 }
 
 #[test]
