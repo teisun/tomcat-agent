@@ -45,6 +45,31 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     .expect("write openai-responses models override");
 }
 
+fn configure_multimodal_history_fixture(fx: &ServeFixture, base_url: &str) {
+    fs::write(
+        fx.home_path.join(".tomcat").join("models.toml"),
+        format!(
+            r#"[[models]]
+id = "gpt-5.4"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "{base_url}"
+capabilities = {{ vision = true, files = true, tools = true, reasoning = true, web_search = false }}
+
+[[models]]
+id = "deepseek-v4-pro"
+api = "openai"
+provider = "deepseek"
+api_key_env = "OPENAI_API_KEY"
+base_url = "{base_url}"
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#
+        ),
+    )
+    .expect("write dual-models override");
+}
+
 fn count_event(frames: &[serde_json::Value], event_type: &str) -> usize {
     frames
         .iter()
@@ -114,7 +139,11 @@ fn serve_stdio_user_roundtrip_e2e() {
     for value in &frames {
         assert_ndjson_line(value);
     }
-    assert_eq!(count_event(&frames, "agent_end"), 1, "expected one agent_end: {frames:?}");
+    assert_eq!(
+        count_event(&frames, "agent_end"),
+        1,
+        "expected one agent_end: {frames:?}"
+    );
     assert_eq!(
         count_event(&frames, "agent_idle"),
         1,
@@ -229,7 +258,9 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
     });
     let state_response = state_frames
         .iter()
-        .find(|value| value.get("id").and_then(|v| v.as_str()) == Some("state-after-interrupt-idle"))
+        .find(|value| {
+            value.get("id").and_then(|v| v.as_str()) == Some("state-after-interrupt-idle")
+        })
         .expect("state-after-interrupt-idle response");
     assert_eq!(state_response["payload"]["busy"].as_bool(), Some(false));
 }
@@ -564,6 +595,139 @@ fn serve_prompt_with_non_pdf_file_attachment_returns_error() {
         server.captured_requests().len(),
         0,
         "non-pdf file attachments should not reach the responses API"
+    );
+}
+
+#[test]
+#[serial]
+fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succeeds() {
+    common::setup_logging();
+    let server = spawn_scripted_openai_stream_server(vec![
+        response(vec![
+            responses_sse_delta("vision ok"),
+            responses_sse_completed(),
+        ]),
+        response(vec![
+            responses_sse_delta("pdf ok"),
+            responses_sse_completed(),
+        ]),
+        response(vec![
+            sse_delta("history ok"),
+            sse_finish("stop"),
+            sse_done(),
+        ]),
+    ]);
+    let fx = setup_serve_fixture(&server.base_url);
+    configure_multimodal_history_fixture(&fx, &server.base_url);
+    let mut child = spawn_serve_child(&fx);
+    let session_id = initialize(&mut child);
+
+    child.send_value(&json!({
+        "type": "prompt",
+        "id": "hist-1",
+        "sessionId": session_id,
+        "text": "describe image",
+        "params": {
+            "attachments": [
+                {
+                    "kind": "image",
+                    "fileId": "file-vision"
+                }
+            ]
+        }
+    }));
+    let first_frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
+    });
+    assert_eq!(count_event(&first_frames, "agent_end"), 1);
+
+    child.send_value(&json!({
+        "type": "prompt",
+        "id": "hist-2",
+        "sessionId": session_id,
+        "text": "summarize pdf",
+        "params": {
+            "attachments": [
+                {
+                    "kind": "file",
+                    "filename": "notes.pdf",
+                    "mimeType": "application/pdf",
+                    "dataBase64": "JVBERi0xLjQK"
+                }
+            ]
+        }
+    }));
+    let second_history_frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
+    });
+    assert_eq!(count_event(&second_history_frames, "agent_end"), 1);
+
+    child.send_value(&json!({
+        "type": "set_model",
+        "id": "set-deepseek",
+        "sessionId": session_id,
+        "model": "deepseek-v4-pro"
+    }));
+    let set_model_frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("id").and_then(|v| v.as_str()) == Some("set-deepseek")
+    });
+    let set_model_response = set_model_frames
+        .iter()
+        .find(|value| value.get("id").and_then(|v| v.as_str()) == Some("set-deepseek"))
+        .expect("set_model response");
+    assert_eq!(set_model_response["success"].as_bool(), Some(true));
+
+    child.send_value(&json!({
+        "type": "prompt",
+        "id": "hist-3",
+        "sessionId": session_id,
+        "text": "follow up",
+        "params": {}
+    }));
+    let second_frames = child.recv_until(Duration::from_secs(5), |value| {
+        value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
+    });
+    assert_eq!(count_event(&second_frames, "agent_end"), 1);
+    assert!(
+        second_frames.iter().all(|value| {
+            value.get("type").and_then(|v| v.as_str()) != Some("agent_end")
+                || value.get("error").and_then(|v| v.as_str()).is_none()
+        }),
+        "history downgrade should avoid terminal errors: {second_frames:?}"
+    );
+
+    let requests = server.captured_requests();
+    assert_eq!(requests.len(), 3, "expected three upstream requests");
+    assert!(
+        requests[2].contains("/v1/chat/completions"),
+        "third request should switch to chat completions path: {:?}",
+        requests[2]
+    );
+    let body = extract_json_body(&requests[2]);
+    let messages = body["messages"].as_array().expect("completions messages");
+    assert!(
+        messages.iter().any(|message| {
+            message
+                .get("content")
+                .and_then(|value| value.as_str())
+                .is_some_and(|text| {
+                    text.contains("[图片已省略：当前模型不支持图片输入]")
+                        && text.contains("describe image")
+                })
+        }),
+        "third request should carry a downgraded image placeholder instead of raw image input: {messages:?}"
+    );
+    assert!(
+        messages.iter().any(|message| {
+            message
+                .get("content")
+                .and_then(|value| value.as_str())
+                .is_some_and(|text| {
+                    text.contains("[文件已省略：当前模型不支持文件输入]")
+                        && text.contains("summarize pdf")
+                })
+        }),
+        "third request should carry a downgraded file placeholder instead of raw file input: {messages:?}"
     );
 }
 

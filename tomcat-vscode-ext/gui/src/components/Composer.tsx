@@ -36,6 +36,68 @@ function formatPlanStatus(planState?: WebviewPlanState | null): string | null {
 const REFERENCE_NODE_NAME = "reference";
 const DROP_URI_SCHEMES = /^(file|vscode-file|vscode-remote):/i;
 const DEFAULT_PROMPT_PLACEHOLDER = "Message Tomcat (Enter to send, Shift+Enter for newline)";
+const IMAGE_ATTACHMENT_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
+
+function hasCapability(capabilities: string[], capability: "files" | "vision"): boolean {
+  return capabilities.includes(capability);
+}
+
+function extractUriExtension(uri: string): string | null {
+  try {
+    const pathname = decodeURIComponent(new URL(uri).pathname).toLowerCase();
+    const lastDot = pathname.lastIndexOf(".");
+    if (lastDot < 0) {
+      return null;
+    }
+    return pathname.slice(lastDot);
+  } catch {
+    return null;
+  }
+}
+
+function buildAttachmentHint(capabilities?: string[]): string | null {
+  if (!capabilities) {
+    return null;
+  }
+  const supportsVision = hasCapability(capabilities, "vision");
+  const supportsFiles = hasCapability(capabilities, "files");
+  if (supportsVision && supportsFiles) {
+    return null;
+  }
+  if (!supportsVision && !supportsFiles) {
+    return "当前模型不支持图片/PDF 附件；新附件发送时会提示切换模型。";
+  }
+  if (!supportsVision) {
+    return "当前模型不支持图片附件；新图片发送时会提示切换模型。";
+  }
+  return "当前模型不支持 PDF 附件；新 PDF 发送时会提示切换模型。";
+}
+
+function buildDropHint(capabilities: string[] | undefined, uris: string[]): string | null {
+  if (!capabilities) {
+    return null;
+  }
+  const supportsVision = hasCapability(capabilities, "vision");
+  const supportsFiles = hasCapability(capabilities, "files");
+  if (supportsVision && supportsFiles) {
+    return null;
+  }
+  const includesImage = uris.some((uri) => {
+    const extension = extractUriExtension(uri);
+    return extension ? IMAGE_ATTACHMENT_EXTENSIONS.has(extension) : false;
+  });
+  const includesPdf = uris.some((uri) => extractUriExtension(uri) === ".pdf");
+  if (includesImage && !supportsVision && includesPdf && !supportsFiles) {
+    return "当前模型不支持图片/PDF 附件；当前拖入会作为文件引用插入。";
+  }
+  if (includesImage && !supportsVision) {
+    return "当前模型不支持图片附件；当前拖入会作为文件引用插入。";
+  }
+  if (includesPdf && !supportsFiles) {
+    return "当前模型不支持 PDF 附件；当前拖入会作为文件引用插入。";
+  }
+  return null;
+}
 
 export interface ComposerDraft {
   hasContent: boolean;
@@ -267,6 +329,7 @@ interface ComposerProps {
   busy?: boolean;
   canPrompt: boolean;
   contextLabel: string;
+  modelCapabilities?: string[] | undefined;
   modeValue: "chat" | "plan";
   modelValue: string;
   thinkingLevelValue: "" | "high" | "low" | "medium" | "xhigh";
@@ -286,6 +349,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   busy = false,
   canPrompt,
   contextLabel,
+  modelCapabilities,
   modeValue,
   modelValue,
   thinkingLevelValue,
@@ -300,6 +364,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   planState,
 }, ref) {
   const planStatus = formatPlanStatus(planState);
+  const [capabilityHint, setCapabilityHint] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [draft, setDraft] = useState<ComposerDraft>(EMPTY_DRAFT);
   const isComposingRef = useRef(false);
@@ -401,6 +466,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     editor.setEditable(canPrompt);
   }, [canPrompt, editor]);
 
+  useEffect(() => {
+    if (!capabilityHint) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      setCapabilityHint(null);
+    }, 4_000);
+    return () => window.clearTimeout(timeout);
+  }, [capabilityHint]);
+
   useImperativeHandle(ref, () => ({
     clear() {
       if (!editor) {
@@ -459,12 +534,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setDropActive(false);
     const uris = extractDropUris(event.dataTransfer);
     if (uris.length) {
+      const hint = buildDropHint(modelCapabilities, uris);
+      if (hint) {
+        setCapabilityHint(hint);
+      }
       onResolveDrop(uris);
     }
   };
 
   const handleDragEnd = () => {
     setDropActive(false);
+  };
+
+  const handleAddAttachment = () => {
+    const hint = buildAttachmentHint(modelCapabilities);
+    if (hint) {
+      setCapabilityHint(hint);
+    }
+    onAddAttachment();
   };
 
   return (
@@ -484,7 +571,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             className="tc-icon-button"
             data-testid="attachment-add"
             disabled={!canPrompt}
-            onClick={onAddAttachment}
+            onClick={handleAddAttachment}
             type="button"
           >
             +
@@ -566,6 +653,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             data-testid="composer-plan-status-footer"
           >
             {planStatus}
+          </span>
+        </div>
+      ) : null}
+      {capabilityHint ? (
+        <div className="tc-composer__footer">
+          <span
+            className="tc-chip tc-chip--warning tc-composer__hint"
+            data-testid="composer-capability-hint"
+          >
+            {capabilityHint}
           </span>
         </div>
       ) : null}

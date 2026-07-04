@@ -80,20 +80,40 @@ function isMutationTool(toolName: string): boolean {
   return toolName === "edit" || toolName === "hashline_edit" || toolName === "write";
 }
 
-function parseModelIds(payload: unknown): string[] {
-  if (typeof payload !== "object" || payload === null) {
+function parseCapabilityNames(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((entry): entry is string => typeof entry === "string");
+  }
+  if (typeof value !== "object" || value === null) {
     return [];
+  }
+  return Object.entries(value)
+    .filter(([, enabled]) => enabled === true)
+    .map(([name]) => name);
+}
+
+export function parseModelCatalog(payload: unknown): {
+  capabilities: Record<string, string[]>;
+  ids: string[];
+} {
+  if (typeof payload !== "object" || payload === null) {
+    return { capabilities: {}, ids: [] };
   }
   const models = (payload as { models?: unknown }).models;
   if (!Array.isArray(models)) {
-    return [];
+    return { capabilities: {}, ids: [] };
   }
-  return models
-    .filter(
-      (entry): entry is { id: string } =>
-        typeof entry === "object" && entry !== null && typeof (entry as { id?: unknown }).id === "string",
-    )
-    .map((entry) => entry.id);
+  const ids: string[] = [];
+  const capabilities: Record<string, string[]> = {};
+  for (const entry of models) {
+    if (typeof entry !== "object" || entry === null || typeof (entry as { id?: unknown }).id !== "string") {
+      continue;
+    }
+    const id = (entry as { id: string }).id;
+    ids.push(id);
+    capabilities[id] = parseCapabilityNames((entry as { capabilities?: unknown }).capabilities);
+  }
+  return { capabilities, ids };
 }
 
 function guessMimeType(filePath: string): string {
@@ -1062,19 +1082,20 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private async refreshModels(): Promise<void> {
     const initializeResult = await this.ensureInitialized();
     if (!hasServeCapability(initializeResult, SERVE_CAPABILITY_LIST_MODELS)) {
-      this.stateStore.setAvailableModels([]);
+      this.stateStore.setAvailableModels([], {});
       return;
     }
     const response = await this.deps.messenger.sendListModels().catch(() => null);
     if (!response) {
-      this.stateStore.setAvailableModels([]);
+      this.stateStore.setAvailableModels([], {});
       return;
     }
     if (!response.success) {
-      this.stateStore.setAvailableModels([]);
+      this.stateStore.setAvailableModels([], {});
       return;
     }
-    this.stateStore.setAvailableModels(parseModelIds(response.payload));
+    const catalog = parseModelCatalog(response.payload);
+    this.stateStore.setAvailableModels(catalog.ids, catalog.capabilities);
   }
 
   private async refreshSessions(): Promise<void> {

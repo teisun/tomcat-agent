@@ -1581,6 +1581,11 @@ input:focus-visible {
   white-space: nowrap;
 }
 
+.tc-composer__hint {
+  max-width: 100%;
+  white-space: normal;
+}
+
 .tc-composer__footer {
   align-items: center;
   display: flex;

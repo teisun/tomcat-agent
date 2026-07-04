@@ -7,6 +7,8 @@ import { Composer, extractDropUris, type ComposerHandle } from "./Composer";
 function renderComposer({
   busy = false,
   canPrompt = true,
+  modelCapabilities = ["vision", "files"],
+  onAddAttachment = vi.fn(),
   onInterrupt = vi.fn(),
   onDraftChange = vi.fn(),
   onResolveDrop = vi.fn(),
@@ -15,6 +17,8 @@ function renderComposer({
 }: {
   busy?: boolean;
   canPrompt?: boolean;
+  modelCapabilities?: string[];
+  onAddAttachment?: () => void;
   onDraftChange?: (draft: { hasContent: boolean; segments: unknown[]; text: string }) => void;
   onResolveDrop?: (uris: string[]) => void;
   onInterrupt?: () => void;
@@ -28,10 +32,11 @@ function renderComposer({
       busy={busy}
       canPrompt={canPrompt}
       contextLabel="Ctx 42%"
+      modelCapabilities={modelCapabilities}
       modeValue="plan"
       modelValue="gpt-5.4"
       thinkingLevelValue="high"
-      onAddAttachment={vi.fn()}
+      onAddAttachment={onAddAttachment}
       onDraftChange={onDraftChange}
       onModeChange={vi.fn()}
       onModelChange={vi.fn()}
@@ -198,6 +203,44 @@ describe("Composer", () => {
     fireEvent.drop(surface, { dataTransfer });
     expect(onResolveDrop).toHaveBeenCalledWith(["file:///workspace/src/app.ts"]);
     expect(surface.className).not.toContain("tc-composer__surface--drop-active");
+  });
+
+  it("shows a light hint before opening attachments on text-only models", () => {
+    const onAddAttachment = vi.fn();
+    renderComposer({
+      modelCapabilities: ["reasoning"],
+      onAddAttachment,
+    });
+
+    fireEvent.click(screen.getByTestId("attachment-add"));
+
+    expect(onAddAttachment).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("composer-capability-hint").textContent).toContain(
+      "当前模型不支持图片/PDF 附件",
+    );
+  });
+
+  it("warns when unsupported image drops are inserted as references", () => {
+    const { onResolveDrop } = renderComposer({
+      modelCapabilities: ["files"],
+    });
+    const surface = screen.getByTestId("composer-surface");
+    const dataTransfer = {
+      files: [],
+      getData(type: string) {
+        if (type === "text/uri-list") {
+          return "file:///workspace/assets/mockup.png";
+        }
+        return "";
+      },
+    } as unknown as DataTransfer;
+
+    fireEvent.drop(surface, { dataTransfer });
+
+    expect(onResolveDrop).toHaveBeenCalledWith(["file:///workspace/assets/mockup.png"]);
+    expect(screen.getByTestId("composer-capability-hint").textContent).toContain(
+      "当前模型不支持图片附件",
+    );
   });
 
   it("does not submit on Shift+Enter or during IME composition", () => {

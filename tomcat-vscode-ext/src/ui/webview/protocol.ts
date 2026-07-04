@@ -152,6 +152,7 @@ export interface WebviewSessionTab {
 
 export interface WebviewStateSnapshot {
   activeSessionId: string | null;
+  availableModelCapabilities?: Record<string, string[]>;
   availableModels: string[];
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;

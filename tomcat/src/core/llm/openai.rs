@@ -36,11 +36,8 @@ use crate::core::llm::types::{
     ContinuityMetadata, ReasoningContinuation, ReasoningFormat, StreamEvent, ThinkingSource,
     TokenUsage,
 };
+use crate::core::llm::{degrade_unsupported_multimodal, Capabilities};
 
-/// 提供商不匹配的固定文案：Completions 路径不接受多模态附件，必须改用 `openai-responses`。
-/// 单测和上层 UI 都会按字符串子串断言这个文案，请勿改动。
-const COMPLETIONS_REJECT_MULTIMODAL_MSG: &str =
-    "provider=openai 不支持多模态附件，请改用 provider=openai-responses";
 const PROVIDER_NAME: &str = "openai";
 
 fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
@@ -162,35 +159,28 @@ fn parts_to_completions_text(parts: &[ChatMessageContentPart]) -> String {
 
 /// Chat Completions 只走纯文本 `content: "..."`。
 ///
-/// 这里先拒绝真正的多模态附件（image/file），再把 `InputText` + `InputReference`
-/// 按顺序合并成单个字符串，避免把 Responses 专用的 `input_text` part 形态误送给
+/// 这里先按纯文本模型能力把不支持的多模态附件降级成占位符文本，再把
+/// `InputText` + `InputReference`
+/// 按顺序合并成单个字符串，避免把 Responses 专用的 `input_*` part 形态误送给
 /// `/v1/chat/completions`。
-fn normalize_for_completions(messages: &[ChatMessage]) -> Result<Cow<'_, [ChatMessage]>, AppError> {
-    let needs_normalize = messages
+fn normalize_for_completions(messages: &[ChatMessage]) -> Cow<'_, [ChatMessage]> {
+    let degraded = degrade_unsupported_multimodal(messages, &Capabilities::default());
+    let needs_normalize = degraded
         .iter()
         .any(|msg| matches!(msg.content, Some(ChatMessageContent::Parts(_))));
     if !needs_normalize {
-        return Ok(Cow::Borrowed(messages));
+        return degraded;
     }
 
-    let mut normalized = Vec::with_capacity(messages.len());
-    for message in messages {
+    let mut normalized = Vec::with_capacity(degraded.len());
+    for message in degraded.iter() {
         let mut next = message.clone();
         if let Some(ChatMessageContent::Parts(parts)) = &message.content {
-            if parts.iter().any(|part| {
-                matches!(
-                    part,
-                    ChatMessageContentPart::InputImage { .. }
-                        | ChatMessageContentPart::InputFile { .. }
-                )
-            }) {
-                return Err(AppError::Llm(COMPLETIONS_REJECT_MULTIMODAL_MSG.to_string()));
-            }
             next.content = Some(ChatMessageContent::Text(parts_to_completions_text(parts)));
         }
         normalized.push(next);
     }
-    Ok(Cow::Owned(normalized))
+    Cow::Owned(normalized)
 }
 
 /// 提取 chat-completions `reasoning_content` continuity blob（deepseek / mimo / 未来同类共用）。
@@ -741,7 +731,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
-        let normalized_messages = normalize_for_completions(&request.messages)?;
+        let normalized_messages = normalize_for_completions(&request.messages);
 
         let _permit = if let Some(ref sem) = self.semaphore {
             Some(
@@ -757,9 +747,11 @@ impl LlmProvider for OpenAiProvider {
         let mut last_err = None;
         for attempt in 0..=self.retry_count {
             match self
-                .run_non_stream_with_stale(
-                    self.chat_inner(&request, normalized_messages.as_ref(), &self.base_url),
-                )
+                .run_non_stream_with_stale(self.chat_inner(
+                    &request,
+                    normalized_messages.as_ref(),
+                    &self.base_url,
+                ))
                 .await
             {
                 Ok(r) => return Ok(r),
@@ -788,9 +780,11 @@ impl LlmProvider for OpenAiProvider {
             if let Some(ref fallback) = self.api_base_fallback {
                 warn!("主 API 不可达，尝试 fallback: {}", fallback);
                 if let Ok(r) = self
-                    .run_non_stream_with_stale(
-                        self.chat_inner(&request, normalized_messages.as_ref(), fallback),
-                    )
+                    .run_non_stream_with_stale(self.chat_inner(
+                        &request,
+                        normalized_messages.as_ref(),
+                        fallback,
+                    ))
                     .await
                 {
                     return Ok(r);
@@ -805,7 +799,7 @@ impl LlmProvider for OpenAiProvider {
         request: ChatRequest,
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>, AppError>
     {
-        let normalized_messages = normalize_for_completions(&request.messages)?;
+        let normalized_messages = normalize_for_completions(&request.messages);
 
         let _permit = if let Some(ref sem) = self.semaphore {
             Some(

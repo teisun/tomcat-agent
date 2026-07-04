@@ -12,11 +12,13 @@
 //! - `ResponsesStream`：SSE 帧切分、NDJSON fallback；上层与 `OpenAiProvider` 同 Stream 契约。
 
 use super::*;
+use crate::core::llm::multimodal::{
+    UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
+};
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::tests::mocks::{MockHttpServer, ScriptedHttpResponse};
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, StreamEvent,
-    ThinkingSource,
+    ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, StreamEvent, ThinkingSource,
 };
 use crate::core::llm::{Capabilities, Credential, ModelEntry};
 use crate::infra::error::{
@@ -52,7 +54,10 @@ fn responses_entry() -> ModelEntry {
 }
 
 fn provider_from_cfg(cfg: LlmConfig) -> OpenAiResponsesProvider {
-    let entry = responses_entry();
+    provider_from_entry(responses_entry(), cfg)
+}
+
+fn provider_from_entry(entry: ModelEntry, cfg: LlmConfig) -> OpenAiResponsesProvider {
     let runtime = cfg.runtime();
     let credential = Credential {
         provider: "openai".to_string(),
@@ -1978,6 +1983,41 @@ fn user_file_file_id_renders_file_id_field() {
     assert_eq!(content[1]["file_id"], "file-xyz");
     assert!(content[1].get("filename").is_none());
     assert!(content[1].get("file_data").is_none());
+}
+
+#[test]
+fn responses_build_request_body_degrades_unsupported_history_attachments_to_input_text() {
+    let mut entry = responses_entry();
+    entry.id = "text-only-responses".to_string();
+    entry.capabilities.vision = false;
+    entry.capabilities.files = false;
+    let provider = provider_from_entry(entry.clone(), LlmConfig::default());
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user_with_parts(vec![
+            ChatMessageContentPart::text("before "),
+            ChatMessageContentPart::image_file_id("file-image").unwrap(),
+            ChatMessageContentPart::text(" between "),
+            ChatMessageContentPart::file_file_id("file-pdf", Some("guide.pdf".to_string()))
+                .unwrap(),
+        ])],
+        model: entry.id,
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        thinking_level: None,
+        tools: None,
+    };
+
+    let expected = format!(
+        "before {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER} between {UNSUPPORTED_FILE_INPUT_PLACEHOLDER}"
+    );
+    let body = provider.build_request_body(&req, true);
+    let input = body["input"].as_array().expect("responses input");
+    let content = input[0]["content"].as_array().expect("responses content");
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"].as_str(), Some(expected.as_str()));
 }
 
 #[test]

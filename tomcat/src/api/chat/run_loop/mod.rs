@@ -8,8 +8,7 @@ use tracing::{info, warn};
 use crate::core::agent_loop::AgentRunOutcome;
 use crate::core::compaction::apply::check_before_request;
 use crate::core::llm::resolver::validate_capabilities;
-use crate::core::llm::ChatMessage;
-use crate::core::llm::LlmScene;
+use crate::core::llm::{degrade_unsupported_multimodal, ChatMessage, LlmScene};
 use crate::core::session::manager::{
     build_context_from_state, estimate_msg_chars, init_context_state,
 };
@@ -471,7 +470,9 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
                     .ok_or_else(|| AppError::Config("无当前会话".to_string()))?,
                 turn_token.child_token(),
             )
-            .map_err(|error| AppError::Config(format!("agent_registry root rearm 失败: {error}")))?;
+            .map_err(|error| {
+                AppError::Config(format!("agent_registry root rearm 失败: {error}"))
+            })?;
 
         let next_system_text = build_system_text(ctx, context_budget_chars).await;
         sync_context_state_system_prompt_len(
@@ -649,7 +650,7 @@ pub async fn run_chat_turn_with_message(
         LlmScene::Main,
         &main_call.model,
         &main_call.capabilities,
-        &messages,
+        &planned_messages,
     ) {
         for (message, account_chars) in appended_messages {
             append_failed_turn_message(context_state, message, account_chars);
@@ -665,6 +666,12 @@ pub async fn run_chat_turn_with_message(
             error: Some(error_message),
         });
         return Ok(AgentRunOutcome::Failed(error));
+    }
+    let mut messages = messages;
+    if let std::borrow::Cow::Owned(degraded) =
+        degrade_unsupported_multimodal(&messages, &main_call.capabilities)
+    {
+        messages = degraded;
     }
 
     let render_cli_output = !ctx.session_runtime.suppress_cli_output;

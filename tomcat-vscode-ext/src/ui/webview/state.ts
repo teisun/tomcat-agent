@@ -1059,6 +1059,7 @@ export class WebviewStateStore {
   constructor(uiMode: TomcatUiMode = "both") {
     this.state = {
       activeSessionId: null,
+      availableModelCapabilities: {},
       availableModels: [],
       ready: false,
       sessionViews: {},
@@ -1075,7 +1076,8 @@ export class WebviewStateStore {
     this.state.ready = ready;
   }
 
-  setAvailableModels(models: string[]): void {
+  setAvailableModels(models: string[], capabilities: Record<string, string[]> = {}): void {
+    this.state.availableModelCapabilities = { ...capabilities };
     this.state.availableModels = [...models];
   }
 
@@ -1088,6 +1090,7 @@ export class WebviewStateStore {
     this.runtimes.clear();
     this.state = {
       activeSessionId: null,
+      availableModelCapabilities: {},
       availableModels: [],
       ready: false,
       sessionViews: {},

@@ -9,6 +9,9 @@
 //! - `chat_real_request_response_print`：`#[ignore]` 真实 API 冒烟。
 
 use super::*;
+use crate::core::llm::multimodal::{
+    UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
+};
 use crate::core::llm::tests::mocks::load_dotenv;
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ContextReference,
@@ -153,11 +156,10 @@ fn is_retriable_returns_false_for_non_llm_error() {
     )));
 }
 
-/// Completions 路径不支持图片 / 文件附件：归一化阶段必须立刻拒绝，
-/// 错误文案必须把诊断指向 `provider=openai-responses` 以引导调用方迁移；并且要
-/// **不可重试**（不被 `is_retriable` 命中），避免在 Agent Loop 的退避循环里反复打。
+/// Completions 路径是纯文本通道：历史里的图片 / 文件附件应降级为占位符文本，
+/// 而不是把整轮请求硬拒绝。
 #[test]
-fn parts_with_image_returns_structured_error() {
+fn parts_with_image_degrade_to_placeholder_text() {
     use base64::Engine;
     const TINY_PNG_B64: &str =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
@@ -168,25 +170,48 @@ fn parts_with_image_returns_structured_error() {
     std::io::Write::write_all(&mut tmp, &bytes).unwrap();
     let part = ChatMessageContentPart::image_b64("image/png", tmp.path()).expect("image_b64 ok");
     let msgs = vec![ChatMessage::user_with_parts(vec![
-        ChatMessageContentPart::text("see this:"),
+        ChatMessageContentPart::text("see this: "),
         part,
     ])];
-    let err = normalize_for_completions(&msgs).expect_err("应拒绝多模态 part");
-    let s = err.to_string();
-    assert!(
-        s.contains("openai-responses"),
-        "错误文案应引导改用 openai-responses，实际: {}",
-        s
-    );
-    assert!(
-        s.contains("不支持多模态附件"),
-        "错误文案应说明拒绝原因，实际: {}",
-        s
-    );
-    assert!(
-        !OpenAiProvider::is_retriable(&err),
-        "多模态拒绝错误必须是不可重试的"
-    );
+    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalized.as_ref();
+    let expected = format!("see this: {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER}");
+    assert!(matches!(
+        &normalized[0].content,
+        Some(ChatMessageContent::Text(text))
+            if text == &expected
+    ));
+}
+
+#[test]
+fn normalize_for_completions_degrades_mixed_image_and_file_history() {
+    let msgs = vec![
+        ChatMessage::user_with_parts(vec![
+            ChatMessageContentPart::text("image "),
+            ChatMessageContentPart::image_file_id("file-image").unwrap(),
+        ]),
+        ChatMessage::user_with_parts(vec![
+            ChatMessageContentPart::text("file "),
+            ChatMessageContentPart::file_file_id("file-pdf", Some("guide.pdf".to_string()))
+                .unwrap(),
+        ]),
+    ];
+
+    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalized.as_ref();
+    let expected_image = format!("image {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER}");
+    let expected_file = format!("file {UNSUPPORTED_FILE_INPUT_PLACEHOLDER}");
+    assert_eq!(normalized.len(), 2);
+    assert!(matches!(
+        &normalized[0].content,
+        Some(ChatMessageContent::Text(text))
+            if text == &expected_image
+    ));
+    assert!(matches!(
+        &normalized[1].content,
+        Some(ChatMessageContent::Text(text))
+            if text == &expected_file
+    ));
 }
 
 #[test]
@@ -202,7 +227,7 @@ fn normalize_for_completions_flattens_references_into_text() {
         )),
         ChatMessageContentPart::text(" after"),
     ])];
-    let normalized = normalize_for_completions(&msgs).expect("normalize");
+    let normalized = normalize_for_completions(&msgs);
     let normalized = normalized.as_ref();
     assert_eq!(normalized.len(), 1);
     assert!(matches!(

@@ -20,6 +20,7 @@
 mod auth_test;
 mod catalog_test;
 pub(crate) mod mocks;
+mod multimodal_test;
 mod registry_test;
 mod replay_policy_test;
 mod resolver_test;

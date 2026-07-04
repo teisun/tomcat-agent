@@ -9,6 +9,7 @@ vi.mock("vscode", () => ({}));
 import {
   ATTACHMENT_OPEN_DIALOG_FILTERS,
   buildAttachmentOpenDialogOptions,
+  parseModelCatalog,
   parsePlanFrontmatter,
   readPlanMetadata,
 } from "../provider";
@@ -158,6 +159,38 @@ describe("attachment picker options", () => {
       canSelectMany: true,
       filters: ATTACHMENT_OPEN_DIALOG_FILTERS,
       openLabel: "Attach to Tomcat",
+    });
+  });
+});
+
+describe("model catalog parsing", () => {
+  it("retains per-model capability metadata for the webview", () => {
+    expect(
+      parseModelCatalog({
+        models: [
+          {
+            capabilities: {
+              reasoning: true,
+            },
+            id: "deepseek-v4-flash",
+          },
+          {
+            capabilities: ["vision", "files"],
+            id: "gpt-5.4",
+          },
+          {
+            capabilities: null,
+            id: "text-only",
+          },
+        ],
+      }),
+    ).toEqual({
+      capabilities: {
+        "deepseek-v4-flash": ["reasoning"],
+        "gpt-5.4": ["vision", "files"],
+        "text-only": [],
+      },
+      ids: ["deepseek-v4-flash", "gpt-5.4", "text-only"],
     });
   });
 });

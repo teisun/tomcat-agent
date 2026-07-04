@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use serial_test::serial;
 
+use crate::core::llm::multimodal::{
+    UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
+};
 use crate::core::llm::{
     ChatMessageContent, ChatMessageContentPart, ContextRefKind, FileSource, ImageSource,
     LlmProvider, MessageKind, StreamEvent,
@@ -26,13 +29,15 @@ async fn wait_for_line(
 }
 
 fn count_event(lines: &[serde_json::Value], event_type: &str) -> usize {
-    lines.iter()
+    lines
+        .iter()
         .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some(event_type))
         .count()
 }
 
 fn first_event_index(lines: &[serde_json::Value], event_type: &str) -> Option<usize> {
-    lines.iter()
+    lines
+        .iter()
         .position(|line| line.get("type").and_then(serde_json::Value::as_str) == Some(event_type))
 }
 
@@ -449,8 +454,16 @@ async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {
         line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
     })
     .await;
-    assert_eq!(count_event(&lines, "agent_end"), 1, "expected one agent_end: {lines:?}");
-    assert_eq!(count_event(&lines, "agent_idle"), 1, "expected one agent_idle: {lines:?}");
+    assert_eq!(
+        count_event(&lines, "agent_end"),
+        1,
+        "expected one agent_end: {lines:?}"
+    );
+    assert_eq!(
+        count_event(&lines, "agent_idle"),
+        1,
+        "expected one agent_idle: {lines:?}"
+    );
     assert!(
         first_event_index(&lines, "agent_end") < first_event_index(&lines, "agent_idle"),
         "agent_idle must arrive after agent_end: {lines:?}"
@@ -511,7 +524,11 @@ async fn serve_prompt_with_precancelled_turn_emits_agent_idle_once() {
         line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
     })
     .await;
-    assert_eq!(count_event(&lines, "agent_idle"), 1, "expected one agent_idle: {lines:?}");
+    assert_eq!(
+        count_event(&lines, "agent_idle"),
+        1,
+        "expected one agent_idle: {lines:?}"
+    );
     let interrupted_end = lines.iter().find(|line| {
         line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
             && line.get("error").and_then(serde_json::Value::as_str) == Some("interrupted")
@@ -1037,11 +1054,9 @@ fn build_user_message_preserves_segment_order_and_appends_attachments() {
         ..ServeMessageParams::default()
     };
 
-    let message = crate::api::serve::commands::build_user_message(
-        "fallback text".to_string(),
-        &params,
-    )
-    .expect("build message");
+    let message =
+        crate::api::serve::commands::build_user_message("fallback text".to_string(), &params)
+            .expect("build message");
     let parts = match message.content {
         Some(ChatMessageContent::Parts(parts)) => parts,
         other => panic!("expected multipart content, got {other:?}"),
@@ -1090,9 +1105,8 @@ fn build_user_message_accepts_reference_only_segments() {
         ..ServeMessageParams::default()
     };
 
-    let message =
-        crate::api::serve::commands::build_user_message(String::new(), &params)
-            .expect("build message");
+    let message = crate::api::serve::commands::build_user_message(String::new(), &params)
+        .expect("build message");
     let parts = match message.content {
         Some(ChatMessageContent::Parts(parts)) => parts,
         other => panic!("expected multipart content, got {other:?}"),
@@ -1701,8 +1715,16 @@ async fn serve_prompt_panic_isolation_emits_agent_idle_once() {
         line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
     })
     .await;
-    assert_eq!(count_event(&lines, "agent_end"), 1, "expected one panic agent_end: {lines:?}");
-    assert_eq!(count_event(&lines, "agent_idle"), 1, "expected one panic agent_idle: {lines:?}");
+    assert_eq!(
+        count_event(&lines, "agent_end"),
+        1,
+        "expected one panic agent_end: {lines:?}"
+    );
+    assert_eq!(
+        count_event(&lines, "agent_idle"),
+        1,
+        "expected one panic agent_idle: {lines:?}"
+    );
     assert!(
         first_event_index(&lines, "agent_end") < first_event_index(&lines, "agent_idle"),
         "panic path should emit agent_idle after agent_end: {lines:?}"
@@ -1715,7 +1737,10 @@ async fn serve_prompt_panic_isolation_emits_agent_idle_once() {
         }),
         "panic path should still surface the panic agent_end: {lines:?}"
     );
-    assert!(!slot.is_busy(), "panic path should restore the slot to idle");
+    assert!(
+        !slot.is_busy(),
+        "panic path should restore the slot to idle"
+    );
 }
 
 #[tokio::test]
@@ -1754,8 +1779,16 @@ async fn serve_prompt_with_invalid_model_override_emits_agent_idle_once() {
         line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
     })
     .await;
-    assert_eq!(count_event(&lines, "agent_end"), 1, "expected one failed agent_end: {lines:?}");
-    assert_eq!(count_event(&lines, "agent_idle"), 1, "expected one failed agent_idle: {lines:?}");
+    assert_eq!(
+        count_event(&lines, "agent_end"),
+        1,
+        "expected one failed agent_end: {lines:?}"
+    );
+    assert_eq!(
+        count_event(&lines, "agent_idle"),
+        1,
+        "expected one failed agent_idle: {lines:?}"
+    );
     assert!(
         first_event_index(&lines, "agent_end") < first_event_index(&lines, "agent_idle"),
         "failed pre-loop resolve should still emit agent_idle after agent_end: {lines:?}"
@@ -1770,7 +1803,10 @@ async fn serve_prompt_with_invalid_model_override_emits_agent_idle_once() {
         }),
         "failed path should mention the invalid override in agent_end: {lines:?}"
     );
-    assert!(!slot.is_busy(), "failed path should restore the slot to idle");
+    assert!(
+        !slot.is_busy(),
+        "failed path should restore the slot to idle"
+    );
 }
 
 #[tokio::test]
@@ -1907,8 +1943,34 @@ async fn serve_prompt_with_stale_invalid_model_override_emits_single_agent_end_a
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_end_and_recovers() {
+async fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succeeds() {
     let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "gpt-5.4"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "{env}"
+base_url = "http://127.0.0.1:1"
+capabilities = {{ vision = true, files = true, tools = true, reasoning = true, web_search = false }}
+
+[[models]]
+id = "deepseek-v4-pro"
+api = "openai"
+provider = "deepseek"
+api_key_env = "{env}"
+base_url = "http://127.0.0.1:1"
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV
+        ),
+    )
+    .expect("write dual-model override");
     let first_stream = vec![
         Ok(StreamEvent::ContentDelta {
             delta: "vision ok".to_string(),
@@ -1919,14 +1981,25 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
     ];
     let second_stream = vec![
         Ok(StreamEvent::ContentDelta {
-            delta: "back on gpt".to_string(),
+            delta: "pdf ok".to_string(),
         }),
         Ok(StreamEvent::FinishReason {
             reason: "stop".to_string(),
         }),
     ];
+    let third_stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "history ok".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (provider, requests) =
+        RecordingMockLlm::new(vec![first_stream, second_stream, third_stream]);
+    let provider: Arc<dyn LlmProvider> = Arc::new(provider);
     let (state, buffer, _temp, slot) =
-        build_initialized_state_with_streams(vec![first_stream, second_stream]).await;
+        build_initialized_state_with_provider(temp, cfg, provider).await;
 
     handle_command(
         Arc::clone(&state),
@@ -1966,6 +2039,56 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
 
     handle_command(
         Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("attachment-history-2".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "summarize pdf".to_string(),
+            params: ServeMessageParams {
+                attachments: vec![ServeAttachment {
+                    kind: ServeAttachmentKind::File,
+                    filename: Some("notes.pdf".to_string()),
+                    mime_type: Some("application/pdf".to_string()),
+                    data_base64: Some("JVBERi0xLjQK".to_string()),
+                    file_id: None,
+                }],
+                ..ServeMessageParams::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let after_second_history = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if lines
+                .iter()
+                .filter(|line| {
+                    line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                        && line
+                            .get("error")
+                            .and_then(serde_json::Value::as_str)
+                            .is_none()
+                })
+                .count()
+                >= 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+    assert_eq!(
+        after_second_history
+            .iter()
+            .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end"))
+            .count(),
+        2
+    );
+
+    handle_command(
+        Arc::clone(&state),
         ServeCommand::SetModel {
             id: Some("set-deepseek".to_string()),
             session_id: Some(slot.session_id.clone()),
@@ -1977,7 +2100,7 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
     handle_command(
         Arc::clone(&state),
         ServeCommand::Prompt {
-            id: Some("attachment-history-2".to_string()),
+            id: Some("attachment-history-3".to_string()),
             session_id: Some(slot.session_id.clone()),
             text: "follow up".to_string(),
             params: ServeMessageParams::default(),
@@ -1986,85 +2109,7 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
     .await
     .unwrap();
 
-    let deepseek_failure = wait_for_line(&buffer, |line| {
-        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-            && line
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .is_some()
-    })
-    .await;
-    let deepseek_errors = deepseek_failure
-        .iter()
-        .filter(|line| {
-            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-                && line
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        deepseek_errors.len(),
-        1,
-        "capability mismatch should emit exactly one terminal error event: {deepseek_failure:?}"
-    );
-    let error_text = deepseek_errors[0]
-        .get("error")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    assert!(
-        error_text.contains("provider/model 不支持"),
-        "expected capability mismatch error, got {error_text:?}"
-    );
-    assert!(
-        slot.turn_state.lock().is_some(),
-        "turn_state should be restored after capability validation failure"
-    );
-    for _ in 0..50 {
-        if !slot.is_busy() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    handle_command(
-        Arc::clone(&state),
-        ServeCommand::SetModel {
-            id: Some("set-back-gpt".to_string()),
-            session_id: Some(slot.session_id.clone()),
-            model: "gpt-5.4".to_string(),
-        },
-    )
-    .await
-    .unwrap();
-    handle_command(
-        Arc::clone(&state),
-        ServeCommand::Prompt {
-            id: Some("attachment-history-3".to_string()),
-            session_id: Some(slot.session_id.clone()),
-            text: "recover".to_string(),
-            params: ServeMessageParams::default(),
-        },
-    )
-    .await
-    .unwrap();
-    let after_recovery_prompt = wait_for_line(&buffer, |line| {
-        line.get("id").and_then(serde_json::Value::as_str) == Some("attachment-history-3")
-    })
-    .await;
-    let recovery_response = after_recovery_prompt
-        .iter()
-        .find(|line| {
-            line.get("id").and_then(serde_json::Value::as_str) == Some("attachment-history-3")
-        })
-        .expect("recovery prompt response");
-    assert_eq!(
-        recovery_response["success"].as_bool(),
-        Some(true),
-        "recovery prompt should still be accepted: {after_recovery_prompt:?}"
-    );
-    let recovered = {
+    let after_second = {
         let mut lines = read_ndjson_lines(&buffer);
         for _ in 0..50 {
             lines = read_ndjson_lines(&buffer);
@@ -2082,11 +2127,11 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
         }
         lines
     };
-    let agent_end_total = recovered
+    let agent_end_total = after_second
         .iter()
         .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end"))
         .count();
-    let agent_end_error_total = recovered
+    let agent_end_error_total = after_second
         .iter()
         .filter(|line| {
             line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
@@ -2098,11 +2143,53 @@ async fn serve_prompt_with_attachment_history_then_deepseek_emits_single_agent_e
         .count();
     assert_eq!(
         agent_end_total, 3,
-        "expected success + failure + recovery agent_end events: {recovered:?}"
+        "expected three successful agent_end events: {after_second:?}"
     );
     assert_eq!(
-        agent_end_error_total, 1,
-        "only the deepseek capability mismatch turn should fail"
+        agent_end_error_total, 0,
+        "history downgrade should avoid capability mismatch errors: {after_second:?}"
+    );
+    let recorded = requests.0.lock().clone();
+    assert_eq!(recorded.len(), 3, "expected three provider requests");
+    let third_messages = &recorded[2].messages;
+    assert!(
+        third_messages.iter().any(|message| matches!(
+            &message.content,
+            Some(ChatMessageContent::Parts(parts))
+                if parts.iter().any(|part| matches!(
+                    part,
+                    ChatMessageContentPart::InputText { text }
+                        if text.contains(UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER)
+                ))
+        )),
+        "deepseek follow-up should contain image omission placeholder in historical user message: {third_messages:?}"
+    );
+    assert!(
+        third_messages.iter().any(|message| matches!(
+            &message.content,
+            Some(ChatMessageContent::Parts(parts))
+                if parts.iter().any(|part| matches!(
+                    part,
+                    ChatMessageContentPart::InputText { text }
+                        if text.contains(UNSUPPORTED_FILE_INPUT_PLACEHOLDER)
+                ))
+        )),
+        "deepseek follow-up should contain file omission placeholder in historical user message: {third_messages:?}"
+    );
+    assert!(
+        third_messages
+            .iter()
+            .all(|message| match &message.content {
+                Some(ChatMessageContent::Parts(parts)) => parts.iter().all(|part| {
+                    !matches!(
+                        part,
+                        ChatMessageContentPart::InputImage { .. }
+                            | ChatMessageContentPart::InputFile { .. }
+                    )
+                }),
+                _ => true,
+            }),
+        "deepseek follow-up should not carry raw multimodal parts after downgrade: {third_messages:?}"
     );
 }
 

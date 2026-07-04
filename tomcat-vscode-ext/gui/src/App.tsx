@@ -21,6 +21,7 @@ import { useAutoScroll } from "./useAutoScroll";
 
 const EMPTY_STATE: WebviewStateSnapshot = {
   activeSessionId: null,
+  availableModelCapabilities: {},
   availableModels: [],
   ready: false,
   sessionViews: {},
@@ -517,6 +518,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const readOnlyConflict = activeSession?.conflictMessage ?? null;
   const canPrompt = state.uiMode !== "participant" && !activeSession?.busy && !readOnlyConflict;
   const canBuildPlan = !!activeSession && !activeSession.busy && !readOnlyConflict;
+  const activeModelCapabilities = activeSession?.model
+    ? state.availableModelCapabilities?.[activeSession.model]
+    : undefined;
   const { bottomSpacerHeight, latestUserScrolledPast, scrollToLatest, userHasScrolled } = useAutoScroll({
     containerRef: streamRef,
     contentRef: transcriptRef,
@@ -880,6 +884,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         busy={!!activeSession?.busy}
         canPrompt={canPrompt}
         contextLabel={buildContextLabel(activeSession?.contextRatio)}
+        modelCapabilities={activeModelCapabilities}
         modeValue={currentModeValue(activeSession?.planState)}
         modelValue={activeSession?.model ?? ""}
         thinkingLevelValue={normalizeThinkingLevel(activeSession?.thinkingLevel)}

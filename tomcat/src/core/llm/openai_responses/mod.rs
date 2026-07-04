@@ -37,7 +37,8 @@ use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
 
 use super::super::auth::Credential;
-use super::super::catalog::{infer_default_base_url, ModelEntry};
+use super::super::catalog::{infer_default_base_url, Capabilities, ModelEntry};
+use crate::core::llm::degrade_unsupported_multimodal;
 use crate::core::llm::http_client::build_http_client;
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
@@ -202,6 +203,7 @@ pub struct OpenAiResponsesProvider {
     configured_thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
     continuity_enabled: bool,
     use_previous_response_id: bool,
+    capabilities: Capabilities,
 }
 
 fn apply_stream_idle_timeout<S>(
@@ -302,6 +304,7 @@ impl OpenAiResponsesProvider {
             configured_thinking_format,
             continuity_enabled: runtime.reasoning_continuity.enabled,
             use_previous_response_id: runtime.openai_responses.use_previous_response_id,
+            capabilities: entry.capabilities.clone(),
         })
     }
 
@@ -369,6 +372,8 @@ impl OpenAiResponsesProvider {
         stream: bool,
         allow_response_id_hint: bool,
     ) -> Value {
+        let degraded_messages =
+            degrade_unsupported_multimodal(&request.messages, &self.capabilities);
         let model = self.effective_model(request);
         let target_profile =
             crate::core::llm::replay_policy::ProviderCompatProfile::openai_responses(&model);
@@ -385,7 +390,7 @@ impl OpenAiResponsesProvider {
         };
         let explicit_replay = self.continuity_enabled && previous_response_id.is_none();
         let (instructions, input) = payload::build_responses_input(
-            &request.messages,
+            degraded_messages.as_ref(),
             &target_profile,
             self.continuity_enabled,
             explicit_replay,
