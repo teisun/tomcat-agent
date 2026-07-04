@@ -84,18 +84,32 @@ beforeAll(() => {
 });
 
 describe("Composer", () => {
-  it("renders plan status in the footer instead of the control bar", () => {
+  it("renders plan status in the notice rail instead of the control bar", () => {
     const { container } = renderComposer();
 
-    expect(screen.getByTestId("composer-plan-status-footer").textContent).toBe("Plan: planning");
-    expect(container.querySelector(".tc-composer__bar .tc-composer__plan-status")).toBeNull();
+    expect(screen.getByTestId("composer-notice-plan").textContent).toBe("Plan: planning");
+    expect(container.querySelector(".tc-composer__bar .tc-notice--plan")).toBeNull();
     expect(screen.queryByText("Tomcat is responding...")).toBeNull();
   });
 
-  it("omits the footer status when chat mode is active", () => {
+  it("renders drag and plan notices on one line when both are active", () => {
+    renderComposer();
+
+    const notices = screen.getByTestId("composer-notices");
+    expect(
+      [...notices.children].map((node) => (node as HTMLElement).dataset.testid),
+    ).toEqual(["composer-notice-drag", "composer-notice-plan"]);
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").className).toContain("tc-notice--left");
+    expect(screen.getByTestId("composer-notice-drag").getAttribute("aria-hidden")).toBe("true");
+    expect(screen.getByTestId("composer-notice-plan").className).toContain("tc-notice--right");
+    expect(screen.getByTestId("composer-notice-plan").getAttribute("aria-hidden")).toBeNull();
+  });
+
+  it("omits the plan notice when chat mode is active", () => {
     renderComposer({ planState: "chat" });
 
-    expect(screen.queryByTestId("composer-plan-status-footer")).toBeNull();
+    expect(screen.queryByTestId("composer-notice-plan")).toBeNull();
   });
 
   it("swaps the send button for a stop button while busy", () => {
@@ -201,16 +215,16 @@ describe("Composer", () => {
       },
     } as unknown as DataTransfer;
 
-    expect(screen.getByTestId("composer-dnd-hint").textContent).toBe("拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("拖文件请按住 Shift");
 
     fireEvent.dragOver(surface, { dataTransfer });
     expect(surface.className).toContain("tc-composer__surface--drop-active");
-    expect(screen.getByTestId("composer-dnd-hint").textContent).toBe("松手加入上下文");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("松手加入上下文");
 
     fireEvent.drop(surface, { dataTransfer });
     expect(onResolveDrop).toHaveBeenCalledWith(["file:///workspace/src/app.ts"]);
     expect(surface.className).not.toContain("tc-composer__surface--drop-active");
-    expect(screen.getByTestId("composer-dnd-hint").textContent).toBe("拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("拖文件请按住 Shift");
   });
 
   it("prevents default on dragenter and hides the Shift hint once content exists", () => {
@@ -225,7 +239,7 @@ describe("Composer", () => {
 
     fireEvent(surface, enterEvent);
     expect(enterEvent.defaultPrevented).toBe(true);
-    expect(screen.getByTestId("composer-dnd-hint").textContent).toBe("拖文件请按住 Shift");
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("拖文件请按住 Shift");
 
     act(() => {
       ref.current?.insertReference({
@@ -239,7 +253,7 @@ describe("Composer", () => {
       });
     });
 
-    expect(screen.queryByTestId("composer-dnd-hint")).toBeNull();
+    expect(screen.queryByTestId("composer-notice-drag")).toBeNull();
   });
 
   it("suppresses raw editor drops and forwards file uris once", () => {
@@ -269,7 +283,7 @@ describe("Composer", () => {
     });
   });
 
-  it("shows a light hint before opening the mixed picker on text-only models", () => {
+  it("lets capability warnings take over the single-line notice rail", () => {
     const onPickContext = vi.fn();
     renderComposer({
       modelCapabilities: ["reasoning"],
@@ -279,9 +293,16 @@ describe("Composer", () => {
     fireEvent.click(screen.getByTestId("attachment-add"));
 
     expect(onPickContext).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("composer-capability-hint").textContent).toContain(
+    expect(screen.getByTestId("composer-notice-capability").textContent).toContain(
       "当前模型不支持图片/PDF 附件",
     );
+    expect(screen.queryByTestId("composer-notice-drag")).toBeNull();
+    expect(screen.queryByTestId("composer-notice-plan")).toBeNull();
+    expect(
+      [...screen.getByTestId("composer-notices").children].map(
+        (node) => (node as HTMLElement).dataset.testid,
+      ),
+    ).toEqual(["composer-notice-capability"]);
   });
 
   it("warns when unsupported image drops still add an attachment", () => {
@@ -302,9 +323,11 @@ describe("Composer", () => {
     fireEvent.drop(surface, { dataTransfer });
 
     expect(onResolveDrop).toHaveBeenCalledWith(["file:///workspace/assets/mockup.png"]);
-    expect(screen.getByTestId("composer-capability-hint").textContent).toContain(
+    expect(screen.getByTestId("composer-notice-capability").textContent).toContain(
       "当前模型不支持图片附件；拖入后会先加入待发送列表",
     );
+    expect(screen.queryByTestId("composer-notice-drag")).toBeNull();
+    expect(screen.queryByTestId("composer-notice-plan")).toBeNull();
   });
 
   it("does not submit on Shift+Enter or during IME composition", () => {

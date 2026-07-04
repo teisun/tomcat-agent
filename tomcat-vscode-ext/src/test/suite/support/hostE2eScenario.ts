@@ -2044,7 +2044,7 @@ export async function assertWebviewFileDropReferenceFlow(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
-      candidate.html.includes('data-testid="composer-dnd-hint"') &&
+      candidate.html.includes('data-testid="composer-notice-drag"') &&
       candidate.html.includes("拖文件请按住 Shift")
         ? candidate
         : undefined,

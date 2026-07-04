@@ -111,6 +111,14 @@ export interface ComposerHandle {
   insertReference(reference: WebviewReference): void;
 }
 
+type ComposerNoticeTone = "info" | "active" | "warning" | "plan";
+
+interface ComposerNotice {
+  id: "capability" | "drag" | "plan";
+  text: string;
+  tone: ComposerNoticeTone;
+}
+
 function normalizeReferenceAttrs(attrs: Record<string, unknown>): WebviewReference | null {
   if (
     (attrs.kind !== "selection" && attrs.kind !== "file") ||
@@ -569,6 +577,37 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onPickContext();
   };
 
+  const warningNotice: ComposerNotice | null = capabilityHint
+    ? {
+        id: "capability",
+        text: capabilityHint,
+        tone: "warning",
+      }
+    : null;
+  const dragNotice: ComposerNotice | null = !warningNotice && canPrompt
+    ? dropActive
+      ? {
+          id: "drag",
+          text: "松手加入上下文",
+          tone: "active",
+        }
+      : !draft.hasContent
+        ? {
+            id: "drag",
+            text: "拖文件请按住 Shift",
+            tone: "info",
+          }
+        : null
+    : null;
+  const planNotice: ComposerNotice | null = !warningNotice && planStatus
+    ? {
+        id: "plan",
+        text: planStatus,
+        tone: "plan",
+      }
+    : null;
+  const hasNotice = Boolean(warningNotice || dragNotice || planNotice);
+
   return (
     <section className="tc-composer" aria-label="prompt" data-testid="composer">
       <div
@@ -580,16 +619,33 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         onDragOver={handleDragOver}
         onDrop={handleDrop}
       >
-        <EditorContent editor={editor} />
-        {canPrompt && (dropActive || !draft.hasContent) ? (
-          <div
-            aria-hidden="true"
-            className={`tc-composer__hint${dropActive ? " tc-composer__hint--active" : ""}`}
-            data-testid="composer-dnd-hint"
-          >
-            {dropActive ? "松手加入上下文" : "拖文件请按住 Shift"}
+        {hasNotice ? (
+          <div className="tc-composer__notices" role="status" aria-live="polite" data-testid="composer-notices">
+            {warningNotice ? (
+              <span className="tc-notice tc-notice--warning" data-testid="composer-notice-capability">
+                {warningNotice.text}
+              </span>
+            ) : (
+              <>
+                {dragNotice ? (
+                  <span
+                    aria-hidden="true"
+                    className={`tc-notice tc-notice--${dragNotice.tone} tc-notice--left`}
+                    data-testid="composer-notice-drag"
+                  >
+                    {dragNotice.text}
+                  </span>
+                ) : null}
+                {planNotice ? (
+                  <span className="tc-notice tc-notice--plan tc-notice--right" data-testid="composer-notice-plan">
+                    {planNotice.text}
+                  </span>
+                ) : null}
+              </>
+            )}
           </div>
         ) : null}
+        <EditorContent editor={editor} />
         <div className="tc-composer__bar" data-testid="composer-bar">
           <button
             aria-label="添加文件/文件夹/图片"
@@ -672,26 +728,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           </button>
         </div>
       </div>
-      {planStatus ? (
-        <div className="tc-composer__footer" data-testid="composer-footer">
-          <span
-            className="tc-chip tc-composer__plan-status"
-            data-testid="composer-plan-status-footer"
-          >
-            {planStatus}
-          </span>
-        </div>
-      ) : null}
-      {capabilityHint ? (
-        <div className="tc-composer__footer">
-          <span
-            className="tc-chip tc-chip--warning tc-composer__capability-hint"
-            data-testid="composer-capability-hint"
-          >
-            {capabilityHint}
-          </span>
-        </div>
-      ) : null}
     </section>
   );
 });

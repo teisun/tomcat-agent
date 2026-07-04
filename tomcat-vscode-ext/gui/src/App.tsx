@@ -141,10 +141,10 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   const composerControlMetrics = Object.fromEntries(composerMetricEntries);
   const composerBar = document.querySelector<HTMLElement>('[data-testid="composer-bar"]');
   const composerFooterPlanStatus =
-    document.querySelector<HTMLElement>('[data-testid="composer-plan-status-footer"]')?.textContent ??
+    document.querySelector<HTMLElement>('[data-testid="composer-notice-plan"]')?.textContent ??
     null;
   const composerPlanStatusInBarCount = document.querySelectorAll(
-    ".tc-composer__bar .tc-composer__plan-status",
+    ".tc-composer__bar .tc-notice--plan",
   ).length;
   const stickyPromptText =
     document.querySelector<HTMLElement>('[data-testid="sticky-user-prompt-text"]')?.textContent ?? null;
