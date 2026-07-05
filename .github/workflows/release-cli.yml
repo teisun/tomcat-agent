@@ -49,13 +49,19 @@ jobs:
           set -euo pipefail
           raw="${RAW_RELEASE_REF}"
           case "${raw}" in
-            dry-run-cli-v*) release_tag="${raw#dry-run-}" ;;
+            dry-run-cli-v*)
+              release_tag="$(printf '%s\n' "${raw}" | sed -E 's/^dry-run-(cli-v[0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
+              ;;
             cli-v*) release_tag="${raw}" ;;
             *)
               echo "Unsupported CLI release ref: ${raw}" >&2
               exit 1
               ;;
           esac
+          if [ -z "${release_tag}" ]; then
+            echo "Could not resolve CLI release tag from ${raw}" >&2
+            exit 1
+          fi
           printf 'release_tag=%s\n' "${release_tag}" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Node for release guards

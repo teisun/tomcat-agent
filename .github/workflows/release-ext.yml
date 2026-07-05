@@ -48,7 +48,7 @@ jobs:
           use_cli_artifacts=0
           case "${raw}" in
             dry-run-ext-v*)
-              release_tag="${raw#dry-run-}"
+              release_tag="$(printf '%s\n' "${raw}" | sed -E 's/^dry-run-(ext-v[0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
               use_cli_artifacts=1
               ;;
             ext-v*)
@@ -59,6 +59,10 @@ jobs:
               exit 1
               ;;
           esac
+          if [ -z "${release_tag}" ]; then
+            echo "Could not resolve extension release tag from ${raw}" >&2
+            exit 1
+          fi
           if [ -n "${CLI_ARTIFACT_RUN_ID}" ]; then
             use_cli_artifacts=1
           fi
@@ -200,6 +204,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && !startsWith(github.ref_name, 'dry-run-')
     needs: build
+    env:
+      HAS_OVSX_PAT: ${{ secrets.OVSX_PAT != '' }}
+      HAS_VSCE_PAT: ${{ secrets.VSCE_PAT != '' }}
     permissions:
       contents: write
 
@@ -226,7 +233,7 @@ jobs:
           generate_release_notes: true
 
       - name: Publish VSIX files to VS Code Marketplace
-        if: ${{ secrets.VSCE_PAT != '' }}
+        if: env.HAS_VSCE_PAT == 'true'
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
@@ -236,7 +243,7 @@ jobs:
           done
 
       - name: Publish VSIX files to OpenVSX
-        if: ${{ secrets.OVSX_PAT != '' }}
+        if: env.HAS_OVSX_PAT == 'true'
         continue-on-error: true
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
