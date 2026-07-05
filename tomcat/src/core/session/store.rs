@@ -68,9 +68,15 @@ pub struct SessionEntry {
     /// L0 落盘原始字符累计（Unicode），与 `ContextState.session_obs.tool_result_chars_persisted` 同步。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result_chars_persisted: Option<u64>,
+    /// 最近一次 turn 末观察到的上下文利用率，供 `get_state` / reload UI 恢复。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_utilization_ratio: Option<f64>,
     /// 最近一次会话级 restore 成功落到的 checkpoint（仅 TurnEnd/Interrupt）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_checkpoint_id: Option<String>,
+    /// 会话标题：首条 user message 首行截断 ≤40 字符生成一次、持久化、永不覆盖。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// 从路径加载 SessionStore；文件不存在或为空时返回空 store。

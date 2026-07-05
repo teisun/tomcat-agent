@@ -120,5 +120,10 @@ fn session_path(
         serde_json::Value::Number(serde_json::Number::from(snapshot.panel_snapshot_id));
     runtime.refresh_notifier().notify(&snapshot);
 
+    runtime.write_transcript_custom(serde_json::json!({
+        "event": crate::infra::wire::WIRE_SESSION_TODOS,
+        "todos": items_json(&todos),
+    }));
+
     Ok(out)
 }

@@ -299,7 +299,6 @@ async fn verifier_blocks_non_whitelisted_tools() {
     for (name, arguments) in [
         ("update_plan", "{}"),
         ("web_search", r#"{"query":"rust async"}"#),
-        ("web_fetch", r#"{"url":"https://example.com"}"#),
         ("write", r#"{"path":"/tmp/demo.txt","content":"hi"}"#),
         (
             "edit",
@@ -338,6 +337,107 @@ async fn verifier_blocks_non_whitelisted_tools() {
             outcome.model_text
         );
     }
+}
+
+#[test]
+fn verifier_allowed_tools_include_web_fetch() {
+    let tools = crate::core::plan_runtime::verify::verifier_allowed_tools_with_policy(false);
+    assert!(tools.contains(&"web_fetch"));
+}
+
+#[tokio::test]
+async fn verifier_web_fetch_requires_runtime_after_whitelist() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let tc = ToolCallInfo {
+        id: "tc_web_fetch_no_runtime".into(),
+        name: "web_fetch".into(),
+        arguments: r#"{"url":"https://example.com"}"#.into(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::Verifier,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(outcome.is_error, "未注入 runtime 时应返回结构化错误");
+    assert!(
+        outcome.model_text.contains("web_fetch runtime 未注入"),
+        "runtime 缺失文案异常: {}",
+        outcome.model_text
+    );
+}
+
+#[tokio::test]
+async fn verifier_web_fetch_succeeds_when_runtime_is_present() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runtime = Arc::new(
+        crate::core::tools::web_fetch::WebFetchRuntime::new(
+            &crate::infra::AppConfig::default(),
+            dir.path().join("tool-results"),
+        )
+        .expect("build web_fetch runtime"),
+    );
+    runtime.insert_cached_output_for_test(
+        "https://example.com/verifier",
+        crate::core::tools::web_fetch::WebFetchFormat::Markdown,
+        crate::core::tools::web_fetch::types::WebFetchOutput::new(
+            "https://example.com/verifier".to_string(),
+            200,
+            "OK".to_string(),
+            "text/html; charset=utf-8".to_string(),
+            10,
+            "# Verifier".to_string(),
+            10,
+            3,
+            None,
+            None,
+            false,
+            Vec::new(),
+        ),
+    );
+    let tc = ToolCallInfo {
+        id: "tc_web_fetch_runtime".into(),
+        name: "web_fetch".into(),
+        arguments: r#"{"url":"https://example.com/verifier"}"#.into(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        Some(&runtime),
+        None,
+        None,
+        None,
+        SubagentType::Verifier,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "unexpected verifier web_fetch error: {}", outcome.model_text);
+    let value: serde_json::Value =
+        serde_json::from_str(&outcome.model_text).expect("valid web_fetch json");
+    assert_eq!(value["url"], "https://example.com/verifier");
+    assert_eq!(value["result"], "# Verifier");
 }
 
 #[tokio::test]

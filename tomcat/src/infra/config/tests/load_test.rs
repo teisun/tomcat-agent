@@ -181,3 +181,23 @@ fn load_config_toml_overrides_scene_models() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
 }
+
+#[test]
+fn resolve_model_thinking_path_uses_work_dir_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(temp.path().to_string_lossy().to_string());
+
+    let path = resolve_model_thinking_path(&cfg).unwrap();
+
+    assert_eq!(
+        std::fs::canonicalize(path.parent().expect("parent path")).unwrap(),
+        std::fs::canonicalize(temp.path()).unwrap()
+    );
+    assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("model-thinking.json"));
+    assert!(
+        !path.starts_with(temp.path().join("agents").join(&cfg.agent.id).join("sessions")),
+        "model thinking store must not live under sessions/: {}",
+        path.display()
+    );
+}

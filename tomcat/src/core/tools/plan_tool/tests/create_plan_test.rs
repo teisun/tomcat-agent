@@ -68,7 +68,7 @@ fn create_plan_in_planning_writes_disk_and_records_active_id() {
 }
 
 #[test]
-fn create_plan_multiple_times_overrides_active_planning_id_without_binding_path() {
+fn create_plan_multiple_times_overrides_active_planning_id_and_binding_path() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -105,9 +105,10 @@ fn create_plan_multiple_times_overrides_active_planning_id_without_binding_path(
     let second_id = second["plan_id"].as_str().unwrap();
     assert_ne!(first_id, second_id);
     assert_eq!(rt.active_planning_plan_id().as_deref(), Some(second_id));
-    assert!(
-        rt.active_plan_path().is_none(),
-        "create_plan 不应写 binding path"
+    assert_eq!(
+        rt.active_plan_path(),
+        Some(plan_path_for_id(second_id).unwrap()),
+        "create_plan 应记录最新 planning plan 的真实 path"
     );
     assert!(plan_path_for_id(first_id).unwrap().is_file());
     assert!(plan_path_for_id(second_id).unwrap().is_file());
@@ -225,4 +226,11 @@ fn create_plan_derived_id_passes_safety_check() {
     crate::core::plan_runtime::safety::assert_plan_id_safe(&id).unwrap();
     let id = create_plan::derive_plan_id("");
     crate::core::plan_runtime::safety::assert_plan_id_safe(&id).unwrap();
+}
+
+#[test]
+fn create_plan_derived_id_collapses_underscore_runs() {
+    let id = create_plan::derive_plan_id("test stuff --- md !!! html");
+    assert!(id.starts_with("plan_test_stuff_md_html_"), "实际 id: {id}");
+    assert!(!id.contains("___"), "不应出现连续下划线: {id}");
 }

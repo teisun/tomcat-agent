@@ -1,8 +1,9 @@
 //! 集成测试：OpenAI Responses 适配器与真实 API（`POST /v1/responses`）。
 //!
-//! 不 Mock 网络；已配置目标模型所需 key 时真实发起 HTTP；无 key 时视为失败，不得 `ignore`。
-//! 写法与 `tests/llm_tests.rs` 对齐：`mod common`、`dotenvy::dotenv`、`setup_logging`、60s 超时
-//! （INTEGRATION_TEST_ROBUSTNESS 2.2）。
+//! 默认不打外部网关；设置 `PI_LIVE_OPENAI_RESPONSES=1` 后才真实发起 HTTP。
+//! 这样本地默认 `cargo test` 不会被账号/网关可用性阻塞，需要联真回归时再显式开启。
+//! 写法与 `tests/llm_tests.rs` / `tests/openai_files_integration_tests.rs` 对齐：`mod common`、
+//! `dotenvy::dotenv`、`setup_logging`、60s 超时（INTEGRATION_TEST_ROBUSTNESS 2.2）。
 //!
 //! 调用面：通过 catalog + resolver 拿 `Arc<dyn LlmProvider>`，**不直接构造**
 //! 任何 concrete Provider 类型；`provider = "openai-responses"` 即可路由到
@@ -60,6 +61,16 @@ fn responses_terminal_reason_opt_in() -> bool {
     env_truthy("TOMCAT_E2E_RESPONSES_TERMINAL_REASON")
 }
 
+fn require_live_openai_responses_opt_in(test_name: &str) -> bool {
+    if env_truthy("PI_LIVE_OPENAI_RESPONSES") {
+        return true;
+    }
+    eprintln!(
+        "skip {test_name}: set PI_LIVE_OPENAI_RESPONSES=1 to enable live OpenAI Responses API tests"
+    );
+    false
+}
+
 fn contains_cjk(text: &str) -> bool {
     text.chars()
         .any(|c| matches!(c, '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}'))
@@ -71,6 +82,10 @@ fn contains_cjk(text: &str) -> bool {
 #[tokio::test]
 async fn test_openai_responses_chat_real_request_returns_ok(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !require_live_openai_responses_opt_in("test_openai_responses_chat_real_request_returns_ok")
+    {
+        return Ok(());
+    }
     common::setup_logging();
     let _span = tracing::info_span!("test_openai_responses_chat_real_request_returns_ok").entered();
     common::load_openai_test_env();
@@ -84,6 +99,7 @@ async fn test_openai_responses_chat_real_request_returns_ok(
         max_tokens: Some(16),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     tracing::info!("Arrange: AppConfig + models.toml fixture → resolver → Arc<dyn LlmProvider>");
@@ -101,6 +117,11 @@ async fn test_openai_responses_chat_real_request_returns_ok(
 #[tokio::test]
 async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !require_live_openai_responses_opt_in(
+        "test_openai_responses_chat_real_request_maps_stop_finish_reason",
+    ) {
+        return Ok(());
+    }
     common::setup_logging();
     let _span =
         tracing::info_span!("test_openai_responses_chat_real_request_maps_stop_finish_reason")
@@ -116,6 +137,7 @@ async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
         max_tokens: Some(64),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
@@ -130,6 +152,11 @@ async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
 #[tokio::test]
 async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !require_live_openai_responses_opt_in(
+        "test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason",
+    ) {
+        return Ok(());
+    }
     common::setup_logging();
     let _span = tracing::info_span!(
         "test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason"
@@ -148,6 +175,7 @@ async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_r
         max_tokens: Some(16),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
@@ -169,6 +197,11 @@ async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_r
 #[tokio::test]
 async fn test_openai_responses_chat_stream_real_request_yields_events(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !require_live_openai_responses_opt_in(
+        "test_openai_responses_chat_stream_real_request_yields_events",
+    ) {
+        return Ok(());
+    }
     common::setup_logging();
     let _span = tracing::info_span!("test_openai_responses_chat_stream_real_request_yields_events")
         .entered();
@@ -183,6 +216,7 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
         max_tokens: Some(16),
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     tracing::info!("Arrange: ChatRequest(stream=true) → Responses SSE");
@@ -211,6 +245,11 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
 #[tokio::test]
 async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !require_live_openai_responses_opt_in(
+        "test_openai_responses_chat_stream_reasoning_emits_thinking",
+    ) {
+        return Ok(());
+    }
     common::setup_logging();
     let _span =
         tracing::info_span!("test_openai_responses_chat_stream_reasoning_emits_thinking").entered();
@@ -232,6 +271,7 @@ async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
             max_tokens: Some(256),
             stream: Some(true),
             model_override: None,
+            thinking_level: None,
             tools: None,
         };
         let mut stream = tokio::time::timeout(Duration::from_secs(60), async {
@@ -286,6 +326,11 @@ async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
 #[tokio::test]
 async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reason_opt_in(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !require_live_openai_responses_opt_in(
+        "test_openai_responses_chat_real_request_observes_tool_calls_finish_reason_opt_in",
+    ) {
+        return Ok(());
+    }
     if !responses_terminal_reason_opt_in() {
         tracing::info!(
             "skip responses terminal-reason tool_calls observation; set TOMCAT_E2E_RESPONSES_TERMINAL_REASON=1 to enable"
@@ -325,6 +370,7 @@ async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reas
         max_tokens: Some(64),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: Some(tools),
     };
     let resp = tokio::time::timeout(Duration::from_secs(60), provider.chat(request))
@@ -354,6 +400,11 @@ async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reas
 #[tokio::test]
 async fn test_openai_responses_latest_user_language_behavior_opt_in(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !require_live_openai_responses_opt_in(
+        "test_openai_responses_latest_user_language_behavior_opt_in",
+    ) {
+        return Ok(());
+    }
     if !language_behavior_e2e_opt_in() {
         tracing::info!(
             "skip language behavior opt-in e2e; set TOMCAT_E2E_LANGUAGE_BEHAVIOR=1 to enable"
@@ -377,6 +428,7 @@ async fn test_openai_responses_latest_user_language_behavior_opt_in(
         max_tokens: Some(256),
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let mut stream = tokio::time::timeout(Duration::from_secs(60), async move {
@@ -423,6 +475,9 @@ async fn test_openai_responses_latest_user_language_behavior_opt_in(
 /// 之一（容忍 LLM 输出口径漂移），超时 60s。
 #[tokio::test]
 async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    if !require_live_openai_responses_opt_in("responses_inline_image_describe_roundtrip") {
+        return Ok(());
+    }
     common::setup_logging();
     let _span = tracing::info_span!("responses_inline_image_describe_roundtrip").entered();
     common::load_openai_test_env();
@@ -444,6 +499,7 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
         max_tokens: Some(96),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     tracing::info!(
@@ -508,6 +564,11 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
 #[tokio::test]
 async fn responses_inline_pdf_input_file_summarize_roundtrip(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !require_live_openai_responses_opt_in(
+        "responses_inline_pdf_input_file_summarize_roundtrip",
+    ) {
+        return Ok(());
+    }
     common::setup_logging();
     let _span =
         tracing::info_span!("responses_inline_pdf_input_file_summarize_roundtrip").entered();
@@ -533,6 +594,7 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
         max_tokens: Some(96),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     tracing::info!(

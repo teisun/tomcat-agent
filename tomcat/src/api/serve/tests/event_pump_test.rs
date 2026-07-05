@@ -109,3 +109,56 @@ async fn serve_lifecycle_events_not_dropped_for_other_sessions() {
         Some(wire::WIRE_AGENT_END)
     );
 }
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_event_pump_streams_plan_transition_events() {
+    let _api_key = install_test_api_key();
+    let (_state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+
+    for event_name in [
+        wire::WIRE_PLAN_ENTER,
+        wire::WIRE_PLAN_EXIT,
+        wire::WIRE_PLAN_PENDING,
+        wire::WIRE_PLAN_COMPLETE,
+    ] {
+        slot.ctx
+            .global_services
+            .event_bus
+            .emit_sync(
+                event_name,
+                EventContext::new(
+                    event_name,
+                    serde_json::json!({
+                        "type": event_name,
+                        "sessionId": slot.session_id.clone(),
+                        "planId": "plan-1",
+                        "path": "/workspace/plan-1.plan.md",
+                        "state": match event_name {
+                            wire::WIRE_PLAN_ENTER => "planning",
+                            wire::WIRE_PLAN_EXIT => "chat",
+                            wire::WIRE_PLAN_PENDING => "pending",
+                            _ => "completed",
+                        }
+                    }),
+                )
+                .with_session_id(slot.session_id.clone()),
+            )
+            .unwrap();
+    }
+
+    let lines = wait_for_lines(&buffer, 4).await;
+    assert_eq!(lines.len(), 4, "expected four routed plan events, got {lines:?}");
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| line.get("type").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>(),
+        vec![
+            Some(wire::WIRE_PLAN_ENTER),
+            Some(wire::WIRE_PLAN_EXIT),
+            Some(wire::WIRE_PLAN_PENDING),
+            Some(wire::WIRE_PLAN_COMPLETE),
+        ]
+    );
+}

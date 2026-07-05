@@ -95,6 +95,72 @@ async fn code_review_pass_runs_verifier_in_same_turn() {
 }
 
 #[tokio::test]
+async fn aborted_code_review_falls_through_to_verifier_and_soft_gate_completes() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let reviewer = std::sync::Arc::new(MockReviewerDispatcher::new(vec![aborted_code_review(
+        "reviewer spawn failed",
+    )]));
+    let verifier = std::sync::Arc::new(MockVerifierDispatcher::new(vec![ok_verify_pass()]));
+    rt.attach_reviewer(reviewer.clone());
+    rt.attach_verifier(verifier.clone());
+    rt.set_verify_gate_mode("soft");
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out["code_review"]["verdict"], "aborted");
+    assert_eq!(out["verify"]["verdict"], "pass");
+    assert_eq!(out["plan_state_after"], "completed");
+    assert_eq!(
+        reviewer
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    let warnings = out["warnings"].as_array().expect("warnings array");
+    assert!(
+        warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|text| text.contains("code review 未能执行(aborted)"))
+        }),
+        "aborted code review 应明确记录降级到 verifier 的 warning"
+    );
+    cleanup_home(&home);
+}
+
+#[tokio::test]
 async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_skips_review() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();

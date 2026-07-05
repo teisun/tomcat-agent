@@ -35,7 +35,7 @@ pub(in super::super) async fn handle_edit(
     }
 
     ctx.primitive
-        .edit_file(path, edits, AGENT_PLUGIN_ID)
+        .edit_file_with_cancel(path, edits, ctx.cancel, AGENT_PLUGIN_ID)
         .await
         .map(|r| {
             if r.applied {

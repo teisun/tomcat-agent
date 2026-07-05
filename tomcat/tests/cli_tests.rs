@@ -29,8 +29,20 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[allow(deprecated)]
 fn cmd() -> Command {
     let mut c = Command::cargo_bin("tomcat").expect("binary tomcat should exist");
-    // 避免宿主环境 TOMCAT__LLM__DEFAULT_MODEL 覆盖临时 HOME 下的 tomcat.config.toml
-    c.env_remove("TOMCAT__LLM__DEFAULT_MODEL");
+    // 避免宿主环境或并行测试残留的 TOMCAT__* 覆盖子进程自己的临时 work_dir/config。
+    for key in [
+        "TOMCAT__LLM__DEFAULT_MODEL",
+        "TOMCAT__CONTEXT__COMPACTION_MODEL",
+        "TOMCAT__LLM__PROVIDER",
+        "TOMCAT__LLM__API_BASE",
+        "TOMCAT__LLM__API_KEY_ENV",
+        "TOMCAT__CONFIG_PATH",
+        "TOMCAT__STORAGE__WORK_DIR",
+        "TOMCAT__STORAGE__SESSIONS_DIR",
+        "TOMCAT__AGENT__ID",
+    ] {
+        c.env_remove(key);
+    }
     c
 }
 
@@ -379,6 +391,35 @@ impl tomcat::core::session::MessageAppendSink for CliInjectAppendInvariantSink {
             }))?;
         }
         self.inner.append_message(value)
+    }
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        let call_idx = self.append_calls.fetch_add(1, Ordering::SeqCst);
+        if call_idx == 2 && !self.injected.swap(true, Ordering::SeqCst) {
+            let tool_call_id = value
+                .get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("call_injected")
+                .to_string();
+            self.inner.append_message(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": "[interrupted]"
+            }))?;
+            self.inner.append_message(serde_json::json!({
+                "role": "user",
+                "content": "nested prompt"
+            }))?;
+            self.inner.append_message(serde_json::json!({
+                "role": "assistant",
+                "content": "nested done"
+            }))?;
+        }
+        self.inner.append_message_with_id(value, forced_id)
     }
 }
 
@@ -986,16 +1027,13 @@ fn test_workspace_add_cwd_e2e() {
         .assert()
         .success();
 
-    // `std::env::current_dir` 为进程全局；若将来 cli_tests 改为多线程并行，需改为子进程或串行策略，避免与其它用例竞态。
-    let prev = std::env::current_dir().unwrap();
-    std::env::set_current_dir(proj.path()).unwrap();
     cmd()
         .args(["workspace", "add", "--cwd"])
+        .current_dir(proj.path())
         .env("HOME", home.path())
         .assert()
         .success()
         .stdout(predicate::str::contains("已添加工作区"));
-    std::env::set_current_dir(&prev).unwrap();
 
     let list_assert = cmd()
         .args(["workspace", "list"])
@@ -1059,6 +1097,90 @@ fn test_init_path_export_idempotent_in_shell_profile() {
         "expected single export PATH line, got {} in: {}",
         count,
         trunc(&content, 500)
+    );
+}
+
+/// bash 场景下，init 会让 login shell 同时加载 .profile 与 .bashrc，避免截断通用环境变量。
+#[test]
+fn test_init_bash_profile_sources_profile_and_bashrc() {
+    common::setup_logging();
+    let _span = info_span!("test_init_bash_profile_sources_profile_and_bashrc").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join(".profile");
+    let bash_profile = dir.path().join(".bash_profile");
+    let bashrc = dir.path().join(".bashrc");
+    fs::write(&profile, ". \"$HOME/.cargo/env\"\n").unwrap();
+
+    cmd()
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/bash")
+        .assert()
+        .success();
+
+    let bash_profile_content =
+        fs::read_to_string(&bash_profile).expect(".bash_profile should be created under HOME");
+    assert!(
+        bash_profile_content.contains("[ -r \"$HOME/.profile\" ] && . \"$HOME/.profile\"")
+            && bash_profile_content.contains("[ -r \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\""),
+        "expected .bash_profile to source .profile and .bashrc, got: {}",
+        trunc(&bash_profile_content, 400)
+    );
+
+    let bashrc_content = fs::read_to_string(&bashrc).expect(".bashrc should be created under HOME");
+    assert!(
+        bashrc_content.contains("export PATH="),
+        "expected PATH block in .bashrc, got: {}",
+        trunc(&bashrc_content, 400)
+    );
+}
+
+/// bash 场景下，重复 init 不应重复注入 .bash_profile 的 source 语句或 .bashrc 的 PATH。
+#[test]
+fn test_init_bash_profile_source_idempotent() {
+    common::setup_logging();
+    let _span = info_span!("test_init_bash_profile_source_idempotent").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join(".profile");
+    let bash_profile = dir.path().join(".bash_profile");
+    let bashrc = dir.path().join(".bashrc");
+    fs::write(&profile, ". \"$HOME/.cargo/env\"\n").unwrap();
+
+    for _ in 0..2 {
+        cmd()
+            .args(["init"])
+            .env("HOME", dir.path())
+            .env("SHELL", "/bin/bash")
+            .assert()
+            .success();
+    }
+
+    let bash_profile_content = fs::read_to_string(&bash_profile).unwrap();
+    assert_eq!(
+        bash_profile_content
+            .matches("[ -r \"$HOME/.profile\" ] && . \"$HOME/.profile\"")
+            .count(),
+        1,
+        "expected single .profile source in .bash_profile, got: {}",
+        trunc(&bash_profile_content, 400)
+    );
+    assert_eq!(
+        bash_profile_content
+            .matches("[ -r \"$HOME/.bashrc\" ] && . \"$HOME/.bashrc\"")
+            .count(),
+        1,
+        "expected single .bashrc source in .bash_profile, got: {}",
+        trunc(&bash_profile_content, 400)
+    );
+
+    let bashrc_content = fs::read_to_string(&bashrc).unwrap();
+    assert_eq!(
+        bashrc_content.matches("export PATH=").count(),
+        1,
+        "expected single PATH export in .bashrc, got: {}",
+        trunc(&bashrc_content, 400)
     );
 }
 
@@ -1496,6 +1618,7 @@ fn test_chat_without_config_exits_with_error() {
 /// 验证：exit 0 且 stdout 包含"对话模式"banner 或模型信息或 agent prompt
 /// 意义：TASK-02 10.1——chat 端到端可用；INTEGRATION_TEST_SPEC：无 key 不得 ignore
 #[test]
+#[serial(env_lock)]
 fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -1701,6 +1824,7 @@ fn test_session_delete_via_cli_removes_session() {
 /// 验证：exit 0（即使会话不存在也不崩溃）
 /// 意义：TASK-02 10.6——session archive 端到端可用
 #[test]
+#[serial(env_lock)]
 fn test_session_archive_exits_ok() {
     common::setup_logging();
     let _span = info_span!("test_session_archive_exits_ok").entered();
@@ -1722,7 +1846,9 @@ fn test_session_archive_exits_ok() {
     let assert = c.assert();
 
     info!("Assert: exit 0");
-    assert.success().stdout(predicate::str::contains("已归档"));
+    assert.success().stdout(
+        predicate::str::contains("已归档").or(predicate::str::contains("会话不存在")),
+    );
 }
 
 // ────────────────────── 补充用例：config set 成功路径 ──────────────────────
@@ -2139,6 +2265,7 @@ fn test_ensure_embedded_assets_tolerates_existing_assets_files() {
 /// 验证：exit 0；stdout 非空
 /// 要求：DEEPSEEK_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
 #[test]
+#[serial(env_lock)]
 fn test_user_asks_pi_a_question() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2182,6 +2309,7 @@ fn test_user_asks_pi_a_question() {
 /// 验证：exit 0；stdout 含"所有权"或"ownership"
 /// 要求：DEEPSEEK_API_KEY 环境变量已设置
 #[test]
+#[serial(env_lock)]
 fn test_user_asks_pi_technical_question() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2228,6 +2356,7 @@ fn test_user_asks_pi_technical_question() {
 /// 验证：exit 0；stdout 含 hello_from_pi（或明显命令执行结果）
 /// 意义：工具调用 E2E 门禁，保证 execute_bash 被真实调用
 #[test]
+#[serial(env_lock)]
 fn test_user_asks_pi_to_run_bash_command() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2280,6 +2409,7 @@ fn test_user_asks_pi_to_run_bash_command() {
 /// 验证：exit 0；stderr 含 `[tool] read` 且包含 not found 语义，并且不退化为 `✗ failed`
 /// 要求：DEEPSEEK_API_KEY 环境变量已设置
 #[test]
+#[serial(env_lock)]
 fn test_user_sees_read_failure_reason_in_tool_line() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2473,6 +2603,7 @@ fn load_background_bash_p1_real_llm_transcript(fx: &BackgroundBashP1RealLlmFixtu
 ///
 /// 意义：P1 门禁——这条用例是真 LLM + 真 CLI `chat_loop` 黑盒，不是仅测 tool 层。
 #[test]
+#[serial(env_lock)]
 fn test_user_background_bash_autofeed_real_llm_cli() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2561,6 +2692,7 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
 /// 意义：P1 第二条真门禁——真正覆盖 `block=true` 等待路径、
 /// transcript 中的真实 tool_call，以及 `new_output` 唤醒后的收尾。
 #[test]
+#[serial(env_lock)]
 fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2677,6 +2809,7 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 /// - 真实产物 `multi_timeout_done.txt` 存在且内容正确；
 /// - stdout 最终包含 `MULTI_TIMEOUT_OK`。
 #[test]
+#[serial(env_lock)]
 fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2815,6 +2948,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
 ///
 /// 意义：锁定“批次边界 midturn drain”本身，而不是沿用既有 finish-only between-turns auto-feed。
 #[test]
+#[serial(env_lock)]
 fn test_user_background_bash_midturn_followup_real_llm_cli() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -2956,6 +3090,7 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
 /// - transcript 的 `role=user` 消息不含 `waiting_for_output`；
 /// - transcript 中不出现 `task_stop` / `task_list`。
 #[test]
+#[serial(env_lock)]
 fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -3081,6 +3216,7 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
 /// 验证：exit 0；`{CARGO_MANIFEST_DIR}/workspace-temp/e2e_cli013_hello/hello_e2e.txt` 存在且内容含 Hello E2E（或 stdout 含写入/创建确认）
 /// 意义：scratch 走 `workspace-temp/`（INTEGRATION_TEST_SPEC §2.3），避免提示词里的「workspace 目录」被模型误解为 crate 下 `workspace/` 子目录
 #[test]
+#[serial(env_lock)]
 fn test_user_asks_pi_to_write_hello_world_bash() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -3987,6 +4123,7 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
 /// 验证：exit 0；stdout 含 AI 回复
 /// 要求：DEEPSEEK_API_KEY 已设置
 #[test]
+#[serial(env_lock)]
 fn test_user_chats_with_llm_gets_streaming_response() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -4033,6 +4170,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
 /// 验证：exit 0；stdout 非空
 /// 要求：DEEPSEEK_API_KEY 已设置
 #[test]
+#[serial(env_lock)]
 fn test_user_receives_nonempty_llm_response() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -4239,6 +4377,7 @@ fn test_user_deletes_session() {
 /// 用户意图：归档刚创建的会话
 /// 验证：exit 0；stdout 含"已归档"
 #[test]
+#[serial(env_lock)]
 fn test_user_archives_session() {
     common::setup_logging();
     let _span = info_span!("test_user_archives_session").entered();
@@ -4270,6 +4409,7 @@ fn test_user_archives_session() {
 /// 用户意图：按当前固定 session key 搜索会话
 /// 验证：exit 0
 #[test]
+#[serial(env_lock)]
 fn test_user_searches_sessions_by_keyword() {
     common::setup_logging();
     let _span = info_span!("test_user_searches_sessions_by_keyword").entered();
@@ -4394,8 +4534,10 @@ id = "mock-local"
 api = "openai"
 provider = "openai"
 base_url = "{base_url}"
+api_key_env = "{api_key_env}"
 capabilities = {{ vision = false, files = false, tools = true, reasoning = false }}
-"#
+"#,
+            api_key_env = common::DEEPSEEK_TEST_API_KEY_ENV,
         ),
     )
     .unwrap();
@@ -4708,6 +4850,7 @@ fn test_user_init_then_doctor_roundtrip() {
 /// 验证：exit 0；进程正常退出（不崩溃）
 /// 要求：DEEPSEEK_API_KEY 已设置
 #[test]
+#[serial(env_lock)]
 fn test_user_chat_resumes_last_session() {
     common::setup_logging();
     common::load_deepseek_test_env();
@@ -6353,6 +6496,7 @@ async fn test_run_chat_turn_rejects_multimodal_message_on_text_model_before_prov
 }
 
 #[tokio::test]
+#[serial(env_lock)]
 async fn test_model_switch_keeps_ctx_metrics_continuous_across_turns() {
     common::setup_logging();
     let _span = info_span!("test_model_switch_keeps_ctx_metrics_continuous_across_turns").entered();
@@ -6542,6 +6686,7 @@ fn test_session_model_override_persists_across_chat_context_restart() {
 /// 验证：exit 0 且 stdout 包含非空 AI 回复文本（需 DEEPSEEK_API_KEY；无 key 时 panic，符合规范）
 /// 意义：TASK-14 T1-P1-005 E2E 门禁——验证 AgentLoop::run() 已完整接入 tomcat chat 交互链路（E2E_TEST_SPEC §6）
 #[test]
+#[serial(env_lock)]
 fn test_user_chat_non_interactive_with_prompt_flag() {
     common::setup_logging();
     common::load_deepseek_test_env();

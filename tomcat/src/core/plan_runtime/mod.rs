@@ -240,6 +240,38 @@ impl PlanRuntime {
         }
     }
 
+    fn emit_plan_state_event(
+        &self,
+        event: &str,
+        state: &str,
+        plan_id: Option<&str>,
+        explicit_path: Option<PathBuf>,
+    ) {
+        let path = explicit_path
+            .or_else(|| self.active_plan_path())
+            .or_else(|| plan_id.and_then(|id| file_store::plan_path_for_id(id).ok()))
+            .map(|path| crate::infra::platform::format_home_path(&path));
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "event".to_string(),
+            serde_json::Value::String(event.to_string()),
+        );
+        payload.insert(
+            "state".to_string(),
+            serde_json::Value::String(state.to_string()),
+        );
+        if let Some(plan_id) = plan_id {
+            payload.insert(
+                "plan_id".to_string(),
+                serde_json::Value::String(plan_id.to_string()),
+            );
+        }
+        if let Some(path) = path {
+            payload.insert("path".to_string(), serde_json::Value::String(path));
+        }
+        self.write_transcript_custom(serde_json::Value::Object(payload));
+    }
+
     /// 注入 checkpoint store（生产 ShadowGit / 测试 Noop / Spy）。
     pub fn attach_checkpoint_store(&self, store: Arc<dyn crate::core::CheckpointStore>) {
         *self.checkpoint_store.lock() = Some(store);
@@ -339,19 +371,33 @@ impl PlanRuntime {
     /// 已在 `Planning` / `Executing` / `Pending` 时返回 `Err`（用户须先 `/plan exit` 或 `/plan build`）。
     pub fn enter_planning(&self) -> Result<(), PlanRuntimeError> {
         let mut mode = self.mode.write();
-        match &*mode {
+        let entered = match &*mode {
             PlanState::Chat | PlanState::Completed { .. } => {
                 *mode = PlanState::Planning;
-                Ok(())
+                true
             }
-            PlanState::Planning => Err(PlanRuntimeError::AlreadyInMode("planning".into())),
-            PlanState::Executing { plan_id } => Err(PlanRuntimeError::AlreadyInMode(format!(
-                "executing(plan_id={plan_id})"
-            ))),
-            PlanState::Pending { plan_id } => Err(PlanRuntimeError::AlreadyInMode(format!(
-                "pending(plan_id={plan_id})"
-            ))),
+            PlanState::Planning => {
+                return Err(PlanRuntimeError::AlreadyInMode("planning".into()));
+            }
+            PlanState::Executing { plan_id } => {
+                return Err(PlanRuntimeError::AlreadyInMode(format!(
+                    "executing(plan_id={plan_id})"
+                )));
+            }
+            PlanState::Pending { plan_id } => {
+                return Err(PlanRuntimeError::AlreadyInMode(format!(
+                    "pending(plan_id={plan_id})"
+                )));
+            }
+        };
+        drop(mode);
+        if entered {
+            self.write_transcript_custom(serde_json::json!({
+                "event": crate::infra::wire::WIRE_PLAN_ENTER,
+                "state": PlanState::Planning.as_str(),
+            }));
         }
+        Ok(())
     }
 
     /// `/plan exit` → 退回 Chat。
@@ -360,14 +406,31 @@ impl PlanRuntime {
     /// 该动作只切 state，不清任何 plan runtime 字段，也不写事件。
     pub fn exit_to_chat(&self) -> Result<(), PlanRuntimeError> {
         let mut mode = self.mode.write();
-        match &*mode {
+        let plan_id = match &*mode {
             PlanState::Planning | PlanState::Pending { .. } => {
+                let plan_id = match &*mode {
+                    PlanState::Planning => self.active_planning_plan_id.lock().clone(),
+                    PlanState::Pending { plan_id } => Some(plan_id.clone()),
+                    _ => None,
+                };
                 *mode = PlanState::Chat;
-                Ok(())
+                plan_id
             }
-            PlanState::Chat => Err(PlanRuntimeError::AlreadyInMode("chat".into())),
-            other => Err(PlanRuntimeError::NotInPlanning(other.as_str().into())),
-        }
+            PlanState::Chat => {
+                return Err(PlanRuntimeError::AlreadyInMode("chat".into()));
+            }
+            other => {
+                return Err(PlanRuntimeError::NotInPlanning(other.as_str().into()));
+            }
+        };
+        drop(mode);
+        self.emit_plan_state_event(
+            crate::infra::wire::WIRE_PLAN_EXIT,
+            PlanState::Chat.as_str(),
+            plan_id.as_deref(),
+            self.active_plan_path(),
+        );
+        Ok(())
     }
 
     /// 启动恢复：由 `init_context_state()` 的单次 transcript 反向扫描产出的最近一条
@@ -485,9 +548,10 @@ impl PlanRuntime {
 
     /// Planning 模式下记 active plan_id 便利字段。
     ///
-    /// v4-g 起 create_plan 只更新 `active_planning_plan_id`，不再写 `active_plan_path`。
-    pub fn set_active_planning_plan(&self, plan_id: String, _path: PathBuf) {
+    /// create_plan 成功后同时记录 plan_id 与真实 path，供 get_state / reload 恢复同一张 plan 卡。
+    pub fn set_active_planning_plan(&self, plan_id: String, path: PathBuf) {
         *self.active_planning_plan_id.lock() = Some(plan_id);
+        *self.active_plan_path.lock() = Some(path);
     }
 
     /// 读 Planning 模式下的 active_plan_id。EXEC/Pending 应直接看 `mode().active_plan_id()`。
@@ -502,12 +566,40 @@ impl PlanRuntime {
 
     /// 内存切到 `Completed { plan_id }`；由 update_plan / todos 在所有 todo 完成时调用。
     pub fn set_mode_completed(&self, plan_id: String) {
+        self.set_mode_completed_with_path(plan_id, None);
+    }
+
+    pub fn set_mode_completed_with_path(&self, plan_id: String, path: Option<PathBuf>) {
+        let event_plan_id = plan_id.clone();
         *self.mode.write() = PlanState::Completed { plan_id };
+        if let Some(path) = path.clone() {
+            *self.active_plan_path.lock() = Some(path);
+        }
+        self.emit_plan_state_event(
+            crate::infra::wire::WIRE_PLAN_COMPLETE,
+            "completed",
+            Some(event_plan_id.as_str()),
+            path,
+        );
     }
 
     /// 内存切到 `Pending { plan_id }`；供 update_plan reopen completed 时同步 runtime state。
     pub fn set_mode_pending(&self, plan_id: String) {
+        self.set_mode_pending_with_path(plan_id, None);
+    }
+
+    pub fn set_mode_pending_with_path(&self, plan_id: String, path: Option<PathBuf>) {
+        let event_plan_id = plan_id.clone();
         *self.mode.write() = PlanState::Pending { plan_id };
+        if let Some(path) = path.clone() {
+            *self.active_plan_path.lock() = Some(path);
+        }
+        self.emit_plan_state_event(
+            crate::infra::wire::WIRE_PLAN_PENDING,
+            "pending",
+            Some(event_plan_id.as_str()),
+            path,
+        );
     }
 
     /// 测试辅助：直接把内存 mode 切到 `Executing { plan_id }`，
@@ -622,14 +714,12 @@ impl PlanRuntime {
             Err(e) => return review::ReviewSummary::aborted_with(format!("read plan 失败: {e}")),
         };
 
-        let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut summary = dispatcher
             .dispatch(
                 plan_id,
                 &plan_text,
                 review::ReviewKind::Plan,
                 allow_review_edit,
-                cascade,
             )
             .await;
         if rounds > 1 {
@@ -692,14 +782,12 @@ impl PlanRuntime {
             }
         };
 
-        let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
         dispatcher
             .dispatch(
                 plan_id,
                 &plan_text,
                 review::ReviewKind::Code,
                 false,
-                cascade,
             )
             .await
     }
@@ -726,8 +814,7 @@ impl PlanRuntime {
             Err(e) => return verify::VerifySummary::aborted_with(format!("read plan 失败: {e}")),
         };
 
-        let cascade = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        dispatcher.dispatch(plan_id, &plan_text, cascade).await
+        dispatcher.dispatch(plan_id, &plan_text).await
     }
 
     pub(crate) fn resolved_plan_path(&self, plan_id: &str) -> Result<PathBuf, String> {
@@ -1218,7 +1305,7 @@ pub struct BuildPlanOutcome {
 /// **契约**：
 /// - 调用方（`PlanRuntime::dispatch_reviewer`）保证：调度时 plan 文件 advisory lock 已 release（RV14）。
 /// - dispatch 内部应通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`]
-///   构造子 `AgentLoop`，把 `abort_signal` 透传给 `AgentLoopConfig`。
+///   构造子 `AgentLoop`，并把 `SubagentSpawnContext.cancel_token` 直接透传给 `AgentLoop::new`。
 /// - 返回 `ReviewSummary`：成功 / aborted / parse_failed 都用同一形态承载。
 /// - **不**写父 transcript（reviewer 子 Agent 持独立 session_id；transcript 隔离 D11）。
 #[async_trait]
@@ -1229,7 +1316,6 @@ pub trait ReviewerDispatcher: Send + Sync {
         plan_text: &str,
         kind: review::ReviewKind,
         allow_review_edit: bool,
-        abort_signal: Arc<std::sync::atomic::AtomicBool>,
     ) -> review::ReviewSummary;
 }
 
@@ -1238,7 +1324,7 @@ pub trait ReviewerDispatcher: Send + Sync {
 /// **契约**：
 /// - 调用方（`PlanRuntime::dispatch_verifier`）保证：调度时 plan 文件 advisory lock 已 release。
 /// - dispatch 内部应通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`]
-///   构造子 `AgentLoop`，把 `abort_signal` 透传给 `AgentLoopConfig`。
+///   构造子 `AgentLoop`，并把 `SubagentSpawnContext.cancel_token` 直接透传给 `AgentLoop::new`。
 /// - 返回 `VerifySummary`：成功 / aborted / parse_failed 都用同一形态承载。
 /// - **不**写父 transcript（verifier 子 Agent 持独立 session_id；transcript 隔离）。
 #[async_trait]
@@ -1247,7 +1333,6 @@ pub trait VerifierDispatcher: Send + Sync {
         &self,
         plan_id: &str,
         plan_text: &str,
-        abort_signal: Arc<std::sync::atomic::AtomicBool>,
     ) -> verify::VerifySummary;
 }
 

@@ -3,7 +3,7 @@
 //! 通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`] 派一个
 //! `SubagentType::Reviewer` 子 [`AgentLoop`]，子 catalog 硬编码为
 //! `{read, grep, find, todos, update_plan, edit}`（reviewer.md §5.2 / §5.5），父
-//! abort_signal 通过 watcher 桥接为子 `CancellationToken`。
+//! turn 的中断通过层级化 `CancellationToken` 自然扩散到子 Agent。
 //!
 //! - **改稿权固定开启**：`allow_review_edit` 形参在生产路径恒为 `true`；Mock 单测可
 //!   注入 `false` 验证只读路径。
@@ -14,12 +14,9 @@
 //! - **transcript turn 计数**：reviewer 结束时把 `reviewer_turns_used / limit / stop_reason`
 //!   写进返回的 `ReviewSummary`，由调用方落 `plan.review` 自定义事件 + `ToolResult.review`。
 
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
-use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, SubagentType,
@@ -91,7 +88,6 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
         plan_text: &str,
         kind: ReviewKind,
         _allow_review_edit: bool,
-        _abort_signal: Arc<AtomicBool>,
     ) -> ReviewSummary {
         let Some(deps) = self.deps.as_ref() else {
             return ReviewSummary::aborted_with_kind(
@@ -175,21 +171,16 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                 SubagentType::Reviewer,
                 move |spawn_ctx| async move {
                     let child_session_id = spawn_ctx.child_session_id.clone();
-                    let cancel_token = CancellationToken::new();
-
-                    // CascadeAbort 桥接：父 abort_signal 翻起 → cancel 子 token。
-                    // 100ms 粒度对人感来说足够（reviewer 长跑数秒到数分钟）。
-                    let token_for_watcher = cancel_token.clone();
-                    let abort_clone = Arc::clone(&spawn_ctx.abort_signal);
-                    let watcher = tokio::spawn(async move {
-                        loop {
-                            if abort_clone.load(std::sync::atomic::Ordering::Acquire) {
-                                token_for_watcher.cancel();
-                                return;
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    });
+                    let cancel_token = spawn_ctx.cancel_token.clone();
+                    let transcript_root = agent_trail_dir.clone();
+                    let transcript_sink =
+                        crate::core::session::subagent_transcript::open_subagent_transcript(
+                            &transcript_root,
+                            &child_session_id,
+                            SubagentType::Reviewer,
+                            &model,
+                            &parent_session_id_for_closure,
+                        );
 
                     let mut system_text = format!(
                         "{}\n(max_turns budget: {} reasoning turns)\n",
@@ -206,15 +197,18 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
                         model,
+                        thinking_level: None,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,
                         compaction_provider,
+                        title_provider: None,
+                        title_model: String::new(),
                         agent_trail_dir,
                         read_file_state,
                         openai_files_runtime,
                         checkpoint_store,
-                        message_append_sink: None,
+                        message_append_sink: transcript_sink,
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::Reviewer,
@@ -233,7 +227,6 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         ChatMessage::user(&initial_user_message),
                     ];
                     let run_outcome = agent_loop.run(initial_messages).await;
-                    watcher.abort();
 
                     let (summary, label) = build_summary_from_outcome(
                         kind,
@@ -241,6 +234,12 @@ impl ReviewerDispatcher for ProdReviewerDispatcher {
                         &child_session_id,
                         turns_limit,
                         run_outcome,
+                    );
+                    let mut summary = summary;
+                    crate::core::session::subagent_transcript::append_subagent_transcript_hint(
+                        &mut summary.summary,
+                        &transcript_root,
+                        &child_session_id,
                     );
                     let _ = tx.send(summary.clone());
 

@@ -14,7 +14,7 @@
 //! findings:
 //!   - { severity: nit|suggestion|concern, area: "<short>", note: "<one-line>" }
 //!   - ...
-//! summary: <≤600 chars 自由文本>
+//! summary: <free-text review opinion>
 //! changes_summary: <none|none-but-noted|applied:<short>>
 //! applied_changes: <true|false>
 //! </review>
@@ -199,7 +199,7 @@ impl ReviewSummary {
 /// 严格解析 `<review>...</review>` 块。失败返回 None；多块 → 取**最后一个**。
 ///
 /// 解析约束：
-/// - `summary:` 必填，截断到 600 字符
+/// - `summary:` 必填，保留 reviewer 返回的完整文本
 /// - `changes_summary:` 必填，常见值 `none` / `none-but-noted` / `applied:<x>`
 /// - `applied_changes:` 必填，`true` / `false`（大小写不敏感）
 /// - `verdict:` 可选，若出现则必须是 `pass|fail|partial|aborted`
@@ -244,10 +244,7 @@ pub fn parse_review_block(text: &str) -> Option<ReviewSummary> {
             }
         }
     }
-    let mut summary = summary?;
-    if summary.len() > 600 {
-        summary.truncate(600);
-    }
+    let summary = summary?;
     let changes_summary = changes_summary?;
     let applied = applied?;
     Some(ReviewSummary {

@@ -39,7 +39,9 @@ fn save_and_load_store_roundtrip() {
             compaction_count: None,
             compaction_tokens_freed: None,
             tool_result_chars_persisted: None,
+            context_utilization_ratio: None,
             last_checkpoint_id: None,
+            title: None,
         },
     );
     save_store(&path, &store).unwrap();

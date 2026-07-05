@@ -113,6 +113,13 @@ pub struct TranscriptReadStats {
     pub entries_scanned: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct TranscriptPage {
+    pub entries: Vec<TranscriptEntry>,
+    pub has_more: bool,
+    pub next_cursor_offset: Option<u64>,
+}
+
 /// 首行：session header，与 pi-mono 格式一致。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionHeader {
@@ -276,6 +283,12 @@ pub struct MessageTextRewrite {
     pub new_content: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct MessageSummaryTitleRewrite {
+    pub message_id: String,
+    pub summary_title: String,
+}
+
 /// 从路径流式读取首行并解析为 SessionHeader；文件不存在或空返回错误。
 pub fn read_header(path: &Path) -> Result<SessionHeader, AppError> {
     let f = std::fs::File::open(path).map_err(AppError::Io)?;
@@ -290,6 +303,40 @@ pub fn read_header(path: &Path) -> Result<SessionHeader, AppError> {
     }
     let header: SessionHeader = serde_json::from_str(trimmed)?;
     Ok(header)
+}
+
+/// 流式扫描 transcript 前 `max_lines` 行，返回首条 `role:user` message 的 content 文本。
+/// 用于 list_sessions 时给老会话（无持久化 title）惰性回填标题，不落盘。
+/// 找不到返回 None；调用方自行兜底。
+pub fn read_first_user_message_text(path: &Path, max_lines: usize) -> Option<String> {
+    let f = std::fs::File::open(path).ok()?;
+    let reader = BufReader::new(f);
+    for (idx, line) in reader.lines().enumerate() {
+        if idx >= max_lines {
+            break;
+        }
+        let line = line.ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("message") {
+            continue;
+        }
+        let message = value.get("message")?;
+        if message.get("role").and_then(|v| v.as_str()) != Some("user") {
+            continue;
+        }
+        return message
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+    None
 }
 
 fn parse_entry_line(line: &str, stats: &mut TranscriptReadStats) -> Option<TranscriptEntry> {
@@ -309,28 +356,56 @@ fn parse_entry_line(line: &str, stats: &mut TranscriptReadStats) -> Option<Trans
     }
 }
 
-/// 真 tail reader：从文件末尾反向分块读取最近 `cap` 条 entry。
+/// 真 tail reader：从 `before` 位置之前反向分块读取最近 `cap` 条 entry。
 /// 返回的 Vec 顺序为从旧到新（与文件顺序一致）。
-pub(crate) fn read_entries_tail_with_stats(
+pub(crate) fn read_entries_tail_before_with_stats(
     path: &Path,
     cap: usize,
-) -> Result<(Vec<TranscriptEntry>, TranscriptReadStats), AppError> {
+    before: Option<u64>,
+) -> Result<(TranscriptPage, TranscriptReadStats), AppError> {
     if cap == 0 {
-        return Ok((Vec::new(), TranscriptReadStats::default()));
+        return Ok((
+            TranscriptPage {
+                entries: Vec::new(),
+                has_more: false,
+                next_cursor_offset: None,
+            },
+            TranscriptReadStats::default(),
+        ));
     }
 
     let mut f = std::fs::File::open(path).map_err(AppError::Io)?;
     let file_len = f.metadata().map_err(AppError::Io)?.len();
     if file_len == 0 {
-        return Ok((Vec::new(), TranscriptReadStats::default()));
+        return Ok((
+            TranscriptPage {
+                entries: Vec::new(),
+                has_more: false,
+                next_cursor_offset: None,
+            },
+            TranscriptReadStats::default(),
+        ));
+    }
+
+    let before = before.unwrap_or(file_len).min(file_len);
+    if before == 0 {
+        return Ok((
+            TranscriptPage {
+                entries: Vec::new(),
+                has_more: false,
+                next_cursor_offset: None,
+            },
+            TranscriptReadStats::default(),
+        ));
     }
 
     let mut stats = TranscriptReadStats::default();
-    let mut pos = file_len;
+    let mut pos = before;
     let mut carry: Vec<u8> = Vec::new();
-    let mut entries_rev = Vec::with_capacity(cap);
+    let internal_cap = cap.saturating_add(1);
+    let mut entries_rev = Vec::with_capacity(internal_cap);
 
-    while pos > 0 && entries_rev.len() < cap {
+    while pos > 0 && entries_rev.len() < internal_cap {
         let read_len = REVERSE_CHUNK_BYTES.min(pos as usize);
         pos -= read_len as u64;
         f.seek(SeekFrom::Start(pos)).map_err(AppError::Io)?;
@@ -353,11 +428,12 @@ pub(crate) fn read_entries_tail_with_stats(
             if segment.is_empty() {
                 continue;
             }
+            let line_start = pos + idx as u64 + 1;
             match std::str::from_utf8(segment) {
                 Ok(line) => {
                     if let Some(entry) = parse_entry_line(line, &mut stats) {
-                        entries_rev.push(entry);
-                        if entries_rev.len() >= cap {
+                        entries_rev.push((line_start, entry));
+                        if entries_rev.len() >= internal_cap {
                             break;
                         }
                     }
@@ -368,7 +444,7 @@ pub(crate) fn read_entries_tail_with_stats(
             }
         }
 
-        if entries_rev.len() >= cap {
+        if entries_rev.len() >= internal_cap {
             break;
         }
 
@@ -376,7 +452,43 @@ pub(crate) fn read_entries_tail_with_stats(
     }
 
     entries_rev.reverse();
-    Ok((entries_rev, stats))
+    let has_more = entries_rev.len() > cap;
+    let mut entries_page = if has_more {
+        entries_rev.into_iter().skip(1).collect::<Vec<_>>()
+    } else {
+        entries_rev
+    };
+    let next_cursor_offset = if has_more {
+        entries_page.first().map(|(line_start, _)| *line_start)
+    } else {
+        None
+    };
+    let entries = entries_page.drain(..).map(|(_, entry)| entry).collect();
+    Ok((
+        TranscriptPage {
+            entries,
+            has_more,
+            next_cursor_offset,
+        },
+        stats,
+    ))
+}
+
+/// 真 tail reader：从文件末尾反向分块读取最近 `cap` 条 entry。
+/// 返回的 Vec 顺序为从旧到新（与文件顺序一致）。
+pub(crate) fn read_entries_tail_with_stats(
+    path: &Path,
+    cap: usize,
+) -> Result<(Vec<TranscriptEntry>, TranscriptReadStats), AppError> {
+    read_entries_tail_before_with_stats(path, cap, None).map(|(page, stats)| (page.entries, stats))
+}
+
+pub(crate) fn read_entries_tail_before(
+    path: &Path,
+    cap: usize,
+    before: Option<u64>,
+) -> Result<TranscriptPage, AppError> {
+    read_entries_tail_before_with_stats(path, cap, before).map(|(page, _)| page)
 }
 
 /// 逐行读取 transcript，仅解析最近 `cap` 条 entry（避免全量加载）；从文件末尾往前取。
@@ -684,6 +796,88 @@ pub fn rewrite_message_text_entries_by_id(
     Ok(changed)
 }
 
+/// 按 `message.id` 批量重写 `message.summary_title`。
+///
+/// 非 message 行与未命中的行保持原样；命中但不是对象结构的 message 会被跳过。
+/// 返回实际改写的 message 行数；若一个都没改到则返回错误，便于调用方记录漂移。
+pub fn rewrite_message_summary_titles_by_id(
+    path: &Path,
+    rewrites: &[MessageSummaryTitleRewrite],
+) -> Result<usize, AppError> {
+    if rewrites.is_empty() {
+        return Ok(0);
+    }
+
+    let rewrite_map: std::collections::HashMap<&str, &str> = rewrites
+        .iter()
+        .map(|r| (r.message_id.as_str(), r.summary_title.as_str()))
+        .collect();
+
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let reader = BufReader::new(f);
+    let lines: Vec<String> = reader
+        .lines()
+        .map(|r| r.map_err(AppError::Io))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(AppError::Config("transcript 文件为空".to_string()));
+    }
+
+    let mut changed = 0usize;
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    out.push(lines[0].clone());
+
+    for line in lines.into_iter().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            out.push(line);
+            continue;
+        }
+
+        let replaced = match serde_json::from_str::<TranscriptEntry>(trimmed) {
+            Ok(TranscriptEntry::Message(mut me)) => {
+                if let Some(message_id) = me.id.as_deref() {
+                    if let Some(summary_title) = rewrite_map.get(message_id) {
+                        if let Some(obj) = me.message.as_object_mut() {
+                            obj.insert(
+                                "summary_title".to_string(),
+                                serde_json::json!(summary_title),
+                            );
+                            changed += 1;
+                            Some(serde_json::to_string(&TranscriptEntry::Message(me))?)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(json) = replaced {
+            out.push(json);
+        } else {
+            out.push(line);
+        }
+    }
+
+    if changed == 0 {
+        return Err(AppError::Config(
+            "transcript: no message entry matched summary title rewrite ids".to_string(),
+        ));
+    }
+
+    let mut content = out.join("\n");
+    content.push('\n');
+    write_file_atomic(path, content.as_bytes())?;
+    let _ = rebuild_resume_index_from_lines(path, &out)?;
+    Ok(changed)
+}
+
 /// 按 `branch_summary` 行的 `id` 将 `isBoundary` 改为 `true`（重写整文件：仅替换匹配行；其余行保留原始字节）。
 ///
 /// 使用临时文件 + `rename` 原子替换目标路径，避免写入中途崩溃导致 transcript 损坏。
@@ -800,7 +994,7 @@ pub fn write_header(path: &Path, header: &SessionHeader) -> Result<(), AppError>
 }
 
 /// 从 TranscriptEntry 取 id（用于树形查询）。
-fn entry_id(entry: &TranscriptEntry) -> Option<&str> {
+pub(crate) fn entry_id(entry: &TranscriptEntry) -> Option<&str> {
     match entry {
         TranscriptEntry::Message(e) => e.id.as_deref(),
         TranscriptEntry::ModelChange(e) => e.id.as_deref(),
@@ -811,6 +1005,51 @@ fn entry_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::SessionInfo(e) => e.id.as_deref(),
         TranscriptEntry::Custom(e) => e.id.as_deref(),
     }
+}
+
+pub(crate) fn find_entry_line_offset(path: &Path, id: &str) -> Result<Option<u64>, AppError> {
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let mut reader = BufReader::new(f);
+    let mut line = String::new();
+    let mut offset = 0u64;
+
+    line.clear();
+    offset += reader.read_line(&mut line).map_err(AppError::Io)? as u64;
+
+    loop {
+        line.clear();
+        let line_start = offset;
+        let bytes = reader.read_line(&mut line).map_err(AppError::Io)?;
+        if bytes == 0 {
+            break;
+        }
+        offset += bytes as u64;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<TranscriptEntry>(trimmed) {
+            if entry_id(&entry) == Some(id) {
+                return Ok(Some(line_start));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+pub(crate) fn read_entry_at_offset(
+    path: &Path,
+    offset: u64,
+) -> Result<Option<TranscriptEntry>, AppError> {
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let mut reader = BufReader::new(f);
+    reader.seek(SeekFrom::Start(offset)).map_err(AppError::Io)?;
+    let mut line = String::new();
+    if reader.read_line(&mut line).map_err(AppError::Io)? == 0 {
+        return Ok(None);
+    }
+    Ok(parse_entry_line(&line, &mut TranscriptReadStats::default()))
 }
 
 fn entry_parent_id(entry: &TranscriptEntry) -> Option<&str> {

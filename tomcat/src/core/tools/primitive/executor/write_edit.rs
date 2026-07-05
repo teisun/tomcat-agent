@@ -35,12 +35,14 @@ use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
 use crate::infra::platform::{read_file_utf8, write_file_atomic};
 use std::sync::OnceLock;
+use tokio_util::sync::CancellationToken;
 
 pub(super) async fn write_file_impl(
     executor: &DefaultPrimitiveExecutor,
     path: &str,
     content: &str,
     overwrite: bool,
+    cancel: &CancellationToken,
     plugin_id: &str,
 ) -> Result<WriteFileResult, AppError> {
     if let Some(err) = url_like_fs_miss(path) {
@@ -66,7 +68,10 @@ pub(super) async fn write_file_impl(
     // 校验 stamp → 这里读全文算 diff → 落 .bak → 写盘）。读盘失败不阻断写流程，
     // 只是回执里不带 diff 摘要。
     let original: Option<String> = if overwrite && pre_existed {
-        crate::infra::platform::read_file_utf8(&path_buf).ok()
+        let path_for_read = path_buf.clone();
+        tokio::task::spawn_blocking(move || crate::infra::platform::read_file_utf8(&path_for_read).ok())
+            .await
+            .map_err(|e| AppError::Primitive(format!("write pre-read join error: {e}")))?
     } else {
         None
     };
@@ -107,12 +112,44 @@ pub(super) async fn write_file_impl(
         }
     }
 
-    if overwrite && pre_existed {
-        let backup = path_buf.with_extension("bak");
-        let _ = std::fs::copy(&path_buf, &backup);
+    let path_for_write = path_buf.clone();
+    let bytes_for_write = final_bytes.clone();
+    let cancel_for_write = cancel.clone();
+    let wrote = tokio::task::spawn_blocking(move || -> Result<bool, AppError> {
+        if overwrite && pre_existed {
+            if cancel_for_write.is_cancelled() {
+                return Ok(false);
+            }
+            let backup = path_for_write.with_extension("bak");
+            let _ = std::fs::copy(&path_for_write, &backup);
+        }
+        if cancel_for_write.is_cancelled() {
+            return Ok(false);
+        }
+        write_file_atomic(&path_for_write, &bytes_for_write)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| AppError::Primitive(format!("write commit join error: {e}")))??;
+    if !wrote {
+        executor.audit.record_primitive(PrimitiveAuditEntry {
+            operation: AuditPrimitiveOp::Write,
+            path_or_cmd: path_str.clone(),
+            plugin_id: plugin_id.to_string(),
+            user_approved: true,
+            success: false,
+            detail: Some("cancelled_before_write".to_string()),
+            permission_scope: Some(permission_scope_str(scope)),
+            grant_type: Some(grant_type_str(grant.grant_type)),
+            grant_trigger: Some(grant_trigger_str(grant.trigger)),
+        });
+        return Ok(WriteFileResult {
+            path: crate::infra::platform::format_home_path(&path_buf),
+            written: false,
+            bytes_written: 0,
+            diff_hint: None,
+        });
     }
-
-    write_file_atomic(&path_buf, &final_bytes)?;
     executor.audit.record_primitive(PrimitiveAuditEntry {
         operation: AuditPrimitiveOp::Write,
         path_or_cmd: path_str,
@@ -143,6 +180,7 @@ pub(super) async fn edit_file_impl(
     executor: &DefaultPrimitiveExecutor,
     path: &str,
     edits: Vec<EditOperation>,
+    cancel: &CancellationToken,
     plugin_id: &str,
 ) -> Result<EditFileResult, AppError> {
     if let Some(err) = url_like_fs_miss(path) {
@@ -160,11 +198,18 @@ pub(super) async fn edit_file_impl(
         EditOperationType::Insert | EditOperationType::Delete => true,
     });
 
-    let result = if is_line_oriented {
-        apply_line_oriented_edits(&path_buf, &edits)
-    } else {
-        apply_string_edits(&path_buf, &edits, path)
-    };
+    let path_for_apply = path_buf.clone();
+    let edits_for_apply = edits.clone();
+    let user_path = path.to_string();
+    let result = tokio::task::spawn_blocking(move || {
+        if is_line_oriented {
+            apply_line_oriented_edits(&path_for_apply, &edits_for_apply)
+        } else {
+            apply_string_edits(&path_for_apply, &edits_for_apply, &user_path)
+        }
+    })
+    .await
+    .map_err(|e| AppError::Primitive(format!("edit apply join error: {e}")))?;
 
     let (original, new_content) = match result {
         Ok(v) => v,
@@ -213,40 +258,45 @@ pub(super) async fn edit_file_impl(
         }
     }
 
-    // 校验全通过 → 写盘前 copy .bak（仅作崩溃兜底；写成功删除）。
-    let backup_path = path_buf.with_extension("bak");
-    if let Err(e) = std::fs::copy(&path_buf, &backup_path) {
+    let path_for_write = path_buf.clone();
+    let content_for_write = new_content.clone();
+    let cancel_for_write = cancel.clone();
+    let applied = tokio::task::spawn_blocking(move || -> Result<bool, AppError> {
+        if cancel_for_write.is_cancelled() {
+            return Ok(false);
+        }
+        let backup_path = path_for_write.with_extension("bak");
+        std::fs::copy(&path_for_write, &backup_path).map_err(AppError::Io)?;
+        if cancel_for_write.is_cancelled() {
+            let _ = std::fs::remove_file(&backup_path);
+            return Ok(false);
+        }
+        if let Err(e) = write_file_atomic(&path_for_write, content_for_write.as_bytes()) {
+            let _ = std::fs::copy(&backup_path, &path_for_write);
+            return Err(e);
+        }
+        let _ = std::fs::remove_file(&backup_path);
+        Ok(true)
+    })
+    .await
+    .map_err(|e| AppError::Primitive(format!("edit commit join error: {e}")))??;
+    if !applied {
         executor.audit.record_primitive(PrimitiveAuditEntry {
             operation: AuditPrimitiveOp::Edit,
-            path_or_cmd: path_str,
+            path_or_cmd: path_str.clone(),
             plugin_id: plugin_id.to_string(),
             user_approved: true,
             success: false,
-            detail: Some(format!(".bak copy failed: {}", e)),
+            detail: Some("cancelled_before_write".to_string()),
             permission_scope: Some(permission_scope_str(scope)),
             grant_type: Some(grant_type_str(grant.grant_type)),
             grant_trigger: Some(grant_trigger_str(grant.trigger)),
         });
-        return Err(AppError::Io(e));
-    }
-
-    if let Err(e) = write_file_atomic(&path_buf, new_content.as_bytes()) {
-        // 写盘失败：从 .bak 恢复磁盘内容；保留 .bak 供事后排查。
-        let _ = std::fs::copy(&backup_path, &path_buf);
-        executor.audit.record_primitive(PrimitiveAuditEntry {
-            operation: AuditPrimitiveOp::Edit,
-            path_or_cmd: path_str,
-            plugin_id: plugin_id.to_string(),
-            user_approved: true,
-            success: false,
-            detail: Some(render_edit_audit_detail(&e)),
-            permission_scope: Some(permission_scope_str(scope)),
-            grant_type: Some(grant_type_str(grant.grant_type)),
-            grant_trigger: Some(grant_trigger_str(grant.trigger)),
+        return Ok(EditFileResult {
+            path: crate::infra::platform::format_home_path(&path_buf),
+            applied: false,
         });
-        return Err(e);
     }
-    let _ = std::fs::remove_file(&backup_path);
     executor.audit.record_primitive(PrimitiveAuditEntry {
         operation: AuditPrimitiveOp::Edit,
         path_or_cmd: path_str,

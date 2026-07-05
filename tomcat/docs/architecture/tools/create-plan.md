@@ -207,7 +207,7 @@
 
 - **交付**：`PlanRuntime::dispatch_reviewer(plan_id, allow_review_edit)` 调 `AgentRegistry::spawn_subagent_internal`（[`multi-agent.md` §14.4.2.1 路径 B / §14.4.2.2](../multi-agent.md#14421-调用栈与代码落点)）；`SubagentType::Reviewer`、`Role::Leaf`；`parent.subagent_type == Reviewer` 时 `create_plan` **不再**二次派 reviewer。
 - **改稿权 runtime 参数**：`PlanRuntime::dispatch_reviewer` 的内部参数 `allow_review_edit: bool`（默认 `false`），**不**作为 `create_plan` 工具入参；当为 `true` 时给 reviewer 加只读 + 可改 `~/.tomcat/plans/*.plan.md` 正文任意段的能力（frontmatter raw 仍不允许）；reviewer 通过 `update_plan` 改 frontmatter `todos[]` 后，`PlanRuntime` 在 await 返回时**重读 PlanFile** 刷新内存快照（[`reviewer.md` RV15](./reviewer.md#41-落地选型决策表)）。
-- **输出契约**：reviewer 最终消息含 `summary:` 自由文本（≤600 字符）；修改说明与审稿摘要只落 `transcript.plan.review` / `ToolResult.review`，**不**写入 `PlanFile.body` 或 frontmatter。
+- **输出契约**：reviewer 最终消息含 `summary:` 自由文本（建议简明聚焦，但 runtime 不再做固定字符上限截断）；修改说明与审稿摘要只落 `transcript.plan.review` / `ToolResult.review`，**不**写入 `PlanFile.body` 或 frontmatter。
 
 **说人话**：审稿细节在 reviewer spec；这里只保证 create_plan 写完必审、审完必把摘要回填到 ToolResult 与 transcript。
 
@@ -445,7 +445,7 @@ todos                  Goal / Draft / Notes / Board      （结构大变）
       "type": "object",
       "description": "Advisory summary from the inline reviewer subagent. Not a gate; the user decides whether to /plan build.",
       "properties": {
-        "summary":         { "type": "string", "description": "Reviewer rationale, <= 600 chars" },
+        "summary":         { "type": "string", "description": "Reviewer rationale; keep it concise and focused, but the runtime does not hard-truncate it" },
         "rounds":          { "type": "integer", "description": "Cumulative reviewer runs for this PlanFile" },
         "applied_changes": { "type": "boolean", "description": "Whether reviewer applied any plan edits during review (controlled by runtime, not LLM)" }
       },

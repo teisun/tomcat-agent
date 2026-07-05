@@ -5,8 +5,8 @@
 //!
 //! - **唯一子 loop 构造点**：除顶层 `chat_loop`，整个仓库内 `AgentLoop::new` 仅在
 //!   `spawn_subagent_internal` 内调用（grep 锚点）。
-//! - **CascadeAbort**：父 Agent 持 `Arc<AtomicBool> abort_signal`；子 Agent 共享同一指针。
-//!   父 abort 一次 `store(true)` 立即扩散到所有后代（无需逐级通知）。
+//! - **CascadeAbort**：父 Agent 持层级化 `CancellationToken`；子 Agent 由
+//!   `child_token()` 派生。父 `cancel()` 一次立即扩散到所有后代（无需逐级通知）。
 //! - **资源限流**：`MAX_SPAWN_DEPTH`、`MAX_CONCURRENT_AGENTS`、`MAX_CHILDREN_PER_AGENT`
 //!   三道闸门防止 fork bomb / 内存膨胀。
 //! - **panic 隔离**：子 spawn 走 `tokio::spawn + JoinHandle.await`；JoinError 转 `SpawnError::Panic`，
@@ -18,8 +18,9 @@
 
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::SubagentType;
 use crate::infra::event_bus::ScopedEventEmitter;
@@ -75,7 +76,7 @@ pub enum SpawnError {
     ParentNotFound(String),
     #[error("父 Agent {0} 已被请求 abort，拒绝派生新子")]
     ParentAborted(String),
-    #[error("子 Agent run() panic：{0}")]
+    #[error("子 Agent 执行或结果解析阶段 panic：{0}")]
     Panic(String),
     #[error("子 spawn 内部错误: {0}")]
     Internal(String),
@@ -96,9 +97,10 @@ pub struct AgentHandle {
     pub subagent_type: SubagentType,
     pub spawn_depth: u32,
     pub parent_session_id: Option<String>,
-    /// 共享给子 Agent 的 abort 信号；父 abort 一次 `store(true)` → 所有后代立即可见。
-    pub abort_signal: Arc<AtomicBool>,
-    /// 直接子 session_id 列表（用于 cascade_abort / MAX_CHILDREN_PER_AGENT 计数）。
+    /// 当前 Agent 子树的根 token。root handle 在每回合开始会被替换成新的 token，
+    /// 子 handle 则在 spawn 时从父 token 派生出独立 child_token。
+    pub cancel_token: Mutex<CancellationToken>,
+    /// 直接子 session_id 列表（仅用于 MAX_CHILDREN_PER_AGENT 计数与 unregister 清理）。
     children: Mutex<Vec<String>>,
 }
 
@@ -109,7 +111,7 @@ impl std::fmt::Debug for AgentHandle {
             .field("subagent_type", &self.subagent_type)
             .field("spawn_depth", &self.spawn_depth)
             .field("parent_session_id", &self.parent_session_id)
-            .field("aborted", &self.abort_signal.load(Ordering::Relaxed))
+            .field("aborted", &self.is_aborted())
             .field("children", &*self.children.lock())
             .finish()
     }
@@ -117,7 +119,23 @@ impl std::fmt::Debug for AgentHandle {
 
 impl AgentHandle {
     pub fn is_aborted(&self) -> bool {
-        self.abort_signal.load(Ordering::Relaxed)
+        self.cancel_token.lock().is_cancelled()
+    }
+
+    pub fn token(&self) -> CancellationToken {
+        self.cancel_token.lock().clone()
+    }
+
+    pub fn child_token(&self) -> CancellationToken {
+        self.cancel_token.lock().child_token()
+    }
+
+    pub fn replace_token(&self, token: CancellationToken) {
+        *self.cancel_token.lock() = token;
+    }
+
+    pub fn cancel(&self) {
+        self.cancel_token.lock().cancel();
     }
 }
 
@@ -155,8 +173,9 @@ pub struct SubagentSpawnContext {
     pub parent_session_id: String,
     pub subagent_type: SubagentType,
     pub spawn_depth: u32,
-    /// **必须**与子 `AgentLoop` 的 `abort_signal` 共享同一指针（参数 `AgentLoopConfig.abort_signal`）。
-    pub abort_signal: Arc<AtomicBool>,
+    /// 子 Agent 的层级化取消 token。调用方应把它直接传给 `AgentLoop::new(..., token)`，
+    /// 让父 turn cancel / root cascade_abort 自然扩散到子 Agent。
+    pub cancel_token: CancellationToken,
 }
 
 // ─── Registry ───────────────────────────────────────────────────────────────
@@ -257,26 +276,45 @@ impl AgentRegistry {
         }
     }
 
-    /// 把 root_session_id 及其所有后代的 abort_signal 置 true（O(N) 一次 scan）。
-    ///
-    /// 用 BFS 而非递归，避免 deep tree 栈溢出；handles 表本身 `parent_session_id`
-    /// 也是 BFS 友好的（直接按 parent 链反向 lookup）。
+    /// cancel 指定 root handle 的 token；tokio 会把取消沿 token 树自动扩散到所有后代。
     pub fn cascade_abort(&self, root_session_id: &str) {
-        let mut queue = vec![root_session_id.to_string()];
-        let snapshot = self.handles.read();
-        while let Some(id) = queue.pop() {
-            if let Some(h) = snapshot.get(&id) {
-                h.abort_signal.store(true, Ordering::Relaxed);
-                queue.extend(h.children.lock().iter().cloned());
-            }
+        let root = {
+            let snapshot = self.handles.read();
+            snapshot.get(root_session_id).cloned()
+        };
+        if let Some(root) = root {
+            root.cancel();
         }
+    }
+
+    /// 在新回合开始时为 root handle 安装新的 token。
+    /// 只允许作用于 root agent（`parent_session_id == None`）。
+    pub fn rearm_root(
+        &self,
+        root_session_id: &str,
+        token: CancellationToken,
+    ) -> Result<(), SpawnError> {
+        let root = {
+            let handles = self.handles.read();
+            handles
+                .get(root_session_id)
+                .cloned()
+                .ok_or_else(|| SpawnError::ParentNotFound(root_session_id.to_string()))?
+        };
+        if root.parent_session_id.is_some() {
+            return Err(SpawnError::Internal(format!(
+                "session {root_session_id} is not a root agent"
+            )));
+        }
+        root.replace_token(token);
+        Ok(())
     }
 
     /// **唯一的子 Agent 构造点**。
     ///
     /// 调用方通过 `spawn` 闭包接收 [`SubagentSpawnContext`]，在其中构造
     /// `AgentLoopConfig`（透传 `parent_session_id` / `spawn_depth` / `subagent_type`
-    /// 与共享的 `abort_signal`），再调用 `AgentLoop::new(...).run().await`。
+    /// 与层级化 `CancellationToken`），再调用 `AgentLoop::new(...).run().await`。
     ///
     /// Registry 责任：
     /// - 三道闸门（depth / global / per-parent）
@@ -296,7 +334,7 @@ impl AgentRegistry {
         let (child_handle, _parent_arc) =
             self.preflight_and_register(parent_session_id, subagent_type)?;
         let child_session_id = child_handle.session_id.clone();
-        let abort_signal = Arc::clone(&child_handle.abort_signal);
+        let cancel_token = child_handle.token();
         let spawn_depth = child_handle.spawn_depth;
 
         // emit SubAgentStart
@@ -315,10 +353,11 @@ impl AgentRegistry {
             parent_session_id: parent_session_id.to_string(),
             subagent_type,
             spawn_depth,
-            abort_signal: Arc::clone(&abort_signal),
+            cancel_token,
         };
 
         // panic 隔离：tokio::spawn + JoinHandle.await，JoinError(panic) → SpawnError::Panic
+        // （覆盖 child run() 本体或 spawn 收尾/结果解析阶段的 panic）
         let join = tokio::spawn(async move { spawn(ctx).await });
         let outcome_result = join.await;
 
@@ -392,7 +431,7 @@ impl AgentRegistry {
             });
         }
 
-        // 注册子 handle（共享父的 abort_signal 指针，确保 cascade_abort 一次写入全可见）
+        // 注册子 handle（child_token 与父 token 形成层级树，父 cancel 一次后代全可见）
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let child_session_id = format!(
             "{}-child-{}-{}",
@@ -405,7 +444,7 @@ impl AgentRegistry {
             subagent_type,
             spawn_depth: new_depth,
             parent_session_id: Some(parent_session_id.to_string()),
-            abort_signal: Arc::clone(&parent.abort_signal),
+            cancel_token: Mutex::new(parent.child_token()),
             children: Mutex::new(Vec::new()),
         });
 
@@ -449,7 +488,7 @@ impl AgentRegistry {
             subagent_type: SubagentType::User,
             spawn_depth: 0,
             parent_session_id: None,
-            abort_signal: Arc::new(AtomicBool::new(false)),
+            cancel_token: Mutex::new(CancellationToken::new()),
             children: Mutex::new(Vec::new()),
         });
         self.register(handle)

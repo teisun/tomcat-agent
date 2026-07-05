@@ -12,6 +12,7 @@ pub(crate) use context::INTERRUPTED_TOOL_RESULT_TEXT;
 pub use context::{build_context_from_state, init_context_state};
 #[allow(unused_imports)]
 pub use session_impl::generate_entry_id;
+pub use session_impl::{derive_title_from_user_message, is_rule_derived_title};
 pub use session_impl::SessionManager;
 pub use types::{
     compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, ApiUsage, CompactionResult,
@@ -23,6 +24,15 @@ pub trait MessageAppendSink: Send + Sync {
         &self,
         value: serde_json::Value,
     ) -> Result<String, crate::infra::error::AppError>;
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, crate::infra::error::AppError> {
+        let _ = forced_id;
+        self.append_message(value)
+    }
 }
 
 const BRANCH_MAX_ENTRIES: usize = 2000;

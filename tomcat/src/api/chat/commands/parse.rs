@@ -4,6 +4,7 @@
 //! LLM:
 //!
 //! - `/path <path>` asks for access to one path through the existing permission menu.
+//! - `/effort low|medium|high|xhigh` updates the current model's reasoning effort.
 //! - `/model ...`, `/plan ...`, `/skill ...`, `/ckpt ...`, `/restore ...` manage
 //!   session-local runtime state.
 //! - `/help` prints the command list.
@@ -16,8 +17,8 @@ use std::path::PathBuf;
 use crate::api::chat::ChatContext;
 
 use super::{
-    cmd_ckpt, cmd_help, cmd_install, cmd_model, cmd_path, cmd_plan, cmd_restore, cmd_skill,
-    cmd_thinking,
+    cmd_ckpt, cmd_effort, cmd_help, cmd_install, cmd_model, cmd_path, cmd_plan, cmd_restore,
+    cmd_skill, cmd_thinking,
 };
 
 pub use cmd_install::InstallCommand;
@@ -40,6 +41,10 @@ pub enum ChatCommand {
     /// `/thinking minimal|summary|full|toggle`：切换 CliTurnRenderer 的显示档位。
     Thinking {
         action: ThinkingAction,
+    },
+    /// `/effort low|medium|high|xhigh`：设置当前模型的 reasoning effort。
+    Effort {
+        level: crate::core::llm::ThinkingLevel,
     },
     /// `/model current|list|use <id>`：查看/切换当前会话模型。
     Model(ModelCommand),
@@ -94,6 +99,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         "/path"
             | "/help"
             | "/thinking"
+            | "/effort"
             | "/model"
             | "/ckpt"
             | "/restore"
@@ -117,6 +123,7 @@ pub fn parse_chat_command(line: &str) -> ChatCommand {
         "/path" => cmd_path::parse_args(tokens, trimmed),
         "/help" => cmd_help::parse_args(tokens),
         "/thinking" => cmd_thinking::parse_args(tokens),
+        "/effort" => cmd_effort::parse_args(tokens),
         "/model" => cmd_model::parse_args(tokens),
         "/ckpt" => parse_ckpt_args(tokens),
         "/restore" => parse_restore_args(tokens),
@@ -148,6 +155,7 @@ pub(crate) async fn dispatch_chat_command(
             original_line,
         } => cmd_path::run(ctx, path, original_line, rl),
         ChatCommand::Thinking { action } => cmd_thinking::run(ctx, action),
+        ChatCommand::Effort { level } => cmd_effort::run(ctx, level),
         ChatCommand::Model(model_cmd) => cmd_model::run(ctx, model_cmd),
         ChatCommand::CkptList { limit } => cmd_ckpt::run_list(ctx, limit),
         ChatCommand::CkptShow { checkpoint_id } => cmd_ckpt::run_show(ctx, checkpoint_id),

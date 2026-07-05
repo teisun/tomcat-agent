@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
 use serde_json::{json, Value};
+use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -31,14 +32,12 @@ use super::super::catalog::{infer_default_base_url, ModelEntry};
 use super::super::retry_delay::provider_retry_delay;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, ContinuityMetadata,
-    ReasoningContinuation, ReasoningFormat, StreamEvent, ThinkingSource, TokenUsage,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ChatResponse,
+    ContinuityMetadata, ReasoningContinuation, ReasoningFormat, StreamEvent, ThinkingSource,
+    TokenUsage,
 };
+use crate::core::llm::{degrade_unsupported_multimodal, Capabilities};
 
-/// 提供商不匹配的固定文案：Completions 路径不接受多模态附件，必须改用 `openai-responses`。
-/// 单测和上层 UI 都会按字符串子串断言这个文案，请勿改动。
-const COMPLETIONS_REJECT_MULTIMODAL_MSG: &str =
-    "provider=openai 不支持多模态附件，请改用 provider=openai-responses";
 const PROVIDER_NAME: &str = "openai";
 
 fn idle_timeout_error(stream_timeout_sec: u64) -> AppError {
@@ -143,20 +142,45 @@ fn map_http_status_error(status: reqwest::StatusCode, body: &[u8]) -> AppError {
     llm_http_status_error(PROVIDER_NAME, status.as_u16(), message)
 }
 
-/// 扫描 messages 是否含非 `InputText` part；返回 `Err` 即结构化非可重试错误。
-///
-/// Completions wire (`/v1/chat/completions`) 默认走文本 + image_url 旁路；本期不为
-/// Completions 实现 vision/file 翻译，遇到多模态 part 直接拒绝并把诊断指向
-/// `provider=openai-responses`。
-fn reject_multimodal_parts(messages: &[ChatMessage]) -> Result<(), AppError> {
-    for msg in messages {
-        if let Some(ChatMessageContent::Parts(parts)) = &msg.content {
-            if parts.iter().any(|p| p.is_non_text()) {
-                return Err(AppError::Llm(COMPLETIONS_REJECT_MULTIMODAL_MSG.to_string()));
+fn parts_to_completions_text(parts: &[ChatMessageContentPart]) -> String {
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            ChatMessageContentPart::InputText { text: chunk } => text.push_str(chunk),
+            ChatMessageContentPart::InputReference { reference } => {
+                text.push_str(&reference.to_prompt_text());
             }
+            ChatMessageContentPart::InputImage { .. }
+            | ChatMessageContentPart::InputFile { .. } => {}
         }
     }
-    Ok(())
+    text
+}
+
+/// Chat Completions 只走纯文本 `content: "..."`。
+///
+/// 这里先按纯文本模型能力把不支持的多模态附件降级成占位符文本，再把
+/// `InputText` + `InputReference`
+/// 按顺序合并成单个字符串，避免把 Responses 专用的 `input_*` part 形态误送给
+/// `/v1/chat/completions`。
+fn normalize_for_completions(messages: &[ChatMessage]) -> Cow<'_, [ChatMessage]> {
+    let degraded = degrade_unsupported_multimodal(messages, &Capabilities::default());
+    let needs_normalize = degraded
+        .iter()
+        .any(|msg| matches!(msg.content, Some(ChatMessageContent::Parts(_))));
+    if !needs_normalize {
+        return degraded;
+    }
+
+    let mut normalized = Vec::with_capacity(degraded.len());
+    for message in degraded.iter() {
+        let mut next = message.clone();
+        if let Some(ChatMessageContent::Parts(parts)) = &message.content {
+            next.content = Some(ChatMessageContent::Text(parts_to_completions_text(parts)));
+        }
+        normalized.push(next);
+    }
+    Cow::Owned(normalized)
 }
 
 /// 提取 chat-completions `reasoning_content` continuity blob（deepseek / mimo / 未来同类共用）。
@@ -527,6 +551,20 @@ impl OpenAiProvider {
         self.configured_thinking_format.resolve_for_model(model)
     }
 
+    fn thinking_cfg_for_request<'a>(
+        &'a self,
+        request: &ChatRequest,
+    ) -> Cow<'a, crate::infra::config::ThinkingConfig> {
+        match request.thinking_level {
+            Some(level) => {
+                let mut cfg = self.thinking_cfg.clone();
+                cfg.level = level.as_str().to_string();
+                Cow::Owned(cfg)
+            }
+            None => Cow::Borrowed(&self.thinking_cfg),
+        }
+    }
+
     fn auth_header(&self) -> (&str, String) {
         ("Authorization", format!("Bearer {}", self.api_key))
     }
@@ -552,17 +590,19 @@ impl OpenAiProvider {
     async fn chat_inner(
         &self,
         request: &ChatRequest,
+        messages: &[ChatMessage],
         base_url: &str,
     ) -> Result<ChatResponse, AppError> {
         let model = self.effective_model(request);
         let thinking_format = self.thinking_format_for_model(&model);
+        let thinking_cfg = self.thinking_cfg_for_request(request);
         let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
-            &self.thinking_cfg,
+            &thinking_cfg,
             thinking_format,
         );
         let body = OpenAiRequestBody {
             model: model.clone(),
-            messages: transport_messages(&request.messages, &model, self.continuity_enabled),
+            messages: transport_messages(messages, &model, self.continuity_enabled),
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: false,
@@ -691,7 +731,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
-        reject_multimodal_parts(&request.messages)?;
+        let normalized_messages = normalize_for_completions(&request.messages);
 
         let _permit = if let Some(ref sem) = self.semaphore {
             Some(
@@ -707,7 +747,11 @@ impl LlmProvider for OpenAiProvider {
         let mut last_err = None;
         for attempt in 0..=self.retry_count {
             match self
-                .run_non_stream_with_stale(self.chat_inner(&request, &self.base_url))
+                .run_non_stream_with_stale(self.chat_inner(
+                    &request,
+                    normalized_messages.as_ref(),
+                    &self.base_url,
+                ))
                 .await
             {
                 Ok(r) => return Ok(r),
@@ -736,7 +780,11 @@ impl LlmProvider for OpenAiProvider {
             if let Some(ref fallback) = self.api_base_fallback {
                 warn!("主 API 不可达，尝试 fallback: {}", fallback);
                 if let Ok(r) = self
-                    .run_non_stream_with_stale(self.chat_inner(&request, fallback))
+                    .run_non_stream_with_stale(self.chat_inner(
+                        &request,
+                        normalized_messages.as_ref(),
+                        fallback,
+                    ))
                     .await
                 {
                     return Ok(r);
@@ -751,7 +799,7 @@ impl LlmProvider for OpenAiProvider {
         request: ChatRequest,
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>, AppError>
     {
-        reject_multimodal_parts(&request.messages)?;
+        let normalized_messages = normalize_for_completions(&request.messages);
 
         let _permit = if let Some(ref sem) = self.semaphore {
             Some(
@@ -765,13 +813,18 @@ impl LlmProvider for OpenAiProvider {
 
         let model = self.effective_model(&request);
         let thinking_format = self.thinking_format_for_model(&model);
+        let thinking_cfg = self.thinking_cfg_for_request(&request);
         let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
-            &self.thinking_cfg,
+            &thinking_cfg,
             thinking_format,
         );
         let body = OpenAiRequestBody {
             model: model.clone(),
-            messages: transport_messages(&request.messages, &model, self.continuity_enabled),
+            messages: transport_messages(
+                normalized_messages.as_ref(),
+                &model,
+                self.continuity_enabled,
+            ),
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: true,

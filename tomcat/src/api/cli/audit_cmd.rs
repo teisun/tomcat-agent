@@ -47,14 +47,10 @@ pub(crate) fn parse_audit_line(line: &str, index: usize) -> Option<AuditDisplayE
         .find("operation=")
         .or_else(|| line.find("tool_name="))
         .or_else(|| line.find("module="))
-        .map(|start| {
-            let end = line.len().min(start + 80);
-            line[start..end].to_string()
-        })
+        .map(|start| line[start..].chars().take(80).collect::<String>())
         .unwrap_or_else(|| {
             let trimmed = line.trim();
-            let end = trimmed.len().min(80);
-            trimmed[..end].to_string()
+            trimmed.chars().take(80).collect::<String>()
         });
 
     Some(AuditDisplayEntry {

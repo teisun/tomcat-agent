@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -111,7 +111,6 @@ impl ReviewerDispatcher for MockReviewerDispatcher {
         _plan_text: &str,
         kind: ReviewKind,
         _allow_review_edit: bool,
-        _abort_signal: std::sync::Arc<AtomicBool>,
     ) -> ReviewSummary {
         self.call_count.fetch_add(1, Ordering::Relaxed);
         if let Some(d) = self.delay {
@@ -162,6 +161,12 @@ pub fn fail_code_review() -> ReviewSummary {
     }
 }
 
+pub fn aborted_code_review(summary: &str) -> ReviewSummary {
+    let mut review = ReviewSummary::aborted_with_kind(ReviewKind::Code, summary);
+    review.verdict = Some("aborted".into());
+    review
+}
+
 pub struct MockVerifierDispatcher {
     summaries: parking_lot::Mutex<Vec<VerifySummary>>,
     pub call_count: AtomicUsize,
@@ -182,7 +187,6 @@ impl VerifierDispatcher for MockVerifierDispatcher {
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        _abort_signal: std::sync::Arc<AtomicBool>,
     ) -> VerifySummary {
         self.call_count.fetch_add(1, Ordering::Relaxed);
         let mut q = self.summaries.lock();

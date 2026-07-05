@@ -31,7 +31,7 @@ fn creates_models_toml_with_all_managed_entries_when_absent() {
     assert_eq!(
         status,
         ModelsTomlStatus::Created {
-            added_model_ids: vec!["mimo-v2.5-pro", "gpt-5.2", "deepseek-v4-flash"]
+            added_model_ids: vec!["mimo-v2.5-pro", "gpt-5.2", "deepseek-v4-flash", "utility-flash"]
         }
     );
 
@@ -59,6 +59,14 @@ fn creates_models_toml_with_all_managed_entries_when_absent() {
     assert!(
         text.contains("model_name = \"deepseek-v4-flash\""),
         "missing deepseek-v4-flash model_name:\n{text}"
+    );
+    assert!(
+        text.contains("id = \"utility-flash\""),
+        "missing utility-flash:\n{text}"
+    );
+    assert!(
+        text.contains("id = \"utility-flash\"\nmodel_name = \"deepseek-v4-flash\""),
+        "missing utility-flash model_name:\n{text}"
     );
     assert!(
         text.contains("# Tomcat 模型清单"),
@@ -94,6 +102,10 @@ fn creates_models_toml_with_all_managed_entries_when_absent() {
     assert_eq!(flash.provider, "deepseek");
     assert_eq!(flash.model_name.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(flash.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
+
+    let utility = catalog.lookup("utility-flash").expect("utility-flash entry");
+    assert_eq!(utility.model_name.as_deref(), Some("deepseek-v4-flash"));
+    assert_eq!(utility.provider, "deepseek");
 }
 
 #[test]
@@ -104,7 +116,7 @@ fn second_run_is_idempotent_no_duplicate() {
     assert_eq!(
         ensure_default_models_toml(&cfg).unwrap(),
         ModelsTomlStatus::Created {
-            added_model_ids: vec!["mimo-v2.5-pro", "gpt-5.2", "deepseek-v4-flash"]
+            added_model_ids: vec!["mimo-v2.5-pro", "gpt-5.2", "deepseek-v4-flash", "utility-flash"]
         }
     );
     assert_eq!(
@@ -131,8 +143,10 @@ fn second_run_is_idempotent_no_duplicate() {
     assert_eq!(count_occurrences(&text, "id = \"deepseek-v4-flash\""), 1);
     assert_eq!(
         count_occurrences(&text, "model_name = \"deepseek-v4-flash\""),
-        1
+        2,
+        "deepseek-v4-flash and utility-flash share model_name:\n{text}"
     );
+    assert_eq!(count_occurrences(&text, "id = \"utility-flash\""), 1);
 }
 
 #[test]
@@ -166,7 +180,7 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
     assert_eq!(
         status,
         ModelsTomlStatus::UpdatedExisting {
-            added_model_ids: vec!["mimo-v2.5-pro", "deepseek-v4-flash"],
+            added_model_ids: vec!["mimo-v2.5-pro", "deepseek-v4-flash", "utility-flash"],
             updated_model_name_ids: vec!["gpt-5.2"]
         }
     );
@@ -187,6 +201,10 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
     assert!(
         text.contains("id = \"deepseek-v4-flash\""),
         "deepseek-v4-flash not appended:\n{text}"
+    );
+    assert!(
+        text.contains("id = \"utility-flash\""),
+        "utility-flash not appended:\n{text}"
     );
     assert!(
         text.contains("model_name = \"gpt-5.2\""),
@@ -224,7 +242,8 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
     assert_eq!(count_occurrences(&text2, "model_name = \"gpt-5.2\""), 1);
     assert_eq!(
         count_occurrences(&text2, "model_name = \"deepseek-v4-flash\""),
-        1
+        2,
+        "deepseek-v4-flash and utility-flash share model_name:\n{text2}"
     );
 }
 
@@ -272,7 +291,7 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
     assert_eq!(
         status,
         ModelsTomlStatus::UpdatedExisting {
-            added_model_ids: vec![],
+            added_model_ids: vec!["utility-flash"],
             updated_model_name_ids: vec!["mimo-v2.5-pro", "gpt-5.2", "deepseek-v4-flash"]
         }
     );
@@ -285,6 +304,11 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
     assert_eq!(count_occurrences(&text, "model_name = \"gpt-5.2\""), 1);
     assert_eq!(
         count_occurrences(&text, "model_name = \"deepseek-v4-flash\""),
-        1
+        2,
+        "deepseek-v4-flash and utility-flash share model_name:\n{text}"
+    );
+    assert!(
+        text.contains("id = \"utility-flash\""),
+        "utility-flash should be appended:\n{text}"
     );
 }

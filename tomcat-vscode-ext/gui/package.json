@@ -1,0 +1,35 @@
+{
+  "name": "tomcat-vscode-ext-gui",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "test": "vitest run"
+  },
+  "license": "MIT",
+  "description": "Tomcat VS Code webview GUI.",
+  "dependencies": {
+    "@tiptap/core": "^3.27.1",
+    "@tiptap/extension-placeholder": "^3.27.1",
+    "@tiptap/react": "^3.27.1",
+    "@tiptap/starter-kit": "^3.27.1",
+    "@vscode/codicons": "^0.0.45",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "esbuild": "^0.28.1",
+    "jsdom": "^27.0.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "vitest": "^3.2.6"
+  }
+}

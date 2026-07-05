@@ -91,11 +91,16 @@ pub struct AgentLoopConfig {
     pub max_tool_rounds: usize,
     pub retry_base_delay_ms: u64,
     pub model: String,
+    pub thinking_level: Option<crate::core::llm::ThinkingLevel>,
     pub session_id: String,
     pub tool_definitions: Vec<serde_json::Value>,
     pub context_config: ContextConfig,
     /// Compaction / preheat 场景专用的 provider；未设置时回落主对话 provider。
     pub compaction_provider: Option<Arc<dyn LlmProvider>>,
+    /// Title / utility 场景专用 provider；未设置时回落主对话 provider。
+    pub title_provider: Option<Arc<dyn LlmProvider>>,
+    /// `LlmScene::Title` 解析后的 model id。
+    pub title_model: String,
     /// Agent 运行态轨迹目录（Layer 0 落盘路径根）。空字符串时 Layer 0 降级截断。
     pub agent_trail_dir: String,
     /// PR-RF（T2-b/c）`read` 工具的会话级 dedup / staleness 表。
@@ -145,10 +150,13 @@ impl Default for AgentLoopConfig {
             max_tool_rounds: usize::MAX,
             retry_base_delay_ms: DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
             model: String::new(),
+            thinking_level: None,
             session_id: String::new(),
             tool_definitions: Vec::new(),
             context_config: ContextConfig::default(),
             compaction_provider: None,
+            title_provider: None,
+            title_model: String::new(),
             agent_trail_dir: String::new(),
             read_file_state: Arc::new(ReadFileState::default()),
             openai_files_runtime: None,
@@ -266,6 +274,7 @@ pub struct AgentLoop {
     pub(super) llm: Arc<dyn LlmProvider>,
     pub(super) primitive: Arc<dyn PrimitiveExecutor>,
     pub(super) emitter: ScopedEventEmitter,
+    pub(super) session_manager: Option<crate::core::session::manager::SessionManager>,
     /// 可选 `config_get` / `config_set` 后端（plan §6 / PR-7）。
     ///
     /// 注入路径：`ChatContext::from_config` 在创建 `AgentLoop` 前构造
@@ -310,6 +319,13 @@ pub struct AgentLoop {
     pub(super) cancel_token: CancellationToken,
     pub(super) context_state: Option<ContextState>,
     pub(super) block_tool_calls: bool,
+    /// 本轮正在 streaming 的 assistant 预分配 transcript `MessageEntry.id`。
+    ///
+    /// 粒度：**每条 assistant message / 每轮 `run_chat_stream` 独占一个**。
+    /// - `stream_handler::run_chat_stream` 在发 `MessageStart` 前 mint；
+    /// - text-only / tool-call / abort-partial 三条收束路径消费并复用为落盘 id；
+    /// - 若本轮在落盘前失败/取消，则必须显式清空，避免串到下一轮。
+    pub(super) pending_assistant_entry_id: Option<String>,
     /// 本次 reasoning loop 是否因为 `max_tool_rounds` 触顶而结束；用于阻止外层
     /// conversation loop 再把共享 `follow_up_queue` 续进一个新 attempt，绕过硬预算。
     pub(super) reasoning_turn_budget_exhausted: bool,
@@ -341,6 +357,8 @@ pub(super) struct ToolCallAccumulator {
 ///
 /// - `tool_results`：按 `tool_calls` 顺序排列的 `Message`（供 `TurnEnd` 事件使用）；
 ///   包含 `block_tool_calls == true` 时注入的 blocked 占位文本。
+/// - `assistant_message_id`：本轮带 `tool_calls` 的 assistant transcript `MessageEntry.id`；
+///   供异步 turn summary 覆盖事件与 transcript 回写定位目标 message。
 /// - `steered == true`：本轮至少有 **1** 个 tool 执行完毕后被 steering queue 打断
 ///   （queue 非空 → `messages.extend(q.drain(..)) + break`）。调用方应 `continue`
 ///   下一轮 reasoning loop，让下一次 LLM 请求携带 steering 消息。
@@ -349,6 +367,7 @@ pub(super) struct ToolCallAccumulator {
 /// 读取；Phase 4 测试将按 `steered / tool_results.len()` 做断言。
 #[allow(dead_code)]
 pub(super) struct DispatchOutcome {
+    pub(super) assistant_message_id: Option<String>,
     pub(super) tool_results: Vec<crate::infra::events::Message>,
     pub(super) steered: bool,
 }

@@ -155,7 +155,7 @@ impl ReasoningState {
 
     fn thinking_text(&self) -> Option<String> {
         let mut summary_entries: Vec<_> = self.summary.iter().collect();
-        summary_entries.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+        summary_entries.sort_by_key(|(key, _)| *key);
         let summary_text = summary_entries
             .into_iter()
             .filter_map(|(_, text)| {
@@ -168,7 +168,7 @@ impl ReasoningState {
         }
 
         let mut raw_entries: Vec<_> = self.raw.iter().collect();
-        raw_entries.sort_by(|(left_key, _), (right_key, _)| left_key.cmp(right_key));
+        raw_entries.sort_by_key(|(key, _)| *key);
         let raw_text = raw_entries
             .into_iter()
             .filter_map(|(_, text)| {

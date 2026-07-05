@@ -355,6 +355,35 @@ impl MessageAppendSink for InjectAppendInvariantSink {
         }
         self.inner.append_message(value)
     }
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        let call_idx = self.append_calls.fetch_add(1, Ordering::SeqCst);
+        if call_idx == 2 && !self.injected.swap(true, Ordering::SeqCst) {
+            let tool_call_id = value
+                .get("tool_call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("call_injected")
+                .to_string();
+            self.inner.append_message(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": "[interrupted]"
+            }))?;
+            self.inner.append_message(serde_json::json!({
+                "role": "user",
+                "content": "nested prompt"
+            }))?;
+            self.inner.append_message(serde_json::json!({
+                "role": "assistant",
+                "content": "nested done"
+            }))?;
+        }
+        self.inner.append_message_with_id(value, forced_id)
+    }
 }
 
 fn chat_context_fixture(env_key: &str) -> (tempfile::TempDir, ChatContext) {

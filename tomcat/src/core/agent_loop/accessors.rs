@@ -29,7 +29,7 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::llm::{ChatMessage, LlmProvider};
-use crate::core::session::manager::ContextState;
+use crate::core::session::manager::{generate_entry_id, ContextState};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::event_bus::{EventBus, ScopedEventEmitter};
 use crate::infra::events::{AgentEvent, ExtensionEvent};
@@ -52,6 +52,7 @@ impl AgentLoop {
             llm,
             primitive,
             emitter,
+            session_manager: None,
             config_backend: None,
             bash_task_registry: None,
             web_fetch_runtime: None,
@@ -65,6 +66,7 @@ impl AgentLoop {
             cancel_token,
             context_state: None,
             block_tool_calls: false,
+            pending_assistant_entry_id: None,
             reasoning_turn_budget_exhausted: false,
             start_idx: 0,
             context_tail_start: 0,
@@ -127,6 +129,15 @@ impl AgentLoop {
         self
     }
 
+    /// 注入 session manager，用于 turn 摘要异步回写 transcript 元数据。
+    pub fn with_session_manager(
+        mut self,
+        session: crate::core::session::manager::SessionManager,
+    ) -> Self {
+        self.session_manager = Some(session);
+        self
+    }
+
     /// P1：注入 `ChatContext` 持有的 session 级共享 `follow_up_queue`。
     ///
     /// 不调用此方法时保持原有"单次 AgentLoop 私有 queue"语义（向后兼容
@@ -183,6 +194,7 @@ impl AgentLoop {
             llm,
             primitive,
             emitter,
+            session_manager: None,
             config_backend: None,
             bash_task_registry: None,
             web_fetch_runtime: None,
@@ -196,6 +208,7 @@ impl AgentLoop {
             cancel_token,
             context_state: None,
             block_tool_calls: false,
+            pending_assistant_entry_id: None,
             reasoning_turn_budget_exhausted: false,
             start_idx: 0,
             context_tail_start: 0,
@@ -228,12 +241,41 @@ impl AgentLoop {
         self.context_state.take()
     }
 
+    pub(super) fn clear_pending_assistant_entry_id(&mut self) {
+        self.pending_assistant_entry_id = None;
+    }
+
+    pub(super) fn mint_pending_assistant_entry_id(&mut self) -> String {
+        let id = generate_entry_id();
+        self.pending_assistant_entry_id = Some(id.clone());
+        id
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_assistant_entry_id(&self) -> Option<&str> {
+        self.pending_assistant_entry_id.as_deref()
+    }
+
+    pub(super) fn take_or_mint_pending_assistant_entry_id(&mut self) -> String {
+        self.pending_assistant_entry_id
+            .take()
+            .unwrap_or_else(generate_entry_id)
+    }
+
     /// 返回 compaction / preheat 路径应使用的 provider。
     ///
     /// 优先沿用上层解析好的 compaction provider；仅在未注入时兼容回退主 provider。
     pub(super) fn compaction_provider(&self) -> Arc<dyn LlmProvider> {
         self.config
             .compaction_provider
+            .clone()
+            .unwrap_or_else(|| Arc::clone(&self.llm))
+    }
+
+    /// 返回 title / utility 路径应使用的 provider。
+    pub(super) fn title_provider(&self) -> Arc<dyn LlmProvider> {
+        self.config
+            .title_provider
             .clone()
             .unwrap_or_else(|| Arc::clone(&self.llm))
     }
@@ -253,6 +295,23 @@ impl AgentLoop {
         Ok(())
     }
 
+    pub(super) fn persist_message_with_forced_id_if_needed(
+        &self,
+        msg: &mut ChatMessage,
+        forced_id: &str,
+    ) -> Result<String, crate::infra::error::AppError> {
+        let Some(ref sink) = self.config.message_append_sink else {
+            return Ok(forced_id.to_string());
+        };
+        let row_id = sink.append_message_with_id(serde_json::to_value(&*msg)?, forced_id)?;
+        debug_assert_eq!(
+            row_id, forced_id,
+            "forced transcript id must be preserved during append"
+        );
+        msg.msg_id = Some(row_id.clone());
+        Ok(row_id)
+    }
+
     pub(super) fn push_message(
         &self,
         messages: &mut Vec<ChatMessage>,
@@ -261,6 +320,17 @@ impl AgentLoop {
         self.persist_message_if_needed(&mut msg)?;
         messages.push(msg);
         Ok(())
+    }
+
+    pub(super) fn push_message_with_forced_id(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        mut msg: ChatMessage,
+        forced_id: &str,
+    ) -> Result<String, crate::infra::error::AppError> {
+        let row_id = self.persist_message_with_forced_id_if_needed(&mut msg, forced_id)?;
+        messages.push(msg);
+        Ok(row_id)
     }
 
     pub(super) fn sync_persisted_messages_into_context(&mut self, messages: &[ChatMessage]) {

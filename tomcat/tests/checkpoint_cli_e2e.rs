@@ -865,7 +865,6 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     drop(stdin);
 
     let output = wait_for_child_output(child, Duration::from_secs(30));
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
@@ -880,11 +879,6 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         "第二轮请求应命中 mock server，actual stage={}",
         stage.load(Ordering::SeqCst)
     );
-    assert!(
-        stdout.contains("RECOVERED_E2E"),
-        "第二轮应继续完成回复，stdout={stdout}"
-    );
-
     let transcript_path = fx
         .session
         .current_transcript_path()

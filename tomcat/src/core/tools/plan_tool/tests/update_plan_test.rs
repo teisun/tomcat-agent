@@ -268,7 +268,7 @@ async fn update_plan_in_exec_promotes_completed() {
 }
 
 #[tokio::test]
-async fn update_plan_reopen_completed_to_pending_and_emits_plan_update() {
+async fn update_plan_reopen_completed_to_pending_and_emits_plan_pending() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -322,9 +322,9 @@ async fn update_plan_reopen_completed_to_pending_and_emits_plan_update() {
     let event = events
         .lock()
         .iter()
-        .find(|v| v["event"] == crate::infra::wire::WIRE_PLAN_UPDATE)
+        .find(|v| v["event"] == crate::infra::wire::WIRE_PLAN_PENDING)
         .cloned()
-        .expect("缺少 plan.update 事件");
+        .expect("缺少 plan.pending 事件");
     assert_eq!(event["plan_id"], plan_id);
     assert_eq!(event["state"], "pending");
     cleanup_home(&home);

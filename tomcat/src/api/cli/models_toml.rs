@@ -4,6 +4,7 @@
 //! - `mimo-v2.5-pro`
 //! - `gpt-5.2`
 //! - `deepseek-v4-flash`
+//! - `utility-flash`
 //!
 //! 设计要点：
 //! - 启动加载沿用 [`crate::core::llm::ModelCatalog::load`]，本模块只负责「init 时把文件创建出来」。
@@ -94,6 +95,21 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
         entry_block: "\
 [[models]]
 id = \"deepseek-v4-flash\"
+model_name = \"deepseek-v4-flash\"
+api = \"openai\"
+provider = \"deepseek\"
+api_key_env = \"DEEPSEEK_API_KEY\"
+base_url = \"https://api.deepseek.com\"
+thinking_format = \"deepseek\"
+capabilities = { vision = false, files = false, tools = true, reasoning = true }
+",
+    },
+    ManagedModelTemplate {
+        id: "utility-flash",
+        model_name: "deepseek-v4-flash",
+        entry_block: "\
+[[models]]
+id = \"utility-flash\"
 model_name = \"deepseek-v4-flash\"
 api = \"openai\"
 provider = \"deepseek\"

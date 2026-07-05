@@ -47,6 +47,20 @@ fn openai_model() -> String {
     common::e2e_openai_model()
 }
 
+fn live_openai_responses_opt_in(test_name: &str) -> bool {
+    match std::env::var("PI_LIVE_OPENAI_RESPONSES") {
+        Ok(value) if matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on") => {
+            true
+        }
+        _ => {
+            eprintln!(
+                "skip {test_name}: set PI_LIVE_OPENAI_RESPONSES=1 to enable live OpenAI Responses reasoning continuity tests"
+            );
+            false
+        }
+    }
+}
+
 fn openai_api_key_env() -> &'static str {
     if openai_model() == "gpt-5.4" {
         "OPENAI_API_KEY"
@@ -226,6 +240,9 @@ async fn run_chat(
 #[tokio::test]
 async fn openai_responses_roundtrip_replays_reasoning_items(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if !live_openai_responses_opt_in("openai_responses_roundtrip_replays_reasoning_items") {
+        return Ok(());
+    }
     require_api_key(openai_api_key_env());
 
     let config = openai_responses_continuity_config();
@@ -245,6 +262,7 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
                 max_tokens: Some(256),
                 stream: Some(true),
                 model_override: None,
+                thinking_level: None,
                 tools: None,
             },
         )
@@ -296,6 +314,7 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
                 max_tokens: Some(128),
                 stream: Some(false),
                 model_override: None,
+                thinking_level: None,
                 tools: None,
             },
         )
@@ -330,6 +349,7 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
                 max_tokens: Some(512),
                 stream: Some(true),
                 model_override: None,
+                thinking_level: None,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -400,6 +420,7 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
                 max_tokens: Some(256),
                 stream: Some(false),
                 model_override: None,
+                thinking_level: None,
                 tools: None,
             },
         )
@@ -437,6 +458,7 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
                 max_tokens: Some(512),
                 stream: Some(true),
                 model_override: None,
+                thinking_level: None,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -507,6 +529,7 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
                 max_tokens: Some(256),
                 stream: Some(false),
                 model_override: None,
+                thinking_level: None,
                 tools: None,
             },
         )
@@ -552,6 +575,7 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
                 max_tokens: Some(512),
                 stream: Some(true),
                 model_override: None,
+                thinking_level: None,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -638,6 +662,7 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
                 max_tokens: Some(256),
                 stream: Some(false),
                 model_override: entry.model_override.clone(),
+                thinking_level: None,
                 tools: None,
             },
         )
@@ -678,6 +703,7 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                 max_tokens: Some(512),
                 stream: Some(true),
                 model_override: None,
+                thinking_level: None,
                 tools: Some(weather_tool_definitions()),
             },
         )
@@ -737,6 +763,7 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                 max_tokens: Some(256),
                 stream: Some(true),
                 model_override: None,
+                thinking_level: None,
                 tools: None,
             },
         )
@@ -793,6 +820,7 @@ async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
                 max_tokens: Some(256),
                 stream: Some(false),
                 model_override: None,
+                thinking_level: None,
                 tools: None,
             },
         )

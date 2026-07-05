@@ -2,18 +2,15 @@
 //!
 //! 设计口径：
 //! - 通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`] 派发；
-//! - 工具白名单固定为 `{read, search_files, list_dir, bash}`；
+//! - 工具白名单固定为 `{read, search_files, list_dir, bash, web_fetch}`；
 //! - 输出必须是 `<verify>...</verify>` block，解析为 [`VerifySummary`]；
 //! - `VERIFIER_MAX_TURNS` 固定 64，不进 TOML。
 
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Weak};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, SubagentType,
@@ -33,7 +30,8 @@ use crate::infra::event_bus::EventBus;
 pub const VERIFIER_MAX_TURNS: u32 = 64;
 
 /// verifier 子 Agent allowed tools 硬白名单。
-pub(crate) const VERIFIER_ALLOWED_TOOLS: &[&str] = &["read", "search_files", "list_dir", "bash"];
+pub(crate) const VERIFIER_ALLOWED_TOOLS: &[&str] =
+    &["read", "search_files", "list_dir", "bash", "web_fetch"];
 
 pub(crate) fn verifier_allowed_tools_with_policy(expose_skills: bool) -> Vec<&'static str> {
     let mut tools = VERIFIER_ALLOWED_TOOLS.to_vec();
@@ -129,16 +127,10 @@ fn normalize_summary(summary: &mut VerifySummary) -> Option<()> {
     ) {
         return None;
     }
-    if summary.summary.len() > 600 {
-        summary.summary.truncate(600);
-    }
     for check in &mut summary.checks {
         check.result = check.result.trim().to_ascii_lowercase();
         if !matches!(check.result.as_str(), "pass" | "fail" | "skip") {
             return None;
-        }
-        if check.output_excerpt.len() > 500 {
-            check.output_excerpt.truncate(500);
         }
     }
     Some(())
@@ -243,6 +235,7 @@ pub struct ProdVerifierDeps {
     pub context_config: ContextConfig,
     pub read_file_state: Arc<ReadFileState>,
     pub openai_files_runtime: Option<Arc<OpenAiFilesRuntime>>,
+    pub web_fetch_runtime: Arc<crate::core::tools::web_fetch::WebFetchRuntime>,
     pub agent_workspace_dir: std::path::PathBuf,
     pub skill_set: Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>,
     pub skills_config: crate::infra::config::SkillsConfig,
@@ -269,7 +262,6 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         &self,
         plan_id: &str,
         plan_text: &str,
-        _abort_signal: Arc<AtomicBool>,
     ) -> VerifySummary {
         let Some(deps) = self.deps.as_ref() else {
             return VerifySummary::aborted_with(format!(
@@ -304,6 +296,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
             crate::infra::config::compute_context_budget_chars(&context_config);
         let read_file_state = Arc::clone(&deps.read_file_state);
         let openai_files_runtime = deps.openai_files_runtime.clone();
+        let web_fetch_runtime = Arc::clone(&deps.web_fetch_runtime);
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
         let expose_skills =
@@ -342,19 +335,16 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                 SubagentType::Verifier,
                 move |spawn_ctx| async move {
                     let child_session_id = spawn_ctx.child_session_id.clone();
-                    let cancel_token = CancellationToken::new();
-
-                    let token_for_watcher = cancel_token.clone();
-                    let abort_clone = Arc::clone(&spawn_ctx.abort_signal);
-                    let watcher = tokio::spawn(async move {
-                        loop {
-                            if abort_clone.load(std::sync::atomic::Ordering::Acquire) {
-                                token_for_watcher.cancel();
-                                return;
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
-                    });
+                    let cancel_token = spawn_ctx.cancel_token.clone();
+                    let transcript_root = agent_trail_dir.clone();
+                    let transcript_sink =
+                        crate::core::session::subagent_transcript::open_subagent_transcript(
+                            &transcript_root,
+                            &child_session_id,
+                            SubagentType::Verifier,
+                            &model,
+                            &parent_session_id_for_closure,
+                        );
 
                     let cfg = AgentLoopConfig {
                         max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
@@ -362,15 +352,18 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         retry_base_delay_ms:
                             crate::infra::config::DEFAULT_AGENT_RETRY_BASE_DELAY_MS,
                         model,
+                        thinking_level: None,
                         session_id: child_session_id.clone(),
                         tool_definitions: tool_defs,
                         context_config,
                         compaction_provider,
+                        title_provider: None,
+                        title_model: String::new(),
                         agent_trail_dir,
                         read_file_state,
                         openai_files_runtime,
                         checkpoint_store,
-                        message_append_sink: None,
+                        message_append_sink: transcript_sink,
                         parent_session_id: Some(parent_session_id_for_closure.clone()),
                         spawn_depth: spawn_ctx.spawn_depth,
                         subagent_type: SubagentType::Verifier,
@@ -383,19 +376,25 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                         },
                     };
                     let mut agent_loop =
-                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone());
+                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone())
+                            .with_web_fetch_runtime(web_fetch_runtime);
                     let initial_messages = vec![
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),
                     ];
                     let run_outcome = agent_loop.run(initial_messages).await;
-                    watcher.abort();
 
                     let (summary, label) = build_summary_from_outcome(
                         origin,
                         &child_session_id,
                         turns_limit,
                         run_outcome,
+                    );
+                    let mut summary = summary;
+                    crate::core::session::subagent_transcript::append_subagent_transcript_hint(
+                        &mut summary.summary,
+                        &transcript_root,
+                        &child_session_id,
                     );
                     let _ = tx.send(summary.clone());
 
@@ -561,8 +560,5 @@ fn append_budget_exhausted_note(summary: &mut String, turns_limit: u32) {
     } else if !summary.contains(&note) {
         summary.push(' ');
         summary.push_str(&note);
-    }
-    if summary.len() > 600 {
-        summary.truncate(600);
     }
 }

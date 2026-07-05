@@ -13,15 +13,18 @@ use tokio::io::AsyncWrite;
 use crate::api::chat::{ChatContext, ChatContextOverrides};
 use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::llm::{
-    Capabilities, ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmResolver, LlmScene,
-    ResolvedCall, StreamEvent,
+    ChatMessage, ChatRequest, ChatResponse, LlmProvider, LlmResolver, LlmScene, ResolvedCall,
+    StreamEvent,
 };
 use crate::{AppConfig, ServeConfig};
 
 use super::registry::SessionSlot;
 use super::types::NewSessionParams;
 use super::writer::{spawn_writer, WriterConfig, WriterHandle};
-use super::{create_session_slot, register_slot_hooks, ServeState, SessionTurnState};
+use super::{
+    build_shared_model_thinking, create_session_slot, register_slot_hooks, ServeState,
+    SessionTurnState,
+};
 use crate::{
     ensure_work_dir_structure, init_context_state, resolve_sessions_dir, session_key_for_agent,
     AppError, SessionManager, SessionMode,
@@ -147,7 +150,8 @@ pub async fn build_initialized_state(
     let cfg = serve_test_config(temp.path(), base_url);
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
-    let state = ServeState::new(cfg, writer);
+    let shared_model_thinking = build_shared_model_thinking(&cfg).expect("shared model thinking");
+    let state = ServeState::new(cfg, writer, shared_model_thinking);
     let slot = create_session_slot(Arc::clone(&state), NewSessionParams::default(), false)
         .await
         .expect("initial session");
@@ -254,13 +258,19 @@ impl LlmProvider for RecordingMockLlm {
 }
 
 pub struct FixedResolver {
+    catalog: Arc<crate::core::llm::ModelCatalog>,
     provider: Arc<dyn LlmProvider>,
     default_model: String,
 }
 
 impl FixedResolver {
-    pub fn new(provider: Arc<dyn LlmProvider>, default_model: impl Into<String>) -> Self {
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        default_model: impl Into<String>,
+        catalog: Arc<crate::core::llm::ModelCatalog>,
+    ) -> Self {
         Self {
+            catalog,
             provider,
             default_model: default_model.into(),
         }
@@ -273,22 +283,18 @@ impl LlmResolver for FixedResolver {
         _scene: LlmScene,
         session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError> {
-        let model = session_override.unwrap_or(&self.default_model).to_string();
+        let entry = self
+            .catalog
+            .lookup_explicit(session_override.unwrap_or(&self.default_model))?;
         Ok(ResolvedCall {
             provider_impl: Arc::clone(&self.provider),
-            model,
-            api: "mock".to_string(),
-            provider: "mock".to_string(),
-            base_url: None,
+            model: entry.id,
+            api: entry.api,
+            provider: entry.provider,
+            base_url: entry.base_url,
             key_source: "test".to_string(),
             thinking_format: ThinkingFormat::Auto,
-            capabilities: Capabilities {
-                vision: true,
-                files: true,
-                tools: true,
-                reasoning: true,
-                web_search: false,
-            },
+            capabilities: entry.capabilities,
         })
     }
 }
@@ -320,7 +326,7 @@ impl LlmProvider for PanickingMockLlm {
     }
 }
 
-async fn build_initialized_state_with_provider(
+pub async fn build_initialized_state_with_provider(
     temp: tempfile::TempDir,
     cfg: AppConfig,
     provider: Arc<dyn LlmProvider>,
@@ -332,7 +338,8 @@ async fn build_initialized_state_with_provider(
 ) {
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
-    let state = ServeState::new(cfg.clone(), writer);
+    let shared_model_thinking = build_shared_model_thinking(&cfg).expect("shared model thinking");
+    let state = ServeState::new(cfg.clone(), writer, shared_model_thinking);
 
     let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let sessions_dir = resolve_sessions_dir(&cfg).expect("sessions dir");
@@ -348,6 +355,7 @@ async fn build_initialized_state_with_provider(
     let overrides = ChatContextOverrides::default()
         .suppress_cli_output()
         .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
+        .with_shared_model_thinking(Arc::clone(&state.shared_model_thinking))
         .with_session_cwd_override(cwd_path.clone());
     let mut ctx =
         ChatContext::from_config_with_mode_and_overrides(cfg.clone(), SessionMode::Code, overrides)
@@ -363,7 +371,11 @@ async fn build_initialized_state_with_provider(
         .plan_runtime
         .attach_ask_question_panel(ask_panel);
     ctx.global_services.llm = Arc::clone(&provider);
-    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(provider, "gpt-5.4"));
+    ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(
+        provider,
+        "gpt-5.4",
+        Arc::clone(&ctx.global_services.model_catalog),
+    ));
 
     let context_budget_chars =
         crate::infra::config::compute_context_budget_chars(&ctx.config.context);

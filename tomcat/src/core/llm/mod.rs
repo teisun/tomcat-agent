@@ -13,6 +13,7 @@
 pub mod auth;
 pub mod catalog;
 pub(crate) mod http_client;
+pub(crate) mod multimodal;
 pub mod openai_files;
 mod provider;
 mod registry;
@@ -26,6 +27,7 @@ mod types;
 
 pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
 pub use catalog::{Capabilities, Cost, ModelCatalog, ModelEntry};
+pub(crate) use multimodal::degrade_unsupported_multimodal;
 pub use provider::LlmProvider;
 pub use registry::{build_provider, registered_provider_ids};
 #[allow(unused_imports)]
@@ -34,13 +36,14 @@ pub use replay_policy::{
     ProviderCompatProfile, ReplayAcceptance, ReplayAction,
 };
 pub use resolver::{DefaultLlmResolver, LlmResolver, LlmScene, ResolvedCall};
+pub use thinking_policy::ThinkingLevel;
 pub use token_usage::SessionTokenUsage;
 #[allow(unused_imports)]
 pub use types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
-    ChatResponse, ChatResponseChoice, ContinuityMetadata, MessageKind, ProviderRefs,
-    ReasoningContinuation, ReasoningFormat, ReplayRequirement, StreamEvent, ThinkingSource,
-    TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+    ChatResponse, ChatResponseChoice, ContextRefKind, ContextReference, ContinuityMetadata,
+    FileSource, ImageSource, MessageKind, ProviderRefs, ReasoningContinuation, ReasoningFormat,
+    ReplayRequirement, StreamEvent, ThinkingSource, TokenUsage, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
 };
 
 #[cfg(test)]

@@ -1406,6 +1406,8 @@ async fn real_mimo_web_search() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "mimo".into();
+    cfg.llm.default_model = mimo_model.clone();
+    cfg.context.compaction_model = mimo_model.clone();
     let harness = build_production_web_search_harness(
         cfg,
         ENV_KEY,
@@ -1484,14 +1486,19 @@ impl ProductionWebSearchHarness {
 
 impl Drop for ProductionWebSearchHarness {
     fn drop(&mut self) {
-        if let Some(ctx) = self.ctx.take() {
+        let ctx = self.ctx.take();
+        let runtime = self._runtime.take();
+        if ctx.is_none() && runtime.is_none() {
+            return;
+        }
+        // `ChatContext` teardown can transitively drop Tokio runtimes owned by plugin/search
+        // services, so move the entire harness shutdown off the async test executor thread.
+        std::thread::spawn(move || {
             drop(ctx);
-        }
-        if let Some(runtime) = self._runtime.take() {
-            std::thread::spawn(move || drop(runtime))
-                .join()
-                .expect("drop production web search runtime");
-        }
+            drop(runtime);
+        })
+        .join()
+        .expect("drop production web search harness");
     }
 }
 
@@ -1618,8 +1625,13 @@ fn build_production_web_search_harness(
     } else {
         common::apply_openai_responses_test_config(&mut config, env_key, None);
     }
-    let (runtime, ctx) = tomcat::api::cli::build_runtime_and_context(&config, SessionMode::Claw)
-        .expect("chat context should be created with production runtime ordering");
+    let config_for_runtime = config.clone();
+    let (runtime, ctx) = std::thread::spawn(move || {
+        tomcat::api::cli::build_runtime_and_context(&config_for_runtime, SessionMode::Claw)
+    })
+    .join()
+    .expect("production web search runtime builder thread panicked")
+    .expect("chat context should be created with production runtime ordering");
     ProductionWebSearchHarness {
         _runtime: Some(runtime),
         ctx: Some(ctx),

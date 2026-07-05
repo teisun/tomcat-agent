@@ -68,6 +68,29 @@ summary: nope
 }
 
 #[test]
+fn parse_verify_block_preserves_multibyte_summary_without_panic() {
+    let summary_text = "验".repeat(250);
+    let text = format!(
+        "<verify>\nchecks:\n  - name: unit\n    command: cargo test -p tomcat verify\n    result: pass\n    output_excerpt: ok\nverdict: pass\nsummary: {summary_text}\n</verify>"
+    );
+    let summary = parse_verify_block(&text).unwrap();
+    assert_eq!(summary.summary, summary_text);
+    assert_eq!(summary.summary.chars().count(), 250);
+}
+
+#[test]
+fn parse_verify_block_preserves_multibyte_output_excerpt_without_panic() {
+    let excerpt = "证".repeat(180);
+    let text = format!(
+        "<verify>\nchecks:\n  - name: unit\n    command: cargo test -p tomcat verify\n    result: pass\n    output_excerpt: {excerpt}\nverdict: pass\nsummary: short summary\n</verify>"
+    );
+    let summary = parse_verify_block(&text).unwrap();
+    assert_eq!(summary.checks.len(), 1);
+    assert_eq!(summary.checks[0].output_excerpt, excerpt);
+    assert_eq!(summary.checks[0].output_excerpt.chars().count(), 180);
+}
+
+#[test]
 fn verify_summary_round_trips_to_json() {
     let summary = VerifySummary {
         checks: vec![VerifyCheck {
@@ -156,6 +179,43 @@ summary: model claimed success
 }
 
 #[test]
+fn build_summary_from_outcome_keeps_long_multibyte_summary_when_budget_note_is_appended() {
+    let body = "测".repeat(250);
+    let verify_block = format!(
+        "<verify>\nchecks:\n  - name: smoke\n    command: cargo test -p tomcat verifier\n    result: pass\n    output_excerpt: ok\nverdict: pass\nsummary: {body}\n</verify>"
+    );
+    let mut new_messages = Vec::new();
+    for idx in 0..63 {
+        new_messages.push(ChatMessage::assistant(format!("turn {idx}")));
+    }
+    new_messages.push(ChatMessage::assistant_with_tool_calls(
+        Some(&verify_block),
+        vec![serde_json::json!({
+            "id": "call_64",
+            "type": "function",
+            "function": { "name": "bash", "arguments": "{}" }
+        })],
+    ));
+    new_messages.push(ChatMessage::tool("call_64", "ok"));
+
+    let (summary, label) = build_summary_from_outcome(
+        "test",
+        "child-3",
+        VERIFIER_MAX_TURNS,
+        AgentRunOutcome::Completed(AgentRunResult {
+            final_text: verify_block,
+            new_messages,
+        }),
+    );
+
+    assert_eq!(summary.verdict, "aborted");
+    assert_eq!(summary.verifier_stop_reason, "max_turns");
+    assert!(summary.summary.contains(&body));
+    assert!(summary.summary.contains("runtime override"));
+    assert_eq!(label, SubagentOutcomeLabel::Failed);
+}
+
+#[test]
 fn build_summary_from_outcome_keeps_pass_when_limit_is_used_exactly_and_normally() {
     let verify_block = r#"<verify>
 checks:
@@ -194,7 +254,7 @@ fn verifier_system_prompt_contains_contract() {
     let prompt = verifier_system_prompt_text();
     assert!(prompt.contains("<verify>"));
     assert!(prompt.contains("pass|fail|partial|aborted"));
-    assert!(prompt.contains("read, search_files, list_dir, bash"));
+    assert!(prompt.contains("read, search_files, list_dir, bash, web_fetch"));
     assert!(prompt.contains("P0-P6"));
     assert!(prompt.contains("AGENTS.md"));
     assert!(prompt.contains("CLAUDE.md"));
@@ -236,6 +296,7 @@ fn verifier_allowed_tools_do_not_include_write_paths() {
     assert!(names.contains("search_files"));
     assert!(names.contains("list_dir"));
     assert!(names.contains("bash"));
+    assert!(names.contains("web_fetch"));
     assert!(!names.contains("create_plan"));
     assert!(!names.contains("update_plan"));
     assert!(!names.contains("write"));

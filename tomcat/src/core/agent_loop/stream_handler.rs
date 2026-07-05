@@ -119,9 +119,12 @@ pub(super) async fn run_chat_stream(
     let mut pending_notice: Option<(String, String)> = None;
     let mut aborted_during_stream = false;
     let mut streaming_announced: Vec<bool> = Vec::new();
+    agent.clear_pending_assistant_entry_id();
+    let assistant_message_id = agent.mint_pending_assistant_entry_id();
 
     agent.emit_event(AgentEvent::MessageStart {
         message: Message(serde_json::json!({})),
+        assistant_message_id: assistant_message_id.clone(),
     });
 
     loop {
@@ -143,6 +146,7 @@ pub(super) async fn run_chat_stream(
                 // 新增 `kind=content_delta`，让单订阅者（CLI/TUI）能与 thinking_delta 分流。
                 agent.emit_event(AgentEvent::MessageUpdate {
                     message: Message(serde_json::json!({})),
+                    assistant_message_id: assistant_message_id.clone(),
                     assistant_message_event: AssistantMessageEvent(serde_json::json!({
                         "kind": "content_delta",
                         "delta": delta,
@@ -169,6 +173,7 @@ pub(super) async fn run_chat_stream(
                 }
                 agent.emit_event(AgentEvent::MessageUpdate {
                     message: Message(serde_json::json!({})),
+                    assistant_message_id: assistant_message_id.clone(),
                     assistant_message_event: AssistantMessageEvent(payload),
                 });
             }
@@ -272,7 +277,9 @@ pub(super) async fn run_chat_stream(
                 // Err 分支先发 MessageEnd 再返回，保证 UI 配对。
                 agent.emit_event(AgentEvent::MessageEnd {
                     message: Message(serde_json::json!({})),
+                    assistant_message_id: assistant_message_id.clone(),
                 });
+                agent.clear_pending_assistant_entry_id();
                 let summary = llm_summary(&e).unwrap_or_else(|| e.to_string());
                 let source_chain = llm_source_chain(&e).join(" <- ");
                 info!(
@@ -290,6 +297,7 @@ pub(super) async fn run_chat_stream(
 
     agent.emit_event(AgentEvent::MessageEnd {
         message: Message(serde_json::json!({})),
+        assistant_message_id: assistant_message_id.clone(),
     });
     if let Some((notice_reason, message)) = pending_notice {
         agent.emit_event(AgentEvent::LlmNotice {

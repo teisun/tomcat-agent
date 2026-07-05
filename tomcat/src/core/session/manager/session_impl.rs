@@ -16,9 +16,11 @@ use crate::core::session::store::{
 };
 use crate::core::session::transcript::{
     append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
-    mark_message_entries_after_anchor_superseded, read_entries_tail, read_header, write_header,
-    BranchSummaryEntry, CustomEntry, LabelEntry, MessageEntry, ModelChangeEntry, SessionHeader,
-    SessionInfoEntry, SyncLevel, ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry,
+    mark_message_entries_after_anchor_superseded, read_entries_tail, read_entries_tail_before,
+    read_header, write_header, rewrite_message_summary_titles_by_id, BranchSummaryEntry,
+    CustomEntry, LabelEntry, MessageEntry, MessageSummaryTitleRewrite, ModelChangeEntry,
+    SessionHeader, SessionInfoEntry, SyncLevel, ThinkingLevelChangeEntry, ThinkingTraceEntry,
+    TranscriptEntry, TranscriptPage,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
@@ -30,6 +32,33 @@ static APPEND_SEQ: AtomicU64 = AtomicU64::new(0);
 static SESSION_ID_SEQ: AtomicU64 = AtomicU64::new(0);
 const VALIDATE_TAIL_CAP: usize = 64;
 const SESSIONS_FILE: &str = "sessions.json";
+const TITLE_MAX_CHARS: usize = 40;
+
+/// 判断当前 title 是否仍为由首条 user 消息规则派生的占位。
+pub fn is_rule_derived_title(title: &str, user_text: &str) -> bool {
+    title == derive_title_from_user_message(user_text)
+}
+
+/// 从首条 user message 文本派生会话标题：取首个非空行、trim、超过 40 字符截断加省略号；
+/// 全空则回退 "New session"。纯函数，无副作用，便于单测。
+pub fn derive_title_from_user_message(text: &str) -> String {
+    let first_line = text
+        .lines()
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty());
+    match first_line {
+        Some(line) => {
+            let count = line.chars().count();
+            if count > TITLE_MAX_CHARS {
+                let truncated: String = line.chars().take(TITLE_MAX_CHARS).collect();
+                format!("{truncated}\u{2026}")
+            } else {
+                line.to_string()
+            }
+        }
+        None => "New session".to_string(),
+    }
+}
 
 struct AppendInFlightGuard {
     counter: Arc<AtomicUsize>,
@@ -290,7 +319,9 @@ impl SessionManager {
             compaction_count: None,
             compaction_tokens_freed: None,
             tool_result_chars_persisted: None,
+            context_utilization_ratio: None,
             last_checkpoint_id: None,
+            title: None,
         };
         self.with_store_mut(|store| {
             store.sessions.insert(session_id.clone(), entry.clone());
@@ -400,6 +431,88 @@ impl SessionManager {
         })
     }
 
+    /// 首条 user message 写入后，若当前会话尚无 title，则派生并持久化一次。
+    /// 已有非占位 title 直接返回；非 user message 直接返回。
+    fn ensure_title_from_message(&self, message: &serde_json::Value) -> Result<(), AppError> {
+        let session_key = self.current_session_key().to_string();
+        self.ensure_title_for_session_key(&session_key, message)
+    }
+
+    /// 按 sessionKey 派生并持久化 title（首条 user、无 title 时才写）。
+    fn ensure_title_for_session_key(
+        &self,
+        session_key: &str,
+        message: &serde_json::Value,
+    ) -> Result<(), AppError> {
+        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role != "user" {
+            return Ok(());
+        }
+        let text = message
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let store = self.load_store()?;
+        let session_id = match self.resolve_active_session_id(&store, session_key) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        if store
+            .sessions
+            .get(&session_id)
+            .and_then(|entry| entry.title.as_ref())
+            .is_some_and(|title| !is_rule_derived_title(title, text))
+        {
+            return Ok(());
+        }
+        let title = derive_title_from_user_message(text);
+        self.update_session(session_key, |entry| {
+            if entry.title.is_none()
+                || entry
+                    .title
+                    .as_ref()
+                    .is_some_and(|existing| is_rule_derived_title(existing, text))
+            {
+                entry.title = Some(title.clone());
+            }
+        })
+    }
+
+    /// 按 session_id 派生并持久化 title（插件多实例路由路径）。
+    fn ensure_title_for_session_id(
+        &self,
+        session_id: &str,
+        message: &serde_json::Value,
+    ) -> Result<(), AppError> {
+        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role != "user" {
+            return Ok(());
+        }
+        let needs_title = self
+            .load_store()?
+            .sessions
+            .get(session_id)
+            .and_then(|entry| entry.title.as_ref())
+            .is_none();
+        if !needs_title {
+            return Ok(());
+        }
+        let text = message
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let title = derive_title_from_user_message(text);
+        self.with_store_mut(|store| {
+            if let Some(entry) = store.sessions.get_mut(session_id) {
+                if entry.title.is_none() {
+                    entry.updated_at = Utc::now().timestamp_millis();
+                    entry.title = Some(title.clone());
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// 更新当前会话的 model_override，并落一条可审计的 model_change transcript 事件。
     pub fn switch_current_model(
         &self,
@@ -428,6 +541,7 @@ impl SessionManager {
             e.compaction_tokens_freed = Some(state.session_obs.compaction_tokens_freed as u64);
             e.tool_result_chars_persisted =
                 Some(state.session_obs.tool_result_chars_persisted as u64);
+            e.context_utilization_ratio = Some(state.live.context_utilization_ratio);
         })
     }
 
@@ -496,6 +610,7 @@ impl SessionManager {
         &self,
         message: serde_json::Value,
         chain_violation_is_invariant: bool,
+        forced_id: Option<&str>,
     ) -> Result<String, AppError> {
         self.append_in_flight.fetch_add(1, Ordering::SeqCst);
         let _guard = AppendInFlightGuard {
@@ -515,9 +630,12 @@ impl SessionManager {
                     Err(AppError::Config(err.to_string()))
                 };
             }
-            let id = generate_entry_id();
+            let id = forced_id
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(generate_entry_id);
             let now = iso_ts_now()?;
             let sync = Self::message_sync_level(&message);
+            let message_for_title = message.clone();
             let entry = TranscriptEntry::Message(MessageEntry {
                 id: Some(id.clone()),
                 parent_id: None,
@@ -525,6 +643,7 @@ impl SessionManager {
                 message,
             });
             append_entry_with_sync(&path, &entry, sync)?;
+            let _ = self.ensure_title_from_message(&message_for_title);
             Ok(id)
         })
     }
@@ -532,13 +651,22 @@ impl SessionManager {
     // 同一 transcript 文件通过 per-file mutex 串行化；不同 transcript 仍可并行追加。
     /// 追加 message 到当前会话的 transcript；返回新行的 `MessageEntry.id`（§5.7 MessageId）。
     pub fn append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
-        self.append_message_internal(message, true)
+        self.append_message_internal(message, true, None)
+    }
+
+    /// 以指定的 transcript `MessageEntry.id` 追加当前会话消息。
+    pub fn append_message_with_id(
+        &self,
+        message: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        self.append_message_internal(message, true, Some(forced_id))
     }
 
     /// 追加 message（dispatcher/插件路径：校验失败返回 Err 而非 panic）。
     /// 返回新行的 `MessageEntry.id`（§5.7 MessageId）。
     pub fn try_append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
-        self.append_message_internal(message, false)
+        self.append_message_internal(message, false, None)
     }
 
     /// 追加 message 到指定 session 的 transcript（插件多实例路由）。
@@ -566,6 +694,7 @@ impl SessionManager {
             let id = generate_entry_id();
             let now = iso_ts_now()?;
             let sync = Self::message_sync_level(&message);
+            let message_for_title = message.clone();
             let entry = TranscriptEntry::Message(MessageEntry {
                 id: Some(id.clone()),
                 parent_id: None,
@@ -573,6 +702,7 @@ impl SessionManager {
                 message,
             });
             append_entry_with_sync(&path, &entry, sync)?;
+            let _ = self.ensure_title_for_session_id(session_id, &message_for_title);
             Ok(id)
         })
     }
@@ -633,6 +763,27 @@ impl SessionManager {
                 extra,
             });
             append_entry(&path, &entry)
+        })
+    }
+
+    /// 按 `message.id` 重写指定 session transcript 中 assistant message 的 `summary_title`。
+    ///
+    /// 用于异步 utility 标题生成完成后，覆盖先前持久化的规则占位标题。
+    pub fn rewrite_message_summary_title_in_session(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        summary_title: &str,
+    ) -> Result<usize, AppError> {
+        let path = self.transcript_path(session_id);
+        self.with_transcript_lock(&path, || {
+            rewrite_message_summary_titles_by_id(
+                &path,
+                &[MessageSummaryTitleRewrite {
+                    message_id: message_id.to_string(),
+                    summary_title: summary_title.to_string(),
+                }],
+            )
         })
     }
 
@@ -764,6 +915,17 @@ impl SessionManager {
         read_entries_tail(&path, cap)
     }
 
+    pub fn get_entries_before(
+        &self,
+        cap: usize,
+        before: Option<u64>,
+    ) -> Result<TranscriptPage, AppError> {
+        let path = self
+            .current_transcript_path()?
+            .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
+        read_entries_tail_before(&path, cap, before)
+    }
+
     /// get_entry 代理到当前会话 transcript。
     pub fn get_entry(&self, id: &str) -> Result<Option<TranscriptEntry>, AppError> {
         let path = self
@@ -809,6 +971,18 @@ impl SessionManager {
             return Err(AppError::Config(format!("会话不存在: {session_id}")));
         }
         read_entries_tail(&self.transcript_path(session_id), cap)
+    }
+
+    pub fn get_entries_before_for_session(
+        &self,
+        session_id: &str,
+        cap: usize,
+        before: Option<u64>,
+    ) -> Result<TranscriptPage, AppError> {
+        if self.get_session_by_id(session_id)?.is_none() {
+            return Err(AppError::Config(format!("会话不存在: {session_id}")));
+        }
+        read_entries_tail_before(&self.transcript_path(session_id), cap, before)
     }
 
     pub fn get_entry_for_session(
@@ -870,6 +1044,14 @@ impl SessionManager {
 impl MessageAppendSink for SessionManager {
     fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
         SessionManager::append_message(self, value)
+    }
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        SessionManager::append_message_with_id(self, value, forced_id)
     }
 }
 

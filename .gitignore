@@ -32,6 +32,11 @@ build/
 ### VS Code ###
 .vscode/
 
+### Cursor ###
+/.cursor/plans/
+node_modules/
+test-stuff/
+
 ### Env (API keys, do not commit) ###
 .env
 /src/main/resources/application-api.properties

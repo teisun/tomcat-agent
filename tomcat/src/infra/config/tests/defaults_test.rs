@@ -41,7 +41,7 @@ fn llm_files_default_expires_after_seconds_is_86400() {
     let cfg = AppConfig::default();
     assert_eq!(cfg.llm.files.expires_after_seconds, 86_400);
     assert_eq!(cfg.llm.vision_model, None);
-    assert_eq!(cfg.llm.title_model, None);
+    assert_eq!(cfg.llm.title_model.as_deref(), Some("utility-flash"));
 }
 
 #[test]
@@ -61,6 +61,12 @@ fn plugin_config_defaults_are_wired_into_app_config() {
     assert_eq!(cfg.plugin.interrupt_budget, 5_000_000);
     assert_eq!(cfg.plugin.event_channel_capacity, 64);
     assert_eq!(cfg.plugin.idle_ttl_ms, 5 * 60 * 1000);
+}
+
+#[test]
+fn ask_question_timeout_defaults_to_no_timeout() {
+    let cfg = AppConfig::default();
+    assert_eq!(cfg.ask_question.timeout_ms, 0);
 }
 
 #[test]

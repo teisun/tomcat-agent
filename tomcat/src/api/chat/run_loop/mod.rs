@@ -8,12 +8,12 @@ use tracing::{info, warn};
 use crate::core::agent_loop::AgentRunOutcome;
 use crate::core::compaction::apply::check_before_request;
 use crate::core::llm::resolver::validate_capabilities;
-use crate::core::llm::ChatMessage;
-use crate::core::llm::LlmScene;
+use crate::core::llm::{degrade_unsupported_multimodal, ChatMessage, LlmScene};
 use crate::core::session::manager::{
     build_context_from_state, estimate_msg_chars, init_context_state,
 };
 use crate::infra::error::AppError;
+use crate::infra::events::AgentEvent;
 use crate::infra::ScopedEventEmitter;
 use crate::{AgentLoop, AgentLoopConfig, CheckpointKind};
 
@@ -30,6 +30,7 @@ mod cleanup;
 mod input;
 mod persist;
 mod rehydrate;
+mod session_title;
 mod thinking_persist;
 mod workspace_state;
 
@@ -37,6 +38,7 @@ use self::background::spawn_completion_subscriber;
 use self::cleanup::ensure_session;
 use self::persist::push_turn_message;
 use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
+use self::session_title::maybe_spawn_semantic_session_title;
 use self::workspace_state::compute_workspace_state;
 
 #[cfg(test)]
@@ -460,6 +462,17 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             *guard = CancellationToken::new();
             guard.clone()
         };
+        ctx.agent_registry
+            .rearm_root(
+                &ctx.session_runtime
+                    .session
+                    .current_session_id()?
+                    .ok_or_else(|| AppError::Config("无当前会话".to_string()))?,
+                turn_token.child_token(),
+            )
+            .map_err(|error| {
+                AppError::Config(format!("agent_registry root rearm 失败: {error}"))
+            })?;
 
         let next_system_text = build_system_text(ctx, context_budget_chars).await;
         sync_context_state_system_prompt_len(
@@ -555,9 +568,17 @@ pub async fn run_chat_turn_with_message(
         .get_session(ctx.session_runtime.session.current_session_key())?;
     let main_call = ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
     let compaction_call = ctx.resolve_call(LlmScene::Compaction, entry.as_ref())?;
+    // Title 模型解析软失败：utility-flash 未配置/未解析时静默回退规则占位，不阻塞主 chat 流（计划 §212）。
+    let title_call = ctx.resolve_call(LlmScene::Title, entry.as_ref()).ok();
     let main_provider = main_call.provider_impl.clone();
     let compaction_provider = compaction_call.provider_impl.clone();
+    let title_provider = title_call.as_ref().map(|c| c.provider_impl.clone());
     let model = main_call.model.clone();
+    let title_model = title_call
+        .as_ref()
+        .map(|c| c.model.clone())
+        .unwrap_or_default();
+    let thinking_level = Some(ctx.global_services.model_thinking.get(&model));
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
 
@@ -586,6 +607,18 @@ pub async fn run_chat_turn_with_message(
         &planned_messages,
         context_state,
     )?;
+    if let Some(title_provider_arc) = title_provider.as_ref() {
+        if !title_model.is_empty() {
+            maybe_spawn_semantic_session_title(
+                &ctx.session_runtime.session,
+                &appended_messages,
+                title_provider_arc.clone(),
+                title_model.clone(),
+                root_event_emitter.clone(),
+                session_id.clone(),
+            );
+        }
+    }
     info!(
         target: "tomcat_chat_diag",
         phase = "chat_after_user_append",
@@ -617,7 +650,7 @@ pub async fn run_chat_turn_with_message(
         LlmScene::Main,
         &main_call.model,
         &main_call.capabilities,
-        &messages,
+        &planned_messages,
     ) {
         for (message, account_chars) in appended_messages {
             append_failed_turn_message(context_state, message, account_chars);
@@ -626,7 +659,19 @@ pub async fn run_chat_turn_with_message(
             .session_runtime
             .session
             .persist_context_observability(context_state);
+        let error_message = error.to_string();
+        let _ = root_event_emitter.emit(AgentEvent::AgentStart);
+        let _ = root_event_emitter.emit(AgentEvent::AgentEnd {
+            messages: Vec::new(),
+            error: Some(error_message),
+        });
         return Ok(AgentRunOutcome::Failed(error));
+    }
+    let mut messages = messages;
+    if let std::borrow::Cow::Owned(degraded) =
+        degrade_unsupported_multimodal(&messages, &main_call.capabilities)
+    {
+        messages = degraded;
     }
 
     let render_cli_output = !ctx.session_runtime.suppress_cli_output;
@@ -636,10 +681,13 @@ pub async fn run_chat_turn_with_message(
         max_tool_rounds: usize::MAX,
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,
         model,
+        thinking_level,
         session_id: session_id.clone(),
         tool_definitions: build_tool_definitions(ctx).await,
         context_config: context_config.clone(),
         compaction_provider: Some(compaction_provider.clone()),
+        title_provider: title_provider.clone(),
+        title_model,
         agent_trail_dir: ctx
             .scope_services
             .agent_trail_dir
@@ -671,6 +719,7 @@ pub async fn run_chat_turn_with_message(
     agent_loop = agent_loop.with_web_fetch_runtime(ctx.global_services.web_fetch_runtime.clone());
     agent_loop = agent_loop.with_web_search_runtime(ctx.global_services.web_search_runtime.clone());
     agent_loop = agent_loop.with_todos_runtime(ctx.session_runtime.todos_runtime.clone());
+    agent_loop = agent_loop.with_session_manager(ctx.session_runtime.session.clone());
     agent_loop =
         agent_loop.with_shared_follow_up_queue(ctx.session_runtime.follow_up_queue.clone());
     agent_loop = agent_loop.with_shared_steering_queue(ctx.session_runtime.steering_queue.clone());

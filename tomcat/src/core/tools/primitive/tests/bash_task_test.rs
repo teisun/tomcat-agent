@@ -229,14 +229,15 @@ async fn wait_for_change_returns_finished_on_natural_exit() {
     // NewOutput 与 Finished 都可接受（race 上 pump 可能先 flush "done\n"）；
     // 二次 wait 必须能拿到 Finished。
     if wake == WakeReason::NewOutput {
-        // 再等一次：现在 task 已 Finished。
-        let info = reg.list();
-        assert!(matches!(info[0].status, BashTaskStatus::Finished { .. }));
+        // 再等一次：现在 task 最终必须收敛到 Finished，再读状态断言，避免
+        // stdout flush 先于 wait 任务翻终态时的瞬时竞态。
         let wake2 = reg
             .wait_for_change(&ticket.task_id, Some(u64::MAX))
             .await
             .expect("wait2");
         assert_eq!(wake2, WakeReason::Finished);
+        let info = reg.list();
+        assert!(matches!(info[0].status, BashTaskStatus::Finished { .. }));
     } else {
         assert_eq!(wake, WakeReason::Finished);
     }

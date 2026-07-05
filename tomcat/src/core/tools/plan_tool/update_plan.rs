@@ -171,6 +171,21 @@ pub async fn execute(
                 .await?;
                 verify_json = verify_payload;
                 state_after
+            } else if code_review_summary.aborted {
+                warnings.push(
+                    "code review 未能执行(aborted)，按 reviewer 不可用处理，转交 verifier"
+                        .into(),
+                );
+                let (state_after, verify_payload) = run_verifier_after_code_review(
+                    runtime,
+                    &target_plan_id,
+                    &path,
+                    &mut plan,
+                    &mut warnings,
+                )
+                .await?;
+                verify_json = verify_payload;
+                state_after
             } else {
                 warnings.push(format!(
                     "code review verdict={}，plan 保持 executing，等待主 Agent 修复或重新 complete",
@@ -219,7 +234,7 @@ pub async fn execute(
     if matches!(plan_state_before, PlanFileState::Completed)
         && matches!(plan_state_after, PlanFileState::Pending)
     {
-        runtime.set_mode_pending(target_plan_id.clone());
+        runtime.set_mode_pending_with_path(target_plan_id.clone(), Some(path.clone()));
     }
 
     let event_payload = crate::infra::events::PlanEventPayload {
@@ -227,11 +242,20 @@ pub async fn execute(
         path: crate::infra::platform::format_home_path(&path),
         state: plan_state_after.as_str().to_string(),
     };
+    if !(matches!(plan_state_before, PlanFileState::Completed)
+        && matches!(plan_state_after, PlanFileState::Pending))
+    {
+        runtime.write_transcript_custom(serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_UPDATE,
+            "plan_id": event_payload.plan_id,
+            "path": event_payload.path,
+            "state": event_payload.state,
+        }));
+    }
     runtime.write_transcript_custom(serde_json::json!({
-        "event": crate::infra::wire::WIRE_PLAN_UPDATE,
-        "plan_id": event_payload.plan_id,
-        "path": event_payload.path,
-        "state": event_payload.state,
+        "event": crate::infra::wire::WIRE_PLAN_TODOS,
+        "plan_id": target_plan_id,
+        "todos": items_json(&plan.frontmatter.todos),
     }));
 
     Ok(serde_json::json!({
@@ -266,7 +290,7 @@ async fn run_verifier_after_code_review(
     if allow_complete {
         plan.frontmatter.state = PlanFileState::Completed;
         write_plan(path, plan, runtime.lock_timeout_ms())?;
-        runtime.set_mode_completed(target_plan_id.to_string());
+        runtime.set_mode_completed_with_path(target_plan_id.to_string(), Some(path.to_path_buf()));
         let _ = runtime.finalize_completed_to_chat();
         Ok((PlanFileState::Completed, verify_json))
     } else {

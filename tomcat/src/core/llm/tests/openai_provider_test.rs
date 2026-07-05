@@ -9,9 +9,16 @@
 //! - `chat_real_request_response_print`：`#[ignore]` 真实 API 冒烟。
 
 use super::*;
+use crate::core::llm::multimodal::{
+    UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
+};
 use crate::core::llm::tests::mocks::load_dotenv;
-use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, ChatRequest};
-use crate::core::llm::{Capabilities, Credential, ModelEntry};
+use crate::core::llm::types::{
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ContextReference,
+};
+use crate::core::llm::{
+    thinking_policy::resolve_request_fields, Capabilities, Credential, ModelEntry, ThinkingLevel,
+};
 use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::LlmConfig;
 
@@ -27,6 +34,21 @@ fn deepseek_entry(api_key_env: &str) -> ModelEntry {
         context_window: None,
         cost: None,
         thinking_format: Some("deepseek".to_string()),
+    }
+}
+
+fn openai_entry(api_key_env: &str) -> ModelEntry {
+    ModelEntry {
+        id: "gpt-5.4".to_string(),
+        model_name: None,
+        api: "openai".to_string(),
+        provider: "openai".to_string(),
+        api_key_env: Some(api_key_env.to_string()),
+        base_url: Some("https://api.openai.com".to_string()),
+        capabilities: Capabilities::default(),
+        context_window: None,
+        cost: None,
+        thinking_format: Some("openai".to_string()),
     }
 }
 
@@ -82,6 +104,7 @@ fn openai_provider_effective_model_maps_catalog_id_to_model_name() {
         max_tokens: Some(10),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     assert_eq!(provider.effective_model(&request), "gpt-5.4");
@@ -133,11 +156,10 @@ fn is_retriable_returns_false_for_non_llm_error() {
     )));
 }
 
-/// Completions 路径不支持多模态附件：含非 InputText part 的 messages 必须立刻拒绝，
-/// 错误文案必须把诊断指向 `provider=openai-responses` 以引导调用方迁移；并且要
-/// **不可重试**（不被 `is_retriable` 命中），避免在 Agent Loop 的退避循环里反复打。
+/// Completions 路径是纯文本通道：历史里的图片 / 文件附件应降级为占位符文本，
+/// 而不是把整轮请求硬拒绝。
 #[test]
-fn parts_with_image_returns_structured_error() {
+fn parts_with_image_degrade_to_placeholder_text() {
     use base64::Engine;
     const TINY_PNG_B64: &str =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
@@ -148,25 +170,72 @@ fn parts_with_image_returns_structured_error() {
     std::io::Write::write_all(&mut tmp, &bytes).unwrap();
     let part = ChatMessageContentPart::image_b64("image/png", tmp.path()).expect("image_b64 ok");
     let msgs = vec![ChatMessage::user_with_parts(vec![
-        ChatMessageContentPart::text("see this:"),
+        ChatMessageContentPart::text("see this: "),
         part,
     ])];
-    let err = reject_multimodal_parts(&msgs).expect_err("应拒绝多模态 part");
-    let s = err.to_string();
-    assert!(
-        s.contains("openai-responses"),
-        "错误文案应引导改用 openai-responses，实际: {}",
-        s
-    );
-    assert!(
-        s.contains("不支持多模态附件"),
-        "错误文案应说明拒绝原因，实际: {}",
-        s
-    );
-    assert!(
-        !OpenAiProvider::is_retriable(&err),
-        "多模态拒绝错误必须是不可重试的"
-    );
+    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalized.as_ref();
+    let expected = format!("see this: {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER}");
+    assert!(matches!(
+        &normalized[0].content,
+        Some(ChatMessageContent::Text(text))
+            if text == &expected
+    ));
+}
+
+#[test]
+fn normalize_for_completions_degrades_mixed_image_and_file_history() {
+    let msgs = vec![
+        ChatMessage::user_with_parts(vec![
+            ChatMessageContentPart::text("image "),
+            ChatMessageContentPart::image_file_id("file-image").unwrap(),
+        ]),
+        ChatMessage::user_with_parts(vec![
+            ChatMessageContentPart::text("file "),
+            ChatMessageContentPart::file_file_id("file-pdf", Some("guide.pdf".to_string()))
+                .unwrap(),
+        ]),
+    ];
+
+    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalized.as_ref();
+    let expected_image = format!("image {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER}");
+    let expected_file = format!("file {UNSUPPORTED_FILE_INPUT_PLACEHOLDER}");
+    assert_eq!(normalized.len(), 2);
+    assert!(matches!(
+        &normalized[0].content,
+        Some(ChatMessageContent::Text(text))
+            if text == &expected_image
+    ));
+    assert!(matches!(
+        &normalized[1].content,
+        Some(ChatMessageContent::Text(text))
+            if text == &expected_file
+    ));
+}
+
+#[test]
+fn normalize_for_completions_flattens_references_into_text() {
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("before "),
+        ChatMessageContentPart::reference(ContextReference::selection(
+            "src/lib.rs",
+            "lib.rs:10-12",
+            Some(10),
+            Some(12),
+            Some("fn hello() {}".to_string()),
+        )),
+        ChatMessageContentPart::text(" after"),
+    ])];
+    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalized.as_ref();
+    assert_eq!(normalized.len(), 1);
+    assert!(matches!(
+        &normalized[0].content,
+        Some(ChatMessageContent::Text(text))
+            if text
+                == "before <selection file=\"src/lib.rs\" lines=\"10-12\">\nfn hello() {}\n</selection> after"
+    ));
 }
 
 /// 依赖 DEEPSEEK_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。
@@ -197,6 +266,7 @@ async fn chat_real_request_response_print() {
         max_tokens: Some(10),
         stream: Some(false),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
 
@@ -211,4 +281,66 @@ async fn chat_real_request_response_print() {
             );
         }
     }
+}
+
+#[test]
+fn thinking_level_override_updates_openai_reasoning_effort() {
+    let entry = openai_entry("OPENAI_API_KEY");
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "openai".to_string(),
+        env_name: "OPENAI_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider = OpenAiProvider::new(&entry, &runtime, &credential).unwrap();
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user("hello")],
+        model: entry.request_model_name().to_string(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(false),
+        model_override: None,
+        thinking_level: Some(ThinkingLevel::Low),
+        tools: None,
+    };
+
+    let cfg = provider.thinking_cfg_for_request(&request);
+    let fields = resolve_request_fields(
+        &cfg,
+        provider.thinking_format_for_model(&provider.effective_model(&request)),
+    );
+
+    assert_eq!(cfg.level, "low");
+    assert_eq!(fields.reasoning_effort.as_deref(), Some("low"));
+}
+
+#[test]
+fn thinking_level_override_updates_deepseek_reasoning_effort() {
+    let entry = deepseek_entry("DEEPSEEK_API_KEY");
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "deepseek".to_string(),
+        env_name: "DEEPSEEK_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider = OpenAiProvider::new(&entry, &runtime, &credential).unwrap();
+    let request = ChatRequest {
+        messages: vec![ChatMessage::user("hello")],
+        model: entry.request_model_name().to_string(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(false),
+        model_override: None,
+        thinking_level: Some(ThinkingLevel::Xhigh),
+        tools: None,
+    };
+
+    let cfg = provider.thinking_cfg_for_request(&request);
+    let fields = resolve_request_fields(
+        &cfg,
+        provider.thinking_format_for_model(&provider.effective_model(&request)),
+    );
+
+    assert_eq!(cfg.level, "xhigh");
+    assert_eq!(fields.reasoning_effort.as_deref(), Some("max"));
 }

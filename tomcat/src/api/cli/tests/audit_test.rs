@@ -42,6 +42,19 @@ fn parse_audit_line_matches_hostcall() {
 }
 
 #[test]
+fn parse_audit_line_handles_multibyte_detail_without_panic() {
+    let detail = "修".repeat(90);
+    let line = format!(
+        "2025-03-10T12:00:00Z  INFO audit primitive operation={detail} success=true"
+    );
+    let entry = parse_audit_line(&line, 3).unwrap();
+    assert_eq!(entry.audit_type, wire::WIRE_AUDIT_PRIMITIVE);
+    assert_eq!(entry.success, "OK");
+    assert!(entry.detail.starts_with("operation="));
+    assert!(entry.detail.chars().count() <= 80);
+}
+
+#[test]
 fn parse_audit_line_returns_none_for_non_audit() {
     let line = "2025-03-10T12:00:00Z  INFO some other log line";
     assert!(parse_audit_line(line, 0).is_none());

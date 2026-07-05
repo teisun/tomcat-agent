@@ -1,0 +1,253 @@
+import * as vscode from "vscode";
+
+import { PARTICIPANT_ID } from "../constants";
+import { isRecord, parseTodos } from "../shared/todos";
+import type { TomcatMessenger } from "./TomcatMessenger";
+import type { GetMessagesParams, ListSessionsScope, ResponseFrame } from "./wire";
+
+export interface SessionSummary {
+  busy: boolean;
+  interrupted?: boolean;
+  isCurrent: boolean;
+  sessionId: string;
+  title: string | null;
+  updatedAt: number | null;
+}
+
+export interface SessionListPayload {
+  activeSessionId: string | null;
+  scope: ListSessionsScope;
+  sessions: SessionSummary[];
+}
+
+export interface SessionStatePayload {
+  busy: boolean;
+  contextRatio?: number | null;
+  cwd?: string | null;
+  interrupted?: boolean;
+  mode?: string | null;
+  model?: string | null;
+  planId?: string | null;
+  planPath?: string | null;
+  planState?: string | null;
+  planTodos?: WebviewTodo[];
+  sessionId: string;
+  sessionKey?: string | null;
+  sessionTodos?: WebviewTodo[];
+  thinkingLevel?: string | null;
+}
+
+export interface WebviewTodo {
+  content: string;
+  id: string;
+  status: "cancelled" | "completed" | "in_progress" | "pending";
+}
+
+export interface SessionHistoryPayload {
+  hasMore?: boolean;
+  header?: unknown;
+  messages: unknown[];
+  nextCursor?: string | null;
+  sessionId: string;
+  upToSeq?: string | null;
+}
+
+function readSessionIdFromHistoryTurn(turn: unknown): string | undefined {
+  if (!isRecord(turn) || turn.participant !== PARTICIPANT_ID || !isRecord(turn.result)) {
+    return undefined;
+  }
+
+  const metadata = turn.result.metadata;
+  return isRecord(metadata) && typeof metadata.sessionId === "string"
+    ? metadata.sessionId
+    : undefined;
+}
+
+function requireSessionId(response: ResponseFrame): string {
+  if (typeof response.sessionId === "string") {
+    return response.sessionId;
+  }
+
+  if (isRecord(response.payload) && typeof response.payload.sessionId === "string") {
+    return response.payload.sessionId;
+  }
+
+  throw new Error("Tomcat response did not include a sessionId");
+}
+
+export class SessionRouter {
+  private bootstrapSessionId: string | null = null;
+
+  constructor(
+    private readonly messenger: TomcatMessenger,
+    private readonly getDefaultCwd: () => string | undefined,
+  ) {}
+
+  setBootstrapSessionId(sessionId: string | null): void {
+    this.bootstrapSessionId = sessionId;
+  }
+
+  takeBootstrapSessionId(): string | null {
+    const value = this.bootstrapSessionId;
+    this.bootstrapSessionId = null;
+    return value;
+  }
+
+  clearBootstrapSessionId(): void {
+    this.bootstrapSessionId = null;
+  }
+
+  buildResultMetadata(sessionId: string): vscode.ChatResult["metadata"] {
+    return { sessionId };
+  }
+
+  extractSessionId(
+    history: readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn)[],
+  ): string | undefined {
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const sessionId = readSessionIdFromHistoryTurn(history[index]);
+      if (sessionId) {
+        return sessionId;
+      }
+    }
+
+    return undefined;
+  }
+
+  async resolveSessionId(
+    history: readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn)[],
+  ): Promise<string> {
+    const historySessionId = this.extractSessionId(history);
+    if (historySessionId) {
+      return historySessionId;
+    }
+
+    const bootstrapSessionId = this.takeBootstrapSessionId();
+    if (bootstrapSessionId) {
+      return bootstrapSessionId;
+    }
+
+    return this.newSession();
+  }
+
+  async newSession(cwd = this.getDefaultCwd()): Promise<string> {
+    const response = await this.messenger.request({
+      params: {
+        cwd,
+      },
+      type: "new_session",
+    });
+    return requireSessionId(response);
+  }
+
+  async switchSession(sessionId: string): Promise<string> {
+    const response = await this.messenger.request({
+      sessionId,
+      type: "switch_session",
+    });
+    return requireSessionId(response);
+  }
+
+  async closeSession(sessionId: string): Promise<boolean> {
+    const response = await this.messenger.request({
+      sessionId,
+      type: "close_session",
+    });
+    return isRecord(response.payload) ? response.payload.closed === true : response.success;
+  }
+
+  async listSessions(scope: ListSessionsScope = "live"): Promise<SessionListPayload> {
+    const response = await this.messenger.request({
+      scope,
+      type: "list_sessions",
+    });
+    const payload = response.payload;
+
+    if (!isRecord(payload)) {
+      return {
+        activeSessionId: null,
+        scope,
+        sessions: [],
+      };
+    }
+
+    return {
+      activeSessionId:
+        typeof payload.activeSessionId === "string" ? payload.activeSessionId : null,
+      scope,
+      sessions: Array.isArray(payload.sessions)
+        ? payload.sessions
+            .filter(isRecord)
+            .map((session) => ({
+              busy: session.busy === true,
+              interrupted: session.interrupted === true,
+              isCurrent: session.isCurrent === true,
+              sessionId: String(session.sessionId ?? ""),
+              title:
+                typeof session.title === "string" && session.title.length > 0
+                  ? session.title
+                  : null,
+              updatedAt:
+                typeof session.updatedAt === "number" ? session.updatedAt : null,
+            }))
+            .filter((session) => session.sessionId.length > 0)
+        : [],
+    };
+  }
+
+  async getState(sessionId?: string): Promise<SessionStatePayload> {
+    const response = await this.messenger.request({
+      sessionId,
+      type: "get_state",
+    });
+    const payload = response.payload;
+
+    if (!isRecord(payload) || typeof payload.sessionId !== "string") {
+      throw new Error("Tomcat get_state payload is missing sessionId");
+    }
+
+    return {
+      busy: payload.busy === true,
+      contextRatio:
+        typeof payload.contextUtilizationRatio === "number"
+          ? payload.contextUtilizationRatio
+          : null,
+      cwd: typeof payload.cwd === "string" ? payload.cwd : null,
+      interrupted: payload.interrupted === true,
+      mode: typeof payload.mode === "string" ? payload.mode : null,
+      model: typeof payload.model === "string" ? payload.model : null,
+      planId: typeof payload.planId === "string" ? payload.planId : null,
+      planPath: typeof payload.planPath === "string" ? payload.planPath : null,
+      planState:
+        typeof payload.planState === "string" ? payload.planState : null,
+      planTodos: parseTodos(payload.planTodos),
+      sessionId: payload.sessionId,
+      sessionKey:
+        typeof payload.sessionKey === "string" ? payload.sessionKey : null,
+      sessionTodos: parseTodos(payload.sessionTodos),
+      thinkingLevel:
+        typeof payload.thinkingLevel === "string" ? payload.thinkingLevel : null,
+    };
+  }
+
+  async getMessages(
+    sessionId?: string,
+    params: GetMessagesParams = {},
+  ): Promise<SessionHistoryPayload> {
+    const response = await this.messenger.sendGetMessages(sessionId, params);
+    const payload = response.payload;
+
+    if (!isRecord(payload) || typeof payload.sessionId !== "string") {
+      throw new Error("Tomcat get_messages payload is missing sessionId");
+    }
+
+    return {
+      hasMore: payload.hasMore === true,
+      header: payload.header,
+      messages: Array.isArray(payload.messages) ? payload.messages : [],
+      nextCursor: typeof payload.nextCursor === "string" ? payload.nextCursor : null,
+      sessionId: payload.sessionId,
+      upToSeq: typeof payload.upToSeq === "string" ? payload.upToSeq : null,
+    };
+  }
+}

@@ -672,7 +672,9 @@ async fn tui_two_phase_attachment_order_interface() {
     ));
     assert!(matches!(
         &parts[1],
-        ChatMessageContentPart::InputFile { file_id: Some(id), data: None, .. } if id == "file-tui-phase"
+        ChatMessageContentPart::InputFile {
+            source: crate::core::llm::FileSource::Uploaded(ref uploaded),
+        } if uploaded.file_id == "file-tui-phase"
     ));
     server.shutdown().await;
 }

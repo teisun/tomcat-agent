@@ -22,7 +22,7 @@ use crate::core::llm::replay_policy::{
 };
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatResponse,
-    ChatResponseChoice, ReasoningContinuation, ReasoningFormat,
+    ChatResponseChoice, FileSource, ImageSource, ReasoningContinuation, ReasoningFormat,
 };
 
 pub(super) const MAX_OUTPUT_TOKENS_NOTICE: &str = "达到 max_output_tokens，回答可能未完成";
@@ -365,7 +365,14 @@ fn extract_text(content: &Option<ChatMessageContent>) -> Option<String> {
         Some(ChatMessageContent::Parts(parts)) => {
             let s: String = parts
                 .iter()
-                .filter_map(|p| p.as_text().map(str::to_string))
+                .filter_map(|part| match part {
+                    ChatMessageContentPart::InputText { text } => Some(text.clone()),
+                    ChatMessageContentPart::InputReference { reference } => {
+                        Some(reference.to_prompt_text())
+                    }
+                    ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputFile { .. } => None,
+                })
                 .collect::<Vec<_>>()
                 .join("");
             if s.is_empty() {
@@ -380,62 +387,71 @@ fn extract_text(content: &Option<ChatMessageContent>) -> Option<String> {
 
 /// 把单个 [`ChatMessageContentPart`] 翻译成 Responses 协议的 `content[i]` JSON。
 ///
-/// `file_id` 通道优先（已上传），否则走 inline `data:` URL；两个通道都缺时退化为
-/// 形状最小的占位（`{type: input_image}` / `{type: input_file}`，由上游 API 报错）。
+/// 类型层已确保：图片/文件的 inline 与 file_id 通道二选一，不存在“半条 part”占位。
 fn part_to_responses_value(p: &ChatMessageContentPart) -> Value {
     match p {
         ChatMessageContentPart::InputText { text } => {
             json!({"type": "input_text", "text": text})
         }
-        ChatMessageContentPart::InputImage {
-            mime_type,
-            data,
-            file_id,
-            detail,
-        } => {
+        ChatMessageContentPart::InputReference { reference } => {
+            json!({"type": "input_text", "text": reference.to_prompt_text()})
+        }
+        ChatMessageContentPart::InputImage { source, detail } => {
             let mut v = json!({"type": "input_image"});
-            if let Some(id) = file_id {
-                v["file_id"] = Value::String(id.clone());
-            } else if let (Some(mt), Some(b64)) = (mime_type, data) {
-                v["image_url"] = Value::String(format!("data:{};base64,{}", mt, b64));
+            match source {
+                ImageSource::Inline(inline) => {
+                    v["image_url"] =
+                        Value::String(format!("data:{};base64,{}", inline.mime_type, inline.data));
+                }
+                ImageSource::Uploaded(uploaded) => {
+                    v["file_id"] = Value::String(uploaded.file_id.clone());
+                }
             }
             if let Some(d) = detail {
                 v["detail"] = Value::String(d.clone());
             }
             v
         }
-        ChatMessageContentPart::InputFile {
-            filename,
-            mime_type,
-            data,
-            file_id,
-        } => {
+        ChatMessageContentPart::InputFile { source } => {
             let mut v = json!({"type": "input_file"});
-            if let Some(name) = filename {
-                v["filename"] = Value::String(name.clone());
-            }
-            if let Some(id) = file_id {
-                v["file_id"] = Value::String(id.clone());
-            } else if let (Some(b64), Some(mt)) = (data, mime_type) {
-                v["file_data"] = Value::String(format!("data:{};base64,{}", mt, b64));
+            match source {
+                FileSource::Inline(inline) => {
+                    v["filename"] = Value::String(inline.filename.clone());
+                    v["file_data"] =
+                        Value::String(format!("data:{};base64,{}", inline.mime_type, inline.data));
+                }
+                FileSource::Uploaded(uploaded) => {
+                    v["file_id"] = Value::String(uploaded.file_id.clone());
+                }
             }
             v
         }
     }
 }
 
-/// 仅 `user` 角色调用：把 content 翻译为 Responses 的 `content` 数组（input_text /
-/// input_image / input_file）。空 parts 兜底成单个空 input_text。
+/// 仅 `user` 角色调用：把文本 + 引用 flatten 成单个 `input_text`，再把附件追加为
+/// `input_image` / `input_file` part。空 parts 兜底成单个空 input_text。
 fn user_content_parts(content: &Option<ChatMessageContent>) -> Vec<Value> {
     match content {
         Some(ChatMessageContent::Text(s)) => {
             vec![json!({"type": "input_text", "text": s})]
         }
         Some(ChatMessageContent::Parts(parts)) => {
-            let mut out: Vec<Value> = parts.iter().map(part_to_responses_value).collect();
-            if out.is_empty() {
-                out.push(json!({"type": "input_text", "text": ""}));
+            let mut text = String::new();
+            let mut out: Vec<Value> = Vec::with_capacity(parts.len().max(1));
+            for part in parts {
+                match part {
+                    ChatMessageContentPart::InputText { text: chunk } => text.push_str(chunk),
+                    ChatMessageContentPart::InputReference { reference } => {
+                        text.push_str(&reference.to_prompt_text());
+                    }
+                    ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputFile { .. } => {
+                        out.push(part_to_responses_value(part));
+                    }
+                }
             }
+            out.insert(0, json!({"type": "input_text", "text": text}));
             out
         }
         None => vec![json!({"type": "input_text", "text": ""})],
@@ -447,7 +463,16 @@ fn user_content_parts(content: &Option<ChatMessageContent>) -> Vec<Value> {
 /// 设计取舍：这些角色在 Responses 协议里 wire 形态主要承载文本与 function_call，
 /// 强行透传图片/文件会触发 API 4xx；warn-and-drop 可保留 wire 兼容、避免主链路中断。
 fn warn_drop_non_text_parts(role: ChatMessageRole, parts: &[ChatMessageContentPart]) {
-    let non_text = parts.iter().filter(|p| p.is_non_text()).count();
+    let non_text = parts
+        .iter()
+        .filter(|part| {
+            matches!(
+                part,
+                ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputFile { .. }
+            )
+        })
+        .count();
     if non_text > 0 {
         warn!(
             role = ?role,

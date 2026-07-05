@@ -12,10 +12,13 @@
 //! - `ResponsesStream`：SSE 帧切分、NDJSON fallback；上层与 `OpenAiProvider` 同 Stream 契约。
 
 use super::*;
+use crate::core::llm::multimodal::{
+    UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
+};
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::tests::mocks::{MockHttpServer, ScriptedHttpResponse};
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContentPart, ChatRequest, StreamEvent, ThinkingSource,
+    ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, StreamEvent, ThinkingSource,
 };
 use crate::core::llm::{Capabilities, Credential, ModelEntry};
 use crate::infra::error::{
@@ -51,7 +54,10 @@ fn responses_entry() -> ModelEntry {
 }
 
 fn provider_from_cfg(cfg: LlmConfig) -> OpenAiResponsesProvider {
-    let entry = responses_entry();
+    provider_from_entry(responses_entry(), cfg)
+}
+
+fn provider_from_entry(entry: ModelEntry, cfg: LlmConfig) -> OpenAiResponsesProvider {
     let runtime = cfg.runtime();
     let credential = Credential {
         provider: "openai".to_string(),
@@ -597,6 +603,7 @@ fn responses_build_request_body_uses_model_name_when_present() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -623,6 +630,7 @@ fn responses_build_request_body_maps_catalog_id_to_model_name() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -649,6 +657,7 @@ fn responses_build_request_body_without_model_name_uses_id() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = provider.build_request_body(&req, true);
@@ -673,6 +682,7 @@ fn responses_build_request_body_disabled_thinking_omits_reasoning_field() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -705,6 +715,7 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -744,6 +755,7 @@ fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -773,6 +785,7 @@ fn responses_build_request_body_persist_true_writes_reasoning_summary_auto() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -802,6 +815,7 @@ fn responses_build_request_body_show_and_persist_false_still_writes_reasoning_su
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -827,6 +841,7 @@ fn responses_build_request_body_continuity_enabled_requests_encrypted_content() 
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -868,6 +883,7 @@ fn openai_responses_roundtrip_replays_reasoning_items() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -914,6 +930,7 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body(&req, true);
@@ -971,6 +988,7 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
         max_tokens: None,
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     };
     let body = p.build_request_body_with_hint(&req, true, false);
@@ -1615,6 +1633,7 @@ fn responses_stream_test_request() -> ChatRequest {
         max_tokens: Some(16),
         stream: Some(true),
         model_override: None,
+        thinking_level: None,
         tools: None,
     }
 }
@@ -1893,6 +1912,32 @@ fn user_image_b64_renders_input_image_data_url() {
 }
 
 #[test]
+fn user_references_flatten_into_single_input_text_and_keep_attachments_afterwards() {
+    let msg = ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("before "),
+        ChatMessageContentPart::reference(ContextReference::selection(
+            "src/lib.rs",
+            "lib.rs:10-12",
+            Some(10),
+            Some(12),
+            Some("fn hello() {}".to_string()),
+        )),
+        ChatMessageContentPart::text(" between "),
+        ChatMessageContentPart::reference(ContextReference::file("docs/guide.md", "guide.md")),
+        ChatMessageContentPart::image_file_id("img-file").expect("image file id"),
+    ]);
+    let (_ins, input) = build_responses_input_test(&[msg]);
+    let content = &input[0]["content"];
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(
+        content[0]["text"],
+        "before <selection file=\"src/lib.rs\" lines=\"10-12\">\nfn hello() {}\n</selection> between [file reference] docs/guide.md"
+    );
+    assert_eq!(content[1]["type"], "input_image");
+    assert_eq!(content[1]["file_id"], "img-file");
+}
+
+#[test]
 fn user_file_b64_renders_input_file_data_url() {
     // 一段最小合法 base64（解码后仅 "PDF"），不真发 API；只断言 wire 形状。
     let pdf_b64 = "UERG"; // base64("PDF")
@@ -1902,11 +1947,13 @@ fn user_file_b64_renders_input_file_data_url() {
     let msg = ChatMessage::user_with_parts(vec![part]);
     let (_ins, input) = build_responses_input_test(&[msg]);
     let content = &input[0]["content"];
-    assert_eq!(content[0]["type"], "input_file");
-    assert_eq!(content[0]["filename"], "sample.pdf");
-    let data = content[0]["file_data"].as_str().expect("file_data present");
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"], "");
+    assert_eq!(content[1]["type"], "input_file");
+    assert_eq!(content[1]["filename"], "sample.pdf");
+    let data = content[1]["file_data"].as_str().expect("file_data present");
     assert_eq!(data, "data:application/pdf;base64,UERG");
-    assert!(content[0].get("file_id").is_none());
+    assert!(content[1].get("file_id").is_none());
 }
 
 #[test]
@@ -1916,9 +1963,11 @@ fn user_image_file_id_renders_file_id_field() {
     let msg = ChatMessage::user_with_parts(vec![part]);
     let (_ins, input) = build_responses_input_test(&[msg]);
     let content = &input[0]["content"];
-    assert_eq!(content[0]["type"], "input_image");
-    assert_eq!(content[0]["file_id"], "file-abc");
-    assert!(content[0].get("image_url").is_none());
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"], "");
+    assert_eq!(content[1]["type"], "input_image");
+    assert_eq!(content[1]["file_id"], "file-abc");
+    assert!(content[1].get("image_url").is_none());
 }
 
 #[test]
@@ -1928,10 +1977,47 @@ fn user_file_file_id_renders_file_id_field() {
     let msg = ChatMessage::user_with_parts(vec![part]);
     let (_ins, input) = build_responses_input_test(&[msg]);
     let content = &input[0]["content"];
-    assert_eq!(content[0]["type"], "input_file");
-    assert_eq!(content[0]["filename"], "notes.pdf");
-    assert_eq!(content[0]["file_id"], "file-xyz");
-    assert!(content[0].get("file_data").is_none());
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"], "");
+    assert_eq!(content[1]["type"], "input_file");
+    assert_eq!(content[1]["file_id"], "file-xyz");
+    assert!(content[1].get("filename").is_none());
+    assert!(content[1].get("file_data").is_none());
+}
+
+#[test]
+fn responses_build_request_body_degrades_unsupported_history_attachments_to_input_text() {
+    let mut entry = responses_entry();
+    entry.id = "text-only-responses".to_string();
+    entry.capabilities.vision = false;
+    entry.capabilities.files = false;
+    let provider = provider_from_entry(entry.clone(), LlmConfig::default());
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user_with_parts(vec![
+            ChatMessageContentPart::text("before "),
+            ChatMessageContentPart::image_file_id("file-image").unwrap(),
+            ChatMessageContentPart::text(" between "),
+            ChatMessageContentPart::file_file_id("file-pdf", Some("guide.pdf".to_string()))
+                .unwrap(),
+        ])],
+        model: entry.id,
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        thinking_level: None,
+        tools: None,
+    };
+
+    let expected = format!(
+        "before {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER} between {UNSUPPORTED_FILE_INPUT_PLACEHOLDER}"
+    );
+    let body = provider.build_request_body(&req, true);
+    let input = body["input"].as_array().expect("responses input");
+    let content = input[0]["content"].as_array().expect("responses content");
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"], "input_text");
+    assert_eq!(content[0]["text"].as_str(), Some(expected.as_str()));
 }
 
 #[test]

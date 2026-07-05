@@ -132,6 +132,42 @@
       {
         "type": "object",
         "required": [
+          "action",
+          "type"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/definitions/SetPlanModeAction"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "planId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_plan_mode"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
           "model",
           "type"
         ],
@@ -155,6 +191,60 @@
             "type": "string",
             "enum": [
               "set_model"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "level",
+          "model",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "level": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_thinking_level"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "list_models"
             ]
           }
         }
@@ -283,6 +373,16 @@
               "null"
             ]
           },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ListSessionsScope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "type": {
             "type": "string",
             "enum": [
@@ -402,6 +502,12 @@
         "description": "`get_messages` 的分页/裁剪参数。",
         "type": "object",
         "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "lastNTurns": {
             "type": [
               "integer",
@@ -419,6 +525,14 @@
             "minimum": 0.0
           }
         }
+      },
+      "ListSessionsScope": {
+        "description": "`list_sessions` 的可选枚举范围。",
+        "type": "string",
+        "enum": [
+          "live",
+          "disk"
+        ]
       },
       "NewSessionParams": {
         "description": "`new_session` 的可选参数。",
@@ -461,6 +575,12 @@
               "null"
             ]
           },
+          "filename": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "kind": {
             "$ref": "#/definitions/ServeAttachmentKind"
           },
@@ -480,6 +600,83 @@
           "file"
         ]
       },
+      "ServeContentSegment": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "type"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "label",
+              "path",
+              "type"
+            ],
+            "properties": {
+              "kind": {
+                "$ref": "#/definitions/ServeContextRefKind"
+              },
+              "label": {
+                "type": "string"
+              },
+              "lineEnd": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "lineStart": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "path": {
+                "type": "string"
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reference"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "ServeContextRefKind": {
+        "type": "string",
+        "enum": [
+          "selection",
+          "file"
+        ]
+      },
       "ServeMessageParams": {
         "description": "发送给 `prompt` / `follow_up` / `steer` 的附加参数。",
         "type": "object",
@@ -489,6 +686,18 @@
             "items": {
               "$ref": "#/definitions/ServeAttachment"
             }
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/ServeContentSegment"
+            }
+          },
+          "userMessageId": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -498,6 +707,15 @@
         "enum": [
           "code",
           "claw"
+        ]
+      },
+      "SetPlanModeAction": {
+        "description": "`set_plan_mode` 的动作枚举。",
+        "type": "string",
+        "enum": [
+          "enter",
+          "exit",
+          "build"
         ]
       }
     }
@@ -675,6 +893,21 @@
         }
       },
       {
+        "description": "会话已真正回到 idle，可再次接收新的 prompt。\n\n与 `AgentEnd` 的区别： - `AgentEnd` 表示本次 attempt / 会话流已给出终态结果； - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。\n\n该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。",
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "agent_idle"
+            ]
+          }
+        }
+      },
+      {
         "type": "object",
         "required": [
           "timestamp",
@@ -708,8 +941,26 @@
           "type"
         ],
         "properties": {
+          "assistantMessageId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "message": {
             "$ref": "#/definitions/Message"
+          },
+          "summaryTitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "toolCallIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "toolResults": {
             "type": "array",
@@ -733,10 +984,14 @@
       {
         "type": "object",
         "required": [
+          "assistantMessageId",
           "message",
           "type"
         ],
         "properties": {
+          "assistantMessageId": {
+            "type": "string"
+          },
           "message": {
             "$ref": "#/definitions/Message"
           },
@@ -752,12 +1007,16 @@
         "type": "object",
         "required": [
           "assistantMessageEvent",
+          "assistantMessageId",
           "message",
           "type"
         ],
         "properties": {
           "assistantMessageEvent": {
             "$ref": "#/definitions/AssistantMessageEvent"
+          },
+          "assistantMessageId": {
+            "type": "string"
           },
           "message": {
             "$ref": "#/definitions/Message"
@@ -773,10 +1032,14 @@
       {
         "type": "object",
         "required": [
+          "assistantMessageId",
           "message",
           "type"
         ],
         "properties": {
+          "assistantMessageId": {
+            "type": "string"
+          },
           "message": {
             "$ref": "#/definitions/Message"
           },
@@ -1605,7 +1868,7 @@
         "$ref": "#/definitions/ControlFrame"
       },
       {
-        "$ref": "#/definitions/WireEvent"
+        "$ref": "#/definitions/ServeEvent"
       }
     ],
     "definitions": {
@@ -1734,6 +1997,656 @@
           }
         }
       },
+      "ServeEvent": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/WireEvent"
+          },
+          {
+            "$ref": "#/definitions/ServePlanEvent"
+          },
+          {
+            "$ref": "#/definitions/ServeSessionEvent"
+          },
+          {
+            "$ref": "#/definitions/ServeTurnEvent"
+          }
+        ]
+      },
+      "ServePlanEvent": {
+        "description": "`plan.*` 自定义事件的 schema 入口。",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.create"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.build"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.enter"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.exit"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.update"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "aborted": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.review"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "aborted": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.code_review"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "aborted": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.verify"
+                ]
+              },
+              "verdict": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "rounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.review.warning"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "rounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.code_review.warning"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.complete"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "path": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.pending"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "todos": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/definitions/ServeTodoItem"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.todos"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "ServeSessionEvent": {
+        "description": "`session.*` 自定义事件的 schema 入口（`session.todos` / `session.title_updated`）。\n\n仅用于 `tomcat serve --print-schema` / fixture 导出，不影响运行时 event bus 发射路径 （运行时经 `write_transcript_custom` / `emit_payload` 以字符串常量发射）。",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "todos": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/definitions/ServeTodoItem"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session.todos"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "session.title_updated"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "ServeTodoItem": {
+        "description": "plan / session todo 项的 wire schema 形状，与 `shared_todo_ops::items_json` 运行时输出一致。",
+        "type": "object",
+        "required": [
+          "content",
+          "id",
+          "status"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "ServeTurnEvent": {
+        "description": "`turn.*` 自定义事件的 schema 入口（当前仅 `turn.summary_updated`）。",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "assistantMessageId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summaryTitle": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "toolCallIds": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "turnIndex": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint",
+                "minimum": 0.0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "turn.summary_updated"
+                ]
+              }
+            }
+          }
+        ]
+      },
       "ToolDisplay": {
         "description": "工具执行成功后给 CLI/TUI 的结构化展示提示。",
         "oneOf": [
@@ -1844,6 +2757,21 @@
             }
           },
           {
+            "description": "会话已真正回到 idle，可再次接收新的 prompt。\n\n与 `AgentEnd` 的区别： - `AgentEnd` 表示本次 attempt / 会话流已给出终态结果； - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。\n\n该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。",
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "agent_idle"
+                ]
+              }
+            }
+          },
+          {
             "type": "object",
             "required": [
               "timestamp",
@@ -1877,8 +2805,26 @@
               "type"
             ],
             "properties": {
+              "assistantMessageId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "message": {
                 "$ref": "#/definitions/Message"
+              },
+              "summaryTitle": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "toolCallIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
               },
               "toolResults": {
                 "type": "array",
@@ -1902,10 +2848,14 @@
           {
             "type": "object",
             "required": [
+              "assistantMessageId",
               "message",
               "type"
             ],
             "properties": {
+              "assistantMessageId": {
+                "type": "string"
+              },
               "message": {
                 "$ref": "#/definitions/Message"
               },
@@ -1921,12 +2871,16 @@
             "type": "object",
             "required": [
               "assistantMessageEvent",
+              "assistantMessageId",
               "message",
               "type"
             ],
             "properties": {
               "assistantMessageEvent": {
                 "$ref": "#/definitions/AssistantMessageEvent"
+              },
+              "assistantMessageId": {
+                "type": "string"
               },
               "message": {
                 "$ref": "#/definitions/Message"
@@ -1942,10 +2896,14 @@
           {
             "type": "object",
             "required": [
+              "assistantMessageId",
               "message",
               "type"
             ],
             "properties": {
+              "assistantMessageId": {
+                "type": "string"
+              },
               "message": {
                 "$ref": "#/definitions/Message"
               },

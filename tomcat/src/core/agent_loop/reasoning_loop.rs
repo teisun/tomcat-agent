@@ -31,7 +31,7 @@ use crate::infra::events::{AgentEvent, Message};
 
 use super::steering_injection::inject_follow_up_messages;
 use super::types::{unix_ts_ms, AgentLoop, LoopError, ToolCallInfo};
-use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize};
+use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize, turn_summary};
 
 pub(super) async fn run_reasoning_loop(
     agent: &mut AgentLoop,
@@ -65,6 +65,7 @@ pub(super) async fn run_reasoning_loop(
             max_tokens: None,
             stream: Some(true),
             model_override: None,
+            thinking_level: agent.config.thinking_level,
             tools: Some(agent.config.tool_definitions.clone()),
         };
 
@@ -117,8 +118,17 @@ pub(super) async fn run_reasoning_loop(
                 if let Some(ref mut ctx_state) = agent.context_state {
                     ctx_state.on_message_appended(content_buf.len());
                 }
-                messages.push(ChatMessage::assistant(&content_buf));
+                let forced_id = agent.take_or_mint_pending_assistant_entry_id();
+                agent
+                    .push_message_with_forced_id(
+                        messages,
+                        ChatMessage::assistant(&content_buf),
+                        &forced_id,
+                    )
+                    .map_err(LoopError::Fatal)?;
                 final_text.push_str(&content_buf);
+            } else {
+                agent.clear_pending_assistant_entry_id();
             }
             return Err(agent.make_aborted(messages, final_text));
         }
@@ -149,6 +159,7 @@ pub(super) async fn run_reasoning_loop(
                 reasoning_continuation.clone(),
                 continuity.clone(),
             )
+            .await
             .map_err(LoopError::Fatal)?;
             return Ok(final_text);
         }
@@ -173,11 +184,25 @@ pub(super) async fn run_reasoning_loop(
         )
         .await?;
 
+        let summary_title = turn_summary::resolve_turn_summary_title(&tool_calls);
+        let tool_call_ids: Vec<String> = tool_calls.iter().map(|tc| tc.id.clone()).collect();
+        turn_summary::maybe_spawn_turn_summary_update(
+            agent,
+            dispatch.assistant_message_id.as_deref(),
+            turn_index,
+            thinking_text.clone(),
+            &tool_calls,
+            summary_title.as_deref(),
+        );
+
         // No synchronous cascade here; L0/L1/L2 handled at timing ⑤
         agent.emit_event(AgentEvent::TurnEnd {
             turn_index,
             message: Message(serde_json::json!({})),
             tool_results: dispatch.tool_results,
+            assistant_message_id: dispatch.assistant_message_id,
+            tool_call_ids,
+            summary_title,
         });
 
         if dispatch.steered {

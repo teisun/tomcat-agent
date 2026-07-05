@@ -76,6 +76,10 @@ pub mod wire {
     // --- AgentEvent（`#[serde(tag = "type", rename_all = "snake_case")]` 下的线格式名）---
     pub const WIRE_AGENT_START: &str = "agent_start";
     pub const WIRE_AGENT_END: &str = "agent_end";
+    /// `AgentEvent::AgentIdle` 的 JSON `type`：整轮任务真正收敛、会话已回到 idle。
+    /// 与 `agent_end` 的区别是：后者可能先于最外层任务尾声发出，前者只在 `mark_idle()`
+    /// 之后发，用作 UI「可再次发送」的权威信号。
+    pub const WIRE_AGENT_IDLE: &str = "agent_idle";
     pub const WIRE_TURN_START: &str = "turn_start";
     pub const WIRE_TURN_END: &str = "turn_end";
     pub const WIRE_MESSAGE_START: &str = "message_start";
@@ -133,8 +137,14 @@ pub mod wire {
     pub const WIRE_PLAN_CREATE: &str = "plan.create";
     /// `/plan build` 成功把 plan 绑定到当前 runtime 并把盘 state 切到 `executing`。
     pub const WIRE_PLAN_BUILD: &str = "plan.build";
+    /// `/plan` 进入 Planning 模式。
+    pub const WIRE_PLAN_ENTER: &str = "plan.enter";
+    /// `/plan exit` 退回 Chat 模式。
+    pub const WIRE_PLAN_EXIT: &str = "plan.exit";
     /// `update_plan` 成功写盘（普通更新 / reopen / finalize 收口都复用此事件）。
     pub const WIRE_PLAN_UPDATE: &str = "plan.update";
+    /// 已完成 / 中断后的 plan 被 reopen 到 `pending`。
+    pub const WIRE_PLAN_PENDING: &str = "plan.pending";
     /// reviewer 子 Agent 返回（含 `aborted: true` 分支）。
     pub const WIRE_PLAN_REVIEW: &str = "plan.review";
     /// verifier 前 code reviewer 子 Agent 返回。
@@ -154,6 +164,12 @@ pub mod wire {
     pub const WIRE_PLAN_PANEL: &str = "plan.panel";
     /// PlanRuntime `mode → completed` 派生时落痕。
     pub const WIRE_PLAN_COMPLETE: &str = "plan.complete";
+    /// session 标题异步 LLM 覆盖后推送。
+    pub const WIRE_SESSION_TITLE_UPDATED: &str = "session.title_updated";
+    /// `todos` 工具写入 session scratchpad 后推送。
+    pub const WIRE_SESSION_TODOS: &str = "session.todos";
+    /// turn 折叠标题异步 utility 覆盖后推送。
+    pub const WIRE_TURN_SUMMARY_UPDATED: &str = "turn.summary_updated";
 
     // --- ExtensionEvent ---
     pub const WIRE_STARTUP: &str = "startup";
@@ -289,6 +305,14 @@ pub enum AgentEvent {
         messages: Vec<Message>,
         error: Option<String>,
     },
+    /// 会话已真正回到 idle，可再次接收新的 prompt。
+    ///
+    /// 与 `AgentEnd` 的区别：
+    /// - `AgentEnd` 表示本次 attempt / 会话流已给出终态结果；
+    /// - `AgentIdle` 表示最外层会话任务已经完整收尾，`busy=false` 已生效。
+    ///
+    /// 该事件主要供 IDE / Webview 把「中断」按钮可靠切回「发送」使用。
+    AgentIdle,
     TurnStart {
         #[serde(rename = "turnIndex")]
         turn_index: usize,
@@ -300,17 +324,29 @@ pub enum AgentEvent {
         message: Message,
         #[serde(rename = "toolResults")]
         tool_results: Vec<Message>,
+        #[serde(rename = "assistantMessageId", skip_serializing_if = "Option::is_none")]
+        assistant_message_id: Option<String>,
+        #[serde(rename = "toolCallIds", skip_serializing_if = "Vec::is_empty", default)]
+        tool_call_ids: Vec<String>,
+        #[serde(rename = "summaryTitle", skip_serializing_if = "Option::is_none")]
+        summary_title: Option<String>,
     },
     MessageStart {
         message: Message,
+        #[serde(rename = "assistantMessageId")]
+        assistant_message_id: String,
     },
     MessageUpdate {
         message: Message,
+        #[serde(rename = "assistantMessageId")]
+        assistant_message_id: String,
         #[serde(rename = "assistantMessageEvent")]
         assistant_message_event: AssistantMessageEvent,
     },
     MessageEnd {
         message: Message,
+        #[serde(rename = "assistantMessageId")]
+        assistant_message_id: String,
     },
     /// LLM 终局错误（如 Responses `response.failed` / 顶层 `error` / `content_filter`）。
     LlmError {

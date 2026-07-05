@@ -12,7 +12,7 @@ pub(in super::super) async fn handle_hashline_edit(
         check_mutation_stamp(state, path, "edit")?;
     }
     ctx.primitive
-        .hashline_edit(path, segments, AGENT_PLUGIN_ID)
+        .hashline_edit_with_cancel(path, segments, ctx.cancel, AGENT_PLUGIN_ID)
         .await
         .map(|r| {
             if r.applied {

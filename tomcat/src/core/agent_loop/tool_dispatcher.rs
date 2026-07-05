@@ -25,6 +25,7 @@ use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, To
 
 use super::steering_injection::inject_steering_messages;
 use super::tool_exec;
+use super::turn_summary;
 use super::types::{AgentLoop, DispatchOutcome, LoopError, ToolCallInfo};
 
 fn plugin_tool_model_text(result: &serde_json::Value) -> String {
@@ -127,7 +128,8 @@ pub(super) async fn run_tool_calls(
     }
 
     // ── 2. push assistant_with_tool_calls ──
-    {
+    let summary_title = turn_summary::resolve_turn_summary_title(tool_calls);
+    let assistant_message_id = {
         let tc_json: Vec<serde_json::Value> = tool_calls
             .iter()
             .zip(persisted_arguments.iter())
@@ -142,26 +144,27 @@ pub(super) async fn run_tool_calls(
                 })
             })
             .collect();
-        agent
-            .push_message(
-                messages,
-                ChatMessage::assistant_with_tool_calls(
-                    if assistant_content.is_empty() {
-                        None
-                    } else {
-                        Some(assistant_content)
-                    },
-                    tc_json,
+        let forced_id = agent.take_or_mint_pending_assistant_entry_id();
+        Some(
+            agent
+                .push_message_with_forced_id(
+                    messages,
+                    ChatMessage::assistant_with_tool_calls(
+                        if assistant_content.is_empty() {
+                            None
+                        } else {
+                            Some(assistant_content)
+                        },
+                        tc_json,
+                    )
+                    .with_completion_metadata(finish_reason, error_message, error_code)
+                    .with_summary_title(summary_title.clone())
+                    .with_reasoning_state(thinking_text, reasoning_continuation, continuity),
+                    &forced_id,
                 )
-                .with_completion_metadata(finish_reason, error_message, error_code)
-                .with_reasoning_state(
-                    thinking_text,
-                    reasoning_continuation,
-                    continuity,
-                ),
-            )
-            .map_err(LoopError::Fatal)?;
-    }
+                .map_err(LoopError::Fatal)?,
+        )
+    };
 
     let mut tool_results: Vec<Message> = Vec::new();
     let mut steered = false;
@@ -183,6 +186,7 @@ pub(super) async fn run_tool_calls(
         }
         agent.block_tool_calls = false;
         return Ok(DispatchOutcome {
+            assistant_message_id,
             tool_results,
             steered,
         });
@@ -367,7 +371,12 @@ pub(super) async fn run_tool_calls(
             let parts_chars: usize = follow_up_parts
                 .iter()
                 .map(|p| match p {
-                    crate::core::llm::ChatMessageContentPart::InputText { text } => text.len(),
+                    crate::core::llm::ChatMessageContentPart::InputText { text } => {
+                        text.chars().count()
+                    }
+                    crate::core::llm::ChatMessageContentPart::InputReference { reference } => {
+                        reference.to_prompt_text().chars().count()
+                    }
                     crate::core::llm::ChatMessageContentPart::InputImage { .. } => 3600,
                     crate::core::llm::ChatMessageContentPart::InputFile { .. } => 8000,
                 })
@@ -388,6 +397,7 @@ pub(super) async fn run_tool_calls(
     }
 
     Ok(DispatchOutcome {
+        assistant_message_id,
         tool_results,
         steered,
     })

@@ -9,6 +9,7 @@
 | ------------ | ---------------------------------------------------------- |
 | E2E-CLI-NNN  | CLI 子进程 E2E 用例（`tests/cli_tests.rs`）                       |
 | E2E-QJS-NNN  | `rquickjs` 插件运行时与相关集成验证（如 `tests/quickjs_e2e_tests.rs`、`tests/long_lived_vm_tests.rs`） |
+| E2E-VSCEXT-NNN | VSCode 扩展 / 宿主 UI E2E（如 `tomcat-vscode-ext/src/test/suite/*.test.ts`、安装版 harness、后续 webview UI driver） |
 
 
 ---
@@ -240,6 +241,42 @@
 | E2E-CLI-099 | 自动 | `serve_ask_question_roundtrip_resumes_turn`；`serve_ask_question_cancel_roundtrip_does_not_hang` | 宿主收到 `ask_question` 控制请求后，能走回答 / 取消两条回环并让 turn 正常收口 | LLM 首轮返回 `ask_question` tool call → 宿主回 `control_response` 或 `control_cancel` → 继续下轮 LLM | `control_request{subtype=ask_question}` 含稳定 `requestId`；回答/取消都能触发后续 LLM 请求并最终收敛到 `agent_end`，不得卡死 |
 | E2E-CLI-100 | 自动 | `serve_parse_error_does_not_break_following_initialize`；`serve_eof_exits_cleanly`；`serve_print_schema_matches_fixture` | 宿主面对坏输入、EOF 与 schema 导出时获得可恢复且可审计的行为 | 发送坏行 → 再 `initialize`；或直接 EOF；或执行 `serve --print-schema` | 坏行返回结构化 `parse_error` 且不打断后续初始化；EOF 干净退出无 panic；`serve.schema.json` / `serve.d.ts` 与 committed fixture 无漂移 |
 | E2E-CLI-101 | 自动 | `serve_prompt_with_attachment_roundtrip` | 宿主通过 `prompt.params.attachments` 发送多模态输入时，serve 能把附件装配进真实回合而不是降级成纯文本 | `initialize` → `prompt{text, params.attachments}`（`image`/`file` 任选其一）→ 等待回合收口 | 首轮命令被接受；下行仍是纯 NDJSON；附件经 `ChatMessage::user_with_parts(...)` 进入 agent 回合，最终正常收敛到 `agent_end` |
+
+---
+
+## Story 8d — VSCode Chat 扩展 Phase 2（8 条）
+
+> 主验收入口为 `tomcat-vscode-ext/tests/*.test.ts`、`tomcat-vscode-ext/src/test/suite/host.e2e.test.ts`、`tomcat-vscode-ext/e2e-harness/src/test/installed.test.ts`，以及后续新增的 webview UI driver。
+> **验收**：participant 与 webview 都要求走真实宿主用户路径；participant 需覆盖真实 chat UI，webview 需覆盖真实侧栏/DOM 交互与安装版 VSIX。允许保留较低层 API/harness 回归，但不得替代真实 UI 驱动验收。
+
+| 编号 | 验收 | 用例名 | 用户意图 | 操作序列 | 必须断言 |
+| ---- | ---- | ------ | -------- | -------- | -------- |
+| E2E-VSCEXT-001 | 自动 | `test_participant_slash_plan_flow_via_real_chat_ui` | 用户在 VSCode 聊天框中输入 `@tomcat /plan`、`/plan build`、`/plan exit`，确认计划模式可驱动且状态可见 | 启动 VSCode Dev Host → 打开真实 chat UI → 新建聊天 → 依次输入 `@tomcat /plan`、`@tomcat /plan build`、`@tomcat /plan exit` | `set_plan_mode` 命令真实发出；事件流出现 `planState=planning/executing/chat` 或等价 UI 状态；`agent_end` 正常收口；不得把 `/plan` 当普通 prompt 文本喂给 LLM |
+| E2E-VSCEXT-002 | 自动 | `test_participant_slash_model_picker_via_real_chat_ui` | 用户在 VSCode 聊天框中触发 `/model`，可看到模型列表、选择模型、取消无副作用 | 启动 VSCode Dev Host → 打开真实 chat UI → 输入 `@tomcat /model` → 真实选择一项或取消 | 先调用 `list_models`；选中时触发 `set_model` 且确认气泡显示当前模型；取消时无副作用；`get_state.model` 与 UI 标记一致 |
+| E2E-VSCEXT-003 | 自动 | `test_webview_streams_thinking_tools_and_approval_cards` | 用户打开侧栏 webview，完成一轮真实消息发送，看到正文、thinking、工具卡与审批卡 | 启动 VSCode Dev Host / webview UI driver → 打开 `Tomcat` 侧栏 view → 输入消息 → 触发带 thinking/tool/ask_question 的回合 | webview 通过 `event` 通道渲染 `thinking_delta`、`tool_execution_*`、`ask_question`；审批回答后回合继续并收口；不回退到纯文本拼接 |
+| E2E-VSCEXT-004 | 自动 | `test_webview_model_plan_and_multisession_controls` | 用户在 webview 顶部使用模型下拉、plan 开关和多会话 tab | 打开 webview → 切换模型 → 进入/退出 plan → 新建 2 个 tab 并切换 | `list_models` / `set_model`、`set_plan_mode`、`new_session` / `switch_session` / `close_session` 均被真实触发；tab 间 sessionId 不串台；plan 徽标随状态变化 |
+| E2E-VSCEXT-005 | 自动 | `test_shared_scope_pool_and_single_owner_conflict_between_frontends` | 用户让 participant 与 webview 同时看到同一项目历史，但对同一 live 会话只能单前端驱动 | 启动 participant + webview → `list_sessions{scope:\"disk\"}` 枚举同一项目历史 → participant 激活会话 → webview 尝试驱动同一 session | 两端枚举到同一份历史，默认指向 `isCurrent`；第二前端只能只读/看到冲突提示；owner 释放后另一端可接管 |
+| E2E-VSCEXT-006 | 自动 | `test_webview_diff_and_apply_reuses_vscode_editor_path` | 用户在 webview 工具卡中点击“看 diff / 应用编辑”，确认仍走 VSCode 原生编辑链路 | 打开 webview → 触发生成文件编辑的回合 → 点击 diff / apply | 宿主调用 `vscode.diff` + `WorkspaceEdit`；目标文件真实被修改；webview 不自建主编辑栈 |
+| E2E-VSCEXT-007 | 自动 | `test_packaged_vsix_contains_gui_dist_and_installed_webview_loads` | 用户安装打包后的 VSIX 后，participant 与 webview 都能正常加载和使用 | 执行 VSIX 打包 → 安装版 harness 启动 VSCode → 打开 chat UI 与 webview | 包内含 `gui/dist`、不含 `gui/src`；安装版 participant 与 webview 都可加载；webview 无 CSP/资源加载错误 |
+| E2E-VSCEXT-008 | 自动 | `test_webview_protocol_and_bridge_reuse_contract` | 宿主与 webview 的 typed `postMessage` 协议稳定，且 participant / webview 共用同一 `TomcatMessenger` 核心 | 运行扩展级集成 + 宿主 E2E；同时订阅 participant / webview | `messageId` / `state` / `event` 协议语义稳定；未知 id 安全丢弃；同一 `TomcatMessenger` 实例同时服务两个前端，核心行为不漂移 |
+
+## Story 8e — VSCode webview transcript 仿 Chat 体验（11 条）
+
+> 对应 [User_Stories.md](../../User_Stories.md) Story 8e；自动化入口 `tomcat-vscode-ext/e2e-harness/src/test/manual-acceptance.test.ts` / `installed.test.ts` + `gui/src/App.test.tsx` 单元测试。
+
+| 编号 | 验收 | 用例名 | 用户意图 | 操作序列 | 必须断言 |
+| --- | --- | --- | --- | --- | --- |
+| E2E-VSCEXT-009 | 自动 | `test_user_webview_user_prompt_pill_and_assistant_no_card` | 用户发送消息后看到 VSCode Chat 风格布局 | 打开 webview → 发送 user prompt → 等待 assistant 回复 | DOM：`userPromptPill=true`（右对齐 pill、无 header）；`assistantNoCard=true`（无卡片边框/标签）；error/notice 保留左边框 |
+| E2E-VSCEXT-010 | 自动 | `test_user_webview_thinking_tool_fold_groups_by_assistant_response` | 用户看到同 assistant message 的 tool 折叠为一组 | 触发含 thinking + 多 tool 的回合 | `assistantResponseGroups>=1`；折叠态 `toolRowFlat` 无 tool DOM（懒渲染）；展开后见 `toolRowFlat` 扁平行非大卡片；`groupFoldTitles` 含 LLM 摘要或回退标题 |
+| E2E-VSCEXT-011 | 自动 | `test_user_webview_tool_row_read_filechip_open` | 用户点击 read 行 FileChip 打开文件 | 触发 read 工具回合 → 展开 tool 行 → 点击 FileChip | `fileChipOpen=true`；宿主打开对应文件 tab |
+| E2E-VSCEXT-012 | 自动 | `test_user_webview_bash_tool_row_ran_command_expandable` | 用户看到 bash 折叠为 Ran \<cmd\> 且可展开输出 | 触发 bash 工具回合 | `toolRowFlat` 含 `Ran` 前缀；`toolRowExpandable=true`；无"打开终端"按钮 |
+| E2E-VSCEXT-013 | 自动 | `test_user_webview_plan_executing_progress_row` | Plan 执行时底部显示 todo 进度 (N/M) | 进入 plan executing → 观察 live cluster 末尾 | `progressRow=true`；显示 `(current/total)` + 当前 todo title；PlanFileCard 同步 `planTodos` |
+| E2E-VSCEXT-014 | 自动 | `test_user_webview_session_title_async_update` | 首条 user 后 session 标题从占位更新为 LLM 标题 | 新建 session → 发送首条 user 消息 | `sessionTitleUpdated=true`；SessionBar 标题从规则占位变为 LLM 生成标题 |
+| E2E-VSCEXT-015 | 自动 | `test_user_webview_left_guide_line_and_ellipsis_above_group` | 折叠组视觉对齐 VSCode（竖线 + 阐述在折叠头上方） | 触发含阐述 + thinking + tool 的回合 | `leftGuideLine=true`；`ellipsisAboveGroupHeader=true`（阐述在折叠头上方可见） |
+| E2E-VSCEXT-016 | 自动 | `test_user_webview_shimmer_while_summary_title_pending` | streaming 且 summaryTitle 未就绪时 header shimmer | 触发 thinking+tool 流式回合 | 折叠 header 含 shimmer class；summaryTitle 就绪后 shimmer 消失 |
+| E2E-VSCEXT-017 | 自动 | `test_user_webview_switch_session_restores_plan_card_and_ctx` | 用户切到别的 session 再切回时，已有 active plan 的 transcript 状态能恢复，不需要重新等 live 事件 | webview 新建 session A → 触发带 `planPath` / `Ctx%` 的 transcript 场景 → 新建 session B → 切回 session A | DOM：`planCardCount===1`、`ctxLabel` 恢复、`planStateText` 与当前 `get_state.planState` 一致；Plan `Build` 控件仍可用；不得生成重复 plan 卡 |
+| E2E-VSCEXT-018 | 自动 | `test_user_webview_reload_replays_plan_history_without_duplicate_card` | 用户 reload webview 后，plan 历史证据（review/verify）能从 `get_messages` 重放回来 | 触发含 custom `plan.review` / `plan.verify` / `plan.pending` 的回合 → 模拟 webview reload → 等待 bootstrap 完成 | DOM：`planNoticeReplayed=true`；review / verify notice 重新出现且各仅 1 次；`planCardCount===1`；plan footer 状态取 `get_state` 当前真相而不是旧历史 |
+| E2E-VSCEXT-019 | 自动 | `test_user_webview_cross_owner_observes_plan_transitions_and_terminal_truth` | participant 持有会话时，webview 作为观察端仍能看到 plan enter/build/exit 与终态收敛 | participant 创建并持有 session → webview 切到该 session（只读）→ participant 触发 `plan.enter` / `plan.build` / `plan.exit` 生命周期 | 观察态 DOM：`hasConflict=true`，footer 依次显示 `Plan: planning` / `Plan: executing` / `null`；timeline 中同一路径始终单张 plan 卡；终态后 state 与 `get_state` 收敛，不残留 completed/pending 漂移 |
 
 ---
 

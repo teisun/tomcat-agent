@@ -3,9 +3,11 @@
 mod append_message_chain;
 pub mod context_metrics;
 pub(crate) mod manager;
+mod model_thinking;
 pub(crate) mod resume_index;
 pub mod scope;
 pub(crate) mod store;
+pub(crate) mod subagent_transcript;
 pub mod transcript;
 
 pub(crate) use append_message_chain::find_dangling_tail_tool_call_ids;
@@ -14,6 +16,7 @@ pub use manager::{
     build_context_from_state, compound_turn_id, estimate_msg_chars, init_context_state, ApiUsage,
     CompactionResult, ContextState, MessageAppendSink, PlanEventKind, PlanEventRef, SessionManager,
 };
+pub use model_thinking::ModelThinkingStore;
 pub use scope::{
     fnv1a_hex, project_root, resolve_session_mode, session_key_for, session_key_for_agent,
     SessionMode,
@@ -22,9 +25,11 @@ pub use store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESS
 pub use transcript::{
     append_entry, append_line, insert_entry_after_message_id,
     mark_message_entries_after_anchor_superseded, read_entries_tail, read_header,
-    remove_branch_summary_entry_by_id, rewrite_message_text_entries_by_id,
+    remove_branch_summary_entry_by_id, rewrite_message_summary_titles_by_id,
+    rewrite_message_text_entries_by_id,
     set_branch_summary_entry_is_boundary_true, write_header, BranchSummaryEntry, MessageEntry,
-    MessageTextRewrite, SessionHeader, ThinkingTraceEntry, TranscriptEntry,
+    MessageSummaryTitleRewrite, MessageTextRewrite, SessionHeader, ThinkingTraceEntry,
+    TranscriptEntry,
 };
 
 #[cfg(test)]

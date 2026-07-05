@@ -43,6 +43,22 @@ const EVENT_NAMES: &[&str] = &[
     wire::WIRE_AGENT_INTERRUPTED,
     wire::WIRE_SUB_AGENT_START,
     wire::WIRE_SUB_AGENT_END,
+    wire::WIRE_PLAN_CREATE,
+    wire::WIRE_PLAN_BUILD,
+    wire::WIRE_PLAN_ENTER,
+    wire::WIRE_PLAN_EXIT,
+    wire::WIRE_PLAN_UPDATE,
+    wire::WIRE_PLAN_PENDING,
+    wire::WIRE_PLAN_REVIEW,
+    wire::WIRE_PLAN_CODE_REVIEW,
+    wire::WIRE_PLAN_VERIFY,
+    wire::WIRE_PLAN_REVIEW_WARNING,
+    wire::WIRE_PLAN_CODE_REVIEW_WARNING,
+    wire::WIRE_PLAN_COMPLETE,
+    wire::WIRE_PLAN_TODOS,
+    wire::WIRE_SESSION_TITLE_UPDATED,
+    wire::WIRE_SESSION_TODOS,
+    wire::WIRE_TURN_SUMMARY_UPDATED,
 ];
 
 pub fn register_session_event_pump(
@@ -52,12 +68,17 @@ pub fn register_session_event_pump(
     let mut ids = Vec::new();
     for event_name in EVENT_NAMES {
         let session_id = slot.session_id.clone();
+        let slot_for_listener = Arc::clone(slot);
+        let event_bus = Arc::clone(&slot.ctx.global_services.event_bus);
         let writer = writer.clone();
-        let id = slot.ctx.global_services.event_bus.on(
+        let id = event_bus.on(
             event_name,
             Box::new(move |ctx| {
                 if ctx.session_id.as_deref() != Some(session_id.as_str()) {
                     return Ok(());
+                }
+                if event_name == &wire::WIRE_AGENT_END {
+                    slot_for_listener.mark_terminal_emitted();
                 }
                 let _ = writer.send(OutFrame::Event(ctx.payload.clone()));
                 Ok(())

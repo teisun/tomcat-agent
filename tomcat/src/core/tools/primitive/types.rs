@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::infra::error::AppError;
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -409,12 +410,33 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
         overwrite: bool,
         plugin_id: &str,
     ) -> Result<WriteFileResult, AppError>;
+    async fn write_file_with_cancel(
+        &self,
+        path: &str,
+        content: &str,
+        overwrite: bool,
+        cancel: &CancellationToken,
+        plugin_id: &str,
+    ) -> Result<WriteFileResult, AppError> {
+        let _ = cancel;
+        self.write_file(path, content, overwrite, plugin_id).await
+    }
     async fn edit_file(
         &self,
         path: &str,
         edits: Vec<EditOperation>,
         plugin_id: &str,
     ) -> Result<EditFileResult, AppError>;
+    async fn edit_file_with_cancel(
+        &self,
+        path: &str,
+        edits: Vec<EditOperation>,
+        cancel: &CancellationToken,
+        plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        let _ = cancel;
+        self.edit_file(path, edits, plugin_id).await
+    }
     /// T2-P0-017 Phase3 / PR-M：行级强一致编辑。**默认实现** 返回 `Unsupported` 错误，
     /// 让 mock / 简化 executor 不必实现；生产路径由 `DefaultPrimitiveExecutor` 覆盖。
     ///
@@ -429,6 +451,16 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
         Err(AppError::Primitive(
             "hashline_edit is not implemented by this PrimitiveExecutor".to_string(),
         ))
+    }
+    async fn hashline_edit_with_cancel(
+        &self,
+        path: &str,
+        segments: Vec<HashlineSegment>,
+        cancel: &CancellationToken,
+        plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        let _ = cancel;
+        self.hashline_edit(path, segments, plugin_id).await
     }
     /// 执行 bash/进程。
     /// - `argv` 为 `None`：`command` 视为完整 shell 命令（经 `sh -c` / `cmd /C`）。

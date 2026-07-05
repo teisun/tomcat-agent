@@ -158,6 +158,43 @@
 - [ ] 会话结束时（`session_shutdown` 或用户退出）VM 正常关闭，资源完全释放
 - [ ] 典型有状态插件场景（git-checkpoint、todo、plan-mode、ssh 等）在长生命周期 VM 下可正确运行
 
+### Story 8c: Agent Server / UI Gateway
+**作为 IDE / GUI 宿主开发者**，我希望 Tomcat 能以标准化协议暴露给外部前端，让 VSCode 等宿主稳定复用对话、工具、审批与多会话能力。
+**验收标准**：
+- [ ] `tomcat serve --stdio` 以 NDJSON 协议暴露 `prompt` / `follow_up` / `steer` / `get_state` / `set_model` / `new_session` / `switch_session` / `get_messages` / `close_session` / `list_sessions` / `interrupt` 与 `ask_question` 回环
+- [ ] 宿主可同时驱动多个 `sessionId`，跨会话事件不串台；同一会话 busy 时返回明确错误，不静默吞消息
+- [ ] `initialize` capabilities、schema 导出（`--print-schema`）与 committed fixture 长期保持一致，供 IDE/GUI 宿主编译期发现协议漂移
+- [ ] 宿主可经 `prompt.params.attachments` 发送多模态输入，Tomcat 在真实回合中按用户消息 part 组装，而不是退化为纯文本
+- [ ] 坏输入 / EOF / ask_question 回答与取消等边界路径均有明确、可恢复且可审计的行为
+
+### Story 8d: VSCode Chat 扩展 Phase 2
+**作为 VSCode 用户**，我希望能在 `@tomcat` 聊天入口与自建 webview 面板中使用 `/plan`、`/model`、富工具卡/审批卡/思考块、多会话历史与 diff/edit 能力，并确保两个入口共享同一项目会话池而不互相抢占。
+**验收标准**：
+- [ ] `@tomcat` 原生聊天入口支持 `/plan`（enter / exit / build）与 `/model`，并通过稳定 VSCode API 接入，不依赖 proposed API
+- [ ] `tomcat serve` 新增 `set_plan_mode`、`list_models`、`get_state.planState`、`plan.*` 事件，以及 `list_sessions{scope:"disk"}` / 磁盘历史 `switch_session`，供 VSCode 前端驱动计划模式、模型切换和项目历史恢复
+- [ ] 自建 VSCode webview 基于 `WebviewViewProvider` + React + Vite 实现，协议走 typed `postMessage`，渲染语义复用 Phase 1 `WireEvent`（thinking/tool/approval/diff/session）
+- [ ] participant 与 webview 默认并存，共享同一 `TomcatMessenger`、单个 `tomcat serve` 进程与同一项目 scope 会话池；同一条 live 会话同一时刻仅允许一个前端驱动，非 owner 端只读并看到明确提示
+- [ ] webview 在切换回已有活动 plan 的 session 时，可仅凭 `get_state.planPath` / `contextUtilizationRatio` 恢复 plan 卡、`Ctx%` 与 `Build` 可用态；不得依赖额外 live `plan.*` 才“补出来”
+- [ ] participant 持有会话时，webview 作为观察端仍能通过 `plan.enter` / `plan.build` / `plan.pending` / `plan.complete` / `plan.exit` 与终态 `get_state` reconcile 保持 plan footer、plan 卡与后端当前真相一致
+- [ ] webview 的“看 diff / 应用编辑”复用 VSCode 原生 `vscode.diff` + `WorkspaceEdit` 落地路径，不自建主编辑栈
+- [ ] 扩展需通过真实宿主与安装版 VSIX 验收：原生 chat UI、webview UI、共享会话池、owner 冲突、VSIX 打包入包与安装后资源加载均有自动化覆盖
+
+### Story 8e: VSCode webview transcript 仿 Chat 体验（Phase 2+）
+**作为 VSCode 用户**，我希望侧栏 transcript 的视觉与交互对齐 VSCode Chat：用户消息右侧 pill、assistant 无框 markdown 流、thinking+tool 按 assistant response 折叠分组、utility 模型生成自然语言折叠标题、bash 折叠为 "Ran \<cmd\>"、plan/session todo 进度行、read 文件 chip 可点击打开。
+**验收标准（P0）**：
+- [ ] user 消息渲染为右侧 pill 气泡，无 "You/user" header；assistant 消息无卡片边框/标签，纯 markdown 流；error/notice 保留左边框
+- [ ] 同一条 assistant message 的 thinking + 多个 tool_calls 折叠为一组（ThinkingGroup）；折叠 header 显示 LLM 生成的 `summaryTitle`（如 "Reviewed 3 files"），streaming 且标题未就绪时 shimmer；折叠态不创建 tool DOM（懒渲染）
+- [ ] tool 行渲染为扁平行（ToolRow），非大卡片；read/grep 行含 FileChip 点击 `openFile`；bash 行显示 `Ran <cmd>` 可展开看输出，无"打开终端"按钮；完成态默认折叠、streaming 默认展开
+- [ ] plan executing 或 chat 有 in_progress session todo 时，live cluster 末尾显示进度行 `(current/total) title`；PlanFileCard 同步渲染 planTodos
+- [ ] 后端 `LlmScene::Title`（默认 `utility-flash`）异步生成 turn 折叠标题与 session 标题；占位优先 + 失败静默回退规则摘要，不阻塞 UI
+- [ ] wire 事件：`TurnEnd.summaryTitle`、`session.title_updated`、`plan.todos`、`session.todos`；`get_state` 含 planTodos/sessionTodos
+- [ ] 切会话 / reload / 跨 owner 观察三条路径下，plan 卡始终按 `path` 唯一；`Ctx%`、plan footer 状态与 review/verify notice 能通过 `get_state` + `get_messages` 重建，且终态事件后 state 以当前真相为准，不得出现重复卡或 completed/pending 漂移
+
+**验收标准（P1）**：
+- [ ] E2E 覆盖：userPromptPill、assistantNoCard、assistantResponseGroups、groupFoldTitles、toolRowFlat、toolRowExpandable、fileChipOpen、progressRow、sessionTitleUpdated
+- [ ] E2E 覆盖：切回带 active plan 的 session 可恢复单张 plan 卡与 `Ctx%`；reload 后 custom `plan.review` / `plan.verify` notice 可重放；participant 持有 session 时 webview 观察态对 `plan.enter/build/exit` 与终态 reconcile 保持一致
+- [ ] 单元测试覆盖 `groupTimelineByAssistantResponse`、`useActiveTodoProgress`、ThinkingGroup 懒渲染、ToolRow 差异化编排
+
 ### Story 9: 插件自举全闭环
 **作为用户**，我希望Agent能根据我的自然语言需求，自主生成、编译、加载插件，无需人工干预。
 **验收标准**：

@@ -35,19 +35,19 @@
 | 术语 | 语义（人话） | 数据载体 | 行为约束 | 说人话 |
 |------|--------------|----------|----------|--------|
 | **Reviewer（Plan 审稿）** | `create_plan` 后读计划/仓库，给**顾问摘要** | `ReviewSummary(kind=plan)` + `transcript.plan.review` | **不进** EXEC gate；可改 plan（`allow_review_edit`） | 开工前的挑刺员，不当法官。 |
-| **Code Reviewer（EXEC 代码审查）** | 全部 todo `completed` 后、Verifier 前，读 diff/代码给**只读结论** | `ReviewSummary(kind=code, verdict=...)` + `transcript.plan.code_review` | **严格只读**；`pass` 同回合直连 verifier，非 `pass` 回主 Agent 修 | 完工前的代码二审，只提问题不动手改。 |
-| **Verifier（验证）** | code review 通过或被跳过后，用**可复现命令**证明交付物可用 | `VerifySummary` + `transcript.plan.verify` | 默认**只读项目** + `bash` 跑检查；输出含 **Command run / Output observed** | 最后的验货员，专找「最后 20%」。 |
+| **Code Reviewer（EXEC 代码审查）** | 全部 todo `completed` 后、Verifier 前，读 diff/代码给**只读结论** | `ReviewSummary(kind=code, verdict=...)` + `transcript.plan.code_review` | **严格只读**；`pass` 同回合直连 verifier；`aborted` 视为 reviewer 不可用并继续 verifier；只有真 findings（`fail/partial`）才回主 Agent 修 | 完工前的代码二审，只提问题不动手改。 |
+| **Verifier（验证）** | code review 通过、被跳过、或 `aborted` 后，用**可复现命令**证明交付物可用 | `VerifySummary` + `transcript.plan.verify` | 默认**只读项目** + `bash` 跑检查；输出含 **Command run / Output observed** | 最后的验货员，专找「最后 20%」。 |
 | **Mini 验证** | 执行单步后的快速自检 | 主 Agent prompt / SOP（无独立子 Agent） | 如 `file_read` 非空、`exit code == 0` | 每步顺手看一眼，不另开子进程。 |
 | **Inline 验证** | 执行过程中穿插跑测试/构建 | 主 Agent `bash` + executor reminder | 不阻塞 `mode=completed` 除非配置 gate | 边干边测，Codex execute 模板风格。 |
 | **CI / 脚本验证** | 人/流水线触发的确定性检查 | `pi_agent_rust/verify` → `scripts/e2e/run_all.sh` 等 | **非** LLM 子 Agent | 机器跑全套测试，和对话解耦。 |
 | **Verdict gate** | 验证结果阻塞「任务完成」叙事 | `VERDICT: PASS\|FAIL`（GenericAgent）/ Stop hook `preventContinuation`（cc-fork） | Tomcat **默认不做** gate（对齐 reviewer 顾问原则） | 验不过就不让喊完工。 |
-| **`mode=completed` 派生** | EXEC 下全部 plan todo `completed` 后 runtime 自动收口 | `update_plan` → `code review?` → `verify` → `set_mode_completed` | code review 非 `pass` 时先停留 EXEC；`verify_gate=gate` + verify fail 时也停留 EXEC | 勾全后不会立刻回 CHAT，要先过完收口链路。 |
+| **`mode=completed` 派生** | EXEC 下全部 plan todo `completed` 后 runtime 自动收口 | `update_plan` → `code review?` → `verify` → `set_mode_completed` | code review 只有真 findings（非 `pass` 且非 `aborted`）才先停留 EXEC；`verify_gate=gate` + verify fail 时也停留 EXEC | 勾全后不会立刻回 CHAT，要先过完收口链路。 |
 
 **时间点钉死**：
 
 - **Reviewer 触发点**：`create_plan` 落盘成功后（PLAN 阶段，**早于** `/plan build`）。
 - **Code Reviewer 触发点（现行）**：最后一次 `update_plan` 使全部 todo `completed` 之后，若 `code_review_rounds < max_code_review_rounds`（默认 1）则先跑 read-only code review。
-- **Verifier 触发点（现行）**：code review `pass` 的同一回合，或 code-review rounds 用尽后，进入 verifier；与 plan reviewer（`create_plan -> review`）**正交**。
+- **Verifier 触发点（现行）**：code review `pass` / `aborted` 的同一回合，或 code-review rounds 用尽后，进入 verifier；与 plan reviewer（`create_plan -> review`）**正交**。
 
 ---
 
@@ -138,7 +138,7 @@
 | **V2 触发** | 何时 spawn verifier | **todo 全 completed 时** runtime 自动派发；无 per-plan 关闭开关，soft/gate 由全局配置 `[plan].verify_gate` 控制。 |
 | **V3 Gate + FAIL 语义** | 何时挡收工、`verdict` 含义 | **默认不 gate**；仅 `fail` 可挡；`partial`/`aborted` 不挡。 |
 | **V4 输出契约** | 结构化 vs 叙述；证据字段 | `<verify>` + `checks[].command`；无命令 PASS 无效。 |
-| **V5 工具集** | 只读 vs 可改仓库 | `{read, search_files, list_dir, bash}`；禁 plan/write/edit。 |
+| **V5 工具集** | 只读 vs 可改仓库 | `{read, search_files, list_dir, bash, web_fetch}`；禁 plan/write/edit。 |
 | **V6 派发入口** | catalog vs internal | **internal subagent**（同 reviewer）。 |
 | **V7 执行中 Mini（PR-V0）** | B 层沿途验证 | prompt + **P0–P6 发现**；不 gate `completed`。 |
 | **V8 FAIL 后谁修** | verifier 能否改 plan 状态 | 只写 transcript/摘要；主 Agent 或用户续跑。 |
@@ -207,7 +207,7 @@
 | **V2 触发点** | 何时 spawn verifier | **采用** `all_completed` 时 `dispatch_verifier` **同步 await**（无 per-plan 关闭开关）。 | `GenericAgent/memory/plan_sop.md` §四；`verificationAgent.ts` L131–132；`update_plan.rs` | **设计**：`ops::all_completed` → `PlanRuntime::dispatch_verifier` 与 `set_mode_completed` 同事务边界；soft/gate 行为由全局 `[plan].verify_gate` 控制。**理由**：对齐 GenericAgent「全 [✓] 后验证」；避免主 Agent 回 CHAT 后才验（§4.1.1 Q2 实现层对照）；frontmatter 零改造保持配置面精简。 | **未入选**：主 Agent / LLM 自觉 spawn；frontmatter `verify` 字段。**拒因**：verification avoidance（cc-fork L12、§4.1.1 Q1）；多一字段无对应需求。 | 勾完 todo 由 runtime 拉验货员，开关只看全局 verify_gate。 |
 | **V3 Gate + FAIL** | 是否阻塞 completed；何谓 FAIL | **采用** `[plan].verify_gate` 单一配置项，枚举 `{soft, gate}`，默认 `soft`；**仅** `verdict=fail` 且 `verify_gate="gate"` 时不 `set_mode_completed`；`partial`/`aborted` **不 gate**。 | `reviewer.md` G4；`verificationAgent.ts` L119–127；`verify_sop.md` L62–64；`ga.py` L459–462（GenericAgent 对照） | **设计**：`fail`=test/build/lint 非 0、对抗探测失败、无 `command` 的 PASS（runtime 降级）；`partial`=环境/工具不可用；`aborted`=spawn/parse/父 abort。**理由**：对齐 reviewer 顾问哲学 + cc-fork PARTIAL 语义；避免 flaky/沙箱误杀（§4.1.1 Q1 表）；单配置项最简。 | **未入选**：GenericAgent 式一律 VERDICT gate 完工声明；frontmatter per-plan 覆盖。**拒因**：Tomcat 默认仍 `set_mode_completed` 留痕；frontmatter 字段会让配置面发散。 | 默认只记账；严模式（一项 config 改 `gate`）只卡真 FAIL。 |
 | **V4 输出契约** | 结构化 vs 叙述；证据 | **采用** `<verify>` → `VerifySummary`；`checks[]` 含 `command`+`output_excerpt`；`verdict` 四态。 | `verificationAgent.ts` L81–127；`plan_sop.md` L206–217；`verify_sop.md` L10–14 | **设计**：每项 check 必须 **Command run + Output observed**（抄 cc-fork）；解析失败→`aborted`。**理由**：GenericAgent「无工具输出的 PASS=无效」；可挂 UI/测（§4.1.1 Q1/Q2）。 | **未入选**：纯 markdown / pi-mono Critical 列表。**拒因**：无法机器区分「真跑 curl」与读代码 PASS。 | 结构化验货单，没命令不算过。 |
-| **V5 工具集** | 能否改代码；bash 谁批 | **采用** `{read, search_files, list_dir, bash}`；**拒绝** `edit`/plan 工具；bash 仍走 **permission**。 | `verificationAgent.ts` L139–145；`QUALITY_MECHANISMS.md` L516–541；Tomcat permission 既有链 | **设计**：与 cc-fork `disallowedTools` 同构；verifier 可跑项目 test，危险命令被拒写入 `VerifySummary`。**理由**：验证=观测+执行，不是第二实施者（§4.1.1 Q2）。 | **未入选**：verifier 可 `edit` 自动修。**拒因**：与 executor 重叠、难审计。 | 验货员只读+跑命令，该问用户还得问。 |
+| **V5 工具集** | 能否改代码；bash 谁批 | **采用** `{read, search_files, list_dir, bash, web_fetch}`；**拒绝** `edit`/plan 工具；bash 仍走 **permission**。 | `verificationAgent.ts` L139–145；`QUALITY_MECHANISMS.md` L516–541；Tomcat permission 既有链 | **设计**：与 cc-fork `disallowedTools` 同构；verifier 可跑项目 test，也可抓取静态网页证据，危险命令被拒写入 `VerifySummary`。**理由**：验证=观测+执行，不是第二实施者（§4.1.1 Q2）。 | **未入选**：verifier 可 `edit` 自动修。**拒因**：与 executor 重叠、难审计。 | 验货员只读+跑命令，必要时可抓静态网页，该问用户还得问。 |
 | **V6 派发** | 入口形态 | **采用** `spawn_subagent_internal`；**拒绝** catalog / `dispatch_agent`。 | [`reviewer.md`](./tools/reviewer.md) §2.1 §4.1 | **设计**：`AgentRegistry::spawn_subagent_internal`，复用 cascade abort / depth。**理由**：与 reviewer、codex internal thread 同路径；防 LLM 跳过验货（§4.1.1 Q2 vs openclaw/hermes 软边界）。 | **未入选**：`dispatch_agent(role=verifier)`。**拒因**：模型可能不调或滥用。 | 内部拉子 Agent，模型看不见。 |
 | **V7 Mini（PR-V0）** | B 层是否只靠 prompt | **采用** PR-V0：`executor.txt`/`planner.txt` **追加** Mini 段（§4.1.1 合入用 Prompt）；**不** gate `update_plan(completed)`。 | `execute.md` L34–41；`prompts.ts` L211；`plan_sop.md` L146；竞品表 §4.1.1 Q3 | **设计**：每 todo `completed` 前 **1 条** scoped smoke 或 `read` 非空；测不了同轮说明原因。**理由**：对齐 codex「along the way」+ GenericAgent Mini；低成本补 B，与 C 层互补（§4.1.1 Q3）。 | **未入选**：PR-V0 用 runtime 拦 `completed`。**拒因**：与「先 prompt 后 gate」分期一致；避免误杀进度。 | 边做边测，先靠提示词。 |
 | **V8 FAIL 后谁修** | verifier 能否改 plan | **采用** FAIL 仅 `VerifySummary`/transcript/tool result；**拒绝** verifier `update_plan` 回滚 todos。Gate 拦下后由**主 Agent 在收到 `verify` tool result 时** `update_plan` 把目标 todo 退回 `in_progress` 或追加新 todo（runtime **不**自动）。 | `plan_sop.md` §步骤10；`update_plan.rs` 进度不变量 | **设计**：verifier 输出修复**建议文案**；todos 仍全 `completed`（gate 失败时 mode 保持 Executing）；主 Agent 后续轮自行 `update_plan` 续跑（同 EXEC 模式正常进度推进路径）。**理由**：进度只由 executor 推；区别于 GenericAgent 自动追加 `[FIX]` 步（§4.1.1 Q1 表）。 | **未入选**：verifier 自动 `pending` / GenericAgent 式修复循环。**拒因**：与 plan-runtime 不变量冲突；修复由主 Agent 或用户 `/plan build` 续跑。 | 验挂了给清单，主 Agent 在下轮把要修的 todo 退回 in_progress。 |
@@ -279,7 +279,7 @@
 | **pi_agent_rust** | **bash 脚本** | lint → lib test → integration → E2E（profile 控制范围） | 无 LLM | exit code + artifact | 纯工程验证。 |
 | **openclaw** | LLM 调 **`sessions_spawn`** | 由 skill（如 code-review）描述步骤；子会话隔离 | 入参定 model/runtime/权限 | 子会话消息 | 灵活、无统一 schema。 |
 | **hermes** | **`delegate_task(goal, toolsets=...)`** | LLM 定何时派；子 Agent 按 goal 执行 | toolsets **LLM 入参** | 文本 | 通用委派，非专用 verifier。 |
-| **Tomcat（拟定 PR-V1）** | `spawn_subagent_internal(SubagentType::Verifier)` | 同 cc-fork：读 plan body Test plan + 仓库脚本（P0–P6 发现）→ bash 跑检查 → 解析 `<verify>` → `VerifySummary` | `{read, search_files, list_dir, bash}`；禁 plan/write/edit | `checks[]` + `verdict` | 与 reviewer 同派发路径，专用验货 prompt。 |
+| **Tomcat（拟定 PR-V1）** | `spawn_subagent_internal(SubagentType::Verifier)` | 同 cc-fork：读 plan body Test plan + 仓库脚本（P0–P6 发现）→ bash / web_fetch 取证 → 解析 `<verify>` → `VerifySummary` | `{read, search_files, list_dir, bash, web_fetch}`；禁 plan/write/edit | `checks[]` + `verdict` | 与 reviewer 同派发路径，专用验货 prompt。 |
 
 **实现层对照（「代码在哪」）**
 
@@ -495,13 +495,13 @@ checks:
     output_excerpt: "test result: ok. 42 passed"
     result: pass   # pass | fail | skip
 verdict: pass      # pass | fail | partial | aborted
-summary: "≤600 chars"
+summary: "concise, focused verification summary"
 ```
 
 | 字段 | 约束 | 说人话 |
 |------|------|--------|
 | `checks[].command` | `result=pass` 必填；缺则 runtime 单条降 `skip` + warning；关键 build/test 全 `skip` → `verdict=partial`（详 §10） | 没命令别说过；单条漏不诛连。 |
-| `checks[].output_excerpt` | ≤ 500 chars；超长尾部截断（保留命令最后若干行 + `…[truncated]` 尾注） | 输出别撑爆 transcript。 |
+| `checks[].output_excerpt` | 建议短小且证据充分；runtime 不再对 verifier 返回做固定字符上限截断 | 输出要有证据，但不要靠硬截断控体积。 |
 | `verdict` | `aborted`：parse 失败 / 达到 `VERIFIER_MAX_TURNS` 预算仍未正常收口 / parent abort；其他四态见 §4.1.1 Q1 | 验货中断。 |
 | transcript / tool result | `plan.verify` 事件与 `update_plan.verify` 共用 runtime `normalize_for_gate()` 之后的最终 `VerifySummary` | 审计口径和当轮推理口径一致。 |
 | Tool result 挂载 | `update_plan` 成功 JSON 增加 `verify: VerifySummary \| null` | 主 Agent 一眼看见验货结果。 |
@@ -594,7 +594,7 @@ sequenceDiagram
 | EXEC + code_reviewing | `all_completed` 且还有 code-review rounds | runtime 同步 spawn read-only code reviewer | 代码二审中。 |
 | EXEC + verifying | code review `pass`，或 rounds 用尽被跳过 | runtime 同步 spawn verifier | 验货中。 |
 | COMPLETED | code review 已通过/跳过，且 verifier 不阻断 completed | 留下 `plan.code_review?` / `plan.verify` 事件供回放 | 回 CHAT。 |
-| EXEC（code review 非 pass） | code reviewer verdict != pass | **停留** EXEC；主 Agent 收 `tool_result.code_review` 后自行 reopen / 新增 todo 修复 | 代码审查打回，主 Agent 接力修。 |
+| EXEC（code review 真 findings） | code reviewer `verdict != pass` 且 `aborted == false` | **停留** EXEC；主 Agent 收 `tool_result.code_review` 后自行 reopen / 新增 todo 修复 | 代码审查真打回，主 Agent 接力修。 |
 | EXEC（gate 失败） | `[plan].verify_gate="gate"` 且 verifier verdict=fail | **停留** EXEC；todos 仍全 completed；主 Agent 收 tool result.verify 后自行 `update_plan` 退 todo | 验货被拦下，主 Agent 自己接力修。 |
 
 ---

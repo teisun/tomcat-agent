@@ -1,0 +1,49 @@
+---
+description: 禁止 rm -rf 误删——2026-06-26 事故后强制安全规则，防止再次误删仓库与家目录
+alwaysApply: true
+---
+
+# 禁止 rm -rf（事故防护规则）
+
+**作用域**：所有终端命令、脚本、Agent 自动执行
+**生效范围**：当前项目全量 Agent，alwaysApply
+
+> 起因：2026-06-26 事故，`HOME=$(mktemp) tomcat init ...; rm -rf "$HOME"` 中 `HOME=...` 只对单条命令生效，分号后 `$HOME` 还原为真实家目录 `/Users/yankeben`，`rm -rf` 遍历删除了整个仓库（含 `.git` 与未提交工作）及个人文件，无副本不可恢复。本规则用于杜绝此类复发。
+
+---
+
+## 一、绝对禁止的命令形态
+
+1. **禁止任何 `rm -rf "$VAR"` 形态命令**，无论 `$VAR` 看起来多"安全"。环境变量在分号 / 换行 / 子 shell 边界后可能恢复为真实值——这是本次事故的直接成因。
+2. **禁止 `rm -rf ~`、`rm -rf $HOME`、`rm -rf /`、`rm -rf .`、`rm -rf *`** 等指向家目录/根/当前目录/通配根的删除。
+3. **禁止用 `rm -rf` 删除仓库根、`.git`、`target/` 之外的源码目录、`node_modules` 之外的依赖目录**。
+
+## 二、临时目录清理的正确写法
+
+临时目录变量必须在**同一条命令链内消费**，不得跨分号：
+
+```bash
+# 正确：同一 && 链，HOME 不跨分号，删的是临时目录
+d=$(mktemp -d) && (HOME="$d" tomcat init ...) && rm -rf "$d"
+
+# 正确：字面量绝对路径
+rm -rf /tmp/tomcat-init-abc123
+
+# 错误（事故原样）：分号后 $HOME 已还原为真实家目录
+HOME=$(mktemp -d /tmp/tomcat-init-XXXX) tomcat init ...
+rm -rf "$HOME"
+```
+
+## 三、删除操作优先级（从安全到危险）
+
+1. 优先用 `git clean -nd` 预览 → 确认后 `git clean -fd`（仅清 untracked，不碰已跟踪文件）
+2. 优先用 `trash <path>`（进废纸篓可找回）而非 `rm`
+3. 逐个删除明确文件：`rm <具体文件路径>`，不用 `-rf`、不用通配符覆盖大范围
+4. 实在要 `rm -rf` 某目录：必须用**字面量绝对路径**，且路径必须在 `/tmp/`、`target/`、`dist/`、`node_modules/` 等明确可重建目录下
+
+## 四、执行 Agent 强制行为
+
+- 执行任何删除前先自检：是否含 `rm -rf`？参数是否含 `$` 变量？变量是否跨命令边界？命中则**停止并改写为安全形态**，不得直接执行。
+- 本机已配双层防护：Cursor `beforeShellExecution` Hook（`~/.cursor/hooks/block-rm-rf.sh`，拦 Agent 终端命令）+ safe-rm（`/usr/local/bin/rm`，拦系统层）。Agent **不得禁用、绕过、修改**这两层防护。
+- 若某条合法命令被误拦：向用户说明，由用户手动执行，**不得自行关闭防护或换名绕过**。
+- 清理构建产物用 `cargo clean` / `npm run clean`，不要手写 `rm -rf target`。

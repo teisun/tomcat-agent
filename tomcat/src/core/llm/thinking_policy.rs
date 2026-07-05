@@ -30,6 +30,17 @@ pub enum ThinkingLevel {
 }
 
 impl ThinkingLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+
     /// 容错解析；未知字符串退化为 `Medium` 并返回 `false` 让 caller 决定是否报告。
     pub fn parse_or_medium(s: &str) -> (Self, bool) {
         match s.trim().to_ascii_lowercase().as_str() {

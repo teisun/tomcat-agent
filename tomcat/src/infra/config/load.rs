@@ -288,6 +288,11 @@ pub fn resolve_plugins_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?.join("plugins"))
 }
 
+/// `work_dir/model-thinking.json` — 全局 per-model reasoning effort 偏好文件。
+pub fn resolve_model_thinking_path(cfg: &AppConfig) -> Result<PathBuf, AppError> {
+    Ok(get_work_dir(cfg)?.join("model-thinking.json"))
+}
+
 /// `work_dir/agents/{id}/tmp` — 临时目录，保留签名兼容。
 pub fn resolve_tmp_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(resolve_agent_trail_dir(cfg)?.join("tmp"))

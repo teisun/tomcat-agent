@@ -28,7 +28,7 @@ findings:
   - { severity: nit|suggestion|concern, area: "<short label>", note: "<one-line concrete remark>" }
   - ...
 verdict: pass|fail|partial|aborted
-summary: <review opinion — what you found and overall assessment, <= 600 chars>
+summary: <concise, focused review opinion; put concrete issues in findings; do not pad for length or worry about truncation>
 changes_summary: none
 applied_changes: false
 </review>

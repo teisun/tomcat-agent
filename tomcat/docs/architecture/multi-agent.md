@@ -67,7 +67,7 @@
 
 多 Agent 能力覆盖两个相互独立的维度：
 
-- **维度 A — 多会话并发（Session-Level Concurrency）**：多个不同 session 各自对应一个独立的 `AgentLoop` 实例，共享同一进程中的 `LlmProvider`、`PrimitiveExecutor`、`EventBus` 等基础设施，彼此上下文完全隔离，各自持有独立的 `abort_signal` / `steering_queue`。
+- **维度 A — 多会话并发（Session-Level Concurrency）**：多个不同 session 各自对应一个独立的 `AgentLoop` 实例，共享同一进程中的 `LlmProvider`、`PrimitiveExecutor`、`EventBus` 等基础设施，彼此上下文完全隔离，各自持有独立的 `CancellationToken` / `steering_queue`。
 - **维度 B — 主-子 Agent 编排（Agent Hierarchy / Orchestration）**：主 Agent 通过注册一个 LLM 可调用的 `dispatch_agent` 工具，将子任务委托给独立的子 `AgentLoop` 实例执行；主 Agent 同步等待子任务完成后得到结果，作为 `ToolResult` 继续工作。
 
 ### 设计目标
@@ -85,9 +85,9 @@
 
 | 术语 | 说明 |
 |------|------|
-| **AgentInstance** | 一个 `AgentLoop` + 关联的 `session_id` + `abort_signal` 的逻辑单元。 |
+| **AgentInstance** | 一个 `AgentLoop` + 关联的 `session_id` + 当前回合 `CancellationToken` 的逻辑单元。 |
 | **AgentRegistry** | 进程级注册表，维护所有活跃 `AgentInstance`，以 `session_id` 为 key，参考 openclaw `subagentRuns: Map<runId, SubagentRunRecord>`。 |
-| **AgentHandle** | 注册表中单个实例的元数据记录（`session_id`、`abort_signal`、`spawn_depth`、`parent_session_id`）。 |
+| **AgentHandle** | 注册表中单个实例的元数据记录（`session_id`、root/child `CancellationToken`、`spawn_depth`、`parent_session_id`）。 |
 | **RootAgent** | 由用户/API 直接发起的 `AgentLoop`，`spawn_depth=0`，`parent_session_id=None`。 |
 | **SubAgent / ChildAgent** | 由主 Agent 通过 `dispatch_agent` 工具创建的 `AgentLoop`，`spawn_depth=parent+1`。 |
 | **dispatch_agent** | 注册到 `tool_definitions` 中的 LLM 可调用工具，触发子 Agent 创建与执行；schema 见 §14.4.1，含 `task` / `subagent_type` / `role` / `allowed_tools` / `model` / `max_turns`。 |
@@ -98,7 +98,7 @@
 | **spawn_depth** | 当前 `AgentInstance` 距根 Agent 的嵌套层数，防止无限递归（参考 openclaw `spawnDepth`、LangGraph `recursion_limit`）。 |
 | **MAX_SPAWN_DEPTH** | 全局可配置的最大嵌套深度，默认值 `2`（与 `agent_registry` 常量一致）；超限时 `dispatch_agent` 返回错误 ToolResult，不终止主 Agent。 |
 | **MAX_CONCURRENT_AGENTS** | 进程级最大并发 `AgentInstance` 数，默认值 `16`。 |
-| **CascadeAbort** | 父 Agent 中止时通过 Registry 遍历所有子 Agent 并触发其 `abort_signal`（参考 AutoGen CancellationToken）。 |
+| **CascadeAbort** | 父 Agent 中止时 cancel root token；tokio 把取消沿 `parent -> child_token()` 树自动扩散到所有子孙。 |
 
 ---
 
@@ -112,14 +112,14 @@
 |------|------|------|--------|
 | **MA1 注册表层级** | 进程级 `AgentRegistry`（`session_id` 为 key） | 塞进 `ChatContext` → 跨会话限流 / `CascadeAbort` 都做不了；与文档 §14.3.2 / §14.7.1 既有图示一致 | 全楼一张登记表。 |
 | **MA2 会话壳层级** | `ChatContextRegistry`（`session_key` → `Arc<ChatContext>`）管 [`TodosRuntime`](./plan-runtime.md#62-todosruntimechat-路径) / [`PlanRuntime`](./plan-runtime.md#63-planruntimeplanexec-路径) / mode | 与 Agent 执行树正交；混在一起会让 Phase 2 的多会话路由失语义 | 每间聊天室一个管家。 |
-| **MA3 Handle 内容** | 只存 `session_id / parent_session_id / spawn_depth / abort_signal`（详见 §14.3.2 `AgentHandle`），**不存** `AgentLoop` | `AgentLoop` 每轮新建，进 `DashMap` 会泄漏且析构难；与「子 loop 跑完即 drop」语义冲突 | 登记工牌不登记工人本体。 |
-| **MA4 父子关系登记** | 子 `AgentHandle.parent_session_id = Some(parent)`；`abort_children(parent_id)` **扫表反查**（对标 openclaw `spawnedBy`） | 维护 `children: Vec` 要 register/unregister 双写一致，遇到 panic / abort 半步极易漂移 | 只记上级是谁，查孩子靠扫表。 |
+| **MA3 Handle 内容** | 只存 `session_id / parent_session_id / spawn_depth / cancel_token`（详见 §14.3.2 `AgentHandle`），**不存** `AgentLoop` | `AgentLoop` 每轮新建，进 `DashMap` 会泄漏且析构难；与「子 loop 跑完即 drop」语义冲突 | 登记工牌不登记工人本体。 |
+| **MA4 父子关系登记** | 子 `AgentHandle.parent_session_id = Some(parent)`；子 token 用 `parent.child_token()` 派生；`children: Vec` 只保留配额计数用途 | 纯靠扫表 / 纯靠共享单个不可复位中断位都容易让取消语义与资源计数耦死 | 既记上级是谁，也让取消树由 tokio 原生维护。 |
 | **MA5 子 loop 启动点** | **两个唯一入口**：①  `dispatch_agent_tool::run`（LLM 工具，§14.4）；② `AgentRegistry::spawn_subagent_internal`（内部 Rust API，§14.6.1） | 在 LLM 回调或工具内部散落 `AgentLoop::new` 难审计、难做 Guard | 统一两个入口函数，其它地方禁止 new。 |
 | **MA6 子 loop 运行方式** | 调用方 **同步 `await child_loop.run(...)`**；并发体现在多 session 各自有父 loop | 异步 fire-and-forget 会让父 Agent 拿不到 `ToolResult` / `ReviewSummary` 盲继续 | 派出去就要等结果。 |
-| **MA7 共享基础设施** | `Arc<dyn LlmProvider>` / `Arc<dyn PrimitiveExecutor>` / `Arc<EventBus>` **进程级共享**（与 §14.3.1、§14.7.1 一致） | 每 loop 一套：重复 HTTP/MCP 连接、内存/FD 线性涨、全局限流难统一；与 [`ChatContext`](../../src/api/chat/mod.rs) 注入模型冲突；隔离应靠 `session_id` + 独立 `ContextState` + 独立 `abort_signal` | 水电共用，房间隔开。 |
+| **MA7 共享基础设施** | `Arc<dyn LlmProvider>` / `Arc<dyn PrimitiveExecutor>` / `Arc<EventBus>` **进程级共享**（与 §14.3.1、§14.7.1 一致） | 每 loop 一套：重复 HTTP/MCP 连接、内存/FD 线性涨、全局限流难统一；与 [`ChatContext`](../../src/api/chat/mod.rs) 注入模型冲突；隔离应靠 `session_id` + 独立 `ContextState` + 独立 `CancellationToken` | 水电共用，房间隔开。 |
 | **MA8 上下文隔离** | 子 loop **不**继承父 messages；仅 `task` + subagent system prompt（§14.4.3） | 继承历史会爆窗 / 串味，与 claude-code / codex 共识相悖 | 子 Agent 白纸进场。 |
 | **MA9 深度 / 并发上限** | `spawn_depth + MAX_SPAWN_DEPTH` + `MAX_CHILDREN_PER_AGENT` + `MAX_CONCURRENT_AGENTS`（§14.3.4 / §14.4.4） | 任何一个缺位都会被 LLM 幻觉打穿 | 楼层与人数双限。 |
-| **MA10 CascadeAbort** | 父 `abort` → `registry.abort_children(parent_session_id)` 深度优先（§14.4.5） | openclaw 不自动级联踩过坑 | 父停子必停。 |
+| **MA10 CascadeAbort** | 父 `abort` → `registry.cascade_abort(root_session_id)` 只 cancel root token；tokio 负责级联（§14.4.5） | 手写 BFS + 手动复位很容易出现“上一回合 abort 永不熄灭”的脏状态 | 父停子必停，而且下一回合换新 token 就自动归零。 |
 | **MA11 internal vs LLM dispatch** | 共用 `AgentRegistry` / `spawn_depth` / `CascadeAbort` / `SubAgentStart/End` 事件；**不**共用 schema / catalog（详见 §14.6.1） | reviewer 权限不能挤进 `dispatch_agent` 的 `subagent_type` 枚举 | 一条登记处，两种进门。 |
 | **MA12 transcript** | 子 `session_id` 独立 `agents/<agentId>/sessions/<child>.jsonl`；含 `:` 时文件名 `replace(':', '_')`（§14.6 / §14.9） | 子事件混进父 transcript → 回放与 compaction 全乱 | 各记各的账。 |
 
@@ -132,7 +132,7 @@
 - `AgentLoop` 无全局单例，可按 `session_id` 独立构造多个，天然支持并发。
 - `AgentLoopConfig.session_id` 已存在；会话级事件在发射时通过 `ScopedEventEmitter` 统一写入**事件信封**，因此 wire payload 顶层有 `sessionId`、`EventContext.session_id` 也同步可用；订阅方按 `ctx.session_id` 过滤即可。
 - 共享资源（`LlmProvider`、`PrimitiveExecutor`、`EventBus`）均以 `Arc<dyn ...>` 注入，内部按需持有线程安全结构，多实例并发安全。
-- 各实例的 `abort_signal: Arc<AtomicBool>` 独立，互不影响。
+- 各实例的当前回合 `CancellationToken` 独立，互不影响；root handle 会在每回合开始 `rearm_root(..., turn_token.child_token())`。
 
 ### 14.3.2 AgentRegistry（进程级）
 
@@ -147,7 +147,7 @@ pub struct AgentRegistry {
 
 pub struct AgentHandle {
     pub session_id:        String,
-    pub abort_signal:      Arc<AtomicBool>,
+    pub cancel_token:      CancellationToken,
     pub spawn_depth:       u32,
     pub parent_session_id: Option<String>,
 }
@@ -159,8 +159,8 @@ pub struct AgentHandle {
 |------|------|
 | `register(session_id, handle) -> Result<()>` | 注册新实例；同一 `session_id` 重复注册返回 `Err`（幂等保护）。 |
 | `unregister(session_id)` | 实例结束后注销。 |
-| `abort(session_id)` | 定向中止某个实例，设置其 `abort_signal`。 |
-| `abort_children(parent_session_id)` | 级联中止指定父 session 下的所有子 Agent（CascadeAbort）。 |
+| `rearm_root(session_id, token)` | 新回合开始时给 root handle 换一棵新的 token 子树。 |
+| `cascade_abort(session_id)` | 定向中止某个 root 实例；取消从 root token 自动扩散到所有子 Agent。 |
 | `abort_all()` | 进程退出时全部中止。 |
 | `active_count() -> usize` | 当前活跃实例数，供 `MAX_CONCURRENT_AGENTS` 上限检查。 |
 | `get(session_id) -> Option<Arc<AgentHandle>>` | 查询指定实例元数据。 |
@@ -172,7 +172,7 @@ pub struct AgentHandle {
 | 维度 | `ChatContextRegistry`（详见 [`plan-runtime.md` §6.4](./plan-runtime.md#64-chatcontext-持有关系)） | `AgentRegistry`（§14.3.2） |
 |------|---------------------------------|---------------------------|
 | Key | `session_key`（持久 chat 会话身份，如 `"agent:main:main"`） | `session_id`（运行时实例 id，含 `:sub:<uuid>` 前缀） |
-| Value | `Arc<ChatContext>`（含 `TodosRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id`） | `Arc<AgentHandle>`（仅控制面元数据 + `abort_signal`） |
+| Value | `Arc<ChatContext>`（含 `TodosRuntime` / `PlanRuntime` / 共享 `Arc` 服务 / `root_session_id`） | `Arc<AgentHandle>`（仅控制面元数据 + `cancel_token`） |
 | 生命周期 | 与 chat session 同寿（启动 → 退出） | **跑时注册，结束注销**（与 `AgentLoop::run` 同寿） |
 | 关心的事 | mode 切换、PlanFile/TodoFile IO、面板投影、`/plan` 命令 | 并发上限、`spawn_depth`、`CascadeAbort`、`SubAgentStart/End` 路由 |
 | 是否持有 `AgentLoop` | **否**（每轮新建） | **否**（仅持 Handle，Loop 在 `dispatch_agent_tool::run` / `spawn_subagent_internal` 栈帧内拥有） |
@@ -180,12 +180,12 @@ pub struct AgentHandle {
 **关键不变量**：
 
 - 一个 `session_key` 对应**唯一** `ChatContext`；该 ChatContext 一辈子 0..n 次产生父 `AgentLoop`，每个父 loop 在 `AgentRegistry` 各登记一条 `AgentHandle`（含其下属子 loop 的 handle）。
-- `AgentHandle` 字段**严格收敛**为：`session_id`、`parent_session_id`、`spawn_depth`、`abort_signal`，（可选 Phase 3+ `subagent_type` / `role` 镜像供 `tool_exec` 守卫读）。**不**加入 `AgentLoop`、`messages`、`tool_state` 等执行面字段——这些数据要么在 `AgentLoop` 栈上、要么在 `ContextState` 里。
-- 子 loop 在 `AgentRegistry` 里登记的 `abort_signal` **与子 loop 内部使用的是同一个 `Arc<AtomicBool>`**——`CascadeAbort` 在表上一次 `store(true)`，reasoning 间隙的子 loop 就能看到。
+- `AgentHandle` 字段**严格收敛**为：`session_id`、`parent_session_id`、`spawn_depth`、`cancel_token`，（可选 Phase 3+ `subagent_type` / `role` 镜像供 `tool_exec` 守卫读）。**不**加入 `AgentLoop`、`messages`、`tool_state` 等执行面字段——这些数据要么在 `AgentLoop` 栈上、要么在 `ContextState` 里。
+- root handle 的 token 在每回合开始由 `rearm_root(..., turn_token.child_token())` 换新；子 loop 的 token 由 `parent.child_token()` 派生。这样当前回合一旦 `turn_token.cancel()`，所有 reviewer / verifier 子孙都会立刻收到取消；下一回合换新 token 后，整棵树自动归零。
 
 > 导航：本节的 `ChatContextRegistry` 在 `tomcat serve --stdio` 里的实际多会话 dispatcher / `sessionId` 路由 / writer demux 落地，见 [`agent-server-and-ui-gateway.md`](./agent-server-and-ui-gateway.md)。
 
-**说人话**：`ChatContextRegistry` 是「楼层档案」（哪间聊天室是谁的）；`AgentRegistry` 是「访客登记处」（谁正在干活、急停按钮在哪）。两张表互不掺和，但要靠 `ChatContext.root_session_id` 把彼此串起来——见 [`plan-runtime.md` §6.4](./plan-runtime.md#64-chatcontext-持有关系)。
+**说人话**：`ChatContextRegistry` 是「楼层档案」（哪间聊天室是谁的）；`AgentRegistry` 是「访客登记处」（谁正在干活、当前这棵执行树的取消 token 在哪）。两张表互不掺和，但要靠 `ChatContext.root_session_id` 把彼此串起来——见 [`plan-runtime.md` §6.4](./plan-runtime.md#64-chatcontext-持有关系)。
 
 ### 14.3.3 AgentLoopConfig 扩展
 
@@ -325,7 +325,7 @@ execute_tool("dispatch_agent", args)
 └─ 返回 ToolResult { content: child_result.final_text, is_error: false }
 ```
 
-> **图侧注**：`registry.register` 写入的是 `AgentHandle`（仅元数据 + `abort_signal`，§14.3.2.1），**不是** `AgentLoop` 本体；`child_loop` 在 `execute_tool` 的栈帧里 `new` 出来，`run().await` 返回后立即 drop。详见 §14.4.2.2「子 AgentLoop 的所有权与生命周期」。
+> **图侧注**：`registry.register` 写入的是 `AgentHandle`（仅元数据 + `cancel_token`，§14.3.2.1），**不是** `AgentLoop` 本体；`child_loop` 在 `execute_tool` 的栈帧里 `new` 出来，`run().await` 返回后立即 drop。详见 §14.4.2.2「子 AgentLoop 的所有权与生命周期」。
 
 ### 14.4.2.1 调用栈与代码落点
 
@@ -406,7 +406,7 @@ execute_tool("dispatch_agent", args)
 |--------|----------|------|----------|
 | `spawn_subagent_internal` 栈帧 | `child_loop: AgentLoop` | **本体（局部变量，stack-owned）** | `AgentLoop::new` → `child_loop.run(...).await` 返回 → **drop** |
 | `child_loop` 内部 | `llm` / `primitive` / `event_bus` | `Arc<dyn …>` clone（来自 `ChatContext` 或 `SpawnDeps`） | 进程级共享，子 loop drop 后 Arc 计数 -1 |
-| `AgentRegistry` | `AgentHandle { abort_signal, parent_session_id, … }` | `Arc<AgentHandle>` | `register(...)` … `unregister(...)` 一窗口 |
+| `AgentRegistry` | `AgentHandle { cancel_token, parent_session_id, … }` | `Arc<AgentHandle>` | `register(...)` … `unregister(...)` 一窗口 |
 | 父 `AgentLoop` | **不持有**子 loop 任何句柄 | — | 仅在 `execute_tool` 内 `await` `dispatch_agent_tool::run`，await 期间阻塞栈 |
 | `ChatContext` | **不**持子 `AgentLoop`，仅提供共享 `Arc<dyn …>` | — | 与 chat session 同寿 |
 | `PlanRuntime::dispatch_reviewer` | **不**持子 `AgentLoop`，只 `await spawn_subagent_internal` 拿 `AgentRunResult` | — | 单次 reviewer 调用栈帧 |
@@ -419,13 +419,12 @@ execute_tool("dispatch_agent", args)
 // src/core/agent_registry.rs（Phase 2 新增；reviewer / dispatch_agent 共用）
 pub async fn spawn_subagent_internal(
     deps: &SpawnDeps,             // Arc<dyn LlmProvider> / PrimitiveExecutor / EventBus
-    parent: &ParentSpawnCtx,      // parent_session_id / spawn_depth / abort_signal
+    parent: &ParentSpawnCtx,      // parent_session_id / spawn_depth / cancel_token
     cfg: AgentLoopConfig,         // 已带 child session_id / parent / depth / subagent_type / role
     initial_messages: Vec<ChatMessage>,
 ) -> Result<AgentRunResult> {
-    // ① 共用 abort_signal：表里和子 loop 看到同一个 Arc<AtomicBool>
-    let child_abort = Arc::new(AtomicBool::new(false));
-    let child_cancel = cfg.cancel_token.clone();
+    // ① 子 token 直接从父 token 派生，父 cancel 后 tokio 会自动级联到子孙
+    let child_cancel = parent.cancel_token.child_token();
 
     // ② 登记 Handle（仅元数据，绝不放 AgentLoop）
     deps.registry.register(
@@ -434,7 +433,7 @@ pub async fn spawn_subagent_internal(
             session_id:        cfg.session_id.clone(),
             parent_session_id: Some(parent.session_id.clone()),
             spawn_depth:       parent.spawn_depth + 1,
-            abort_signal:      Arc::clone(&child_abort),
+            cancel_token:      Mutex::new(child_cancel.clone()),
         }),
     )?;
 
@@ -466,7 +465,7 @@ pub async fn spawn_subagent_internal(
 | `new` 位置 | [`chat_loop`](../../../src/api/chat/mod.rs)（Phase 1） | `spawn_subagent_internal`（Phase 2/3） |
 | 引用方 | `chat_loop` 栈帧（每用户输入一次） | `spawn_subagent_internal` 栈帧（每 spawn 一次） |
 | `Registry` 是否登记 | Phase 2 起登记（自身 handle） | 始终登记 |
-| `abort_signal` 来源 | 用户/CLI/SDK 注入 | `spawn_subagent_internal` 内新建，**与 Handle 共用同一 Arc** |
+| `cancel_token` 来源 | 用户/CLI/SDK 每回合注入新 token | `spawn_subagent_internal` 内由 `parent.child_token()` 派生，并写入 Handle 与子 loop |
 | 寿命 | 单 user turn | 单 spawn（一次 reviewer / 一次 dispatch_agent） |
 | 与 `ChatContext` 关系 | 借共享 `Arc` 服务，不被持有 | 同左 |
 
@@ -476,9 +475,9 @@ pub async fn spawn_subagent_internal(
 AgentRegistry
 └── agents: DashMap<session_id, Arc<AgentHandle>>
       │
-      ├─ "S1"                  → AgentHandle { parent=None,   depth=0, abort_signal_a }
-      ├─ "S1:sub:abc"          → AgentHandle { parent=S1,     depth=1, abort_signal_b }   (子 loop 跑期间)
-      └─ "S1:sub:abc:sub:def"  → AgentHandle { parent=S1:sub:abc, depth=2, abort_signal_c }
+      ├─ "S1"                  → AgentHandle { parent=None,   depth=0, cancel_token_a }
+      ├─ "S1:sub:abc"          → AgentHandle { parent=S1,     depth=1, cancel_token_b }   (子 loop 跑期间)
+      └─ "S1:sub:abc:sub:def"  → AgentHandle { parent=S1:sub:abc, depth=2, cancel_token_c }
 
                   ▲                 ▲
                   │                 │
@@ -521,7 +520,7 @@ chat_loop ──── new ────▶ 父 AgentLoop(S1)
 - ❌ ~~每个 `AgentLoop` 自带 `LlmProvider`/`PrimitiveExecutor` 实例~~ → 否；进程级 `Arc<dyn …>` 共享（MA7）。
 - ✅ 子 loop **唯一** `new` 点 = `spawn_subagent_internal`；`dispatch_agent_tool::run` 通过它落地。
 
-**说人话**：子工人只在派遣公司（`spawn_subagent_internal`）里雇一次，干完就散；登记处只记工牌（`AgentHandle`）和急停按钮（`abort_signal`），不把工人养在抽屉里。
+**说人话**：子工人只在派遣公司（`spawn_subagent_internal`）里雇一次，干完就散；登记处只记工牌（`AgentHandle`）和取消 token，不把工人养在抽屉里。
 
 ---
 
@@ -530,7 +529,7 @@ chat_loop ──── new ────▶ 父 AgentLoop(S1)
 参考 claude-code 的强隔离设计（只返回 final message）和 openclaw 的 system prompt 注入方式：
 
 - **不继承 messages 历史**：子 Agent 只接收 `args.task` 字符串，外加宿主注入的系统 prompt（由 `subagent_type` 决定模板，含子 Agent 身份描述、`spawn_depth`、`parent_session_id`）。
-- **独立 Transcript**：子 Agent session 的 transcript 写入 `agents/main/sessions/{child_session_id}.jsonl`，或通过配置设为不落盘（ephemeral）。
+- **独立 Transcript**：子 Agent session 的 transcript 写入 `agents/main/subagent-sessions/{child_session_id}.jsonl`（与主 session JSONL 同构，但不进历史会话列表），或通过配置设为不落盘（ephemeral）。
 - **工具集由三参数共同决定**：子 Agent 工具集 = `subagent_type` 预设默认集 ∩ 父 Agent 当前 catalog ∩ （可选）`args.allowed_tools`，再按 `role` 决定是否重新注入 `dispatch_agent`：
   - `role = "leaf"`（默认）：剔除 `dispatch_agent`，子 Agent 不可再派发（对标 hermes `role='leaf'`、claude-code 子 Agent 不再可派发）。
   - `role = "orchestrator"`：重新注入 `dispatch_agent`，但仍受 `spawn_depth` / `MAX_SPAWN_DEPTH` 约束（对标 hermes `role='orchestrator'`）。
@@ -548,10 +547,10 @@ chat_loop ──── new ────▶ 父 AgentLoop(S1)
 
 参考 AutoGen 的 `CancellationToken` 机制，对 openclaw 「不自动级联」的缺陷做改进：
 
-- 每个 `AgentHandle` 持有独立的 `abort_signal: Arc<AtomicBool>`。
-- 当父 Agent 收到 Abort（用户 Ctrl+C 或 API 调用）时，在设置自身 `abort_signal` 的同时，调用 `registry.abort_children(parent_session_id)`，该方法遍历所有 `parent_session_id` 匹配的子 Agent 并设置其 `abort_signal`。
-- 子 Agent 在 reasoning loop 的工具间隙检查 `abort_signal`，发现置位后按 Abort 语义终止并发布 `agent_end(interrupted)`。
-- 级联传播是**深度优先**的：子 Agent abort 时同样触发 `registry.abort_children(child_session_id)`，确保孙 Agent 也被中止。
+- 每个 `AgentHandle` 持有层级化 `CancellationToken`；root handle 在每回合开始通过 `rearm_root(..., turn_token.child_token())` 换成新 token。
+- 子 Agent 在 `spawn_subagent_internal` 中直接用 `parent.child_token()` 派生自己的 token；不再额外维护第二套中断位。
+- 当父 Agent 收到 Abort（用户 Ctrl+C 或 API 调用）时，`turn_token.cancel()` 或 `registry.cascade_abort(root_session_id)` 只需 cancel root token；tokio 会沿父子 token 树自动扩散到所有后代。
+- 子 Agent 在 reasoning / tool await 的取消检查点观察 `cancel_token`，命中后按 Abort 语义终止并发布 `agent_end(interrupted)`；无需手写 DFS/BFS 逐个通知。
 
 ---
 
@@ -592,7 +591,7 @@ SubAgentEnd {
 |------|------|
 | [`plugin-system/events.md`](./plugin-system/events.md) | 新增 `SubAgentStart` / `SubAgentEnd` 两个 `AgentEvent` 变体；事件通过 envelope 统一携带 `sessionId`，其中子生命周期事件的 envelope `sessionId = child_session_id`；订阅方按 `EventContext.session_id` 过滤，并结合 `parentSessionId` / `childSessionId` 追踪父子关系。 |
 | [`session-storage.md`](./session-storage.md) | `SessionEntry` 预留注释「channel/agent 相关字段供三期多 channel 使用」；本节给出 `parent_session_id` 的具体语义与写入时机（子 Agent 创建时 patch）。 |
-| [`work-dir-and-data-layout.md`](./work-dir-and-data-layout.md) | 子 Agent session 的 transcript 路径沿用 `agents/<agentId>/sessions/` 布局，以 `child_session_id`（含冒号，需 URL encode 或替换为下划线）作为文件名。 |
+| [`work-dir-and-data-layout.md`](./work-dir-and-data-layout.md) | 子 Agent session 的 transcript 路径位于 `agents/<agentId>/subagent-sessions/{child_session_id}.jsonl`；它与主 session transcript JSONL 同构，但不进入历史会话列表。 |
 | [`agent-loop.md`](./agent-loop.md) | `AgentLoop` 本身不修改；`dispatch_agent` 工具作为普通工具注入 `tool_definitions`；`AgentRegistry` 是新增的进程级管理层；`AgentLoopConfig` 新增 `parent_session_id` / `spawn_depth` / `subagent_type` / `role` 四个字段。 |
 
 ### 14.6.1 internal subagent dispatch（reviewer 消费方）
@@ -621,7 +620,7 @@ SubAgentEnd {
                  │                       进程                                   │
   用户/API        │                                                               │
    Session A ───▶│  AgentLoop(S-A)        AgentLoop(S-B)        AgentLoop(S-C)  │
-   Session B ───▶│  abort_signal_a        abort_signal_b        abort_signal_c  │
+   Session B ───▶│  cancel_token_a        cancel_token_b        cancel_token_c  │
    Session C ───▶│       │                     │                     │          │
                  │       └─────────┬───────────┘─────────────────────┘          │
                  │                 ▼                                              │
@@ -701,6 +700,6 @@ SubAgentEnd {
 |------|---------|
 | LLM 幻觉导致无限派发子 Agent | `MAX_SPAWN_DEPTH`（深度限制） + `MAX_CHILDREN_PER_AGENT`（单父并发限制） |
 | 大量子 Agent 耗尽内存/CPU | `MAX_CONCURRENT_AGENTS`（进程级并发上限），超限返回错误 ToolResult |
-| 父 Agent abort 后子 Agent 仍在消耗资源 | `CascadeAbort`：深度优先遍历 Registry，逐一设置 `abort_signal` |
-| 子 session_id 文件名非法字符（含冒号） | transcript 路径使用 `child_session_id.replace(':', "_")` 生成安全文件名 |
+| 父 Agent abort 后子 Agent 仍在消耗资源 | `CascadeAbort`：只 cancel root token，由 tokio 沿 token 树自动级联到所有子孙 |
+| 子 session_id 文件名非法字符（含冒号） | 当前 child session_id 生成规则为安全文件名；subagent transcript 直接写 `subagent-sessions/{child_session_id}.jsonl`，若未来 session_id 规则放宽，再补显式 sanitize |
 | 子 Agent 意外 panic 影响父 Agent | `child_loop.run().await` 包裹在 `catch_unwind` 或 `tokio::spawn + JoinHandle` 中，panic 转化为 `AgentRunResult::Err`，不传播到父 Agent |
