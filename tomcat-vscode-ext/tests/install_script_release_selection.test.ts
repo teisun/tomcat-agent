@@ -16,11 +16,11 @@ describe("install.sh release selection", () => {
     const releasesJson = JSON.stringify([
       {
         assets: [
-          { name: "tomcat-vscode-ext-0.1.2-darwin-arm64.vsix" },
+          { name: "tomcat-vscode-ext-0.1.3-darwin-arm64.vsix" },
         ],
         draft: false,
         prerelease: false,
-        tag_name: "ext-v0.1.2",
+        tag_name: "ext-v0.1.3",
       },
       {
         assets: [

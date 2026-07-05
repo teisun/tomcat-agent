@@ -17,8 +17,8 @@ GitHub Release is the primary install channel for this release.
 
 | What you want | Download | Best for |
 | --- | --- | --- |
-| Fastest, fewest steps | `tomcat-vscode-ext-0.1.2-darwin-arm64.vsix` / `darwin-x64` / `linux-x64` | New users who want Tomcat Agent Box **and** a matching CLI bundled together |
-| I already installed the CLI | `tomcat-vscode-ext-0.1.2.vsix` | Existing CLI users who only want the VS Code extension |
+| Fastest, fewest steps | `tomcat-vscode-ext-0.1.3-darwin-arm64.vsix` / `darwin-x64` / `linux-x64` | New users who want Tomcat Agent Box **and** a matching CLI bundled together |
+| I already installed the CLI | `tomcat-vscode-ext-0.1.3.vsix` | Existing CLI users who only want the VS Code extension |
 | CLI only | `tomcat-cli-v0.1.8-<target>.tar.gz` | Terminal-only usage without the VS Code extension |
 
 If you are unsure, pick the **platform-specific bundled VSIX** for your machine.
@@ -29,7 +29,7 @@ If you are unsure, pick the **platform-specific bundled VSIX** for your machine.
 2. Install it:
 
    ```bash
-   code --install-extension /path/to/tomcat-vscode-ext-0.1.2-darwin-arm64.vsix --force
+   code --install-extension /path/to/tomcat-vscode-ext-0.1.3-darwin-arm64.vsix --force
    ```
 
 3. Reload VS Code.
@@ -37,7 +37,7 @@ If you are unsure, pick the **platform-specific bundled VSIX** for your machine.
 What happens after installation:
 
 ```text
-Downloads/tomcat-vscode-ext-0.1.2-*.vsix
+Downloads/tomcat-vscode-ext-0.1.3-*.vsix
     -> VS Code installs the extension
     -> VS Code unpacks it into its extensions directory
     -> the bundled CLI lives inside the installed extension
@@ -116,7 +116,7 @@ If VS Code says the VSIX is not compatible:
 
 1. Download the platform-specific bundled VSIX that matches your machine.
 2. If your platform is not one of the bundled targets, install
-   `tomcat-vscode-ext-0.1.2.vsix` and bring your own CLI.
+   `tomcat-vscode-ext-0.1.3.vsix` and bring your own CLI.
 
 If the extension cannot find Tomcat:
 

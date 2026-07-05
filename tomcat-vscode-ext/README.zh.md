@@ -17,8 +17,8 @@ Tomcat Agent Box 将 `tomcat serve --stdio` 运行时带到了专属的 VS Code 
 
 | 你想要什么 | 下载内容 | 适合谁 |
 | --- | --- | --- |
-| 最快上手、步骤最少 | `tomcat-vscode-ext-0.1.2-darwin-arm64.vsix` / `darwin-x64` / `linux-x64` | 想同时获得 Tomcat Agent Box **和** 配套 CLI 的新用户 |
-| 我已经安装 CLI | `tomcat-vscode-ext-0.1.2.vsix` | 只想安装 VS Code 扩展的现有 CLI 用户 |
+| 最快上手、步骤最少 | `tomcat-vscode-ext-0.1.3-darwin-arm64.vsix` / `darwin-x64` / `linux-x64` | 想同时获得 Tomcat Agent Box **和** 配套 CLI 的新用户 |
+| 我已经安装 CLI | `tomcat-vscode-ext-0.1.3.vsix` | 只想安装 VS Code 扩展的现有 CLI 用户 |
 | 仅 CLI | `tomcat-cli-v0.1.8-<target>.tar.gz` | 只在终端使用、不需要 VS Code 扩展的用户 |
 
 如果你不确定怎么选，就选适合你机器的 **platform-specific bundled VSIX**。
@@ -29,7 +29,7 @@ Tomcat Agent Box 将 `tomcat serve --stdio` 运行时带到了专属的 VS Code 
 2. 安装它：
 
    ```bash
-   code --install-extension /path/to/tomcat-vscode-ext-0.1.2-darwin-arm64.vsix --force
+   code --install-extension /path/to/tomcat-vscode-ext-0.1.3-darwin-arm64.vsix --force
    ```
 
 3. Reload VS Code。
@@ -37,7 +37,7 @@ Tomcat Agent Box 将 `tomcat serve --stdio` 运行时带到了专属的 VS Code 
 安装之后会发生什么：
 
 ```text
-Downloads/tomcat-vscode-ext-0.1.2-*.vsix
+Downloads/tomcat-vscode-ext-0.1.3-*.vsix
     -> VS Code 安装扩展
     -> VS Code 将其解压到扩展目录
     -> bundled CLI 位于已安装的扩展内部
@@ -113,7 +113,7 @@ Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部
 
 1. 下载与你机器匹配的 platform-specific bundled VSIX。
 2. 如果你的平台不在 bundled targets 之内，安装
-   `tomcat-vscode-ext-0.1.2.vsix` 并自行提供 CLI。
+   `tomcat-vscode-ext-0.1.3.vsix` 并自行提供 CLI。
 
 如果扩展找不到 Tomcat：
 

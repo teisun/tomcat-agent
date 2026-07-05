@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Refresh the README install examples and release filenames for the `0.1.3` VSIX line.
+- Add bilingual extension documentation links so GitHub and bundled VSIX users can switch between English and Simplified Chinese.
+- Clarify that the primary entry point is Tomcat Agent Box in the VS Code sidebar.
+
 ## 0.1.2
 
 - Add platform-specific bundled VSIX packages that include the matching Tomcat CLI.

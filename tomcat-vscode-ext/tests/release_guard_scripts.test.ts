@@ -38,21 +38,21 @@ describe("release guard scripts", () => {
         JSON.stringify({
           name: "tomcat-vscode-ext",
           tomcat: { bundledCliVersion: "0.1.8" },
-          version: "0.1.2",
+          version: "0.1.3",
         }),
       );
       await fs.writeFile(
         path.join(guiRoot, "package.json"),
         JSON.stringify({
           name: "tomcat-vscode-ext-gui",
-          version: "0.1.2",
+          version: "0.1.3",
         }),
       );
       await fs.writeFile(
         path.join(extensionRoot, "package-lock.json"),
         JSON.stringify({
           packages: {
-            "": { version: "0.1.2" },
+            "": { version: "0.1.3" },
           },
         }),
       );
@@ -60,15 +60,15 @@ describe("release guard scripts", () => {
         path.join(guiRoot, "package-lock.json"),
         JSON.stringify({
           packages: {
-            "": { version: "0.1.2" },
+            "": { version: "0.1.3" },
           },
         }),
       );
 
       const versions = guards.readExtensionVersions(tempRoot);
       expect(versions.bundledCliVersion).toBe("0.1.8");
-      expect(() => guards.validateExtensionReleaseTag("ext-v0.1.2", versions)).not.toThrow();
-      expect(() => guards.validateExtensionReleaseTag("ext-v0.1.3", versions)).toThrow(
+      expect(() => guards.validateExtensionReleaseTag("ext-v0.1.3", versions)).not.toThrow();
+      expect(() => guards.validateExtensionReleaseTag("ext-v0.1.4", versions)).toThrow(
         /Extension release tag mismatch/,
       );
     } finally {

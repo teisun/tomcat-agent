@@ -100,8 +100,8 @@ describe("VSIX packaging", () => {
     const extensionRoot = path.resolve(__dirname, "..");
 
     expect(
-      buildVsixOutPath(extensionRoot, { name: "tomcat-vscode-ext", version: "0.1.2" }, "linux-x64"),
-    ).toBe(path.join(extensionRoot, "tomcat-vscode-ext-0.1.2-linux-x64.vsix"));
+      buildVsixOutPath(extensionRoot, { name: "tomcat-vscode-ext", version: "0.1.3" }, "linux-x64"),
+    ).toBe(path.join(extensionRoot, "tomcat-vscode-ext-0.1.3-linux-x64.vsix"));
     expect(
       buildVscePackageArgs("/tmp/tomcat-vscode-ext.vsix", "linux-x64"),
     ).toEqual([
