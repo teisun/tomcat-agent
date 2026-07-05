@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Tom | 2026-06-28 07:10 +0800 | DOING | feature/tomcat-vscode-extension | — |
+| Tom | 2026-07-05 10:56 +0800 | PENDING_INTEGRATION | feature/tomcat-vscode-extension | — |
 
 ### ✅ DONE
 - [x] **[P1]** 认领 `T2-P1-020`，任务卡 / 看板索引已切到 `DOING / Tom`；依赖例外已按用户显式要求记录。
@@ -35,7 +35,7 @@
 - [x] **[P2]** 2026-06-28 修复 serve 集成测试套跑偶发超时：新增 `warmTomcatBinaryForSuite()` 在 `beforeAll` 预热 `cargo build --bin tomcat`，避免首个真实 serve 用例把编译冷启动挤进 30s 测试预算；`npm run test:unit` → 主包 94 + GUI 82 全绿。
 
 ### 🔄 IN PROGRESS
-- [ ] **[P1]** 推送 `feature/tomcat-vscode-extension` 远端后，将 `T2-P1-020` 前移到 `PENDING_INTEGRATION` 并走集成合并流程。
+- [ ] 无；当前分支已完成开发、本地门禁与桌面验收，等待 Nibbles 在 `develop` 侧复跑并合并。
 
 ### 🔌 INTERFACE (当前口径)
 - 当前唯一真相以 `tomcat-vscode-ext/docs/architecture/tomcat-vscode-extension-phase2.md` 为主，Phase 1 基线继续以 `tomcat-vscode-ext/docs/architecture/tomcat-vscode-extension.md` 为事实起点。
@@ -67,7 +67,7 @@
   - 已完成 host/devhost/install harness 覆盖 participant happy-path、approval、diff/apply、interrupt/restart、多会话路由，以及 Phase 2 的 `/plan`、`/model`、webview streaming、webview diff/apply、webview multi-session、webview ownership、切会话恢复 plan 卡与 `Ctx%`、reload 历史重放、cross-owner plan enter/build/exit 观察一致。
   - 上述 harness 现统一降级表述为“host integration / internal UI harness”，不再作为“真实桌面 UI 验收”口径。
 - Rust 补测：`cargo test serve_get_state_includes_active_plan_path_and_context_ratio`、`serve_event_pump_streams_plan_transition_events`、`enter_and_exit_write_transition_events`、`completed_and_pending_modes_emit_transition_events`、`finalize_completed_to_chat_does_not_emit_event`、`update_plan_reopen_completed_to_pending_and_emits_plan_pending` → **全部通过**
-- 例外说明：OpenAI Files live 组在 `integration-openai-responses-wire` 中按设计保持 opt-in，因未设置 `PI_LIVE_OPENAI_FILES=1` 而自跳过；`T2-P1-020` 的开发与本地验收已完成，但因尚未按用户要求执行提交/推送流程，状态暂留 `DOING`。
+- 例外说明：OpenAI Files live 组在 `integration-openai-responses-wire` 中按设计保持 opt-in，因未设置 `PI_LIVE_OPENAI_FILES=1` 而自跳过；`T2-P1-020` 已完成开发与本地验收，并已前移至 `PENDING_INTEGRATION`，等待 Nibbles 在 `develop` 侧复跑与合并。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
