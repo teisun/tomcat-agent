@@ -161,6 +161,7 @@ export function createParticipantHandler(
         metadata: deps.sessionRouter.buildResultMetadata(sessionId),
       };
     } finally {
+      deps.ownership.release(sessionId, "participant");
       cancellation.dispose();
       eventSubscription.dispose();
       attachTurn.dispose();

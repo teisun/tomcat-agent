@@ -8,7 +8,10 @@ fn load_missing_file_initializes_store() {
 
     let store = ModelThinkingStore::load(&path, ThinkingLevel::High).unwrap();
 
-    assert!(path.exists(), "missing store should be created on first load");
+    assert!(
+        path.exists(),
+        "missing store should be created on first load"
+    );
     assert!(store.snapshot().is_empty());
     assert_eq!(store.get("gpt-5.4"), ThinkingLevel::High);
 }

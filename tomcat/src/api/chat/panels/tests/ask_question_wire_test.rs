@@ -203,7 +203,10 @@ fn ask_question_wire_payload_serializes_as_camel_case() {
         questions: vec![sample_question()],
     };
     let request_value = serde_json::to_value(&request).expect("serialize wire request");
-    assert_eq!(request_value.get("requestId").and_then(|v| v.as_str()), Some("ask-serde"));
+    assert_eq!(
+        request_value.get("requestId").and_then(|v| v.as_str()),
+        Some("ask-serde")
+    );
     assert!(
         request_value.get("request_id").is_none(),
         "wire request should not leak snake_case keys"
@@ -259,6 +262,9 @@ fn ask_question_wire_payload_deserializes_camel_case_host_response() {
     assert_eq!(response.request_id, "ask-deser");
     assert_eq!(response.result.answers[0].question_id, "color");
     assert_eq!(response.result.answers[0].option_ids, vec!["blue"]);
-    assert_eq!(response.result.answers[0].custom_text.as_deref(), Some("navy"));
+    assert_eq!(
+        response.result.answers[0].custom_text.as_deref(),
+        Some("navy")
+    );
     assert!(!response.result.answers[0].picked_recommended);
 }

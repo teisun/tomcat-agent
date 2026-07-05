@@ -262,10 +262,7 @@ async fn reviewer_dispatch_invokes_mock_without_abort_param() {
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), true)
         .await
         .unwrap();
-    assert!(
-        called.load(Ordering::Acquire),
-        "dispatcher 未被调用"
-    );
+    assert!(called.load(Ordering::Acquire), "dispatcher 未被调用");
     assert_eq!(out["review"]["aborted"], serde_json::Value::Bool(false));
     cleanup_home(&home);
 }

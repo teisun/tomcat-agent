@@ -300,6 +300,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
       return sessionId;
     },
   };
+  const ownership = new SessionOwnershipTracker();
 
   const provider = new TomcatWebviewViewProvider({
     extensionUri: vscode.Uri.file("/extension"),
@@ -320,11 +321,11 @@ function buildProvider(options: BuildProviderOptions = {}) {
     } as never,
     initialize: async () => initializeResult(),
     messenger: messenger as never,
-    ownership: new SessionOwnershipTracker(),
+    ownership,
     sessionRouter: sessionRouter as never,
   });
 
-  return { historyCalls, messenger, provider, sessionState };
+  return { historyCalls, messenger, ownership, provider, sessionState };
 }
 
 describe("webview provider integration", () => {
@@ -619,6 +620,54 @@ describe("webview provider integration", () => {
     ]);
 
     provider.dispose();
+  });
+
+  it("blocks interrupt requests when the participant owns the active session", async () => {
+    const { messenger, ownership, provider } = buildProvider();
+    ownership.claim("session-1", "participant");
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-participant-owner",
+      type: "ready",
+    });
+
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "interrupt-participant-owner",
+      type: "interrupt",
+    });
+
+    expect(messenger.requestCalls.filter((call) => call.type === "interrupt")).toHaveLength(0);
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      conflictMessage: "This session is currently owned by the Tomcat participant.",
+      owner: "participant",
+      ownedByThisFrontend: false,
+    });
+
+    provider.dispose();
+  });
+
+  it("releases webview ownership when the provider is disposed", async () => {
+    const { ownership, provider } = buildProvider();
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-dispose-release",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: {
+        modelId: "gpt-5.4",
+        sessionId: "session-1",
+      },
+      messageId: "claim-webview-owner",
+      type: "setModel",
+    });
+
+    expect(ownership.ownerOf("session-1")?.owner).toBe("webview");
+
+    provider.dispose();
+
+    expect(ownership.ownerOf("session-1")).toBeUndefined();
   });
 
   it("refreshes the session list after a prompt so generated titles appear", async () => {
@@ -1094,6 +1143,109 @@ describe("webview provider integration", () => {
     await Promise.all([first, second]);
     expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
       hasMoreHistory: false,
+      historyLoading: false,
+    });
+  });
+
+  it("clears stale older-history loading when a newer history refresh wins", async () => {
+    const olderResponse = deferred<SessionHistoryPayload>();
+    const { provider } = buildProvider({
+      getMessagesImpl: async (sessionId, params) => {
+        if (params?.cursor === "cursor-1") {
+          return olderResponse.promise;
+        }
+        if (sessionId === "session-2") {
+          return {
+            hasMore: false,
+            messages: [
+              {
+                id: "hist-session-b-1",
+                message: { content: "session B", role: "assistant" },
+                type: "message",
+              },
+            ],
+            nextCursor: null,
+            sessionId: "session-2",
+          };
+        }
+        return {
+          hasMore: true,
+          messages: [
+            {
+              id: "hist-user-2",
+              message: { content: "second prompt", role: "user" },
+              type: "message",
+            },
+          ],
+          nextCursor: "cursor-1",
+          sessionId: "session-1",
+        };
+      },
+      getStateImpl: async (sessionId) => ({
+        busy: false,
+        contextRatio: null,
+        interrupted: false,
+        model: "gpt-5.4",
+        planId: null,
+        planPath: null,
+        planState: "chat",
+        sessionId: sessionId ?? "session-1",
+        thinkingLevel: "high",
+      }),
+      listSessionsImpl: async () => ({
+        activeSessionId: "session-1",
+        scope: "disk" as const,
+        sessions: [
+          { busy: false, isCurrent: true, sessionId: "session-1", updatedAt: 1 },
+          { busy: false, isCurrent: false, sessionId: "session-2", updatedAt: 2 },
+        ],
+      }),
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-stale-older-history",
+      type: "ready",
+    });
+
+    const loadingOlder = provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "older-stale-history-1",
+      type: "loadOlderHistory",
+    });
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve();
+    }
+
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      historyLoading: true,
+    });
+
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-2" },
+      messageId: "switch-stale-older-to-b",
+      type: "switchSession",
+    });
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "switch-stale-older-back-to-a",
+      type: "switchSession",
+    });
+
+    olderResponse.resolve({
+      hasMore: false,
+      messages: [
+        {
+          id: "hist-user-1",
+          message: { content: "older prompt", role: "user" },
+          type: "message",
+        },
+      ],
+      nextCursor: null,
+      sessionId: "session-1",
+    });
+    await loadingOlder;
+
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
       historyLoading: false,
     });
   });

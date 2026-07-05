@@ -91,8 +91,8 @@ fn run_init_migrates_legacy_llm_connection_fields_in_existing_config() {
             !config_text.contains("provider = "),
             "init should drop legacy llm.provider from rewritten config, got:\n{config_text}"
         );
-        let models_path =
-            crate::core::llm::ModelCatalog::default_user_path(&AppConfig::default()).expect("models path");
+        let models_path = crate::core::llm::ModelCatalog::default_user_path(&AppConfig::default())
+            .expect("models path");
         let models_text = std::fs::read_to_string(models_path).expect("models.toml text");
         assert!(models_text.contains("id = \"gpt-5.2\""));
     });

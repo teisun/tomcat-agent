@@ -60,10 +60,7 @@ fn serve_unknown_command_returns_error_response() {
     assert_eq!(response["type"].as_str(), Some("response"));
     assert_eq!(response["id"].as_str(), Some("mystery-1"));
     assert_eq!(response["success"].as_bool(), Some(false));
-    assert_eq!(
-        response["error"].as_str(),
-        Some("unknown_command: mystery")
-    );
+    assert_eq!(response["error"].as_str(), Some("unknown_command: mystery"));
 }
 
 #[test]
@@ -83,7 +80,10 @@ fn serve_parse_error_response_preserves_request_id() {
     let response = child.recv_value(Duration::from_secs(5));
     assert_eq!(response["type"].as_str(), Some("response"));
     assert_eq!(response["id"].as_str(), Some("bad-session-id"));
-    assert!(response.get("sessionId").is_none(), "invalid null sessionId must not echo back as a string");
+    assert!(
+        response.get("sessionId").is_none(),
+        "invalid null sessionId must not echo back as a string"
+    );
     assert_eq!(response["success"].as_bool(), Some(false));
     assert_eq!(
         response["error"].as_str(),
@@ -142,11 +142,15 @@ fn serve_set_thinking_level_roundtrip_over_real_stdio_writes_global_store() {
         .find(|value| value.get("id").and_then(|v| v.as_str()) == Some("state-1"))
         .expect("get_state response");
     assert_eq!(state_response["success"].as_bool(), Some(true));
-    assert_eq!(state_response["payload"]["thinkingLevel"].as_str(), Some("high"));
+    assert_eq!(
+        state_response["payload"]["thinkingLevel"].as_str(),
+        Some("high")
+    );
 
     let store_path = fx.home_path.join(".tomcat").join("model-thinking.json");
     let store = std::fs::read_to_string(&store_path).expect("read global model thinking store");
-    let parsed: serde_json::Value = serde_json::from_str(&store).expect("parse model thinking store");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&store).expect("parse model thinking store");
     assert_eq!(parsed["models"]["gpt-5.4"].as_str(), Some("high"));
     assert!(
         !fx.home_path

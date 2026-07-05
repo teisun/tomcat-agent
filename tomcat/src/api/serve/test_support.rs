@@ -246,9 +246,11 @@ impl LlmProvider for RecordingMockLlm {
         AppError,
     > {
         self.requests.0.lock().push(req);
-        let events = self.streams.lock().pop_front().ok_or_else(|| {
-            AppError::Llm("RecordingMockLlm: no more streams".to_string())
-        })?;
+        let events = self
+            .streams
+            .lock()
+            .pop_front()
+            .ok_or_else(|| AppError::Llm("RecordingMockLlm: no more streams".to_string()))?;
         Ok(Box::new(tokio_stream::iter(events)))
     }
 
@@ -360,9 +362,10 @@ pub async fn build_initialized_state_with_provider(
     let mut ctx =
         ChatContext::from_config_with_mode_and_overrides(cfg.clone(), SessionMode::Code, overrides)
             .expect("chat context");
-    state
-        .shared_event_bus
-        .register_session_bus(current_entry.session_id.clone(), ctx.global_services.event_bus.clone());
+    state.shared_event_bus.register_session_bus(
+        current_entry.session_id.clone(),
+        ctx.global_services.event_bus.clone(),
+    );
     let ask_panel = state.ask_question.panel_for_session(
         ctx.global_services.event_bus.clone(),
         &current_entry.session_id,
@@ -443,7 +446,8 @@ pub async fn build_initialized_state_with_recorded_streams(
     let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
     let (provider, requests) = RecordingMockLlm::new(streams);
     let provider: Arc<dyn LlmProvider> = Arc::new(provider);
-    let (state, buffer, temp, slot) = build_initialized_state_with_provider(temp, cfg, provider).await;
+    let (state, buffer, temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
     (state, buffer, temp, slot, requests)
 }
 

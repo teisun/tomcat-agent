@@ -433,7 +433,11 @@ async fn verifier_web_fetch_succeeds_when_runtime_is_present() {
     )
     .await;
 
-    assert!(!outcome.is_error, "unexpected verifier web_fetch error: {}", outcome.model_text);
+    assert!(
+        !outcome.is_error,
+        "unexpected verifier web_fetch error: {}",
+        outcome.model_text
+    );
     let value: serde_json::Value =
         serde_json::from_str(&outcome.model_text).expect("valid web_fetch json");
     assert_eq!(value["url"], "https://example.com/verifier");

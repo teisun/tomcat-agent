@@ -5,7 +5,6 @@
 //! - 共享测试夹具继续复用父模块的 `test_support`
 //! - 业务源文件不再内联 `#[cfg(test)] mod tests { ... }`
 
-pub(crate) use super::*;
 pub(crate) use super::ask_question::*;
 pub(crate) use super::commands::*;
 pub(crate) use super::control::*;
@@ -15,6 +14,7 @@ pub(crate) use super::stdin::*;
 pub(crate) use super::test_support::*;
 pub(crate) use super::types::*;
 pub(crate) use super::writer::*;
+pub(crate) use super::*;
 
 mod ask_question_test;
 mod commands_test;

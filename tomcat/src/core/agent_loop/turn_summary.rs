@@ -68,7 +68,8 @@ pub(super) fn maybe_spawn_turn_summary_update(
         .map(ToOwned::to_owned);
 
     tokio::spawn(async move {
-        let title = generate_turn_summary(thinking_text.as_deref(), &tools, llm.as_ref(), &model).await;
+        let title =
+            generate_turn_summary(thinking_text.as_deref(), &tools, llm.as_ref(), &model).await;
         let title = title.trim().to_string();
         if title.is_empty() {
             return;
@@ -80,9 +81,11 @@ pub(super) fn maybe_spawn_turn_summary_update(
         if let (Some(session_manager), Some(message_id)) =
             (session_manager.as_ref(), assistant_message_id.as_deref())
         {
-            if let Err(error) =
-                session_manager.rewrite_message_summary_title_in_session(&session_id, message_id, &title)
-            {
+            if let Err(error) = session_manager.rewrite_message_summary_title_in_session(
+                &session_id,
+                message_id,
+                &title,
+            ) {
                 warn!(
                     error = %error,
                     session_id = %session_id,

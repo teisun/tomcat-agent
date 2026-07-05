@@ -109,7 +109,9 @@ async fn serve_writer_coalesces_deltas_under_pressure() {
             max_buffered_frames: 8,
         },
     );
-    handle.send(event("s1", "message_update", Some("he"))).unwrap();
+    handle
+        .send(event("s1", "message_update", Some("he")))
+        .unwrap();
     handle
         .send(event("s1", "message_update", Some("llo")))
         .unwrap();
@@ -133,8 +135,12 @@ async fn serve_writer_never_drops_lifecycle() {
             max_buffered_frames: 1,
         },
     );
-    handle.send(event("s1", "message_update", Some("a"))).unwrap();
-    handle.send(event("s1", "message_update", Some("b"))).unwrap();
+    handle
+        .send(event("s1", "message_update", Some("a")))
+        .unwrap();
+    handle
+        .send(event("s1", "message_update", Some("b")))
+        .unwrap();
     handle.send(event("s1", "agent_end", None)).unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     let bytes = shared.0.lock().clone();
@@ -155,9 +161,15 @@ async fn serve_writer_backpressure_notice_emitted_once() {
             max_buffered_frames: 1,
         },
     );
-    handle.send(event("s1", "message_update", Some("a"))).unwrap();
-    handle.send(event("s1", "message_update", Some("b"))).unwrap();
-    handle.send(event("s1", "message_update", Some("c"))).unwrap();
+    handle
+        .send(event("s1", "message_update", Some("a")))
+        .unwrap();
+    handle
+        .send(event("s1", "message_update", Some("b")))
+        .unwrap();
+    handle
+        .send(event("s1", "message_update", Some("c")))
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let bytes = shared.0.lock().clone();
@@ -182,9 +194,15 @@ async fn serve_writer_round_robins_across_sessions() {
             max_buffered_frames: 8,
         },
     );
-    handle.send(event("s1", "message_update", Some("a1"))).unwrap();
-    handle.send(event("s1", "message_update", Some("a2"))).unwrap();
-    handle.send(event("s2", "message_update", Some("b1"))).unwrap();
+    handle
+        .send(event("s1", "message_update", Some("a1")))
+        .unwrap();
+    handle
+        .send(event("s1", "message_update", Some("a2")))
+        .unwrap();
+    handle
+        .send(event("s2", "message_update", Some("b1")))
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     let bytes = shared.0.lock().clone();
     let rendered = String::from_utf8(bytes).unwrap();

@@ -258,11 +258,7 @@ impl ProdVerifierDispatcher {
 
 #[async_trait]
 impl VerifierDispatcher for ProdVerifierDispatcher {
-    async fn dispatch(
-        &self,
-        plan_id: &str,
-        plan_text: &str,
-    ) -> VerifySummary {
+    async fn dispatch(&self, plan_id: &str, plan_text: &str) -> VerifySummary {
         let Some(deps) = self.deps.as_ref() else {
             return VerifySummary::aborted_with(format!(
                 "[{}] 生产 verifier 子 Agent 未注入依赖（stub 模式）",

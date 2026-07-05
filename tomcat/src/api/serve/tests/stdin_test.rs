@@ -40,7 +40,9 @@ async fn dispatch_command_returns_error_frame_and_keeps_loop_alive_after_handler
     .await;
     let error_response = after_error
         .iter()
-        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("list-models-missing"))
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-models-missing")
+        })
         .expect("error response");
     assert_eq!(error_response["success"].as_bool(), Some(false));
     assert_eq!(error_response["error"].as_str(), Some("unknown_session"));
@@ -62,8 +64,7 @@ async fn dispatch_command_returns_error_frame_and_keeps_loop_alive_after_handler
     let success_response = after_success
         .iter()
         .find(|line| {
-            line.get("id").and_then(serde_json::Value::as_str)
-                == Some("new-session-after-error")
+            line.get("id").and_then(serde_json::Value::as_str) == Some("new-session-after-error")
         })
         .expect("success response");
     assert_eq!(success_response["success"].as_bool(), Some(true));

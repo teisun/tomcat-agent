@@ -335,6 +335,7 @@ const EMPTY_DRAFT: ComposerDraft = {
 interface ComposerProps {
   availableModels: string[];
   busy?: boolean;
+  canInterrupt: boolean;
   canPrompt: boolean;
   contextLabel: string;
   modelCapabilities?: string[] | undefined;
@@ -355,6 +356,7 @@ interface ComposerProps {
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer({
   availableModels,
   busy = false,
+  canInterrupt,
   canPrompt,
   contextLabel,
   modelCapabilities,
@@ -735,7 +737,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             aria-label={busy ? "Stop" : "Send prompt"}
             className="tc-send-button"
             data-testid={busy ? "stop-button" : "send-button"}
-            disabled={busy ? false : !draft.hasContent || !canPrompt}
+            disabled={busy ? !canInterrupt : !draft.hasContent || !canPrompt}
             onClick={busy ? onInterrupt : onSubmit}
             type="button"
           >

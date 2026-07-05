@@ -321,7 +321,10 @@ async fn edit_file_with_cancel_skips_disk_write() {
         .await
         .expect("cancelled edit should return a structured non-apply result");
     assert!(!result.applied);
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), "line1\nline2\nline3\n");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "line1\nline2\nline3\n"
+    );
 }
 
 #[tokio::test]
@@ -1219,6 +1222,70 @@ async fn write_file_overwrite_creates_backup() {
     let _ = std::fs::remove_file(&f);
     let _ = std::fs::remove_file(&backup);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn write_file_overwrite_backup_failure_preserves_original() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let f = dir.join("overwrite.txt");
+    std::fs::write(&f, "original").unwrap();
+    let backup = dir.join("overwrite.bak");
+    std::fs::create_dir(&backup).unwrap();
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+
+    let err = exec
+        .write_file(&path_str, "overwritten", true, "p1")
+        .await
+        .expect_err("backup copy failure should abort overwrite");
+
+    assert!(matches!(err, AppError::Io(_)));
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "original");
+    assert!(backup.is_dir());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn write_file_overwrite_rollback_failure_surfaces_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let f = dir.join("overwrite.txt");
+    let original = "original";
+    std::fs::write(&f, original.as_bytes()).unwrap();
+    let backup = dir.join("overwrite.bak");
+    let file_mode = std::fs::metadata(&f).unwrap().permissions().mode();
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let cancel = CancellationToken::new();
+    let err = simulate_failed_commit_with_backup_for_test(&f, &cancel, true, "write_file")
+        .expect_err("rollback failure should surface as an error");
+    std::fs::set_permissions(&f, std::fs::Permissions::from_mode(file_mode)).unwrap();
+
+    let msg = err.to_string();
+    assert!(
+        matches!(err, AppError::Primitive(_)),
+        "rollback failure should be reported as a primitive error: {msg}"
+    );
+    assert!(
+        msg.contains("rollback"),
+        "error should mention rollback failure: {msg}"
+    );
+    assert!(
+        msg.contains("write_error=") && msg.contains("rollback_error="),
+        "error should preserve both write and rollback causes: {msg}"
+    );
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), original);
+    assert!(
+        backup.exists(),
+        "failed rollback should keep .bak for postmortem"
+    );
 }
 
 #[tokio::test]

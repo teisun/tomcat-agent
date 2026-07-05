@@ -115,6 +115,8 @@ pub(crate) use read::{
     compute_line_hash, detect_inline_mime, format_with_hashlines, format_with_line_numbers,
     DetectedInlineMime, InlineKind,
 };
+#[cfg(test)]
+pub(crate) use write_edit::simulate_failed_commit_with_backup_for_test;
 
 /// 单次读取文件最大字节数，避免 OOM。
 ///

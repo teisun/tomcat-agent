@@ -24,9 +24,7 @@ pub(crate) async fn run_stdio_loop(state: Arc<ServeState>) -> Result<(), AppErro
                 let message = render_command_error(&error);
                 let (id, session_id) = extract_response_refs(trimmed);
                 state.writer.send(OutFrame::Response(ResponseFrame::error(
-                    id,
-                    session_id,
-                    message,
+                    id, session_id, message,
                 )))?;
                 continue;
             }

@@ -159,7 +159,11 @@ pub(super) async fn run_tool_calls(
                     )
                     .with_completion_metadata(finish_reason, error_message, error_code)
                     .with_summary_title(summary_title.clone())
-                    .with_reasoning_state(thinking_text, reasoning_continuation, continuity),
+                    .with_reasoning_state(
+                        thinking_text,
+                        reasoning_continuation,
+                        continuity,
+                    ),
                     &forced_id,
                 )
                 .map_err(LoopError::Fatal)?,

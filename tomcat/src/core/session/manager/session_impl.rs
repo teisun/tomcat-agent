@@ -17,7 +17,7 @@ use crate::core::session::store::{
 use crate::core::session::transcript::{
     append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
     mark_message_entries_after_anchor_superseded, read_entries_tail, read_entries_tail_before,
-    read_header, write_header, rewrite_message_summary_titles_by_id, BranchSummaryEntry,
+    read_header, rewrite_message_summary_titles_by_id, write_header, BranchSummaryEntry,
     CustomEntry, LabelEntry, MessageEntry, MessageSummaryTitleRewrite, ModelChangeEntry,
     SessionHeader, SessionInfoEntry, SyncLevel, ThinkingLevelChangeEntry, ThinkingTraceEntry,
     TranscriptEntry, TranscriptPage,

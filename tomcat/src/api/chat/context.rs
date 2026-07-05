@@ -25,10 +25,10 @@ use crate::infra::{
 };
 use crate::{
     resolve_agent_definition_dir, resolve_agent_trail_dir, resolve_model_thinking_path,
-    resolve_plugins_dir, resolve_sessions_dir, resolve_workspace_roots_paths, session_key_for_agent,
-    AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider, ModelThinkingStore,
-    PrimitiveExecutor, SessionEntry, SessionManager, SessionMode, ThinkingLevel, Tool, ToolExecutor,
-    ToolRegistry,
+    resolve_plugins_dir, resolve_sessions_dir, resolve_workspace_roots_paths,
+    session_key_for_agent, AppConfig, DefaultPrimitiveExecutor, DefaultToolRegistry, LlmProvider,
+    ModelThinkingStore, PrimitiveExecutor, SessionEntry, SessionManager, SessionMode,
+    ThinkingLevel, Tool, ToolExecutor, ToolRegistry,
 };
 
 use crate::core::llm::LlmScene;

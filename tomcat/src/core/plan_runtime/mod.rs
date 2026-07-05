@@ -783,12 +783,7 @@ impl PlanRuntime {
         };
 
         dispatcher
-            .dispatch(
-                plan_id,
-                &plan_text,
-                review::ReviewKind::Code,
-                false,
-            )
+            .dispatch(plan_id, &plan_text, review::ReviewKind::Code, false)
             .await
     }
 
@@ -1329,11 +1324,7 @@ pub trait ReviewerDispatcher: Send + Sync {
 /// - **不**写父 transcript（verifier 子 Agent 持独立 session_id；transcript 隔离）。
 #[async_trait]
 pub trait VerifierDispatcher: Send + Sync {
-    async fn dispatch(
-        &self,
-        plan_id: &str,
-        plan_text: &str,
-    ) -> verify::VerifySummary;
+    async fn dispatch(&self, plan_id: &str, plan_text: &str) -> verify::VerifySummary;
 }
 
 /// `PlanRuntime` 操作错误。

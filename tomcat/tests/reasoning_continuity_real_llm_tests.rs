@@ -49,7 +49,12 @@ fn openai_model() -> String {
 
 fn live_openai_responses_opt_in(test_name: &str) -> bool {
     match std::env::var("PI_LIVE_OPENAI_RESPONSES") {
-        Ok(value) if matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on") => {
+        Ok(value)
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ) =>
+        {
             true
         }
         _ => {

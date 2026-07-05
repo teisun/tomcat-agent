@@ -123,13 +123,7 @@ impl WriterShared {
                 session_order,
                 global_frames,
             } = &mut *queues;
-            enqueue_frame(
-                frame,
-                buffers,
-                session_order,
-                global_frames,
-                self.config,
-            );
+            enqueue_frame(frame, buffers, session_order, global_frames, self.config);
         }
         self.notify.notify_one();
     }

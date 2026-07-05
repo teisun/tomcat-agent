@@ -517,6 +517,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
   const readOnlyConflict = activeSession?.conflictMessage ?? null;
   const canPrompt = state.uiMode !== "participant" && !activeSession?.busy && !readOnlyConflict;
+  const canInterrupt = state.uiMode !== "participant" && !readOnlyConflict;
   const canBuildPlan = !!activeSession && !activeSession.busy && !readOnlyConflict;
   const activeModelCapabilities = activeSession?.model
     ? state.availableModelCapabilities?.[activeSession.model]
@@ -882,6 +883,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       <Composer
         availableModels={state.availableModels}
         busy={!!activeSession?.busy}
+        canInterrupt={canInterrupt}
         canPrompt={canPrompt}
         contextLabel={buildContextLabel(activeSession?.contextRatio)}
         modelCapabilities={activeModelCapabilities}

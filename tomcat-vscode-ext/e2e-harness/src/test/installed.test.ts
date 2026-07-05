@@ -19,6 +19,7 @@ type HostE2eHelper = {
   assertWebviewCrossOwnerPlanFlow(api: unknown): Promise<void>;
   assertWebviewDiffFlow(api: unknown): Promise<void>;
   assertWebviewFileDropReferenceFlow(api: unknown): Promise<void>;
+  assertWebviewPickContextFlow(api: unknown): Promise<void>;
   assertWebviewGiantGroupLazyLoadFlow(api: unknown): Promise<void>;
   assertWebviewInterruptFlow(api: unknown): Promise<void>;
   assertWebviewMultiSessionFlow(api: unknown): Promise<void>;
@@ -154,6 +155,11 @@ suite("Installed Tomcat extension", () => {
   test("deduplicates dropped file references in the webview composer", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewFileDropReferenceFlow(api);
+  });
+
+  test("routes smart picker selections into attachments and context chips", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewPickContextFlow(api);
   });
 
   test("renders the transcript UI groups, tool rows, file chips, and progress", async () => {

@@ -14,12 +14,14 @@
 //! 3. **错误集合（本期必落）**：`NotFound` / `Ambiguous` / `Overlap` / `BinaryFile` /
 //!    `Io`；`Stale` 由 `tool_exec::check_edit_staleness` 在调 primitive 之前拦截。
 //! 4. **`.bak` 写序**：校验阶段**不**触碰磁盘；全部校验通过后 → `copy(path → path.bak)`
-//!    → `write_file_atomic`；写成功 `remove .bak`；写失败回滚 `path.bak → path` 并保留
-//!    备份供排查（与 [edit.md §2.4.1](.) 第 4 条一致：「校验失败磁盘原样、无 `.bak` 残留」）。
+//!    → `write_file_atomic`；写失败回滚 `path.bak → path`。`write_file(overwrite=true)` 成功后保留
+//!    `.bak` 供后续排查；`edit_file` 成功后清理 `.bak` 保持工作区整洁；校验失败/取消前退出时
+//!    磁盘原样。
 //! 5. **行号 API 保留**：`EditOperation` 的 `start_line` / `Insert` / `Delete` 路径
 //!    仍供 dispatcher / extension 内部调用，本期 LLM 主路径只走「字符串 + 无行号」分支。
 //!
-//! diff 文本由 [`super::super::diff::build_simple_diff`] 生成（副作用日志，调用结果可丢弃）。
+//! diff 文本由 [`super::super::diff::build_simple_diff`] 生成：`write_file` 回包 `diff_hint` 使用；
+//! `edit_file` 仅落库，不保留 diff 文本。
 
 use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
 use super::DefaultPrimitiveExecutor;
@@ -36,6 +38,83 @@ use crate::infra::error::AppError;
 use crate::infra::platform::{read_file_utf8, write_file_atomic};
 use std::sync::OnceLock;
 use tokio_util::sync::CancellationToken;
+
+fn rollback_failure_error(
+    operation: &str,
+    path: &std::path::Path,
+    backup_path: &std::path::Path,
+    write_error: AppError,
+    rollback_error: std::io::Error,
+) -> AppError {
+    AppError::Primitive(format!(
+        "{operation} commit failed for {} and rollback from {} also failed: write_error={write_error}; rollback_error={rollback_error}",
+        path.display(),
+        backup_path.display(),
+    ))
+}
+
+fn commit_with_backup<F>(
+    path: &std::path::Path,
+    cancel: &CancellationToken,
+    keep_backup_on_success: bool,
+    operation: &str,
+    commit: F,
+) -> Result<bool, AppError>
+where
+    F: FnOnce(&std::path::Path) -> Result<(), AppError>,
+{
+    if cancel.is_cancelled() {
+        return Ok(false);
+    }
+    let backup_path = path.with_extension("bak");
+    std::fs::copy(path, &backup_path).map_err(AppError::Io)?;
+    if cancel.is_cancelled() {
+        let _ = std::fs::remove_file(&backup_path); // 取消发生在提交前；残留 .bak 只会制造噪音。
+        return Ok(false);
+    }
+    if let Err(write_error) = commit(path) {
+        return match std::fs::copy(&backup_path, path) {
+            Ok(_) => Err(write_error),
+            Err(rollback_error) => Err(rollback_failure_error(
+                operation,
+                path,
+                &backup_path,
+                write_error,
+                rollback_error,
+            )),
+        };
+    }
+    if !keep_backup_on_success {
+        let _ = std::fs::remove_file(&backup_path); // edit 成功后 .bak 仅是调试残留，清理失败不影响语义。
+    }
+    Ok(true)
+}
+
+fn commit_bytes_with_backup(
+    path: &std::path::Path,
+    bytes: &[u8],
+    cancel: &CancellationToken,
+    keep_backup_on_success: bool,
+    operation: &str,
+) -> Result<bool, AppError> {
+    commit_with_backup(path, cancel, keep_backup_on_success, operation, |path| {
+        write_file_atomic(path, bytes)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn simulate_failed_commit_with_backup_for_test(
+    path: &std::path::Path,
+    cancel: &CancellationToken,
+    keep_backup_on_success: bool,
+    operation: &str,
+) -> Result<bool, AppError> {
+    commit_with_backup(path, cancel, keep_backup_on_success, operation, |_path| {
+        Err(AppError::Io(std::io::Error::other(
+            "simulated write failure",
+        )))
+    })
+}
 
 pub(super) async fn write_file_impl(
     executor: &DefaultPrimitiveExecutor,
@@ -69,9 +148,11 @@ pub(super) async fn write_file_impl(
     // 只是回执里不带 diff 摘要。
     let original: Option<String> = if overwrite && pre_existed {
         let path_for_read = path_buf.clone();
-        tokio::task::spawn_blocking(move || crate::infra::platform::read_file_utf8(&path_for_read).ok())
-            .await
-            .map_err(|e| AppError::Primitive(format!("write pre-read join error: {e}")))?
+        tokio::task::spawn_blocking(move || {
+            crate::infra::platform::read_file_utf8(&path_for_read).ok()
+        })
+        .await
+        .map_err(|e| AppError::Primitive(format!("write pre-read join error: {e}")))?
     } else {
         None
     };
@@ -117,11 +198,13 @@ pub(super) async fn write_file_impl(
     let cancel_for_write = cancel.clone();
     let wrote = tokio::task::spawn_blocking(move || -> Result<bool, AppError> {
         if overwrite && pre_existed {
-            if cancel_for_write.is_cancelled() {
-                return Ok(false);
-            }
-            let backup = path_for_write.with_extension("bak");
-            let _ = std::fs::copy(&path_for_write, &backup);
+            return commit_bytes_with_backup(
+                &path_for_write,
+                &bytes_for_write,
+                &cancel_for_write,
+                true,
+                "write_file",
+            );
         }
         if cancel_for_write.is_cancelled() {
             return Ok(false);
@@ -230,8 +313,6 @@ pub(super) async fn edit_file_impl(
         }
     };
 
-    let _ = build_simple_diff(original.as_str(), &new_content);
-
     // T2-P0-017 PR-M T3-K：secrets 扫描在 .bak 之前。命中走 require_user_confirmation；
     // 用户拒 → 返回 SecretsRejected，磁盘字节级未变；用户允 → 继续写盘。
     if let Some(hits) = scan_new_content_for_secrets(&original, &new_content) {
@@ -261,22 +342,14 @@ pub(super) async fn edit_file_impl(
     let path_for_write = path_buf.clone();
     let content_for_write = new_content.clone();
     let cancel_for_write = cancel.clone();
-    let applied = tokio::task::spawn_blocking(move || -> Result<bool, AppError> {
-        if cancel_for_write.is_cancelled() {
-            return Ok(false);
-        }
-        let backup_path = path_for_write.with_extension("bak");
-        std::fs::copy(&path_for_write, &backup_path).map_err(AppError::Io)?;
-        if cancel_for_write.is_cancelled() {
-            let _ = std::fs::remove_file(&backup_path);
-            return Ok(false);
-        }
-        if let Err(e) = write_file_atomic(&path_for_write, content_for_write.as_bytes()) {
-            let _ = std::fs::copy(&backup_path, &path_for_write);
-            return Err(e);
-        }
-        let _ = std::fs::remove_file(&backup_path);
-        Ok(true)
+    let applied = tokio::task::spawn_blocking(move || {
+        commit_bytes_with_backup(
+            &path_for_write,
+            content_for_write.as_bytes(),
+            &cancel_for_write,
+            false,
+            "edit_file",
+        )
     })
     .await
     .map_err(|e| AppError::Primitive(format!("edit commit join error: {e}")))??;

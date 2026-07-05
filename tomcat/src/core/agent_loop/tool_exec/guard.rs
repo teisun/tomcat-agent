@@ -43,8 +43,10 @@ pub(super) fn reviewer_allowed_tools_description_with_policy(
 }
 
 pub(super) fn is_verifier_whitelisted_tool(name: &str, expose_skills: bool) -> bool {
-    matches!(name, "read" | "search_files" | "list_dir" | "bash" | "web_fetch")
-        || (expose_skills && name == "load_skill")
+    matches!(
+        name,
+        "read" | "search_files" | "list_dir" | "bash" | "web_fetch"
+    ) || (expose_skills && name == "load_skill")
 }
 
 pub(super) fn verifier_allowed_tools_description(expose_skills: bool) -> String {

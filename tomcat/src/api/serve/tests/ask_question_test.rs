@@ -5,14 +5,14 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use serial_test::serial;
 
-use crate::ServeConfig;
 use crate::api::chat::panels::{
-    AskQuestionWireRequest, AskQuestionWireResponse, Question, QuestionOption,
-    ask_question_response_event_name,
+    ask_question_response_event_name, AskQuestionWireRequest, AskQuestionWireResponse, Question,
+    QuestionOption,
 };
 use crate::api::serve::test_support::{read_ndjson_lines, spawn_buffered_writer};
 use crate::api::serve::types::ControlFrame;
 use crate::infra::{DefaultEventBus, EventBus, EventContext};
+use crate::ServeConfig;
 
 async fn wait_for_line(
     buffer: &crate::api::serve::test_support::SharedWriterBuffer,
@@ -77,7 +77,9 @@ async fn serve_ask_question_bridge_emits_control_request() {
     .await;
     let frame = lines
         .iter()
-        .find(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("control_request"))
+        .find(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+        })
         .unwrap();
     assert_eq!(
         frame.get("subtype").and_then(serde_json::Value::as_str),
@@ -183,11 +185,19 @@ async fn serve_ask_question_bridge_routes_by_session() {
     .await;
     let controls = lines
         .iter()
-        .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("control_request"))
+        .filter(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_request")
+        })
         .collect::<Vec<_>>();
-    assert_eq!(controls.len(), 1, "expected exactly one routed control frame");
     assert_eq!(
-        controls[0].get("sessionId").and_then(serde_json::Value::as_str),
+        controls.len(),
+        1,
+        "expected exactly one routed control frame"
+    );
+    assert_eq!(
+        controls[0]
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str),
         Some("session-a")
     );
 }

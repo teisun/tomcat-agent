@@ -9,7 +9,15 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-06-07 07:34 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-05 14:43 +0800 | ACTIVE | develop | — |
+
+### 2026-07-05 | merge `feature/tomcat-vscode-extension` → develop（T2-P1-019 / T2-P1-020 集成验收）
+
+- **合并范围**：已在 `develop` 上以 `git merge --no-ff` 合入 `feature/tomcat-vscode-extension`（merge `2b04acd`），带入 VSCode Chat 扩展 Phase 1 / Phase 2：sidebar webview transcript、`/plan` / `/model` slash、共享会话池与单活跃 ownership、附件与 `Ctx%`、serve plan/model 协议扩展、Phase 2 React webview 与打包链路，以及对应 OpenSpec / 场景库 / 架构文档同步。
+- **develop 侧补修**：Rust 侧在 `src/ext/runtime/instance.rs` 把 QuickJS host bootstrap 排除到插件 timeout budget 之外，修复 `quickjs_e2e_tests::runaway_plugin_timeout_interrupts_when_budget_disabled`；扩展侧补稳 `hostE2eScenario.ts` / `e2eHostFixture.ts`，把 ownership / transcript-progress 场景改为确定性验收，消除 VSIX 安装 E2E 假红，但不弱化断言。
+- **自动化门禁**：`./scripts/run-integration-tests.sh all` **PASS**；`integration-openai-responses-wire` 在 `LITELLM_SUNMI_API_KEY` + `NO_PROXY=aigateway.sunmi.com` 口径下 **PASS**；`npm run build` / `npm run test:unit` / `npm run test:integration` / `npm --prefix gui run test` / `npm audit`（0 vulnerabilities）/ `npm run package:vsix` / `npm run test:e2e:vscode-install`（26 passing）/ `npm run verify:vsix`（4 passing，截图裁剪产物已生成）全部通过。
+- **留人工 / 跳过项**：无桌面视觉留人工项；`verify:vsix` 已在可见 VSCode 窗口下完成截图与裁剪。`integration-real-llm` 本分支无新增 target，按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §4 跳过，不视为阻塞。
+- **负责人 / 结论**：Nibbles 已完成 `develop` 侧合并复核；`T2-P1-019` / `T2-P1-020` 转 `DONE`，看板与 status 同步；本轮仅本地提交，不推送远端。
 
 ### 2026-06-07 | merge `feature/skill-system` → develop（T2-P1-014 集成验收）
 

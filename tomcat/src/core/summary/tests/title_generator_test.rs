@@ -89,7 +89,8 @@ async fn generate_turn_summary_success_returns_sanitized_title() {
     }];
 
     info!(target: "test", phase = "act");
-    let title = generate_turn_summary(Some("thinking"), &tools, llm.as_ref(), "utility-flash").await;
+    let title =
+        generate_turn_summary(Some("thinking"), &tools, llm.as_ref(), "utility-flash").await;
 
     info!(target: "test", phase = "assert");
     assert_eq!(title, "Reviewed 3 files");
@@ -164,10 +165,9 @@ async fn generate_session_title_success_returns_title() {
     let llm = MockUtilityLlm::ok("Fix login bug");
 
     info!(target: "test", phase = "act");
-    let title =
-        generate_session_title("please fix the login bug", llm.as_ref(), "utility-flash")
-            .await
-            .expect("ok");
+    let title = generate_session_title("please fix the login bug", llm.as_ref(), "utility-flash")
+        .await
+        .expect("ok");
 
     info!(target: "test", phase = "assert");
     assert_eq!(title, "Fix login bug");

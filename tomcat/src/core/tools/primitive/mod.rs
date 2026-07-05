@@ -15,6 +15,8 @@ pub use bash_task::{
 };
 #[allow(unused_imports)]
 pub(crate) use executor::compute_line_hash;
+#[cfg(test)]
+pub(crate) use executor::simulate_failed_commit_with_backup_for_test;
 pub use executor::DefaultPrimitiveExecutor;
 pub use types::{
     BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, HashlineOp,

@@ -70,10 +70,7 @@ pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
                 "Edited file".to_string()
             }
             "bash" | "shell" | "execute_command" => {
-                let cmd = t
-                    .summary
-                    .strip_prefix("command=")
-                    .unwrap_or(&t.summary);
+                let cmd = t.summary.strip_prefix("command=").unwrap_or(&t.summary);
                 format!("Ran {cmd}")
             }
             "ask_question" => "Asked question".to_string(),
@@ -89,7 +86,12 @@ pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
 
     let read_count = tools
         .iter()
-        .filter(|t| matches!(t.tool_name.as_str(), "read" | "read_file" | "grep" | "search_files"))
+        .filter(|t| {
+            matches!(
+                t.tool_name.as_str(),
+                "read" | "read_file" | "grep" | "search_files"
+            )
+        })
         .count();
     let edit_count = tools
         .iter()
@@ -122,7 +124,11 @@ pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
     format!("Used {} tools", tools.len())
 }
 
-async fn call_utility(prompt: &str, llm: &dyn LlmProvider, model: &str) -> Result<String, AppError> {
+async fn call_utility(
+    prompt: &str,
+    llm: &dyn LlmProvider,
+    model: &str,
+) -> Result<String, AppError> {
     let req = ChatRequest {
         model: model.to_string(),
         messages: vec![ChatMessage::user(prompt)],
@@ -177,7 +183,11 @@ fn build_session_title_prompt(first_user_text: &str) -> String {
 }
 
 fn sanitize_title(mut title: String, max_words: usize) -> String {
-    title = title.trim().trim_matches('"').trim_matches('\'').to_string();
+    title = title
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string();
     while title.ends_with('.') || title.ends_with('!') || title.ends_with('?') {
         title.pop();
     }

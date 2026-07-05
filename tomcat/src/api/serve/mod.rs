@@ -33,8 +33,8 @@ use std::time::Duration;
 
 use crate::api::chat::run_chat_turn_with_message;
 use crate::api::chat::{ChatContext, ChatContextOverrides};
-use crate::core::llm::ChatMessage;
 use crate::core::agent_registry::AgentRegistry;
+use crate::core::llm::ChatMessage;
 use crate::{
     ensure_work_dir_structure, resolve_model_thinking_path, resolve_sessions_dir,
     session_key_for_agent, AppConfig, AppError, ModelThinkingStore, SessionManager, SessionMode,
@@ -190,9 +190,10 @@ pub(crate) async fn create_session_slot(
         .with_shared_model_thinking(Arc::clone(&state.shared_model_thinking))
         .with_session_cwd_override(cwd_path.clone());
     let ctx = ChatContext::from_config_with_mode_and_overrides(state.cfg.clone(), mode, overrides)?;
-    state
-        .shared_event_bus
-        .register_session_bus(current_entry.session_id.clone(), ctx.global_services.event_bus.clone());
+    state.shared_event_bus.register_session_bus(
+        current_entry.session_id.clone(),
+        ctx.global_services.event_bus.clone(),
+    );
     let ask_panel = state.ask_question.panel_for_session(
         ctx.global_services.event_bus.clone(),
         &current_entry.session_id,
@@ -362,7 +363,9 @@ pub(crate) async fn cleanup_session_slot(
 
     event_pump::unregister_session_event_pump(slot);
     state.ask_question.clear_session(&slot.session_id);
-    state.shared_event_bus.unregister_session_bus(&slot.session_id);
+    state
+        .shared_event_bus
+        .unregister_session_bus(&slot.session_id);
     slot.ctx.shutdown_completion_subscriber();
     slot.ctx.agent_registry.unregister(&slot.session_id);
     if remove_from_registry {

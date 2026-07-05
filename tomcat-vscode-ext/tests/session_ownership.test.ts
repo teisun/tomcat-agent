@@ -58,4 +58,74 @@ describe("session ownership", () => {
     expect(ownership.release("s1", "webview")).toBe(true);
     expect(ownership.claim("s1", "participant").ok).toBe(true);
   });
+
+  it("releases participant ownership after a completed turn", async () => {
+    const ownership = new SessionOwnershipTracker();
+    const listeners = new Set<(event: { sessionId: string; type: string }) => void>();
+
+    const handler = createParticipantHandler({
+      commands: {
+        attachTurn() {
+          return { dispose() {} };
+        },
+      } as never,
+      getUiMode: () => "both",
+      ide: {} as never,
+      initialize: async () => ({
+        capabilities: ["prompt", "ask_question"],
+        protocolVersion: 1,
+        sessionId: "s1",
+      }),
+      messenger: {
+        onEvent(listener: (event: { sessionId: string; type: string }) => void) {
+          listeners.add(listener);
+          return {
+            dispose() {
+              listeners.delete(listener);
+            },
+          };
+        },
+        async request() {
+          for (const listener of listeners) {
+            listener({ sessionId: "s1", type: "agent_end" });
+          }
+          return {
+            payload: { accepted: true },
+            sessionId: "s1",
+            success: true,
+            type: "response",
+          };
+        },
+      } as never,
+      ownership,
+      sessionRouter: {
+        buildResultMetadata(sessionId: string) {
+          return { sessionId };
+        },
+        async getState() {
+          return null;
+        },
+        async resolveSessionId() {
+          return "s1";
+        },
+      } as never,
+    });
+
+    const result = await handler(
+      { prompt: "hello" } as vscode.ChatRequest,
+      { history: [] } as vscode.ChatContext,
+      {
+        markdown() {},
+        progress() {},
+      } as unknown as vscode.ChatResponseStream,
+      {
+        isCancellationRequested: false,
+        onCancellationRequested: () => ({ dispose() {} }),
+      } as unknown as vscode.CancellationToken,
+    );
+
+    expect(result?.metadata).toEqual({ sessionId: "s1" });
+    expect(ownership.ownerOf("s1")).toBeUndefined();
+    expect(ownership.claim("s1", "webview").ok).toBe(true);
+  });
 });

@@ -31,7 +31,12 @@ fn creates_models_toml_with_all_managed_entries_when_absent() {
     assert_eq!(
         status,
         ModelsTomlStatus::Created {
-            added_model_ids: vec!["mimo-v2.5-pro", "gpt-5.2", "deepseek-v4-flash", "utility-flash"]
+            added_model_ids: vec![
+                "mimo-v2.5-pro",
+                "gpt-5.2",
+                "deepseek-v4-flash",
+                "utility-flash"
+            ]
         }
     );
 
@@ -103,7 +108,9 @@ fn creates_models_toml_with_all_managed_entries_when_absent() {
     assert_eq!(flash.model_name.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(flash.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
 
-    let utility = catalog.lookup("utility-flash").expect("utility-flash entry");
+    let utility = catalog
+        .lookup("utility-flash")
+        .expect("utility-flash entry");
     assert_eq!(utility.model_name.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(utility.provider, "deepseek");
 }
@@ -116,7 +123,12 @@ fn second_run_is_idempotent_no_duplicate() {
     assert_eq!(
         ensure_default_models_toml(&cfg).unwrap(),
         ModelsTomlStatus::Created {
-            added_model_ids: vec!["mimo-v2.5-pro", "gpt-5.2", "deepseek-v4-flash", "utility-flash"]
+            added_model_ids: vec![
+                "mimo-v2.5-pro",
+                "gpt-5.2",
+                "deepseek-v4-flash",
+                "utility-flash"
+            ]
         }
     );
     assert_eq!(

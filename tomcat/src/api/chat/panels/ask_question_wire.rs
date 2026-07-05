@@ -104,7 +104,11 @@ struct WireAnswer {
     question_id: String,
     #[serde(alias = "option_ids")]
     option_ids: Vec<String>,
-    #[serde(default, alias = "custom_text", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "custom_text",
+        skip_serializing_if = "Option::is_none"
+    )]
     custom_text: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     skipped: bool,

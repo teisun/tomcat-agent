@@ -82,8 +82,7 @@ fn contains_cjk(text: &str) -> bool {
 #[tokio::test]
 async fn test_openai_responses_chat_real_request_returns_ok(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !require_live_openai_responses_opt_in("test_openai_responses_chat_real_request_returns_ok")
-    {
+    if !require_live_openai_responses_opt_in("test_openai_responses_chat_real_request_returns_ok") {
         return Ok(());
     }
     common::setup_logging();
@@ -564,9 +563,8 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
 #[tokio::test]
 async fn responses_inline_pdf_input_file_summarize_roundtrip(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !require_live_openai_responses_opt_in(
-        "responses_inline_pdf_input_file_summarize_roundtrip",
-    ) {
+    if !require_live_openai_responses_opt_in("responses_inline_pdf_input_file_summarize_roundtrip")
+    {
         return Ok(());
     }
     common::setup_logging();

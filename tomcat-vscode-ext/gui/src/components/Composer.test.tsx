@@ -6,6 +6,7 @@ import { Composer, extractDropUris, type ComposerHandle } from "./Composer";
 
 function renderComposer({
   busy = false,
+  canInterrupt = true,
   canPrompt = true,
   modelCapabilities = ["vision", "files"],
   onPickContext = vi.fn(),
@@ -16,6 +17,7 @@ function renderComposer({
   planState = "planning",
 }: {
   busy?: boolean;
+  canInterrupt?: boolean;
   canPrompt?: boolean;
   modelCapabilities?: string[];
   onPickContext?: () => void;
@@ -30,6 +32,7 @@ function renderComposer({
     <Composer
       availableModels={["gpt-5.4"]}
       busy={busy}
+      canInterrupt={canInterrupt}
       canPrompt={canPrompt}
       contextLabel="Ctx 42%"
       modelCapabilities={modelCapabilities}
@@ -117,6 +120,7 @@ describe("Composer", () => {
     const onInterrupt = vi.fn();
     renderComposer({
       busy: true,
+      canInterrupt: true,
       canPrompt: true,
       onInterrupt,
     });
@@ -124,6 +128,21 @@ describe("Composer", () => {
     expect(screen.queryByTestId("send-button")).toBeNull();
     fireEvent.click(screen.getByTestId("stop-button"));
     expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the stop button when interrupt is not allowed", () => {
+    const onInterrupt = vi.fn();
+    renderComposer({
+      busy: true,
+      canInterrupt: false,
+      canPrompt: false,
+      onInterrupt,
+    });
+
+    const stopButton = screen.getByTestId("stop-button") as HTMLButtonElement;
+    expect(stopButton.disabled).toBe(true);
+    fireEvent.click(stopButton);
+    expect(onInterrupt).not.toHaveBeenCalled();
   });
 
   it("inserts references as inline chips and deduplicates them", async () => {

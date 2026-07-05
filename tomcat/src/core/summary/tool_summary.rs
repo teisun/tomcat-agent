@@ -130,15 +130,7 @@ fn count_summary(args: &Value, key: &str, label: &str) -> Option<String> {
 
 fn summarize_known_key(args: &Value) -> Option<String> {
     for key in [
-        "path",
-        "url",
-        "goal",
-        "query",
-        "pattern",
-        "key",
-        "plan_id",
-        "planId",
-        "command",
+        "path", "url", "goal", "query", "pattern", "key", "plan_id", "planId", "command",
     ] {
         if let Some(summary) = key_value_summary(args, key) {
             return Some(summary);

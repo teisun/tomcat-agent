@@ -497,7 +497,6 @@ impl ChatMessageContentPart {
             Self::InputFile { .. } => FILE_CHAR_ESTIMATE,
         }
     }
-
 }
 
 /// 仅供测试 / 已知 base64 字符串场景：解码并返回字节长度。

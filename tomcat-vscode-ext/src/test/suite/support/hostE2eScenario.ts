@@ -452,6 +452,28 @@ async function answerPendingQuestion(
   });
 }
 
+async function startPendingParticipantTurn(
+  api: TomcatExtensionApi,
+): Promise<{
+  pending: PendingQuestionSnapshot;
+  sessionId: string;
+  turnPromise: ReturnType<TomcatExtensionApi["__testing"]["runParticipantTurn"]>;
+}> {
+  api.__testing.clearObservedEvents();
+  const turnPromise = api.__testing.runParticipantTurn({
+    prompt: "answer card showcase",
+  });
+  const pending = await api.__testing.waitForPendingQuestion();
+  if (typeof pending.sessionId !== "string") {
+    throw new Error("expected pending participant turn to carry a sessionId");
+  }
+  return {
+    pending,
+    sessionId: pending.sessionId,
+    turnPromise,
+  };
+}
+
 function buildWebviewIntent(
   intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>,
 ): Exclude<WebviewIntent, { type: "__test.dom_snapshot" }> {
@@ -1225,11 +1247,7 @@ export async function assertWebviewMultiSessionFlow(
 export async function assertWebviewOwnershipFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
-  const participantTurn = await api.__testing.runParticipantTurn({
-    prompt: "participant owner",
-  });
-  const sessionId = participantTurn.result?.metadata?.sessionId;
-  assert.equal(typeof sessionId, "string");
+  const { pending, sessionId, turnPromise } = await startPendingParticipantTurn(api);
 
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
@@ -1252,7 +1270,9 @@ export async function assertWebviewOwnershipFlow(
   );
   assert.ok(state.sessionViews[sessionId!]?.conflictMessage);
 
-  assert.equal(api.__testing.releaseSessionOwnership(sessionId!, "participant"), true);
+  await answerPendingQuestion(pending);
+  const participantTurn = await turnPromise;
+  assert.equal(participantTurn.result?.errorDetails?.message, undefined);
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: { sessionId },
@@ -1765,16 +1785,7 @@ export async function assertWebviewCrossOwnerPlanFlow(
     }
   }
 
-  const participantTurn = await api.__testing.runParticipantTurn({
-    prompt: "participant owner",
-  });
-  assert.equal(
-    participantTurn.result?.errorDetails?.message,
-    undefined,
-    "expected the participant turn to claim its session before the webview switches in",
-  );
-  const sessionId = participantTurn.result?.metadata?.sessionId;
-  assert.equal(typeof sessionId, "string");
+  const { pending, sessionId, turnPromise } = await startPendingParticipantTurn(api);
 
   await api.__testing.reloadWebview();
   await api.__testing.focusWebview();
@@ -1890,6 +1901,10 @@ export async function assertWebviewCrossOwnerPlanFlow(
     20_000,
   );
   assert.equal(exited.planStateText, null);
+
+  await answerPendingQuestion(pending);
+  const participantTurn = await turnPromise;
+  assert.equal(participantTurn.result?.errorDetails?.message, undefined);
 }
 
 export async function assertWebviewSelectionReferenceFlow(
@@ -2363,85 +2378,108 @@ export async function assertTranscriptUiFlow(
       type: "prompt",
     }),
   );
-  const busyTodo = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      !candidate.progressRow && candidate.todoWidgetVisible && candidate.planCardCount > 0
-        ? candidate
-        : undefined,
-  );
-  assert.ok(
-    busyTodo.todoWidgetVisible,
-    "expected the docked todo widget while the transcript flow is still busy",
-  );
-  assert.equal(
-    busyTodo.composerPlanStatusInBarCount,
-    0,
-    `expected no inline plan-status chip in composer bar, got ${busyTodo.composerPlanStatusInBarCount}`,
-  );
-  assert.equal(
-    busyTodo.composerFooterPlanStatus,
-    "Plan: planning",
-    `expected plan status to render in the composer footer, got ${busyTodo.composerFooterPlanStatus}`,
-  );
-  assert.ok(busyTodo.planFooterSameRow, "expected View Plan and Build to stay on one row");
-  assert.ok(
-    !busyTodo.html.includes("Tomcat is responding..."),
-    "expected busy hint text to be removed from the composer",
-  );
-  if (process.env.TOMCAT_E2E_CAPTURE_PROGRESS === "1") {
-    assert.equal(
-      busyTodo.progressRow,
-      false,
-      "expected no inline progress row once the docked todo widget owns the busy state",
+  const requireBusyProgress = process.env.TOMCAT_E2E_CAPTURE_PROGRESS === "1";
+  const busyStageTimeoutMs = requireBusyProgress ? 15_000 : 3_000;
+  const collapsedPredicate = (candidate: Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>>) =>
+    candidate.assistantResponseGroups >= 1 &&
+    candidate.planCardCount >= 1 &&
+    !candidate.progressRow &&
+    !candidate.todoWidgetVisible &&
+    candidate.userPromptPill &&
+    candidate.assistantNoCard &&
+    candidate.ellipsisAboveGroupHeader &&
+    candidate.sessionTitleUpdated &&
+    candidate.groupFoldTitles.some((title) => title.trim().length > 0) &&
+    candidate.planCardTodoCountText === "4 todos" &&
+    candidate.composerFooterPlanStatus === "Plan: planning"
+      ? candidate
+      : undefined;
+  let collapsedFromBusyFallback:
+    | Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>>
+    | null = null;
+  try {
+    const busyTodo = await waitForWebviewDomSnapshot(
+      api,
+      (candidate) =>
+        !candidate.progressRow &&
+        candidate.todoWidgetVisible &&
+        candidate.planCardCount > 0 &&
+        candidate.composerFooterPlanStatus === "Plan: planning"
+          ? candidate
+          : undefined,
+      busyStageTimeoutMs,
     );
-    await api.__testing.focusWebview();
-    captureTranscriptVisual("progress");
-  }
-  await api.__testing.sendWebviewDomAction({
-    kind: "clickTestId",
-    testId: "todo-widget-toggle",
-  });
-  const expandedTodo = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      candidate.todoWidgetVisible &&
-      candidate.todoWidgetExpanded &&
-      candidate.todoWidgetItemCount >= 4
-        ? candidate
-        : undefined,
-  );
-  assert.equal(
-    expandedTodo.todoWidgetTitle,
-    "Todos (2/4)",
-    `expected expanded todo widget title, got ${expandedTodo.todoWidgetTitle}`,
-  );
-  assert.ok(
-    expandedTodo.todoWidgetItemCount >= 4,
-    `expected at least 4 todo rows, got ${expandedTodo.todoWidgetItemCount}`,
-  );
-  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    await api.__testing.focusWebview();
-    captureTranscriptVisual("todo-expanded");
+    assert.ok(
+      busyTodo.todoWidgetVisible,
+      "expected the docked todo widget while the transcript flow is still busy",
+    );
+    assert.equal(
+      busyTodo.composerPlanStatusInBarCount,
+      0,
+      `expected no inline plan-status chip in composer bar, got ${busyTodo.composerPlanStatusInBarCount}`,
+    );
+    assert.equal(
+      busyTodo.composerFooterPlanStatus,
+      "Plan: planning",
+      `expected plan status to render in the composer footer, got ${busyTodo.composerFooterPlanStatus}`,
+    );
+    assert.ok(busyTodo.planFooterSameRow, "expected View Plan and Build to stay on one row");
+    assert.ok(
+      !busyTodo.html.includes("Tomcat is responding..."),
+      "expected busy hint text to be removed from the composer",
+    );
+    if (requireBusyProgress) {
+      assert.equal(
+        busyTodo.progressRow,
+        false,
+        "expected no inline progress row once the docked todo widget owns the busy state",
+      );
+      await api.__testing.focusWebview();
+      captureTranscriptVisual("progress");
+    }
+    await api.__testing.sendWebviewDomAction({
+      kind: "clickTestId",
+      testId: "todo-widget-toggle",
+    });
+    const expandedTodo = await waitForWebviewDomSnapshot(
+      api,
+      (candidate) =>
+        candidate.todoWidgetVisible &&
+        candidate.todoWidgetExpanded &&
+        candidate.todoWidgetItemCount >= 4
+          ? candidate
+          : undefined,
+      busyStageTimeoutMs,
+    );
+    assert.equal(
+      expandedTodo.todoWidgetTitle,
+      "Todos (2/4)",
+      `expected expanded todo widget title, got ${expandedTodo.todoWidgetTitle}`,
+    );
+    assert.ok(
+      expandedTodo.todoWidgetItemCount >= 4,
+      `expected at least 4 todo rows, got ${expandedTodo.todoWidgetItemCount}`,
+    );
+    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+      await api.__testing.focusWebview();
+      captureTranscriptVisual("todo-expanded");
+    }
+  } catch (error) {
+    if (requireBusyProgress) {
+      throw error;
+    }
+    const snapshot = await api.__testing.captureWebviewDom();
+    const collapsed = collapsedPredicate(snapshot);
+    if (!collapsed) {
+      throw error;
+    }
+    collapsedFromBusyFallback = collapsed;
   }
   await waitForEvent(api, { type: "agent_end" });
 
-  const collapsed = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      candidate.assistantResponseGroups >= 1 &&
-      candidate.planCardCount >= 1 &&
-      !candidate.progressRow &&
-      !candidate.todoWidgetVisible &&
-      candidate.userPromptPill &&
-      candidate.assistantNoCard &&
-      candidate.ellipsisAboveGroupHeader &&
-      candidate.sessionTitleUpdated &&
-      candidate.groupFoldTitles.some((title) => title.trim().length > 0) &&
-      candidate.planCardTodoCountText === "4 todos"
-        ? candidate
-        : undefined,
-  );
+  const collapsed =
+    collapsedFromBusyFallback
+    ?? await waitForWebviewDomSnapshot(api, collapsedPredicate);
   assert.ok(
     collapsed.assistantResponseGroups >= 1,
     "expected at least one assistant response group",

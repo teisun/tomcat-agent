@@ -44,7 +44,11 @@ async fn serve_event_pump_streams_agent_events() {
         .unwrap();
 
     let lines = wait_for_lines(&buffer, 1).await;
-    assert_eq!(lines.len(), 1, "expected single routed event, got {lines:?}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected single routed event, got {lines:?}"
+    );
     assert_eq!(
         lines[0].get("type").and_then(serde_json::Value::as_str),
         Some(wire::WIRE_AGENT_START)
@@ -97,7 +101,11 @@ async fn serve_lifecycle_events_not_dropped_for_other_sessions() {
         .unwrap();
 
     let lines = wait_for_lines(&buffer, 1).await;
-    assert_eq!(lines.len(), 1, "expected only same-session event, got {lines:?}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected only same-session event, got {lines:?}"
+    );
     assert_eq!(
         lines[0]
             .get("sessionId")
@@ -148,7 +156,11 @@ async fn serve_event_pump_streams_plan_transition_events() {
     }
 
     let lines = wait_for_lines(&buffer, 4).await;
-    assert_eq!(lines.len(), 4, "expected four routed plan events, got {lines:?}");
+    assert_eq!(
+        lines.len(),
+        4,
+        "expected four routed plan events, got {lines:?}"
+    );
     assert_eq!(
         lines
             .iter()

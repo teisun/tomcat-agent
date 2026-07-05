@@ -44,9 +44,8 @@ fn parse_audit_line_matches_hostcall() {
 #[test]
 fn parse_audit_line_handles_multibyte_detail_without_panic() {
     let detail = "修".repeat(90);
-    let line = format!(
-        "2025-03-10T12:00:00Z  INFO audit primitive operation={detail} success=true"
-    );
+    let line =
+        format!("2025-03-10T12:00:00Z  INFO audit primitive operation={detail} success=true");
     let entry = parse_audit_line(&line, 3).unwrap();
     assert_eq!(entry.audit_type, wire::WIRE_AUDIT_PRIMITIVE);
     assert_eq!(entry.success, "OK");

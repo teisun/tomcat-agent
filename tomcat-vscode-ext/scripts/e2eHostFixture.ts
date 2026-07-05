@@ -58,7 +58,7 @@ const historyPageDelayMs = Math.max(
 );
 const transcriptProgressDelayMs = Math.max(
   0,
-  Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "250"),
+  Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
 
 function touchSession(session) {

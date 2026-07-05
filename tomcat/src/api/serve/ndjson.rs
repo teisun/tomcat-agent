@@ -14,8 +14,8 @@ pub fn ndjson_safe_stringify<T: Serialize>(value: &T) -> Result<String, AppError
 }
 
 pub fn parse_command_line(line: &str) -> Result<super::types::ServeCommand, AppError> {
-    let value: Value =
-        serde_json::from_str(line).map_err(|error| AppError::Config(format!("parse_error: {error}")))?;
+    let value: Value = serde_json::from_str(line)
+        .map_err(|error| AppError::Config(format!("parse_error: {error}")))?;
     reject_explicit_null_session_id(&value)?;
     parse_command_value(value)
 }
@@ -48,7 +48,8 @@ fn parse_command_value(value: Value) -> Result<super::types::ServeCommand, AppEr
         .get("type")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
-    serde_json::from_value(value).map_err(|error| map_command_parse_error(command_type.as_deref(), error))
+    serde_json::from_value(value)
+        .map_err(|error| map_command_parse_error(command_type.as_deref(), error))
 }
 
 fn map_command_parse_error(command_type: Option<&str>, error: serde_json::Error) -> AppError {

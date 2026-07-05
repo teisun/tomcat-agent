@@ -774,7 +774,10 @@ backends.tavily = searchWithTavily;
         .expect("builtin web_search function call");
 
     assert_eq!(result["backend"], "tavily");
-    assert_eq!(result["hits"][0]["url"], json!("https://tavily.example.com"));
+    assert_eq!(
+        result["hits"][0]["url"],
+        json!("https://tavily.example.com")
+    );
     assert!(result["warnings"]
         .as_array()
         .expect("warnings array")

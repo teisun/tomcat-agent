@@ -12,8 +12,8 @@ pub(crate) use context::INTERRUPTED_TOOL_RESULT_TEXT;
 pub use context::{build_context_from_state, init_context_state};
 #[allow(unused_imports)]
 pub use session_impl::generate_entry_id;
-pub use session_impl::{derive_title_from_user_message, is_rule_derived_title};
 pub use session_impl::SessionManager;
+pub use session_impl::{derive_title_from_user_message, is_rule_derived_title};
 pub use types::{
     compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, ApiUsage, CompactionResult,
     ContextLiveMetrics, ContextState, PlanEventKind, PlanEventRef,

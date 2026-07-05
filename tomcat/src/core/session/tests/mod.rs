@@ -12,9 +12,9 @@
 //! `transcript_header_test` / `transcript_read_test` / `transcript_lookup_test` /
 //! `transcript_mutate_test` 四个文件。
 
+mod model_thinking_test;
 mod resume_index_test;
 mod scope_test;
-mod model_thinking_test;
 mod store_test;
 mod subagent_transcript_test;
 mod transcript_header_test;

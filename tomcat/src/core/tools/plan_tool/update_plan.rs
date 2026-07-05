@@ -173,8 +173,7 @@ pub async fn execute(
                 state_after
             } else if code_review_summary.aborted {
                 warnings.push(
-                    "code review 未能执行(aborted)，按 reviewer 不可用处理，转交 verifier"
-                        .into(),
+                    "code review 未能执行(aborted)，按 reviewer 不可用处理，转交 verifier".into(),
                 );
                 let (state_after, verify_payload) = run_verifier_after_code_review(
                     runtime,

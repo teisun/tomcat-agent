@@ -56,7 +56,10 @@ fn effort_unknown_arg_is_usage_error() {
         ChatCommand::UsageError { message } => message,
         other => panic!("应为 UsageError，实际：{:?}", other),
     };
-    assert!(msg.contains("low|medium|high|xhigh"), "错误文案应列出合法值：{msg}");
+    assert!(
+        msg.contains("low|medium|high|xhigh"),
+        "错误文案应列出合法值：{msg}"
+    );
     assert!(msg.contains("turbo"), "错误文案应回显非法输入：{msg}");
 }
 

@@ -183,11 +183,7 @@ impl MockVerifierDispatcher {
 
 #[async_trait]
 impl VerifierDispatcher for MockVerifierDispatcher {
-    async fn dispatch(
-        &self,
-        _plan_id: &str,
-        _plan_text: &str,
-    ) -> VerifySummary {
+    async fn dispatch(&self, _plan_id: &str, _plan_text: &str) -> VerifySummary {
         self.call_count.fetch_add(1, Ordering::Relaxed);
         let mut q = self.summaries.lock();
         if q.is_empty() {

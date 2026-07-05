@@ -36,7 +36,11 @@ impl FanoutEventBus {
 
 #[async_trait]
 impl EventBus for FanoutEventBus {
-    fn on(&self, event_name: &str, callback: crate::infra::event_bus::EventCallback) -> EventListenerId {
+    fn on(
+        &self,
+        event_name: &str,
+        callback: crate::infra::event_bus::EventCallback,
+    ) -> EventListenerId {
         self.local.on(event_name, callback)
     }
 

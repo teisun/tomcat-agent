@@ -355,6 +355,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   dispose(): void {
+    this.deps.ownership.releaseAll("webview");
     this.messageSubscription?.dispose();
     this.visibilitySubscription?.dispose();
     this.eventSubscription.dispose();
@@ -847,8 +848,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         return;
       }
       case "interrupt": {
-        const sessionId = intent.data?.sessionId ?? this.currentState().activeSessionId;
+        const sessionId = await this.ensureWebviewSessionWithoutHistory(
+          intent.data?.sessionId ?? this.currentState().activeSessionId,
+        );
         if (!sessionId) {
+          await this.postState();
           return;
         }
         await this.deps.messenger.request({
@@ -1263,6 +1267,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       limit: HISTORY_PAGE_ENTRIES,
     }).catch(() => null);
     if (this.currentHistoryFetchGen(sessionId) !== fetchGen) {
+      this.stateStore.setHistoryLoading(sessionId, false);
+      await this.postState();
       return;
     }
     if (!history || history.sessionId !== sessionId) {

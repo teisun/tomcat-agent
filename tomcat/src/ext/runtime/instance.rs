@@ -12,7 +12,7 @@ use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Function};
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -41,6 +41,7 @@ struct ExecutionGuardState {
     reason: Mutex<Option<InterruptReason>>,
     timeout: Duration,
     budget: u64,
+    timeout_paused: AtomicBool,
 }
 
 impl ExecutionGuardState {
@@ -51,6 +52,7 @@ impl ExecutionGuardState {
             reason: Mutex::new(None),
             timeout,
             budget,
+            timeout_paused: AtomicBool::new(false),
         }
     }
 
@@ -60,7 +62,28 @@ impl ExecutionGuardState {
         *self.reason.lock() = None;
     }
 
+    fn pause_timeout(&self) {
+        self.timeout_paused.store(true, Ordering::SeqCst);
+    }
+
+    fn resume_timeout(&self) {
+        self.reset();
+        self.timeout_paused.store(false, Ordering::SeqCst);
+    }
+
+    fn pause_for_idle_wait(&self) {
+        self.pause_timeout();
+        self.reset();
+    }
+
+    fn resume_after_idle_wait(&self) {
+        self.resume_timeout();
+    }
+
     fn should_interrupt(&self) -> bool {
+        if self.timeout_paused.load(Ordering::SeqCst) {
+            return false;
+        }
         if !self.timeout.is_zero() && self.started_at.lock().elapsed() >= self.timeout {
             *self.reason.lock() = Some(InterruptReason::Timeout);
             return true;
@@ -235,6 +258,8 @@ impl PluginVmInstance {
 
         run_with_local_runtime(move || async move {
             guard.reset();
+            // Built-in bridge/shim bootstrap is host-owned overhead, not user/plugin work.
+            guard.pause_timeout();
             let js_runtime = AsyncRuntime::new().map_err(to_app_js_error)?;
             if let Some(heap_limit_bytes) = heap_limit_bytes {
                 js_runtime.set_memory_limit(heap_limit_bytes).await;
@@ -314,6 +339,7 @@ impl PluginVmInstance {
              // --- pi_node_shim.js ---\n{PI_NODE_SHIM}\n\
              // --- pi_typebox_shim.js ---\n{PI_TYPEBOX_SHIM}\n\
              // --- pi_ms_shim.js ---\n{PI_MS_SHIM}\n\
+             // --- begin user budget window ---\nif (typeof __pi_resume_timeout === 'function') __pi_resume_timeout();\n\
              // --- user script ---\n{user_code}",
             bridge = get_bridge_js_content()
         );
@@ -371,8 +397,10 @@ fn install_host_globals<'js>(
             let wait_bridge = wait_bridge.clone();
             let wait_guard = wait_guard.clone();
             async move {
+                // Waiting on the host event queue is idle time, not plugin execution.
+                wait_guard.pause_for_idle_wait();
                 let result = wait_bridge.wait_for_event(timeout_ms).await;
-                wait_guard.reset();
+                wait_guard.resume_after_idle_wait();
                 result.map_err(|e| js_runtime_error(e.to_string()))
             }
         }),
@@ -385,6 +413,15 @@ fn install_host_globals<'js>(
         "__pi_budget_reset",
         Func::from(move || -> rquickjs::Result<()> {
             budget_reset_guard.reset();
+            Ok(())
+        }),
+    )?;
+
+    let resume_timeout_guard = guard.clone();
+    globals.set(
+        "__pi_resume_timeout",
+        Func::from(move || -> rquickjs::Result<()> {
+            resume_timeout_guard.resume_timeout();
             Ok(())
         }),
     )?;
@@ -503,6 +540,10 @@ mod tests {
         assert!(
             combined.contains("__pi_start_event_loop"),
             "combined script should include event loop bootstrap"
+        );
+        assert!(
+            combined.contains("__pi_resume_timeout"),
+            "combined script should resume the timeout budget at the user-code boundary"
         );
     }
 
@@ -652,6 +693,43 @@ globalThis.__hold = new Uint8Array(4 * 1024 * 1024);
 "#,
             )
             .expect("idle wait ticks should reset timeout budget instead of tripping it");
+    }
+
+    #[test]
+    fn wait_for_event_can_block_past_call_timeout_without_tripping_idle_vm() {
+        let mut instance = PluginVmInstance::new(
+            PluginEngineConfig {
+                quickjs_heap_mb: 8,
+                call_timeout_ms: 50,
+                interrupt_budget: 0,
+                ..Default::default()
+            },
+            "idle-timeout-pause".to_string(),
+        )
+        .expect("create quickjs instance");
+        instance
+            .register_host_binding(|request_json| {
+                let request: serde_json::Value =
+                    serde_json::from_str(request_json).expect("host request should be JSON");
+                if request["module"] == "__session" && request["method"] == "waitForEvent" {
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                    return Ok(
+                        serde_json::json!({ "ok": true, "data": { "type": "__tick" } }).to_string(),
+                    );
+                }
+                Ok(serde_json::json!({ "ok": true, "data": null }).to_string())
+            })
+            .expect("register host binding");
+        instance
+            .run_script(
+                r#"
+(async function () {
+  await __pi_wait_for_event(80);
+  globalThis.__idleWaitCompleted = true;
+})();
+"#,
+            )
+            .expect("idle wait should not spend call_timeout_ms while no plugin code is running");
     }
 
     #[test]

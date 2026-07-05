@@ -37,8 +37,8 @@ use tomcat::core::plan_runtime::verify::{
 };
 use tomcat::core::plan_runtime::{PlanRuntime, ReviewerDispatcher, VerifierDispatcher};
 use tomcat::core::skill::SkillSet;
-use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
 use tomcat::core::tools::pipeline::read_state::ReadFileState;
+use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
 use tomcat::core::tools::web_fetch::WebFetchRuntime;
 use tomcat::core::{
     CheckpointDiff, CheckpointError, CheckpointId, CheckpointMeta, CheckpointRecordRequest,
@@ -153,11 +153,7 @@ impl QueueVerifier {
 
 #[async_trait]
 impl VerifierDispatcher for QueueVerifier {
-    async fn dispatch(
-        &self,
-        _plan_id: &str,
-        _plan_text: &str,
-    ) -> VerifySummary {
+    async fn dispatch(&self, _plan_id: &str, _plan_text: &str) -> VerifySummary {
         self.call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut summaries = self.summaries.lock();
@@ -1007,7 +1003,11 @@ async fn h11_prod_verifier_persists_child_transcript_and_keeps_child_id_aligned(
     std::fs::create_dir_all(&agent_trail_dir).unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::new(vec![
-        scripted_tool_call_stream("bash", "call_bash_1", r#"{"command":"printf verifier-proof"}"#),
+        scripted_tool_call_stream(
+            "bash",
+            "call_bash_1",
+            r#"{"command":"printf verifier-proof"}"#,
+        ),
         scripted_text_stream(
             r#"<verify>
 checks:
@@ -1050,20 +1050,24 @@ summary: verifier child completed
         },
     );
 
-    let summary = dispatcher.dispatch(plan_id, "## Goal\nship verifier\n").await;
+    let summary = dispatcher
+        .dispatch(plan_id, "## Goal\nship verifier\n")
+        .await;
     assert_eq!(summary.verdict, "pass");
     assert!(!summary.child_session_id.is_empty());
 
     let transcript_path = subagent_transcript_path(&agent_trail_dir, &summary.child_session_id);
     assert!(transcript_path.exists(), "missing {transcript_path:?}");
-    assert!(
-        summary
-            .summary
-            .contains(&format!("subagent-sessions/{}.jsonl", summary.child_session_id))
-    );
+    assert!(summary.summary.contains(&format!(
+        "subagent-sessions/{}.jsonl",
+        summary.child_session_id
+    )));
 
     let lines = transcript_lines(&transcript_path);
-    assert!(lines.len() >= 5, "transcript should contain header/meta/multi-turn messages");
+    assert!(
+        lines.len() >= 5,
+        "transcript should contain header/meta/multi-turn messages"
+    );
     let header: SessionHeader = serde_json::from_str(&lines[0]).unwrap();
     assert_eq!(header.id, summary.child_session_id);
     assert!(lines[1].contains("\"subagent.transcript.meta\""));
@@ -1072,10 +1076,9 @@ summary: verifier child completed
         transcript_message_count(&transcript_path) >= 3,
         "expected assistant tool-call + tool + final assistant messages"
     );
-    assert!(
-        lines.iter()
-            .any(|line| line.contains("mock bash ok: printf verifier-proof"))
-    );
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("mock bash ok: printf verifier-proof")));
 
     cleanup_home(&home);
 }
@@ -1152,16 +1155,14 @@ applied_changes: false
     let code_path = subagent_transcript_path(&agent_trail_dir, &code_summary.child_session_id);
     assert!(plan_path.exists(), "missing {plan_path:?}");
     assert!(code_path.exists(), "missing {code_path:?}");
-    assert!(
-        plan_summary
-            .summary
-            .contains(&format!("subagent-sessions/{}.jsonl", plan_summary.child_session_id))
-    );
-    assert!(
-        code_summary
-            .summary
-            .contains(&format!("subagent-sessions/{}.jsonl", code_summary.child_session_id))
-    );
+    assert!(plan_summary.summary.contains(&format!(
+        "subagent-sessions/{}.jsonl",
+        plan_summary.child_session_id
+    )));
+    assert!(code_summary.summary.contains(&format!(
+        "subagent-sessions/{}.jsonl",
+        code_summary.child_session_id
+    )));
 
     let plan_header: SessionHeader =
         serde_json::from_str(&transcript_lines(&plan_path).first().unwrap().clone()).unwrap();

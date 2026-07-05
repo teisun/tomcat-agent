@@ -194,9 +194,17 @@ fn resolve_model_thinking_path_uses_work_dir_root() {
         std::fs::canonicalize(path.parent().expect("parent path")).unwrap(),
         std::fs::canonicalize(temp.path()).unwrap()
     );
-    assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("model-thinking.json"));
+    assert_eq!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("model-thinking.json")
+    );
     assert!(
-        !path.starts_with(temp.path().join("agents").join(&cfg.agent.id).join("sessions")),
+        !path.starts_with(
+            temp.path()
+                .join("agents")
+                .join(&cfg.agent.id)
+                .join("sessions")
+        ),
         "model thinking store must not live under sessions/: {}",
         path.display()
     );

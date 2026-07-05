@@ -126,7 +126,10 @@ fn append_user_message_persists_title_once_and_never_overwrites() {
     }))
     .unwrap();
     let entry = mgr.current_session_entry().unwrap().unwrap();
-    assert_eq!(entry.title.as_deref(), Some("帮我重构 session 列表的标题逻辑"));
+    assert_eq!(
+        entry.title.as_deref(),
+        Some("帮我重构 session 列表的标题逻辑")
+    );
 
     // 后续 user message 不应覆盖已有 title。
     mgr.append_message(serde_json::json!({
@@ -191,7 +194,10 @@ fn placeholder_title_is_replaced_by_semantic_then_preserved() {
     .unwrap();
     let entry = mgr.current_session_entry().unwrap().unwrap();
     assert_eq!(entry.title.as_deref(), Some(user_text));
-    assert!(is_rule_derived_title(entry.title.as_deref().unwrap(), user_text));
+    assert!(is_rule_derived_title(
+        entry.title.as_deref().unwrap(),
+        user_text
+    ));
 
     // 模拟异步 LLM 语义 title 覆盖占位（与 maybe_spawn_semantic_session_title 写回路径一致）。
     mgr.update_session(&key, |e| {
@@ -200,7 +206,10 @@ fn placeholder_title_is_replaced_by_semantic_then_preserved() {
     .unwrap();
     let after = mgr.current_session_entry().unwrap().unwrap();
     assert_eq!(after.title.as_deref(), Some("Refactor session list titles"));
-    assert!(!is_rule_derived_title(after.title.as_deref().unwrap(), user_text));
+    assert!(!is_rule_derived_title(
+        after.title.as_deref().unwrap(),
+        user_text
+    ));
 
     // 语义 title 写入后，后续同文本 user append 不应回退为规则占位。
     mgr.append_message(serde_json::json!({
@@ -209,7 +218,10 @@ fn placeholder_title_is_replaced_by_semantic_then_preserved() {
     }))
     .unwrap();
     let final_entry = mgr.current_session_entry().unwrap().unwrap();
-    assert_eq!(final_entry.title.as_deref(), Some("Refactor session list titles"));
+    assert_eq!(
+        final_entry.title.as_deref(),
+        Some("Refactor session list titles")
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

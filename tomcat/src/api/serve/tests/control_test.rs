@@ -1,7 +1,7 @@
 use super::*;
 use std::fs;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serial_test::serial;
@@ -79,10 +79,14 @@ async fn serve_initialize_control_request_sets_ready_state() {
     .await;
     let response = lines
         .iter()
-        .find(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("control_response"))
+        .find(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("control_response")
+        })
         .unwrap();
     assert_eq!(
-        response.get("requestId").and_then(serde_json::Value::as_str),
+        response
+            .get("requestId")
+            .and_then(serde_json::Value::as_str),
         Some("init-1")
     );
     let payload = response.get("payload").unwrap();
@@ -92,7 +96,9 @@ async fn serve_initialize_control_request_sets_ready_state() {
             .and_then(serde_json::Value::as_i64),
         Some(1)
     );
-    let capabilities = payload["capabilities"].as_array().expect("capabilities array");
+    let capabilities = payload["capabilities"]
+        .as_array()
+        .expect("capabilities array");
     let capability_names = capabilities
         .iter()
         .filter_map(serde_json::Value::as_str)
@@ -209,9 +215,14 @@ async fn serve_interrupt_unknown_session_returns_error_response() {
     .await;
     let response = lines
         .iter()
-        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("interrupt-missing"))
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("interrupt-missing")
+        })
         .unwrap();
-    assert_eq!(response.get("success").and_then(serde_json::Value::as_bool), Some(false));
+    assert_eq!(
+        response.get("success").and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
     assert_eq!(
         response.get("error").and_then(serde_json::Value::as_str),
         Some("unknown_session")
@@ -249,7 +260,10 @@ async fn serve_unknown_control_subtype_returns_unknown_command_error() {
                 == Some("unknown_command: control_request/mystery")
         })
         .unwrap();
-    assert_eq!(response.get("success").and_then(serde_json::Value::as_bool), Some(false));
+    assert_eq!(
+        response.get("success").and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

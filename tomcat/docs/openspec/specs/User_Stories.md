@@ -177,6 +177,8 @@
 - [ ] webview 在切换回已有活动 plan 的 session 时，可仅凭 `get_state.planPath` / `contextUtilizationRatio` 恢复 plan 卡、`Ctx%` 与 `Build` 可用态；不得依赖额外 live `plan.*` 才“补出来”
 - [ ] participant 持有会话时，webview 作为观察端仍能通过 `plan.enter` / `plan.build` / `plan.pending` / `plan.complete` / `plan.exit` 与终态 `get_state` reconcile 保持 plan footer、plan 卡与后端当前真相一致
 - [ ] webview 的“看 diff / 应用编辑”复用 VSCode 原生 `vscode.diff` + `WorkspaceEdit` 落地路径，不自建主编辑栈
+- [ ] webview composer 的 `+` 智能选取可将图片 / PDF 作为待发送附件，将工作区文件 / 目录作为 reference chips；发送时附件走 `prompt.params.attachments[]`，reference 作为可恢复消息段保留在 transcript
+- [ ] 编辑器 `Add Selection to Tomcat Chat` 与 Shift 拖放文件上下文都可把引用加入 composer；重复文件引用需去重，reload / 历史回放后仍保留正确的文件名与行号标签
 - [ ] 扩展需通过真实宿主与安装版 VSIX 验收：原生 chat UI、webview UI、共享会话池、owner 冲突、VSIX 打包入包与安装后资源加载均有自动化覆盖
 
 ### Story 8e: VSCode webview transcript 仿 Chat 体验（Phase 2+）

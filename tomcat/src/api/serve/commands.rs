@@ -996,9 +996,7 @@ pub(crate) fn build_user_message(
         return Ok(ChatMessage::user(text));
     }
 
-    let mut parts = Vec::with_capacity(
-        params.segments.len().max(1) + params.attachments.len(),
-    );
+    let mut parts = Vec::with_capacity(params.segments.len().max(1) + params.attachments.len());
     if params.segments.is_empty() {
         parts.push(ChatMessageContentPart::text(text));
     } else {
@@ -1008,7 +1006,9 @@ pub(crate) fn build_user_message(
                     parts.push(ChatMessageContentPart::text(text.clone()));
                 }
                 ServeContentSegment::Reference { reference } => {
-                    parts.push(ChatMessageContentPart::reference(to_context_reference(reference)));
+                    parts.push(ChatMessageContentPart::reference(to_context_reference(
+                        reference,
+                    )));
                 }
             }
         }

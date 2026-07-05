@@ -24,9 +24,7 @@ fn create_session_manager() -> (tempfile::TempDir, SessionManager) {
     (dir, mgr)
 }
 
-fn capture_assistant_ids(
-    event_bus: &Arc<DefaultEventBus>,
-) -> AssistantIdCapture {
+fn capture_assistant_ids(event_bus: &Arc<DefaultEventBus>) -> AssistantIdCapture {
     let message_start_ids = Arc::new(Mutex::new(Vec::<String>::new()));
     let turn_end_ids = Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -152,7 +150,10 @@ async fn multi_turn_tool_loop_mints_distinct_ids_per_assistant_message() {
     };
     let mut agent = AgentLoop::new(llm, primitive, event_bus, config, CancellationToken::new());
 
-    let result = agent.run(vec![ChatMessage::user("use a tool")]).await.unwrap();
+    let result = agent
+        .run(vec![ChatMessage::user("use a tool")])
+        .await
+        .unwrap();
     assert_eq!(result.final_text, "done");
     assert!(
         agent.pending_assistant_entry_id().is_none(),
@@ -163,7 +164,11 @@ async fn multi_turn_tool_loop_mints_distinct_ids_per_assistant_message() {
     let turn_end_ids = turn_end_ids.lock().unwrap().clone();
     let transcript_ids = assistant_entry_ids(&mgr);
 
-    assert_eq!(message_start_ids.len(), 2, "tool loop should emit two assistant messages");
+    assert_eq!(
+        message_start_ids.len(),
+        2,
+        "tool loop should emit two assistant messages"
+    );
     assert_eq!(turn_end_ids, message_start_ids);
     assert_eq!(transcript_ids, message_start_ids);
     assert_ne!(

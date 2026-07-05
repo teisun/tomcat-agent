@@ -444,18 +444,17 @@ async fn rearm_root_replaces_cancelled_token_and_allows_new_spawn() {
     let _g = reg.register_root_for_test("root").unwrap();
     reg.cascade_abort("root");
     assert!(
-        reg.handles
-            .read()
-            .get("root")
-            .expect("root")
-            .is_aborted(),
+        reg.handles.read().get("root").expect("root").is_aborted(),
         "cascade_abort 后 root token 应已取消"
     );
 
     reg.rearm_root("root", CancellationToken::new())
         .expect("rearm root");
     let parent = reg.handles.read().get("root").cloned().unwrap();
-    assert!(!parent.is_aborted(), "rearm_root 后 root token 应恢复未取消");
+    assert!(
+        !parent.is_aborted(),
+        "rearm_root 后 root token 应恢复未取消"
+    );
 
     let outcome = reg
         .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
