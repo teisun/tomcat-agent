@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-05 21:38 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-05 21:52 +0800 | ACTIVE | develop | — |
 
 ### 集成说明
+- 根 README 已对齐双组件 monorepo 现状：补充 `tomcat/` + `tomcat-vscode-ext/` 组件索引、Agent Box/CLI 双入口架构图，并修正终端用户前提（`tomcat init` → `~/.tomcat/assets/.env`；Rust 1.70+ 仅源码构建需要）。
 - 用户文档已切换主推 **Tomcat Agent Box**：根 README、扩展 README、`user-guide` 与 `package.json` 面板/命令文案同步更新，新增 `assets/tomcat-agent-box.png` 截图；`manifest_contract` 与 GUI 单测已复跑通过。
 - 已在 `develop` 上以 `git merge --no-ff` 合入 `feature/tomcat-vscode-extension`（merge `2b04acd`），覆盖 `T2-P1-019` 与 `T2-P1-020`。
 - Rust develop-side 门禁已通过：`./scripts/run-integration-tests.sh all` 全绿；`integration-openai-responses-wire` 在 LiteLLM 直连网关口径下复跑通过。集成期补修 `tomcat/src/ext/runtime/instance.rs`，把 QuickJS host bootstrap 排除到插件 timeout budget 之外，并补强对应断言，消除 `quickjs_e2e_tests::runaway_plugin_timeout_interrupts_when_budget_disabled` 的假红；同一提交还带入 `tomcat/src/core/tools/primitive/executor/write_edit.rs` 的备份提交路径收敛与回滚失败显式报错，并为 overwrite/rollback 边界补了配套测试。

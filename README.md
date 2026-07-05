@@ -1,6 +1,6 @@
 # tomcat
 
-基于 Rust 的轻量 AI Agent 运行时，为作者学习 Agent 开发而作的实践项目。源码与构建在 [`tomcat/`](tomcat/) 目录。
+基于 Rust 的轻量 AI Agent 运行时与 VS Code 扩展，为作者学习 Agent 开发而作的实践项目：[`tomcat/`](tomcat/) 提供运行时、CLI 与 `tomcat serve --stdio`，[`tomcat-vscode-ext/`](tomcat-vscode-ext/) 提供 VS Code 里的 Tomcat Agent Box。
 
 ![Tomcat Agent Box screenshot](assets/tomcat-agent-box.png)
 
@@ -23,24 +23,38 @@
 - **VS Code 插件（推荐）**：从 GitHub Release 下载平台对应的 bundled `.vsix`，安装并 Reload VS Code。然后按 `Cmd/Ctrl+Shift+P` 运行 `Tomcat: Focus Agent Box` 打开 **Tomcat Agent Box**；也可以先打开右侧二级侧边栏（Secondary Side Bar）再点击 Tomcat Agent Box 图标。首次使用若看到提示，点击 `Start Setup` 让 VS Code 帮你跑 `tomcat init`。包怎么选、怎么装，见 [`tomcat-vscode-ext/README.md`](tomcat-vscode-ext/README.md)。
 - **CLI**：见 **[用户使用说明](tomcat/docs/user-guide.md)**，覆盖前置依赖、构建、`init` / `doctor` / `chat`、会话与工作区、配置、审计及集成测试等完整步骤与示例输出。
 
-简要前提：Rust stable 1.70+；OpenAI 兼容 API 密钥（`tomcat/.env.example` → `tomcat/.env` 中的 `OPENAI_API_KEY`）。运行态数据默认在 `~/.tomcat/`，目录布局见 [工作目录与数据布局](tomcat/docs/architecture/work-dir-and-data-layout.md)。
+通用前提：需要一个 OpenAI 兼容 API 密钥；无论通过 VS Code 插件还是 CLI 使用，首次运行都可通过 `tomcat init`（或在 VS Code 里点击 `Start Setup`）完成配置，Key 会写入 `~/.tomcat/assets/.env` 并在启动时自动加载。运行态数据默认在 `~/.tomcat/`，目录布局见 [工作目录与数据布局](tomcat/docs/architecture/work-dir-and-data-layout.md)。
+
+仅从源码编译时才需要 Rust stable 1.70+；仓库内的 `tomcat/.env` 仅用于本地/CI 测试夹具，不是终端用户的配置路径。
 
 ## 项目结构
+
+| 组件 | 作用 | 主要文档 |
+| --- | --- | --- |
+| [`tomcat/`](tomcat/) | Rust Agent 运行时、CLI 与 `tomcat serve --stdio` | [用户使用说明](tomcat/docs/user-guide.md)、[tomcat/src/README.md](tomcat/src/README.md) |
+| [`tomcat-vscode-ext/`](tomcat-vscode-ext/) | VS Code 扩展与 Tomcat Agent Box | [tomcat-vscode-ext/README.md](tomcat-vscode-ext/README.md) |
 
 ```text
 tomcat/
 ├── src/
-│   ├── api/              # CLI：init、doctor、config、session、chat、plugin、audit …
-│   ├── core/             # 宿主核心（仅可信 Rust）
-│   ├── ext/              # 扩展能力（建设中）
+│   ├── api/              # CLI、serve --stdio、config、session、plugin、audit …
+│   ├── core/             # Agent Loop、LLM、会话、工具、权限、Checkpoint、Plan
+│   ├── ext/              # 插件与扩展能力
 │   └── infra/            # 配置、日志、审计、事件总线、错误、平台 IO
 └── docs/
     ├── openspec/         # 宪法、架构索引、开发与测试规范
     ├── agents/           # 角色卡、任务看板、计划模板
-    └── architecture/     # 各子系统设计
+    └── architecture/     # 运行时、工作目录与子系统设计
 ```
 
-模块级说明见 [tomcat/src/README.md](tomcat/src/README.md)。
+```text
+tomcat-vscode-ext/
+├── src/                  # 扩展宿主：serve 桥接、webview provider、typed 协议
+├── gui/                  # Tomcat Agent Box 前端（React + Vite）
+└── docs/architecture/    # 扩展架构设计
+```
+
+模块级说明见 [tomcat/src/README.md](tomcat/src/README.md)；扩展安装与使用见 [tomcat-vscode-ext/README.md](tomcat-vscode-ext/README.md)。
 
 ## 架构
 
@@ -51,14 +65,31 @@ tomcat/
     ↑
 宿主核心能力层 (core) — 会话、LLM、Agent Loop、Compaction、工具、权限、Checkpoint、Plan
     ↑
-交互层 (api) — CLI
+交互层 (api) — CLI `chat` + `serve --stdio`（供 VS Code Tomcat Agent Box）
 ```
 
-一次对话的主路径：**CLI `chat`** → **SessionManager** 加载 transcript → **AgentLoop** 调用 **LlmProvider** 流式推理 → 按需执行内置工具 → 写回 transcript / 审计。全貌见 [项目全貌](tomcat/docs/architecture/project-overview-panorama.md)。
+两条主要入口共用同一套运行时内核，差别只在交互层：
+
+```text
+VS Code Tomcat Agent Box
+    -> tomcat serve --stdio
+    -> AgentLoop
+    -> LlmProvider
+    -> 工具执行 / transcript / 审计
+
+CLI chat
+    -> SessionManager
+    -> AgentLoop
+    -> LlmProvider
+    -> 工具执行 / transcript / 审计
+```
+
+全貌见 [项目全貌](tomcat/docs/architecture/project-overview-panorama.md)。
 
 ## 文档入口
 
 - [tomcat/docs/README.md](tomcat/docs/README.md) — 文档地图
+- [tomcat-vscode-ext/README.md](tomcat-vscode-ext/README.md) — VS Code 扩展（Tomcat Agent Box）安装与使用
 - [tomcat/src/README.md](tomcat/src/README.md) — `src/` 模块索引与分层图
 
 ## 许可
