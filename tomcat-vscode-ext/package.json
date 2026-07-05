@@ -86,7 +86,7 @@
       "secondarySidebar": [
         {
           "id": "tomcat-sidebar",
-          "title": "Tomcat Agent Box",
+          "title": "TOMCAT",
           "icon": "media/tomcat.svg"
         }
       ]
@@ -95,7 +95,7 @@
       "tomcat-sidebar": [
         {
           "id": "tomcat.chatView",
-          "name": "Tomcat Agent Box",
+          "name": "TOMCAT",
           "type": "webview"
         }
       ]

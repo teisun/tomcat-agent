@@ -83,14 +83,14 @@ describe("extension manifest contract", () => {
 
     expect(containers).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: "tomcat-sidebar", title: "Tomcat Agent Box" }),
+        expect.objectContaining({ id: "tomcat-sidebar", title: "TOMCAT" }),
       ]),
     );
     expect(views).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: "tomcat.chatView",
-          name: "Tomcat Agent Box",
+          name: "TOMCAT",
           type: "webview",
         }),
       ]),
