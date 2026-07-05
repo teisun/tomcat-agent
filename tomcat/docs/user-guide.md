@@ -1,190 +1,195 @@
-# tomcat 操作说明
+# tomcat User Guide
 
-本文档面向第一次使用 tomcat 的用户。若你主要在 VS Code 中使用，请先走插件路径；若你主要在终端中使用，再继续阅读下面的 CLI 章节。本文仍按"获取程序 → 初始化 → 逐功能体验"顺序，覆盖 tomcat 的主要使用方式与可用功能。
+<p align="center">
+  <a href="user-guide.md">English</a> |
+  <a href="user-guide.zh.md">简体中文</a>
+</p>
 
----
-
-## 目录
-
-- [先选使用方式：VS Code 插件 / CLI](#先选使用方式vs-code-插件--cli)
-- [0. 下载 Release 二进制直接使用](#0-下载-release-二进制直接使用)
-- [1. 下载源码并编译构建](#1-下载源码并编译构建)
-- [2. 初始化与环境检测](#2-初始化与环境检测)
-- [3. 配置管理](#3-配置管理)
-- [4. 会话管理](#4-会话管理)
-- [5. 工作区管理](#5-工作区管理)
-- [6. 对话模式](#6-对话模式)
-- [7. 审计日志](#7-审计日志)
-- [8. 附录](#8-附录)
-- [9. rquickjs 插件运行时](#9-rquickjs-插件运行时)
+This document is for first-time tomcat users. If you mainly use tomcat inside VS Code, start with the extension route first. If you mainly use it in the terminal, continue to the CLI sections below. The guide still follows the order "get the program -> initialize -> try features one by one" and covers tomcat's main usage patterns and available capabilities.
 
 ---
 
-## 先选使用方式：VS Code 插件 / CLI
+## Table of Contents
 
-### A. 我主要在 VS Code 里使用（推荐）
+- [Choose Your Path First: VS Code Extension / CLI](#choose-your-path-first-vs-code-extension--cli)
+- [0. Use the Release Binary Directly](#0-use-the-release-binary-directly)
+- [1. Build from Source](#1-build-from-source)
+- [2. Initialization and Environment Checks](#2-initialization-and-environment-checks)
+- [3. Configuration Management](#3-configuration-management)
+- [4. Session Management](#4-session-management)
+- [5. Workspace Management](#5-workspace-management)
+- [6. Chat Modes](#6-chat-modes)
+- [7. Audit Log](#7-audit-log)
+- [8. Appendix](#8-appendix)
+- [9. rquickjs Plugin Runtime](#9-rquickjs-plugin-runtime)
 
-直接走 VS Code 插件路径，不要先手动研究 CLI 安装细节：
+---
+
+## Choose Your Path First: VS Code Extension / CLI
+
+### A. I mainly use VS Code (recommended)
+
+Go straight through the VS Code extension path. Do not start by manually researching CLI installation details:
 
 ```text
 GitHub Release
-   -> 下载平台对应的 bundled .vsix
+   -> download the bundled .vsix for your platform
    -> code --install-extension xxx.vsix
    -> Cmd/Ctrl+Shift+P -> Tomcat: Focus Agent Box
-   -> 或打开右侧二级侧边栏后点击 Tomcat Agent Box
-   -> 如果提示首次设置，点 Start Setup，让 VS Code 帮你跑 tomcat init
+   -> or open the Secondary Side Bar on the right and click Tomcat Agent Box
+   -> if first-time setup appears, click Start Setup and let VS Code run tomcat init for you
 ```
 
-扩展包怎么选、怎么安装、装完后 bundled CLI 住在哪里，统一看：
+For which extension package to choose, how to install it, and where the bundled CLI lives after installation, see:
 
 - [`tomcat-vscode-ext/README.md`](../../tomcat-vscode-ext/README.md)
 
-### B. 我主要在终端里使用
+### B. I mainly use the terminal
 
-继续看下面的 CLI 安装与初始化章节即可。
+Continue with the CLI installation and initialization sections below.
 
 ---
 
-## 0. 下载 Release 二进制直接使用
+## 0. Use the Release Binary Directly
 
-适合只想尽快运行 CLI 的用户。推荐使用一键安装脚本：它会自动识别平台、下载对应的 release 压缩包、校验 `SHA256SUMS`、解压后安装到 `~/.local/bin`。若该目录尚未加入 `PATH`，脚本会提示你写入 shell profile。
+This path is for users who just want to get the CLI running quickly. The recommended option is the one-line install script: it automatically detects your platform, downloads the matching release archive, verifies `SHA256SUMS`, extracts the archive, and installs it into `~/.local/bin`. If that directory is not yet in your `PATH`, the script will tell you how to append it to your shell profile.
 
 ```bash
-# 1. 一键安装最新 release
+# 1. One-line install of the latest release
 curl -sSf https://raw.githubusercontent.com/teisun/tomcat-agent/main/tomcat/scripts/install.sh | bash
 
-# 2. 初始化
+# 2. Initialize
 ~/.local/bin/tomcat init
-# 若当前 shell 已包含 ~/.local/bin，也可直接运行：
+# If your current shell already includes ~/.local/bin, you can also run:
 tomcat init
 
-# 3. 验证
+# 3. Verify
 ~/.local/bin/tomcat --help
-# 或
+# Or:
 tomcat --help
 ```
 
-安装指定版本时，可在脚本后追加 `-v` 参数：
+To install a specific version, pass `-v` after the script:
 
 ```bash
 curl -sSf https://raw.githubusercontent.com/teisun/tomcat-agent/main/tomcat/scripts/install.sh | bash -s -- -v 0.1.8
 ```
 
-如果你更希望手动下载 Release 压缩包，请先按平台选择对应的 `target`：
+If you prefer to download the Release archive manually, first choose the matching `target` for your platform:
 
-- Apple Silicon（M1/M2/M3）：`aarch64-apple-darwin`
-- Intel Mac：`x86_64-apple-darwin`
-- Linux x86_64：`x86_64-unknown-linux-gnu`
+- Apple Silicon (M1/M2/M3): `aarch64-apple-darwin`
+- Intel Mac: `x86_64-apple-darwin`
+- Linux x86_64: `x86_64-unknown-linux-gnu`
 
-Release 资产命名格式为 `tomcat-<tag>-<target>.tar.gz`。CLI 现在使用独立 tag 命名空间，所以最新命名会像 `tomcat-cli-v0.1.8-aarch64-apple-darwin.tar.gz`。手动下载后的安装步骤如下：
+Release assets are named `tomcat-<tag>-<target>.tar.gz`. The CLI now uses its own tag namespace, so recent artifacts look like `tomcat-cli-v0.1.8-aarch64-apple-darwin.tar.gz`. After downloading manually, install it like this:
 
 ```bash
-# 1. 解压 release 压缩包
+# 1. Extract the release archive
 tar -xzf tomcat-<tag>-<target>.tar.gz
 
-# 2. 若是 macOS 且文件来自浏览器下载，可先清除 quarantine
+# 2. On macOS, if the file came from a browser download, clear quarantine first
 xattr -dr com.apple.quarantine ./tomcat
 
-# 3. 安装到用户级 PATH 目录（免 sudo）
+# 3. Install into a user-level PATH directory (no sudo)
 mkdir -p "$HOME/.local/bin"
 install -m 755 ./tomcat "$HOME/.local/bin/tomcat"
 
-# 4. 初始化
+# 4. Initialize
 "$HOME/.local/bin/tomcat" init
 ```
 
-`tomcat init` 会完成默认配置写入、工作目录创建、资源部署与 API Key 配置。初始化完成后，可继续阅读 [第 2 节](#2-初始化与环境检测) 与 [第 6 节](#6-对话模式)。
+`tomcat init` writes the default config, creates the working directory structure, deploys embedded assets, and configures API keys. After initialization, continue with [Section 2](#2-initialization-and-environment-checks) and [Section 6](#6-chat-modes).
 
 ---
 
-## 1. 下载源码并编译构建
+## 1. Build from Source
 
-适合需要从源码运行、调试或参与开发的用户。
+This path is for users who need to run from source, debug, or contribute to development.
 
-### 前置依赖
+### Prerequisites
 
-| 依赖 | 版本要求 | 用途 |
-|------|----------|------|
-| Rust | stable 1.70+ | 编译 |
+| Dependency | Version Requirement | Purpose |
+|------------|---------------------|---------|
+| Rust | stable 1.70+ | Build |
 
-### 构建
+### Build
 
-先获取仓库源码，再进入仓库中的 `tomcat/` 目录执行构建：
+First get the repository source, then enter the `tomcat/` directory inside the repo and build there:
 
 ```bash
-# 拉取源码后进入仓库中的 tomcat/ 目录
+# After cloning the repository, enter the tomcat/ directory inside it
 cd tomcat
 cargo build --release
 ```
 
 ```bash
 ./target/release/tomcat --help
-# 或直接加到 PATH：
+# Or add it to PATH directly:
 export PATH="$PWD/target/release:$PATH"
 tomcat --help
 ```
 
-查看版本：
+Check the version:
 
 ```bash
 tomcat --version
 # tomcat 0.1.8
 ```
 
-### 工作目录
+### Working Directory
 
-tomcat 默认将所有数据存放在 `~/.tomcat/`。可在 `tomcat.config.toml` 的 `[storage]` 段修改 `work_dir`。
+By default, tomcat stores all data under `~/.tomcat/`. You can change `work_dir` in the `[storage]` section of `tomcat.config.toml`.
 
-子目录结构（由 `tomcat init` 或首次启动自动创建）：
+Subdirectories are created automatically by `tomcat init` or on first startup:
 
 ```
 ~/.tomcat/
-├── tomcat.config.toml                 # 主配置文件（tomcat init 生成）
-├── models.toml                        # 模型清单（tomcat init 生成；增删模型只改这里）
+├── tomcat.config.toml                 # main config file (generated by tomcat init)
+├── models.toml                        # model catalog (generated by tomcat init; add/remove models here only)
 ├── agents/
 │   └── main/
-│       ├── agent/                 # 身份与凭据
-│       ├── sessions/              # 会话 JSONL transcript
-│       ├── logs/                  # 日志文件
-│       └── audit/                 # 审计日志
-├── workspace-main/                # agent_definition_dir：默认 agent 设计态目录
+│       ├── agent/                 # identity and credentials
+│       ├── sessions/              # session JSONL transcripts
+│       ├── logs/                  # log files
+│       └── audit/                 # audit logs
+├── workspace-main/                # agent_definition_dir: default design-time directory
 ├── assets/
-│   ├── .env                       # API Key 等敏感配置（0600 权限）
-│   ├── .versions.json             # 内嵌资源 SHA-256 版本记录
-│   ├── .lock                      # 并发写入保护锁
-│   └── js/                        # 运行时注入脚本与 shim 资源
-├── plugins/                       # 插件目录（见第 9 节）
-└── memory/                        # 向量检索索引
+│   ├── .env                       # sensitive config such as API keys (0600 permissions)
+│   ├── .versions.json             # embedded asset SHA-256 version record
+│   ├── .lock                      # lock for concurrent writes
+│   └── js/                        # runtime injected scripts and shim assets
+├── plugins/                       # plugin directory (see Section 9)
+└── memory/                        # vector retrieval index
 ```
 
-详见 [directory-structure.md](architecture/directory-structure.md)。
+See [directory-structure.md](architecture/directory-structure.md) for details.
 
-目录概念速记：`agent_workspace_dir` 是当前会话绑定的工作目录（通常为启动 `tomcat code` 时的 shell 当前目录），是“当前目录 / 这个项目 / 相对路径”的语义来源，但不自动授权文件访问；`agent_definition_dir` 是 `workspace-<agentId>/` 设计态目录，也是默认可写根；`agent_trail_dir` 是 `agents/<agentId>/` 运行态目录。
+Quick glossary: `agent_workspace_dir` is the working directory bound to the current session (usually the shell's current directory when you start `tomcat code`). It is the source of meanings such as "current directory", "this project", and relative paths, but it does not automatically grant file access. `agent_definition_dir` is the design-time directory `workspace-<agentId>/` and is also the default writable root. `agent_trail_dir` is the runtime directory `agents/<agentId>/`.
 
 ---
 
-## 2. 初始化与环境检测
+## 2. Initialization and Environment Checks
 
-### tomcat init — 三步向导
+### tomcat init - Three-Step Wizard
 
 ```bash
 tomcat init
 ```
 
-`tomcat init` 为**交互式 model-first** 三步向导。当前主配置 `tomcat.config.toml` 只负责：
+`tomcat init` is an **interactive, model-first** three-step wizard. The main config file `tomcat.config.toml` now only handles:
 
-- 选哪个模型：`[llm].default_model` / `vision_model` / `title_model`
-- 全局运行时旋钮：并发、重试、超时、proxy、files、continuity 等
+- which model to use: `default_model`, `vision_model`, and `title_model` under `[llm]`
+- global runtime knobs: concurrency, retry, timeout, proxy, files, continuity, and so on
 
-模型怎么连（`api` / `provider` / `base_url` / `api_key_env`）已经全部迁到 `~/.tomcat/models.toml`。
+Connection details for models (`api`, `provider`, `base_url`, `api_key_env`) have all moved into `~/.tomcat/models.toml`.
 
-三步流程如下：
+The three steps are:
 
-1. **[1/3] 环境初始化**：先确保 `~/.tomcat/models.toml` 至少含受管默认条目（`mimo-v2.5-pro`、`gpt-5.2`、`deepseek-v4-flash`），再加载模型 catalog 进入交互式选模；随后写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（modules 等）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
-2. **[2/3] 资源检查**：与 `tomcat doctor` 相同的检查项（配置合法、内嵌资源、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
-3. **[3/3] API Key 配置**：先按你在向导里选中的默认模型提示对应的凭证变量（例如 `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `MIMO_API_KEY` / `LITELLM_SUNMI_API_KEY`），再可选顺手补其它 provider 的 key。可回车跳过；**跳过不会写入空 Key**。后续可再次运行 `tomcat init`，或自行编辑 `~/.tomcat/assets/.env`
+1. **[1/3] Environment initialization**: ensure that `~/.tomcat/models.toml` contains at least the managed default entries (`mimo-v2.5-pro`, `gpt-5.2`, `deepseek-v4-flash`), then load the model catalog and enter interactive model selection; after that, write `~/.tomcat/tomcat.config.toml` if it does not already exist, create the directory structure, extract embedded assets (modules and so on), and append `export PATH="..."` to `~/.zshrc`, `~/.bash_profile`, `~/.bashrc`, or `~/.profile` based on `$SHELL` (with the `# Added by tomcat init` marker; if the same export already exists in the same order, it is skipped)
+2. **[2/3] Asset checks**: the same checks as `tomcat doctor` (config validity, embedded assets, asset versions, and so on), **excluding** `.env` permissions and `OPENAI_API_KEY` environment variable reminders
+3. **[3/3] API key setup**: first prompt for the credential variable that matches the default model you selected in the wizard (for example `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `MIMO_API_KEY`, `LITELLM_SUNMI_API_KEY`), then optionally let you add keys for other providers. You can press Enter to skip; **skipping does not write an empty key**. Later you can run `tomcat init` again, or edit `~/.tomcat/assets/.env` yourself
 
-预期输出（节选）：
+Expected output (excerpt):
 
 ```
 [1/3] 环境初始化
@@ -209,53 +214,53 @@ tomcat init
 初始化完成！运行 `tomcat code` 开始对话。
 ```
 
-若无法自动写入 shell 配置，会打印 `⚠ 无法自动配置 PATH` 及一行可手动执行的 `export PATH=...`。
+If tomcat cannot update your shell config automatically, it prints `⚠ 无法自动配置 PATH` plus a one-line `export PATH=...` command you can run manually.
 
-**幂等性**：若 `~/.tomcat/tomcat.config.toml` **已存在**，会以现有配置为基线更新；`models.toml` 不会重写你已有的条目与注释，只会在缺失时补齐受管默认模型。第二次起会看到「已更新配置文件」与「受管默认模型已齐全」类提示。
+**Idempotency**: if `~/.tomcat/tomcat.config.toml` **already exists**, tomcat updates it using the existing file as the baseline. `models.toml` never rewrites your existing entries or comments; it only fills in missing managed default models. On the second run and later, you will see messages such as "configuration file updated" and "managed default models are complete".
 
-**旧配置迁移**：如果老配置里还残留 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env`，`tomcat init` 会允许你进入向导并在写回时清掉这些旧连接字段，把连接事实迁到 `models.toml`。
+**Legacy config migration**: if old fields such as `[llm].provider`, `[llm].api_base`, or `[llm].api_key_env` still exist in an older config, `tomcat init` lets you go through the wizard and removes those legacy connection fields when it writes back, moving the connection facts into `models.toml`.
 
-**与 `tomcat doctor`**：`init` 第二步与 `doctor` 共用同一套检查逻辑；配置与资源有疑义时可再运行 `tomcat doctor` 查看含 API Key / `.env` 的完整诊断。
+**Relationship to `tomcat doctor`**: step 2 of `init` shares the same checking logic as `doctor`. If you are unsure about config or embedded assets, run `tomcat doctor` again to see the full diagnostics including API key and `.env` checks.
 
-### models.toml — 增删模型与 MiMo Token Plan
+### models.toml - Add/Remove Models and MiMo Token Plan
 
-`tomcat init` 会生成 `~/.tomcat/models.toml`（**模型清单**）。这是「增删模型」的唯一入口：
+`tomcat init` generates `~/.tomcat/models.toml` (the **model catalog**). This is the only entry point for adding or removing models:
 
-- **启动自动加载**：`tomcat code` / `tomcat claw` 等启动路径会合并「内置模型表 + `models.toml`」，**同 id 覆盖内置、新 id 新增**，无需改代码、无需重新编译。
-- **当前内置模型只有 2 条**：`gpt-5.4` 与 `deepseek-v4-pro`。其余常用模型（如 `gpt-5.2`、`deepseek-v4-flash`、`mimo-v2.5-pro`）都由 `tomcat init` 写进 `models.toml`。
-- **幂等生成**：`models.toml` 不存在则创建；已存在但缺受管默认条目则**仅追加缺失项**；已齐全则原样不动——**绝不覆盖你已有的条目或注释**。重复 `tomcat init` 安全。
-- **再加一个模型**：复制现有 `[[models]]` 段，显式填写 `api` / `provider` / `base_url`；`api_key_env` 可选，不写时默认推断成 `<PROVIDER>_API_KEY`。
+- **Auto-loaded on startup**: startup paths such as `tomcat code` and `tomcat claw` merge the built-in model table with `models.toml`. **The same id overrides the built-in entry, and a new id adds a new model**. No code changes or recompilation are required.
+- **Only two models are built in right now**: `gpt-5.4` and `deepseek-v4-pro`. Other commonly used models (such as `gpt-5.2`, `deepseek-v4-flash`, and `mimo-v2.5-pro`) are written into `models.toml` by `tomcat init`.
+- **Idempotent generation**: if `models.toml` does not exist, tomcat creates it. If it exists but is missing managed default entries, tomcat **only appends the missing entries**. If it is already complete, tomcat leaves it untouched. It **never overwrites your existing entries or comments**. Running `tomcat init` repeatedly is safe.
+- **Add one more model**: copy an existing `[[models]]` block and explicitly fill in `api`, `provider`, and `base_url`. `api_key_env` is optional; when omitted it defaults to `<PROVIDER>_API_KEY`.
 
-字段语义：
+Field meanings:
 
-- `id`：本地模型 id，给 `/model list`、默认模型选择、会话持久化使用
-- `model_name`：真正发给上游的模型名；省略时默认等于 `id`
-- `api`：走哪条 wire，目前支持 `openai` 与 `openai-responses`
-- `provider`：逻辑厂商名，只用于凭证推断、展示、审计
-- `api_key_env`：显式指定环境变量名；省略时自动推断为 `<PROVIDER>_API_KEY`
-- `base_url`：只填 host，不要写完整 endpoint
+- `id`: the local model id used by `/model list`, default-model selection, and session persistence
+- `model_name`: the real model name sent upstream; when omitted it defaults to `id`
+- `api`: which wire protocol to use; currently `openai` and `openai-responses` are supported
+- `provider`: the logical vendor name, used only for credential inference, display, and auditing
+- `api_key_env`: explicitly names the environment variable; when omitted it is inferred as `<PROVIDER>_API_KEY`
+- `base_url`: host only; do not write the full endpoint
 
-**MiMo Token Plan 最小配置**（init 默认就帮你写好一条）：
+**Minimal MiMo Token Plan config** (written by `init` by default):
 
 ```toml
 [[models]]
 id = "mimo-v2.5-pro"
-api = "openai"                                  # 走 OpenAI-compatible /v1/chat/completions
-provider = "mimo"                               # 决定取 MIMO_API_KEY
-base_url = "https://token-plan-cn.xiaomimimo.com"  # 只填 host，后缀程序拼接
+api = "openai"                                  # uses OpenAI-compatible /v1/chat/completions
+provider = "mimo"                               # determines MIMO_API_KEY
+base_url = "https://token-plan-cn.xiaomimimo.com"  # host only; the program appends the suffix
 thinking_format = "doubao"
 context_window = 1000000
 capabilities = { vision = false, files = false, tools = true, reasoning = true }
 ```
 
-- **Key**：设置环境变量 `MIMO_API_KEY=tp-xxxxx`（写入 `~/.tomcat/assets/.env` 或当前 shell）。`tp-xxxxx`（Token Plan）不能与按量 `sk-xxxxx` 混用。
-- **base_url**：只填 **host**，`/v1/chat/completions` 由程序拼接，**不要**写成完整 endpoint。host 以你订阅页显示的为准（CN / SGP / AMS 区域代号对应中国 / 新加坡 / 欧洲）。
-- **使用**：在 `tomcat code` / `tomcat claw` 里用 `/model mimo-v2.5-pro` 切换，或把 `[llm] default_model` 设成它。
-- **能力边界**：`mimo-v2.5-pro` 官方仅文本（无图片/文件），故 `vision/files=false`；thinking 服务端默认开，本集成走豆包系 `thinking` 线格式。
+- **Key**: set `MIMO_API_KEY=tp-xxxxx` either in `~/.tomcat/assets/.env` or in the current shell. `tp-xxxxx` (Token Plan) cannot be mixed with usage-based `sk-xxxxx`.
+- **base_url**: enter the **host only**. The program appends `/v1/chat/completions` for you, so **do not** write the full endpoint. Use the host shown on your subscription page (CN / SGP / AMS map to China / Singapore / Europe).
+- **Usage**: switch to it with `/model mimo-v2.5-pro` inside `tomcat code` or `tomcat claw`, or set `[llm].default_model` to it.
+- **Capability boundary**: `mimo-v2.5-pro` is text-only officially (no images or files), so `vision/files=false`; server-side thinking is enabled by default, and this integration uses the Doubao-style `thinking` wire format.
 
-### OpenAI 与 LiteLLM 网关并存
+### OpenAI and LiteLLM Gateway Side by Side
 
-如果你既想保留官方 `gpt-5.4`，又想加一条走公司网关的 `gpt-5.4`，不要复用同一个 `id`。推荐在 `models.toml` 新增一条：
+If you want to keep the official `gpt-5.4` and also add a gateway-backed `gpt-5.4`, do not reuse the same `id`. The recommended approach is to add another entry in `models.toml`:
 
 ```toml
 [[models]]
@@ -268,53 +273,53 @@ thinking_format = "openai"
 capabilities = { vision = true, files = true, tools = true, reasoning = true }
 ```
 
-- 切到网关：把 `[llm].default_model` 改成 `gpt-5.4_litellm-sunmi`
-- 切回官方：改回 `gpt-5.4`
-- `provider = "litellm-sunmi"` 默认会把 key 推断成 `LITELLM_SUNMI_API_KEY`
+- Switch to the gateway: set `[llm].default_model` to `gpt-5.4_litellm-sunmi`
+- Switch back to the official endpoint: change it back to `gpt-5.4`
+- `provider = "litellm-sunmi"` defaults to the key name `LITELLM_SUNMI_API_KEY`
 
-### 旧配置迁移
+### Legacy Config Migration
 
-旧的 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env` 已删除。现在如果继续写这些字段，Tomcat 会直接报迁移错误，并提示你把连接信息迁到 `models.toml`。
+The old `[llm].provider`, `[llm].api_base`, and `[llm].api_key_env` fields have been removed. If you keep writing them now, tomcat raises a migration error and tells you to move the connection data into `models.toml`.
 
-### tomcat doctor — 环境诊断
+### tomcat doctor - Environment Diagnostics
 
 ```bash
 tomcat doctor
 ```
 
-doctor 逐项检查环境并给出可执行的修复建议：
+`doctor` checks the environment item by item and gives you executable remediation advice:
 
-| 检查项 | 通过示例 | 失败示例 |
-|--------|---------|---------|
-| 配置文件 | `✓ 配置合法 (~/.tomcat/tomcat.config.toml)` | `✗ 未找到配置文件` |
-| 内嵌资源 | `✓ 内嵌资源已就绪` | `✗ 资源释放失败` |
-| 资源版本 | `资源版本: modules=def456...` | — |
-| 代理语义 | `✓ llm.proxy 已配置，将优先于环境代理` / `✓ 检测到环境代理（HTTPS_PROXY）` | `⚠ HTTPS_PROXY 含首尾空格` / `⚠ ALL_PROXY 使用 socks5://...` |
-| .env 权限 | `✓ .env 权限: 0600` | `⚠ .env 权限: 0644（建议 0600）` |
-| API Key | `✓ OPENAI_API_KEY 已设置` | `⚠ OPENAI_API_KEY 未设置` |
+| Check Item | Passing Example | Failure Example |
+|------------|-----------------|-----------------|
+| Config file | `✓ 配置合法 (~/.tomcat/tomcat.config.toml)` | `✗ 未找到配置文件` |
+| Embedded assets | `✓ 内嵌资源已就绪` | `✗ 资源释放失败` |
+| Asset version | `资源版本: modules=def456...` | — |
+| Proxy semantics | `✓ llm.proxy 已配置，将优先于环境代理` / `✓ 检测到环境代理（HTTPS_PROXY）` | `⚠ HTTPS_PROXY 含首尾空格` / `⚠ ALL_PROXY 使用 socks5://...` |
+| `.env` permissions | `✓ .env 权限: 0600` | `⚠ .env 权限: 0644（建议 0600）` |
+| API key | `✓ OPENAI_API_KEY 已设置` | `⚠ OPENAI_API_KEY 未设置` |
 
-每个失败/警告项都会给出 `→ 运行 tomcat init 或...` 修复建议。插件运行时相关检查见 [第 9 节](#9-rquickjs-插件运行时)。
+Each failed or warning item includes a fix suggestion such as `→ 运行 tomcat init 或...`. For plugin runtime-related checks, see [Section 9](#9-rquickjs-plugin-runtime).
 
-代理诊断的规则是：
+Proxy diagnostics follow these rules:
 
-- `llm.proxy` 已配置时，优先于 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。
-- `llm.proxy` 未配置时，Tomcat 的出网 client 会尊重环境代理；`web_search`、`web_fetch`、plugin `pi.fetch` 走同一套语义。
-- `doctor` 会提示代理值的首尾空格，因为这类配置很容易造成“看起来配了代理，实际行为不一致”。
-- 当前构建未启用 reqwest 的 socks feature，`ALL_PROXY=socks5://...` 不作为 `web_search` 的推荐配置；优先使用 `HTTPS_PROXY=http://...`。
+- If `llm.proxy` is configured, it takes precedence over `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY`.
+- If `llm.proxy` is not configured, tomcat's outbound client respects environment proxies. `web_search`, `web_fetch`, and plugin `pi.fetch` follow the same rules.
+- `doctor` warns about leading or trailing whitespace in proxy values because this kind of configuration often causes "it looks configured, but behaves inconsistently" problems.
+- The current build does not enable reqwest's socks feature, so `ALL_PROXY=socks5://...` is not the recommended configuration for `web_search`; prefer `HTTPS_PROXY=http://...`.
 
 ---
 
-## 3. 配置管理
+## 3. Configuration Management
 
-`tomcat config` 提供对 `tomcat.config.toml` 的读写操作，无需手动编辑文件。
+`tomcat config` reads and writes `tomcat.config.toml`, so you do not need to edit the file by hand.
 
-### 查看完整配置
+### View the Full Config
 
 ```bash
 tomcat config get
 ```
 
-输出当前配置的完整 TOML 内容：
+This prints the full TOML content of the current configuration:
 
 ```toml
 [log]
@@ -329,32 +334,32 @@ compaction_model = "gpt-5.4"
 ...
 ```
 
-注意：`tomcat config get` 只显示 `tomcat.config.toml`；模型连接细节（`api` / `provider` / `base_url` / `api_key_env`）在 `~/.tomcat/models.toml`，不会出现在这里。
+Note: `tomcat config get` only shows `tomcat.config.toml`. Model connection details (`api`, `provider`, `base_url`, `api_key_env`) live in `~/.tomcat/models.toml` and do not appear here.
 
-### serve 网关
+### serve Gateway
 
 ```bash
 tomcat serve --stdio
 ```
 
-`tomcat serve` 是给 IDE / GUI 宿主使用的 Agent Server 入口。Phase 1 当前只开放 `--stdio`：
+`tomcat serve` is the Agent Server entry point for IDE / GUI hosts. In Phase 1, only `--stdio` is exposed:
 
-- 上行：宿主经 stdin 发送一行一个 NDJSON 命令帧（如 `initialize`、`prompt`、`new_session`、`interrupt`）
-- 下行：Tomcat 经 stdout 只输出 NDJSON 响应/事件帧，不夹杂普通日志
-- 多会话：通过 `sessionId` 路由；未带 `sessionId` 时默认命中当前活跃会话
-- 审批回环：`ask_question` 通过 `control_request` / `control_response` / `control_cancel` 往返
+- Upstream: the host sends one NDJSON command frame per line over stdin (for example `initialize`, `prompt`, `new_session`, `interrupt`)
+- Downstream: tomcat writes only NDJSON response/event frames to stdout, without mixing in normal logs
+- Multi-session: routing happens via `sessionId`; if no `sessionId` is provided, the current active session is used
+- Approval loop: `ask_question` round-trips through `control_request`, `control_response`, and `control_cancel`
 
-如需导出协议工件给扩展侧消费：
+To export protocol artifacts for the extension side:
 
 ```bash
 tomcat serve --print-schema
 ```
 
-该命令会输出 schema 目录路径，目录内包含 `serve.schema.json` 与 `serve.d.ts`。
+This command prints the schema directory path. That directory contains `serve.schema.json` and `serve.d.ts`.
 
-### 查询单个配置项
+### Query a Single Config Item
 
-使用点路径格式查询，支持所有 TOML 嵌套字段：
+Use dot-path syntax. All nested TOML fields are supported:
 
 ```bash
 tomcat config get log.level
@@ -364,49 +369,49 @@ tomcat config get llm.default_model
 # gpt-5.4
 
 tomcat config get llm.proxy
-# （空或当前代理地址）
+# (empty or the current proxy address)
 ```
 
-如果字段不存在：
+If the field does not exist:
 
 ```
 未找到配置项: nonexistent.key
   同级可用项: [...]
 ```
 
-### 修改配置项
+### Change a Config Item
 
 ```bash
 tomcat config set log.level debug
-# 已设置 log.level = debug
+# sets log.level = debug
 
 tomcat config set llm.default_model gpt-4o
-# 已设置 llm.default_model = gpt-4o
+# sets llm.default_model = gpt-4o
 
 tomcat config set log.file_enabled true
-# 已设置 log.file_enabled = true
+# sets log.file_enabled = true
 ```
 
-值类型自动推断：整数、布尔（`true`/`false`）、字符串。修改后程序会对新配置做合法性校验。
+Value types are inferred automatically: integers, booleans (`true` / `false`), and strings. After each change, tomcat validates the updated configuration.
 
-### 启动预检与搜索工具安装
+### Startup Preflight and Search-Tool Installation
 
-进入 `tomcat code` / `tomcat claw` 后，tomcat 会在后台探测 `search_files` 的快速实现依赖（`rg`/ripgrep 与 `fd`/`fdfind`）。若缺失，会按当前平台尝试后台安装；该流程不阻塞聊天，失败时 `search_files` 会自动使用进程内 Tier2 兜底（walkdir + globset + Rust regex）。默认情况下这些预检仍会执行，但 `[tools]` / `[git]` 终端提示默认**关闭**，避免打扰输入。
+After you enter `tomcat code` or `tomcat claw`, tomcat checks in the background for fast implementations used by `search_files` (`rg`/ripgrep and `fd`/`fdfind`). If they are missing, tomcat attempts a background install for the current platform. This does not block chat. If installation fails, `search_files` automatically falls back to the in-process Tier 2 implementation (`walkdir + globset + Rust regex`). These preflights still run by default, but the `[tools]` / `[git]` terminal prompts are **off** by default to avoid interrupting input.
 
-如需关闭后台安装尝试，可在配置中设置：
+To disable background installation attempts, set:
 
 ```toml
 [preflight]
 auto_install_search_tools = false
 ```
 
-也可以通过配置命令修改：
+You can also change it through the config command:
 
 ```bash
 tomcat config set preflight.auto_install_search_tools false
 ```
 
-如果想单独打开终端提示而不影响后台预检功能，可设置：
+If you want to turn on terminal prompts without disabling background preflight, set:
 
 ```toml
 [preflight]
@@ -414,52 +419,52 @@ show_search_tools_ui = true
 show_git_ui = true
 ```
 
-对应配置命令：
+The equivalent config commands are:
 
 ```bash
 tomcat config set preflight.show_search_tools_ui true
 tomcat config set preflight.show_git_ui true
 ```
 
-CI 或一次性运行可用环境变量覆盖：
+For CI or one-off runs, you can override it with an environment variable:
 
 ```bash
 TOMCAT__PREFLIGHT__AUTO_INSTALL_SEARCH_TOOLS=false tomcat code
 ```
 
-### 用编辑器打开配置
+### Open the Config in an Editor
 
 ```bash
 tomcat config edit
-# 使用 $EDITOR（默认 vi）打开配置文件，保存后自动重新校验
+# opens the config file in $EDITOR (default: vi) and re-validates after save
 ```
 
-### 路径规则（pathrules）
+### Path Rules (pathrules)
 
-除工作区根目录外，可用 `tomcat pathrules` 追加细粒度路径规则（写入 `primitive.path_rules`，与内置 deny/readonly 规则合并生效）：
+Besides the workspace root, you can use `tomcat pathrules` to add fine-grained path rules (written into `primitive.path_rules` and merged with the built-in deny/readonly rules):
 
 ```bash
-tomcat pathrules add ~/.ssh --mode deny      # 拒绝读写
-tomcat pathrules add ~/notes --mode readonly # 仅可读
-tomcat pathrules list                      # 查看 builtin / user / session 三段规则
+tomcat pathrules add ~/.ssh --mode deny      # deny read and write
+tomcat pathrules add ~/notes --mode readonly # read-only
+tomcat pathrules list                        # show builtin / user / session rule groups
 ```
 
-路径支持 `~` 前缀；目标不存在时仅警告，仍允许写入配置。
+Paths support the `~` prefix. If the target does not exist, tomcat only warns and still allows the config write.
 
 ---
 
-## 4. 会话管理
+## 4. Session Management
 
-tomcat 按 **scope** 组织会话：`tomcat claw` 绑定全局 scope，`tomcat code` 绑定当前项目 scope。每个 scope 下都可以有多条 session，并以 JSONL transcript 格式持久化；`tomcat session` 默认作用于当前默认 mode，也可显式传 `--scope claw|code`。
+tomcat organizes sessions by **scope**: `tomcat claw` binds to the global scope, and `tomcat code` binds to the current project scope. Each scope can contain multiple sessions, persisted as JSONL transcripts. `tomcat session` operates on the current default mode by default, and you can also pass `--scope claw|code` explicitly.
 
-### 创建新会话
+### Create a New Session
 
 ```bash
 tomcat session new --scope claw
-# 已创建会话: 1773299946709_70b6fc3c6c5723b2  agent:main:main
+# creates session: 1773299946709_70b6fc3c6c5723b2  agent:main:main
 ```
 
-### 列出当前 scope 的会话
+### List Sessions in the Current Scope
 
 ```bash
 tomcat session list --scope claw
@@ -467,69 +472,69 @@ tomcat session list --scope claw
 #   1773299947001_aabbccddeeff0011  agent:main:main
 ```
 
-无会话时输出：
+When there are no sessions, the output is:
 
 ```
 当前无会话。使用 session new 创建。
 ```
 
-### 切换会话
+### Switch Sessions
 
 ```bash
 tomcat session switch 1773299946709_70b6fc3c6c5723b2 --scope claw
 ```
 
-切换到不存在的会话时：
+If you switch to a non-existent session:
 
 ```
 会话不存在: nonexistent-session-id
 ```
 
-### 搜索会话
+### Search Sessions
 
 ```bash
 tomcat session search 1773299 --scope claw
-# 按当前 scope 下的 key 或 session_id 包含关键词过滤，输出匹配的会话列表
+# filters sessions in the current scope whose key or session_id contains the keyword
 ```
 
-### 归档会话
+### Archive a Session
 
 ```bash
 tomcat session archive 1773299946709_70b6fc3c6c5723b2 --scope claw
-# 已归档会话: 1773299946709_70b6fc3c6c5723b2
+# archives session: 1773299946709_70b6fc3c6c5723b2
 ```
 
-### 删除会话
+### Delete a Session
 
 ```bash
 tomcat session delete 1773299946709_70b6fc3c6c5723b2 --scope claw
-# 已删除会话: 1773299946709_70b6fc3c6c5723b2
+# deletes session: 1773299946709_70b6fc3c6c5723b2
 ```
 
 ---
 
-## 5. 工作区管理
+## 5. Workspace Management
 
-tomcat 通过 `workspace` 子命令管理 **额外**可访问的外部目录根（与每个 agent 默认可写的设计态目录 `agent_definition_dir` 不同）。授权列表为**全局**配置，持久化在 `~/.tomcat/tomcat.config.toml` 的 `[workspace]` 表（字段 `workspace_roots`），**所有 agent 共用同一份列表**。启动 `tomcat code` 时的当前目录不会自动加入该列表；需要访问当前项目时，可用 `tomcat workspace add --cwd`、对话中的 cwd lazy prompt 或 `/path <路径>` 授权命令显式加入。cwd lazy prompt 使用 `[s]` 本次会话允许、`[w]` 写入 `workspace_roots`、`[c]` 取消；输错选项会提示可选项并按取消处理，不会静默吞掉。若取消后工具再次因当前目录未授权失败，错误会提示下次触达 cwd 可重新选择 `[s]/[w]/[c]`，也可执行 `tomcat workspace add <路径>` 永久授权。旧的 `primitive.path_whitelist` 已删除，请使用 `workspace.workspace_roots` 或 `primitive.path_rules`。
+tomcat uses the `workspace` subcommand to manage **additional** accessible external directory roots. This is different from the design-time directory `agent_definition_dir`, which each agent can write to by default. The authorization list is a **global** configuration stored in the `[workspace]` table of `~/.tomcat/tomcat.config.toml` (field `workspace_roots`), and **all agents share the same list**. The current directory when you start `tomcat code` is not automatically added. If you need access to the current project, explicitly add it with `tomcat workspace add --cwd`, the cwd lazy prompt inside chat, or the `/path <path>` authorization command. The cwd lazy prompt supports `[s]` for this session only, `[w]` to write into `workspace_roots`, and `[c]` to cancel. Invalid input shows the valid choices and is treated as cancel, rather than being silently swallowed. If you cancel and a tool later fails again because the current directory is still unauthorized, the error explains that the next cwd access can choose `[s]` / `[w]` / `[c]` again, or you can run `tomcat workspace add <path>` for permanent authorization. The old `primitive.path_whitelist` has been removed; use `workspace.workspace_roots` or `primitive.path_rules` instead.
 
-### 添加工作区
+### Add a Workspace
 
 ```bash
 tomcat workspace add /path/to/project
-# 已添加工作区: /path/to/project
+# adds workspace: /path/to/project
 ```
 
-将**当前工作目录**加入授权列表（无需敲绝对路径）：
+To add the **current working directory** to the authorization list without typing an absolute path:
 
 ```bash
 cd /path/to/project
 tomcat workspace add --cwd
-# 已添加工作区: /path/to/project
+# adds workspace: /path/to/project
 ```
 
-路径必须是已存在的目录；`tomcat workspace add` 须提供路径**或** `--cwd`。重复添加会去重。
+The path must be an existing directory. `tomcat workspace add` requires either a path **or** `--cwd`. Duplicate additions are deduplicated.
 
-### 列出已授权工作区
+### List Authorized Workspaces
 
 ```bash
 tomcat workspace list
@@ -537,54 +542,54 @@ tomcat workspace list
 # /another/project
 ```
 
-### 移除工作区
+### Remove a Workspace
 
 ```bash
 tomcat workspace remove /path/to/project
-# 已移除工作区: /path/to/project
+# removes workspace: /path/to/project
 ```
 
-### PackageManager 安装
+### PackageManager Installation
 
-从 T2-P1-017 开始，plugin / skill 的**正式安装入口**统一为 `PackageManager`。它只做本地 source 的静态校验、三层落盘和账本维护；真正的 runtime 发现仍然复用现有的 `plugins/` / `skills/` 三层扫描。
+Starting from T2-P1-017, the **official installation entry point** for plugins and skills is unified under `PackageManager`. It only performs static validation of local sources, writes to the three storage layers, and maintains the registries. Actual runtime discovery still reuses the existing three-layer scans for `plugins/` and `skills/`.
 
-支持的 source 形态：
+Supported source shapes:
 
-- `package.json` 顶层带 `tomcat` 块的 package 目录。
-- bare plugin：带 `plugin.json` 的目录。
-- bare skill：带 `SKILL.md` 的目录。
+- a package directory whose top-level `package.json` contains a `tomcat` block
+- a bare plugin: a directory with `plugin.json`
+- a bare skill: a directory with `SKILL.md`
 
-三层可见范围：
+The three visibility layers are:
 
-- `scope`：当前项目，落到 `<scope_root>/.tomcat/{plugins,skills,packages}`。
-- `agent`：当前 agent，落到 `~/.tomcat/agents/<id>/{plugins,skills,packages}`。
-- `global`：全局共享层，落到 `~/.tomcat/{plugins,skills,packages}`。
+- `scope`: the current project, written to `<scope_root>/.tomcat/{plugins,skills,packages}`
+- `agent`: the current agent, written to `~/.tomcat/agents/<id>/{plugins,skills,packages}`
+- `global`: the globally shared layer, written to `~/.tomcat/{plugins,skills,packages}`
 
-shell CLI：
+Shell CLI:
 
 ```bash
-# 安装到当前项目（非交互 shell 缺省即 scope；交互式 TTY 未传时会弹 chooser）
+# Install into the current project (in a non-interactive shell the default is scope; in an interactive TTY, a chooser appears if omitted)
 tomcat install ./my-package --visibility scope
 
-# 安装到 agent / global
+# Install into the agent / global layer
 tomcat install ./my-plugin --visibility agent
 tomcat install ./my-skill --visibility global
 
-# 显式指定 scope 根
+# Explicitly specify the scope root
 tomcat install ./my-package --visibility scope --scope-root /path/to/project
 
-# 同层已有同名资源时允许覆盖
+# Allow overwriting when the same-name resource already exists in the same layer
 tomcat install ./my-package --visibility scope --force
 
-# 查看已安装 package 账本（缺省列出当前 scope + agent + global）
+# View the installed package registries (by default: current scope + agent + global)
 tomcat packages
 tomcat packages --visibility agent
 
-# 按 package 名称卸载某层资源与账本
+# Uninstall resources and registry entries in one layer by package name
 tomcat uninstall my-package --visibility scope
 ```
 
-对话内安装：
+Install from inside chat:
 
 ```text
 /install ./my-package
@@ -592,44 +597,44 @@ tomcat uninstall my-package --visibility scope
 /install ./my-skill current-project
 ```
 
-说明：
+Notes:
 
-- `/install` 里的 `current-project` 只是用户标签，内部映射到 `scope`。
-- code/claw 会话里 `/install` 成功后，当前会话会立即刷新 `SkillSet` 与 plugin catalog/static tool 清单，因此新装的 skill / 静态 plugin 能力无需重进会话即可可见。
-- 这个 live refresh **不会**在安装路径执行插件代码，也**不会**热替换已经加载的 plugin 实例；若当前会话里某个 plugin 已在跑，它会继续沿用旧实例，直到后续正常 runtime 路径重新激活。
+- `current-project` inside `/install` is only a user-facing label; internally it maps to `scope`.
+- In `code` / `claw` sessions, after `/install` succeeds, the current session immediately refreshes `SkillSet` plus the plugin catalog/static tool list, so newly installed skills and static plugin capabilities become visible without restarting the session.
+- This live refresh **does not** execute plugin code inside the install path, and **does not** hot-swap plugin instances that are already loaded. If a plugin is already running in the current session, it keeps using the old instance until a later normal runtime path reactivates it.
 
 ---
 
-## 6. 对话模式
+## 6. Chat Modes
 
-tomcat 提供两个正式对话入口：
+tomcat provides two official chat entry points:
 
-- `tomcat code`：按项目隔离的对话模式，推荐默认使用
-- `tomcat claw`：全局对话模式，不绑定项目 scope
+- `tomcat code`: project-isolated chat mode, recommended as the default
+- `tomcat claw`: global chat mode, not bound to a project scope
 
-历史命令 `tomcat chat` 仍作为**隐藏兼容别名**保留，行为等价于 `tomcat code`；对外文档与验收口径统一以 `code` / `claw` 为准。
+The historical command `tomcat chat` still exists as a **hidden compatibility alias** and behaves the same as `tomcat code`, but public docs and acceptance criteria are standardized on `code` / `claw`.
 
-### 前提条件
+### Prerequisites
 
-确保已运行 `tomcat init` 并配置了 API Key。`tomcat init` 会将 Key 写入 `~/.tomcat/assets/.env`，启动时自动加载。
+Make sure you have already run `tomcat init` and configured an API key. `tomcat init` writes keys into `~/.tomcat/assets/.env`, which is loaded automatically on startup.
 
-也可手动设置环境变量：
+You can also set the environment variable manually:
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-### 启动对话
+### Start a Chat
 
 ```bash
-# 按项目隔离（推荐）
+# Project-isolated (recommended)
 tomcat code
 
-# 全局模式
+# Global mode
 tomcat claw
 ```
 
-banner 输出样例：
+Sample banner output:
 
 ```
 tomcat 对话模式 (模型: gpt-5.4)
@@ -639,106 +644,106 @@ tomcat 对话模式 (模型: gpt-5.4)
 > 
 ```
 
-### 启动画面（Splash 吉祥物）
+### Startup Screen (Splash Mascot)
 
-在**交互式终端**下启动 `tomcat code` / `tomcat claw` 时，banner 上方会先绘制像素风吉祥物「Tommy」（4 帧 idle 动画，播放一次后定格），随后照常打印上面的文本 banner。管道 / 重定向 / CI 等**非 TTY** 场景自动跳过绘制。
+When you start `tomcat code` or `tomcat claw` in an **interactive terminal**, tomcat first renders the pixel-art mascot "Tommy" above the banner (a four-frame idle animation that plays once and then stops on the final frame), and only then prints the regular text banner above. In **non-TTY** scenarios such as pipes, redirection, or CI, rendering is skipped automatically.
 
 ```toml
 # ~/.tomcat/tomcat.config.toml
 [splash]
-enabled = true       # 关闭吉祥物：false
-animations = true    # 只显示静态首帧：false
-max_width = 56       # 居中参考宽度上限
+enabled = true       # set false to disable the mascot
+animations = true    # set false to show only the first static frame
+max_width = 56       # maximum reference width for centering
 ```
 
-环境变量 `TOMCAT_SPLASH=0` 可临时关闭；`NO_COLOR` 去除颜色转义。读屏器用户建议设 `animations = false` 或 `enabled = false`。
+The environment variable `TOMCAT_SPLASH=0` disables it temporarily. `NO_COLOR` removes color escapes. Screen-reader users should consider `animations = false` or `enabled = false`.
 
-逐字流式输出 AI 回复：
+AI replies stream out incrementally:
 
 ```
-u> 你好，介绍一下你自己
+u> Hi, introduce yourself
 
-agent.main> 你好！我是一个通过 API 访问的 AI 助手，可以用中文或英文和你交流...
+agent.main> Hi! I'm an AI assistant accessed through an API, and I can talk with you in Chinese or English...
 ```
 
-退出时：
+On exit:
 
 ```
 再见！
 ```
 
-### 本地命令
+### Local Commands
 
-进入交互式对话后，tomcat 会在消息发送给 LLM 前识别以 `/` 开头的本地命令（完整列表以 `/help` 为准）：
+Inside interactive chat, tomcat intercepts local commands starting with `/` before the message is sent to the LLM (use `/help` for the complete list):
 
-| 命令 | 说明 |
-|------|------|
-| `/help` | 显示当前支持的本地命令 |
-| `/path <绝对路径>` | 为单个路径打开授权菜单（本次会话 / 写入工作区 / 只读 / 禁止 / 取消） |
-| `/model`（`current` / `list` / `use <id>`） | 查看或切换当前会话模型（catalog 来自内置表 + `models.toml`） |
-| `/thinking`（`minimal` / `summary` / `full` / `toggle`） | 切换 Thinking 展示档位（缺省为 toggle） |
-| `/ckpt list [--limit N]` | 列出最近 checkpoint |
-| `/ckpt show <id>` / `/ckpt diff <id>` | 查看 checkpoint 元数据或与工作区差异 |
-| `/restore <id> [--path <rel>]... [--dry-run]` | 从 checkpoint 恢复 |
-| `/plan` | 进入 PLAN 规划模式（计划落盘 `~/.tomcat/plans/`） |
-| `/plan exit` | 退回 Chat 模式 |
-| `/plan build <plan_id或路径>` | 进入 EXEC 执行模式 |
-| `/plan list` | 列出 `~/.tomcat/plans/` 下计划文件 |
+| Command | Description |
+|---------|-------------|
+| `/help` | Show the currently supported local commands |
+| `/path <absolute path>` | Open the authorization menu for one path (this session / write to workspace / read-only / deny / cancel) |
+| `/model` (`current` / `list` / `use <id>`) | View or switch the current session model (catalog = built-in table + `models.toml`) |
+| `/thinking` (`minimal` / `summary` / `full` / `toggle`) | Switch the Thinking display level (default is `toggle`) |
+| `/ckpt list [--limit N]` | List recent checkpoints |
+| `/ckpt show <id>` / `/ckpt diff <id>` | View checkpoint metadata or workspace diffs |
+| `/restore <id> [--path <rel>]... [--dry-run]` | Restore from a checkpoint |
+| `/plan` | Enter PLAN mode (plans are stored under `~/.tomcat/plans/`) |
+| `/plan exit` | Return to Chat mode |
+| `/plan build <plan_id or path>` | Enter EXEC mode |
+| `/plan list` | List plan files under `~/.tomcat/plans/` |
 
-直接拖拽或粘贴路径后回车不会触发授权菜单，会按普通聊天消息发送给 LLM。需要显式授权路径时，请输入 `/path <绝对路径>`。
+Dragging or pasting a path and pressing Enter does not open the authorization menu. It is sent to the LLM as a normal chat message. If you need to authorize a path explicitly, use `/path <absolute path>`.
 
-#### Checkpoint 启动目录建议
+#### Recommended Startup Directory for Checkpoints
 
-`tomcat code` 的 checkpoint 会把**启动时当前目录**当成工作区根。也就是说，如果你在一个塞了多个项目的共享目录里启动，checkpoint 每回合都会把整棵大树当成扫描范围。
+The checkpoint system in `tomcat code` treats the **current directory at startup** as the workspace root. That means if you start it inside a shared directory that contains many projects, every checkpoint turn scans the entire large tree.
 
-实测（2026-06-09，本机 `~/.tomcat/temp`）：
+Measured on 2026-06-09 in `~/.tomcat/temp` on the local machine:
 
-- 共享目录 `~/.tomcat/temp`：约 `33031` 个文件，单次 `os.walk` 约 `0.313s`
-- 单项目目录 `~/.tomcat/temp/iron-vanguard`：约 `3026` 个文件，单次 `os.walk` 约 `0.053s`
+- shared directory `~/.tomcat/temp`: about `33031` files, one `os.walk` takes about `0.313s`
+- single-project directory `~/.tomcat/temp/iron-vanguard`: about `3026` files, one `os.walk` takes about `0.053s`
 
-因此更稳妥的做法是：**先进入具体项目目录，再启动 `tomcat code`**。
+So the safer pattern is: **enter the specific project directory first, then start `tomcat code`**.
 
 ```bash
 cd ~/.tomcat/temp/iron-vanguard
 tomcat code
 ```
 
-如果你在 `~/.tomcat/temp` 这类共享目录里直接启动，即使现在已经加入了超时退避和噪音目录排除，checkpoint 仍然会盯住整棵共享树，卡顿概率会明显更高。
+If you start directly from a shared directory such as `~/.tomcat/temp`, checkpoints still watch the whole shared tree even though timeout backoff and noisy-directory exclusions have already been added, so the chance of noticeable stalls is still much higher.
 
-### 快捷键
+### Keyboard Shortcuts
 
-| 按键 | 动作 |
-|------|------|
-| `Ctrl+D` | 结束输入，正常退出对话模式 |
-| `Ctrl+C` | 中断当前生成，可继续输入下一条消息 |
-| `↑` / `↓` | 历史输入切换 |
+| Key | Action |
+|-----|--------|
+| `Ctrl+D` | End input and exit chat mode normally |
+| `Ctrl+C` | Interrupt the current generation and keep chatting |
+| `↑` / `↓` | Browse input history |
 
-### 恢复上次会话（--resume）
+### Resume the Previous Session (`--resume`)
 
 ```bash
 tomcat code --resume
-# 若使用全局模式，则对应为：
+# If you use global mode, the equivalent command is:
 tomcat claw --resume
 ```
 
-会从当前 scope（`code` 或 `claw`）的 JSONL transcript 加载历史消息，LLM 会拥有之前对话的上下文。
+This loads prior messages from the JSONL transcript in the current scope (`code` or `claw`), so the LLM resumes with the previous conversation context.
 
-### 工具调用
+### Tool Calls
 
-在对话中，LLM 通过内置工具与宿主交互（Agent 循环自动多轮，轮次上限见配置）。常用工具如下（名称以 catalog 为准；旧名如 `read_file` 已不再接受）：
+During chat, the LLM interacts with the host through built-in tools (the Agent loop runs multi-turn automatically; the max turn count is controlled by config). Common tools are:
 
-| 工具 | 说明 |
-|------|------|
-| `read` | 读取文件（可选 hashline 模式，配合 `hashline_edit`） |
-| `write` | 创建或覆盖文件 |
-| `edit` | 对已有文件做精确替换（支持多段 `edits`） |
-| `bash` | 执行 shell 命令（可 `run_in_background` + `task_output` / `task_stop` / `task_list`） |
-| `list_dir` | 列出目录 |
-| `search_files` | 在授权路径内搜索文件（优先 ripgrep/fd，缺失时进程内兜底） |
+| Tool | Description |
+|------|-------------|
+| `read` | Read files (optional hashline mode, useful with `hashline_edit`) |
+| `write` | Create or overwrite files |
+| `edit` | Perform precise replacements in existing files (supports multi-entry `edits`) |
+| `bash` | Run shell commands (supports `run_in_background` plus `task_output` / `task_stop` / `task_list`) |
+| `list_dir` | List directories |
+| `search_files` | Search files under authorized paths (prefers ripgrep/fd, falls back to in-process search when missing) |
 
-此外还有 `create_plan`、`update_plan`、`todos`、`web_search`、`web_fetch` 等，按模型与配置启用。
+Other tools such as `create_plan`, `update_plan`, `todos`, `web_search`, and `web_fetch` are also available depending on the model and configuration.
 
-**用户确认提示**（当 `require_approval_for_all_write = true` 时）：
+**User confirmation prompt** (when `require_approval_for_all_write = true`):
 
 ```
 [工具调用] write: /path/to/file
@@ -746,50 +751,50 @@ tomcat claw --resume
 是否执行？[y/N]
 ```
 
-按 `y` 确认执行，按 `N` 或直接回车拒绝。
+Press `y` to confirm. Press `N` or just Enter to deny.
 
-> 可在 `tomcat.config.toml` 的 `[primitive]` 段调整确认策略：
-> - `auto_confirm = true`：白名单内自动确认，无需交互
-> - `require_approval_for_all_write = false`：写操作不强制询问
+> You can adjust the confirmation strategy in the `[primitive]` section of `tomcat.config.toml`:
+> - `auto_confirm = true`: auto-confirm within the allowlist, with no interaction
+> - `require_approval_for_all_write = false`: do not force prompts for write operations
 
-### 无 API Key 时的行为
+### Behavior Without an API Key
 
-若未设置 `OPENAI_API_KEY`，进入 `tomcat code` / `tomcat claw` 后会快速失败并输出错误提示（不会挂起）：
+If `OPENAI_API_KEY` is not set, entering `tomcat code` or `tomcat claw` fails quickly with an error message instead of hanging:
 
 ```bash
 tomcat code
-# Error: LLM 配置错误：...（含 key/API/失败 等关键词）
+# Error: LLM configuration error: ... (contains keywords such as key/API/failure)
 ```
 
 ---
 
-## 7. 审计日志
+## 7. Audit Log
 
-tomcat 将 4 原语操作、工具调用等记录到**独立审计日志**，便于事后排查。审计日志仅追加、不可篡改，与业务日志分离。（插件相关审计类型见 [第 9 节](#9-rquickjs-插件运行时)。）
+tomcat records the four primitive operations, tool calls, and related events in a **separate audit log** for after-the-fact investigation. The audit log is append-only, tamper-resistant by design, and separate from business logs. (For plugin-related audit event types, see [Section 9](#9-rquickjs-plugin-runtime).)
 
-**说明**：当前审计日志为明文存储；加密存储为后续 TODO。
+**Note**: audit logs are currently stored in plaintext. Encrypted storage is a future TODO.
 
-### 审计日志配置
+### Audit Log Configuration
 
-审计日志**默认开启**（`security.enable_audit_log = true`），无需额外配置。如需关闭可设为 `false`：
+The audit log is **enabled by default** (`security.enable_audit_log = true`) and needs no extra setup. To disable it, set it to `false`:
 
 ```bash
 tomcat config set security.enable_audit_log false
-# 可选：调整保留天数（默认 90）
+# Optional: adjust retention days (default 90)
 tomcat config set security.audit_log_retention_days 90
 ```
 
-审计文件存放于 `~/.tomcat/agents/main/audit/audit.jsonl`（专用 JSONL，仅追加）。
+Audit records are stored in `~/.tomcat/agents/main/audit/audit.jsonl` (a dedicated append-only JSONL file).
 
-### 查看审计记录列表
+### List Audit Records
 
 ```bash
 tomcat audit list
-# 或指定条数（默认 50）：
+# Or specify the count (default 50):
 tomcat audit list --limit 20
 ```
 
-输出格式（有记录时）：
+Output format when records exist:
 
 ```
 #   时间                    类型          状态   详情
@@ -800,38 +805,38 @@ tomcat audit list --limit 20
 共 3 条
 ```
 
-无记录时给出友好提示。执行 `tomcat audit list` 时会按配置自动清理过期记录。
+If there are no records, tomcat prints a friendly message. Running `tomcat audit list` also cleans up expired records automatically according to config.
 
-### 审计记录类型
+### Audit Record Types
 
-| 类型 | 触发场景 |
-|------|----------|
-| `primitive` | LLM 调用内置原语（如 read / write / edit / bash） |
-| `tool_call` | 插件或 LLM 通过工具注册表调用 tool |
-| `hostcall` | 插件 JS 通过 `__pi_host_call` 调用宿主 API |
-| `plugin_lifecycle` | 插件 load / enable / disable / unload |
+| Type | Trigger |
+|------|---------|
+| `primitive` | The LLM calls a built-in primitive such as `read`, `write`, `edit`, or `bash` |
+| `tool_call` | A plugin or the LLM calls a tool through the tool registry |
+| `hostcall` | Plugin JavaScript calls host APIs through `__pi_host_call` |
+| `plugin_lifecycle` | Plugin `load` / `enable` / `disable` / `unload` |
 
-### 查看单条审计记录
+### View One Audit Record
 
 ```bash
 tomcat audit show 0
-# 显示序号为 0 的记录的完整详情
+# shows the full details of record 0
 ```
 
-序号不存在时：
+If the index does not exist:
 
 ```
 未找到审计记录: 0
 ```
 
-### 导出审计记录
+### Export Audit Records
 
 ```bash
 tomcat audit export /tmp/audit_backup.json
-# 已导出 N 条审计记录到 /tmp/audit_backup.json
+# exports N audit records to /tmp/audit_backup.json
 ```
 
-导出为 JSON 数组格式，可用 `jq` 进一步处理：
+The export format is a JSON array, which you can process further with `jq`:
 
 ```bash
 jq '.[0]' /tmp/audit_backup.json
@@ -839,56 +844,56 @@ jq '.[0]' /tmp/audit_backup.json
 
 ---
 
-## 8. 附录
+## 8. Appendix
 
-### 环境变量速查
+### Environment Variable Quick Reference
 
-| 变量名 | 是否必填 | 说明 |
-|--------|----------|------|
-| `OPENAI_API_KEY` | 必填（code/claw/LLM） | LLM API 密钥 |
-| `HTTPS_PROXY` | 可选 | 全局 HTTPS 代理（curl 兼容格式）|
-| `HTTP_PROXY` | 可选 | 全局 HTTP 代理 |
-| `ALL_PROXY` | 可选 | 兜底代理；当前更推荐配 `HTTPS_PROXY=http://...`，`socks5://` 不作为 `web_search` 官方支持路径 |
-| `TOMCAT__LLM__PROXY` | 可选 | 仅 LLM 请求使用的代理，覆盖 config |
-| `TOMCAT__LLM__API_BASE_FALLBACK` | 可选 | 主 API 不通时的备用 base URL |
-| `TOMCAT__LLM__DEFAULT_MODEL` | 可选 | 覆盖 `[llm] default_model`；未设置时以配置文件 / 代码默认 `gpt-5.4` 为准 |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OPENAI_API_KEY` | Required (`code` / `claw` / LLM) | LLM API key |
+| `HTTPS_PROXY` | Optional | Global HTTPS proxy (curl-compatible format) |
+| `HTTP_PROXY` | Optional | Global HTTP proxy |
+| `ALL_PROXY` | Optional | Fallback proxy. `HTTPS_PROXY=http://...` is currently preferred; `socks5://` is not the official path for `web_search` |
+| `TOMCAT__LLM__PROXY` | Optional | Proxy used only for LLM requests; overrides config |
+| `TOMCAT__LLM__API_BASE_FALLBACK` | Optional | Backup base URL when the primary API is unreachable |
+| `TOMCAT__LLM__DEFAULT_MODEL` | Optional | Overrides `[llm].default_model`; if unset, tomcat uses the config file or code default `gpt-5.4` |
 
-> LLM 相关的 `TOMCAT__LLM__*` 变量可覆盖 `tomcat.config.toml` 中对应字段，`__` 作为嵌套分隔符。仓库与安装包**不会**默认注入这些变量；若本机 shell 里长期设置了旧模型 id，会导致与 `tomcat init` 新写入的 toml 不一致。
+> `TOMCAT__LLM__*` variables override the matching fields in `tomcat.config.toml`, with `__` used as the nesting separator. The repository and installation packages do **not** inject these variables by default. If your local shell still exports an old model id for a long time, it can diverge from the TOML newly written by `tomcat init`.
 >
-> `web_search` / `web_fetch` / plugin `pi.fetch` 的代理优先级与此保持一致：`llm.proxy`（或 `TOMCAT__LLM__PROXY`）优先；未配置时回退到环境 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`。
+> `web_search`, `web_fetch`, and plugin `pi.fetch` follow the same proxy priority: `llm.proxy` (or `TOMCAT__LLM__PROXY`) comes first; if unset, tomcat falls back to environment `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY`.
+>
+> `tomcat/.env` inside the test repository is only for local/CI test fixtures. The production CLI actually reads `~/.tomcat/assets/.env`. Both can inject proxy variables into the current process environment, but they serve different purposes, so do not mix their debugging conclusions.
 
-> 测试仓库中的 `tomcat/.env` 只服务于本地/CI 测试夹具；生产 CLI 实际读取的是 `~/.tomcat/assets/.env`。两者都可能把代理变量灌进当前进程环境，但用途不同，不要混用排障结论。
+### FAQ
 
-### 常见问题
+**Q: `tomcat code` / `tomcat claw` exits immediately with an error after startup**
 
-**Q: `tomcat code` / `tomcat claw` 启动后立即报错退出**
-
-原因：未设置 `OPENAI_API_KEY`，或 key 无效。
+Reason: `OPENAI_API_KEY` is not set, or the key is invalid.
 
 ```bash
-# 检查是否已加载：
+# Check whether it is already loaded:
 echo $OPENAI_API_KEY
 
-# 加载 .env：
+# Load .env:
 set -a && source .env && set +a
 tomcat code
 ```
 
 ---
 
-**Q: `tomcat code` / `tomcat claw` 连接 OpenAI 超时（curl exit 28）**
+**Q: `tomcat code` / `tomcat claw` times out when connecting to OpenAI (`curl exit 28`)**
 
-原因：当前网络无法直连 `api.openai.com`。
+Reason: the current network cannot reach `api.openai.com` directly.
 
 ```bash
-# 在 .env 中配置代理：
+# Configure a proxy in .env:
 HTTPS_PROXY=http://127.0.0.1:7890
-# 确保本机代理进程已启动，然后：
+# Make sure your local proxy process is running, then:
 set -a && source .env && set +a
 tomcat code
 ```
 
-可用 `scripts/verify-openai-apis.sh` 验证连通性：
+You can verify connectivity with `scripts/verify-openai-apis.sh`:
 
 ```bash
 ./scripts/verify-openai-apis.sh 1 2 3
@@ -898,59 +903,59 @@ tomcat code
 
 ---
 
-### 相关文档
+### Related Documents
 
-| 文档 | 内容 |
-|------|------|
-| [README.md](../README.md) | 项目简介、快速开始 |
-| [Architecture.md](openspec/specs/Architecture.md) | 系统架构与分层设计 |
-| [src/infra/README.md](../src/infra/README.md) | 基础设施层（配置/日志/审计/事件总线）|
-| [src/core/llm/README.md](../src/core/llm/README.md) | LLM 模块（OpenAI 适配器、流式输出）|
-| [src/core/session/README.md](../src/core/session/README.md) | 会话管理与 CLI 设计 |
-| [src/core/README.md](../src/core/README.md) | Agent 循环（多轮对话、工具调用、重试）|
-| [src/api/README.md](../src/api/README.md) | CLI / chat / render 入口层 |
-| [INTEGRATION_TEST_LOGGING.md](openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md) | 集成测试日志查看方法 |
+| Document | Content |
+|----------|---------|
+| [README.md](../README.md) | Project overview and quick start |
+| [Architecture.md](openspec/specs/Architecture.md) | System architecture and layered design |
+| [src/infra/README.md](../src/infra/README.md) | Infrastructure layer (config / logging / audit / event bus) |
+| [src/core/llm/README.md](../src/core/llm/README.md) | LLM module (OpenAI adapter, streaming output) |
+| [src/core/session/README.md](../src/core/session/README.md) | Session management and CLI design |
+| [src/core/README.md](../src/core/README.md) | Agent loop (multi-turn chat, tool calls, retries) |
+| [src/api/README.md](../src/api/README.md) | CLI / chat / render entry layer |
+| [INTEGRATION_TEST_LOGGING.md](openspec/specs/guides/testing/INTEGRATION_TEST_LOGGING.md) | How to inspect integration test logs |
 
 ---
 
-## 9. rquickjs 插件运行时
+## 9. rquickjs Plugin Runtime
 
-> **状态**：插件系统当前走**进程内 `rquickjs`**，不再依赖 WasmEdge、QuickJS wasm 文件或额外 C 运行时安装。`tomcat doctor` 只检查当前构建与 `rquickjs` 运行时是否可用。
+> **Status**: the plugin system now runs on **in-process `rquickjs`**. It no longer depends on WasmEdge, QuickJS wasm files, or extra C runtime installation. `tomcat doctor` only checks whether the current build and the `rquickjs` runtime are usable.
 
-### 运行时特性
+### Runtime Characteristics
 
-- 入口仍是 `plugin.json` + `main.js` / `main.ts`。
-- manifest 里有两条注册面：`tools[]` 给 LLM，`functions[]` 给宿主；两者都允许为空，但已声明的 `functions[]` 条目必须同时提供非空 `point` / `function`。
-- 敏感能力统一走 `pi.*` hostcall，例如 `pi.readFile()`、`pi.writeFile()`、`pi.editFile()`、`pi.exec()`。
-- `node:fs`、`node:child_process`、`node:os` 不会直接暴露给插件；会返回明确的 fail-closed 错误。
-- 当前默认提供的轻量能力包括：
+- The entry points are still `plugin.json` plus `main.js` / `main.ts`.
+- The manifest has two registration surfaces: `tools[]` for the LLM and `functions[]` for the host. Both may be empty, but every declared `functions[]` entry must provide non-empty `point` and `function`.
+- Sensitive capabilities always go through `pi.*` hostcalls, such as `pi.readFile()`, `pi.writeFile()`, `pi.editFile()`, and `pi.exec()`.
+- `node:fs`, `node:child_process`, and `node:os` are not exposed directly to plugins; they return explicit fail-closed errors.
+- The lightweight capabilities currently provided by default include:
   - `path`
   - `util.format`
   - `events.EventEmitter`
   - `Buffer`
-  - `crypto`（含 `hash` / `hmac` / `randomBytes` / `randomUUID` / `aes-gcm` / `ed25519`）
+  - `crypto` (including `hash`, `hmac`, `randomBytes`, `randomUUID`, `aes-gcm`, and `ed25519`)
   - `@sinclair/typebox`
   - `ms`
-- 可用环境变量：
-  - `PI_PLUGIN_DISABLE=1|true|yes|on`：整套插件运行时入口短路。
+- Available environment variable:
+  - `PI_PLUGIN_DISABLE=1|true|yes|on`: short-circuits the entire plugin runtime entry path.
 
-**最小插件示例**
+**Minimal plugin example**
 
-`plugin.json`：
+`plugin.json`:
 
 ```json
 {
   "id": "my-plugin",
   "name": "My Plugin",
   "version": "0.1.0",
-  "description": "体验用最小插件",
+  "description": "Minimal plugin for experimentation",
   "author": "me",
   "main": "main.js",
   "requiredPermissions": [],
   "tools": [
     {
       "name": "hello_world",
-      "description": "返回一条问候语",
+      "description": "Return a greeting",
       "parameters": {
         "type": "object",
         "properties": {}
@@ -964,35 +969,35 @@ tomcat code
 }
 ```
 
-`main.js`：
+`main.js`:
 
 ```js
 pi.on("session_start", function () {
   pi.log("my-plugin: session_start");
 });
 
-pi.log("my-plugin: 已加载");
+pi.log("my-plugin: loaded");
 ```
 
-说明：
+Notes:
 
-- 敏感能力一律走 `pi.*`，例如读写文件用 `pi.readFile()` / `pi.writeFile()`，执行命令用 `pi.exec()`。
-- `tools[]` 是给 LLM 的静态工具契约；`functions[]` 是给宿主自己的静态函数契约。宿主函数不会进入 `ToolRegistry`，也不会出现在喂给 LLM 的工具清单里。
-- `functions[]` 的 `point` 是宿主扩展点 ID，例如 `web_search.backend`、`test.echo`。宿主按 `point` 枚举候选函数，再回 VM 调用 `function` 字段对应的 JS 入口名。
-- `pi.registerFunction(name, handler)` 只负责把 JS 实现绑定到当前 VM；宿主能否“看见”这条能力，仍然只取决于 manifest 里的 `functions[]`。
-- `node:fs`、`node:child_process` 等 Node 内置模块不会直接暴露给插件；当前只保留少量轻量能力与 fail-closed alias。
-- 加载期 `requiredPermissions` 本期默认放行，但真正敏感的文件/命令/会话能力仍由 `pi.*` 路由统一鉴权与审计。
+- Sensitive capabilities always go through `pi.*`. For example, use `pi.readFile()` / `pi.writeFile()` for file I/O and `pi.exec()` for commands.
+- `tools[]` is the static tool contract for the LLM. `functions[]` is the static function contract for the host itself. Host functions do not enter `ToolRegistry`, and they do not appear in the tool list passed to the LLM.
+- The `point` field in `functions[]` is a host extension point id such as `web_search.backend` or `test.echo`. The host enumerates candidate functions by `point`, then calls back into the VM using the JavaScript entry name stored in `function`.
+- `pi.registerFunction(name, handler)` only binds the JavaScript implementation into the current VM. Whether the host can "see" that capability still depends entirely on `functions[]` in the manifest.
+- Node built-ins such as `node:fs` and `node:child_process` are not exposed directly to plugins. Only a small set of lightweight capabilities and fail-closed aliases remain.
+- During this phase, `requiredPermissions` is allowed by default at load time, but truly sensitive file, command, and session capabilities are still routed through `pi.*` for unified authorization and auditing.
 
-**宿主函数最小示例**
+**Minimal host-function example**
 
-`plugin.json`：
+`plugin.json`:
 
 ```json
 {
   "id": "my-host-function-plugin",
   "name": "My Host Function Plugin",
   "version": "0.1.0",
-  "description": "给宿主提供一个 echo 扩展点",
+  "description": "Expose one echo extension point to the host",
   "author": "me",
   "main": "main.js",
   "requiredPermissions": [],
@@ -1008,7 +1013,7 @@ pi.log("my-plugin: 已加载");
 }
 ```
 
-`main.js`：
+`main.js`:
 
 ```js
 pi.registerFunction("echoHost", function (params) {
@@ -1018,11 +1023,11 @@ pi.registerFunction("echoHost", function (params) {
 });
 ```
 
-说明：
+Notes:
 
-- `functions[]` 只报“我提供哪个宿主扩展点、回 VM 时该调哪个 JS 函数名”，不要把插件内部默认参数、排序或厂商细节上浮到宿主。
-- 当前 host-facing function 与普通 plugin 一样复用 `project > agent > global` 三层发现 / 安装链；真正特殊的地方只在注册面：进入 `FunctionRegistry` 前会按 `point` 做 override，高层声明覆盖低层。
-- 一个插件可以同时有 `tools[]`、`functions[]`、`events[]`，也可以只有其中一类。
+- `functions[]` should only declare which host extension point the plugin provides and which JavaScript function name the VM should call. Do not lift plugin-internal default parameters, ordering, or vendor-specific details into the host surface.
+- Host-facing functions reuse the same `project > agent > global` discovery and installation chain as ordinary plugins. The only special behavior is at registration time: before entering `FunctionRegistry`, functions are overridden by `point`, with higher-layer declarations taking precedence over lower-layer ones.
+- A plugin can expose `tools[]`, `functions[]`, and `events[]` together, or any one of them alone.
 
 ```bash
 tomcat plugin load ~/tomcat-plugins/my-plugin
@@ -1033,6 +1038,6 @@ tomcat plugin enable my-plugin
 tomcat plugin unload my-plugin
 ```
 
-`tomcat plugin load` 仍是**运行态加载入口**，会执行一次短生命周期初始化校验，并把登记信息写入全局 `{work_dir}/plugins/registry.json`。而 `tomcat install` / `/install` 是**安装管理入口**：它会按 `scope|agent|global` 三层分别写对应层的 `plugins/registry.json` 与 `packages/registry.json`，但不会在安装路径执行插件代码。真正的长生命周期 session VM 仍只会在会话里首次用到该插件时按需创建。
+`tomcat plugin load` is still the **runtime loading entry point**. It performs a short-lived initialization check once and writes the registration data into the global `{work_dir}/plugins/registry.json`. By contrast, `tomcat install` and `/install` are the **installation management entry points**: they write the corresponding layer's `plugins/registry.json` and `packages/registry.json` under `scope|agent|global`, but they do not execute plugin code inside the install path. The actual long-lived session VM is still created lazily only when the session first needs that plugin.
 
-实现细节见 [architecture/plugin-system-overview.md](./architecture/plugin-system-overview.md) 与 [src/ext/README.md](../src/ext/README.md)。
+Implementation details: [architecture/plugin-system-overview.md](./architecture/plugin-system-overview.md) and [src/ext/README.md](../src/ext/README.md).

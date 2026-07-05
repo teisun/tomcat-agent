@@ -2,6 +2,7 @@
 !out/**
 !package.json
 !README.md
+!README.zh.md
 !CHANGELOG.md
 !LICENSE
 !LICENSE.txt

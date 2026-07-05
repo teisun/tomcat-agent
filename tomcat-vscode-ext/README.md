@@ -1,5 +1,10 @@
 # Tomcat for VS Code
 
+<p align="center">
+  <a href="README.md">English</a> |
+  <a href="README.zh.md">简体中文</a>
+</p>
+
 Tomcat Agent Box brings the `tomcat serve --stdio` runtime into a dedicated VS Code sidebar.
 
 ![Tomcat Agent Box screenshot](../assets/tomcat-agent-box.png)
