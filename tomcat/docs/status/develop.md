@@ -1,6 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-05 22:35 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-06 07:35 +0800 | ACTIVE | develop | — |
+
+### ✅ DONE (已完成/进行中)
+- [✓] **[P1]** Add Models 架构方案：新增 `tomcat-vscode-ext/docs/architecture/model-management-add-models.md` 总览 + 5 篇子文档（术语/决策/协议/验收/UI ASCII 基线），对齐 Phase 2 文档组织方式 @2026-07-06
 
 ### 集成说明
 - 面向用户文档已双语化（英文默认 + opencode 式切换栏）：根 README、扩展 README、`user-guide` 各新增 `.zh.md` 中文镜像；`tomcat-vscode-ext/.vscodeignore` 已放行 `README.zh.md` 入 VSIX。
