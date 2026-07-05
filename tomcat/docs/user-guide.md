@@ -1,11 +1,12 @@
 # tomcat 操作说明
 
-本文档面向第一次使用 tomcat 的用户，按"获取程序 → 初始化 → 逐功能体验"顺序，覆盖 tomcat 的主要使用方式与可用功能。
+本文档面向第一次使用 tomcat 的用户。若你主要在 VS Code 中使用，请先走插件路径；若你主要在终端中使用，再继续阅读下面的 CLI 章节。本文仍按"获取程序 → 初始化 → 逐功能体验"顺序，覆盖 tomcat 的主要使用方式与可用功能。
 
 ---
 
 ## 目录
 
+- [先选使用方式：VS Code 插件 / CLI](#先选使用方式vs-code-插件--cli)
 - [0. 下载 Release 二进制直接使用](#0-下载-release-二进制直接使用)
 - [1. 下载源码并编译构建](#1-下载源码并编译构建)
 - [2. 初始化与环境检测](#2-初始化与环境检测)
@@ -16,6 +17,30 @@
 - [7. 审计日志](#7-审计日志)
 - [8. 附录](#8-附录)
 - [9. rquickjs 插件运行时](#9-rquickjs-插件运行时)
+
+---
+
+## 先选使用方式：VS Code 插件 / CLI
+
+### A. 我主要在 VS Code 里使用（推荐）
+
+直接走 VS Code 插件路径，不要先手动研究 CLI 安装细节：
+
+```text
+GitHub Release
+   -> 下载平台对应的 bundled .vsix
+   -> code --install-extension xxx.vsix
+   -> 在 Chat 里输入 @tomcat
+   -> 如果提示首次设置，点 Start Setup，让 VS Code 帮你跑 tomcat init
+```
+
+扩展包怎么选、怎么安装、装完后 bundled CLI 住在哪里，统一看：
+
+- [`tomcat-vscode-ext/README.md`](../../tomcat-vscode-ext/README.md)
+
+### B. 我主要在终端里使用
+
+继续看下面的 CLI 安装与初始化章节即可。
 
 ---
 
@@ -41,7 +66,7 @@ tomcat --help
 安装指定版本时，可在脚本后追加 `-v` 参数：
 
 ```bash
-curl -sSf https://raw.githubusercontent.com/teisun/tomcat-agent/main/tomcat/scripts/install.sh | bash -s -- -v v0.1.3
+curl -sSf https://raw.githubusercontent.com/teisun/tomcat-agent/main/tomcat/scripts/install.sh | bash -s -- -v 0.1.8
 ```
 
 如果你更希望手动下载 Release 压缩包，请先按平台选择对应的 `target`：
@@ -50,7 +75,7 @@ curl -sSf https://raw.githubusercontent.com/teisun/tomcat-agent/main/tomcat/scri
 - Intel Mac：`x86_64-apple-darwin`
 - Linux x86_64：`x86_64-unknown-linux-gnu`
 
-Release 资产命名格式为 `tomcat-<tag>-<target>.tar.gz`，例如 `tomcat-v0.1.3-aarch64-apple-darwin.tar.gz`。手动下载后的安装步骤如下：
+Release 资产命名格式为 `tomcat-<tag>-<target>.tar.gz`。CLI 现在使用独立 tag 命名空间，所以最新命名会像 `tomcat-cli-v0.1.8-aarch64-apple-darwin.tar.gz`。手动下载后的安装步骤如下：
 
 ```bash
 # 1. 解压 release 压缩包
@@ -102,7 +127,7 @@ tomcat --help
 
 ```bash
 tomcat --version
-# tomcat 0.1.1
+# tomcat 0.1.8
 ```
 
 ### 工作目录

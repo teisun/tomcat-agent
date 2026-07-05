@@ -1,4 +1,6 @@
+import * as assert from "node:assert/strict";
 import * as path from "node:path";
+import * as vscode from "vscode";
 
 const repoRoot = path.resolve(__dirname, "../../../");
 type HostE2eHelper = {
@@ -30,13 +32,124 @@ type HostE2eHelper = {
   assertWebviewStreamingFlow(api: unknown): Promise<void>;
   getTomcatExtensionApi(): Promise<unknown>;
 };
+type ResolvedSourceApi = {
+  __testing: {
+    getPromptHistory(): Array<{
+      actions: string[];
+      message: string;
+      severity: string;
+    }>;
+    getResolvedExecutable(): {
+      source: string;
+    };
+  };
+};
+type PromptEntry = ResolvedSourceApi["__testing"] extends {
+  getPromptHistory(): Array<infer T>;
+}
+  ? T
+  : never;
 
 const hostE2e = require(path.resolve(
   repoRoot,
   "out/test/suite/support/hostE2eScenario.js",
 )) as HostE2eHelper;
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function maybeTriggerOnboardingBootstrap(): Promise<void> {
+  if (process.env.TOMCAT_EXPECT_PROMPT_TRIGGER !== "restart") {
+    return;
+  }
+  try {
+    await vscode.commands.executeCommand("tomcat.restartServe");
+  } catch {
+    // Setup-required scenarios intentionally fail the first initialize attempt.
+  }
+}
+
+async function waitForPrompt(
+  api: ResolvedSourceApi,
+  expectedSubstring: string,
+  timeoutMs: number,
+): Promise<PromptEntry> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const prompt = api.__testing.getPromptHistory().find((entry) =>
+      entry.message.includes(expectedSubstring),
+    );
+    if (prompt) {
+      return prompt;
+    }
+    await sleep(100);
+  }
+  assert.fail(`Timed out waiting for prompt containing: ${expectedSubstring}`);
+}
+
 suite("Installed Tomcat extension", () => {
+  test("uses the expected executable source when the host fixture asks for it", async function () {
+    const expectedSource = process.env.TOMCAT_EXPECT_RESOLVED_SOURCE;
+    if (!expectedSource) {
+      this.skip();
+      return;
+    }
+
+    const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
+    assert.equal(api.__testing.getResolvedExecutable().source, expectedSource);
+  });
+
+  test("shows the expected onboarding prompt when requested by the host fixture", async function () {
+    const expectedSubstring = process.env.TOMCAT_EXPECT_PROMPT_SUBSTRING;
+    if (!expectedSubstring) {
+      this.skip();
+      return;
+    }
+
+    const expectedSeverity = process.env.TOMCAT_EXPECT_PROMPT_SEVERITY;
+    const expectedActions = (process.env.TOMCAT_EXPECT_PROMPT_ACTIONS ?? "")
+      .split("|")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
+    await maybeTriggerOnboardingBootstrap();
+    const prompt = await waitForPrompt(api, expectedSubstring, 15_000);
+    if (expectedSeverity) {
+      assert.equal(prompt.severity, expectedSeverity);
+    }
+    if (expectedActions.length > 0) {
+      assert.deepEqual(prompt.actions, expectedActions);
+    }
+  });
+
+  test("recovers from a setup-required startup when the test fixture auto-runs init", async function () {
+    if (process.env.TOMCAT_EXPECT_SETUP_RECOVERY !== "1") {
+      this.skip();
+      return;
+    }
+
+    const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
+    await maybeTriggerOnboardingBootstrap();
+    await waitForPrompt(api, "Tomcat is installed, but it is not ready yet", 20_000);
+
+    const deadline = Date.now() + 20_000;
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+      try {
+        await hostE2e.assertParticipantHappyPath(api as unknown);
+        return;
+      } catch (error) {
+        lastError = error;
+        await sleep(1_000);
+      }
+    }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new Error("Timed out waiting for setup-required recovery to succeed");
+  });
+
   test("runs the participant happy path", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertParticipantHappyPath(api);

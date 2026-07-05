@@ -11,6 +11,10 @@ export interface HostE2eFixture {
   workspaceDir: string;
 }
 
+export interface HostE2eFixtureOptions {
+  requireInit?: boolean;
+}
+
 const CHAT_E2E_SETTINGS = {
   "chat.allowAnonymousAccess": true,
   "chat.disableAIFeatures": false,
@@ -29,7 +33,11 @@ export async function seedChatUserSettings(userDataDir: string): Promise<void> {
   );
 }
 
-function buildFakeServeSource(editFilePath: string): string {
+function buildFakeServeSource(
+  editFilePath: string,
+  options: HostE2eFixtureOptions,
+  setupMarkerPath: string,
+): string {
   const transcriptPlanMarkdown = JSON.stringify(`---
 name: Transcript UI Showcase
 overview: Review the transcript UI polish and confirm the merged plan card before building.
@@ -43,6 +51,8 @@ const path = require("node:path");
 const readline = require("node:readline");
 
 const editFilePath = ${JSON.stringify(editFilePath)};
+const requireInit = ${JSON.stringify(Boolean(options.requireInit))};
+const setupMarkerPath = ${JSON.stringify(setupMarkerPath)};
 const MODEL_OPTIONS = ["fake-model", "gpt-5.4", "claude-4.6-sonnet"];
 const sessions = new Map();
 let sessionCounter = 1;
@@ -60,6 +70,28 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
+
+if (process.argv[2] === "--version") {
+  process.stdout.write("tomcat fake 0.1.8\\n");
+  process.exit(0);
+}
+
+if (process.argv[2] === "init") {
+  fs.mkdirSync(path.dirname(setupMarkerPath), { recursive: true });
+  fs.writeFileSync(setupMarkerPath, "ok\\n", "utf8");
+  process.stdout.write("fake init completed\\n");
+  process.exit(0);
+}
+
+if (process.argv[2] !== "serve") {
+  process.stderr.write("unsupported command: " + String(process.argv[2] || "") + "\\n");
+  process.exit(2);
+}
+
+if (requireInit && !fs.existsSync(setupMarkerPath)) {
+  process.stderr.write("fake serve requires tomcat init first\\n");
+  process.exit(1);
+}
 
 function touchSession(session) {
   session.updatedAt = Date.now();
@@ -1307,15 +1339,22 @@ rl.on("line", (line) => {
 `;
 }
 
-export async function createHostE2eFixture(): Promise<HostE2eFixture> {
+export async function createHostE2eFixture(
+  options: HostE2eFixtureOptions = {},
+): Promise<HostE2eFixture> {
   const rootDir = await mkdtemp(path.join(os.tmpdir(), "tomcat-vscode-ext-host-"));
   const workspaceDir = path.join(rootDir, "workspace");
   const fakeServePath = path.join(rootDir, "fake-tomcat.js");
   const editFilePath = path.join(rootDir, "edit-target.txt");
+  const setupMarkerPath = path.join(rootDir, "setup", "ready");
 
   await mkdir(workspaceDir, { recursive: true });
   await writeFile(editFilePath, "before\n", "utf8");
-  await writeFile(fakeServePath, buildFakeServeSource(editFilePath), "utf8");
+  await writeFile(
+    fakeServePath,
+    buildFakeServeSource(editFilePath, options, setupMarkerPath),
+    "utf8",
+  );
   await chmod(fakeServePath, 0o755);
 
   return {

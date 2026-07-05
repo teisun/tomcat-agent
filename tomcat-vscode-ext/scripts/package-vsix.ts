@@ -9,8 +9,11 @@ type PackageManifest = {
 };
 
 export interface PackageVsixOptions {
+  bundleBinaryPath?: string;
   extensionRoot?: string;
   outPath?: string;
+  skipBuild?: boolean;
+  target?: string;
 }
 
 const REQUIRED_FILES = [
@@ -38,6 +41,7 @@ const DISALLOWED_PREFIXES = [
 
 const ROOT_ASSETS = [
   ".vscodeignore",
+  "CHANGELOG.md",
   "LICENSE",
   "README.md",
   "package.json",
@@ -87,6 +91,28 @@ function readManifest(extensionRoot: string): PackageManifest {
   return JSON.parse(
     fs.readFileSync(path.join(extensionRoot, "package.json"), "utf8"),
   ) as PackageManifest;
+}
+
+export function bundledExecutableRelativePath(target?: string): string {
+  return target?.startsWith("win") ? "bin/tomcat.exe" : "bin/tomcat";
+}
+
+export function buildVsixOutPath(
+  extensionRoot: string,
+  manifest: PackageManifest,
+  target?: string,
+): string {
+  const suffix = target ? `-${target}` : "";
+  return path.join(extensionRoot, `${manifest.name}-${manifest.version}${suffix}.vsix`);
+}
+
+export function buildVscePackageArgs(outPath: string, target?: string): string[] {
+  const args = ["package", "--no-dependencies"];
+  if (target) {
+    args.push("--target", target);
+  }
+  args.push("--out", outPath);
+  return args;
 }
 
 function shouldIncludeOutPath(relativePath: string): boolean {
@@ -144,7 +170,10 @@ function copyDirectory(sourcePath: string, targetPath: string): void {
   }
 }
 
-export function preparePublishDirectory(extensionRoot: string): string {
+export function preparePublishDirectory(
+  extensionRoot: string,
+  options: Pick<PackageVsixOptions, "bundleBinaryPath" | "target"> = {},
+): string {
   const publishRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tomcat-vsix-stage-"));
   for (const asset of ROOT_ASSETS) {
     fs.copyFileSync(
@@ -159,6 +188,15 @@ export function preparePublishDirectory(extensionRoot: string): string {
   const stagedOutRoot = path.join(publishRoot, "out");
   fs.mkdirSync(stagedOutRoot, { recursive: true });
   copyFilteredOut(path.join(extensionRoot, "out"), stagedOutRoot);
+  if (options.bundleBinaryPath) {
+    const bundledRelativePath = bundledExecutableRelativePath(options.target);
+    const bundledTargetPath = path.join(publishRoot, bundledRelativePath);
+    fs.mkdirSync(path.dirname(bundledTargetPath), { recursive: true });
+    fs.copyFileSync(options.bundleBinaryPath, bundledTargetPath);
+    if (!options.target?.startsWith("win")) {
+      fs.chmodSync(bundledTargetPath, 0o755);
+    }
+  }
   return publishRoot;
 }
 
@@ -178,8 +216,16 @@ export function listPublishableFiles(
     .filter((line) => line.length > 0);
 }
 
-export function assertPublishableFiles(fileList: readonly string[]): void {
-  for (const requiredFile of REQUIRED_FILES) {
+export function assertPublishableFiles(
+  fileList: readonly string[],
+  options: Pick<PackageVsixOptions, "bundleBinaryPath" | "target"> = {},
+): void {
+  const requiredFiles = [...REQUIRED_FILES];
+  if (options.bundleBinaryPath) {
+    requiredFiles.push(bundledExecutableRelativePath(options.target));
+  }
+
+  for (const requiredFile of requiredFiles) {
     if (!hasPath(fileList, requiredFile)) {
       throw new Error(`VSIX source is missing required file: ${requiredFile}`);
     }
@@ -201,20 +247,19 @@ export function assertPublishableFiles(fileList: readonly string[]): void {
 export function packageVsix(options: PackageVsixOptions = {}): string {
   const extensionRoot = options.extensionRoot ?? path.resolve(__dirname, "..");
   const manifest = readManifest(extensionRoot);
-  const defaultOutPath = path.join(
-    extensionRoot,
-    `${manifest.name}-${manifest.version}.vsix`,
-  );
+  const defaultOutPath = buildVsixOutPath(extensionRoot, manifest, options.target);
   const outPath = options.outPath ?? defaultOutPath;
 
-  run("npm", ["run", "build"], extensionRoot);
-  const publishRoot = preparePublishDirectory(extensionRoot);
+  if (!options.skipBuild) {
+    run("npm", ["run", "build"], extensionRoot);
+  }
+  const publishRoot = preparePublishDirectory(extensionRoot, options);
   try {
     const fileList = listPublishableFiles(publishRoot, extensionRoot);
-    assertPublishableFiles(fileList);
+    assertPublishableFiles(fileList, options);
 
     runVsce(
-      ["package", "--no-dependencies", "--out", outPath],
+      buildVscePackageArgs(outPath, options.target),
       publishRoot,
       extensionRoot,
     );
@@ -237,9 +282,43 @@ function parseOutPath(argv: readonly string[]): string | undefined {
   return path.resolve(value);
 }
 
+function parseTarget(argv: readonly string[]): string | undefined {
+  const index = argv.indexOf("--target");
+  if (index === -1) {
+    return undefined;
+  }
+
+  const value = argv[index + 1];
+  if (!value) {
+    throw new Error("--target requires a VS Code target");
+  }
+  return value;
+}
+
+function parseBundleBinaryPath(argv: readonly string[]): string | undefined {
+  const index = argv.indexOf("--bundle-binary");
+  if (index === -1) {
+    return undefined;
+  }
+
+  const value = argv[index + 1];
+  if (!value) {
+    throw new Error("--bundle-binary requires a file path");
+  }
+  return path.resolve(value);
+}
+
+function parseSkipBuild(argv: readonly string[]): boolean {
+  return argv.includes("--skip-build");
+}
+
 function main(): void {
-  const outPath = parseOutPath(process.argv.slice(2));
-  const result = packageVsix({ outPath });
+  const argv = process.argv.slice(2);
+  const outPath = parseOutPath(argv);
+  const target = parseTarget(argv);
+  const bundleBinaryPath = parseBundleBinaryPath(argv);
+  const skipBuild = parseSkipBuild(argv);
+  const result = packageVsix({ bundleBinaryPath, outPath, skipBuild, target });
   console.log(`Packaged VSIX at ${result}`);
 }
 

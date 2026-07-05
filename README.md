@@ -12,7 +12,10 @@
 
 ## 快速开始
 
-**[用户使用说明](tomcat/docs/user-guide.md)** — 前置依赖、构建、`init` / `doctor` / `chat`、会话与工作区、配置、审计及集成测试等完整步骤与示例输出。
+优先入口：
+
+- **VS Code 插件（推荐）**：从 GitHub Release 下载平台对应的 bundled `.vsix`，安装后直接在 Chat 里用 `@tomcat`。包怎么选、怎么装，见 [`tomcat-vscode-ext/README.md`](tomcat-vscode-ext/README.md)。
+- **CLI**：见 **[用户使用说明](tomcat/docs/user-guide.md)**，覆盖前置依赖、构建、`init` / `doctor` / `chat`、会话与工作区、配置、审计及集成测试等完整步骤与示例输出。
 
 简要前提：Rust stable 1.70+；OpenAI 兼容 API 密钥（`tomcat/.env.example` → `tomcat/.env` 中的 `OPENAI_API_KEY`）。运行态数据默认在 `~/.tomcat/`，目录布局见 [工作目录与数据布局](tomcat/docs/architecture/work-dir-and-data-layout.md)。
 

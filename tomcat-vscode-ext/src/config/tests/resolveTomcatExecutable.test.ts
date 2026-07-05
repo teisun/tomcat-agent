@@ -20,6 +20,7 @@ describe("resolveTomcatExecutable", () => {
 
   it("keeps an explicit configured path", async () => {
     const resolved = await resolveTomcatExecutable({
+      bundledPath: "/bundled/tomcat",
       commandRunner: async () => "",
       configuredPath: "/custom/bin/tomcat",
       fileExists: async (targetPath) => targetPath === "/custom/bin/tomcat",
@@ -30,6 +31,41 @@ describe("resolveTomcatExecutable", () => {
       executable: "/custom/bin/tomcat",
       found: true,
       source: "config",
+    });
+  });
+
+  it("prefers the bundled executable after explicit config is ruled out", async () => {
+    const resolved = await resolveTomcatExecutable({
+      bundledPath: "/extension/bin/tomcat",
+      commandRunner: async () => {
+        throw new Error("should not reach PATH when bundled exists");
+      },
+      fileExists: async (targetPath) => targetPath === "/extension/bin/tomcat",
+    });
+
+    expect(resolved).toEqual({
+      executable: "/extension/bin/tomcat",
+      found: true,
+      source: "bundled",
+    });
+  });
+
+  it("falls through to PATH discovery when the bundled executable is absent", async () => {
+    const resolved = await resolveTomcatExecutable({
+      bundledPath: "/extension/bin/tomcat",
+      commandRunner: async (command) => {
+        if (command === "which") {
+          return "/usr/local/bin/tomcat\n";
+        }
+        throw new Error("unexpected command");
+      },
+      fileExists: async () => false,
+    });
+
+    expect(resolved).toEqual({
+      executable: "/usr/local/bin/tomcat",
+      found: true,
+      source: "process-path",
     });
   });
 

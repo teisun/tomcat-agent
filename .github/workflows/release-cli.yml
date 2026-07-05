@@ -1,15 +1,22 @@
-name: release
+name: release-cli
 
 on:
   push:
     tags:
-      - "v*"
+      - "cli-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "CLI release tag to validate/package (for dry runs)"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -35,6 +42,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup Node for release guards
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate CLI release tag
+        run: node ../.github/scripts/release/check-cli-tag.mjs "${GITHUB_WORKSPACE}" "${RELEASE_TAG}"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -51,7 +66,7 @@ jobs:
       - name: Package release archive
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${RELEASE_TAG}"
           target="${{ matrix.target }}"
           package="tomcat-${tag}-${target}"
           bin_path="target/${target}/release/tomcat"
@@ -63,13 +78,14 @@ jobs:
       - name: Upload packaged archive
         uses: actions/upload-artifact@v4
         with:
-          name: release-${{ matrix.target }}
-          path: tomcat/dist/tomcat-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          name: release-cli-${{ matrix.target }}
+          path: tomcat/dist/tomcat-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   publish:
-    name: publish release
+    name: publish cli release
     runs-on: ubuntu-latest
+    if: github.event_name == 'push'
     needs: build
     permissions:
       contents: write
@@ -79,7 +95,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: release-*
+          pattern: release-cli-*
           merge-multiple: true
 
       - name: Generate SHA256SUMS

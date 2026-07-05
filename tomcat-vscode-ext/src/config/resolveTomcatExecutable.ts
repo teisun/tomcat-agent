@@ -20,6 +20,7 @@ type CommandRunner = (
 type FileExists = (targetPath: string, platform: NodeJS.Platform) => Promise<boolean>;
 
 export interface ResolveTomcatExecutableOptions {
+  bundledPath?: string;
   commandRunner?: CommandRunner;
   configuredPath?: string;
   env?: NodeJS.ProcessEnv;
@@ -33,6 +34,7 @@ export interface ResolvedTomcatExecutable {
   executable: string;
   found: boolean;
   source:
+    | "bundled"
     | "common-path"
     | "config"
     | "default"
@@ -202,6 +204,15 @@ export async function resolveTomcatExecutable(
       executable: configuredPath,
       found: await commandLooksUsable(configuredPath, env, platform, runCommand, fileExists),
       source: "config",
+    };
+  }
+
+  const bundledPath = options.bundledPath?.trim();
+  if (bundledPath && await fileExists(bundledPath, platform)) {
+    return {
+      executable: bundledPath,
+      found: true,
+      source: "bundled",
     };
   }
 

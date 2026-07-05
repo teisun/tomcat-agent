@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tomcat 一键安装脚本（macOS/Linux）。
-# 默认安装最新 release 到 ~/.local/bin，并可按需将 PATH 写入 shell profile。
-# 支持 -y/--yes：非交互模式，自动追加 PATH。支持 -v VER：指定版本（接受 v0.1.4 或 0.1.4）。
+# 默认安装最新 CLI release 到 ~/.local/bin，并可按需将 PATH 写入 shell profile。
+# 支持 -y/--yes：非交互模式，自动追加 PATH。支持 -v VER：指定版本（接受 cli-v0.1.4 / v0.1.4 / 0.1.4）。
 set -euo pipefail
 
 REPO="teisun/tomcat-agent"
@@ -16,7 +16,7 @@ Usage: install.sh [-y|--yes] [-v VERSION]
 
 Options:
   -y, --yes        非交互模式；若 ~/.local/bin 不在 PATH 中，自动写入 shell profile
-  -v VERSION       安装指定版本，例如 v0.1.4 或 0.1.4
+  -v VERSION       安装指定版本，例如 cli-v0.1.4、v0.1.4 或 0.1.4
   -h, --help       显示帮助
 EOF
 }
@@ -30,8 +30,16 @@ require_command() {
 
 normalize_tag() {
   case "$1" in
-    v*) printf '%s\n' "$1" ;;
+    cli-v*|v*) printf '%s\n' "$1" ;;
     *) printf 'v%s\n' "$1" ;;
+  esac
+}
+
+tag_candidates() {
+  case "$1" in
+    cli-v*) printf '%s\n' "$1" ;;
+    v*) printf 'cli-%s\n%s\n' "$1" "$1" ;;
+    *) printf 'cli-v%s\nv%s\n' "$1" "$1" ;;
   esac
 }
 
@@ -75,33 +83,115 @@ curl_fetch() {
     -H "User-Agent: tomcat-installer" "$@"
 }
 
-load_release_metadata() {
-  local api_url tag
+extract_release_tag_name() {
+  printf '%s' "$1" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p'
+}
 
-  if [ -n "${TAG}" ]; then
-    api_url="https://api.github.com/repos/${REPO}/releases/tags/${TAG}"
-  else
-    api_url="https://api.github.com/repos/${REPO}/releases/latest"
+select_latest_cli_release_with_python() {
+  local releases_json target
+  releases_json="$1"
+  target="$2"
+
+  printf '%s' "${releases_json}" | python3 -c '
+import json
+import re
+import sys
+
+target = sys.argv[1]
+pattern = re.compile(rf"^tomcat-.*-{re.escape(target)}\.tar\.gz$")
+data = json.load(sys.stdin)
+for release in data:
+    if release.get("draft") or release.get("prerelease"):
+        continue
+    for asset in release.get("assets", []):
+        if pattern.match(asset.get("name", "")):
+            print(json.dumps(release, separators=(",", ":")))
+            sys.exit(0)
+sys.exit(1)
+' "${target}"
+}
+
+select_latest_cli_release_with_sed() {
+  local releases_json target release_lines selected_release
+  releases_json="$1"
+  target="$2"
+  release_lines="$(
+    printf '%s' "${releases_json}" \
+      | sed -E 's/^\[//; s/\]$//; s/},\{"url":"([^"]+)","assets_url":/}\n{"url":"\1","assets_url":/g'
+  )"
+  selected_release="$(
+    printf '%s\n' "${release_lines}" \
+      | awk -v target="${target}" '
+          index($0, "\"draft\":false") &&
+          index($0, "\"prerelease\":false") &&
+          $0 ~ ("\"name\":\"tomcat-[^\"]*-" target "\\.tar\\.gz\"") {
+            print
+            exit
+          }
+        '
+  )"
+  if [ -z "${selected_release}" ]; then
+    return 1
+  fi
+  printf '%s' "${selected_release}"
+}
+
+select_latest_cli_release() {
+  local releases_json target selected_release
+  releases_json="$1"
+  target="$2"
+  selected_release=""
+
+  if command -v python3 >/dev/null 2>&1; then
+    selected_release="$(select_latest_cli_release_with_python "${releases_json}" "${target}" 2>/dev/null || true)"
   fi
 
-  RELEASE_JSON="$(curl_fetch "${api_url}" | tr -d '\n')"
-  if [ -z "${RELEASE_JSON}" ]; then
+  if [ -z "${selected_release}" ]; then
+    selected_release="$(select_latest_cli_release_with_sed "${releases_json}" "${target}" 2>/dev/null || true)"
+  fi
+
+  if [ -z "${selected_release}" ]; then
+    echo "无法定位包含 tomcat 安装包的最新 CLI release，请稍后重试或使用 -v 指定版本。" >&2
+    exit 1
+  fi
+
+  printf '%s' "${selected_release}"
+}
+
+load_release_metadata() {
+  local api_url candidate normalized_tag release_list_json selected_release selected_tag
+
+  if [ -n "${TAG}" ]; then
+    normalized_tag="${TAG}"
+    while IFS= read -r candidate; do
+      api_url="https://api.github.com/repos/${REPO}/releases/tags/${candidate}"
+      if RELEASE_JSON="$(curl_fetch "${api_url}" 2>/dev/null | tr -d '\n')"; then
+        TAG="${candidate}"
+        return 0
+      fi
+    done <<EOF
+$(tag_candidates "${normalized_tag}")
+EOF
+    echo "无法读取 ${normalized_tag} 对应的 CLI release，请确认版本存在后重试。" >&2
+    exit 1
+  fi
+
+  api_url="https://api.github.com/repos/${REPO}/releases?per_page=30"
+  release_list_json="$(curl_fetch "${api_url}" | tr -d '\n')"
+  if [ -z "${release_list_json}" ]; then
     echo "无法读取 release 元数据，请稍后重试。" >&2
     exit 1
   fi
 
-  if [ -n "${TAG}" ]; then
-    return 0
-  fi
-
-  tag="$(printf '%s' "${RELEASE_JSON}" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p')"
-
-  if [ -z "${tag}" ]; then
-    echo "无法解析最新 release 版本，请稍后重试或使用 -v 指定版本。" >&2
+  selected_release="$(select_latest_cli_release "${release_list_json}" "${TARGET}")"
+  RELEASE_JSON="${selected_release}"
+  selected_tag="$(extract_release_tag_name "${RELEASE_JSON}")"
+  if [ -z "${selected_tag}" ]; then
+    echo "无法解析最新 CLI release 版本，请稍后重试或使用 -v 指定版本。" >&2
     exit 1
   fi
 
-  TAG="${tag}"
+  TAG="${selected_tag}"
 }
 
 extract_asset_metadata_with_python() {
@@ -244,6 +334,28 @@ verify_checksum() {
   fi
 }
 
+cleanup_tmp_dir() {
+  if [ -z "${TMP_DIR:-}" ] || [ ! -d "${TMP_DIR}" ]; then
+    return
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "${TMP_DIR}" <<'PY'
+import os
+import shutil
+import sys
+
+target = sys.argv[1]
+if target.startswith("/tmp/") and os.path.isdir(target):
+    shutil.rmtree(target, ignore_errors=True)
+PY
+    return
+  fi
+
+  find "${TMP_DIR}" -depth -type f -exec rm -f {} \; 2>/dev/null || true
+  find "${TMP_DIR}" -depth -type d -exec rmdir {} \; 2>/dev/null || true
+}
+
 detect_profile() {
   case "${SHELL:-}" in
     *zsh) printf '%s\n' "$HOME/.zshrc" ;;
@@ -337,6 +449,10 @@ ensure_path_config() {
   fi
 }
 
+if [ "${TOMCAT_INSTALL_SH_SOURCE_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 while [ $# -gt 0 ]; do
   case "$1" in
     -y|--yes)
@@ -376,7 +492,7 @@ TARGET="$(detect_target)"
 load_release_metadata
 
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "${TMP_DIR}"' EXIT
+trap cleanup_tmp_dir EXIT
 
 ASSET_NAME="tomcat-${TAG}-${TARGET}.tar.gz"
 ASSET_METADATA="$(extract_asset_metadata "${ASSET_NAME}")"

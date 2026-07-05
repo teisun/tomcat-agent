@@ -6,6 +6,8 @@
 !LICENSE
 !LICENSE.txt
 !LICENSE.md
+!bin/
+!bin/**
 !gui/
 gui/**
 !gui/dist/

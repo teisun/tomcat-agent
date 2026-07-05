@@ -2,12 +2,15 @@
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat",
   "description": "Tomcat chat participant for VS Code.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "tomcat",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/teisun/tomcat-agent.git"
+  },
+  "tomcat": {
+    "bundledCliVersion": "0.1.8"
   },
   "categories": [
     "AI",

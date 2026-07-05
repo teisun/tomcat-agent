@@ -1,3 +1,7 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import * as vscode from "vscode";
 
 import {
@@ -7,7 +11,9 @@ import {
   TOMCAT_FOCUS_WEBVIEW_COMMAND,
   TEST_DEFAULT_CWD_ENV,
   TEST_EXTRA_ARGS_ENV,
+  TEST_INFO_ACTION_ENV,
   TEST_SUPPRESS_EXIT_PROMPT_ENV,
+  TEST_WARNING_ACTION_ENV,
   TOMCAT_CONFIG_SECTION,
   TOMCAT_EXECUTABLE_NAME,
   TOMCAT_UI_MODE_SETTING,
@@ -48,6 +54,13 @@ import { TomcatWebviewViewProvider } from "./ui/webview/provider";
 export type { WebviewIntent } from "./ui/webview/protocol";
 
 let disposeRuntime: (() => void) | undefined;
+const execFileAsync = promisify(execFile);
+const SETUP_TERMINAL_NAME = "Tomcat Setup";
+const START_SETUP_ACTION = "Start Setup";
+const RETRY_SETUP_ACTION = "I've Finished Setup";
+const OPEN_GUIDE_ACTION = "View Guide";
+const OPEN_SETTINGS_ACTION = "Open Settings";
+const OPEN_TERMINAL_ACTION = "Open Terminal";
 
 type CapturedStreamEvent =
   | {
@@ -77,6 +90,12 @@ export interface RunParticipantTurnResult {
   result: vscode.ChatResult | undefined;
   stream: CapturedStreamEvent[];
 }
+
+type PromptRecord = {
+  actions: string[];
+  message: string;
+  severity: "info" | "warning";
+};
 
 export interface ObservedEventFilter {
   sessionId?: string;
@@ -163,6 +182,7 @@ export interface TomcatExtensionApi {
     getObservedEvents(): ServeEvent[];
     getOwnership(): Array<{ owner: FrontendOwnerKind; sessionId: string }>;
     getPendingQuestion(requestId?: string): PendingQuestionSnapshot | undefined;
+    getPromptHistory(): PromptRecord[];
     getPreparedChange(toolCallId: string): {
       displayPath: string;
       originalContent: string;
@@ -307,20 +327,53 @@ function shouldSuppressExitPrompt(): boolean {
   return process.env[TEST_SUPPRESS_EXIT_PROMPT_ENV] === "1";
 }
 
-async function showInformationMessage(message: string): Promise<void> {
-  if (shouldSuppressExitPrompt()) {
-    return;
-  }
-
-  await vscode.window.showInformationMessage(message);
+function autoSelectedPromptAction(
+  severity: PromptRecord["severity"],
+  actions: readonly string[],
+): string | undefined {
+  const envName = severity === "info" ? TEST_INFO_ACTION_ENV : TEST_WARNING_ACTION_ENV;
+  const configured = process.env[envName]?.trim();
+  return configured && actions.includes(configured) ? configured : undefined;
 }
 
-async function showWarningMessage(message: string): Promise<void> {
-  if (shouldSuppressExitPrompt()) {
-    return;
+async function showPromptMessage(
+  promptHistory: PromptRecord[],
+  severity: PromptRecord["severity"],
+  message: string,
+  actions: string[] = [],
+): Promise<string | undefined> {
+  promptHistory.push({
+    actions: [...actions],
+    message,
+    severity,
+  });
+
+  const autoSelected = autoSelectedPromptAction(severity, actions);
+  if (autoSelected) {
+    return autoSelected;
   }
 
-  await vscode.window.showWarningMessage(message);
+  if (shouldSuppressExitPrompt()) {
+    return undefined;
+  }
+
+  return severity === "info"
+    ? vscode.window.showInformationMessage(message, ...actions)
+    : vscode.window.showWarningMessage(message, ...actions);
+}
+
+async function showInformationMessage(
+  promptHistory: PromptRecord[],
+  message: string,
+): Promise<void> {
+  await showPromptMessage(promptHistory, "info", message);
+}
+
+async function showWarningMessage(
+  promptHistory: PromptRecord[],
+  message: string,
+): Promise<void> {
+  await showPromptMessage(promptHistory, "warning", message);
 }
 
 function getDefaultCwd(): string | undefined {
@@ -337,8 +390,95 @@ function getDefaultCwd(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
-async function resolveExecutable(): Promise<ResolvedTomcatExecutable> {
+function bundledExecutableName(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "tomcat.exe" : "tomcat";
+}
+
+function bundledExecutableCandidate(extensionPath: string): string {
+  return path.join(extensionPath, "bin", bundledExecutableName());
+}
+
+function quoteForTerminal(command: string): string {
+  if (process.platform === "win32") {
+    return `"${command.replace(/"/g, '""')}"`;
+  }
+  return `'${command.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildInitCommand(executable: string): string {
+  if (executable.includes(path.sep) || executable.includes("\\")) {
+    return `${quoteForTerminal(executable)} init`;
+  }
+  return `${executable} init`;
+}
+
+async function clearMacQuarantine(targetPath: string): Promise<void> {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  try {
+    await execFileAsync("xattr", ["-dr", "com.apple.quarantine", targetPath]);
+  } catch {
+    // Best-effort only. Browser-downloaded binaries may carry quarantine flags.
+  }
+}
+
+function isReadonlyExecutableError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const code = "code" in error ? String((error as { code?: unknown }).code ?? "") : "";
+  return code === "EPERM" || code === "EROFS";
+}
+
+async function ensureBundledExecutable(
+  context: vscode.ExtensionContext,
+  candidatePath: string,
+): Promise<string> {
+  try {
+    await fs.access(candidatePath);
+  } catch {
+    return candidatePath;
+  }
+
+  try {
+    if (process.platform !== "win32") {
+      await fs.chmod(candidatePath, 0o755);
+      await clearMacQuarantine(candidatePath);
+    }
+    return candidatePath;
+  } catch (error) {
+    if (!isReadonlyExecutableError(error)) {
+      return candidatePath;
+    }
+  }
+
+  const fallbackDir = context.globalStorageUri.fsPath;
+  const fallbackPath = path.join(fallbackDir, path.basename(candidatePath));
+  await fs.mkdir(fallbackDir, { recursive: true });
+  await fs.copyFile(candidatePath, fallbackPath);
+  if (process.platform !== "win32") {
+    await fs.chmod(fallbackPath, 0o755);
+    await clearMacQuarantine(fallbackPath);
+  }
+  return fallbackPath;
+}
+
+async function openExtensionGuide(context: vscode.ExtensionContext): Promise<void> {
+  const guidePath = path.join(context.extensionPath, "README.md");
+  const document = await vscode.workspace.openTextDocument(guidePath);
+  await vscode.window.showTextDocument(document, { preview: true });
+}
+
+async function resolveExecutable(
+  context: vscode.ExtensionContext,
+): Promise<ResolvedTomcatExecutable> {
+  const bundledPath = await ensureBundledExecutable(
+    context,
+    bundledExecutableCandidate(context.extensionPath),
+  );
   return resolveTomcatExecutable({
+    bundledPath,
     configuredPath: getTomcatConfiguration().get<string>("path", TOMCAT_EXECUTABLE_NAME),
     pathWasConfigured: isTomcatPathConfigured(),
   });
@@ -365,6 +505,7 @@ export async function activate(
   const commands = new ParticipantCommands(ide);
   commands.register(context);
   const observedEvents: ServeEvent[] = [];
+  const promptHistory: PromptRecord[] = [];
   const eventWaiters = new Set<{
     filter: ObservedEventFilter;
     reject(error: Error): void;
@@ -382,7 +523,7 @@ export async function activate(
       waiter.resolve(event);
     }
   };
-  let resolvedExecutable = await resolveExecutable();
+  let resolvedExecutable = await resolveExecutable(context);
 
   const messenger = new TomcatMessenger({
     cwd: getDefaultCwd(),
@@ -400,38 +541,194 @@ export async function activate(
 
   let initializePromise: Promise<InitializeResult> | undefined;
   let hasShownInitializationHint = false;
+  let firstRunSetupInProgress = false;
+  let firstRunRetryAttemptsRemaining = 0;
+  let firstRunRetryTimer: NodeJS.Timeout | undefined;
+  let setupTerminal: vscode.Terminal | undefined;
 
-  const maybeShowExecutableWarning = async (): Promise<void> => {
-    if (resolvedExecutable.found || shouldSuppressExitPrompt()) {
-      return;
-    }
-
-    const selection = await vscode.window.showWarningMessage(
-      "Tomcat CLI was not found automatically. Install `tomcat` on your PATH or set tomcat.path if VS Code does not inherit your shell environment.",
-      "Open Settings",
-    );
-    if (selection === "Open Settings") {
-      await vscode.commands.executeCommand(
-        "workbench.action.openSettings",
-        `${TOMCAT_CONFIG_SECTION}.path`,
-      );
+  const clearFirstRunRetryTimer = (): void => {
+    if (firstRunRetryTimer) {
+      clearTimeout(firstRunRetryTimer);
+      firstRunRetryTimer = undefined;
     }
   };
 
+  const openTomcatPathSettings = async (): Promise<void> => {
+    await vscode.commands.executeCommand(
+      "workbench.action.openSettings",
+      `${TOMCAT_CONFIG_SECTION}.path`,
+    );
+  };
+
+  const ensureSetupTerminal = (): vscode.Terminal => {
+    if (!setupTerminal || setupTerminal.exitStatus) {
+      setupTerminal = vscode.window.createTerminal({
+        cwd: getDefaultCwd(),
+        name: SETUP_TERMINAL_NAME,
+      });
+    }
+    return setupTerminal;
+  };
+
+  const maybeShowSetupRecoveryMessage = async (
+    message: string,
+    severity: "info" | "warning" = "info",
+  ): Promise<void> => {
+    const selection = severity === "warning"
+      ? await showPromptMessage(
+          promptHistory,
+          "warning",
+          message,
+          [RETRY_SETUP_ACTION, OPEN_TERMINAL_ACTION, OPEN_GUIDE_ACTION],
+        )
+      : await showPromptMessage(
+          promptHistory,
+          "info",
+          message,
+          [RETRY_SETUP_ACTION, OPEN_TERMINAL_ACTION, OPEN_GUIDE_ACTION],
+        );
+
+    if (selection === RETRY_SETUP_ACTION) {
+      const recovered = await retryInitializationAfterSetup(true);
+      if (!recovered) {
+        await maybeShowSetupRecoveryMessage(
+          "Tomcat is not ready yet. Finish the `tomcat init` prompts in the integrated terminal, then try again.",
+          "warning",
+        );
+      }
+      return;
+    }
+    if (selection === OPEN_TERMINAL_ACTION) {
+      ensureSetupTerminal().show(true);
+      return;
+    }
+    if (selection === OPEN_GUIDE_ACTION) {
+      void openExtensionGuide(context);
+    }
+  };
+
+  const stopFirstRunSetup = (): void => {
+    firstRunSetupInProgress = false;
+    firstRunRetryAttemptsRemaining = 0;
+    clearFirstRunRetryTimer();
+  };
+
+  const maybeShowExecutableWarning = async (): Promise<void> => {
+    if (resolvedExecutable.found) {
+      return;
+    }
+
+    const selection = await showPromptMessage(
+      promptHistory,
+      "warning",
+      "Tomcat CLI was not found automatically. Install a bundled VSIX for your platform, or install `tomcat` on your PATH, or set tomcat.path if VS Code does not inherit your shell environment.",
+      [OPEN_GUIDE_ACTION, OPEN_SETTINGS_ACTION],
+    );
+    if (selection === OPEN_GUIDE_ACTION) {
+      await openExtensionGuide(context);
+      return;
+    }
+    if (selection === OPEN_SETTINGS_ACTION) {
+      await openTomcatPathSettings();
+    }
+  };
+
+  const retryInitializationAfterSetup = async (showSuccessMessage: boolean): Promise<boolean> => {
+    try {
+      await applyRuntimeConfiguration();
+      messenger.restart();
+      initializePromise = undefined;
+      sessionRouter.clearBootstrapSessionId();
+      const result = await ensureInitialized();
+      stopFirstRunSetup();
+      if (showSuccessMessage) {
+        await showInformationMessage(
+          promptHistory,
+          `Tomcat setup finished. Active session: ${result.sessionId ?? "n/a"}`,
+        );
+      }
+      return true;
+    } catch (error) {
+      appendOutput(output, "debug", `setup retry still waiting: ${String(error)}`);
+      return false;
+    }
+  };
+
+  const scheduleFirstRunRetryLoop = (): void => {
+    clearFirstRunRetryTimer();
+    if (!firstRunSetupInProgress) {
+      return;
+    }
+
+    firstRunRetryAttemptsRemaining = 24;
+    const tick = async (): Promise<void> => {
+      if (!firstRunSetupInProgress) {
+        return;
+      }
+      if (firstRunRetryAttemptsRemaining <= 0) {
+        clearFirstRunRetryTimer();
+        void maybeShowSetupRecoveryMessage(
+          "Tomcat is still waiting for first-time setup. Finish `tomcat init` in the integrated terminal, then choose `I've Finished Setup` to reconnect.",
+          "warning",
+        );
+        return;
+      }
+
+      firstRunRetryAttemptsRemaining -= 1;
+      const recovered = await retryInitializationAfterSetup(false);
+      if (recovered || !firstRunSetupInProgress) {
+        return;
+      }
+      firstRunRetryTimer = setTimeout(() => {
+        void tick();
+      }, 5_000);
+    };
+
+    firstRunRetryTimer = setTimeout(() => {
+      void tick();
+    }, 5_000);
+  };
+
+  const startFirstRunSetup = async (): Promise<void> => {
+    firstRunSetupInProgress = true;
+    hasShownInitializationHint = true;
+    const terminal = ensureSetupTerminal();
+    const initCommand = buildInitCommand(resolvedExecutable.executable);
+    terminal.show(true);
+    terminal.sendText(initCommand, true);
+    appendOutput(output, "info", `started first-run setup: ${initCommand}`);
+    scheduleFirstRunRetryLoop();
+    await maybeShowSetupRecoveryMessage(
+      "Tomcat setup is running in the integrated terminal. Finish the prompts there, then choose `I've Finished Setup` if Tomcat does not reconnect automatically.",
+    );
+  };
+
   const maybeShowInitializationHint = async (): Promise<void> => {
-    if (hasShownInitializationHint || shouldSuppressExitPrompt()) {
+    if (hasShownInitializationHint || firstRunSetupInProgress) {
       return;
     }
 
     hasShownInitializationHint = true;
-    await vscode.window.showWarningMessage(
-      "Tomcat was found, but the runtime could not initialize. If this is your first time using Tomcat, run `tomcat init` once in a terminal and try again.",
+    const selection = await showPromptMessage(
+      promptHistory,
+      "info",
+      "Tomcat is installed, but it is not ready yet (usually about 1 minute to finish setup): choose a default model, add your API key, and initialize the local runtime.",
+      [START_SETUP_ACTION, OPEN_GUIDE_ACTION],
     );
+    if (selection === START_SETUP_ACTION) {
+      await startFirstRunSetup();
+      return;
+    }
+    if (selection === OPEN_GUIDE_ACTION) {
+      await openExtensionGuide(context);
+    }
   };
 
   const applyRuntimeConfiguration = async (): Promise<void> => {
-    resolvedExecutable = await resolveExecutable();
-    hasShownInitializationHint = false;
+    resolvedExecutable = await resolveExecutable(context);
+    if (!firstRunSetupInProgress) {
+      hasShownInitializationHint = false;
+    }
     messenger.updateOptions({
       cwd: getDefaultCwd(),
       executable: resolvedExecutable.executable,
@@ -556,11 +853,12 @@ export async function activate(
       void maybeShowExecutableWarning();
       return;
     }
-    void vscode.window
-      .showWarningMessage(
-        "Tomcat serve exited. Restart the bridge to continue chatting.",
-        "Restart Tomcat",
-      )
+    void showPromptMessage(
+      promptHistory,
+      "warning",
+      "Tomcat serve exited. Restart the bridge to continue chatting.",
+      ["Restart Tomcat"],
+    )
       .then((selection) => {
         if (selection === "Restart Tomcat") {
           void vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND);
@@ -604,6 +902,7 @@ export async function activate(
       sessionRouter.clearBootstrapSessionId();
       const result = await ensureInitialized();
       await showInformationMessage(
+        promptHistory,
         `Tomcat serve restarted. Active session: ${result.sessionId ?? "n/a"}`,
       );
     },
@@ -614,7 +913,7 @@ export async function activate(
     async () => {
       await ensureInitialized();
       const sessionId = await sessionRouter.newSession();
-      await showInformationMessage(`Created Tomcat session: ${sessionId ?? "unknown"}`);
+      await showInformationMessage(promptHistory, `Created Tomcat session: ${sessionId ?? "unknown"}`);
     },
   );
 
@@ -630,6 +929,7 @@ export async function activate(
         return `${session.sessionId} - ${busy}${active}`;
       });
       await showInformationMessage(
+        promptHistory,
         sessionLines.length > 0
           ? `Tomcat sessions: ${sessionLines.join(", ")}`
           : "Tomcat has no active sessions.",
@@ -647,17 +947,17 @@ export async function activate(
     async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
-        await showWarningMessage("Open an editor and select some text first.");
+        await showWarningMessage(promptHistory, "Open an editor and select some text first.");
         return;
       }
       const reference = buildSelectionReference(editor);
       if (!reference) {
-        await showWarningMessage("Select some text before adding it to Tomcat Chat.");
+        await showWarningMessage(promptHistory, "Select some text before adding it to Tomcat Chat.");
         return;
       }
       const sessionId = await focusWebviewSurface();
       if (!sessionId) {
-        await showWarningMessage("Tomcat sidebar is not ready yet. Please try again.");
+        await showWarningMessage(promptHistory, "Tomcat sidebar is not ready yet. Please try again.");
         return;
       }
       await webviewProvider.postInsertReference(sessionId, reference);
@@ -672,12 +972,12 @@ export async function activate(
           ? [uri]
           : [];
       if (!targets.length) {
-        await showWarningMessage("Choose a file or folder in the explorer first.");
+        await showWarningMessage(promptHistory, "Choose a file or folder in the explorer first.");
         return;
       }
       const sessionId = await focusWebviewSurface();
       if (!sessionId) {
-        await showWarningMessage("Tomcat sidebar is not ready yet. Please try again.");
+        await showWarningMessage(promptHistory, "Tomcat sidebar is not ready yet. Please try again.");
         return;
       }
       for (const target of targets) {
@@ -727,7 +1027,7 @@ export async function activate(
         if (messenger.isRunning) {
           messenger.restart();
           await ensureInitialized();
-          await showInformationMessage("Tomcat settings changed. Restarted Tomcat serve.");
+          await showInformationMessage(promptHistory, "Tomcat settings changed. Restarted Tomcat serve.");
         }
         webviewProvider.setUiMode(getTomcatUiMode());
       })().catch((error: unknown) => {
@@ -767,12 +1067,16 @@ export async function activate(
         if (selectionCodeLensTimer) {
           clearTimeout(selectionCodeLensTimer);
         }
+        clearFirstRunRetryTimer();
+        setupTerminal?.dispose();
       },
     },
   );
   scheduleSelectionCodeLensRefresh();
 
   disposeRuntime = () => {
+    clearFirstRunRetryTimer();
+    setupTerminal?.dispose();
     participant?.dispose();
     askQuestionHandler.dispose();
     observedEventSubscription.dispose();
@@ -819,6 +1123,7 @@ export async function activate(
           sessionId,
         })),
       getPendingQuestion: (requestId?: string) => commands.getPendingQuestion(requestId),
+      getPromptHistory: () => [...promptHistory],
       getPreparedChange: (toolCallId) => {
         const change = ide.getPreparedChange(toolCallId);
         if (!change) {

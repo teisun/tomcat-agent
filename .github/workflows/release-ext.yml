@@ -1,0 +1,202 @@
+name: release-ext
+
+on:
+  push:
+    tags:
+      - "ext-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extension release tag to validate/package (for dry runs)"
+        required: true
+        type: string
+      cli_run_id:
+        description: "Optional release-cli workflow run ID that provides dry-run CLI artifacts"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CLI_ARTIFACT_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_run_id || '' }}
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: build extension packages
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: tomcat-vscode-ext
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          cache: npm
+          cache-dependency-path: |
+            tomcat-vscode-ext/package-lock.json
+            tomcat-vscode-ext/gui/package-lock.json
+          node-version: 22
+
+      - name: Validate extension release tag
+        id: guard
+        run: node ../.github/scripts/release/check-ext-tag.mjs "${GITHUB_WORKSPACE}" "${RELEASE_TAG}"
+
+      - name: Install extension dependencies
+        run: |
+          set -euo pipefail
+          npm ci
+          npm --prefix gui ci
+
+      - name: Build extension once
+        run: npm run build
+
+      - name: Download dry-run CLI artifacts
+        if: env.CLI_ARTIFACT_RUN_ID != ''
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          path: bundles/artifacts
+          pattern: release-cli-*
+          repository: ${{ github.repository }}
+          run-id: ${{ env.CLI_ARTIFACT_RUN_ID }}
+
+      - name: Check dry-run CLI artifacts
+        if: env.CLI_ARTIFACT_RUN_ID != ''
+        env:
+          PINNED_CLI_VERSION: ${{ steps.guard.outputs.bundled_cli_version }}
+        run: |
+          set -euo pipefail
+          tag="cli-v${PINNED_CLI_VERSION}"
+          asset_names=""
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+            archive="tomcat-${tag}-${target}.tar.gz"
+            artifact_dir="../bundles/artifacts/release-cli-${target}"
+            test -f "${artifact_dir}/${archive}"
+            asset_names="${asset_names}${archive}\n"
+          done
+          printf '%b' "${asset_names}" \
+            | node ../.github/scripts/release/check-bundled-cli-assets.mjs "${PINNED_CLI_VERSION}"
+
+      - name: Check pinned CLI release assets
+        if: env.CLI_ARTIFACT_RUN_ID == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PINNED_CLI_VERSION: ${{ steps.guard.outputs.bundled_cli_version }}
+        run: |
+          set -euo pipefail
+          tag="cli-v${PINNED_CLI_VERSION}"
+          asset_names="$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          printf '%s\n' "${asset_names}" \
+            | node ../.github/scripts/release/check-bundled-cli-assets.mjs "${PINNED_CLI_VERSION}"
+
+      - name: Package bundled and pure VSIX artifacts
+        env:
+          CLI_ARTIFACT_RUN_ID: ${{ env.CLI_ARTIFACT_RUN_ID }}
+          EXT_VERSION: ${{ steps.guard.outputs.extension_version }}
+          GH_TOKEN: ${{ github.token }}
+          PINNED_CLI_VERSION: ${{ steps.guard.outputs.bundled_cli_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist bundles
+
+          package_bundled_vsix() {
+            local cli_target="$1"
+            local vscode_target="$2"
+            local tag="cli-v${PINNED_CLI_VERSION}"
+            local bundle_dir="bundles/${cli_target}"
+            local archive="tomcat-${tag}-${cli_target}.tar.gz"
+
+            mkdir -p "${bundle_dir}"
+            if [ -n "${CLI_ARTIFACT_RUN_ID}" ]; then
+              cp "../bundles/artifacts/release-cli-${cli_target}/${archive}" "${bundle_dir}/${archive}"
+            else
+              gh release download "${tag}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --pattern "${archive}" \
+                --dir "${bundle_dir}"
+            fi
+            tar -xzf "${bundle_dir}/${archive}" -C "${bundle_dir}"
+
+            npx tsx scripts/package-vsix.ts \
+              --skip-build \
+              --target "${vscode_target}" \
+              --bundle-binary "${bundle_dir}/tomcat" \
+              --out "dist/tomcat-vscode-ext-${EXT_VERSION}-${vscode_target}.vsix"
+          }
+
+          package_bundled_vsix "aarch64-apple-darwin" "darwin-arm64"
+          package_bundled_vsix "x86_64-apple-darwin" "darwin-x64"
+          package_bundled_vsix "x86_64-unknown-linux-gnu" "linux-x64"
+
+          npx tsx scripts/package-vsix.ts \
+            --skip-build \
+            --out "dist/tomcat-vscode-ext-${EXT_VERSION}.vsix"
+
+      - name: Upload packaged VSIX artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-ext-vsix
+          path: tomcat-vscode-ext/dist/*.vsix
+          if-no-files-found: error
+
+  publish:
+    name: publish extension release
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs: build
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packaged VSIX artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: release-ext-vsix
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.vsix > SHA256SUMS
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.vsix
+            dist/SHA256SUMS
+          generate_release_notes: true
+
+      - name: Publish VSIX files to VS Code Marketplace
+        if: ${{ secrets.VSCE_PAT != '' }}
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          set -euo pipefail
+          for file in dist/*.vsix; do
+            npx @vscode/vsce publish --packagePath "$file" -p "${VSCE_PAT}"
+          done
+
+      - name: Publish VSIX files to OpenVSX
+        if: ${{ secrets.OVSX_PAT != '' }}
+        continue-on-error: true
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          set -euo pipefail
+          for file in dist/*.vsix; do
+            npx ovsx publish "$file" -p "${OVSX_PAT}"
+          done
