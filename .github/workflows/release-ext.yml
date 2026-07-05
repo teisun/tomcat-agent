@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "ext-v*"
+      - "dry-run-ext-v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -20,7 +21,7 @@ permissions:
 
 env:
   CLI_ARTIFACT_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.cli_run_id || '' }}
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  RAW_RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -39,6 +40,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          raw="${RAW_RELEASE_REF}"
+          use_cli_artifacts=0
+          case "${raw}" in
+            dry-run-ext-v*)
+              release_tag="${raw#dry-run-}"
+              use_cli_artifacts=1
+              ;;
+            ext-v*)
+              release_tag="${raw}"
+              ;;
+            *)
+              echo "Unsupported extension release ref: ${raw}" >&2
+              exit 1
+              ;;
+          esac
+          if [ -n "${CLI_ARTIFACT_RUN_ID}" ]; then
+            use_cli_artifacts=1
+          fi
+          printf 'release_tag=%s\n' "${release_tag}" >> "${GITHUB_OUTPUT}"
+          printf 'use_cli_artifacts=%s\n' "${use_cli_artifacts}" >> "${GITHUB_OUTPUT}"
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -50,7 +76,7 @@ jobs:
 
       - name: Validate extension release tag
         id: guard
-        run: node ../.github/scripts/release/check-ext-tag.mjs "${GITHUB_WORKSPACE}" "${RELEASE_TAG}"
+        run: node ../.github/scripts/release/check-ext-tag.mjs "${GITHUB_WORKSPACE}" "${{ steps.meta.outputs.release_tag }}"
 
       - name: Install extension dependencies
         run: |
@@ -61,18 +87,37 @@ jobs:
       - name: Build extension once
         run: npm run build
 
+      - name: Resolve CLI dry-run workflow run
+        if: steps.meta.outputs.use_cli_artifacts == '1' && env.CLI_ARTIFACT_RUN_ID == ''
+        id: cli_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs" \
+            -f event=push \
+            -f head_sha="${GITHUB_SHA}" \
+            -f per_page=50 \
+            --jq '.workflow_runs | map(select(.name == "release-cli" and .conclusion == "success")) | first | .id')"
+          if [ -z "${run_id}" ] || [ "${run_id}" = "null" ]; then
+            echo "Could not locate a successful release-cli dry-run for commit ${GITHUB_SHA}" >&2
+            exit 1
+          fi
+          printf 'run_id=%s\n' "${run_id}" >> "${GITHUB_OUTPUT}"
+
       - name: Download dry-run CLI artifacts
-        if: env.CLI_ARTIFACT_RUN_ID != ''
+        if: steps.meta.outputs.use_cli_artifacts == '1'
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
+          merge-multiple: false
           path: bundles/artifacts
           pattern: release-cli-*
           repository: ${{ github.repository }}
-          run-id: ${{ env.CLI_ARTIFACT_RUN_ID }}
+          run-id: ${{ env.CLI_ARTIFACT_RUN_ID || steps.cli_run.outputs.run_id }}
 
       - name: Check dry-run CLI artifacts
-        if: env.CLI_ARTIFACT_RUN_ID != ''
+        if: steps.meta.outputs.use_cli_artifacts == '1'
         env:
           PINNED_CLI_VERSION: ${{ steps.guard.outputs.bundled_cli_version }}
         run: |
@@ -89,7 +134,7 @@ jobs:
             | node ../.github/scripts/release/check-bundled-cli-assets.mjs "${PINNED_CLI_VERSION}"
 
       - name: Check pinned CLI release assets
-        if: env.CLI_ARTIFACT_RUN_ID == ''
+        if: steps.meta.outputs.use_cli_artifacts != '1'
         env:
           GH_TOKEN: ${{ github.token }}
           PINNED_CLI_VERSION: ${{ steps.guard.outputs.bundled_cli_version }}
@@ -102,10 +147,10 @@ jobs:
 
       - name: Package bundled and pure VSIX artifacts
         env:
-          CLI_ARTIFACT_RUN_ID: ${{ env.CLI_ARTIFACT_RUN_ID }}
           EXT_VERSION: ${{ steps.guard.outputs.extension_version }}
           GH_TOKEN: ${{ github.token }}
           PINNED_CLI_VERSION: ${{ steps.guard.outputs.bundled_cli_version }}
+          USE_CLI_ARTIFACTS: ${{ steps.meta.outputs.use_cli_artifacts }}
         run: |
           set -euo pipefail
           mkdir -p dist bundles
@@ -118,7 +163,7 @@ jobs:
             local archive="tomcat-${tag}-${cli_target}.tar.gz"
 
             mkdir -p "${bundle_dir}"
-            if [ -n "${CLI_ARTIFACT_RUN_ID}" ]; then
+            if [ "${USE_CLI_ARTIFACTS}" = "1" ]; then
               cp "../bundles/artifacts/release-cli-${cli_target}/${archive}" "${bundle_dir}/${archive}"
             else
               gh release download "${tag}" \
@@ -153,7 +198,7 @@ jobs:
   publish:
     name: publish extension release
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && !startsWith(github.ref_name, 'dry-run-')
     needs: build
     permissions:
       contents: write

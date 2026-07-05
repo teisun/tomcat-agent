@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "cli-v*"
+      - "dry-run-cli-v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -16,7 +17,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  RAW_RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -42,13 +43,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          raw="${RAW_RELEASE_REF}"
+          case "${raw}" in
+            dry-run-cli-v*) release_tag="${raw#dry-run-}" ;;
+            cli-v*) release_tag="${raw}" ;;
+            *)
+              echo "Unsupported CLI release ref: ${raw}" >&2
+              exit 1
+              ;;
+          esac
+          printf 'release_tag=%s\n' "${release_tag}" >> "${GITHUB_OUTPUT}"
+
       - name: Setup Node for release guards
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - name: Validate CLI release tag
-        run: node ../.github/scripts/release/check-cli-tag.mjs "${GITHUB_WORKSPACE}" "${RELEASE_TAG}"
+        run: node ../.github/scripts/release/check-cli-tag.mjs "${GITHUB_WORKSPACE}" "${{ steps.meta.outputs.release_tag }}"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -66,7 +82,7 @@ jobs:
       - name: Package release archive
         run: |
           set -euo pipefail
-          tag="${RELEASE_TAG}"
+          tag="${{ steps.meta.outputs.release_tag }}"
           target="${{ matrix.target }}"
           package="tomcat-${tag}-${target}"
           bin_path="target/${target}/release/tomcat"
@@ -79,13 +95,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-cli-${{ matrix.target }}
-          path: tomcat/dist/tomcat-${{ env.RELEASE_TAG }}-${{ matrix.target }}.tar.gz
+          path: tomcat/dist/tomcat-${{ steps.meta.outputs.release_tag }}-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   publish:
     name: publish cli release
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && !startsWith(github.ref_name, 'dry-run-')
     needs: build
     permissions:
       contents: write
