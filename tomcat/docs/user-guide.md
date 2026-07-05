@@ -30,7 +30,8 @@
 GitHub Release
    -> 下载平台对应的 bundled .vsix
    -> code --install-extension xxx.vsix
-   -> 在 Chat 里输入 @tomcat
+   -> Cmd/Ctrl+Shift+P -> Tomcat: Focus Agent Box
+   -> 或打开右侧二级侧边栏后点击 Tomcat Agent Box
    -> 如果提示首次设置，点 Start Setup，让 VS Code 帮你跑 tomcat init
 ```
 

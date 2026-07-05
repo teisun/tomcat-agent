@@ -1,7 +1,7 @@
 {
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat",
-  "description": "Tomcat chat participant for VS Code.",
+  "description": "Tomcat Agent Box, an AI coding agent in your VS Code sidebar.",
   "version": "0.1.2",
   "publisher": "tomcat",
   "license": "MIT",
@@ -19,7 +19,9 @@
   "keywords": [
     "tomcat",
     "agent",
-    "chat",
+    "ai",
+    "assistant",
+    "sidebar",
     "vscode"
   ],
   "icon": "media/icon.png",
@@ -47,7 +49,7 @@
       },
       {
         "command": "tomcat.ui.focus",
-        "title": "Tomcat: Focus Sidebar"
+        "title": "Tomcat: Focus Agent Box"
       },
       {
         "category": "Tomcat",
@@ -84,7 +86,7 @@
       "secondarySidebar": [
         {
           "id": "tomcat-sidebar",
-          "title": "Tomcat",
+          "title": "Tomcat Agent Box",
           "icon": "media/tomcat.svg"
         }
       ]
@@ -93,7 +95,7 @@
       "tomcat-sidebar": [
         {
           "id": "tomcat.chatView",
-          "name": "Tomcat",
+          "name": "Tomcat Agent Box",
           "type": "webview"
         }
       ]
@@ -156,7 +158,7 @@
             "webview"
           ],
           "default": "both",
-          "description": "Choose whether Tomcat shows the native chat participant, the custom sidebar webview, or both."
+          "description": "Choose whether Tomcat shows the native chat participant, the Tomcat Agent Box, or both."
         }
       }
     }
