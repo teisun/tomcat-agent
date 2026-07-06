@@ -333,8 +333,7 @@ pub fn read_first_user_message_text(path: &Path, max_lines: usize) -> Option<Str
         }
         return message
             .get("content")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .and_then(crate::core::session::manager::extract_user_text_from_content);
     }
     None
 }

@@ -60,6 +60,35 @@ pub fn derive_title_from_user_message(text: &str) -> String {
     }
 }
 
+/// 从 transcript / wire 的 `content` 字段中提取用户真实输入文本。
+///
+/// 兼容两种落盘形态：
+/// - 纯字符串：`"content": "hello"`
+/// - 结构化 parts：`"content": [{"type":"input_text","text":"hello"}]`
+///
+/// 对 parts 仅拼接 `input_text` 片段，忽略 reference / image / file；这样标题只来源于
+/// 用户显式输入，不把上下文标签或附件元数据混进标题主体。
+pub(crate) fn extract_user_text_from_content(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(parts) => {
+            let mut text = String::new();
+            let mut saw_input_text = false;
+            for part in parts {
+                if part.get("type").and_then(|v| v.as_str()) != Some("input_text") {
+                    continue;
+                }
+                if let Some(chunk) = part.get("text").and_then(|v| v.as_str()) {
+                    saw_input_text = true;
+                    text.push_str(chunk);
+                }
+            }
+            saw_input_text.then_some(text)
+        }
+        _ => None,
+    }
+}
+
 struct AppendInFlightGuard {
     counter: Arc<AtomicUsize>,
 }
@@ -450,8 +479,8 @@ impl SessionManager {
         }
         let text = message
             .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .and_then(extract_user_text_from_content)
+            .unwrap_or_default();
         let store = self.load_store()?;
         let session_id = match self.resolve_active_session_id(&store, session_key) {
             Some(id) => id,
@@ -461,17 +490,17 @@ impl SessionManager {
             .sessions
             .get(&session_id)
             .and_then(|entry| entry.title.as_ref())
-            .is_some_and(|title| !is_rule_derived_title(title, text))
+            .is_some_and(|title| !is_rule_derived_title(title, &text))
         {
             return Ok(());
         }
-        let title = derive_title_from_user_message(text);
+        let title = derive_title_from_user_message(&text);
         self.update_session(session_key, |entry| {
             if entry.title.is_none()
                 || entry
                     .title
                     .as_ref()
-                    .is_some_and(|existing| is_rule_derived_title(existing, text))
+                    .is_some_and(|existing| is_rule_derived_title(existing, &text))
             {
                 entry.title = Some(title.clone());
             }
@@ -499,9 +528,9 @@ impl SessionManager {
         }
         let text = message
             .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let title = derive_title_from_user_message(text);
+            .and_then(extract_user_text_from_content)
+            .unwrap_or_default();
+        let title = derive_title_from_user_message(&text);
         self.with_store_mut(|store| {
             if let Some(entry) = store.sessions.get_mut(session_id) {
                 if entry.title.is_none() {

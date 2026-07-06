@@ -112,6 +112,7 @@ function createSession() {
     planPath: null,
     planState: "chat",
     sessionKey: "fake-workspace",
+    title: null,
   }));
   if (!activeSessionId) {
     activeSessionId = sessionId;
@@ -123,6 +124,61 @@ createSession();
 
 function send(frame) {
   process.stdout.write(JSON.stringify(frame) + "\\n");
+}
+
+function deriveSessionTitleFromText(text) {
+  if (typeof text !== "string") {
+    return null;
+  }
+  const firstLine = text
+    .split(/\\r?\\n/u)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!firstLine) {
+    return null;
+  }
+  if ([...firstLine].length > 40) {
+    return [...firstLine].slice(0, 40).join("") + "…";
+  }
+  return firstLine;
+}
+
+function extractUserTextForTitle(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return null;
+  }
+  let text = "";
+  let sawInputText = false;
+  for (const part of content) {
+    if (!part || typeof part !== "object" || part.type !== "input_text") {
+      continue;
+    }
+    if (typeof part.text === "string") {
+      text += part.text;
+      sawInputText = true;
+    }
+  }
+  return sawInputText ? text : null;
+}
+
+function emitSessionTitleUpdated(sessionId, content) {
+  const title = deriveSessionTitleFromText(extractUserTextForTitle(content));
+  if (!title) {
+    return;
+  }
+  const session = touchSession(ensureSession(sessionId));
+  if (session.title && session.title !== "New session") {
+    return;
+  }
+  session.title = title;
+  send({
+    sessionId,
+    title,
+    type: "session.title_updated",
+  });
 }
 
 function ensureSession(sessionId) {
@@ -139,6 +195,7 @@ function ensureSession(sessionId) {
       planPath: null,
       planState: "chat",
       sessionKey: "fake-workspace",
+      title: null,
     }));
   }
   return sessions.get(sessionId);
@@ -606,7 +663,9 @@ function handlePrompt(frame) {
   if (text.includes("switch back order")) {
     seedTranscriptSwitchBackHistory(sessionId);
   }
-  recordHistoryMessage(sessionId, "user", normalizeHistoryContent(text, segments), userMessageId);
+  const normalizedUserContent = normalizeHistoryContent(text, segments);
+  recordHistoryMessage(sessionId, "user", normalizedUserContent, userMessageId);
+  emitSessionTitleUpdated(sessionId, normalizedUserContent);
   if (text.includes("answer card showcase")) {
     const requestId = \`ask-answer-\${sessionId}\`;
     const request = {
@@ -826,6 +885,7 @@ function handlePrompt(frame) {
     emitCustomPlanEvent(sessionId, "plan.review.warning", {
       reason: "rounds_exhausted",
     });
+    ensureSession(sessionId).title = "Transcript UI Showcase";
     send({
       sessionId,
       title: "Transcript UI Showcase",
@@ -1098,6 +1158,7 @@ function handleCommand(frame) {
             busy: session.busy,
             isCurrent: sessionId === activeSessionId,
             sessionId,
+            title: session.title ?? null,
             updatedAt: session.updatedAt,
           })),
         },

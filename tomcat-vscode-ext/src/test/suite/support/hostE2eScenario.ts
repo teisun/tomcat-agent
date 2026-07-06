@@ -2239,6 +2239,89 @@ export async function assertWebviewPickContextFlow(
   }
 }
 
+export async function assertWebviewSessionTitleFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+
+  const plainSessionId = await createFreshWebviewSession(
+    api,
+    "webview-session-title-plain-new-session",
+  );
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        segments: [{ text: "hello", type: "text" }],
+        sessionId: plainSessionId,
+        text: "hello",
+      },
+      messageId: "webview-session-title-plain-prompt",
+      type: "prompt",
+    }),
+  );
+  const plainTitle = await waitForWebviewState(
+    api,
+    (state) =>
+      state.sessions.find((session) => session.sessionId === plainSessionId)?.title === "hello"
+        ? "hello"
+        : undefined,
+    20_000,
+  );
+  assert.equal(plainTitle, "hello");
+  assert.ok(
+    api.__testing.getObservedEvents().some(
+      (event) => event.sessionId === plainSessionId && event.type === "session.title_updated",
+    ),
+    "expected a session.title_updated event for the pure-text first message",
+  );
+
+  api.__testing.clearObservedEvents();
+  const referencedSessionId = await createFreshWebviewSession(
+    api,
+    "webview-session-title-reference-new-session",
+  );
+  const workspaceDir = requireEnv(TEST_DEFAULT_CWD_ENV);
+  const filePath = path.join(workspaceDir, "title-context.ts");
+  await fs.writeFile(filePath, "export const titleContext = true;\n", "utf8");
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        segments: [
+          { text: "before ", type: "text" },
+          {
+            kind: "file",
+            label: "title-context.ts",
+            path: filePath,
+            type: "reference",
+          },
+          { text: "after", type: "text" },
+        ],
+        sessionId: referencedSessionId,
+        text: "before title-context.ts after",
+      },
+      messageId: "webview-session-title-reference-prompt",
+      type: "prompt",
+    }),
+  );
+  const referencedTitle = await waitForWebviewState(
+    api,
+    (state) => {
+      const title = state.sessions.find((session) => session.sessionId === referencedSessionId)?.title;
+      return title && title !== "New session" ? title : undefined;
+    },
+    20_000,
+  );
+  assert.equal(referencedTitle, "before after");
+  assert.ok(
+    api.__testing.getObservedEvents().some(
+      (event) => event.sessionId === referencedSessionId && event.type === "session.title_updated",
+    ),
+    "expected a session.title_updated event for the reference-bearing first message",
+  );
+}
+
 function transcriptVisualArtifactPath(filename: string): string {
   const dir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR || "/tmp";
   return path.join(dir, filename);

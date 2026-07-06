@@ -44,6 +44,22 @@ fn append_and_read_entries_tail() {
 }
 
 #[test]
+fn read_first_user_message_text_supports_structured_input_text_parts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("structured-user-title.jsonl");
+    write_header(&path, &make_header("sid_parts")).unwrap();
+    append_line(
+        &path,
+        r#"{"type":"message","id":"u1","parentId":null,"timestamp":"2025-01-01T00:00:01.000Z","message":{"role":"user","content":[{"type":"input_text","text":"hello"},{"type":"input_reference","ref_kind":"file","path":"src/app.ts","label":"app.ts"},{"type":"input_text","text":" world"}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        read_first_user_message_text(&path, 10).as_deref(),
+        Some("hello world")
+    );
+}
+
+#[test]
 fn tail_reader_returns_exact_cap_from_large_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large.jsonl");

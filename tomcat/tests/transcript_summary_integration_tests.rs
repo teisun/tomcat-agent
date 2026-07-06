@@ -42,13 +42,32 @@ use tracing::info;
 /// 主对话 provider：依序消费预设 `chat_stream` 事件序列；`chat` 不被使用。
 struct MainStreamLlm {
     streams: Mutex<VecDeque<Vec<Result<StreamEvent, AppError>>>>,
+    chat_reply: Option<String>,
+    chat_call_count: AtomicUsize,
 }
 
 impl MainStreamLlm {
     fn new(streams: Vec<Vec<Result<StreamEvent, AppError>>>) -> Self {
         Self {
             streams: Mutex::new(streams.into()),
+            chat_reply: None,
+            chat_call_count: AtomicUsize::new(0),
         }
+    }
+
+    fn with_chat_reply(
+        streams: Vec<Vec<Result<StreamEvent, AppError>>>,
+        chat_reply: impl Into<String>,
+    ) -> Self {
+        Self {
+            streams: Mutex::new(streams.into()),
+            chat_reply: Some(chat_reply.into()),
+            chat_call_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn chat_call_count(&self) -> usize {
+        self.chat_call_count.load(Ordering::Relaxed)
     }
 }
 
@@ -58,7 +77,19 @@ impl LlmProvider for MainStreamLlm {
         "mock-main-stream"
     }
     async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
-        Err(AppError::Llm("main mock chat not used".to_string()))
+        self.chat_call_count.fetch_add(1, Ordering::Relaxed);
+        let Some(reply) = &self.chat_reply else {
+            return Err(AppError::Llm("main mock chat not used".to_string()));
+        };
+        Ok(ChatResponse {
+            id: None,
+            choices: vec![ChatResponseChoice {
+                index: 0,
+                message: ChatMessage::assistant(reply),
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: None,
+        })
     }
     async fn chat_stream(
         &self,
@@ -225,6 +256,7 @@ struct SceneResolver {
     title: Arc<dyn LlmProvider>,
     main_model: String,
     title_model: String,
+    resolve_title: bool,
 }
 
 impl SceneResolver {
@@ -233,12 +265,14 @@ impl SceneResolver {
         title: Arc<dyn LlmProvider>,
         main_model: impl Into<String>,
         title_model: impl Into<String>,
+        resolve_title: bool,
     ) -> Self {
         Self {
             main,
             title,
             main_model: main_model.into(),
             title_model: title_model.into(),
+            resolve_title,
         }
     }
 }
@@ -250,7 +284,14 @@ impl LlmResolver for SceneResolver {
         _session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError> {
         let (provider_impl, model) = match scene {
-            LlmScene::Title => (Arc::clone(&self.title), self.title_model.clone()),
+            LlmScene::Title if self.resolve_title => {
+                (Arc::clone(&self.title), self.title_model.clone())
+            }
+            LlmScene::Title => {
+                return Err(AppError::Config(
+                    "title scene intentionally unresolved for test".to_string(),
+                ))
+            }
             _ => (Arc::clone(&self.main), self.main_model.clone()),
         };
         Ok(ResolvedCall {
@@ -294,8 +335,30 @@ fn install_scene_resolver(
     title_model: &str,
 ) {
     ctx.global_services.llm = main.clone();
-    ctx.global_services.llm_resolver =
-        Arc::new(SceneResolver::new(main, title, default_model, title_model));
+    ctx.global_services.llm_resolver = Arc::new(SceneResolver::new(
+        main,
+        title,
+        default_model,
+        title_model,
+        true,
+    ));
+}
+
+fn install_scene_resolver_without_title(
+    ctx: &mut ChatContext,
+    main: Arc<dyn LlmProvider>,
+    title: Arc<dyn LlmProvider>,
+    default_model: &str,
+    title_model: &str,
+) {
+    ctx.global_services.llm = main.clone();
+    ctx.global_services.llm_resolver = Arc::new(SceneResolver::new(
+        main,
+        title,
+        default_model,
+        title_model,
+        false,
+    ));
 }
 
 /// 纯文本收敛流（一轮 text-only 回合）。
@@ -814,7 +877,7 @@ async fn get_state_contains_plan_and_session_todos() {
 
 // ─── Test 7-8：session.title_updated 异步 ────────────────────────────────────
 
-/// 首条 user 后异步 utility 模型生成 session 标题并 emit `session.title_updated`。
+/// 首条 user 先 emit 规则标题，再异步 emit 语义 session 标题。
 #[tokio::test]
 #[serial]
 async fn session_title_updated_emitted_after_first_user() {
@@ -863,7 +926,7 @@ async fn session_title_updated_emitted_after_first_user() {
     );
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            if !captured.lock().unwrap().is_empty() {
+            if captured.lock().unwrap().len() >= 2 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -875,9 +938,13 @@ async fn session_title_updated_emitted_after_first_user() {
     info!(target: "test", phase = "assert", "captured session.title_updated = {:?}", captured.lock().unwrap());
     assert_eq!(
         captured.lock().unwrap().clone(),
-        vec!["Semantic session title".to_string()],
-        "首条 user 后应异步 emit 语义 session 标题"
+        vec![
+            "请帮我整理 transcript UI".to_string(),
+            "Semantic session title".to_string(),
+        ],
+        "首条 user 后应先 emit 规则标题，再异步 emit 语义 session 标题"
     );
+    assert_eq!(title.call_count(), 1, "title provider 应被调用一次");
     let title_on_disk = ctx
         .session_runtime
         .session
@@ -886,6 +953,103 @@ async fn session_title_updated_emitted_after_first_user() {
         .and_then(|entry| entry.title)
         .unwrap_or_default();
     assert_eq!(title_on_disk, "Semantic session title");
+
+    unsafe { std::env::remove_var(env_key) };
+    drop(work_dir);
+}
+
+/// Title scene 未解析时，会话标题应降级到主模型；事件顺序仍为 L0 先、L1 后。
+#[tokio::test]
+#[serial]
+async fn session_title_updated_falls_back_to_main_model_when_title_scene_unresolved() {
+    common::setup_logging();
+    let env_key = "OPENAI_API_KEY_TRANSCRIPT_SUMMARY_TITLE_FALLBACK";
+    let (work_dir, mut ctx) = deterministic_chat_context_fixture(env_key);
+    let captured: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = Arc::clone(&captured);
+    ctx.global_services.event_bus.on(
+        wire::WIRE_SESSION_TITLE_UPDATED,
+        Box::new(move |ctx: EventContext| {
+            if let Some(title) = ctx.payload.get("title").and_then(|v| v.as_str()) {
+                cap.lock()
+                    .unwrap()
+                    .push((title.to_string(), ctx.session_id.clone()));
+            }
+            Ok(())
+        }),
+    );
+    let main = Arc::new(MainStreamLlm::with_chat_reply(
+        vec![text_stream("Done.")],
+        "Semantic via main model",
+    ));
+    let title = Arc::new(TitleChatLlm::ok("Should not resolve"));
+    install_scene_resolver_without_title(
+        &mut ctx,
+        main.clone(),
+        title,
+        "mimo-v2.5-pro",
+        "utility-flash",
+    );
+    let system_text = "system prompt";
+    let mut state = init_context_state(
+        &ctx.session_runtime.session,
+        &ctx.config.context,
+        system_text,
+    )
+    .expect("init_context_state");
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        run_chat_turn(
+            &ctx,
+            "hello",
+            system_text,
+            &mut state,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("run_chat_turn timeout 5s")
+    .expect("run_chat_turn should succeed");
+    assert!(matches!(outcome, AgentRunOutcome::Completed(_)));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if captured.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("fallback session.title_updated events should arrive");
+
+    let captured = captured.lock().unwrap().clone();
+    assert_eq!(
+        captured,
+        vec![
+            (
+                "hello".to_string(),
+                ctx.session_runtime.session.current_session_id().unwrap()
+            ),
+            (
+                "Semantic via main model".to_string(),
+                ctx.session_runtime.session.current_session_id().unwrap(),
+            ),
+        ]
+    );
+    assert_eq!(
+        main.chat_call_count(),
+        1,
+        "title scene 不可解析时应恰好降级调用主模型一次"
+    );
+    let title_on_disk = ctx
+        .session_runtime
+        .session
+        .current_session_entry()
+        .unwrap()
+        .and_then(|entry| entry.title)
+        .unwrap_or_default();
+    assert_eq!(title_on_disk, "Semantic via main model");
 
     unsafe { std::env::remove_var(env_key) };
     drop(work_dir);

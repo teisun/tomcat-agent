@@ -10,6 +10,7 @@ mod types;
 
 pub(crate) use context::INTERRUPTED_TOOL_RESULT_TEXT;
 pub use context::{build_context_from_state, init_context_state};
+pub(crate) use session_impl::extract_user_text_from_content;
 #[allow(unused_imports)]
 pub use session_impl::generate_entry_id;
 pub use session_impl::SessionManager;

@@ -47,6 +47,38 @@ fn chat_message_assistant_with_tool_calls() {
 }
 
 #[test]
+fn chat_message_first_text_supports_plain_text() {
+    let msg = ChatMessage::user("hello");
+    assert_eq!(msg.first_text().as_deref(), Some("hello"));
+}
+
+#[test]
+fn chat_message_first_text_supports_parts_and_ignores_non_text_parts() {
+    let msg = ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("before "),
+        ChatMessageContentPart::reference(ContextReference::file("src/app.ts", "app.ts")),
+        ChatMessageContentPart::text("after"),
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+        ChatMessageContentPart::file_file_id("file-doc", Some("spec.pdf".to_string())).unwrap(),
+    ]);
+    assert_eq!(msg.first_text().as_deref(), Some("before after"));
+}
+
+#[test]
+fn chat_message_first_text_returns_none_for_reference_only_parts() {
+    let msg = ChatMessage::user_with_parts(vec![ChatMessageContentPart::reference(
+        ContextReference::selection(
+            "src/app.ts",
+            "app.ts:1-3",
+            Some(1),
+            Some(3),
+            Some("const x = 1;".to_string()),
+        ),
+    )]);
+    assert_eq!(msg.first_text(), None);
+}
+
+#[test]
 fn chat_message_completion_metadata_roundtrip() {
     let msg = ChatMessage::assistant("oops")
         .with_completion_metadata(

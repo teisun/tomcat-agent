@@ -8,6 +8,37 @@ use crate::core::summary::generate_session_title;
 use crate::infra::events::wire;
 use crate::infra::ScopedEventEmitter;
 
+pub(crate) fn maybe_emit_rule_session_title(
+    session: &SessionManager,
+    appended_messages: &[(ChatMessage, bool)],
+    emitter: &Arc<ScopedEventEmitter>,
+) {
+    for (message, _) in appended_messages {
+        if message.role != ChatMessageRole::User {
+            continue;
+        }
+        let Some(text) = message.first_text() else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let session_key = session.current_session_key().to_string();
+        let Ok(Some(current_entry)) = session.get_session(&session_key) else {
+            break;
+        };
+        let current_title = current_entry.title.as_deref().unwrap_or("");
+        if !current_title.is_empty() && !is_rule_derived_title(current_title, &text) {
+            break;
+        }
+        emit_session_title_updated(
+            emitter.as_ref(),
+            &crate::core::session::manager::derive_title_from_user_message(&text),
+        );
+        break;
+    }
+}
+
 pub(crate) fn maybe_spawn_semantic_session_title(
     session: &SessionManager,
     appended_messages: &[(ChatMessage, bool)],
@@ -20,22 +51,22 @@ pub(crate) fn maybe_spawn_semantic_session_title(
         if message.role != ChatMessageRole::User {
             continue;
         }
-        let Some(text) = message.text_content() else {
+        let Some(text) = message.first_text() else {
             continue;
         };
         if text.trim().is_empty() {
             continue;
         }
         let session_key = session.current_session_key().to_string();
-        let rule_title = crate::core::session::manager::derive_title_from_user_message(text);
+        let rule_title = crate::core::session::manager::derive_title_from_user_message(&text);
         let Ok(Some(current_entry)) = session.get_session(&session_key) else {
             break;
         };
         let current_title = current_entry.title.as_deref().unwrap_or("");
-        if !current_title.is_empty() && !is_rule_derived_title(current_title, text) {
+        if !current_title.is_empty() && !is_rule_derived_title(current_title, &text) {
             break;
         }
-        let user_text = text.to_string();
+        let user_text = text;
         let session = session.clone();
         tokio::spawn(async move {
             let Ok(generated) =
@@ -66,12 +97,16 @@ pub(crate) fn maybe_spawn_semantic_session_title(
             if current == generated || (current.is_empty() && generated == rule_title) {
                 return;
             }
-            let payload = serde_json::json!({
-                "type": wire::WIRE_SESSION_TITLE_UPDATED,
-                "title": generated,
-            });
-            let _ = emitter.emit_payload(wire::WIRE_SESSION_TITLE_UPDATED, payload);
+            emit_session_title_updated(emitter.as_ref(), &generated);
         });
         break;
     }
+}
+
+fn emit_session_title_updated(emitter: &ScopedEventEmitter, title: &str) {
+    let payload = serde_json::json!({
+        "type": wire::WIRE_SESSION_TITLE_UPDATED,
+        "title": title,
+    });
+    let _ = emitter.emit_payload(wire::WIRE_SESSION_TITLE_UPDATED, payload);
 }

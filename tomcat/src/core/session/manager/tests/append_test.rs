@@ -111,6 +111,73 @@ fn derive_title_takes_first_non_empty_line_and_truncates_to_40() {
 }
 
 #[test]
+fn extract_user_text_from_content_supports_structured_input_text_parts() {
+    let content = serde_json::json!([
+        { "type": "input_text", "text": "before " },
+        {
+            "type": "input_reference",
+            "ref_kind": "file",
+            "path": "src/app.ts",
+            "label": "app.ts"
+        },
+        { "type": "input_text", "text": "after" },
+        { "type": "input_file", "file_id": "file-123" }
+    ]);
+    assert_eq!(
+        extract_user_text_from_content(&content).as_deref(),
+        Some("before after")
+    );
+}
+
+#[test]
+fn extract_user_text_from_content_supports_plain_string_and_reference_only_none() {
+    assert_eq!(
+        extract_user_text_from_content(&serde_json::json!("hello")).as_deref(),
+        Some("hello")
+    );
+    assert_eq!(
+        extract_user_text_from_content(&serde_json::json!([
+            {
+                "type": "input_reference",
+                "ref_kind": "file",
+                "path": "src/app.ts",
+                "label": "app.ts"
+            }
+        ])),
+        None
+    );
+}
+
+#[test]
+fn append_user_message_with_structured_parts_derives_title_from_input_text() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key().to_string();
+    mgr.create_session(&key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({
+        "role": "user",
+        "content": [
+            { "type": "input_text", "text": "hello" },
+            {
+                "type": "input_reference",
+                "ref_kind": "file",
+                "path": "src/app.ts",
+                "label": "app.ts"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let entry = mgr.current_session_entry().unwrap().unwrap();
+    assert_eq!(entry.title.as_deref(), Some("hello"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn append_user_message_persists_title_once_and_never_overwrites() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

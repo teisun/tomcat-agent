@@ -21,6 +21,7 @@ import {
   assertWebviewOwnershipFlow,
   assertWebviewReloadReplayFlow,
   assertWebviewSelectionReferenceFlow,
+  assertWebviewSessionTitleFlow,
   assertWebviewSessionSwitchRestoreFlow,
   assertWebviewStreamingFlow,
   assertTranscriptSwitchBackOrder,
@@ -151,5 +152,10 @@ suite("Tomcat host E2E", () => {
   test("routes smart picker selections into attachments and context chips", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewPickContextFlow(api);
+  });
+
+  test("derives non-placeholder session titles from first webview prompt segments", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewSessionTitleFlow(api);
   });
 });

@@ -1,9 +1,10 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-06 07:35 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-06 14:30 +0800 | ACTIVE | develop | — |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P1]** Add Models 架构方案：新增 `tomcat-vscode-ext/docs/architecture/model-management-add-models.md` 总览 + 5 篇子文档（术语/决策/协议/验收/UI ASCII 基线），对齐 Phase 2 文档组织方式 @2026-07-06
+- [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 集成说明
 - 面向用户文档已双语化（英文默认 + opencode 式切换栏）：根 README、扩展 README、`user-guide` 各新增 `.zh.md` 中文镜像；`tomcat-vscode-ext/.vscodeignore` 已放行 `README.zh.md` 入 VSIX。
@@ -15,3 +16,4 @@
 - 为消除 VSIX 安装 E2E 的 develop-side 假红，本轮补稳了 `hostE2eScenario.ts` / `e2eHostFixture.ts`：ownership 场景改为显式挂起 participant 问答后再切 webview，transcript UI 场景在常规安装套件允许直接落到最终折叠态，而 `verify:vsix` 继续强制捕获 docked todo/progress 视觉证据；同一提交也修正了 `App.tsx` / `Composer.tsx` / `provider.ts` / `handler.ts` 的 ownership 释放、interrupt 可用性与 history loading 收口，并补上单测与安装 E2E 覆盖。
 - 4 件套 review 已覆盖 `serve`、`summary`、`plan_tool`、`primitive/executor` 与 VSCode 扩展热区；未发现未记录的规范违背。`integration-real-llm` 本轮无新增 target，按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` §4 跳过，不构成本次合并阻塞。
 - 结论：`feature/tomcat-vscode-extension` 已在 `develop` 完成合并、复测与验收，`T2-P1-019` / `T2-P1-020` 可转 `DONE`；对应验收提交现已位于 `origin/develop`。
+- 已知残留（本期刻意不补）：插件 `ext/dispatcher/session_ops.rs -> try_append_message_to_session` 的注入路径仍不推送活跃 `session.title_updated`，disk 刷新后的标题正确；本轮仅修复 Prompt → `run_loop` 主链路，即计划中的“放法一”。

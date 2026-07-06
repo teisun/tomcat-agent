@@ -856,6 +856,29 @@ impl ChatMessage {
             _ => None,
         }
     }
+
+    /// Extract user-authored text from plain text or structured parts.
+    ///
+    /// For multipart content we only keep `input_text` chunks and ignore references/files/images,
+    /// because session titles should be derived from what the user typed rather than projected
+    /// context labels or attachment metadata.
+    pub fn first_text(&self) -> Option<String> {
+        match &self.content {
+            Some(ChatMessageContent::Text(s)) => Some(s.clone()),
+            Some(ChatMessageContent::Parts(parts)) => {
+                let mut text = String::new();
+                let mut saw_input_text = false;
+                for part in parts {
+                    if let ChatMessageContentPart::InputText { text: chunk } = part {
+                        saw_input_text = true;
+                        text.push_str(chunk);
+                    }
+                }
+                saw_input_text.then_some(text)
+            }
+            None => None,
+        }
+    }
 }
 
 /// 会话级模型覆盖；若为 None，使用全局 LlmConfig.default_model。

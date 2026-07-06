@@ -135,6 +135,41 @@ describe("WebviewStateStore wire routing", () => {
     expect(store.snapshot().sessions[0]?.title).toBe("Fix transcript UI");
   });
 
+  it("replaces a rule title with a later semantic session title", () => {
+    const store = new WebviewStateStore();
+    store.syncSessionList(
+      {
+        activeSessionId: "s1",
+        scope: "live",
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+      },
+      new Map(),
+      "webview",
+    );
+
+    store.applyEvent({
+      sessionId: "s1",
+      title: "hello",
+      type: "session.title_updated",
+    });
+    expect(store.snapshot().sessions[0]?.title).toBe("hello");
+
+    store.applyEvent({
+      sessionId: "s1",
+      title: "Semantic via main model",
+      type: "session.title_updated",
+    });
+    expect(store.snapshot().sessions[0]?.title).toBe("Semantic via main model");
+  });
+
   it("does not override an existing active session during session list refresh", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
