@@ -2,15 +2,19 @@
 
 ## 1. 概述 (Overview)
 
-- **职责**：为宿主 API 与 chat 提供统一的 LLM 能力：`ModelCatalog`、`DefaultLlmResolver`、`LlmProvider` Trait、OpenAI Chat Completions / Responses 适配器、流式/非流式调用、限流与指数退避重试、Token 统计、会话级模型切换。
+- **职责**：为宿主 API 与 chat 提供统一的 LLM 能力：`ModelCatalog`、`DefaultLlmResolver`、`admin.rs` 模型管理中枢、`LlmProvider` Trait、OpenAI Chat Completions / Responses / Anthropic Messages 适配器、流式/非流式调用、限流与指数退避重试、Token 统计、会话级模型切换。
 - **所在层级**：宿主核心能力层（`src/core/llm`），依赖基础设施层（`AppConfig` / `LlmConfig` / `LlmRuntimeConfig` / `AppError`）。
 - **核心文件**：
-  - `src/core/llm/catalog.rs` — `ModelEntry` / `ModelCatalog`；合并内置模型与 `models.toml`
+  - `src/core/llm/builtin_models.toml` — 内嵌预置模型事实源；`tomcat init` 直接从这里释放 seed
+  - `src/core/llm/catalog.rs` — `ModelEntry` / `ModelCatalog`；解析内嵌预置并合并 `models.toml`
   - `src/core/llm/resolver.rs` — `DefaultLlmResolver` / `ResolvedCall`；按 scene + session override 选模型
   - `src/core/llm/auth.rs` — 凭证解析；优先 `api_key_env`，否则推断 `<PROVIDER>_API_KEY`
+  - `src/core/llm/admin.rs` — 模型管理共享中枢；`upsert/remove/set_key/list_keys/default`
+  - `src/core/llm/endpoint.rs` — path-aware endpoint 拼接；bare host 自动补 `/v1`，显式路径保留原样
   - `src/core/llm/registry.rs` — `entry.api` → `Arc<dyn LlmProvider>`
   - `src/core/llm/openai.rs` — `OpenAiProvider`（`POST …/v1/chat/completions`）
   - `src/core/llm/openai_responses/mod.rs` — `OpenAiResponsesProvider`（`POST …/v1/responses`）
+  - `src/core/llm/anthropic/mod.rs` — `AnthropicProvider`（`POST …/v1/messages`）
 
 ### 1.1 当前配置模型
 
@@ -29,13 +33,22 @@
 |------|------|------|
 | `openai-responses` | `OpenAiResponsesProvider` | `POST {base}/v1/responses` |
 | `openai` | `OpenAiProvider` | `POST {base}/v1/chat/completions` |
+| `anthropic-messages` | `AnthropicProvider` | `POST {base}/v1/messages` |
 
 `provider` 现在只表示**逻辑厂商**，用于凭证推断、展示和审计；例如 `provider = "deepseek"` 仍然可以配 `api = "openai"`。
 
+### 1.2.1 Path-aware endpoint 规则
+
+- **bare host**：`https://api.openai.com` + `responses` → `https://api.openai.com/v1/responses`
+- **显式 provider 路径**：`https://open.bigmodel.cn/api/paas/v4` + `chat/completions` → `https://open.bigmodel.cn/api/paas/v4/chat/completions`
+- **Anthropic**：`https://api.anthropic.com/v1` + `messages` → `https://api.anthropic.com/v1/messages`
+
+说人话：如果 `base_url` 只是主机，就按历史兼容自动补 `/v1`；如果用户已经明确写了路径，就别再帮倒忙多拼一层。
+
 ### 1.3 `models.toml` 与内置模型
 
-- **当前内置模型只有两条**：`gpt-5.4`、`deepseek-v4-pro`
-- **`tomcat init` 会补的受管默认模型**：`mimo-v2.5-pro`、`gpt-5.2`、`deepseek-v4-flash`
+- **常用预置的运行时事实源只有一份内嵌 `builtin_models.toml`**：OpenAI（`gpt-5.2` / `gpt-5.4` / `gpt-5.5` / `gpt-5.6`）、DeepSeek（`deepseek-v4-pro` / `deepseek-v4-flash` / `utility-flash`）、MiMo（`mimo-v2.5-pro`）、GLM（`glm-5.2`）、Kimi（`kimi-k2.7-code`）、Anthropic Messages（`claude-opus-4-8` / `4-7` / `4-6`）
+- **`tomcat init` 会把这份内嵌预置原样 seed 到 `models.toml`**：这样用户能直接看 / 改 / 删，但不会再维护第二份手写模型清单
 - **同 id 覆盖内置，新 id 直接新增**
 - **新增用户条目必须显式写 `api` 和 `provider`**；不再按模型家族猜协议/厂商/能力
 
@@ -43,14 +56,21 @@
 
 ```toml
 [[models]]
-id = "gpt-5.4_litellm-sunmi"
+id = "gpt-5.4_gateway"
 model_name = "gpt-5.4"
 api = "openai-responses"
-provider = "litellm-sunmi"
-base_url = "https://aigateway.sunmi.com"
+provider = "openai-gateway"
+base_url = "https://gateway.example.com"
 ```
 
-这样本地可以同时保留 `gpt-5.4` 与 `gpt-5.4_litellm-sunmi` 两条模型，但真正发给上游的 `model` 仍然是 `gpt-5.4`。
+这样本地可以同时保留 `gpt-5.4` 与 `gpt-5.4_gateway` 两条模型，但真正发给上游的 `model` 仍然是 `gpt-5.4`。
+
+### 1.4 模型管理入口
+
+- **共享后端**：`core/llm/admin.rs` 是唯一写盘入口，统一负责 `models.toml` / `.env`、文件锁、原子写、权限与热刷新。
+- **CLI 门面**：`tomcat model add/list/remove/key/default` 全部复用这套共享逻辑。
+- **serve 门面**：`list_models` / `upsert_model` / `remove_model` / `set_provider_key` / `list_provider_keys` 走同一个中枢。
+- **安全边界**：协议与状态里只暴露 `envName` / `keyPresent`，从不回显明文 key。
 
 ### 1.2 LLM 调用路径（ASCII）
 

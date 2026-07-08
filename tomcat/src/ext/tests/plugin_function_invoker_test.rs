@@ -1128,6 +1128,7 @@ async fn net_fetch_hostcall_rejects_secret_and_host_policy_violations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn net_fetch_hostcall_rejects_redirect_responses_by_default() {
     let server = HttpsTestServer::start(
         "api.tavily.com",
@@ -1183,6 +1184,7 @@ async fn net_fetch_hostcall_rejects_redirect_responses_by_default() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn net_fetch_hostcall_enforces_response_size_limit() {
     let server = HttpsTestServer::start(
         "api.tavily.com",
@@ -1231,6 +1233,7 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn net_fetch_hostcall_enforces_request_timeout() {
     let server = HttpsTestServer::start(
         "api.tavily.com",
@@ -1275,6 +1278,7 @@ async fn net_fetch_hostcall_enforces_request_timeout() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn net_fetch_hostcall_respects_concurrency_limit() {
     let server = HttpsTestServer::start(
         "api.tavily.com",

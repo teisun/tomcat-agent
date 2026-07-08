@@ -8,6 +8,7 @@ import * as vscode from "vscode";
 import type { VsCodeIde } from "../../ide/VsCodeIde";
 import {
   hasServeCapability,
+  hasModelAdminCapabilities,
   SERVE_CAPABILITY_LIST_MODELS,
   type InitializeResult,
 } from "../../serveClient/initialize";
@@ -64,6 +65,7 @@ export interface TomcatWebviewProviderDeps {
   ide: VsCodeIde;
   initialize(): Promise<InitializeResult>;
   messenger: TomcatMessenger;
+  openModelSettings?(route?: "models"): void;
   ownership: SessionOwnershipTracker;
   sessionRouter: SessionRouter;
   showOpenDialog?(
@@ -106,6 +108,9 @@ export function parseModelCatalog(payload: unknown): {
   const capabilities: Record<string, string[]> = {};
   for (const entry of models) {
     if (typeof entry !== "object" || entry === null || typeof (entry as { id?: unknown }).id !== "string") {
+      continue;
+    }
+    if ((entry as { keyPresent?: unknown }).keyPresent === false) {
       continue;
     }
     const id = (entry as { id: string }).id;
@@ -494,6 +499,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   currentState() {
     return this.stateStore.snapshot();
+  }
+
+  async refreshModelCatalog(): Promise<void> {
+    await this.refreshModels();
+    if (this.isReady && this.uiMode !== "participant") {
+      await this.postState();
+    }
   }
 
   private pendingAttachmentsForSession(sessionId: string): WebviewPendingAttachment[] {
@@ -920,6 +932,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
+      case "openModelSettings":
+        if (!hasModelAdminCapabilities(await this.ensureInitialized())) {
+          return;
+        }
+        this.deps.openModelSettings?.(intent.data?.route ?? "models");
+        return;
       case "setPlanMode": {
         await this.ensureInitialized();
         const sessionId = await this.ensureWebviewSessionWithoutHistory(
@@ -1178,6 +1196,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private async refreshModels(): Promise<void> {
     const initializeResult = await this.ensureInitialized();
+    this.stateStore.setModelAdminSupported(
+      hasModelAdminCapabilities(initializeResult),
+    );
     if (!hasServeCapability(initializeResult, SERVE_CAPABILITY_LIST_MODELS)) {
       this.stateStore.setAvailableModels([], {});
       return;

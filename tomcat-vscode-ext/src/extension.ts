@@ -19,6 +19,7 @@ import {
   TOMCAT_UI_MODE_SETTING,
   TOMCAT_LIST_SESSIONS_COMMAND,
   TOMCAT_NEW_SESSION_COMMAND,
+  TOMCAT_OPEN_SETTINGS_COMMAND,
   TOMCAT_RESTART_COMMAND,
   TOMCAT_WEBVIEW_CONTAINER_ID,
   TOMCAT_WEBVIEW_ID,
@@ -28,7 +29,11 @@ import {
   type ResolvedTomcatExecutable,
 } from "./config/resolveTomcatExecutable";
 import { VsCodeIde } from "./ide/VsCodeIde";
-import { initializeServe, type InitializeResult } from "./serveClient/initialize";
+import {
+  hasModelAdminCapabilities,
+  initializeServe,
+  type InitializeResult,
+} from "./serveClient/initialize";
 import { SessionRouter } from "./serveClient/sessionRouter";
 import { TomcatMessenger } from "./serveClient/TomcatMessenger";
 import type { ServeEvent } from "./serveClient/wire";
@@ -49,6 +54,8 @@ import {
   buildSelectionReference,
   resolveUriToFileReference,
 } from "./ui/webview/contextReferences";
+import { SettingsPanel } from "./ui/settings/SettingsPanel";
+import type { SettingsIntent, SettingsStateSnapshot } from "./shared/settingsProtocol";
 import { TomcatWebviewViewProvider } from "./ui/webview/provider";
 
 export type { WebviewIntent } from "./ui/webview/protocol";
@@ -191,6 +198,11 @@ export interface TomcatExtensionApi {
     } | undefined;
     getResolvedExecutable(): ResolvedTomcatExecutable;
     getSessionState(sessionId?: string): Promise<Awaited<ReturnType<SessionRouter["getState"]>>>;
+    getSettingsPanelState(): {
+      route: "models";
+      state: SettingsStateSnapshot;
+      visible: boolean;
+    };
     getWebviewState(): ReturnType<TomcatWebviewViewProvider["currentState"]>;
     injectServeEvent(event: ServeEvent): Promise<void>;
     listSessions(
@@ -208,6 +220,7 @@ export interface TomcatExtensionApi {
     sendWebviewIntent(
       intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>,
     ): Promise<void>;
+    sendSettingsIntent(intent: SettingsIntent): Promise<void>;
     setOpenDialogHandler(
       handler:
         | ((
@@ -778,6 +791,7 @@ export async function activate(
         options: vscode.OpenDialogOptions,
       ) => Thenable<readonly vscode.Uri[] | undefined> | readonly vscode.Uri[] | undefined)
     | undefined;
+  let settingsPanel: SettingsPanel;
   const webviewProvider = new TomcatWebviewViewProvider({
     extensionUri: context.extensionUri,
     getDefaultCwd,
@@ -785,10 +799,23 @@ export async function activate(
     ide,
     initialize: ensureInitialized,
     messenger,
+    openModelSettings: (route) => {
+      void ensureInitialized().then((result) => {
+        if (hasModelAdminCapabilities(result)) {
+          settingsPanel.reveal(route ?? "models");
+        }
+      });
+    },
     ownership,
     sessionRouter,
     showOpenDialog: (options) =>
       testOpenDialogHandler?.(options) ?? vscode.window.showOpenDialog(options),
+  });
+  settingsPanel = new SettingsPanel({
+    ensureInitialized,
+    extensionUri: context.extensionUri,
+    messenger,
+    onModelCatalogChanged: () => webviewProvider.refreshModelCatalog(),
   });
   const selectionCodeLensProvider = new TomcatSelectionCodeLensProvider();
   let selectionCodeLensTimer: ReturnType<typeof setTimeout> | undefined;
@@ -942,6 +969,20 @@ export async function activate(
       await focusWebviewSurface();
     },
   );
+  const openSettingsCommand = vscode.commands.registerCommand(
+    TOMCAT_OPEN_SETTINGS_COMMAND,
+    async (route?: "models") => {
+      const initializeResult = await ensureInitialized();
+      if (!hasModelAdminCapabilities(initializeResult)) {
+        await showWarningMessage(
+          promptHistory,
+          "The connected `tomcat serve` does not support model management yet.",
+        );
+        return;
+      }
+      settingsPanel.reveal(route ?? "models");
+    },
+  );
   const addSelectionToChatCommand = vscode.commands.registerCommand(
     TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
     async () => {
@@ -1054,8 +1095,10 @@ export async function activate(
     newSessionCommand,
     listSessionsCommand,
     focusWebviewCommand,
+    openSettingsCommand,
     addSelectionToChatCommand,
     addFileToChatCommand,
+    settingsPanel,
     webviewProvider,
     webviewRegistration,
     codeLensRegistration,
@@ -1083,6 +1126,7 @@ export async function activate(
     stderrSubscription.dispose();
     frameErrorSubscription.dispose();
     exitSubscription.dispose();
+    settingsPanel.dispose();
     for (const waiter of [...eventWaiters]) {
       clearTimeout(waiter.timeout);
       waiter.reject(new Error("Tomcat extension is shutting down"));
@@ -1137,6 +1181,7 @@ export async function activate(
         };
       },
       getResolvedExecutable: () => resolvedExecutable,
+      getSettingsPanelState: () => settingsPanel.__testingSnapshot(),
       getWebviewState: () => webviewProvider.currentState(),
       injectServeEvent: async (event) => {
         recordObservedEvent(event);
@@ -1261,6 +1306,9 @@ export async function activate(
       },
       sendWebviewIntent: async (intent) => {
         await webviewProvider.dispatchTestIntent(intent);
+      },
+      sendSettingsIntent: async (intent) => {
+        await settingsPanel.__testingDispatchIntent(intent);
       },
       sendWebviewDomAction: async (action) => {
         await webviewProvider.dispatchTestDomAction(action);

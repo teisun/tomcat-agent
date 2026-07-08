@@ -3,6 +3,17 @@
 
 export type AssistantMessageEvent = any;
 
+export interface Capabilities {
+  files?: boolean;
+  reasoning?: boolean;
+  tools?: boolean;
+  vision?: boolean;
+  web_search?: boolean;
+}
+export interface Cost {
+  input_per_mtok?: null | number;
+  output_per_mtok?: null | number;
+}
 export interface GetMessagesParams {
   cursor?: null | string;
   lastNTurns?: null | number;
@@ -12,6 +23,18 @@ export type ListSessionsScope = "live" | "disk";
 
 export type Message = any;
 
+export interface ModelEntryInput {
+  api: string;
+  apiKeyEnv?: null | string;
+  baseUrl?: null | string;
+  capabilities?: Capabilities;
+  contextWindow?: null | number;
+  cost?: Cost | null;
+  id: string;
+  modelName?: null | string;
+  provider: string;
+  thinkingFormat?: null | string;
+}
 export interface NewSessionParams {
   cwd?: null | string;
   mode?: ServeSessionMode | null;
@@ -202,6 +225,11 @@ export type ServeCommand = {
   sessionId?: null | string;
   type: "set_plan_mode";
 } | {
+  envName: string;
+  id?: null | string;
+  type: "set_provider_key";
+  value: string;
+} | {
   id?: null | string;
   level: string;
   model: string;
@@ -209,9 +237,17 @@ export type ServeCommand = {
   type: "set_thinking_level";
 } | {
   id?: null | string;
+  model: ModelEntryInput;
+  type: "upsert_model";
+} | {
+  id?: null | string;
   model: string;
   sessionId?: null | string;
   type: "set_model";
+} | {
+  id?: null | string;
+  modelId: string;
+  type: "remove_model";
 } | {
   id?: null | string;
   params?: GetMessagesParams;
@@ -262,6 +298,9 @@ export type ServeCommand = {
 } | {
   id?: null | string;
   type: "list_models";
+} | {
+  id?: null | string;
+  type: "list_provider_keys";
 } | {
   payload?: any;
   requestId: string;

@@ -23,6 +23,7 @@ const EMPTY_STATE: WebviewStateSnapshot = {
   activeSessionId: null,
   availableModelCapabilities: {},
   availableModels: [],
+  modelAdminSupported: false,
   ready: false,
   sessionViews: {},
   sessions: [],
@@ -519,6 +520,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const canPrompt = state.uiMode !== "participant" && !activeSession?.busy && !readOnlyConflict;
   const canInterrupt = state.uiMode !== "participant" && !readOnlyConflict;
   const canBuildPlan = !!activeSession && !activeSession.busy && !readOnlyConflict;
+  const modelAdminSupported = state.modelAdminSupported;
   const activeModelCapabilities = activeSession?.model
     ? state.availableModelCapabilities?.[activeSession.model]
     : undefined;
@@ -907,6 +909,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             sessionId: activeSession.sessionId,
           });
         }}
+        onOpenModelSettings={modelAdminSupported
+          ? () => {
+              postIntent(vscodeApi, "openModelSettings", {
+                route: "models",
+              });
+            }
+          : undefined}
         onThinkingLevelChange={(level) => {
           if (!activeSession || !activeSession.model || !level) {
             return;

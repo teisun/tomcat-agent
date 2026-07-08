@@ -197,6 +197,7 @@ function parseModelEntries(payload: unknown): Array<{
   baseUrl: string | null;
   capabilities: string[];
   id: string;
+  keyPresent: boolean;
   modelName: string | null;
   provider: string | null;
 }> {
@@ -218,11 +219,12 @@ function parseModelEntries(payload: unknown): Array<{
                 .map(([name]) => name)
             : [],
       id: typeof entry.id === "string" ? entry.id : "",
+      keyPresent: entry.keyPresent === false ? false : true,
       modelName:
         typeof entry.modelName === "string" ? entry.modelName : null,
       provider: typeof entry.provider === "string" ? entry.provider : null,
     }))
-    .filter((entry) => entry.id.length > 0);
+    .filter((entry) => entry.id.length > 0 && entry.keyPresent);
 }
 
 function toModelQuickPickItems(

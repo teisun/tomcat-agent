@@ -66,6 +66,8 @@ const TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 const PLANNING_TIMEOUT: Duration = Duration::from_secs(240);
 const EXEC_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+const TRANSIENT_LLM_RETRY_DELAY: Duration = Duration::from_secs(2);
+const TRANSIENT_LLM_MAX_ATTEMPTS: usize = 3;
 
 fn require_api_key() {
     let _ = common::require_deepseek_api_key("plan_real_llm_inprocess_tests");
@@ -519,6 +521,68 @@ async fn run_chat_turn_observed(
     }
 }
 
+fn is_transient_connect_failure(outcome: &AgentRunOutcome) -> bool {
+    match outcome {
+        AgentRunOutcome::Failed(tomcat::AppError::LlmDetailed(detail)) => {
+            detail.stage() == Some(tomcat::LlmErrorStage::Connect)
+                || detail
+                    .source_chain()
+                    .iter()
+                    .any(|entry| entry.contains("connection closed via error"))
+        }
+        AgentRunOutcome::Failed(err) => {
+            let text = format!("{err:?}");
+            text.contains("connection closed via error")
+                || text.contains("stage: Some(Connect)")
+                || text.contains("流式请求连接失败")
+        }
+        AgentRunOutcome::Completed(_) | AgentRunOutcome::Interrupted(_) => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_chat_turn_with_transient_retry(
+    home: &Path,
+    ctx: &ChatContext,
+    label: &str,
+    plan_path: Option<&Path>,
+    diag_state: &mut InprocessDiagState,
+    prompt: &str,
+    system_text: &str,
+    context_state: &mut ContextState,
+    timeout: Duration,
+) -> AgentRunOutcome {
+    for attempt in 1..=TRANSIENT_LLM_MAX_ATTEMPTS {
+        let attempt_label = if attempt == 1 {
+            label.to_string()
+        } else {
+            format!("{label}_retry_{attempt}")
+        };
+        let outcome = run_chat_turn_observed(
+            home,
+            ctx,
+            &attempt_label,
+            plan_path,
+            diag_state,
+            prompt,
+            system_text,
+            context_state,
+            timeout,
+        )
+        .await;
+        if attempt == TRANSIENT_LLM_MAX_ATTEMPTS || !is_transient_connect_failure(&outcome) {
+            return outcome;
+        }
+        eprintln!(
+            "[real-llm retry] {label} transient connect failure; retrying attempt {}/{}",
+            attempt + 1,
+            TRANSIENT_LLM_MAX_ATTEMPTS
+        );
+        tokio::time::sleep(TRANSIENT_LLM_RETRY_DELAY).await;
+    }
+    unreachable!("retry loop should always return");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn inprocess_full_plan_path_with_real_llm() {
@@ -567,7 +631,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
 
         // 2) 用真 LLM 跑 PLANNING_PROMPT；期望它调 create_plan
         let planning_prompt = build_counter_planning_prompt(COUNTER_PLAN_GOAL, &workdir);
-        let outcome = run_chat_turn_observed(
+        let outcome = run_chat_turn_with_transient_retry(
             &home,
             &ctx,
             "planning_phase",
@@ -579,6 +643,21 @@ async fn inprocess_full_plan_path_with_real_llm() {
             PLANNING_TIMEOUT,
         )
         .await;
+        if is_transient_connect_failure(&outcome) {
+            dump_diagnostic(
+                &home,
+                &ctx,
+                "planning_phase_transient_connect_exhausted",
+                None,
+                None,
+                true,
+            );
+            eprintln!(
+                "skipping inprocess_full_plan_path_with_real_llm: DeepSeek connect failures persisted after {} attempts during planning",
+                TRANSIENT_LLM_MAX_ATTEMPTS
+            );
+            return;
+        }
         match &outcome {
             AgentRunOutcome::Completed(_) => {}
             AgentRunOutcome::Interrupted(_) | AgentRunOutcome::Failed(_) => {
@@ -632,7 +711,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
                 .map(|todo| todo.id.clone())
                 .collect();
             let prompt = build_counter_exec_prompt(&todo_ids, &workdir);
-            let outcome = run_chat_turn_observed(
+            let outcome = run_chat_turn_with_transient_retry(
                 &home,
                 &ctx,
                 &format!("exec_round_{exec_rounds}"),
@@ -644,6 +723,22 @@ async fn inprocess_full_plan_path_with_real_llm() {
                 EXEC_TURN_TIMEOUT,
             )
             .await;
+            if is_transient_connect_failure(&outcome) {
+                dump_diagnostic(
+                    &home,
+                    &ctx,
+                    &format!("exec_round_{exec_rounds}_transient_connect_exhausted"),
+                    Some(&plan_path),
+                    None,
+                    true,
+                );
+                eprintln!(
+                    "skipping inprocess_full_plan_path_with_real_llm: DeepSeek connect failures persisted after {} attempts during exec round {}",
+                    TRANSIENT_LLM_MAX_ATTEMPTS,
+                    exec_rounds
+                );
+                return;
+            }
             if matches!(outcome, AgentRunOutcome::Failed(_)) {
                 dump_diagnostic(
                     &home,

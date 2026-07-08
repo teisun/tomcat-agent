@@ -185,9 +185,9 @@ tomcat init
 
 三步流程如下：
 
-1. **[1/3] 环境初始化**：先确保 `~/.tomcat/models.toml` 至少含受管默认条目（`mimo-v2.5-pro`、`gpt-5.2`、`deepseek-v4-flash`），再加载模型 catalog 进入交互式选模；随后写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（modules 等）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
+1. **[1/3] 环境初始化**：先确保 `~/.tomcat/models.toml` 含由内嵌 `builtin_models.toml` 预置源释放出的受管预置条目（OpenAI `gpt-5.2/5.4/5.5/5.6`、DeepSeek `deepseek-v4-pro/-flash`、`utility-flash`、MiMo `mimo-v2.5-pro`、GLM `glm-5.2`、Kimi `kimi-k2.7-code`、Anthropic `claude-opus-4-8/4-7/4-6`），再加载模型 catalog 进入交互式选模；随后写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（modules 等）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
 2. **[2/3] 资源检查**：与 `tomcat doctor` 相同的检查项（配置合法、内嵌资源、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
-3. **[3/3] API Key 配置**：先按你在向导里选中的默认模型提示对应的凭证变量（例如 `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `MIMO_API_KEY` / `LITELLM_SUNMI_API_KEY`），再可选顺手补其它 provider 的 key。可回车跳过；**跳过不会写入空 Key**。后续可再次运行 `tomcat init`，或自行编辑 `~/.tomcat/assets/.env`
+3. **[3/3] API Key 配置**：先按你在向导里选中的默认模型提示对应的凭证变量（例如 `OPENAI_API_KEY` / `OPENAI_GATEWAY_API_KEY` / `DEEPSEEK_API_KEY` / `MIMO_API_KEY` / `ANTHROPIC_API_KEY`），再可选顺手补其它 provider 的 key。可回车跳过；**跳过不会写入空 Key**。后续可再次运行 `tomcat init`、自行编辑 `~/.tomcat/assets/.env`，或直接执行 `tomcat model key set`
 
 预期输出（节选）：
 
@@ -198,7 +198,7 @@ tomcat init
   ✓ 默认模型协议线: openai-responses
   ✓ 模型逻辑厂商: openai
   ✓ 目录结构就绪
-  ✓ 已生成模型清单 models.toml（含 mimo-v2.5-pro, gpt-5.2, deepseek-v4-flash）
+  ✓ 已生成模型清单 models.toml（含全部受管预置模型）
   ✓ 内嵌资源已释放
   ✓ 已加入 PATH 环境变量
 
@@ -216,7 +216,7 @@ tomcat init
 
 若无法自动写入 shell 配置，会打印 `⚠ 无法自动配置 PATH` 及一行可手动执行的 `export PATH=...`。
 
-**幂等性**：若 `~/.tomcat/tomcat.config.toml` **已存在**，会以现有配置为基线更新；`models.toml` 不会重写你已有的条目与注释，只会在缺失时补齐受管默认模型。第二次起会看到「已更新配置文件」与「受管默认模型已齐全」类提示。
+**幂等性**：若 `~/.tomcat/tomcat.config.toml` **已存在**，会以现有配置为基线更新；`models.toml` 不会重写你已有的条目与注释，只会在缺失时补齐受管预置模型。第二次起会看到「已更新配置文件」与「受管预置模型已齐全」类提示。
 
 **旧配置迁移**：如果老配置里还残留 `[llm].provider` / `[llm].api_base` / `[llm].api_key_env`，`tomcat init` 会允许你进入向导并在写回时清掉这些旧连接字段，把连接事实迁到 `models.toml`。
 
@@ -227,18 +227,47 @@ tomcat init
 `tomcat init` 会生成 `~/.tomcat/models.toml`（**模型清单**）。这是「增删模型」的唯一入口：
 
 - **启动自动加载**：`tomcat code` / `tomcat claw` 等启动路径会合并「内置模型表 + `models.toml`」，**同 id 覆盖内置、新 id 新增**，无需改代码、无需重新编译。
-- **当前内置模型只有 2 条**：`gpt-5.4` 与 `deepseek-v4-pro`。其余常用模型（如 `gpt-5.2`、`deepseek-v4-flash`、`mimo-v2.5-pro`）都由 `tomcat init` 写进 `models.toml`。
-- **幂等生成**：`models.toml` 不存在则创建；已存在但缺受管默认条目则**仅追加缺失项**；已齐全则原样不动——**绝不覆盖你已有的条目或注释**。重复 `tomcat init` 安全。
+- **运行时单源、文件里可见可改**：常用预置的运行时事实源只有一份内嵌 `builtin_models.toml`：OpenAI（`gpt-5.2` / `gpt-5.4` / `gpt-5.5` / `gpt-5.6`）、DeepSeek（`deepseek-v4-pro` / `deepseek-v4-flash` / `utility-flash`）、MiMo（`mimo-v2.5-pro`）、GLM（`glm-5.2`）、Kimi（`kimi-k2.7-code`）以及 Anthropic Messages（`claude-opus-4-8` / `4-7` / `4-6`）。`tomcat init` 会把这份内嵌预置原样释放到 `models.toml`，所以你既能直接看到 / 编辑 / 删除这些 seed 条目，也不会再维护第二份手写真相。
+- **幂等生成**：`models.toml` 不存在则按受管预置清单创建；已存在但缺受管预置条目则**仅追加缺失项**；已齐全则原样不动——**绝不覆盖你已有的条目或注释**。重复 `tomcat init` 安全。
 - **再加一个模型**：复制现有 `[[models]]` 段，显式填写 `api` / `provider` / `base_url`；`api_key_env` 可选，不写时默认推断成 `<PROVIDER>_API_KEY`。
 
 字段语义：
 
 - `id`：本地模型 id，给 `/model list`、默认模型选择、会话持久化使用
 - `model_name`：真正发给上游的模型名；省略时默认等于 `id`
-- `api`：走哪条 wire，目前支持 `openai` 与 `openai-responses`
+- `api`：走哪条 wire，目前支持 `openai`、`openai-responses` 与 `anthropic-messages`
 - `provider`：逻辑厂商名，只用于凭证推断、展示、审计
 - `api_key_env`：显式指定环境变量名；省略时自动推断为 `<PROVIDER>_API_KEY`
-- `base_url`：只填 host，不要写完整 endpoint
+- `base_url`：既可以只填 host，也可以带显式厂商路径。tomcat 会自动补 leaf，所以 `https://api.openai.com` 会拼成 `/v1/...`，而 GLM 这类 `https://open.bigmodel.cn/api/paas/v4` 会保留 `/api/paas/v4/...`
+- `kimi-k2.7-code` / Moonshot 端点说明：当前内置预置默认走 Moonshot 中国站 `https://api.moonshot.cn`，因为本仓 real-LLM 冒烟已按这个端点验证通过。Moonshot 全球站使用 `https://api.moonshot.ai`。如果你的 API Key 是在全球站申请的，请在 `models.toml` 里把 `base_url` 改成 `https://api.moonshot.ai`。
+
+### tomcat model —— 不手改文件也能管模型与 Key
+
+如果你不想手动编辑 `models.toml` 或 `.env`，可以直接使用专门的模型管理子命令：
+
+```bash
+tomcat model list
+tomcat model add claude-opus-gateway \
+  --api anthropic-messages \
+  --provider anthropic \
+  --model-name claude-opus-4-6 \
+  --base-url https://api.anthropic.com/v1 \
+  --reasoning --tools \
+  --thinking-format anthropic
+
+tomcat model key set anthropic
+# 或：tomcat model key set anthropic sk-ant-xxxxx
+tomcat model key list
+tomcat model default claude-opus-gateway
+tomcat model remove claude-opus-gateway
+```
+
+这些命令分别做什么：
+
+- `tomcat model add/remove` 通过与运行时相同的校验路径更新 `~/.tomcat/models.toml`。
+- `tomcat model key set` 既支持 `tomcat model key set <provider>`（交互式密码输入），也支持 `tomcat model key set <provider> <value>`（脚本友好）；它会以 `0600` 权限写入 `~/.tomcat/assets/.env`，保留其它键，不会在响应里回显明文 Key。
+- `tomcat model list` 会显示模型来自内置表还是用户目录，以及对应 API Key 是否已就绪。
+- `tomcat model default` 用来切换 `tomcat.config.toml` 中的 `[llm].default_model`。
 
 **MiMo Token Plan 最小配置**（init 默认就帮你写好一条）：
 
@@ -258,24 +287,24 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
 - **使用**：在 `tomcat code` / `tomcat claw` 里用 `/model mimo-v2.5-pro` 切换，或把 `[llm] default_model` 设成它。
 - **能力边界**：`mimo-v2.5-pro` 官方仅文本（无图片/文件），故 `vision/files=false`；thinking 服务端默认开，本集成走豆包系 `thinking` 线格式。
 
-### OpenAI 与 LiteLLM 网关并存
+### OpenAI 与网关并存
 
 如果你既想保留官方 `gpt-5.4`，又想加一条走公司网关的 `gpt-5.4`，不要复用同一个 `id`。推荐在 `models.toml` 新增一条：
 
 ```toml
 [[models]]
-id = "gpt-5.4_litellm-sunmi"
+id = "gpt-5.4_gateway"
 model_name = "gpt-5.4"
 api = "openai-responses"
-provider = "litellm-sunmi"
-base_url = "https://aigateway.sunmi.com"
+provider = "openai-gateway"
+base_url = "https://gateway.example.com"
 thinking_format = "openai"
 capabilities = { vision = true, files = true, tools = true, reasoning = true }
 ```
 
-- 切到网关：把 `[llm].default_model` 改成 `gpt-5.4_litellm-sunmi`
+- 切到网关：把 `[llm].default_model` 改成 `gpt-5.4_gateway`
 - 切回官方：改回 `gpt-5.4`
-- `provider = "litellm-sunmi"` 默认会把 key 推断成 `LITELLM_SUNMI_API_KEY`
+- `provider = "openai-gateway"` 默认会把 key 推断成 `OPENAI_GATEWAY_API_KEY`
 
 ### 旧配置迁移
 

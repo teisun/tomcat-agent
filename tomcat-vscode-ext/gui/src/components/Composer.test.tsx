@@ -5,23 +5,31 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { Composer, extractDropUris, type ComposerHandle } from "./Composer";
 
 function renderComposer({
+  availableModels = ["gpt-5.4"],
   busy = false,
   canInterrupt = true,
   canPrompt = true,
   modelCapabilities = ["vision", "files"],
+  modelValue = "gpt-5.4",
   onPickContext = vi.fn(),
   onInterrupt = vi.fn(),
   onDraftChange = vi.fn(),
+  onModelChange = vi.fn(),
+  onOpenModelSettings = vi.fn(),
   onResolveDrop = vi.fn(),
   onSubmit = vi.fn(),
   planState = "planning",
 }: {
+  availableModels?: string[];
   busy?: boolean;
   canInterrupt?: boolean;
   canPrompt?: boolean;
   modelCapabilities?: string[];
+  modelValue?: string;
   onPickContext?: () => void;
   onDraftChange?: (draft: { hasContent: boolean; segments: unknown[]; text: string }) => void;
+  onModelChange?: (model: string) => void;
+  onOpenModelSettings?: (() => void) | null;
   onResolveDrop?: (uris: string[]) => void;
   onInterrupt?: () => void;
   onSubmit?: () => void;
@@ -30,19 +38,20 @@ function renderComposer({
   const ref = createRef<ComposerHandle>();
   const renderResult = render(
     <Composer
-      availableModels={["gpt-5.4"]}
+      availableModels={availableModels}
       busy={busy}
       canInterrupt={canInterrupt}
       canPrompt={canPrompt}
       contextLabel="Ctx 42%"
       modelCapabilities={modelCapabilities}
       modeValue="plan"
-      modelValue="gpt-5.4"
+      modelValue={modelValue}
       thinkingLevelValue="high"
       onPickContext={onPickContext}
       onDraftChange={onDraftChange}
       onModeChange={vi.fn()}
-      onModelChange={vi.fn()}
+      onModelChange={onModelChange}
+      onOpenModelSettings={onOpenModelSettings ?? undefined}
       onResolveDrop={onResolveDrop}
       onThinkingLevelChange={vi.fn()}
       onInterrupt={onInterrupt}
@@ -108,6 +117,51 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-notice-drag").getAttribute("aria-hidden")).toBe("true");
     expect(screen.getByTestId("composer-notice-plan").className).toContain("tc-notice--right");
     expect(screen.getByTestId("composer-notice-plan").getAttribute("aria-hidden")).toBeNull();
+  });
+
+  it("opens the model menu and routes Add Models to settings", () => {
+    const onOpenModelSettings = vi.fn();
+    renderComposer({
+      availableModels: ["gpt-5.4", "claude-opus-4-6"],
+      onOpenModelSettings,
+    });
+
+    fireEvent.click(screen.getByTestId("model-select"));
+
+    expect(screen.getAllByTestId("model-option")).toHaveLength(2);
+    fireEvent.click(screen.getByTestId("model-open-settings"));
+    expect(onOpenModelSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects a model from the custom dropdown", () => {
+    const onModelChange = vi.fn();
+    renderComposer({
+      availableModels: ["gpt-5.4", "claude-opus-4-6"],
+      modelValue: "gpt-5.4",
+      onModelChange,
+    });
+
+    fireEvent.click(screen.getByTestId("model-select"));
+    fireEvent.click(screen.getAllByTestId("model-option")[1]);
+
+    expect(onModelChange).toHaveBeenCalledWith("claude-opus-4-6");
+  });
+
+  it("falls back to the native select when model admin is unavailable", () => {
+    const onModelChange = vi.fn();
+    renderComposer({
+      availableModels: ["gpt-5.4", "claude-opus-4-6"],
+      modelValue: "gpt-5.4",
+      onModelChange,
+      onOpenModelSettings: null,
+    });
+
+    const modelSelect = screen.getByTestId("model-select") as HTMLSelectElement;
+    expect(modelSelect.tagName).toBe("SELECT");
+    expect(screen.queryByTestId("model-open-settings")).toBeNull();
+
+    fireEvent.change(modelSelect, { target: { value: "claude-opus-4-6" } });
+    expect(onModelChange).toHaveBeenCalledWith("claude-opus-4-6");
   });
 
   it("omits the plan notice when chat mode is active", () => {

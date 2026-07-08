@@ -214,6 +214,7 @@ export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
   availableModels: string[];
+  modelAdminSupported: boolean;
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
   sessions: WebviewSessionTab[];
@@ -349,6 +350,13 @@ export type WebviewIntent =
         level: "high" | "low" | "medium" | "xhigh";
         modelId: string;
         sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "openModelSettings";
+      data?: {
+        route?: "models" | null;
       };
     }
   | {

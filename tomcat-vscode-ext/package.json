@@ -52,6 +52,10 @@
         "title": "Tomcat: Focus Agent Box"
       },
       {
+        "command": "tomcat.openSettings",
+        "title": "Tomcat: Open Settings"
+      },
+      {
         "category": "Tomcat",
         "command": "tomcat.addSelectionToChat",
         "icon": "$(comment-add)",

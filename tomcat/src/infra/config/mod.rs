@@ -5,6 +5,8 @@
 
 pub mod append;
 mod assets;
+mod default_model;
+mod env_file;
 mod load;
 pub mod lock;
 mod types;
@@ -16,6 +18,8 @@ mod tests;
 pub use append::append_workspace_entry_to_disk;
 pub use append::{append_path_rule_to_disk, append_workspace_root_to_disk};
 pub use assets::ensure_embedded_assets;
+pub use default_model::write_default_model;
+pub use env_file::{read_env_entries, write_env_entries};
 pub use load::{
     ensure_work_dir_structure, get_work_dir, load_config, load_config_for_init,
     load_config_toml_file, resolve_agent_definition_dir, resolve_agent_dir,

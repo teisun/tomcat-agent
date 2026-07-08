@@ -27,21 +27,22 @@ async fn dispatch_command_returns_error_frame_and_keeps_loop_alive_after_handler
 
     dispatch_command(
         Arc::clone(&state),
-        ServeCommand::ListModels {
-            id: Some("list-models-missing".to_string()),
+        ServeCommand::GetState {
+            id: Some("get-state-missing".to_string()),
+            session_id: None,
         },
     )
     .await
     .unwrap();
 
     let after_error = wait_for_line(&buffer, |line| {
-        line.get("id").and_then(serde_json::Value::as_str) == Some("list-models-missing")
+        line.get("id").and_then(serde_json::Value::as_str) == Some("get-state-missing")
     })
     .await;
     let error_response = after_error
         .iter()
         .find(|line| {
-            line.get("id").and_then(serde_json::Value::as_str) == Some("list-models-missing")
+            line.get("id").and_then(serde_json::Value::as_str) == Some("get-state-missing")
         })
         .expect("error response");
     assert_eq!(error_response["success"].as_bool(), Some(false));

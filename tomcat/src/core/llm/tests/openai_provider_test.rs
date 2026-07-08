@@ -32,7 +32,6 @@ fn deepseek_entry(api_key_env: &str) -> ModelEntry {
         base_url: Some("https://api.deepseek.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
-        cost: None,
         thinking_format: Some("deepseek".to_string()),
     }
 }
@@ -47,7 +46,6 @@ fn openai_entry(api_key_env: &str) -> ModelEntry {
         base_url: Some("https://api.openai.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
-        cost: None,
         thinking_format: Some("openai".to_string()),
     }
 }

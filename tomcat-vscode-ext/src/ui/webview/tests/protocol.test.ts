@@ -67,6 +67,16 @@ describe("webview protocol helpers", () => {
         type: "resolveDrop",
       }),
     ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: {
+          route: "models",
+        },
+        messageId: "settings-1",
+        type: "openModelSettings",
+      }),
+    ).toBe(true);
   });
 
   it("rejects malformed intents", () => {

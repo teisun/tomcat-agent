@@ -172,6 +172,11 @@ input:focus-visible {
   border-color: var(--vscode-focusBorder, rgba(127, 127, 127, 0.5));
 }
 
+.tc-topbar__trigger--compact {
+  height: 34px;
+  width: 100%;
+}
+
 .tc-topbar__trigger-label {
   flex: 1 1 auto;
   min-width: 0;
@@ -318,6 +323,15 @@ input:focus-visible {
   text-decoration: underline;
 }
 
+.tc-model-dropdown {
+  min-width: 220px;
+}
+
+.tc-model-dropdown__divider {
+  border-top: 1px solid var(--vscode-dropdown-border, rgba(127, 127, 127, 0.2));
+  margin: 6px 0;
+}
+
 .tc-button:hover:not(:disabled) {
   filter: brightness(1.06);
 }
@@ -330,6 +344,7 @@ input:focus-visible {
 }
 
 .tc-field select,
+.tc-input,
 .tc-composer textarea,
 .tc-approval-custom__input {
   background: var(--vscode-input-background);
@@ -383,6 +398,174 @@ input:focus-visible {
   background: transparent;
   border-color: var(--vscode-button-border, rgba(127, 127, 127, 0.25));
   color: inherit;
+}
+
+.tc-settings-shell {
+  color: var(--vscode-foreground);
+  display: grid;
+  gap: 20px;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 100vh;
+  padding: 18px;
+}
+
+.tc-settings-shell__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tc-settings-shell__brand {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+
+.tc-settings-nav__item {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: inherit;
+  cursor: pointer;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.tc-settings-nav__item:hover:not(:disabled),
+.tc-settings-nav__item--active {
+  background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.12));
+  border-color: var(--vscode-list-activeSelectionBackground, rgba(127, 127, 127, 0.22));
+}
+
+.tc-settings-nav__item:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.tc-settings-shell__content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.tc-settings-shell__header {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.tc-settings-shell__header h1,
+.tc-settings-shell__header p {
+  margin: 0;
+}
+
+.tc-settings-shell__header p {
+  color: var(--vscode-descriptionForeground);
+  margin-top: 6px;
+  max-width: 780px;
+}
+
+.tc-settings-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+}
+
+.tc-settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+}
+
+.tc-settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tc-settings-form__row {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tc-settings-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
+.tc-settings-capabilities__item {
+  align-items: center;
+  color: var(--vscode-descriptionForeground);
+  display: inline-flex;
+  gap: 6px;
+}
+
+.tc-settings-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.tc-settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tc-settings-group__title {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tc-settings-model {
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.24));
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.tc-settings-model__header {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.tc-settings-model__meta,
+.tc-settings-model__footer {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
+.tc-settings-inline-key {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+@media (max-width: 920px) {
+  .tc-settings-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .tc-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .tc-settings-form__row {
+    grid-template-columns: 1fr;
+  }
 }
 
 .tc-chip {
@@ -1727,6 +1910,7 @@ input:focus-visible {
 .tc-field--model {
   flex: 1 1 72px;
   min-width: 0;
+  position: relative;
 }
 
 .tc-field--model select {

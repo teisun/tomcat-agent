@@ -7,7 +7,8 @@
 //! 模型怎么连（`base_url` / `api_key_env` / `model_name`）来自 [`ModelEntry`]；
 //! 全局重试/超时/proxy 等运行时参数来自 [`LlmRuntimeConfig`]；
 //! 凭证值来自 [`Credential`]。
-//! 当前内置模型只有 `gpt-5.4` / `deepseek-v4-pro`；其余模型通常来自 `models.toml`。
+//! 内置模型事实源由 `catalog.rs` 解析内嵌 `builtin_models.toml` 统一提供；这里只按 `api`
+//! 选 provider。
 //!
 //! 因此这里不再接收整个 [`LlmConfig`]，也不再做“克隆配置再覆写四个字段”的桥接。
 
@@ -27,7 +28,10 @@ mod openai;
 // 风格对齐；新增 single-file Provider 仍可走 `#[path = "<new>.rs"]`。
 #[path = "openai_responses/mod.rs"]
 mod openai_responses;
+#[path = "anthropic/mod.rs"]
+mod anthropic;
 
+use anthropic::AnthropicProvider;
 use openai::OpenAiProvider;
 use openai_responses::OpenAiResponsesProvider;
 
@@ -38,6 +42,7 @@ type ProviderCtor =
 const PROVIDERS: &[(&str, ProviderCtor)] = &[
     ("openai", build_openai_completions),
     ("openai-responses", build_openai_responses),
+    ("anthropic-messages", build_anthropic_messages),
 ];
 
 fn build_openai_completions(
@@ -56,6 +61,14 @@ fn build_openai_responses(
     Ok(Arc::new(OpenAiResponsesProvider::new(
         entry, runtime, credential,
     )?))
+}
+
+fn build_anthropic_messages(
+    entry: &ModelEntry,
+    runtime: &LlmRuntimeConfig,
+    credential: &Credential,
+) -> Result<Arc<dyn LlmProvider>, AppError> {
+    Ok(Arc::new(AnthropicProvider::new(entry, runtime, credential)?))
 }
 
 /// 按 `entry.api` 字符串查表构造 [`Arc<dyn LlmProvider>`]；未知 id 返回 [`AppError::Config`]

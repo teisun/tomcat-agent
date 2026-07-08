@@ -11,14 +11,14 @@ A lightweight Rust-based AI agent runtime and VS Code extension built as a hands
 
 ## Features
 
-- **Tomcat Agent Box**: The main experience is a chat panel in the VS Code Secondary Side Bar, with multi-session switching, `Chat/Plan` modes, model switching, attachments, and context-watermark controls; install the bundled `.vsix` and start using it right away.
+- **Tomcat Agent Box**: The main experience is a chat panel in the VS Code Secondary Side Bar, with multi-session switching, `Chat/Plan` modes, model switching, attachments, context-watermark controls, and an in-product **Add Models** settings center; install the bundled `.vsix` and start using it right away.
 - **Autonomous agent loop**: A three-layer nested loop (conversation management -> fault-tolerant retry -> think-act) supports Steering / FollowUp / Abort, with automatic context compaction and rate-limit backoff for long conversations.
 - **Robust code read/write**: Beyond primitives such as `read`, `write`, `edit`, and `list_dir`, it also offers `hashline_edit` for line-anchored edits; `search_files` supports both system `rg` / `fd` and an in-process fallback implementation while consistently honoring ignore rules.
 - **Command execution and background tasks**: `bash` runs behind permission gating; long-running work can continue in the background and be driven across turns with `task_output` / `task_stop` / `task_list` instead of blocking the whole session on one command.
 - **Web retrieval**: `web_search` normalizes multiple search backends, and `web_fetch` converts web pages into Markdown while proactively blocking private-network / loopback / credentialed URLs.
 - **Plans, todos, and clarification questions**: `create_plan` / `update_plan` / `todos` / `ask_question` let long tasks move from planning to execution to tracking.
 - **Skills and plugin extensibility**: Skills can be loaded by name; the plugin system uses in-process `rquickjs`, and sensitive capabilities go through `pi.*` host calls so both LLM tools and host extension points can be expanded.
-- **Multi-model support and security auditing**: Supports pipelines such as OpenAI Chat Completions and OpenAI Responses; `models.toml` manages model catalogs and credentials; PermissionGate, shadow-Git checkpoints, JSONL transcripts, and audit logs keep runs controllable and traceable.
+- **Multi-model support and security auditing**: Supports OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages; ships built-in presets for OpenAI / DeepSeek / MiMo / GLM / Kimi / Claude Opus; `models.toml` plus `.env` manage model catalogs and credentials; PermissionGate, shadow-Git checkpoints, JSONL transcripts, and audit logs keep runs controllable and traceable.
 - **Terminal CLI**: With no subcommand it enters `chat` by default, and also covers full workflows for `init`, `doctor`, sessions, configuration, workspace management, and auditing.
 
 ## Quick Start
@@ -28,7 +28,7 @@ Recommended entry points:
 - **VS Code extension (recommended)**: Download the platform-specific bundled `.vsix` from GitHub Release, install it, and Reload VS Code. Then press `Cmd/Ctrl+Shift+P` and run `Tomcat: Focus Agent Box` to open **Tomcat Agent Box**. You can also open the Secondary Side Bar first and click the Tomcat Agent Box icon. If you see the first-time prompt, click `Start Setup` so VS Code can run `tomcat init` for you. For package selection and installation details, see [`tomcat-vscode-ext/README.md`](tomcat-vscode-ext/README.md).
 - **CLI**: See the **[User Guide](tomcat/docs/user-guide.md)** for end-to-end steps and sample output covering prerequisites, builds, `init` / `doctor` / `chat`, sessions and workspace handling, configuration, auditing, and integration tests.
 
-General prerequisites: you need an OpenAI-compatible API key. Whether you use the VS Code extension or the CLI, you can complete first-run setup with `tomcat init` (or by clicking `Start Setup` in VS Code). The key is written to `~/.tomcat/assets/.env` and loaded automatically on startup. Runtime data defaults to `~/.tomcat/`; see [Working Directory and Data Layout](tomcat/docs/architecture/work-dir-and-data-layout.md) for the directory layout.
+General prerequisites: you need a provider API key that matches the model you plan to use (for example OpenAI-compatible, DeepSeek, MiMo, GLM, Kimi, or Anthropic). Whether you use the VS Code extension or the CLI, you can complete first-run setup with `tomcat init` (or by clicking `Start Setup` in VS Code). Keys are written to `~/.tomcat/assets/.env` with `0600` permissions and loaded automatically on startup. Runtime data defaults to `~/.tomcat/`; see [Working Directory and Data Layout](tomcat/docs/architecture/work-dir-and-data-layout.md) for the directory layout.
 
 You only need Rust stable 1.70+ when building from source. The repository's `tomcat/.env` is only for local/CI test fixtures and is not the end-user configuration path.
 

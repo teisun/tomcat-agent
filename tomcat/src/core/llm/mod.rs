@@ -10,8 +10,10 @@
 //! `SessionEntry` 约定一致。本模块不直接依赖 `SessionEntry`，仅消费已解析的
 //! [`ChatRequest`]。
 
+pub mod admin;
 pub mod auth;
 pub mod catalog;
+pub(crate) mod endpoint;
 pub(crate) mod http_client;
 pub(crate) mod multimodal;
 pub mod openai_files;
@@ -26,7 +28,12 @@ mod token_usage;
 mod types;
 
 pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
-pub use catalog::{Capabilities, Cost, ModelCatalog, ModelEntry};
+pub use admin::{
+    list_model_views, list_provider_keys, remove_user_model, resolve_provider_key_env_name,
+    set_default_model, set_provider_key, upsert_user_model, ModelEntryInput, ModelKeyStatus,
+    ModelSource, ModelView, ProviderKeyInput, ProviderKeyView,
+};
+pub use catalog::{Capabilities, ModelCatalog, ModelEntry, SharedModelCatalog};
 pub(crate) use multimodal::degrade_unsupported_multimodal;
 pub use provider::LlmProvider;
 pub use registry::{build_provider, registered_provider_ids};

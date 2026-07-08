@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use serial_test::serial;
 
-use crate::core::llm::{DefaultLlmResolver, LlmResolver, LlmScene, ModelCatalog};
+use crate::core::llm::{
+    auth::clear_managed_credentials_for_test, DefaultLlmResolver, LlmResolver, LlmScene,
+    ModelCatalog, SharedModelCatalog,
+};
 use crate::infra::config::AppConfig;
 
 #[test]
@@ -179,6 +182,104 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
 
     unsafe {
         std::env::remove_var("OPENAI_API_KEY");
+    }
+}
+
+#[test]
+fn shared_catalog_reload_picks_up_new_user_models() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let path = work_dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "custom-before-reload"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+"#,
+    )
+    .unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
+
+    let shared = SharedModelCatalog::load(&cfg).expect("load shared catalog");
+    assert!(shared.lookup("custom-before-reload").is_some());
+    assert!(shared.lookup("custom-after-reload").is_none());
+
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "custom-after-reload"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+"#,
+    )
+    .unwrap();
+
+    shared.reload(&cfg).expect("reload shared catalog");
+
+    assert!(shared.lookup("custom-before-reload").is_none());
+    assert!(shared.lookup("custom-after-reload").is_some());
+    assert!(shared.is_user_model("custom-after-reload"));
+}
+
+#[test]
+#[serial(env_lock)]
+fn resolver_uses_reloaded_shared_catalog_for_new_model() {
+    clear_managed_credentials_for_test();
+    let work_dir = tempfile::tempdir().unwrap();
+    let path = work_dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "custom-before-reload"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+"#,
+    )
+    .unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
+
+    let shared = SharedModelCatalog::load(&cfg).expect("load shared catalog");
+    let resolver = DefaultLlmResolver::new(cfg.clone(), shared.clone());
+    assert!(
+        resolver.resolve(LlmScene::Main, Some("custom-after-reload")).is_err(),
+        "resolver should not see new model before reload"
+    );
+
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "custom-after-reload"
+model_name = "claude-sonnet-4-5"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com/v1"
+"#,
+    )
+    .unwrap();
+    shared.reload(&cfg).expect("reload shared catalog");
+
+    unsafe {
+        std::env::set_var("ANTHROPIC_API_KEY", "stub");
+    }
+
+    let resolved = resolver
+        .resolve(LlmScene::Main, Some("custom-after-reload"))
+        .expect("resolver should use reloaded model catalog");
+    assert_eq!(resolved.provider, "anthropic");
+    assert_eq!(resolved.model, "claude-sonnet-4-5");
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_API_KEY");
     }
 }
 

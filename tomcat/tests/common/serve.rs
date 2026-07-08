@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command as StdCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -240,6 +241,7 @@ pub struct ScriptedOpenAiServer {
     pub base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
     join: Option<thread::JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl ScriptedOpenAiServer {
@@ -250,6 +252,7 @@ impl ScriptedOpenAiServer {
 
 impl Drop for ScriptedOpenAiServer {
     fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -259,21 +262,70 @@ impl Drop for ScriptedOpenAiServer {
 pub fn spawn_scripted_openai_stream_server(
     responses: Vec<ScriptedResponse>,
 ) -> ScriptedOpenAiServer {
+    spawn_scripted_openai_stream_server_internal(responses, false)
+}
+
+pub fn spawn_scripted_openai_stream_server_with_auto_title(
+    responses: Vec<ScriptedResponse>,
+) -> ScriptedOpenAiServer {
+    spawn_scripted_openai_stream_server_internal(responses, true)
+}
+
+fn spawn_scripted_openai_stream_server_internal(
+    responses: Vec<ScriptedResponse>,
+    auto_title_response: bool,
+) -> ScriptedOpenAiServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock llm server");
+    listener
+        .set_nonblocking(true)
+        .expect("mock llm listener nonblocking");
     let addr = listener.local_addr().expect("local addr");
     let requests = Arc::new(Mutex::new(Vec::new()));
     let requests_thread = Arc::clone(&requests);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_thread = Arc::clone(&shutdown);
     let join = thread::spawn(move || {
-        for scripted in responses {
-            let (mut stream, _) = listener.accept().expect("accept mock request");
+        let mut scripted = std::collections::VecDeque::from(responses);
+        loop {
+            if shutdown_thread.load(Ordering::Relaxed) {
+                break;
+            }
+            let (mut stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(err) => panic!("accept mock request: {err}"),
+            };
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("stream read timeout");
             let request = read_http_request(&mut stream);
-            requests_thread.lock().expect("requests lock").push(request);
-            let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+            requests_thread
+                .lock()
+                .expect("requests lock")
+                .push(request.clone());
+            let handled_title = auto_title_response && request_is_session_title_request(&request);
+            let (headers, parts) = if handled_title {
+                (
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                    vec![ScriptedPart {
+                        delay_ms: 0,
+                        body: session_title_response_json(&request, "Generated title"),
+                    }],
+                )
+            } else {
+                let scripted = scripted
+                    .pop_front()
+                    .expect("missing scripted response for streamed request");
+                (
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                    scripted.parts,
+                )
+            };
             stream.write_all(headers.as_bytes()).expect("write headers");
-            for part in scripted.parts {
+            for part in parts {
                 if part.delay_ms > 0 {
                     thread::sleep(Duration::from_millis(part.delay_ms));
                 }
@@ -282,13 +334,106 @@ pub fn spawn_scripted_openai_stream_server(
                     .expect("write response part");
                 stream.flush().expect("flush response part");
             }
+            if scripted.is_empty() && handled_title {
+                break;
+            }
+            if !handled_title && scripted.is_empty() {
+                break;
+            }
         }
     });
     ScriptedOpenAiServer {
         base_url: format!("http://{addr}"),
         requests,
         join: Some(join),
+        shutdown,
     }
+}
+
+pub fn captured_non_title_requests(server: &ScriptedOpenAiServer) -> Vec<String> {
+    server
+        .captured_requests()
+        .into_iter()
+        .filter(|request| !request_is_session_title_request(request))
+        .collect()
+}
+
+fn request_is_session_title_request(request: &str) -> bool {
+    let Some((_, body)) = request.split_once("\r\n\r\n") else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    if value.get("stream").and_then(Value::as_bool) != Some(false) {
+        return false;
+    }
+
+    let chat_completions_title = value
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| messages.first())
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .is_some_and(|content| {
+            content.starts_with("Generate a short chat title from the user's first message.\n")
+        });
+    if chat_completions_title {
+        return true;
+    }
+
+    value
+        .get("input")
+        .and_then(Value::as_array)
+        .and_then(|input| input.first())
+        .and_then(|item| item.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|content| content.first())
+        .and_then(|part| part.get("text"))
+        .and_then(Value::as_str)
+        .is_some_and(|text| {
+            text.starts_with("Generate a short chat title from the user's first message.\n")
+        })
+}
+
+fn session_title_response_json(request: &str, title: &str) -> String {
+    if request.starts_with("POST /v1/responses ") {
+        return serde_json::json!({
+            "id": "title-mock",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": title,
+                }],
+            }],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+            },
+        })
+        .to_string();
+    }
+
+    serde_json::json!({
+        "id": "title-mock",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": title,
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+        },
+    })
+    .to_string()
 }
 
 pub fn sse_delta(content: &str) -> ScriptedPart {
@@ -382,12 +527,16 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
     String::from_utf8_lossy(&raw).to_string()
 }
 
-pub fn extract_json_body(request: &str) -> Value {
+pub fn try_extract_json_body(request: &str) -> Option<Value> {
     let body = request
         .split_once("\r\n\r\n")
         .map(|(_, body)| body)
         .unwrap_or("");
-    serde_json::from_str(body).expect("request body should be json")
+    serde_json::from_str(body).ok()
+}
+
+pub fn extract_json_body(request: &str) -> Value {
+    try_extract_json_body(request).expect("request body should be json")
 }
 
 pub fn assert_ndjson_line(value: &Value) {

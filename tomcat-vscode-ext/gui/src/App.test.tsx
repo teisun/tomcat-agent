@@ -968,9 +968,12 @@ describe("Tomcat webview App", () => {
       },
     });
     fireEvent.click(screen.getByTestId("send-button"));
-    fireEvent.change(screen.getByTestId("model-select"), {
-      target: { value: "claude-4.6-sonnet" },
-    });
+    fireEvent.click(screen.getByTestId("model-select"));
+    fireEvent.click(
+      screen
+        .getAllByTestId("model-option")
+        .find((node) => node.textContent?.includes("claude-4.6-sonnet")) ?? screen.getAllByTestId("model-option")[0],
+    );
     fireEvent.change(screen.getByTestId("thinking-level-select"), {
       target: { value: "xhigh" },
     });

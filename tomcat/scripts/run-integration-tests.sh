@@ -44,17 +44,20 @@ build_test_args() {
 }
 
 openai_responses_target() {
-  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-gpt-5.4_litellm-sunmi}"
+  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-gpt-5.4}"
 }
 
 openai_responses_key_env() {
   local target
   target="$(openai_responses_target)"
-  if [ "$target" = "gpt-5.4" ]; then
+  case "$target" in
+    gpt-5.2|gpt-5.4|gpt-5.5|gpt-5.6)
     printf '%s' "OPENAI_API_KEY"
-  else
-    printf '%s' "LITELLM_SUNMI_API_KEY"
-  fi
+    ;;
+    *)
+    printf '%s' "${TOMCAT_E2E_OPENAI_KEY_ENV:-OPENAI_GATEWAY_API_KEY}"
+    ;;
+  esac
 }
 
 missing_required_envs_for_real_llm() {

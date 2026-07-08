@@ -1,14 +1,16 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-
 use parking_lot::Mutex;
 use tracing::warn;
 
 use crate::infra::config::{AppConfig, LlmRuntimeConfig};
 use crate::infra::error::AppError;
 
-use super::auth::{AuthStore, Credential};
-use super::catalog::{infer_default_base_url, Capabilities, ModelCatalog, ModelEntry};
+use super::auth::{credential_generation, AuthStore, Credential};
+use std::sync::Arc;
+
+use super::catalog::{
+    infer_default_base_url, Capabilities, ModelCatalog, ModelEntry, SharedModelCatalog,
+};
 use super::provider::LlmProvider;
 use super::registry::build_provider;
 use super::thinking_policy::{thinking_format_for_model, ThinkingFormat};
@@ -92,6 +94,7 @@ struct ProviderCacheKey {
     api: String,
     base_url: Option<String>,
     key_source: String,
+    key_generation: u64,
 }
 
 pub fn capability_requirements_for_messages(messages: &[ChatMessage]) -> CapabilityRequirements {
@@ -154,16 +157,16 @@ pub trait LlmResolver: Send + Sync {
 
 pub struct DefaultLlmResolver {
     config: AppConfig,
-    catalog: Arc<ModelCatalog>,
+    catalog: SharedModelCatalog,
     auth: AuthStore,
     provider_cache: Mutex<HashMap<ProviderCacheKey, Arc<dyn LlmProvider>>>,
 }
 
 impl DefaultLlmResolver {
-    pub fn new(config: AppConfig, catalog: Arc<ModelCatalog>) -> Self {
+    pub fn new(config: AppConfig, catalog: impl Into<SharedModelCatalog>) -> Self {
         Self {
             config,
-            catalog,
+            catalog: catalog.into(),
             auth: AuthStore,
             provider_cache: Mutex::new(HashMap::new()),
         }
@@ -223,14 +226,16 @@ impl DefaultLlmResolver {
     }
 
     fn guard_scene(&self, scene: LlmScene, entry: &ModelEntry) -> Result<(), AppError> {
-        validate_capabilities(
-            &self.catalog,
-            &self.config.llm.default_model,
-            scene,
-            &entry.id,
-            &entry.capabilities,
-            &[],
-        )
+        self.catalog.with_catalog(|catalog| {
+            validate_capabilities(
+                catalog,
+                &self.config.llm.default_model,
+                scene,
+                &entry.id,
+                &entry.capabilities,
+                &[],
+            )
+        })
     }
 
     fn credential_for(
@@ -241,25 +246,21 @@ impl DefaultLlmResolver {
         self.auth.get(entry, compatible_fallback_env)
     }
 
-    fn compatible_fallback_env<'a>(
-        &'a self,
-        scene: LlmScene,
-        entry: &ModelEntry,
-    ) -> Option<&'a str> {
+    fn compatible_fallback_env(&self, scene: LlmScene, entry: &ModelEntry) -> Option<String> {
         match scene {
             LlmScene::Compaction => self.compaction_fallback_env(entry),
             _ => self.test_fallback_env(),
         }
     }
 
-    fn compaction_fallback_env<'a>(&'a self, entry: &ModelEntry) -> Option<&'a str> {
+    fn compaction_fallback_env(&self, entry: &ModelEntry) -> Option<String> {
         let default_model = self.config.llm.default_model.trim();
         if default_model.is_empty() || entry.id == default_model {
             return None;
         }
         let default_entry = self.catalog.lookup(default_model)?;
         if default_entry.provider == entry.provider {
-            default_entry.api_key_env.as_deref()
+            default_entry.api_key_env
         } else {
             None
         }
@@ -278,12 +279,12 @@ impl DefaultLlmResolver {
     }
 
     #[cfg(test)]
-    fn test_fallback_env(&self) -> Option<&str> {
-        self.config.llm.api_key_env.as_deref()
+    fn test_fallback_env(&self) -> Option<String> {
+        self.config.llm.api_key_env.clone()
     }
 
     #[cfg(not(test))]
-    fn test_fallback_env(&self) -> Option<&str> {
+    fn test_fallback_env(&self) -> Option<String> {
         None
     }
 
@@ -311,6 +312,7 @@ impl DefaultLlmResolver {
             api: entry.api.clone(),
             base_url: self.effective_base_url(entry),
             key_source: credential.env_name.clone(),
+            key_generation: credential_generation(&credential.env_name),
         }
     }
 
@@ -341,7 +343,7 @@ impl DefaultLlmResolver {
         let entry = self.lookup_entry(model_id)?;
         self.guard_scene(scene, &entry)?;
         let compatible_fallback_env = self.compatible_fallback_env(scene, &entry);
-        let credential = self.credential_for(&entry, compatible_fallback_env)?;
+        let credential = self.credential_for(&entry, compatible_fallback_env.as_deref())?;
         let provider_impl = self.resolve_cached_provider(&entry, &credential)?;
         let base_url = self.effective_base_url(&entry);
         Ok(ResolvedCall {

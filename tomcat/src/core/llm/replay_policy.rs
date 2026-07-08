@@ -157,6 +157,20 @@ impl ProviderCompatProfile {
             },
         }
     }
+
+    pub fn anthropic_messages(model: &str) -> Self {
+        Self {
+            profile_id: "anthropic.messages.default".to_string(),
+            provider: "anthropic".to_string(),
+            api_family: "messages".to_string(),
+            model_family: model_family(model),
+            capture_mode: CaptureMode::OpaqueItems,
+            replay_acceptance: ReplayAcceptance::SameProfileOnly,
+            requires_tool_turn_replay: true,
+            supports_response_id_hint: false,
+            downgrade_mode: DowngradeMode::FallbackText,
+        }
+    }
 }
 
 /// 统一计算 assistant turn continuity 的出站策略。
@@ -447,6 +461,13 @@ fn is_compatible(target: &ProviderCompatProfile, continuation: &ReasoningContinu
                 && matches!(target.capture_mode, CaptureMode::ReasoningContent)
                 && same_profile(target, continuation)
         }
+        ReasoningFormat::AnthropicThinkingBlocks => {
+            continuation.source_provider == "anthropic"
+                && continuation.source_api == "messages"
+                && target.api_family == "messages"
+                && matches!(target.capture_mode, CaptureMode::OpaqueItems)
+                && same_profile(target, continuation)
+        }
     }
 }
 
@@ -463,6 +484,8 @@ pub fn model_family(model: &str) -> String {
         "deepseek-v4".to_string()
     } else if lower.starts_with("gpt-5") {
         "gpt-5".to_string()
+    } else if lower.starts_with("claude-opus-4-") {
+        "claude-opus-4".to_string()
     } else if lower.is_empty() {
         "unknown".to_string()
     } else {

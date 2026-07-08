@@ -151,7 +151,7 @@ pub async fn build_initialized_state(
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
     let shared_model_thinking = build_shared_model_thinking(&cfg).expect("shared model thinking");
-    let state = ServeState::new(cfg, writer, shared_model_thinking);
+    let state = ServeState::new(cfg, writer, shared_model_thinking).expect("serve state");
     let slot = create_session_slot(Arc::clone(&state), NewSessionParams::default(), false)
         .await
         .expect("initial session");
@@ -341,7 +341,7 @@ pub async fn build_initialized_state_with_provider(
     ensure_work_dir_structure(&cfg).expect("work dir");
     let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
     let shared_model_thinking = build_shared_model_thinking(&cfg).expect("shared model thinking");
-    let state = ServeState::new(cfg.clone(), writer, shared_model_thinking);
+    let state = ServeState::new(cfg.clone(), writer, shared_model_thinking).expect("serve state");
 
     let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let sessions_dir = resolve_sessions_dir(&cfg).expect("sessions dir");
@@ -377,7 +377,7 @@ pub async fn build_initialized_state_with_provider(
     ctx.global_services.llm_resolver = Arc::new(FixedResolver::new(
         provider,
         "gpt-5.4",
-        Arc::clone(&ctx.global_services.model_catalog),
+        ctx.global_services.model_catalog.snapshot(),
     ));
 
     let context_budget_chars =

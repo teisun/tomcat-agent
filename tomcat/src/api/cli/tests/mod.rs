@@ -19,6 +19,7 @@
 
 mod audit_test;
 mod config_keys_test;
+mod model_cmd_test;
 mod mocks;
 mod nested_guard_test;
 mod package_cmd_test;

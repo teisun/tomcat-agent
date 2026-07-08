@@ -2,9 +2,9 @@
 
 > 适用范围：给 Tomcat Agent Box 增加「模型管理」端到端能力——把 Composer 的原生 `<select>` 换成含分隔符与「Add Models」的**自定义下拉**；点击后在**编辑器区全屏 Webview 标签页**打开「设置中心」（左导航模块入口 / 右模块内容，本期只 Models 可点）；在 Models 模块页里增删改模型、填写 API Key；配套新增 `tomcat model` CLI 子命令，把常用模型（OpenAI / MiMo / DeepSeek / GLM / Kimi / Claude Opus）作为**官方内置预置**开箱即用（用户只填 Key），并实现新的 **Anthropic Messages provider**。
 > 上位规范：[`ARCHITECTURE_SPEC.md`](../../../tomcat/docs/openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。本方案参考 [`tomcat-vscode-extension-phase2.md`](tomcat-vscode-extension-phase2.md) 的组织方式，按规范 §1–§10 拆为「总览（本文）+ 5 篇子文档」，文首「方案导图集」置于子文档之前、不占用 § 编号。
-> 单一事实源：模型目录仍以 `tomcat/src/core/llm/catalog.rs` 为准；serve 协议以 `tomcat/src/api/serve/types.rs` 为准；模型增删改 / Key 写入的落地逻辑统一收敛到拟新增的 `core/llm/admin.rs`，CLI 与 serve 都调用它，不各写一份。
+> 单一事实源：模型目录仍以内嵌 `tomcat/src/core/llm/builtin_models.toml` + `catalog.rs` 解析结果为准；serve 协议以 `tomcat/src/api/serve/types.rs` 为准；模型增删改 / Key 写入的落地逻辑统一收敛到拟新增的 `core/llm/admin.rs`，CLI 与 serve 都调用它，不各写一份。
 
-**一句话定位**：本方案把「模型管理」收敛成一条清晰链路：**唯一写盘中枢** `core/llm/admin.rs`（改 `models.toml`/`.env`，含锁、原子写、校验、Key 脱敏与只入不出）对上暴露 `tomcat model` **CLI** 与 `tomcat serve` **模型管理命令**两个等价门面；前端在侧栏用**自定义下拉**（可用模型 + 分隔符 + Add Models）触发**编辑器区设置中心**（左导航 / 右 Models 页，密文填 Key 即用）；后端把常用模型统一并进 `builtin_models()` **单表**（OpenAI 5.4/5.5/5.6、MiMo、DeepSeek、GLM、Kimi、Opus×3），用 **path-aware endpoint** 修好 GLM 非 `/v1` 地址，并新增 `anthropic-messages` **provider** 接入 Claude；「一个模型能不能用」由「Key 变量是否非空」动态二分，内置预置填个 Key 就地转正——全程 Key 密文、不回吐、`.env` 0600。
+**一句话定位**：本方案把「模型管理」收敛成一条清晰链路：**唯一写盘中枢** `core/llm/admin.rs`（改 `models.toml`/`.env`，含锁、原子写、校验、Key 脱敏与只入不出）对上暴露 `tomcat model` **CLI** 与 `tomcat serve` **模型管理命令**两个等价门面；前端在侧栏用**自定义下拉**（可用模型 + 分隔符 + Add Models）触发**编辑器区设置中心**（左导航 / 右 Models 页，密文填 Key 即用）；后端把常用模型统一收敛到内嵌 `builtin_models.toml` **单源**（OpenAI 5.4/5.5/5.6、MiMo、DeepSeek、GLM、Kimi、Opus×3），由 `catalog.rs` 解析成运行时 builtin catalog，用 **path-aware endpoint** 修好 GLM 非 `/v1` 地址，并新增 `anthropic-messages` **provider** 接入 Claude；「一个模型能不能用」由「Key 变量是否非空」动态二分，内置预置填个 Key 就地转正——全程 Key 密文、不回吐、`.env` 0600。
 
 ---
 
@@ -60,7 +60,7 @@
                             │ 写后 reload
                             ▼
 ┌─ ModelCatalog（可重载句柄；单一事实源）───────────────────┐
-│  builtin_models()  ── 官方内置预置（开机即在）             │
+│  builtin_models.toml（内嵌）── 官方内置预置（开机即在）    │
 │  ⊕ 用户 models.toml（同 id 覆盖 / 新 id 追加）             │
 │  registry(api) → provider 分派                            │
 └───────────────────────────┬──────────────────────────────┘
@@ -94,17 +94,17 @@
 │ Editor Area                            │     │   core::llm::admin::*               │
 │  ui/settings/SettingsPanel.ts ◀NEW     │     │  ListModels 出参 ◀加 source/key     │
 │   createWebviewPanel(retainContext)    │     │                                     │
-│        │ postMessage(settings.*)        │◀────│ src/api/serve/control.rs            │
+│        │ postMessage(intent/state)      │◀────│ src/api/serve/control.rs            │
 │        ▼                               │stdout│  capabilities ◀NEW:                 │
 │  gui/src/settings/*.tsx ◀NEW           │NDJSON│   upsert_model/remove_model/        │
 │   设置中心壳(左导航/右内容)+Models 页  │     │   set_provider_key                  │
-│        │ settings.upsertModel/setKey    │     │                                     │
+│        │ upsertModel / setProviderKey   │     │                                     │
 │        ▼                               │     │ src/core/llm/admin.rs ◀NEW ★        │
 │  serveClient/TomcatMessenger.ts        │     │  list_model_views/upsert/remove/    │
 │   +sendUpsertModel/+sendSetProviderKey │     │  set_provider_key/list_provider_keys│
 │   +sendRemoveModel/+sendListProviderKey│     │        │ 写                          │
 │  serveClient/initialize.ts             │     │        ├─▶ core/llm/catalog.rs      │
-│   +SERVE_CAPABILITY_* 门控             │     │        │    builtin_models()+GLM/Kimi│
+│   +SERVE_CAPABILITY_* 门控             │     │        │    builtin_models.toml      │
 │  serveClient/wire.d.ts / protocol.ts   │     │        │    /Opus…；可重载句柄       │
 │   +新命令/响应类型                     │     │        ├─▶ core/llm/registry.rs     │
 └───────────────────────────────────────┘     │        │    +("anthropic-messages",..)│
@@ -123,7 +123,7 @@
                        upsert_user_model（含合法 api/provider/base_url）
         ┌───────────────────────────────────────────────────────────┐
         │                                                             ▼
-┌───────────────┐  内置于 builtin_models()          ┌───────────────────────────┐
+┌───────────────┐  内置于 builtin_models.toml       ┌───────────────────────────┐
 │  (不存在)     │ ─────────────────────────────────▶│  NeedsKey                 │
 └───────────────┘                                    │  {source, key_present=F}  │
         ▲                                             └───────┬───────────────────┘
@@ -140,7 +140,7 @@
 
 | 当前状态      | 事件                            | 目标状态           | 副作用（`admin.rs`）                                   | 说人话                    |
 | --------- | ----------------------------- | -------------- | ------------------------------------------------- | ---------------------- |
-| (不存在)     | 命中 `builtin_models()`         | NeedsKey       | 无（开机即在，`key_present` 依 `.env` 判定）                 | 官方内置模型开机就列出来，只是还没 Key。 |
+| (不存在)     | 命中内嵌 `builtin_models.toml` | NeedsKey       | 无（开机即在，`key_present` 依 `.env` 判定）                 | 官方内置模型开机就列出来，只是还没 Key。 |
 | (不存在)     | `upsert_user_model`           | Ready/NeedsKey | 写 `models.toml` + reload；校验 api/provider/base_url | 用户手动加一个自定义模型。          |
 | NeedsKey  | `set_provider_key{env,value}` | Ready          | 写 `.env`(0600) + 重载 Key；仅回 `key_present=true`     | 填上 Key 就地转正，进入下拉。      |
 | Ready     | 对应 `.env` 键被清空                | NeedsKey       | 下次 `list_model_views` 判定 `key_present=false`      | Key 没了就退回「待填」。         |
@@ -153,7 +153,7 @@
 
 ## 一句话总结
 
-本方案把「模型管理」收敛成一条清晰链路：**唯一写盘中枢** `core/llm/admin.rs`（改 `models.toml`/`.env`，含锁、原子写、校验、Key 脱敏与只入不出）对上暴露 `tomcat model` **CLI** 与 `tomcat serve` **模型管理命令**两个等价门面；前端在侧栏用**自定义下拉**（可用模型 + 分隔符 + Add Models）触发**编辑器区设置中心**（左导航 / 右 Models 页，密文填 Key 即用）；后端把常用模型统一并进 `builtin_models()` **单表**（OpenAI 5.4/5.5/5.6、MiMo、DeepSeek、GLM、Kimi、Opus×3），用 **path-aware endpoint** 修好 GLM 非 `/v1` 地址，并新增 `anthropic-messages` **provider** 接入 Claude；「一个模型能不能用」由「Key 变量是否非空」动态二分，内置预置填个 Key 就地转正——全程 Key 密文、不回吐、`.env` 0600。UI 总分设计详见附录 A。
+本方案把「模型管理」收敛成一条清晰链路：**唯一写盘中枢** `core/llm/admin.rs`（改 `models.toml`/`.env`，含锁、原子写、校验、Key 脱敏与只入不出）对上暴露 `tomcat model` **CLI** 与 `tomcat serve` **模型管理命令**两个等价门面；前端在侧栏用**自定义下拉**（可用模型 + 分隔符 + Add Models）触发**编辑器区设置中心**（左导航 / 右 Models 页，密文填 Key 即用）；后端把常用模型统一收敛到内嵌 `builtin_models.toml` **单源**（OpenAI 5.4/5.5/5.6、MiMo、DeepSeek、GLM、Kimi、Opus×3），由 `catalog.rs` 解析成运行时 builtin catalog，用 **path-aware endpoint** 修好 GLM 非 `/v1` 地址，并新增 `anthropic-messages` **provider** 接入 Claude；「一个模型能不能用」由「Key 变量是否非空」动态二分，内置预置填个 Key 就地转正——全程 Key 密文、不回吐、`.env` 0600。UI 总分设计详见附录 A。
 
 ---
 

@@ -61,6 +61,7 @@ pub(crate) struct ServeState {
     pub registry: Arc<ChatContextRegistry>,
     pub writer: WriterHandle,
     pub ask_question: ServeAskQuestionBridge,
+    pub shared_model_catalog: crate::core::llm::SharedModelCatalog,
     pub shared_model_thinking: Arc<ModelThinkingStore>,
     pub shared_agent_registry: Arc<AgentRegistry>,
     pub shared_event_bus: Arc<FanoutEventBus>,
@@ -72,21 +73,23 @@ impl ServeState {
         cfg: AppConfig,
         writer: WriterHandle,
         shared_model_thinking: Arc<ModelThinkingStore>,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>, AppError> {
         let registry = Arc::new(ChatContextRegistry::new(cfg.serve.max_sessions));
         let ask_question = ServeAskQuestionBridge::new(writer.clone());
         let shared_event_bus = Arc::new(FanoutEventBus::new());
         let shared_agent_registry = AgentRegistry::new().attach_event_bus(shared_event_bus.clone());
-        Arc::new(Self {
+        let shared_model_catalog = crate::core::llm::SharedModelCatalog::load(&cfg)?;
+        Ok(Arc::new(Self {
             cfg,
             registry,
             writer,
             ask_question,
+            shared_model_catalog,
             shared_model_thinking,
             shared_agent_registry,
             shared_event_bus,
             initialized: AtomicBool::new(false),
-        })
+        }))
     }
 }
 
@@ -131,7 +134,7 @@ async fn run_stdio(cfg: AppConfig) -> Result<(), AppError> {
     ensure_work_dir_structure(&cfg)?;
     let shared_model_thinking = build_shared_model_thinking(&cfg)?;
     let writer = writer::spawn_stdout_writer(WriterConfig::from(&cfg.serve));
-    let state = ServeState::new(cfg, writer, shared_model_thinking);
+    let state = ServeState::new(cfg, writer, shared_model_thinking)?;
     let initial_slot =
         create_session_slot(Arc::clone(&state), NewSessionParams::default(), false).await?;
     state.registry.insert(Arc::clone(&initial_slot))?;

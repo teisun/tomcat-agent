@@ -99,6 +99,28 @@ fn blocked_commands() -> Vec<Commands> {
         Commands::Config {
             sub: ConfigSub::Edit,
         },
+        Commands::Model {
+            sub: ModelSub::Add {
+                id: "custom".to_string(),
+                api: "openai-responses".to_string(),
+                provider: "openai".to_string(),
+                model_name: Some("gpt-5.4".to_string()),
+                api_key_env: None,
+                base_url: None,
+                vision: false,
+                files: false,
+                tools: false,
+                reasoning: false,
+                web_search: false,
+                context_window: None,
+                thinking_format: None,
+            },
+        },
+        Commands::Model {
+            sub: ModelSub::Default {
+                model: "gpt-5.4".to_string(),
+            },
+        },
         Commands::Workspace {
             sub: WorkspaceSub::Add {
                 path: Some("/tmp/ws".to_string()),
@@ -155,6 +177,12 @@ fn allowed_commands() -> Vec<Commands> {
         Commands::Config {
             sub: ConfigSub::Get {
                 key: Some("log.level".to_string()),
+            },
+        },
+        Commands::Model { sub: ModelSub::List },
+        Commands::Model {
+            sub: ModelSub::Key {
+                sub: ModelKeySub::List,
             },
         },
         Commands::Packages {

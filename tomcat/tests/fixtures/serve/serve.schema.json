@@ -252,6 +252,102 @@
       {
         "type": "object",
         "required": [
+          "model",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "$ref": "#/definitions/ModelEntryInput"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "upsert_model"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "modelId",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modelId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "remove_model"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "envName",
+          "type",
+          "value"
+        ],
+        "properties": {
+          "envName": {
+            "type": "string"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_provider_key"
+            ]
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "list_provider_keys"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
           "type"
         ],
         "properties": {
@@ -498,6 +594,52 @@
       }
     ],
     "definitions": {
+      "Capabilities": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "default": false,
+            "type": "boolean"
+          },
+          "reasoning": {
+            "default": false,
+            "type": "boolean"
+          },
+          "tools": {
+            "default": true,
+            "type": "boolean"
+          },
+          "vision": {
+            "default": false,
+            "type": "boolean"
+          },
+          "web_search": {
+            "default": false,
+            "type": "boolean"
+          }
+        }
+      },
+      "Cost": {
+        "type": "object",
+        "properties": {
+          "input_per_mtok": {
+            "default": null,
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "output_per_mtok": {
+            "default": null,
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
       "GetMessagesParams": {
         "description": "`get_messages` 的分页/裁剪参数。",
         "type": "object",
@@ -533,6 +675,81 @@
           "live",
           "disk"
         ]
+      },
+      "ModelEntryInput": {
+        "type": "object",
+        "required": [
+          "api",
+          "id",
+          "provider"
+        ],
+        "properties": {
+          "api": {
+            "type": "string"
+          },
+          "apiKeyEnv": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "baseUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "default": {
+              "files": false,
+              "reasoning": false,
+              "tools": true,
+              "vision": false,
+              "web_search": false
+            },
+            "allOf": [
+              {
+                "$ref": "#/definitions/Capabilities"
+              }
+            ]
+          },
+          "contextWindow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/Cost"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "modelName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "thinkingFormat": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "NewSessionParams": {
         "description": "`new_session` 的可选参数。",

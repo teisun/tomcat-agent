@@ -7,9 +7,10 @@ use serde_json::json;
 use serial_test::serial;
 
 use common::serve::{
-    assert_ndjson_line, extract_json_body, response, setup_serve_fixture,
-    spawn_scripted_openai_stream_server, spawn_serve_child, sse_delta, sse_done, sse_finish,
-    ScriptedPart, ServeChild, ServeFixture,
+    assert_ndjson_line, captured_non_title_requests, extract_json_body, response,
+    setup_serve_fixture, spawn_scripted_openai_stream_server,
+    spawn_scripted_openai_stream_server_with_auto_title, spawn_serve_child, sse_delta, sse_done,
+    sse_finish, ScriptedPart, ScriptedOpenAiServer, ServeChild, ServeFixture,
 };
 
 fn initialize(child: &mut ServeChild) -> String {
@@ -96,6 +97,10 @@ fn transcript_entries(fx: &ServeFixture, session_id: &str) -> Vec<serde_json::Va
         .collect()
 }
 
+fn non_title_requests(server: &ScriptedOpenAiServer) -> Vec<String> {
+    captured_non_title_requests(server)
+}
+
 fn responses_sse_delta(content: &str) -> ScriptedPart {
     ScriptedPart {
         delay_ms: 0,
@@ -116,7 +121,7 @@ fn responses_sse_completed() -> ScriptedPart {
 #[serial]
 fn serve_stdio_user_roundtrip_e2e() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         sse_delta("hello from serve"),
         sse_finish("stop"),
         sse_done(),
@@ -183,14 +188,14 @@ fn serve_stdio_user_roundtrip_e2e() {
         output.status.success(),
         "serve e2e should exit cleanly: {output:?}"
     );
-    assert_eq!(server.captured_requests().len(), 1);
+    assert_eq!(non_title_requests(&server).len(), 1);
 }
 
 #[test]
 #[serial]
 fn serve_interrupt_emits_agent_interrupted_e2e() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         sse_delta("partial"),
         common::serve::ScriptedPart {
             delay_ms: 350,
@@ -269,7 +274,7 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
 #[serial]
 fn serve_stdout_only_emits_ndjson_frames() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         sse_delta("ndjson ok"),
         sse_finish("stop"),
         sse_done(),
@@ -302,7 +307,7 @@ fn serve_stdout_only_emits_ndjson_frames() {
 #[serial]
 fn serve_prompt_with_attachment_roundtrip() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         responses_sse_delta("vision ok"),
         responses_sse_completed(),
     ])]);
@@ -341,7 +346,7 @@ fn serve_prompt_with_attachment_roundtrip() {
         "expected attachment prompt to reach agent_end, got {frames:?}"
     );
 
-    let requests = server.captured_requests();
+    let requests = non_title_requests(&server);
     assert_eq!(requests.len(), 1, "expected one responses API request");
     let body = extract_json_body(&requests[0]);
     let input = body["input"].as_array().expect("responses input array");
@@ -358,7 +363,7 @@ fn serve_prompt_with_attachment_roundtrip() {
 #[serial]
 fn serve_prompt_with_inline_file_attachment_roundtrip() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         responses_sse_delta("file ok"),
         responses_sse_completed(),
     ])]);
@@ -399,7 +404,7 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
         "expected file attachment prompt to reach agent_end, got {frames:?}"
     );
 
-    let requests = server.captured_requests();
+    let requests = non_title_requests(&server);
     assert_eq!(requests.len(), 1, "expected one responses API request");
     let body = extract_json_body(&requests[0]);
     let input = body["input"].as_array().expect("responses input array");
@@ -421,7 +426,7 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
 #[serial]
 fn serve_prompt_with_context_reference_segments_roundtrip() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         responses_sse_delta("context ok"),
         responses_sse_completed(),
     ])]);
@@ -502,7 +507,7 @@ fn serve_prompt_with_context_reference_segments_roundtrip() {
         .or_else(|| state_response["sessionId"].as_str())
         .unwrap_or(session_id.as_str());
 
-    let requests = server.captured_requests();
+    let requests = non_title_requests(&server);
     assert_eq!(requests.len(), 1, "expected one responses API request");
     let body = extract_json_body(&requests[0]);
     let input = body["input"].as_array().expect("responses input array");
@@ -592,7 +597,7 @@ fn serve_prompt_with_non_pdf_file_attachment_returns_error() {
         )
     );
     assert_eq!(
-        server.captured_requests().len(),
+        non_title_requests(&server).len(),
         0,
         "non-pdf file attachments should not reach the responses API"
     );
@@ -602,7 +607,7 @@ fn serve_prompt_with_non_pdf_file_attachment_returns_error() {
 #[serial]
 fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succeeds() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
         response(vec![
             responses_sse_delta("vision ok"),
             responses_sse_completed(),
@@ -696,7 +701,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
         "history downgrade should avoid terminal errors: {second_frames:?}"
     );
 
-    let requests = server.captured_requests();
+    let requests = non_title_requests(&server);
     assert_eq!(requests.len(), 3, "expected three upstream requests");
     assert!(
         requests[2].contains("/v1/chat/completions"),

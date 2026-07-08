@@ -198,14 +198,24 @@ describe("model catalog parsing", () => {
               reasoning: true,
             },
             id: "deepseek-v4-flash",
+            keyPresent: true,
           },
           {
             capabilities: ["vision", "files"],
             id: "gpt-5.4",
+            keyPresent: true,
           },
           {
             capabilities: null,
             id: "text-only",
+            keyPresent: true,
+          },
+          {
+            capabilities: {
+              tools: true,
+            },
+            id: "missing-key",
+            keyPresent: false,
           },
         ],
       }),

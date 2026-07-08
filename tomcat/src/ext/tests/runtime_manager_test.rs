@@ -141,16 +141,19 @@ fn reap_configured_idle_noops_when_ttl_zero() {
 fn touch_refreshes_idle_deadline() {
     let mgr = PluginRuntimeManager::new();
     let key = PluginRuntimeKey::new("session-touch", "plugin-touch");
+    let ttl = Duration::from_millis(40);
     mgr.insert(key.clone(), make_stub_handle());
 
-    std::thread::sleep(Duration::from_millis(10));
+    // Leave enough margin on both sides of the touch so scheduler jitter does not
+    // turn this into a flaky boundary-timing assertion.
+    std::thread::sleep(Duration::from_millis(60));
     assert!(
         mgr.touch(&key),
         "touch should succeed for registered runtime"
     );
 
     std::thread::sleep(Duration::from_millis(5));
-    let reaped = mgr.reap_idle(Duration::from_millis(10));
+    let reaped = mgr.reap_idle(ttl);
     assert!(
         reaped.is_empty(),
         "touch should refresh last_used so the runtime is not reaped yet"
@@ -159,6 +162,11 @@ fn touch_refreshes_idle_deadline() {
         mgr.contains(&key),
         "runtime should remain after a fresh touch"
     );
+
+    std::thread::sleep(Duration::from_millis(45));
+    let reaped = mgr.reap_idle(ttl);
+    assert_eq!(reaped.len(), 1, "runtime should expire after the refreshed TTL");
+    assert_eq!(reaped[0].0, key);
 }
 
 #[test]

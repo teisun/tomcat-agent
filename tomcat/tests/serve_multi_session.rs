@@ -6,8 +6,9 @@ use serde_json::json;
 use serial_test::serial;
 
 use common::serve::{
-    assert_ndjson_line, response, setup_serve_fixture, spawn_scripted_openai_stream_server,
-    spawn_serve_child, sse_delta, sse_done, sse_finish, ServeChild,
+    assert_ndjson_line, response, setup_serve_fixture,
+    spawn_scripted_openai_stream_server_with_auto_title, spawn_serve_child, sse_delta, sse_done,
+    sse_finish, ServeChild,
 };
 
 fn initialize(child: &mut ServeChild) -> String {
@@ -48,7 +49,7 @@ fn new_session(child: &mut ServeChild, id: &str) -> String {
 #[serial]
 fn serve_multi_session_concurrency_and_isolation() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
         response(vec![
             sse_delta("slow"),
             common::serve::ScriptedPart {
@@ -161,7 +162,7 @@ fn serve_multi_session_concurrency_and_isolation() {
 #[serial]
 fn serve_same_session_is_busy_until_turn_finishes() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         sse_delta("busy"),
         common::serve::ScriptedPart {
             delay_ms: 250,

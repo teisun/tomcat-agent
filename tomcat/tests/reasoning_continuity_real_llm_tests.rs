@@ -67,11 +67,7 @@ fn live_openai_responses_opt_in(test_name: &str) -> bool {
 }
 
 fn openai_api_key_env() -> &'static str {
-    if openai_model() == "gpt-5.4" {
-        "OPENAI_API_KEY"
-    } else {
-        common::OPENAI_GATEWAY_TEST_API_KEY_ENV
-    }
+    common::openai_test_api_key_env_for_model(openai_model().as_str())
 }
 
 fn deepseek_model() -> String {

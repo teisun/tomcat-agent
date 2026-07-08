@@ -346,6 +346,7 @@ interface ComposerProps {
   onDraftChange(draft: ComposerDraft): void;
   onModeChange(value: "chat" | "plan"): void;
   onModelChange(value: string): void;
+  onOpenModelSettings?(): void;
   onResolveDrop(uris: string[]): void;
   onThinkingLevelChange(value: "high" | "low" | "medium" | "xhigh" | ""): void;
   onInterrupt?(): void;
@@ -367,6 +368,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onDraftChange,
   onModeChange,
   onModelChange,
+  onOpenModelSettings,
   onResolveDrop,
   onThinkingLevelChange,
   onInterrupt,
@@ -377,8 +379,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [capabilityHint, setCapabilityHint] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [draft, setDraft] = useState<ComposerDraft>(EMPTY_DRAFT);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const isComposingRef = useRef(false);
   const draftRef = useRef<ComposerDraft>(EMPTY_DRAFT);
+  const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const latestHandlersRef = useRef({
     canPrompt,
     onDraftChange,
@@ -493,6 +497,39 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }, 4_000);
     return () => window.clearTimeout(timeout);
   }, [capabilityHint]);
+
+  useEffect(() => {
+    if (!modelMenuOpen) {
+      return;
+    }
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!modelMenuRef.current) {
+        return;
+      }
+      if (event.target instanceof Node && !modelMenuRef.current.contains(event.target)) {
+        setModelMenuOpen(false);
+      }
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setModelMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [modelMenuOpen]);
+
+  const useNativeModelSelect = !onOpenModelSettings;
+  const canOpenModelMenu = canPrompt && (availableModels.length > 0 || Boolean(onOpenModelSettings));
+
+  const handleModelPick = (nextModel: string) => {
+    onModelChange(nextModel);
+    setModelMenuOpen(false);
+  };
 
   useImperativeHandle(ref, () => ({
     clear() {
@@ -687,23 +724,81 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             |
           </span>
 
-          <label className="tc-field tc-field--compact tc-field--model">
+          <div className="tc-field tc-field--compact tc-field--model" ref={useNativeModelSelect ? null : modelMenuRef}>
             <span>Model</span>
-            <select
-              aria-label="Tomcat model"
-              data-testid="model-select"
-              disabled={!canPrompt || !availableModels.length}
-              onChange={(event) => onModelChange(event.target.value)}
-              value={modelValue}
-            >
-              <option value="">Select model</option>
-              {availableModels.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          </label>
+            {useNativeModelSelect ? (
+              <select
+                aria-label="Tomcat model"
+                data-testid="model-select"
+                disabled={!canPrompt || availableModels.length === 0}
+                onChange={(event) => onModelChange(event.target.value)}
+                value={modelValue}
+              >
+                {availableModels.length === 0 ? (
+                  <option value="">No ready models</option>
+                ) : null}
+                {availableModels.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <>
+                <button
+                  aria-expanded={modelMenuOpen}
+                  aria-label="Tomcat model"
+                  className="tc-topbar__trigger tc-topbar__trigger--compact"
+                  data-testid="model-select"
+                  disabled={!canOpenModelMenu}
+                  onClick={() => setModelMenuOpen((value) => !value)}
+                  type="button"
+                >
+                  <span className="tc-topbar__trigger-label">
+                    {modelValue || (availableModels.length ? "Select model" : "Add models")}
+                  </span>
+                  <span className="tc-topbar__caret" aria-hidden="true">
+                    {modelMenuOpen ? "▴" : "▾"}
+                  </span>
+                </button>
+                {modelMenuOpen ? (
+                  <div className="tc-session-dropdown tc-model-dropdown" data-testid="model-dropdown">
+                    {availableModels.length > 0 ? (
+                      availableModels.map((model) => {
+                        const isActive = model === modelValue;
+                        return (
+                          <button
+                            aria-current={isActive ? "true" : undefined}
+                            className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
+                            data-testid="model-option"
+                            key={model}
+                            onClick={() => handleModelPick(model)}
+                            type="button"
+                          >
+                            <span className="tc-session-item__title">{model}</span>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="tc-session-dropdown__empty">No ready models</div>
+                    )}
+                    <div className="tc-model-dropdown__divider" />
+                    <button
+                      className="tc-session-item tc-model-dropdown__footer"
+                      data-testid="model-open-settings"
+                      onClick={() => {
+                        setModelMenuOpen(false);
+                        onOpenModelSettings();
+                      }}
+                      type="button"
+                    >
+                      <span className="tc-session-item__title">Add Models...</span>
+                    </button>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
           <span aria-hidden="true" className="tc-composer__bar-sep">
             |
           </span>

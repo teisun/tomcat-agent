@@ -83,22 +83,22 @@ pub(crate) fn run_init() -> Result<(), AppError> {
             updated_model_name_ids.is_empty(),
         ) {
             (false, false) => println!(
-                "  ✓ 已向现有 models.toml 补齐受管默认模型：{}；并补写 model_name：{}",
+                "  ✓ 已向现有 models.toml 补齐受管预置模型：{}；并补写 model_name：{}",
                 added_model_ids.join(", "),
                 updated_model_name_ids.join(", ")
             ),
             (false, true) => println!(
-                "  ✓ 已向现有 models.toml 补齐受管默认模型：{}",
+                "  ✓ 已向现有 models.toml 补齐受管预置模型：{}",
                 added_model_ids.join(", ")
             ),
             (true, false) => println!(
-                "  ✓ 已为现有 models.toml 补写受管默认模型的 model_name：{}",
+                "  ✓ 已为现有 models.toml 补写受管预置模型的 model_name：{}",
                 updated_model_name_ids.join(", ")
             ),
-            (true, true) => println!("  ✓ models.toml 已就绪（受管默认模型已齐全）"),
+            (true, true) => println!("  ✓ models.toml 已就绪（受管预置模型已齐全）"),
         },
         crate::api::cli::models_toml::ModelsTomlStatus::AlreadyPresent => {
-            println!("  ✓ models.toml 已就绪（受管默认模型与 model_name 已齐全）")
+            println!("  ✓ models.toml 已就绪（受管预置模型与 model_name 已齐全）")
         }
     }
 

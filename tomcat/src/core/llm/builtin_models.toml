@@ -1,0 +1,142 @@
+[[models]]
+id = "gpt-5.2"
+model_name = "gpt-5.2"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com"
+thinking_format = "openai"
+context_window = 400000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "gpt-5.4"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com"
+thinking_format = "openai"
+context_window = 400000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "gpt-5.5"
+model_name = "gpt-5.5"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com"
+thinking_format = "openai"
+context_window = 400000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "gpt-5.6"
+model_name = "gpt-5.6"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com"
+thinking_format = "openai"
+context_window = 400000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "deepseek-v4-pro"
+model_name = "deepseek-v4-pro"
+api = "openai"
+provider = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+thinking_format = "deepseek"
+context_window = 400000
+capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "deepseek-v4-flash"
+model_name = "deepseek-v4-flash"
+api = "openai"
+provider = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+thinking_format = "deepseek"
+context_window = 400000
+capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "utility-flash"
+model_name = "deepseek-v4-flash"
+api = "openai"
+provider = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com"
+thinking_format = "deepseek"
+context_window = 400000
+capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "mimo-v2.5-pro"
+model_name = "mimo-v2.5-pro"
+api = "openai"
+provider = "mimo"
+api_key_env = "MIMO_API_KEY"
+base_url = "https://token-plan-cn.xiaomimimo.com"
+thinking_format = "doubao"
+context_window = 1000000
+capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "glm-5.2"
+model_name = "glm-5.2"
+api = "openai"
+provider = "zhipu"
+api_key_env = "ZHIPU_API_KEY"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+thinking_format = "zai"
+context_window = 400000
+capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "kimi-k2.7-code"
+model_name = "kimi-k2.7-code"
+api = "openai"
+provider = "moonshot"
+api_key_env = "MOONSHOT_API_KEY"
+base_url = "https://api.moonshot.cn"
+thinking_format = "doubao"
+context_window = 400000
+capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "claude-opus-4-8"
+model_name = "claude-opus-4-8"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic"
+context_window = 400000
+capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "claude-opus-4-7"
+model_name = "claude-opus-4-7"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic"
+context_window = 400000
+capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "claude-opus-4-6"
+model_name = "claude-opus-4-6"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+thinking_format = "anthropic"
+context_window = 400000
+capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }

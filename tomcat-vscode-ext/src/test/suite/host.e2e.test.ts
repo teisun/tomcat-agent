@@ -11,6 +11,7 @@ import {
   assertPlanSlashFlowViaChatUi,
   assertWebviewPlanModeSwitchFlow,
   assertWebviewAnswerCardFlow,
+  assertWebviewAddModelsFlow,
   assertWebviewDiffFlow,
   assertWebviewCrossOwnerPlanFlow,
   assertWebviewFileDropReferenceFlow,
@@ -82,6 +83,11 @@ suite("Tomcat host E2E", () => {
   test("runs /model via the real chat UI", async () => {
     const api = await getTomcatExtensionApi();
     await assertModelSlashFlowViaChatUi(api);
+  });
+
+  test("adds a model through settings and uses it in the webview", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewAddModelsFlow(api);
   });
 
   test("streams in the Tomcat webview", async () => {

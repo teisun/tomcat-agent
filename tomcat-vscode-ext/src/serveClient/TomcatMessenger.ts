@@ -23,7 +23,13 @@ import type {
   ServeCommand,
   ServeEvent,
   GetMessagesParams,
+  ListModelsPayload,
+  ListProviderKeysPayload,
+  ModelEntryInput,
+  RemoveModelResponse,
+  SetProviderKeyResponse,
   SetPlanModeAction,
+  UpsertModelResponse,
 } from "./wire";
 
 export interface TomcatMessengerLogger {
@@ -85,6 +91,10 @@ type PendingControl = {
   reject(error: Error): void;
   resolve(frame: ControlResponseFrame | ControlCancelFrame): void;
   timeout: NodeJS.Timeout;
+};
+
+type TypedResponseFrame<TPayload> = Omit<ResponseFrame, "payload"> & {
+  payload?: TPayload;
 };
 
 function toError(error: unknown): Error {
@@ -272,13 +282,63 @@ export class TomcatMessenger {
     });
   }
 
-  sendListModels(timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+  sendListModels(timeoutMs = this.timeoutMs()): Promise<TypedResponseFrame<ListModelsPayload>> {
     return this.request(
       {
         type: "list_models",
       },
       timeoutMs,
-    );
+    ) as Promise<TypedResponseFrame<ListModelsPayload>>;
+  }
+
+  sendUpsertModel(
+    model: ModelEntryInput,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<UpsertModelResponse>> {
+    return this.request(
+      {
+        model,
+        type: "upsert_model",
+      },
+      timeoutMs,
+    ) as Promise<TypedResponseFrame<UpsertModelResponse>>;
+  }
+
+  sendRemoveModel(
+    modelId: string,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<RemoveModelResponse>> {
+    return this.request(
+      {
+        modelId,
+        type: "remove_model",
+      },
+      timeoutMs,
+    ) as Promise<TypedResponseFrame<RemoveModelResponse>>;
+  }
+
+  sendSetProviderKey(
+    envName: string,
+    value: string,
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<SetProviderKeyResponse>> {
+    return this.request(
+      {
+        envName,
+        type: "set_provider_key",
+        value,
+      },
+      timeoutMs,
+    ) as Promise<TypedResponseFrame<SetProviderKeyResponse>>;
+  }
+
+  sendListProviderKeys(timeoutMs = this.timeoutMs()): Promise<TypedResponseFrame<ListProviderKeysPayload>> {
+    return this.request(
+      {
+        type: "list_provider_keys",
+      },
+      timeoutMs,
+    ) as Promise<TypedResponseFrame<ListProviderKeysPayload>>;
   }
 
   sendSetModel(

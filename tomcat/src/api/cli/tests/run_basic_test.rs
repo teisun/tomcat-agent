@@ -389,7 +389,6 @@ fn apply_model_choice_updates_provider_and_key_env() {
         base_url: Some("https://api.deepseek.com".to_string()),
         capabilities: crate::core::llm::Capabilities::default(),
         context_window: None,
-        cost: None,
         thinking_format: Some("deepseek".to_string()),
     };
 
@@ -433,8 +432,26 @@ fn additional_provider_env_names_skip_selected_provider_and_dedupe() {
         "DEEPSEEK_API_KEY",
     );
 
-    assert_eq!(extra_for_openai, vec!["DEEPSEEK_API_KEY".to_string()]);
-    assert_eq!(extra_for_deepseek, vec!["OPENAI_API_KEY".to_string()]);
+    assert_eq!(
+        extra_for_openai,
+        vec![
+            "ANTHROPIC_API_KEY".to_string(),
+            "DEEPSEEK_API_KEY".to_string(),
+            "MIMO_API_KEY".to_string(),
+            "MOONSHOT_API_KEY".to_string(),
+            "ZHIPU_API_KEY".to_string(),
+        ]
+    );
+    assert_eq!(
+        extra_for_deepseek,
+        vec![
+            "ANTHROPIC_API_KEY".to_string(),
+            "MIMO_API_KEY".to_string(),
+            "MOONSHOT_API_KEY".to_string(),
+            "OPENAI_API_KEY".to_string(),
+            "ZHIPU_API_KEY".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -449,7 +466,6 @@ fn apply_model_choice_skips_default_openai_base_url() {
         base_url: Some("https://api.openai.com".to_string()),
         capabilities: crate::core::llm::Capabilities::default(),
         context_window: None,
-        cost: None,
         thinking_format: None,
     };
 

@@ -154,6 +154,7 @@ export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
   availableModels: string[];
+  modelAdminSupported: boolean;
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
   sessions: WebviewSessionTab[];
@@ -304,6 +305,13 @@ export type WebviewIntent =
         level: "high" | "low" | "medium" | "xhigh";
         modelId: string;
         sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "openModelSettings";
+      data?: {
+        route?: "models" | null;
       };
     }
   | {
@@ -527,6 +535,14 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "openFile":
     case "openPlanFile":
       return isRecord(value.data) && isString(value.data.path);
+    case "openModelSettings":
+      return (
+        value.data === undefined ||
+        (isRecord(value.data) &&
+          (value.data.route === undefined ||
+            value.data.route === null ||
+            value.data.route === "models"))
+      );
     case "resolveDrop":
       return (
         isRecord(value.data) &&

@@ -349,7 +349,7 @@ impl ChatContext {
         let cfg_path_snapshot =
             crate::api::cli::config_file_path().unwrap_or_else(|_| std::path::PathBuf::new());
 
-        let model_catalog = Arc::new(crate::core::llm::ModelCatalog::load(&config)?);
+        let model_catalog = crate::core::llm::SharedModelCatalog::load(&config)?;
         let web_search_runtime = Arc::new(crate::core::tools::web_search::WebSearchRuntime::new(
             &config,
             model_catalog.clone(),

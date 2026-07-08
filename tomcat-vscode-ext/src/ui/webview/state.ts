@@ -1061,6 +1061,7 @@ export class WebviewStateStore {
       activeSessionId: null,
       availableModelCapabilities: {},
       availableModels: [],
+      modelAdminSupported: false,
       ready: false,
       sessionViews: {},
       sessions: [],
@@ -1081,6 +1082,10 @@ export class WebviewStateStore {
     this.state.availableModels = [...models];
   }
 
+  setModelAdminSupported(supported: boolean): void {
+    this.state.modelAdminSupported = supported;
+  }
+
   setUiMode(mode: TomcatUiMode): void {
     this.state.uiMode = mode;
   }
@@ -1092,6 +1097,7 @@ export class WebviewStateStore {
       activeSessionId: null,
       availableModelCapabilities: {},
       availableModels: [],
+      modelAdminSupported: false,
       ready: false,
       sessionViews: {},
       sessions: [],

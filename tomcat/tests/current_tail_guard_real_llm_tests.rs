@@ -11,7 +11,9 @@ use std::time::Duration;
 use chrono::Utc;
 use serial_test::serial;
 use tempfile::TempDir;
-use tomcat::core::agent_loop::build_collapse_summary_artifacts_for_test;
+use tomcat::core::agent_loop::{
+    build_collapse_summary_artifacts_for_test, CollapseSummaryArtifacts,
+};
 use tomcat::core::llm::MessageKind;
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
@@ -24,13 +26,16 @@ use tomcat::core::session::{PlanEventKind, PlanEventRef};
 use tomcat::core::tools::contract::catalog::builtin_tool_by_name;
 use tomcat::core::tools::plan_tool::update_plan::{self, UpdatePlanArgs};
 use tomcat::{
-    init_context_state, AppConfig, ChatMessage, ChatRequest, ContextConfig, SessionManager,
+    init_context_state, AppConfig, ChatMessage, ChatRequest, ChatResponse, ContextConfig,
+    SessionManager,
 };
 
 const COMPACTION_MODEL: &str = "deepseek-v4-pro";
 const SESSION_KEY: &str = "keepalive-real-llm";
 const SESSION_ID: &str = "keepalive-real-llm-session";
 const LLM_TIMEOUT: Duration = Duration::from_secs(120);
+const TRANSIENT_LLM_RETRY_DELAY: Duration = Duration::from_secs(2);
+const TRANSIENT_LLM_MAX_ATTEMPTS: usize = 3;
 
 fn require_api_key() {
     let _ = common::require_deepseek_api_key("current_tail_guard_real_llm_tests");
@@ -53,6 +58,90 @@ fn real_llm_config() -> AppConfig {
 
 fn real_llm() -> Arc<dyn tomcat::LlmProvider> {
     common::resolve_main_provider(&real_llm_config())
+}
+
+fn is_transient_connect_failure_text(text: &str) -> bool {
+    text.contains("connection closed via error")
+        || text.contains("请求连接失败")
+        || text.contains("流式请求连接失败")
+        || text.contains("stage: Some(Connect)")
+        || text.contains("stage=Some(Connect)")
+}
+
+async fn request_chat_response_or_skip(
+    test_name: &str,
+    phase: &str,
+    llm: &dyn tomcat::LlmProvider,
+    request: &ChatRequest,
+) -> Option<ChatResponse> {
+    for attempt in 1..=TRANSIENT_LLM_MAX_ATTEMPTS {
+        match tokio::time::timeout(LLM_TIMEOUT, llm.chat(request.clone())).await {
+            Ok(Ok(response)) => return Some(response),
+            Ok(Err(err)) => {
+                let detail = format!("{err:?}");
+                if is_transient_connect_failure_text(&detail) {
+                    if attempt < TRANSIENT_LLM_MAX_ATTEMPTS {
+                        eprintln!(
+                            "[real-llm retry] {test_name} {phase} transient connect failure; retrying attempt {}/{}",
+                            attempt + 1,
+                            TRANSIENT_LLM_MAX_ATTEMPTS
+                        );
+                        tokio::time::sleep(TRANSIENT_LLM_RETRY_DELAY).await;
+                        continue;
+                    }
+                    eprintln!(
+                        "skipping {test_name}: DeepSeek connect failures persisted during {phase}: {detail}"
+                    );
+                    return None;
+                }
+                panic!("真实 LLM {phase} 失败: {err:?}");
+            }
+            Err(_) => panic!("真实 LLM {phase} 超时"),
+        }
+    }
+    unreachable!("retry loop should always return");
+}
+
+async fn build_collapse_summary_artifacts_or_skip(
+    test_name: &str,
+    phase: &str,
+    working: &[ChatMessage],
+    llm: &dyn tomcat::LlmProvider,
+    fixture: &PlanFixture,
+) -> Option<CollapseSummaryArtifacts> {
+    for attempt in 1..=TRANSIENT_LLM_MAX_ATTEMPTS {
+        match build_collapse_summary_artifacts_for_test(
+            working,
+            llm,
+            COMPACTION_MODEL,
+            Some(&fixture.plan_runtime),
+            Some(&fixture.latest_plan_event),
+        )
+        .await
+        {
+            Ok(artifacts) => return Some(artifacts),
+            Err(err) => {
+                let detail = format!("{err:?}");
+                if is_transient_connect_failure_text(&detail) {
+                    if attempt < TRANSIENT_LLM_MAX_ATTEMPTS {
+                        eprintln!(
+                            "[real-llm retry] {test_name} {phase} transient connect failure; retrying attempt {}/{}",
+                            attempt + 1,
+                            TRANSIENT_LLM_MAX_ATTEMPTS
+                        );
+                        tokio::time::sleep(TRANSIENT_LLM_RETRY_DELAY).await;
+                        continue;
+                    }
+                    eprintln!(
+                        "skipping {test_name}: DeepSeek connect failures persisted during {phase}: {detail}"
+                    );
+                    return None;
+                }
+                panic!("{phase} 失败: {err:?}");
+            }
+        }
+    }
+    unreachable!("retry loop should always return");
 }
 
 struct HomeGuard {
@@ -246,7 +335,7 @@ async fn request_update_plan_args(
     llm: &Arc<dyn tomcat::LlmProvider>,
     context_messages: Vec<ChatMessage>,
     fixture: &PlanFixture,
-) -> UpdatePlanArgs {
+) -> Option<UpdatePlanArgs> {
     let mut messages = vec![ChatMessage::system(keepalive_resume_system_prompt())];
     messages.extend(context_messages);
     messages.push(ChatMessage::user(keepalive_resume_user_prompt(fixture)));
@@ -264,10 +353,13 @@ async fn request_update_plan_args(
             thinking_level: None,
             tools: Some(tool_definitions.clone()),
         };
-        let response = tokio::time::timeout(LLM_TIMEOUT, llm.chat(request))
-            .await
-            .expect("真实 LLM resume 请求超时")
-            .expect("真实 LLM resume 请求失败");
+        let response = request_chat_response_or_skip(
+            "current_tail_guard_real_llm_tests",
+            "requesting update_plan tool call",
+            llm.as_ref(),
+            &request,
+        )
+        .await?;
         let assistant = response
             .choices
             .first()
@@ -275,7 +367,7 @@ async fn request_update_plan_args(
             .message
             .clone();
         match parse_update_plan_args_from_message(&assistant) {
-            Ok(args) => return args,
+            Ok(args) => return Some(args),
             Err(err) => {
                 last_error = err;
                 if attempt == 2 {
@@ -399,15 +491,17 @@ async fn real_llm_collapse_summary_includes_programmatic_keepalive() {
     let llm = real_llm();
     let working = assign_manual_message_ids(make_working_messages(&fixture));
 
-    let artifacts = build_collapse_summary_artifacts_for_test(
+    let Some(artifacts) = build_collapse_summary_artifacts_or_skip(
+        "real_llm_collapse_summary_includes_programmatic_keepalive",
+        "building collapse summary artifacts",
         &working,
         &*llm,
-        COMPACTION_MODEL,
-        Some(&fixture.plan_runtime),
-        Some(&fixture.latest_plan_event),
+        &fixture,
     )
     .await
-    .expect("构建 collapse summary artifacts 失败");
+    else {
+        return;
+    };
 
     assert_eq!(
         artifacts.summary_message.kind,
@@ -454,18 +548,23 @@ async fn real_llm_reads_keepalive_and_calls_update_plan() {
     let fixture = build_plan_fixture("case-b");
     let llm = real_llm();
     let working = assign_manual_message_ids(make_working_messages(&fixture));
-    let artifacts = build_collapse_summary_artifacts_for_test(
+    let Some(artifacts) = build_collapse_summary_artifacts_or_skip(
+        "real_llm_reads_keepalive_and_calls_update_plan",
+        "building collapse summary artifacts",
         &working,
         &*llm,
-        COMPACTION_MODEL,
-        Some(&fixture.plan_runtime),
-        Some(&fixture.latest_plan_event),
+        &fixture,
     )
     .await
-    .expect("A 产物构建失败");
+    else {
+        return;
+    };
 
-    let args =
-        request_update_plan_args(&llm, vec![artifacts.summary_message.clone()], &fixture).await;
+    let Some(args) =
+        request_update_plan_args(&llm, vec![artifacts.summary_message.clone()], &fixture).await
+    else {
+        return;
+    };
     assert_update_plan_targets_current_and_next(&args, &fixture);
     let result = execute_update_plan_and_assert(&fixture, args).await;
     assert_eq!(result["plan_id"].as_str(), Some(fixture.plan_id.as_str()));
@@ -499,15 +598,17 @@ async fn real_llm_after_reload_reads_keepalive_and_calls_update_plan() {
     }))
     .expect("append_custom_entry(plan.build) 失败");
 
-    let artifacts = build_collapse_summary_artifacts_for_test(
+    let Some(artifacts) = build_collapse_summary_artifacts_or_skip(
+        "real_llm_after_reload_reads_keepalive_and_calls_update_plan",
+        "building collapse summary artifacts before reload",
         &working,
         &*llm,
-        COMPACTION_MODEL,
-        Some(&fixture.plan_runtime),
-        Some(&fixture.latest_plan_event),
+        &fixture,
     )
     .await
-    .expect("构建 reload 前 collapse artifacts 失败");
+    else {
+        return;
+    };
     let transcript_path = mgr
         .current_transcript_path()
         .expect("读取当前 transcript path 失败")
@@ -541,7 +642,9 @@ async fn real_llm_after_reload_reads_keepalive_and_calls_update_plan() {
 
     let mut reloaded_messages = state.messages.clone();
     reloaded_messages.retain(|msg| msg.kind == MessageKind::CompactionSummary);
-    let args = request_update_plan_args(&llm, reloaded_messages, &fixture).await;
+    let Some(args) = request_update_plan_args(&llm, reloaded_messages, &fixture).await else {
+        return;
+    };
     assert_update_plan_targets_current_and_next(&args, &fixture);
     let result = update_plan::execute(&restored_runtime, args)
         .await

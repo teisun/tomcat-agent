@@ -68,7 +68,7 @@ bundled CLI **不会** 从你的 Downloads 文件夹直接运行。
 help me understand this repository
 ```
 
-Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部的 session picker 可以切换会话或创建新会话。
+Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部的 session picker 可以切换会话或创建新会话。现在模型选择器里还带有 `Add Models...` 入口，可直接打开专门的设置中心，在 VS Code 内新增自定义 OpenAI-compatible 或 Anthropic 模型。
 
 ## 可选设置
 
@@ -95,6 +95,7 @@ Tomcat Agent Box 默认会恢复当前项目的活动会话。使用面板顶部
 这个扩展提供了这些命令：
 
 - `Tomcat: Focus Agent Box`
+- `Tomcat: Open Settings`
 - `Tomcat: Restart Serve`
 - `Tomcat: Start New Session`
 - `Tomcat: List Sessions`

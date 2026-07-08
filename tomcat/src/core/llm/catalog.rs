@@ -1,16 +1,21 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use parking_lot::RwLock;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::infra::config::{get_work_dir, AppConfig, ContextConfig};
 use crate::infra::error::AppError;
 
+const BUILTIN_MODELS_TOML: &str = include_str!("builtin_models.toml");
+
 fn default_tools_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Capabilities {
     #[serde(default)]
     pub vision: bool,
@@ -36,15 +41,7 @@ impl Default for Capabilities {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Cost {
-    #[serde(default)]
-    pub input_per_mtok: Option<f64>,
-    #[serde(default)]
-    pub output_per_mtok: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelEntry {
     pub id: String,
     #[serde(default)]
@@ -60,8 +57,6 @@ pub struct ModelEntry {
     #[serde(default)]
     pub context_window: Option<u32>,
     #[serde(default)]
-    pub cost: Option<Cost>,
-    #[serde(default)]
     pub thinking_format: Option<String>,
 }
 
@@ -76,6 +71,12 @@ pub struct ModelCatalog {
     by_id: HashMap<String, ModelEntry>,
     user_path: PathBuf,
     ordered_ids: Vec<String>,
+    user_ids: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SharedModelCatalog {
+    inner: Arc<RwLock<Arc<ModelCatalog>>>,
 }
 
 impl ModelCatalog {
@@ -87,21 +88,16 @@ impl ModelCatalog {
     pub fn load_from_path(config: &AppConfig, user_path: PathBuf) -> Result<Self, AppError> {
         let mut by_id = HashMap::new();
         let mut ordered_ids = Vec::new();
-        for entry in builtin_models(&config.context) {
+        let mut user_ids = HashSet::new();
+        for entry in builtin_seed_entries_result(&config.context)? {
             ordered_ids.push(entry.id.clone());
             by_id.insert(entry.id.clone(), entry);
         }
         if user_path.exists() {
-            let content = std::fs::read_to_string(&user_path).map_err(AppError::Io)?;
-            let file: UserModelsFile = toml::from_str(&content).map_err(|e| {
-                AppError::Config(format!(
-                    "解析 models.toml 失败（{}）：{}",
-                    user_path.display(),
-                    e
-                ))
-            })?;
+            let file = load_user_models_file(&user_path)?;
             for raw in file.models {
                 let model_id = raw.id.clone();
+                user_ids.insert(model_id.clone());
                 let merged = merge_user_model(raw, by_id.remove(&model_id), &config.context)?;
                 if !ordered_ids.iter().any(|existing| existing == &merged.id) {
                     ordered_ids.push(merged.id.clone());
@@ -113,6 +109,7 @@ impl ModelCatalog {
             by_id,
             user_path,
             ordered_ids,
+            user_ids,
         })
     }
 
@@ -146,90 +143,168 @@ impl ModelCatalog {
             .filter_map(|id| self.by_id.get(id).cloned())
             .collect()
     }
+
+    pub fn is_user_model(&self, model_id: &str) -> bool {
+        self.user_ids.contains(model_id.trim())
+    }
 }
 
-#[derive(Debug, Deserialize)]
-struct UserModelsFile {
-    #[serde(default)]
-    models: Vec<UserModelEntry>,
+impl SharedModelCatalog {
+    pub fn load(config: &AppConfig) -> Result<Self, AppError> {
+        Ok(Self::from(ModelCatalog::load(config)?))
+    }
+
+    pub fn snapshot(&self) -> Arc<ModelCatalog> {
+        self.inner.read().clone()
+    }
+
+    pub fn replace(&self, catalog: ModelCatalog) -> Arc<ModelCatalog> {
+        let next = Arc::new(catalog);
+        *self.inner.write() = next.clone();
+        next
+    }
+
+    pub fn reload(&self, config: &AppConfig) -> Result<Arc<ModelCatalog>, AppError> {
+        let user_path = self.snapshot().user_path().to_path_buf();
+        let next = ModelCatalog::load_from_path(config, user_path)?;
+        Ok(self.replace(next))
+    }
+
+    pub fn lookup(&self, model_id: &str) -> Option<ModelEntry> {
+        self.snapshot().lookup(model_id).cloned()
+    }
+
+    pub fn lookup_explicit(&self, model_id: &str) -> Result<ModelEntry, AppError> {
+        self.snapshot().lookup_explicit(model_id)
+    }
+
+    pub fn entries(&self) -> Vec<ModelEntry> {
+        self.snapshot().entries()
+    }
+
+    pub fn entries_in_merge_order(&self) -> Vec<ModelEntry> {
+        self.snapshot().entries_in_merge_order()
+    }
+
+    pub fn is_user_model(&self, model_id: &str) -> bool {
+        self.snapshot().is_user_model(model_id)
+    }
+
+    pub fn user_path(&self) -> PathBuf {
+        self.snapshot().user_path().to_path_buf()
+    }
+
+    pub fn with_catalog<R>(&self, f: impl FnOnce(&ModelCatalog) -> R) -> R {
+        let snapshot = self.snapshot();
+        f(snapshot.as_ref())
+    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct UserModelEntry {
-    id: String,
-    #[serde(default)]
-    model_name: Option<String>,
-    #[serde(default)]
-    api: Option<String>,
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    api_key_env: Option<String>,
-    #[serde(default)]
-    base_url: Option<String>,
-    #[serde(default)]
-    capabilities: Option<PartialCapabilities>,
-    #[serde(default)]
-    context_window: Option<u32>,
-    #[serde(default)]
-    cost: Option<Cost>,
-    #[serde(default)]
-    thinking_format: Option<String>,
+impl From<ModelCatalog> for SharedModelCatalog {
+    fn from(value: ModelCatalog) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Arc::new(value))),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct PartialCapabilities {
-    #[serde(default)]
-    vision: Option<bool>,
-    #[serde(default)]
-    files: Option<bool>,
-    #[serde(default)]
-    tools: Option<bool>,
-    #[serde(default)]
-    reasoning: Option<bool>,
-    #[serde(default)]
-    web_search: Option<bool>,
+impl From<Arc<ModelCatalog>> for SharedModelCatalog {
+    fn from(value: Arc<ModelCatalog>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(value)),
+        }
+    }
 }
 
-fn builtin_models(context: &ContextConfig) -> Vec<ModelEntry> {
-    vec![
-        ModelEntry {
-            id: "gpt-5.4".to_string(),
-            model_name: None,
-            api: "openai-responses".to_string(),
-            provider: "openai".to_string(),
-            api_key_env: None,
-            base_url: Some("https://api.openai.com".to_string()),
-            capabilities: Capabilities {
-                vision: true,
-                files: true,
-                tools: true,
-                reasoning: true,
-                web_search: false,
-            },
-            context_window: Some(context.context_window as u32),
-            cost: None,
-            thinking_format: None,
-        },
-        ModelEntry {
-            id: "deepseek-v4-pro".to_string(),
-            model_name: None,
-            api: "openai".to_string(),
-            provider: "deepseek".to_string(),
-            api_key_env: None,
-            base_url: Some("https://api.deepseek.com".to_string()),
-            capabilities: Capabilities {
-                vision: false,
-                files: false,
-                tools: true,
-                reasoning: true,
-                web_search: false,
-            },
-            context_window: Some(context.context_window as u32),
-            cost: None,
-            thinking_format: Some("deepseek".to_string()),
-        },
-    ]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct UserModelsFile {
+    #[serde(default)]
+    pub(crate) models: Vec<UserModelEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct UserModelEntry {
+    pub(crate) id: String,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) model_name: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) api: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) api_key_env: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) base_url: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) capabilities: Option<PartialCapabilities>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) context_window: Option<u32>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thinking_format: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct PartialCapabilities {
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vision: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) files: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tools: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reasoning: Option<bool>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) web_search: Option<bool>,
+}
+
+pub(crate) fn load_user_models_file(path: &Path) -> Result<UserModelsFile, AppError> {
+    if !path.exists() {
+        return Ok(UserModelsFile::default());
+    }
+    let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
+    toml::from_str(&content).map_err(|e| {
+        AppError::Config(format!("解析 models.toml 失败（{}）：{}", path.display(), e))
+    })
+}
+
+pub(crate) fn render_user_models_file(file: &UserModelsFile) -> Result<String, AppError> {
+    toml::to_string_pretty(file)
+        .map(|text| format!("{text}\n"))
+        .map_err(|e| AppError::Config(format!("序列化 models.toml 失败: {e}")))
+}
+
+pub(crate) fn builtin_seed_toml_text() -> &'static str {
+    BUILTIN_MODELS_TOML
+}
+
+#[cfg(test)]
+pub(crate) fn builtin_seed_entries(context: &ContextConfig) -> Vec<ModelEntry> {
+    builtin_seed_entries_result(context)
+        .unwrap_or_else(|err| panic!("解析内嵌 builtin_models.toml 失败: {err}"))
+}
+
+pub(crate) fn builtin_seed_entries_result(
+    context: &ContextConfig,
+) -> Result<Vec<ModelEntry>, AppError> {
+    let file = toml::from_str::<UserModelsFile>(BUILTIN_MODELS_TOML)
+        .map_err(|e| AppError::Config(format!("解析内嵌 builtin_models.toml 失败: {e}")))?;
+    file.models
+        .into_iter()
+        .map(|raw| merge_user_model(raw, None, context))
+        .collect()
 }
 
 fn merge_user_model(
@@ -246,7 +321,6 @@ fn merge_user_model(
         base_url: None,
         capabilities: Capabilities::default(),
         context_window: Some(context.context_window as u32),
-        cost: None,
         thinking_format: None,
     });
     merged.id = raw.id.clone();
@@ -282,9 +356,6 @@ fn merge_user_model(
     }
     if let Some(context_window) = raw.context_window {
         merged.context_window = Some(context_window);
-    }
-    if let Some(cost) = raw.cost {
-        merged.cost = Some(cost);
     }
     if let Some(thinking_format) = raw.thinking_format {
         merged.thinking_format = Some(thinking_format);
@@ -323,6 +394,9 @@ pub(crate) fn infer_default_base_url(provider: Option<&str>) -> Option<String> {
         "openai" | "openai-responses" => Some("https://api.openai.com".to_string()),
         "deepseek" => Some("https://api.deepseek.com".to_string()),
         "mimo" => Some("https://token-plan-cn.xiaomimimo.com".to_string()),
+        "zhipu" => Some("https://open.bigmodel.cn/api/paas/v4".to_string()),
+        "moonshot" => Some("https://api.moonshot.cn".to_string()),
+        "anthropic" | "anthropic-messages" => Some("https://api.anthropic.com".to_string()),
         _ => None,
     }
 }
