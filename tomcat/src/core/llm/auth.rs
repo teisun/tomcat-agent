@@ -119,7 +119,7 @@ pub fn missing_key_message(
 }
 
 pub fn refresh_managed_credentials(env_path: &Path) -> Result<(), AppError> {
-    let vars = read_env_entries(env_path);
+    let vars = read_env_entries(env_path)?;
     refresh_managed_credentials_from_entries(&vars);
     Ok(())
 }

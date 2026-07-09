@@ -200,6 +200,7 @@ pub fn resolve_provider_key_env_name(catalog: &ModelCatalog, raw: &str) -> Strin
 
 pub fn upsert_user_model(cfg: &AppConfig, input: ModelEntryInput) -> Result<ModelView, AppError> {
     let entry = input.into_model_entry()?;
+    validate_mutable_model_entry(&entry)?;
     let path = ModelCatalog::default_user_path(cfg)?;
     with_file_lock(&models_lock_path(&path), || {
         let mut file = load_user_models_file(&path)?;
@@ -232,6 +233,7 @@ pub fn remove_user_model(cfg: &AppConfig, model_id: &str) -> Result<(), AppError
             }
             return Err(AppError::Config(format!("模型 `{trimmed}` 不存在。")));
         }
+        ensure_model_not_in_use(cfg, trimmed)?;
         let mut file = load_user_models_file(&path)?;
         let before = file.models.len();
         file.models.retain(|entry| entry.id.trim() != trimmed);
@@ -274,7 +276,7 @@ pub fn set_provider_key(
     }
     let env_path = runtime_env_path(cfg)?;
     with_file_lock(&env_lock_path(&env_path), || {
-        let mut vars = read_env_entries(&env_path);
+        let mut vars = read_env_entries(&env_path)?;
         vars.insert(env_name.clone(), value);
         write_env_entries(&env_path, &vars)?;
         refresh_managed_credentials(&env_path)?;
@@ -291,11 +293,73 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
         .filter(|raw| !raw.is_empty())
 }
 
+fn validate_mutable_model_entry(entry: &ModelEntry) -> Result<(), AppError> {
+    let registered = super::registered_provider_ids();
+    if !registered.iter().any(|api| *api == entry.api) {
+        return Err(AppError::Config(format!(
+            "模型 `{}` 的 api=`{}` 未注册；可选值：{}。",
+            entry.id,
+            entry.api,
+            registered.join(", ")
+        )));
+    }
+    if entry.api == "anthropic-messages" && entry.capabilities.files {
+        return Err(AppError::Config(format!(
+            "模型 `{}` 的 api=`anthropic-messages` 当前不支持 files 附件能力，请关闭 files 或改用支持文件附件的 api。",
+            entry.id
+        )));
+    }
+    Ok(())
+}
+
 fn inferred_api_key_env(entry: &ModelEntry) -> String {
     entry
         .api_key_env
         .clone()
         .unwrap_or_else(|| env_name_for_provider(&entry.provider))
+}
+
+fn ensure_model_not_in_use(cfg: &AppConfig, model_id: &str) -> Result<(), AppError> {
+    let mut refs = Vec::new();
+    if cfg.llm.default_model.trim() == model_id {
+        refs.push("llm.default_model".to_string());
+    }
+    if cfg.context.compaction_model.trim() == model_id {
+        refs.push("context.compaction_model".to_string());
+    }
+    if cfg.llm.vision_model.as_deref().map(str::trim) == Some(model_id) {
+        refs.push("llm.vision_model".to_string());
+    }
+    if cfg.llm.title_model.as_deref().map(str::trim) == Some(model_id) {
+        refs.push("llm.title_model".to_string());
+    }
+
+    let sessions_path = crate::resolve_sessions_dir(cfg)?.join("sessions.json");
+    let store = crate::load_store(&sessions_path)?;
+    for entry in store.sessions.values().filter(|entry| {
+        entry
+            .model_override
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|current| current == model_id)
+    }) {
+        let label = entry
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(|title| format!("session `{}` ({title})", entry.session_id))
+            .unwrap_or_else(|| format!("session `{}`", entry.session_id));
+        refs.push(label);
+    }
+
+    if refs.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::Config(format!(
+        "模型 `{model_id}` 仍被以下位置引用：{}。请先切换这些位置的模型，再删除。",
+        refs.join("、")
+    )))
 }
 
 fn model_entry_to_user_model(entry: &ModelEntry) -> UserModelEntry {

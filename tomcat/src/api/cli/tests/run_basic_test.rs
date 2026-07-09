@@ -656,6 +656,21 @@ fn write_env_entries_writes_provider_keys() {
 }
 
 #[test]
+fn preload_runtime_env_rejects_invalid_env_file() {
+    let work_dir = tempfile::tempdir().expect("tempdir");
+    let cfg = test_config(work_dir.path());
+    let env_path = work_dir.path().join("assets").join(".env");
+    std::fs::create_dir_all(env_path.parent().expect("env parent")).expect("mkdir assets");
+    std::fs::write(&env_path, "BROKEN_ENV=\"unterminated\n").expect("write broken env");
+
+    let error = preload_runtime_env(&cfg).expect_err("broken runtime env must fail");
+    assert!(
+        error.to_string().contains("加载"),
+        "error should mention runtime env loading failure, got: {error}"
+    );
+}
+
+#[test]
 fn additional_provider_env_names_skip_selected_provider_and_dedupe() {
     let cfg = AppConfig::default();
     let catalog = crate::core::llm::ModelCatalog::load_from_path(

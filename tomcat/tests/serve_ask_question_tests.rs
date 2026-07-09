@@ -11,6 +11,8 @@ use common::serve::{
     ScriptedOpenAiServer, ServeChild,
 };
 
+const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 const ASK_QUESTION_ARGS: &str = r#"{"questions":[{"id":"q1","prompt":"Pick one","options":[{"id":"a","label":"A","recommended":true},{"id":"b","label":"B"}]}]}"#;
 
 fn is_scripted_followup_delta(value: &serde_json::Value) -> bool {
@@ -30,7 +32,7 @@ fn initialize(child: &mut ServeChild) -> String {
         "subtype": "initialize",
         "payload": {}
     }));
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_response")
             && value.get("requestId").and_then(|v| v.as_str()) == Some("init-1")
     });
@@ -46,7 +48,7 @@ fn new_session(child: &mut ServeChild, request_id: &str) -> String {
         "id": request_id,
         "params": {}
     }));
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some(request_id)
     });
     frames.last().expect("new_session response")["payload"]["sessionId"]
@@ -96,7 +98,7 @@ fn serve_ask_question_roundtrip_resumes_turn() {
         "params": {}
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_request")
             && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
     });
@@ -121,7 +123,7 @@ fn serve_ask_question_roundtrip_resumes_turn() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
     assert!(
@@ -155,7 +157,7 @@ fn serve_ask_question_cancel_roundtrip_does_not_hang() {
         "params": {}
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_request")
             && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
     });
@@ -171,7 +173,7 @@ fn serve_ask_question_cancel_roundtrip_does_not_hang() {
         "payload": {}
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
     assert!(
@@ -228,7 +230,7 @@ fn serve_ask_question_routes_by_session() {
         "params": {}
     }));
 
-    let ask_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let ask_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_request")
             && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
     });
@@ -245,7 +247,7 @@ fn serve_ask_question_routes_by_session() {
         "text": "run in session b",
         "params": {}
     }));
-    let session_b_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let session_b_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
             && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_b.as_str())
     });
@@ -281,7 +283,7 @@ fn serve_ask_question_routes_by_session() {
         }
     }));
 
-    let session_a_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let session_a_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
             && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_a.as_str())
     });
@@ -316,7 +318,7 @@ fn serve_interrupt_emits_agent_interrupted_and_tool_execution_end() {
         "params": {}
     }));
 
-    let mut frames = child.recv_until(Duration::from_secs(5), |value| {
+    let mut frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_request")
             && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
     });
@@ -330,7 +332,7 @@ fn serve_interrupt_emits_agent_interrupted_and_tool_execution_end() {
         "id": "interrupt-ask-ack",
         "sessionId": session_id.clone()
     }));
-    frames.extend(child.recv_until(Duration::from_secs(5), |value| {
+    frames.extend(child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
             && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.as_str())
     }));

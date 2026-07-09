@@ -38,6 +38,14 @@ export function hasModelAdminCapabilities(
   );
 }
 
+export function hasAnyModelAdminCapability(
+  result: Pick<InitializeResult, "capabilities">,
+): boolean {
+  return SERVE_MODEL_ADMIN_CAPABILITIES.some((capability) =>
+    hasServeCapability(result, capability),
+  );
+}
+
 export async function initializeServe(
   messenger: TomcatMessenger,
 ): Promise<InitializeResult> {

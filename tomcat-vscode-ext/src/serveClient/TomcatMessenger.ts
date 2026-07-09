@@ -133,6 +133,10 @@ export class TomcatMessenger {
     return this.child?.pid;
   }
 
+  get recentStderr(): string {
+    return this.stderrText;
+  }
+
   start(): void {
     this.ensureNotDisposed();
     if (this.isRunning) {

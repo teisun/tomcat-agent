@@ -16,6 +16,7 @@ use crate::core::llm::{
     SharedModelCatalog,
 };
 use crate::infra::config::AppConfig;
+use crate::{resolve_sessions_dir, save_store, SessionEntry, SessionStore};
 
 fn temp_cfg() -> (tempfile::TempDir, AppConfig) {
     let work_dir = tempfile::tempdir().expect("tempdir");
@@ -179,6 +180,7 @@ fn set_provider_key_waits_for_env_lock_and_then_succeeds() {
     std::fs::create_dir_all(env_lock_path.parent().expect("lock parent")).expect("mkdir assets");
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .read(true)
         .open(&env_lock_path)
@@ -212,6 +214,137 @@ fn set_provider_key_waits_for_env_lock_and_then_succeeds() {
     worker.join().expect("join worker");
 
     assert!(status.key_present);
+}
+
+#[test]
+#[serial(env_lock)]
+fn remove_user_model_rejects_models_still_referenced_by_config_or_sessions() {
+    clear_managed_credentials_for_test();
+    let (_work_dir, mut cfg) = temp_cfg();
+    upsert_user_model(&cfg, custom_claude_input()).expect("seed custom model");
+    cfg.llm.default_model = "custom-claude".to_string();
+    cfg.context.compaction_model = "custom-claude".to_string();
+
+    let sessions_dir = resolve_sessions_dir(&cfg).expect("sessions dir");
+    std::fs::create_dir_all(&sessions_dir).expect("mkdir sessions dir");
+    save_store(
+        &sessions_dir.join("sessions.json"),
+        &SessionStore {
+            current: [("agent:main:main".to_string(), "session-1".to_string())]
+                .into_iter()
+                .collect(),
+            sessions: [(
+                "session-1".to_string(),
+                SessionEntry {
+                    session_key: "agent:main:main".to_string(),
+                    session_id: "session-1".to_string(),
+                    updated_at: 1,
+                    session_file: None,
+                    cwd: None,
+                    thinking_level: None,
+                    model_override: Some("custom-claude".to_string()),
+                    input_tokens: None,
+                    output_tokens: None,
+                    compaction_count: None,
+                    compaction_tokens_freed: None,
+                    tool_result_chars_persisted: None,
+                    context_utilization_ratio: None,
+                    last_checkpoint_id: None,
+                    title: Some("Pinned Claude Session".to_string()),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        },
+    )
+    .expect("save session store");
+
+    let error = remove_user_model(&cfg, "custom-claude").expect_err("in-use model must fail");
+    let message = error.to_string();
+    assert!(message.contains("llm.default_model"), "unexpected error: {message}");
+    assert!(
+        message.contains("context.compaction_model"),
+        "unexpected error: {message}"
+    );
+    assert!(message.contains("session `session-1`"), "unexpected error: {message}");
+}
+
+#[test]
+#[serial(env_lock)]
+fn upsert_user_model_rejects_unknown_api() {
+    clear_managed_credentials_for_test();
+    let (_work_dir, cfg) = temp_cfg();
+    let error = upsert_user_model(
+        &cfg,
+        ModelEntryInput {
+            id: "bad-api".to_string(),
+            model_name: Some("bad-api".to_string()),
+            api: "mystery-wire".to_string(),
+            provider: "openai".to_string(),
+            api_key_env: None,
+            base_url: Some("https://example.test/v1".to_string()),
+            capabilities: Capabilities::default(),
+            context_window: None,
+            thinking_format: None,
+        },
+    )
+    .expect_err("unknown api must fail");
+    assert!(
+        error.to_string().contains("mystery-wire"),
+        "error should mention rejected api, got: {error}"
+    );
+}
+
+#[test]
+#[serial(env_lock)]
+fn upsert_user_model_rejects_anthropic_files_capability() {
+    clear_managed_credentials_for_test();
+    let (_work_dir, cfg) = temp_cfg();
+    let error = upsert_user_model(
+        &cfg,
+        ModelEntryInput {
+            capabilities: Capabilities {
+                files: true,
+                ..Default::default()
+            },
+            ..custom_claude_input()
+        },
+    )
+    .expect_err("anthropic files capability must fail");
+    assert!(
+        error.to_string().contains("files"),
+        "error should mention unsupported files capability, got: {error}"
+    );
+}
+
+#[test]
+#[serial(env_lock)]
+fn set_provider_key_rejects_invalid_env_file() {
+    clear_managed_credentials_for_test();
+    let (work_dir, cfg) = temp_cfg();
+    upsert_user_model(&cfg, custom_claude_input()).expect("seed custom model");
+
+    let env_path = work_dir.path().join("assets").join(".env");
+    std::fs::create_dir_all(env_path.parent().expect("env parent")).expect("mkdir assets");
+    std::fs::write(&env_path, "BROKEN_ENV=\"unterminated\n").expect("seed broken env");
+
+    let error = set_provider_key(
+        &cfg,
+        ProviderKeyInput {
+            env_name: "ADMIN_TEST_ANTHROPIC_KEY".to_string(),
+            value: "should-not-write".to_string(),
+        },
+    )
+    .expect_err("broken env file must fail");
+    assert!(
+        error.to_string().contains("解析"),
+        "error should mention env parse failure, got: {error}"
+    );
+    let env_text = std::fs::read_to_string(&env_path).expect("read .env");
+    assert!(
+        env_text.contains("unterminated"),
+        "broken env file should remain unchanged"
+    );
 }
 
 #[test]

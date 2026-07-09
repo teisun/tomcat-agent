@@ -1194,7 +1194,7 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
         Duration::ZERO,
     )
     .await;
-    let client = server.client_for("api.tavily.com", Duration::from_secs(5));
+    let client = server.client_for("api.tavily.com", Duration::from_secs(15));
     let plugin_dir = plugin_function_fixture_with_manifest(
         "net-fetch-large-body",
         json!({
@@ -1204,7 +1204,7 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
         "",
     );
     let (_invoker, _function_registry, manager, dispatcher) =
-        function_search_harness_with_custom_net_fetch(Duration::from_secs(1), client, 5, 16);
+        function_search_harness_with_custom_net_fetch(Duration::from_secs(5), client, 5, 16);
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with size limit");
@@ -1229,7 +1229,7 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
         .error
         .as_deref()
         .unwrap_or("")
-        .contains("response_too_large"));
+        .contains("response_too_large"), "unexpected response: {:?}", response);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

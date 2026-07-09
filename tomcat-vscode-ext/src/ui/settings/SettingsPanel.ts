@@ -27,6 +27,7 @@ import type {
   SettingsModelCapabilities,
   SettingsModelInput,
   SettingsModelView,
+  SettingsProviderKeyInput,
   SettingsProviderKeyView,
   SettingsRoute,
   SettingsStateSnapshot,
@@ -204,7 +205,7 @@ export class SettingsPanel implements vscode.Disposable {
         await this.refreshState();
         return;
       case "upsertModel":
-        await this.handleUpsertModel(intent.data.model);
+        await this.handleUpsertModel(intent.data.model, intent.data.providerKey);
         return;
       case "removeModel":
         await this.handleRemoveModel(intent.data.modelId);
@@ -215,7 +216,10 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private async handleUpsertModel(model: SettingsModelInput): Promise<void> {
+  private async handleUpsertModel(
+    model: SettingsModelInput,
+    providerKey?: SettingsProviderKeyInput,
+  ): Promise<void> {
     try {
       const capabilities = this.buildCapabilities(await this.deps.ensureInitialized());
       if (!capabilities.upsertModel) {
@@ -225,6 +229,29 @@ export class SettingsPanel implements vscode.Disposable {
       const response = await this.deps.messenger.sendUpsertModel(toWireModelEntryInput(model));
       if (!response.success) {
         await this.refreshState(response.error ?? "Unable to save model.");
+        return;
+      }
+      if (providerKey) {
+        if (!capabilities.setProviderKey) {
+          await this.refreshState(
+            "Model saved, but this serve instance cannot store API keys yet.",
+          );
+          await this.deps.onModelCatalogChanged?.();
+          return;
+        }
+        const keyResponse = await this.deps.messenger.sendSetProviderKey(
+          providerKey.envName,
+          providerKey.value,
+        );
+        if (!keyResponse.success) {
+          await this.refreshState(
+            `Model saved, but API key was not stored: ${keyResponse.error ?? "Unknown error."}`,
+          );
+          await this.deps.onModelCatalogChanged?.();
+          return;
+        }
+        await this.refreshState(null, `Saved ${providerKey.envName}.`);
+        await this.deps.onModelCatalogChanged?.();
         return;
       }
       await this.refreshState(null, "Model saved.");
@@ -275,28 +302,68 @@ export class SettingsPanel implements vscode.Disposable {
   private async refreshState(error: string | null = null, status: string | null = null): Promise<void> {
     const initializeResult = await this.deps.ensureInitialized();
     const capabilities = this.buildCapabilities(initializeResult);
-    const models = capabilities.listModels
-      ? await this.deps.messenger
-          .sendListModels()
-          .then((response) => (response.success ? parseModelsPayload(response.payload) : []))
-          .catch(() => [])
-      : [];
-    const providerKeys = capabilities.listProviderKeys
-      ? await this.deps.messenger
-          .sendListProviderKeys()
-          .then((response) => (response.success ? parseProviderKeysPayload(response.payload) : []))
-          .catch(() => [])
-      : [];
+    const modelsResult = capabilities.listModels
+      ? await this.fetchModels(this.state.models)
+      : { error: null, models: [] };
+    const providerKeysResult = capabilities.listProviderKeys
+      ? await this.fetchProviderKeys(this.state.providerKeys)
+      : { error: null, providerKeys: [] };
     this.state = {
       capabilities,
-      error,
-      models,
-      providerKeys,
+      error: error ?? modelsResult.error ?? providerKeysResult.error,
+      models: modelsResult.models,
+      providerKeys: providerKeysResult.providerKeys,
       ready: true,
       route: this.route,
       status,
     };
     this.postState();
+  }
+
+  private async fetchModels(
+    fallback: SettingsModelView[],
+  ): Promise<{ error: string | null; models: SettingsModelView[] }> {
+    try {
+      const response = await this.deps.messenger.sendListModels();
+      if (!response.success) {
+        return {
+          error: response.error ?? "Unable to load models.",
+          models: fallback,
+        };
+      }
+      return {
+        error: null,
+        models: parseModelsPayload(response.payload),
+      };
+    } catch (error) {
+      return {
+        error: String(error),
+        models: fallback,
+      };
+    }
+  }
+
+  private async fetchProviderKeys(
+    fallback: SettingsProviderKeyView[],
+  ): Promise<{ error: string | null; providerKeys: SettingsProviderKeyView[] }> {
+    try {
+      const response = await this.deps.messenger.sendListProviderKeys();
+      if (!response.success) {
+        return {
+          error: response.error ?? "Unable to load provider keys.",
+          providerKeys: fallback,
+        };
+      }
+      return {
+        error: null,
+        providerKeys: parseProviderKeysPayload(response.payload),
+      };
+    } catch (error) {
+      return {
+        error: String(error),
+        providerKeys: fallback,
+      };
+    }
   }
 
   private buildCapabilities(initializeResult: InitializeResult): SettingsCapabilities {

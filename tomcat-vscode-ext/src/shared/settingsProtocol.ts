@@ -43,6 +43,11 @@ export interface SettingsProviderKeyView {
   provider: string;
 }
 
+export interface SettingsProviderKeyInput {
+  envName: string;
+  value: string;
+}
+
 export interface SettingsCapabilities {
   listModels: boolean;
   listProviderKeys: boolean;
@@ -84,6 +89,7 @@ export type SettingsIntent =
       type: "upsertModel";
       data: {
         model: SettingsModelInput;
+        providerKey?: SettingsProviderKeyInput;
       };
     }
   | {
@@ -155,6 +161,10 @@ function isSettingsModelInput(value: unknown): value is SettingsModelInput {
   );
 }
 
+function isSettingsProviderKeyInput(value: unknown): value is SettingsProviderKeyInput {
+  return isRecord(value) && typeof value.envName === "string" && typeof value.value === "string";
+}
+
 export function isSettingsIntent(value: unknown): value is SettingsIntent {
   if (!isRecord(value) || typeof value.messageId !== "string" || typeof value.type !== "string") {
     return false;
@@ -169,7 +179,11 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
     case "listModels":
       return true;
     case "upsertModel":
-      return isRecord(value.data) && isSettingsModelInput(value.data.model);
+      return (
+        isRecord(value.data) &&
+        isSettingsModelInput(value.data.model) &&
+        (value.data.providerKey === undefined || isSettingsProviderKeyInput(value.data.providerKey))
+      );
     case "removeModel":
       return isRecord(value.data) && typeof value.data.modelId === "string";
     case "setProviderKey":

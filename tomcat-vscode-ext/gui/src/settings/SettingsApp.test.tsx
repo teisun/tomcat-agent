@@ -77,7 +77,7 @@ describe("SettingsApp", () => {
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
 
-    expect(postMessage).toHaveBeenCalledTimes(3);
+    expect(postMessage).toHaveBeenCalledTimes(2);
     expect(postMessage.mock.calls[1][0]).toMatchObject({
       data: {
         model: {
@@ -85,15 +85,12 @@ describe("SettingsApp", () => {
           id: "gateway-claude",
           provider: "anthropic gateway",
         },
+        providerKey: {
+          envName: "ANTHROPIC_GATEWAY_API_KEY",
+          value: "secret-value",
+        },
       },
       type: "upsertModel",
-    });
-    expect(postMessage.mock.calls[2][0]).toMatchObject({
-      data: {
-        envName: "ANTHROPIC_GATEWAY_API_KEY",
-        value: "secret-value",
-      },
-      type: "setProviderKey",
     });
     expect(screen.queryByRole("dialog")).toBeNull();
   });

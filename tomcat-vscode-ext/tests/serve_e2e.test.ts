@@ -48,7 +48,7 @@ describe("real tomcat serve happy path", () => {
         ),
       ).toBe(true);
       expect(events.at(-1)?.type).toBe("agent_end");
-      expect(server.capturedRequests()).toHaveLength(1);
+      expect(server.capturedNonTitleRequests()).toHaveLength(1);
     } finally {
       await runtime.cleanup();
       await server.close();

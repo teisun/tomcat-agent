@@ -265,18 +265,16 @@ export function SettingsApp({
           ...normalized,
           apiKeyEnv: normalized.apiKeyEnv || null,
         },
+        providerKey:
+          draftApiKey.trim() && envName
+            ? {
+                envName,
+                value: draftApiKey.trim(),
+              }
+            : undefined,
       },
       type: "upsertModel",
     });
-    if (draftApiKey.trim() && envName) {
-      send(vscodeApi, {
-        data: {
-          envName,
-          value: draftApiKey.trim(),
-        },
-        type: "setProviderKey",
-      });
-    }
     closeForm();
   };
 

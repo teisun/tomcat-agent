@@ -121,7 +121,7 @@ pub(crate) fn prompt_and_store_provider_key(
     env_path: &Path,
     env_name: &str,
 ) -> Result<KeyConfigStatus, AppError> {
-    let mut vars = read_env_entries(env_path);
+    let mut vars = read_env_entries(env_path)?;
     if vars
         .get(env_name)
         .map(|value| !value.trim().is_empty())

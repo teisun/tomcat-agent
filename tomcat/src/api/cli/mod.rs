@@ -521,12 +521,7 @@ pub fn run_cli() -> Result<(), AppError> {
     ensure_work_dir_structure(&cfg)?;
     ensure_embedded_assets(&cfg)?;
 
-    // 在 init_logging 之前加载 .env，使 RUST_LOG 等变量参与 EnvFilter（dotenvy 默认不覆盖已存在的环境变量）。
-    if let Ok(work_dir) = get_work_dir(&cfg) {
-        let env_path = work_dir.join("assets").join(".env");
-        let _ = dotenvy::from_path(&env_path);
-        let _ = crate::core::llm::auth::refresh_managed_credentials(&env_path);
-    }
+    preload_runtime_env(&cfg)?;
 
     let log_dir = resolve_log_dir(&cfg)?;
     std::fs::create_dir_all(&log_dir).map_err(AppError::Io)?;
@@ -593,6 +588,22 @@ pub fn run_cli() -> Result<(), AppError> {
         ),
         Commands::Chat { resume } => run_code(resume, &cfg),
     }
+}
+
+pub(crate) fn preload_runtime_env(cfg: &AppConfig) -> Result<(), AppError> {
+    let Ok(work_dir) = get_work_dir(cfg) else {
+        return Ok(());
+    };
+    let env_path = work_dir.join("assets").join(".env");
+    if !env_path.exists() {
+        return Ok(());
+    }
+
+    // 在 init_logging 之前加载 .env，使 RUST_LOG 等变量参与 EnvFilter（dotenvy 默认不覆盖已存在的环境变量）。
+    dotenvy::from_path(&env_path)
+        .map_err(|error| AppError::Config(format!("加载 {} 失败: {error}", env_path.display())))?;
+    crate::core::llm::auth::refresh_managed_credentials(&env_path)?;
+    Ok(())
 }
 
 pub(crate) fn resolve_default_cli_session_mode(

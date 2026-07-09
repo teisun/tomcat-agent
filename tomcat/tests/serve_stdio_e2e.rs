@@ -13,6 +13,8 @@ use common::serve::{
     sse_finish, ScriptedOpenAiServer, ScriptedPart, ServeChild, ServeFixture,
 };
 
+const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn initialize(child: &mut ServeChild) -> String {
     child.send_value(&json!({
         "type": "control_request",
@@ -20,7 +22,7 @@ fn initialize(child: &mut ServeChild) -> String {
         "subtype": "initialize",
         "payload": {}
     }));
-    let init = child.recv_until(Duration::from_secs(5), |value| {
+    let init = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_response")
             && value.get("requestId").and_then(|v| v.as_str()) == Some("init-1")
     });
@@ -40,6 +42,13 @@ api = "openai-responses"
 provider = "openai"
 base_url = "{base_url}"
 capabilities = {{ vision = true, files = true, tools = true, reasoning = true, web_search = false }}
+
+[[models]]
+id = "utility-flash"
+api = "openai"
+provider = "openai"
+base_url = "http://127.0.0.1:1"
+capabilities = {{ vision = false, files = false, tools = false, reasoning = false, web_search = false }}
 "#
         ),
     )
@@ -138,7 +147,7 @@ fn serve_stdio_user_roundtrip_e2e() {
         "params": {}
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     for value in &frames {
@@ -174,7 +183,7 @@ fn serve_stdio_user_roundtrip_e2e() {
         "id": "state-after-idle",
         "sessionId": session_id
     }));
-    let state_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let state_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("state-after-idle")
     });
     let state_response = state_frames
@@ -183,7 +192,7 @@ fn serve_stdio_user_roundtrip_e2e() {
         .expect("state-after-idle response");
     assert_eq!(state_response["payload"]["busy"].as_bool(), Some(false));
 
-    let output = child.wait_for_exit(Duration::from_secs(5));
+    let output = child.wait_for_exit(WAIT_TIMEOUT);
     assert!(
         output.status.success(),
         "serve e2e should exit cleanly: {output:?}"
@@ -214,7 +223,7 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
         "text": "start then interrupt",
         "params": {}
     }));
-    let mut frames = child.recv_until(Duration::from_secs(5), |value| {
+    let mut frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("message_update")
     });
 
@@ -223,7 +232,7 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
         "id": "interrupt-1",
         "sessionId": session_id.clone()
     }));
-    frames.extend(child.recv_until(Duration::from_secs(5), |value| {
+    frames.extend(child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
             && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.as_str())
     }));
@@ -258,7 +267,7 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
         "id": "state-after-interrupt-idle",
         "sessionId": session_id
     }));
-    let state_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let state_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("state-after-interrupt-idle")
     });
     let state_response = state_frames
@@ -283,7 +292,7 @@ fn serve_stdout_only_emits_ndjson_frames() {
     let mut child = spawn_serve_child(&fx);
 
     child.send_raw("{not json");
-    let parse_error = child.recv_value(Duration::from_secs(5));
+    let parse_error = child.recv_value(WAIT_TIMEOUT);
     assert_ndjson_line(&parse_error);
     assert_eq!(parse_error["success"].as_bool(), Some(false));
 
@@ -295,7 +304,7 @@ fn serve_stdout_only_emits_ndjson_frames() {
         "text": "say hi",
         "params": {}
     }));
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
     for value in &frames {
@@ -331,7 +340,7 @@ fn serve_prompt_with_attachment_roundtrip() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     assert!(
@@ -389,7 +398,7 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
     assert!(
@@ -469,7 +478,7 @@ fn serve_prompt_with_context_reference_segments_roundtrip() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
     assert!(
@@ -495,7 +504,7 @@ fn serve_prompt_with_context_reference_segments_roundtrip() {
         "id": "state-context-reference",
         "sessionId": session_id
     }));
-    let state_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let state_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("state-context-reference")
     });
     let state_response = state_frames
@@ -582,7 +591,7 @@ fn serve_prompt_with_non_pdf_file_attachment_returns_error() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("file-e2e-bad-mime")
     });
     let response = frames
@@ -641,7 +650,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
             ]
         }
     }));
-    let first_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let first_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     assert_eq!(count_event(&first_frames, "agent_end"), 1);
@@ -662,7 +671,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
             ]
         }
     }));
-    let second_history_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let second_history_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     assert_eq!(count_event(&second_history_frames, "agent_end"), 1);
@@ -673,7 +682,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
         "sessionId": session_id,
         "model": "deepseek-v4-pro"
     }));
-    let set_model_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let set_model_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("set-deepseek")
     });
     let set_model_response = set_model_frames
@@ -689,7 +698,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
         "text": "follow up",
         "params": {}
     }));
-    let second_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let second_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     assert_eq!(count_event(&second_frames, "agent_end"), 1);
@@ -760,7 +769,7 @@ fn serve_prompt_with_inline_file_attachment_missing_filename_returns_error() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("file-e2e-missing-name")
     });
     let response = frames

@@ -10,10 +10,6 @@ export interface Capabilities {
   vision?: boolean;
   web_search?: boolean;
 }
-export interface Cost {
-  input_per_mtok?: null | number;
-  output_per_mtok?: null | number;
-}
 export interface GetMessagesParams {
   cursor?: null | string;
   lastNTurns?: null | number;
@@ -29,10 +25,24 @@ export interface ModelEntryInput {
   baseUrl?: null | string;
   capabilities?: Capabilities;
   contextWindow?: null | number;
-  cost?: Cost | null;
   id: string;
   modelName?: null | string;
   provider: string;
+  thinkingFormat?: null | string;
+}
+export type ModelSource = "builtin" | "user";
+
+export interface ModelView {
+  api: string;
+  apiKeyEnv: string;
+  baseUrl?: null | string;
+  capabilities: Capabilities;
+  contextWindow?: null | number;
+  id: string;
+  keyPresent: boolean;
+  modelName?: null | string;
+  provider: string;
+  source: ModelSource;
   thinkingFormat?: null | string;
 }
 export interface NewSessionParams {
@@ -208,8 +218,27 @@ export type ControlFrame = {
   type: "control_response";
 };
 
+export interface ListModelsPayload {
+  models: ModelView[];
+}
+export interface ListProviderKeysPayload {
+  keys: ProviderKeyView[];
+}
+export interface ModelKeyStatus {
+  envName: string;
+  keyPresent: boolean;
+}
 export type OutFrame = ControlFrame | ResponseFrame | ServeEvent;
 
+export interface ProviderKeyView {
+  envName: string;
+  keyPresent: boolean;
+  modelIds: string[];
+  provider: string;
+}
+export interface RemoveModelResponse {
+  modelId: string;
+}
 export interface ResponseFrame {
   error?: null | string;
   id?: null | string;
@@ -319,6 +348,13 @@ export type ServeCommand = {
   type: "control_response";
 };
 
+export interface SetProviderKeyResponse {
+  envName: string;
+  keyPresent: boolean;
+}
+export interface UpsertModelResponse {
+  model: ModelView;
+}
 export type WireEvent = ({
   args: any;
   partialResult: ToolOutput;
@@ -482,3 +518,16 @@ export type WireEvent = ({
   sessionId?: null | string;
 };
 
+export interface WireModelView {
+  api: string;
+  apiKeyEnv: string;
+  baseUrl?: null | string;
+  capabilities: Capabilities;
+  contextWindow?: null | number;
+  id: string;
+  keyPresent: boolean;
+  modelName?: null | string;
+  provider: string;
+  source: ModelSource;
+  thinkingFormat?: null | string;
+}

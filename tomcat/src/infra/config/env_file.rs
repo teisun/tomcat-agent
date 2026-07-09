@@ -4,19 +4,21 @@ use std::path::Path;
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
 
-pub fn read_env_entries(env_path: &Path) -> BTreeMap<String, String> {
+pub fn read_env_entries(env_path: &Path) -> Result<BTreeMap<String, String>, AppError> {
     let mut vars = BTreeMap::new();
     if !env_path.exists() {
-        return vars;
+        return Ok(vars);
     }
-    if let Ok(iter) = dotenvy::from_path_iter(env_path) {
-        for (key, value) in iter.flatten() {
-            if !key.trim().is_empty() {
-                vars.insert(key, value);
-            }
+    let iter = dotenvy::from_path_iter(env_path)
+        .map_err(|error| AppError::Config(format!("解析 {} 失败: {error}", env_path.display())))?;
+    for entry in iter {
+        let (key, value) = entry
+            .map_err(|error| AppError::Config(format!("解析 {} 失败: {error}", env_path.display())))?;
+        if !key.trim().is_empty() {
+            vars.insert(key, value);
         }
     }
-    vars
+    Ok(vars)
 }
 
 pub fn write_env_entries(env_path: &Path, vars: &BTreeMap<String, String>) -> Result<(), AppError> {

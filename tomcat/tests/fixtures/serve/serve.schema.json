@@ -619,27 +619,6 @@
           }
         }
       },
-      "Cost": {
-        "type": "object",
-        "properties": {
-          "input_per_mtok": {
-            "default": null,
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "output_per_mtok": {
-            "default": null,
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          }
-        }
-      },
       "GetMessagesParams": {
         "description": "`get_messages` 的分页/裁剪参数。",
         "type": "object",
@@ -720,16 +699,6 @@
             ],
             "format": "uint32",
             "minimum": 0.0
-          },
-          "cost": {
-            "anyOf": [
-              {
-                "$ref": "#/definitions/Cost"
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "id": {
             "type": "string"
@@ -3864,6 +3833,441 @@
               "string",
               "null"
             ]
+          }
+        }
+      }
+    }
+  },
+  "wire_model_view": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ModelView",
+    "type": "object",
+    "required": [
+      "api",
+      "apiKeyEnv",
+      "capabilities",
+      "id",
+      "keyPresent",
+      "provider",
+      "source"
+    ],
+    "properties": {
+      "api": {
+        "type": "string"
+      },
+      "apiKeyEnv": {
+        "type": "string"
+      },
+      "baseUrl": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "capabilities": {
+        "$ref": "#/definitions/Capabilities"
+      },
+      "contextWindow": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint32",
+        "minimum": 0.0
+      },
+      "id": {
+        "type": "string"
+      },
+      "keyPresent": {
+        "type": "boolean"
+      },
+      "modelName": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "provider": {
+        "type": "string"
+      },
+      "source": {
+        "$ref": "#/definitions/ModelSource"
+      },
+      "thinkingFormat": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "definitions": {
+      "Capabilities": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "default": false,
+            "type": "boolean"
+          },
+          "reasoning": {
+            "default": false,
+            "type": "boolean"
+          },
+          "tools": {
+            "default": true,
+            "type": "boolean"
+          },
+          "vision": {
+            "default": false,
+            "type": "boolean"
+          },
+          "web_search": {
+            "default": false,
+            "type": "boolean"
+          }
+        }
+      },
+      "ModelSource": {
+        "type": "string",
+        "enum": [
+          "builtin",
+          "user"
+        ]
+      }
+    }
+  },
+  "model_key_status": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ModelKeyStatus",
+    "type": "object",
+    "required": [
+      "envName",
+      "keyPresent"
+    ],
+    "properties": {
+      "envName": {
+        "type": "string"
+      },
+      "keyPresent": {
+        "type": "boolean"
+      }
+    }
+  },
+  "provider_key_view": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ProviderKeyView",
+    "type": "object",
+    "required": [
+      "envName",
+      "keyPresent",
+      "modelIds",
+      "provider"
+    ],
+    "properties": {
+      "envName": {
+        "type": "string"
+      },
+      "keyPresent": {
+        "type": "boolean"
+      },
+      "modelIds": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "provider": {
+        "type": "string"
+      }
+    }
+  },
+  "list_models_payload": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ListModelsPayload",
+    "type": "object",
+    "required": [
+      "models"
+    ],
+    "properties": {
+      "models": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/ModelView"
+        }
+      }
+    },
+    "definitions": {
+      "Capabilities": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "default": false,
+            "type": "boolean"
+          },
+          "reasoning": {
+            "default": false,
+            "type": "boolean"
+          },
+          "tools": {
+            "default": true,
+            "type": "boolean"
+          },
+          "vision": {
+            "default": false,
+            "type": "boolean"
+          },
+          "web_search": {
+            "default": false,
+            "type": "boolean"
+          }
+        }
+      },
+      "ModelSource": {
+        "type": "string",
+        "enum": [
+          "builtin",
+          "user"
+        ]
+      },
+      "ModelView": {
+        "type": "object",
+        "required": [
+          "api",
+          "apiKeyEnv",
+          "capabilities",
+          "id",
+          "keyPresent",
+          "provider",
+          "source"
+        ],
+        "properties": {
+          "api": {
+            "type": "string"
+          },
+          "apiKeyEnv": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "$ref": "#/definitions/Capabilities"
+          },
+          "contextWindow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "id": {
+            "type": "string"
+          },
+          "keyPresent": {
+            "type": "boolean"
+          },
+          "modelName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/definitions/ModelSource"
+          },
+          "thinkingFormat": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "upsert_model_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "UpsertModelResponse",
+    "type": "object",
+    "required": [
+      "model"
+    ],
+    "properties": {
+      "model": {
+        "$ref": "#/definitions/ModelView"
+      }
+    },
+    "definitions": {
+      "Capabilities": {
+        "type": "object",
+        "properties": {
+          "files": {
+            "default": false,
+            "type": "boolean"
+          },
+          "reasoning": {
+            "default": false,
+            "type": "boolean"
+          },
+          "tools": {
+            "default": true,
+            "type": "boolean"
+          },
+          "vision": {
+            "default": false,
+            "type": "boolean"
+          },
+          "web_search": {
+            "default": false,
+            "type": "boolean"
+          }
+        }
+      },
+      "ModelSource": {
+        "type": "string",
+        "enum": [
+          "builtin",
+          "user"
+        ]
+      },
+      "ModelView": {
+        "type": "object",
+        "required": [
+          "api",
+          "apiKeyEnv",
+          "capabilities",
+          "id",
+          "keyPresent",
+          "provider",
+          "source"
+        ],
+        "properties": {
+          "api": {
+            "type": "string"
+          },
+          "apiKeyEnv": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "$ref": "#/definitions/Capabilities"
+          },
+          "contextWindow": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "id": {
+            "type": "string"
+          },
+          "keyPresent": {
+            "type": "boolean"
+          },
+          "modelName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/definitions/ModelSource"
+          },
+          "thinkingFormat": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "remove_model_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "RemoveModelResponse",
+    "type": "object",
+    "required": [
+      "modelId"
+    ],
+    "properties": {
+      "modelId": {
+        "type": "string"
+      }
+    }
+  },
+  "set_provider_key_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SetProviderKeyResponse",
+    "type": "object",
+    "required": [
+      "envName",
+      "keyPresent"
+    ],
+    "properties": {
+      "envName": {
+        "type": "string"
+      },
+      "keyPresent": {
+        "type": "boolean"
+      }
+    }
+  },
+  "list_provider_keys_payload": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ListProviderKeysPayload",
+    "type": "object",
+    "required": [
+      "keys"
+    ],
+    "properties": {
+      "keys": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/ProviderKeyView"
+        }
+      }
+    },
+    "definitions": {
+      "ProviderKeyView": {
+        "type": "object",
+        "required": [
+          "envName",
+          "keyPresent",
+          "modelIds",
+          "provider"
+        ],
+        "properties": {
+          "envName": {
+            "type": "string"
+          },
+          "keyPresent": {
+            "type": "boolean"
+          },
+          "modelIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "provider": {
+            "type": "string"
           }
         }
       }

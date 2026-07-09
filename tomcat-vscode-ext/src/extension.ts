@@ -30,7 +30,7 @@ import {
 } from "./config/resolveTomcatExecutable";
 import { VsCodeIde } from "./ide/VsCodeIde";
 import {
-  hasModelAdminCapabilities,
+  hasAnyModelAdminCapability,
   initializeServe,
   type InitializeResult,
 } from "./serveClient/initialize";
@@ -807,7 +807,7 @@ export async function activate(
     messenger,
     openModelSettings: (route) => {
       void ensureInitialized().then((result) => {
-        if (hasModelAdminCapabilities(result)) {
+        if (hasAnyModelAdminCapability(result)) {
           settingsPanel.reveal(route ?? "models");
         }
       });
@@ -979,7 +979,7 @@ export async function activate(
     TOMCAT_OPEN_SETTINGS_COMMAND,
     async (route?: "models") => {
       const initializeResult = await ensureInitialized();
-      if (!hasModelAdminCapabilities(initializeResult)) {
+      if (!hasAnyModelAdminCapability(initializeResult)) {
         await showWarningMessage(
           promptHistory,
           "The connected `tomcat serve` does not support model management yet.",

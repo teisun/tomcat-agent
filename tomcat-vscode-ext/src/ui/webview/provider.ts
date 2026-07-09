@@ -7,8 +7,8 @@ import * as vscode from "vscode";
 
 import type { VsCodeIde } from "../../ide/VsCodeIde";
 import {
+  hasAnyModelAdminCapability,
   hasServeCapability,
-  hasModelAdminCapabilities,
   SERVE_CAPABILITY_LIST_MODELS,
   type InitializeResult,
 } from "../../serveClient/initialize";
@@ -934,7 +934,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         return;
       }
       case "openModelSettings":
-        if (!hasModelAdminCapabilities(await this.ensureInitialized())) {
+        if (!hasAnyModelAdminCapability(await this.ensureInitialized())) {
           return;
         }
         this.deps.openModelSettings?.(intent.data?.route ?? "models");
@@ -1198,7 +1198,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private async refreshModels(): Promise<void> {
     const initializeResult = await this.ensureInitialized();
     this.stateStore.setModelAdminSupported(
-      hasModelAdminCapabilities(initializeResult),
+      hasAnyModelAdminCapability(initializeResult),
     );
     if (!hasServeCapability(initializeResult, SERVE_CAPABILITY_LIST_MODELS)) {
       this.stateStore.setAvailableModels([], {});
