@@ -116,6 +116,7 @@ describe("extension manifest contract", () => {
 
     expect(commands).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({ command: "tomcat.openSettings" }),
         expect.objectContaining({ command: "tomcat.addSelectionToChat" }),
         expect.objectContaining({ command: "tomcat.addFileToChat" }),
       ]),

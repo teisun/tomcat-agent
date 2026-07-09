@@ -42,7 +42,7 @@
 ### 4.3 webview↔host intent（新增）
 
 - 侧栏 Agent Box → host：`openModelSettings`（无参）→ host 调 `SettingsPanel.reveal("models")`。
-- 设置中心 webview ↔ host：`settings.ready` / `settings.listModels` / `settings.upsertModel` / `settings.removeModel` / `settings.setProviderKey`（上行）；host → webview `settings.state{ activeModule, models: ModelView[], providerKeys, error? }`（下行）。
+- 设置中心 webview ↔ host：`settings.ready` / `listModels` / `upsertModel` / `removeModel` / `setProviderKey`（上行）；host → webview `state{ route, ready, capabilities, models, providerKeys, error? }`（下行）。
 - 门控：仅当 serve `initialize.capabilities` 含 `upsert_model`/`set_provider_key` 时，下拉「Add Models」与设置页可用；否则回退旧 `<select>`。
 
 ### 4.4 调用样例（jsonc）
@@ -82,13 +82,14 @@ Rust（tomcat/src/）
     · 写后 reload catalog 句柄            [core/llm/tests/admin_test.rs]
         │ 读/写
         ▼
-  core/llm/catalog.rs 【改】builtin_models() 并入全部预置(OpenAI/MiMo/DeepSeek/GLM/Kimi/Opus)
+  core/llm/builtin_models.toml 【NEW】内嵌全部预置(OpenAI/MiMo/DeepSeek/GLM/Kimi/Opus)
+  core/llm/catalog.rs 【改】解析内嵌 builtin_models.toml 并生成运行时 builtin catalog
     · infer_default_base_url() 追加 zhipu/moonshot/anthropic
         │
         ├─▶ core/llm/openai.rs / openai_responses/ 【改】endpoint path-aware（去掉硬编码 /v1）
         ├─▶ core/llm/anthropic/{mod,wire,stream}.rs 【NEW】/v1/messages + x-api-key + SSE + thinking
         ├─▶ core/llm/registry.rs 【改】PROVIDERS += ("anthropic-messages", build_anthropic)
-        ├─▶ core/llm/thinking_policy.rs 【改】+ ThinkingFormat::Anthropic（adaptive+effort）
+        ├─▶ core/llm/thinking_policy.rs 【改】+ ThinkingFormat::Anthropic（enabled+budget_tokens 单源）
         ├─▶ core/llm/replay_policy.rs 【改】anthropic 签名保留规则（区别 deepseek strip）
         └─▶ core/llm/resolver.rs 【改】读可重载 catalog 当前值
         │
@@ -102,7 +103,7 @@ Rust（tomcat/src/）
         │                                       [api/serve/tests/commands_test.rs]
   api/cli/model_cmd.rs 【NEW】run_model(ModelSub) 复用 admin.rs（list/add/remove/key set/key list/default）
   api/cli/mod.rs 【改】Commands::Model{sub:ModelSub}；run_cli match；nested 守卫；parse_cli_test
-  api/cli/models_toml.rs 【改】MANAGED_MODELS 内容并入 builtin_models() 后收敛/精简
+  api/cli/models_toml.rs 【改】删除手写 MANAGED_MODELS，改为按内嵌 builtin_models.toml 原样释放/按块追加 seed 并收敛为单源
   api/cli/init_model_wizard.rs 【改】read/write_env_entries 下沉供 admin 复用
 
 TypeScript（tomcat-vscode-ext/src、gui/）
@@ -111,7 +112,7 @@ TypeScript（tomcat-vscode-ext/src、gui/）
   serveClient/initialize.ts 【改】+SERVE_CAPABILITY_UPSERT_MODEL 等 + 门控
   ui/webview/provider.ts 【改】handleIntent 处理 openModelSettings → SettingsPanel.reveal
   ui/webview/protocol.ts + gui/src/types.ts 【改】+openModelSettings intent（两处镜像）
-  ui/settings/SettingsPanel.ts 【NEW】editor-area WebviewPanel 单例(retainContextWhenHidden/CSP/nonce)+settings.* 协议
+  ui/settings/SettingsPanel.ts 【NEW】editor-area WebviewPanel 单例(retainContextWhenHidden/CSP/nonce)+typed intent/state 协议
   package.json 【改】contributes.commands += tomcat.openSettings
   gui/vite.config.ts 【改】多入口（新增 settings.html/settings/main.tsx）
   gui/src/components/Composer.tsx 【改】自定义下拉替换原生 select（分隔符+Add Models 页脚）

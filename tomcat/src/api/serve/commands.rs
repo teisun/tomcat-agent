@@ -13,7 +13,9 @@ use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 
 use crate::core::llm::{
-    ChatMessage, ChatMessageContentPart, ContextRefKind, ContextReference, ThinkingLevel,
+    list_model_views, list_provider_keys, remove_user_model, set_provider_key, upsert_user_model,
+    ChatMessage, ChatMessageContentPart, ContextRefKind, ContextReference, ProviderKeyInput,
+    ThinkingLevel,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::transcript::{
@@ -25,9 +27,10 @@ use crate::{SessionManager, SessionMode};
 
 use super::control;
 use super::types::{
-    ListSessionsScope, OutFrame, ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand,
-    ServeContentSegment, ServeContextRefKind, ServeContextReference, ServeMessageParams,
-    ServeSessionMode, SetPlanModeAction,
+    ListModelsPayload, ListProviderKeysPayload, ListSessionsScope, OutFrame, RemoveModelResponse,
+    ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand, ServeContentSegment,
+    ServeContextRefKind, ServeContextReference, ServeMessageParams, ServeSessionMode,
+    SetPlanModeAction, SetProviderKeyResponse, UpsertModelResponse,
 };
 use super::{
     cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
@@ -679,28 +682,108 @@ pub(crate) async fn handle_command(
             )))?;
         }
         ServeCommand::ListModels { id } => {
-            let slot = resolve_active_slot(&state)?;
-            let models = slot
-                .ctx
-                .global_services
-                .model_catalog
-                .entries()
-                .into_iter()
-                .map(|entry| {
-                    serde_json::json!({
-                        "id": entry.id,
-                        "modelName": entry.model_name,
-                        "provider": entry.provider,
-                        "api": entry.api,
-                        "baseUrl": entry.base_url,
-                        "capabilities": entry.capabilities,
-                    })
-                })
-                .collect::<Vec<_>>();
+            let catalog = resolve_model_catalog_snapshot(&state)?;
+            let models = list_model_views(catalog.as_ref());
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(serde_json::json!({ "models": models })),
+                Some(
+                    serde_json::to_value(ListModelsPayload { models }).map_err(|error| {
+                        AppError::Config(format!("serialize list_models payload failed: {error}"))
+                    })?,
+                ),
+            )))?;
+        }
+        ServeCommand::UpsertModel { id, model } => {
+            let model = match upsert_user_model(&state.cfg, model) {
+                Ok(model) => model,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            refresh_all_model_catalogs(&state)?;
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(
+                    serde_json::to_value(UpsertModelResponse { model }).map_err(|error| {
+                        AppError::Config(format!("serialize upsert_model payload failed: {error}"))
+                    })?,
+                ),
+            )))?;
+        }
+        ServeCommand::RemoveModel { id, model_id } => {
+            if let Err(error) = remove_user_model(&state.cfg, &model_id) {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            refresh_all_model_catalogs(&state)?;
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(
+                    serde_json::to_value(RemoveModelResponse { model_id }).map_err(|error| {
+                        AppError::Config(format!("serialize remove_model payload failed: {error}"))
+                    })?,
+                ),
+            )))?;
+        }
+        ServeCommand::SetProviderKey {
+            id,
+            env_name,
+            value,
+        } => {
+            let status = match set_provider_key(&state.cfg, ProviderKeyInput { env_name, value }) {
+                Ok(status) => status,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            refresh_all_model_catalogs(&state)?;
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(
+                    serde_json::to_value(SetProviderKeyResponse::from(status)).map_err(
+                        |error| {
+                            AppError::Config(format!(
+                                "serialize set_provider_key payload failed: {error}"
+                            ))
+                        },
+                    )?,
+                ),
+            )))?;
+        }
+        ServeCommand::ListProviderKeys { id } => {
+            let catalog = resolve_model_catalog_snapshot(&state)?;
+            let keys = list_provider_keys(catalog.as_ref());
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(
+                    serde_json::to_value(ListProviderKeysPayload { keys }).map_err(|error| {
+                        AppError::Config(format!(
+                            "serialize list_provider_keys payload failed: {error}"
+                        ))
+                    })?,
+                ),
             )))?;
         }
         ServeCommand::CloseSession { id, session_id } => {
@@ -760,6 +843,35 @@ fn resolve_active_slot(state: &ServeState) -> Result<Arc<super::registry::Sessio
         .into_iter()
         .find_map(|summary| state.registry.get(&summary.session_id))
         .ok_or_else(|| AppError::Config("unknown_session".to_string()))
+}
+
+fn resolve_model_catalog_snapshot(
+    state: &ServeState,
+) -> Result<Arc<crate::core::llm::ModelCatalog>, AppError> {
+    if let Some(active_session_id) = state.registry.active_session_id() {
+        if let Some(slot) = state.registry.get(&active_session_id) {
+            return Ok(slot.ctx.global_services.model_catalog.snapshot());
+        }
+    }
+    if let Some(slot) = state
+        .registry
+        .list()
+        .into_iter()
+        .find_map(|summary| state.registry.get(&summary.session_id))
+    {
+        return Ok(slot.ctx.global_services.model_catalog.snapshot());
+    }
+    Ok(state.shared_model_catalog.snapshot())
+}
+
+fn refresh_all_model_catalogs(state: &ServeState) -> Result<(), AppError> {
+    state.shared_model_catalog.reload(&state.cfg)?;
+    for summary in state.registry.list() {
+        if let Some(slot) = state.registry.get(&summary.session_id) {
+            slot.ctx.global_services.model_catalog.reload(&state.cfg)?;
+        }
+    }
+    Ok(())
 }
 
 async fn open_existing_session_slot(

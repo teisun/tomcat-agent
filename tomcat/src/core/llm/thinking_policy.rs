@@ -73,6 +73,8 @@ pub enum ThinkingFormat {
     Qwen,
     /// 豆包 / Moonshot：`thinking: {"type":"enabled", "max_tokens": ?}` 对象。
     Doubao,
+    /// Anthropic Messages：`thinking: {"type":"enabled","budget_tokens": ...}`。
+    Anthropic,
 }
 
 impl ThinkingFormat {
@@ -86,6 +88,7 @@ impl ThinkingFormat {
                 "zai" => Self::Zai,
                 "qwen" => Self::Qwen,
                 "doubao" | "moonshot" => Self::Doubao,
+                "anthropic" => Self::Anthropic,
                 _ => Self::Auto,
             },
         }
@@ -103,6 +106,7 @@ impl ThinkingFormat {
             "zai" => Self::Zai,
             "qwen" => Self::Qwen,
             "doubao" | "moonshot" => Self::Doubao,
+            "anthropic" | "anthropic-messages" => Self::Anthropic,
             _ => Self::Openai,
         }
     }
@@ -134,6 +138,8 @@ pub fn thinking_format_for_model(model: &str) -> ThinkingFormat {
         || lower.starts_with("mimo-")
     {
         ThinkingFormat::Doubao
+    } else if lower.starts_with("claude-") {
+        ThinkingFormat::Anthropic
     } else {
         ThinkingFormat::Openai
     }
@@ -146,6 +152,12 @@ pub struct ThinkingRequestFields {
     pub reasoning_effort: Option<String>,
     /// DeepSeek / 豆包 / Moonshot：`thinking: {"type":"enabled", ...}`
     pub thinking: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnthropicThinkingRequest {
+    pub thinking: Option<serde_json::Value>,
+    pub max_tokens: u32,
 }
 
 /// 把 `ThinkingConfig` + provider 推断出的 `ThinkingFormat` 翻译为具体请求字段。
@@ -201,10 +213,51 @@ pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> Thin
                 thinking: Some(serde_json::Value::Object(obj)),
             }
         }
-        // Qwen：请求侧暂未接显式 reasoning 参数；仅靠响应侧 reasoning_content 解析。
-        ThinkingFormat::Qwen => ThinkingRequestFields::default(),
+        // Qwen：当前无显式请求字段；Anthropic 走 `resolve_anthropic_request`。
+        ThinkingFormat::Qwen | ThinkingFormat::Anthropic => ThinkingRequestFields::default(),
         // Auto 应该已经被 caller resolve 掉；保险起见兜底。
         ThinkingFormat::Auto => ThinkingRequestFields::default(),
+    }
+}
+
+pub fn resolve_anthropic_request(
+    cfg: &ThinkingConfig,
+    request_max_tokens: Option<u32>,
+) -> AnthropicThinkingRequest {
+    let (level, _ok) = ThinkingLevel::parse_or_medium(&cfg.level);
+    let default_budget = match level {
+        ThinkingLevel::Off => 0,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
+        ThinkingLevel::Medium => 2048,
+        ThinkingLevel::High => 4096,
+        ThinkingLevel::Xhigh => 8192,
+    };
+    let mut max_tokens = request_max_tokens.unwrap_or_else(|| {
+        if cfg.enabled && default_budget > 0 {
+            (default_budget + 1024).max(2048)
+        } else {
+            2048
+        }
+    });
+    if !cfg.enabled || default_budget == 0 || max_tokens <= 512 {
+        return AnthropicThinkingRequest {
+            thinking: None,
+            max_tokens: max_tokens.max(256),
+        };
+    }
+    let configured_budget = cfg.max_tokens.unwrap_or(default_budget);
+    let budget_tokens = configured_budget
+        .min(max_tokens.saturating_sub(256).max(256))
+        .max(256);
+    if max_tokens <= budget_tokens {
+        max_tokens = budget_tokens + 256;
+    }
+    AnthropicThinkingRequest {
+        thinking: Some(serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": budget_tokens,
+        })),
+        max_tokens,
     }
 }
 
@@ -244,7 +297,7 @@ pub fn should_strip_on_resend(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> bool
     if !cfg.strip_on_resend {
         return false;
     }
-    !matches!(fmt, ThinkingFormat::Auto)
+    !matches!(fmt, ThinkingFormat::Auto | ThinkingFormat::Anthropic)
 }
 
 /// `persist=true` 时上层应把 Thinking 事件落 transcript；默认 false（仅展示不落盘）。

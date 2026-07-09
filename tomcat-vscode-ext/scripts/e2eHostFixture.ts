@@ -53,7 +53,46 @@ const readline = require("node:readline");
 const editFilePath = ${JSON.stringify(editFilePath)};
 const requireInit = ${JSON.stringify(Boolean(options.requireInit))};
 const setupMarkerPath = ${JSON.stringify(setupMarkerPath)};
-const MODEL_OPTIONS = ["fake-model", "gpt-5.4", "claude-4.6-sonnet"];
+const BUILTIN_MODELS = [
+  {
+    api: "openai",
+    apiKeyEnv: "OPENAI_API_KEY",
+    capabilities: { files: false, reasoning: false, tools: true, vision: false, webSearch: false },
+    id: "fake-model",
+    keyPresent: true,
+    modelName: "fake-model",
+    provider: "openai",
+    source: "builtin",
+    thinkingFormat: null,
+  },
+  {
+    api: "openai",
+    apiKeyEnv: "OPENAI_API_KEY",
+    capabilities: { files: false, reasoning: true, tools: true, vision: false, webSearch: false },
+    id: "gpt-5.4",
+    keyPresent: true,
+    modelName: "gpt-5.4",
+    provider: "openai",
+    source: "builtin",
+    thinkingFormat: "openai",
+  },
+  {
+    api: "anthropic-messages",
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+    capabilities: { files: false, reasoning: true, tools: true, vision: true, webSearch: false },
+    id: "claude-4.6-sonnet",
+    keyPresent: true,
+    modelName: "claude-4.6-sonnet",
+    provider: "anthropic",
+    source: "builtin",
+    thinkingFormat: "anthropic",
+  },
+];
+const MODEL_OPTIONS = BUILTIN_MODELS.map((model) => model.id);
+const userModels = new Map();
+const providerKeys = new Map(
+  BUILTIN_MODELS.map((model) => [model.apiKeyEnv, { keyPresent: true, provider: model.provider }]),
+);
 const sessions = new Map();
 let sessionCounter = 1;
 let historyCounter = 1;
@@ -96,6 +135,83 @@ if (requireInit && !fs.existsSync(setupMarkerPath)) {
 function touchSession(session) {
   session.updatedAt = Date.now();
   return session;
+}
+
+function inferDefaultKeyEnv(provider) {
+  if (typeof provider !== "string" || provider.trim().length === 0) {
+    return "OPENAI_API_KEY";
+  }
+  return provider.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_") + "_API_KEY";
+}
+
+function normalizeModelEntry(entry, source) {
+  const provider = typeof entry?.provider === "string" ? entry.provider : "openai";
+  const apiKeyEnv =
+    typeof entry?.apiKeyEnv === "string" && entry.apiKeyEnv.trim().length > 0
+      ? entry.apiKeyEnv.trim()
+      : inferDefaultKeyEnv(provider);
+  const providerKey = providerKeys.get(apiKeyEnv);
+  return {
+    api: typeof entry?.api === "string" ? entry.api : "openai",
+    apiKeyEnv,
+    baseUrl: typeof entry?.baseUrl === "string" ? entry.baseUrl : null,
+    capabilities: {
+      files: entry?.capabilities?.files === true,
+      reasoning: entry?.capabilities?.reasoning === true,
+      tools: entry?.capabilities?.tools === true,
+      vision: entry?.capabilities?.vision === true,
+      webSearch:
+        entry?.capabilities?.webSearch === true || entry?.capabilities?.web_search === true,
+    },
+    contextWindow: typeof entry?.contextWindow === "number" ? entry.contextWindow : null,
+    cost:
+      entry?.cost && typeof entry.cost === "object"
+        ? {
+            inputPerMtok:
+              typeof entry.cost.inputPerMtok === "number"
+                ? entry.cost.inputPerMtok
+                : typeof entry.cost.input_per_mtok === "number"
+                  ? entry.cost.input_per_mtok
+                  : null,
+            outputPerMtok:
+              typeof entry.cost.outputPerMtok === "number"
+                ? entry.cost.outputPerMtok
+                : typeof entry.cost.output_per_mtok === "number"
+                  ? entry.cost.output_per_mtok
+                  : null,
+          }
+        : null,
+    id: typeof entry?.id === "string" ? entry.id : "fake-model",
+    keyPresent: providerKey?.keyPresent === true,
+    modelName: typeof entry?.modelName === "string" ? entry.modelName : null,
+    provider,
+    source,
+    thinkingFormat: typeof entry?.thinkingFormat === "string" ? entry.thinkingFormat : null,
+  };
+}
+
+function listModelViews() {
+  return [
+    ...BUILTIN_MODELS.map((model) => normalizeModelEntry(model, "builtin")),
+    ...Array.from(userModels.values()).map((model) => normalizeModelEntry(model, "user")),
+  ];
+}
+
+function listProviderKeyViews() {
+  const grouped = new Map();
+  for (const model of listModelViews()) {
+    if (!grouped.has(model.apiKeyEnv)) {
+      grouped.set(model.apiKeyEnv, {
+        envName: model.apiKeyEnv,
+        keyPresent: model.keyPresent,
+        modelIds: [],
+        provider: model.provider,
+      });
+    }
+    grouped.get(model.apiKeyEnv).keyPresent = model.keyPresent;
+    grouped.get(model.apiKeyEnv).modelIds.push(model.id);
+  }
+  return Array.from(grouped.values());
 }
 
 function createSession() {
@@ -1110,6 +1226,10 @@ function handleCommand(frame) {
               "interrupt",
               "follow_up",
               "list_models",
+              "upsert_model",
+              "remove_model",
+              "set_provider_key",
+              "list_provider_keys",
               "set_model",
               "set_plan_mode",
             ],
@@ -1277,9 +1397,62 @@ function handleCommand(frame) {
       send({
         id: frame.id,
         payload: {
-          models: MODEL_OPTIONS.map((id) => ({ id })),
+          models: listModelViews(),
         },
         sessionId: activeSessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    case "upsert_model": {
+      const normalized = normalizeModelEntry(frame.model, "user");
+      userModels.set(normalized.id, normalized);
+      send({
+        id: frame.id,
+        payload: {
+          model: normalized,
+        },
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "remove_model":
+      userModels.delete(frame.modelId);
+      send({
+        id: frame.id,
+        payload: {
+          modelId: frame.modelId,
+          removed: true,
+        },
+        success: true,
+        type: "response",
+      });
+      break;
+    case "set_provider_key": {
+      const entry = {
+        keyPresent: typeof frame.value === "string" && frame.value.trim().length > 0,
+        provider:
+          listModelViews().find((model) => model.apiKeyEnv === frame.envName)?.provider || "openai",
+      };
+      providerKeys.set(frame.envName, entry);
+      send({
+        id: frame.id,
+        payload: {
+          envName: frame.envName,
+          keyPresent: entry.keyPresent,
+        },
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "list_provider_keys":
+      send({
+        id: frame.id,
+        payload: {
+          keys: listProviderKeyViews(),
+        },
         success: true,
         type: "response",
       });

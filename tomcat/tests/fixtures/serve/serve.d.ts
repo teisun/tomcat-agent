@@ -3,6 +3,13 @@
 
 export type AssistantMessageEvent = any;
 
+export interface Capabilities {
+  files?: boolean;
+  reasoning?: boolean;
+  tools?: boolean;
+  vision?: boolean;
+  web_search?: boolean;
+}
 export interface GetMessagesParams {
   cursor?: null | string;
   lastNTurns?: null | number;
@@ -12,6 +19,32 @@ export type ListSessionsScope = "live" | "disk";
 
 export type Message = any;
 
+export interface ModelEntryInput {
+  api: string;
+  apiKeyEnv?: null | string;
+  baseUrl?: null | string;
+  capabilities?: Capabilities;
+  contextWindow?: null | number;
+  id: string;
+  modelName?: null | string;
+  provider: string;
+  thinkingFormat?: null | string;
+}
+export type ModelSource = "builtin" | "user";
+
+export interface ModelView {
+  api: string;
+  apiKeyEnv: string;
+  baseUrl?: null | string;
+  capabilities: Capabilities;
+  contextWindow?: null | number;
+  id: string;
+  keyPresent: boolean;
+  modelName?: null | string;
+  provider: string;
+  source: ModelSource;
+  thinkingFormat?: null | string;
+}
 export interface NewSessionParams {
   cwd?: null | string;
   mode?: ServeSessionMode | null;
@@ -185,8 +218,27 @@ export type ControlFrame = {
   type: "control_response";
 };
 
+export interface ListModelsPayload {
+  models: ModelView[];
+}
+export interface ListProviderKeysPayload {
+  keys: ProviderKeyView[];
+}
+export interface ModelKeyStatus {
+  envName: string;
+  keyPresent: boolean;
+}
 export type OutFrame = ControlFrame | ResponseFrame | ServeEvent;
 
+export interface ProviderKeyView {
+  envName: string;
+  keyPresent: boolean;
+  modelIds: string[];
+  provider: string;
+}
+export interface RemoveModelResponse {
+  modelId: string;
+}
 export interface ResponseFrame {
   error?: null | string;
   id?: null | string;
@@ -202,6 +254,11 @@ export type ServeCommand = {
   sessionId?: null | string;
   type: "set_plan_mode";
 } | {
+  envName: string;
+  id?: null | string;
+  type: "set_provider_key";
+  value: string;
+} | {
   id?: null | string;
   level: string;
   model: string;
@@ -209,9 +266,17 @@ export type ServeCommand = {
   type: "set_thinking_level";
 } | {
   id?: null | string;
+  model: ModelEntryInput;
+  type: "upsert_model";
+} | {
+  id?: null | string;
   model: string;
   sessionId?: null | string;
   type: "set_model";
+} | {
+  id?: null | string;
+  modelId: string;
+  type: "remove_model";
 } | {
   id?: null | string;
   params?: GetMessagesParams;
@@ -263,6 +328,9 @@ export type ServeCommand = {
   id?: null | string;
   type: "list_models";
 } | {
+  id?: null | string;
+  type: "list_provider_keys";
+} | {
   payload?: any;
   requestId: string;
   sessionId?: null | string;
@@ -280,6 +348,13 @@ export type ServeCommand = {
   type: "control_response";
 };
 
+export interface SetProviderKeyResponse {
+  envName: string;
+  keyPresent: boolean;
+}
+export interface UpsertModelResponse {
+  model: ModelView;
+}
 export type WireEvent = ({
   args: any;
   partialResult: ToolOutput;
@@ -443,3 +518,16 @@ export type WireEvent = ({
   sessionId?: null | string;
 };
 
+export interface WireModelView {
+  api: string;
+  apiKeyEnv: string;
+  baseUrl?: null | string;
+  capabilities: Capabilities;
+  contextWindow?: null | number;
+  id: string;
+  keyPresent: boolean;
+  modelName?: null | string;
+  provider: string;
+  source: ModelSource;
+  thinkingFormat?: null | string;
+}

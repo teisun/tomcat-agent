@@ -1,9 +1,9 @@
 //! `thinking_policy` 单测：覆盖 ThinkingLevel/Format 解析与 resolve_request_fields 映射表。
 
 use super::super::thinking_policy::{
-    resolve_request_fields, should_persist_thinking, should_strip_on_resend,
-    strip_anthropic_thinking_blocks, thinking_format_for_model, ThinkingFormat, ThinkingLevel,
-    ThinkingRequestFields,
+    resolve_anthropic_request, resolve_request_fields, should_persist_thinking,
+    should_strip_on_resend, strip_anthropic_thinking_blocks, thinking_format_for_model,
+    ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
 };
 use crate::infra::config::ThinkingConfig;
 
@@ -88,6 +88,10 @@ fn format_resolve_auto_by_model_name() {
         thinking_format_for_model("mimo-v2.5-pro"),
         ThinkingFormat::Doubao
     );
+    assert_eq!(
+        thinking_format_for_model("claude-opus-4-6"),
+        ThinkingFormat::Anthropic
+    );
 }
 
 #[test]
@@ -167,6 +171,25 @@ fn qwen_has_no_request_field() {
         resolve_request_fields(&cfg_with(true, "high"), ThinkingFormat::Qwen),
         ThinkingRequestFields::default()
     );
+}
+
+#[test]
+fn anthropic_request_maps_to_enabled_budget_tokens() {
+    let r = resolve_anthropic_request(&cfg_with(true, "high"), None);
+    assert_eq!(r.max_tokens, 5120);
+    assert_eq!(r.thinking.as_ref().unwrap()["type"], "enabled");
+    assert_eq!(r.thinking.as_ref().unwrap()["budget_tokens"], 4096);
+}
+
+#[test]
+fn anthropic_request_caps_budget_against_requested_max_tokens() {
+    let r = resolve_anthropic_request(&cfg_with(true, "xhigh"), Some(1024));
+    assert_eq!(r.max_tokens, 1024);
+    assert_eq!(r.thinking.as_ref().unwrap()["budget_tokens"], 768);
+
+    let off = resolve_anthropic_request(&cfg_with(true, "off"), Some(400));
+    assert!(off.thinking.is_none());
+    assert_eq!(off.max_tokens, 400);
 }
 
 #[test]

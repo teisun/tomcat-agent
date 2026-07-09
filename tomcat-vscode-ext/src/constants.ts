@@ -15,6 +15,7 @@ export const TOMCAT_RESTART_COMMAND = "tomcat.restartServe";
 export const TOMCAT_NEW_SESSION_COMMAND = "tomcat.session.new";
 export const TOMCAT_LIST_SESSIONS_COMMAND = "tomcat.session.list";
 export const TOMCAT_FOCUS_WEBVIEW_COMMAND = "tomcat.ui.focus";
+export const TOMCAT_OPEN_SETTINGS_COMMAND = "tomcat.openSettings";
 export const TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND = "tomcat.addSelectionToChat";
 export const TOMCAT_ADD_FILE_TO_CHAT_COMMAND = "tomcat.addFileToChat";
 export const TOMCAT_ANSWER_COMMAND = "tomcat.answer";

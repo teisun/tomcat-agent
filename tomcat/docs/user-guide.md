@@ -52,7 +52,7 @@ Continue with the CLI installation and initialization sections below.
 
 ## 0. Use the Release Binary Directly
 
-This path is for users who just want to get the CLI running quickly. The recommended option is the one-line install script: it automatically detects your platform, downloads the matching release archive, verifies `SHA256SUMS`, extracts the archive, and installs it into `~/.local/bin`. If that directory is not yet in your `PATH`, the script will tell you how to append it to your shell profile.
+This path is for users who just want to get the CLI running quickly. The recommended option is the one-line install script: it automatically detects your platform, downloads the matching release archive, verifies `SHA256SUMS`, extracts the archive, and installs it into `~/.local/bin`. If that directory is not yet in your `PATH`, the script appends `export PATH="$HOME/.local/bin:$PATH"` to the right shell startup files (for zsh: both `~/.zprofile` and `~/.zshrc`).
 
 ```bash
 # 1. One-line install of the latest release
@@ -124,8 +124,9 @@ cargo build --release
 
 ```bash
 ./target/release/tomcat --help
-# Or add it to PATH directly:
-export PATH="$PWD/target/release:$PATH"
+# Then initialize once; init creates ~/.local/bin/tomcat and writes a stable PATH entry:
+./target/release/tomcat init
+# Open a new shell (or source your profile), then:
 tomcat --help
 ```
 
@@ -185,9 +186,9 @@ Connection details for models (`api`, `provider`, `base_url`, `api_key_env`) hav
 
 The three steps are:
 
-1. **[1/3] Environment initialization**: ensure that `~/.tomcat/models.toml` contains at least the managed default entries (`mimo-v2.5-pro`, `gpt-5.2`, `deepseek-v4-flash`), then load the model catalog and enter interactive model selection; after that, write `~/.tomcat/tomcat.config.toml` if it does not already exist, create the directory structure, extract embedded assets (modules and so on), and append `export PATH="..."` to `~/.zshrc`, `~/.bash_profile`, `~/.bashrc`, or `~/.profile` based on `$SHELL` (with the `# Added by tomcat init` marker; if the same export already exists in the same order, it is skipped)
+1. **[1/3] Environment initialization**: ensure that `~/.tomcat/models.toml` contains the managed preset entries released from the embedded `builtin_models.toml` preset source (OpenAI `gpt-5.2/5.4/5.5/5.6`, DeepSeek `deepseek-v4-pro/-flash`, `utility-flash`, MiMo `mimo-v2.5-pro`, GLM `glm-5.2`, Kimi `kimi-k2.7-code`, and Anthropic `claude-opus-4-8/4-7/4-6`), then load the model catalog and enter interactive model selection; after that, write `~/.tomcat/tomcat.config.toml` if it does not already exist, create the directory structure, extract embedded assets (modules and so on), create a stable `~/.local/bin/tomcat` command entry when the current binary comes from a local build, prune old tomcat-injected `target/*` PATH exports, and append the stable line `export PATH="$HOME/.local/bin:$PATH"` to the right startup files (`~/.zprofile` + `~/.zshrc` for zsh, `~/.bashrc` for bash while keeping `~/.bash_profile` sourcing both `.profile` and `.bashrc`, or `~/.profile` for other shells)
 2. **[2/3] Asset checks**: the same checks as `tomcat doctor` (config validity, embedded assets, asset versions, and so on), **excluding** `.env` permissions and `OPENAI_API_KEY` environment variable reminders
-3. **[3/3] API key setup**: first prompt for the credential variable that matches the default model you selected in the wizard (for example `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `MIMO_API_KEY`, `LITELLM_SUNMI_API_KEY`), then optionally let you add keys for other providers. You can press Enter to skip; **skipping does not write an empty key**. Later you can run `tomcat init` again, or edit `~/.tomcat/assets/.env` yourself
+3. **[3/3] API key setup**: first prompt for the credential variable that matches the default model you selected in the wizard (for example `OPENAI_API_KEY`, `OPENAI_GATEWAY_API_KEY`, `DEEPSEEK_API_KEY`, `MIMO_API_KEY`, `ANTHROPIC_API_KEY`), then optionally let you add keys for other providers. You can press Enter to skip; **skipping does not write an empty key**. Later you can run `tomcat init` again, edit `~/.tomcat/assets/.env` yourself, or use `tomcat model key set`
 
 Expected output (excerpt):
 
@@ -198,7 +199,7 @@ Expected output (excerpt):
   ✓ 默认模型协议线: openai-responses
   ✓ 模型逻辑厂商: openai
   ✓ 目录结构就绪
-  ✓ 已生成模型清单 models.toml（含 mimo-v2.5-pro, gpt-5.2, deepseek-v4-flash）
+  ✓ 已生成模型清单 models.toml（含全部受管预置模型）
   ✓ 内嵌资源已释放
   ✓ 已加入 PATH 环境变量
 
@@ -214,9 +215,9 @@ Expected output (excerpt):
 初始化完成！运行 `tomcat code` 开始对话。
 ```
 
-If tomcat cannot update your shell config automatically, it prints `⚠ 无法自动配置 PATH` plus a one-line `export PATH=...` command you can run manually.
+If tomcat cannot update your shell config automatically, it prints `⚠ 无法自动配置 PATH` plus the exact one-line command `export PATH="$HOME/.local/bin:$PATH"` that you can run manually.
 
-**Idempotency**: if `~/.tomcat/tomcat.config.toml` **already exists**, tomcat updates it using the existing file as the baseline. `models.toml` never rewrites your existing entries or comments; it only fills in missing managed default models. On the second run and later, you will see messages such as "configuration file updated" and "managed default models are complete".
+**Idempotency**: if `~/.tomcat/tomcat.config.toml` **already exists**, tomcat updates it using the existing file as the baseline. `models.toml` never rewrites your existing entries or comments; it only fills in missing managed preset models. On the second run and later, you will see messages such as "configuration file updated" and "managed preset models are complete".
 
 **Legacy config migration**: if old fields such as `[llm].provider`, `[llm].api_base`, or `[llm].api_key_env` still exist in an older config, `tomcat init` lets you go through the wizard and removes those legacy connection fields when it writes back, moving the connection facts into `models.toml`.
 
@@ -227,18 +228,47 @@ If tomcat cannot update your shell config automatically, it prints `⚠ 无法�
 `tomcat init` generates `~/.tomcat/models.toml` (the **model catalog**). This is the only entry point for adding or removing models:
 
 - **Auto-loaded on startup**: startup paths such as `tomcat code` and `tomcat claw` merge the built-in model table with `models.toml`. **The same id overrides the built-in entry, and a new id adds a new model**. No code changes or recompilation are required.
-- **Only two models are built in right now**: `gpt-5.4` and `deepseek-v4-pro`. Other commonly used models (such as `gpt-5.2`, `deepseek-v4-flash`, and `mimo-v2.5-pro`) are written into `models.toml` by `tomcat init`.
-- **Idempotent generation**: if `models.toml` does not exist, tomcat creates it. If it exists but is missing managed default entries, tomcat **only appends the missing entries**. If it is already complete, tomcat leaves it untouched. It **never overwrites your existing entries or comments**. Running `tomcat init` repeatedly is safe.
+- **Single runtime source, user-visible seed file**: the embedded `builtin_models.toml` is the single runtime source of truth for common presets: OpenAI (`gpt-5.2` / `gpt-5.4` / `gpt-5.5` / `gpt-5.6`), DeepSeek (`deepseek-v4-pro` / `deepseek-v4-flash` / `utility-flash`), MiMo (`mimo-v2.5-pro`), GLM (`glm-5.2`), Kimi (`kimi-k2.7-code`), and Anthropic Messages (`claude-opus-4-8` / `4-7` / `4-6`). `tomcat init` releases that same embedded preset list into `models.toml`, so you can inspect, edit, or delete the seeded entries without creating a second hand-maintained source of truth.
+- **Idempotent generation**: if `models.toml` does not exist, tomcat creates it with the managed preset list. If it exists but is missing managed preset entries, tomcat **only appends the missing entries**. If it is already complete, tomcat leaves it untouched. It **never overwrites your existing entries or comments**. Running `tomcat init` repeatedly is safe.
 - **Add one more model**: copy an existing `[[models]]` block and explicitly fill in `api`, `provider`, and `base_url`. `api_key_env` is optional; when omitted it defaults to `<PROVIDER>_API_KEY`.
 
 Field meanings:
 
 - `id`: the local model id used by `/model list`, default-model selection, and session persistence
 - `model_name`: the real model name sent upstream; when omitted it defaults to `id`
-- `api`: which wire protocol to use; currently `openai` and `openai-responses` are supported
+- `api`: which wire protocol to use; currently `openai`, `openai-responses`, and `anthropic-messages` are supported
 - `provider`: the logical vendor name, used only for credential inference, display, and auditing
 - `api_key_env`: explicitly names the environment variable; when omitted it is inferred as `<PROVIDER>_API_KEY`
-- `base_url`: host only; do not write the full endpoint
+- `base_url`: either a bare host or a host with an explicit provider path. tomcat appends the leaf automatically, so `https://api.openai.com` becomes `/v1/...`, while GLM-style paths such as `https://open.bigmodel.cn/api/paas/v4` keep `/api/paas/v4/...`
+- `kimi-k2.7-code` / Moonshot endpoint note: the built-in preset currently defaults to Moonshot China `https://api.moonshot.cn`, because that is the endpoint verified by the live smoke setup in this repo. Moonshot's global platform uses `https://api.moonshot.ai` instead. If your API key was created on the global platform, override `base_url` in `models.toml` to `https://api.moonshot.ai`.
+
+### tomcat model - Manage models and keys without hand-editing files
+
+If you do not want to edit `models.toml` or `.env` manually, use the dedicated model-management subcommands:
+
+```bash
+tomcat model list
+tomcat model add claude-opus-gateway \
+  --api anthropic-messages \
+  --provider anthropic \
+  --model-name claude-opus-4-6 \
+  --base-url https://api.anthropic.com/v1 \
+  --reasoning --tools \
+  --thinking-format anthropic
+
+tomcat model key set anthropic
+# or: tomcat model key set anthropic sk-ant-xxxxx
+tomcat model key list
+tomcat model default claude-opus-gateway
+tomcat model remove claude-opus-gateway
+```
+
+What these commands do:
+
+- `tomcat model add/remove` updates `~/.tomcat/models.toml` through the same validation path used at runtime.
+- `tomcat model key set` accepts either `tomcat model key set <provider>` (interactive password prompt) or `tomcat model key set <provider> <value>` (script-friendly form); it writes `~/.tomcat/assets/.env` with `0600` permissions, keeps other keys intact, and never prints the plaintext key back in responses.
+- `tomcat model list` shows whether each model comes from the built-in table or the user catalog, plus whether its API key is already present.
+- `tomcat model default` switches `[llm].default_model` in `tomcat.config.toml`.
 
 **Minimal MiMo Token Plan config** (written by `init` by default):
 
@@ -258,24 +288,24 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
 - **Usage**: switch to it with `/model mimo-v2.5-pro` inside `tomcat code` or `tomcat claw`, or set `[llm].default_model` to it.
 - **Capability boundary**: `mimo-v2.5-pro` is text-only officially (no images or files), so `vision/files=false`; server-side thinking is enabled by default, and this integration uses the Doubao-style `thinking` wire format.
 
-### OpenAI and LiteLLM Gateway Side by Side
+### OpenAI and Gateway Side by Side
 
 If you want to keep the official `gpt-5.4` and also add a gateway-backed `gpt-5.4`, do not reuse the same `id`. The recommended approach is to add another entry in `models.toml`:
 
 ```toml
 [[models]]
-id = "gpt-5.4_litellm-sunmi"
+id = "gpt-5.4_gateway"
 model_name = "gpt-5.4"
 api = "openai-responses"
-provider = "litellm-sunmi"
-base_url = "https://aigateway.sunmi.com"
+provider = "openai-gateway"
+base_url = "https://gateway.example.com"
 thinking_format = "openai"
 capabilities = { vision = true, files = true, tools = true, reasoning = true }
 ```
 
-- Switch to the gateway: set `[llm].default_model` to `gpt-5.4_litellm-sunmi`
+- Switch to the gateway: set `[llm].default_model` to `gpt-5.4_gateway`
 - Switch back to the official endpoint: change it back to `gpt-5.4`
-- `provider = "litellm-sunmi"` defaults to the key name `LITELLM_SUNMI_API_KEY`
+- `provider = "openai-gateway"` defaults to the key name `OPENAI_GATEWAY_API_KEY`
 
 ### Legacy Config Migration
 

@@ -23,6 +23,7 @@ const EMPTY_STATE: WebviewStateSnapshot = {
   activeSessionId: null,
   availableModelCapabilities: {},
   availableModels: [],
+  modelAdminSupported: false,
   ready: false,
   sessionViews: {},
   sessions: [],
@@ -241,6 +242,9 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   const streamRect = stream?.getBoundingClientRect();
   const latestUserRect = latestUserMessage?.getBoundingClientRect();
   const fileChipRect = fileChipEl?.getBoundingClientRect();
+  const modelDropdownRect = document
+    .querySelector<HTMLElement>('[data-testid="model-dropdown"]')
+    ?.getBoundingClientRect();
   const fileChipTopWithinStream =
     streamRect && fileChipRect ? fileChipRect.top - streamRect.top : null;
   const fileChipVisible =
@@ -248,6 +252,13 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     !!fileChipRect &&
     fileChipRect.bottom > streamRect.top &&
     fileChipRect.top < streamRect.bottom;
+  const modelDropdownFullyVisible =
+    !!modelDropdownRect &&
+    modelDropdownRect.height > 0 &&
+    modelDropdownRect.top >= 0 &&
+    modelDropdownRect.bottom <= window.innerHeight &&
+    modelDropdownRect.left >= 0 &&
+    modelDropdownRect.right <= window.innerWidth;
   const planNoticeReplayed = queryText('[data-testid="message-text"]').some((text) =>
     text.startsWith("Tomcat plan review:") ||
     text.startsWith("Tomcat plan verify:") ||
@@ -282,6 +293,12 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     latestUserTopWithinStream:
       streamRect && latestUserRect ? latestUserRect.top - streamRect.top : null,
     messageTexts: queryText('[data-testid="message-text"]'),
+    modelDropdownBottom: modelDropdownRect?.bottom ?? null,
+    modelDropdownFullyVisible,
+    modelDropdownHeight: modelDropdownRect?.height ?? 0,
+    modelDropdownLeft: modelDropdownRect?.left ?? null,
+    modelDropdownRight: modelDropdownRect?.right ?? null,
+    modelDropdownTop: modelDropdownRect?.top ?? null,
     overflowAnchor: stream?.style.overflowAnchor ?? null,
     sessionTabs: queryText('[data-testid="session-option"]'),
     sessionGroupHeaders: queryText('[data-testid="session-group-header"]'),
@@ -519,6 +536,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const canPrompt = state.uiMode !== "participant" && !activeSession?.busy && !readOnlyConflict;
   const canInterrupt = state.uiMode !== "participant" && !readOnlyConflict;
   const canBuildPlan = !!activeSession && !activeSession.busy && !readOnlyConflict;
+  const modelAdminSupported = state.modelAdminSupported;
   const activeModelCapabilities = activeSession?.model
     ? state.availableModelCapabilities?.[activeSession.model]
     : undefined;
@@ -907,6 +925,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             sessionId: activeSession.sessionId,
           });
         }}
+        onOpenModelSettings={modelAdminSupported
+          ? () => {
+              postIntent(vscodeApi, "openModelSettings", {
+                route: "models",
+              });
+            }
+          : undefined}
         onThinkingLevelChange={(level) => {
           if (!activeSession || !activeSession.model || !level) {
             return;

@@ -72,6 +72,35 @@ fn openai_target_env_override_switches_back_to_builtin_openai() {
     }
 }
 
+#[test]
+#[serial(env_lock)]
+fn openai_target_env_override_treats_55_and_56_as_builtin_openai() {
+    for model_id in ["gpt-5.5", "gpt-5.6"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+
+        unsafe {
+            std::env::set_var(common::OPENAI_TEST_MODEL_ENV, model_id);
+            std::env::set_var("OPENAI_API_KEY", "openai-stub");
+        }
+
+        common::apply_openai_app_config(&mut cfg);
+        let resolved = resolve_main_call(&cfg);
+
+        assert_eq!(cfg.llm.default_model, model_id);
+        assert_eq!(resolved.provider, "openai");
+        assert_eq!(resolved.api, "openai-responses");
+        assert_eq!(resolved.model, model_id);
+        assert_eq!(resolved.key_source, "OPENAI_API_KEY");
+
+        unsafe {
+            std::env::remove_var(common::OPENAI_TEST_MODEL_ENV);
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+    }
+}
+
 #[tokio::test]
 #[serial(env_lock)]
 async fn gateway_model_routes_with_wire_name_in_request_body() {

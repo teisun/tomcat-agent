@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command as StdCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -46,6 +47,7 @@ pub fn setup_serve_fixture(base_url: &str) -> ServeFixture {
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
     cfg.llm.default_model = "gpt-5.4".to_string();
     cfg.context.compaction_model = "gpt-5.4".to_string();
+    cfg.llm.title_model = Some("utility-flash".to_string());
     cfg.skills.enabled = false;
     fs::write(
         &config_path,
@@ -62,6 +64,13 @@ api = "openai"
 provider = "openai"
 base_url = "{base_url}"
 capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+
+[[models]]
+id = "utility-flash"
+api = "openai"
+provider = "openai"
+base_url = "http://127.0.0.1:1"
+capabilities = {{ vision = false, files = false, tools = false, reasoning = false, web_search = false }}
 "#
         ),
     )
@@ -98,7 +107,7 @@ impl ServeChild {
         let line = self
             .stdout_rx
             .recv_timeout(timeout)
-            .expect("timed out waiting for serve stdout");
+            .unwrap_or_else(|err| panic!("timed out waiting for serve stdout: {err}; stderr={}", self.stderr()));
         serde_json::from_str(&line).unwrap_or_else(|err| {
             panic!("stdout line should be json: {err}; line={line}");
         })
@@ -116,7 +125,18 @@ impl ServeChild {
                 now < deadline,
                 "timed out waiting for matching serve stdout"
             );
-            let value = self.recv_value(deadline.saturating_duration_since(now));
+            let line = self
+                .stdout_rx
+                .recv_timeout(deadline.saturating_duration_since(now))
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "timed out waiting for matching serve stdout: {err}; seen={out:?}; stderr={}",
+                        self.stderr()
+                    )
+                });
+            let value = serde_json::from_str(&line).unwrap_or_else(|err| {
+                panic!("stdout line should be json: {err}; line={line}");
+            });
             let matched = predicate(&value);
             out.push(value);
             if matched {
@@ -180,6 +200,7 @@ pub fn spawn_serve_child(fx: &ServeFixture) -> ServeChild {
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
+        .env("RUST_LOG", "tomcat=debug,info")
         .current_dir(&fx.workspace)
         .args(["serve", "--stdio"])
         .stdin(Stdio::piped())
@@ -240,6 +261,7 @@ pub struct ScriptedOpenAiServer {
     pub base_url: String,
     requests: Arc<Mutex<Vec<String>>>,
     join: Option<thread::JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl ScriptedOpenAiServer {
@@ -250,6 +272,7 @@ impl ScriptedOpenAiServer {
 
 impl Drop for ScriptedOpenAiServer {
     fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -259,21 +282,73 @@ impl Drop for ScriptedOpenAiServer {
 pub fn spawn_scripted_openai_stream_server(
     responses: Vec<ScriptedResponse>,
 ) -> ScriptedOpenAiServer {
+    spawn_scripted_openai_stream_server_internal(responses, false)
+}
+
+pub fn spawn_scripted_openai_stream_server_with_auto_title(
+    responses: Vec<ScriptedResponse>,
+) -> ScriptedOpenAiServer {
+    spawn_scripted_openai_stream_server_internal(responses, true)
+}
+
+fn spawn_scripted_openai_stream_server_internal(
+    responses: Vec<ScriptedResponse>,
+    auto_title_response: bool,
+) -> ScriptedOpenAiServer {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock llm server");
+    listener
+        .set_nonblocking(true)
+        .expect("mock llm listener nonblocking");
     let addr = listener.local_addr().expect("local addr");
     let requests = Arc::new(Mutex::new(Vec::new()));
     let requests_thread = Arc::clone(&requests);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_thread = Arc::clone(&shutdown);
     let join = thread::spawn(move || {
-        for scripted in responses {
-            let (mut stream, _) = listener.accept().expect("accept mock request");
+        let mut scripted = std::collections::VecDeque::from(responses);
+        loop {
+            if shutdown_thread.load(Ordering::Relaxed) {
+                break;
+            }
+            let (mut stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(err) => panic!("accept mock request: {err}"),
+            };
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("stream read timeout");
             let request = read_http_request(&mut stream);
-            requests_thread.lock().expect("requests lock").push(request);
-            let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+            if request.trim().is_empty() {
+                continue;
+            }
+            requests_thread
+                .lock()
+                .expect("requests lock")
+                .push(request.clone());
+            let handled_title = auto_title_response && request_is_session_title_request(&request);
+            let (headers, parts) = if handled_title {
+                (
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+                    vec![ScriptedPart {
+                        delay_ms: 0,
+                        body: session_title_response_json(&request, "Generated title"),
+                    }],
+                )
+            } else {
+                let scripted = scripted
+                    .pop_front()
+                    .expect("missing scripted response for streamed request");
+                (
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                    scripted.parts,
+                )
+            };
             stream.write_all(headers.as_bytes()).expect("write headers");
-            for part in scripted.parts {
+            for part in parts {
                 if part.delay_ms > 0 {
                     thread::sleep(Duration::from_millis(part.delay_ms));
                 }
@@ -282,13 +357,81 @@ pub fn spawn_scripted_openai_stream_server(
                     .expect("write response part");
                 stream.flush().expect("flush response part");
             }
+            if scripted.is_empty() && handled_title {
+                break;
+            }
+            if !handled_title && scripted.is_empty() {
+                break;
+            }
         }
     });
     ScriptedOpenAiServer {
         base_url: format!("http://{addr}"),
         requests,
         join: Some(join),
+        shutdown,
     }
+}
+
+pub fn captured_non_title_requests(server: &ScriptedOpenAiServer) -> Vec<String> {
+    server
+        .captured_requests()
+        .into_iter()
+        .filter(|request| !request_is_session_title_request(request))
+        .collect()
+}
+
+fn request_is_session_title_request(request: &str) -> bool {
+    let Some((_, body)) = request.split_once("\r\n\r\n") else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    if value.get("stream").and_then(Value::as_bool) != Some(false) {
+        return false;
+    }
+    body.contains("Generate a short chat title from the user's first message.\\n")
+}
+
+fn session_title_response_json(request: &str, title: &str) -> String {
+    if request.starts_with("POST /v1/responses ") {
+        return serde_json::json!({
+            "id": "title-mock",
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": title,
+                }],
+            }],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+            },
+        })
+        .to_string();
+    }
+
+    serde_json::json!({
+        "id": "title-mock",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": title,
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+        },
+    })
+    .to_string()
 }
 
 pub fn sse_delta(content: &str) -> ScriptedPart {
@@ -342,16 +485,17 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {
     let mut raw = Vec::new();
     let mut chunk = [0u8; 4096];
-    let mut header_end = None;
+    let mut body_start = None;
     let mut content_len = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => {
                 raw.extend_from_slice(&chunk[..read]);
-                if header_end.is_none() {
+                if body_start.is_none() {
                     if let Some(end) = find_header_end(&raw) {
-                        header_end = Some(end);
+                        body_start = Some(end + 4);
                         let headers = String::from_utf8_lossy(&raw[..end]);
                         content_len = headers.lines().find_map(|line| {
                             let (name, value) = line.split_once(':')?;
@@ -362,8 +506,8 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
                         });
                     }
                 }
-                if let (Some(end), Some(len)) = (header_end, content_len) {
-                    if raw.len() >= end + len {
+                if let (Some(start), Some(len)) = (body_start, content_len) {
+                    if raw.len() >= start + len {
                         break;
                     }
                 }
@@ -374,6 +518,19 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
+                if let (Some(start), Some(len)) = (body_start, content_len) {
+                    let body_len = raw.len().saturating_sub(start);
+                    if body_len < len {
+                        assert!(
+                            Instant::now() < deadline,
+                            "timed out reading mock request body: got {body_len} of {len} bytes"
+                        );
+                        continue;
+                    }
+                }
+                if raw.is_empty() && Instant::now() < deadline {
+                    continue;
+                }
                 break;
             }
             Err(err) => panic!("read mock request: {err}"),
@@ -382,12 +539,17 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> String {
     String::from_utf8_lossy(&raw).to_string()
 }
 
-pub fn extract_json_body(request: &str) -> Value {
+pub fn try_extract_json_body(request: &str) -> Option<Value> {
     let body = request
         .split_once("\r\n\r\n")
         .map(|(_, body)| body)
         .unwrap_or("");
-    serde_json::from_str(body).expect("request body should be json")
+    serde_json::from_str(body).ok()
+}
+
+pub fn extract_json_body(request: &str) -> Value {
+    try_extract_json_body(request)
+        .unwrap_or_else(|| panic!("request body should be json: {request}"))
 }
 
 pub fn assert_ndjson_line(value: &Value) {

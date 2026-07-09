@@ -41,6 +41,9 @@ test-stuff/
 .env
 /src/main/resources/application-api.properties
 
+### Patent (local docs, do not commit) ###
+patent/
+
 ### pi-rust-wasm — local / E2E scratch workspace ###
 pi-rust-wasm/workspace-temp/
 pi-rust-wasm/.integration_test_output.log

@@ -10,8 +10,8 @@ use crate::core::llm::multimodal::{
     UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
 };
 use crate::core::llm::{
-    ChatMessageContent, ChatMessageContentPart, ContextRefKind, FileSource, ImageSource,
-    LlmProvider, MessageKind, StreamEvent,
+    Capabilities, ChatMessageContent, ChatMessageContentPart, ContextRefKind, FileSource,
+    ImageSource, LlmProvider, MessageKind, ModelEntryInput, StreamEvent,
 };
 
 async fn wait_for_line(
@@ -2331,6 +2331,186 @@ async fn serve_set_thinking_level_roundtrips_in_get_state() {
     assert_eq!(response["success"].as_bool(), Some(true));
     assert_eq!(payload["model"].as_str(), Some("gpt-5.4"));
     assert_eq!(payload["thinkingLevel"].as_str(), Some("xhigh"));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_model_admin_roundtrip_updates_key_presence() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, temp, _slot) = build_initialized_state_with_streams(vec![]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::UpsertModel {
+            id: Some("upsert-model".to_string()),
+            model: ModelEntryInput {
+                id: "claude-opus-gateway".to_string(),
+                model_name: Some("claude-opus-4-6".to_string()),
+                api: "anthropic-messages".to_string(),
+                provider: "anthropic".to_string(),
+                api_key_env: Some("SERVE_TEST_GATEWAY_KEY".to_string()),
+                base_url: Some("https://api.example.test/v1".to_string()),
+                capabilities: Capabilities {
+                    tools: true,
+                    reasoning: true,
+                    ..Capabilities::default()
+                },
+                context_window: Some(200_000),
+                thinking_format: Some("anthropic".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("upsert-model")
+    })
+    .await;
+    let upsert = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("upsert-model"))
+        .expect("upsert_model response");
+    assert_eq!(upsert["success"].as_bool(), Some(true));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListModels {
+            id: Some("list-models-before-key".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-models-before-key")
+    })
+    .await;
+    let listed = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-models-before-key")
+        })
+        .expect("list_models before key");
+    let before_key = listed["payload"]["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some("claude-opus-gateway"))
+        .expect("custom model in list");
+    assert_eq!(before_key["source"].as_str(), Some("user"));
+    assert_eq!(before_key["keyPresent"].as_bool(), Some(false));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetProviderKey {
+            id: Some("set-provider-key".to_string()),
+            env_name: "SERVE_TEST_GATEWAY_KEY".to_string(),
+            value: "relay-secret".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("set-provider-key")
+    })
+    .await;
+    let set_key = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("set-provider-key"))
+        .expect("set_provider_key response");
+    assert_eq!(set_key["success"].as_bool(), Some(true));
+    assert_eq!(
+        set_key["payload"]["envName"].as_str(),
+        Some("SERVE_TEST_GATEWAY_KEY")
+    );
+    assert_eq!(set_key["payload"]["keyPresent"].as_bool(), Some(true));
+    assert!(
+        !set_key.to_string().contains("relay-secret"),
+        "set_provider_key response must not leak plaintext secrets: {set_key}"
+    );
+    let env_text = std::fs::read_to_string(temp.path().join("assets").join(".env")).unwrap();
+    assert!(env_text.contains("SERVE_TEST_GATEWAY_KEY=relay-secret"));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListProviderKeys {
+            id: Some("list-provider-keys".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-provider-keys")
+    })
+    .await;
+    let key_list = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-provider-keys")
+        })
+        .expect("list_provider_keys response");
+    assert_eq!(key_list["success"].as_bool(), Some(true));
+    let provider_key = key_list["payload"]["keys"]
+        .as_array()
+        .expect("provider keys array")
+        .iter()
+        .find(|entry| entry["envName"].as_str() == Some("SERVE_TEST_GATEWAY_KEY"))
+        .expect("provider key entry");
+    assert_eq!(provider_key["keyPresent"].as_bool(), Some(true));
+    assert_eq!(provider_key["provider"].as_str(), Some("anthropic"));
+    assert!(
+        !key_list.to_string().contains("relay-secret"),
+        "list_provider_keys must not leak plaintext secrets: {key_list}"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListModels {
+            id: Some("list-models-after-key".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-models-after-key")
+    })
+    .await;
+    let listed = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-models-after-key")
+        })
+        .expect("list_models after key");
+    let after_key = listed["payload"]["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some("claude-opus-gateway"))
+        .expect("custom model in list after key");
+    assert_eq!(after_key["keyPresent"].as_bool(), Some(true));
+    assert!(
+        !listed.to_string().contains("relay-secret"),
+        "list_models must not leak plaintext secrets: {listed}"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RemoveModel {
+            id: Some("remove-model".to_string()),
+            model_id: "claude-opus-gateway".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("remove-model")
+    })
+    .await;
+    let removed = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("remove-model"))
+        .expect("remove_model response");
+    assert_eq!(removed["success"].as_bool(), Some(true));
 }
 
 #[tokio::test]

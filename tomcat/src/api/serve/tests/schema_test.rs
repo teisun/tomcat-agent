@@ -10,6 +10,10 @@ fn serve_dts_emits_named_types_not_unknown() {
     let dts = serve_dts();
     assert!(dts.contains("export type ServeCommand = "));
     assert!(dts.contains("export type WireEvent = "));
+    assert!(dts.contains("export interface WireModelView {"));
+    assert!(dts.contains("export interface SetProviderKeyResponse {"));
+    assert!(dts.contains("export interface ProviderKeyView {"));
+    assert!(dts.contains("export interface ListModelsPayload {"));
     assert!(!dts.contains("export type ServeCommand = unknown;"));
     assert!(!dts.contains("export type OutFrame = unknown;"));
 }

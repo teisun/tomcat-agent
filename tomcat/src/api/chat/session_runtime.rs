@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_loop::BackgroundCompletionRoutes;
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
-use crate::core::llm::ModelCatalog;
+use crate::core::llm::SharedModelCatalog;
 use crate::core::plan_runtime;
 use crate::core::tools::contract::registry::ToolRegistry;
 use crate::core::tools::primitive::{BashTaskId, BashTaskRegistry, PrimitiveExecutor};
@@ -21,7 +21,7 @@ use crate::infra::{AuditRecorder, EventBus};
 
 pub struct GlobalServices {
     pub llm: Arc<dyn LlmProvider>,
-    pub model_catalog: Arc<ModelCatalog>,
+    pub model_catalog: SharedModelCatalog,
     pub llm_resolver: Arc<dyn LlmResolver>,
     pub model_thinking: Arc<ModelThinkingStore>,
     pub primitive: Arc<dyn PrimitiveExecutor>,

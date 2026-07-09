@@ -144,6 +144,41 @@ fn test_openai_chunk_empty_reasoning_is_ignored() {
     );
 }
 
+#[tokio::test]
+async fn sse_stream_drain_skips_empty_first_block_and_keeps_following_events() {
+    use tokio_stream::StreamExt;
+
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let source = tokio_stream::iter(vec![Ok(Bytes::from_static(body.as_bytes()))]);
+    let mut stream = SseEventStream::new(
+        source,
+        ProviderCompatProfile::chat_completions("kimi-k2.7-code"),
+        true,
+    );
+
+    let mut visible = String::new();
+    let mut thinking = String::new();
+    let mut saw_finish = false;
+    while let Some(item) = stream.next().await {
+        match item.expect("stream event") {
+            StreamEvent::Thinking { delta, .. } => thinking.push_str(&delta),
+            StreamEvent::ContentDelta { delta } => visible.push_str(&delta),
+            StreamEvent::FinishReason { .. } => saw_finish = true,
+            _ => {}
+        }
+    }
+
+    assert_eq!(thinking, "plan");
+    assert_eq!(visible, "ok");
+    assert!(saw_finish, "stream should still emit finish reason");
+}
+
 /// 回归：chat-completions 类 provider 的 reasoning 单流必须发成 `ThinkingSource::Summary`。
 ///
 /// 这些模型（deepseek/mimo/doubao 等）没有 OpenAI Responses 的独立 summary/raw 双流，
@@ -689,7 +724,6 @@ fn stream_test_provider(
         base_url: Some(base_url),
         capabilities: Capabilities::default(),
         context_window: None,
-        cost: None,
         thinking_format: Some("openai".to_string()),
     };
     let mut runtime = LlmConfig::default().runtime();

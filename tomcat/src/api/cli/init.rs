@@ -1,15 +1,19 @@
 //! `tomcat init` 与 `tomcat doctor` 子命令实现。
 
-use std::io::Write;
-use std::path::Path;
+use std::ffi::OsStr;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use crate::{
     ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config,
     load_config_for_init, load_store, normalize_path, resolve_sessions_dir, validate_config,
-    AppConfig, AppError, PluginEngine, DEFAULT_LLM_MODEL,
+    write_file_atomic, AppConfig, AppError, PluginEngine, DEFAULT_LLM_MODEL,
 };
 
 use super::DEFAULT_CONFIG_PATH;
+
+const LOCAL_BIN_EXPORT_LINE: &str = "export PATH=\"$HOME/.local/bin:$PATH\"";
+const TOMCAT_INIT_COMMENT: &str = "# Added by tomcat init";
 
 pub(crate) fn run_init() -> Result<(), AppError> {
     let config_file = normalize_path(DEFAULT_CONFIG_PATH)?;
@@ -83,22 +87,22 @@ pub(crate) fn run_init() -> Result<(), AppError> {
             updated_model_name_ids.is_empty(),
         ) {
             (false, false) => println!(
-                "  ✓ 已向现有 models.toml 补齐受管默认模型：{}；并补写 model_name：{}",
+                "  ✓ 已向现有 models.toml 补齐受管预置模型：{}；并补写 model_name：{}",
                 added_model_ids.join(", "),
                 updated_model_name_ids.join(", ")
             ),
             (false, true) => println!(
-                "  ✓ 已向现有 models.toml 补齐受管默认模型：{}",
+                "  ✓ 已向现有 models.toml 补齐受管预置模型：{}",
                 added_model_ids.join(", ")
             ),
             (true, false) => println!(
-                "  ✓ 已为现有 models.toml 补写受管默认模型的 model_name：{}",
+                "  ✓ 已为现有 models.toml 补写受管预置模型的 model_name：{}",
                 updated_model_name_ids.join(", ")
             ),
-            (true, true) => println!("  ✓ models.toml 已就绪（受管默认模型已齐全）"),
+            (true, true) => println!("  ✓ models.toml 已就绪（受管预置模型已齐全）"),
         },
         crate::api::cli::models_toml::ModelsTomlStatus::AlreadyPresent => {
-            println!("  ✓ models.toml 已就绪（受管默认模型与 model_name 已齐全）")
+            println!("  ✓ models.toml 已就绪（受管预置模型与 model_name 已齐全）")
         }
     }
 
@@ -119,13 +123,35 @@ pub(crate) fn run_init() -> Result<(), AppError> {
 
     match std::env::current_exe() {
         Ok(exe) => {
-            if let Some(bin_dir) = exe.parent() {
-                if auto_add_to_path(bin_dir) {
+            let canonical_exe = std::fs::canonicalize(&exe);
+            if canonical_exe
+                .as_ref()
+                .is_ok_and(|path| is_target_deps_artifact(path))
+            {
+                println!(
+                    "  ⚠ 检测到 cargo test 的临时构建产物，跳过 PATH 自动配置以避免写入悬空 target/deps 路径"
+                );
+            } else if let Some(home) = crate::infra::platform::home_dir() {
+                let local_bin_dir = canonical_local_bin_dir(&home);
+                match install_canonical_symlink(&exe, &local_bin_dir) {
+                    Ok(Some(link)) => println!(
+                        "  ✓ 已建立稳定命令入口: {}",
+                        crate::infra::platform::format_home_path(&link)
+                    ),
+                    Ok(None) => {}
+                    Err(err) => {
+                        println!("  ⚠ 无法建立稳定命令入口（{}）；后续仍可继续初始化", err);
+                    }
+                }
+                if auto_add_to_path(&home) {
                     println!("  ✓ 已加入 PATH 环境变量");
                 } else {
                     println!("  ⚠ 无法自动配置 PATH，请手动执行：");
-                    println!("    export PATH=\"{}:$PATH\"", bin_dir.display());
+                    println!("    {}", LOCAL_BIN_EXPORT_LINE);
                 }
+            } else if let Some(bin_dir) = exe.parent() {
+                println!("  ⚠ 无法确定 HOME 目录，请手动执行：");
+                println!("    export PATH=\"{}:$PATH\"", bin_dir.display());
             } else {
                 println!("  ⚠ 无法确定可执行文件所在目录，请手动配置 PATH");
             }
@@ -185,29 +211,95 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     Ok(())
 }
 
-/// 将 `tomcat` 可执行文件所在目录追加到 shell 启动脚本中的 PATH；已存在同序 export 则跳过。
-fn auto_add_to_path(bin_dir: &Path) -> bool {
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let Some(home) = crate::infra::platform::home_dir() else {
+fn canonical_local_bin_dir(home: &Path) -> PathBuf {
+    home.join(".local").join("bin")
+}
+
+fn canonical_tomcat_command_path(local_bin_dir: &Path) -> PathBuf {
+    if cfg!(windows) {
+        local_bin_dir.join("tomcat.exe")
+    } else {
+        local_bin_dir.join("tomcat")
+    }
+}
+
+fn is_target_deps_artifact(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
         return false;
     };
-    let export_line = format!("export PATH=\"{}:$PATH\"", bin_dir.display());
+    if parent.file_name() != Some(OsStr::new("deps")) {
+        return false;
+    }
+    parent
+        .ancestors()
+        .any(|ancestor| ancestor.file_name() == Some(OsStr::new("target")))
+}
 
-    if shell.contains("zsh") {
-        return append_export_once(&home.join(".zshrc"), &export_line);
+pub(crate) fn install_canonical_symlink(
+    exe: &Path,
+    local_bin_dir: &Path,
+) -> io::Result<Option<PathBuf>> {
+    let exe = std::fs::canonicalize(exe)?;
+    if is_target_deps_artifact(&exe) || exe.starts_with(local_bin_dir) {
+        return Ok(None);
     }
 
+    std::fs::create_dir_all(local_bin_dir)?;
+    let link = canonical_tomcat_command_path(local_bin_dir);
+
+    if let Ok(meta) = std::fs::symlink_metadata(&link) {
+        if meta.file_type().is_symlink() {
+            if std::fs::canonicalize(&link)
+                .ok()
+                .as_deref()
+                .is_some_and(|target| target == exe.as_path())
+            {
+                return Ok(None);
+            }
+            std::fs::remove_file(&link)?;
+        } else {
+            return Ok(None);
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&exe, &link)?;
+    }
+    #[cfg(windows)]
+    {
+        std::fs::copy(&exe, &link)?;
+    }
+
+    Ok(Some(link))
+}
+
+pub(crate) fn path_export_targets(shell: &str, home: &Path) -> Vec<PathBuf> {
+    if shell.contains("zsh") {
+        return vec![home.join(".zprofile"), home.join(".zshrc")];
+    }
+    if shell.contains("bash") {
+        return vec![home.join(".bashrc")];
+    }
+    vec![home.join(".profile")]
+}
+
+/// 将稳定的 `~/.local/bin` 追加到 shell 启动脚本中的 PATH；已存在同序 export 则跳过。
+pub(crate) fn auto_add_to_path(home: &Path) -> bool {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let mut ok = true;
+    for profile in path_export_targets(&shell, home) {
+        ok &= prune_stale_tomcat_exports(&profile);
+        ok &= append_export_once(&profile, LOCAL_BIN_EXPORT_LINE);
+    }
     if shell.contains("bash") {
         // macOS 的 login bash 会优先读 .bash_profile（存在时不再继续读 .profile），而
         // 交互式 bash 通常读 .bashrc。为避免截断用户写在 .profile 里的通用环境（如 Rust 的
         // ~/.cargo/env），PATH 仍写进 .bashrc，再确保 .bash_profile 同时 source
         // .profile 与 .bashrc。
-        let wrote_bashrc = append_export_once(&home.join(".bashrc"), &export_line);
-        let linked_profile = ensure_bash_profile_sources_profile_and_bashrc(&home);
-        return wrote_bashrc || linked_profile;
+        ok &= ensure_bash_profile_sources_profile_and_bashrc(home);
     }
-
-    append_export_once(&home.join(".profile"), &export_line)
+    ok
 }
 
 /// 幂等地把一行 export 追加到指定 shell 启动脚本；已存在同序 export 则跳过。
@@ -225,7 +317,62 @@ fn append_export_once(profile: &Path, export_line: &str) -> bool {
         Ok(f) => f,
         Err(_) => return false,
     };
-    writeln!(f, "\n# Added by tomcat init\n{}", export_line).is_ok()
+    writeln!(f, "\n{}\n{}", TOMCAT_INIT_COMMENT, export_line).is_ok()
+}
+
+fn is_stale_tomcat_target_export(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("export PATH=") && trimmed.contains("/target/")
+}
+
+pub(crate) fn prune_stale_lines(content: &str) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut result = Vec::with_capacity(lines.len());
+    let mut changed = false;
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        if line.trim() == TOMCAT_INIT_COMMENT
+            && lines
+                .get(index + 1)
+                .is_some_and(|next| is_stale_tomcat_target_export(next))
+        {
+            changed = true;
+            index += 2;
+            continue;
+        }
+        if is_stale_tomcat_target_export(line) {
+            changed = true;
+            index += 1;
+            continue;
+        }
+        result.push(line);
+        index += 1;
+    }
+
+    if !changed {
+        return content.to_string();
+    }
+
+    let mut pruned = result.join("\n");
+    if content.ends_with('\n') {
+        pruned.push('\n');
+    }
+    pruned
+}
+
+pub(crate) fn prune_stale_tomcat_exports(profile: &Path) -> bool {
+    let content = match std::fs::read_to_string(profile) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    let pruned = prune_stale_lines(&content);
+    if pruned == content {
+        return true;
+    }
+    write_file_atomic(profile, pruned.as_bytes()).is_ok()
 }
 
 /// 确保 `~/.bash_profile` 会同时 source `~/.profile` 与 `~/.bashrc`，使 macOS 上的

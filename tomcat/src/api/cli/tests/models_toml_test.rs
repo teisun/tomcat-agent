@@ -3,8 +3,11 @@
 //! 本测试模块挂在 `api::cli::models_toml` 源文件下（见该文件末尾
 //! `#[cfg(test)] #[path] mod tests;`），故不在 `cli/tests/mod.rs` 声明。
 
-use super::{ensure_default_models_toml, ModelsTomlStatus};
-use crate::core::llm::ModelCatalog;
+use super::{
+    builtin_seed_blocks, ensure_default_models_toml, ModelsTomlStatus, MODELS_TOML_HEADER,
+};
+use crate::core::llm::catalog::{builtin_seed_entries, builtin_seed_toml_text};
+use crate::core::llm::{ModelCatalog, ModelEntry};
 use crate::AppConfig;
 
 fn config_with_work_dir(dir: &std::path::Path) -> AppConfig {
@@ -22,8 +25,65 @@ fn count_occurrences(haystack: &str, needle: &str) -> usize {
     haystack.matches(needle).count()
 }
 
+fn seed_entries(cfg: &AppConfig) -> Vec<ModelEntry> {
+    builtin_seed_entries(&cfg.context)
+}
+
+fn seed_entry(cfg: &AppConfig, model_id: &str) -> ModelEntry {
+    seed_entries(cfg)
+        .into_iter()
+        .find(|entry| entry.id == model_id)
+        .unwrap_or_else(|| panic!("missing builtin seed entry: {model_id}"))
+}
+
+fn seed_blocks() -> Vec<(String, String)> {
+    builtin_seed_blocks()
+        .expect("embedded seed blocks")
+        .into_iter()
+        .map(|entry| (entry.id, entry.block))
+        .collect()
+}
+
+fn seed_ids() -> Vec<String> {
+    seed_blocks()
+        .into_iter()
+        .map(|(model_id, _)| model_id)
+        .collect()
+}
+
+fn seed_block_text(model_id: &str) -> String {
+    seed_blocks()
+        .into_iter()
+        .find(|(id, _)| id == model_id)
+        .map(|(_, block)| block)
+        .unwrap_or_else(|| panic!("missing embedded seed block: {model_id}"))
+}
+
+fn expected_seed_file_text() -> String {
+    format!("{MODELS_TOML_HEADER}\n{}", expected_seed_blocks_text())
+}
+
+fn expected_seed_blocks_text() -> String {
+    builtin_seed_toml_text().to_string()
+}
+
+fn seed_ids_except(excluded: &[&str]) -> Vec<String> {
+    seed_ids()
+        .into_iter()
+        .filter(|model_id| !excluded.contains(&model_id.as_str()))
+        .collect()
+}
+
+fn strip_model_name(block: &str) -> String {
+    block
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("model_name = "))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
-fn creates_models_toml_with_all_managed_entries_when_absent() {
+fn creates_models_toml_with_all_seed_entries_when_absent() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_with_work_dir(dir.path());
 
@@ -31,88 +91,22 @@ fn creates_models_toml_with_all_managed_entries_when_absent() {
     assert_eq!(
         status,
         ModelsTomlStatus::Created {
-            added_model_ids: vec![
-                "mimo-v2.5-pro",
-                "gpt-5.2",
-                "deepseek-v4-flash",
-                "utility-flash"
-            ]
+            added_model_ids: seed_ids()
         }
     );
 
     let text = models_toml_text(&cfg);
-    assert!(
-        text.contains("id = \"mimo-v2.5-pro\""),
-        "missing mimo entry:\n{text}"
-    );
-    assert!(
-        text.contains("model_name = \"mimo-v2.5-pro\""),
-        "missing mimo model_name:\n{text}"
-    );
-    assert!(
-        text.contains("id = \"gpt-5.2\""),
-        "missing gpt-5.2:\n{text}"
-    );
-    assert!(
-        text.contains("model_name = \"gpt-5.2\""),
-        "missing gpt-5.2 model_name:\n{text}"
-    );
-    assert!(
-        text.contains("id = \"deepseek-v4-flash\""),
-        "missing deepseek-v4-flash:\n{text}"
-    );
-    assert!(
-        text.contains("model_name = \"deepseek-v4-flash\""),
-        "missing deepseek-v4-flash model_name:\n{text}"
-    );
-    assert!(
-        text.contains("id = \"utility-flash\""),
-        "missing utility-flash:\n{text}"
-    );
-    assert!(
-        text.contains("id = \"utility-flash\"\nmodel_name = \"deepseek-v4-flash\""),
-        "missing utility-flash model_name:\n{text}"
-    );
-    assert!(
-        text.contains("# Tomcat 模型清单"),
-        "missing header comment:\n{text}"
-    );
+    assert_eq!(text, expected_seed_file_text());
 
-    // 生成的条目必须能被 catalog 正确解析。
     let catalog = ModelCatalog::load(&cfg).expect("catalog load");
-    let entry = catalog.lookup("mimo-v2.5-pro").expect("mimo entry");
-    assert_eq!(entry.api, "openai");
-    assert_eq!(entry.provider, "mimo");
-    assert_eq!(
-        entry.base_url.as_deref(),
-        Some("https://token-plan-cn.xiaomimimo.com")
-    );
-    assert_eq!(entry.model_name.as_deref(), Some("mimo-v2.5-pro"));
-    assert_eq!(entry.thinking_format.as_deref(), Some("doubao"));
-    assert!(!entry.capabilities.vision);
-    assert!(!entry.capabilities.files);
-    assert!(entry.capabilities.tools);
-    assert!(entry.capabilities.reasoning);
-
-    let gpt52 = catalog.lookup("gpt-5.2").expect("gpt-5.2 entry");
-    assert_eq!(gpt52.api, "openai-responses");
-    assert_eq!(gpt52.provider, "openai");
-    assert_eq!(gpt52.model_name.as_deref(), Some("gpt-5.2"));
-    assert_eq!(gpt52.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
-
-    let flash = catalog
-        .lookup("deepseek-v4-flash")
-        .expect("deepseek-v4-flash entry");
-    assert_eq!(flash.api, "openai");
-    assert_eq!(flash.provider, "deepseek");
-    assert_eq!(flash.model_name.as_deref(), Some("deepseek-v4-flash"));
-    assert_eq!(flash.api_key_env.as_deref(), Some("DEEPSEEK_API_KEY"));
-
-    let utility = catalog
-        .lookup("utility-flash")
-        .expect("utility-flash entry");
-    assert_eq!(utility.model_name.as_deref(), Some("deepseek-v4-flash"));
-    assert_eq!(utility.provider, "deepseek");
+    for entry in seed_entries(&cfg) {
+        assert_eq!(catalog.lookup(&entry.id).cloned(), Some(entry.clone()));
+        assert!(
+            catalog.is_user_model(&entry.id),
+            "seeded preset should be marked as user-owned after init: {}",
+            entry.id
+        );
+    }
 }
 
 #[test]
@@ -123,14 +117,10 @@ fn second_run_is_idempotent_no_duplicate() {
     assert_eq!(
         ensure_default_models_toml(&cfg).unwrap(),
         ModelsTomlStatus::Created {
-            added_model_ids: vec![
-                "mimo-v2.5-pro",
-                "gpt-5.2",
-                "deepseek-v4-flash",
-                "utility-flash"
-            ]
+            added_model_ids: seed_ids()
         }
     );
+    let first_text = models_toml_text(&cfg);
     assert_eq!(
         ensure_default_models_toml(&cfg).unwrap(),
         ModelsTomlStatus::AlreadyPresent
@@ -141,28 +131,19 @@ fn second_run_is_idempotent_no_duplicate() {
     );
 
     let text = models_toml_text(&cfg);
-    assert_eq!(
-        count_occurrences(&text, "id = \"mimo-v2.5-pro\""),
-        1,
-        "repeated init must not duplicate the mimo entry:\n{text}"
-    );
-    assert_eq!(
-        count_occurrences(&text, "model_name = \"mimo-v2.5-pro\""),
-        1
-    );
-    assert_eq!(count_occurrences(&text, "id = \"gpt-5.2\""), 1);
-    assert_eq!(count_occurrences(&text, "model_name = \"gpt-5.2\""), 1);
-    assert_eq!(count_occurrences(&text, "id = \"deepseek-v4-flash\""), 1);
-    assert_eq!(
-        count_occurrences(&text, "model_name = \"deepseek-v4-flash\""),
-        2,
-        "deepseek-v4-flash and utility-flash share model_name:\n{text}"
-    );
-    assert_eq!(count_occurrences(&text, "id = \"utility-flash\""), 1);
+    assert_eq!(text, first_text);
+    assert_eq!(count_occurrences(&text, "[[models]]"), seed_ids().len());
+    for model_id in seed_ids() {
+        assert_eq!(
+            count_occurrences(&text, &format!("id = \"{model_id}\"")),
+            1,
+            "repeated init must not duplicate the {model_id} entry:\n{text}"
+        );
+    }
 }
 
 #[test]
-fn appends_missing_managed_entries_preserving_existing_user_entries() {
+fn appends_missing_seed_entries_preserving_existing_user_entries() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_with_work_dir(dir.path());
 
@@ -170,7 +151,8 @@ fn appends_missing_managed_entries_preserving_existing_user_entries() {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    let user_content = "\
+    let user_content = format!(
+        "\
 # my own notes
 [[models]]
 id = \"my-custom-model\"
@@ -178,22 +160,18 @@ api = \"openai\"
 provider = \"acme\"
 base_url = \"https://api.acme.example\"
 
-[[models]]
-id = \"gpt-5.2\"
-api = \"openai-responses\"
-provider = \"openai\"
-api_key_env = \"OPENAI_API_KEY\"
-base_url = \"https://api.openai.com\"
-capabilities = { vision = true, files = true, tools = true, reasoning = true }
-";
+{}
+",
+        strip_model_name(&seed_block_text("gpt-5.2"))
+    );
     std::fs::write(&path, user_content).unwrap();
 
     let status = ensure_default_models_toml(&cfg).expect("ensure");
     assert_eq!(
         status,
         ModelsTomlStatus::UpdatedExisting {
-            added_model_ids: vec!["mimo-v2.5-pro", "deepseek-v4-flash", "utility-flash"],
-            updated_model_name_ids: vec!["gpt-5.2"]
+            added_model_ids: seed_ids_except(&["gpt-5.2"]),
+            updated_model_name_ids: vec!["gpt-5.2".to_string()]
         }
     );
 
@@ -206,61 +184,47 @@ capabilities = { vision = true, files = true, tools = true, reasoning = true }
         text.contains("id = \"my-custom-model\""),
         "user entry lost:\n{text}"
     );
-    assert!(
-        text.contains("id = \"mimo-v2.5-pro\""),
-        "mimo not appended:\n{text}"
-    );
-    assert!(
-        text.contains("id = \"deepseek-v4-flash\""),
-        "deepseek-v4-flash not appended:\n{text}"
-    );
-    assert!(
-        text.contains("id = \"utility-flash\""),
-        "utility-flash not appended:\n{text}"
-    );
+    for model_id in seed_ids_except(&["gpt-5.2"]) {
+        assert!(
+            text.contains(&format!("id = \"{model_id}\"")),
+            "{model_id} not appended:\n{text}"
+        );
+    }
     assert!(
         text.contains("model_name = \"gpt-5.2\""),
         "gpt-5.2 model_name not backfilled:\n{text}"
     );
-    assert!(
-        text.contains("model_name = \"mimo-v2.5-pro\""),
-        "mimo model_name not written:\n{text}"
-    );
-    assert!(
-        text.contains("model_name = \"deepseek-v4-flash\""),
-        "deepseek-v4-flash model_name not written:\n{text}"
-    );
 
-    // 两个条目都应能解析。
     let catalog = ModelCatalog::load(&cfg).expect("catalog load");
     assert!(catalog.lookup("my-custom-model").is_some());
-    assert!(catalog.lookup("mimo-v2.5-pro").is_some());
-    assert!(catalog.lookup("gpt-5.2").is_some());
-    assert!(catalog.lookup("deepseek-v4-flash").is_some());
+    for entry in seed_entries(&cfg) {
+        assert!(catalog.lookup(&entry.id).is_some(), "missing {}", entry.id);
+        assert!(
+            catalog.is_user_model(&entry.id),
+            "seeded preset should be user-owned after append: {}",
+            entry.id
+        );
+    }
 
-    // 再跑一次保持幂等。
     assert_eq!(
         ensure_default_models_toml(&cfg).unwrap(),
         ModelsTomlStatus::AlreadyPresent
     );
     let text2 = models_toml_text(&cfg);
-    assert_eq!(count_occurrences(&text2, "id = \"mimo-v2.5-pro\""), 1);
-    assert_eq!(count_occurrences(&text2, "id = \"gpt-5.2\""), 1);
-    assert_eq!(count_occurrences(&text2, "id = \"deepseek-v4-flash\""), 1);
     assert_eq!(
-        count_occurrences(&text2, "model_name = \"mimo-v2.5-pro\""),
-        1
+        count_occurrences(&text2, "[[models]]"),
+        seed_ids().len() + 1
     );
-    assert_eq!(count_occurrences(&text2, "model_name = \"gpt-5.2\""), 1);
-    assert_eq!(
-        count_occurrences(&text2, "model_name = \"deepseek-v4-flash\""),
-        2,
-        "deepseek-v4-flash and utility-flash share model_name:\n{text2}"
-    );
+    for model_id in seed_ids() {
+        assert_eq!(
+            count_occurrences(&text2, &format!("id = \"{model_id}\"")),
+            1
+        );
+    }
 }
 
 #[test]
-fn backfills_missing_model_name_for_existing_managed_entries() {
+fn backfills_missing_model_name_for_existing_seed_entries() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = config_with_work_dir(dir.path());
 
@@ -268,59 +232,64 @@ fn backfills_missing_model_name_for_existing_managed_entries() {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }
-    let existing = "\
-[[models]]
-id = \"mimo-v2.5-pro\"
-api = \"openai\"
-provider = \"mimo\"
-api_key_env = \"MIMO_API_KEY\"
-base_url = \"https://token-plan-cn.xiaomimimo.com\"
-thinking_format = \"doubao\"
-context_window = 1000000
-capabilities = { vision = false, files = false, tools = true, reasoning = true }
-
-[[models]]
-id = \"gpt-5.2\"
-api = \"openai-responses\"
-provider = \"openai\"
-api_key_env = \"OPENAI_API_KEY\"
-base_url = \"https://api.openai.com\"
-thinking_format = \"openai\"
-capabilities = { vision = true, files = true, tools = true, reasoning = true }
-
-[[models]]
-id = \"deepseek-v4-flash\"
-api = \"openai\"
-provider = \"deepseek\"
-api_key_env = \"DEEPSEEK_API_KEY\"
-base_url = \"https://api.deepseek.com\"
-thinking_format = \"deepseek\"
-capabilities = { vision = false, files = false, tools = true, reasoning = true }
-";
+    let missing_model_name_ids = ["mimo-v2.5-pro", "gpt-5.2", "deepseek-v4-flash"];
+    let expected_updated_model_name_ids = seed_ids()
+        .into_iter()
+        .filter(|model_id| missing_model_name_ids.contains(&model_id.as_str()))
+        .collect::<Vec<_>>();
+    let mut existing = seed_blocks()
+        .into_iter()
+        .map(|(model_id, block)| {
+            if missing_model_name_ids.contains(&model_id.as_str()) {
+                strip_model_name(&block)
+            } else {
+                block
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    existing.push('\n');
     std::fs::write(&path, existing).unwrap();
 
     let status = ensure_default_models_toml(&cfg).expect("ensure");
     assert_eq!(
         status,
         ModelsTomlStatus::UpdatedExisting {
-            added_model_ids: vec!["utility-flash"],
-            updated_model_name_ids: vec!["mimo-v2.5-pro", "gpt-5.2", "deepseek-v4-flash"]
+            added_model_ids: vec![],
+            updated_model_name_ids: expected_updated_model_name_ids
         }
     );
 
     let text = models_toml_text(&cfg);
-    assert_eq!(
-        count_occurrences(&text, "model_name = \"mimo-v2.5-pro\""),
-        1
-    );
-    assert_eq!(count_occurrences(&text, "model_name = \"gpt-5.2\""), 1);
-    assert_eq!(
-        count_occurrences(&text, "model_name = \"deepseek-v4-flash\""),
-        2,
-        "deepseek-v4-flash and utility-flash share model_name:\n{text}"
-    );
-    assert!(
-        text.contains("id = \"utility-flash\""),
-        "utility-flash should be appended:\n{text}"
-    );
+    assert_eq!(text, expected_seed_blocks_text());
+    for model_id in missing_model_name_ids {
+        let entry = seed_entry(&cfg, model_id);
+        assert_eq!(
+            count_occurrences(
+                &text,
+                &format!("model_name = \"{}\"", entry.request_model_name())
+            ),
+            if model_id == "deepseek-v4-flash" {
+                2
+            } else {
+                1
+            }
+        );
+    }
+}
+
+#[test]
+fn generated_models_toml_matches_embedded_seed_without_drift() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config_with_work_dir(dir.path());
+
+    ensure_default_models_toml(&cfg).expect("ensure");
+    let rendered = expected_seed_file_text();
+    let written = models_toml_text(&cfg);
+    assert_eq!(written, rendered);
+
+    let catalog = ModelCatalog::load(&cfg).expect("catalog load");
+    for entry in seed_entries(&cfg) {
+        assert_eq!(catalog.lookup(&entry.id).cloned(), Some(entry));
+    }
 }

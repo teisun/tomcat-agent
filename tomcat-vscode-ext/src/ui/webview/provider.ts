@@ -7,6 +7,7 @@ import * as vscode from "vscode";
 
 import type { VsCodeIde } from "../../ide/VsCodeIde";
 import {
+  hasAnyModelAdminCapability,
   hasServeCapability,
   SERVE_CAPABILITY_LIST_MODELS,
   type InitializeResult,
@@ -37,6 +38,7 @@ import {
   type WebviewReference,
   type WebviewStateSnapshot,
 } from "./protocol";
+import { resolveGuiStylesheet } from "../guiAssets";
 import { buildFileReference } from "./contextReferences";
 import { SessionOwnershipTracker } from "./ownership";
 import { TomcatSessionPool } from "./sessionPool";
@@ -64,6 +66,7 @@ export interface TomcatWebviewProviderDeps {
   ide: VsCodeIde;
   initialize(): Promise<InitializeResult>;
   messenger: TomcatMessenger;
+  openModelSettings?(route?: "models"): void;
   ownership: SessionOwnershipTracker;
   sessionRouter: SessionRouter;
   showOpenDialog?(
@@ -106,6 +109,9 @@ export function parseModelCatalog(payload: unknown): {
   const capabilities: Record<string, string[]> = {};
   for (const entry of models) {
     if (typeof entry !== "object" || entry === null || typeof (entry as { id?: unknown }).id !== "string") {
+      continue;
+    }
+    if ((entry as { keyPresent?: unknown }).keyPresent === false) {
       continue;
     }
     const id = (entry as { id: string }).id;
@@ -494,6 +500,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   currentState() {
     return this.stateStore.snapshot();
+  }
+
+  async refreshModelCatalog(): Promise<void> {
+    await this.refreshModels();
+    if (this.isReady && this.uiMode !== "participant") {
+      await this.postState();
+    }
   }
 
   private pendingAttachmentsForSession(sessionId: string): WebviewPendingAttachment[] {
@@ -920,6 +933,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
+      case "openModelSettings":
+        if (!hasAnyModelAdminCapability(await this.ensureInitialized())) {
+          return;
+        }
+        this.deps.openModelSettings?.(intent.data?.route ?? "models");
+        return;
       case "setPlanMode": {
         await this.ensureInitialized();
         const sessionId = await this.ensureWebviewSessionWithoutHistory(
@@ -1178,6 +1197,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private async refreshModels(): Promise<void> {
     const initializeResult = await this.ensureInitialized();
+    this.stateStore.setModelAdminSupported(
+      hasAnyModelAdminCapability(initializeResult),
+    );
     if (!hasServeCapability(initializeResult, SERVE_CAPABILITY_LIST_MODELS)) {
       this.stateStore.setAvailableModels([], {});
       return;
@@ -1303,7 +1325,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private renderHtml(webview: vscode.Webview): string {
     const distRoot = path.join(this.deps.extensionUri.fsPath, "gui", "dist");
     const jsPath = path.join(distRoot, "index.js");
-    const cssPath = path.join(distRoot, "index.css");
+    const cssPath = resolveGuiStylesheet(distRoot);
     if (!fs.existsSync(jsPath)) {
       return this.renderFallbackHtml(
         "Tomcat webview assets are missing. Run `npm run build` in `tomcat-vscode-ext` to generate `gui/dist`.",
@@ -1311,7 +1333,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
 
     const scriptUri = webview.asWebviewUri(vscode.Uri.file(jsPath));
-    const styleUri = fs.existsSync(cssPath)
+    const styleUri = cssPath
       ? webview.asWebviewUri(vscode.Uri.file(cssPath)).toString()
       : null;
     const nonce = getNonce();

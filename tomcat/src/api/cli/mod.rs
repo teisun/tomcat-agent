@@ -7,7 +7,8 @@ mod claw_cmd;
 mod code_cmd;
 mod config_cmd;
 mod init;
-mod init_model_wizard;
+pub(crate) mod init_model_wizard;
+mod model_cmd;
 mod models_toml;
 mod package_cmd;
 mod pathrules_cmd;
@@ -36,6 +37,7 @@ pub(crate) use claw_cmd::run_claw;
 pub(crate) use code_cmd::run_code;
 pub(crate) use config_cmd::{config_file_path, run_config};
 pub(crate) use init::{run_doctor, run_init};
+pub(crate) use model_cmd::run_model;
 pub(crate) use package_cmd::{run_install, run_packages, run_uninstall};
 pub(crate) use pathrules_cmd::run_pathrules;
 pub(crate) use plugin_cmd::run_plugin;
@@ -47,6 +49,10 @@ pub(crate) use workspace_cmd::run_workspace;
 pub(crate) use audit_cmd::{parse_audit_line, read_audit_entries};
 #[cfg(test)]
 pub(crate) use config_cmd::{resolve_toml_key, set_toml_key};
+#[cfg(test)]
+pub(crate) use init::{
+    auto_add_to_path, install_canonical_symlink, path_export_targets, prune_stale_lines,
+};
 #[cfg(test)]
 pub(crate) use init_model_wizard::{apply_model_choice, write_env_entries};
 #[cfg(test)]
@@ -97,6 +103,11 @@ pub enum Commands {
     Skill {
         #[command(subcommand)]
         sub: SkillSub,
+    },
+    /// 模型管理：列出 / 新增 / 删除 / Key / 默认模型
+    Model {
+        #[command(subcommand)]
+        sub: ModelSub,
     },
     /// 安装 package / bare plugin / bare skill
     Install {
@@ -360,6 +371,73 @@ pub enum SkillSub {
     Reload,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum ModelSub {
+    /// 列出当前可见模型与 Key 状态
+    List,
+    /// 新增或覆盖一个用户模型
+    Add {
+        /// 模型 id（如 my-gateway）
+        id: String,
+        /// 上游协议族：openai / openai-responses / anthropic-messages
+        #[arg(long)]
+        api: String,
+        /// provider 名（决定默认 API Key 环境变量名）
+        #[arg(long)]
+        provider: String,
+        /// 实际请求发给上游的 model 名；缺省时等于 id
+        #[arg(long)]
+        model_name: Option<String>,
+        /// API Key 环境变量名（默认按 provider 推断）
+        #[arg(long)]
+        api_key_env: Option<String>,
+        /// 上游 base_url
+        #[arg(long)]
+        base_url: Option<String>,
+        /// 是否支持 vision
+        #[arg(long, default_value_t = false)]
+        vision: bool,
+        /// 是否支持 files
+        #[arg(long, default_value_t = false)]
+        files: bool,
+        /// 是否支持 tools
+        #[arg(long, default_value_t = true)]
+        tools: bool,
+        /// 是否支持 reasoning
+        #[arg(long, default_value_t = false)]
+        reasoning: bool,
+        /// 是否支持 web search
+        #[arg(long, default_value_t = false)]
+        web_search: bool,
+        /// context window
+        #[arg(long)]
+        context_window: Option<u32>,
+        /// thinking format（如 deepseek / doubao / anthropic）
+        #[arg(long)]
+        thinking_format: Option<String>,
+    },
+    /// 删除一个用户模型；内置模型不可删
+    Remove { id: String },
+    /// 管理 provider API Key
+    Key {
+        #[command(subcommand)]
+        sub: ModelKeySub,
+    },
+    /// 设置 llm.default_model
+    Default { model: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ModelKeySub {
+    /// 写入 provider / ENV_NAME 对应的 API Key
+    Set {
+        provider: String,
+        value: Option<String>,
+    },
+    /// 列出当前模型所需的 API Key 槽位
+    List,
+}
+
 const TOMCAT_AGENT_ACTIVE_ENV: &str = "TOMCAT_AGENT_ACTIVE";
 const NESTED_INVOCATION_REFUSAL: &str = "Refusing to run this Tomcat command inside an active Tomcat agent session because it would mutate session or global state. Use the agent's tool calls instead, or run the command from a separate terminal outside the active session.";
 
@@ -388,6 +466,13 @@ fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
         ),
         Commands::Audit { .. } => false,
         Commands::Skill { .. } => false,
+        Commands::Model { sub } => !matches!(
+            sub,
+            ModelSub::List
+                | ModelSub::Key {
+                    sub: ModelKeySub::List
+                }
+        ),
         Commands::Install { .. } | Commands::Uninstall { .. } => true,
         Commands::Packages { .. } => false,
         Commands::Workspace { sub } => {
@@ -436,10 +521,7 @@ pub fn run_cli() -> Result<(), AppError> {
     ensure_work_dir_structure(&cfg)?;
     ensure_embedded_assets(&cfg)?;
 
-    // 在 init_logging 之前加载 .env，使 RUST_LOG 等变量参与 EnvFilter（dotenvy 默认不覆盖已存在的环境变量）。
-    if let Ok(work_dir) = get_work_dir(&cfg) {
-        let _ = dotenvy::from_path(work_dir.join("assets").join(".env"));
-    }
+    preload_runtime_env(&cfg)?;
 
     let log_dir = resolve_log_dir(&cfg)?;
     std::fs::create_dir_all(&log_dir).map_err(AppError::Io)?;
@@ -489,6 +571,7 @@ pub fn run_cli() -> Result<(), AppError> {
         Commands::Plugin { sub } => run_plugin(sub, &cfg),
         Commands::Audit { sub } => run_audit(sub, &cfg),
         Commands::Skill { sub } => run_skill(sub, &cfg),
+        Commands::Model { sub } => run_model(sub, &cfg),
         Commands::Claw { resume } => run_claw(resume, &cfg),
         Commands::Code { resume } => run_code(resume, &cfg),
         Commands::Serve {
@@ -505,6 +588,22 @@ pub fn run_cli() -> Result<(), AppError> {
         ),
         Commands::Chat { resume } => run_code(resume, &cfg),
     }
+}
+
+pub(crate) fn preload_runtime_env(cfg: &AppConfig) -> Result<(), AppError> {
+    let Ok(work_dir) = get_work_dir(cfg) else {
+        return Ok(());
+    };
+    let env_path = work_dir.join("assets").join(".env");
+    if !env_path.exists() {
+        return Ok(());
+    }
+
+    // 在 init_logging 之前加载 .env，使 RUST_LOG 等变量参与 EnvFilter（dotenvy 默认不覆盖已存在的环境变量）。
+    dotenvy::from_path(&env_path)
+        .map_err(|error| AppError::Config(format!("加载 {} 失败: {error}", env_path.display())))?;
+    crate::core::llm::auth::refresh_managed_credentials(&env_path)?;
+    Ok(())
 }
 
 pub(crate) fn resolve_default_cli_session_mode(

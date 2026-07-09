@@ -72,6 +72,9 @@ help me understand this repository
 
 Tomcat Agent Box restores the active project session by default. Use the
 session picker at the top of the panel to switch sessions or create a new one.
+The model picker now also includes an `Add Models...` entry that opens the
+dedicated settings center, so you can add custom OpenAI-compatible or
+Anthropic-backed models without leaving VS Code.
 
 ## Optional settings
 
@@ -98,6 +101,7 @@ Resolution order, in plain English:
 The extension contributes these commands:
 
 - `Tomcat: Focus Agent Box`
+- `Tomcat: Open Settings`
 - `Tomcat: Restart Serve`
 - `Tomcat: Start New Session`
 - `Tomcat: List Sessions`

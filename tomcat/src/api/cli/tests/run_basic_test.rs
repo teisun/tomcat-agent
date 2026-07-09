@@ -194,6 +194,245 @@ fn run_init_keeps_existing_sessions_store() {
 }
 
 #[test]
+fn path_export_targets_cover_shell_profiles() {
+    let home = std::path::Path::new("/tmp/tomcat-home");
+    assert_eq!(
+        path_export_targets("/bin/zsh", home),
+        vec![home.join(".zprofile"), home.join(".zshrc")]
+    );
+    assert_eq!(
+        path_export_targets("/bin/bash", home),
+        vec![home.join(".bashrc")]
+    );
+    assert_eq!(
+        path_export_targets("/bin/fish", home),
+        vec![home.join(".profile")]
+    );
+}
+
+#[test]
+#[serial(env_lock)]
+fn install_canonical_symlink_creates_local_bin_and_points_to_exe() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("target").join("debug").join("tomcat");
+    let local_bin = dir.path().join(".local").join("bin");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+
+    let installed = install_canonical_symlink(&exe, &local_bin).expect("install symlink");
+    let link = installed.expect("should create canonical command entry");
+    assert_eq!(
+        link,
+        local_bin.join(if cfg!(windows) {
+            "tomcat.exe"
+        } else {
+            "tomcat"
+        })
+    );
+    assert!(local_bin.is_dir(), "local bin should be created");
+
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            std::fs::canonicalize(&exe).unwrap()
+        );
+    }
+    #[cfg(windows)]
+    {
+        assert!(
+            link.exists(),
+            "windows fallback should copy an .exe-like target"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[serial(env_lock)]
+fn install_canonical_symlink_replaces_existing_symlink_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let old_exe = dir.path().join("target").join("debug").join("tomcat-old");
+    let new_exe = dir.path().join("target").join("debug").join("tomcat-new");
+    let local_bin = dir.path().join(".local").join("bin");
+    let link = local_bin.join("tomcat");
+    std::fs::create_dir_all(old_exe.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&local_bin).unwrap();
+    std::fs::write(&old_exe, b"old").unwrap();
+    std::fs::write(&new_exe, b"new").unwrap();
+    std::os::unix::fs::symlink(&old_exe, &link).unwrap();
+
+    let installed = install_canonical_symlink(&new_exe, &local_bin).expect("refresh symlink");
+    assert_eq!(installed.as_deref(), Some(link.as_path()));
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::fs::canonicalize(&new_exe).unwrap()
+    );
+}
+
+#[test]
+#[serial(env_lock)]
+fn install_canonical_symlink_skips_when_exe_is_already_in_local_bin() {
+    let dir = tempfile::tempdir().unwrap();
+    let local_bin = dir.path().join(".local").join("bin");
+    let exe = local_bin.join(if cfg!(windows) {
+        "tomcat.exe"
+    } else {
+        "tomcat"
+    });
+    std::fs::create_dir_all(&local_bin).unwrap();
+    std::fs::write(&exe, b"release-binary").unwrap();
+
+    let installed = install_canonical_symlink(&exe, &local_bin).expect("skip self-referential");
+    assert!(
+        installed.is_none(),
+        "already canonical install should be skipped"
+    );
+    assert_eq!(std::fs::read(&exe).unwrap(), b"release-binary");
+}
+
+#[test]
+#[serial(env_lock)]
+fn install_canonical_symlink_preserves_existing_regular_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("target").join("debug").join("tomcat");
+    let local_bin = dir.path().join(".local").join("bin");
+    let existing = local_bin.join(if cfg!(windows) {
+        "tomcat.exe"
+    } else {
+        "tomcat"
+    });
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&local_bin).unwrap();
+    std::fs::write(&exe, b"debug-binary").unwrap();
+    std::fs::write(&existing, b"real-user-install").unwrap();
+
+    let installed = install_canonical_symlink(&exe, &local_bin).expect("preserve regular file");
+    assert!(installed.is_none(), "regular file should not be replaced");
+    assert_eq!(std::fs::read(&existing).unwrap(), b"real-user-install");
+}
+
+#[test]
+#[serial(env_lock)]
+fn install_canonical_symlink_skips_target_deps_artifact() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir
+        .path()
+        .join("target")
+        .join("debug")
+        .join("deps")
+        .join("tomcat-hash");
+    let local_bin = dir.path().join(".local").join("bin");
+    std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+    std::fs::write(&exe, b"deps-binary").unwrap();
+
+    let installed = install_canonical_symlink(&exe, &local_bin).expect("skip deps binary");
+    assert!(installed.is_none(), "deps artifacts must not be linked");
+    assert!(
+        !local_bin.exists() || std::fs::read_dir(&local_bin).unwrap().next().is_none(),
+        "deps skip should not create a populated local bin directory"
+    );
+}
+
+#[test]
+fn prune_stale_lines_removes_only_target_exports() {
+    let content = r#"
+# Added by tomcat init
+export PATH="/tmp/project/target/release:$PATH"
+# Added by tomcat init
+export PATH="$HOME/.local/bin:$PATH"
+export PATH="/usr/local/bin:$PATH"
+# Added by tomcat init
+export PATH="/tmp/project/target/debug/deps:$PATH"
+"#;
+    let pruned = prune_stale_lines(content);
+    assert!(
+        !pruned.contains("/target/release") && !pruned.contains("/target/debug/deps"),
+        "target exports should be removed, got:\n{pruned}"
+    );
+    assert!(
+        pruned.contains("export PATH=\"$HOME/.local/bin:$PATH\"")
+            && pruned.contains("export PATH=\"/usr/local/bin:$PATH\""),
+        "valid exports should remain, got:\n{pruned}"
+    );
+}
+
+#[test]
+#[serial(env_lock)]
+fn auto_add_to_path_writes_zprofile_and_zshrc_without_touching_zshenv() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let zshenv = home.join(".zshenv");
+    std::fs::write(&zshenv, ". \"$HOME/.cargo/env\"\n").unwrap();
+    let _env = EnvVarGuard::set_many(&[("HOME", home.to_str()), ("SHELL", Some("/bin/zsh"))]);
+
+    assert!(
+        auto_add_to_path(home),
+        "auto_add_to_path should succeed for zsh"
+    );
+
+    let zprofile = std::fs::read_to_string(home.join(".zprofile")).unwrap();
+    let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+    assert!(
+        zprofile.contains("export PATH=\"$HOME/.local/bin:$PATH\"")
+            && zshrc.contains("export PATH=\"$HOME/.local/bin:$PATH\""),
+        "zprofile/zshrc should both receive the stable export"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&zshenv).unwrap(),
+        ". \"$HOME/.cargo/env\"\n",
+        ".zshenv should remain untouched"
+    );
+}
+
+#[test]
+#[serial(env_lock)]
+fn auto_add_to_path_prunes_stale_target_exports_and_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let bashrc = home.join(".bashrc");
+    std::fs::write(
+        &bashrc,
+        [
+            "# Added by tomcat init",
+            "export PATH=\"/tmp/project/target/release:$PATH\"",
+            "# Added by tomcat init",
+            "export PATH=\"/tmp/project/target/debug/deps:$PATH\"",
+            "export PATH=\"/usr/local/bin:$PATH\"",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let _env = EnvVarGuard::set_many(&[("HOME", home.to_str()), ("SHELL", Some("/bin/bash"))]);
+
+    assert!(
+        auto_add_to_path(home),
+        "first auto_add_to_path should succeed"
+    );
+    assert!(
+        auto_add_to_path(home),
+        "second auto_add_to_path should stay idempotent"
+    );
+
+    let bashrc_content = std::fs::read_to_string(&bashrc).unwrap();
+    assert!(
+        !bashrc_content.contains("/target/"),
+        "stale target exports should be pruned, got:\n{bashrc_content}"
+    );
+    assert_eq!(
+        bashrc_content
+            .matches("export PATH=\"$HOME/.local/bin:$PATH\"")
+            .count(),
+        1,
+        "stable export should appear exactly once, got:\n{bashrc_content}"
+    );
+    assert!(
+        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\""),
+        "user exports must be preserved, got:\n{bashrc_content}"
+    );
+}
+
+#[test]
 fn run_doctor_returns_ok() {
     let r = run_doctor();
     assert!(r.is_ok());
@@ -389,7 +628,6 @@ fn apply_model_choice_updates_provider_and_key_env() {
         base_url: Some("https://api.deepseek.com".to_string()),
         capabilities: crate::core::llm::Capabilities::default(),
         context_window: None,
-        cost: None,
         thinking_format: Some("deepseek".to_string()),
     };
 
@@ -418,6 +656,21 @@ fn write_env_entries_writes_provider_keys() {
 }
 
 #[test]
+fn preload_runtime_env_rejects_invalid_env_file() {
+    let work_dir = tempfile::tempdir().expect("tempdir");
+    let cfg = test_config(work_dir.path());
+    let env_path = work_dir.path().join("assets").join(".env");
+    std::fs::create_dir_all(env_path.parent().expect("env parent")).expect("mkdir assets");
+    std::fs::write(&env_path, "BROKEN_ENV=\"unterminated\n").expect("write broken env");
+
+    let error = preload_runtime_env(&cfg).expect_err("broken runtime env must fail");
+    assert!(
+        error.to_string().contains("加载"),
+        "error should mention runtime env loading failure, got: {error}"
+    );
+}
+
+#[test]
 fn additional_provider_env_names_skip_selected_provider_and_dedupe() {
     let cfg = AppConfig::default();
     let catalog = crate::core::llm::ModelCatalog::load_from_path(
@@ -433,8 +686,26 @@ fn additional_provider_env_names_skip_selected_provider_and_dedupe() {
         "DEEPSEEK_API_KEY",
     );
 
-    assert_eq!(extra_for_openai, vec!["DEEPSEEK_API_KEY".to_string()]);
-    assert_eq!(extra_for_deepseek, vec!["OPENAI_API_KEY".to_string()]);
+    assert_eq!(
+        extra_for_openai,
+        vec![
+            "ANTHROPIC_API_KEY".to_string(),
+            "DEEPSEEK_API_KEY".to_string(),
+            "MIMO_API_KEY".to_string(),
+            "MOONSHOT_API_KEY".to_string(),
+            "ZHIPU_API_KEY".to_string(),
+        ]
+    );
+    assert_eq!(
+        extra_for_deepseek,
+        vec![
+            "ANTHROPIC_API_KEY".to_string(),
+            "MIMO_API_KEY".to_string(),
+            "MOONSHOT_API_KEY".to_string(),
+            "OPENAI_API_KEY".to_string(),
+            "ZHIPU_API_KEY".to_string(),
+        ]
+    );
 }
 
 #[test]
@@ -449,7 +720,6 @@ fn apply_model_choice_skips_default_openai_base_url() {
         base_url: Some("https://api.openai.com".to_string()),
         capabilities: crate::core::llm::Capabilities::default(),
         context_window: None,
-        cost: None,
         thinking_format: None,
     };
 

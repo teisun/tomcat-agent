@@ -214,6 +214,7 @@ export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
   availableModels: string[];
+  modelAdminSupported: boolean;
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
   sessions: WebviewSessionTab[];
@@ -353,6 +354,13 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "openModelSettings";
+      data?: {
+        route?: "models" | null;
+      };
+    }
+  | {
+      messageId: string;
       type: "setPlanMode";
       data: {
         action: "build" | "enter" | "exit";
@@ -408,6 +416,12 @@ export type WebviewIntent =
         jumpToLatestVisible: boolean;
         latestUserTopWithinStream: number | null;
         messageTexts: string[];
+        modelDropdownBottom: number | null;
+        modelDropdownFullyVisible: boolean;
+        modelDropdownHeight: number;
+        modelDropdownLeft: number | null;
+        modelDropdownRight: number | null;
+        modelDropdownTop: number | null;
         overflowAnchor: string | null;
         sessionTabs: string[];
         sessionGroupHeaders: string[];

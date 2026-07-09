@@ -38,6 +38,7 @@ use tracing::warn;
 
 use super::super::auth::Credential;
 use super::super::catalog::{infer_default_base_url, Capabilities, ModelEntry};
+use super::super::endpoint::build_path_aware_endpoint;
 use crate::core::llm::degrade_unsupported_multimodal;
 use crate::core::llm::http_client::build_http_client;
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
@@ -462,7 +463,7 @@ impl OpenAiResponsesProvider {
         body: &Value,
         base_url: &str,
     ) -> Result<ChatResponse, AppError> {
-        let url = format!("{}/v1/responses", base_url.trim_end_matches('/'));
+        let url = build_path_aware_endpoint(base_url, "responses");
         let (key, value) = self.auth_header();
 
         let resp = self
@@ -548,7 +549,7 @@ impl OpenAiResponsesProvider {
         base_url: &str,
         body: &Value,
     ) -> Result<reqwest::Response, AppError> {
-        let url = format!("{}/v1/responses", base_url.trim_end_matches('/'));
+        let url = build_path_aware_endpoint(base_url, "responses");
         let (key, value) = self.auth_header();
         let resp = self
             .client

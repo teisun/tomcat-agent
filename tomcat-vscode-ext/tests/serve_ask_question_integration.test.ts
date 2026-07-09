@@ -108,7 +108,7 @@ describe("real tomcat serve ask_question integration", () => {
               "after approval",
         ),
       ).toBe(true);
-      expect(server.capturedRequests()).toHaveLength(2);
+      expect(server.capturedNonTitleRequests()).toHaveLength(2);
     } finally {
       await runtime.cleanup();
       await server.close();
@@ -175,7 +175,7 @@ describe("real tomcat serve ask_question integration", () => {
               "multi approval complete",
         ),
       ).toBe(true);
-      expect(server.capturedRequests()).toHaveLength(2);
+      expect(server.capturedNonTitleRequests()).toHaveLength(2);
       expect(
         events.some(
           (event) =>

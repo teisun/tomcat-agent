@@ -7,10 +7,13 @@ use serde_json::json;
 use serial_test::serial;
 
 use common::serve::{
-    assert_ndjson_line, extract_json_body, response, setup_serve_fixture,
-    spawn_scripted_openai_stream_server, spawn_serve_child, sse_delta, sse_done, sse_finish,
-    ScriptedPart, ServeChild, ServeFixture,
+    assert_ndjson_line, captured_non_title_requests, extract_json_body, response,
+    setup_serve_fixture, spawn_scripted_openai_stream_server,
+    spawn_scripted_openai_stream_server_with_auto_title, spawn_serve_child, sse_delta, sse_done,
+    sse_finish, ScriptedOpenAiServer, ScriptedPart, ServeChild, ServeFixture,
 };
+
+const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn initialize(child: &mut ServeChild) -> String {
     child.send_value(&json!({
@@ -19,7 +22,7 @@ fn initialize(child: &mut ServeChild) -> String {
         "subtype": "initialize",
         "payload": {}
     }));
-    let init = child.recv_until(Duration::from_secs(5), |value| {
+    let init = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_response")
             && value.get("requestId").and_then(|v| v.as_str()) == Some("init-1")
     });
@@ -39,6 +42,13 @@ api = "openai-responses"
 provider = "openai"
 base_url = "{base_url}"
 capabilities = {{ vision = true, files = true, tools = true, reasoning = true, web_search = false }}
+
+[[models]]
+id = "utility-flash"
+api = "openai"
+provider = "openai"
+base_url = "http://127.0.0.1:1"
+capabilities = {{ vision = false, files = false, tools = false, reasoning = false, web_search = false }}
 "#
         ),
     )
@@ -96,6 +106,10 @@ fn transcript_entries(fx: &ServeFixture, session_id: &str) -> Vec<serde_json::Va
         .collect()
 }
 
+fn non_title_requests(server: &ScriptedOpenAiServer) -> Vec<String> {
+    captured_non_title_requests(server)
+}
+
 fn responses_sse_delta(content: &str) -> ScriptedPart {
     ScriptedPart {
         delay_ms: 0,
@@ -116,7 +130,7 @@ fn responses_sse_completed() -> ScriptedPart {
 #[serial]
 fn serve_stdio_user_roundtrip_e2e() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         sse_delta("hello from serve"),
         sse_finish("stop"),
         sse_done(),
@@ -133,7 +147,7 @@ fn serve_stdio_user_roundtrip_e2e() {
         "params": {}
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     for value in &frames {
@@ -169,7 +183,7 @@ fn serve_stdio_user_roundtrip_e2e() {
         "id": "state-after-idle",
         "sessionId": session_id
     }));
-    let state_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let state_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("state-after-idle")
     });
     let state_response = state_frames
@@ -178,19 +192,19 @@ fn serve_stdio_user_roundtrip_e2e() {
         .expect("state-after-idle response");
     assert_eq!(state_response["payload"]["busy"].as_bool(), Some(false));
 
-    let output = child.wait_for_exit(Duration::from_secs(5));
+    let output = child.wait_for_exit(WAIT_TIMEOUT);
     assert!(
         output.status.success(),
         "serve e2e should exit cleanly: {output:?}"
     );
-    assert_eq!(server.captured_requests().len(), 1);
+    assert_eq!(non_title_requests(&server).len(), 1);
 }
 
 #[test]
 #[serial]
 fn serve_interrupt_emits_agent_interrupted_e2e() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         sse_delta("partial"),
         common::serve::ScriptedPart {
             delay_ms: 350,
@@ -209,7 +223,7 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
         "text": "start then interrupt",
         "params": {}
     }));
-    let mut frames = child.recv_until(Duration::from_secs(5), |value| {
+    let mut frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("message_update")
     });
 
@@ -218,7 +232,7 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
         "id": "interrupt-1",
         "sessionId": session_id.clone()
     }));
-    frames.extend(child.recv_until(Duration::from_secs(5), |value| {
+    frames.extend(child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
             && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.as_str())
     }));
@@ -253,7 +267,7 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
         "id": "state-after-interrupt-idle",
         "sessionId": session_id
     }));
-    let state_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let state_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("state-after-interrupt-idle")
     });
     let state_response = state_frames
@@ -269,7 +283,7 @@ fn serve_interrupt_emits_agent_interrupted_e2e() {
 #[serial]
 fn serve_stdout_only_emits_ndjson_frames() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         sse_delta("ndjson ok"),
         sse_finish("stop"),
         sse_done(),
@@ -278,7 +292,7 @@ fn serve_stdout_only_emits_ndjson_frames() {
     let mut child = spawn_serve_child(&fx);
 
     child.send_raw("{not json");
-    let parse_error = child.recv_value(Duration::from_secs(5));
+    let parse_error = child.recv_value(WAIT_TIMEOUT);
     assert_ndjson_line(&parse_error);
     assert_eq!(parse_error["success"].as_bool(), Some(false));
 
@@ -290,7 +304,7 @@ fn serve_stdout_only_emits_ndjson_frames() {
         "text": "say hi",
         "params": {}
     }));
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
     for value in &frames {
@@ -302,7 +316,7 @@ fn serve_stdout_only_emits_ndjson_frames() {
 #[serial]
 fn serve_prompt_with_attachment_roundtrip() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         responses_sse_delta("vision ok"),
         responses_sse_completed(),
     ])]);
@@ -326,7 +340,7 @@ fn serve_prompt_with_attachment_roundtrip() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     assert!(
@@ -341,7 +355,7 @@ fn serve_prompt_with_attachment_roundtrip() {
         "expected attachment prompt to reach agent_end, got {frames:?}"
     );
 
-    let requests = server.captured_requests();
+    let requests = non_title_requests(&server);
     assert_eq!(requests.len(), 1, "expected one responses API request");
     let body = extract_json_body(&requests[0]);
     let input = body["input"].as_array().expect("responses input array");
@@ -358,7 +372,7 @@ fn serve_prompt_with_attachment_roundtrip() {
 #[serial]
 fn serve_prompt_with_inline_file_attachment_roundtrip() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         responses_sse_delta("file ok"),
         responses_sse_completed(),
     ])]);
@@ -384,7 +398,7 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
     assert!(
@@ -399,7 +413,7 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
         "expected file attachment prompt to reach agent_end, got {frames:?}"
     );
 
-    let requests = server.captured_requests();
+    let requests = non_title_requests(&server);
     assert_eq!(requests.len(), 1, "expected one responses API request");
     let body = extract_json_body(&requests[0]);
     let input = body["input"].as_array().expect("responses input array");
@@ -421,7 +435,7 @@ fn serve_prompt_with_inline_file_attachment_roundtrip() {
 #[serial]
 fn serve_prompt_with_context_reference_segments_roundtrip() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         responses_sse_delta("context ok"),
         responses_sse_completed(),
     ])]);
@@ -464,7 +478,7 @@ fn serve_prompt_with_context_reference_segments_roundtrip() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
     assert!(
@@ -490,7 +504,7 @@ fn serve_prompt_with_context_reference_segments_roundtrip() {
         "id": "state-context-reference",
         "sessionId": session_id
     }));
-    let state_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let state_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("state-context-reference")
     });
     let state_response = state_frames
@@ -502,7 +516,7 @@ fn serve_prompt_with_context_reference_segments_roundtrip() {
         .or_else(|| state_response["sessionId"].as_str())
         .unwrap_or(session_id.as_str());
 
-    let requests = server.captured_requests();
+    let requests = non_title_requests(&server);
     assert_eq!(requests.len(), 1, "expected one responses API request");
     let body = extract_json_body(&requests[0]);
     let input = body["input"].as_array().expect("responses input array");
@@ -577,7 +591,7 @@ fn serve_prompt_with_non_pdf_file_attachment_returns_error() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("file-e2e-bad-mime")
     });
     let response = frames
@@ -592,7 +606,7 @@ fn serve_prompt_with_non_pdf_file_attachment_returns_error() {
         )
     );
     assert_eq!(
-        server.captured_requests().len(),
+        non_title_requests(&server).len(),
         0,
         "non-pdf file attachments should not reach the responses API"
     );
@@ -602,7 +616,7 @@ fn serve_prompt_with_non_pdf_file_attachment_returns_error() {
 #[serial]
 fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succeeds() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
         response(vec![
             responses_sse_delta("vision ok"),
             responses_sse_completed(),
@@ -636,7 +650,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
             ]
         }
     }));
-    let first_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let first_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     assert_eq!(count_event(&first_frames, "agent_end"), 1);
@@ -657,7 +671,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
             ]
         }
     }));
-    let second_history_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let second_history_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     assert_eq!(count_event(&second_history_frames, "agent_end"), 1);
@@ -668,7 +682,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
         "sessionId": session_id,
         "model": "deepseek-v4-pro"
     }));
-    let set_model_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let set_model_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("set-deepseek")
     });
     let set_model_response = set_model_frames
@@ -684,7 +698,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
         "text": "follow up",
         "params": {}
     }));
-    let second_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let second_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_idle")
     });
     assert_eq!(count_event(&second_frames, "agent_end"), 1);
@@ -696,7 +710,7 @@ fn serve_prompt_with_attachment_history_then_deepseek_degrades_history_and_succe
         "history downgrade should avoid terminal errors: {second_frames:?}"
     );
 
-    let requests = server.captured_requests();
+    let requests = non_title_requests(&server);
     assert_eq!(requests.len(), 3, "expected three upstream requests");
     assert!(
         requests[2].contains("/v1/chat/completions"),
@@ -755,7 +769,7 @@ fn serve_prompt_with_inline_file_attachment_missing_filename_returns_error() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("file-e2e-missing-name")
     });
     let response = frames

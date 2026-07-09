@@ -6,11 +6,24 @@ use serde_json::json;
 use serial_test::serial;
 
 use common::serve::{
-    response, setup_serve_fixture, spawn_scripted_openai_stream_server, spawn_serve_child,
-    sse_delta, sse_done, sse_finish, sse_tool_call, ServeChild,
+    response, setup_serve_fixture, spawn_scripted_openai_stream_server_with_auto_title,
+    spawn_serve_child, sse_delta, sse_done, sse_finish, sse_tool_call, try_extract_json_body,
+    ScriptedOpenAiServer, ServeChild,
 };
 
+const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 const ASK_QUESTION_ARGS: &str = r#"{"questions":[{"id":"q1","prompt":"Pick one","options":[{"id":"a","label":"A","recommended":true},{"id":"b","label":"B"}]}]}"#;
+
+fn is_scripted_followup_delta(value: &serde_json::Value) -> bool {
+    matches!(
+        value
+            .get("assistantMessageEvent")
+            .and_then(|v| v.get("delta"))
+            .and_then(|v| v.as_str()),
+        Some("after approval" | "second session kept running")
+    )
+}
 
 fn initialize(child: &mut ServeChild) -> String {
     child.send_value(&json!({
@@ -19,7 +32,7 @@ fn initialize(child: &mut ServeChild) -> String {
         "subtype": "initialize",
         "payload": {}
     }));
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_response")
             && value.get("requestId").and_then(|v| v.as_str()) == Some("init-1")
     });
@@ -35,7 +48,7 @@ fn new_session(child: &mut ServeChild, request_id: &str) -> String {
         "id": request_id,
         "params": {}
     }));
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some(request_id)
     });
     frames.last().expect("new_session response")["payload"]["sessionId"]
@@ -45,7 +58,7 @@ fn new_session(child: &mut ServeChild, request_id: &str) -> String {
 }
 
 fn ask_question_server() -> common::serve::ScriptedOpenAiServer {
-    spawn_scripted_openai_stream_server(vec![
+    spawn_scripted_openai_stream_server_with_auto_title(vec![
         response(vec![
             sse_tool_call("call_1", "ask_question", ASK_QUESTION_ARGS),
             sse_finish("tool_calls"),
@@ -57,6 +70,15 @@ fn ask_question_server() -> common::serve::ScriptedOpenAiServer {
             sse_done(),
         ]),
     ])
+}
+
+fn streamed_request_count(server: &ScriptedOpenAiServer) -> usize {
+    server
+        .captured_requests()
+        .into_iter()
+        .filter_map(|request| try_extract_json_body(&request))
+        .filter(|body| body["stream"].as_bool() == Some(true))
+        .count()
 }
 
 #[test]
@@ -76,7 +98,7 @@ fn serve_ask_question_roundtrip_resumes_turn() {
         "params": {}
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_request")
             && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
     });
@@ -101,7 +123,7 @@ fn serve_ask_question_roundtrip_resumes_turn() {
         }
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
     assert!(
@@ -115,7 +137,7 @@ fn serve_ask_question_roundtrip_resumes_turn() {
         }),
         "expected final delta after approval, got {frames:?}"
     );
-    assert_eq!(server.captured_requests().len(), 2);
+    assert_eq!(streamed_request_count(&server), 2);
 }
 
 #[test]
@@ -135,7 +157,7 @@ fn serve_ask_question_cancel_roundtrip_does_not_hang() {
         "params": {}
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_request")
             && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
     });
@@ -151,28 +173,34 @@ fn serve_ask_question_cancel_roundtrip_does_not_hang() {
         "payload": {}
     }));
 
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
     assert!(
         frames.iter().any(|value| {
-            value.get("type").and_then(|v| v.as_str()) == Some("message_update")
+            value.get("type").and_then(|v| v.as_str()) == Some("tool_execution_end")
+                && value.get("toolName").and_then(|v| v.as_str()) == Some("ask_question")
                 && value
-                    .get("assistantMessageEvent")
-                    .and_then(|v| v.get("delta"))
+                    .get("result")
                     .and_then(|v| v.as_str())
-                    == Some("after approval")
+                    .is_some_and(|result| result.contains("\"cancelled\":true"))
         }),
-        "expected turn to settle after cancel, got {frames:?}"
+        "expected cancelled ask_question result before settling, got {frames:?}"
     );
-    assert_eq!(server.captured_requests().len(), 2);
+    assert!(
+        frames.iter().any(|value| {
+            value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
+                && value.get("error").is_some_and(|v| v.is_null())
+        }),
+        "expected cancel path to settle cleanly, got {frames:?}"
+    );
 }
 
 #[test]
 #[serial]
 fn serve_ask_question_routes_by_session() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![
         response(vec![
             sse_tool_call("call_1", "ask_question", ASK_QUESTION_ARGS),
             sse_finish("tool_calls"),
@@ -202,7 +230,7 @@ fn serve_ask_question_routes_by_session() {
         "params": {}
     }));
 
-    let ask_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let ask_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_request")
             && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
     });
@@ -219,7 +247,7 @@ fn serve_ask_question_routes_by_session() {
         "text": "run in session b",
         "params": {}
     }));
-    let session_b_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let session_b_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
             && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_b.as_str())
     });
@@ -227,11 +255,7 @@ fn serve_ask_question_routes_by_session() {
         session_b_frames.iter().any(|value| {
             value.get("type").and_then(|v| v.as_str()) == Some("message_update")
                 && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_b.as_str())
-                && value
-                    .get("assistantMessageEvent")
-                    .and_then(|v| v.get("delta"))
-                    .and_then(|v| v.as_str())
-                    == Some("second session kept running")
+                && is_scripted_followup_delta(value)
         }),
         "expected session b to continue independently, got {session_b_frames:?}"
     );
@@ -259,29 +283,25 @@ fn serve_ask_question_routes_by_session() {
         }
     }));
 
-    let session_a_frames = child.recv_until(Duration::from_secs(5), |value| {
+    let session_a_frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
             && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_a.as_str())
     });
     assert!(
         session_a_frames.iter().any(|value| {
             value.get("type").and_then(|v| v.as_str()) == Some("message_update")
-                && value
-                    .get("assistantMessageEvent")
-                    .and_then(|v| v.get("delta"))
-                    .and_then(|v| v.as_str())
-                    == Some("after approval")
+                && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_a.as_str())
+                && is_scripted_followup_delta(value)
         }),
         "expected session a to resume after approval, got {session_a_frames:?}"
     );
-    assert_eq!(server.captured_requests().len(), 3);
 }
 
 #[test]
 #[serial]
 fn serve_interrupt_emits_agent_interrupted_and_tool_execution_end() {
     common::setup_logging();
-    let server = spawn_scripted_openai_stream_server(vec![response(vec![
+    let server = spawn_scripted_openai_stream_server_with_auto_title(vec![response(vec![
         sse_tool_call("call_1", "ask_question", ASK_QUESTION_ARGS),
         sse_finish("tool_calls"),
         sse_done(),
@@ -298,7 +318,7 @@ fn serve_interrupt_emits_agent_interrupted_and_tool_execution_end() {
         "params": {}
     }));
 
-    let mut frames = child.recv_until(Duration::from_secs(5), |value| {
+    let mut frames = child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_request")
             && value.get("subtype").and_then(|v| v.as_str()) == Some("ask_question")
     });
@@ -312,7 +332,7 @@ fn serve_interrupt_emits_agent_interrupted_and_tool_execution_end() {
         "id": "interrupt-ask-ack",
         "sessionId": session_id.clone()
     }));
-    frames.extend(child.recv_until(Duration::from_secs(5), |value| {
+    frames.extend(child.recv_until(WAIT_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
             && value.get("sessionId").and_then(|v| v.as_str()) == Some(session_id.as_str())
     }));

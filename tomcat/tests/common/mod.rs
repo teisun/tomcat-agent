@@ -35,6 +35,16 @@ pub const MIMO_TEST_DEFAULT_MODEL: &str = "mimo-v2.5-pro";
 pub const MIMO_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_MIMO_BASE_URL";
 pub const MIMO_TEST_DEFAULT_BASE_URL: &str = "https://token-plan-cn.xiaomimimo.com";
 pub const MIMO_TEST_API_KEY_ENV: &str = "MIMO_API_KEY";
+pub const KIMI_TEST_MODEL_ENV: &str = "TOMCAT_E2E_KIMI_MODEL";
+pub const KIMI_TEST_DEFAULT_MODEL: &str = "kimi-k2.7-code";
+pub const KIMI_TEST_API_KEY_ENV: &str = "MOONSHOT_API_KEY";
+pub const KIMI_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_KIMI_BASE_URL";
+pub const KIMI_TEST_DEFAULT_BASE_URL: &str = "https://api.moonshot.cn";
+pub const ANTHROPIC_TEST_MODEL_ENV: &str = "TOMCAT_E2E_ANTHROPIC_MODEL";
+pub const ANTHROPIC_TEST_DEFAULT_MODEL: &str = "claude-opus-4-6";
+pub const ANTHROPIC_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_ANTHROPIC_BASE_URL";
+pub const ANTHROPIC_TEST_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
+pub const ANTHROPIC_TEST_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 
 /// 为依赖真实 LLM 凭证的集成测试加载环境变量（与 `UNIT_TEST_SPEC` / `INTEGRATION_TEST_SPEC` 对齐）。
 ///
@@ -69,6 +79,36 @@ pub fn mimo_test_base_url() -> String {
     std::env::var(MIMO_TEST_BASE_URL_ENV).unwrap_or_else(|_| MIMO_TEST_DEFAULT_BASE_URL.to_string())
 }
 
+pub fn kimi_test_model() -> String {
+    std::env::var(KIMI_TEST_MODEL_ENV).unwrap_or_else(|_| KIMI_TEST_DEFAULT_MODEL.to_string())
+}
+
+pub fn kimi_test_base_url() -> String {
+    std::env::var(KIMI_TEST_BASE_URL_ENV).unwrap_or_else(|_| KIMI_TEST_DEFAULT_BASE_URL.to_string())
+}
+
+pub fn anthropic_test_model() -> String {
+    std::env::var(ANTHROPIC_TEST_MODEL_ENV)
+        .unwrap_or_else(|_| ANTHROPIC_TEST_DEFAULT_MODEL.to_string())
+}
+
+pub fn anthropic_test_base_url() -> String {
+    std::env::var(ANTHROPIC_TEST_BASE_URL_ENV)
+        .unwrap_or_else(|_| ANTHROPIC_TEST_DEFAULT_BASE_URL.to_string())
+}
+
+pub fn openai_target_uses_builtin_responses_key(target: &str) -> bool {
+    matches!(target, "gpt-5.2" | "gpt-5.4" | "gpt-5.5" | "gpt-5.6")
+}
+
+pub fn openai_test_api_key_env_for_model(target: &str) -> &'static str {
+    if openai_target_uses_builtin_responses_key(target) {
+        "OPENAI_API_KEY"
+    } else {
+        OPENAI_GATEWAY_TEST_API_KEY_ENV
+    }
+}
+
 pub fn require_deepseek_api_key(test_name: &str) -> String {
     setup_logging();
     load_deepseek_test_env();
@@ -93,6 +133,48 @@ pub fn apply_openai_app_config(cfg: &mut AppConfig) {
     cfg.llm.default_model = e2e_openai_model();
     cfg.context.compaction_model = "gpt-5.4".to_string();
     maybe_write_test_models(cfg);
+}
+
+pub fn apply_kimi_app_config(cfg: &mut AppConfig) {
+    let model_id = kimi_test_model();
+    let base_url = kimi_test_base_url();
+    cfg.llm.default_model = model_id.clone();
+    cfg.context.compaction_model = model_id;
+    write_model_override(
+        cfg,
+        ModelOverrideSpec {
+            model_id: cfg.llm.default_model.as_str(),
+            api: "openai",
+            provider: "moonshot",
+            env_key: KIMI_TEST_API_KEY_ENV,
+            base_url: Some(base_url.as_str()),
+            model_name: None,
+            thinking_format: Some("doubao"),
+            supports_files: false,
+            supports_reasoning: true,
+        },
+    );
+}
+
+pub fn apply_anthropic_app_config(cfg: &mut AppConfig) {
+    let model_id = anthropic_test_model();
+    let base_url = anthropic_test_base_url();
+    cfg.llm.default_model = model_id.clone();
+    cfg.context.compaction_model = model_id.clone();
+    write_model_override(
+        cfg,
+        ModelOverrideSpec {
+            model_id: &model_id,
+            api: "anthropic-messages",
+            provider: "anthropic",
+            env_key: ANTHROPIC_TEST_API_KEY_ENV,
+            base_url: Some(base_url.as_str()),
+            model_name: None,
+            thinking_format: Some("anthropic"),
+            supports_files: false,
+            supports_reasoning: true,
+        },
+    );
 }
 
 pub fn apply_openai_responses_test_config(

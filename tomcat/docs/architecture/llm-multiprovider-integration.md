@@ -132,7 +132,7 @@ DeepSeek 与 **Xiaomi MiMo（`mimo-v2.5-pro`，Token Plan）** 都是「复用 `
 | thinking 线格式 | `deepseek` | `doubao`（`thinking: {"type":"enabled"}`） |
 | 能力 | text/tools/reasoning | text/tools/reasoning（**无 vision/files**，官方文档定死） |
 | `reasoning_content` continuity | 数据表行 `deepseek-v4` | 数据表行 `mimo-v2.5-pro`（同一条逻辑，见续传文档 §4.2.3.1） |
-| 事实源 | `builtin_models()` | **`tomcat init` 生成的 `~/.tomcat/models.toml`**（不进 builtin） |
+| 事实源 | 内嵌 `builtin_models.toml`（由 `catalog.rs` 解析成 builtin） | **`tomcat init` 生成的 `~/.tomcat/models.toml`**（用户可见 seed / 覆盖层） |
 
 要点：**MiMo 全程零新增 provider / 零改 transport / 零改 continuity 5 道门**，只靠一条 `models.toml` 数据 + `MIMO_API_KEY` 即可上线，是「数据驱动接入同类 LLM」的活样板。`tomcat init` 会幂等生成这条 `models.toml`（缺则补、不覆盖用户内容）。
 

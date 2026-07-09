@@ -650,14 +650,16 @@ pub async fn run_chat_turn_with_message(
         ratio = context_state.usage_ratio(),
         compaction_count = context_state.session_obs.compaction_count
     );
-    if let Err(error) = validate_capabilities(
-        &ctx.global_services.model_catalog,
-        &ctx.config.llm.default_model,
-        LlmScene::Main,
-        &main_call.model,
-        &main_call.capabilities,
-        &planned_messages,
-    ) {
+    if let Err(error) = ctx.global_services.model_catalog.with_catalog(|catalog| {
+        validate_capabilities(
+            catalog,
+            &ctx.config.llm.default_model,
+            LlmScene::Main,
+            &main_call.model,
+            &main_call.capabilities,
+            &planned_messages,
+        )
+    }) {
         for (message, account_chars) in appended_messages {
             append_failed_turn_message(context_state, message, account_chars);
         }

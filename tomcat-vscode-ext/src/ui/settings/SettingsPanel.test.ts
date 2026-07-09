@@ -1,0 +1,207 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as vscode from "vscode";
+
+import { SettingsPanel } from "./SettingsPanel";
+import type { SettingsIntent } from "../../shared/settingsProtocol";
+
+describe("settings panel html asset resolution", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs.map(async (dir) => {
+        await fs.rm(dir, { force: true, recursive: true });
+      }),
+    );
+    tempDirs.length = 0;
+  });
+
+  async function createExtensionRoot(files: Record<string, string>): Promise<vscode.Uri> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-settings-assets-"));
+    tempDirs.push(dir);
+    await Promise.all(
+      Object.entries(files).map(async ([relativePath, contents]) => {
+        const filePath = path.join(dir, relativePath);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(filePath, contents, "utf8");
+      }),
+    );
+    return vscode.Uri.file(dir);
+  }
+
+  function createWebview(): vscode.Webview {
+    return {
+      asWebviewUri(uri: vscode.Uri) {
+        return uri;
+      },
+      cspSource: "vscode-test-webview",
+    } as unknown as vscode.Webview;
+  }
+
+  it("falls back to another built stylesheet when styles.css is absent", async () => {
+    const extensionUri = await createExtensionRoot({
+      "gui/dist/settings.js": "console.log('settings');",
+      "gui/dist/theme.css": "body { color: blue; }",
+    });
+    const panel = new SettingsPanel({
+      ensureInitialized: async () => ({} as never),
+      extensionUri,
+      messenger: {} as never,
+    });
+
+    const html = (
+      panel as unknown as {
+        renderHtml(webview: vscode.Webview): string;
+      }
+    ).renderHtml(createWebview());
+
+    expect(html).toContain('rel="stylesheet"');
+    expect(html).toContain("theme.css");
+  });
+});
+
+describe("settings panel model management flow", () => {
+  function createPanel(overrides?: {
+    ensureInitialized?: () => Promise<{
+      capabilities: string[];
+      protocolVersion: number;
+      sessionId: string | null;
+    }>;
+    messenger?: Partial<{
+      sendListModels: () => Promise<unknown>;
+      sendListProviderKeys: () => Promise<unknown>;
+      sendSetProviderKey: (envName: string, value: string) => Promise<unknown>;
+      sendUpsertModel: (model: unknown) => Promise<unknown>;
+    }>;
+    onModelCatalogChanged?: () => Promise<void> | void;
+  }) {
+    const messenger = {
+      sendListModels: vi.fn().mockResolvedValue({
+        payload: { models: [] },
+        success: true,
+      }),
+      sendListProviderKeys: vi.fn().mockResolvedValue({
+        payload: { keys: [] },
+        success: true,
+      }),
+      sendSetProviderKey: vi.fn().mockResolvedValue({ payload: null, success: true }),
+      sendUpsertModel: vi.fn().mockResolvedValue({ payload: null, success: true }),
+      ...overrides?.messenger,
+    };
+    const panel = new SettingsPanel({
+      ensureInitialized:
+        overrides?.ensureInitialized
+        ?? (async () => ({
+          capabilities: [
+            "list_models",
+            "list_provider_keys",
+            "remove_model",
+            "set_provider_key",
+            "upsert_model",
+          ],
+          protocolVersion: 1,
+          sessionId: null,
+        })),
+      extensionUri: vscode.Uri.file("/tmp/tomcat-ext"),
+      messenger: messenger as never,
+      onModelCatalogChanged: overrides?.onModelCatalogChanged,
+    });
+    return { messenger, panel };
+  }
+
+  it("does not persist provider keys when model save fails", async () => {
+    const { messenger, panel } = createPanel({
+      messenger: {
+        sendUpsertModel: vi.fn().mockResolvedValue({
+          error: "bad model",
+          success: false,
+        }),
+      },
+    });
+
+    await panel.__testingDispatchIntent({
+      data: {
+        model: {
+          api: "openai",
+          apiKeyEnv: "OPENAI_API_KEY",
+          capabilities: {
+            files: false,
+            reasoning: true,
+            tools: true,
+            vision: true,
+            webSearch: false,
+          },
+          id: "broken-model",
+          provider: "openai",
+        },
+        providerKey: {
+          envName: "OPENAI_API_KEY",
+          value: "secret",
+        },
+      },
+      messageId: "upsert-with-key",
+      type: "upsertModel",
+    } satisfies SettingsIntent);
+
+    expect(messenger.sendUpsertModel).toHaveBeenCalledTimes(1);
+    expect(messenger.sendSetProviderKey).not.toHaveBeenCalled();
+    expect(panel.__testingSnapshot().state.error).toBe("bad model");
+  });
+
+  it("keeps previous models and exposes list failures", async () => {
+    const { messenger, panel } = createPanel({
+      messenger: {
+        sendListModels: vi
+          .fn()
+          .mockResolvedValueOnce({
+            payload: {
+              models: [
+                {
+                  api: "openai",
+                  apiKeyEnv: "OPENAI_API_KEY",
+                  capabilities: {
+                    files: true,
+                    reasoning: true,
+                    tools: true,
+                    vision: true,
+                    web_search: false,
+                  },
+                  id: "gpt-5.4",
+                  keyPresent: true,
+                  provider: "openai",
+                  source: "builtin",
+                },
+              ],
+            },
+            success: true,
+          })
+          .mockResolvedValueOnce({
+            error: "models broken",
+            success: false,
+          }),
+      },
+    });
+
+    await panel.__testingDispatchIntent({
+      data: { route: "models" },
+      messageId: "ready",
+      type: "settings.ready",
+    } satisfies SettingsIntent);
+    expect(panel.__testingSnapshot().state.models.map((model) => model.id)).toEqual([
+      "gpt-5.4",
+    ]);
+
+    await panel.__testingDispatchIntent({
+      messageId: "refresh",
+      type: "listModels",
+    } satisfies SettingsIntent);
+
+    const snapshot = panel.__testingSnapshot().state;
+    expect(snapshot.error).toBe("models broken");
+    expect(snapshot.models.map((model) => model.id)).toEqual(["gpt-5.4"]);
+  });
+});

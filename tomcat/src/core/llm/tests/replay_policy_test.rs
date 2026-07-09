@@ -32,11 +32,45 @@ fn openai_reasoning_message() -> ChatMessage {
     )
 }
 
+fn anthropic_reasoning_message() -> ChatMessage {
+    ChatMessage::assistant("answer").with_reasoning_state(
+        Some("anthropic summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "anthropic".to_string(),
+            source_api: "messages".to_string(),
+            source_model: "claude-opus-4-6".to_string(),
+            format: ReasoningFormat::AnthropicThinkingBlocks,
+            opaque_payload: serde_json::json!([{
+                "type": "thinking",
+                "thinking": "internal",
+                "signature": "sig_123"
+            }]),
+            fallback_text: Some("anthropic summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
+        }),
+    )
+}
+
 #[test]
 fn replay_policy_openai_responses_keeps_encrypted_reasoning() {
     let msg = openai_reasoning_message();
     let profile = ProviderCompatProfile::openai_responses("gpt-5");
     assert_eq!(plan(&profile, &msg), ReplayAction::KeepOpaque);
+}
+
+#[test]
+fn replay_policy_anthropic_same_profile_keeps_signed_thinking_blocks() {
+    let msg = anthropic_reasoning_message();
+    let profile = ProviderCompatProfile::anthropic_messages("claude-opus-4-8");
+    assert_eq!(plan(&profile, &msg), ReplayAction::KeepOpaque);
+    assert_eq!(
+        msg.reasoning_continuation.as_ref().unwrap().opaque_payload[0]["signature"],
+        "sig_123"
+    );
 }
 
 #[test]

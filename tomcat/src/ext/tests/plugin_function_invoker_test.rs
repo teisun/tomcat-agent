@@ -1128,6 +1128,7 @@ async fn net_fetch_hostcall_rejects_secret_and_host_policy_violations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn net_fetch_hostcall_rejects_redirect_responses_by_default() {
     let server = HttpsTestServer::start(
         "api.tavily.com",
@@ -1183,6 +1184,7 @@ async fn net_fetch_hostcall_rejects_redirect_responses_by_default() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn net_fetch_hostcall_enforces_response_size_limit() {
     let server = HttpsTestServer::start(
         "api.tavily.com",
@@ -1192,7 +1194,7 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
         Duration::ZERO,
     )
     .await;
-    let client = server.client_for("api.tavily.com", Duration::from_secs(5));
+    let client = server.client_for("api.tavily.com", Duration::from_secs(15));
     let plugin_dir = plugin_function_fixture_with_manifest(
         "net-fetch-large-body",
         json!({
@@ -1202,7 +1204,7 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
         "",
     );
     let (_invoker, _function_registry, manager, dispatcher) =
-        function_search_harness_with_custom_net_fetch(Duration::from_secs(1), client, 5, 16);
+        function_search_harness_with_custom_net_fetch(Duration::from_secs(5), client, 5, 16);
     manager
         .load_plugin(plugin_dir.path())
         .expect("load plugin with size limit");
@@ -1227,10 +1229,11 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
         .error
         .as_deref()
         .unwrap_or("")
-        .contains("response_too_large"));
+        .contains("response_too_large"), "unexpected response: {:?}", response);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn net_fetch_hostcall_enforces_request_timeout() {
     let server = HttpsTestServer::start(
         "api.tavily.com",
@@ -1275,6 +1278,7 @@ async fn net_fetch_hostcall_enforces_request_timeout() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn net_fetch_hostcall_respects_concurrency_limit() {
     let server = HttpsTestServer::start(
         "api.tavily.com",

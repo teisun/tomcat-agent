@@ -10,7 +10,11 @@ use serde_json::{Map, Value};
 use crate::infra::events::WireEvent;
 use crate::{resolve_agent_trail_dir, AppConfig, AppError};
 
-use super::types::{ControlFrame, OutFrame, ResponseFrame, ServeCommand};
+use super::types::{
+    ControlFrame, ListModelsPayload, ListProviderKeysPayload, OutFrame, RemoveModelResponse,
+    ResponseFrame, ServeCommand, SetProviderKeyResponse, UpsertModelResponse,
+};
+use crate::core::llm::{ModelKeyStatus, ModelView, ProviderKeyView};
 
 #[derive(Serialize)]
 pub(crate) struct ServeSchemaBundle {
@@ -19,6 +23,14 @@ pub(crate) struct ServeSchemaBundle {
     response_frame: schemars::schema::RootSchema,
     wire_event: schemars::schema::RootSchema,
     out_frame: schemars::schema::RootSchema,
+    wire_model_view: schemars::schema::RootSchema,
+    model_key_status: schemars::schema::RootSchema,
+    provider_key_view: schemars::schema::RootSchema,
+    list_models_payload: schemars::schema::RootSchema,
+    upsert_model_response: schemars::schema::RootSchema,
+    remove_model_response: schemars::schema::RootSchema,
+    set_provider_key_response: schemars::schema::RootSchema,
+    list_provider_keys_payload: schemars::schema::RootSchema,
 }
 
 pub fn schema_output_dir(cfg: &AppConfig) -> Result<PathBuf, AppError> {
@@ -35,6 +47,14 @@ pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
         response_frame: schema_for!(ResponseFrame),
         wire_event: schema_for!(WireEvent),
         out_frame: schema_for!(OutFrame),
+        wire_model_view: schema_for!(ModelView),
+        model_key_status: schema_for!(ModelKeyStatus),
+        provider_key_view: schema_for!(ProviderKeyView),
+        list_models_payload: schema_for!(ListModelsPayload),
+        upsert_model_response: schema_for!(UpsertModelResponse),
+        remove_model_response: schema_for!(RemoveModelResponse),
+        set_provider_key_response: schema_for!(SetProviderKeyResponse),
+        list_provider_keys_payload: schema_for!(ListProviderKeysPayload),
     }
 }
 
@@ -68,6 +88,17 @@ fn render_typescript(bundle: &ServeSchemaBundle) -> String {
         ("ResponseFrame", &bundle.response_frame),
         ("WireEvent", &bundle.wire_event),
         ("OutFrame", &bundle.out_frame),
+        ("WireModelView", &bundle.wire_model_view),
+        ("ModelKeyStatus", &bundle.model_key_status),
+        ("ProviderKeyView", &bundle.provider_key_view),
+        ("ListModelsPayload", &bundle.list_models_payload),
+        ("UpsertModelResponse", &bundle.upsert_model_response),
+        ("RemoveModelResponse", &bundle.remove_model_response),
+        ("SetProviderKeyResponse", &bundle.set_provider_key_response),
+        (
+            "ListProviderKeysPayload",
+            &bundle.list_provider_keys_payload,
+        ),
     ];
 
     let root_names = root_schemas

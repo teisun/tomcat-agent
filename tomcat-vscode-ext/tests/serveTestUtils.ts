@@ -183,6 +183,7 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true, 
 export async function spawnScriptedOpenAiStreamServer(responses: ScriptedResponse[]): Promise<{
   baseUrl: string;
   capturedRequests(): string[];
+  capturedNonTitleRequests(): string[];
   close(): Promise<void>;
 }> {
   const captured: string[] = [];
@@ -197,7 +198,17 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
     const headers = Object.entries(request.headers)
       .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(",") : value ?? ""}`)
       .join("\r\n");
-    captured.push(`${request.method} ${request.url} HTTP/1.1\r\n${headers}\r\n\r\n${body}`);
+    const rawRequest = `${request.method} ${request.url} HTTP/1.1\r\n${headers}\r\n\r\n${body}`;
+    captured.push(rawRequest);
+
+    if (isSessionTitleRequest(rawRequest)) {
+      response.writeHead(200, {
+        Connection: "close",
+        "Content-Type": "application/json",
+      });
+      response.end(sessionTitleResponseJson(rawRequest, "Generated title"));
+      return;
+    }
 
     const scripted = responses[responseIndex++];
     if (!scripted) {
@@ -239,6 +250,9 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
     capturedRequests() {
       return [...captured];
     },
+    capturedNonTitleRequests() {
+      return captured.filter((request) => !isSessionTitleRequest(request));
+    },
     async close() {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {
@@ -251,6 +265,73 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
       });
     },
   };
+}
+
+function isSessionTitleRequest(rawRequest: string): boolean {
+  const body = rawRequest.split("\r\n\r\n")[1];
+  if (!body) {
+    return false;
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return false;
+  }
+
+  if (!isRecord(value) || value.stream !== false) {
+    return false;
+  }
+  return body.includes("Generate a short chat title from the user's first message.\\n");
+}
+
+function sessionTitleResponseJson(rawRequest: string, title: string): string {
+  if (rawRequest.startsWith("POST /v1/responses ")) {
+    return JSON.stringify({
+      id: "title-mock",
+      output: [
+        {
+          content: [
+            {
+              text: title,
+              type: "output_text",
+            },
+          ],
+          type: "message",
+        },
+      ],
+      status: "completed",
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        total_tokens: 2,
+      },
+    });
+  }
+
+  return JSON.stringify({
+    choices: [
+      {
+        finish_reason: "stop",
+        index: 0,
+        message: {
+          content: title,
+          role: "assistant",
+        },
+      },
+    ],
+    id: "title-mock",
+    usage: {
+      completion_tokens: 1,
+      prompt_tokens: 1,
+      total_tokens: 2,
+    },
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 export async function createRealServeMessenger(
@@ -286,15 +367,26 @@ export async function waitForEvent(
 ): Promise<ServeEvent[]> {
   return new Promise((resolve, reject) => {
     const seen: ServeEvent[] = [];
-    const timer = setTimeout(() => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      stderrDisposable.dispose();
       disposable.dispose();
-      reject(new Error("timed out waiting for matching event"));
+    };
+    const timer = setTimeout(() => {
+      const seenTypes = seen.map((event) => event.type).join(", ") || "(none)";
+      const stderr = messenger.recentStderr.trim() || "(empty)";
+      cleanup();
+      reject(
+        new Error(
+          `timed out waiting for matching event; seen=${seenTypes}; stderr=${stderr}`,
+        ),
+      );
     }, timeoutMs);
+    const stderrDisposable = messenger.onStderr(() => {});
     const disposable = messenger.onEvent((event) => {
       seen.push(event);
       if (predicate(event)) {
-        clearTimeout(timer);
-        disposable.dispose();
+        cleanup();
         resolve(seen);
       }
     });

@@ -120,6 +120,61 @@ fn skill_subcommand_parsed() {
 }
 
 #[test]
+fn cli_parse_model_add_and_key_set() {
+    let add = Cli::try_parse_from([
+        "tomcat",
+        "model",
+        "add",
+        "claude-opus-gateway",
+        "--api",
+        "anthropic-messages",
+        "--provider",
+        "anthropic",
+        "--model-name",
+        "claude-opus-4-6",
+        "--base-url",
+        "https://api.example.test/v1",
+        "--reasoning",
+        "--tools",
+        "--thinking-format",
+        "anthropic",
+    ])
+    .unwrap();
+    assert!(matches!(
+        add.command,
+        Some(Commands::Model {
+            sub: ModelSub::Add {
+                id,
+                api,
+                provider,
+                model_name: Some(model_name),
+                base_url: Some(base_url),
+                reasoning: true,
+                tools: true,
+                thinking_format: Some(thinking_format),
+                ..
+            }
+        }) if id == "claude-opus-gateway"
+            && api == "anthropic-messages"
+            && provider == "anthropic"
+            && model_name == "claude-opus-4-6"
+            && base_url == "https://api.example.test/v1"
+            && thinking_format == "anthropic"
+    ));
+
+    let key = Cli::try_parse_from(["tomcat", "model", "key", "set", "anthropic", "secret-value"])
+        .unwrap();
+    assert!(matches!(
+        key.command,
+        Some(Commands::Model {
+            sub: ModelSub::Key {
+                sub: ModelKeySub::Set { provider, value }
+            }
+        }) if provider == "anthropic" && value.as_deref() == Some("secret-value")
+    ));
+}
+
+#[test]
 fn cli_parse_install_visibility_scope_root() {
     let cli = Cli::try_parse_from([
         "tomcat",

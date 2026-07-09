@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::core::llm::catalog::infer_default_base_url;
-use crate::core::llm::{env_name_for_provider, AuthStore, ModelCatalog};
+use crate::core::llm::{env_name_for_provider, AuthStore, SharedModelCatalog};
 use crate::infra::http_client::{
     build_outbound_client, default_connect_timeout_for, OutboundClientErrorKind,
     OutboundClientOptions,
@@ -30,21 +30,24 @@ use self::types::{normalize_hits, Stats, WebSearchArgs, WebSearchOutput, WebSear
 pub struct WebSearchRuntime {
     client: reqwest::Client,
     config: ToolsWebSearchConfig,
-    model_catalog: Arc<ModelCatalog>,
+    model_catalog: SharedModelCatalog,
     auth: AuthStore,
     cache: WebSearchCache,
     plugin_invoker: OnceLock<Arc<dyn PluginSearchInvoker>>,
 }
 
 impl WebSearchRuntime {
-    pub fn new(config: &AppConfig, model_catalog: Arc<ModelCatalog>) -> Result<Self, AppError> {
+    pub fn new(
+        config: &AppConfig,
+        model_catalog: impl Into<SharedModelCatalog>,
+    ) -> Result<Self, AppError> {
         let web_cfg = config.tools.web_search.clone();
         let client = build_web_search_http_client(config, &web_cfg)?;
         Ok(Self {
             cache: WebSearchCache::new(&web_cfg),
             client,
             config: web_cfg,
-            model_catalog,
+            model_catalog: model_catalog.into(),
             auth: AuthStore,
             plugin_invoker: OnceLock::new(),
         })
@@ -66,7 +69,8 @@ impl WebSearchRuntime {
             return Ok(cached);
         }
 
-        let hosted_candidate = discover_hosted_candidate(&self.model_catalog);
+        let catalog = self.model_catalog.snapshot();
+        let hosted_candidate = discover_hosted_candidate(&catalog);
         let plan = pick_backend(request.backend.clone(), hosted_candidate)?;
         let output = match plan {
             BackendPlan::Auto {

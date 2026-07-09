@@ -1,33 +1,38 @@
 //! `tomcat init` 自动生成 / 维护用户级 `~/.tomcat/models.toml`。
 //!
-//! 当前受管默认条目：
-//! - `mimo-v2.5-pro`
-//! - `gpt-5.2`
-//! - `deepseek-v4-flash`
-//! - `utility-flash`
+//! 当前受管预置条目直接来自内嵌 [`crate::core::llm::catalog::builtin_seed_toml_text`]。
 //!
 //! 设计要点：
-//! - 启动加载沿用 [`crate::core::llm::ModelCatalog::load`]，本模块只负责「init 时把文件创建出来」。
-//! - **幂等**：文件不存在则创建；已存在则补缺失的受管条目，并为已有受管默认条目补缺失
+//! - 运行时事实源仍是 [`crate::core::llm::ModelCatalog::load`] 使用的 builtin catalog；本模块只负责
+//!   「init 时把同一批预置原样释放到用户文件里」。
+//! - **幂等**：文件不存在则创建；已存在则补缺失的受管条目，并为已有受管预置条目补缺失
 //!   `model_name`，绝不重写 / 覆盖用户已有条目与注释。
-//! - `gpt-5.2` / `deepseek-v4-flash` 的“事实源”现在放在这里生成的 `models.toml`，而非 `builtin_models()`。
+//! - 用户可在 `models.toml` 里直接改这些预置；运行时按「同 id 覆盖 builtin」语义合并。
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use crate::core::llm::ModelCatalog;
+use crate::core::llm::catalog::{builtin_seed_entries_result, builtin_seed_toml_text};
+use crate::core::llm::{ModelCatalog, ModelEntry};
 use crate::{AppConfig, AppError};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeedBlock {
+    id: String,
+    block: String,
+}
 
 /// init 维护 `models.toml` 的结果，用于打印对用户友好的提示。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelsTomlStatus {
-    /// 文件原本不存在，已新建并写入全部受管默认条目。
-    Created { added_model_ids: Vec<&'static str> },
-    /// 文件已存在，已补缺失条目和/或为现有受管默认条目补缺失的 `model_name`。
+    /// 文件原本不存在，已新建并写入全部受管预置条目。
+    Created { added_model_ids: Vec<String> },
+    /// 文件已存在，已补缺失条目和/或为现有受管预置条目补缺失的 `model_name`。
     UpdatedExisting {
-        added_model_ids: Vec<&'static str>,
-        updated_model_name_ids: Vec<&'static str>,
+        added_model_ids: Vec<String>,
+        updated_model_name_ids: Vec<String>,
     },
-    /// 文件已存在且已含全部受管默认条目，未做任何改动。
+    /// 文件已存在且已含全部受管预置条目，未做任何改动。
     AlreadyPresent,
 }
 
@@ -41,107 +46,40 @@ const MODELS_TOML_HEADER: &str = "\
 # 字段说明：
 #   id              本地模型 id（选择 / 显示用）
 #   model_name      上游真实模型名；省略时默认与 id 相同
-#   api             走哪条 wire：openai（/v1/chat/completions）| openai-responses（/v1/responses）
+#   api             走哪条 wire：openai | openai-responses | anthropic-messages
 #   provider        逻辑厂商；决定取哪个 <PROVIDER>_API_KEY 环境变量
 #   api_key_env     显式凭证变量名；省略时自动推断为 <PROVIDER>_API_KEY
-#   base_url        只填 host，后缀由 api 决定，不要写成完整 endpoint
-#   thinking_format openai | deepseek | qwen | doubao 等
-#   capabilities    vision/files/tools/reasoning 能力位
+#   base_url        可只填 host，也可带厂商路径；程序会按 api 自动补 leaf
+#                   例如 host -> /v1/<leaf>，GLM 这类 /api/paas/v4 路径会被保留
+#   thinking_format openai | deepseek | qwen | doubao | anthropic 等
+#   capabilities    vision/files/tools/reasoning/web_search 能力位
+#   context_window  模型上下文窗口（当前用于列表显示；运行时预算仍读 [context] 全局配置）
 #
+# API Key 请写入 ~/.tomcat/assets/.env（0600 权限），不要回填到本文件。
 # 再加一个模型时，复制下面这段、改 id/provider/base_url 即可。
 ";
 
-struct ManagedModelTemplate {
-    id: &'static str,
-    model_name: &'static str,
-    entry_block: &'static str,
-}
-
-const MANAGED_MODELS: &[ManagedModelTemplate] = &[
-    ManagedModelTemplate {
-        id: "mimo-v2.5-pro",
-        model_name: "mimo-v2.5-pro",
-        entry_block: "\
-[[models]]
-id = \"mimo-v2.5-pro\"
-model_name = \"mimo-v2.5-pro\"
-api = \"openai\"
-provider = \"mimo\"
-api_key_env = \"MIMO_API_KEY\"
-base_url = \"https://token-plan-cn.xiaomimimo.com\"
-thinking_format = \"doubao\"
-context_window = 1000000
-capabilities = { vision = false, files = false, tools = true, reasoning = true }
-",
-    },
-    ManagedModelTemplate {
-        id: "gpt-5.2",
-        model_name: "gpt-5.2",
-        entry_block: "\
-[[models]]
-id = \"gpt-5.2\"
-model_name = \"gpt-5.2\"
-api = \"openai-responses\"
-provider = \"openai\"
-api_key_env = \"OPENAI_API_KEY\"
-base_url = \"https://api.openai.com\"
-thinking_format = \"openai\"
-capabilities = { vision = true, files = true, tools = true, reasoning = true }
-",
-    },
-    ManagedModelTemplate {
-        id: "deepseek-v4-flash",
-        model_name: "deepseek-v4-flash",
-        entry_block: "\
-[[models]]
-id = \"deepseek-v4-flash\"
-model_name = \"deepseek-v4-flash\"
-api = \"openai\"
-provider = \"deepseek\"
-api_key_env = \"DEEPSEEK_API_KEY\"
-base_url = \"https://api.deepseek.com\"
-thinking_format = \"deepseek\"
-capabilities = { vision = false, files = false, tools = true, reasoning = true }
-",
-    },
-    ManagedModelTemplate {
-        id: "utility-flash",
-        model_name: "deepseek-v4-flash",
-        entry_block: "\
-[[models]]
-id = \"utility-flash\"
-model_name = \"deepseek-v4-flash\"
-api = \"openai\"
-provider = \"deepseek\"
-api_key_env = \"DEEPSEEK_API_KEY\"
-base_url = \"https://api.deepseek.com\"
-thinking_format = \"deepseek\"
-capabilities = { vision = false, files = false, tools = true, reasoning = true }
-",
-    },
-];
-
-/// 确保 `~/.tomcat/models.toml` 存在且含全部受管默认条目。
+/// 确保 `~/.tomcat/models.toml` 存在且含全部受管预置条目。
 pub(crate) fn ensure_default_models_toml(cfg: &AppConfig) -> Result<ModelsTomlStatus, AppError> {
     let path = ModelCatalog::default_user_path(cfg)?;
+    let seed_blocks = builtin_seed_blocks()?;
+    let seed_entries = seed_entry_map(cfg)?;
+    let seed_model_ids = seed_model_ids(&seed_blocks);
 
     if !path.exists() {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(AppError::Io)?;
         }
-        let contents = format!(
-            "{MODELS_TOML_HEADER}\n{}",
-            render_entry_blocks(MANAGED_MODELS)
-        );
+        let contents = format!("{MODELS_TOML_HEADER}\n{}", builtin_seed_toml_text());
         write_file_atomic(&path, contents.as_bytes())?;
         return Ok(ModelsTomlStatus::Created {
-            added_model_ids: managed_model_ids(MANAGED_MODELS),
+            added_model_ids: seed_model_ids,
         });
     }
 
     let existing = std::fs::read_to_string(&path).map_err(AppError::Io)?;
-    let missing_models = missing_managed_models(&existing);
-    let (mut updated, updated_model_name_ids) = sync_managed_model_names(&existing);
+    let missing_models = missing_managed_models(&existing, &seed_blocks);
+    let (mut updated, updated_model_name_ids) = sync_managed_model_names(&existing, &seed_entries);
     if missing_models.is_empty() && updated_model_name_ids.is_empty() {
         return Ok(ModelsTomlStatus::AlreadyPresent);
     }
@@ -151,17 +89,13 @@ pub(crate) fn ensure_default_models_toml(cfg: &AppConfig) -> Result<ModelsTomlSt
             updated.push('\n');
         }
         updated.push('\n');
-        updated.push_str(&render_entry_blocks(&missing_models));
+        updated.push_str(&render_entry_blocks(&seed_blocks, &missing_models)?);
     }
     write_file_atomic(&path, updated.as_bytes())?;
     Ok(ModelsTomlStatus::UpdatedExisting {
-        added_model_ids: managed_model_ids(&missing_models),
+        added_model_ids: missing_models,
         updated_model_name_ids,
     })
-}
-
-fn managed_model_ids(models: &[ManagedModelTemplate]) -> Vec<&'static str> {
-    models.iter().map(|entry| entry.id).collect()
 }
 
 fn write_file_atomic(target: &Path, content: &[u8]) -> Result<(), AppError> {
@@ -177,27 +111,39 @@ fn write_file_atomic(target: &Path, content: &[u8]) -> Result<(), AppError> {
     })
 }
 
-fn render_entry_blocks(models: &[ManagedModelTemplate]) -> String {
-    models
+fn render_entry_blocks(
+    seed_blocks: &[SeedBlock],
+    model_ids: &[String],
+) -> Result<String, AppError> {
+    model_ids
         .iter()
-        .map(|entry| entry.entry_block)
-        .collect::<Vec<_>>()
-        .join("\n")
+        .map(|model_id| {
+            seed_blocks
+                .iter()
+                .find(|entry| entry.id == *model_id)
+                .ok_or_else(|| {
+                    AppError::Config(format!(
+                        "内置预置 `{model_id}` 未在 builtin catalog 中定义。"
+                    ))
+                })
+                .map(|entry| entry.block.clone())
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|blocks| format!("{}\n", blocks.join("\n\n")))
 }
 
-fn missing_managed_models(contents: &str) -> Vec<ManagedModelTemplate> {
-    MANAGED_MODELS
+fn missing_managed_models(contents: &str, seed_blocks: &[SeedBlock]) -> Vec<String> {
+    seed_blocks
         .iter()
-        .filter(|entry| !models_file_has_model(contents, entry.id))
-        .map(|entry| ManagedModelTemplate {
-            id: entry.id,
-            model_name: entry.model_name,
-            entry_block: entry.entry_block,
-        })
+        .map(|entry| entry.id.clone())
+        .filter(|entry| !models_file_has_model(contents, entry))
         .collect()
 }
 
-fn sync_managed_model_names(contents: &str) -> (String, Vec<&'static str>) {
+fn sync_managed_model_names(
+    contents: &str,
+    seed_entries: &HashMap<String, ModelEntry>,
+) -> (String, Vec<String>) {
     let mut lines = contents
         .split('\n')
         .map(std::string::ToString::to_string)
@@ -234,14 +180,14 @@ fn sync_managed_model_names(contents: &str) -> (String, Vec<&'static str>) {
 
         if !has_model_name {
             if let (Some(model_id), Some(id_line_index)) = (model_id.as_deref(), id_line_index) {
-                if let Some(template) = managed_model_by_id(model_id) {
+                if let Some(entry) = seed_entries.get(model_id) {
                     let indent = leading_whitespace(&lines[id_line_index]).to_string();
                     lines.insert(
                         id_line_index + 1,
-                        format!("{indent}model_name = \"{}\"", template.model_name),
+                        format!("{indent}model_name = \"{}\"", entry.request_model_name()),
                     );
-                    if !updated_ids.contains(&template.id) {
-                        updated_ids.push(template.id);
+                    if !updated_ids.iter().any(|existing| existing == model_id) {
+                        updated_ids.push(model_id.to_string());
                     }
                     index = next_block + 1;
                     continue;
@@ -255,8 +201,71 @@ fn sync_managed_model_names(contents: &str) -> (String, Vec<&'static str>) {
     (lines.join("\n"), updated_ids)
 }
 
-fn managed_model_by_id(model_id: &str) -> Option<&'static ManagedModelTemplate> {
-    MANAGED_MODELS.iter().find(|entry| entry.id == model_id)
+fn seed_entry_map(cfg: &AppConfig) -> Result<HashMap<String, ModelEntry>, AppError> {
+    let builtin_entries = builtin_seed_entries_result(&cfg.context)?
+        .into_iter()
+        .map(|entry| (entry.id.clone(), entry))
+        .collect::<HashMap<_, _>>();
+    let seed_blocks = builtin_seed_blocks()?;
+    for seed_block in &seed_blocks {
+        if !builtin_entries.contains_key(&seed_block.id) {
+            return Err(AppError::Config(format!(
+                "内嵌 builtin_models.toml 包含 `{}`，但 builtin catalog 未定义该模型。",
+                seed_block.id
+            )));
+        }
+    }
+    if builtin_entries.len() != seed_blocks.len() {
+        return Err(AppError::Config(
+            "内嵌 builtin_models.toml 与 builtin catalog 的条目数不一致。".to_string(),
+        ));
+    }
+    Ok(builtin_entries)
+}
+
+fn builtin_seed_blocks() -> Result<Vec<SeedBlock>, AppError> {
+    let text = builtin_seed_toml_text();
+    let starts = text
+        .match_indices("[[models]]")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if starts.is_empty() {
+        return Err(AppError::Config(
+            "内嵌 builtin_models.toml 不含任何 [[models]] 块。".to_string(),
+        ));
+    }
+
+    let mut blocks = Vec::with_capacity(starts.len());
+    for (index, start) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(text.len());
+        let block = text[*start..end].trim().to_string();
+        let model_id = block
+            .lines()
+            .find_map(|line| parse_string_field(line.trim(), "id"))
+            .map(str::to_string)
+            .ok_or_else(|| {
+                AppError::Config(
+                    "内嵌 builtin_models.toml 存在缺失 id 的 [[models]] 块。".to_string(),
+                )
+            })?;
+        if blocks
+            .iter()
+            .any(|existing: &SeedBlock| existing.id == model_id)
+        {
+            return Err(AppError::Config(format!(
+                "内嵌 builtin_models.toml 存在重复模型 id：`{model_id}`。"
+            )));
+        }
+        blocks.push(SeedBlock {
+            id: model_id,
+            block,
+        });
+    }
+    Ok(blocks)
+}
+
+fn seed_model_ids(seed_blocks: &[SeedBlock]) -> Vec<String> {
+    seed_blocks.iter().map(|entry| entry.id.clone()).collect()
 }
 
 fn parse_string_field<'a>(line: &'a str, field_name: &str) -> Option<&'a str> {
@@ -280,7 +289,7 @@ fn leading_whitespace(line: &str) -> &str {
 
 /// 解析现有 `models.toml`，判断是否已含某个 model id。
 ///
-/// 解析失败（用户写坏了文件）时保守返回 `false`，让 init 仅按缺失条目追加受管默认模型，
+/// 解析失败（用户写坏了文件）时保守返回 `false`，让 init 仅按缺失条目追加受管预置模型，
 /// 同时绝不触碰用户原有文本。
 fn models_file_has_model(contents: &str, model_id: &str) -> bool {
     let Ok(value) = toml::from_str::<toml::Value>(contents) else {

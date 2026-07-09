@@ -1,3 +1,10 @@
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::OnceLock;
+
+use parking_lot::RwLock;
+
+use crate::infra::config::read_env_entries;
 use crate::infra::error::AppError;
 
 use super::catalog::ModelEntry;
@@ -11,6 +18,17 @@ pub struct Credential {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AuthStore;
+
+#[derive(Debug, Default)]
+struct ManagedCredentialState {
+    values: BTreeMap<String, String>,
+    generations: BTreeMap<String, u64>,
+}
+
+fn managed_credential_state() -> &'static RwLock<ManagedCredentialState> {
+    static STATE: OnceLock<RwLock<ManagedCredentialState>> = OnceLock::new();
+    STATE.get_or_init(|| RwLock::new(ManagedCredentialState::default()))
+}
 
 impl AuthStore {
     pub fn get(
@@ -100,7 +118,69 @@ pub fn missing_key_message(
     }
 }
 
+pub fn refresh_managed_credentials(env_path: &Path) -> Result<(), AppError> {
+    let vars = read_env_entries(env_path)?;
+    refresh_managed_credentials_from_entries(&vars);
+    Ok(())
+}
+
+pub fn refresh_managed_credentials_from_entries(vars: &BTreeMap<String, String>) {
+    let mut next_values = BTreeMap::new();
+    for (key, value) in vars {
+        let key = key.trim();
+        let value = value.trim();
+        if !key.is_empty() && !value.is_empty() {
+            next_values.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    let mut state = managed_credential_state().write();
+    for (key, value) in &next_values {
+        if state.values.get(key) != Some(value) {
+            *state.generations.entry(key.clone()).or_insert(0) += 1;
+        }
+    }
+    let removed_keys: Vec<String> = state
+        .values
+        .keys()
+        .filter(|key| !next_values.contains_key(*key))
+        .cloned()
+        .collect();
+    for key in removed_keys {
+        *state.generations.entry(key).or_insert(0) += 1;
+    }
+    state.values = next_values;
+}
+
+pub fn credential_generation(env_name: &str) -> u64 {
+    managed_credential_state()
+        .read()
+        .generations
+        .get(env_name)
+        .copied()
+        .unwrap_or(0)
+}
+
+pub fn key_present_for_env(env_name: &str) -> bool {
+    read_env_value(env_name).is_some()
+}
+
+#[cfg(test)]
+pub fn clear_managed_credentials_for_test() {
+    let mut state = managed_credential_state().write();
+    state.values.clear();
+    state.generations.clear();
+}
+
 fn read_env_value(env_name: &str) -> Option<String> {
+    if let Some(value) = managed_credential_state()
+        .read()
+        .values
+        .get(env_name)
+        .cloned()
+    {
+        return Some(value);
+    }
     std::env::var(env_name)
         .ok()
         .map(|value| value.trim().to_string())

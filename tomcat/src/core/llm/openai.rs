@@ -29,6 +29,7 @@ use crate::infra::error::{
 
 use super::super::auth::Credential;
 use super::super::catalog::{infer_default_base_url, ModelEntry};
+use super::super::endpoint::build_path_aware_endpoint;
 use super::super::retry_delay::provider_retry_delay;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
@@ -612,7 +613,7 @@ impl OpenAiProvider {
             thinking: thinking_fields.thinking,
         };
 
-        let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+        let url = build_path_aware_endpoint(base_url, "chat/completions");
         let (key, value) = self.auth_header();
 
         let resp = self
@@ -655,7 +656,7 @@ impl OpenAiProvider {
         base_url: &str,
         body: &OpenAiRequestBody,
     ) -> Result<reqwest::Response, AppError> {
-        let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+        let url = build_path_aware_endpoint(base_url, "chat/completions");
         let (key, value) = self.auth_header();
         let resp = self
             .client
@@ -1018,6 +1019,17 @@ impl<S> SseEventStream<S> {
     }
 }
 
+fn drain_ready_sse_events(
+    buffer: &mut Vec<u8>,
+    reasoning: &mut OpenAiReasoningState,
+) -> Result<Vec<StreamEvent>, AppError> {
+    let mut events = Vec::new();
+    while let Some(iter) = parse_sse_buffer(buffer, reasoning)? {
+        events.extend(iter);
+    }
+    Ok(events)
+}
+
 impl<S> Stream for SseEventStream<S>
 where
     S: Stream<Item = Result<Bytes, AppError>> + Unpin,
@@ -1037,14 +1049,15 @@ where
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     this.buffer.extend_from_slice(&bytes);
-                    match parse_sse_buffer(&mut this.buffer, &mut this.reasoning) {
-                        Ok(Some(mut iter)) => {
-                            if let Some(evt) = iter.next() {
-                                this.pending = iter;
-                                return Poll::Ready(Some(Ok(evt)));
+                    match drain_ready_sse_events(&mut this.buffer, &mut this.reasoning) {
+                        Ok(events) => {
+                            if let Some((first, rest)) = events.split_first() {
+                                #[allow(clippy::unnecessary_to_owned)]
+                                let pending_vec = rest.to_vec();
+                                this.pending = pending_vec.into_iter();
+                                return Poll::Ready(Some(Ok(first.clone())));
                             }
                         }
-                        Ok(None) => {}
                         Err(e) => return Poll::Ready(Some(Err(e))),
                     }
                 }
@@ -1053,17 +1066,15 @@ where
                 }
                 Poll::Ready(None) => {
                     if !this.buffer.is_empty() {
-                        match parse_sse_buffer(&mut this.buffer, &mut this.reasoning) {
-                            Ok(Some(iter)) => {
-                                let vec: Vec<_> = iter.collect();
-                                if let Some((first, rest)) = vec.split_first() {
+                        match drain_ready_sse_events(&mut this.buffer, &mut this.reasoning) {
+                            Ok(events) => {
+                                if let Some((first, rest)) = events.split_first() {
                                     #[allow(clippy::unnecessary_to_owned)]
                                     let pending_vec = rest.to_vec();
                                     this.pending = pending_vec.into_iter();
                                     return Poll::Ready(Some(Ok(first.clone())));
                                 }
                             }
-                            Ok(None) => {}
                             Err(e) => return Poll::Ready(Some(Err(e))),
                         }
                     }

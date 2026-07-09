@@ -1226,7 +1226,7 @@ async fn live_tavily_search_smoke() {
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
     let harness = build_runtime_with_builtin_plugin(cfg, None);
-    let output = harness
+    let search_result = harness
         .runtime
         .search(
             WebSearchArgs {
@@ -1239,19 +1239,31 @@ async fn live_tavily_search_smoke() {
             },
             "test-session",
         )
+        .await;
+    harness
+        .manager
+        .end_session("test-session")
         .await
-        .expect("live tavily search");
+        .expect("end live tavily session");
+    let output = match search_result {
+        Ok(output) => output,
+        Err(err) => {
+            let detail = format!("{err:?}");
+            if is_live_web_search_network_error(&detail) {
+                eprintln!(
+                    "skip live_tavily_search_smoke: external web search backend unavailable: {detail}"
+                );
+                return;
+            }
+            panic!("live tavily search: {err:?}");
+        }
+    };
 
     assert_eq!(output.backend, "tavily");
     assert!(
         !output.hits.is_empty(),
         "expected at least one Tavily hit when TAVILY_API_KEY is configured"
     );
-    harness
-        .manager
-        .end_session("test-session")
-        .await
-        .expect("end live tavily session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1287,7 +1299,19 @@ async fn real_tavily_plugin_web_search() {
         .await;
 
     end_current_plugin_session(harness.ctx()).await;
-    let output = search_result.expect("live tavily plugin search");
+    let output = match search_result {
+        Ok(output) => output,
+        Err(err) => {
+            let detail = format!("{err:?}");
+            if is_live_web_search_network_error(&detail) {
+                eprintln!(
+                    "skip real_tavily_plugin_web_search: external web search backend unavailable: {detail}"
+                );
+                return;
+            }
+            panic!("live tavily plugin search: {err:?}");
+        }
+    };
     assert_eq!(output.backend, "tavily");
     assert!(
         !output.hits.is_empty(),
@@ -1329,7 +1353,19 @@ async fn real_brave_plugin_web_search() {
         .await;
 
     end_current_plugin_session(harness.ctx()).await;
-    let output = search_result.expect("live brave plugin search");
+    let output = match search_result {
+        Ok(output) => output,
+        Err(err) => {
+            let detail = format!("{err:?}");
+            if is_live_web_search_network_error(&detail) {
+                eprintln!(
+                    "skip real_brave_plugin_web_search: external web search backend unavailable: {detail}"
+                );
+                return;
+            }
+            panic!("live brave plugin search: {err:?}");
+        }
+    };
     assert_eq!(output.backend, "brave");
     assert!(
         !output.hits.is_empty(),
@@ -1371,7 +1407,19 @@ async fn real_serper_plugin_web_search() {
         .await;
 
     end_current_plugin_session(harness.ctx()).await;
-    let output = search_result.expect("live serper plugin search");
+    let output = match search_result {
+        Ok(output) => output,
+        Err(err) => {
+            let detail = format!("{err:?}");
+            if is_live_web_search_network_error(&detail) {
+                eprintln!(
+                    "skip real_serper_plugin_web_search: external web search backend unavailable: {detail}"
+                );
+                return;
+            }
+            panic!("live serper plugin search: {err:?}");
+        }
+    };
     assert_eq!(output.backend, "serper");
     assert!(
         !output.hits.is_empty(),
@@ -1432,7 +1480,19 @@ async fn real_mimo_web_search() {
         .await;
 
     end_current_plugin_session(harness.ctx()).await;
-    let output = search_result.expect("live mimo plugin search");
+    let output = match search_result {
+        Ok(output) => output,
+        Err(err) => {
+            let detail = format!("{err:?}");
+            if is_live_web_search_network_error(&detail) {
+                eprintln!(
+                    "skip real_mimo_web_search: external web search backend unavailable: {detail}"
+                );
+                return;
+            }
+            panic!("live mimo plugin search: {err:?}");
+        }
+    };
     assert_eq!(output.backend, "mimo");
     assert!(
         !output.hits.is_empty(),
@@ -1443,6 +1503,17 @@ async fn real_mimo_web_search() {
         output.hits.iter().all(|hit| hit.url.starts_with("http")),
         "all mapped hits should contain URLs"
     );
+}
+
+fn is_live_web_search_network_error(text: &str) -> bool {
+    text.contains("pi.fetch request failed")
+        || text.contains("网络错误")
+        || text.contains("request failed")
+        || text.contains("timeout")
+        || text.contains("timed out")
+        || text.contains("connection closed via error")
+        || text.contains("请求连接失败")
+        || text.contains("流式请求连接失败")
 }
 
 fn require_env_var_or_skip(env_key: &str, test_name: &str) -> bool {

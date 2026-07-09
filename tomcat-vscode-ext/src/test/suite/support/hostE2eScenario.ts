@@ -17,6 +17,7 @@ import type {
   TomcatExtensionApi,
   WebviewIntent,
 } from "../../../extension";
+import type { SettingsIntent } from "../../../shared/settingsProtocol";
 
 let dummyLanguageModelRegistration: vscode.Disposable | undefined;
 let hasWarmedChatUi = false;
@@ -223,6 +224,25 @@ async function waitForWebviewState<T>(
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("Timed out waiting for webview state to match the expected condition");
+}
+
+async function waitForSettingsPanelState<T>(
+  api: TomcatExtensionApi,
+  predicate: (
+    state: ReturnType<TomcatExtensionApi["__testing"]["getSettingsPanelState"]>,
+  ) => T | undefined,
+  timeoutMs = 15_000,
+): Promise<T> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const state = api.__testing.getSettingsPanelState();
+    const result = predicate(state);
+    if (result !== undefined) {
+      return result;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Timed out waiting for settings panel state to match the expected condition");
 }
 
 async function waitForWebviewBootstrapSettled(
@@ -477,6 +497,10 @@ async function startPendingParticipantTurn(
 function buildWebviewIntent(
   intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>,
 ): Exclude<WebviewIntent, { type: "__test.dom_snapshot" }> {
+  return intent;
+}
+
+function buildSettingsIntent(intent: SettingsIntent): SettingsIntent {
   return intent;
 }
 
@@ -873,6 +897,162 @@ export async function assertModelSlashFlowViaChatUi(
   assert.equal(state.model, "claude-4.6-sonnet");
 
   api.__testing.setParticipantUiOverrides({});
+}
+
+export async function assertWebviewAddModelsFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  await waitForWebviewBootstrapSettled(api);
+
+  const modelId = `host-e2e-added-model-${Date.now().toString(36)}`;
+  const keyEnv = "TOMCAT_ADD_MODELS_E2E_API_KEY";
+  const sessionId = api.__testing.getWebviewState().activeSessionId;
+  assert.ok(sessionId, "expected a live webview session before opening settings");
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        route: "models",
+      },
+      messageId: "webview-open-model-settings",
+      type: "openModelSettings",
+    }),
+  );
+
+  await waitForSettingsPanelState(
+    api,
+    (snapshot) =>
+      snapshot.visible && snapshot.route === "models" && snapshot.state.ready
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+
+  await api.__testing.sendSettingsIntent(
+    buildSettingsIntent({
+      data: {
+        model: {
+          api: "openai",
+          apiKeyEnv: keyEnv,
+          baseUrl: null,
+          capabilities: {
+            files: false,
+            reasoning: true,
+            tools: true,
+            vision: false,
+            webSearch: false,
+          },
+          contextWindow: 16_384,
+          id: modelId,
+          modelName: "gpt-5.4",
+          provider: "openai",
+          thinkingFormat: "openai",
+        },
+      },
+      messageId: "settings-upsert-model",
+      type: "upsertModel",
+    }),
+  );
+
+  await api.__testing.sendSettingsIntent(
+    buildSettingsIntent({
+      data: {
+        envName: keyEnv,
+        value: "host-e2e-key",
+      },
+      messageId: "settings-set-provider-key",
+      type: "setProviderKey",
+    }),
+  );
+
+  await waitForSettingsPanelState(
+    api,
+    (snapshot) => {
+      const model = snapshot.state.models.find((candidate) => candidate.id === modelId);
+      return model?.keyPresent ? model : undefined;
+    },
+    20_000,
+  );
+
+  await waitForWebviewState(
+    api,
+    (state) => (state.availableModels.includes(modelId) ? state : undefined),
+    20_000,
+  );
+
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "model-select",
+  });
+  const dropdown = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.html.includes('data-testid="model-dropdown"') &&
+      snapshot.html.includes(modelId) &&
+      snapshot.modelDropdownHeight > 0
+        ? snapshot
+        : undefined,
+    10_000,
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    captureTranscriptVisual("model-dropdown-open");
+  }
+  const modelSelectTop = dropdown.composerControlMetrics["model-select"]?.top ?? null;
+  assert.ok(
+    dropdown.modelDropdownFullyVisible,
+    `expected the model dropdown to be fully visible, got top=${dropdown.modelDropdownTop}, bottom=${dropdown.modelDropdownBottom}, left=${dropdown.modelDropdownLeft}, right=${dropdown.modelDropdownRight}, height=${dropdown.modelDropdownHeight}, triggerTop=${modelSelectTop}`,
+  );
+  assert.ok(
+    dropdown.modelDropdownTop !== null && dropdown.modelDropdownTop >= 0,
+    `expected the model dropdown to stay inside the viewport, got top=${dropdown.modelDropdownTop}`,
+  );
+  assert.ok(
+    dropdown.modelDropdownBottom !== null &&
+      modelSelectTop !== null &&
+      dropdown.modelDropdownBottom <= modelSelectTop,
+    `expected the model dropdown to open upward above the trigger, got dropdownBottom=${dropdown.modelDropdownBottom}, triggerTop=${modelSelectTop}`,
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        modelId,
+        sessionId,
+      },
+      messageId: "webview-set-added-model",
+      type: "setModel",
+    }),
+  );
+
+  await waitForSessionState(
+    api,
+    (state) =>
+      state.sessionId === sessionId && state.model === modelId ? state : undefined,
+    20_000,
+  );
+
+  api.__testing.clearObservedEvents();
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        text: "hello fake tomcat from added model",
+      },
+      messageId: "webview-prompt-added-model",
+      type: "prompt",
+    }),
+  );
+  await waitForEvent(api, {
+    sessionId,
+    textIncludes: "hello from fake tomcat",
+    type: "message_update",
+  });
+  await waitForEvent(api, {
+    sessionId,
+    type: "agent_idle",
+  });
 }
 
 export async function assertWebviewStreamingFlow(
@@ -2399,6 +2579,7 @@ function captureTranscriptVisual(
     | "file-drop-reference"
     | "file-drop-reference-hover"
     | "file-chip"
+    | "model-dropdown-open"
     | "progress"
     | "reload-replay"
     | "selection-reference-codelens"

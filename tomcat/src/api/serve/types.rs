@@ -10,6 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::core::llm::{ModelEntryInput, ModelKeyStatus, ModelView, ProviderKeyView};
 use crate::infra::events::WireEvent as AgentWireEvent;
 
 /// `prompt` / `follow_up` 附件的逻辑类型。
@@ -142,6 +143,46 @@ pub struct GetMessagesParams {
     pub cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListModelsPayload {
+    pub models: Vec<ModelView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertModelResponse {
+    pub model: ModelView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveModelResponse {
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProviderKeyResponse {
+    pub env_name: String,
+    pub key_present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListProviderKeysPayload {
+    pub keys: Vec<ProviderKeyView>,
+}
+
+impl From<ModelKeyStatus> for SetProviderKeyResponse {
+    fn from(value: ModelKeyStatus) -> Self {
+        Self {
+            env_name: value.env_name,
+            key_present: value.key_present,
+        }
+    }
+}
+
 /// UI 通过 stdin 发送给 `tomcat serve` 的命令帧。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -212,6 +253,30 @@ pub enum ServeCommand {
     },
     #[serde(rename_all = "camelCase")]
     ListModels {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    UpsertModel {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        model: ModelEntryInput,
+    },
+    #[serde(rename_all = "camelCase")]
+    RemoveModel {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        model_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetProviderKey {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        env_name: String,
+        value: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    ListProviderKeys {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
     },
@@ -297,6 +362,10 @@ impl ServeCommand {
             | Self::SetModel { id, .. }
             | Self::SetThinkingLevel { id, .. }
             | Self::ListModels { id, .. }
+            | Self::UpsertModel { id, .. }
+            | Self::RemoveModel { id, .. }
+            | Self::SetProviderKey { id, .. }
+            | Self::ListProviderKeys { id, .. }
             | Self::NewSession { id, .. }
             | Self::SwitchSession { id, .. }
             | Self::GetMessages { id, .. }
@@ -325,7 +394,13 @@ impl ServeCommand {
             | Self::ControlResponse { session_id, .. }
             | Self::ControlCancel { session_id, .. } => session_id.as_deref(),
             Self::SwitchSession { session_id, .. } => Some(session_id.as_str()),
-            Self::NewSession { .. } | Self::ListModels { .. } | Self::ListSessions { .. } => None,
+            Self::NewSession { .. }
+            | Self::ListModels { .. }
+            | Self::UpsertModel { .. }
+            | Self::RemoveModel { .. }
+            | Self::SetProviderKey { .. }
+            | Self::ListProviderKeys { .. }
+            | Self::ListSessions { .. } => None,
         }
     }
 
@@ -355,6 +430,10 @@ impl ServeCommand {
             Self::SetModel { .. } => "set_model",
             Self::SetThinkingLevel { .. } => "set_thinking_level",
             Self::ListModels { .. } => "list_models",
+            Self::UpsertModel { .. } => "upsert_model",
+            Self::RemoveModel { .. } => "remove_model",
+            Self::SetProviderKey { .. } => "set_provider_key",
+            Self::ListProviderKeys { .. } => "list_provider_keys",
             Self::NewSession { .. } => "new_session",
             Self::SwitchSession { .. } => "switch_session",
             Self::GetMessages { .. } => "get_messages",

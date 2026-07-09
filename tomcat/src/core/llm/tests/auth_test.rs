@@ -1,6 +1,9 @@
 use serial_test::serial;
 
-use crate::core::llm::{env_name_for_provider, missing_key_message, AuthStore, ModelEntry};
+use crate::core::llm::{
+    auth::clear_managed_credentials_for_test, env_name_for_provider, missing_key_message,
+    AuthStore, ModelEntry,
+};
 
 fn entry(provider: &str, api_key_env: Option<&str>) -> ModelEntry {
     ModelEntry {
@@ -12,7 +15,6 @@ fn entry(provider: &str, api_key_env: Option<&str>) -> ModelEntry {
         base_url: None,
         capabilities: Default::default(),
         context_window: None,
-        cost: None,
         thinking_format: None,
     }
 }
@@ -20,6 +22,7 @@ fn entry(provider: &str, api_key_env: Option<&str>) -> ModelEntry {
 #[test]
 #[serial(env_lock)]
 fn per_provider_env_prefers_provider_specific_api_key() {
+    clear_managed_credentials_for_test();
     // SAFETY: 测试串行执行，且在本用例作用域内临时写环境变量。
     unsafe {
         std::env::set_var("DEEPSEEK_API_KEY", "deepseek-secret");
@@ -43,6 +46,7 @@ fn per_provider_env_prefers_provider_specific_api_key() {
 #[test]
 #[serial(env_lock)]
 fn explicit_api_key_env_overrides_default_provider_env() {
+    clear_managed_credentials_for_test();
     unsafe {
         std::env::set_var("CUSTOM_OPENAI_KEY", "custom-secret");
         std::env::remove_var("OPENAI_API_KEY");
@@ -70,6 +74,7 @@ fn missing_key_message_mentions_expected_env() {
 #[test]
 #[serial(env_lock)]
 fn mimo_provider_uses_mimo_api_key_env() {
+    clear_managed_credentials_for_test();
     // provider=mimo 走通用规则即得 MIMO_API_KEY，无需为它写专门分支。
     assert_eq!(env_name_for_provider("mimo"), "MIMO_API_KEY");
 

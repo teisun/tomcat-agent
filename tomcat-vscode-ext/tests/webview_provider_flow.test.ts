@@ -41,7 +41,9 @@ type BuildProviderOptions = {
   historyMessages?: unknown[];
   historyResponses?: Record<string, SessionHistoryPayload>;
   ideOverrides?: Partial<IdeHost>;
+  listModelsPayload?: Record<string, unknown>;
   listSessionsImpl?: () => Promise<Record<string, unknown>>;
+  openModelSettings?: (route?: "models") => void;
   requestImpl?: (command: Record<string, unknown>) => Promise<Record<string, unknown>>;
   sessionState?: Partial<MutableSessionState>;
 };
@@ -55,6 +57,9 @@ class FakeMessenger {
     sessionId: string | null | undefined;
   }> = [];
   private readonly listeners = new Set<(event: Record<string, unknown>) => void>();
+  listModelsPayload: Record<string, unknown> = {
+    models: [{ id: "gpt-5.4" }, { id: "claude-4.6-sonnet" }],
+  };
 
   constructor(
     private readonly sessionState: MutableSessionState,
@@ -91,7 +96,7 @@ class FakeMessenger {
 
   async sendListModels() {
     return {
-      payload: { models: [{ id: "gpt-5.4" }, { id: "claude-4.6-sonnet" }] },
+      payload: this.listModelsPayload,
       success: true,
       type: "response",
     };
@@ -175,10 +180,14 @@ function initializeResult(): InitializeResult {
   return {
     capabilities: [
       "ask_question",
+      "list_provider_keys",
       "prompt",
+      "remove_model",
       "list_models",
+      "set_provider_key",
       "set_plan_mode",
       "set_thinking_level",
+      "upsert_model",
     ],
     protocolVersion: 1,
     sessionId: "session-1",
@@ -301,6 +310,7 @@ function buildProvider(options: BuildProviderOptions = {}) {
     },
   };
   const ownership = new SessionOwnershipTracker();
+  const openModelSettings = options.openModelSettings ?? vi.fn();
 
   const provider = new TomcatWebviewViewProvider({
     extensionUri: vscode.Uri.file("/extension"),
@@ -321,10 +331,12 @@ function buildProvider(options: BuildProviderOptions = {}) {
     } as never,
     initialize: async () => initializeResult(),
     messenger: messenger as never,
+    openModelSettings,
     ownership,
     sessionRouter: sessionRouter as never,
   });
 
+  messenger.listModelsPayload = options.listModelsPayload ?? messenger.listModelsPayload;
   return { historyCalls, messenger, ownership, provider, sessionState };
 }
 
@@ -668,6 +680,81 @@ describe("webview provider integration", () => {
     provider.dispose();
 
     expect(ownership.ownerOf("session-1")).toBeUndefined();
+  });
+
+  it("opens model settings when the composer footer intent fires", async () => {
+    const openModelSettings = vi.fn();
+    const { provider } = buildProvider({
+      listModelsPayload: { models: [] },
+      openModelSettings,
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-open-model-settings",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: { route: "models" },
+      messageId: "open-model-settings",
+      type: "openModelSettings",
+    });
+
+    expect(openModelSettings).toHaveBeenCalledWith("models");
+    provider.dispose();
+  });
+
+  it("refreshes the available model catalog after external model changes", async () => {
+    const { messenger, provider } = buildProvider({
+      listModelsPayload: {
+        models: [{ id: "gpt-5.4", keyPresent: true }],
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-refresh-model-catalog",
+      type: "ready",
+    });
+    expect(provider.currentState().availableModels).toEqual(["gpt-5.4"]);
+
+    messenger.listModelsPayload = {
+      models: [
+        { id: "gpt-5.4", keyPresent: true },
+        { id: "claude-opus-gateway", keyPresent: true },
+        { id: "missing-key", keyPresent: false },
+      ],
+    };
+
+    await provider.refreshModelCatalog();
+
+    expect(provider.currentState().availableModels).toEqual([
+      "gpt-5.4",
+      "claude-opus-gateway",
+    ]);
+    provider.dispose();
+  });
+
+  it("never surfaces plaintext provider keys in webview state snapshots", async () => {
+    const { provider } = buildProvider({
+      listModelsPayload: {
+        models: [
+          {
+            apiKey: "relay-secret",
+            id: "claude-opus-gateway",
+            keyPresent: true,
+          },
+        ],
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-no-plaintext-state",
+      type: "ready",
+    });
+
+    const snapshot = JSON.stringify(provider.currentState());
+    expect(snapshot).not.toContain("relay-secret");
+    expect(provider.currentState().availableModels).toEqual(["claude-opus-gateway"]);
+    provider.dispose();
   });
 
   it("refreshes the session list after a prompt so generated titles appear", async () => {

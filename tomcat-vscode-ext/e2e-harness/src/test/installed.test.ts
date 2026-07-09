@@ -19,6 +19,7 @@ type HostE2eHelper = {
   assertTranscriptUiFlow(api: unknown): Promise<void>;
   assertTranscriptSwitchBackOrder(api: unknown): Promise<void>;
   assertWebviewCrossOwnerPlanFlow(api: unknown): Promise<void>;
+  assertWebviewAddModelsFlow(api: unknown): Promise<void>;
   assertWebviewDiffFlow(api: unknown): Promise<void>;
   assertWebviewFileDropReferenceFlow(api: unknown): Promise<void>;
   assertWebviewPickContextFlow(api: unknown): Promise<void>;
@@ -273,6 +274,11 @@ suite("Installed Tomcat extension", () => {
   test("routes smart picker selections into attachments and context chips", async () => {
     const api = await hostE2e.getTomcatExtensionApi();
     await hostE2e.assertWebviewPickContextFlow(api);
+  });
+
+  test("opens model settings and adds a model from the webview", async () => {
+    const api = await hostE2e.getTomcatExtensionApi();
+    await hostE2e.assertWebviewAddModelsFlow(api);
   });
 
   test("renders the transcript UI groups, tool rows, file chips, and progress", async () => {

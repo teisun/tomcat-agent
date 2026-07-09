@@ -965,7 +965,8 @@ async fn session_title_updated_falls_back_to_main_model_when_title_scene_unresol
     common::setup_logging();
     let env_key = "OPENAI_API_KEY_TRANSCRIPT_SUMMARY_TITLE_FALLBACK";
     let (work_dir, mut ctx) = deterministic_chat_context_fixture(env_key);
-    let captured: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+    type CapturedTitles = Arc<Mutex<Vec<(String, Option<String>)>>>;
+    let captured: CapturedTitles = Arc::new(Mutex::new(Vec::new()));
     let cap = Arc::clone(&captured);
     ctx.global_services.event_bus.on(
         wire::WIRE_SESSION_TITLE_UPDATED,

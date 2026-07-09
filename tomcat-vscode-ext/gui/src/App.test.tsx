@@ -968,15 +968,31 @@ describe("Tomcat webview App", () => {
       },
     });
     fireEvent.click(screen.getByTestId("send-button"));
-    fireEvent.change(screen.getByTestId("model-select"), {
-      target: { value: "claude-4.6-sonnet" },
-    });
-    fireEvent.change(screen.getByTestId("thinking-level-select"), {
-      target: { value: "xhigh" },
-    });
-    fireEvent.change(screen.getByTestId("mode-select"), {
-      target: { value: "chat" },
-    });
+    const modelSelect = screen.getByTestId("model-select");
+    if (modelSelect.tagName === "SELECT") {
+      fireEvent.change(modelSelect, {
+        target: { value: "claude-4.6-sonnet" },
+      });
+    } else {
+      fireEvent.click(modelSelect);
+      fireEvent.click(
+        screen
+          .getAllByTestId("model-option")
+          .find((node) => node.textContent?.includes("claude-4.6-sonnet")) ??
+          screen.getAllByTestId("model-option")[0],
+      );
+    }
+    fireEvent.click(screen.getByTestId("thinking-level-select"));
+    fireEvent.click(
+      screen
+        .getAllByTestId("thinking-level-option")
+        .find((node) => node.textContent?.includes("Xhigh")) ?? screen.getAllByTestId("thinking-level-option")[0],
+    );
+    fireEvent.click(screen.getByTestId("mode-select"));
+    fireEvent.click(
+      screen.getAllByTestId("mode-option").find((node) => node.textContent?.includes("Chat")) ??
+        screen.getAllByTestId("mode-option")[0],
+    );
     fireEvent.click(screen.getByLabelText("添加文件/文件夹/图片"));
     fireEvent.click(screen.getByTestId("attachment-chip"));
     fireEvent.click(screen.getByTestId("plan-card-title"));
@@ -1356,9 +1372,7 @@ describe("Tomcat webview App", () => {
       messageId: "state-thinking-gpt",
     });
 
-    expect((screen.getByTestId("thinking-level-select") as HTMLSelectElement).value).toBe(
-      "high",
-    );
+    expect(screen.getByTestId("thinking-level-select").textContent).toContain("High");
 
     await emitState({
       channel: "state",
@@ -1399,9 +1413,7 @@ describe("Tomcat webview App", () => {
       messageId: "state-thinking-claude",
     });
 
-    expect((screen.getByTestId("thinking-level-select") as HTMLSelectElement).value).toBe(
-      "low",
-    );
+    expect(screen.getByTestId("thinking-level-select").textContent).toContain("Low");
   });
 
   it("shows a sticky prompt and live cluster for the active turn", async () => {
