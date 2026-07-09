@@ -276,7 +276,11 @@ pub(crate) fn load_user_models_file(path: &Path) -> Result<UserModelsFile, AppEr
     }
     let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
     toml::from_str(&content).map_err(|e| {
-        AppError::Config(format!("解析 models.toml 失败（{}）：{}", path.display(), e))
+        AppError::Config(format!(
+            "解析 models.toml 失败（{}）：{}",
+            path.display(),
+            e
+        ))
     })
 }
 

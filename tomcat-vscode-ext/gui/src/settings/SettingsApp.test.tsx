@@ -47,6 +47,11 @@ function readyState(overrides: Partial<SettingsStateSnapshot> = {}): SettingsSta
   };
 }
 
+function openAddModelDialog() {
+  fireEvent.click(screen.getByRole("button", { name: /add model/i }));
+  return screen.getByRole("dialog");
+}
+
 describe("SettingsApp", () => {
   it("posts a ready handshake and saves models with inferred api key env names", async () => {
     const { postMessage } = mount();
@@ -59,16 +64,18 @@ describe("SettingsApp", () => {
 
     await emitState(readyState());
 
-    fireEvent.change(screen.getByLabelText("Model ID"), {
+    const dialog = openAddModelDialog();
+
+    fireEvent.change(within(dialog).getByLabelText("Model ID"), {
       target: { value: "gateway-claude" },
     });
-    fireEvent.change(screen.getByLabelText("Provider"), {
+    fireEvent.change(within(dialog).getByLabelText("Provider"), {
       target: { value: "anthropic gateway" },
     });
-    fireEvent.change(screen.getByLabelText("API Key"), {
+    fireEvent.change(within(dialog).getByLabelText("API Key"), {
       target: { value: "secret-value" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save Model" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
 
     expect(postMessage).toHaveBeenCalledTimes(3);
     expect(postMessage.mock.calls[1][0]).toMatchObject({
@@ -88,6 +95,7 @@ describe("SettingsApp", () => {
       },
       type: "setProviderKey",
     });
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("renders ready vs needs-key groups and sends inline key saves", async () => {
@@ -157,6 +165,10 @@ describe("SettingsApp", () => {
     expect(screen.getByText("Needs API Key")).toBeTruthy();
     expect(screen.getByText("gpt-5.4")).toBeTruthy();
     expect(screen.getByText("claude-opus-gateway")).toBeTruthy();
+    expect(screen.queryByText("builtin · openai · openai")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Show details for gpt-5.4" }),
+    ).toBeTruthy();
 
     const inlineInput = screen.getByPlaceholderText("Save CLAUDE_GATEWAY_KEY");
     fireEvent.change(inlineInput, {
@@ -188,18 +200,22 @@ describe("SettingsApp", () => {
       }),
     );
 
-    fireEvent.change(screen.getByLabelText("Model ID"), {
+    const dialog = openAddModelDialog();
+
+    fireEvent.change(within(dialog).getByLabelText("Model ID"), {
       target: { value: "gateway-claude" },
     });
-    fireEvent.change(screen.getByLabelText("Provider"), {
+    fireEvent.change(within(dialog).getByLabelText("Provider"), {
       target: { value: "anthropic gateway" },
     });
-    fireEvent.change(screen.getByLabelText("API Key"), {
+    fireEvent.change(within(dialog).getByLabelText("API Key"), {
       target: { value: "secret-value" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save Model" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
 
-    expect(screen.getByText("当前后端不支持保存 API Key，请先升级 `tomcat serve`。")).toBeTruthy();
+    expect(
+      within(dialog).getByText("当前后端不支持保存 API Key，请先升级 `tomcat serve`。"),
+    ).toBeTruthy();
     expect(postMessage).toHaveBeenCalledTimes(1);
   });
 
@@ -240,16 +256,29 @@ describe("SettingsApp", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const dialog = screen.getByRole("dialog");
 
-    const modelIdInput = screen.getByLabelText("Model ID") as HTMLInputElement;
+    const modelIdInput = within(dialog).getByLabelText("Model ID") as HTMLInputElement;
     expect(modelIdInput.disabled).toBe(true);
 
-    const apiKeyInputs = screen.getAllByLabelText("API Key") as HTMLInputElement[];
-    expect(apiKeyInputs[0].type).toBe("password");
-    expect(apiKeyInputs[0].autocomplete).toBe("off");
+    const modalApiKeyInput = within(dialog).getByLabelText("API Key") as HTMLInputElement;
+    expect(modalApiKeyInput.type).toBe("password");
+    expect(modalApiKeyInput.autocomplete).toBe("off");
 
     const inlineInput = screen.getByPlaceholderText("Save CLAUDE_GATEWAY_KEY") as HTMLInputElement;
     expect(inlineInput.type).toBe("password");
     expect(inlineInput.autocomplete).toBe("off");
+  });
+
+  it("opens the modal from the header button and closes it on escape", async () => {
+    mount();
+    await emitState(readyState());
+
+    openAddModelDialog();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

@@ -52,7 +52,7 @@ Continue with the CLI installation and initialization sections below.
 
 ## 0. Use the Release Binary Directly
 
-This path is for users who just want to get the CLI running quickly. The recommended option is the one-line install script: it automatically detects your platform, downloads the matching release archive, verifies `SHA256SUMS`, extracts the archive, and installs it into `~/.local/bin`. If that directory is not yet in your `PATH`, the script will tell you how to append it to your shell profile.
+This path is for users who just want to get the CLI running quickly. The recommended option is the one-line install script: it automatically detects your platform, downloads the matching release archive, verifies `SHA256SUMS`, extracts the archive, and installs it into `~/.local/bin`. If that directory is not yet in your `PATH`, the script appends `export PATH="$HOME/.local/bin:$PATH"` to the right shell startup files (for zsh: both `~/.zprofile` and `~/.zshrc`).
 
 ```bash
 # 1. One-line install of the latest release
@@ -124,8 +124,9 @@ cargo build --release
 
 ```bash
 ./target/release/tomcat --help
-# Or add it to PATH directly:
-export PATH="$PWD/target/release:$PATH"
+# Then initialize once; init creates ~/.local/bin/tomcat and writes a stable PATH entry:
+./target/release/tomcat init
+# Open a new shell (or source your profile), then:
 tomcat --help
 ```
 
@@ -185,7 +186,7 @@ Connection details for models (`api`, `provider`, `base_url`, `api_key_env`) hav
 
 The three steps are:
 
-1. **[1/3] Environment initialization**: ensure that `~/.tomcat/models.toml` contains the managed preset entries released from the embedded `builtin_models.toml` preset source (OpenAI `gpt-5.2/5.4/5.5/5.6`, DeepSeek `deepseek-v4-pro/-flash`, `utility-flash`, MiMo `mimo-v2.5-pro`, GLM `glm-5.2`, Kimi `kimi-k2.7-code`, and Anthropic `claude-opus-4-8/4-7/4-6`), then load the model catalog and enter interactive model selection; after that, write `~/.tomcat/tomcat.config.toml` if it does not already exist, create the directory structure, extract embedded assets (modules and so on), and append `export PATH="..."` to `~/.zshrc`, `~/.bash_profile`, `~/.bashrc`, or `~/.profile` based on `$SHELL` (with the `# Added by tomcat init` marker; if the same export already exists in the same order, it is skipped)
+1. **[1/3] Environment initialization**: ensure that `~/.tomcat/models.toml` contains the managed preset entries released from the embedded `builtin_models.toml` preset source (OpenAI `gpt-5.2/5.4/5.5/5.6`, DeepSeek `deepseek-v4-pro/-flash`, `utility-flash`, MiMo `mimo-v2.5-pro`, GLM `glm-5.2`, Kimi `kimi-k2.7-code`, and Anthropic `claude-opus-4-8/4-7/4-6`), then load the model catalog and enter interactive model selection; after that, write `~/.tomcat/tomcat.config.toml` if it does not already exist, create the directory structure, extract embedded assets (modules and so on), create a stable `~/.local/bin/tomcat` command entry when the current binary comes from a local build, prune old tomcat-injected `target/*` PATH exports, and append the stable line `export PATH="$HOME/.local/bin:$PATH"` to the right startup files (`~/.zprofile` + `~/.zshrc` for zsh, `~/.bashrc` for bash while keeping `~/.bash_profile` sourcing both `.profile` and `.bashrc`, or `~/.profile` for other shells)
 2. **[2/3] Asset checks**: the same checks as `tomcat doctor` (config validity, embedded assets, asset versions, and so on), **excluding** `.env` permissions and `OPENAI_API_KEY` environment variable reminders
 3. **[3/3] API key setup**: first prompt for the credential variable that matches the default model you selected in the wizard (for example `OPENAI_API_KEY`, `OPENAI_GATEWAY_API_KEY`, `DEEPSEEK_API_KEY`, `MIMO_API_KEY`, `ANTHROPIC_API_KEY`), then optionally let you add keys for other providers. You can press Enter to skip; **skipping does not write an empty key**. Later you can run `tomcat init` again, edit `~/.tomcat/assets/.env` yourself, or use `tomcat model key set`
 
@@ -214,7 +215,7 @@ Expected output (excerpt):
 初始化完成！运行 `tomcat code` 开始对话。
 ```
 
-If tomcat cannot update your shell config automatically, it prints `⚠ 无法自动配置 PATH` plus a one-line `export PATH=...` command you can run manually.
+If tomcat cannot update your shell config automatically, it prints `⚠ 无法自动配置 PATH` plus the exact one-line command `export PATH="$HOME/.local/bin:$PATH"` that you can run manually.
 
 **Idempotency**: if `~/.tomcat/tomcat.config.toml` **already exists**, tomcat updates it using the existing file as the baseline. `models.toml` never rewrites your existing entries or comments; it only fills in missing managed preset models. On the second run and later, you will see messages such as "configuration file updated" and "managed preset models are complete".
 

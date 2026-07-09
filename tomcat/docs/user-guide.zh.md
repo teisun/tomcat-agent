@@ -52,7 +52,7 @@ GitHub Release
 
 ## 0. 下载 Release 二进制直接使用
 
-适合只想尽快运行 CLI 的用户。推荐使用一键安装脚本：它会自动识别平台、下载对应的 release 压缩包、校验 `SHA256SUMS`、解压后安装到 `~/.local/bin`。若该目录尚未加入 `PATH`，脚本会提示你写入 shell profile。
+适合只想尽快运行 CLI 的用户。推荐使用一键安装脚本：它会自动识别平台、下载对应的 release 压缩包、校验 `SHA256SUMS`、解压后安装到 `~/.local/bin`。若该目录尚未加入 `PATH`，脚本会把 `export PATH="$HOME/.local/bin:$PATH"` 追加到正确的 shell 启动文件（zsh 会同时写 `~/.zprofile` 与 `~/.zshrc`）。
 
 ```bash
 # 1. 一键安装最新 release
@@ -124,8 +124,9 @@ cargo build --release
 
 ```bash
 ./target/release/tomcat --help
-# 或直接加到 PATH：
-export PATH="$PWD/target/release:$PATH"
+# 然后初始化一次；init 会创建 ~/.local/bin/tomcat 并写入稳定的 PATH：
+./target/release/tomcat init
+# 新开一个 shell（或 source 对应 profile）后再运行：
 tomcat --help
 ```
 
@@ -185,7 +186,7 @@ tomcat init
 
 三步流程如下：
 
-1. **[1/3] 环境初始化**：先确保 `~/.tomcat/models.toml` 含由内嵌 `builtin_models.toml` 预置源释放出的受管预置条目（OpenAI `gpt-5.2/5.4/5.5/5.6`、DeepSeek `deepseek-v4-pro/-flash`、`utility-flash`、MiMo `mimo-v2.5-pro`、GLM `glm-5.2`、Kimi `kimi-k2.7-code`、Anthropic `claude-opus-4-8/4-7/4-6`），再加载模型 catalog 进入交互式选模；随后写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（modules 等）、按 `$SHELL` 将 `export PATH="…"` 追加到 `~/.zshrc` / `~/.bash_profile` 或 `~/.bashrc` / `~/.profile`（带 `# Added by tomcat init` 标记；已存在同序 export 则跳过）
+1. **[1/3] 环境初始化**：先确保 `~/.tomcat/models.toml` 含由内嵌 `builtin_models.toml` 预置源释放出的受管预置条目（OpenAI `gpt-5.2/5.4/5.5/5.6`、DeepSeek `deepseek-v4-pro/-flash`、`utility-flash`、MiMo `mimo-v2.5-pro`、GLM `glm-5.2`、Kimi `kimi-k2.7-code`、Anthropic `claude-opus-4-8/4-7/4-6`），再加载模型 catalog 进入交互式选模；随后写入 `~/.tomcat/tomcat.config.toml`（若尚不存在）、创建目录结构、释放内嵌资源（modules 等）、在当前二进制来自本地构建时创建稳定的 `~/.local/bin/tomcat` 命令入口、清理旧的 tomcat 注入过的 `target/*` PATH 垃圾，然后把稳定行 `export PATH="$HOME/.local/bin:$PATH"` 追加到正确的启动文件（zsh 写 `~/.zprofile` + `~/.zshrc`；bash 写 `~/.bashrc`，并保持 `~/.bash_profile` 同时 source `.profile` 与 `.bashrc`；其它 shell 写 `~/.profile`）
 2. **[2/3] 资源检查**：与 `tomcat doctor` 相同的检查项（配置合法、内嵌资源、资源版本等），**不包含** `.env` 权限与 `OPENAI_API_KEY` 环境变量提示
 3. **[3/3] API Key 配置**：先按你在向导里选中的默认模型提示对应的凭证变量（例如 `OPENAI_API_KEY` / `OPENAI_GATEWAY_API_KEY` / `DEEPSEEK_API_KEY` / `MIMO_API_KEY` / `ANTHROPIC_API_KEY`），再可选顺手补其它 provider 的 key。可回车跳过；**跳过不会写入空 Key**。后续可再次运行 `tomcat init`、自行编辑 `~/.tomcat/assets/.env`，或直接执行 `tomcat model key set`
 
@@ -214,7 +215,7 @@ tomcat init
 初始化完成！运行 `tomcat code` 开始对话。
 ```
 
-若无法自动写入 shell 配置，会打印 `⚠ 无法自动配置 PATH` 及一行可手动执行的 `export PATH=...`。
+若无法自动写入 shell 配置，会打印 `⚠ 无法自动配置 PATH`，并给出一行可手动执行的精确命令：`export PATH="$HOME/.local/bin:$PATH"`。
 
 **幂等性**：若 `~/.tomcat/tomcat.config.toml` **已存在**，会以现有配置为基线更新；`models.toml` 不会重写你已有的条目与注释，只会在缺失时补齐受管预置模型。第二次起会看到「已更新配置文件」与「受管预置模型已齐全」类提示。
 

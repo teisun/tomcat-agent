@@ -27,12 +27,12 @@ pub mod thinking_policy;
 mod token_usage;
 mod types;
 
-pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
 pub use admin::{
     list_model_views, list_provider_keys, remove_user_model, resolve_provider_key_env_name,
     set_default_model, set_provider_key, upsert_user_model, ModelEntryInput, ModelKeyStatus,
     ModelSource, ModelView, ProviderKeyInput, ProviderKeyView,
 };
+pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
 pub use catalog::{Capabilities, ModelCatalog, ModelEntry, SharedModelCatalog};
 pub(crate) use multimodal::degrade_unsupported_multimodal;
 pub use provider::LlmProvider;

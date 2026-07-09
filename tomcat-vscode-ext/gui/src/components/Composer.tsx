@@ -37,6 +37,17 @@ const REFERENCE_NODE_NAME = "reference";
 const DROP_URI_SCHEMES = /^(file|vscode-file|vscode-remote):/i;
 const DEFAULT_PROMPT_PLACEHOLDER = "Message Tomcat (Enter to send, Shift+Enter for newline)";
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
+const MODE_OPTIONS = [
+  { label: "Chat", value: "chat" },
+  { label: "Plan", value: "plan" },
+] as const;
+const THINKING_LEVEL_OPTIONS = [
+  { label: "Effort", value: "" },
+  { label: "Low", value: "low" },
+  { label: "Medium", value: "medium" },
+  { label: "High", value: "high" },
+  { label: "Xhigh", value: "xhigh" },
+] as const;
 
 function hasCapability(capabilities: string[], capability: "files" | "vision"): boolean {
   return capabilities.includes(capability);
@@ -97,6 +108,14 @@ function buildDropHint(capabilities: string[] | undefined, uris: string[]): stri
     return "当前模型不支持 PDF 附件；拖入后会先加入待发送列表，发送时会提示切换模型。";
   }
   return null;
+}
+
+function modeLabel(value: "chat" | "plan"): string {
+  return MODE_OPTIONS.find((option) => option.value === value)?.label ?? "Chat";
+}
+
+function thinkingLevelLabel(value: "" | "high" | "low" | "medium" | "xhigh"): string {
+  return THINKING_LEVEL_OPTIONS.find((option) => option.value === value)?.label ?? "Effort";
 }
 
 export interface ComposerDraft {
@@ -380,9 +399,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [dropActive, setDropActive] = useState(false);
   const [draft, setDraft] = useState<ComposerDraft>(EMPTY_DRAFT);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const [effortMenuOpen, setEffortMenuOpen] = useState(false);
   const isComposingRef = useRef(false);
   const draftRef = useRef<ComposerDraft>(EMPTY_DRAFT);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const modeMenuRef = useRef<HTMLDivElement | null>(null);
+  const effortMenuRef = useRef<HTMLDivElement | null>(null);
   const latestHandlersRef = useRef({
     canPrompt,
     onDraftChange,
@@ -499,20 +522,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [capabilityHint]);
 
   useEffect(() => {
-    if (!modelMenuOpen) {
+    if (!modelMenuOpen && !modeMenuOpen && !effortMenuOpen) {
       return;
     }
+    const refs = [modelMenuRef, modeMenuRef, effortMenuRef];
     const handleClickOutside = (event: MouseEvent) => {
-      if (!modelMenuRef.current) {
+      if (!(event.target instanceof Node)) {
         return;
       }
-      if (event.target instanceof Node && !modelMenuRef.current.contains(event.target)) {
-        setModelMenuOpen(false);
+      if (refs.some((ref) => ref.current?.contains(event.target))) {
+        return;
       }
+      setModelMenuOpen(false);
+      setModeMenuOpen(false);
+      setEffortMenuOpen(false);
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setModelMenuOpen(false);
+        setModeMenuOpen(false);
+        setEffortMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -521,14 +550,34 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleEscape);
     };
-  }, [modelMenuOpen]);
+  }, [effortMenuOpen, modeMenuOpen, modelMenuOpen]);
 
   const useNativeModelSelect = !onOpenModelSettings;
   const canOpenModelMenu = canPrompt && (availableModels.length > 0 || Boolean(onOpenModelSettings));
+  const canOpenModeMenu = canPrompt;
+  const canOpenEffortMenu = canPrompt && Boolean(modelValue);
 
   const handleModelPick = (nextModel: string) => {
     onModelChange(nextModel);
     setModelMenuOpen(false);
+    setModeMenuOpen(false);
+    setEffortMenuOpen(false);
+  };
+
+  const handleModePick = (nextMode: "chat" | "plan") => {
+    onModeChange(nextMode);
+    setModelMenuOpen(false);
+    setModeMenuOpen(false);
+    setEffortMenuOpen(false);
+  };
+
+  const handleThinkingLevelPick = (
+    nextLevel: "high" | "low" | "medium" | "xhigh" | "",
+  ) => {
+    onThinkingLevelChange(nextLevel);
+    setModelMenuOpen(false);
+    setModeMenuOpen(false);
+    setEffortMenuOpen(false);
   };
 
   useImperativeHandle(ref, () => ({
@@ -707,24 +756,57 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             |
           </span>
 
-          <label className="tc-field tc-field--compact tc-field--mode">
+          <div
+            className="tc-field tc-field--compact tc-field--dropdown tc-field--mode"
+            ref={modeMenuRef}
+          >
             <span>Mode</span>
-            <select
+            <button
+              aria-expanded={modeMenuOpen}
               aria-label="Tomcat chat mode"
+              className="tc-topbar__trigger tc-topbar__trigger--compact"
               data-testid="mode-select"
-              disabled={!canPrompt}
-              onChange={(event) => onModeChange(event.target.value as "chat" | "plan")}
-              value={modeValue}
+              disabled={!canOpenModeMenu}
+              onClick={() => {
+                setModelMenuOpen(false);
+                setEffortMenuOpen(false);
+                setModeMenuOpen((value) => !value);
+              }}
+              type="button"
             >
-              <option value="chat">Chat</option>
-              <option value="plan">Plan</option>
-            </select>
-          </label>
+              <span className="tc-topbar__trigger-label">{modeLabel(modeValue)}</span>
+              <span className="tc-topbar__caret" aria-hidden="true">
+                {modeMenuOpen ? "▴" : "▾"}
+              </span>
+            </button>
+            {modeMenuOpen ? (
+              <div className="tc-session-dropdown tc-composer-dropdown" data-testid="mode-dropdown">
+                {MODE_OPTIONS.map((option) => {
+                  const isActive = option.value === modeValue;
+                  return (
+                    <button
+                      aria-current={isActive ? "true" : undefined}
+                      className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
+                      data-testid="mode-option"
+                      key={option.value}
+                      onClick={() => handleModePick(option.value)}
+                      type="button"
+                    >
+                      <span className="tc-session-item__title">{option.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
           <span aria-hidden="true" className="tc-composer__bar-sep">
             |
           </span>
 
-          <div className="tc-field tc-field--compact tc-field--model" ref={useNativeModelSelect ? null : modelMenuRef}>
+          <div
+            className="tc-field tc-field--compact tc-field--dropdown tc-field--model"
+            ref={useNativeModelSelect ? null : modelMenuRef}
+          >
             <span>Model</span>
             {useNativeModelSelect ? (
               <select
@@ -751,7 +833,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                   className="tc-topbar__trigger tc-topbar__trigger--compact"
                   data-testid="model-select"
                   disabled={!canOpenModelMenu}
-                  onClick={() => setModelMenuOpen((value) => !value)}
+                  onClick={() => {
+                    setModeMenuOpen(false);
+                    setEffortMenuOpen(false);
+                    setModelMenuOpen((value) => !value);
+                  }}
                   type="button"
                 >
                   <span className="tc-topbar__trigger-label">
@@ -788,6 +874,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                       data-testid="model-open-settings"
                       onClick={() => {
                         setModelMenuOpen(false);
+                        setModeMenuOpen(false);
+                        setEffortMenuOpen(false);
                         onOpenModelSettings();
                       }}
                       type="button"
@@ -803,26 +891,54 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             |
           </span>
 
-          <label className="tc-field tc-field--compact tc-field--effort">
+          <div
+            className="tc-field tc-field--compact tc-field--dropdown tc-field--effort"
+            ref={effortMenuRef}
+          >
             <span>Effort</span>
-            <select
+            <button
+              aria-expanded={effortMenuOpen}
               aria-label="Tomcat reasoning effort"
+              className="tc-topbar__trigger tc-topbar__trigger--compact"
               data-testid="thinking-level-select"
-              disabled={!canPrompt || !modelValue}
-              onChange={(event) =>
-                onThinkingLevelChange(
-                  event.target.value as "high" | "low" | "medium" | "xhigh" | "",
-                )
-              }
-              value={thinkingLevelValue}
+              disabled={!canOpenEffortMenu}
+              onClick={() => {
+                setModelMenuOpen(false);
+                setModeMenuOpen(false);
+                setEffortMenuOpen((value) => !value);
+              }}
+              type="button"
             >
-              <option value="">Effort</option>
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-              <option value="xhigh">Xhigh</option>
-            </select>
-          </label>
+              <span className="tc-topbar__trigger-label">
+                {thinkingLevelLabel(thinkingLevelValue)}
+              </span>
+              <span className="tc-topbar__caret" aria-hidden="true">
+                {effortMenuOpen ? "▴" : "▾"}
+              </span>
+            </button>
+            {effortMenuOpen ? (
+              <div
+                className="tc-session-dropdown tc-composer-dropdown"
+                data-testid="thinking-level-dropdown"
+              >
+                {THINKING_LEVEL_OPTIONS.map((option) => {
+                  const isActive = option.value === thinkingLevelValue;
+                  return (
+                    <button
+                      aria-current={isActive ? "true" : undefined}
+                      className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
+                      data-testid="thinking-level-option"
+                      key={option.label}
+                      onClick={() => handleThinkingLevelPick(option.value)}
+                      type="button"
+                    >
+                      <span className="tc-session-item__title">{option.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
 
           <span className="tc-composer__context" data-testid="context-ratio">
             {contextLabel}

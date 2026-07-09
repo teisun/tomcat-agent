@@ -11,11 +11,13 @@ use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::replay_policy::ProviderCompatProfile;
 use crate::core::llm::retry_delay::provider_retry_delay;
-use crate::core::llm::types::{ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent};
+use crate::core::llm::types::{
+    ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent,
+};
 use crate::infra::config::LlmRuntimeConfig;
 use crate::infra::error::{
-    is_retryable_llm_error, llm_error, llm_error_with_source, llm_http_status_error,
-    AppError, LlmErrorStage,
+    is_retryable_llm_error, llm_error, llm_error_with_source, llm_http_status_error, AppError,
+    LlmErrorStage,
 };
 
 use super::super::auth::Credential;
@@ -118,7 +120,11 @@ impl AnthropicProvider {
             .header("anthropic-version", "2023-06-01")
     }
 
-    async fn chat_once(&self, request: &ChatRequest, stream: bool) -> Result<reqwest::Response, AppError> {
+    async fn chat_once(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+    ) -> Result<reqwest::Response, AppError> {
         let model = self.effective_model(request);
         let thinking_cfg = self.thinking_cfg_for_request(request);
         let body = wire::build_request_body(
@@ -142,7 +148,10 @@ impl AnthropicProvider {
                     } else {
                         LlmErrorStage::Send
                     },
-                    format!("Anthropic {}请求失败", if stream { "流式" } else { "非流式" }),
+                    format!(
+                        "Anthropic {}请求失败",
+                        if stream { "流式" } else { "非流式" }
+                    ),
                     anyhow::anyhow!(error),
                 )
             })?;
@@ -157,7 +166,11 @@ impl AnthropicProvider {
         Ok(response)
     }
 
-    async fn chat_with_retry(&self, request: &ChatRequest, stream: bool) -> Result<reqwest::Response, AppError> {
+    async fn chat_with_retry(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+    ) -> Result<reqwest::Response, AppError> {
         let mut last_error = None;
         for attempt in 0..=self.retry_count {
             match self.chat_once(request, stream).await {
@@ -177,9 +190,7 @@ impl AnthropicProvider {
                 Err(error) => return Err(error),
             }
         }
-        Err(last_error.unwrap_or_else(|| {
-            AppError::Llm("Anthropic 请求重试耗尽".to_string())
-        }))
+        Err(last_error.unwrap_or_else(|| AppError::Llm("Anthropic 请求重试耗尽".to_string())))
     }
 }
 
@@ -222,7 +233,8 @@ impl LlmProvider for AnthropicProvider {
     async fn chat_stream(
         &self,
         request: ChatRequest,
-    ) -> Result<Box<dyn Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>, AppError> {
+    ) -> Result<Box<dyn Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>, AppError>
+    {
         let model = self.effective_model(&request);
         let response = self.chat_with_retry(&request, true).await?;
         let source_profile = self.source_profile(&model);
@@ -238,9 +250,10 @@ impl LlmProvider for AnthropicProvider {
             .iter()
             .map(|message| match &message.content {
                 Some(ChatMessageContent::Text(text)) => text.chars().count(),
-                Some(ChatMessageContent::Parts(parts)) => {
-                    parts.iter().map(|part| part.estimated_chars()).sum::<usize>()
-                }
+                Some(ChatMessageContent::Parts(parts)) => parts
+                    .iter()
+                    .map(|part| part.estimated_chars())
+                    .sum::<usize>(),
                 None => 0,
             })
             .sum();

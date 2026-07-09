@@ -73,7 +73,10 @@ fn upsert_list_and_remove_user_model_roundtrip() {
         .find(|entry| entry.id == "custom-openai")
         .expect("custom model in list");
     assert_eq!(custom.source, ModelSource::User);
-    assert_eq!(custom.base_url.as_deref(), Some("https://gateway.example.test/v1"));
+    assert_eq!(
+        custom.base_url.as_deref(),
+        Some("https://gateway.example.test/v1")
+    );
 
     remove_user_model(&cfg, "custom-openai").expect("remove custom model");
     let catalog = ModelCatalog::load(&cfg).expect("reload catalog after remove");
@@ -196,7 +199,10 @@ fn set_provider_key_waits_for_env_lock_and_then_succeeds() {
     });
 
     std::thread::sleep(Duration::from_millis(200));
-    assert!(rx.try_recv().is_err(), "lock should block concurrent writer");
+    assert!(
+        rx.try_recv().is_err(),
+        "lock should block concurrent writer"
+    );
 
     lock_file.unlock().expect("unlock env file");
     let status = rx

@@ -121,7 +121,11 @@ fn render_entry_blocks(
             seed_blocks
                 .iter()
                 .find(|entry| entry.id == *model_id)
-                .ok_or_else(|| AppError::Config(format!("内置预置 `{model_id}` 未在 builtin catalog 中定义。")))
+                .ok_or_else(|| {
+                    AppError::Config(format!(
+                        "内置预置 `{model_id}` 未在 builtin catalog 中定义。"
+                    ))
+                })
                 .map(|entry| entry.block.clone())
         })
         .collect::<Result<Vec<_>, _>>()
@@ -240,14 +244,22 @@ fn builtin_seed_blocks() -> Result<Vec<SeedBlock>, AppError> {
             .find_map(|line| parse_string_field(line.trim(), "id"))
             .map(str::to_string)
             .ok_or_else(|| {
-                AppError::Config("内嵌 builtin_models.toml 存在缺失 id 的 [[models]] 块。".to_string())
+                AppError::Config(
+                    "内嵌 builtin_models.toml 存在缺失 id 的 [[models]] 块。".to_string(),
+                )
             })?;
-        if blocks.iter().any(|existing: &SeedBlock| existing.id == model_id) {
+        if blocks
+            .iter()
+            .any(|existing: &SeedBlock| existing.id == model_id)
+        {
             return Err(AppError::Config(format!(
                 "内嵌 builtin_models.toml 存在重复模型 id：`{model_id}`。"
             )));
         }
-        blocks.push(SeedBlock { id: model_id, block });
+        blocks.push(SeedBlock {
+            id: model_id,
+            block,
+        });
     }
     Ok(blocks)
 }

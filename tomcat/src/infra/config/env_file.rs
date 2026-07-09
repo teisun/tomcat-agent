@@ -19,10 +19,7 @@ pub fn read_env_entries(env_path: &Path) -> BTreeMap<String, String> {
     vars
 }
 
-pub fn write_env_entries(
-    env_path: &Path,
-    vars: &BTreeMap<String, String>,
-) -> Result<(), AppError> {
+pub fn write_env_entries(env_path: &Path, vars: &BTreeMap<String, String>) -> Result<(), AppError> {
     if let Some(parent) = env_path.parent() {
         std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }

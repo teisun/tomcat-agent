@@ -38,6 +38,7 @@ import {
   type WebviewReference,
   type WebviewStateSnapshot,
 } from "./protocol";
+import { resolveGuiStylesheet } from "../guiAssets";
 import { buildFileReference } from "./contextReferences";
 import { SessionOwnershipTracker } from "./ownership";
 import { TomcatSessionPool } from "./sessionPool";
@@ -1324,7 +1325,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private renderHtml(webview: vscode.Webview): string {
     const distRoot = path.join(this.deps.extensionUri.fsPath, "gui", "dist");
     const jsPath = path.join(distRoot, "index.js");
-    const cssPath = path.join(distRoot, "index.css");
+    const cssPath = resolveGuiStylesheet(distRoot);
     if (!fs.existsSync(jsPath)) {
       return this.renderFallbackHtml(
         "Tomcat webview assets are missing. Run `npm run build` in `tomcat-vscode-ext` to generate `gui/dist`.",
@@ -1332,7 +1333,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
 
     const scriptUri = webview.asWebviewUri(vscode.Uri.file(jsPath));
-    const styleUri = fs.existsSync(cssPath)
+    const styleUri = cssPath
       ? webview.asWebviewUri(vscode.Uri.file(cssPath)).toString()
       : null;
     const nonce = getNonce();

@@ -10,9 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::llm::{
-    ModelEntryInput, ModelKeyStatus, ModelView, ProviderKeyView,
-};
+use crate::core::llm::{ModelEntryInput, ModelKeyStatus, ModelView, ProviderKeyView};
 use crate::infra::events::WireEvent as AgentWireEvent;
 
 /// `prompt` / `follow_up` 附件的逻辑类型。

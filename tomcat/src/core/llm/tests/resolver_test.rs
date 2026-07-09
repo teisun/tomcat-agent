@@ -249,7 +249,9 @@ api_key_env = "OPENAI_API_KEY"
     let shared = SharedModelCatalog::load(&cfg).expect("load shared catalog");
     let resolver = DefaultLlmResolver::new(cfg.clone(), shared.clone());
     assert!(
-        resolver.resolve(LlmScene::Main, Some("custom-after-reload")).is_err(),
+        resolver
+            .resolve(LlmScene::Main, Some("custom-after-reload"))
+            .is_err(),
         "resolver should not see new model before reload"
     );
 

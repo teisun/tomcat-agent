@@ -26,10 +26,10 @@ mod openai;
 // `openai_responses` 已升级为目录模块（L-3 拆分整改：mod / payload / stream 三文件）。
 // 用 `#[path = "<dir>/mod.rs"]` 显式锁定入口，与既有「在 registry 内本地声明 mod」
 // 风格对齐；新增 single-file Provider 仍可走 `#[path = "<new>.rs"]`。
-#[path = "openai_responses/mod.rs"]
-mod openai_responses;
 #[path = "anthropic/mod.rs"]
 mod anthropic;
+#[path = "openai_responses/mod.rs"]
+mod openai_responses;
 
 use anthropic::AnthropicProvider;
 use openai::OpenAiProvider;
@@ -68,7 +68,9 @@ fn build_anthropic_messages(
     runtime: &LlmRuntimeConfig,
     credential: &Credential,
 ) -> Result<Arc<dyn LlmProvider>, AppError> {
-    Ok(Arc::new(AnthropicProvider::new(entry, runtime, credential)?))
+    Ok(Arc::new(AnthropicProvider::new(
+        entry, runtime, credential,
+    )?))
 }
 
 /// 按 `entry.api` 字符串查表构造 [`Arc<dyn LlmProvider>`]；未知 id 返回 [`AppError::Config`]

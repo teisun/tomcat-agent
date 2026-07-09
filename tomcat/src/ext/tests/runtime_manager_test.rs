@@ -165,7 +165,11 @@ fn touch_refreshes_idle_deadline() {
 
     std::thread::sleep(Duration::from_millis(45));
     let reaped = mgr.reap_idle(ttl);
-    assert_eq!(reaped.len(), 1, "runtime should expire after the refreshed TTL");
+    assert_eq!(
+        reaped.len(),
+        1,
+        "runtime should expire after the refreshed TTL"
+    );
     assert_eq!(reaped[0].0, key);
 }
 

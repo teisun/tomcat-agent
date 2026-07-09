@@ -83,12 +83,21 @@ impl<S> AnthropicStream<S> {
             )
         })?;
         let event = event_name
-            .or_else(|| value.get("type").and_then(Value::as_str).map(str::to_string))
+            .or_else(|| {
+                value
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .unwrap_or_default();
         self.events_for_value(&event, &value)
     }
 
-    fn events_for_value(&mut self, event: &str, value: &Value) -> Result<Vec<StreamEvent>, AppError> {
+    fn events_for_value(
+        &mut self,
+        event: &str,
+        value: &Value,
+    ) -> Result<Vec<StreamEvent>, AppError> {
         match event {
             "ping" => Ok(Vec::new()),
             "message_start" => {
@@ -154,7 +163,11 @@ impl<S> AnthropicStream<S> {
                         if thinking_delta.is_empty() {
                             return Ok(Vec::new());
                         }
-                        self.thinking.entry(index).or_default().text.push_str(&thinking_delta);
+                        self.thinking
+                            .entry(index)
+                            .or_default()
+                            .text
+                            .push_str(&thinking_delta);
                         Ok(vec![StreamEvent::Thinking {
                             delta: thinking_delta,
                             source: ThinkingSource::Raw,
@@ -197,9 +210,10 @@ impl<S> AnthropicStream<S> {
             "content_block_stop" => Ok(Vec::new()),
             "message_delta" => {
                 self.record_usage(value.get("usage"));
-                if let Some(stop_reason) = value.get("delta").and_then(|delta| {
-                    delta.get("stop_reason").and_then(Value::as_str)
-                }) {
+                if let Some(stop_reason) = value
+                    .get("delta")
+                    .and_then(|delta| delta.get("stop_reason").and_then(Value::as_str))
+                {
                     self.stop_reason = Some(stop_reason.to_string());
                 }
                 Ok(Vec::new())
@@ -221,7 +235,10 @@ impl<S> AnthropicStream<S> {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 let mut events = vec![StreamEvent::LlmError {
-                    reason: format!("error:{}", code.clone().unwrap_or_else(|| "unknown".to_string())),
+                    reason: format!(
+                        "error:{}",
+                        code.clone().unwrap_or_else(|| "unknown".to_string())
+                    ),
                     message,
                     code,
                 }];

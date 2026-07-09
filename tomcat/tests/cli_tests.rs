@@ -1094,7 +1094,9 @@ fn test_init_auto_adds_path_to_shell_profile() {
     let _span = info_span!("test_init_auto_adds_path_to_shell_profile").entered();
 
     let dir = tempfile::tempdir().unwrap();
+    let zprofile = dir.path().join(".zprofile");
     let zshrc = dir.path().join(".zshrc");
+    let local_tomcat = dir.path().join(".local").join("bin").join("tomcat");
 
     cmd()
         .args(["init"])
@@ -1103,11 +1105,19 @@ fn test_init_auto_adds_path_to_shell_profile() {
         .assert()
         .success();
 
-    let content = fs::read_to_string(&zshrc).expect(".zshrc should be created under HOME");
+    let zprofile_content =
+        fs::read_to_string(&zprofile).expect(".zprofile should be created under HOME");
+    let zshrc_content = fs::read_to_string(&zshrc).expect(".zshrc should be created under HOME");
     assert!(
-        content.contains("export PATH=") && content.contains("# Added by tomcat init"),
-        "expected PATH block in .zshrc, got: {}",
-        trunc(&content, 400)
+        zprofile_content.contains("export PATH=\"$HOME/.local/bin:$PATH\"")
+            && zshrc_content.contains("export PATH=\"$HOME/.local/bin:$PATH\""),
+        "expected stable PATH block in both zprofile/zshrc, got zprofile:\n{}\n---\nzshrc:\n{}",
+        trunc(&zprofile_content, 400),
+        trunc(&zshrc_content, 400)
+    );
+    assert!(
+        local_tomcat.exists(),
+        "init should create ~/.local/bin/tomcat"
     );
 }
 
@@ -1118,6 +1128,7 @@ fn test_init_path_export_idempotent_in_shell_profile() {
     let _span = info_span!("test_init_path_export_idempotent_in_shell_profile").entered();
 
     let dir = tempfile::tempdir().unwrap();
+    let zprofile = dir.path().join(".zprofile");
     let zshrc = dir.path().join(".zshrc");
 
     for _ in 0..2 {
@@ -1128,14 +1139,23 @@ fn test_init_path_export_idempotent_in_shell_profile() {
             .assert()
             .success();
     }
-    let content = fs::read_to_string(&zshrc).unwrap();
-    let count = content.matches("export PATH=").count();
+    let zprofile_content = fs::read_to_string(&zprofile).unwrap();
+    let zshrc_content = fs::read_to_string(&zshrc).unwrap();
     assert_eq!(
-        count,
+        zprofile_content
+            .matches("export PATH=\"$HOME/.local/bin:$PATH\"")
+            .count(),
         1,
-        "expected single export PATH line, got {} in: {}",
-        count,
-        trunc(&content, 500)
+        "expected single stable export in .zprofile, got: {}",
+        trunc(&zprofile_content, 500)
+    );
+    assert_eq!(
+        zshrc_content
+            .matches("export PATH=\"$HOME/.local/bin:$PATH\"")
+            .count(),
+        1,
+        "expected single stable export in .zshrc, got: {}",
+        trunc(&zshrc_content, 500)
     );
 }
 
@@ -1220,6 +1240,104 @@ fn test_init_bash_profile_source_idempotent() {
         1,
         "expected single PATH export in .bashrc, got: {}",
         trunc(&bashrc_content, 400)
+    );
+}
+
+/// bash 场景下，init 会先清理旧的 target/* PATH 垃圾，再补一条稳定的 ~/.local/bin。
+#[test]
+fn test_init_prunes_stale_target_paths_from_shell_profile() {
+    common::setup_logging();
+    let _span = info_span!("test_init_prunes_stale_target_paths_from_shell_profile").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let bashrc = dir.path().join(".bashrc");
+    fs::write(
+        &bashrc,
+        [
+            "# Added by tomcat init",
+            "export PATH=\"/tmp/project/target/release:$PATH\"",
+            "# Added by tomcat init",
+            "export PATH=\"/tmp/project/target/debug/deps:$PATH\"",
+            "export PATH=\"/usr/local/bin:$PATH\"",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    cmd()
+        .args(["init"])
+        .env("HOME", dir.path())
+        .env("SHELL", "/bin/bash")
+        .assert()
+        .success();
+
+    let bashrc_content = fs::read_to_string(&bashrc).unwrap();
+    assert!(
+        !bashrc_content.contains("/target/"),
+        "expected stale target exports to be pruned, got: {}",
+        trunc(&bashrc_content, 500)
+    );
+    assert_eq!(
+        bashrc_content
+            .matches("export PATH=\"$HOME/.local/bin:$PATH\"")
+            .count(),
+        1,
+        "expected a single stable export in .bashrc, got: {}",
+        trunc(&bashrc_content, 500)
+    );
+    assert!(
+        bashrc_content.contains("export PATH=\"/usr/local/bin:$PATH\""),
+        "expected user-managed PATH lines to survive prune, got: {}",
+        trunc(&bashrc_content, 500)
+    );
+}
+
+/// install.sh 在 zsh 下同时写 .zprofile 与 .zshrc，且重复执行保持幂等。
+#[test]
+fn test_install_sh_writes_zprofile_and_zshrc_for_zsh() {
+    common::setup_logging();
+    let _span = info_span!("test_install_sh_writes_zprofile_and_zshrc_for_zsh").entered();
+
+    let dir = tempfile::tempdir().unwrap();
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("install.sh");
+    let output = std::process::Command::new("bash")
+        .arg("-lc")
+        .arg(format!(
+            "source \"{}\"; NON_INTERACTIVE=1; ensure_path_config; ensure_path_config",
+            script.display()
+        ))
+        .env("HOME", dir.path())
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("SHELL", "/bin/zsh")
+        .env("TOMCAT_INSTALL_SH_SOURCE_ONLY", "1")
+        .output()
+        .expect("source install.sh and invoke ensure_path_config");
+    assert!(
+        output.status.success(),
+        "install.sh helper should succeed, stdout:\n{}\nstderr:\n{}",
+        trunc(&String::from_utf8_lossy(&output.stdout), 400),
+        trunc(&String::from_utf8_lossy(&output.stderr), 400)
+    );
+
+    let zprofile = fs::read_to_string(dir.path().join(".zprofile")).unwrap();
+    let zshrc = fs::read_to_string(dir.path().join(".zshrc")).unwrap();
+    assert_eq!(
+        zprofile
+            .matches("export PATH=\"$HOME/.local/bin:$PATH\"")
+            .count(),
+        1,
+        "expected single stable export in .zprofile, got: {}",
+        trunc(&zprofile, 400)
+    );
+    assert_eq!(
+        zshrc
+            .matches("export PATH=\"$HOME/.local/bin:$PATH\"")
+            .count(),
+        1,
+        "expected single stable export in .zshrc, got: {}",
+        trunc(&zshrc, 400)
     );
 }
 

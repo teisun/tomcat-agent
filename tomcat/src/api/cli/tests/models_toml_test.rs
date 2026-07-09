@@ -3,7 +3,9 @@
 //! 本测试模块挂在 `api::cli::models_toml` 源文件下（见该文件末尾
 //! `#[cfg(test)] #[path] mod tests;`），故不在 `cli/tests/mod.rs` 声明。
 
-use super::{builtin_seed_blocks, ensure_default_models_toml, ModelsTomlStatus, MODELS_TOML_HEADER};
+use super::{
+    builtin_seed_blocks, ensure_default_models_toml, ModelsTomlStatus, MODELS_TOML_HEADER,
+};
 use crate::core::llm::catalog::{builtin_seed_entries, builtin_seed_toml_text};
 use crate::core::llm::{ModelCatalog, ModelEntry};
 use crate::AppConfig;
@@ -209,9 +211,15 @@ base_url = \"https://api.acme.example\"
         ModelsTomlStatus::AlreadyPresent
     );
     let text2 = models_toml_text(&cfg);
-    assert_eq!(count_occurrences(&text2, "[[models]]"), seed_ids().len() + 1);
+    assert_eq!(
+        count_occurrences(&text2, "[[models]]"),
+        seed_ids().len() + 1
+    );
     for model_id in seed_ids() {
-        assert_eq!(count_occurrences(&text2, &format!("id = \"{model_id}\"")), 1);
+        assert_eq!(
+            count_occurrences(&text2, &format!("id = \"{model_id}\"")),
+            1
+        );
     }
 }
 
@@ -261,7 +269,11 @@ fn backfills_missing_model_name_for_existing_seed_entries() {
                 &text,
                 &format!("model_name = \"{}\"", entry.request_model_name())
             ),
-            if model_id == "deepseek-v4-flash" { 2 } else { 1 }
+            if model_id == "deepseek-v4-flash" {
+                2
+            } else {
+                1
+            }
         );
     }
 }

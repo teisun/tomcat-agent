@@ -179,7 +179,9 @@ fn allowed_commands() -> Vec<Commands> {
                 key: Some("log.level".to_string()),
             },
         },
-        Commands::Model { sub: ModelSub::List },
+        Commands::Model {
+            sub: ModelSub::List,
+        },
         Commands::Model {
             sub: ModelSub::Key {
                 sub: ModelKeySub::List,

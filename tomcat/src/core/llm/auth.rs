@@ -173,7 +173,12 @@ pub fn clear_managed_credentials_for_test() {
 }
 
 fn read_env_value(env_name: &str) -> Option<String> {
-    if let Some(value) = managed_credential_state().read().values.get(env_name).cloned() {
+    if let Some(value) = managed_credential_state()
+        .read()
+        .values
+        .get(env_name)
+        .cloned()
+    {
         return Some(value);
     }
     std::env::var(env_name)

@@ -18,7 +18,11 @@ pub(crate) fn run_model(sub: ModelSub, cfg: &AppConfig) -> Result<(), AppError> 
                     crate::core::llm::ModelSource::Builtin => "builtin",
                     crate::core::llm::ModelSource::User => "user",
                 };
-                let readiness = if view.key_present { "ready" } else { "needs-key" };
+                let readiness = if view.key_present {
+                    "ready"
+                } else {
+                    "needs-key"
+                };
                 let context_window = view
                     .context_window
                     .map(|value| value.to_string())

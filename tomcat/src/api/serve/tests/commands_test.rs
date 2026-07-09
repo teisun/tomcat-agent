@@ -2416,12 +2416,13 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
     .await;
     let set_key = lines
         .iter()
-        .find(|line| {
-            line.get("id").and_then(serde_json::Value::as_str) == Some("set-provider-key")
-        })
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("set-provider-key"))
         .expect("set_provider_key response");
     assert_eq!(set_key["success"].as_bool(), Some(true));
-    assert_eq!(set_key["payload"]["envName"].as_str(), Some("SERVE_TEST_GATEWAY_KEY"));
+    assert_eq!(
+        set_key["payload"]["envName"].as_str(),
+        Some("SERVE_TEST_GATEWAY_KEY")
+    );
     assert_eq!(set_key["payload"]["keyPresent"].as_bool(), Some(true));
     assert!(
         !set_key.to_string().contains("relay-secret"),
@@ -2444,7 +2445,9 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
     .await;
     let key_list = lines
         .iter()
-        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("list-provider-keys"))
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-provider-keys")
+        })
         .expect("list_provider_keys response");
     assert_eq!(key_list["success"].as_bool(), Some(true));
     let provider_key = key_list["payload"]["keys"]

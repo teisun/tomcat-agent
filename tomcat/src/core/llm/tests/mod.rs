@@ -17,8 +17,8 @@
 
 // `mocks` 需被 `tests/openai_test.rs` 通过 crate path 复用（该文件已由 openai.rs 内挂，
 // 不再隶属 `tests` 父模块的兄弟链），故提升到 `pub(crate)`。
-mod auth_test;
 mod admin_test;
+mod auth_test;
 mod catalog_test;
 pub(crate) mod mocks;
 mod multimodal_test;

@@ -50,6 +50,10 @@ pub(crate) use audit_cmd::{parse_audit_line, read_audit_entries};
 #[cfg(test)]
 pub(crate) use config_cmd::{resolve_toml_key, set_toml_key};
 #[cfg(test)]
+pub(crate) use init::{
+    auto_add_to_path, install_canonical_symlink, path_export_targets, prune_stale_lines,
+};
+#[cfg(test)]
 pub(crate) use init_model_wizard::{apply_model_choice, write_env_entries};
 #[cfg(test)]
 pub(crate) use plugin_cmd::{
@@ -413,18 +417,14 @@ pub enum ModelSub {
         thinking_format: Option<String>,
     },
     /// 删除一个用户模型；内置模型不可删
-    Remove {
-        id: String,
-    },
+    Remove { id: String },
     /// 管理 provider API Key
     Key {
         #[command(subcommand)]
         sub: ModelKeySub,
     },
     /// 设置 llm.default_model
-    Default {
-        model: String,
-    },
+    Default { model: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -466,7 +466,13 @@ fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
         ),
         Commands::Audit { .. } => false,
         Commands::Skill { .. } => false,
-        Commands::Model { sub } => !matches!(sub, ModelSub::List | ModelSub::Key { sub: ModelKeySub::List }),
+        Commands::Model { sub } => !matches!(
+            sub,
+            ModelSub::List
+                | ModelSub::Key {
+                    sub: ModelKeySub::List
+                }
+        ),
         Commands::Install { .. } | Commands::Uninstall { .. } => true,
         Commands::Packages { .. } => false,
         Commands::Workspace { sub } => {

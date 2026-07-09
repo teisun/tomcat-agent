@@ -84,8 +84,7 @@ pub fn kimi_test_model() -> String {
 }
 
 pub fn kimi_test_base_url() -> String {
-    std::env::var(KIMI_TEST_BASE_URL_ENV)
-        .unwrap_or_else(|_| KIMI_TEST_DEFAULT_BASE_URL.to_string())
+    std::env::var(KIMI_TEST_BASE_URL_ENV).unwrap_or_else(|_| KIMI_TEST_DEFAULT_BASE_URL.to_string())
 }
 
 pub fn anthropic_test_model() -> String {

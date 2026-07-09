@@ -6,12 +6,12 @@ import type {
   SettingsModelCapabilities,
   SettingsModelInput,
   SettingsModelView,
-  SettingsProviderKeyView,
   SettingsStateSnapshot,
   VsCodeApiLike,
 } from "../../../src/shared/settingsProtocol";
 
 type FormState = SettingsModelInput;
+type FormMode = "create" | "edit";
 
 const EMPTY_CAPABILITIES: SettingsModelCapabilities = {
   files: false,
@@ -83,15 +83,49 @@ function modelToForm(model: SettingsModelView): FormState {
   };
 }
 
-function modelRowMeta(model: SettingsModelView, providerKeys: SettingsProviderKeyView[]): string[] {
-  const meta = [model.source, model.api];
-  const key = providerKeys.find((entry) => entry.envName === model.apiKeyEnv);
-  if (key?.provider) {
-    meta.push(key.provider);
-  } else if (model.provider) {
-    meta.push(model.provider);
-  }
-  return meta;
+function modelKeyEnvName(model: SettingsModelView): string {
+  return model.apiKeyEnv?.trim() || inferApiKeyEnv(model.provider);
+}
+
+function buildModelDetails(model: SettingsModelView): Array<{ label: string; value: string }> {
+  const detailRows = [
+    {
+      label: "Source",
+      value: model.source === "user" ? "User" : "Built-in",
+    },
+    {
+      label: "API",
+      value: model.api,
+    },
+    {
+      label: "Provider",
+      value: model.provider,
+    },
+    {
+      label: "API Key Env",
+      value: modelKeyEnvName(model),
+    },
+    {
+      label: "Base URL",
+      value: model.baseUrl ?? "",
+    },
+    {
+      label: "Thinking",
+      value: model.thinkingFormat ?? "",
+    },
+    {
+      label: "Context Window",
+      value:
+        typeof model.contextWindow === "number"
+          ? String(model.contextWindow)
+          : "",
+    },
+    {
+      label: "Upstream Model",
+      value: model.modelName ?? "",
+    },
+  ];
+  return detailRows.filter((entry) => entry.value.trim().length > 0);
 }
 
 function send(vscodeApi: VsCodeApiLike<SettingsIntent>, message: Omit<SettingsIntent, "messageId">): void {
@@ -123,6 +157,8 @@ export function SettingsApp({
   const [draftApiKey, setDraftApiKey] = useState("");
   const [inlineApiKeys, setInlineApiKeys] = useState<Record<string, string>>({});
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  const [formMode, setFormMode] = useState<FormMode>("create");
+  const [isFormOpen, setIsFormOpen] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -144,6 +180,27 @@ export function SettingsApp({
     };
   }, [vscodeApi]);
 
+  useEffect(() => {
+    if (!isFormOpen) {
+      return;
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setIsFormOpen(false);
+        setFormMode("create");
+        setSelectedModelId(null);
+        setDraftApiKey("");
+        setValidationError(null);
+        setForm(createEmptyForm());
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isFormOpen]);
+
   const readyModels = useMemo(
     () => state.models.filter((model) => model.keyPresent),
     [state.models],
@@ -164,11 +221,29 @@ export function SettingsApp({
     setForm(createEmptyForm());
   };
 
+  const closeForm = () => {
+    setIsFormOpen(false);
+    setFormMode("create");
+    resetForm();
+  };
+
+  const openCreateForm = () => {
+    resetForm();
+    setFormMode("create");
+    setIsFormOpen(true);
+  };
+
   const loadModel = (model: SettingsModelView) => {
     setSelectedModelId(model.id);
     setDraftApiKey("");
     setValidationError(null);
     setForm(modelToForm(model));
+  };
+
+  const openEditForm = (model: SettingsModelView) => {
+    loadModel(model);
+    setFormMode("edit");
+    setIsFormOpen(true);
   };
 
   const handleSave = () => {
@@ -202,7 +277,7 @@ export function SettingsApp({
         type: "setProviderKey",
       });
     }
-    setDraftApiKey("");
+    closeForm();
   };
 
   const handleDelete = () => {
@@ -215,7 +290,7 @@ export function SettingsApp({
       },
       type: "removeModel",
     });
-    resetForm();
+    closeForm();
   };
 
   const handleInlineSave = (model: SettingsModelView) => {
@@ -235,6 +310,13 @@ export function SettingsApp({
       [model.id]: "",
     }));
   };
+
+  const formTitle =
+    formMode === "edit" && selectedModel ? `Edit ${selectedModel.id}` : "Add Model";
+  const formDescription =
+    formMode === "edit"
+      ? "Update this model or replace the key without exposing it in the UI."
+      : "Add a custom model or override a built-in preset.";
 
   return (
     <div className="tc-settings-shell">
@@ -257,35 +339,223 @@ export function SettingsApp({
         <header className="tc-settings-shell__header">
           <div>
             <h1>Models</h1>
-            <p>Manage built-in and custom models, then store API keys without echoing them back into the UI.</p>
+            <p>
+              Built-in and custom models, with provider keys stored without
+              echoing them back into the UI.
+            </p>
           </div>
-          <button className="tc-button tc-button--secondary" onClick={resetForm} type="button">
-            New Model
-          </button>
+          <div className="tc-button-row">
+            <button
+              className="tc-button tc-button--secondary"
+              disabled={!state.capabilities.upsertModel}
+              onClick={openCreateForm}
+              type="button"
+            >
+              + Add Model
+            </button>
+          </div>
         </header>
 
         {state.error ? <div className="tc-banner tc-banner--warning">{state.error}</div> : null}
-        {validationError ? <div className="tc-banner tc-banner--warning">{validationError}</div> : null}
         {state.status ? <div className="tc-banner">{state.status}</div> : null}
 
         {!state.capabilities.listModels ? (
           <section className="tc-empty-state">
             <h2>Model management unavailable</h2>
-            <p>The connected `tomcat serve` does not expose the model management capabilities yet.</p>
+            <p>
+              The connected `tomcat serve` does not expose model management yet.
+            </p>
           </section>
         ) : (
-          <div className="tc-settings-grid">
-            <section className="tc-card tc-settings-card">
-              <div className="tc-card__header">
-                <h3>{selectedModel ? `Edit ${selectedModel.id}` : "Add or Override Model"}</h3>
+          <div className="tc-settings-groups">
+            <section className="tc-settings-group">
+              <h2 className="tc-settings-group__title">Ready</h2>
+              {readyModels.length === 0 ? (
+                <div className="tc-session-dropdown__empty">No ready models yet.</div>
+              ) : (
+                readyModels.map((model) => {
+                  const details = buildModelDetails(model);
+                  return (
+                    <article className="tc-settings-model" key={model.id}>
+                      <div className="tc-settings-model__header">
+                        <div className="tc-settings-model__identity">
+                          <span
+                            aria-label="Ready"
+                            className="tc-settings-model__status-dot tc-settings-model__status-dot--ready"
+                            role="img"
+                          />
+                          <strong>{model.id}</strong>
+                        </div>
+                        <div className="tc-settings-model__actions">
+                          <div className="tc-settings-model__tooltip-anchor">
+                            <button
+                              aria-label={`Show details for ${model.id}`}
+                              className="tc-settings-model__info"
+                              type="button"
+                            >
+                              <span
+                                aria-hidden="true"
+                                className="codicon codicon-info"
+                              />
+                            </button>
+                            <div
+                              className="tc-settings-model__tooltip"
+                              role="tooltip"
+                            >
+                              <dl className="tc-settings-model__tooltip-list">
+                                {details.map((entry) => (
+                                  <div
+                                    className="tc-settings-model__tooltip-row"
+                                    key={`${model.id}-${entry.label}`}
+                                  >
+                                    <dt>{entry.label}</dt>
+                                    <dd>{entry.value}</dd>
+                                  </div>
+                                ))}
+                              </dl>
+                            </div>
+                          </div>
+                          <button
+                            className="tc-button tc-button--secondary"
+                            onClick={() => openEditForm(model)}
+                            type="button"
+                          >
+                            Edit
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })
+              )}
+            </section>
+
+            <section className="tc-settings-group">
+              <h2 className="tc-settings-group__title">Needs API Key</h2>
+              {needsKeyModels.length === 0 ? (
+                <div className="tc-session-dropdown__empty">
+                  All visible models are ready.
+                </div>
+              ) : (
+                needsKeyModels.map((model) => {
+                  const details = buildModelDetails(model);
+                  return (
+                    <article className="tc-settings-model" key={model.id}>
+                      <div className="tc-settings-model__header">
+                        <div className="tc-settings-model__identity">
+                          <span
+                            aria-label="Needs API key"
+                            className="tc-settings-model__status-dot tc-settings-model__status-dot--missing"
+                            role="img"
+                          />
+                          <strong>{model.id}</strong>
+                        </div>
+                        <div className="tc-settings-model__actions">
+                          <div className="tc-settings-model__tooltip-anchor">
+                            <button
+                              aria-label={`Show details for ${model.id}`}
+                              className="tc-settings-model__info"
+                              type="button"
+                            >
+                              <span
+                                aria-hidden="true"
+                                className="codicon codicon-info"
+                              />
+                            </button>
+                            <div
+                              className="tc-settings-model__tooltip"
+                              role="tooltip"
+                            >
+                              <dl className="tc-settings-model__tooltip-list">
+                                {details.map((entry) => (
+                                  <div
+                                    className="tc-settings-model__tooltip-row"
+                                    key={`${model.id}-${entry.label}`}
+                                  >
+                                    <dt>{entry.label}</dt>
+                                    <dd>{entry.value}</dd>
+                                  </div>
+                                ))}
+                              </dl>
+                            </div>
+                          </div>
+                          <button
+                            className="tc-button tc-button--secondary"
+                            onClick={() => openEditForm(model)}
+                            type="button"
+                          >
+                            Edit
+                          </button>
+                        </div>
+                      </div>
+                      <div className="tc-settings-inline-key">
+                        <input
+                          autoComplete="off"
+                          className="tc-input"
+                          onChange={(event) =>
+                            setInlineApiKeys((current) => ({
+                              ...current,
+                              [model.id]: event.target.value,
+                            }))
+                          }
+                          placeholder={`Save ${modelKeyEnvName(model)}`}
+                          type="password"
+                          value={inlineApiKeys[model.id] ?? ""}
+                        />
+                        <button
+                          className="tc-button tc-button--primary"
+                          disabled={!state.capabilities.setProviderKey}
+                          onClick={() => handleInlineSave(model)}
+                          type="button"
+                        >
+                          Save
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })
+              )}
+            </section>
+          </div>
+        )}
+
+        {isFormOpen ? (
+          <div className="tc-settings-modal" onClick={closeForm}>
+            <section
+              aria-labelledby="settings-model-form-title"
+              aria-modal="true"
+              className="tc-card tc-settings-modal__card"
+              onClick={(event) => event.stopPropagation()}
+              role="dialog"
+            >
+              <div className="tc-settings-modal__header">
+                <div>
+                  <h3 id="settings-model-form-title">{formTitle}</h3>
+                  <p>{formDescription}</p>
+                </div>
+                <button
+                  aria-label="Close model form"
+                  className="tc-icon-button tc-settings-modal__close"
+                  onClick={closeForm}
+                  type="button"
+                >
+                  <span aria-hidden="true" className="codicon codicon-close" />
+                </button>
               </div>
+
+              {validationError ? (
+                <div className="tc-banner tc-banner--warning">{validationError}</div>
+              ) : null}
+
               <div className="tc-settings-form">
                 <label className="tc-field">
                   <span>Model ID</span>
                   <input
                     className="tc-input"
                     disabled={selectedModel !== null}
-                    onChange={(event) => setForm((current) => ({ ...current, id: event.target.value }))}
+                    onChange={(event) =>
+                      setForm((current) => ({ ...current, id: event.target.value }))
+                    }
                     placeholder="claude-opus-gateway"
                     value={form.id}
                   />
@@ -390,7 +660,7 @@ export function SettingsApp({
                   <label className="tc-field">
                     <span>API Key</span>
                     <input
-                    autoComplete="off"
+                      autoComplete="off"
                       className="tc-input"
                       onChange={(event) => setDraftApiKey(event.target.value)}
                       placeholder="Optional: save together"
@@ -427,14 +697,13 @@ export function SettingsApp({
                     </label>
                   ))}
                 </div>
-                <div className="tc-button-row">
+                <div className="tc-button-row tc-settings-form__actions">
                   <button
-                    className="tc-button tc-button--primary"
-                    disabled={!state.capabilities.upsertModel || !form.id || !form.provider}
-                    onClick={handleSave}
+                    className="tc-button tc-button--ghost"
+                    onClick={closeForm}
                     type="button"
                   >
-                    Save Model
+                    Cancel
                   </button>
                   {selectedModel?.source === "user" ? (
                     <button
@@ -446,99 +715,19 @@ export function SettingsApp({
                       Delete
                     </button>
                   ) : null}
-                </div>
-              </div>
-            </section>
-
-            <section className="tc-card tc-settings-card">
-              <div className="tc-card__header">
-                <h3>Configured Models</h3>
-              </div>
-              <div className="tc-settings-groups">
-                <div className="tc-settings-group">
-                  <div className="tc-settings-group__title">Ready</div>
-                  {readyModels.length === 0 ? (
-                    <div className="tc-session-dropdown__empty">No ready models yet.</div>
-                  ) : (
-                    readyModels.map((model) => (
-                      <article className="tc-settings-model" key={model.id}>
-                        <div className="tc-settings-model__header">
-                          <div>
-                            <strong>{model.id}</strong>
-                            <div className="tc-settings-model__meta">
-                              {modelRowMeta(model, state.providerKeys).join(" · ")}
-                            </div>
-                          </div>
-                          <div className="tc-button-row">
-                            <span className="tc-chip tc-chip--success">Ready</span>
-                            <button
-                              className="tc-button tc-button--secondary"
-                              onClick={() => loadModel(model)}
-                              type="button"
-                            >
-                              Edit
-                            </button>
-                          </div>
-                        </div>
-                        <div className="tc-settings-model__footer">{model.apiKeyEnv}</div>
-                      </article>
-                    ))
-                  )}
-                </div>
-
-                <div className="tc-settings-group">
-                  <div className="tc-settings-group__title">Needs API Key</div>
-                  {needsKeyModels.length === 0 ? (
-                    <div className="tc-session-dropdown__empty">All visible models are ready.</div>
-                  ) : (
-                    needsKeyModels.map((model) => (
-                      <article className="tc-settings-model" key={model.id}>
-                        <div className="tc-settings-model__header">
-                          <div>
-                            <strong>{model.id}</strong>
-                            <div className="tc-settings-model__meta">
-                              {modelRowMeta(model, state.providerKeys).join(" · ")}
-                            </div>
-                          </div>
-                          <button
-                            className="tc-button tc-button--secondary"
-                            onClick={() => loadModel(model)}
-                            type="button"
-                          >
-                            Edit
-                          </button>
-                        </div>
-                        <div className="tc-settings-inline-key">
-                          <input
-                            autoComplete="off"
-                            className="tc-input"
-                            onChange={(event) =>
-                              setInlineApiKeys((current) => ({
-                                ...current,
-                                [model.id]: event.target.value,
-                              }))
-                            }
-                            placeholder={`Save ${model.apiKeyEnv}`}
-                            type="password"
-                            value={inlineApiKeys[model.id] ?? ""}
-                          />
-                          <button
-                            className="tc-button tc-button--primary"
-                            disabled={!state.capabilities.setProviderKey}
-                            onClick={() => handleInlineSave(model)}
-                            type="button"
-                          >
-                            Save
-                          </button>
-                        </div>
-                      </article>
-                    ))
-                  )}
+                  <button
+                    className="tc-button tc-button--primary"
+                    disabled={!state.capabilities.upsertModel || !form.id || !form.provider}
+                    onClick={handleSave}
+                    type="button"
+                  >
+                    Save Model
+                  </button>
                 </div>
               </div>
             </section>
           </div>
-        )}
+        ) : null}
       </main>
     </div>
   );

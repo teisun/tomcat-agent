@@ -65,7 +65,8 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
     let resp = {
         let mut resp = None;
         for attempt in 1..=TRANSIENT_LLM_MAX_ATTEMPTS {
-            match tokio::time::timeout(Duration::from_secs(60), provider.chat(request.clone())).await
+            match tokio::time::timeout(Duration::from_secs(60), provider.chat(request.clone()))
+                .await
             {
                 Ok(Ok(value)) => {
                     resp = Some(value);
@@ -132,8 +133,11 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
     let mut stream = {
         let mut stream = None;
         for attempt in 1..=TRANSIENT_LLM_MAX_ATTEMPTS {
-            match tokio::time::timeout(Duration::from_secs(60), provider.chat_stream(request.clone()))
-                .await
+            match tokio::time::timeout(
+                Duration::from_secs(60),
+                provider.chat_stream(request.clone()),
+            )
+            .await
             {
                 Ok(Ok(value)) => {
                     stream = Some(value);

@@ -161,12 +161,14 @@ pub fn list_provider_keys(catalog: &ModelCatalog) -> Vec<ProviderKeyView> {
     for entry in catalog.entries_in_merge_order() {
         let env_name = inferred_api_key_env(&entry);
         let key_present = key_present_for_env(&env_name);
-        let slot = by_env.entry(env_name.clone()).or_insert_with(|| ProviderKeyView {
-            provider: entry.provider.clone(),
-            env_name: env_name.clone(),
-            key_present,
-            model_ids: Vec::new(),
-        });
+        let slot = by_env
+            .entry(env_name.clone())
+            .or_insert_with(|| ProviderKeyView {
+                provider: entry.provider.clone(),
+                env_name: env_name.clone(),
+                key_present,
+                model_ids: Vec::new(),
+            });
         slot.key_present = key_present;
         if slot.provider.is_empty() {
             slot.provider = entry.provider.clone();
@@ -209,9 +211,7 @@ pub fn upsert_user_model(cfg: &AppConfig, input: ModelEntryInput) -> Result<Mode
             .lookup(&entry.id)
             .cloned()
             .map(|resolved| ModelView::from_entry(&reloaded, resolved))
-            .ok_or_else(|| {
-                AppError::Config(format!("模型 `{}` 写入后未能重新加载。", entry.id))
-            })?;
+            .ok_or_else(|| AppError::Config(format!("模型 `{}` 写入后未能重新加载。", entry.id)))?;
         Ok(view)
     })
 }
@@ -260,7 +260,10 @@ pub fn set_default_model(
     write_default_model(config_path, trimmed)
 }
 
-pub fn set_provider_key(cfg: &AppConfig, input: ProviderKeyInput) -> Result<ModelKeyStatus, AppError> {
+pub fn set_provider_key(
+    cfg: &AppConfig,
+    input: ProviderKeyInput,
+) -> Result<ModelKeyStatus, AppError> {
     let env_name = input.env_name.trim().to_string();
     let value = input.value.trim().to_string();
     if env_name.is_empty() {
@@ -283,7 +286,9 @@ pub fn set_provider_key(cfg: &AppConfig, input: ProviderKeyInput) -> Result<Mode
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
-    value.map(|raw| raw.trim().to_string()).filter(|raw| !raw.is_empty())
+    value
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
 }
 
 fn inferred_api_key_env(entry: &ModelEntry) -> String {

@@ -70,35 +70,51 @@ Model ▾
 └─────────────────────────┘
 ```
 
-### A.分图 2：设置中心（照抄附件3，编辑器区标签页）
+### A.分图 2：设置中心（编辑器区标签页，列表优先）
 
 ```text
-┌ Tomcat Settings ─────────────────────────────────── □ x ┐
-│ ┌──────────────┬───────────────────────────────────────┐│
-│ │ ▸ Models   ● │  Models                                ││
-│ │   Language ○ │  ┌ Add model ──────┐  ┌ Configured ──┐ ││
-│ │   Skills   ○ │  │ id   [        ] │  │ Ready         │ ││
-│ │   Plugins  ○ │  │ api  ▾  provider│  │ · gpt-5.4  ×  │ ││
-│ │              │  │ base_url [    ] │  │ · glm-5.2  ×  │ ││
-│ │  ○=未实现占位 │  │ API Key ●●●●●●  │  │ Needs API key │ ││
-│ │              │  │ caps □v □f □t.. │  │ · opus-4-8    │ ││
-│ │              │  │ [  Save model ] │  │  ●●●●● [Save] │ ││
-│ │              │  └─────────────────┘  └───────────────┘ ││
-│ └──────────────┴───────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────┘
+┌ Tomcat Settings ────────────────────────────────────────────────┐
+│ ┌──────────────┬──────────────────────────────────────────────┐ │
+│ │ ▸ Models   ● │  Models                     [ + Add Model ]  │ │
+│ │   Sessions ○ │  Manage built-in and custom models...        │ │
+│ │   Tools    ○ │  ──────────────────────────────────────────  │ │
+│ │              │  Ready                                        │ │
+│ │  ○=未实现占位 │  ● gpt-5.4                         (i) Edit │ │
+│ │              │  ● glm-5.2                         (i) Edit │ │
+│ │              │  ──────────────────────────────────────────  │ │
+│ │              │  Needs API key                               │ │
+│ │              │  ○ claude-opus-4-8                (i) Edit │ │
+│ │              │    [ Save ANTHROPIC_API_KEY ]      [Save]  │ │
+│ └──────────────┴──────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-左导航是「模块入口」（后续 语言/Skill/Plugin 配置都挂这里；本期只 Models 可点，其余灰置占位）。右侧渲染当前模块。点击 Add Models 时直接激活 Models 模块。两处 `●●●●●` 均为密文 API Key 输入框（见 [`01-scope-and-research.md`](01-scope-and-research.md) 的 §1 术语「API Key」与 [`02-decisions-and-delivery.md`](02-decisions-and-delivery.md) 的 §3.1 D8）。
+左导航是「模块入口」（后续配置可继续挂这里；本期只 Models 可点，其余灰置占位）。右侧先展示 Ready / Needs API key 列表，`Configured Models` 总标题被去掉，只保留分区标题。行内的 `● / ○` 负责轻量表达 ready 状态，`(i)` 为 hover/focus 才展开的字段提示卡，里面用字段名解释 `Source / API / Provider / API Key Env / Base URL` 等信息。点击 `+ Add Model` 或行内 `Edit` 再打开表单弹窗。
 
-### A.分图 3：Models 模块（左表单 / 右列表）
+### A.分图 3：Models 模块（扁平列表 + info 提示 + 弹窗表单）
 
-- 左：新增/编辑自定义模型表单，字段对齐 `models.toml`：`id / model_name / api(下拉) / provider / base_url / thinking_format(下拉) / context_window / capabilities(多选)`；外加两个 Key 相关字段：
-  - **API Key（密文输入，masked）**：模型的密钥值本身；保存时经 `set_provider_key` 写入 `.env`，供该 provider 复用。
-  - `api_key_env`（高级/可选）：显式环境变量名；留空则按 provider 自动推断 `<PROVIDER>_API_KEY`（不是密钥值，只是变量名）。
-- 右：已配置列表，两组：
+- 页面右侧先展示已配置列表，两组，使用扁平列表行而不是厚卡片：
   - Ready（`key_present=true`）：可用，行内 Edit / 删除（内置不可删，可覆盖）。
   - Needs API key（`key_present=false`，多为官方内置预置）：行内一个**密文 API Key 输入框 + Save**，保存即调 `set_provider_key` 写 `.env`，`key_present` 翻转为 true、升入 Ready 组并进入下拉。
+- 行内的圆形 info 按钮 hover/focus 后，显示带字段名的提示卡：`Source / API / Provider / API Key Env / Base URL / Thinking / Context Window / Upstream Model`；不再把 `user · openai · deepseek` 这种裸值直接印在列表上。
+- 新增/编辑整条模型通过弹窗完成，字段对齐 `models.toml`：`id / model_name / api(下拉) / provider / base_url / thinking_format(下拉) / context_window / capabilities(多选)`；外加两个 Key 相关字段：
+  - **API Key（密文输入，masked）**：模型的密钥值本身；保存时经 `set_provider_key` 写入 `.env`，供该 provider 复用。
+  - `api_key_env`（高级/可选）：显式环境变量名；留空则按 provider 自动推断 `<PROVIDER>_API_KEY`（不是密钥值，只是变量名）。
 - **Key 保护**：两处 Key 输入均 `type=password` 不回显、`autocomplete=off`；保存后仅回传 `key_present`，serve/host 决不把 Key 明文回吐 webview；`.env` 0600、日志脱敏。
+
+```text
+                         ┌ Add Model ──────────────────────── x ┐
+                         │ Model ID        [                ]   │
+                         │ Model Name      [                ]   │
+                         │ API ▾           Thinking ▾           │
+                         │ Provider        [                ]   │
+                         │ API Key Env     [                ]   │
+                         │ Base URL        [ https://...    ]   │
+                         │ Context Window  [      ] API Key ●●  │
+                         │ caps  □vision □files □tools ...      │
+                         │                    [Cancel][Save]    │
+                         └───────────────────────────────────────┘
+```
 
 ### A.分图 4：后端 provider 分派 + endpoint 构造
 

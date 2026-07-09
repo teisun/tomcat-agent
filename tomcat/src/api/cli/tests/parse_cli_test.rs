@@ -162,15 +162,8 @@ fn cli_parse_model_add_and_key_set() {
             && thinking_format == "anthropic"
     ));
 
-    let key = Cli::try_parse_from([
-        "tomcat",
-        "model",
-        "key",
-        "set",
-        "anthropic",
-        "secret-value",
-    ])
-    .unwrap();
+    let key = Cli::try_parse_from(["tomcat", "model", "key", "set", "anthropic", "secret-value"])
+        .unwrap();
     assert!(matches!(
         key.command,
         Some(Commands::Model {

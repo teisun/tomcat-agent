@@ -95,7 +95,10 @@ fn render_typescript(bundle: &ServeSchemaBundle) -> String {
         ("UpsertModelResponse", &bundle.upsert_model_response),
         ("RemoveModelResponse", &bundle.remove_model_response),
         ("SetProviderKeyResponse", &bundle.set_provider_key_response),
-        ("ListProviderKeysPayload", &bundle.list_provider_keys_payload),
+        (
+            "ListProviderKeysPayload",
+            &bundle.list_provider_keys_payload,
+        ),
     ];
 
     let root_names = root_schemas

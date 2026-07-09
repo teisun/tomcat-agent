@@ -6,9 +6,9 @@ use serde_json::json;
 use serial_test::serial;
 
 use common::serve::{
-    response, setup_serve_fixture, try_extract_json_body,
-    spawn_scripted_openai_stream_server_with_auto_title, spawn_serve_child, sse_delta, sse_done,
-    sse_finish, sse_tool_call, ScriptedOpenAiServer, ServeChild,
+    response, setup_serve_fixture, spawn_scripted_openai_stream_server_with_auto_title,
+    spawn_serve_child, sse_delta, sse_done, sse_finish, sse_tool_call, try_extract_json_body,
+    ScriptedOpenAiServer, ServeChild,
 };
 
 const ASK_QUESTION_ARGS: &str = r#"{"questions":[{"id":"q1","prompt":"Pick one","options":[{"id":"a","label":"A","recommended":true},{"id":"b","label":"B"}]}]}"#;

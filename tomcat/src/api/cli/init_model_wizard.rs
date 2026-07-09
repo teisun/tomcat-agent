@@ -144,4 +144,3 @@ pub(crate) fn prompt_and_store_provider_key(
     crate::core::llm::auth::refresh_managed_credentials(env_path)?;
     Ok(KeyConfigStatus::Written)
 }
-

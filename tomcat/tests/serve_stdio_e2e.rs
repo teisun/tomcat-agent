@@ -10,7 +10,7 @@ use common::serve::{
     assert_ndjson_line, captured_non_title_requests, extract_json_body, response,
     setup_serve_fixture, spawn_scripted_openai_stream_server,
     spawn_scripted_openai_stream_server_with_auto_title, spawn_serve_child, sse_delta, sse_done,
-    sse_finish, ScriptedPart, ScriptedOpenAiServer, ServeChild, ServeFixture,
+    sse_finish, ScriptedOpenAiServer, ScriptedPart, ServeChild, ServeFixture,
 };
 
 fn initialize(child: &mut ServeChild) -> String {

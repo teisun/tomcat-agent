@@ -687,16 +687,23 @@ pub(crate) async fn handle_command(
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(serde_json::to_value(ListModelsPayload { models }).map_err(|error| {
-                    AppError::Config(format!("serialize list_models payload failed: {error}"))
-                })?),
+                Some(
+                    serde_json::to_value(ListModelsPayload { models }).map_err(|error| {
+                        AppError::Config(format!("serialize list_models payload failed: {error}"))
+                    })?,
+                ),
             )))?;
         }
         ServeCommand::UpsertModel { id, model } => {
             let model = match upsert_user_model(&state.cfg, model) {
                 Ok(model) => model,
                 Err(error) => {
-                    send_error(&state, id, state.registry.active_session_id(), render_error_message(&error))?;
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
                     return Ok(());
                 }
             };
@@ -704,9 +711,11 @@ pub(crate) async fn handle_command(
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(serde_json::to_value(UpsertModelResponse { model }).map_err(|error| {
-                    AppError::Config(format!("serialize upsert_model payload failed: {error}"))
-                })?),
+                Some(
+                    serde_json::to_value(UpsertModelResponse { model }).map_err(|error| {
+                        AppError::Config(format!("serialize upsert_model payload failed: {error}"))
+                    })?,
+                ),
             )))?;
         }
         ServeCommand::RemoveModel { id, model_id } => {
@@ -723,9 +732,11 @@ pub(crate) async fn handle_command(
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(serde_json::to_value(RemoveModelResponse { model_id }).map_err(|error| {
-                    AppError::Config(format!("serialize remove_model payload failed: {error}"))
-                })?),
+                Some(
+                    serde_json::to_value(RemoveModelResponse { model_id }).map_err(|error| {
+                        AppError::Config(format!("serialize remove_model payload failed: {error}"))
+                    })?,
+                ),
             )))?;
         }
         ServeCommand::SetProviderKey {
@@ -733,13 +744,7 @@ pub(crate) async fn handle_command(
             env_name,
             value,
         } => {
-            let status = match set_provider_key(
-                &state.cfg,
-                ProviderKeyInput {
-                    env_name,
-                    value,
-                },
-            ) {
+            let status = match set_provider_key(&state.cfg, ProviderKeyInput { env_name, value }) {
                 Ok(status) => status,
                 Err(error) => {
                     send_error(
@@ -756,11 +761,13 @@ pub(crate) async fn handle_command(
                 id,
                 state.registry.active_session_id(),
                 Some(
-                    serde_json::to_value(SetProviderKeyResponse::from(status)).map_err(|error| {
-                        AppError::Config(format!(
-                            "serialize set_provider_key payload failed: {error}"
-                        ))
-                    })?,
+                    serde_json::to_value(SetProviderKeyResponse::from(status)).map_err(
+                        |error| {
+                            AppError::Config(format!(
+                                "serialize set_provider_key payload failed: {error}"
+                            ))
+                        },
+                    )?,
                 ),
             )))?;
         }
@@ -770,11 +777,13 @@ pub(crate) async fn handle_command(
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(serde_json::to_value(ListProviderKeysPayload { keys }).map_err(|error| {
-                    AppError::Config(format!(
-                        "serialize list_provider_keys payload failed: {error}"
-                    ))
-                })?),
+                Some(
+                    serde_json::to_value(ListProviderKeysPayload { keys }).map_err(|error| {
+                        AppError::Config(format!(
+                            "serialize list_provider_keys payload failed: {error}"
+                        ))
+                    })?,
+                ),
             )))?;
         }
         ServeCommand::CloseSession { id, session_id } => {

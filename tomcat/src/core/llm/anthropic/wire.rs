@@ -344,7 +344,8 @@ fn continuation_blocks(continuation: &ReasoningContinuation) -> Option<Vec<Value
             .as_array()
             .cloned()
             .map(|items| {
-                items.into_iter()
+                items
+                    .into_iter()
                     .filter(|item| {
                         item.get("type")
                             .and_then(Value::as_str)
@@ -432,10 +433,9 @@ fn user_content_blocks(message: &ChatMessage) -> Vec<Value> {
             "type": "text",
             "text": text,
         })],
-        Some(ChatMessageContent::Parts(parts)) => parts
-            .iter()
-            .map(content_part_to_block)
-            .collect::<Vec<_>>(),
+        Some(ChatMessageContent::Parts(parts)) => {
+            parts.iter().map(content_part_to_block).collect::<Vec<_>>()
+        }
         None => vec![json!({
             "type": "text",
             "text": "",
@@ -538,7 +538,10 @@ mod tests {
     #[test]
     fn build_request_body_extracts_system_and_user_messages() {
         let request = ChatRequest {
-            messages: vec![ChatMessage::system("be helpful"), ChatMessage::user("hello")],
+            messages: vec![
+                ChatMessage::system("be helpful"),
+                ChatMessage::user("hello"),
+            ],
             model: "ignored".to_string(),
             temperature: Some(0.2),
             max_tokens: Some(4096),
@@ -619,6 +622,9 @@ mod tests {
                 .map(|continuation| continuation.format.clone()),
             Some(ReasoningFormat::AnthropicThinkingBlocks)
         );
-        assert_eq!(response.usage.as_ref().map(|usage| usage.total_tokens), Some(Some(33)));
+        assert_eq!(
+            response.usage.as_ref().map(|usage| usage.total_tokens),
+            Some(Some(33))
+        );
     }
 }

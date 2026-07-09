@@ -32,6 +32,7 @@ import type {
   SettingsStateSnapshot,
 } from "../../shared/settingsProtocol";
 import { isSettingsIntent as isSettingsIntentMessage } from "../../shared/settingsProtocol";
+import { resolveGuiStylesheet } from "../guiAssets";
 
 function getNonce(): string {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
@@ -329,14 +330,14 @@ export class SettingsPanel implements vscode.Disposable {
   private renderHtml(webview: vscode.Webview): string {
     const distRoot = path.join(this.deps.extensionUri.fsPath, "gui", "dist");
     const jsPath = path.join(distRoot, "settings.js");
-    const cssPath = path.join(distRoot, "settings.css");
+    const cssPath = resolveGuiStylesheet(distRoot);
     if (!fs.existsSync(jsPath)) {
       return this.renderFallbackHtml(
         "Tomcat settings assets are missing. Run `npm run build` in `tomcat-vscode-ext` first.",
       );
     }
     const scriptUri = webview.asWebviewUri(vscode.Uri.file(jsPath));
-    const styleUri = fs.existsSync(cssPath)
+    const styleUri = cssPath
       ? webview.asWebviewUri(vscode.Uri.file(cssPath)).toString()
       : null;
     const nonce = getNonce();

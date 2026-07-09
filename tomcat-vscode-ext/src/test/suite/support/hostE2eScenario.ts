@@ -986,13 +986,33 @@ export async function assertWebviewAddModelsFlow(
     kind: "clickTestId",
     testId: "model-select",
   });
-  await waitForWebviewDomSnapshot(
+  const dropdown = await waitForWebviewDomSnapshot(
     api,
     (snapshot) =>
-      snapshot.html.includes('data-testid="model-dropdown"') && snapshot.html.includes(modelId)
+      snapshot.html.includes('data-testid="model-dropdown"') &&
+      snapshot.html.includes(modelId) &&
+      snapshot.modelDropdownHeight > 0
         ? snapshot
         : undefined,
     10_000,
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    captureTranscriptVisual("model-dropdown-open");
+  }
+  const modelSelectTop = dropdown.composerControlMetrics["model-select"]?.top ?? null;
+  assert.ok(
+    dropdown.modelDropdownFullyVisible,
+    `expected the model dropdown to be fully visible, got top=${dropdown.modelDropdownTop}, bottom=${dropdown.modelDropdownBottom}, left=${dropdown.modelDropdownLeft}, right=${dropdown.modelDropdownRight}, height=${dropdown.modelDropdownHeight}, triggerTop=${modelSelectTop}`,
+  );
+  assert.ok(
+    dropdown.modelDropdownTop !== null && dropdown.modelDropdownTop >= 0,
+    `expected the model dropdown to stay inside the viewport, got top=${dropdown.modelDropdownTop}`,
+  );
+  assert.ok(
+    dropdown.modelDropdownBottom !== null &&
+      modelSelectTop !== null &&
+      dropdown.modelDropdownBottom <= modelSelectTop,
+    `expected the model dropdown to open upward above the trigger, got dropdownBottom=${dropdown.modelDropdownBottom}, triggerTop=${modelSelectTop}`,
   );
 
   await api.__testing.sendWebviewIntent(
@@ -2559,6 +2579,7 @@ function captureTranscriptVisual(
     | "file-drop-reference"
     | "file-drop-reference-hover"
     | "file-chip"
+    | "model-dropdown-open"
     | "progress"
     | "reload-replay"
     | "selection-reference-codelens"

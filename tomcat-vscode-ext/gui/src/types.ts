@@ -416,6 +416,12 @@ export type WebviewIntent =
         jumpToLatestVisible: boolean;
         latestUserTopWithinStream: number | null;
         messageTexts: string[];
+        modelDropdownBottom: number | null;
+        modelDropdownFullyVisible: boolean;
+        modelDropdownHeight: number;
+        modelDropdownLeft: number | null;
+        modelDropdownRight: number | null;
+        modelDropdownTop: number | null;
         overflowAnchor: string | null;
         sessionTabs: string[];
         sessionGroupHeaders: string[];

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as vscode from "vscode";
 
 import {
+  TomcatWebviewViewProvider,
   buildAttachmentOpenDialogOptions,
   classifyPickedUri,
   parseModelCatalog,
@@ -227,5 +228,71 @@ describe("model catalog parsing", () => {
       },
       ids: ["deepseek-v4-flash", "gpt-5.4", "text-only"],
     });
+  });
+});
+
+describe("webview html asset resolution", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(
+      tempDirs.map(async (dir) => {
+        await fs.rm(dir, { force: true, recursive: true });
+      }),
+    );
+    tempDirs.length = 0;
+  });
+
+  async function createExtensionRoot(files: Record<string, string>): Promise<vscode.Uri> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-webview-assets-"));
+    tempDirs.push(dir);
+    await Promise.all(
+      Object.entries(files).map(async ([relativePath, contents]) => {
+        const filePath = path.join(dir, relativePath);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(filePath, contents, "utf8");
+      }),
+    );
+    return vscode.Uri.file(dir);
+  }
+
+  function createWebview(): vscode.Webview {
+    return {
+      asWebviewUri(uri: vscode.Uri) {
+        return uri;
+      },
+      cspSource: "vscode-test-webview",
+    } as unknown as vscode.Webview;
+  }
+
+  it("links the built stylesheet when gui dist ships styles.css", async () => {
+    const extensionUri = await createExtensionRoot({
+      "gui/dist/index.js": "console.log('index');",
+      "gui/dist/styles.css": "body { color: red; }",
+    });
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri,
+      getDefaultCwd: () => undefined,
+      getUiMode: () => "webview",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      ownership: {
+        releaseAll() {},
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    const html = (
+      provider as unknown as {
+        renderHtml(webview: vscode.Webview): string;
+      }
+    ).renderHtml(createWebview());
+
+    expect(html).toContain('rel="stylesheet"');
+    expect(html).toContain("styles.css");
+    provider.dispose();
   });
 });

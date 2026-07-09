@@ -46,10 +46,7 @@ mod tests {
     #[test]
     fn preserves_explicit_provider_paths() {
         assert_eq!(
-            build_path_aware_endpoint(
-                "https://open.bigmodel.cn/api/paas/v4/",
-                "chat/completions",
-            ),
+            build_path_aware_endpoint("https://open.bigmodel.cn/api/paas/v4/", "chat/completions",),
             "https://open.bigmodel.cn/api/paas/v4/chat/completions"
         );
         assert_eq!(

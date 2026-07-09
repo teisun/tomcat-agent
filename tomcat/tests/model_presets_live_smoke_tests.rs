@@ -36,15 +36,22 @@ fn require_api_key(env_key: &str, test_name: &str) {
 
 fn kimi_config() -> AppConfig {
     let mut cfg = AppConfig::default();
-    cfg.storage.work_dir = Some(common::dot_tomcat_e2e_workdir("live_kimi_builtin").display().to_string());
+    cfg.storage.work_dir = Some(
+        common::dot_tomcat_e2e_workdir("live_kimi_builtin")
+            .display()
+            .to_string(),
+    );
     common::apply_kimi_app_config(&mut cfg);
     cfg
 }
 
 fn anthropic_config() -> AppConfig {
     let mut cfg = AppConfig::default();
-    cfg.storage.work_dir =
-        Some(common::dot_tomcat_e2e_workdir("live_anthropic_builtin").display().to_string());
+    cfg.storage.work_dir = Some(
+        common::dot_tomcat_e2e_workdir("live_anthropic_builtin")
+            .display()
+            .to_string(),
+    );
     common::apply_anthropic_app_config(&mut cfg);
     cfg
 }
@@ -59,10 +66,16 @@ async fn run_stream_smoke(
     max_tokens: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let call = common::resolve_main_call(&config);
-    assert_eq!(call.provider, expected_provider, "{label} provider mismatch");
+    assert_eq!(
+        call.provider, expected_provider,
+        "{label} provider mismatch"
+    );
     assert_eq!(call.api, expected_api, "{label} api mismatch");
     assert_eq!(call.model, expected_model, "{label} model mismatch");
-    assert_eq!(call.key_source, expected_key_env, "{label} key env mismatch");
+    assert_eq!(
+        call.key_source, expected_key_env,
+        "{label} key env mismatch"
+    );
 
     let mut stream = tokio::time::timeout(
         STREAM_TIMEOUT,

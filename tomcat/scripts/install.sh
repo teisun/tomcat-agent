@@ -356,11 +356,22 @@ PY
   find "${TMP_DIR}" -depth -type d -exec rmdir {} \; 2>/dev/null || true
 }
 
-detect_profile() {
+path_export_targets() {
   case "${SHELL:-}" in
-    *zsh) printf '%s\n' "$HOME/.zshrc" ;;
+    *zsh)
+      printf '%s\n' "$HOME/.zprofile"
+      printf '%s\n' "$HOME/.zshrc"
+      ;;
     *bash) printf '%s\n' "$HOME/.bashrc" ;;
     *) printf '%s\n' "$HOME/.profile" ;;
+  esac
+}
+
+refresh_shell_hint() {
+  case "${SHELL:-}" in
+    *zsh) printf 'source "$HOME/.zprofile" && source "$HOME/.zshrc"' ;;
+    *bash) printf 'source "$HOME/.bashrc"' ;;
+    *) printf 'source "$HOME/.profile"' ;;
   esac
 }
 
@@ -395,7 +406,7 @@ ensure_bash_profile_sources_common_env() {
 }
 
 ensure_path_config() {
-  local profile export_line do_append answer
+  local export_line do_append answer profile primary_profile targets_display refresh_hint targets_text
   export_line='export PATH="$HOME/.local/bin:$PATH"'
 
   case ":$PATH:" in
@@ -405,14 +416,17 @@ ensure_path_config() {
       ;;
   esac
 
-  profile="$(detect_profile)"
+  targets_text="$(path_export_targets)"
+  primary_profile="${targets_text%%$'\n'*}"
+  targets_display="${targets_text//$'\n'/, }"
+  refresh_hint="$(refresh_shell_hint)"
   do_append=0
 
   if [ "${NON_INTERACTIVE}" -eq 1 ]; then
     do_append=1
   else
     echo ""
-    printf "是否将 %s 追加到 %s，使新开终端可直接执行 tomcat？[y/N] " "${export_line}" "${profile}"
+    printf "是否将 %s 追加到 %s，使新开终端可直接执行 tomcat？[y/N] " "${export_line}" "${targets_display}"
     read -r answer
     case "${answer:-n}" in
       [yY]|[yY][eE][sS]) do_append=1 ;;
@@ -420,31 +434,36 @@ ensure_path_config() {
   fi
 
   if [ "${do_append}" -eq 1 ]; then
-    if [ -f "${profile}" ] && grep -Fqs "${export_line}" "${profile}" 2>/dev/null; then
-      echo "PATH 配置已存在于 ${profile}，跳过追加。"
-    else
-      {
-        echo ""
-        echo "# tomcat (install.sh)"
-        echo "${export_line}"
-      } >> "${profile}"
-      echo "已写入 ${profile}，新开终端将自动生效。"
-    fi
+    while IFS= read -r profile; do
+      [ -n "${profile}" ] || continue
+      if [ -f "${profile}" ] && grep -Fqs "${export_line}" "${profile}" 2>/dev/null; then
+        echo "PATH 配置已存在于 ${profile}，跳过追加。"
+      else
+        {
+          echo ""
+          echo "# tomcat (install.sh)"
+          echo "${export_line}"
+        } >> "${profile}"
+        echo "已写入 ${profile}，新开终端将自动生效。"
+      fi
+    done <<EOF
+${targets_text}
+EOF
     # macOS 的 login bash 会优先读 .bash_profile（存在时不再继续读 .profile）。当 PATH
     # 写进 .bashrc 时，需确保 .bash_profile 同时加载 .profile 与 .bashrc，避免截断用户
     # 已放在 .profile 的通用环境变量（如 Rust 的 ~/.cargo/env）。
     case "${SHELL:-}" in
       *bash)
-        if [ "${profile}" = "$HOME/.bashrc" ]; then
+        if [ "${primary_profile}" = "$HOME/.bashrc" ]; then
           ensure_bash_profile_sources_common_env
           echo "已让 $HOME/.bash_profile 同时加载 .profile 和 .bashrc，覆盖 macOS 的 login shell。"
         fi
         ;;
     esac
-    echo "当前终端请执行: source \"${profile}\"  或重新打开终端。"
+    echo "当前终端请执行: ${refresh_hint}  或重新打开终端。"
   else
     echo "当前终端可直接执行: \"${INSTALL_DIR}/tomcat\" init"
-    echo "若想直接使用 tomcat 命令，请将以下内容加入 ${profile}:"
+    echo "若想直接使用 tomcat 命令，请将以下内容加入 ${targets_display}:"
     echo "  ${export_line}"
   fi
 }
