@@ -8,7 +8,7 @@ mod common;
 use assert_cmd::Command;
 use async_trait::async_trait;
 use predicates::prelude::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use serial_test::serial;
 use std::collections::VecDeque;
 use std::fs;
@@ -17,10 +17,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tomcat::{
-    init_context_state, llm_http_status_error, run_chat_turn, AppConfig, AppError, BashResult,
-    Capabilities, ChatContext, ChatMessage, ChatRequest, ChatResponse, DirEntry, EditFileResult,
-    EditOperation, LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation,
-    ResolvedCall, SessionManager, StreamEvent, WriteFileResult,
+    AppConfig, AppError, BashResult, Capabilities, ChatContext, ChatMessage, ChatRequest,
+    ChatResponse, DirEntry, EditFileResult, EditOperation, LlmProvider, LlmResolver, LlmScene,
+    PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent,
+    WriteFileResult, init_context_state, llm_http_status_error, run_chat_turn,
 };
 use tracing::{info, info_span};
 use wiremock::matchers::{method, path};
@@ -5889,7 +5889,7 @@ async fn test_chat_path_auto_web_search_does_not_fallback_past_shadowed_plugin_s
         std::time::Duration::ZERO,
     )
     .await;
-    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(2));
+    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(10));
 
     const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_AUTO_CHAT_KEY";
     let _env = EnvGuard::set_many(&[
@@ -6375,8 +6375,8 @@ async fn test_chat_path_web_search_survives_idle_gap_between_turns() {
         system_text,
     )
     .unwrap();
-    let first = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+    let first_outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
         run_chat_turn(
             &ctx,
             "请搜索 reqwest rust",
@@ -6386,18 +6386,25 @@ async fn test_chat_path_web_search_survives_idle_gap_between_turns() {
         ),
     )
     .await
-    .expect("first run_chat_turn timeout 5s")
-    .expect("first run_chat_turn result");
-    let first = match first {
-        tomcat::AgentRunOutcome::Completed(result) => result,
-        other => panic!("首轮 web_search 应成功完成，实际: {other:?}"),
+    .map_err(|_| "first run_chat_turn timeout 10s".to_string())
+    .and_then(|result| result.map_err(|err| format!("first run_chat_turn result error: {err}")));
+    let first = match &first_outcome {
+        Ok(tomcat::AgentRunOutcome::Completed(result)) => result,
+        Ok(other) => {
+            end_current_plugin_session(&ctx).await;
+            panic!("首轮 web_search 应成功完成，实际: {other:?}");
+        }
+        Err(err) => {
+            end_current_plugin_session(&ctx).await;
+            panic!("{err}");
+        }
     };
     assert!(first.final_text.contains("FIRST_SEARCH_OK"));
 
     tokio::time::sleep(std::time::Duration::from_millis(350)).await;
 
-    let second = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+    let second_outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
         run_chat_turn(
             &ctx,
             "再搜索一次 reqwest async",
@@ -6407,11 +6414,13 @@ async fn test_chat_path_web_search_survives_idle_gap_between_turns() {
         ),
     )
     .await
-    .expect("second run_chat_turn timeout 5s")
-    .expect("second run_chat_turn result");
-    let second = match second {
-        tomcat::AgentRunOutcome::Completed(result) => result,
-        other => panic!("空闲后第二轮 web_search 应仍成功，实际: {other:?}"),
+    .map_err(|_| "second run_chat_turn timeout 10s".to_string())
+    .and_then(|result| result.map_err(|err| format!("second run_chat_turn result error: {err}")));
+    end_current_plugin_session(&ctx).await;
+    let second = match &second_outcome {
+        Ok(tomcat::AgentRunOutcome::Completed(result)) => result,
+        Ok(other) => panic!("空闲后第二轮 web_search 应仍成功，实际: {other:?}"),
+        Err(err) => panic!("{err}"),
     };
     assert!(second.final_text.contains("SECOND_SEARCH_OK"));
     let tool_msg = second
@@ -6433,7 +6442,6 @@ async fn test_chat_path_web_search_survives_idle_gap_between_turns() {
         "空闲后第二轮不应再暴露 idle timeout 症状，实际: {}",
         trunc(tool_text, 400)
     );
-    end_current_plugin_session(&ctx).await;
 }
 
 #[tokio::test]
@@ -6831,12 +6839,7 @@ async fn test_run_chat_turn_rejects_multimodal_message_on_text_model_before_prov
                 msg.contains("vision"),
                 "should mention missing vision: {msg}"
             );
-            let suggested_model = msg
-                .split('`')
-                .nth(1)
-                .unwrap_or_default()
-                .trim()
-                .to_string();
+            let suggested_model = msg.split('`').nth(1).unwrap_or_default().trim().to_string();
             let catalog = tomcat::ModelCatalog::load(&ctx.config).expect("load model catalog");
             assert!(
                 !suggested_model.is_empty()

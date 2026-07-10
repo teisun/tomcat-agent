@@ -4,6 +4,7 @@ use super::{build_runtime_and_context, check_double_tap, DoubleTap, DOUBLE_TAP_W
 use std::time::{Duration, Instant};
 
 use crate::{AppConfig, SessionMode};
+use serial_test::serial;
 
 #[test]
 fn soft_when_first_press() {
@@ -46,6 +47,7 @@ fn hard_at_exact_window_boundary() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn build_runtime_and_context_constructs_chat_context_with_tokio_handle() {
     let work_dir = tempfile::tempdir().expect("work dir");
     let mut cfg = AppConfig::default();

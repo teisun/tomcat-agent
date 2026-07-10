@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command as StdCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -104,10 +104,12 @@ impl ServeChild {
     }
 
     pub fn recv_value(&self, timeout: Duration) -> Value {
-        let line = self
-            .stdout_rx
-            .recv_timeout(timeout)
-            .unwrap_or_else(|err| panic!("timed out waiting for serve stdout: {err}; stderr={}", self.stderr()));
+        let line = self.stdout_rx.recv_timeout(timeout).unwrap_or_else(|err| {
+            panic!(
+                "timed out waiting for serve stdout: {err}; stderr={}",
+                self.stderr()
+            )
+        });
         serde_json::from_str(&line).unwrap_or_else(|err| {
             panic!("stdout line should be json: {err}; line={line}");
         })

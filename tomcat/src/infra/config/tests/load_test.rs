@@ -9,6 +9,7 @@
 
 use super::super::*;
 use std::io::Write;
+use serial_test::serial;
 
 #[test]
 fn load_config_none_path_returns_default_or_env() {
@@ -100,6 +101,7 @@ fn load_config_from_example_file() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn load_config_env_overrides_llm_files_expires_after_seconds() {
     let dir = std::env::temp_dir().join("tomcat_files_env_override_test");
     std::fs::create_dir_all(&dir).unwrap();

@@ -7,18 +7,19 @@ pub mod serve;
 
 use rcgen::generate_simple_self_signed;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tomcat::{AppConfig, DefaultLlmResolver, LlmProvider, LlmResolver, LlmScene, ModelCatalog};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 static INIT: Once = Once::new();
 
@@ -347,6 +348,45 @@ pub fn setup_logging() {
             .with(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
             .init();
     });
+}
+
+/// 把当前测试进程的 HOME 切到独立 tempdir，隔离 `~/.tomcat/*` 盘状态。
+///
+/// nextest 模式下是一用例一进程，因此一个 guard 对应一个测试进程，最适合 real-llm
+/// / CLI 子进程这类会落盘到 `~/.tomcat` 的场景。
+pub struct TempHomeGuard {
+    home: tempfile::TempDir,
+    old_home: Option<OsString>,
+}
+
+impl TempHomeGuard {
+    pub fn new() -> Self {
+        let home = tempfile::tempdir().expect("create temp HOME for test");
+        let dot_tomcat = home.path().join(".tomcat");
+        std::fs::create_dir_all(dot_tomcat.join("plans")).expect("create ~/.tomcat/plans for test");
+        std::fs::create_dir_all(dot_tomcat.join("temp")).expect("create ~/.tomcat/temp for test");
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+        Self { home, old_home }
+    }
+
+    pub fn home_path(&self) -> &Path {
+        self.home.path()
+    }
+
+    pub fn dot_tomcat_path(&self) -> std::path::PathBuf {
+        self.home.path().join(".tomcat")
+    }
+}
+
+impl Drop for TempHomeGuard {
+    fn drop(&mut self) {
+        if let Some(old_home) = &self.old_home {
+            std::env::set_var("HOME", old_home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
 }
 
 /// 在 `~/.tomcat/temp/` 下创建本次 E2E 专用子目录（已默认在 workspace_roots 内）。

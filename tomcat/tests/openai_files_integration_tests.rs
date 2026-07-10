@@ -17,7 +17,13 @@ use tomcat::{AppConfig, ChatMessage, ChatMessageContentPart, ChatRequest, LlmPro
 const SAMPLE_IMAGE_PATH: &str = "tests/fixtures/llm_multimodal/sample_image.png";
 const SAMPLE_PDF_B64: &str = include_str!("fixtures/llm_multimodal/sample_pdf_b64.txt");
 
-fn responses_config() -> AppConfig {
+struct ResponsesFixture {
+    _home: common::TempHomeGuard,
+    config: AppConfig,
+}
+
+fn responses_fixture() -> ResponsesFixture {
+    let home = common::TempHomeGuard::new();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(
         common::dot_tomcat_e2e_workdir("openai_files")
@@ -25,7 +31,10 @@ fn responses_config() -> AppConfig {
             .to_string(),
     );
     common::apply_openai_app_config(&mut cfg);
-    cfg
+    ResponsesFixture {
+        _home: home,
+        config: cfg,
+    }
 }
 
 fn decode_b64_to_tempfile(
@@ -117,9 +126,9 @@ async fn openai_files_roundtrip_four_sizes_real_api() -> Result<(), Box<dyn std:
         return Ok(());
     }
     common::load_openai_test_env();
-    let cfg = responses_config();
-    let provider = common::resolve_main_provider(&cfg);
-    let client = files_client_from_provider(provider.as_ref(), &cfg)?;
+    let fixture = responses_fixture();
+    let provider = common::resolve_main_provider(&fixture.config);
+    let client = files_client_from_provider(provider.as_ref(), &fixture.config)?;
     let prefix = unique_prefix();
 
     let mut guard = CleanupGuard::new(client.clone());
@@ -164,9 +173,9 @@ async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std
         return Ok(());
     }
     common::load_openai_test_env();
-    let cfg = responses_config();
-    let provider = common::resolve_main_provider(&cfg);
-    let client = files_client_from_provider(provider.as_ref(), &cfg)?;
+    let fixture = responses_fixture();
+    let provider = common::resolve_main_provider(&fixture.config);
+    let client = files_client_from_provider(provider.as_ref(), &fixture.config)?;
     let prefix = unique_prefix();
     let filename = format!("{prefix}-sample.txt");
     let uploaded = client
@@ -186,7 +195,7 @@ async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std
     ];
     let req = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
-        model: cfg.llm.default_model.clone(),
+        model: fixture.config.llm.default_model.clone(),
         temperature: None,
         max_tokens: Some(96),
         stream: Some(false),
@@ -222,16 +231,16 @@ async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std
 #[tokio::test]
 #[ignore = "T2-P0-015: 待可用 Files API 的 key；手动 cargo test --test openai_files_integration_tests -- --ignored"]
 #[serial]
-async fn openai_files_cli_single_turn_image_describe_real_api(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn openai_files_cli_single_turn_image_describe_real_api()
+-> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     if !require_live_openai_files_opt_in("openai_files_cli_single_turn_image_describe_real_api") {
         return Ok(());
     }
     common::load_openai_test_env();
-    let cfg = responses_config();
-    let provider = common::resolve_main_provider(&cfg);
-    let client = files_client_from_provider(provider.as_ref(), &cfg)?;
+    let fixture = responses_fixture();
+    let provider = common::resolve_main_provider(&fixture.config);
+    let client = files_client_from_provider(provider.as_ref(), &fixture.config)?;
     let prefix = unique_prefix();
     let image_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(SAMPLE_IMAGE_PATH);
     let image_bytes = std::fs::read(&image_path)?;
@@ -250,7 +259,7 @@ async fn openai_files_cli_single_turn_image_describe_real_api(
     ];
     let req = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
-        model: cfg.llm.default_model.clone(),
+        model: fixture.config.llm.default_model.clone(),
         temperature: None,
         max_tokens: Some(96),
         stream: Some(false),
@@ -312,9 +321,9 @@ async fn openai_files_tui_two_phase_pdf_describe_real_api() -> Result<(), Box<dy
         return Ok(());
     }
     common::load_openai_test_env();
-    let cfg = responses_config();
-    let provider = common::resolve_main_provider(&cfg);
-    let client = files_client_from_provider(provider.as_ref(), &cfg)?;
+    let fixture = responses_fixture();
+    let provider = common::resolve_main_provider(&fixture.config);
+    let client = files_client_from_provider(provider.as_ref(), &fixture.config)?;
     let prefix = unique_prefix();
     let filename = format!("{prefix}-tui-two-phase.pdf");
     let pdf_tmp = decode_b64_to_tempfile(SAMPLE_PDF_B64.trim())?;
@@ -339,7 +348,7 @@ async fn openai_files_tui_two_phase_pdf_describe_real_api() -> Result<(), Box<dy
     ];
     let req = ChatRequest {
         messages: vec![ChatMessage::user_with_parts(parts)],
-        model: cfg.llm.default_model.clone(),
+        model: fixture.config.llm.default_model.clone(),
         temperature: None,
         max_tokens: Some(96),
         stream: Some(false),

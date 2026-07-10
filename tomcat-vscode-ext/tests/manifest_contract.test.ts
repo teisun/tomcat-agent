@@ -61,6 +61,15 @@ describe("extension manifest contract", () => {
     expect(manifest.scripts?.["package:vsix"]).toBe("tsx scripts/package-vsix.ts");
   });
 
+  it("keeps fast/full extension gate scripts wired to the shared entrypoints", async () => {
+    const manifest = await readManifest();
+
+    expect(manifest.scripts?.["test:unit:core"]).toBe("vitest run --maxWorkers 4 src");
+    expect(manifest.scripts?.["test:integration"]).toBe("vitest run --maxWorkers 1 tests");
+    expect(manifest.scripts?.["gate:fast"]).toBe("npm run lint && npm run test:unit");
+    expect(manifest.scripts?.["gate:full"]).toBe("tsx scripts/run-vscode-full-gate.ts");
+  });
+
   it("registers the stable slash commands for the chat participant", async () => {
     const manifest = await readManifest();
     const participant = manifest.contributes?.chatParticipants?.[0];

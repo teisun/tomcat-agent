@@ -19,8 +19,10 @@
 //! - 默认模型来自 `TOMCAT_E2E_DEEPSEEK_MODEL`，未设 → `deepseek-v4-pro`。
 //!
 //! ## 数据目录
-//! - 子进程**继承真实 HOME**（不注入临时 `HOME`）；plan 落盘到 `~/.tomcat/plans/`。
-//! - 默认 cwd 用 `~/.tomcat/temp/<run>/`（内置 workspace_roots）；自定义 cwd 必须显式位于可写根内。
+//! - 每个测试进程先切到独立临时 `HOME`，CLI 子进程继承这个临时 HOME；
+//!   plan 落盘到该临时 HOME 下的 `~/.tomcat/plans/`。
+//! - 默认 cwd 用临时 HOME 下的 `~/.tomcat/temp/<run>/`（内置 workspace_roots）；
+//!   自定义 cwd 必须显式位于可写根内。
 //! - 诊断日志写到仓库内 `workspace-temp/logs/`，运行一开始就打印可点击路径。
 //! - 每次 run 都会按当前 `workdir` 生成新的 code-scope `session_id`；
 //!   因此 `recover()` 必须按 `session_id` 而不是仅按固定 `DEFAULT_SESSION_KEY`
@@ -39,8 +41,8 @@ use std::time::Duration;
 
 use serial_test::serial;
 use tomcat::core::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
-    TodoItem, TodoStatus,
+    PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus, plan_path_for_id,
+    read_plan, write_plan,
 };
 use tomcat::{
     load_config_toml_file, normalize_path, resolve_sessions_dir, resolve_workspace_roots_paths,
@@ -108,6 +110,7 @@ impl DiagLog {
 }
 
 struct CliFixture {
+    _home_guard: common::TempHomeGuard,
     home: PathBuf,
     workdir: PathBuf,
     run_session_id: String,
@@ -290,15 +293,12 @@ fn setup_fixture(
 ) -> CliFixture {
     let api_key = require_api_key();
     let model = default_model();
-    let home = dirs::home_dir().expect("无法定位 HOME 目录");
+    let home_guard = common::TempHomeGuard::new();
+    let home = home_guard.home_path().to_path_buf();
     std::fs::create_dir_all(home.join(".tomcat").join("plans")).unwrap();
     let user_config_path = {
         let p = home.join(".tomcat").join("tomcat.config.toml");
-        if p.exists() {
-            Some(p)
-        } else {
-            None
-        }
+        if p.exists() { Some(p) } else { None }
     };
     let mut cfg = load_user_config(user_config_path.as_deref());
     cfg.plan.max_code_review_rounds = max_code_review_rounds;
@@ -325,6 +325,7 @@ fn setup_fixture(
     let diag_log = DiagLog::new(log_slug);
 
     let fx = CliFixture {
+        _home_guard: home_guard,
         home,
         workdir,
         run_session_id: session.session_id,
@@ -641,11 +642,7 @@ fn text_delta_from_bytes(bytes: &[u8], cursor: &mut Utf8StreamCursor) -> Option<
                     let valid = err.valid_up_to();
                     let text = String::from_utf8_lossy(&chunk[..valid]).to_string();
                     cursor.carry = chunk[valid..].to_vec();
-                    if text.is_empty() {
-                        None
-                    } else {
-                        Some(text)
-                    }
+                    if text.is_empty() { None } else { Some(text) }
                 }
             }
         }

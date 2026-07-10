@@ -50,9 +50,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
 
-const editFilePath = ${JSON.stringify(editFilePath)};
-const requireInit = ${JSON.stringify(Boolean(options.requireInit))};
-const setupMarkerPath = ${JSON.stringify(setupMarkerPath)};
+const editFilePath =
+  process.env.TOMCAT_VSCODE_TEST_EDIT_FILE || ${JSON.stringify(editFilePath)};
+const requireInit =
+  process.env.TOMCAT_VSCODE_TEST_REQUIRE_INIT === "1"
+    ? true
+    : ${JSON.stringify(Boolean(options.requireInit))};
+const setupMarkerPath =
+  process.env.TOMCAT_VSCODE_TEST_SETUP_MARKER || ${JSON.stringify(setupMarkerPath)};
 const BUILTIN_MODELS = [
   {
     api: "openai",
@@ -1601,6 +1606,8 @@ export async function createHostE2eFixture(
       TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
       TOMCAT_VSCODE_TEST_EDIT_FILE: editFilePath,
       TOMCAT_VSCODE_TEST_PATH: fakeServePath,
+      TOMCAT_VSCODE_TEST_REQUIRE_INIT: options.requireInit ? "1" : "0",
+      TOMCAT_VSCODE_TEST_SETUP_MARKER: setupMarkerPath,
       TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
     },
     fakeServePath,

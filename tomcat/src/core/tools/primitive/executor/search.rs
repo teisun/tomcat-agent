@@ -7,8 +7,8 @@
 //!
 //! 详见 `docs/architecture/tools/search_files.md` 与 plan §5–§7。
 
-use super::helpers::{find_binary, grant_trigger_str, grant_type_str, permission_scope_str};
 use super::DefaultPrimitiveExecutor;
+use super::helpers::{find_binary, grant_trigger_str, grant_type_str, permission_scope_str};
 use crate::core::permission::{PathRule, PathRuleMode};
 use crate::core::tools::primitive::{
     PrimitiveOperation, SearchFileCount, SearchFileMatch, SearchFilesArgs, SearchFilesOutput,
@@ -26,7 +26,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 
-const SEARCH_CONTENT_TIMEOUT_SECS: u64 = 5;
+// 在满核 nextest 门禁下，spawn `rg` 的调度抖动会放大；10s 仍是硬上界，
+// 但能避免把极轻量本地搜索误判成超时。
+const SEARCH_CONTENT_TIMEOUT_SECS: u64 = 10;
 const SEARCH_FILES_TIMEOUT_SECS: u64 = 60;
 /// Tier2 单查询墙钟（plan §7.3 冻结值：10s）。
 const SEARCH_FALLBACK_TIMEOUT_SECS: u64 = 10;
@@ -50,13 +52,13 @@ fn resolve_search_limit(args: &SearchFilesArgs) -> Result<Option<usize>, AppErro
         Some(Some(0)) => {
             return Err(AppError::Primitive(
                 "search_files.head_limit must be 1..=1024 or null; 0 is not accepted".to_string(),
-            ))
+            ));
         }
         Some(Some(n)) if n > SEARCH_LIMIT_HARD_CAP => {
             return Err(AppError::Primitive(format!(
                 "search_files.head_limit must be <= {}",
                 SEARCH_LIMIT_HARD_CAP
-            )))
+            )));
         }
         Some(Some(n)) => Some(n),
     };
@@ -119,11 +121,7 @@ fn paginate<T>(
 
 fn absolute_result_path(root: &Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        root.join(p)
-    }
+    if p.is_absolute() { p } else { root.join(p) }
 }
 
 fn filter_denied_files(

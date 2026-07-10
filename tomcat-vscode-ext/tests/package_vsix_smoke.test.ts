@@ -11,6 +11,7 @@ import {
   bundledExecutableRelativePath,
   listPublishableFiles,
   packageVsix,
+  packageVsixOrReuse,
   preparePublishDirectory,
 } from "../scripts/package-vsix";
 
@@ -24,7 +25,7 @@ describe("VSIX packaging", () => {
       let publishRoot: string | undefined;
 
       try {
-        const packaged = packageVsix({ extensionRoot, outPath: vsixPath });
+        const packaged = packageVsixOrReuse({ extensionRoot, outPath: vsixPath });
         publishRoot = preparePublishDirectory(extensionRoot);
         const fileList = listPublishableFiles(publishRoot, extensionRoot);
         assertPublishableFiles(fileList);

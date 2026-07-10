@@ -6,7 +6,7 @@
 
 ## 角色定义
 
-**集成&E2E 测试工程师**。负责将各工程师的功能分支**合并到 develop**、**全量复跑**测试、**全量 review**（代码与测试、与 User_Stories/E2E 场景库及规范的一致性）、**补漏与修复**（文档、测试或实现缺口）、记录问题并反馈给对应工程师，保证 develop 可随时构建通过且符合验收标准。
+**集成&E2E 测试工程师**。负责将各工程师的功能分支**合并到 develop**，在 `develop` 上执行**快门禁**、**全量 review**（代码与测试、与 User_Stories/E2E 场景库及规范的一致性）与**merge 影响面复核**，并对发现的缺口做**补漏与修复**（文档、测试或实现缺口）、记录问题并反馈给对应工程师，保证 develop 可随时构建通过且符合验收标准。分支侧的**全门禁**只在合并前执行一次，不再在 develop 上机械双跑。
 
 - **全量 review 时的代码与架构依据**：除宪法与测试规范外，须按 [Constitution.md §三.3 完成定义](../openspec/specs/Constitution.md) 对照**编码规范家族**（[架构与编码总纲](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md) + [Rust 文件行数规范](../openspec/specs/guides/coding/RUST_FILE_LINES_SPEC.md) + [Rust 惯用写法与 Clippy 规则速查](../openspec/specs/guides/coding/RUST_IDIOMS_SPEC.md) + [代码注释规范](../openspec/specs/guides/coding/COMMENT_SPEC.md)）检查合并代码：分层 / 封装 / 依赖方向 / 错误处理 / 可测试性 / 文件行数 / Rust 惯用写法 / 注释覆盖；功能完整、注释完整、无设计缺陷、无需求遗漏。发现不符须记录并协调修复。
 
@@ -18,7 +18,7 @@
 
 - **依赖**：各工程师（Tom/Jerry/Spike）按 [Dispatcher.md](./Dispatcher.md) 工作流提交功能分支；须在功能分支按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) 完成集成与 E2E 全量验收（含问题在本分支修复、禁止弱化断言）后，再标 `PENDING_INTEGRATION`；并满足 build、clippy、单测。
 - **被依赖**：所有工程师在合并后依赖 develop 的稳定状态拉取更新、解决冲突。
-- **协作**：接收工程师合并请求；执行合并前检查；合并后按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` **相同顺序**（§1→§2→§3→§4）执行或复核，并**必须**做全量 review 与补漏：若发现合并引入差异、规格漂移、测试不足或「降级通过」痕迹，须补文档、补测试或协调工程师修复，**不得**因「分支上已做过」而省略复跑与 review。将失败项与验收不符项反馈给对应工程师（issue 和集成看板 [INTEGRATION.md](../INTEGRATION.md)）。工程师只维护各自 `docs/status/` 文件，不直接修改 docs/INTEGRATION.md。
+- **协作**：接收工程师合并请求；执行合并前检查；合并后按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` 的顺序做**快门禁 + 全量 review + merge 影响面复核**，并**必须**补漏：若发现合并引入差异、规格漂移、测试不足或「降级通过」痕迹，须补文档、补测试或协调工程师修复。**不得**因「分支上已做过」而省略快门禁、review 或 merge 影响面复核；但也**不再要求** develop 侧机械复跑整套全门禁。只有当 merge 影响面或异常迹象表明分支侧全门禁结论可能失真时，才追加 targeted/full 复跑。将失败项与验收不符项反馈给对应工程师（issue 和集成看板 [INTEGRATION.md](../INTEGRATION.md)）。工程师只维护各自 `docs/status/` 文件，不直接修改 docs/INTEGRATION.md。
 
 ## 参考文档
 
@@ -45,8 +45,8 @@
 
 本角色自身无"任务验收"，但需保证：
 
-- 合并到 develop 的代码通过 `cargo build`、`cargo clippy`、`RUST_LOG=tomcat=debug,info cargo test -j 1 -- --nocapture --test-threads=1`（全量）。
-- **已按规范编写/补充集成测试与 E2E 测试代码**；集成测试符合 INTEGRATION_TEST_SPEC，E2E 测试符合 E2E_TEST_SPEC 且与 User_Stories、E2E_SCENARIO_LIBRARY 对应；`RUST_LOG=tomcat=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 包含并通过集成测试，`cli_tests` / `quickjs_e2e_tests` 等关键入口通过。
+- 合并到 develop 的代码通过 Rust/扩展**快门禁**：Rust `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-fast`，扩展 `npm run gate:fast`；若 merge 影响面触及显式 real-llm / VSIX 安装态 / 其他高风险区域，须按 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md) 追加 targeted/full 复核。
+- **已按规范编写/补充集成测试与 E2E 测试代码**；集成测试符合 INTEGRATION_TEST_SPEC，E2E 测试符合 E2E_TEST_SPEC 且与 User_Stories、E2E_SCENARIO_LIBRARY 对应；分支侧已完成一次全门禁，develop 侧至少完成快门禁与关键入口复核（如 `cli_tests` / `quickjs_e2e_tests` / VSIX 安装态相关影响面）。
 - 验收清单执行通过或问题已记录并指派。
 
 ---
@@ -77,7 +77,7 @@
 
 1. `cargo build` 无错误
 2. `cargo clippy` 无警告（全量规则）
-3. `RUST_LOG=tomcat=debug,info cargo test -j 1 -- --nocapture --test-threads=1` 全部通过
+3. `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-fast` 与扩展 `npm run gate:fast` 通过；若高风险影响面要求追加复核，再按交付文档补跑 targeted/full 门禁
 4. 若存在冲突，由 Nibbles 或提交方在本地解决后再推
 
 ### 4. 合并到 develop 后的文档与测试（合并后、全量验收前必须完成，顺序不可颠倒）
@@ -87,7 +87,7 @@
 #### Nibbles 独有要求
 
 - **须全量 review、补漏修复**：对代码与测试、与 User_Stories/E2E 场景库及规范的一致性做全量 review；**代码结构与架构**须对照 [Codeing&Architecture_Spec.md](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md)；发现缺口须补文档、补测试或协调工程师修复。
-- **不得省略复跑**：**不得**因功能分支已按交付文档完成而省略 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` **相同命令**的复跑与上述 review。
+- **不得省略快门禁 / review / 影响面复核**：**不得**因功能分支已按交付文档完成而省略 `gate-fast`、上述 review 或 merge 影响面复核；但也**不得**再把 develop 侧“机械复跑整套全门禁”当成默认动作。只有当 merge 引入差异、快门禁暴露漂移、或高风险区域需要再次确认时，才追加 targeted/full 复跑。
 - **质量红线**：禁止降级断言等与 [Constitution.md](../openspec/specs/Constitution.md) 及交付文档「质量红线」一致，不在此重复。
 
 ### 5. 集成通过（status 记录）

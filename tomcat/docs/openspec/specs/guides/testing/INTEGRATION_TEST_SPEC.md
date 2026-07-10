@@ -123,21 +123,31 @@ my_project/
 ## 7. 执行与持续集成 (CI)
 
 ### 7.1 本地执行
-*   **分类执行约定（本仓库）**：默认让可并发的测试目标并发执行；只有涉及进程级全局资源、真实插件运行时、长生命周期 VM 或重子进程的目标进入串行组，使用 `-j 1` 与 `--test-threads=1`。一键脚本 `./scripts/run-integration-tests.sh` 是分类执行的唯一入口。
+*   **分类执行约定（本仓库）**：Rust 门禁唯一入口仍是 `./scripts/run-integration-tests.sh`；`integration*` 统一走 `cargo-nextest`，`lib` / `doctest` 继续用 `cargo test`，避免把纯单测误切到“一用例一进程”模型。
 *   运行默认集成测试：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration`
-*   仅运行可并发集成测试：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-parallel`
-*   仅运行必须串行集成测试：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-serial`
-*   运行特定文件：若该目标无全局资源依赖，可用 `RUST_LOG=tomcat=debug,info cargo test --test audit_tests -- --nocapture`；若属于串行组，须用 `RUST_LOG=tomcat=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1`。
-*   显示打印输出（含库内单元测试）：`RUST_LOG=tomcat=debug,info cargo test --lib -- --nocapture`
+*   仅运行默认 integration 组：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-parallel`
+*   仅运行 serial 兜底组（默认空）：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-serial`
+*   运行真 LLM 显式层：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-real-llm`
+*   运行 Rust 快门禁：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-fast`
+*   运行 Rust 全门禁：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-full`
+*   运行特定文件：默认目标可用 `RUST_LOG=tomcat=debug,info cargo nextest run --test audit_tests`；显式 real-llm 目标用 `RUST_LOG=tomcat=debug,info cargo nextest run --profile real-llm --test plan_real_llm_cli_e2e`。若要覆盖 doctest，额外执行 `cargo test --doc`。
+*   仅运行库内单元测试：`RUST_LOG=tomcat=debug,info cargo test --lib`
+*   仅运行 doctest：`cargo test --doc`
 
-### 7.2 并发组与串行组
-集成测试二进制名单维护在 `scripts/test-groups.sh`。**每一个**新增或更名的 integration 测试目标（`cargo test --test <name>` 之 `<name>`）**都必须**写入 `TOMCAT_INTEGRATION_PARALLEL_TESTS` 与 `TOMCAT_INTEGRATION_SERIAL_TESTS` **二者之一**；未列入任一阵列时，`./scripts/run-integration-tests.sh` **不会**执行该二进制（与最终选并行还是串行无关，两组清单都必须维护）。新增集成测试 binary 时**默认加入串行组**；确认满足以下条件后才可移入并发组：不修改进程全局 env / cwd，不依赖共享宿主文件路径，不启动真实插件运行时 / 长生命周期 VM，不启动重子进程并依赖其全局环境。工程师全量集成前登记分组的要求见 [Dispatcher.md](../agents/Dispatcher.md) §5「开发流程」。
+### 7.2 并发模型、默认过滤与显式层
+集成测试二进制名单维护在 `scripts/test-groups.sh`，nextest 过滤 / test-group 维护在 `.config/nextest.toml`。两者必须同步，缺一不可。
 
-**可并发组**（默认 cargo 并发；与 `scripts/test-groups.sh` 中 `TOMCAT_INTEGRATION_PARALLEL_TESTS` 对齐）：
-`audit_tests`、`event_tests`、`agent_loop_tests`、`bash_assignment_deny`、`system_prompt_cwd_priority`、`path_command_e2e`、`cwd_lazy_prompt_e2e`、`search_files_tests`、`session_tests`、`plugin_tests`、`llm_tests`、`openai_responses_integration_tests`、`context_management_tests`、`robustness_tests`、`read_tool_tests`、`web_search_tool_tests`、`web_fetch_tool_tests`。
+**当前模型（默认追求最省时间）**：
 
-**必须串行组**（强制 `-j 1 --test-threads=1`；与 `TOMCAT_INTEGRATION_SERIAL_TESTS` 对齐）：
-`cli_tests`、`quickjs_e2e_tests`、`long_lived_vm_tests`、`hostcall_tests`、`primitives_tools_tests`、`tool_catalog_doc`。
+1. **默认满并发车道**：`cargo nextest run` 的默认 `test-threads = num-cpus`。凡已证实不共享进程级全局状态或真实 `~/.tomcat` 盘目录的 binary，全部放这里，包括原先的 `cli_tests`、`checkpoint_cli_e2e`、`resume_hydration_cli_e2e`、`quickjs_e2e_tests`、`hostcall_tests`、`long_lived_vm_tests`、`primitives_tools_tests`、`tool_catalog_doc`、`serve_*` 等。
+2. **serial 兜底组**：`test-groups.serial.max-threads = 1`，默认空。只有 3x 连跑证明确实互踩、OOM 或明显抖动时，才把个别 binary 临时回退到这里。
+3. **real-llm 显式层**：`.config/nextest.toml` 的 `profile.real-llm` 负责收口 `TOMCAT_INTEGRATION_REAL_LLM_TESTS` 以及 `cli_tests` 里 `*_real_llm_cli` 慢用例；其 `test-groups.real-llm.max-threads = 2` 只为规避 provider API 限流，不是正确性要求。
+
+**隔离原则**：
+
+*   `nextest` 是“一用例一进程”，因此 `set_var` / `cwd` 这类进程内状态不再天然要求整组 `-j1 --test-threads=1`。
+*   真 LLM / CLI E2E 里凡会落盘到 `~/.tomcat` 的路径，都必须在测试入口先切到**临时 HOME**，让 `~/.tomcat/*` 落到私有 tempdir；默认门禁不再依赖真实家目录。
+*   默认过滤（`profile.default.default-filter`）会排除显式 real-llm binary 与 `cli_tests` 里的 `*_real_llm_cli` 慢用例；它们只能通过 `integration-real-llm` / `profile real-llm` 进入门禁。
 
 ### 7.3 CI 检查项
 在流水线（如 GitHub Actions）中，集成测试应包含：
@@ -147,8 +157,14 @@ my_project/
 4.  **覆盖率要求**：集成测试应覆盖核心业务路径（使用 `cargo-tarpaulin` 统计）。
 
 ### 7.4 全量集成测试
-跑默认全量集成测试时使用：
-`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`
+默认门禁与分层流程如下：
+
+*   **快门禁**（默认 / `all` / `gate-fast`）：`clippy` → `lib(cargo test)` → `doctest` → `integration(nextest 默认满并发)`  
+    命令：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-fast`
+*   **全门禁**（合并前显式一次）：`gate-fast` → `integration-real-llm`  
+    命令：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-full`
+*   **release**：不再属于默认门禁；只在确需产物时单独执行  
+    命令：`./scripts/run-integration-tests.sh release`
 
 ## 8. 最佳实践建议
 *   **不要过度 Mock**：集成测试的价值在于真实性，如果所有外部依赖都被 Mock 了，那它就变成了单元测试。
@@ -169,7 +185,7 @@ my_project/
 2. **上下文**：为每个测试用例创建 `info_span!`（或使用 `#[instrument]`）标注用例名与关键参数（如 plugin_id、session_key）。
 3. **AAA 日志锚点**：在 Arrange / Act / Assert 三个阶段的关键步骤**至少各记录一条** `tracing::info!`（必要时补 `tracing::debug!` 记录关键变量）。
 
-> 说明：默认 `cargo test` 会捕获输出，需使用 `-- --nocapture` 才能在终端实时看到日志；若为了阅读连续日志而临时串行化，可追加 `--test-threads=1`。详细技术说明与目录结构见 [INTEGRATION_TEST_LOGGING.md](INTEGRATION_TEST_LOGGING.md)。
+> 说明：默认 `cargo test` / `cargo nextest run` 都会捕获输出；若需要在诊断场景里实时查看逐步日志，可用 targeted `cargo test -- --nocapture` 或读取脚本产出的日志文件。详细技术说明与目录结构见 [INTEGRATION_TEST_LOGGING.md](INTEGRATION_TEST_LOGGING.md)。
 
 ---
 

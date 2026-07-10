@@ -3,8 +3,10 @@ use std::sync::Arc;
 use crate::api::chat::panels::{AskQuestionPanel, MockAskQuestionPanel};
 use crate::api::chat::{ChatContext, ChatContextOverrides};
 use crate::AppConfig;
+use serial_test::serial;
 
 #[test]
+#[serial(env_lock)]
 fn chat_context_uses_injected_ask_question_panel_override() {
     const ENV_KEY: &str = "TOMCAT_CHAT_CONTEXT_OVERRIDE_ASKQ_KEY";
 

@@ -16,6 +16,8 @@ export interface PackageVsixOptions {
   target?: string;
 }
 
+export const PREBUILT_VSIX_ENV = "TOMCAT_PREBUILT_VSIX";
+
 const REQUIRED_FILES = [
   "LICENSE",
   "README.md",
@@ -269,6 +271,29 @@ export function packageVsix(options: PackageVsixOptions = {}): string {
   }
 }
 
+export function resolvePrebuiltVsixPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env[PREBUILT_VSIX_ENV]?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const resolved = path.resolve(raw);
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`${PREBUILT_VSIX_ENV} points to a missing file: ${resolved}`);
+  }
+  return resolved;
+}
+
+export function packageVsixOrReuse(
+  options: PackageVsixOptions = {},
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const prebuilt = resolvePrebuiltVsixPath(env);
+  if (prebuilt) {
+    return prebuilt;
+  }
+  return packageVsix(options);
+}
+
 function parseOutPath(argv: readonly string[]): string | undefined {
   const index = argv.indexOf("--out");
   if (index === -1) {
@@ -318,7 +343,7 @@ function main(): void {
   const target = parseTarget(argv);
   const bundleBinaryPath = parseBundleBinaryPath(argv);
   const skipBuild = parseSkipBuild(argv);
-  const result = packageVsix({ bundleBinaryPath, outPath, skipBuild, target });
+  const result = packageVsixOrReuse({ bundleBinaryPath, outPath, skipBuild, target });
   console.log(`Packaged VSIX at ${result}`);
 }
 

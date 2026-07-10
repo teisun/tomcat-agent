@@ -11,7 +11,7 @@ import {
   resolveVsCodeExecutable,
   seedChatUserSettings,
 } from "./e2eHostFixture";
-import { packageVsix } from "./package-vsix";
+import { packageVsixOrReuse } from "./package-vsix";
 
 function currentVsCodeTarget(): string {
   if (process.platform === "darwin" && process.arch === "arm64") {
@@ -31,8 +31,8 @@ type InstalledScenarioOptions = {
   extensionRoot: string;
   harnessRoot: string;
   harnessTestsPath: string;
-  packageOptions: Parameters<typeof packageVsix>[0];
   testEnv: NodeJS.ProcessEnv;
+  vsixPath: string;
   workspacePath: string;
 };
 
@@ -40,7 +40,6 @@ async function runInstalledScenario(options: InstalledScenarioOptions): Promise<
   const installRoot = await fs.mkdtemp("/tmp/tvsi-verify-");
   const extensionsDir = path.join(installRoot, "extensions");
   const userDataDir = path.join(installRoot, "user-data");
-  const vsixPath = path.join(installRoot, "tomcat-vscode-ext.vsix");
 
   try {
     await fs.mkdir(extensionsDir, { recursive: true });
@@ -56,11 +55,6 @@ async function runInstalledScenario(options: InstalledScenarioOptions): Promise<
       );
     }
 
-    packageVsix({
-      ...options.packageOptions,
-      extensionRoot: options.extensionRoot,
-      outPath: vsixPath,
-    });
     execFileSync(
       resolveVsCodeCli(),
       [
@@ -69,7 +63,7 @@ async function runInstalledScenario(options: InstalledScenarioOptions): Promise<
         "--extensions-dir",
         extensionsDir,
         "--install-extension",
-        vsixPath,
+        options.vsixPath,
         "--force",
       ],
       {
@@ -107,6 +101,7 @@ async function main(): Promise<void> {
     ?? path.join(os.tmpdir(), "tomcat-vsix-verify-artifacts");
   const bundledFixture = await createHostE2eFixture();
   const setupRequiredFixture = await createHostE2eFixture({ requireInit: true });
+  const prebuiltVsixRoot = await fs.mkdtemp("/tmp/tvsi-prebuilt-vsix-");
   const {
     TOMCAT_VSCODE_TEST_PATH: _ignoredBundledTestPath,
     ...bundledOnlyFixtureEnv
@@ -173,16 +168,19 @@ async function main(): Promise<void> {
       cwd: extensionRoot,
       stdio: "inherit",
     });
+    const reusableVsixPath = packageVsixOrReuse({
+      bundleBinaryPath: bundledFixture.fakeServePath,
+      extensionRoot,
+      outPath: path.join(prebuiltVsixRoot, "tomcat-vscode-ext.vsix"),
+      target: currentVsCodeTarget(),
+    });
 
     await runInstalledScenario({
       extensionRoot,
       harnessRoot,
       harnessTestsPath: bundledHarnessTestsPath,
-      packageOptions: {
-        bundleBinaryPath: bundledFixture.fakeServePath,
-        target: currentVsCodeTarget(),
-      },
       testEnv: bundledVerifyEnv,
+      vsixPath: reusableVsixPath,
       workspacePath: path.resolve(extensionRoot, ".."),
     });
 
@@ -193,10 +191,8 @@ async function main(): Promise<void> {
       extensionRoot,
       harnessRoot,
       harnessTestsPath: promptOnlyHarnessTestsPath,
-      packageOptions: {
-        skipBuild: true,
-      },
       testEnv: pureExtPromptEnv,
+      vsixPath: reusableVsixPath,
       workspacePath: pureExtWorkspacePath,
     });
 
@@ -204,12 +200,8 @@ async function main(): Promise<void> {
       extensionRoot,
       harnessRoot,
       harnessTestsPath: setupRecoveryHarnessTestsPath,
-      packageOptions: {
-        bundleBinaryPath: setupRequiredFixture.fakeServePath,
-        skipBuild: true,
-        target: currentVsCodeTarget(),
-      },
       testEnv: setupRecoveryEnv,
+      vsixPath: reusableVsixPath,
       workspacePath: setupRequiredFixture.workspaceDir,
     });
   } finally {
@@ -218,6 +210,7 @@ async function main(): Promise<void> {
     console.log(`\nverify:vsix artifacts (screenshots + crops): ${artifactsDir}`);
     await bundledFixture.cleanup();
     await setupRequiredFixture.cleanup();
+    await fs.rm(prebuiltVsixRoot, { force: true, recursive: true });
     await fs.rm(pureExtWorkspacePath, { force: true, recursive: true });
   }
 }

@@ -3,31 +3,29 @@
 mod common;
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use serial_test::serial;
-use tempfile::TempDir;
 use tomcat::core::agent_loop::{
-    build_collapse_summary_artifacts_for_test, CollapseSummaryArtifacts,
+    CollapseSummaryArtifacts, build_collapse_summary_artifacts_for_test,
 };
 use tomcat::core::llm::MessageKind;
+use tomcat::core::plan_runtime::PlanRuntime;
 use tomcat::core::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
-    TodoItem, TodoStatus, PLAN_FILE_SCHEMA_VERSION,
+    PLAN_FILE_SCHEMA_VERSION, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+    plan_path_for_id, read_plan, write_plan,
 };
 use tomcat::core::plan_runtime::state::PlanState;
-use tomcat::core::plan_runtime::PlanRuntime;
 use tomcat::core::session::transcript::append_entry;
 use tomcat::core::session::{PlanEventKind, PlanEventRef};
 use tomcat::core::tools::contract::catalog::builtin_tool_by_name;
 use tomcat::core::tools::plan_tool::update_plan::{self, UpdatePlanArgs};
 use tomcat::{
-    init_context_state, AppConfig, ChatMessage, ChatRequest, ChatResponse, ContextConfig,
-    SessionManager,
+    AppConfig, ChatMessage, ChatRequest, ChatResponse, ContextConfig, SessionManager,
+    init_context_state,
 };
 
 const COMPACTION_MODEL: &str = "deepseek-v4-pro";
@@ -142,35 +140,6 @@ async fn build_collapse_summary_artifacts_or_skip(
         }
     }
     unreachable!("retry loop should always return");
-}
-
-struct HomeGuard {
-    _temp: TempDir,
-    old_home: Option<OsString>,
-}
-
-impl HomeGuard {
-    fn new() -> Self {
-        let temp = tempfile::tempdir().expect("创建临时 HOME 失败");
-        std::fs::create_dir_all(temp.path().join(".tomcat").join("plans"))
-            .expect("创建 ~/.tomcat/plans 失败");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", temp.path());
-        Self {
-            _temp: temp,
-            old_home,
-        }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        if let Some(ref old_home) = self.old_home {
-            std::env::set_var("HOME", old_home);
-        } else {
-            std::env::remove_var("HOME");
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -486,7 +455,7 @@ async fn execute_update_plan_and_assert(
 #[serial]
 async fn real_llm_collapse_summary_includes_programmatic_keepalive() {
     require_api_key();
-    let _home_guard = HomeGuard::new();
+    let _home_guard = common::TempHomeGuard::new();
     let fixture = build_plan_fixture("case-a");
     let llm = real_llm();
     let working = assign_manual_message_ids(make_working_messages(&fixture));
@@ -507,20 +476,26 @@ async fn real_llm_collapse_summary_includes_programmatic_keepalive() {
         artifacts.summary_message.kind,
         MessageKind::CompactionSummary
     );
-    assert!(artifacts
-        .summary_text
-        .starts_with("## Structured Summary\n"));
-    assert!(artifacts
-        .summary_text
-        .contains("\n\n## Execution Keepalive\n"));
+    assert!(
+        artifacts
+            .summary_text
+            .starts_with("## Structured Summary\n")
+    );
+    assert!(
+        artifacts
+            .summary_text
+            .contains("\n\n## Execution Keepalive\n")
+    );
     assert!(artifacts.summary_text.contains("- mode: executing"));
     assert!(artifacts.summary_text.contains(&format!(
         "- active_plan_path: {}",
         fixture.plan_path.display()
     )));
-    assert!(artifacts
-        .summary_text
-        .contains(&format!("- current_step: {}", fixture.active_content)));
+    assert!(
+        artifacts
+            .summary_text
+            .contains(&format!("- current_step: {}", fixture.active_content))
+    );
     assert!(artifacts.summary_text.contains(&fixture.next_content));
     assert!(artifacts.summary_text.contains(&format!(
         "latest_plan_event: build:{}:{}",
@@ -544,7 +519,7 @@ async fn real_llm_collapse_summary_includes_programmatic_keepalive() {
 #[serial]
 async fn real_llm_reads_keepalive_and_calls_update_plan() {
     require_api_key();
-    let _home_guard = HomeGuard::new();
+    let _home_guard = common::TempHomeGuard::new();
     let fixture = build_plan_fixture("case-b");
     let llm = real_llm();
     let working = assign_manual_message_ids(make_working_messages(&fixture));
@@ -574,7 +549,7 @@ async fn real_llm_reads_keepalive_and_calls_update_plan() {
 #[serial]
 async fn real_llm_after_reload_reads_keepalive_and_calls_update_plan() {
     require_api_key();
-    let _home_guard = HomeGuard::new();
+    let _home_guard = common::TempHomeGuard::new();
     let fixture = build_plan_fixture("case-c");
     let llm = real_llm();
 

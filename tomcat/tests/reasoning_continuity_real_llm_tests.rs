@@ -1,13 +1,13 @@
 mod common;
 
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use tomcat::core::llm::{ContinuityMetadata, ReasoningContinuation};
 use tomcat::{
-    build_context_from_state, init_context_state, AppConfig, AppError, ChatMessage, ChatRequest,
-    ContextConfig, LlmProvider, SessionManager, StreamEvent, TranscriptEntry,
+    AppConfig, AppError, ChatMessage, ChatRequest, ContextConfig, LlmProvider, SessionManager,
+    StreamEvent, TranscriptEntry, build_context_from_state, init_context_state,
 };
 
 const STREAM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -79,43 +79,52 @@ fn deepseek_alt_model() -> String {
         .unwrap_or_else(|_| "deepseek-v4-flash".to_string())
 }
 
+struct ContinuityFixture {
+    _home: common::TempHomeGuard,
+    config: AppConfig,
+}
+
 fn mimo_model() -> String {
     common::mimo_test_model()
 }
 
-fn base_continuity_config(label: &str) -> AppConfig {
+fn base_continuity_config(label: &str) -> ContinuityFixture {
+    let home = common::TempHomeGuard::new();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(common::dot_tomcat_e2e_workdir(label).display().to_string());
-    cfg
+    ContinuityFixture {
+        _home: home,
+        config: cfg,
+    }
 }
 
-fn openai_responses_continuity_config() -> AppConfig {
-    let mut cfg = base_continuity_config("reasoning_continuity_openai");
-    common::apply_openai_app_config(&mut cfg);
-    cfg.llm.default_model = openai_model();
-    cfg.llm.reasoning_continuity.enabled = true;
-    cfg
+fn openai_responses_continuity_config() -> ContinuityFixture {
+    let mut fixture = base_continuity_config("reasoning_continuity_openai");
+    common::apply_openai_app_config(&mut fixture.config);
+    fixture.config.llm.default_model = openai_model();
+    fixture.config.llm.reasoning_continuity.enabled = true;
+    fixture
 }
 
-fn deepseek_continuity_config() -> AppConfig {
-    let mut cfg = base_continuity_config("reasoning_continuity_deepseek");
-    common::apply_deepseek_app_config(&mut cfg);
-    cfg.llm.default_model = deepseek_model();
-    cfg.llm.reasoning_continuity.enabled = true;
-    cfg.llm.thinking.enabled = true;
-    cfg.llm.thinking.level = "high".to_string();
-    cfg
+fn deepseek_continuity_config() -> ContinuityFixture {
+    let mut fixture = base_continuity_config("reasoning_continuity_deepseek");
+    common::apply_deepseek_app_config(&mut fixture.config);
+    fixture.config.llm.default_model = deepseek_model();
+    fixture.config.llm.reasoning_continuity.enabled = true;
+    fixture.config.llm.thinking.enabled = true;
+    fixture.config.llm.thinking.level = "high".to_string();
+    fixture
 }
 
-fn mimo_continuity_config() -> AppConfig {
-    let mut cfg = base_continuity_config("reasoning_continuity_mimo");
-    common::apply_deepseek_app_config(&mut cfg);
-    cfg.llm.default_model = mimo_model();
-    cfg.llm.reasoning_continuity.enabled = true;
-    cfg.llm.thinking.enabled = true;
-    cfg.llm.thinking.level = "high".to_string();
-    cfg.llm.thinking.format = Some("doubao".to_string());
-    cfg
+fn mimo_continuity_config() -> ContinuityFixture {
+    let mut fixture = base_continuity_config("reasoning_continuity_mimo");
+    common::apply_deepseek_app_config(&mut fixture.config);
+    fixture.config.llm.default_model = mimo_model();
+    fixture.config.llm.reasoning_continuity.enabled = true;
+    fixture.config.llm.thinking.enabled = true;
+    fixture.config.llm.thinking.level = "high".to_string();
+    fixture.config.llm.thinking.format = Some("doubao".to_string());
+    fixture
 }
 
 fn append_chat_message(session: &SessionManager, message: &ChatMessage) -> Result<(), AppError> {
@@ -239,15 +248,16 @@ async fn run_chat(
 }
 
 #[tokio::test]
-async fn openai_responses_roundtrip_replays_reasoning_items(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn openai_responses_roundtrip_replays_reasoning_items()
+-> Result<(), Box<dyn std::error::Error>> {
     if !live_openai_responses_opt_in("openai_responses_roundtrip_replays_reasoning_items") {
         return Ok(());
     }
     require_api_key(openai_api_key_env());
 
-    let config = openai_responses_continuity_config();
-    let call = common::resolve_main_call(&config);
+    let fixture = openai_responses_continuity_config();
+    let config = &fixture.config;
+    let call = common::resolve_main_call(config);
     let provider = call.provider_impl;
     let model = call.model;
     let prompt =
@@ -331,12 +341,13 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
 }
 
 #[tokio::test]
-async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content()
+-> Result<(), Box<dyn std::error::Error>> {
     require_api_key("DEEPSEEK_API_KEY");
 
-    let config = deepseek_continuity_config();
-    let provider = common::resolve_main_provider(&config);
+    let fixture = deepseek_continuity_config();
+    let config = &fixture.config;
+    let provider = common::resolve_main_provider(config);
     let prompt =
         "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
 
@@ -440,12 +451,13 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
 }
 
 #[tokio::test]
-async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content()
+-> Result<(), Box<dyn std::error::Error>> {
     require_api_key("MIMO_API_KEY");
 
-    let config = mimo_continuity_config();
-    let provider = common::resolve_main_provider(&config);
+    let fixture = mimo_continuity_config();
+    let config = &fixture.config;
+    let provider = common::resolve_main_provider(config);
     let prompt =
         "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
 
@@ -549,22 +561,22 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
 }
 
 #[tokio::test]
-async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content()
+-> Result<(), Box<dyn std::error::Error>> {
     require_api_key("DEEPSEEK_API_KEY");
 
-    let config = deepseek_continuity_config();
+    let fixture = deepseek_continuity_config();
+    let config = &fixture.config;
     let switched_model = deepseek_alt_model();
     assert_ne!(
         config.llm.default_model, switched_model,
         "切 model replay 用例需要两个不同的 DeepSeek model；可通过 TOMCAT_E2E_DEEPSEEK_ALT_MODEL 覆盖"
     );
 
-    let provider = common::resolve_main_provider(&config);
+    let provider = common::resolve_main_provider(config);
     let prompt =
         "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
-    let followup =
-        "We switched to another model in the same session. Do not call more tools. Answer directly in one short sentence.";
+    let followup = "We switched to another model in the same session. Do not call more tools. Answer directly in one short sentence.";
 
     for attempt in 1..=DEEPSEEK_CAPTURE_ATTEMPTS {
         let first_turn = capture_stream_turn(
@@ -682,12 +694,13 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
 }
 
 #[tokio::test]
-async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content()
+-> Result<(), Box<dyn std::error::Error>> {
     require_api_key("DEEPSEEK_API_KEY");
 
-    let config = deepseek_continuity_config();
-    let provider = common::resolve_main_provider(&config);
+    let fixture = deepseek_continuity_config();
+    let config = &fixture.config;
+    let provider = common::resolve_main_provider(config);
     let prompt =
         "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
     let followup =

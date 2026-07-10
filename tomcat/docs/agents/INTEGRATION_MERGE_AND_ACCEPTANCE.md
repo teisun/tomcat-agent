@@ -5,7 +5,7 @@
 | 角色 | 时机 | 说明 |
 |------|------|------|
 | 工程师（Tom/Jerry/Spike） | 标 `PENDING_INTEGRATION` 前，在功能分支 | 完成 §1–§3 与 §4 全量验收 |
-| Nibbles | 合并到 `develop` 后 | 按本文相同顺序与命令复跑与验收 |
+| Nibbles | 合并到 `develop` 后 | 执行快门禁、全量 review 与 merge 影响面复核；不再机械复跑整套全量 |
 
 **TASK_BOARD_002/tasks/T2-*.md** 中 `PENDING_INTEGRATION` 状态说明引用本文档（看板索引见 [TASK_BOARD_002/README.md](./TASK_BOARD_002/README.md)）。
 
@@ -23,7 +23,7 @@
 
 集成测试与 E2E 测试可能因死锁、无限循环、外部依赖超时等原因**长时间挂起不返回**。为避免浪费时间和阻塞交付流程，**所有 §2–§4 中的测试执行**必须采用以下模式。
 
-> **与 [INTEGRATION_TEST_SPEC.md §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#7-执行与持续集成-ci) 对齐**：分类执行（默认并发组并发，仅进程级全局资源 / 真实插件运行时 / 长生命周期 VM / 重子进程目标进串行组用 `-j 1 --test-threads=1`）的唯一入口是 [`scripts/run-integration-tests.sh`](../../scripts/run-integration-tests.sh)；测试目标的并发/串行分组以 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 为单一事实源（详见 §7.2）。**交付前顺序**：凡新增或调整 integration 测试二进制，须先按 §7.2 更新 `test-groups.sh`（并行或串行**两组之一**登记即可，但必须登记），再跑全量集成；工程师侧流程见 [Dispatcher.md §5](./Dispatcher.md)。下面的模板与 §4 自动化门禁均围绕这两个入口设计，禁止在交付步骤里手写散装 `cargo test --test xxx` 序列绕开分组约束。
+> **与 [INTEGRATION_TEST_SPEC.md §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#7-执行与持续集成-ci) 对齐**：Rust 分类执行的唯一入口仍是 [`scripts/run-integration-tests.sh`](../../scripts/run-integration-tests.sh)，但 `lib` / `integration*` 已统一切到 `cargo-nextest`。默认策略是 **nextest 满并发 + 每测试进程临时 HOME**；`serial` 只剩证伪兜底默认空，`real-llm` 则是显式 profile（`max-threads=2`）。测试目标的分组 SSoT 仍是 [`scripts/test-groups.sh`](../../scripts/test-groups.sh)，对应的 nextest 过滤与 test-group 则在 [`tomcat/.config/nextest.toml`](../../.config/nextest.toml)。**交付前顺序**：凡新增或调整 integration 测试二进制，须先更新这两处，再跑门禁；工程师侧流程见 [Dispatcher.md §5](./Dispatcher.md)。下面的模板与 §4 自动化门禁均围绕这些入口设计，禁止在交付步骤里手写散装 `cargo test --test xxx` 序列绕开分组约束。
 
 ### 执行模式
 
@@ -32,10 +32,10 @@
 
 ```bash
 cd tomcat
-RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration \
+RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-full \
   > .integration_test_output.log 2>&1 &
 TEST_PID=$!
-# 脚本内部按 scripts/test-groups.sh 自动拆分并发组与串行组，无需手填 -j 1 / --test-threads=1
+# 脚本内部按 nextest 默认满并发 / real-llm 显式层执行，无需手填 -j 1 / --test-threads=1
 # 轮询：反复执行 tail -80 .integration_test_output.log（间隔按指数退避 5s→10s→20s→30s，上限 30s）
 # 超时：kill $TEST_PID（单用例约 120s 无新输出、全量约 10 分钟仍不结束则介入，见下文）
 # 结束判定：日志文件末尾出现 EXIT_CODE=0 为通过；非 0 为失败
@@ -45,11 +45,11 @@ TEST_PID=$!
 
 ```bash
 cd tomcat
-RUST_LOG=tomcat=debug,info cargo test -j 1 -- --nocapture --test-threads=1 \
+RUST_LOG=tomcat=debug,info cargo nextest run --no-fail-fast \
   > .integration_test_output.log 2>&1 &
 TEST_PID=$!
-# 注意：此模板**所有目标都强制串行**，仅在脚本不可用 / 容器内调试时使用；
-# 正式交付仍以模板 A 为准，避免把 §7 的并发优化吃掉。
+# 注意：此模板只在脚本不可用 / 容器内临时调试时使用；
+# 正式交付仍以模板 A 为准，避免绕开门禁分层与默认过滤。
 ```
 
 ### 常见错误（须避免）
@@ -63,7 +63,7 @@ TEST_PID=$!
    在进程结束之前管道下游**读不到完整流**，表现为长时间无输出；同样无法观察**当前跑到哪一个测试**。
 
 3. **把「全量测试」当成「应快速失败」的探测命令**  
-   快速失败只适用于**缩小范围**后的单测（如 `cargo test -j 1 某测试名 -- --test-threads=1`）。**§4 全量门禁**必须按上文模板**写日志文件 + 后台跑**，再通过 `tail -f .integration_test_output.log` 或周期性 `tail -80 .integration_test_output.log` 观察；**不得以「先前台跑一下看会不会马上挂」代替正规验收**。
+   快速失败只适用于**缩小范围**后的单测（如 `cargo nextest run --test cli_tests 某测试名`）。**§4 全量门禁**必须按上文模板**写日志文件 + 后台跑**，再通过 `tail -f .integration_test_output.log` 或周期性 `tail -80 .integration_test_output.log` 观察；**不得以「先前台跑一下看会不会马上挂」代替正规验收**。
 
 4. **手写 `cargo test --test xxx` 序列覆盖全量**  
    会绕开 [INTEGRATION_TEST_SPEC §7.2](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#72-并发组与串行组) 的分组约定（并发组该并发跑、串行组该串行跑），出现「漏跑某个 binary」或「把串行组当并发跑」的隐式漂移。需要按目标筛选时，只能用脚本子命令（`integration-parallel` / `integration-serial`）或精确指定该目标对应的 `-j` / `--test-threads` 参数。
@@ -112,10 +112,10 @@ set -a
 # shellcheck disable=SC1091
 source .env
 set +a
-cargo test -j 1 -p tomcat --test cli_tests --test llm_tests --test openai_responses_integration_tests -- --nocapture --test-threads=1
+cargo nextest run --no-fail-fast --test cli_tests --test llm_tests --test openai_responses_integration_tests
 ```
 
-5. **与 §4 全量门禁衔接**：仍需遵守上文「写日志 + 后台 + 轮询」模板时，可将上述 `cargo test` 换为全量命令并重定向到 `.integration_test_output.log`；若环境变量仅存在于当前 shell，须在**同一** `source .env` 后的子 shell 内启动后台测试，避免子进程丢失 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY`。
+5. **与 §4 全量门禁衔接**：仍需遵守上文「写日志 + 后台 + 轮询」模板时，可将上述 `cargo nextest run` 换为全量命令并重定向到 `.integration_test_output.log`；若环境变量仅存在于当前 shell，须在**同一** `source .env` 后的子 shell 内启动后台测试，避免子进程丢失 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY`。
 
 ---
 
@@ -140,7 +140,7 @@ cargo test -j 1 -p tomcat --test cli_tests --test llm_tests --test openai_respon
 - **动作**：针对本次变更引入的模块与场景，在 `tests/` 下建立或更新集成测试文件，**仅通过 `pub` API** 做黑盒测试。
 - **Wasm 真实运行时**：若涉及插件/Wasm 加载或运行时，须包含「Wasm 真实运行时」集成测试；实现前阅读 **INTEGRATION_TEST_SPEC 5.4** 与 **Constitution 二、3**（测试不得假绿；Wasm 门禁见该规范）。
 - **静态检查**：进入 §4 全量验收前须通过 `cargo clippy --all-targets -- -D warnings`（可与 §4 第 1 项一并执行；覆盖 `tests/` 且警告即失败）。
-- **验证**：`RUST_LOG=tomcat=debug,info cargo test -j 1 --test '*' -- --nocapture --test-threads=1` 通过。
+- **验证**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration` 通过。
 
 **检查清单**：
 
@@ -154,25 +154,25 @@ cargo test -j 1 -p tomcat --test cli_tests --test llm_tests --test openai_respon
 - **时机**：在 §1、§2 之后。
 - **依据**：[User_Stories.md](../openspec/specs/User_Stories.md)、[E2E_SCENARIO_LIBRARY.md](../openspec/specs/guides/testing/E2E_SCENARIO_LIBRARY.md)、[E2E_TEST_SPEC.md](../openspec/specs/guides/testing/E2E_TEST_SPEC.md)。
 - **动作**：根据场景库中与本次变更相关的用例，在 `tests/cli_tests.rs`、`tests/quickjs_e2e_tests.rs` 或其他当前有效测试入口中编写或补充 `test_user_*` / `E2E-QJS-*` 用例，与场景库对应。
-- **验证**：`RUST_LOG=tomcat=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1`；插件运行时链路执行 `RUST_LOG=tomcat=debug,info cargo test -j 1 --test quickjs_e2e_tests -- --nocapture --test-threads=1`。
+- **验证**：`RUST_LOG=tomcat=debug,info cargo nextest run --test cli_tests`；插件运行时链路执行 `RUST_LOG=tomcat=debug,info cargo nextest run --test quickjs_e2e_tests`。
 
 ### §4 全量测试与验收清单
 
-完成 §1–§3 后须通过以下全量验收。**首选一键入口**：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh all`（按 [INTEGRATION_TEST_SPEC §7.4](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#74-全量集成测试) 串起 `release` → `clippy` → `lib` → `integration`，并自动按 [§7.2](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#72-并发组与串行组) 分组并发/串行执行，与下方自动化门禁逐项对齐）。
+完成 §1–§3 后须通过以下全量验收。**首选一键入口**：Rust 侧用 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-full`，VSCode 扩展侧用 `npm run gate:full`。其中 Rust 默认 `all` / `gate-fast` 已不再包含 `release`，`release` 只在确需产物时单独执行。
 
 以下为全量验收依据；分类执行约定（§7.1）、并发/串行组（§7.2）、CI 检查项（§7.3）、全量入口（§7.4）以及日志/鲁棒性门禁，详见 [INTEGRATION_TEST_SPEC.md](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 第 7、9、10 章。
 
-> **门禁与 §7 的映射**：第 1 项对应 §7.3 第 1–2 项 + §7.1 本地执行；第 3 项对应 §7.1 + §7.2（脚本内部完成分组）；第 4 项对应 §7.1 中 `cli_tests` / `quickjs_e2e_tests` 串行组要求。本节不重复 §7.2 的目标清单；新增/移动 binary 时仅改 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 与 §7.2 文档，本节自动跟随。
+> **门禁与 §7 的映射**：第 1 项对应 §7.3 第 1–2 项 + §7.1 本地执行；第 3 项对应 §7.1 + §7.2（脚本内部完成默认过滤、显式 real-llm 层与 test-group 调度）；第 4 项对应 §7.1 中 `cli_tests` / `quickjs_e2e_tests` 等关键入口的 targeted nextest 复核。本节不重复 §7.2 的目标清单；新增/移动 binary 时仅改 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 与 §7.2 文档，本节自动跟随。
 
 #### 自动化门禁（脚本/测试，必须 pass）
 
-1. **构建与静态检查（§7.3 第 1–2 项）**：`cargo build --release`、`cargo clippy --all-targets -- -D warnings`、`RUST_LOG=tomcat=debug,info cargo test --lib -- --nocapture` 通过。
+1. **构建与静态检查（§7.3 第 1–2 项）**：`cargo clippy --all-targets -- -D warnings`、`RUST_LOG=tomcat=debug,info cargo test --lib`、`cargo test --doc` 通过；`cargo build --release` 改为**按需**单独执行，不再属于默认门禁。
 2. **CLI 子命令**：`tomcat init`、`tomcat doctor`、`tomcat config`、`tomcat session`、`tomcat plugin`、`tomcat audit` 可执行且帮助完整。
-3. **集成测试（§7.1/§7.2 分类执行 + §9/§10 门禁）**：首选 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration`（脚本内并发组 cargo 默认并发、串行组 `-j 1 --test-threads=1`，覆盖日志门禁与鲁棒性集成测试）；脚本不可用时回退「测试执行策略」中的模板 B 走全量串行。**禁止**用 `cargo test --test '<某 binary>'` 序列拼凑全量集成验证。
-   - 若本次变更新增了 `TOMCAT_INTEGRATION_REAL_LLM_TESTS` 里的 target（例如 keepalive A/B/C 这类真 key 用例），还必须显式执行 `set -a && source .env && set +a && ./scripts/run-integration-tests.sh integration-real-llm`；该分组**不进入**普通 `integration` / `all`，避免默认门禁误耗真实 key 与配额。
+3. **集成测试（§7.1/§7.2 分类执行 + §9/§10 门禁）**：首选 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-fast`；若本次变更触及 `TOMCAT_INTEGRATION_REAL_LLM_TESTS` 或 `cli_tests` 里的 `*_real_llm_cli`，还必须显式执行 `set -a && source .env && set +a && ./scripts/run-integration-tests.sh integration-real-llm`，或直接跑 `gate-full`。**禁止**用 `cargo test --test '<某 binary>'` 序列拼凑全量集成验证。
+   - `integration` / `all` / `gate-fast` 会自动排除显式 real-llm binary 与 `*_real_llm_cli` 慢用例；这是默认过滤策略，不是漏跑。
    - 若本次改动触及 host-facing `functions[]` / `FunctionRegistry` / `web_search.backend`，除全量门禁外，工程师侧还应先跑 focused 回归：`runtime_split_test`（三层发现 + point override）、`plugin_function_invoker_test`（不跨插件 fallback）、以及至少一条官方 `web-search-backends` 单插件内 `auto` 路由用例。
-4. **E2E**：`RUST_LOG=tomcat=debug,info cargo test -j 1 --test cli_tests -- --nocapture --test-threads=1` 通过；插件运行时链路执行 `RUST_LOG=tomcat=debug,info cargo test -j 1 --test quickjs_e2e_tests -- --nocapture --test-threads=1` 通过（均位于 §7.2 串行组，必须 `-j 1 --test-threads=1`）；须符合 E2E_TEST_SPEC §6。
-5. **真实插件运行时（若任务涉及插件）**：按 INTEGRATION_TEST_SPEC 5.4 + §7.2 串行组要求执行。
+4. **E2E**：`RUST_LOG=tomcat=debug,info cargo nextest run --test cli_tests` 通过；插件运行时链路执行 `RUST_LOG=tomcat=debug,info cargo nextest run --test quickjs_e2e_tests` 通过；须符合 E2E_TEST_SPEC §6。它们已进入默认满并发车道，无需再手写 `-j 1 --test-threads=1`。
+5. **真实插件运行时（若任务涉及插件）**：按 INTEGRATION_TEST_SPEC 5.4 与当前 nextest 分组模型执行；若 3x 连跑证明确有互踩/OOM，再最小范围回退到 serial 兜底组。
 
 #### 人工验收（条件具备时）
 

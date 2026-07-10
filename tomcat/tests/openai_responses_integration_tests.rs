@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use std::time::Duration;
 use tomcat::{
-    AppConfig, ChatMessage, ChatMessageContentPart, ChatRequest, StreamEvent, IMAGE_MAX_BYTES,
+    AppConfig, ChatMessage, ChatMessageContentPart, ChatRequest, IMAGE_MAX_BYTES, StreamEvent,
 };
 
 /// Sample puppy PNG (≈ 46 KB), base64 字面量；fixture 详见
@@ -24,7 +24,13 @@ const SAMPLE_IMAGE_B64: &str = include_str!("fixtures/llm_multimodal/sample_imag
 /// Sample one-page PDF（reportlab 生成，含字符串 "Hello PDF content for LLM summarize test"），base64 字面量。
 const SAMPLE_PDF_B64: &str = include_str!("fixtures/llm_multimodal/sample_pdf_b64.txt");
 
-fn responses_config() -> AppConfig {
+struct ResponsesFixture {
+    _home: common::TempHomeGuard,
+    config: AppConfig,
+}
+
+fn responses_fixture() -> ResponsesFixture {
+    let home = common::TempHomeGuard::new();
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(
         common::dot_tomcat_e2e_workdir("openai_responses")
@@ -32,7 +38,10 @@ fn responses_config() -> AppConfig {
             .to_string(),
     );
     common::apply_openai_app_config(&mut cfg);
-    cfg
+    ResponsesFixture {
+        _home: home,
+        config: cfg,
+    }
 }
 
 fn responses_provider_and_model(
@@ -80,8 +89,8 @@ fn contains_cjk(text: &str) -> bool {
 ///
 /// 验证：choices 非空、首条 index=0（超时 60s）
 #[tokio::test]
-async fn test_openai_responses_chat_real_request_returns_ok(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_openai_responses_chat_real_request_returns_ok()
+-> Result<(), Box<dyn std::error::Error>> {
     if !require_live_openai_responses_opt_in("test_openai_responses_chat_real_request_returns_ok") {
         return Ok(());
     }
@@ -89,8 +98,8 @@ async fn test_openai_responses_chat_real_request_returns_ok(
     let _span = tracing::info_span!("test_openai_responses_chat_real_request_returns_ok").entered();
     common::load_openai_test_env();
 
-    let config = responses_config();
-    let (provider, model) = responses_provider_and_model(&config);
+    let fixture = responses_fixture();
+    let (provider, model) = responses_provider_and_model(&fixture.config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say exactly: ok")],
         model,
@@ -114,8 +123,8 @@ async fn test_openai_responses_chat_real_request_returns_ok(
 
 /// [Responses 非流式 finish_reason=stop] 简短回答应映射为 `stop`
 #[tokio::test]
-async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_openai_responses_chat_real_request_maps_stop_finish_reason()
+-> Result<(), Box<dyn std::error::Error>> {
     if !require_live_openai_responses_opt_in(
         "test_openai_responses_chat_real_request_maps_stop_finish_reason",
     ) {
@@ -127,8 +136,8 @@ async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
             .entered();
     common::load_openai_test_env();
 
-    let config = responses_config();
-    let (provider, model) = responses_provider_and_model(&config);
+    let fixture = responses_fixture();
+    let (provider, model) = responses_provider_and_model(&fixture.config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Answer with exactly one word: ok")],
         model,
@@ -149,8 +158,8 @@ async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
 
 /// [Responses 非流式 finish_reason=max_output_tokens] 低输出预算应映射为 `max_output_tokens`
 #[tokio::test]
-async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason()
+-> Result<(), Box<dyn std::error::Error>> {
     if !require_live_openai_responses_opt_in(
         "test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason",
     ) {
@@ -163,8 +172,8 @@ async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_r
     .entered();
     common::load_openai_test_env();
 
-    let config = responses_config();
-    let (provider, model) = responses_provider_and_model(&config);
+    let fixture = responses_fixture();
+    let (provider, model) = responses_provider_and_model(&fixture.config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user(
             "Write the numbers from 1 to 200, one per line, with no summary or explanation.",
@@ -194,8 +203,8 @@ async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_r
 ///
 /// 验证：至少产生一个 `StreamEvent`（超时 60s）
 #[tokio::test]
-async fn test_openai_responses_chat_stream_real_request_yields_events(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_openai_responses_chat_stream_real_request_yields_events()
+-> Result<(), Box<dyn std::error::Error>> {
     if !require_live_openai_responses_opt_in(
         "test_openai_responses_chat_stream_real_request_yields_events",
     ) {
@@ -206,8 +215,8 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
         .entered();
     common::load_openai_test_env();
 
-    let config = responses_config();
-    let (provider, model) = responses_provider_and_model(&config);
+    let fixture = responses_fixture();
+    let (provider, model) = responses_provider_and_model(&fixture.config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say hi")],
         model,
@@ -242,8 +251,8 @@ async fn test_openai_responses_chat_stream_real_request_yields_events(
 ///
 /// 验证：至少一个 `StreamEvent::Thinking` 且至少一个 `ContentDelta`（超时 60s）
 #[tokio::test]
-async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_openai_responses_chat_stream_reasoning_emits_thinking()
+-> Result<(), Box<dyn std::error::Error>> {
     if !require_live_openai_responses_opt_in(
         "test_openai_responses_chat_stream_reasoning_emits_thinking",
     ) {
@@ -254,8 +263,8 @@ async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
         tracing::info_span!("test_openai_responses_chat_stream_reasoning_emits_thinking").entered();
     common::load_openai_test_env();
 
-    let config = responses_config();
-    let (provider, model) = responses_provider_and_model(&config);
+    let fixture = responses_fixture();
+    let (provider, model) = responses_provider_and_model(&fixture.config);
     // 真实模型在个别请求上可能不给 thinking（同样提示词下偶发），这里允许有限重试，
     // 以减少测试抖动；若解析链路回归，重试后仍会稳定失败。
     const MAX_ATTEMPTS: usize = 3;
@@ -323,8 +332,8 @@ async fn test_openai_responses_chat_stream_reasoning_emits_thinking(
 
 /// [Responses tool_calls 终局观察] opt-in 验证真实 API 是否返回 `tool_calls`
 #[tokio::test]
-async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reason_opt_in(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reason_opt_in()
+-> Result<(), Box<dyn std::error::Error>> {
     if !require_live_openai_responses_opt_in(
         "test_openai_responses_chat_real_request_observes_tool_calls_finish_reason_opt_in",
     ) {
@@ -344,8 +353,8 @@ async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reas
     .entered();
     common::load_openai_test_env();
 
-    let config = responses_config();
-    let (provider, model) = responses_provider_and_model(&config);
+    let fixture = responses_fixture();
+    let (provider, model) = responses_provider_and_model(&fixture.config);
     let tools = vec![json!({
         "type": "function",
         "function": {
@@ -397,8 +406,8 @@ async fn test_openai_responses_chat_real_request_observes_tool_calls_finish_reas
 /// 开关：`TOMCAT_E2E_LANGUAGE_BEHAVIOR=1`（兼容旧开关 `TOMCAT_E2E_PROMPT_LANGUAGE=1`）。
 /// 验证：中文用户输入下，最终回答出现中文字符；若存在 thinking，也应出现中文字符。
 #[tokio::test]
-async fn test_openai_responses_latest_user_language_behavior_opt_in(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_openai_responses_latest_user_language_behavior_opt_in()
+-> Result<(), Box<dyn std::error::Error>> {
     if !require_live_openai_responses_opt_in(
         "test_openai_responses_latest_user_language_behavior_opt_in",
     ) {
@@ -416,8 +425,8 @@ async fn test_openai_responses_latest_user_language_behavior_opt_in(
         tracing::info_span!("test_openai_responses_latest_user_language_behavior_opt_in").entered();
     common::load_openai_test_env();
 
-    let config = responses_config();
-    let (provider, model) = responses_provider_and_model(&config);
+    let fixture = responses_fixture();
+    let (provider, model) = responses_provider_and_model(&fixture.config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user(
             "请用一句中文回答：为什么 Rust 的所有权系统能减少内存错误？",
@@ -481,8 +490,8 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
     let _span = tracing::info_span!("responses_inline_image_describe_roundtrip").entered();
     common::load_openai_test_env();
 
-    let config = responses_config();
-    let (provider, model) = responses_provider_and_model(&config);
+    let fixture = responses_fixture();
+    let (provider, model) = responses_provider_and_model(&fixture.config);
 
     let image_b64 = SAMPLE_IMAGE_B64.trim();
     let img_tmp = decode_b64_to_tempfile(image_b64);
@@ -561,8 +570,8 @@ async fn responses_inline_image_describe_roundtrip() -> Result<(), Box<dyn std::
 ///
 /// 验证：HTTP 200 + 响应文本非空 + 能读出该固定句子的核心片段，超时 60s。
 #[tokio::test]
-async fn responses_inline_pdf_input_file_summarize_roundtrip(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn responses_inline_pdf_input_file_summarize_roundtrip()
+-> Result<(), Box<dyn std::error::Error>> {
     if !require_live_openai_responses_opt_in("responses_inline_pdf_input_file_summarize_roundtrip")
     {
         return Ok(());
@@ -572,9 +581,10 @@ async fn responses_inline_pdf_input_file_summarize_roundtrip(
         tracing::info_span!("responses_inline_pdf_input_file_summarize_roundtrip").entered();
     common::load_openai_test_env();
 
-    let mut config = responses_config();
+    let mut fixture = responses_fixture();
+    let config = &mut fixture.config;
     config.llm.thinking.enabled = false;
-    let (provider, model) = responses_provider_and_model(&config);
+    let (provider, model) = responses_provider_and_model(config);
 
     let pdf_b64 = SAMPLE_PDF_B64.trim();
     let pdf_tmp = decode_b64_to_tempfile(pdf_b64);

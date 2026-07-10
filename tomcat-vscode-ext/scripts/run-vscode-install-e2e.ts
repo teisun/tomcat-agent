@@ -1,4 +1,3 @@
-import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { execFileSync } from "node:child_process";
@@ -11,7 +10,7 @@ import {
   resolveVsCodeExecutable,
   seedChatUserSettings,
 } from "./e2eHostFixture";
-import { packageVsix } from "./package-vsix";
+import { packageVsixOrReuse } from "./package-vsix";
 
 async function main(): Promise<void> {
   const extensionRoot = path.resolve(__dirname, "..");
@@ -20,7 +19,6 @@ async function main(): Promise<void> {
   const installRoot = await fs.mkdtemp("/tmp/tvsi-");
   const extensionsDir = path.join(installRoot, "extensions");
   const userDataDir = path.join(installRoot, "user-data");
-  const vsixPath = path.join(installRoot, "tomcat-vscode-ext.vsix");
   const fixture = await createHostE2eFixture();
 
   try {
@@ -32,7 +30,10 @@ async function main(): Promise<void> {
       cwd: extensionRoot,
       stdio: "inherit",
     });
-    packageVsix({ extensionRoot, outPath: vsixPath });
+    const packagedVsixPath = packageVsixOrReuse({
+      extensionRoot,
+      outPath: path.join(installRoot, "tomcat-vscode-ext.vsix"),
+    });
     execFileSync(
       resolveVsCodeCli(),
       [
@@ -41,7 +42,7 @@ async function main(): Promise<void> {
         "--extensions-dir",
         extensionsDir,
         "--install-extension",
-        vsixPath,
+        packagedVsixPath,
         "--force",
       ],
       {

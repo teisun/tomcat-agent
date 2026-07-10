@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # 集成测试：默认路径不依赖外部 Wasm 运行时。
-# 测试执行按资源需求分类：单元测试默认并发；集成测试分为并发组与串行组。
+# 测试执行按资源需求分类：默认门禁走 cargo-nextest 满并发，显式 real-llm 层单独触发。
 # 非 TTY 下强制 EDITOR/PAGER 为无交互，避免子进程阻塞；说明见 docs/reports/integration_test_hang_remediation.md。
 #
 # 用法（在项目根）：
-#   ./scripts/run-integration-tests.sh                      # 全量：release → clippy → lib → integration
-#   ./scripts/run-integration-tests.sh all                  # 同上
+#   ./scripts/run-integration-tests.sh                      # 默认快门禁：clippy → lib → doctest → integration
+#   ./scripts/run-integration-tests.sh all                  # 同上（保留兼容别名）
 #   ./scripts/run-integration-tests.sh release              # 仅 cargo build --release
 #   ./scripts/run-integration-tests.sh clippy               # 仅 cargo clippy --all-targets -- -D warnings
-#   ./scripts/run-integration-tests.sh lib                  # 仅库内单元测试（默认并发）
-#   ./scripts/run-integration-tests.sh integration          # 并发组 + 串行组
-#   ./scripts/run-integration-tests.sh integration-parallel # 仅可并发的 integration crate
-#   ./scripts/run-integration-tests.sh integration-serial   # 仅必须串行的 integration crate
-#   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM E2E（需当前 OpenAI target 对应 key + DEEPSEEK_API_KEY + MIMO_API_KEY）
+#   ./scripts/run-integration-tests.sh lib                  # 仅库内单元测试（nextest 满并发）
+#   ./scripts/run-integration-tests.sh doctest              # 仅文档测试（cargo test --doc）
+#   ./scripts/run-integration-tests.sh integration          # 默认 integration 门禁（nextest 满并发 + serial 兜底空组）
+#   ./scripts/run-integration-tests.sh integration-parallel # 默认 integration 组（含原串行组已放开的 binary）
+#   ./scripts/run-integration-tests.sh integration-serial   # 仅 serial 兜底组（默认空）
+#   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM 显式层（nextest real-llm profile，max-threads=2）
 #   ./scripts/run-integration-tests.sh integration-openai-responses-wire # 只跑 OpenAI Responses wire 真链路组（需当前 OpenAI target 对应 key）
+#   ./scripts/run-integration-tests.sh gate-fast            # 快门禁：clippy → lib → doctest → integration
+#   ./scripts/run-integration-tests.sh gate-full            # 全门禁：gate-fast → integration-real-llm
 #
 # 未知子命令：打印用法并 exit 2。
 set -e
@@ -31,8 +34,26 @@ export GIT_EDITOR=true
 export PAGER=cat
 export GIT_PAGER=cat
 
+NEXTTEST_INSTALL_HINT="cargo install cargo-nextest --locked"
+
 log_phase() {
   echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] $* ==="
+}
+
+ensure_nextest() {
+  if cargo nextest --version >/dev/null 2>&1; then
+    return 0
+  fi
+  cat >&2 <<EOF
+cargo-nextest 未安装，无法执行当前门禁。
+
+请先安装：
+  $NEXTTEST_INSTALL_HINT
+
+或使用 binstall：
+  cargo binstall cargo-nextest
+EOF
+  return 127
 }
 
 build_test_args() {
@@ -91,10 +112,18 @@ run_clippy() {
 }
 
 run_lib() {
-  log_phase "开始 lib: cargo test --lib（默认并发；少数全局状态用例用 serial_test 串行）"
-  cargo test --lib -- --nocapture
+  log_phase "开始 lib: cargo test --lib"
+  cargo test --lib
   local status=$?
   log_phase "结束 lib"
+  return $status
+}
+
+run_doctest() {
+  log_phase "开始 doctest: cargo test --doc"
+  cargo test --doc
+  local status=$?
+  log_phase "结束 doctest"
   return $status
 }
 
@@ -104,8 +133,9 @@ run_integration_parallel() {
     args+=("$arg")
   done < <(build_test_args "${TOMCAT_INTEGRATION_PARALLEL_TESTS[@]}")
 
-  log_phase "开始 integration-parallel（可并发 integration crate）"
-  cargo test --no-fail-fast "${args[@]}" -- --nocapture
+  ensure_nextest
+  log_phase "开始 integration-parallel（默认 integration 门禁，nextest 满并发）"
+  cargo nextest run --no-fail-fast "${args[@]}"
   local status=$?
   log_phase "结束 integration-parallel"
   return $status
@@ -118,12 +148,13 @@ run_integration_serial() {
   done < <(build_test_args "${TOMCAT_INTEGRATION_SERIAL_TESTS[@]}")
 
   if [ "${#args[@]}" -eq 0 ]; then
-    log_phase "跳过 integration-serial：当前平台无可执行串行组"
+    log_phase "跳过 integration-serial：serial 兜底组当前为空"
     return 0
   fi
 
-  log_phase "开始 integration-serial（必须串行 integration crate）"
-  cargo test -j 1 --no-fail-fast "${args[@]}" -- --nocapture --test-threads=1
+  ensure_nextest
+  log_phase "开始 integration-serial（nextest serial 兜底组）"
+  cargo nextest run --no-fail-fast "${args[@]}"
   local status=$?
   log_phase "结束 integration-serial"
   return $status
@@ -150,15 +181,28 @@ run_integration_real_llm() {
     echo "跳过 integration-real-llm：未设置 ${missing[*]}（当前 OpenAI target=$(openai_responses_target)）" >&2
     return 0
   fi
-  local args=()
-  while IFS= read -r arg; do
-    args+=("$arg")
-  done < <(build_test_args "${TOMCAT_INTEGRATION_REAL_LLM_TESTS[@]}")
-  log_phase "开始 integration-real-llm（真 LLM E2E；串行，需 ${openai_key_env} + DEEPSEEK_API_KEY + MIMO_API_KEY）"
-  cargo test -j 1 --no-fail-fast "${args[@]}" -- --nocapture --test-threads=1
+  ensure_nextest
+  log_phase "开始 integration-real-llm（真 LLM 显式层；nextest real-llm profile，max-threads=2；需 ${openai_key_env} + DEEPSEEK_API_KEY + MIMO_API_KEY）"
+  cargo nextest run --profile real-llm --no-fail-fast
   local status=$?
   log_phase "结束 integration-real-llm"
   return $status
+}
+
+run_gate_fast() {
+  local fail=0
+  run_clippy || fail=1
+  run_lib || fail=1
+  run_doctest || fail=1
+  run_integration || fail=1
+  return $fail
+}
+
+run_gate_full() {
+  local fail=0
+  run_gate_fast || fail=1
+  run_integration_real_llm || fail=1
+  return $fail
 }
 
 run_integration_openai_responses_wire() {
@@ -203,6 +247,9 @@ case "$CMD" in
   lib)
     run_lib
     ;;
+  doctest)
+    run_doctest
+    ;;
   integration)
     run_integration
     ;;
@@ -218,28 +265,32 @@ case "$CMD" in
   integration-openai-responses-wire)
     run_integration_openai_responses_wire
     ;;
+  gate-fast)
+    run_gate_fast
+    ;;
+  gate-full)
+    run_gate_full
+    ;;
   all)
     set +e
     FAIL=0
-    run_release || FAIL=1
-    run_clippy || FAIL=1
-    run_lib || FAIL=1
-    run_integration || FAIL=1
+    run_gate_fast || FAIL=1
     set -e
     if [ $FAIL -ne 0 ]; then
       echo "=== 存在失败的测试，请查看上方输出 ===" >&2
       exit 1
     fi
-    echo "=== 全量测试通过 ==="
+    echo "=== 默认快门禁通过 ==="
     ;;
   -h|--help|help)
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   *)
-    echo "用法: $0 [release|clippy|lib|integration|integration-parallel|integration-serial|integration-real-llm|integration-openai-responses-wire|all|-h]" >&2
-    echo "  默认与 all：release → clippy → lib → integration-parallel → integration-serial" >&2
-    echo "  integration-real-llm 需当前 OpenAI target 对应 key + DEEPSEEK_API_KEY + MIMO_API_KEY；不进 all，须显式触发" >&2
+    echo "用法: $0 [release|clippy|lib|doctest|integration|integration-parallel|integration-serial|integration-real-llm|integration-openai-responses-wire|gate-fast|gate-full|all|-h]" >&2
+    echo "  默认与 all：clippy → lib → doctest → integration" >&2
+    echo "  gate-full：gate-fast → integration-real-llm" >&2
+    echo "  integration-real-llm 需当前 OpenAI target 对应 key + DEEPSEEK_API_KEY + MIMO_API_KEY；不进默认门禁，须显式触发" >&2
     exit 2
     ;;
 esac

@@ -11,11 +11,11 @@
 //! - 默认模型来自 `TOMCAT_E2E_DEEPSEEK_MODEL` env，未设则 `deepseek-v4-pro`。
 //!
 //! ## 数据目录
-//! - 使用进程**真实 HOME**（不覆盖 `HOME` env）；plan 落盘到 `~/.tomcat/plans/`。
-//! - 读取 `~/.tomcat/tomcat.config.toml`（存在时），与日常 `tomcat chat` 一致。
-//! - cwd 切到 `~/.tomcat/temp/<run>/`（内置 workspace_roots），避免 `cargo test` 目录触发路径授权。
-//! - 与 `cli_planning_path_with_real_llm` / `cli_exec_resume_path_with_real_llm` 共用盘目录，
-//!   故标记 `#[serial]` 串行执行。
+//! - 每个测试进程先切到独立临时 `HOME`，把 `~/.tomcat/*` 隔离到私有 tempdir。
+//! - 仍按产品真实路径解析：plan 落盘到该临时 HOME 下的 `~/.tomcat/plans/`。
+//! - 若临时 HOME 里存在 `~/.tomcat/tomcat.config.toml` 会读取；否则走默认配置。
+//! - cwd 切到临时 HOME 下的 `~/.tomcat/temp/<run>/`（内置 workspace_roots），避免
+//!   `cargo test` 目录触发路径授权。
 //!
 //! ## 业务断言（硬门禁）
 //! 1. `~/.tomcat/plans/<plan_id>.plan.md` 存在且 `frontmatter.state == Completed`
@@ -45,16 +45,16 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use tomcat::core::llm::system_prompt::{
-    build_system_prompt_with_state, WorkspaceContext, WorkspaceState,
+    WorkspaceContext, WorkspaceState, build_system_prompt_with_state,
 };
 use tomcat::core::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, PlanFileState, TodoStatus,
+    PlanFileState, TodoStatus, plan_path_for_id, read_plan,
 };
 use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::session::ContextState;
 use tomcat::{
-    init_context_state, load_config_toml_file, resolve_sessions_dir, run_chat_turn,
-    AgentRunOutcome, ChatContext, SessionManager,
+    AgentRunOutcome, ChatContext, SessionManager, init_context_state, load_config_toml_file,
+    resolve_sessions_dir, run_chat_turn,
 };
 
 const COUNTER_PLAN_GOAL: &str = "inprocess e2e: write counter.py that prints 0";
@@ -77,17 +77,17 @@ fn default_model() -> String {
     common::deepseek_test_model()
 }
 
-fn real_home() -> PathBuf {
+fn current_home() -> PathBuf {
     dirs::home_dir().expect("无法定位 HOME 目录")
 }
 
 fn ensure_plans_dir() {
-    std::fs::create_dir_all(real_home().join(".tomcat").join("plans"))
+    std::fs::create_dir_all(current_home().join(".tomcat").join("plans"))
         .expect("创建 ~/.tomcat/plans 失败");
 }
 
 fn user_config_path() -> PathBuf {
-    real_home().join(".tomcat").join("tomcat.config.toml")
+    current_home().join(".tomcat").join("tomcat.config.toml")
 }
 
 fn load_user_config() -> tomcat::AppConfig {
@@ -588,6 +588,7 @@ async fn run_chat_turn_with_transient_retry(
 async fn inprocess_full_plan_path_with_real_llm() {
     require_api_key();
     common::setup_logging();
+    let _home_guard = common::TempHomeGuard::new();
     ensure_plans_dir();
     std::env::set_var("TOMCAT_ASK_QUESTION_TIMEOUT_MS", "5000");
     std::env::set_var("TOMCAT__LLM__DEFAULT_MODEL", default_model());
@@ -598,7 +599,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
         common::DEEPSEEK_TEST_API_KEY_ENV,
     );
     std::env::set_var("TOMCAT__CONTEXT__COMPACTION_MODEL", default_model());
-    let home = real_home();
+    let home = current_home();
     let mut config = load_user_config();
     config.plan.max_code_review_rounds = 1;
     let workdir = common::dot_tomcat_e2e_workdir("inprocess_real_llm");

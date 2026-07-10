@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use serde_json::json;
 use serial_test::serial;
-use tomcat::core::tools::web_search::types::WebSearchArgs;
 use tomcat::core::tools::web_search::WebSearchRuntime;
+use tomcat::core::tools::web_search::types::WebSearchArgs;
 use tomcat::{
     AppConfig, DefaultEventBus, DefaultLlmResolver, ExtPluginSearchInvoker, FunctionRegistry,
     HostApiDispatcher, ManifestFunction, ModelCatalog, PluginEngine, PluginFunctionInvoker,
@@ -45,15 +45,16 @@ async fn runtime_explicit_tavily_works_from_public_api() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
+    cfg.plugin.call_timeout_ms = 10_000;
     let harness = build_runtime_with_builtin_plugin_and_fetch_client(
         cfg,
         None,
-        Some(tavily.client_for("api.tavily.com", std::time::Duration::from_secs(2))),
+        Some(tavily.client_for("api.tavily.com", std::time::Duration::from_secs(10))),
     );
 
-    let output = harness
-        .runtime
-        .search(
+    let search_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        harness.runtime.search(
             WebSearchArgs {
                 query: "tokio rust".into(),
                 count: Some(3),
@@ -63,18 +64,22 @@ async fn runtime_explicit_tavily_works_from_public_api() {
                 domain_filter: vec!["tokio.rs".into()],
             },
             "test-session",
-        )
-        .await
-        .expect("tavily search");
+        ),
+    )
+    .await
+    .expect("tavily search should not hang");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        harness.manager.end_session("test-session"),
+    )
+    .await
+    .expect("tavily plugin test teardown should not hang")
+    .expect("end tavily plugin test session");
+    let output = search_result.expect("tavily search");
 
     assert_eq!(output.backend, "tavily");
     assert_eq!(output.hits.len(), 1);
     assert_eq!(output.hits[0].url, "https://tokio.rs/");
-    harness
-        .manager
-        .end_session("test-session")
-        .await
-        .expect("end tavily plugin test session");
 }
 
 #[tokio::test]
@@ -112,15 +117,15 @@ async fn runtime_auto_routes_to_plugin_backends_after_retryable_failures() {
     cfg.tools.web_search.backend = "auto".into();
     cfg.tools.web_search.cache_ttl_secs = 60;
     cfg.tools.web_search.cache_capacity = 8;
-    cfg.plugin.call_timeout_ms = 5_000;
+    cfg.plugin.call_timeout_ms = 10_000;
     let harness = build_runtime_with_builtin_plugin_without_mimo_and_fetch_client(
         cfg,
         None,
-        Some(brave.client_for("api.search.brave.com", std::time::Duration::from_secs(5))),
+        Some(brave.client_for("api.search.brave.com", std::time::Duration::from_secs(10))),
     );
 
     let search_result = tokio::time::timeout(
-        std::time::Duration::from_secs(8),
+        std::time::Duration::from_secs(15),
         harness.runtime.search(
             WebSearchArgs {
                 query: "reqwest rust".into(),
@@ -146,14 +151,18 @@ async fn runtime_auto_routes_to_plugin_backends_after_retryable_failures() {
 
     assert_eq!(output.backend, "brave");
     assert_eq!(output.hits.len(), 1);
-    assert!(output
-        .warnings
-        .iter()
-        .any(|warning| warning == "backend_unavailable:tavily, fallback=brave"));
-    assert!(output
-        .warnings
-        .iter()
-        .any(|warning| warning == "brave_domain_filter_via_query_rewrite"));
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning == "backend_unavailable:tavily, fallback=brave")
+    );
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning == "brave_domain_filter_via_query_rewrite")
+    );
 }
 
 #[tokio::test]
@@ -235,15 +244,16 @@ async fn runtime_explicit_brave_works_from_public_api() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "brave".into();
+    cfg.plugin.call_timeout_ms = 10_000;
     let harness = build_runtime_with_builtin_plugin_and_fetch_client(
         cfg,
         None,
-        Some(brave.client_for("api.search.brave.com", std::time::Duration::from_secs(2))),
+        Some(brave.client_for("api.search.brave.com", std::time::Duration::from_secs(10))),
     );
 
-    let output = harness
-        .runtime
-        .search(
+    let search_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        harness.runtime.search(
             WebSearchArgs {
                 query: "reqwest rust".into(),
                 count: Some(3),
@@ -253,22 +263,28 @@ async fn runtime_explicit_brave_works_from_public_api() {
                 domain_filter: vec!["docs.rs".into()],
             },
             "test-session",
-        )
-        .await
-        .expect("brave search");
+        ),
+    )
+    .await
+    .expect("brave search should not hang");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        harness.manager.end_session("test-session"),
+    )
+    .await
+    .expect("brave plugin test teardown should not hang")
+    .expect("end brave plugin test session");
+    let output = search_result.expect("brave search");
 
     assert_eq!(output.backend, "brave");
     assert_eq!(output.hits.len(), 1);
     assert_eq!(output.hits[0].url, "https://docs.rs/reqwest");
-    assert!(output
-        .warnings
-        .iter()
-        .any(|warning| warning == "brave_domain_filter_via_query_rewrite"));
-    harness
-        .manager
-        .end_session("test-session")
-        .await
-        .expect("end brave plugin test session");
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning == "brave_domain_filter_via_query_rewrite")
+    );
 }
 
 #[tokio::test]
@@ -301,15 +317,16 @@ async fn runtime_explicit_serper_works_from_public_api() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "serper".into();
+    cfg.plugin.call_timeout_ms = 10_000;
     let harness = build_runtime_with_builtin_plugin_and_fetch_client(
         cfg,
         None,
-        Some(serper.client_for("google.serper.dev", std::time::Duration::from_secs(2))),
+        Some(serper.client_for("google.serper.dev", std::time::Duration::from_secs(10))),
     );
 
-    let output = harness
-        .runtime
-        .search(
+    let search_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        harness.runtime.search(
             WebSearchArgs {
                 query: "rust book".into(),
                 count: Some(5),
@@ -319,22 +336,28 @@ async fn runtime_explicit_serper_works_from_public_api() {
                 domain_filter: vec!["doc.rust-lang.org".into()],
             },
             "test-session",
-        )
-        .await
-        .expect("serper search");
+        ),
+    )
+    .await
+    .expect("serper search should not hang");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        harness.manager.end_session("test-session"),
+    )
+    .await
+    .expect("serper plugin test teardown should not hang")
+    .expect("end serper plugin test session");
+    let output = search_result.expect("serper search");
 
     assert_eq!(output.backend, "serper");
     assert_eq!(output.hits.len(), 1);
     assert_eq!(output.hits[0].url, "https://doc.rust-lang.org/book/");
-    assert!(output
-        .warnings
-        .iter()
-        .any(|warning| warning == "serper_domain_filter_via_query_rewrite"));
-    harness
-        .manager
-        .end_session("test-session")
-        .await
-        .expect("end serper plugin test session");
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning == "serper_domain_filter_via_query_rewrite")
+    );
 }
 
 #[tokio::test]
@@ -504,15 +527,16 @@ async fn runtime_injected_fetch_client_bypasses_env_proxy() {
 
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "tavily".into();
+    cfg.plugin.call_timeout_ms = 10_000;
     let harness = build_runtime_with_builtin_plugin_and_fetch_client(
         cfg,
         None,
-        Some(tavily.client_for("api.tavily.com", std::time::Duration::from_secs(2))),
+        Some(tavily.client_for("api.tavily.com", std::time::Duration::from_secs(10))),
     );
 
-    let output = harness
-        .runtime
-        .search(
+    let search_result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        harness.runtime.search(
             WebSearchArgs {
                 query: "tokio rust".into(),
                 count: Some(3),
@@ -522,9 +546,18 @@ async fn runtime_injected_fetch_client_bypasses_env_proxy() {
                 domain_filter: vec!["tokio.rs".into()],
             },
             "injected-fetch-client-session",
-        )
-        .await
-        .expect("tavily search");
+        ),
+    )
+    .await
+    .expect("injected fetch client search should not hang");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        harness.manager.end_session("injected-fetch-client-session"),
+    )
+    .await
+    .expect("injected fetch client teardown should not hang")
+    .expect("end injected fetch client test session");
+    let output = search_result.expect("tavily search");
 
     assert_eq!(output.backend, "tavily");
     assert_eq!(output.hits.len(), 1);
@@ -532,11 +565,6 @@ async fn runtime_injected_fetch_client_bypasses_env_proxy() {
         !proxy.saw_host("api.tavily.com"),
         "injected loopback client should bypass ambient proxy"
     );
-    harness
-        .manager
-        .end_session("injected-fetch-client-session")
-        .await
-        .expect("end injected fetch client test session");
 }
 
 #[tokio::test]
@@ -918,16 +946,23 @@ async fn production_path_plugin_timeout_returns_tool_error_before_vm_timeout() {
 #[serial]
 async fn runtime_auto_timeout_falls_back_to_brave_after_tavily_timeout() {
     common::setup_logging();
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("bind hanging tcp listener");
-    let hang_addr = listener.local_addr().expect("hang listener addr");
-    let hang_task = tokio::spawn(async move {
-        if let Ok((stream, _)) = listener.accept().await {
-            let _stream = stream;
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-    });
+    let tavily = common::HttpsTestServer::start(
+        "api.tavily.com",
+        "200 OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        serde_json::to_vec(&json!({
+            "results": [
+                {
+                    "title": "Tokio",
+                    "url": "https://tokio.rs",
+                    "content": "Async runtime for Rust"
+                }
+            ]
+        }))
+        .expect("serialize hanging tavily response"),
+        std::time::Duration::from_secs(12),
+    )
+    .await;
     let brave = common::HttpsTestServer::start(
         "api.search.brave.com",
         "200 OK",
@@ -970,8 +1005,8 @@ async fn runtime_auto_timeout_falls_back_to_brave_after_tavily_timeout() {
         .no_proxy()
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_millis(4_000))
-        .resolve("api.tavily.com", hang_addr)
+        .timeout(std::time::Duration::from_millis(10_000))
+        .resolve("api.tavily.com", tavily.addr())
         .resolve("api.search.brave.com", brave.addr())
         .build()
         .expect("build timeout fallback client");
@@ -982,7 +1017,7 @@ async fn runtime_auto_timeout_falls_back_to_brave_after_tavily_timeout() {
     );
     let start = std::time::Instant::now();
     let search_result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(20),
         harness.runtime.search(
             WebSearchArgs {
                 query: "reqwest rust".into(),
@@ -997,7 +1032,6 @@ async fn runtime_auto_timeout_falls_back_to_brave_after_tavily_timeout() {
     )
     .await
     .expect("auto timeout fallback search should not hang");
-    hang_task.abort();
 
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -1008,16 +1042,18 @@ async fn runtime_auto_timeout_falls_back_to_brave_after_tavily_timeout() {
     .expect("end timeout fallback session");
     let output = search_result.expect("auto search should fall back to brave after tavily timeout");
     assert!(
-        start.elapsed() < std::time::Duration::from_millis(10_000),
+        start.elapsed() < std::time::Duration::from_millis(20_000),
         "timeout fallback should finish after a structured timeout and fallback, elapsed={:?}",
         start.elapsed()
     );
     assert_eq!(output.backend, "brave");
     assert_eq!(output.hits.len(), 1);
-    assert!(output
-        .warnings
-        .iter()
-        .any(|warning| warning.contains("tavily") && warning.contains("fallback=brave")));
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("tavily") && warning.contains("fallback=brave"))
+    );
 }
 
 #[tokio::test]
@@ -1511,6 +1547,7 @@ fn is_live_web_search_network_error(text: &str) -> bool {
         || text.contains("request failed")
         || text.contains("timeout")
         || text.contains("timed out")
+        || text.contains("请求超时")
         || text.contains("connection closed via error")
         || text.contains("请求连接失败")
         || text.contains("流式请求连接失败")

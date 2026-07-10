@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 集成测试二进制分类唯一来源。
-# 默认进入串行组；确认无进程级全局状态或重子进程依赖后再移入并发组。
+# 默认进入并发组；只有 3x 连跑证明确实互踩或压垮机器时，才退回串行兜底组。
 
 TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   audit_tests
@@ -28,9 +28,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   resume_hydration_tests
   skill_tool_tests
   transcript_summary_integration_tests
-)
-
-TOMCAT_INTEGRATION_SERIAL_TESTS=(
+  integration_gate_config_tests
   cli_tests
   checkpoint_cli_e2e
   resume_hydration_cli_e2e
@@ -46,12 +44,19 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
   serve_stdio_e2e
 )
 
+TOMCAT_INTEGRATION_SERIAL_TESTS=(
+)
+
 # 真 LLM E2E（需当前 OpenAI target 对应 key；部分 target 还需 DEEPSEEK_API_KEY / MIMO_API_KEY）。
-# 这几个 target 串行运行：fixture 都会碰真实 `~/.tomcat` 盘目录，并发会互踩。
+# 默认快门禁不跑本组；显式 real-llm 层才运行。
+# 这几个 target 现在会在各自测试进程内切到临时 HOME，把 `~/.tomcat/*` 隔离到
+# 私有 tempdir；剩余并发约束只来自 provider API 限流，因此 nextest profile 把本组
+# 限到 max-threads=2，而不再用 -j1 串行到底。
 # 其中 `plan_real_llm_cli_e2e` 现在只保留 planning-only / exec-only 两条窄 CLI smoke，
 # full completion / artifact / transcript 顺序 / EOF settlement 等重断言交给更快的
 # inprocess/runtime 层；CLI 只保留 resume/build wiring、EXEC prompt 与 session 绑定。
-# run-integration-tests.sh 显式跳过本组，用户/CI 需要时按需 `cargo test --test plan_real_llm_*` 单独触发。
+# run-integration-tests.sh 默认跳过本组，用户/CI 需要时按需
+# `./scripts/run-integration-tests.sh integration-real-llm` 显式触发。
 TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
   current_tail_guard_real_llm_tests
   openai_files_integration_tests
@@ -59,6 +64,14 @@ TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
   plan_real_llm_inprocess_tests
   plan_real_llm_cli_e2e
   reasoning_continuity_real_llm_tests
+)
+
+TOMCAT_INTEGRATION_REAL_LLM_CLI_TESTS=(
+  test_user_background_bash_autofeed_real_llm_cli
+  test_user_background_bash_blocking_waitslice_real_llm_cli
+  test_user_background_bash_multiple_timeout_slices_real_llm_cli
+  test_user_background_bash_midturn_followup_real_llm_cli
+  test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli
 )
 
 # OpenAI Responses wire 真链路子组：只收口到最终走 `api=openai-responses` 的验收入口。

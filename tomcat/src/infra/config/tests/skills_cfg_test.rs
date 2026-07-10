@@ -2,6 +2,7 @@
 
 use super::super::*;
 use std::io::Write;
+use serial_test::serial;
 
 #[test]
 fn skills_config_default_values() {
@@ -74,6 +75,7 @@ expose_to_reviewer = true
 }
 
 #[test]
+#[serial(env_lock)]
 fn skills_env_override_beats_toml() {
     let dir = std::env::temp_dir().join("tomcat_skills_env_override_test");
     std::fs::create_dir_all(&dir).unwrap();
