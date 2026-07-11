@@ -6,9 +6,11 @@ import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
 import { TodoListWidget } from "./components/TodoListWidget";
 import { TranscriptView } from "./components/TranscriptView";
+import { readContextSearchDebounceMs } from "./contextSearchConfig";
 import { isWebviewReference } from "./contextReferences";
 import type {
   AskQuestionResult,
+  ContextSearchMatch,
   HostToWebviewFrame,
   VsCodeApiLike,
   WebviewDomAction,
@@ -36,6 +38,23 @@ const EMPTY_DRAFT: ComposerDraft = {
   hasContent: false,
   segments: [],
   text: "",
+};
+const CONTEXT_SEARCH_DEBOUNCE_MS = readContextSearchDebounceMs();
+
+interface ContextSearchState {
+  loading: boolean;
+  matches: ContextSearchMatch[];
+  open: boolean;
+  query: string;
+  truncated: boolean;
+}
+
+const EMPTY_CONTEXT_SEARCH_STATE: ContextSearchState = {
+  loading: false,
+  matches: [],
+  open: false,
+  query: "",
+  truncated: false,
 };
 
 interface PendingComposerSubmission {
@@ -85,6 +104,75 @@ function isInsertReferenceEvent(
     "reference" in content &&
     isWebviewReference(content.reference)
   );
+}
+
+function sanitizeContextSearchMatches(value: unknown): ContextSearchMatch[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") {
+      return [];
+    }
+    const candidate = entry as Record<string, unknown>;
+    if (!isWebviewReference(candidate.reference)) {
+      return [];
+    }
+    if (
+      candidate.description !== undefined &&
+      candidate.description !== null &&
+      typeof candidate.description !== "string"
+    ) {
+      return [];
+    }
+    return [{
+      description: candidate.description as string | null | undefined,
+      reference: candidate.reference,
+    }];
+  });
+}
+
+function parseContextSearchResultEvent(
+  content: HostToWebviewFrame["content"],
+): {
+  matches: ContextSearchMatch[];
+  query: string;
+  requestId: string;
+  sessionId?: string | null;
+  truncated: boolean;
+  type: "contextSearchResult";
+  workspaceAvailable?: boolean;
+} | null {
+  if (
+    !content ||
+    typeof content !== "object" ||
+    !("type" in content) ||
+    content.type !== "contextSearchResult" ||
+    !("requestId" in content) ||
+    typeof content.requestId !== "string" ||
+    !("query" in content) ||
+    typeof content.query !== "string" ||
+    !("truncated" in content) ||
+    typeof content.truncated !== "boolean" ||
+    (("workspaceAvailable" in content && content.workspaceAvailable !== undefined) &&
+      typeof content.workspaceAvailable !== "boolean")
+  ) {
+    return null;
+  }
+
+  const eventContent = content as {
+    query: string;
+    requestId: string;
+    sessionId?: string | null;
+    truncated: boolean;
+    workspaceAvailable?: boolean;
+  };
+
+  return {
+    ...eventContent,
+    matches: sanitizeContextSearchMatches((content as { matches?: unknown }).matches),
+    type: "contextSearchResult",
+  };
 }
 
 function resolvePendingComposerSubmission(
@@ -342,6 +430,16 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
 }
 
 function runDomAction(action: WebviewDomAction): void {
+  const dispatchTestComposerValue = (value: string) => {
+    window.dispatchEvent(
+      new CustomEvent("tomcat:test:set-composer-value", {
+        detail: {
+          testId: action.testId,
+          value,
+        },
+      }),
+    );
+  };
   const resolveActionTarget = (): HTMLElement | null => {
     const nodes = [...document.querySelectorAll<HTMLElement>(`[data-testid="${action.testId ?? ""}"]`)];
     const resolvedIndex =
@@ -363,20 +461,38 @@ function runDomAction(action: WebviewDomAction): void {
   }
 
   if (action.kind === "setInputValue") {
-    const target = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+    const target = document.querySelector<HTMLElement>(
       `[data-testid="${action.testId ?? ""}"]`,
     );
-    if (!target) {
+    const nextValue = action.value ?? "";
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(target),
+        "value",
+      );
+      descriptor?.set?.call(target, nextValue);
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      target.dispatchEvent(new Event("change", { bubbles: true }));
       return;
     }
-    const nextValue = action.value ?? "";
-    const descriptor = Object.getOwnPropertyDescriptor(
-      Object.getPrototypeOf(target),
-      "value",
-    );
-    descriptor?.set?.call(target, nextValue);
-    target.dispatchEvent(new Event("input", { bubbles: true }));
-    target.dispatchEvent(new Event("change", { bubbles: true }));
+    if (target?.isContentEditable) {
+      target.focus();
+      const pasteEvent = new Event("paste", {
+        bubbles: true,
+        cancelable: true,
+      }) as ClipboardEvent;
+      Object.defineProperty(pasteEvent, "clipboardData", {
+        configurable: true,
+        value: {
+          getData(format: string) {
+            return format === "text/plain" ? nextValue : "";
+          },
+        },
+      });
+      target.dispatchEvent(pasteEvent);
+      return;
+    }
+    dispatchTestComposerValue(nextValue);
     return;
   }
 
@@ -398,7 +514,8 @@ function runDomAction(action: WebviewDomAction): void {
     if (!target) {
       return;
     }
-    target.focus();
+    target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+    target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
     target.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
     return;
   }
@@ -488,10 +605,16 @@ function submitPrompt(
 
 export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [state, setState] = useState<WebviewStateSnapshot>(EMPTY_STATE);
+  const [contextSearch, setContextSearch] = useState<ContextSearchState>(
+    EMPTY_CONTEXT_SEARCH_STATE,
+  );
   const stateRef = useRef<WebviewStateSnapshot>(EMPTY_STATE);
   const composerRef = useRef<ComposerHandle | null>(null);
   const pendingInsertionsRef = useRef<Array<{ reference: WebviewReference; sessionId: string }>>([]);
   const pendingComposerSubmissionRef = useRef<PendingComposerSubmission | null>(null);
+  const contextSearchRequestSeqRef = useRef(0);
+  const latestContextSearchRequestIdRef = useRef<string | null>(null);
+  const contextSearchWarningShownRef = useRef(false);
   const streamRef = useRef<HTMLElement | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
 
@@ -566,6 +689,34 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     pendingInsertionsRef.current = remaining;
   };
 
+  const closeMentionFromApp = () => {
+    latestContextSearchRequestIdRef.current = null;
+    composerRef.current?.closeMention();
+  };
+
+  useEffect(() => {
+    closeMentionFromApp();
+  }, [activeSession?.sessionId]);
+
+  useEffect(() => {
+    if (!contextSearch.open) {
+      return;
+    }
+    const requestId = `context-search-${++contextSearchRequestSeqRef.current}`;
+    latestContextSearchRequestIdRef.current = requestId;
+    const timeout = window.setTimeout(() => {
+      postIntent(vscodeApi, "searchContext", {
+        kind: "file",
+        query: contextSearch.query,
+        requestId,
+        sessionId: activeSession?.sessionId ?? null,
+      });
+    }, CONTEXT_SEARCH_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [activeSession?.sessionId, contextSearch.open, contextSearch.query, vscodeApi]);
+
   useEffect(() => {
     const pending = pendingComposerSubmissionRef.current;
     const composer = composerRef.current;
@@ -616,6 +767,32 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         }
         return;
       }
+      if (frame.channel === "event") {
+        const contextSearchResult = parseContextSearchResultEvent(frame.content);
+        if (contextSearchResult) {
+          if (contextSearchResult.requestId !== latestContextSearchRequestIdRef.current) {
+            return;
+          }
+          if (contextSearchResult.workspaceAvailable === false) {
+            if (!contextSearchWarningShownRef.current) {
+              contextSearchWarningShownRef.current = true;
+              postIntent(vscodeApi, "showWarningMessage", {
+                message: "打开文件夹后可用 @",
+              });
+            }
+            closeMentionFromApp();
+            return;
+          }
+          contextSearchWarningShownRef.current = false;
+          setContextSearch((current) => ({
+            ...current,
+            loading: false,
+            matches: contextSearchResult.matches,
+            truncated: contextSearchResult.truncated,
+          }));
+          return;
+        }
+      }
       if (
         frame.channel === "event" &&
         typeof frame.content === "object" &&
@@ -654,6 +831,33 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
   const handleAnswerQuestion = (requestId: string, result: AskQuestionResult) => {
     answerQuestion(vscodeApi, requestId, result);
+  };
+
+  const handleContextSearchOpen = () => {
+    setContextSearch({
+      loading: true,
+      matches: [],
+      open: true,
+      query: "",
+      truncated: false,
+    });
+  };
+
+  const handleContextSearchQueryChange = (query: string) => {
+    // Keep the raw @query as a filename search term.
+    // Line-scoped references continue to use the existing Add-to-Chat selection flow.
+    setContextSearch((current) => ({
+      ...current,
+      loading: true,
+      open: true,
+      query,
+      truncated: false,
+    }));
+  };
+
+  const handleContextSearchClose = () => {
+    latestContextSearchRequestIdRef.current = null;
+    setContextSearch(EMPTY_CONTEXT_SEARCH_STATE);
   };
 
   const handleModeChange = (value: "chat" | "plan") => {
@@ -903,12 +1107,19 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         busy={!!activeSession?.busy}
         canInterrupt={canInterrupt}
         canPrompt={canPrompt}
+        contextSearchLoading={contextSearch.loading}
+        contextSearchMatches={contextSearch.matches}
+        contextSearchQuery={contextSearch.query}
+        contextSearchTruncated={contextSearch.truncated}
         contextLabel={buildContextLabel(activeSession?.contextRatio)}
         modelCapabilities={activeModelCapabilities}
         modeValue={currentModeValue(activeSession?.planState)}
         modelValue={activeSession?.model ?? ""}
         thinkingLevelValue={normalizeThinkingLevel(activeSession?.thinkingLevel)}
         ref={composerRef}
+        onContextSearchClose={handleContextSearchClose}
+        onContextSearchOpen={handleContextSearchOpen}
+        onContextSearchQueryChange={handleContextSearchQueryChange}
         onPickContext={() =>
           postIntent(vscodeApi, "pickContext", {
             sessionId: activeSession?.sessionId ?? null,

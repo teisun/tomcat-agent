@@ -308,6 +308,54 @@ input:focus-visible {
   white-space: nowrap;
 }
 
+.tc-context-search-dropdown {
+  bottom: calc(100% + 8px);
+  top: auto;
+}
+
+.tc-context-search-dropdown__list {
+  display: flex;
+  flex-direction: column;
+}
+
+.tc-context-search-dropdown__item {
+  align-items: center;
+  gap: 10px;
+}
+
+.tc-context-search-dropdown__icon {
+  color: var(--vscode-descriptionForeground);
+  flex: 0 0 auto;
+  font-size: 14px;
+}
+
+.tc-context-search-dropdown__description {
+  color: var(--vscode-descriptionForeground);
+  flex: 0 1 44%;
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tc-context-search-dropdown__highlight {
+  color: var(--vscode-list-highlightForeground, inherit);
+  font-weight: 600;
+}
+
+.tc-context-search-dropdown__footer {
+  border-top: 1px solid var(--vscode-dropdown-border, rgba(127, 127, 127, 0.3));
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  padding: 8px 14px 4px;
+}
+
+.tc-context-search-dropdown__footer--status {
+  padding-bottom: 6px;
+}
+
 .tc-session-group__more {
   background: transparent;
   border: 0;

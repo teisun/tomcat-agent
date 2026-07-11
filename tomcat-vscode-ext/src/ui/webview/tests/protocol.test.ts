@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  coerceContextSearchResultEvent,
   isHostToWebviewFrame,
   isWebviewIntent,
   PendingMessageTracker,
@@ -71,6 +72,19 @@ describe("webview protocol helpers", () => {
     expect(
       isWebviewIntent({
         data: {
+          kind: "file",
+          query: "app",
+          requestId: "req-1",
+          sessionId: "s1",
+        },
+        messageId: "search-1",
+        type: "searchContext",
+      }),
+    ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: {
           route: "models",
         },
         messageId: "settings-1",
@@ -80,6 +94,24 @@ describe("webview protocol helpers", () => {
   });
 
   it("rejects malformed intents", () => {
+    expect(
+      isWebviewIntent({
+        data: {},
+        messageId: "search-missing",
+        type: "searchContext",
+      }),
+    ).toBe(false);
+    expect(
+      isWebviewIntent({
+        data: {
+          kind: "folder",
+          query: "app",
+          requestId: "req-2",
+        },
+        messageId: "search-bad-kind",
+        type: "searchContext",
+      }),
+    ).toBe(false);
     expect(
       isWebviewIntent({
         data: {},
@@ -127,6 +159,73 @@ describe("webview protocol helpers", () => {
         messageId: "state-1",
       }),
     ).toBe(false);
+  });
+
+  it("filters malformed context search matches before the frontend consumes them", () => {
+    expect(
+      coerceContextSearchResultEvent({
+        matches: [],
+        query: "app",
+        truncated: false,
+        type: "contextSearchResult",
+      }),
+    ).toBeNull();
+
+    expect(
+      coerceContextSearchResultEvent({
+        matches: [
+          {
+            description: "src",
+            reference: {
+              kind: "file",
+              label: "app.ts",
+              path: "src/app.ts",
+              type: "reference",
+            },
+          },
+          {
+            description: "src",
+            reference: {
+              kind: "file",
+              label: 123,
+              path: "src/bad.ts",
+              type: "reference",
+            },
+          },
+          {
+            description: 42,
+            reference: {
+              kind: "file",
+              label: "also-bad.ts",
+              path: "src/also-bad.ts",
+              type: "reference",
+            },
+          },
+        ],
+        query: "app",
+        requestId: "req-3",
+        truncated: false,
+        type: "contextSearchResult",
+        workspaceAvailable: true,
+      }),
+    ).toEqual({
+      matches: [
+        {
+          description: "src",
+          reference: {
+            kind: "file",
+            label: "app.ts",
+            path: "src/app.ts",
+            type: "reference",
+          },
+        },
+      ],
+      query: "app",
+      requestId: "req-3",
+      truncated: false,
+      type: "contextSearchResult",
+      workspaceAvailable: true,
+    });
   });
 
   it("drops unknown pending message ids", async () => {

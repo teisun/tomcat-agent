@@ -2,6 +2,7 @@ import {
   forwardRef,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
   type DragEvent,
@@ -20,10 +21,16 @@ import {
 
 import { referenceIdentity } from "../contextReferences";
 import type {
+  ContextSearchMatch,
   WebviewPlanState,
   WebviewMessageSegment,
   WebviewReference,
 } from "../types";
+import {
+  ContextSearchDropdown,
+  type ContextSearchDropdownHandle,
+} from "./ContextSearchDropdown";
+import { createMentionSuggestion } from "./mentionSuggestion";
 import { ReferenceChip } from "./ReferenceChip";
 
 function formatPlanStatus(planState?: WebviewPlanState | null): string | null {
@@ -37,6 +44,7 @@ const REFERENCE_NODE_NAME = "reference";
 const DROP_URI_SCHEMES = /^(file|vscode-file|vscode-remote):/i;
 const DEFAULT_PROMPT_PLACEHOLDER = "Message Tomcat (Enter to send, Shift+Enter for newline)";
 const IMAGE_ATTACHMENT_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
+const TEST_SET_COMPOSER_VALUE_EVENT = "tomcat:test:set-composer-value";
 const MODE_OPTIONS = [
   { label: "Chat", value: "chat" },
   { label: "Plan", value: "plan" },
@@ -126,6 +134,7 @@ export interface ComposerDraft {
 
 export interface ComposerHandle {
   clear(): void;
+  closeMention(): void;
   getDraft(): ComposerDraft;
   insertReference(reference: WebviewReference): void;
 }
@@ -356,10 +365,17 @@ interface ComposerProps {
   busy?: boolean;
   canInterrupt: boolean;
   canPrompt: boolean;
+  contextSearchLoading: boolean;
+  contextSearchMatches: ContextSearchMatch[];
+  contextSearchQuery: string;
+  contextSearchTruncated: boolean;
   contextLabel: string;
   modelCapabilities?: string[] | undefined;
   modeValue: "chat" | "plan";
   modelValue: string;
+  onContextSearchClose(): void;
+  onContextSearchOpen(): void;
+  onContextSearchQueryChange(query: string): void;
   thinkingLevelValue: "" | "high" | "low" | "medium" | "xhigh";
   onPickContext(): void;
   onDraftChange(draft: ComposerDraft): void;
@@ -378,10 +394,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   busy = false,
   canInterrupt,
   canPrompt,
+  contextSearchLoading,
+  contextSearchMatches,
+  contextSearchQuery,
+  contextSearchTruncated,
   contextLabel,
   modelCapabilities,
   modeValue,
   modelValue,
+  onContextSearchClose,
+  onContextSearchOpen,
+  onContextSearchQueryChange,
   thinkingLevelValue,
   onPickContext,
   onDraftChange,
@@ -401,11 +424,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [effortMenuOpen, setEffortMenuOpen] = useState(false);
+  const [mentionOpen, setMentionOpen] = useState(false);
   const isComposingRef = useRef(false);
+  const isMentionOpenRef = useRef(false);
+  const contextSearchDropdownRef = useRef<ContextSearchDropdownHandle | null>(null);
   const draftRef = useRef<ComposerDraft>(EMPTY_DRAFT);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const modeMenuRef = useRef<HTMLDivElement | null>(null);
   const effortMenuRef = useRef<HTMLDivElement | null>(null);
+  const latestContextSearchHandlersRef = useRef({
+    onClose: onContextSearchClose,
+    onOpen: onContextSearchOpen,
+    onQueryChange: onContextSearchQueryChange,
+  });
+  latestContextSearchHandlersRef.current = {
+    onClose: onContextSearchClose,
+    onOpen: onContextSearchOpen,
+    onQueryChange: onContextSearchQueryChange,
+  };
   const latestHandlersRef = useRef({
     canPrompt,
     onDraftChange,
@@ -423,6 +459,28 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     latestHandlersRef.current.onDraftChange(next);
   };
 
+  const mentionSuggestion = useMemo(() =>
+    createMentionSuggestion({
+      editorHasReference,
+      getKeyHandler: () => contextSearchDropdownRef.current?.onKeyDown ?? null,
+      isComposing: () => isComposingRef.current,
+      onClose: () => {
+        isMentionOpenRef.current = false;
+        setMentionOpen(false);
+        latestContextSearchHandlersRef.current.onClose();
+      },
+      onOpen: () => {
+        isMentionOpenRef.current = true;
+        setMentionOpen(true);
+        latestContextSearchHandlersRef.current.onOpen();
+      },
+      onQueryChange: (query) => {
+        latestContextSearchHandlersRef.current.onQueryChange(query);
+      },
+      referenceNodeName: REFERENCE_NODE_NAME,
+    }),
+  []);
+
   const editor = useEditor({
     immediatelyRender: false,
     extensions: [
@@ -439,6 +497,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         placeholder: DEFAULT_PROMPT_PLACEHOLDER,
       }),
       ReferenceNode,
+      mentionSuggestion.extension,
     ],
     editorProps: {
       attributes: {
@@ -456,6 +515,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           return false;
         },
         keydown: (_view, event) => {
+          if (isMentionOpenRef.current) {
+            return false;
+          }
           if (
             event.key === "Enter" &&
             !event.shiftKey &&
@@ -503,6 +565,35 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       updateDraft(serializeComposerDocument(nextEditor.getJSON()));
     },
   });
+
+  useEffect(() => {
+    if (!editor) {
+      return;
+    }
+    const handleTestSetComposerValue = (event: Event) => {
+      const detail = (event as CustomEvent<{ testId?: string; value?: string | null }>).detail;
+      if (detail?.testId && detail.testId !== "composer-input") {
+        return;
+      }
+      const nextValue = detail?.value ?? "";
+      const chain = editor.chain().focus().clearContent(true);
+      if (nextValue) {
+        chain.insertContent(nextValue);
+      }
+      chain.focus("end").run();
+      updateDraft(serializeComposerDocument(editor.getJSON()));
+    };
+    window.addEventListener(
+      TEST_SET_COMPOSER_VALUE_EVENT,
+      handleTestSetComposerValue as EventListener,
+    );
+    return () => {
+      window.removeEventListener(
+        TEST_SET_COMPOSER_VALUE_EVENT,
+        handleTestSetComposerValue as EventListener,
+      );
+    };
+  }, [editor]);
 
   useEffect(() => {
     if (!editor) {
@@ -590,6 +681,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       editor.commands.focus("end");
       updateDraft(serializeComposerDocument(editor.getJSON()));
     },
+    closeMention() {
+      mentionSuggestion.close();
+    },
     getDraft() {
       return draftRef.current;
     },
@@ -613,7 +707,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         .run();
       updateDraft(serializeComposerDocument(editor.getJSON()));
     },
-  }), [editor]);
+  }), [editor, mentionSuggestion]);
 
   const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
     if (!canPrompt) {
@@ -739,6 +833,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             )}
           </div>
         ) : null}
+        <ContextSearchDropdown
+          ref={contextSearchDropdownRef}
+          loading={contextSearchLoading}
+          matches={contextSearchMatches}
+          onSelect={(match) => {
+            mentionSuggestion.command(match);
+          }}
+          open={mentionOpen}
+          query={contextSearchQuery}
+          truncated={contextSearchTruncated}
+        />
         <EditorContent editor={editor} />
         <div className="tc-composer__bar" data-testid="composer-bar">
           <button

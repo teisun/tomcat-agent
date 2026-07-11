@@ -9,6 +9,12 @@ const configuration = new Map<string, unknown>();
 const configurationListeners = new Set<
   (event: { affectsConfiguration(section: string): boolean }) => void
 >();
+const fileWatchers = new Set<{
+  createListeners: Set<(uri: Uri) => void>;
+  deleteListeners: Set<(uri: Uri) => void>;
+  glob: string;
+}>();
+const textDocuments: TextDocument[] = [];
 
 let quickPickHandler: ((items: QuickPickItem[]) => any) | undefined;
 let inputBoxHandler: ((options: InputBoxOptions) => any) | undefined;
@@ -32,6 +38,86 @@ export class Disposable {
   }
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+function normalizePath(value: string): string {
+  return value.replace(/\\/g, "/");
+}
+
+function globToRegExp(glob: string): RegExp {
+  const normalized = normalizePath(glob);
+  let result = "^";
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    const next = normalized[index + 1];
+    const nextNext = normalized[index + 2];
+    if (char === "*" && next === "*" && nextNext === "/") {
+      result += "(?:.*/)?";
+      index += 2;
+      continue;
+    }
+    if (char === "*" && next === "*") {
+      result += ".*";
+      index += 1;
+      continue;
+    }
+    if (char === "*") {
+      result += "[^/]*";
+      continue;
+    }
+    if (char === "?") {
+      result += ".";
+      continue;
+    }
+    result += escapeRegex(char);
+  }
+  result += "$";
+  return new RegExp(result);
+}
+
+function matchesAnyGlob(candidatePath: string, globs: readonly string[]): boolean {
+  return globs.some((glob) => globToRegExp(glob).test(candidatePath));
+}
+
+function collectWorkspaceExcludeGlobs(): string[] {
+  const result: string[] = [];
+  for (const key of ["files.exclude", "search.exclude"]) {
+    const raw = configuration.get(key);
+    if (!raw || typeof raw !== "object") {
+      continue;
+    }
+    for (const [pattern, enabled] of Object.entries(raw as Record<string, unknown>)) {
+      if (enabled === true) {
+        result.push(pattern);
+      }
+    }
+  }
+  return result;
+}
+
+function isInWorkspace(uri: Uri): boolean {
+  const normalized = normalizePath(uri.fsPath);
+  return workspace.workspaceFolders.some((folder) => {
+    const root = normalizePath(folder.uri.fsPath);
+    return normalized === root || normalized.startsWith(`${root}/`);
+  });
+}
+
+function notifyWatchers(kind: "create" | "delete", uri: Uri): void {
+  const normalized = normalizePath(uri.fsPath);
+  for (const watcher of fileWatchers) {
+    if (!globToRegExp(watcher.glob).test(normalized)) {
+      continue;
+    }
+    const listeners = kind === "create" ? watcher.createListeners : watcher.deleteListeners;
+    for (const listener of listeners) {
+      listener(uri);
+    }
+  }
+}
+
 export class EventEmitter<T = void> {
   private readonly listeners = new Set<(value: T) => void>();
 
@@ -50,6 +136,47 @@ export class EventEmitter<T = void> {
 
   dispose(): void {
     this.listeners.clear();
+  }
+}
+
+export interface CancellationToken {
+  isCancellationRequested: boolean;
+  onCancellationRequested(listener: () => void): Disposable;
+}
+
+export class CancellationTokenSource {
+  private cancelled = false;
+  private readonly listeners = new Set<() => void>();
+
+  get token(): CancellationToken {
+    return {
+      isCancellationRequested: this.cancelled,
+      onCancellationRequested: (listener: () => void): Disposable => {
+        if (this.cancelled) {
+          listener();
+          return new Disposable();
+        }
+        this.listeners.add(listener);
+        return new Disposable(() => {
+          this.listeners.delete(listener);
+        });
+      },
+    };
+  }
+
+  cancel(): void {
+    if (this.cancelled) {
+      return;
+    }
+    this.cancelled = true;
+    for (const listener of this.listeners) {
+      listener();
+    }
+    this.listeners.clear();
+  }
+
+  dispose(): void {
+    this.cancel();
   }
 }
 
@@ -128,6 +255,16 @@ export class Uri {
       return new Uri("file", "", value, "");
     }
     return new Uri(match[1], match[2] ?? "", match[3] ?? "", match[4] ?? "");
+  }
+
+  static joinPath(base: Uri, ...pathSegments: string[]): Uri {
+    const joined = [
+      base.path.replace(/\/+$/u, ""),
+      ...pathSegments.map((segment) => segment.replace(/^\/+|\/+$/gu, "")),
+    ]
+      .filter((segment) => segment.length > 0)
+      .join("/");
+    return new Uri(base.scheme, base.authority, joined.startsWith("/") ? joined : `/${joined}`, base.query);
   }
 
   get fsPath(): string {
@@ -312,6 +449,71 @@ export const workspace = {
       },
     };
   },
+  async findFiles(
+    include: string,
+    exclude?: string,
+    maxResults?: number,
+    token?: CancellationToken,
+  ): Promise<Uri[]> {
+    if (token?.isCancellationRequested) {
+      return [];
+    }
+    const includeMatcher = globToRegExp(include);
+    const excludeGlobs = exclude ? [exclude] : collectWorkspaceExcludeGlobs();
+    const results: Uri[] = [];
+    for (const [rawUri, entry] of files) {
+      if (entry.type !== FileType.File) {
+        continue;
+      }
+      const uri = Uri.parse(rawUri);
+      if (!isInWorkspace(uri)) {
+        continue;
+      }
+      const relativePath = normalizePath(workspace.asRelativePath(uri));
+      if (!includeMatcher.test(relativePath)) {
+        continue;
+      }
+      if (matchesAnyGlob(relativePath, excludeGlobs)) {
+        continue;
+      }
+      results.push(uri);
+      if (typeof maxResults === "number" && results.length >= maxResults) {
+        break;
+      }
+    }
+    return results;
+  },
+  createFileSystemWatcher(glob: string): {
+    dispose(): void;
+    onDidCreate(listener: (uri: Uri) => void): Disposable;
+    onDidDelete(listener: (uri: Uri) => void): Disposable;
+  } {
+    const watcher = {
+      createListeners: new Set<(uri: Uri) => void>(),
+      deleteListeners: new Set<(uri: Uri) => void>(),
+      glob,
+    };
+    fileWatchers.add(watcher);
+    return {
+      dispose() {
+        fileWatchers.delete(watcher);
+        watcher.createListeners.clear();
+        watcher.deleteListeners.clear();
+      },
+      onDidCreate(listener: (uri: Uri) => void): Disposable {
+        watcher.createListeners.add(listener);
+        return new Disposable(() => {
+          watcher.createListeners.delete(listener);
+        });
+      },
+      onDidDelete(listener: (uri: Uri) => void): Disposable {
+        watcher.deleteListeners.add(listener);
+        return new Disposable(() => {
+          watcher.deleteListeners.delete(listener);
+        });
+      },
+    };
+  },
   onDidChangeConfiguration(
     listener: (event: { affectsConfiguration(section: string): boolean }) => void,
   ): Disposable {
@@ -321,13 +523,21 @@ export const workspace = {
     });
   },
   openTextDocument: async (uri: Uri): Promise<TextDocument> => {
+    const existing = textDocuments.find((document) => document.uri.toString() === uri.toString());
+    if (existing) {
+      return existing;
+    }
     const provider = contentProviders.get(uri.scheme);
     if (provider) {
-      return new TextDocument(uri, provider.provideTextDocumentContent(uri));
+      const document = new TextDocument(uri, provider.provideTextDocumentContent(uri));
+      textDocuments.push(document);
+      return document;
     }
 
     const text = files.get(uri.toString())?.text ?? "";
-    return new TextDocument(uri, text);
+    const document = new TextDocument(uri, text);
+    textDocuments.push(document);
+    return document;
   },
   registerTextDocumentContentProvider(scheme: string, provider: Provider): Disposable {
     contentProviders.set(scheme, provider);
@@ -335,6 +545,7 @@ export const workspace = {
       contentProviders.delete(scheme);
     });
   },
+  textDocuments,
   workspaceFolders: [{ uri: Uri.file("/workspace") }],
 };
 
@@ -345,6 +556,10 @@ export const window = {
         selection: Selection;
       }
     | undefined,
+  visibleTextEditors: [] as Array<{
+    document: TextDocument;
+    selection: Selection;
+  }>,
   async showInformationMessage(message: string, ...items: string[]): Promise<string | undefined> {
     return infoMessageHandler?.(message, items);
   },
@@ -364,6 +579,15 @@ export const window = {
     return inputBoxHandler?.(options);
   },
   async showTextDocument(document: TextDocument, _options?: unknown): Promise<{ document: TextDocument }> {
+    const editor = {
+      document,
+      selection: new Selection(new Position(0, 0), new Position(0, 0)),
+    };
+    window.activeTextEditor = editor;
+    window.visibleTextEditors = [editor];
+    if (!textDocuments.some((entry) => entry.uri.toString() === document.uri.toString())) {
+      textDocuments.push(document);
+    }
     return { document };
   },
   createOutputChannel(_name: string): { appendLine(line: string): void; dispose(): void } {
@@ -392,7 +616,9 @@ export const chat = {
 
 export const __testing = {
   deleteFile(filePath: string): void {
-    files.delete(Uri.file(filePath).toString());
+    const uri = Uri.file(filePath);
+    files.delete(uri.toString());
+    notifyWatchers("delete", uri);
   },
   get lastDiffCommand() {
     return lastDiffCommand;
@@ -401,15 +627,20 @@ export const __testing = {
     return files.get(Uri.file(filePath).toString())?.text;
   },
   registerFile(filePath: string, text: string): void {
-    files.set(Uri.file(filePath).toString(), { text, type: FileType.File });
+    const uri = Uri.file(filePath);
+    files.set(uri.toString(), { text, type: FileType.File });
+    notifyWatchers("create", uri);
   },
   registerDirectory(dirPath: string): void {
-    files.set(Uri.file(dirPath).toString(), { text: "", type: FileType.Directory });
+    const uri = Uri.file(dirPath);
+    files.set(uri.toString(), { text: "", type: FileType.Directory });
+    notifyWatchers("create", uri);
   },
   reset(): void {
     commandHandlers.clear();
     contentProviders.clear();
     files.clear();
+    fileWatchers.clear();
     configuration.clear();
     configurationListeners.clear();
     quickPickHandler = undefined;
@@ -418,7 +649,9 @@ export const __testing = {
     warningMessageHandler = undefined;
     openDialogHandler = undefined;
     lastDiffCommand = undefined;
+    textDocuments.length = 0;
     window.activeTextEditor = undefined;
+    window.visibleTextEditors = [];
     workspace.workspaceFolders = [{ uri: Uri.file("/workspace") }];
   },
   setConfiguration(key: string, value: unknown): void {

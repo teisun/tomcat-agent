@@ -567,6 +567,80 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
+  it("shapes @ search references like dropped file references and preserves them in prompt segments", async () => {
+    const { messenger, provider } = buildProvider();
+    __testing.registerFile("/workspace/src/app.ts", "export const answer = 42;\n");
+
+    const postEventSpy = vi
+      .spyOn(provider as unknown as { postEvent(content: Record<string, unknown>): Promise<void> }, "postEvent")
+      .mockResolvedValue(undefined);
+    const postInsertReference = vi
+      .spyOn(provider, "postInsertReference")
+      .mockResolvedValue(undefined);
+
+    await provider.dispatchTestIntent({
+      data: {
+        query: "app",
+        requestId: "req-at-1",
+        sessionId: "session-1",
+      },
+      messageId: "search-at-1",
+      type: "searchContext",
+    });
+
+    const searchEvent = postEventSpy.mock.calls
+      .map(([content]) => content)
+      .find((content) => content.type === "contextSearchResult");
+    const searchReference = (searchEvent as {
+      matches: Array<{ reference: Record<string, unknown> }>;
+    }).matches[0]?.reference;
+
+    await provider.dispatchTestIntent({
+      data: {
+        sessionId: "session-1",
+        uris: [vscode.Uri.file("/workspace/src/app.ts").toString()],
+      },
+      messageId: "drop-shape-1",
+      type: "resolveDrop",
+    });
+
+    const droppedReference = postInsertReference.mock.calls[0]?.[1];
+    expect(searchReference).toEqual(droppedReference);
+
+    const segments = [
+      { text: "Inspect ", type: "text" as const },
+      searchReference as {
+        kind: "file";
+        label: string;
+        path: string;
+        type: "reference";
+      },
+      { text: " now", type: "text" as const },
+    ];
+
+    await provider.dispatchTestIntent({
+      data: {
+        segments,
+        sessionId: "session-1",
+        text: "Inspect app.ts now",
+      },
+      messageId: "prompt-at-shape",
+      type: "prompt",
+    });
+
+    expect(messenger.requestCalls.find((call) => call.type === "prompt")).toEqual(
+      expect.objectContaining({
+        params: expect.objectContaining({
+          segments,
+        }),
+      }),
+    );
+
+    postEventSpy.mockRestore();
+    postInsertReference.mockRestore();
+    provider.dispose();
+  });
+
   it("routes dropped uris into matching reference and attachment channels", async () => {
     const { provider } = buildProvider();
     __testing.registerFile("/workspace/src/app.ts", "export const answer = 42;\n");

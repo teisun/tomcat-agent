@@ -11,6 +11,7 @@ import {
   TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
   TOMCAT_ANSWER_COMMAND,
 } from "../../../constants";
+import { resolveUriToFileReference } from "../../../ui/webview/contextReferences";
 import type { PendingQuestionSnapshot } from "../../../ui/participant/commands";
 import type {
   ObservedEventFilter,
@@ -454,6 +455,54 @@ async function waitForWebviewDomSnapshot<T>(
     : undefined;
   throw new Error(
     `Timed out waiting for webview DOM to match the expected condition. lastSnapshot=${JSON.stringify(dbg)}`,
+  );
+}
+
+async function waitForContextSearchIntent(
+  api: TomcatExtensionApi,
+  predicate: (
+    intent: Extract<WebviewIntent, { type: "searchContext" }>,
+  ) => boolean,
+  timeoutMs = 15_000,
+): Promise<Extract<WebviewIntent, { type: "searchContext" }>> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const intent = api.__testing.getLastContextSearchIntent();
+    if (intent && predicate(intent)) {
+      return intent;
+    }
+    await pause(100);
+  }
+  throw new Error("Timed out waiting for context search intent");
+}
+
+async function setComposerInputValue(
+  api: TomcatExtensionApi,
+  value: string,
+): Promise<void> {
+  await api.__testing.sendWebviewDomAction({
+    kind: "setInputValue",
+    testId: "composer-input",
+    value,
+  });
+}
+
+async function clearComposerDraft(
+  api: TomcatExtensionApi,
+  sessionId: string,
+): Promise<void> {
+  await api.__testing.sendWebviewDomAction({
+    kind: "setInputValue",
+    value: "",
+  });
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      !snapshot.html.includes('data-testid="composer-reference-chip"')
+        ? snapshot
+        : undefined,
+    10_000,
   );
 }
 
@@ -2332,6 +2381,292 @@ export async function assertWebviewFileDropReferenceFlow(
     "expected distinct file drops to remain while duplicate file drops dedupe away",
   );
   captureTranscriptVisual("file-drop-reference", "sidebar", "drop-context.md");
+}
+
+export async function assertWebviewAtMentionReferenceFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-at-mention-reference-new-session",
+  );
+  await clearComposerDraft(api, sessionId);
+
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  assert.ok(workspaceRoot, "expected a real workspace folder for @ mention E2E");
+  const scratchDir = path.join(
+    workspaceRoot,
+    `tmp-at-mention-file-${Date.now().toString(36)}`,
+  );
+
+  try {
+    await fs.mkdir(scratchDir, { recursive: true });
+    const stem = `at-mention-target-${Date.now().toString(36)}`;
+    const filePath = path.join(scratchDir, `${stem}.ts`);
+    await fs.writeFile(filePath, "export const atMentionTarget = true;\n", "utf8");
+    const fileReference = await resolveUriToFileReference(vscode.Uri.file(filePath));
+
+    await setComposerInputValue(api, `@${stem}`);
+
+    await waitForContextSearchIntent(
+      api,
+      (intent) => intent.data.sessionId === sessionId && intent.data.query === stem,
+      20_000,
+    );
+
+    await waitForWebviewDomSnapshot(
+      api,
+      (snapshot) =>
+        snapshot.activeSessionId === sessionId &&
+        snapshot.html.includes('data-testid="context-search-dropdown"') &&
+        snapshot.html.includes(`title="${fileReference.path}"`)
+          ? snapshot
+          : undefined,
+      20_000,
+    ).catch((error: Error) => {
+      throw new Error(`ATMENTION file dropdown stage failed: ${error.message}`);
+    });
+
+    await api.__testing.sendWebviewDomAction({
+      index: 0,
+      kind: "clickTestId",
+      testId: "context-search-option",
+    });
+
+    const composerSnapshot = await waitForWebviewDomSnapshot(
+      api,
+      (snapshot) => {
+        const chipCount = (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
+        const sendDisabled = /data-testid="send-button"[^>]*disabled/u.test(snapshot.html);
+        return (
+          snapshot.activeSessionId === sessionId &&
+          chipCount === 1 &&
+          snapshot.html.includes(`title="${fileReference.path}"`) &&
+          !sendDisabled &&
+          !snapshot.html.includes('data-testid="context-search-dropdown"')
+        )
+          ? snapshot
+          : undefined;
+      },
+      20_000,
+    ).catch((error: Error) => {
+      throw new Error(`ATMENTION file chip stage failed: ${error.message}`);
+    });
+    assert.ok(
+      composerSnapshot.html.includes(fileReference.label),
+      "expected the composer chip label to match the selected @ file reference",
+    );
+
+    await api.__testing.sendWebviewDomAction({
+      kind: "clickTestId",
+      testId: "send-button",
+    });
+    await waitForEvent(api, { sessionId, type: "agent_end" });
+
+    type RestoredReferenceSegment = {
+      kind?: string;
+      label?: string;
+      lineEnd?: number | null;
+      lineStart?: number | null;
+      path?: string;
+      type: string;
+    };
+    const restoredMessage = await waitForWebviewState(
+      api,
+      (state) => {
+        const timeline = state.sessionViews[sessionId]?.timeline ?? [];
+        const userMessage = [...timeline]
+          .reverse()
+          .find((item) => item.type === "message" && "kind" in item && item.kind === "user");
+        const segments =
+          userMessage && "segments" in userMessage
+            ? (userMessage.segments as RestoredReferenceSegment[] | undefined)
+            : undefined;
+        return segments?.some(
+          (segment) =>
+            segment.type === "reference" &&
+            segment.kind === "file" &&
+            segment.path === fileReference.path &&
+            segment.lineStart == null &&
+            segment.lineEnd == null,
+        )
+          ? { segments }
+          : undefined;
+      },
+      20_000,
+    );
+    assert.ok(
+      restoredMessage.segments?.some(
+        (segment) =>
+          segment.type === "reference" &&
+          segment.path === fileReference.path &&
+          segment.lineStart == null &&
+          segment.lineEnd == null,
+      ),
+      "expected the sent @ file reference to stay line-free in user message segments",
+    );
+
+    await api.__testing.reloadWebview();
+    const restoredSnapshot = await waitForWebviewDomSnapshot(
+      api,
+      (snapshot) =>
+        snapshot.activeSessionId === sessionId &&
+        snapshot.html.includes('data-testid="history-reference-chip"') &&
+        snapshot.html.includes(`title="${fileReference.path}"`)
+          ? snapshot
+          : undefined,
+      20_000,
+    );
+    assert.ok(
+      restoredSnapshot.messageTexts.some((text) => text.includes(fileReference.label)),
+      "expected the reloaded transcript to render the @ file reference chip",
+    );
+  } finally {
+    await fs.rm(scratchDir, { force: true, recursive: true });
+  }
+}
+
+export async function assertWebviewAtMentionDirectoryAndWarningFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-at-mention-directory-new-session",
+  );
+  await clearComposerDraft(api, sessionId);
+
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  assert.ok(workspaceRoot, "expected a real workspace folder for @ directory E2E");
+  const scratchDir = path.join(
+    workspaceRoot,
+    `tmp-at-mention-scratch-${Date.now().toString(36)}`,
+  );
+
+  await fs.mkdir(scratchDir, { recursive: true });
+  const dirStem = `directory-target-${Date.now().toString(36)}`;
+  const dirPath = path.join(scratchDir, dirStem);
+  await fs.mkdir(dirPath, { recursive: true });
+  await fs.writeFile(path.join(dirPath, "nested.txt"), "nested\n", "utf8");
+  const dirReference = await resolveUriToFileReference(vscode.Uri.file(dirPath));
+
+  await setComposerInputValue(api, `@${dirReference.label}`);
+  await waitForContextSearchIntent(
+    api,
+    (intent) => intent.data.sessionId === sessionId && intent.data.query === dirReference.label,
+    20_000,
+  );
+
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes('data-testid="context-search-dropdown"') &&
+      snapshot.html.includes(`title="${dirReference.path}"`)
+        ? snapshot
+        : undefined,
+    20_000,
+  ).catch((error: Error) => {
+    throw new Error(`ATMENTION directory dropdown stage failed: ${error.message}`);
+  });
+
+  await api.__testing.sendWebviewDomAction({
+    index: 0,
+    kind: "clickTestId",
+    testId: "context-search-option",
+  });
+
+  const directorySnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) => {
+      const chipCount = (snapshot.html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
+      return (
+        snapshot.activeSessionId === sessionId &&
+        chipCount === 1 &&
+        snapshot.html.includes(`title="${dirReference.path}"`) &&
+        snapshot.html.includes(dirReference.label)
+      )
+        ? snapshot
+        : undefined;
+    },
+    20_000,
+  ).catch((error: Error) => {
+    throw new Error(`ATMENTION directory chip stage failed: ${error.message}`);
+  });
+  assert.ok(
+    directorySnapshot.html.includes(dirReference.label),
+    "expected the composer chip label to preserve the directory suffix",
+  );
+
+  const originalShowWarningMessage = vscode.window.showWarningMessage;
+  const warnings: string[] = [];
+  Object.defineProperty(vscode.window, "showWarningMessage", {
+    configurable: true,
+    value: async (message: string, ..._items: string[]) => {
+      warnings.push(message);
+      return undefined;
+    },
+  });
+
+  try {
+    await api.__testing.reloadWebview();
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    const warningSessionId = await claimActiveWebviewSession(
+      api,
+      "webview-at-mention-warning-claim",
+      20_000,
+    );
+    await clearComposerDraft(api, warningSessionId);
+
+    await setComposerInputValue(api, "@workspace-missing");
+    const searchIntent = await waitForContextSearchIntent(
+      api,
+      (intent) =>
+        intent.data.sessionId === warningSessionId &&
+        intent.data.query === "workspace-missing",
+      20_000,
+    );
+
+    await api.__testing.sendWebviewHostEvent({
+      matches: [],
+      query: searchIntent.data.query,
+      requestId: searchIntent.data.requestId,
+      sessionId: warningSessionId,
+      truncated: false,
+      type: "contextSearchResult",
+      workspaceAvailable: false,
+    });
+
+    await waitForWebviewDomSnapshot(
+      api,
+      (snapshot) =>
+        snapshot.activeSessionId === warningSessionId &&
+        snapshot.html.includes('data-testid="composer"') &&
+        !snapshot.html.includes('data-testid="context-search-dropdown"')
+          ? snapshot
+          : undefined,
+      20_000,
+    ).catch((error: Error) => {
+      throw new Error(`ATMENTION warning stage failed: ${error.message}`);
+    });
+    assert.equal(
+      warnings.at(-1),
+      "打开文件夹后可用 @",
+      "expected the no-workspace @ warning to be surfaced once the host reports workspaceAvailable=false",
+    );
+  } finally {
+    await fs.rm(scratchDir, { force: true, recursive: true });
+    Object.defineProperty(vscode.window, "showWarningMessage", {
+      configurable: true,
+      value: originalShowWarningMessage,
+    });
+  }
 }
 
 export async function assertWebviewPickContextFlow(

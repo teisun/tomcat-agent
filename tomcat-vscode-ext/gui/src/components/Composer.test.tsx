@@ -9,9 +9,16 @@ function renderComposer({
   busy = false,
   canInterrupt = true,
   canPrompt = true,
+  contextSearchLoading = false,
+  contextSearchMatches = [],
+  contextSearchQuery = "",
+  contextSearchTruncated = false,
   modelCapabilities = ["vision", "files"],
   modelValue = "gpt-5.4",
   modeValue = "plan",
+  onContextSearchClose = vi.fn(),
+  onContextSearchOpen = vi.fn(),
+  onContextSearchQueryChange = vi.fn(),
   onPickContext = vi.fn(),
   onInterrupt = vi.fn(),
   onDraftChange = vi.fn(),
@@ -28,9 +35,27 @@ function renderComposer({
   busy?: boolean;
   canInterrupt?: boolean;
   canPrompt?: boolean;
+  contextSearchLoading?: boolean;
+  contextSearchMatches?: Array<{
+    description?: string | null;
+    reference: {
+      kind: "file";
+      label: string;
+      lineEnd?: number | null;
+      lineStart?: number | null;
+      path: string;
+      text?: string | null;
+      type: "reference";
+    };
+  }>;
+  contextSearchQuery?: string;
+  contextSearchTruncated?: boolean;
   modelCapabilities?: string[];
   modelValue?: string;
   modeValue?: "chat" | "plan";
+  onContextSearchClose?: () => void;
+  onContextSearchOpen?: () => void;
+  onContextSearchQueryChange?: (query: string) => void;
   onPickContext?: () => void;
   onDraftChange?: (draft: { hasContent: boolean; segments: unknown[]; text: string }) => void;
   onModeChange?: (value: "chat" | "plan") => void;
@@ -50,11 +75,18 @@ function renderComposer({
       busy={busy}
       canInterrupt={canInterrupt}
       canPrompt={canPrompt}
+      contextSearchLoading={contextSearchLoading}
+      contextSearchMatches={contextSearchMatches}
+      contextSearchQuery={contextSearchQuery}
+      contextSearchTruncated={contextSearchTruncated}
       contextLabel="Ctx 42%"
       modelCapabilities={modelCapabilities}
       modeValue={modeValue}
       modelValue={modelValue}
       thinkingLevelValue={thinkingLevelValue}
+      onContextSearchClose={onContextSearchClose}
+      onContextSearchOpen={onContextSearchOpen}
+      onContextSearchQueryChange={onContextSearchQueryChange}
       onPickContext={onPickContext}
       onDraftChange={onDraftChange}
       onModeChange={onModeChange}
@@ -111,6 +143,19 @@ beforeAll(() => {
 });
 
 describe("Composer", () => {
+  const searchMatch = {
+    description: "src",
+    reference: {
+      kind: "file" as const,
+      label: "app.ts",
+      lineEnd: null,
+      lineStart: null,
+      path: "src/app.ts",
+      text: null,
+      type: "reference" as const,
+    },
+  };
+
   it("renders plan status in the notice rail instead of the control bar", () => {
     const { container } = renderComposer();
 
@@ -483,6 +528,140 @@ describe("Composer", () => {
 
     fireEvent.keyDown(textbox, { isComposing: true, key: "Enter" });
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("opens @ context search and forwards raw query updates", async () => {
+    const onContextSearchOpen = vi.fn();
+    const onContextSearchQueryChange = vi.fn();
+    renderComposer({
+      onContextSearchOpen,
+      onContextSearchQueryChange,
+    });
+    const textbox = screen.getByTestId("composer-input");
+
+    await act(async () => {
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          getData: (type: string) => (type === "text/plain" ? "@app" : ""),
+        },
+      });
+    });
+
+    expect(onContextSearchOpen).toHaveBeenCalledTimes(1);
+    expect(onContextSearchQueryChange).toHaveBeenLastCalledWith("app");
+  });
+
+  it("exposes closeMention and closes an active @ session through the plugin", async () => {
+    const { ref } = renderComposer({
+      contextSearchMatches: [searchMatch],
+      contextSearchQuery: "app",
+    });
+    const textbox = screen.getByTestId("composer-input");
+
+    await act(async () => {
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          getData: (type: string) => (type === "text/plain" ? "@app" : ""),
+        },
+      });
+    });
+
+    expect(screen.getByTestId("context-search-dropdown")).toBeTruthy();
+
+    await act(async () => {
+      ref.current?.closeMention();
+    });
+
+    expect(screen.queryByTestId("context-search-dropdown")).toBeNull();
+  });
+
+  it("does not trigger @ context search during IME composition", async () => {
+    const onContextSearchOpen = vi.fn();
+    const onContextSearchQueryChange = vi.fn();
+    renderComposer({
+      onContextSearchOpen,
+      onContextSearchQueryChange,
+    });
+    const textbox = screen.getByTestId("composer-input");
+
+    fireEvent.compositionStart(textbox);
+    await act(async () => {
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          getData: (type: string) => (type === "text/plain" ? "@app" : ""),
+        },
+      });
+    });
+
+    expect(onContextSearchOpen).not.toHaveBeenCalled();
+    expect(onContextSearchQueryChange).not.toHaveBeenCalled();
+  });
+
+  it("lets Enter select an @ match instead of submitting", async () => {
+    const onSubmit = vi.fn();
+    renderComposer({
+      contextSearchMatches: [searchMatch],
+      contextSearchQuery: "app",
+      onSubmit,
+    });
+    const textbox = screen.getByTestId("composer-input");
+
+    await act(async () => {
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          getData: (type: string) => (type === "text/plain" ? "@app" : ""),
+        },
+      });
+    });
+
+    expect(screen.getByTestId("context-search-dropdown")).toBeTruthy();
+
+    fireEvent.keyDown(textbox, { key: "Enter" });
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByTestId("composer-reference-chip").textContent).toContain("app.ts");
+  });
+
+  it("deduplicates @ selections and keeps them as file references without line numbers", async () => {
+    const { onDraftChange, ref } = renderComposer({
+      contextSearchMatches: [searchMatch],
+      contextSearchQuery: "app.ts:12",
+    });
+    const textbox = screen.getByTestId("composer-input");
+
+    act(() => {
+      ref.current?.insertReference(searchMatch.reference);
+    });
+
+    await act(async () => {
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          getData: (type: string) => (type === "text/plain" ? "@app.ts:12" : ""),
+        },
+      });
+    });
+    fireEvent.keyDown(textbox, { key: "Enter" });
+
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(1);
+    expect(onDraftChange).toHaveBeenLastCalledWith({
+      hasContent: true,
+      segments: [
+        {
+          kind: "file",
+          label: "app.ts",
+          lineEnd: null,
+          lineStart: null,
+          path: "src/app.ts",
+          text: null,
+          type: "reference",
+        },
+        {
+          text: " ",
+          type: "text",
+        },
+      ],
+      text: "app.ts ",
+    });
   });
 
   it("clears drop highlighting on dragend", () => {

@@ -154,6 +154,12 @@
           "default": "",
           "description": "Default working directory used when creating a new Tomcat session. Empty means the first workspace folder."
         },
+        "tomcat.contextSearch.maxFiles": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 20000,
+          "description": "Maximum workspace files indexed for `@` context search. Larger workspaces stop at this cap to keep the sidebar responsive."
+        },
         "tomcat.ui": {
           "type": "string",
           "enum": [

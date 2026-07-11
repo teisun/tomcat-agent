@@ -45,6 +45,7 @@ import {
 import { SessionOwnershipTracker } from "./ui/webview/ownership";
 import {
   createHostFrameMessageId,
+  type HostEventFrameContent,
   type FrontendOwnerKind,
   type TomcatUiMode,
   type WebviewDomAction,
@@ -203,6 +204,7 @@ export interface TomcatExtensionApi {
       toolCallId: string;
     } | undefined;
     getResolvedExecutable(): ResolvedTomcatExecutable;
+    getLastContextSearchIntent(): Extract<WebviewIntent, { type: "searchContext" }> | null;
     getSessionState(sessionId?: string): Promise<Awaited<ReturnType<SessionRouter["getState"]>>>;
     getSettingsPanelState(): {
       route: "models";
@@ -223,6 +225,7 @@ export interface TomcatExtensionApi {
     restartServe(): Promise<void>;
     runParticipantTurn(options: RunParticipantTurnOptions): Promise<RunParticipantTurnResult>;
     sendWebviewDomAction(action: WebviewDomAction): Promise<void>;
+    sendWebviewHostEvent(content: HostEventFrameContent): Promise<void>;
     sendWebviewIntent(
       intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>,
     ): Promise<void>;
@@ -1187,6 +1190,7 @@ export async function activate(
         };
       },
       getResolvedExecutable: () => resolvedExecutable,
+      getLastContextSearchIntent: () => webviewProvider.getLastContextSearchIntent(),
       getSettingsPanelState: () => settingsPanel.__testingSnapshot(),
       getWebviewState: () => webviewProvider.currentState(),
       injectServeEvent: async (event) => {
@@ -1318,6 +1322,9 @@ export async function activate(
       },
       sendWebviewDomAction: async (action) => {
         await webviewProvider.dispatchTestDomAction(action);
+      },
+      sendWebviewHostEvent: async (content) => {
+        await webviewProvider.dispatchTestHostEvent(content);
       },
       setOpenDialogHandler: (handler) => {
         testOpenDialogHandler = handler;

@@ -71,7 +71,7 @@ segments = [
 ### 2.2 非目标
 
 1. 不在这次里绕过 VS Code webview 沙箱；侧边栏 webview 的**非 Shift 拖拽**和**外部文件直接拖入取路径**都不是扩展能修的。
-2. 不在这次里做 `@` 内联搜索；本期可靠入口是智能 `+`，不是再引入一套异步搜索系统。
+2. `@` 内联搜索已由 [`at-mention-context-search.md`](at-mention-context-search.md) 独立立项覆盖；本篇仍只聚焦 `+`、拖拽、选区三条既有入口的引用系统本体。
 3. 不在这次里引入富文本格式化能力；composer 仍然只是“纯文本 + 原子 chip”。
 4. 不在这次里把 Completions 变成真正多模态；Completions 仍是 text-only，引用只会被 flatten 成文本。
 

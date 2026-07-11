@@ -39,6 +39,7 @@ import {
   type WebviewStateSnapshot,
 } from "./protocol";
 import { resolveGuiStylesheet } from "../guiAssets";
+import { ContextSearchService } from "./contextSearch";
 import { buildFileReference } from "./contextReferences";
 import { SessionOwnershipTracker } from "./ownership";
 import { TomcatSessionPool } from "./sessionPool";
@@ -331,6 +332,7 @@ function formatBridgeError(action: string, error: unknown): string {
 }
 
 export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
+  private readonly contextSearch = new ContextSearchService();
   private readonly domSnapshots = new PendingMessageTracker<DomSnapshot>();
   private readonly historyFetchGen = new Map<string, number>();
   private readonly pendingQuestions = new Map<string, PendingQuestion>();
@@ -345,7 +347,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private readonly eventSubscription: { dispose(): void };
   private initialized?: InitializeResult;
   private isReady = false;
+  private lastContextSearchIntent: Extract<WebviewIntent, { type: "searchContext" }> | null = null;
   private openFileObserved = false;
+  private contextSearchTokenSource?: vscode.CancellationTokenSource;
   private messageSubscription?: vscode.Disposable;
   private uiMode: TomcatUiMode;
   private visibilitySubscription?: vscode.Disposable;
@@ -362,6 +366,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   dispose(): void {
     this.deps.ownership.releaseAll("webview");
+    this.contextSearchTokenSource?.cancel();
+    this.contextSearchTokenSource?.dispose();
+    this.contextSearch.dispose();
     this.messageSubscription?.dispose();
     this.visibilitySubscription?.dispose();
     this.eventSubscription.dispose();
@@ -431,8 +438,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.openFileObserved = false;
   }
 
+  getLastContextSearchIntent(): Extract<WebviewIntent, { type: "searchContext" }> | null {
+    return this.lastContextSearchIntent;
+  }
+
   resetForTestReload(): void {
     this.isReady = false;
+    this.lastContextSearchIntent = null;
     this.openFileObserved = false;
     this.planMetadataCache.clear();
     this.stateStore.resetForReload();
@@ -445,6 +457,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       content: { action, type: "__test.dom_action" },
       messageId: createHostFrameMessageId("webview-dom-action"),
     });
+  }
+
+  async dispatchTestHostEvent(content: HostEventFrameContent): Promise<void> {
+    await this.waitUntilReady();
+    await this.postEvent(content);
   }
 
   reveal(preserveFocus = false): void {
@@ -658,6 +675,57 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.postState();
   }
 
+  private async postContextSearchResult(
+    intent: Extract<WebviewIntent, { type: "searchContext" }>,
+    payload?: {
+      matches: Extract<HostEventFrameContent, { type: "contextSearchResult" }>["matches"];
+      truncated: boolean;
+      workspaceAvailable: boolean;
+    },
+  ): Promise<void> {
+    await this.postEvent({
+      matches: payload?.matches ?? [],
+      query: intent.data.query,
+      requestId: intent.data.requestId,
+      sessionId: intent.data.sessionId ?? null,
+      truncated: payload?.truncated ?? false,
+      type: "contextSearchResult",
+      workspaceAvailable: payload?.workspaceAvailable,
+    });
+  }
+
+  private async handleContextSearch(
+    intent: Extract<WebviewIntent, { type: "searchContext" }>,
+  ): Promise<void> {
+    this.lastContextSearchIntent = intent;
+    this.contextSearchTokenSource?.cancel();
+    this.contextSearchTokenSource?.dispose();
+    const tokenSource = new vscode.CancellationTokenSource();
+    this.contextSearchTokenSource = tokenSource;
+    try {
+      const result = await this.contextSearch.search({
+        kind: intent.data.kind,
+        query: intent.data.query,
+        token: tokenSource.token,
+      });
+      await this.postContextSearchResult(intent, {
+        matches: result.matches,
+        truncated: result.truncated,
+        workspaceAvailable: result.workspaceAvailable,
+      });
+    } catch (error) {
+      if (!tokenSource.token.isCancellationRequested) {
+        console.error("Tomcat context search failed", error);
+      }
+      await this.postContextSearchResult(intent);
+    } finally {
+      if (this.contextSearchTokenSource === tokenSource) {
+        this.contextSearchTokenSource = undefined;
+      }
+      tokenSource.dispose();
+    }
+  }
+
   private lookupApprovalSessionId(requestId: string): string | null {
     for (const session of Object.values(this.currentState().sessionViews)) {
       const approval = session.timeline.find(
@@ -837,6 +905,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.ingestPickedUris(sessionId, uris);
         return;
       }
+      case "searchContext":
+        await this.handleContextSearch(intent);
+        return;
+      case "showWarningMessage":
+        await vscode.window.showWarningMessage(intent.data.message);
+        return;
       case "pickContext": {
         await this.ensureInitialized();
         const sessionId = await this.ensureWebviewSession(intent.data?.sessionId ?? null);

@@ -14,6 +14,8 @@ import {
   assertWebviewAddModelsFlow,
   assertWebviewDiffFlow,
   assertWebviewCrossOwnerPlanFlow,
+  assertWebviewAtMentionDirectoryAndWarningFlow,
+  assertWebviewAtMentionReferenceFlow,
   assertWebviewFileDropReferenceFlow,
   assertWebviewPickContextFlow,
   assertWebviewGiantGroupLazyLoadFlow,
@@ -158,6 +160,16 @@ suite("Tomcat host E2E", () => {
   test("routes smart picker selections into attachments and context chips", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewPickContextFlow(api);
+  });
+
+  test("supports @ file search, inline chips, and replay after reload", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewAtMentionReferenceFlow(api);
+  });
+
+  test("supports @ directory search and no-workspace warning fallback", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewAtMentionDirectoryAndWarningFlow(api);
   });
 
   test("derives non-placeholder session titles from first webview prompt segments", async () => {

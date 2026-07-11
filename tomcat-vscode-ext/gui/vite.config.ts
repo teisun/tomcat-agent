@@ -5,6 +5,11 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   base: "./",
+  define: {
+    "import.meta.env.TOMCAT_CONTEXT_SEARCH_DEBOUNCE_MS": JSON.stringify(
+      process.env.TOMCAT_CONTEXT_SEARCH_DEBOUNCE_MS ?? "",
+    ),
+  },
   plugins: [react()],
   build: {
     outDir: "dist",

@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import {
@@ -13,6 +13,7 @@ import {
   parsePlanFrontmatter,
   readPlanMetadata,
 } from "../provider";
+import type { HostToWebviewFrame } from "../protocol";
 
 const __testing = (
   vscode as typeof vscode & {
@@ -293,6 +294,236 @@ describe("webview html asset resolution", () => {
 
     expect(html).toContain('rel="stylesheet"');
     expect(html).toContain("styles.css");
+    provider.dispose();
+  });
+});
+
+function buildSearchProvider(): {
+  postedFrames: HostToWebviewFrame[];
+  provider: TomcatWebviewViewProvider;
+} {
+  const postedFrames: HostToWebviewFrame[] = [];
+  const provider = new TomcatWebviewViewProvider({
+    extensionUri: vscode.Uri.file("/workspace/extension"),
+    getDefaultCwd: () => "/workspace",
+    getUiMode: () => "webview",
+    ide: {} as never,
+    initialize: async () => ({} as never),
+    messenger: {
+      onEvent: () => ({ dispose() {} }),
+    } as never,
+    ownership: {
+      releaseAll() {},
+    } as never,
+    sessionRouter: {} as never,
+  });
+
+  provider.resolveWebviewView({
+    onDidChangeVisibility: () => new vscode.Disposable(() => undefined),
+    show() {},
+    visible: true,
+    webview: {
+      asWebviewUri(uri: vscode.Uri) {
+        return uri;
+      },
+      cspSource: "vscode-test-webview",
+      html: "",
+      onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+      options: {},
+      postMessage: async (frame: HostToWebviewFrame) => {
+        postedFrames.push(frame);
+        return true;
+      },
+    },
+  } as unknown as vscode.WebviewView);
+
+  return { postedFrames, provider };
+}
+
+describe("context search intent handling", () => {
+  it("routes searchContext intents into contextSearchResult events", async () => {
+    __testing.reset();
+    __testing.registerFile("/workspace/src/app.ts", "export const app = true;\n");
+    const { postedFrames, provider } = buildSearchProvider();
+
+    await provider.dispatchTestIntent({
+      data: {
+        query: "app",
+        requestId: "req-1",
+        sessionId: "session-1",
+      },
+      messageId: "search-1",
+      type: "searchContext",
+    });
+
+    expect(postedFrames.at(-1)).toEqual({
+      channel: "event",
+      content: {
+        matches: [
+          {
+            description: "src",
+            reference: {
+              kind: "file",
+              label: "app.ts",
+              path: "src/app.ts",
+              type: "reference",
+            },
+          },
+        ],
+        query: "app",
+        requestId: "req-1",
+        sessionId: "session-1",
+        truncated: false,
+        type: "contextSearchResult",
+        workspaceAvailable: true,
+      },
+      messageId: expect.any(String),
+    });
+
+    provider.dispose();
+  });
+
+  it("cancels the previous search when a new query arrives", async () => {
+    __testing.reset();
+    __testing.registerFile("/workspace/src/new.ts", "export const next = true;\n");
+    const { postedFrames, provider } = buildSearchProvider();
+    let firstCancelled = false;
+    const findFilesSpy = vi
+      .spyOn(vscode.workspace, "findFiles")
+      .mockImplementationOnce(
+        async (_include, _exclude, _maxResults, token) =>
+          new Promise((resolve) => {
+            token?.onCancellationRequested(() => {
+              firstCancelled = true;
+              resolve([]);
+            });
+          }),
+      )
+      .mockResolvedValueOnce([vscode.Uri.file("/workspace/src/new.ts")]);
+
+    const firstRequest = provider.dispatchTestIntent({
+      data: {
+        query: "old",
+        requestId: "req-old",
+        sessionId: "session-1",
+      },
+      messageId: "search-old",
+      type: "searchContext",
+    });
+    const secondRequest = provider.dispatchTestIntent({
+      data: {
+        query: "new",
+        requestId: "req-new",
+        sessionId: "session-1",
+      },
+      messageId: "search-new",
+      type: "searchContext",
+    });
+
+    await Promise.all([firstRequest, secondRequest]);
+
+    expect(firstCancelled).toBe(true);
+    const resultsByRequestId = new Map(
+      postedFrames.map((frame) => [
+        (frame.content as { requestId?: string }).requestId,
+        frame.content,
+      ]),
+    );
+    expect(resultsByRequestId.get("req-old")).toEqual(
+      expect.objectContaining({
+        matches: [],
+        query: "old",
+        requestId: "req-old",
+        truncated: false,
+        type: "contextSearchResult",
+      }),
+    );
+    expect(resultsByRequestId.get("req-new")).toEqual(
+      expect.objectContaining({
+        matches: [
+          {
+            description: "src",
+            reference: {
+              kind: "file",
+              label: "new.ts",
+              path: "src/new.ts",
+              type: "reference",
+            },
+          },
+        ],
+        query: "new",
+        requestId: "req-new",
+        type: "contextSearchResult",
+      }),
+    );
+
+    findFilesSpy.mockRestore();
+    provider.dispose();
+  });
+
+  it("returns an empty result when no workspace folder is open", async () => {
+    __testing.reset();
+    const workspace = vscode.workspace as typeof vscode.workspace & {
+      workspaceFolders: Array<{ uri: vscode.Uri }>;
+    };
+    workspace.workspaceFolders = [];
+    const { postedFrames, provider } = buildSearchProvider();
+
+    await provider.dispatchTestIntent({
+      data: {
+        query: "app",
+        requestId: "req-noworkspace",
+      },
+      messageId: "search-noworkspace",
+      type: "searchContext",
+    });
+
+    expect(postedFrames.at(-1)?.content).toEqual({
+      matches: [],
+      query: "app",
+      requestId: "req-noworkspace",
+      sessionId: null,
+      truncated: false,
+      type: "contextSearchResult",
+      workspaceAvailable: false,
+    });
+
+    provider.dispose();
+  });
+
+  it("swallows search errors and responds with an empty result", async () => {
+    __testing.reset();
+    const { postedFrames, provider } = buildSearchProvider();
+    const findFilesSpy = vi
+      .spyOn(vscode.workspace, "findFiles")
+      .mockRejectedValueOnce(new Error("boom"));
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(
+      provider.dispatchTestIntent({
+        data: {
+          query: "app",
+          requestId: "req-error",
+          sessionId: "session-1",
+        },
+        messageId: "search-error",
+        type: "searchContext",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(postedFrames.at(-1)?.content).toEqual({
+      matches: [],
+      query: "app",
+      requestId: "req-error",
+      sessionId: "session-1",
+      truncated: false,
+      type: "contextSearchResult",
+      workspaceAvailable: undefined,
+    });
+
+    expect(consoleErrorSpy).toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
+    findFilesSpy.mockRestore();
     provider.dispose();
   });
 });

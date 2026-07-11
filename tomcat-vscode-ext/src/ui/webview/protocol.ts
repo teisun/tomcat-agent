@@ -11,12 +11,25 @@ export type FrontendOwnerKind = "participant" | "webview";
 export type WebviewMessageSegment = ServeContentSegment;
 export type WebviewReference = Extract<ServeContentSegment, { type: "reference" }>;
 
+export interface ContextSearchMatch {
+  description?: string | null;
+  reference: WebviewReference;
+}
+
 export interface WebviewDomAction {
-  kind: "clickTestId" | "dragOverTestId" | "dragLeaveTestId" | "scrollIntoView" | "scrollToEdge" | "setRootWidth";
+  kind:
+    | "clickTestId"
+    | "dragOverTestId"
+    | "dragLeaveTestId"
+    | "scrollIntoView"
+    | "scrollToEdge"
+    | "setInputValue"
+    | "setRootWidth";
   edge?: "bottom" | "top";
   index?: number;
   scrollBlock?: "center" | "end" | "nearest" | "start";
   testId?: string;
+  value?: string;
   widthPx?: number | null;
 }
 
@@ -172,6 +185,15 @@ export type WebviewTimelineItem =
 export type HostEventFrameContent =
   | ControlRequestFrame
   | ServeEvent
+  | {
+      matches: ContextSearchMatch[];
+      query: string;
+      requestId: string;
+      sessionId?: string | null;
+      truncated: boolean;
+      type: "contextSearchResult";
+      workspaceAvailable?: boolean;
+    }
   | {
       reference: WebviewReference;
       sessionId?: string | null;
@@ -340,6 +362,23 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
+      type: "searchContext";
+      data: {
+        kind?: "file";
+        query: string;
+        requestId: string;
+        sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "showWarningMessage";
+      data: {
+        message: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "openPlanFile";
       data: {
         path: string;
@@ -459,6 +498,52 @@ function isWebviewReferenceShape(value: unknown): value is WebviewReference {
   );
 }
 
+function isContextSearchMatchShape(value: unknown): value is ContextSearchMatch {
+  return (
+    isRecord(value) &&
+    isWebviewReferenceShape(value.reference) &&
+    (value.description === undefined ||
+      value.description === null ||
+      isString(value.description))
+  );
+}
+
+export function sanitizeContextSearchMatches(value: unknown): ContextSearchMatch[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter(isContextSearchMatchShape);
+}
+
+export function coerceContextSearchResultEvent(
+  value: unknown,
+): Extract<HostEventFrameContent, { type: "contextSearchResult" }> | null {
+  if (
+    !isRecord(value) ||
+    value.type !== "contextSearchResult" ||
+    !isString(value.requestId) ||
+    !isString(value.query) ||
+    typeof value.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    matches: sanitizeContextSearchMatches(value.matches),
+    query: value.query,
+    requestId: value.requestId,
+    sessionId:
+      value.sessionId === undefined || value.sessionId === null || isString(value.sessionId)
+        ? value.sessionId
+        : undefined,
+    truncated: value.truncated,
+    type: "contextSearchResult",
+    workspaceAvailable:
+      value.workspaceAvailable === undefined || typeof value.workspaceAvailable === "boolean"
+        ? value.workspaceAvailable
+        : undefined,
+  };
+}
+
 function isWebviewMessageSegmentShape(value: unknown): value is WebviewMessageSegment {
   if (!isRecord(value) || !isString(value.type)) {
     return false;
@@ -557,6 +642,18 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       );
     case "removeAttachment":
       return isRecord(value.data) && isString(value.data.attachmentId);
+    case "searchContext":
+      return (
+        isRecord(value.data) &&
+        isString(value.data.requestId) &&
+        isString(value.data.query) &&
+        (value.data.kind === undefined || value.data.kind === "file") &&
+        (value.data.sessionId === undefined ||
+          value.data.sessionId === null ||
+          isString(value.data.sessionId))
+      );
+    case "showWarningMessage":
+      return isRecord(value.data) && isString(value.data.message);
     case "answerQuestion":
       return (
         isRecord(value.data) &&

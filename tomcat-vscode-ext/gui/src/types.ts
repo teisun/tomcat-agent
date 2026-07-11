@@ -18,6 +18,11 @@ export type WebviewMessageSegment =
 
 export type WebviewReference = Extract<WebviewMessageSegment, { type: "reference" }>;
 
+export interface ContextSearchMatch {
+  description?: string | null;
+  reference: WebviewReference;
+}
+
 export interface WebviewDomAction {
   kind:
     | "clickTestId"
@@ -234,6 +239,15 @@ export type HostToWebviewFrame =
       channel: "event";
       content:
         | {
+            matches: ContextSearchMatch[];
+            query: string;
+            requestId: string;
+            sessionId?: string | null;
+            truncated: boolean;
+            type: "contextSearchResult";
+            workspaceAvailable?: boolean;
+          }
+        | {
             reference: WebviewReference;
             sessionId?: string | null;
             type: "insertReference";
@@ -381,6 +395,23 @@ export type WebviewIntent =
       data: {
         sessionId?: string | null;
         uris: string[];
+      };
+    }
+  | {
+      messageId: string;
+      type: "searchContext";
+      data: {
+        kind?: "file";
+        query: string;
+        requestId: string;
+        sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "showWarningMessage";
+      data: {
+        message: string;
       };
     }
   | {

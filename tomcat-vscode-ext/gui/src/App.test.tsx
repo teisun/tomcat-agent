@@ -20,6 +20,49 @@ async function emitState(frame: HostToWebviewFrame) {
   });
 }
 
+async function emitReadySessionState(sessionId = "s1") {
+  await emitState({
+    channel: "state",
+    content: {
+      activeSessionId: sessionId,
+      availableModels: ["gpt-5.4"],
+      ready: true,
+      sessions: [
+        {
+          busy: false,
+          isCurrent: true,
+          ownedByThisFrontend: true,
+          owner: "webview",
+          sessionId,
+          title: null,
+          updatedAt: 1,
+        },
+      ],
+      sessionViews: {
+        [sessionId]: {
+          busy: false,
+          conflictMessage: null,
+          contextRatio: null,
+          hasMoreHistory: false,
+          historyLoading: false,
+          model: "gpt-5.4",
+          ownedByThisFrontend: true,
+          owner: "webview",
+          pendingAttachments: [],
+          planFile: null,
+          planId: null,
+          planState: "chat",
+          sessionId,
+          thinkingLevel: "high",
+          timeline: [],
+        },
+      },
+      uiMode: "both",
+    },
+    messageId: `state-ready-${sessionId}`,
+  });
+}
+
 beforeAll(() => {
   const emptyRect = () => ({
     bottom: 0,
@@ -1879,46 +1922,7 @@ describe("Tomcat webview App", () => {
   it("accepts insertReference events and sends reference-only prompts", async () => {
     const { postMessage } = mount();
 
-    await emitState({
-      channel: "state",
-      content: {
-        activeSessionId: "s1",
-        availableModels: ["gpt-5.4"],
-        ready: true,
-        sessions: [
-          {
-            busy: false,
-            isCurrent: true,
-            ownedByThisFrontend: true,
-            owner: "webview",
-            sessionId: "s1",
-            title: null,
-            updatedAt: 1,
-          },
-        ],
-        sessionViews: {
-          s1: {
-            busy: false,
-            conflictMessage: null,
-            contextRatio: null,
-            hasMoreHistory: false,
-            historyLoading: false,
-            model: "gpt-5.4",
-            ownedByThisFrontend: true,
-            owner: "webview",
-            pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
-            sessionId: "s1",
-            thinkingLevel: "high",
-            timeline: [],
-          },
-        },
-        uiMode: "both",
-      },
-      messageId: "state-reference-only",
-    });
+    await emitReadySessionState("s1");
 
     await emitState({
       channel: "event",
@@ -2285,46 +2289,7 @@ describe("Tomcat webview App", () => {
   it("ignores malformed insertReference events without a concrete session id", async () => {
     mount();
 
-    await emitState({
-      channel: "state",
-      content: {
-        activeSessionId: "s1",
-        availableModels: ["gpt-5.4"],
-        ready: true,
-        sessions: [
-          {
-            busy: false,
-            isCurrent: true,
-            ownedByThisFrontend: true,
-            owner: "webview",
-            sessionId: "s1",
-            title: null,
-            updatedAt: 1,
-          },
-        ],
-        sessionViews: {
-          s1: {
-            busy: false,
-            conflictMessage: null,
-            contextRatio: null,
-            hasMoreHistory: false,
-            historyLoading: false,
-            model: "gpt-5.4",
-            ownedByThisFrontend: true,
-            owner: "webview",
-            pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
-            sessionId: "s1",
-            thinkingLevel: "high",
-            timeline: [],
-          },
-        },
-        uiMode: "both",
-      },
-      messageId: "state-invalid-insert-ref",
-    });
+    await emitReadySessionState("s1");
 
     await emitState({
       channel: "event",
@@ -2342,5 +2307,251 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.queryByTestId("composer-reference-chip")).toBeNull();
+  });
+
+  it("debounces @ searches, routes fresh results, and drops stale ones", async () => {
+    vi.useFakeTimers();
+    try {
+      const { postMessage } = mount();
+      await emitReadySessionState("s1");
+      postMessage.mockClear();
+
+      const textbox = screen.getByTestId("composer-input");
+      await act(async () => {
+        fireEvent.paste(textbox, {
+          clipboardData: {
+            getData: (type: string) => (type === "text/plain" ? "@app" : ""),
+          },
+        });
+      });
+
+      expect(screen.getByTestId("context-search-loading").textContent).toContain("搜索中");
+      expect(postMessage).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(150);
+      });
+
+      const searchIntent = postMessage.mock.calls.find(
+        ([message]) => message.type === "searchContext",
+      )?.[0];
+      expect(searchIntent?.data).toMatchObject({
+        kind: "file",
+        query: "app",
+        sessionId: "s1",
+      });
+
+      await emitState({
+        channel: "event",
+        content: {
+          matches: [
+            {
+              description: "old",
+              reference: {
+                kind: "file",
+                label: "old.ts",
+                path: "old/old.ts",
+                type: "reference",
+              },
+            },
+          ],
+          query: "app",
+          requestId: "stale-request",
+          truncated: false,
+          type: "contextSearchResult",
+          workspaceAvailable: true,
+        },
+        messageId: "stale-result",
+      });
+      expect(screen.queryByText("old.ts")).toBeNull();
+
+      await emitState({
+        channel: "event",
+        content: {
+          matches: [
+            {
+              description: "src",
+              reference: {
+                kind: "file",
+                label: "app.ts",
+                path: "src/app.ts",
+                type: "reference",
+              },
+            },
+          ],
+          query: "app",
+          requestId: searchIntent?.data?.requestId ?? "missing",
+          truncated: false,
+          type: "contextSearchResult",
+          workspaceAvailable: true,
+        },
+        messageId: "fresh-result",
+      });
+
+      expect(screen.getByTestId("context-search-dropdown")).toBeTruthy();
+      expect(screen.getByTitle("src/app.ts")).toBeTruthy();
+      expect(screen.getByText("src")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("warns once and closes the menu when @ search runs without a workspace", async () => {
+    vi.useFakeTimers();
+    try {
+      const { postMessage } = mount();
+      await emitReadySessionState("s1");
+      postMessage.mockClear();
+
+      const textbox = screen.getByTestId("composer-input");
+      await act(async () => {
+        fireEvent.paste(textbox, {
+          clipboardData: {
+            getData: (type: string) => (type === "text/plain" ? "@app" : ""),
+          },
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(150);
+      });
+      const firstSearch = postMessage.mock.calls.find(
+        ([message]) => message.type === "searchContext",
+      )?.[0];
+      expect(firstSearch?.data?.requestId).toBeTruthy();
+
+      await emitState({
+        channel: "event",
+        content: {
+          matches: [],
+          query: "app",
+          requestId: firstSearch?.data?.requestId ?? "missing",
+          truncated: false,
+          type: "contextSearchResult",
+          workspaceAvailable: false,
+        },
+        messageId: "no-workspace-result-1",
+      });
+
+      expect(
+        postMessage.mock.calls.filter(([message]) => message.type === "showWarningMessage"),
+      ).toHaveLength(1);
+      expect(screen.queryByTestId("context-search-dropdown")).toBeNull();
+
+      postMessage.mockClear();
+      await act(async () => {
+        fireEvent.paste(textbox, {
+          clipboardData: {
+            getData: (type: string) => (type === "text/plain" ? "@app" : ""),
+          },
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(150);
+      });
+      const secondSearch = postMessage.mock.calls.find(
+        ([message]) => message.type === "searchContext",
+      )?.[0];
+      await emitState({
+        channel: "event",
+        content: {
+          matches: [],
+          query: "app",
+          requestId: secondSearch?.data?.requestId ?? "missing-2",
+          truncated: false,
+          type: "contextSearchResult",
+          workspaceAvailable: false,
+        },
+        messageId: "no-workspace-result-2",
+      });
+
+      expect(
+        postMessage.mock.calls.filter(([message]) => message.type === "showWarningMessage"),
+      ).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the previous @ results visible while the next query is debouncing", async () => {
+    vi.useFakeTimers();
+    try {
+      const { postMessage } = mount();
+      await emitReadySessionState("s1");
+      postMessage.mockClear();
+
+      const textbox = screen.getByTestId("composer-input");
+      await act(async () => {
+        fireEvent.paste(textbox, {
+          clipboardData: {
+            getData: (type: string) => (type === "text/plain" ? "@app" : ""),
+          },
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(150);
+      });
+
+      const searchIntent = postMessage.mock.calls.find(
+        ([message]) => message.type === "searchContext",
+      )?.[0];
+      await emitState({
+        channel: "event",
+        content: {
+          matches: [
+            {
+              description: "src",
+              reference: {
+                kind: "file",
+                label: "app.ts",
+                path: "src/app.ts",
+                type: "reference",
+              },
+            },
+          ],
+          query: "app",
+          requestId: searchIntent?.data?.requestId ?? "missing",
+          truncated: false,
+          type: "contextSearchResult",
+          workspaceAvailable: true,
+        },
+        messageId: "context-search-result-app",
+      });
+
+      postMessage.mockClear();
+      await act(async () => {
+        fireEvent.paste(textbox, {
+          clipboardData: {
+            getData: (type: string) => (type === "text/plain" ? "l" : ""),
+          },
+        });
+      });
+
+      expect(screen.getByTitle("src/app.ts")).toBeTruthy();
+      expect(screen.getByTestId("context-search-loading-inline").textContent).toContain("搜索中");
+      expect(postMessage).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes an active @ dropdown when the active session changes", async () => {
+    const { postMessage } = mount();
+    await emitReadySessionState("s1");
+    postMessage.mockClear();
+
+    const textbox = screen.getByTestId("composer-input");
+    await act(async () => {
+      fireEvent.paste(textbox, {
+        clipboardData: {
+          getData: (type: string) => (type === "text/plain" ? "@app" : ""),
+        },
+      });
+    });
+
+    expect(screen.getByTestId("context-search-dropdown")).toBeTruthy();
+
+    await emitReadySessionState("s2");
+
+    expect(screen.queryByTestId("context-search-dropdown")).toBeNull();
   });
 });

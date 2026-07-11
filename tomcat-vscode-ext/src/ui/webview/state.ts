@@ -1357,6 +1357,7 @@ export class WebviewStateStore {
     if (
       frame.type === "__test.capture_dom" ||
       frame.type === "__test.dom_action" ||
+      frame.type === "contextSearchResult" ||
       frame.type === "insertReference"
     ) {
       return;
