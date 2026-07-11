@@ -102,6 +102,11 @@ fn creates_models_toml_with_all_seed_entries_when_absent() {
     for entry in seed_entries(&cfg) {
         assert_eq!(catalog.lookup(&entry.id).cloned(), Some(entry.clone()));
         assert!(
+            catalog.is_builtin_seed(&entry.id),
+            "seeded preset should still be marked as builtin: {}",
+            entry.id
+        );
+        assert!(
             catalog.is_user_model(&entry.id),
             "seeded preset should be marked as user-owned after init: {}",
             entry.id
@@ -199,6 +204,11 @@ base_url = \"https://api.acme.example\"
     assert!(catalog.lookup("my-custom-model").is_some());
     for entry in seed_entries(&cfg) {
         assert!(catalog.lookup(&entry.id).is_some(), "missing {}", entry.id);
+        assert!(
+            catalog.is_builtin_seed(&entry.id),
+            "seeded preset should still be builtin after append: {}",
+            entry.id
+        );
         assert!(
             catalog.is_user_model(&entry.id),
             "seeded preset should be user-owned after append: {}",

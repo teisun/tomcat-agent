@@ -13,7 +13,7 @@ use super::catalog::{
 };
 use super::provider::LlmProvider;
 use super::registry::build_provider;
-use super::thinking_policy::{thinking_format_for_model, ThinkingFormat};
+use super::thinking_policy::ThinkingFormat;
 use super::{ChatMessage, ChatMessageContent, ChatMessageContentPart};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,18 +289,13 @@ impl DefaultLlmResolver {
     }
 
     fn resolved_thinking_format(&self, entry: &ModelEntry) -> ThinkingFormat {
-        let model_name = entry.request_model_name();
-        match entry.thinking_format.as_deref() {
-            Some(format) => {
-                ThinkingFormat::parse_or_auto(Some(format)).resolve_for_model(model_name)
-            }
-            None => match self.config.llm.thinking.format.as_deref() {
-                Some(format) => {
-                    ThinkingFormat::parse_or_auto(Some(format)).resolve_for_model(model_name)
-                }
-                None => thinking_format_for_model(model_name),
-            },
-        }
+        ThinkingFormat::parse_or_auto(
+            entry
+                .thinking_format
+                .as_deref()
+                .or(self.config.llm.thinking.format.as_deref()),
+        )
+        .resolve_for_api(entry.api.as_str())
     }
 
     fn runtime(&self) -> LlmRuntimeConfig {

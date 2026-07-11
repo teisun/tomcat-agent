@@ -449,7 +449,7 @@ pub struct OpenAiProvider {
     http_read_timeout_sec: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request 不会写任何 reasoning 字段。
     thinking_cfg: crate::infra::config::ThinkingConfig,
-    /// 用户显式配置的 thinking format；`Auto` 时按请求实际 model 决定。
+    /// 用户显式配置的 thinking format；`Auto` 时按当前 wire(`openai`) 决定。
     configured_thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
     continuity_enabled: bool,
 }
@@ -545,11 +545,9 @@ impl OpenAiProvider {
         }
     }
 
-    fn thinking_format_for_model(
-        &self,
-        model: &str,
-    ) -> crate::core::llm::thinking_policy::ThinkingFormat {
-        self.configured_thinking_format.resolve_for_model(model)
+    fn thinking_format_for_wire(&self) -> crate::core::llm::thinking_policy::ThinkingFormat {
+        self.configured_thinking_format
+            .resolve_for_api(PROVIDER_NAME)
     }
 
     fn thinking_cfg_for_request<'a>(
@@ -595,7 +593,7 @@ impl OpenAiProvider {
         base_url: &str,
     ) -> Result<ChatResponse, AppError> {
         let model = self.effective_model(request);
-        let thinking_format = self.thinking_format_for_model(&model);
+        let thinking_format = self.thinking_format_for_wire();
         let thinking_cfg = self.thinking_cfg_for_request(request);
         let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
             &thinking_cfg,
@@ -813,7 +811,7 @@ impl LlmProvider for OpenAiProvider {
         };
 
         let model = self.effective_model(&request);
-        let thinking_format = self.thinking_format_for_model(&model);
+        let thinking_format = self.thinking_format_for_wire();
         let thinking_cfg = self.thinking_cfg_for_request(&request);
         let thinking_fields = crate::core::llm::thinking_policy::resolve_request_fields(
             &thinking_cfg,

@@ -14,6 +14,8 @@ fn resolve_known_model() {
     let gpt = catalog.lookup("gpt-5.4").expect("builtin gpt-5.4");
     assert_eq!(gpt.api, "openai-responses");
     assert_eq!(gpt.provider, "openai");
+    assert!(catalog.is_builtin_seed("gpt-5.4"));
+    assert!(!catalog.is_user_model("gpt-5.4"));
     assert!(catalog.lookup("gpt-5.2").is_some());
     assert!(catalog.lookup("gpt-5.6").is_some());
 
@@ -148,7 +150,36 @@ vision = false
     assert_eq!(entry.base_url.as_deref(), Some("https://example.override"));
     assert!(!entry.capabilities.vision);
     assert_eq!(entry.provider, "openai");
+    assert!(catalog.is_builtin_seed("gpt-5.4"));
     assert!(catalog.is_user_model("gpt-5.4"));
+}
+
+#[test]
+fn builtin_seed_and_user_model_flags_are_tracked_independently() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "gpt-5.4"
+base_url = "https://seeded.override"
+
+[[models]]
+id = "custom-hosted"
+api = "openai"
+provider = "relay"
+"#,
+    )
+    .unwrap();
+
+    let cfg = AppConfig::default();
+    let catalog = ModelCatalog::load_from_path(&cfg, path).expect("load merged catalog");
+
+    assert!(catalog.is_builtin_seed("gpt-5.4"));
+    assert!(catalog.is_user_model("gpt-5.4"));
+    assert!(!catalog.is_builtin_seed("custom-hosted"));
+    assert!(catalog.is_user_model("custom-hosted"));
 }
 
 #[test]

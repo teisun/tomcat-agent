@@ -1,4 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 
 import type {
   SettingsHostFrame,
@@ -6,14 +11,22 @@ import type {
   SettingsModelCapabilities,
   SettingsModelInput,
   SettingsModelView,
+  SettingsProviderKeyView,
   SettingsStateSnapshot,
   VsCodeApiLike,
 } from "../../../src/shared/settingsProtocol";
+import {
+  buildProviderPresets,
+  findMatchingProviderPreset,
+  type ProviderPreset,
+} from "./providerPresets";
+import { deriveRelayFields, RELAY_ID_SEPARATOR } from "./relayDerive";
 
 type FormState = SettingsModelInput;
 type FormMode = "create" | "edit";
+type DialogKind = "official" | "relay";
 
-const EMPTY_CAPABILITIES: SettingsModelCapabilities = {
+const RELAY_DEFAULT_CAPABILITIES: SettingsModelCapabilities = {
   files: false,
   reasoning: true,
   tools: true,
@@ -21,12 +34,41 @@ const EMPTY_CAPABILITIES: SettingsModelCapabilities = {
   webSearch: false,
 };
 
+const API_OPTIONS = [
+  { label: "OpenAI (Chat Completions)", value: "openai" },
+  { label: "OpenAI (Responses)", value: "openai-responses" },
+  { label: "Anthropic (Messages)", value: "anthropic-messages" },
+] as const;
+
+const THINKING_FORMAT_OPTIONS = [
+  { label: "Auto (follow the selected API)", value: "" },
+  { label: "OpenAI effort", value: "openai" },
+  { label: "DeepSeek thinking", value: "deepseek" },
+  { label: "ZAI / GLM reasoning", value: "zai" },
+  { label: "Doubao / Kimi / MiMo thinking", value: "doubao" },
+  { label: "Anthropic thinking budget", value: "anthropic" },
+] as const;
+
+const CAPABILITY_OPTIONS = [
+  ["vision", "Vision"],
+  ["files", "Files"],
+  ["tools", "Tools"],
+  ["reasoning", "Reasoning"],
+  ["webSearch", "Web Search"],
+] as const;
+
+function cloneCapabilities(
+  capabilities: SettingsModelCapabilities,
+): SettingsModelCapabilities {
+  return { ...capabilities };
+}
+
 function createEmptyForm(): FormState {
   return {
-    api: "openai",
+    api: "",
     apiKeyEnv: "",
     baseUrl: "",
-    capabilities: { ...EMPTY_CAPABILITIES },
+    capabilities: cloneCapabilities(RELAY_DEFAULT_CAPABILITIES),
     contextWindow: null,
     id: "",
     modelName: "",
@@ -35,29 +77,54 @@ function createEmptyForm(): FormState {
   };
 }
 
-function inferApiKeyEnv(provider: string): string {
-  const normalized = provider
-    .trim()
-    .replace(/[^A-Za-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .toUpperCase();
-  return normalized ? `${normalized}_API_KEY` : "";
+function fieldText(value: string | null | undefined): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeOptionalText(value: string | null | undefined): string | null {
+  const trimmed = fieldText(value);
+  return trimmed ? trimmed : null;
+}
+
+function hasScheme(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
+}
+
+function normalizeBaseUrlInput(value: string | null | undefined): string | null {
+  const trimmed = fieldText(value);
+  if (!trimmed) {
+    return null;
+  }
+  return hasScheme(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
+function isValidBaseUrl(value: string | null | undefined): boolean {
+  const normalized = normalizeBaseUrlInput(value);
+  if (!normalized) {
+    return false;
+  }
+  try {
+    const parsed = new URL(normalized);
+    return Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function normalizeModel(model: FormState): SettingsModelInput {
   return {
-    api: model.api.trim(),
-    apiKeyEnv: model.apiKeyEnv?.trim() ? model.apiKeyEnv.trim() : null,
-    baseUrl: model.baseUrl?.trim() ? model.baseUrl.trim() : null,
-    capabilities: { ...model.capabilities },
+    api: fieldText(model.api),
+    apiKeyEnv: normalizeOptionalText(model.apiKeyEnv),
+    baseUrl: normalizeBaseUrlInput(model.baseUrl),
+    capabilities: cloneCapabilities(model.capabilities),
     contextWindow:
       typeof model.contextWindow === "number" && Number.isFinite(model.contextWindow)
         ? model.contextWindow
         : null,
-    id: model.id.trim(),
-    modelName: model.modelName?.trim() ? model.modelName.trim() : null,
-    provider: model.provider.trim(),
-    thinkingFormat: model.thinkingFormat?.trim() ? model.thinkingFormat.trim() : null,
+    id: fieldText(model.id),
+    modelName: normalizeOptionalText(model.modelName),
+    provider: fieldText(model.provider),
+    thinkingFormat: normalizeOptionalText(model.thinkingFormat),
   };
 }
 
@@ -74,7 +141,7 @@ function modelToForm(model: SettingsModelView): FormState {
     api: model.api,
     apiKeyEnv: model.apiKeyEnv,
     baseUrl: model.baseUrl ?? "",
-    capabilities: { ...model.capabilities },
+    capabilities: cloneCapabilities(model.capabilities),
     contextWindow: model.contextWindow ?? null,
     id: model.id,
     modelName: model.modelName ?? "",
@@ -83,8 +150,29 @@ function modelToForm(model: SettingsModelView): FormState {
   };
 }
 
+function formatApiLabel(api: string): string {
+  return API_OPTIONS.find((entry) => entry.value === api)?.label ?? api;
+}
+
+function formatThinkingLabel(thinkingFormat: string | null | undefined): string {
+  return (
+    THINKING_FORMAT_OPTIONS.find((entry) => entry.value === (thinkingFormat ?? ""))?.label ??
+    thinkingFormat ??
+    ""
+  );
+}
+
 function modelKeyEnvName(model: SettingsModelView): string {
-  return model.apiKeyEnv?.trim() || inferApiKeyEnv(model.provider);
+  return fieldText(model.apiKeyEnv);
+}
+
+function fallbackModelName(model: SettingsModelView): string {
+  const explicit = fieldText(model.modelName);
+  if (explicit) {
+    return explicit;
+  }
+  const fromRelay = model.id.split(RELAY_ID_SEPARATOR).pop();
+  return fromRelay?.trim() || model.id;
 }
 
 function buildModelDetails(model: SettingsModelView): Array<{ label: string; value: string }> {
@@ -95,7 +183,7 @@ function buildModelDetails(model: SettingsModelView): Array<{ label: string; val
     },
     {
       label: "API",
-      value: model.api,
+      value: formatApiLabel(model.api),
     },
     {
       label: "Provider",
@@ -111,7 +199,7 @@ function buildModelDetails(model: SettingsModelView): Array<{ label: string; val
     },
     {
       label: "Thinking",
-      value: model.thinkingFormat ?? "",
+      value: formatThinkingLabel(model.thinkingFormat),
     },
     {
       label: "Context Window",
@@ -121,14 +209,131 @@ function buildModelDetails(model: SettingsModelView): Array<{ label: string; val
           : "",
     },
     {
-      label: "Upstream Model",
+      label: "Model Name",
       value: model.modelName ?? "",
     },
   ];
   return detailRows.filter((entry) => entry.value.trim().length > 0);
 }
 
-function send(vscodeApi: VsCodeApiLike<SettingsIntent>, message: Omit<SettingsIntent, "messageId">): void {
+function buildConfiguredKeyLabel(entry: SettingsProviderKeyView): string {
+  return entry.keyPresent ? `${entry.envName} (configured)` : entry.envName;
+}
+
+function buildKeySlotOptions(
+  suggestedEnvName: string,
+  providerKeys: SettingsProviderKeyView[],
+): Array<{ envName: string; keyPresent: boolean; label: string }> {
+  const options: Array<{ envName: string; keyPresent: boolean; label: string }> = [];
+  const seen = new Set<string>();
+  if (suggestedEnvName) {
+    const existing = providerKeys.find((entry) => entry.envName === suggestedEnvName);
+    options.push({
+      envName: suggestedEnvName,
+      keyPresent: existing?.keyPresent ?? false,
+      label: existing?.keyPresent
+        ? `${suggestedEnvName} (configured)`
+        : `${suggestedEnvName} (suggested)`,
+    });
+    seen.add(suggestedEnvName);
+  }
+  for (const entry of providerKeys) {
+    if (seen.has(entry.envName)) {
+      continue;
+    }
+    options.push({
+      envName: entry.envName,
+      keyPresent: entry.keyPresent,
+      label: buildConfiguredKeyLabel(entry),
+    });
+    seen.add(entry.envName);
+  }
+  return options;
+}
+
+function defaultDialogKindForPresets(presets: ProviderPreset[]): DialogKind {
+  return presets.length > 0 ? "official" : "relay";
+}
+
+function tabIdForDialogKind(kind: DialogKind): string {
+  return `settings-model-tab-${kind}`;
+}
+
+function panelIdForDialogKind(kind: DialogKind): string {
+  return `settings-model-panel-${kind}`;
+}
+
+function focusDialogTab(kind: DialogKind): void {
+  window.requestAnimationFrame(() => {
+    const element = window.document.getElementById(tabIdForDialogKind(kind));
+    if (element instanceof HTMLButtonElement) {
+      element.focus();
+    }
+  });
+}
+
+function inferDialogKind(
+  model: SettingsModelView,
+  presets: ProviderPreset[],
+): {
+  dialogKind: DialogKind;
+  selectedProvider: string;
+} {
+  const matchingPreset = findMatchingProviderPreset(model, presets);
+  if (matchingPreset) {
+    return {
+      dialogKind: "official",
+      selectedProvider: matchingPreset.provider,
+    };
+  }
+
+  return {
+    dialogKind: "relay",
+    selectedProvider: presets[0]?.provider ?? "",
+  };
+}
+
+function buildEditForm(
+  model: SettingsModelView,
+  dialogKind: DialogKind,
+  preset: ProviderPreset | null,
+): FormState {
+  const form = modelToForm({
+    ...model,
+    modelName: fallbackModelName(model),
+  });
+
+  if (dialogKind === "official" && preset) {
+    if (form.api === preset.api) {
+      form.api = "";
+    }
+    if (fieldText(form.baseUrl) === preset.baseUrl) {
+      form.baseUrl = "";
+    }
+    if (fieldText(form.apiKeyEnv) === preset.apiKeyEnv) {
+      form.apiKeyEnv = "";
+    }
+    if (fieldText(form.thinkingFormat) === preset.thinkingFormat) {
+      form.thinkingFormat = "";
+    }
+    form.provider = "";
+    return form;
+  }
+
+  const relayDerived = deriveRelayFields(form.baseUrl ?? "", form.modelName ?? "", RELAY_ID_SEPARATOR);
+  if (fieldText(form.provider) === relayDerived.provider) {
+    form.provider = "";
+  }
+  if (fieldText(form.apiKeyEnv) === relayDerived.apiKeyEnv) {
+    form.apiKeyEnv = "";
+  }
+  return form;
+}
+
+function send(
+  vscodeApi: VsCodeApiLike<SettingsIntent>,
+  message: Omit<SettingsIntent, "messageId">,
+): void {
   vscodeApi.postMessage({
     ...message,
     messageId: `${message.type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -153,12 +358,15 @@ export function SettingsApp({
     ready: false,
     route: "models",
   });
+  const [dialogKind, setDialogKind] = useState<DialogKind>("official");
   const [form, setForm] = useState<FormState>(() => createEmptyForm());
   const [draftApiKey, setDraftApiKey] = useState("");
   const [inlineApiKeys, setInlineApiKeys] = useState<Record<string, string>>({});
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  const [selectedProvider, setSelectedProvider] = useState("");
   const [formMode, setFormMode] = useState<FormMode>("create");
   const [isFormOpen, setIsFormOpen] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -180,6 +388,31 @@ export function SettingsApp({
     };
   }, [vscodeApi]);
 
+  const providerPresets = useMemo(
+    () => buildProviderPresets(state.models),
+    [state.models],
+  );
+  const providerPresetByProvider = useMemo(
+    () => new Map(providerPresets.map((preset) => [preset.provider, preset])),
+    [providerPresets],
+  );
+  const providerKeysByEnv = useMemo(
+    () => new Map(state.providerKeys.map((entry) => [entry.envName, entry])),
+    [state.providerKeys],
+  );
+
+  useEffect(() => {
+    if (!isFormOpen || dialogKind !== "official" || selectedProvider || providerPresets.length === 0) {
+      return;
+    }
+    const firstPreset = providerPresets[0];
+    setSelectedProvider(firstPreset.provider);
+    setForm((current) => ({
+      ...current,
+      capabilities: cloneCapabilities(firstPreset.capabilities),
+    }));
+  }, [dialogKind, isFormOpen, providerPresets, selectedProvider]);
+
   useEffect(() => {
     if (!isFormOpen) {
       return;
@@ -187,12 +420,7 @@ export function SettingsApp({
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        setIsFormOpen(false);
-        setFormMode("create");
-        setSelectedModelId(null);
-        setDraftApiKey("");
-        setValidationError(null);
-        setForm(createEmptyForm());
+        closeForm();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -214,42 +442,263 @@ export function SettingsApp({
     [selectedModelId, state.models],
   );
 
-  const resetForm = () => {
-    setSelectedModelId(null);
-    setDraftApiKey("");
-    setValidationError(null);
-    setForm(createEmptyForm());
-  };
+  const selectedPreset =
+    dialogKind === "official"
+      ? providerPresetByProvider.get(selectedProvider) ?? providerPresets[0] ?? null
+      : null;
+  const relayDerived = useMemo(
+    () =>
+      deriveRelayFields(
+        form.baseUrl ?? "",
+        form.modelName ?? "",
+        RELAY_ID_SEPARATOR,
+      ),
+    [form.baseUrl, form.modelName],
+  );
 
-  const closeForm = () => {
+  const effectiveModelName = fieldText(form.modelName);
+  const effectiveApi =
+    dialogKind === "official"
+      ? fieldText(form.api) || selectedPreset?.api || ""
+      : fieldText(form.api) || "openai";
+  const effectiveProvider =
+    dialogKind === "official"
+      ? fieldText(form.provider) || selectedPreset?.provider || ""
+      : fieldText(form.provider) || relayDerived.provider;
+  const effectiveBaseUrl =
+    dialogKind === "official"
+      ? normalizeBaseUrlInput(form.baseUrl) ?? selectedPreset?.baseUrl ?? null
+      : normalizeBaseUrlInput(form.baseUrl);
+  const suggestedApiKeyEnv =
+    dialogKind === "official"
+      ? selectedPreset?.apiKeyEnv ?? ""
+      : relayDerived.apiKeyEnv;
+  const effectiveApiKeyEnv = fieldText(form.apiKeyEnv) || suggestedApiKeyEnv;
+  const derivedId = dialogKind === "official" ? effectiveModelName : relayDerived.id;
+  const effectiveId = selectedModel ? selectedModel.id : fieldText(form.id) || derivedId;
+  const effectiveThinkingFormat =
+    fieldText(form.thinkingFormat) ||
+    (dialogKind === "official" ? selectedPreset?.thinkingFormat ?? "" : "");
+  const effectiveModel: SettingsModelInput = normalizeModel({
+    ...form,
+    api: effectiveApi,
+    apiKeyEnv: effectiveApiKeyEnv,
+    baseUrl: effectiveBaseUrl ?? "",
+    id: effectiveId,
+    modelName: effectiveModelName,
+    provider: effectiveProvider,
+    thinkingFormat: effectiveThinkingFormat,
+  });
+
+  const keySlotOptions = useMemo(
+    () => buildKeySlotOptions(suggestedApiKeyEnv, state.providerKeys),
+    [state.providerKeys, suggestedApiKeyEnv],
+  );
+  const selectedKeyStatus = effectiveApiKeyEnv
+    ? providerKeysByEnv.get(effectiveApiKeyEnv) ?? null
+    : null;
+  const effectiveKeyPresent = Boolean(selectedKeyStatus?.keyPresent);
+  const builtinCollision = useMemo(
+    () =>
+      state.models.find(
+        (model) => model.source === "builtin" && model.id === effectiveId,
+      ) ?? null,
+    [effectiveId, state.models],
+  );
+  const normalizedContextWindow =
+    typeof form.contextWindow === "number" && Number.isFinite(form.contextWindow)
+      ? form.contextWindow
+      : null;
+  const officialPresetUnavailable =
+    dialogKind === "official" && selectedPreset === null;
+  const showSharedFormFields = dialogKind === "relay" || selectedPreset !== null;
+
+  function resetForm() {
+    const nextDialogKind = defaultDialogKindForPresets(providerPresets);
+    setDialogKind(nextDialogKind);
+    setDraftApiKey("");
+    setSelectedModelId(null);
+    setSelectedProvider(providerPresets[0]?.provider ?? "");
+    setShowAdvanced(false);
+    setValidationError(null);
+    setForm({
+      ...createEmptyForm(),
+      capabilities: cloneCapabilities(
+        providerPresets[0]?.capabilities ?? RELAY_DEFAULT_CAPABILITIES,
+      ),
+    });
+  }
+
+  function closeForm() {
     setIsFormOpen(false);
     setFormMode("create");
     resetForm();
-  };
+  }
 
-  const openCreateForm = () => {
+  function openCreateForm() {
     resetForm();
     setFormMode("create");
     setIsFormOpen(true);
-  };
+  }
 
-  const loadModel = (model: SettingsModelView) => {
+  function openEditForm(model: SettingsModelView) {
+    const inferred = inferDialogKind(model, providerPresets);
+    const preset =
+      inferred.dialogKind === "official"
+        ? providerPresetByProvider.get(inferred.selectedProvider) ?? null
+        : null;
     setSelectedModelId(model.id);
     setDraftApiKey("");
     setValidationError(null);
-    setForm(modelToForm(model));
-  };
-
-  const openEditForm = (model: SettingsModelView) => {
-    loadModel(model);
+    setDialogKind(inferred.dialogKind);
+    setSelectedProvider(inferred.selectedProvider);
+    setShowAdvanced(false);
+    setForm(buildEditForm(model, inferred.dialogKind, preset));
     setFormMode("edit");
     setIsFormOpen(true);
-  };
+  }
 
-  const handleSave = () => {
-    const normalized = normalizeModel(form);
-    if (!normalized.id || !normalized.provider || !normalized.api) {
-      setValidationError("Model ID、Provider 和 API 都必须填写。");
+  function handleDialogKindChange(nextKind: DialogKind) {
+    if (nextKind === dialogKind) {
+      return;
+    }
+    setDialogKind(nextKind);
+    setShowAdvanced(false);
+    setValidationError(null);
+    if (nextKind === "official") {
+      const nextProvider = selectedProvider || providerPresets[0]?.provider || "";
+      const preset = providerPresetByProvider.get(nextProvider) ?? providerPresets[0] ?? null;
+      setSelectedProvider(nextProvider);
+      setForm((current) => ({
+        ...createEmptyForm(),
+        capabilities: cloneCapabilities(
+          preset?.capabilities ?? RELAY_DEFAULT_CAPABILITIES,
+        ),
+        contextWindow: current.contextWindow ?? null,
+        id: selectedModel ? selectedModel.id : "",
+        modelName: current.modelName ?? "",
+      }));
+      return;
+    }
+
+    setForm((current) => ({
+      ...createEmptyForm(),
+      api: fieldText(current.api) || "openai",
+      baseUrl: current.baseUrl ?? "",
+      capabilities: cloneCapabilities(RELAY_DEFAULT_CAPABILITIES),
+      contextWindow: current.contextWindow ?? null,
+      id: selectedModel ? selectedModel.id : "",
+      modelName: current.modelName ?? "",
+    }));
+  }
+
+  function handleDialogTabKeyDown(
+    currentKind: DialogKind,
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+  ) {
+    let nextKind: DialogKind | null = null;
+    switch (event.key) {
+      case "ArrowLeft":
+      case "ArrowUp":
+        nextKind = currentKind === "official" ? "relay" : "official";
+        break;
+      case "ArrowRight":
+      case "ArrowDown":
+        nextKind = currentKind === "official" ? "relay" : "official";
+        break;
+      case "Home":
+        nextKind = "official";
+        break;
+      case "End":
+        nextKind = "relay";
+        break;
+      default:
+        return;
+    }
+
+    event.preventDefault();
+    handleDialogKindChange(nextKind);
+    focusDialogTab(nextKind);
+  }
+
+  function handlePresetChange(nextProvider: string) {
+    const preset = providerPresetByProvider.get(nextProvider) ?? null;
+    setSelectedProvider(nextProvider);
+    setValidationError(null);
+    setForm((current) => ({
+      ...current,
+      api: "",
+      apiKeyEnv: "",
+      baseUrl: "",
+      capabilities: cloneCapabilities(
+        preset?.capabilities ?? RELAY_DEFAULT_CAPABILITIES,
+      ),
+      provider: "",
+      thinkingFormat: "",
+    }));
+  }
+
+  function handleApiChange(nextApi: string) {
+    setForm((current) => ({
+      ...current,
+      api:
+        dialogKind === "official" && selectedPreset && nextApi === selectedPreset.api
+          ? ""
+          : nextApi,
+    }));
+  }
+
+  function handleKeySlotChange(nextEnvName: string) {
+    setForm((current) => ({
+      ...current,
+      apiKeyEnv: nextEnvName === suggestedApiKeyEnv ? "" : nextEnvName,
+    }));
+  }
+
+  function handleCapabilityChange(
+    key: keyof SettingsModelCapabilities,
+    checked: boolean,
+  ) {
+    setForm((current) => ({
+      ...current,
+      capabilities: {
+        ...current.capabilities,
+        [key]: checked,
+      },
+    }));
+  }
+
+  function handleSave() {
+    if (dialogKind === "official" && !selectedPreset) {
+      setValidationError("Choose an official provider preset first.");
+      return;
+    }
+    if (!effectiveModelName) {
+      setValidationError("Model name is required. Example: gpt-5.6");
+      return;
+    }
+    if (dialogKind === "relay" && !fieldText(form.baseUrl)) {
+      setValidationError("Base URL is required for relay or custom endpoints.");
+      return;
+    }
+    if (dialogKind === "relay" && !isValidBaseUrl(form.baseUrl)) {
+      setValidationError(
+        "Base URL could not be parsed. Use a value like https://host/v1.",
+      );
+      return;
+    }
+    if (!effectiveModel.id || !effectiveModel.provider || !effectiveModel.api) {
+      setValidationError("Model ID, provider, and API are all required.");
+      return;
+    }
+    if (!effectiveApiKeyEnv) {
+      setValidationError("Choose or derive an API key slot before saving.");
+      return;
+    }
+    if (!effectiveKeyPresent && !draftApiKey.trim()) {
+      setValidationError(
+        `Add an API key or switch to a configured slot such as ${effectiveApiKeyEnv}.`,
+      );
       return;
     }
     if (draftApiKey.trim() && !state.capabilities.setProviderKey) {
@@ -257,18 +706,13 @@ export function SettingsApp({
       return;
     }
     setValidationError(null);
-    const envName =
-      normalized.apiKeyEnv?.trim() || inferApiKeyEnv(normalized.provider);
     send(vscodeApi, {
       data: {
-        model: {
-          ...normalized,
-          apiKeyEnv: normalized.apiKeyEnv || null,
-        },
+        model: effectiveModel,
         providerKey:
-          draftApiKey.trim() && envName
+          draftApiKey.trim() && effectiveApiKeyEnv
             ? {
-                envName,
+                envName: effectiveApiKeyEnv,
                 value: draftApiKey.trim(),
               }
             : undefined,
@@ -276,9 +720,9 @@ export function SettingsApp({
       type: "upsertModel",
     });
     closeForm();
-  };
+  }
 
-  const handleDelete = () => {
+  function handleDelete() {
     if (!selectedModel || selectedModel.source !== "user") {
       return;
     }
@@ -289,16 +733,16 @@ export function SettingsApp({
       type: "removeModel",
     });
     closeForm();
-  };
+  }
 
-  const handleInlineSave = (model: SettingsModelView) => {
+  function handleInlineSave(model: SettingsModelView) {
     const value = inlineApiKeys[model.id]?.trim() ?? "";
     if (!value) {
       return;
     }
     send(vscodeApi, {
       data: {
-        envName: model.apiKeyEnv || inferApiKeyEnv(model.provider),
+        envName: model.apiKeyEnv,
         value,
       },
       type: "setProviderKey",
@@ -307,14 +751,30 @@ export function SettingsApp({
       ...current,
       [model.id]: "",
     }));
-  };
+  }
 
   const formTitle =
     formMode === "edit" && selectedModel ? `Edit ${selectedModel.id}` : "Add Model";
   const formDescription =
     formMode === "edit"
-      ? "Update this model or replace the key without exposing it in the UI."
-      : "Add a custom model or override a built-in preset.";
+      ? "Update this model, reuse a saved key slot, or rotate the key without echoing it back into the UI."
+      : "Add an official model that Tomcat does not ship yet, or connect a relay or custom endpoint.";
+
+  const saveDisabledReason =
+    !state.capabilities.upsertModel
+      ? "The connected `tomcat serve` does not expose model writes yet."
+      : officialPresetUnavailable
+        ? "No official provider presets are available right now. Switch to Relay / custom endpoint."
+        : !effectiveModelName
+          ? "Enter a model name to continue."
+          : !effectiveApiKeyEnv
+            ? "Choose or derive an API key slot before saving."
+            : dialogKind === "relay" && !fieldText(form.baseUrl)
+              ? "Enter a base URL to continue."
+              : !effectiveKeyPresent && !draftApiKey.trim()
+                ? `Add an API key or choose a configured slot such as ${effectiveApiKeyEnv}.`
+                : null;
+  const saveDisabled = saveDisabledReason !== null;
 
   return (
     <div className="tc-settings-shell">
@@ -544,157 +1004,441 @@ export function SettingsApp({
               {validationError ? (
                 <div className="tc-banner tc-banner--warning">{validationError}</div>
               ) : null}
+              {builtinCollision ? (
+                <div className="tc-banner tc-banner--warning">
+                  Saving this model will override the built-in model `{builtinCollision.id}`.
+                </div>
+              ) : null}
 
               <div className="tc-settings-form">
-                <label className="tc-field">
-                  <span>Model ID</span>
-                  <input
-                    className="tc-input"
-                    disabled={selectedModel !== null}
-                    onChange={(event) =>
-                      setForm((current) => ({ ...current, id: event.target.value }))
-                    }
-                    placeholder="claude-opus-gateway"
-                    value={form.id}
-                  />
-                </label>
-                <label className="tc-field">
-                  <span>Model Name</span>
-                  <input
-                    className="tc-input"
-                    onChange={(event) =>
-                      setForm((current) => ({ ...current, modelName: event.target.value }))
-                    }
-                    placeholder="Upstream model name"
-                    value={form.modelName ?? ""}
-                  />
-                </label>
-                <div className="tc-settings-form__row">
-                  <label className="tc-field">
-                    <span>API</span>
-                    <select
-                      onChange={(event) =>
-                        setForm((current) => ({ ...current, api: event.target.value }))
-                      }
-                      value={form.api}
-                    >
-                      <option value="openai">openai</option>
-                      <option value="openai-responses">openai-responses</option>
-                      <option value="anthropic-messages">anthropic-messages</option>
-                    </select>
-                  </label>
-                  <label className="tc-field">
-                    <span>Thinking Format</span>
-                    <select
-                      onChange={(event) =>
-                        setForm((current) => ({
-                          ...current,
-                          thinkingFormat: event.target.value,
-                        }))
-                      }
-                      value={form.thinkingFormat ?? ""}
-                    >
-                      <option value="">Auto</option>
-                      <option value="openai">openai</option>
-                      <option value="deepseek">deepseek</option>
-                      <option value="zai">zai</option>
-                      <option value="doubao">doubao</option>
-                      <option value="anthropic">anthropic</option>
-                    </select>
-                  </label>
+                <div
+                  aria-label="Add model mode"
+                  className="tc-settings-tabs"
+                  role="tablist"
+                >
+                  <button
+                    aria-controls={panelIdForDialogKind("official")}
+                    aria-selected={dialogKind === "official"}
+                    className={`tc-settings-tabs__tab${dialogKind === "official" ? " tc-settings-tabs__tab--active" : ""}`}
+                    id={tabIdForDialogKind("official")}
+                    onClick={() => handleDialogKindChange("official")}
+                    onKeyDown={(event) => handleDialogTabKeyDown("official", event)}
+                    role="tab"
+                    tabIndex={dialogKind === "official" ? 0 : -1}
+                    type="button"
+                  >
+                    Official new model
+                  </button>
+                  <button
+                    aria-controls={panelIdForDialogKind("relay")}
+                    aria-selected={dialogKind === "relay"}
+                    className={`tc-settings-tabs__tab${dialogKind === "relay" ? " tc-settings-tabs__tab--active" : ""}`}
+                    id={tabIdForDialogKind("relay")}
+                    onClick={() => handleDialogKindChange("relay")}
+                    onKeyDown={(event) => handleDialogTabKeyDown("relay", event)}
+                    role="tab"
+                    tabIndex={dialogKind === "relay" ? 0 : -1}
+                    type="button"
+                  >
+                    Relay / custom endpoint
+                  </button>
                 </div>
-                <div className="tc-settings-form__row">
-                  <label className="tc-field">
-                    <span>Provider</span>
-                    <input
-                      className="tc-input"
-                      onChange={(event) =>
-                        setForm((current) => ({ ...current, provider: event.target.value }))
-                      }
-                      placeholder="anthropic"
-                      value={form.provider}
-                    />
-                  </label>
-                  <label className="tc-field">
-                    <span>API Key Env</span>
-                    <input
-                      className="tc-input"
-                      onChange={(event) =>
-                        setForm((current) => ({ ...current, apiKeyEnv: event.target.value }))
-                      }
-                      placeholder={inferApiKeyEnv(form.provider)}
-                      value={form.apiKeyEnv ?? ""}
-                    />
-                  </label>
-                </div>
-                <label className="tc-field">
-                  <span>Base URL</span>
-                  <input
-                    className="tc-input"
-                    onChange={(event) =>
-                      setForm((current) => ({ ...current, baseUrl: event.target.value }))
-                    }
-                    placeholder="https://api.example.com"
-                    value={form.baseUrl ?? ""}
-                  />
-                </label>
-                <div className="tc-settings-form__row">
-                  <label className="tc-field">
-                    <span>Context Window</span>
-                    <input
-                      className="tc-input"
-                      inputMode="numeric"
-                      onChange={(event) =>
-                        setForm((current) => ({
-                          ...current,
-                          contextWindow: event.target.value
-                            ? Number(event.target.value)
-                            : null,
-                        }))
-                      }
-                      value={form.contextWindow ?? ""}
-                    />
-                  </label>
-                  <label className="tc-field">
-                    <span>API Key</span>
-                    <input
-                      autoComplete="off"
-                      className="tc-input"
-                      onChange={(event) => setDraftApiKey(event.target.value)}
-                      placeholder="Optional: save together"
-                      type="password"
-                      value={draftApiKey}
-                    />
-                  </label>
-                </div>
-                <div className="tc-settings-capabilities">
-                  {(
-                    [
-                      ["vision", "Vision"],
-                      ["files", "Files"],
-                      ["tools", "Tools"],
-                      ["reasoning", "Reasoning"],
-                      ["webSearch", "Web Search"],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <label className="tc-settings-capabilities__item" key={key}>
+
+                {dialogKind === "official" ? (
+                  <div
+                    aria-labelledby={tabIdForDialogKind("official")}
+                    className="tc-settings-tabpanel"
+                    id={panelIdForDialogKind("official")}
+                    role="tabpanel"
+                  >
+                    {selectedPreset ? (
+                      <>
+                        <div className="tc-settings-form__row">
+                          <label className="tc-field">
+                            <span>Provider</span>
+                            <select
+                              aria-label="Provider"
+                              onChange={(event) => handlePresetChange(event.target.value)}
+                              value={selectedPreset?.provider ?? ""}
+                            >
+                              {providerPresets.map((preset) => (
+                                <option key={preset.provider} value={preset.provider}>
+                                  {preset.label}
+                                </option>
+                              ))}
+                            </select>
+                            <small className="tc-field__hint">
+                              Choose the official vendor. Tomcat fills in the API,
+                              URL, key slot, thinking format, and capabilities.
+                            </small>
+                          </label>
+                          <label className="tc-field">
+                            <span>Model name</span>
+                            <input
+                              className="tc-input"
+                              onChange={(event) =>
+                                setForm((current) => ({
+                                  ...current,
+                                  modelName: event.target.value,
+                                }))
+                              }
+                              placeholder="For example: gpt-5.6"
+                              value={form.modelName ?? ""}
+                            />
+                            <small className="tc-field__hint">
+                              The exact model name the provider expects.
+                            </small>
+                          </label>
+                        </div>
+
+                        <label className="tc-field">
+                          <span>Model ID (alias)</span>
+                          <input
+                            className="tc-input tc-input--readonly"
+                            disabled
+                            readOnly
+                            value={effectiveId}
+                          />
+                          <small className="tc-field__hint">
+                            This is how the model appears inside Tomcat. You can
+                            override the alias in Advanced.
+                          </small>
+                        </label>
+
+                        <div className="tc-settings-preset-summary">
+                          <span className="tc-settings-preset-summary__line">
+                            {formatApiLabel(selectedPreset.api)}
+                          </span>
+                          <span className="tc-settings-preset-summary__line">
+                            {selectedPreset.baseUrl}
+                          </span>
+                          <span className="tc-settings-preset-summary__line">
+                            {selectedPreset.apiKeyEnv}
+                            {selectedPreset.keyPresent ? " already configured" : " not configured yet"}
+                          </span>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="tc-settings-mode-empty" role="status">
+                        <p>
+                          No official provider presets are available from the
+                          connected `tomcat serve`.
+                        </p>
+                        <button
+                          className="tc-button tc-button--secondary"
+                          onClick={() => handleDialogKindChange("relay")}
+                          type="button"
+                        >
+                          Use Relay / custom endpoint
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div
+                    aria-labelledby={tabIdForDialogKind("relay")}
+                    className="tc-settings-tabpanel"
+                    id={panelIdForDialogKind("relay")}
+                    role="tabpanel"
+                  >
+                    <label className="tc-field">
+                      <span>Base URL</span>
                       <input
-                        checked={form.capabilities[key]}
+                        className="tc-input"
                         onChange={(event) =>
                           setForm((current) => ({
                             ...current,
-                            capabilities: {
-                              ...current.capabilities,
-                              [key]: event.target.checked,
-                            },
+                            baseUrl: event.target.value,
                           }))
                         }
-                        type="checkbox"
+                        placeholder="https://api.chatanywhere.tech/v1"
+                        value={form.baseUrl ?? ""}
                       />
-                      <span>{label}</span>
+                      <small className="tc-field__hint">
+                        The relay or custom endpoint. A missing scheme will be
+                        saved as `https://...`.
+                      </small>
                     </label>
-                  ))}
-                </div>
+
+                    <div className="tc-settings-form__row">
+                      <label className="tc-field">
+                        <span>API</span>
+                        <select
+                          aria-label="API"
+                          onChange={(event) => handleApiChange(event.target.value)}
+                          value={fieldText(form.api) || "openai"}
+                        >
+                          {API_OPTIONS.map((entry) => (
+                            <option key={entry.value} value={entry.value}>
+                              {entry.label}
+                            </option>
+                          ))}
+                        </select>
+                        <small className="tc-field__hint">
+                          This decides how Tomcat talks to the endpoint and how
+                          Auto thinking is encoded.
+                        </small>
+                      </label>
+                      <label className="tc-field">
+                        <span>Model name</span>
+                        <input
+                          className="tc-input"
+                          onChange={(event) =>
+                            setForm((current) => ({
+                              ...current,
+                              modelName: event.target.value,
+                            }))
+                          }
+                          placeholder="For example: gpt-5.4"
+                          value={form.modelName ?? ""}
+                        />
+                        <small className="tc-field__hint">
+                          The exact model name your relay forwards upstream.
+                        </small>
+                      </label>
+                    </div>
+
+                    <div className="tc-settings-preview">
+                      <div className="tc-settings-preview__title">
+                        Will save as
+                      </div>
+                      <div className="tc-settings-preview__row">
+                        <span>provider</span>
+                        <strong>{effectiveProvider || "—"}</strong>
+                      </div>
+                      <div className="tc-settings-preview__row">
+                        <span>env</span>
+                        <strong>{effectiveApiKeyEnv || "—"}</strong>
+                      </div>
+                      <div className="tc-settings-preview__row">
+                        <span>id</span>
+                        <strong>{effectiveId || "—"}</strong>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {showSharedFormFields ? (
+                  <>
+                    <div className="tc-settings-form__row">
+                      <label className="tc-field">
+                        <span>Key slot</span>
+                        <select
+                          aria-label="Key slot"
+                          onChange={(event) => handleKeySlotChange(event.target.value)}
+                          value={effectiveApiKeyEnv}
+                        >
+                          {keySlotOptions.map((entry) => (
+                            <option key={entry.envName} value={entry.envName}>
+                              {entry.label}
+                            </option>
+                          ))}
+                        </select>
+                        <small className="tc-field__hint">
+                          Reuse a configured key, or keep the suggested slot for this
+                          model.
+                        </small>
+                      </label>
+                      <label className="tc-field">
+                        <span>{effectiveKeyPresent ? "New API key (optional)" : "API key"}</span>
+                        <input
+                          autoComplete="off"
+                          className="tc-input"
+                          onChange={(event) => setDraftApiKey(event.target.value)}
+                          placeholder={
+                            effectiveKeyPresent
+                              ? `Leave blank to reuse ${effectiveApiKeyEnv}`
+                              : `Save ${effectiveApiKeyEnv || "the selected key slot"}`
+                          }
+                          type="password"
+                          value={draftApiKey}
+                        />
+                        <small className="tc-field__hint">
+                          {effectiveKeyPresent
+                            ? `Already configured: ${effectiveApiKeyEnv}.`
+                            : "Required unless you choose a configured slot."}
+                        </small>
+                      </label>
+                    </div>
+
+                    <button
+                      aria-expanded={showAdvanced}
+                      className="tc-settings-advanced__toggle"
+                      onClick={() => setShowAdvanced((current) => !current)}
+                      type="button"
+                    >
+                      <span>Advanced</span>
+                      <span className="tc-settings-advanced__caret">
+                        {showAdvanced ? "▾" : "▸"}
+                      </span>
+                    </button>
+
+                    {showAdvanced ? (
+                      <div className="tc-settings-advanced">
+                        {dialogKind === "official" ? (
+                          <div className="tc-settings-form__row">
+                            <label className="tc-field">
+                              <span>API override</span>
+                              <select
+                                aria-label="API override"
+                                onChange={(event) => handleApiChange(event.target.value)}
+                                value={fieldText(form.api) || selectedPreset?.api || ""}
+                              >
+                                {API_OPTIONS.map((entry) => (
+                                  <option key={entry.value} value={entry.value}>
+                                    {entry.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="tc-field">
+                              <span>Base URL override</span>
+                              <input
+                                className="tc-input"
+                                onChange={(event) =>
+                                  setForm((current) => ({
+                                    ...current,
+                                    baseUrl: event.target.value,
+                                  }))
+                                }
+                                placeholder={selectedPreset?.baseUrl || "https://api.example.com/v1"}
+                                value={form.baseUrl ?? ""}
+                              />
+                            </label>
+                          </div>
+                        ) : null}
+
+                        <div className="tc-settings-form__row">
+                          <label className="tc-field">
+                            <span>Model ID (alias)</span>
+                            <input
+                              className="tc-input"
+                              disabled={selectedModel !== null}
+                              onChange={(event) =>
+                                setForm((current) => ({
+                                  ...current,
+                                  id: event.target.value,
+                                }))
+                              }
+                              placeholder={derivedId || "Defaults to the model name"}
+                              value={selectedModel ? selectedModel.id : form.id}
+                            />
+                            <small className="tc-field__hint">
+                              Leave this empty to use the suggested alias.
+                            </small>
+                          </label>
+                          <label className="tc-field">
+                            <span>Provider override</span>
+                            <input
+                              className="tc-input"
+                              onChange={(event) =>
+                                setForm((current) => ({
+                                  ...current,
+                                  provider: event.target.value,
+                                }))
+                              }
+                              placeholder={effectiveProvider || "Derived from the current mode"}
+                              value={form.provider}
+                            />
+                            <small className="tc-field__hint">
+                              Usually you should keep the derived provider label.
+                            </small>
+                          </label>
+                        </div>
+
+                        <div className="tc-settings-form__row">
+                          <label className="tc-field">
+                            <span>API key env override</span>
+                            <input
+                              className="tc-input"
+                              onChange={(event) =>
+                                setForm((current) => ({
+                                  ...current,
+                                  apiKeyEnv: event.target.value,
+                                }))
+                              }
+                              placeholder={suggestedApiKeyEnv || "Derived from the current mode"}
+                              value={form.apiKeyEnv ?? ""}
+                            />
+                            <small className="tc-field__hint">
+                              Leave this empty to keep the suggested key slot.
+                            </small>
+                          </label>
+                          <label className="tc-field">
+                            <span>Context window</span>
+                            <input
+                              className="tc-input"
+                              inputMode="numeric"
+                              onChange={(event) =>
+                                setForm((current) => ({
+                                  ...current,
+                                  contextWindow: event.target.value
+                                    ? Number(event.target.value)
+                                    : null,
+                                }))
+                              }
+                              placeholder="400000"
+                              value={normalizedContextWindow ?? ""}
+                            />
+                            <small className="tc-field__hint">
+                              Leave this empty to use Tomcat’s default context window.
+                            </small>
+                          </label>
+                        </div>
+
+                        <label className="tc-field">
+                          <span>Thinking format</span>
+                          <select
+                            aria-label="Thinking format"
+                            onChange={(event) =>
+                              setForm((current) => ({
+                                ...current,
+                                thinkingFormat:
+                                  dialogKind === "official" &&
+                                  selectedPreset &&
+                                  event.target.value === selectedPreset.thinkingFormat
+                                    ? ""
+                                    : event.target.value,
+                              }))
+                            }
+                            value={
+                              fieldText(form.thinkingFormat) ||
+                              (dialogKind === "official"
+                                ? selectedPreset?.thinkingFormat ?? ""
+                                : "")
+                            }
+                          >
+                            {THINKING_FORMAT_OPTIONS.map((entry) => (
+                              <option key={entry.value || "auto"} value={entry.value}>
+                                {entry.label}
+                              </option>
+                            ))}
+                          </select>
+                          <small className="tc-field__hint">
+                            In relay mode, Auto follows the selected API and never
+                            guesses from the model name.
+                          </small>
+                        </label>
+
+                        <div className="tc-settings-capabilities">
+                          {CAPABILITY_OPTIONS.map(([key, label]) => (
+                            <label className="tc-settings-capabilities__item" key={key}>
+                              <input
+                                checked={form.capabilities[key]}
+                                onChange={(event) =>
+                                  handleCapabilityChange(key, event.target.checked)
+                                }
+                                type="checkbox"
+                              />
+                              <span>{label}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
+
                 <div className="tc-button-row tc-settings-form__actions">
                   <button
                     className="tc-button tc-button--ghost"
@@ -715,13 +1459,18 @@ export function SettingsApp({
                   ) : null}
                   <button
                     className="tc-button tc-button--primary"
-                    disabled={!state.capabilities.upsertModel || !form.id || !form.provider}
+                    disabled={saveDisabled}
                     onClick={handleSave}
                     type="button"
                   >
                     Save Model
                   </button>
                 </div>
+                {saveDisabledReason ? (
+                  <div className="tc-settings-form__disabled-reason">
+                    {saveDisabledReason}
+                  </div>
+                ) : null}
               </div>
             </section>
           </div>

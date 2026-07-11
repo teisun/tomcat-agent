@@ -55,10 +55,10 @@ impl ThinkingLevel {
     }
 }
 
-/// 厂商请求格式。`Auto` 表示按 model 名推断；其它显式指定。
+/// 厂商请求格式。`Auto` 表示按 wire `api` 推断；其它显式指定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThinkingFormat {
-    /// 按 model 名推断；未知 model 保守回落到 `Openai`。
+    /// 按 wire `api` 推断；未知 wire 保守回落到 `Openai`。
     #[default]
     Auto,
     /// OpenAI Chat Completions / Responses：`reasoning_effort` 字符串档位。
@@ -94,29 +94,46 @@ impl ThinkingFormat {
         }
     }
 
-    /// 当 format=Auto 时按 provider id（与 [`crate::core::llm::registry`] 注册名）推断。
-    /// 仅保留给旧路径/文档描述；新路径优先走 [`resolve_for_model`]。
+    /// 当 format=Auto 时按 wire `api`（与 [`crate::core::llm::registry`] 注册名一致）推断。
+    /// 兼容旧调用名；新路径优先走 [`resolve_for_api`]。
     pub fn resolve(&self, provider_id: &str) -> Self {
+        self.resolve_for_api(provider_id)
+    }
+
+    /// 当 format=Auto 时按 wire `api` 推断。
+    pub fn resolve_for_api(&self, api: &str) -> Self {
         if !matches!(self, Self::Auto) {
             return *self;
         }
-        match provider_id {
-            "openai" | "openai-responses" => Self::Openai,
-            "deepseek" => Self::Deepseek,
-            "zai" => Self::Zai,
-            "qwen" => Self::Qwen,
-            "doubao" | "moonshot" => Self::Doubao,
-            "anthropic" | "anthropic-messages" => Self::Anthropic,
-            _ => Self::Openai,
-        }
+        thinking_format_for_api(api)
     }
 
-    /// 按 model 选择请求格式；显式指定的 format 原样返回，`Auto` 才走 model 推断。
+    /// 旧的按 model 名启发式推断，仅保留给工具函数/单测。
+    /// 运行时解析不再调用该路径，避免名字骗过 wire。
     pub fn resolve_for_model(&self, model: &str) -> Self {
         if !matches!(self, Self::Auto) {
             return *self;
         }
         thinking_format_for_model(model)
+    }
+}
+
+/// 按 wire `api` 归一到默认 thinking 请求格式。
+///
+/// 设计目标：
+/// - 解析期完全不看 model 名，避免中转站把 `claude-*` 这类名字误导成 Anthropic wire；
+/// - `openai` 与 `openai-responses` 共用「effort 档位」语义，但由各自 provider 负责编码成
+///   顶层 `reasoning_effort` 或嵌套 `reasoning: { effort }`；
+/// - 显式 `thinking_format` 仍可覆盖这一路径，用于极少数 relay 方言。
+pub fn thinking_format_for_api(api: &str) -> ThinkingFormat {
+    match api.trim() {
+        "openai" | "openai-responses" => ThinkingFormat::Openai,
+        "deepseek" => ThinkingFormat::Deepseek,
+        "zai" => ThinkingFormat::Zai,
+        "qwen" => ThinkingFormat::Qwen,
+        "doubao" | "moonshot" => ThinkingFormat::Doubao,
+        "anthropic" | "anthropic-messages" => ThinkingFormat::Anthropic,
+        _ => ThinkingFormat::Openai,
     }
 }
 
@@ -126,6 +143,8 @@ impl ThinkingFormat {
 /// - 单输入（model 字符串）即可决定默认格式；
 /// - 同厂商多个 model 可以复用同一种 format；
 /// - 未来某个特殊 model 也可以单独映射到独立 format。
+///
+/// 注意：该函数仅保留给测试/工具代码；运行时解析已改为 [`thinking_format_for_api`]。
 pub fn thinking_format_for_model(model: &str) -> ThinkingFormat {
     let lower = model.trim().to_ascii_lowercase();
     if lower.starts_with("deepseek-") {

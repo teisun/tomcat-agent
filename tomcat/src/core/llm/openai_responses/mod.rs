@@ -200,7 +200,7 @@ pub struct OpenAiResponsesProvider {
     files_expires_after_seconds: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request_body 不会写 reasoning。
     thinking_cfg: crate::infra::config::ThinkingConfig,
-    /// 用户显式配置的 thinking format；`Auto` 时按请求实际 model 决定。
+    /// 用户显式配置的 thinking format；`Auto` 时按当前 wire(`openai-responses`) 决定。
     configured_thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
     continuity_enabled: bool,
     use_previous_response_id: bool,
@@ -325,11 +325,9 @@ impl OpenAiResponsesProvider {
         }
     }
 
-    fn thinking_format_for_model(
-        &self,
-        model: &str,
-    ) -> crate::core::llm::thinking_policy::ThinkingFormat {
-        self.configured_thinking_format.resolve_for_model(model)
+    fn thinking_format_for_wire(&self) -> crate::core::llm::thinking_policy::ThinkingFormat {
+        self.configured_thinking_format
+            .resolve_for_api(PROVIDER_NAME)
     }
 
     fn thinking_cfg_for_request<'a>(
@@ -378,7 +376,7 @@ impl OpenAiResponsesProvider {
         let model = self.effective_model(request);
         let target_profile =
             crate::core::llm::replay_policy::ProviderCompatProfile::openai_responses(&model);
-        let thinking_format = self.thinking_format_for_model(&model);
+        let thinking_format = self.thinking_format_for_wire();
         let thinking_cfg = self.thinking_cfg_for_request(request);
         let previous_response_id = if self.continuity_enabled
             && self.use_previous_response_id

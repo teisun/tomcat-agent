@@ -906,8 +906,11 @@ export async function assertWebviewAddModelsFlow(
   await api.__testing.waitForWebviewReady();
   await waitForWebviewBootstrapSettled(api);
 
-  const modelId = `host-e2e-added-model-${Date.now().toString(36)}`;
+  const relayProvider = `host-e2e-relay-${Date.now().toString(36)}`;
+  const modelName = "gpt-5.4";
+  const modelId = `${relayProvider}/${modelName}`;
   const keyEnv = "TOMCAT_ADD_MODELS_E2E_API_KEY";
+  const relayBaseUrl = `https://${relayProvider}.example.test/v1`;
   const sessionId = api.__testing.getWebviewState().activeSessionId;
   assert.ok(sessionId, "expected a live webview session before opening settings");
 
@@ -921,13 +924,20 @@ export async function assertWebviewAddModelsFlow(
     }),
   );
 
-  await waitForSettingsPanelState(
+  const settingsSnapshot = await waitForSettingsPanelState(
     api,
     (snapshot) =>
       snapshot.visible && snapshot.route === "models" && snapshot.state.ready
         ? snapshot
         : undefined,
     20_000,
+  );
+  const builtinModels = settingsSnapshot.state.models.filter(
+    (model) => model.source === "builtin",
+  );
+  assert.ok(
+    builtinModels.length > 0,
+    "expected the settings panel to expose builtin models so official presets are available",
   );
 
   await api.__testing.sendSettingsIntent(
@@ -936,7 +946,7 @@ export async function assertWebviewAddModelsFlow(
         model: {
           api: "openai",
           apiKeyEnv: keyEnv,
-          baseUrl: null,
+          baseUrl: relayBaseUrl,
           capabilities: {
             files: false,
             reasoning: true,
@@ -946,9 +956,9 @@ export async function assertWebviewAddModelsFlow(
           },
           contextWindow: 16_384,
           id: modelId,
-          modelName: "gpt-5.4",
-          provider: "openai",
-          thinkingFormat: "openai",
+          modelName,
+          provider: relayProvider,
+          thinkingFormat: null,
         },
       },
       messageId: "settings-upsert-model",

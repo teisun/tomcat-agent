@@ -103,10 +103,10 @@ impl ModelView {
             capabilities: entry.capabilities.clone(),
             thinking_format: entry.thinking_format.clone(),
             context_window: entry.context_window,
-            source: if catalog.is_user_model(&entry.id) {
-                ModelSource::User
-            } else {
+            source: if catalog.is_builtin_seed(&entry.id) {
                 ModelSource::Builtin
+            } else {
+                ModelSource::User
             },
             key_present: key_present_for_env(&api_key_env),
             api_key_env,

@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
@@ -22,6 +22,7 @@ use tomcat::{AppConfig, DefaultLlmResolver, LlmProvider, LlmResolver, LlmScene, 
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 static INIT: Once = Once::new();
+static TEMP_HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub const DEEPSEEK_TEST_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 pub const DEEPSEEK_TEST_API_BASE: &str = "https://api.deepseek.com";
@@ -355,19 +356,28 @@ pub fn setup_logging() {
 /// nextest 模式下是一用例一进程，因此一个 guard 对应一个测试进程，最适合 real-llm
 /// / CLI 子进程这类会落盘到 `~/.tomcat` 的场景。
 pub struct TempHomeGuard {
+    _home_lock: MutexGuard<'static, ()>,
     home: tempfile::TempDir,
     old_home: Option<OsString>,
 }
 
 impl TempHomeGuard {
     pub fn new() -> Self {
+        let home_lock = TEMP_HOME_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock TEMP_HOME for test");
         let home = tempfile::tempdir().expect("create temp HOME for test");
         let dot_tomcat = home.path().join(".tomcat");
         std::fs::create_dir_all(dot_tomcat.join("plans")).expect("create ~/.tomcat/plans for test");
         std::fs::create_dir_all(dot_tomcat.join("temp")).expect("create ~/.tomcat/temp for test");
         let old_home = std::env::var_os("HOME");
         std::env::set_var("HOME", home.path());
-        Self { home, old_home }
+        Self {
+            _home_lock: home_lock,
+            home,
+            old_home,
+        }
     }
 
     pub fn home_path(&self) -> &Path {

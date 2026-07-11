@@ -72,6 +72,7 @@ pub struct ModelCatalog {
     user_path: PathBuf,
     ordered_ids: Vec<String>,
     user_ids: HashSet<String>,
+    builtin_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +90,9 @@ impl ModelCatalog {
         let mut by_id = HashMap::new();
         let mut ordered_ids = Vec::new();
         let mut user_ids = HashSet::new();
+        let mut builtin_ids = HashSet::new();
         for entry in builtin_seed_entries_result(&config.context)? {
+            builtin_ids.insert(entry.id.clone());
             ordered_ids.push(entry.id.clone());
             by_id.insert(entry.id.clone(), entry);
         }
@@ -110,6 +113,7 @@ impl ModelCatalog {
             user_path,
             ordered_ids,
             user_ids,
+            builtin_ids,
         })
     }
 
@@ -146,6 +150,10 @@ impl ModelCatalog {
 
     pub fn is_user_model(&self, model_id: &str) -> bool {
         self.user_ids.contains(model_id.trim())
+    }
+
+    pub fn is_builtin_seed(&self, model_id: &str) -> bool {
+        self.builtin_ids.contains(model_id.trim())
     }
 }
 
@@ -188,6 +196,10 @@ impl SharedModelCatalog {
 
     pub fn is_user_model(&self, model_id: &str) -> bool {
         self.snapshot().is_user_model(model_id)
+    }
+
+    pub fn is_builtin_seed(&self, model_id: &str) -> bool {
+        self.snapshot().is_builtin_seed(model_id)
     }
 
     pub fn user_path(&self) -> PathBuf {

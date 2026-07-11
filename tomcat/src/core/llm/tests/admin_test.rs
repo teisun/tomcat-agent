@@ -86,6 +86,108 @@ fn upsert_list_and_remove_user_model_roundtrip() {
 
 #[test]
 #[serial(env_lock)]
+fn list_model_views_keep_seeded_builtin_entries_as_builtin_sources() {
+    clear_managed_credentials_for_test();
+    let (_work_dir, cfg) = temp_cfg();
+    let path = ModelCatalog::default_user_path(&cfg).expect("models.toml path");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "gpt-5.4"
+base_url = "https://gateway.example.test/v1"
+
+[[models]]
+id = "claude-opus-gateway"
+api = "anthropic-messages"
+provider = "relay"
+"#,
+    )
+    .expect("seed models.toml");
+
+    let catalog = ModelCatalog::load(&cfg).expect("load catalog");
+    let views = list_model_views(&catalog);
+    let seeded_builtin = views
+        .iter()
+        .find(|entry| entry.id == "gpt-5.4")
+        .expect("seeded builtin view");
+    let custom = views
+        .iter()
+        .find(|entry| entry.id == "claude-opus-gateway")
+        .expect("custom relay view");
+
+    assert_eq!(seeded_builtin.source, ModelSource::Builtin);
+    assert_eq!(custom.source, ModelSource::User);
+}
+
+#[test]
+#[serial(env_lock)]
+fn remove_user_model_can_drop_seeded_builtin_override_then_fall_back_to_builtin() {
+    clear_managed_credentials_for_test();
+    let (_work_dir, mut cfg) = temp_cfg();
+    cfg.llm.default_model = "gpt-5.2".to_string();
+    let path = ModelCatalog::default_user_path(&cfg).expect("models.toml path");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "gpt-5.4"
+base_url = "https://gateway.example.test/v1"
+"#,
+    )
+    .expect("seed builtin override");
+
+    remove_user_model(&cfg, "gpt-5.4").expect("remove seeded builtin override");
+
+    let catalog = ModelCatalog::load(&cfg).expect("reload catalog after remove");
+    let seeded_builtin = list_model_views(&catalog)
+        .into_iter()
+        .find(|entry| entry.id == "gpt-5.4")
+        .expect("builtin gpt-5.4 remains available");
+    assert_eq!(seeded_builtin.source, ModelSource::Builtin);
+    assert!(!catalog.is_user_model("gpt-5.4"));
+    assert!(catalog.is_builtin_seed("gpt-5.4"));
+
+    let error = remove_user_model(&cfg, "gpt-5.4").expect_err("pure builtin remove must fail");
+    assert!(
+        error.to_string().contains("内置模型"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+#[serial(env_lock)]
+fn upsert_user_model_accepts_id_with_slash() {
+    clear_managed_credentials_for_test();
+    let (_work_dir, cfg) = temp_cfg();
+    let input = ModelEntryInput {
+        id: "chatanywhere/gpt-5.4".to_string(),
+        model_name: Some("gpt-5.4".to_string()),
+        api: "openai-responses".to_string(),
+        provider: "chatanywhere".to_string(),
+        api_key_env: Some("CHATANYWHERE_API_KEY".to_string()),
+        base_url: Some("https://api.chatanywhere.tech/v1".to_string()),
+        capabilities: Capabilities {
+            tools: true,
+            reasoning: true,
+            ..Default::default()
+        },
+        context_window: None,
+        thinking_format: None,
+    };
+
+    let view = upsert_user_model(&cfg, input).expect("slash id should be accepted");
+    assert_eq!(view.id, "chatanywhere/gpt-5.4");
+
+    let catalog = ModelCatalog::load(&cfg).expect("reload catalog");
+    let custom = catalog
+        .lookup("chatanywhere/gpt-5.4")
+        .expect("model with slash id should roundtrip");
+    assert_eq!(custom.provider, "chatanywhere");
+}
+
+#[test]
+#[serial(env_lock)]
 fn set_provider_key_persists_env_and_flips_key_presence() {
     clear_managed_credentials_for_test();
     let (work_dir, cfg) = temp_cfg();

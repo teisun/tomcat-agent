@@ -6,6 +6,7 @@ use crate::core::llm::{
     auth::clear_managed_credentials_for_test, DefaultLlmResolver, LlmResolver, LlmScene,
     ModelCatalog, SharedModelCatalog,
 };
+use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::infra::config::AppConfig;
 
 #[test]
@@ -101,6 +102,98 @@ capabilities = { vision = false, files = false, tools = true, reasoning = true }
 
     unsafe {
         std::env::remove_var("MIMO_API_KEY");
+    }
+}
+
+#[test]
+#[serial(env_lock)]
+fn resolver_auto_thinking_format_uses_wire_not_model_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "claude-relay"
+model_name = "claude-opus-4-6"
+api = "openai"
+provider = "relay"
+api_key_env = "RELAY_API_KEY"
+base_url = "https://gateway.example.test/v1"
+capabilities = { vision = false, files = false, tools = true, reasoning = true }
+"#,
+    )
+    .unwrap();
+
+    let cfg = AppConfig::default();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg, catalog);
+
+    unsafe {
+        std::env::set_var("RELAY_API_KEY", "stub");
+    }
+
+    let resolved = resolver
+        .resolve(LlmScene::Main, Some("claude-relay"))
+        .expect("relay model should resolve");
+    assert_eq!(resolved.thinking_format, ThinkingFormat::Openai);
+
+    unsafe {
+        std::env::remove_var("RELAY_API_KEY");
+    }
+}
+
+#[test]
+#[serial(env_lock)]
+fn resolver_thinking_format_priority_is_entry_then_global_then_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "entry-explicit"
+model_name = "claude-opus-4-6"
+api = "openai"
+provider = "relay"
+api_key_env = "RELAY_API_KEY"
+base_url = "https://gateway.example.test/v1"
+thinking_format = "anthropic"
+capabilities = { vision = false, files = false, tools = true, reasoning = true }
+
+[[models]]
+id = "global-explicit"
+model_name = "claude-opus-4-6"
+api = "openai"
+provider = "relay"
+api_key_env = "RELAY_API_KEY"
+base_url = "https://gateway.example.test/v1"
+capabilities = { vision = false, files = false, tools = true, reasoning = true }
+"#,
+    )
+    .unwrap();
+
+    let mut cfg = AppConfig::default();
+    cfg.llm.thinking.format = Some("deepseek".to_string());
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg, catalog);
+
+    unsafe {
+        std::env::set_var("RELAY_API_KEY", "stub");
+    }
+
+    let entry_explicit = resolver
+        .resolve(LlmScene::Main, Some("entry-explicit"))
+        .expect("entry-explicit should resolve");
+    assert_eq!(entry_explicit.thinking_format, ThinkingFormat::Anthropic);
+
+    let global_explicit = resolver
+        .resolve(LlmScene::Main, Some("global-explicit"))
+        .expect("global-explicit should resolve");
+    assert_eq!(global_explicit.thinking_format, ThinkingFormat::Deepseek);
+
+    unsafe {
+        std::env::remove_var("RELAY_API_KEY");
     }
 }
 

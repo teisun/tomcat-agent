@@ -1,8 +1,9 @@
 use serial_test::serial;
 
+use super::super::models_toml::ensure_default_models_toml;
 use super::super::*;
 use super::mocks::{test_config, with_temp_home, with_tomcat_config_in_home};
-use crate::core::llm::{list_model_views, ModelCatalog};
+use crate::core::llm::{list_model_views, ModelCatalog, ModelSource};
 
 #[test]
 #[serial(env_lock)]
@@ -126,5 +127,24 @@ fn run_model_default_returns_err_for_unknown_model() {
             message.contains("missing-model"),
             "error should mention invalid model id, got: {message}"
         );
+    });
+}
+
+#[test]
+#[serial(env_lock)]
+fn run_model_list_marks_seeded_builtin_models_as_builtin() {
+    with_temp_home(|| {
+        let work_dir = tempfile::tempdir().expect("tempdir");
+        let cfg = test_config(work_dir.path());
+        ensure_default_models_toml(&cfg).expect("seed builtin models.toml");
+
+        run_model(ModelSub::List, &cfg).expect("list models");
+
+        let catalog = ModelCatalog::load(&cfg).expect("load catalog");
+        let gpt = list_model_views(&catalog)
+            .into_iter()
+            .find(|entry| entry.id == "gpt-5.4")
+            .expect("seeded builtin gpt-5.4");
+        assert_eq!(gpt.source, ModelSource::Builtin);
     });
 }

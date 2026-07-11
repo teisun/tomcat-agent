@@ -50,6 +50,20 @@ fn openai_entry(api_key_env: &str) -> ModelEntry {
     }
 }
 
+fn openai_auto_entry(api_key_env: &str, provider: &str, model_name: &str) -> ModelEntry {
+    ModelEntry {
+        id: format!("{provider}/relay"),
+        model_name: Some(model_name.to_string()),
+        api: "openai".to_string(),
+        provider: provider.to_string(),
+        api_key_env: Some(api_key_env.to_string()),
+        base_url: Some("https://gateway.example.test/v1".to_string()),
+        capabilities: Capabilities::default(),
+        context_window: None,
+        thinking_format: None,
+    }
+}
+
 #[test]
 fn openai_provider_new_uses_supplied_credential_without_env_lookup() {
     let entry = deepseek_entry("TOMCAT_TEST_NONEXISTENT_ENV_VAR_12345");
@@ -305,7 +319,7 @@ fn thinking_level_override_updates_openai_reasoning_effort() {
     let cfg = provider.thinking_cfg_for_request(&request);
     let fields = resolve_request_fields(
         &cfg,
-        provider.thinking_format_for_model(&provider.effective_model(&request)),
+        provider.thinking_format_for_wire(),
     );
 
     assert_eq!(cfg.level, "low");
@@ -336,9 +350,53 @@ fn thinking_level_override_updates_deepseek_reasoning_effort() {
     let cfg = provider.thinking_cfg_for_request(&request);
     let fields = resolve_request_fields(
         &cfg,
-        provider.thinking_format_for_model(&provider.effective_model(&request)),
+        provider.thinking_format_for_wire(),
     );
 
     assert_eq!(cfg.level, "xhigh");
     assert_eq!(fields.reasoning_effort.as_deref(), Some("max"));
+}
+
+#[test]
+fn openai_auto_thinking_format_ignores_claude_model_name_on_openai_wire() {
+    let entry = openai_auto_entry("GATEWAY_KEY", "relay", "claude-opus-4-6");
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "relay".to_string(),
+        env_name: "GATEWAY_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider = OpenAiProvider::new(&entry, &runtime, &credential).unwrap();
+    let fields = resolve_request_fields(
+        &provider.thinking_cfg,
+        provider.thinking_format_for_wire(),
+    );
+    assert_eq!(
+        provider.thinking_format_for_wire(),
+        crate::core::llm::thinking_policy::ThinkingFormat::Openai
+    );
+    assert_eq!(fields.reasoning_effort.as_deref(), Some("high"));
+    assert!(fields.thinking.is_none(), "openai wire 不应被 claude 名字误导出 anthropic/deepseek thinking");
+}
+
+#[test]
+fn openai_auto_thinking_format_ignores_deepseek_model_name_on_openai_wire() {
+    let entry = openai_auto_entry("GATEWAY_KEY", "relay", "deepseek-v4-pro");
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "relay".to_string(),
+        env_name: "GATEWAY_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider = OpenAiProvider::new(&entry, &runtime, &credential).unwrap();
+    let fields = resolve_request_fields(
+        &provider.thinking_cfg,
+        provider.thinking_format_for_wire(),
+    );
+    assert_eq!(
+        provider.thinking_format_for_wire(),
+        crate::core::llm::thinking_policy::ThinkingFormat::Openai
+    );
+    assert_eq!(fields.reasoning_effort.as_deref(), Some("high"));
+    assert!(fields.thinking.is_none(), "openai wire 的 Auto 不应自动补 deepseek thinking 方言");
 }

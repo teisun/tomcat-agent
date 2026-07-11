@@ -735,6 +735,34 @@ fn responses_build_request_body_high_writes_reasoning_effort() {
 }
 
 #[test]
+fn responses_auto_thinking_format_ignores_claude_model_name_on_responses_wire() {
+    let mut entry = responses_entry();
+    entry.id = "claude-relay".to_string();
+    entry.model_name = Some("claude-opus-4-6".to_string());
+    entry.provider = "relay".to_string();
+    entry.base_url = Some("https://gateway.example.test/v1".to_string());
+    entry.thinking_format = None;
+    let provider = provider_from_entry(entry, LlmConfig::default());
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi")],
+        model: String::new(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        thinking_level: None,
+        tools: None,
+    };
+    let body = provider.build_request_body(&req, true);
+    assert_eq!(
+        body["reasoning"]["effort"],
+        "high",
+        "responses wire 不应被 claude 名字误导成 anthropic thinking"
+    );
+    assert!(body.get("thinking").is_none());
+}
+
+#[test]
 fn responses_build_request_body_show_true_writes_reasoning_summary_auto() {
     let cfg = LlmConfig {
         thinking: crate::infra::config::ThinkingConfig {

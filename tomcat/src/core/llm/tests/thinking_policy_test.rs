@@ -2,7 +2,8 @@
 
 use super::super::thinking_policy::{
     resolve_anthropic_request, resolve_request_fields, should_persist_thinking,
-    should_strip_on_resend, strip_anthropic_thinking_blocks, thinking_format_for_model,
+    should_strip_on_resend, strip_anthropic_thinking_blocks, thinking_format_for_api,
+    thinking_format_for_model,
     ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
 };
 use crate::infra::config::ThinkingConfig;
@@ -48,26 +49,38 @@ fn level_parse_unknown_falls_back_to_medium_and_signals_false() {
 }
 
 #[test]
-fn format_resolve_auto_by_provider_id() {
+fn format_resolve_auto_by_wire_api() {
     assert_eq!(
-        ThinkingFormat::Auto.resolve("openai"),
+        ThinkingFormat::Auto.resolve_for_api("openai"),
         ThinkingFormat::Openai
     );
     assert_eq!(
-        ThinkingFormat::Auto.resolve("openai-responses"),
+        ThinkingFormat::Auto.resolve_for_api("openai-responses"),
         ThinkingFormat::Openai
     );
     assert_eq!(
-        ThinkingFormat::Auto.resolve("deepseek"),
+        ThinkingFormat::Auto.resolve_for_api("anthropic-messages"),
+        ThinkingFormat::Anthropic
+    );
+    assert_eq!(
+        thinking_format_for_api("openai"),
+        ThinkingFormat::Openai
+    );
+    assert_eq!(
+        thinking_format_for_api("openai-responses"),
+        ThinkingFormat::Openai
+    );
+    assert_eq!(
+        thinking_format_for_api("deepseek"),
         ThinkingFormat::Deepseek
     );
     assert_eq!(
-        ThinkingFormat::Auto.resolve("doubao"),
+        thinking_format_for_api("doubao"),
         ThinkingFormat::Doubao
     );
     // 已显式指定的 format 不会被改写
     assert_eq!(
-        ThinkingFormat::Doubao.resolve("openai"),
+        ThinkingFormat::Doubao.resolve_for_api("openai"),
         ThinkingFormat::Doubao
     );
 }
@@ -95,14 +108,14 @@ fn format_resolve_auto_by_model_name() {
 }
 
 #[test]
-fn explicit_format_wins_over_model_auto_detection() {
+fn explicit_format_wins_over_wire_auto_detection() {
     assert_eq!(
-        ThinkingFormat::Openai.resolve_for_model("deepseek-v4-pro"),
+        ThinkingFormat::Openai.resolve_for_api("anthropic-messages"),
         ThinkingFormat::Openai
     );
     assert_eq!(
-        ThinkingFormat::Auto.resolve_for_model("deepseek-v4-pro"),
-        ThinkingFormat::Deepseek
+        ThinkingFormat::Auto.resolve_for_api("openai"),
+        ThinkingFormat::Openai
     );
 }
 
