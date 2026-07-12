@@ -1616,6 +1616,143 @@ describe("Tomcat webview App", () => {
     );
   });
 
+  it("hides the previous sticky prompt until the newly revealed user turn scrolls past the top edge", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: true,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: true,
+            conflictMessage: null,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [
+              { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
+              { id: "assistant-1", kind: "assistant", text: "第一轮回答", type: "message" },
+              { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
+              { id: "thinking-2", text: "正在回答第二轮问题", type: "thinking" },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-sticky-reveal",
+    });
+
+    const metrics = { scrollTop: 300 };
+    mockScrollableTranscriptUsers({
+      metrics,
+      scrollHeight: 640,
+      users: [
+        { id: "user-1", top: 80, bottom: 120 },
+        { id: "user-2", top: 300, bottom: 340 },
+      ],
+    });
+
+    fireEvent.scroll(screen.getByTestId("stream-container"));
+    expect(screen.queryByTestId("sticky-user-prompt")).toBeNull();
+
+    metrics.scrollTop = 360;
+    fireEvent.scroll(screen.getByTestId("stream-container"));
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
+  });
+
+  it("keeps sticky hidden while the newest user turn is still visible at the bottom of the viewport", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: true,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: true,
+            conflictMessage: null,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [
+              { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
+              { id: "assistant-1", kind: "assistant", text: "第一轮回答", type: "message" },
+              { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
+              { id: "assistant-2", kind: "assistant", text: "第二轮回答", type: "message" },
+              { id: "user-3", kind: "user", text: "第三轮问题", type: "message" },
+              { id: "thinking-3", text: "正在回答第三轮问题", type: "thinking" },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-sticky-live-bottom",
+    });
+
+    const metrics = { scrollTop: 320 };
+    mockScrollableTranscriptUsers({
+      metrics,
+      scrollHeight: 760,
+      users: [
+        { id: "user-1", top: 80, bottom: 120 },
+        { id: "user-2", top: 240, bottom: 280 },
+        { id: "user-3", top: 390, bottom: 430 },
+      ],
+    });
+
+    fireEvent.scroll(screen.getByTestId("stream-container"));
+    expect(screen.queryByTestId("sticky-user-prompt")).toBeNull();
+
+    metrics.scrollTop = 460;
+    fireEvent.scroll(screen.getByTestId("stream-container"));
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第三轮问题");
+  });
+
   it("switches the sticky prompt to the visible historical turn while scrolling upward", async () => {
     mount();
 

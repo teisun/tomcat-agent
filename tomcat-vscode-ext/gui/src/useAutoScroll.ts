@@ -6,6 +6,7 @@ const STICKY_PROMPT_THRESHOLD_PX = 12;
 type ScrollMode = "followBottom" | "paused" | "revealUser";
 
 export type StickyUserMetric = {
+  top: number;
   bottom: number;
   id: string;
 };
@@ -17,18 +18,34 @@ function isAtBottom(element: HTMLElement): boolean {
 export function selectActiveStickyUserId(
   userMetrics: StickyUserMetric[],
   scrollTop: number,
+  viewportHeight: number,
   threshold: number,
 ): string | null {
-  let activeMetric: StickyUserMetric | null = null;
+  const topLine = scrollTop + threshold;
+  const viewportBottom = scrollTop + viewportHeight;
+  let owningMetric: StickyUserMetric | null = null;
+  let newestMetric: StickyUserMetric | null = null;
   for (const metric of userMetrics) {
-    if (metric.bottom - scrollTop >= threshold) {
+    if (!newestMetric || metric.top > newestMetric.top) {
+      newestMetric = metric;
+    }
+    if (metric.top > topLine) {
       continue;
     }
-    if (!activeMetric || metric.bottom > activeMetric.bottom) {
-      activeMetric = metric;
+    if (!owningMetric || metric.top > owningMetric.top) {
+      owningMetric = metric;
     }
   }
-  return activeMetric?.id ?? null;
+  if (!owningMetric) {
+    return null;
+  }
+  if (owningMetric.bottom > topLine) {
+    return null;
+  }
+  if (newestMetric && newestMetric.id !== owningMetric.id && newestMetric.top < viewportBottom) {
+    return null;
+  }
+  return owningMetric.id;
 }
 
 type UseAutoScrollOptions = {
@@ -94,6 +111,7 @@ function currentStickyUserMetrics(
       return {
         bottom: container.scrollTop + (rect.bottom - containerRect.top),
         id,
+        top: container.scrollTop + (rect.top - containerRect.top),
       } satisfies StickyUserMetric;
     })
     .filter((metric): metric is StickyUserMetric => metric !== null);
@@ -179,6 +197,7 @@ export function useAutoScroll({
     const nextStickyMessageId = selectActiveStickyUserId(
       currentStickyUserMetrics(container, content),
       container.scrollTop,
+      container.clientHeight,
       STICKY_PROMPT_THRESHOLD_PX,
     );
     syncActiveStickyMessageId(nextStickyMessageId);

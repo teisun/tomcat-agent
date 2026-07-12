@@ -3358,7 +3358,7 @@ export async function assertWebviewStickyHistoryFlow(
   );
 
   const prompts = Array.from(
-    { length: 8 },
+    { length: 20 },
     (_, index) => `第${index + 1}轮 sticky 问题`,
   );
   for (const [index, text] of prompts.entries()) {
@@ -3386,6 +3386,20 @@ export async function assertWebviewStickyHistoryFlow(
 
   await api.__testing.sendWebviewDomAction({
     index: 2,
+    kind: "scrollIntoView",
+    scrollBlock: "start",
+    testId: "message-block",
+  });
+  await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId && !candidate.stickyPromptText
+        ? candidate
+        : undefined,
+  );
+
+  await api.__testing.sendWebviewDomAction({
+    index: 3,
     kind: "scrollIntoView",
     scrollBlock: "start",
     testId: "message-block",

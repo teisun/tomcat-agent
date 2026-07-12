@@ -278,7 +278,9 @@ assistant response group
 3. `scroll` 监听根据 `|scrollHeight - scrollTop - clientHeight| < 2` 判断是否贴底；
 4. **只有 user message 数量增加**时才重置跟随，工具/notice/thinking 不会把用户强行拉回底部；
 5. `App.tsx` 在 `userHasScrolled=true` 时显示 `Jump to latest` 向下箭头图标按钮（保留 `scroll-to-bottom` test id，弱化视觉重量）；
-6. sticky prompt 不再只认“最后一条 user message”，而是扫描 transcript 里**所有** user message，选出“其底部已滚过容器顶”的最靠下那条，顶部悬浮框随滚动切换到当前视口对应那一轮问题；滚到第一条 user 之上时自动消失。
+6. sticky prompt 不再只认“最后一条 user message”，而是扫描 transcript 里**所有** user message，先找出“当前视口顶部属于哪一轮”（`top <= scrollTop + threshold` 的 user message 里 `top` 最大者），再判断这一轮自己的 user message 是否已**完全**滚出顶部（`bottom <= scrollTop + threshold`）；只有完全滚出时才有资格显示 sticky。
+7. 在此基础上，再加一条更贴近真实对话流的保护：**只要最新一轮 user message 仍在屏幕内可见（顶部或底部都算），sticky 就保持隐藏**，绝不悬浮更旧的问题。这样既覆盖“新问题被 reveal 到顶部”的情况，也覆盖“新问题留在底部、回答在其下方流式生长”的真机情况。
+8. 因此，发出**新的提示词**时，旧 sticky 会立即消失；等新问题被它自己的回答顶出一屏后，sticky 才显示新问题。向上翻历史时，若最新问题已在屏幕外，sticky 会按视口实际落在哪一轮而切换；滚到第一条 user 之上时自动消失；经过某一轮 user message 头部的瞬间，sticky 仍会短暂隐藏，等该 user message 完全滚出顶部后再显示该轮问题。
 
 为什么不用虚拟列表：
 

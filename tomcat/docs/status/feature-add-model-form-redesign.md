@@ -1,8 +1,12 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-12 18:29 +0800 | ACTIVE | feature/add-model-form-redesign | — |
+| Nibbles | 2026-07-12 20:40 +0800 | ACTIVE | feature/add-model-form-redesign | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** Sticky 底部流式残留 bug 修复：只要最新一轮 user message 仍在屏幕内（顶部或底部都算），sticky 一律隐藏，不再悬浮上一轮问题；待该轮被自身回答顶出一屏后再显示新 sticky @2026-07-12
+- [✓] **[P1]** 验收：`check:wire`、扩展 `lint`、core unit(113)、GUI unit(177)、sticky Devhost 过滤场景全绿；扩展 bump `0.1.10`，`tomcat-vscode-ext-0.1.10.vsix` 已重打（gitignore，不入库）@2026-07-12
+- [✓] **[P0]** Sticky 新提示词 reveal 收口：sticky 改按“视口顶部所属轮次”选择；当前轮 user message 仍露在顶部时先隐藏，不再回退显示旧问题；历史滚动保持按轮次切换 @2026-07-12
+- [✓] **[P1]** 验收：扩展 `lint`、core unit(113)、GUI unit(176)、sticky Devhost 过滤场景全绿；扩展 bump `0.1.9`，`tomcat-vscode-ext-0.1.9.vsix` 已重打（gitignore，不入库）@2026-07-12
 - [✓] **[P0]** Transcript 双 Creating plan 根因修复：plan 抑制改按 `toolName`（运行中尚无 `display`），覆盖 grouped / standalone / raw tool；测试改为真实流式态无 display @2026-07-12
 - [✓] **[P0]** Transcript 横向溢出收口：外层只允许纵向滚，flex 子项 `min-width:0`，长 token `overflow-wrap:anywhere`；宽内容仅在 diff/terminal/code 局部滚动 @2026-07-12
 - [✓] **[P1]** 验收：`check:wire`、`lint`、core unit(113)、GUI unit(175)、Devhost 全量 33 绿；扩展 bump `0.1.8`，`tomcat-vscode-ext-0.1.8.vsix` 已重打（gitignore，不入库）@2026-07-12
@@ -40,8 +44,8 @@
 | 无 | - | - |
 
 ### 集成说明
-- 本分支目标：Add Model 双模式 Tab + 官方 seed 语义；叠加 Composer `@` 提及；再叠加 Transcript 扁平化、结构化内联 diff 与 transcript UX 修复（扩展 `0.1.8`）。
+- 本分支目标：Add Model 双模式 Tab + 官方 seed 语义；叠加 Composer `@` 提及；再叠加 Transcript 扁平化、结构化内联 diff 与 transcript UX 修复（扩展 `0.1.10`）。
 - Transcript：命令/写编辑共用 DisclosureCard；edit 折叠预览改为变更锚定；prepared diff 改 path-key 后，View diff 在真机 mixed-case `toolCallId` 下可稳定打开非空对比。
-- Plan / Sticky：运行态按 `toolName` 抑制内层 plan 行，仅保留单头 + PlanFileCard；运行中 `View Plan` 呼吸提示；sticky 可切回历史轮次；transcript 外层禁止横滚。
+- Plan / Sticky：运行态按 `toolName` 抑制内层 plan 行，仅保留单头 + PlanFileCard；运行中 `View Plan` 呼吸提示；sticky 可切回历史轮次，且只要最新一轮 user message 仍在屏幕内（顶部或底部）就保持隐藏，待该轮被自身回答顶出一屏后再显示新 sticky；transcript 外层禁止横滚。
 - `@` 行为：有工作区时敲 `@` 出下拉；无工作区/切会话经 `closeMention()` 关闭；选中注入 context chip，不改 serve/wire。
-- 验收：本轮 `check:wire`、扩展 `lint`、GUI/core unit、Devhost 全量回归绿；`package:vsix` / 纯插件包不入库。
+- 验收：本轮 `check:wire`、扩展 `lint`、GUI/core unit、sticky Devhost 过滤回归绿；`package:vsix` / 纯插件包不入库。

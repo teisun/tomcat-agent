@@ -99,29 +99,64 @@ describe("useAutoScroll", () => {
     vi.unstubAllGlobals();
   });
 
-  it("selects the lowest user message whose bottom has scrolled past the top threshold", () => {
-    expect(selectActiveStickyUserId([], 50, 12)).toBeNull();
+  it("keeps sticky hidden while the newest user message remains visible in the viewport", () => {
+    expect(selectActiveStickyUserId([], 50, 100, 12)).toBeNull();
     expect(
       selectActiveStickyUserId(
         [
-          { bottom: 40, id: "user-1" },
-          { bottom: 80, id: "user-2" },
-          { bottom: 140, id: "user-3" },
+          { bottom: 40, id: "user-1", top: 10 },
+          { bottom: 80, id: "user-2", top: 50 },
+          { bottom: 260, id: "user-3", top: 220 },
         ],
         90,
+        100,
         12,
       ),
     ).toBe("user-2");
     expect(
       selectActiveStickyUserId(
         [
-          { bottom: 40, id: "user-1" },
-          { bottom: 80, id: "user-2" },
+          { bottom: 40, id: "user-1", top: 10 },
+          { bottom: 80, id: "user-2", top: 50 },
         ],
         0,
+        100,
         12,
       ),
     ).toBeNull();
+    expect(
+      selectActiveStickyUserId(
+        [
+          { bottom: 30, id: "user-1", top: 0 },
+          { bottom: 113, id: "user-2", top: 90 },
+        ],
+        100,
+        100,
+        12,
+      ),
+    ).toBeNull();
+    expect(
+      selectActiveStickyUserId(
+        [
+          { bottom: 40, id: "user-1", top: 10 },
+          { bottom: 280, id: "user-2", top: 240 },
+        ],
+        50,
+        240,
+        12,
+      ),
+    ).toBeNull();
+    expect(
+      selectActiveStickyUserId(
+        [
+          { bottom: 40, id: "user-1", top: 10 },
+          { bottom: 280, id: "user-2", top: 240 },
+        ],
+        50,
+        120,
+        12,
+      ),
+    ).toBe("user-1");
   });
 
   it("reveals the latest user once and keeps it pinned while streamed content grows", () => {
