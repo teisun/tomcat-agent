@@ -661,13 +661,18 @@ describe("mutation diff stat injection", () => {
 
   it("routes openDiff intents into ide.openReconstructedDiff", async () => {
     const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
+    const rememberToolResult = vi.fn().mockResolvedValue({
+      displayPath: "src/app.ts",
+    });
     const showFile = vi.fn().mockResolvedValue(undefined);
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       getUiMode: () => "webview",
       ide: {
+        getPreparedChange: () => undefined,
         openReconstructedDiff,
+        rememberToolResult,
         showFile,
       } as never,
       initialize: async () => ({} as never),
@@ -724,15 +729,108 @@ describe("mutation diff stat injection", () => {
     provider.dispose();
   });
 
-  it("falls back to ide.showFile when openDiff has no structured diff", async () => {
+  it("prefers ide.openPreparedDiff when live tool snapshots are available", async () => {
+    const getPreparedChange = vi.fn().mockReturnValue({
+      displayPath: "src/app.ts",
+    });
+    const openPreparedDiff = vi.fn().mockResolvedValue(undefined);
     const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
+    const rememberToolResult = vi.fn().mockResolvedValue({
+      displayPath: "src/app.ts",
+    });
+    const rememberToolStart = vi.fn().mockResolvedValue(undefined);
     const showFile = vi.fn().mockResolvedValue(undefined);
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
       getUiMode: () => "webview",
       ide: {
+        getPreparedChange,
+        openPreparedDiff,
         openReconstructedDiff,
+        rememberToolResult,
+        rememberToolStart,
+        showFile,
+      } as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      ownership: {
+        ownerOf() {
+          return null;
+        },
+        releaseAll() {},
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      args: { path: "src/app.ts" },
+      sessionId: "s1",
+      toolCallId: "tool-edit-live",
+      toolName: "edit",
+      type: "tool_execution_start",
+    });
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      display: {
+        added: 1,
+        diff: [
+          { newLine: 1, oldLine: 1, tag: "ctx", text: "before" },
+          { newLine: null, oldLine: 2, tag: "del", text: "old line" },
+          { newLine: 2, oldLine: null, tag: "add", text: "new line" },
+        ],
+        file: "src/app.ts",
+        kind: "file",
+        removed: 1,
+      },
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-edit-live",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+
+    expect(rememberToolStart).toHaveBeenCalledWith("tool-edit-live", { path: "src/app.ts" });
+    expect(rememberToolResult).toHaveBeenCalledWith("tool-edit-live", "src/app.ts");
+
+    await provider.dispatchTestIntent({
+      data: { toolCallId: "tool-edit-live" },
+      messageId: "intent-open-diff-live",
+      type: "openDiff",
+    });
+
+    expect(getPreparedChange).toHaveBeenCalledWith("tool-edit-live");
+    expect(openPreparedDiff).toHaveBeenCalledWith("tool-edit-live");
+    expect(openReconstructedDiff).not.toHaveBeenCalled();
+    expect(showFile).not.toHaveBeenCalled();
+
+    provider.dispose();
+  });
+
+  it("falls back to ide.showFile when openDiff has no structured diff", async () => {
+    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
+    const rememberToolResult = vi.fn().mockResolvedValue({
+      displayPath: "src/huge.ts",
+    });
+    const showFile = vi.fn().mockResolvedValue(undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      getUiMode: () => "webview",
+      ide: {
+        getPreparedChange: () => undefined,
+        openReconstructedDiff,
+        rememberToolResult,
         showFile,
       } as never,
       initialize: async () => ({} as never),

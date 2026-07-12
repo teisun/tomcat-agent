@@ -62,6 +62,10 @@ type DomSnapshot = Extract<
 
 type UserSubmitKind = "prompt" | "steer";
 
+function isMutationTool(toolName: string): boolean {
+  return toolName === "write" || toolName === "edit" || toolName === "hashline_edit";
+}
+
 function reconstructDiffPair(diff: FileDiffLine[]): { after: string; before: string } {
   const before: string[] = [];
   const after: string[] = [];
@@ -1101,7 +1105,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           return;
         }
         try {
-          if (tool.diff?.length) {
+          if (this.deps.ide.getPreparedChange(intent.data.toolCallId)) {
+            await this.deps.ide.openPreparedDiff(intent.data.toolCallId);
+          } else if (tool.diff?.length) {
             const { after, before } = reconstructDiffPair(tool.diff);
             await this.deps.ide.openReconstructedDiff(
               intent.data.toolCallId,
@@ -1165,6 +1171,29 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async handleServeEvent(event: ServeEvent): Promise<void> {
+    if (
+      event.type === "tool_execution_start" &&
+      isMutationTool(event.toolName) &&
+      typeof this.deps.ide.rememberToolStart === "function"
+    ) {
+      try {
+        await this.deps.ide.rememberToolStart(event.toolCallId, event.args);
+      } catch (error) {
+        console.warn("Tomcat webview failed to capture tool start snapshot", error);
+      }
+    }
+    if (
+      event.type === "tool_execution_end" &&
+      event.display?.kind === "file" &&
+      isMutationTool(event.toolName) &&
+      typeof this.deps.ide.rememberToolResult === "function"
+    ) {
+      try {
+        await this.deps.ide.rememberToolResult(event.toolCallId, event.display.file);
+      } catch (error) {
+        console.warn("Tomcat webview failed to capture tool result snapshot", error);
+      }
+    }
     this.stateStore.applyEvent(event);
     if (event.sessionId) {
       this.stateStore.setOwnership(
