@@ -54,6 +54,17 @@ export function isRunning(item: WebviewToolCard): boolean {
   return (item.status === "running" || item.status === "streaming") && !item.isError;
 }
 
+export function isSuppressedPlanToolRow(item: WebviewToolCard): boolean {
+  return (
+    !item.isError &&
+    (
+      item.toolName === "create_plan" ||
+      item.toolName === "update_plan" ||
+      item.display?.kind === "plan"
+    )
+  );
+}
+
 function formatToolSummary(summary: string | undefined): string | undefined {
   if (!summary) {
     return undefined;

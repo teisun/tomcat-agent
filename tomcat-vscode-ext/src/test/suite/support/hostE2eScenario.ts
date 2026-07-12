@@ -3314,6 +3314,11 @@ export async function assertWebviewPlanToolUxFlow(
     pending.html.includes('data-testid="view-plan-pending"'),
     "expected the plan card to show the busy View Plan affordance while update_plan is running",
   );
+  assert.equal(
+    (pending.html.match(/>\s*Creating plan\s*</g) ?? []).length,
+    1,
+    "expected the running plan UX to show a single Creating plan label while the inner tool row stays hidden",
+  );
 
   await waitForEvent(api, { type: "agent_end" });
   const settled = await waitForWebviewDomSnapshot(

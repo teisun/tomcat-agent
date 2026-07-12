@@ -94,6 +94,33 @@ describe("partitionAssistantResponseGroup", () => {
     expect(entries.map((entry) => entry.type)).toEqual(["context-group", "action-tool"]);
   });
 
+  it("keeps a plan workflow tool inside a context segment so the plan card can own the UX", () => {
+    const entries = partitionAssistantResponseGroup(
+      buildGroup({
+        tools: [
+          {
+            assistantMessageId: "assistant-1",
+            id: "plan-1",
+            isError: false,
+            status: "streaming",
+            summary: "Creating plan",
+            toolCallId: "tc-plan-1",
+            toolName: "create_plan",
+            type: "tool",
+          },
+        ],
+      }),
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      type: "context-group",
+      group: {
+        tools: [{ id: "plan-1", toolName: "create_plan" }],
+      },
+    });
+  });
+
   it("creates a thinking-only context segment when no tools exist", () => {
     const entries = partitionAssistantResponseGroup(
       buildGroup({

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { WebviewMessageBlock, WebviewToolCard } from "../types";
 import { MessageBubble } from "./MessageBubble";
 import { ThinkingBlock } from "./ThinkingBlock";
-import { buildToolCollectionTitle, ToolRow } from "./ToolRow";
+import { buildToolCollectionTitle, isSuppressedPlanToolRow, ToolRow } from "./ToolRow";
 import type { AssistantResponseGroup } from "./sessionList/groupTimelineByAssistantResponse";
 
 function isDirtySummaryTitle(summaryTitle: string, tools: WebviewToolCard[]): boolean {
@@ -29,7 +29,7 @@ function groupHeaderTitle(
 }
 
 function shouldHideGroupedToolRow(tool: WebviewToolCard): boolean {
-  return tool.display?.kind === "plan" && !tool.isError;
+  return isSuppressedPlanToolRow(tool);
 }
 
 export function ThinkingGroup({

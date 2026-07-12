@@ -148,12 +148,12 @@ describe("TranscriptView", () => {
         type: "thinking",
       },
       {
+        args: { plan_id: "demo-plan" },
         assistantMessageId: "assistant-plan",
-        display: { kind: "plan", plan: "/tmp/demo.plan.md" },
         id: "tool-plan",
         isError: false,
         status: "streaming",
-        summary: "Created plan demo",
+        summary: "Creating plan",
         toolCallId: "tc-plan",
         toolName: "create_plan",
         type: "tool",
@@ -182,27 +182,37 @@ describe("TranscriptView", () => {
 
     expect(screen.getAllByText("Creating plan")).toHaveLength(1);
     expect(screen.getByTestId("thinking-group")).toBeTruthy();
+    expect(screen.queryByTestId("tool-row")).toBeNull();
     expect(screen.getByTestId("plan-card-title").textContent).toBe("Demo plan");
     expect(screen.getByTestId("view-plan-pending")).toBeTruthy();
   });
 
-  it("keeps a standalone create_plan tool visible when no thinking text exists", () => {
+  it("suppresses a standalone running create_plan tool when the plan card carries the workflow", () => {
     const timeline: WebviewTimelineItem[] = [
       {
+        args: { plan_id: "mini-plan" },
         assistantMessageId: "assistant-plan-standalone",
         id: "tool-plan-only",
         isError: false,
-        status: "complete",
-        summary: "Created plan mini-game",
+        status: "streaming",
+        summary: "Creating plan",
         toolCallId: "tc-plan-only",
         toolName: "create_plan",
         type: "tool",
+      },
+      {
+        id: "plan-card-mini",
+        path: "/tmp/mini.plan.md",
+        planId: "mini-plan",
+        state: "planning",
+        title: "Mini plan",
+        type: "plan",
       },
     ];
 
     render(
       <TranscriptView
-        busy={false}
+        busy
         canBuildPlan={false}
         onAnswer={vi.fn()}
         onBuildPlan={vi.fn()}
@@ -213,7 +223,9 @@ describe("TranscriptView", () => {
     );
 
     expect(screen.queryByTestId("thinking-group")).toBeNull();
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Created plan");
+    expect(screen.queryByTestId("tool-row")).toBeNull();
+    expect(screen.getByTestId("plan-card-title").textContent).toBe("Mini plan");
+    expect(screen.getByTestId("view-plan-pending")).toBeTruthy();
   });
 
   it("prefers matching by planId before falling back to the newest plan card", () => {
@@ -237,7 +249,6 @@ describe("TranscriptView", () => {
       {
         args: { plan_id: "plan-a" },
         assistantMessageId: "assistant-update",
-        display: { kind: "plan", plan: "/tmp/plan-a.plan.md" },
         id: "tool-update-plan",
         isError: false,
         status: "streaming",

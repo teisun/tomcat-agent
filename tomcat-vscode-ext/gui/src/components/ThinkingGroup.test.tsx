@@ -251,11 +251,10 @@ describe("ThinkingGroup", () => {
           tools: [
             {
               assistantMessageId: "assistant-1",
-              display: { kind: "plan", plan: "/tmp/demo.plan.md" },
               id: "tool-plan",
               isError: false,
               status: "streaming",
-              summary: "Created plan",
+              summary: "Creating plan",
               toolCallId: "tc-plan",
               toolName: "create_plan",
               type: "tool",
@@ -279,7 +278,6 @@ describe("ThinkingGroup", () => {
           tools: [
             {
               assistantMessageId: "assistant-1",
-              display: { kind: "plan", plan: "/tmp/demo.plan.md" },
               id: "tool-plan-error",
               isError: true,
               status: "complete",

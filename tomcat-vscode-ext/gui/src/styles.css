@@ -1087,7 +1087,8 @@ input:focus-visible {
 
 .tc-stream {
   height: 100%;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding-right: 10px;
   scrollbar-color: color-mix(
       in srgb,
@@ -1205,12 +1206,20 @@ input:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 .tc-live-cluster {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+}
+
+.tc-transcript > *,
+.tc-live-cluster > * {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .tc-transcript__spacer {
@@ -1270,6 +1279,9 @@ input:focus-visible {
 
 .tc-message--assistant .rendered-markdown {
   line-height: 1.5em;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .tc-message--assistant .rendered-markdown p {
@@ -1289,7 +1301,9 @@ input:focus-visible {
 }
 
 .tc-message__text-segment {
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tc-message__status {

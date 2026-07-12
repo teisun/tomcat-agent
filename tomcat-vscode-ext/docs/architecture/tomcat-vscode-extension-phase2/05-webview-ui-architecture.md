@@ -344,7 +344,7 @@ ToolRow
    - `read/search/web_*` 等保持小图标 + 描述色的一行摘要。
    - 连续多个会被 `ThinkingGroup` 收纳，避免 transcript 变成工具日志墙；单个无 thinking 的 context 工具直接扁平显示，保留 `FileChip` 与配色。
    - `read / read_file` 前导图标改成 `codicon-eye`，避免和 Markdown `FileChip` 的书本图标撞语义。
-   - `create_plan / update_plan` 在 grouped 场景采用 Variant B：分组头仍可显示 `Creating plan`（或更具体的 thinking summary），但 `ThinkingGroup` 内层会隐藏非 error 的 plan 工具行，避免“分组头 + 内层行”双重重复；若该轮无 thinking，只剩单个 plan 工具，则仍按 standalone 一行显示。
+  - `create_plan / update_plan` 在 grouped 场景采用 Variant B：分组头仍可显示 `Creating plan`（或更具体的 thinking summary），但 transcript 里任何**非 error** 的 plan 工具行都会被抑制，避免“分组头 + 内层行”双重重复。关键点是抑制判据不能只看 `display.kind === "plan"`，因为运行中的 plan 工具直到 `tool_execution_end` 才拿到 `display`；真正可靠的真源是 `toolName === create_plan/update_plan`（再兼容结束态 `display.kind === "plan"`）。
 
 5. **plan 卡片**
    - `PlanFileCard` 始终是 plan 文件的正式足迹：文件名、语义标题、todo 数、`View Plan / Build` 都在这里。
@@ -355,6 +355,7 @@ ToolRow
 - 结果体仍是懒挂载，展开前不进 DOM，减少长输出的布局压力。
 - thinking-only 残组不会继续拿 `summaryTitle` 当折叠标题，避免命令标题在 action 行和折叠头各出现一次。
 - `DisclosureCard` 是内容无关外壳，terminal / diff 细节全部留给 `TerminalOutput` / `DiffView`；这比在一个万能组件里堆 `mode` 开关更稳。
+- transcript 外层 `.tc-stream` 现在只允许**纵向**滚动；消息文本、cluster 容器和其直接子节点都强制 `min-width: 0` + `overflow-wrap: anywhere`，所以 Markdown 里的长横杠分隔线、长文件名或其他无空格 token 只会在局部断行，不会再把整条 transcript 横向撑出视口。真正需要横向滚的只有 diff / terminal / code block 这类局部内容体。
 
 ### 5.4 Composer：不换行、只压缩可压缩项
 

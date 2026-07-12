@@ -16,7 +16,7 @@ import { PlanFileCard } from "./PlanFileCard";
 import { ProgressRow } from "./ProgressRow";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ThinkingGroup } from "./ThinkingGroup";
-import { isActionTool, ToolRow } from "./ToolRow";
+import { isActionTool, isSuppressedPlanToolRow, ToolRow } from "./ToolRow";
 import {
   groupTimelineByAssistantResponse,
   type AssistantResponseGroup,
@@ -190,6 +190,9 @@ export function TranscriptView({
             />
           );
         case "tool":
+          if (isSuppressedPlanToolRow(item)) {
+            return null;
+          }
           return (
             <ToolRow
               item={item}
@@ -243,11 +246,17 @@ export function TranscriptView({
                 );
               }
               const hasThinkingText = Boolean(segment.group.thinking?.text.trim());
-              if (segment.group.tools.length === 1 && !hasThinkingText) {
+              const renderableTools = segment.group.tools.filter(
+                (tool) => !isSuppressedPlanToolRow(tool),
+              );
+              if (renderableTools.length === 0 && !hasThinkingText) {
+                return null;
+              }
+              if (renderableTools.length === 1 && !hasThinkingText) {
                 return (
                   <ToolRow
-                    item={segment.group.tools[0]}
-                    key={`group-context-standalone-${segment.group.tools[0].id}`}
+                    item={renderableTools[0]}
+                    key={`group-context-standalone-${renderableTools[0].id}`}
                     onOpenDiff={onOpenDiff}
                     onOpenFile={onOpenFile}
                   />
