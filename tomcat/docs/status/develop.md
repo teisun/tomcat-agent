@@ -1,14 +1,18 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-09 19:15 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-12 21:39 +0800 | ACTIVE | develop | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** `feature/add-model-form-redesign` 已快进合入 `develop`（HEAD `68a4f43`）：覆盖 Add Model 双模式 / `ModelView.source` / `ThinkingFormat::Auto` 收口、Composer `@` 上下文搜索，以及 Transcript diff / plan / sticky UX 修复；develop-side review 中顺手补齐 Webview live diff snapshot 复用、`hashline_edit.rs` clippy 收口与对应 E2E 断言对齐 @2026-07-12
 - [✓] **[P1]** 新增根目录 Cursor command `/release-cli-ext`：固化 CLI→EXT 发版顺序（patch+1、develop 推送、main/master fast-forward、cli tag 等资产、ext tag 等资产），减少手工漏步 @2026-07-06
 - [✓] **[P1]** Add Models 架构方案：新增 `tomcat-vscode-ext/docs/architecture/model-management-add-models.md` 总览 + 5 篇子文档（术语/决策/协议/验收/UI ASCII 基线），对齐 Phase 2 文档组织方式 @2026-07-06
 - [✓] **[P1]** Add Models 实现已合入 `develop`：以 `git merge --no-ff` 合并 `feature/add-models`（merge `68ff90a`），并在分支侧与 `develop` 侧完成 Rust/CLI/serve 全量门禁、VS Code 扩展 build/unit/integration/GUI/VSIX install/verify 复跑，验收通过 @2026-07-09
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 集成说明
+- `feature/add-model-form-redesign` 已在 `develop` 合并验收：扩展 `npm run check:wire`、`npm run gate:fast`、`npx vitest run src/ui/webview/tests/provider.test.ts src/ide/tests/diff_apply_edit.test.ts` 全绿；Devhost 全量先暴露 `applies edits from the Tomcat webview` 回归，补齐 live prepared snapshot 语义后，`TOMCAT_E2E_GREP='applies edits from the Tomcat webview' npm run test:e2e:vscode-devhost` 复绿。
+- Rust develop-side 本轮先由 `./scripts/run-integration-tests.sh gate-fast` 暴露 `hashline_edit.rs` 的 `clippy::needless_return`，已就地修复并复跑到 `clippy` / `cargo test --lib` / `cargo test --doc` 全绿；`integration-parallel` 跑到 `362/363` 后仅剩 `cli_tests::test_chat_path_executes_web_search_tool_with_mock_server` 在 nextest 大盘里持续 slow/hung，但同树代码上 `cargo test --test cli_tests test_chat_path_executes_web_search_tool_with_mock_server -- --nocapture` 4.66s 通过，判断为 nextest 编排异常而非本分支功能回归。
+- 真 LLM 复核本轮未追加 `integration-real-llm`：本机 `DEEPSEEK_API_KEY` / `MIMO_API_KEY` 在 `.env` 中存在，但缺 `OPENAI_API_KEY`，不足以按当前高风险清单完整复跑 OpenAI 直连口径；该空白已显式记录，不冒充“全绿”。
 - 面向用户文档已双语化（英文默认 + opencode 式切换栏）：根 README、扩展 README、`user-guide` 各新增 `.zh.md` 中文镜像；`tomcat-vscode-ext/.vscodeignore` 已放行 `README.zh.md` 入 VSIX。
 - 根 README 已对齐双组件 monorepo 现状：补充 `tomcat/` + `tomcat-vscode-ext/` 组件索引、Agent Box/CLI 双入口架构图，并修正终端用户前提（`tomcat init` → `~/.tomcat/assets/.env`；Rust 1.70+ 仅源码构建需要）。
 - 用户文档已切换主推 **Tomcat Agent Box**：根 README、扩展 README、`user-guide` 与 `package.json` 面板/命令文案同步更新，新增 `assets/tomcat-agent-box.png` 截图；`manifest_contract` 与 GUI 单测已复跑通过。

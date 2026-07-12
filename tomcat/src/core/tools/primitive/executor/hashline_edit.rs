@@ -189,13 +189,13 @@ pub async fn hashline_edit_impl(
                 grant_type: Some(grant_type_str(grant.grant_type)),
                 grant_trigger: Some(grant_trigger_str(grant.trigger)),
             });
-            return Ok(EditFileResult {
+            Ok(EditFileResult {
                 path: crate::infra::platform::format_home_path(&path_buf),
                 applied: false,
                 added: None,
                 removed: None,
                 diff: None,
-            });
+            })
         }
         Err(e) => {
             executor.audit.record_primitive(PrimitiveAuditEntry {
@@ -209,7 +209,7 @@ pub async fn hashline_edit_impl(
                 grant_type: Some(grant_type_str(grant.grant_type)),
                 grant_trigger: Some(grant_trigger_str(grant.trigger)),
             });
-            return Err(e);
+            Err(e)
         }
         Ok(HashlineEditOutcome::Applied {
             added,
@@ -227,13 +227,13 @@ pub async fn hashline_edit_impl(
                 grant_type: Some(grant_type_str(grant.grant_type)),
                 grant_trigger: Some(grant_trigger_str(grant.trigger)),
             });
-            return Ok(EditFileResult {
+            Ok(EditFileResult {
                 path: crate::infra::platform::format_home_path(&path_buf),
                 applied: true,
                 added: Some(added),
                 removed: Some(removed),
                 diff,
-            });
+            })
         }
     }
 }

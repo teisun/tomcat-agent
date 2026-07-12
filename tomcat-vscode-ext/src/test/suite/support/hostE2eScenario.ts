@@ -1504,11 +1504,11 @@ export async function assertWebviewDiffFlow(
   const preparedChange = await waitForPreparedChange(
     api,
     "toolu_01AbC",
-    (change) => change.originalContent === "before" && change.proposedContent === "after",
+    (change) => change.originalContent === "before\n" && change.proposedContent === "after\n",
   );
   assert.equal(preparedChange.displayPath, editFile);
-  assert.equal(preparedChange.originalContent, "before");
-  assert.equal(preparedChange.proposedContent, "after");
+  assert.equal(preparedChange.originalContent, "before\n");
+  assert.equal(preparedChange.proposedContent, "after\n");
   assert.equal(await fs.readFile(editFile, "utf8"), "after\n");
 
   await api.__testing.injectServeEvent({
