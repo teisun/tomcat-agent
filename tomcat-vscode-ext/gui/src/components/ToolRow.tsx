@@ -741,7 +741,7 @@ export function ToolRow({
               category === "command" ? (
                 <TerminalOutput preview text={tailTerminalOutput(item.summary, 5)} />
               ) : (
-                <DiffView diff={item.diff} previewLines={5} />
+                <DiffView diff={item.diff} previewRows={5} />
               )
             }
             resetKey={item.id}

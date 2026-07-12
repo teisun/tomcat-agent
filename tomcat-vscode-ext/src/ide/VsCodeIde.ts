@@ -39,6 +39,26 @@ function toSearchParams(side: DiffSide): string {
   return new URLSearchParams({ side }).toString();
 }
 
+function encodeDiffPathSegment(value: string): string {
+  return encodeURIComponent(value);
+}
+
+function createPreparedDiffPath(toolCallId: string, fileName: string): string {
+  return `/${encodeDiffPathSegment(toolCallId)}/${encodeDiffPathSegment(fileName)}`;
+}
+
+function preparedDiffKeyFromPath(diffPath: string): string | null {
+  const encodedKey = diffPath.split("/").filter(Boolean)[0];
+  if (!encodedKey) {
+    return null;
+  }
+  try {
+    return decodeURIComponent(encodedKey);
+  } catch {
+    return null;
+  }
+}
+
 export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Disposable {
   private readonly preparedChanges = new Map<string, PreparedFileChange>();
   private readonly preparedSnapshots = new Map<string, PreparedSnapshot>();
@@ -178,7 +198,8 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
 
   provideTextDocumentContent(uri: vscode.Uri): string {
     const side = new URLSearchParams(uri.query).get("side") as DiffSide | null;
-    const change = this.preparedChanges.get(uri.authority);
+    const changeKey = preparedDiffKeyFromPath(uri.path);
+    const change = changeKey ? this.preparedChanges.get(changeKey) : undefined;
     if (!change || !side) {
       return "";
     }
@@ -201,8 +222,7 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
   ): vscode.Uri {
     return vscode.Uri.from({
       scheme: DIFF_SCHEME,
-      authority: toolCallId,
-      path: `/${fileName}`,
+      path: createPreparedDiffPath(toolCallId, fileName),
       query: toSearchParams(side),
     });
   }

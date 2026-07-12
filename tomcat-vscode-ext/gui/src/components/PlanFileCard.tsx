@@ -39,12 +39,14 @@ function todoCountLabel(count: number): string {
 
 export function PlanFileCard({
   canBuild,
+  creating = false,
   item,
   onBuild,
   onOpenPlanFile,
   planTodos = [],
 }: {
   canBuild: boolean;
+  creating?: boolean;
   item: WebviewPlanFileCard;
   onBuild(planId: string | null, path: string): void;
   onOpenPlanFile(path: string): void;
@@ -87,15 +89,30 @@ export function PlanFileCard({
         {todoCountLabel(item.todos?.length ?? planTodos.length)}
       </div>
       <div className="tc-plan-card__footer">
-        <button
-          aria-label="View plan file"
-          className="tc-plan-card__footer-link"
-          data-testid="view-plan"
-          onClick={() => onOpenPlanFile(item.path)}
-          type="button"
-        >
-          View Plan
-        </button>
+        {creating ? (
+          <button
+            aria-busy="true"
+            aria-label="Creating plan file"
+            className="tc-plan-card__footer-link tc-plan-card__footer-link--busy"
+            data-testid="view-plan-pending"
+            disabled
+            type="button"
+          >
+            <span aria-hidden="true" className="tc-thinking__dots tc-plan-card__footer-dots">
+              ...
+            </span>
+          </button>
+        ) : (
+          <button
+            aria-label="View plan file"
+            className="tc-plan-card__footer-link"
+            data-testid="view-plan"
+            onClick={() => onOpenPlanFile(item.path)}
+            type="button"
+          >
+            View Plan
+          </button>
+        )}
         <button
           className="tc-button tc-button--primary"
           data-testid="build-plan"

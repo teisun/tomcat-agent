@@ -22,10 +22,12 @@ import {
   assertWebviewInterruptFlow,
   assertWebviewMultiSessionFlow,
   assertWebviewOwnershipFlow,
+  assertWebviewPlanToolUxFlow,
   assertWebviewReloadReplayFlow,
   assertWebviewSelectionReferenceFlow,
   assertWebviewSessionTitleFlow,
   assertWebviewSessionSwitchRestoreFlow,
+  assertWebviewStickyHistoryFlow,
   assertWebviewStreamingFlow,
   assertTranscriptUiFlow,
   assertTranscriptSwitchBackOrder,
@@ -111,6 +113,16 @@ suite("Tomcat host E2E", () => {
   test("renders transcript action rows and context groups in the Tomcat webview", async () => {
     const api = await getTomcatExtensionApi();
     await assertTranscriptUiFlow(api);
+  });
+
+  test("keeps plan tool UX clean in the Tomcat webview transcript", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewPlanToolUxFlow(api);
+  });
+
+  test("keeps sticky user prompts aligned with historical turns in the Tomcat webview", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewStickyHistoryFlow(api);
   });
 
   test("resets interrupted Tomcat webview sessions back to send mode", async () => {

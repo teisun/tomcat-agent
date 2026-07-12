@@ -654,16 +654,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     anchorOldestItemId: null,
     sessionId: null,
   });
-  const latestUserMessage = [...activeTimeline]
-    .reverse()
-    .find((item): item is WebviewMessageBlock => item.type === "message" && item.kind === "user") ?? null;
-  const latestUserMessageText = latestUserMessage?.text ?? null;
+  const userMessages = activeTimeline.filter(
+    (item): item is WebviewMessageBlock => item.type === "message" && item.kind === "user",
+  );
   const lastTimelineItem = activeTimeline.at(-1);
   const lastItemIsLatestUser =
     lastTimelineItem?.type === "message" && lastTimelineItem.kind === "user";
-  const userMessageCount = activeTimeline.filter(
-    (item) => item.type === "message" && item.kind === "user",
-  ).length;
+  const userMessageCount = userMessages.length;
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
   const readOnlyConflict = activeSession?.conflictMessage ?? null;
   const canPrompt = state.uiMode !== "participant" && !activeSession?.busy && !readOnlyConflict;
@@ -673,7 +670,12 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const activeModelCapabilities = activeSession?.model
     ? state.availableModelCapabilities?.[activeSession.model]
     : undefined;
-  const { bottomSpacerHeight, latestUserScrolledPast, scrollToLatest, userHasScrolled } = useAutoScroll({
+  const {
+    activeStickyMessageId,
+    bottomSpacerHeight,
+    scrollToLatest,
+    userHasScrolled,
+  } = useAutoScroll({
     containerRef: streamRef,
     contentRef: transcriptRef,
     contentKey: streamContentKey,
@@ -682,6 +684,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     resetKey: activeSession?.sessionId ?? null,
     userMessageCount,
   });
+  const stickyUserMessageText =
+    userMessages.find((message) => message.id === activeStickyMessageId)?.text ?? null;
 
   const flushPendingInsertions = () => {
     const activeSessionId = stateRef.current.activeSessionId;
@@ -1026,8 +1030,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
               </span>
             ) : null}
           </div>
-          {latestUserScrolledPast && latestUserMessageText ? (
-            <StickyUserPrompt text={latestUserMessageText} />
+          {stickyUserMessageText ? (
+            <StickyUserPrompt text={stickyUserMessageText} />
           ) : null}
           {activeSession ? (
             activeSession.timeline.length ||

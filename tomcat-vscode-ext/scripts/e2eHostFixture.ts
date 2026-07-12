@@ -45,6 +45,13 @@ overview: Review the transcript UI polish and confirm the merged plan card befor
 
 # Transcript UI showcase
 `);
+  const planToolUxMarkdown = JSON.stringify(`---
+name: plan tool ux
+overview: Keep one Creating plan header and a breathing View Plan state.
+---
+
+# Plan tool UX
+`);
   return `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
@@ -1118,6 +1125,80 @@ function handlePrompt(frame) {
     return;
   }
 
+  if (text.includes("plan tool ux")) {
+    emitMessageDelta(sessionId, "I refreshed the plan card UX.");
+    send({
+      assistantMessageEvent: {
+        delta: "Keep only one Creating plan header while the plan card reflects the tool state.",
+        kind: "thinking_delta",
+      },
+      assistantMessageId: ensurePendingAssistantMessageId(session),
+      message: {},
+      sessionId,
+      type: "message_update",
+    });
+    const planPath = path.join(process.cwd(), "plans", "plan-tool-ux.plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    fs.writeFileSync(
+      planPath,
+      ${planToolUxMarkdown},
+      "utf8",
+    );
+    session.planId = "plan-tool-ux";
+    session.planPath = planPath;
+    session.planState = "planning";
+    emitPlanEvent(sessionId, "plan.create");
+    const planTodos = [
+      { id: "pt-1", content: "Render the plan card", status: "completed" },
+      { id: "pt-2", content: "Hide duplicate plan rows", status: "in_progress" },
+      { id: "pt-3", content: "Verify sticky history", status: "pending" },
+    ];
+    session.planTodos = planTodos;
+    send({
+      planId: session.planId,
+      sessionId,
+      todos: planTodos,
+      type: "plan.todos",
+    });
+    send({
+      args: { plan_id: session.planId },
+      sessionId,
+      toolCallId: "tc-plan-tool-ux",
+      toolName: "update_plan",
+      type: "tool_execution_start",
+    });
+    emitTurnEnd(sessionId, {
+      message: {},
+      summaryTitle: "Creating plan",
+      toolResults: [],
+      turnIndex: 1,
+    });
+    const completePlanTool = () => {
+      send({
+        display: { kind: "plan", plan: planPath },
+        isError: false,
+        result: "Updated plan plan-tool-ux",
+        sessionId,
+        toolCallId: "tc-plan-tool-ux",
+        toolName: "update_plan",
+        type: "tool_execution_end",
+      });
+    };
+    const finishPlanToolTurn = () => {
+      emitContextMetrics(sessionId, 0.52);
+      recordHistoryMessage(sessionId, "assistant", "I refreshed the plan card UX.");
+      finishTurn(sessionId, null);
+    };
+    if (transcriptProgressDelayMs > 0) {
+      setTimeout(completePlanTool, Math.min(Math.max(transcriptProgressDelayMs - 100, 0), 400));
+      setTimeout(finishPlanToolTurn, transcriptProgressDelayMs);
+    } else {
+      completePlanTool();
+      finishPlanToolTurn();
+    }
+    return;
+  }
+
   if (text.includes("plan replay")) {
     session.planId = "history-plan";
     session.planPath = path.join(process.cwd(), "plans", "history-plan.plan.md");
@@ -1241,7 +1322,7 @@ function handleControlResponse(frame) {
     send({
       args: { path: editFilePath },
       sessionId,
-      toolCallId: "tool-edit-1",
+      toolCallId: "toolu_01AbC",
       toolName: "write",
       type: "tool_execution_start",
     });
@@ -1258,7 +1339,7 @@ function handleControlResponse(frame) {
         isError: false,
         result: { ok: true },
         sessionId,
-        toolCallId: "tool-edit-1",
+        toolCallId: "toolu_01AbC",
         toolName: "write",
         type: "tool_execution_end",
       });

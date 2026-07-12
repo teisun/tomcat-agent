@@ -3,9 +3,11 @@ import { Fragment, type RefObject } from "react";
 import { selectActiveTodoSource } from "../hooks/useActiveTodoProgress";
 import type {
   AskQuestionResult,
+  WebviewPlanFileCard,
   WebviewPlanState,
   WebviewTimelineItem,
   WebviewTodo,
+  WebviewToolCard,
 } from "../types";
 import { ApprovalCard } from "./ApprovalCard";
 import { BoundaryBlock } from "./BoundaryBlock";
@@ -30,6 +32,44 @@ export type AssistantRenderEntry =
       tool: Extract<WebviewTimelineItem, { type: "tool" }>;
       type: "action-tool";
     };
+
+function asString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function isPlanWorkflowTool(tool: WebviewToolCard): boolean {
+  return (
+    tool.toolName === "create_plan" ||
+    tool.toolName === "update_plan" ||
+    tool.display?.kind === "plan"
+  );
+}
+
+function isRunningPlanTool(item: WebviewTimelineItem): item is WebviewToolCard {
+  return (
+    item.type === "tool" &&
+    !item.isError &&
+    (item.status === "running" || item.status === "streaming") &&
+    isPlanWorkflowTool(item)
+  );
+}
+
+function toolPlanId(tool: WebviewToolCard): string | null {
+  return asString(tool.args?.plan_id) ?? asString(tool.args?.planId);
+}
+
+function toolPlanPath(tool: WebviewToolCard): string | null {
+  return tool.display?.kind === "plan" ? tool.display.plan : asString(tool.args?.path);
+}
+
+function matchesPlanCard(tool: WebviewToolCard, item: WebviewPlanFileCard): boolean {
+  const candidatePlanId = toolPlanId(tool);
+  if (candidatePlanId && item.planId && candidatePlanId === item.planId) {
+    return true;
+  }
+  const candidatePath = toolPlanPath(tool);
+  return candidatePath === item.path;
+}
 
 export function partitionAssistantResponseGroup(
   group: AssistantResponseGroup,
@@ -120,103 +160,120 @@ export function TranscriptView({
     -1,
   );
 
-  const renderGroupedItem = (item: GroupedTimelineEntry) => {
-    if ("type" in item && item.type === "assistant-response-group") {
-      const group = item as AssistantResponseGroup;
-      const segments = partitionAssistantResponseGroup(group);
-      return (
-        <Fragment key={`group-${group.assistantMessageId}`}>
-          {group.preamble ? (
-            <MessageBubble
-              item={group.preamble}
-              key={`${group.preamble.id}-preamble`}
-              onRetry={onRetryUserMessage}
-            />
-          ) : null}
-          {segments.map((segment, index) => {
-            if (segment.type === "action-tool") {
-              return (
-                <ToolRow
-                  item={segment.tool}
-                  key={`group-action-${segment.tool.id}`}
-                  onOpenDiff={onOpenDiff}
-                  onOpenFile={onOpenFile}
-                />
-              );
-            }
-            const hasThinkingText = Boolean(segment.group.thinking?.text.trim());
-            if (segment.group.tools.length === 1 && !hasThinkingText) {
-              return (
-                <ToolRow
-                  item={segment.group.tools[0]}
-                  key={`group-context-standalone-${segment.group.tools[0].id}`}
-                  onOpenDiff={onOpenDiff}
-                  onOpenFile={onOpenFile}
-                />
-              );
-            }
-            const isStreaming =
-              busy &&
-              (segment.group.thinking?.id === lastThinkingId ||
-                segment.group.tools.some((tool) => tool.status !== "complete"));
-            return (
-              <ThinkingGroup
-                group={segment.group}
-                isStreaming={isStreaming}
-                key={`group-context-${group.assistantMessageId}-${index}`}
-                onOpenDiff={onOpenDiff}
-                onOpenFile={onOpenFile}
-              />
-            );
-          })}
-        </Fragment>
-      );
-    }
-
-    return renderTimelineItem(item as WebviewTimelineItem);
-  };
-
-  const renderTimelineItem = (item: WebviewTimelineItem) => {
-    switch (item.type) {
-      case "boundary":
-        return <BoundaryBlock item={item} key={item.id} />;
-      case "message":
-        return <MessageBubble item={item} key={item.id} onRetry={onRetryUserMessage} />;
-      case "thinking":
-        return (
-          <ThinkingBlock
-            isStreaming={item.id === lastThinkingId}
-            item={item}
-            key={item.id}
-          />
-        );
-      case "tool":
-        return (
-          <ToolRow
-            item={item}
-            key={item.id}
-            onOpenDiff={onOpenDiff}
-            onOpenFile={onOpenFile}
-          />
-        );
-      case "plan":
-        return (
-          <PlanFileCard
-            canBuild={canBuildPlan}
-            item={item}
-            key={item.id}
-            onBuild={onBuildPlan}
-            onOpenPlanFile={onOpenPlanFile}
-            planTodos={planTodos}
-          />
-        );
-      case "approval":
-        return <ApprovalCard item={item} key={item.id} onAnswer={onAnswer} />;
-    }
-  };
-
   const renderCluster = (clusterTimeline: WebviewTimelineItem[], showProgress: boolean) => {
     const grouped = groupTimelineByAssistantResponse(clusterTimeline);
+    const activePlanTools = clusterTimeline.filter(isRunningPlanTool);
+    const planCards = clusterTimeline.filter(
+      (item): item is WebviewPlanFileCard => item.type === "plan",
+    );
+    const latestPlanCardId = [...planCards].reverse()[0]?.id ?? null;
+    const matchedPlanCardIds = new Set(
+      planCards
+        .filter((item) => activePlanTools.some((tool) => matchesPlanCard(tool, item)))
+        .map((item) => item.id),
+    );
+    const shouldFallbackToLatestPlanCard =
+      activePlanTools.length > 0 && matchedPlanCardIds.size === 0;
+
+    const renderTimelineItem = (item: WebviewTimelineItem) => {
+      switch (item.type) {
+        case "boundary":
+          return <BoundaryBlock item={item} key={item.id} />;
+        case "message":
+          return <MessageBubble item={item} key={item.id} onRetry={onRetryUserMessage} />;
+        case "thinking":
+          return (
+            <ThinkingBlock
+              isStreaming={item.id === lastThinkingId}
+              item={item}
+              key={item.id}
+            />
+          );
+        case "tool":
+          return (
+            <ToolRow
+              item={item}
+              key={item.id}
+              onOpenDiff={onOpenDiff}
+              onOpenFile={onOpenFile}
+            />
+          );
+        case "plan":
+          return (
+            <PlanFileCard
+              canBuild={canBuildPlan}
+              creating={
+                matchedPlanCardIds.has(item.id) ||
+                (shouldFallbackToLatestPlanCard && latestPlanCardId === item.id)
+              }
+              item={item}
+              key={item.id}
+              onBuild={onBuildPlan}
+              onOpenPlanFile={onOpenPlanFile}
+              planTodos={planTodos}
+            />
+          );
+        case "approval":
+          return <ApprovalCard item={item} key={item.id} onAnswer={onAnswer} />;
+      }
+    };
+
+    const renderGroupedItem = (item: GroupedTimelineEntry) => {
+      if ("type" in item && item.type === "assistant-response-group") {
+        const group = item as AssistantResponseGroup;
+        const segments = partitionAssistantResponseGroup(group);
+        return (
+          <Fragment key={`group-${group.assistantMessageId}`}>
+            {group.preamble ? (
+              <MessageBubble
+                item={group.preamble}
+                key={`${group.preamble.id}-preamble`}
+                onRetry={onRetryUserMessage}
+              />
+            ) : null}
+            {segments.map((segment, index) => {
+              if (segment.type === "action-tool") {
+                return (
+                  <ToolRow
+                    item={segment.tool}
+                    key={`group-action-${segment.tool.id}`}
+                    onOpenDiff={onOpenDiff}
+                    onOpenFile={onOpenFile}
+                  />
+                );
+              }
+              const hasThinkingText = Boolean(segment.group.thinking?.text.trim());
+              if (segment.group.tools.length === 1 && !hasThinkingText) {
+                return (
+                  <ToolRow
+                    item={segment.group.tools[0]}
+                    key={`group-context-standalone-${segment.group.tools[0].id}`}
+                    onOpenDiff={onOpenDiff}
+                    onOpenFile={onOpenFile}
+                  />
+                );
+              }
+              const isStreaming =
+                busy &&
+                (segment.group.thinking?.id === lastThinkingId ||
+                  segment.group.tools.some((tool) => tool.status !== "complete"));
+              return (
+                <ThinkingGroup
+                  group={segment.group}
+                  isStreaming={isStreaming}
+                  key={`group-context-${group.assistantMessageId}-${index}`}
+                  onOpenDiff={onOpenDiff}
+                  onOpenFile={onOpenFile}
+                />
+              );
+            })}
+          </Fragment>
+        );
+      }
+
+      return renderTimelineItem(item as WebviewTimelineItem);
+    };
+
     const hasActiveThinking = clusterTimeline.some((item) => item.type === "thinking");
     const hasRunningTool = clusterTimeline.some(
       (item) => item.type === "tool" && item.status !== "complete",

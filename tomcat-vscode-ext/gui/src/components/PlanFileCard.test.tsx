@@ -204,4 +204,32 @@ describe("PlanFileCard", () => {
 
     expect(screen.getByTestId("plan-todos-count").textContent).toBe("1 todo");
   });
+
+  it("shows a breathing pending affordance while the plan file is still being created", () => {
+    const onOpenPlanFile = vi.fn();
+
+    render(
+      <PlanFileCard
+        canBuild
+        creating
+        item={{
+          id: "plan-creating",
+          path: "/tmp/creating.plan.md",
+          planId: "pc",
+          state: "planning",
+          type: "plan",
+        }}
+        onBuild={() => undefined}
+        onOpenPlanFile={onOpenPlanFile}
+        planTodos={[]}
+      />,
+    );
+
+    expect(screen.queryByTestId("view-plan")).toBeNull();
+    const pending = screen.getByTestId("view-plan-pending") as HTMLButtonElement;
+    expect(pending.disabled).toBe(true);
+    expect(pending.getAttribute("aria-busy")).toBe("true");
+    expect(pending.textContent).toContain("...");
+    expect(onOpenPlanFile).not.toHaveBeenCalled();
+  });
 });

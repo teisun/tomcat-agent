@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useAutoScroll } from "./useAutoScroll";
+import { selectActiveStickyUserId, useAutoScroll } from "./useAutoScroll";
 
 class ResizeObserverMock {
   static instances: ResizeObserverMock[] = [];
@@ -46,7 +46,13 @@ function Fixture({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const { bottomSpacerHeight, latestUserScrolledPast, scrollToLatest, userHasScrolled } = useAutoScroll({
+  const {
+    activeStickyMessageId,
+    bottomSpacerHeight,
+    latestUserScrolledPast,
+    scrollToLatest,
+    userHasScrolled,
+  } = useAutoScroll({
     containerRef,
     contentRef,
     contentKey,
@@ -74,6 +80,7 @@ function Fixture({
       </div>
       <span data-testid="spacer-height">{bottomSpacerHeight}</span>
       <span data-testid="scroll-state">{userHasScrolled ? "paused" : "following"}</span>
+      <span data-testid="sticky-id">{activeStickyMessageId ?? "none"}</span>
       <span data-testid="sticky-state">{latestUserScrolledPast ? "sticky" : "inline"}</span>
       <button onClick={scrollToLatest} type="button">
         Jump
@@ -90,6 +97,31 @@ describe("useAutoScroll", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("selects the lowest user message whose bottom has scrolled past the top threshold", () => {
+    expect(selectActiveStickyUserId([], 50, 12)).toBeNull();
+    expect(
+      selectActiveStickyUserId(
+        [
+          { bottom: 40, id: "user-1" },
+          { bottom: 80, id: "user-2" },
+          { bottom: 140, id: "user-3" },
+        ],
+        90,
+        12,
+      ),
+    ).toBe("user-2");
+    expect(
+      selectActiveStickyUserId(
+        [
+          { bottom: 40, id: "user-1" },
+          { bottom: 80, id: "user-2" },
+        ],
+        0,
+        12,
+      ),
+    ).toBeNull();
   });
 
   it("reveals the latest user once and keeps it pinned while streamed content grows", () => {

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { WebviewTimelineItem } from "../types";
@@ -136,5 +136,134 @@ describe("TranscriptView", () => {
     expect(screen.queryByTestId("thinking-group")).toBeNull();
     expect(screen.getByTestId("file-chip").textContent).toContain("README.md");
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Read");
+  });
+
+  it("keeps a grouped create_plan turn to a single header while showing a pending plan card affordance", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        assistantMessageId: "assistant-plan",
+        id: "think-plan",
+        summaryTitle: "Creating plan",
+        text: "Let me break the work down first.",
+        type: "thinking",
+      },
+      {
+        assistantMessageId: "assistant-plan",
+        display: { kind: "plan", plan: "/tmp/demo.plan.md" },
+        id: "tool-plan",
+        isError: false,
+        status: "streaming",
+        summary: "Created plan demo",
+        toolCallId: "tc-plan",
+        toolName: "create_plan",
+        type: "tool",
+      },
+      {
+        id: "plan-card-1",
+        path: "/tmp/demo.plan.md",
+        planId: "demo-plan",
+        state: "planning",
+        title: "Demo plan",
+        type: "plan",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.getAllByText("Creating plan")).toHaveLength(1);
+    expect(screen.getByTestId("thinking-group")).toBeTruthy();
+    expect(screen.getByTestId("plan-card-title").textContent).toBe("Demo plan");
+    expect(screen.getByTestId("view-plan-pending")).toBeTruthy();
+  });
+
+  it("keeps a standalone create_plan tool visible when no thinking text exists", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        assistantMessageId: "assistant-plan-standalone",
+        id: "tool-plan-only",
+        isError: false,
+        status: "complete",
+        summary: "Created plan mini-game",
+        toolCallId: "tc-plan-only",
+        toolName: "create_plan",
+        type: "tool",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy={false}
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.queryByTestId("thinking-group")).toBeNull();
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Created plan");
+  });
+
+  it("prefers matching by planId before falling back to the newest plan card", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        id: "plan-card-a",
+        path: "/tmp/plan-a.plan.md",
+        planId: "plan-a",
+        state: "planning",
+        title: "Plan A",
+        type: "plan",
+      },
+      {
+        id: "plan-card-b",
+        path: "/tmp/plan-b.plan.md",
+        planId: "plan-b",
+        state: "planning",
+        title: "Plan B",
+        type: "plan",
+      },
+      {
+        args: { plan_id: "plan-a" },
+        assistantMessageId: "assistant-update",
+        display: { kind: "plan", plan: "/tmp/plan-a.plan.md" },
+        id: "tool-update-plan",
+        isError: false,
+        status: "streaming",
+        summary: "Updating plan",
+        toolCallId: "tc-update-plan",
+        toolName: "update_plan",
+        type: "tool",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    const planCards = screen.getAllByTestId("plan-card");
+    expect(within(planCards[0]).getByTestId("plan-card-title").textContent).toBe("Plan A");
+    expect(within(planCards[0]).getByTestId("view-plan-pending")).toBeTruthy();
+    expect(within(planCards[1]).getByTestId("plan-card-title").textContent).toBe("Plan B");
+    expect(within(planCards[1]).getByTestId("view-plan")).toBeTruthy();
   });
 });

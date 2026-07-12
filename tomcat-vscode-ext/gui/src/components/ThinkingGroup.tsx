@@ -28,6 +28,10 @@ function groupHeaderTitle(
   return { shimmer: isStreaming, text: "Thinking" };
 }
 
+function shouldHideGroupedToolRow(tool: WebviewToolCard): boolean {
+  return tool.display?.kind === "plan" && !tool.isError;
+}
+
 export function ThinkingGroup({
   group,
   isStreaming = false,
@@ -55,7 +59,7 @@ export function ThinkingGroup({
 
   const preamble = group.preamble;
   const thinking = group.thinking;
-  const tools = group.tools;
+  const tools = group.tools.filter((tool) => !shouldHideGroupedToolRow(tool));
 
   return (
     <section

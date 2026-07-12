@@ -70,4 +70,23 @@ describe("VsCodeIde diff/apply", () => {
     expect(original.getText()).toBe("before\nold line");
     expect(proposed.getText()).toBe("before\nnew line");
   });
+
+  it("preserves mixed-case tool ids when reconstructing diff documents", async () => {
+    const ide = new VsCodeIde();
+
+    await ide.openReconstructedDiff(
+      "toolu_01AbC",
+      "src/mixed-case.ts",
+      "before\nleft side",
+      "before\nright side",
+    );
+
+    const diff = __testing.lastDiffCommand;
+    expect(diff?.title).toContain("mixed-case.ts");
+
+    const original = await vscode.workspace.openTextDocument(diff!.original);
+    const proposed = await vscode.workspace.openTextDocument(diff!.modified);
+    expect(original.getText()).toBe("before\nleft side");
+    expect(proposed.getText()).toBe("before\nright side");
+  });
 });

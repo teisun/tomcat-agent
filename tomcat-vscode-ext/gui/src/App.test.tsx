@@ -160,6 +160,77 @@ function mockScrollableTranscript({
   );
 }
 
+function mockScrollableTranscriptUsers({
+  metrics,
+  scrollHeight,
+  users,
+}: {
+  metrics: { scrollTop: number };
+  scrollHeight: number;
+  users: Array<{ bottom: number; id: string; top: number }>;
+}) {
+  const stream = screen.getByTestId("stream-container");
+  const transcript = screen.getByLabelText("active-session");
+  const userMessages = screen
+    .getAllByTestId("message-block")
+    .filter((node) => node.getAttribute("data-kind") === "user");
+
+  Object.defineProperty(stream, "clientHeight", {
+    configurable: true,
+    get: () => 100,
+  });
+  Object.defineProperty(stream, "scrollHeight", {
+    configurable: true,
+    get: () => scrollHeight,
+  });
+  Object.defineProperty(stream, "scrollTop", {
+    configurable: true,
+    get: () => metrics.scrollTop,
+  });
+  Object.defineProperty(transcript, "scrollHeight", {
+    configurable: true,
+    get: () => scrollHeight,
+  });
+
+  (stream as HTMLElement).getBoundingClientRect = vi.fn(
+    () => ({ top: 0, bottom: 100, height: 100, left: 0, right: 0, width: 0, x: 0, y: 0 }) as DOMRect,
+  );
+  (transcript as HTMLElement).getBoundingClientRect = vi.fn(
+    () =>
+      ({
+        top: -metrics.scrollTop,
+        bottom: scrollHeight - metrics.scrollTop,
+        height: scrollHeight,
+        left: 0,
+        right: 0,
+        width: 0,
+        x: 0,
+        y: -metrics.scrollTop,
+      }) as DOMRect,
+  );
+
+  for (const userMessage of userMessages) {
+    const id = userMessage.getAttribute("data-message-id");
+    const metric = users.find((entry) => entry.id === id);
+    if (!metric) {
+      continue;
+    }
+    (userMessage as HTMLElement).getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: metric.top - metrics.scrollTop,
+          bottom: metric.bottom - metrics.scrollTop,
+          height: metric.bottom - metric.top,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: metric.top - metrics.scrollTop,
+        }) as DOMRect,
+    );
+  }
+}
+
 describe("Tomcat webview App", () => {
   it("shows a loading state while serve is connecting", async () => {
     mount();
@@ -1543,6 +1614,80 @@ describe("Tomcat webview App", () => {
     expect(document.querySelector(".tc-thinking pre")?.textContent).toContain(
       "先整理美国热点新闻，再决定是否需要补 fetch。",
     );
+  });
+
+  it("switches the sticky prompt to the visible historical turn while scrolling upward", async () => {
+    mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4"],
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            contextRatio: null,
+            hasMoreHistory: false,
+            historyLoading: false,
+            model: "gpt-5.4",
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planFile: null,
+            planId: null,
+            planState: "chat",
+            sessionId: "s1",
+            thinkingLevel: "high",
+            timeline: [
+              { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
+              { id: "assistant-1", kind: "assistant", text: "第一轮回答", type: "message" },
+              { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
+              { id: "assistant-2", kind: "assistant", text: "第二轮回答", type: "message" },
+              { id: "user-3", kind: "user", text: "第三轮问题", type: "message" },
+              { id: "assistant-3", kind: "assistant", text: "第三轮回答", type: "message" },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-sticky-history",
+    });
+
+    const metrics = { scrollTop: 350 };
+    mockScrollableTranscriptUsers({
+      metrics,
+      scrollHeight: 900,
+      users: [
+        { id: "user-1", top: 80, bottom: 120 },
+        { id: "user-2", top: 280, bottom: 320 },
+        { id: "user-3", top: 480, bottom: 520 },
+      ],
+    });
+
+    fireEvent.scroll(screen.getByTestId("stream-container"));
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
+
+    metrics.scrollTop = 560;
+    fireEvent.scroll(screen.getByTestId("stream-container"));
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第三轮问题");
+
+    metrics.scrollTop = 0;
+    fireEvent.scroll(screen.getByTestId("stream-container"));
+    expect(screen.queryByTestId("sticky-user-prompt")).toBeNull();
   });
 
   it("drives send stop state from busy instead of inferring from transcript tail", async () => {

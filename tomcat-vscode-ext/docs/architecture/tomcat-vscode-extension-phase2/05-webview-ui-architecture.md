@@ -143,7 +143,7 @@ wire.d.ts / protocol.ts / state.ts
   └─ tool.diffStat + tool.diff
                 │
                 ├─ ToolRow(edit/write) -> DisclosureCard + DiffView
-                │     └─ transcript 内联彩色 diff（preview tail5 / expand 50vh）
+                │     └─ transcript 内联彩色 diff（preview 首变更锚定 / expand 50vh）
                 │
                 └─ openDiff intent
                       └─ provider.ts reconstruct before(ctx+del) / after(ctx+add)
@@ -155,7 +155,7 @@ wire.d.ts / protocol.ts / state.ts
 
 - `diff` 是可选字段：大文件超阈值时核心只发 `added/removed`，不发 `diff`；
 - 这时 transcript 仍显示 `+N/-M` 徽章，但 `DiffView` 退化为“文件过大，仅显示统计”，`View diff` 按钮隐藏；
-- 因为宿主不再自己重算 diff，所以没有“文件已经写完，再回头读 before 导致左栏空白/`+0 -0`”的竞态。
+- 宿主不再自己重算 diff；`tomcat-diff://` 虚拟文档也不再把 `toolCallId` 塞进 URI authority（会被 VS Code 小写化），而是编码进 path 段作为稳定键，所以不会再出现“点 `View diff` 后左右都空白”的大小写竞态。
 
 ---
 
@@ -277,7 +277,8 @@ assistant response group
 2. 用户仍贴底时，内容变高就 `scrollTop = scrollHeight`；
 3. `scroll` 监听根据 `|scrollHeight - scrollTop - clientHeight| < 2` 判断是否贴底；
 4. **只有 user message 数量增加**时才重置跟随，工具/notice/thinking 不会把用户强行拉回底部；
-5. `App.tsx` 在 `userHasScrolled=true` 时显示 `Jump to latest` 向下箭头图标按钮（保留 `scroll-to-bottom` test id，弱化视觉重量）。
+5. `App.tsx` 在 `userHasScrolled=true` 时显示 `Jump to latest` 向下箭头图标按钮（保留 `scroll-to-bottom` test id，弱化视觉重量）；
+6. sticky prompt 不再只认“最后一条 user message”，而是扫描 transcript 里**所有** user message，选出“其底部已滚过容器顶”的最靠下那条，顶部悬浮框随滚动切换到当前视口对应那一轮问题；滚到第一条 user 之上时自动消失。
 
 为什么不用虚拟列表：
 
@@ -308,7 +309,7 @@ ToolRow
   ├─ edit/write
   │    └─ DisclosureCard
   │         ├─ header  = 动词 + FileChip + +N/-N 徽章 + View diff
-  │         ├─ preview = DiffView.tail(5)
+  │         ├─ preview = DiffView.changeAnchoredPreview(5)
   │         └─ body    = DiffView
   ├─ command
   │    └─ DisclosureCard
@@ -324,9 +325,9 @@ ToolRow
 1. **edit**
    - 只认 `edit / write / hashline_edit`，与 transcript 内部的 mutation 语义对齐。
    - diff 徽章与逐行 diff 都来自核心 `ToolDisplay::File.added/removed/diff`，经 [`src/serveClient/wire.d.ts`](../../../src/serveClient/wire.d.ts) → [`src/ui/webview/state.ts`](../../../src/ui/webview/state.ts) 直达 GUI。
-   - 有 `diff` 时，`ToolRow` 会装配 `DisclosureCard(body=DiffView)`：折叠态只看尾部 5 行，展开态看完整结构化 diff（最大半屏、高度内滚动）。
+   - 有 `diff` 时，`ToolRow` 会装配 `DisclosureCard(body=DiffView)`：折叠态不是看“文件尾部 5 行”，而是围绕**第一处真实改动**取迷你预览；展开态看完整结构化 diff（最大半屏、高度内滚动）。
    - `toolCallId + diff` 同时存在时，卡片右上角显示 `View diff` 图标按钮；点击发 `openDiff` intent。
-   - 宿主 [`src/ui/webview/provider.ts`](../../../src/ui/webview/provider.ts) 会按 `ctx+del` 重建 before、按 `ctx+add` 重建 after，再通过 [`src/ide/VsCodeIde.ts`](../../../src/ide/VsCodeIde.ts) 复用既有 `tomcat-diff://` + `vscode.diff` 原生链路打开 diff 编辑器。
+   - 宿主 [`src/ui/webview/provider.ts`](../../../src/ui/webview/provider.ts) 会按 `ctx+del` 重建 before、按 `ctx+add` 重建 after，再通过 [`src/ide/VsCodeIde.ts`](../../../src/ide/VsCodeIde.ts) 复用既有 `tomcat-diff://` + `vscode.diff` 原生链路打开 diff 编辑器；虚拟文档键现编码进 URI path，规避 authority 被小写化后的空白 diff。
    - 大文件拿不到 `diff` 时，仍保留 `+N/-M` 徽章，但 `DiffView` 只显示 fallback 提示，`View diff` 自动隐藏。
 
 2. **command**
@@ -343,6 +344,11 @@ ToolRow
    - `read/search/web_*` 等保持小图标 + 描述色的一行摘要。
    - 连续多个会被 `ThinkingGroup` 收纳，避免 transcript 变成工具日志墙；单个无 thinking 的 context 工具直接扁平显示，保留 `FileChip` 与配色。
    - `read / read_file` 前导图标改成 `codicon-eye`，避免和 Markdown `FileChip` 的书本图标撞语义。
+   - `create_plan / update_plan` 在 grouped 场景采用 Variant B：分组头仍可显示 `Creating plan`（或更具体的 thinking summary），但 `ThinkingGroup` 内层会隐藏非 error 的 plan 工具行，避免“分组头 + 内层行”双重重复；若该轮无 thinking，只剩单个 plan 工具，则仍按 standalone 一行显示。
+
+5. **plan 卡片**
+   - `PlanFileCard` 始终是 plan 文件的正式足迹：文件名、语义标题、todo 数、`View Plan / Build` 都在这里。
+   - 当 `create_plan / update_plan` 仍处于 `running / streaming` 时，卡片底部 `View Plan` 会切成呼吸省略号按钮（disabled + `aria-busy=true`）；完成后恢复普通 `View Plan`。卡片优先按 `planId` 与运行中的工具匹配；只有工具暂时拿不到 `planId/path` 时，才兜底点亮当前 cluster 里的最新 plan 卡。
 
 还有三个实现细节很关键：
 

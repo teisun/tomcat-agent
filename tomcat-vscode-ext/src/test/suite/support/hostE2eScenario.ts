@@ -272,9 +272,12 @@ async function waitForWebviewBootstrapSettled(
   await waitForWebviewState(
     api,
     (state) => {
+      if (!state.ready) {
+        return undefined;
+      }
       const activeSessionId = state.activeSessionId;
       if (!activeSessionId) {
-        return undefined;
+        return state.sessions.length === 0 ? state : undefined;
       }
       const activeSessionInList = state.sessions.some(
         (session) => session.sessionId === activeSessionId,
@@ -293,7 +296,11 @@ async function claimActiveWebviewSession(
   timeoutMs = 20_000,
 ): Promise<string> {
   await waitForWebviewBootstrapSettled(api);
-  const sessionId = api.__testing.getWebviewState().activeSessionId;
+  const bootstrapState = api.__testing.getWebviewState();
+  if (!bootstrapState.activeSessionId && bootstrapState.sessions.length === 0) {
+    return createFreshWebviewSession(api, `${messageId}-bootstrap`, timeoutMs);
+  }
+  const sessionId = bootstrapState.activeSessionId;
   assert.ok(sessionId, "expected a bootstrapped active session before claiming ownership");
   api.__testing.releaseSessionOwnership(sessionId);
   await api.__testing.sendWebviewIntent(
@@ -657,13 +664,12 @@ export async function assertApprovalDiffFlowViaChatUi(
   assert.equal(typeof completed.sessionId, "string");
   await waitForEvent(api, { type: "tool_execution_end" });
 
-  const prepared = api.__testing.getPreparedChange("tool-edit-1");
-  assert.ok(prepared, "expected prepared change from real chat UI");
+  const prepared = await waitForPreparedChange(api, "toolu_01AbC");
   assert.equal(prepared.originalContent, "before\n");
   assert.equal(prepared.proposedContent, "after\n");
 
-  await api.__testing.openPreparedDiff("tool-edit-1");
-  assert.equal(await api.__testing.applyPreparedEdit("tool-edit-1"), true);
+  await api.__testing.openPreparedDiff("toolu_01AbC");
+  assert.equal(await api.__testing.applyPreparedEdit("toolu_01AbC"), true);
   assert.equal(await fs.readFile(editFile, "utf8"), "after\n");
 
   await vscode.commands.executeCommand("workbench.action.closeAllEditors");
@@ -1497,7 +1503,7 @@ export async function assertWebviewDiffFlow(
   });
   const preparedChange = await waitForPreparedChange(
     api,
-    "tool-edit-1",
+    "toolu_01AbC",
     (change) => change.originalContent === "before" && change.proposedContent === "after",
   );
   assert.equal(preparedChange.displayPath, editFile);
@@ -3272,5 +3278,124 @@ export async function assertTranscriptUiFlow(
     (collapsed.html.match(/git status --short/g) ?? []).length,
     1,
     "expected the standalone bash command to render once without duplicate fold titles",
+  );
+}
+
+export async function assertWebviewPlanToolUxFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-plan-tool-ux-session",
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId, text: "plan tool ux" },
+      messageId: "webview-plan-tool-ux-prompt",
+      type: "prompt",
+    }),
+  );
+
+  const pending = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.planCardCount === 1 &&
+      candidate.html.includes('data-testid="view-plan-pending"')
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    pending.html.includes('data-testid="view-plan-pending"'),
+    "expected the plan card to show the busy View Plan affordance while update_plan is running",
+  );
+
+  await waitForEvent(api, { type: "agent_end" });
+  const settled = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.planCardCount === 1 &&
+      candidate.html.includes("View Plan")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.equal(
+    settled.groupFoldTitles.filter((title) => title === "Creating plan").length,
+    1,
+    `expected one grouped Creating plan header, got ${JSON.stringify(settled.groupFoldTitles)}`,
+  );
+  assert.ok(
+    !settled.toolTitles.some((title) => title.includes("Creating plan")),
+    `expected no inline plan tool row to repeat Creating plan, got ${JSON.stringify(settled.toolTitles)}`,
+  );
+  assert.ok(
+    settled.html.includes("View Plan"),
+    "expected View Plan to return after the plan tool finishes",
+  );
+}
+
+export async function assertWebviewStickyHistoryFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-sticky-history-session",
+  );
+
+  const prompts = Array.from(
+    { length: 8 },
+    (_, index) => `第${index + 1}轮 sticky 问题`,
+  );
+  for (const [index, text] of prompts.entries()) {
+    api.__testing.clearObservedEvents();
+    await api.__testing.sendWebviewIntent(
+      buildWebviewIntent({
+        data: { sessionId, text },
+        messageId: `webview-sticky-history-prompt-${index + 1}`,
+        type: "prompt",
+      }),
+    );
+    await waitForEvent(api, { type: "agent_end" });
+  }
+
+  await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.messageTexts.includes(prompts[0]) &&
+      candidate.messageTexts.includes(prompts[1]) &&
+      candidate.messageTexts.includes(prompts[prompts.length - 1])
+        ? candidate
+        : undefined,
+  );
+
+  await api.__testing.sendWebviewDomAction({
+    index: 2,
+    kind: "scrollIntoView",
+    scrollBlock: "start",
+    testId: "message-block",
+  });
+  const historicalTurn = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.stickyPromptText !== null &&
+      candidate.stickyPromptText !== prompts[prompts.length - 1]
+        ? candidate
+        : undefined,
+  );
+  assert.ok(
+    prompts.slice(0, -1).includes(historicalTurn.stickyPromptText ?? ""),
+    `expected sticky prompt to switch to a historical turn, got ${historicalTurn.stickyPromptText}`,
   );
 }

@@ -64,13 +64,53 @@ describe("ToolRow", () => {
     expect(screen.queryByRole("button", { name: /apply/i })).toBeNull();
   });
 
+  it("edit row preview stays anchored to the first real change", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/a.rs" },
+          diff: [
+            { newLine: 1, oldLine: 1, tag: "ctx", text: "line 1" },
+            { newLine: 2, oldLine: 2, tag: "ctx", text: "line 2" },
+            { newLine: 3, oldLine: 3, tag: "ctx", text: "line 3" },
+            { newLine: 4, oldLine: 4, tag: "ctx", text: "line 4" },
+            { newLine: 5, oldLine: 5, tag: "ctx", text: "line 5" },
+            { newLine: 6, oldLine: 6, tag: "ctx", text: "line 6" },
+            { newLine: 7, oldLine: 7, tag: "ctx", text: "line 7" },
+            { newLine: 8, oldLine: 8, tag: "ctx", text: "line 8" },
+            { newLine: 9, oldLine: 9, tag: "ctx", text: "line 9" },
+            { newLine: 10, oldLine: 10, tag: "ctx", text: "line 10" },
+            { newLine: null, oldLine: 11, tag: "del", text: "line 11 old" },
+            { newLine: 11, oldLine: null, tag: "add", text: "line 11 new" },
+            { newLine: 12, oldLine: 12, tag: "ctx", text: "line 12" },
+            { newLine: 13, oldLine: 13, tag: "ctx", text: "line 13" },
+            { newLine: 14, oldLine: 14, tag: "ctx", text: "line 14" },
+            { newLine: 15, oldLine: 15, tag: "ctx", text: "line 15" },
+            { newLine: 16, oldLine: 16, tag: "ctx", text: "line 16" },
+            { newLine: 17, oldLine: 17, tag: "ctx", text: "line 17" },
+            { newLine: 18, oldLine: 18, tag: "ctx", text: "line 18" },
+          ],
+          display: { file: "/workspace/a.rs", kind: "file" },
+          toolName: "edit",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    const preview = screen.getByTestId("diff-view-preview").textContent ?? "";
+    expect(preview).toContain("line 10");
+    expect(preview).toContain("line 11 old");
+    expect(preview).toContain("line 11 new");
+    expect(preview).not.toContain("line 18");
+  });
+
   it("bash row uses a terminal block and stays collapsed when complete", () => {
     render(
       <ToolRow
         item={buildTool({
           args: { command: "cargo test" },
           status: "complete",
-          summary: "test output",
+          summary: "line 1\nline 2\nline 3\nline 4\nline 5\nline 6",
           toolName: "bash",
         })}
         onOpenFile={vi.fn()}
@@ -80,8 +120,13 @@ describe("ToolRow", () => {
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Ran");
     expect(screen.getByTestId("tool-row-cmd").textContent).toBe("cargo test");
     expect(screen.queryByTestId("tool-row-terminal")).toBeNull();
+    const preview = screen.getByTestId("terminal-output-preview").textContent ?? "";
+    expect(preview).not.toContain("line 1");
+    expect(preview).toContain("line 2");
+    expect(preview).toContain("line 6");
     fireEvent.click(screen.getByTestId("tool-row-toggle"));
-    expect(screen.getByTestId("tool-row-terminal").textContent).toContain("test output");
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain("line 1");
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain("line 6");
   });
 
   it("bash row auto expands when it errors", () => {

@@ -5,6 +5,7 @@ type RenderRow =
       kind: "fold";
       hiddenCount: number;
       key: string;
+      label?: string;
     }
   | {
       key: string;
@@ -15,13 +16,13 @@ type RenderRow =
 const CONTEXT_HEAD = 2;
 const CONTEXT_TAIL = 2;
 const MIN_CONTEXT_TO_FOLD = 7;
+const PREVIEW_LEADING_CONTEXT = 2;
 
-function tailRows(diff: FileDiffLine[], previewLines: number): RenderRow[] {
-  return diff.slice(-previewLines).map((line, index) => ({
-    key: `preview-${index}-${line.oldLine ?? "n"}-${line.newLine ?? "n"}`,
-    kind: "line",
-    line,
-  }));
+function countRenderedLines(rows: RenderRow[]): number {
+  return rows.reduce(
+    (total, row) => total + (row.kind === "line" ? 1 : row.hiddenCount),
+    0,
+  );
 }
 
 function collapseContextRows(diff: FileDiffLine[]): RenderRow[] {
@@ -82,6 +83,34 @@ function renderLineNumber(value: number | null | undefined): string {
   return typeof value === "number" ? String(value) : "";
 }
 
+function previewRows(rows: RenderRow[], maxRows: number): RenderRow[] {
+  if (rows.length <= maxRows) {
+    return rows;
+  }
+
+  const firstChangeIndex = rows.findIndex(
+    (row) => row.kind === "line" && row.line.tag !== "ctx",
+  );
+  let start =
+    firstChangeIndex === -1
+      ? 0
+      : Math.max(0, firstChangeIndex - PREVIEW_LEADING_CONTEXT);
+
+  const leadingFold =
+    start > 0 && rows[start - 1]?.kind === "fold" ? [rows[start - 1]] : [];
+  const end = Math.min(rows.length, start + maxRows);
+  const preview = [...leadingFold, ...rows.slice(start, end)];
+  if (end < rows.length) {
+    preview.push({
+      hiddenCount: countRenderedLines(rows.slice(end)),
+      key: `fold-preview-more-${end}`,
+      kind: "fold",
+      label: `${countRenderedLines(rows.slice(end))} more lines`,
+    });
+  }
+  return preview;
+}
+
 function diffRowClass(tag: FileDiffLine["tag"]): string {
   switch (tag) {
     case "add":
@@ -95,10 +124,10 @@ function diffRowClass(tag: FileDiffLine["tag"]): string {
 
 export function DiffView({
   diff,
-  previewLines,
+  previewRows: previewLimit,
 }: {
   diff?: FileDiffLine[];
-  previewLines?: number;
+  previewRows?: number;
 }) {
   if (!diff) {
     return (
@@ -116,17 +145,18 @@ export function DiffView({
     );
   }
 
-  const rows = previewLines ? tailRows(diff, previewLines) : collapseContextRows(diff);
+  const fullRows = collapseContextRows(diff);
+  const rows = previewLimit ? previewRows(fullRows, previewLimit) : fullRows;
 
   return (
     <div
-      className={`tc-diff-view${previewLines ? " tc-diff-view--preview" : ""}`}
-      data-testid={previewLines ? "diff-view-preview" : "diff-view"}
+      className={`tc-diff-view${previewLimit ? " tc-diff-view--preview" : ""}`}
+      data-testid={previewLimit ? "diff-view-preview" : "diff-view"}
     >
       {rows.map((row) =>
         row.kind === "fold" ? (
           <div className="tc-diff-view__fold" data-testid="diff-fold-marker" key={row.key}>
-            {row.hiddenCount} unmodified lines
+            {row.label ?? `${row.hiddenCount} unmodified lines`}
           </div>
         ) : (
           <div className={diffRowClass(row.line.tag)} key={row.key}>

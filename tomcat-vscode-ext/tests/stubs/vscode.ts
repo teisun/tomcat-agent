@@ -243,7 +243,7 @@ export class Uri {
   }): Uri {
     return new Uri(
       parts.scheme,
-      parts.authority ?? "",
+      (parts.authority ?? "").toLowerCase(),
       parts.path ?? "",
       parts.query ?? "",
     );
@@ -254,7 +254,7 @@ export class Uri {
     if (!match) {
       return new Uri("file", "", value, "");
     }
-    return new Uri(match[1], match[2] ?? "", match[3] ?? "", match[4] ?? "");
+    return new Uri(match[1], (match[2] ?? "").toLowerCase(), match[3] ?? "", match[4] ?? "");
   }
 
   static joinPath(base: Uri, ...pathSegments: string[]): Uri {

@@ -1,8 +1,11 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-12 12:57 +0800 | ACTIVE | feature/add-model-form-redesign | — |
+| Nibbles | 2026-07-12 17:40 +0800 | ACTIVE | feature/add-model-form-redesign | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** Transcript diff/plan UX 修复：`tomcat-diff://` prepared diff 改为 path-key 保住 mixed-case `toolCallId`，View diff 不再白屏；edit 折叠预览改为首个真实变更锚定，不再误看文件尾巴 @2026-07-12
+- [✓] **[P0]** Transcript 计划与 sticky 体验收口：Variant B 保留单个 `Creating plan` 组头、隐藏内层成功 plan 行；`View Plan` 在 create/update plan 期间改为呼吸 `...`；sticky user prompt 可随历史滚动切到对应轮次 @2026-07-12
+- [✓] **[P1]** 验收：`check:wire`、扩展 `lint`、core unit(113)、GUI unit(69)、Devhost 失败集 10 条全绿；修复 fake serve 生成脚本转义与 no-session bootstrap 假死 @2026-07-12
 - [✓] **[P0]** Transcript 视觉整改 v2：Jump 箭头、DisclosureCard/TerminalOutput/DiffView、命令淡黄、read 图标去重；扩展 `0.1.6` @2026-07-12
 - [✓] **[P0]** 核心下发结构化 `FileDiffLine` diff（write/edit/hashline）；`ToolDisplay::File.diff` 贯通 serve schema / wire；View diff 由 host 重建 before/after 打开 `vscode.diff` @2026-07-12
 - [✓] **[P1]** 验收：`cargo test`、扩展 lint/unit/Devhost E2E 全绿；env_lock 串行稳住 HOME 竞态；纯插件包 `tomcat-vscode-ext-0.1.6-pure.vsix` 已打（gitignore，不入库）@2026-07-12
@@ -16,6 +19,9 @@
 - [✓] **[P2]** 测试稳定性：`TempHomeGuard` 加进程内锁，消除全量 `cargo test` 下 HOME 并发竞态；Auto thinking 断言对齐默认 `high` effort @2026-07-10
 
 ### 🔌 INTERFACE (接口变更)
+- `tomcat-diff://` prepared diff URI：host 侧 key 从 `authority` 挪到 `path`，避免 VS Code 规范化 `authority` 小写后丢失 mixed-case `toolCallId`。
+- Transcript Webview：`DiffView` 折叠预览语义从“尾部 tail5”改为“首个真实变更锚定预览”；`PlanFileCard` 新增 creating/busy 呈现；`useAutoScroll` / `App` 贯通 `activeStickyMessageId`。
+- Devhost 测试夹具：新增 plan-tool-ux / sticky-history 场景，bootstrap 接受 `ready + no sessions`，避免空页面假死。
 - `FileDiffLine` / `DiffTag`：核心 `ToolDisplay::File.diff`、`WriteFileResult`/`EditFileResult.diff` 新增结构化行级 diff；serve schema / wire 已同步。
 - Webview：`WebviewToolCard.diff`；`openDiff` 经 host 从 diff 重建 before/after 打开编辑器对比。
 - Webview↔Host：`searchContext` 请求/响应与 context search 相关消息；Composer 经 Suggestion 插件驱动，关闭统一 `exitSuggestion` / `closeMention()`。
@@ -29,7 +35,8 @@
 | 无 | - | - |
 
 ### 集成说明
-- 本分支目标：Add Model 双模式 Tab + 官方 seed 语义；叠加 Composer `@` 提及；再叠加 Transcript 扁平化与结构化内联 diff（扩展 `0.1.6`）。
-- Transcript：命令/写编辑共用 DisclosureCard（折叠 tail5、展开半屏滚动）；核心下发对齐 diff，前端 DiffView 彩色内联；View diff 重建编辑器对比。
+- 本分支目标：Add Model 双模式 Tab + 官方 seed 语义；叠加 Composer `@` 提及；再叠加 Transcript 扁平化、结构化内联 diff 与本轮 transcript UX 修复（扩展 `0.1.7`）。
+- Transcript：命令/写编辑共用 DisclosureCard；edit 折叠预览改为变更锚定；prepared diff 改 path-key 后，View diff 在真机 mixed-case `toolCallId` 下可稳定打开非空对比。
+- Plan / Sticky：grouped plan 仅保留单头，运行中 `View Plan` 呼吸提示；sticky user prompt 在宿主真机可切回历史轮次，精细切换与顶端消失由单测覆盖。
 - `@` 行为：有工作区时敲 `@` 出下拉；无工作区/切会话经 `closeMention()` 关闭；选中注入 context chip，不改 serve/wire。
-- 验收：`cargo test` + 扩展 lint/unit/Devhost E2E；`package:vsix` / 纯插件包不入库。
+- 验收：本轮补充 `check:wire`、扩展 `lint`、GUI/core unit 与 Devhost 失败集回归；`package:vsix` / 纯插件包不入库。

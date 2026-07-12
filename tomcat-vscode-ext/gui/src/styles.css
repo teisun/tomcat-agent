@@ -1159,6 +1159,8 @@ input:focus-visible {
   display: flex;
   gap: 8px;
   margin-bottom: 10px;
+  max-width: 100%;
+  overflow: hidden;
   padding: 8px 10px;
   position: sticky;
   top: 0;
@@ -1449,14 +1451,28 @@ input:focus-visible {
 }
 
 .tc-plan-card__footer-link {
+  align-items: center;
   background: transparent;
   border: 0;
   color: var(--vscode-descriptionForeground);
   cursor: pointer;
+  display: inline-flex;
   flex: 1 1 auto;
+  gap: 4px;
   padding: 0;
   text-align: left;
   white-space: nowrap;
+}
+
+.tc-plan-card__footer-link--busy,
+.tc-plan-card__footer-link:disabled {
+  cursor: default;
+}
+
+.tc-plan-card__footer-dots {
+  color: var(--vscode-descriptionForeground);
+  display: inline-block;
+  letter-spacing: 0.08em;
 }
 
 .tc-plan-card__footer .tc-button {
@@ -2104,6 +2120,11 @@ input:focus-visible {
   border-bottom: 1px dashed var(--vscode-panel-border, rgba(127, 127, 127, 0.25));
   margin: 4px 0;
   text-align: center;
+}
+
+.tc-diff-view--preview .tc-diff-view__fold {
+  margin: 2px 0;
+  opacity: 0.9;
 }
 
 .tc-tool-row--edit .tc-tool-row__leading-icon,

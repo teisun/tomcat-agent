@@ -236,4 +236,65 @@ describe("ThinkingGroup", () => {
 
     expect(screen.getByTestId("thinking-group-title").textContent).toBe("Thinking");
   });
+
+  it("keeps the grouped plan header but hides the inner non-error plan tool row", () => {
+    render(
+      <ThinkingGroup
+        group={buildGroup({
+          thinking: {
+            assistantMessageId: "assistant-1",
+            id: "think-1",
+            summaryTitle: "Creating plan",
+            text: "Let me structure the work first.",
+            type: "thinking",
+          },
+          tools: [
+            {
+              assistantMessageId: "assistant-1",
+              display: { kind: "plan", plan: "/tmp/demo.plan.md" },
+              id: "tool-plan",
+              isError: false,
+              status: "streaming",
+              summary: "Created plan",
+              toolCallId: "tc-plan",
+              toolName: "create_plan",
+              type: "tool",
+            },
+          ],
+        })}
+        isStreaming
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe("Creating plan");
+    expect(screen.getByTestId("thinking-group-body").textContent).toContain("structure the work");
+    expect(screen.queryByTestId("tool-row")).toBeNull();
+  });
+
+  it("still renders failed plan tool rows for debugging feedback", () => {
+    render(
+      <ThinkingGroup
+        group={buildGroup({
+          tools: [
+            {
+              assistantMessageId: "assistant-1",
+              display: { kind: "plan", plan: "/tmp/demo.plan.md" },
+              id: "tool-plan-error",
+              isError: true,
+              status: "complete",
+              summary: "Unable to update plan",
+              toolCallId: "tc-plan-error",
+              toolName: "update_plan",
+              type: "tool",
+            },
+          ],
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("thinking-group-toggle"));
+    expect(screen.getByTestId("tool-row").textContent).toContain("Updated plan");
+  });
 });

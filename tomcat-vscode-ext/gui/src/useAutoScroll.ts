@@ -5,8 +5,30 @@ const STICKY_PROMPT_THRESHOLD_PX = 12;
 
 type ScrollMode = "followBottom" | "paused" | "revealUser";
 
+export type StickyUserMetric = {
+  bottom: number;
+  id: string;
+};
+
 function isAtBottom(element: HTMLElement): boolean {
   return Math.abs(element.scrollHeight - element.scrollTop - element.clientHeight) < BOTTOM_THRESHOLD_PX;
+}
+
+export function selectActiveStickyUserId(
+  userMetrics: StickyUserMetric[],
+  scrollTop: number,
+  threshold: number,
+): string | null {
+  let activeMetric: StickyUserMetric | null = null;
+  for (const metric of userMetrics) {
+    if (metric.bottom - scrollTop >= threshold) {
+      continue;
+    }
+    if (!activeMetric || metric.bottom > activeMetric.bottom) {
+      activeMetric = metric;
+    }
+  }
+  return activeMetric?.id ?? null;
 }
 
 type UseAutoScrollOptions = {
@@ -57,6 +79,26 @@ function latestTurnMetrics(
   };
 }
 
+function currentStickyUserMetrics(
+  container: HTMLElement,
+  content: HTMLElement,
+): StickyUserMetric[] {
+  const containerRect = container.getBoundingClientRect();
+  return Array.from(content.querySelectorAll<HTMLElement>('[data-message-kind="user"]'))
+    .map((message) => {
+      const id = message.getAttribute("data-message-id");
+      if (!id) {
+        return null;
+      }
+      const rect = message.getBoundingClientRect();
+      return {
+        bottom: container.scrollTop + (rect.bottom - containerRect.top),
+        id,
+      } satisfies StickyUserMetric;
+    })
+    .filter((metric): metric is StickyUserMetric => metric !== null);
+}
+
 export function useAutoScroll({
   containerRef,
   contentRef,
@@ -66,6 +108,7 @@ export function useAutoScroll({
   resetKey,
   userMessageCount,
 }: UseAutoScrollOptions) {
+  const [activeStickyMessageId, setActiveStickyMessageId] = useState<string | null>(null);
   const [bottomSpacerHeight, setBottomSpacerHeight] = useState(0);
   const [latestUserScrolledPast, setLatestUserScrolledPast] = useState(false);
   const [userHasScrolled, setUserHasScrolled] = useState(false);
@@ -88,6 +131,10 @@ export function useAutoScroll({
   const syncBottomSpacerHeight = (next: number) => {
     bottomSpacerHeightRef.current = next;
     setBottomSpacerHeight((current) => (current === next ? current : next));
+  };
+
+  const syncActiveStickyMessageId = (next: string | null) => {
+    setActiveStickyMessageId((current) => (current === next ? current : next));
   };
 
   const syncLatestUserScrolledPast = (next: boolean) => {
@@ -124,19 +171,24 @@ export function useAutoScroll({
     const container = containerRef.current;
     const content = contentRef.current;
     if (!container || !content) {
+      syncActiveStickyMessageId(null);
       syncLatestUserScrolledPast(false);
       return;
     }
+
+    const nextStickyMessageId = selectActiveStickyUserId(
+      currentStickyUserMetrics(container, content),
+      container.scrollTop,
+      STICKY_PROMPT_THRESHOLD_PX,
+    );
+    syncActiveStickyMessageId(nextStickyMessageId);
+    syncLatestUserScrolledPast(Boolean(nextStickyMessageId));
 
     const metrics = latestTurnMetrics(container, content, bottomSpacerHeightRef.current);
     if (!metrics) {
       syncLatestUserScrolledPast(false);
       return;
     }
-
-    syncLatestUserScrolledPast(
-      metrics.userBottom - container.scrollTop < STICKY_PROMPT_THRESHOLD_PX,
-    );
   };
 
   const scrollToBottom = (queueAfterSpacer = false) => {
@@ -257,6 +309,7 @@ export function useAutoScroll({
     pendingScrollActionRef.current = null;
     previousOldestItemKeyRef.current = oldestItemKey;
     revealSettledRef.current = false;
+    syncActiveStickyMessageId(null);
     syncUserHasScrolled(false);
     syncBottomSpacerHeight(0);
     scrollToBottom(true);
@@ -425,6 +478,7 @@ export function useAutoScroll({
   }, [containerRef, userHasScrolled]);
 
   return {
+    activeStickyMessageId,
     bottomSpacerHeight,
     latestUserScrolledPast,
     scrollToLatest,
