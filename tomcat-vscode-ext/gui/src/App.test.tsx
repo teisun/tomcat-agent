@@ -209,7 +209,7 @@ describe("Tomcat webview App", () => {
   });
 
   it("renders transcript timeline, plan UI, attachments, and context ratio", async () => {
-    mount();
+    const { postMessage } = mount();
 
     await emitState({
       channel: "state",
@@ -272,6 +272,7 @@ describe("Tomcat webview App", () => {
               { id: "m1", kind: "assistant", text: "hello", type: "message" },
               {
                 display: { file: "src/app.ts", kind: "file" },
+                diffStat: { added: 1, removed: 1 },
                 id: "tool-card-1",
                 isError: false,
                 status: "complete",
@@ -325,9 +326,7 @@ describe("Tomcat webview App", () => {
     expect(screen.getByText("Questions")).toBeTruthy();
     expect(screen.getByText("Proceed?")).toBeTruthy();
     expect(screen.getByTestId("file-chip").textContent).toContain("app.ts");
-    expect(screen.queryByText("updated file")).toBeNull();
-    fireEvent.click(screen.getByTestId("tool-row-toggle"));
-    expect(screen.getByText("updated file")).toBeTruthy();
+    expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
     fireEvent.click(screen.getByTestId("session-select"));
     expect(screen.getByTestId("session-option").textContent).toContain("New session");
     expect(screen.queryByLabelText("Close active session")).toBeNull();

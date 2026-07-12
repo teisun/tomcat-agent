@@ -225,6 +225,81 @@ describe("WebviewStateStore wire routing", () => {
 
     expect(store.snapshot().activeSessionId).toBe("s2");
   });
+
+  it("derives diff stats from file display metadata", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applyEvent({
+      args: { path: "src/app.ts" },
+      sessionId: "s1",
+      toolCallId: "tool-edit-1",
+      toolName: "edit",
+      type: "tool_execution_start",
+    });
+    store.applyEvent({
+      display: {
+        added: 3,
+        diff: [
+          { newLine: 1, oldLine: 1, tag: "ctx", text: "const a = 1;" },
+          { newLine: null, oldLine: 2, tag: "del", text: "const b = 2;" },
+          { newLine: 2, oldLine: null, tag: "add", text: "const b = 3;" },
+        ],
+        file: "src/app.ts",
+        kind: "file",
+        removed: 1,
+      },
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-edit-1",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+
+    const tool = store.snapshot().sessionViews.s1.timeline.find((item) => item.type === "tool");
+    expect(tool).toMatchObject({
+      diff: [
+        { newLine: 1, oldLine: 1, tag: "ctx", text: "const a = 1;" },
+        { newLine: null, oldLine: 2, tag: "del", text: "const b = 2;" },
+        { newLine: 2, oldLine: null, tag: "add", text: "const b = 3;" },
+      ],
+      diffStat: {
+        added: 3,
+        removed: 1,
+      },
+      toolCallId: "tool-edit-1",
+      type: "tool",
+    });
+  });
+
+  it("leaves diff stats empty when the file display omits counts", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applyEvent({
+      args: { path: "src/app.ts" },
+      sessionId: "s1",
+      toolCallId: "tool-edit-1",
+      toolName: "edit",
+      type: "tool_execution_start",
+    });
+    store.applyEvent({
+      display: { file: "src/app.ts", kind: "file" },
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-edit-1",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+
+    const tool = store.snapshot().sessionViews.s1.timeline.find((item) => item.type === "tool");
+    expect(tool).toMatchObject({
+      toolCallId: "tool-edit-1",
+      type: "tool",
+    });
+    expect(tool && "diffStat" in tool ? tool.diffStat : undefined).toBeUndefined();
+    expect(tool && "diff" in tool ? tool.diff : undefined).toBeUndefined();
+  });
 });
 
 describe("history tool attribution", () => {
@@ -1398,6 +1473,16 @@ describe("openFile intent protocol", () => {
         data: { path: "/tmp/file.rs" },
         messageId: "open-1",
         type: "openFile",
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts openDiff intent shape", () => {
+    expect(
+      isWebviewIntent({
+        data: { toolCallId: "tool-1" },
+        messageId: "open-diff-1",
+        type: "openDiff",
       }),
     ).toBe(true);
   });

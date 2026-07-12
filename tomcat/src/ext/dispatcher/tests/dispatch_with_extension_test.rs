@@ -274,6 +274,9 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
                 written: false,
                 bytes_written: 0,
                 diff_hint: None,
+                added: None,
+                removed: None,
+                diff: None,
             })
         }
         async fn edit_file(
@@ -285,6 +288,9 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
             Ok(EditFileResult {
                 path: String::new(),
                 applied: false,
+                added: None,
+                removed: None,
+                diff: None,
             })
         }
         async fn execute_bash(

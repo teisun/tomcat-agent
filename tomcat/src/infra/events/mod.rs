@@ -70,6 +70,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use crate::core::tools::primitive::FileDiffLine;
 
 /// JSON `type` 字段与 pi-mono / 审计展示用字符串；业务与测试请引用此处常量，避免散落字面量。
 pub mod wire {
@@ -220,7 +221,15 @@ pub struct ToolOutput(pub serde_json::Value);
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolDisplay {
-    File { file: String },
+    File {
+        file: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        added: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        removed: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff: Option<Vec<FileDiffLine>>,
+    },
     Plan { plan: String },
     Text { text: String },
 }

@@ -24,6 +24,7 @@ import {
   createHostFrameMessageId,
   isWebviewIntent,
   PendingMessageTracker,
+  type FileDiffLine,
   type FrontendOwnerKind,
   type HostEventFrameContent,
   type HostToWebviewFrame,
@@ -37,6 +38,7 @@ import {
   type WebviewPlanFileCard,
   type WebviewReference,
   type WebviewStateSnapshot,
+  type WebviewToolCard,
 } from "./protocol";
 import { resolveGuiStylesheet } from "../guiAssets";
 import { ContextSearchService } from "./contextSearch";
@@ -60,6 +62,23 @@ type DomSnapshot = Extract<
 
 type UserSubmitKind = "prompt" | "steer";
 
+function reconstructDiffPair(diff: FileDiffLine[]): { after: string; before: string } {
+  const before: string[] = [];
+  const after: string[] = [];
+  for (const line of diff) {
+    if (line.tag !== "add") {
+      before.push(line.text);
+    }
+    if (line.tag !== "del") {
+      after.push(line.text);
+    }
+  }
+  return {
+    after: after.join("\n"),
+    before: before.join("\n"),
+  };
+}
+
 export interface TomcatWebviewProviderDeps {
   extensionUri: vscode.Uri;
   getDefaultCwd(): string | undefined;
@@ -77,10 +96,6 @@ export interface TomcatWebviewProviderDeps {
 
 function getNonce(): string {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-}
-
-function isMutationTool(toolName: string): boolean {
-  return toolName === "edit" || toolName === "hashline_edit" || toolName === "write";
 }
 
 function parseCapabilityNames(value: unknown): string[] {
@@ -517,6 +532,18 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   currentState() {
     return this.stateStore.snapshot();
+  }
+
+  private findToolCard(toolCallId: string): WebviewToolCard | undefined {
+    for (const session of Object.values(this.currentState().sessionViews)) {
+      const tool = session.timeline.find(
+        (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
+      );
+      if (tool) {
+        return tool;
+      }
+    }
+    return undefined;
   }
 
   async refreshModelCatalog(): Promise<void> {
@@ -1046,12 +1073,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         await this.postState();
         return;
       }
-      case "openDiff":
-        await this.deps.ide.openPreparedDiff(intent.data.toolCallId);
-        return;
-      case "applyEdit":
-        await this.deps.ide.applyPreparedEdit(intent.data.toolCallId);
-        return;
       case "openFile":
         this.openFileObserved = true;
         try {
@@ -1068,6 +1089,42 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           }
         }
         return;
+      case "openDiff": {
+        const tool = this.findToolCard(intent.data.toolCallId);
+        const displayPath =
+          tool?.display?.kind === "file"
+            ? tool.display.file
+            : typeof tool?.args?.path === "string"
+              ? tool.args.path
+              : null;
+        if (!tool || !displayPath) {
+          return;
+        }
+        try {
+          if (tool.diff?.length) {
+            const { after, before } = reconstructDiffPair(tool.diff);
+            await this.deps.ide.openReconstructedDiff(
+              intent.data.toolCallId,
+              displayPath,
+              before,
+              after,
+            );
+          } else {
+            await this.deps.ide.showFile(displayPath);
+          }
+        } catch (error) {
+          const sessionId = this.currentState().activeSessionId;
+          if (sessionId) {
+            this.stateStore.appendMessage(
+              sessionId,
+              "error",
+              formatBridgeError(`open diff ${displayPath}`, error),
+            );
+            await this.postState();
+          }
+        }
+        return;
+      }
       case "openPlanFile":
         try {
           await this.deps.ide.showFile(intent.data.path);
@@ -1108,17 +1165,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async handleServeEvent(event: ServeEvent): Promise<void> {
-    if (event.type === "tool_execution_start" && isMutationTool(event.toolName)) {
-      await this.deps.ide.rememberToolStart(event.toolCallId, event.args);
-    }
-    if (
-      event.type === "tool_execution_end" &&
-      isMutationTool(event.toolName) &&
-      event.display?.kind === "file"
-    ) {
-      await this.deps.ide.rememberToolResult(event.toolCallId, event.display.file);
-    }
-
     this.stateStore.applyEvent(event);
     if (event.sessionId) {
       this.stateStore.setOwnership(

@@ -30,6 +30,9 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
         result: ToolOutput(serde_json::json!({})),
         display: Some(ToolDisplay::File {
             file: "~/demo.txt".into(),
+            added: Some(10),
+            removed: Some(2),
+            diff: None,
         }),
         is_error: false,
     };
@@ -61,6 +64,8 @@ fn agent_event_tool_execution_uses_pi_mono_wire_names() {
     let payload = serde_json::to_value(&end).unwrap();
     assert_eq!(payload["display"]["kind"].as_str(), Some("file"));
     assert_eq!(payload["display"]["file"].as_str(), Some("~/demo.txt"));
+    assert_eq!(payload["display"]["added"].as_u64(), Some(10));
+    assert_eq!(payload["display"]["removed"].as_u64(), Some(2));
 }
 
 #[test]

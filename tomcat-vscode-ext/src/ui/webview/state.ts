@@ -1523,6 +1523,23 @@ export class WebviewStateStore {
         const activeAssistantId = runtime.activeAssistantId ?? undefined;
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
         tool.display = frame.display ?? undefined;
+        if (
+          frame.display?.kind === "file" &&
+          typeof frame.display.added === "number" &&
+          typeof frame.display.removed === "number"
+        ) {
+          tool.diffStat = {
+            added: frame.display.added,
+            removed: frame.display.removed,
+          };
+        } else {
+          delete tool.diffStat;
+        }
+        if (frame.display?.kind === "file" && Array.isArray(frame.display.diff)) {
+          tool.diff = frame.display.diff;
+        } else {
+          delete tool.diff;
+        }
         tool.isError = frame.isError;
         tool.status = toolResultWasInterrupted(frame.result) ? "interrupted" : "complete";
         tool.summary = toolResultWasInterrupted(frame.result) ? "Interrupted" : asText(frame.result);

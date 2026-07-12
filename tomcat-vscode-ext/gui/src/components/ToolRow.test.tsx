@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { WebviewToolCard } from "../types";
-import { ToolRow } from "./ToolRow";
+import { toolCategory, ToolRow } from "./ToolRow";
 
 function buildTool(overrides: Partial<WebviewToolCard> = {}): WebviewToolCard {
   return {
@@ -34,7 +34,37 @@ describe("ToolRow", () => {
     expect(onOpenFile).toHaveBeenCalledWith("/workspace/README.md");
   });
 
-  it("bash row shows Ran command and expands output without terminal button", () => {
+  it("edit row shows diff badges and routes the View diff action", () => {
+    const onOpenDiff = vi.fn();
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/a.rs" },
+          diff: [
+            { newLine: 1, oldLine: 1, tag: "ctx", text: "fn main() {" },
+            { newLine: null, oldLine: 2, tag: "del", text: "  old();" },
+            { newLine: 2, oldLine: null, tag: "add", text: "  new();" },
+          ],
+          diffStat: { added: 4, removed: 2 },
+          display: { file: "/workspace/a.rs", kind: "file" },
+          status: "complete",
+          toolName: "edit",
+        })}
+        onOpenDiff={onOpenDiff}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
+    expect(screen.getByTestId("tool-row-diff-added").textContent).toBe("+4");
+    expect(screen.getByTestId("tool-row-diff-removed").textContent).toBe("-2");
+    expect(screen.getByTestId("tool-row-open-diff")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("tool-row-open-diff"));
+    expect(onOpenDiff).toHaveBeenCalledWith("tc-1");
+    expect(screen.queryByRole("button", { name: /apply/i })).toBeNull();
+  });
+
+  it("bash row uses a terminal block and stays collapsed when complete", () => {
     render(
       <ToolRow
         item={buildTool({
@@ -49,10 +79,26 @@ describe("ToolRow", () => {
 
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Ran");
     expect(screen.getByTestId("tool-row-cmd").textContent).toBe("cargo test");
-    expect(screen.queryByTestId("tool-row-body")).toBeNull();
+    expect(screen.queryByTestId("tool-row-terminal")).toBeNull();
     fireEvent.click(screen.getByTestId("tool-row-toggle"));
-    expect(screen.getByTestId("tool-row-result").textContent).toBe("test output");
-    expect(screen.queryByRole("button", { name: /terminal/i })).toBeNull();
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain("test output");
+  });
+
+  it("bash row auto expands when it errors", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { command: "cargo test" },
+          isError: true,
+          status: "complete",
+          summary: "command failed",
+          toolName: "bash",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain("command failed");
   });
 
   it("web_search row expands hits list", () => {
@@ -73,183 +119,7 @@ describe("ToolRow", () => {
     expect(screen.getByText("Rust async book")).toBeTruthy();
   });
 
-  it("complete rows default folded and streaming rows default expanded", () => {
-    const { rerender } = render(
-      <ToolRow
-        item={buildTool({ status: "complete" })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-    expect(screen.queryByTestId("tool-row-body")).toBeNull();
-
-    rerender(
-      <ToolRow
-        item={buildTool({ status: "streaming", summary: "partial output" })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-    expect(screen.getByTestId("tool-row-body")).toBeTruthy();
-  });
-
-  it("does not render inline check icon in row label", () => {
-    render(
-      <ToolRow
-        item={buildTool()}
-        onOpenFile={vi.fn()}
-      />,
-    );
-
-    expect(document.querySelector(".tc-tool-row .codicon-check")).toBeNull();
-  });
-
-  it("bash row renders the command inside a code element", () => {
-    render(
-      <ToolRow
-        item={buildTool({
-          args: { command: "git status --short" },
-          status: "complete",
-          summary: "M file",
-          toolName: "bash",
-        })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-
-    const cmd = screen.getByTestId("tool-row-cmd");
-    expect(cmd.tagName).toBe("CODE");
-    expect(cmd.textContent).toBe("git status --short");
-  });
-
-  it("grep row appends result count from summary", () => {
-    render(
-      <ToolRow
-        item={buildTool({
-          args: { pattern: "foo" },
-          status: "complete",
-          summary: "Found 2 results\nfile.rs:10:foo\nfile.rs:20:foo",
-          toolName: "grep",
-        })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-
-    const label = screen.getByTestId("tool-row-label").textContent ?? "";
-    expect(label).toContain("Searched foo");
-    expect(label).toContain("2 results");
-  });
-
-  it("search_workspace row shows workspace search label", () => {
-    render(
-      <ToolRow
-        item={buildTool({
-          args: { query: "config" },
-          status: "complete",
-          summary: "hit",
-          toolName: "search_workspace",
-        })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-
-    expect(screen.getByTestId("tool-row-label").textContent).toContain(
-      "Searched workspace for config",
-    );
-  });
-
-  it("edit row uses the edit codicon", () => {
-    render(
-      <ToolRow
-        item={buildTool({
-          args: { path: "/workspace/a.rs" },
-          display: { file: "/workspace/a.rs", kind: "file" },
-          toolName: "edit",
-        })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-
-    expect(document.querySelector(".tc-thinking-tool-wrapper .codicon-edit")).toBeTruthy();
-  });
-
-  it("keeps file tool content but removes webview diff/apply buttons", () => {
-    render(
-      <ToolRow
-        item={buildTool({
-          args: { path: "/workspace/a.rs" },
-          display: { file: "/workspace/a.rs", kind: "file" },
-          summary: "updated file",
-          toolName: "edit",
-        })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-
-    fireEvent.click(screen.getByTestId("tool-row-toggle"));
-    expect(screen.getByTestId("tool-row-result").textContent).toBe("updated file");
-    expect(screen.queryByRole("button", { name: "Open Diff" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Apply Edit" })).toBeNull();
-  });
-
-  it("maps additional built-in tools to readable labels and distinct icons", () => {
-    const { rerender } = render(
-      <ToolRow
-        item={buildTool({
-          args: { name: "sdk" },
-          summary: "Loaded skill",
-          toolName: "load_skill",
-        })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Loaded skill sdk");
-    expect(document.querySelector(".tc-thinking-tool-wrapper .codicon-book")).toBeTruthy();
-
-    rerender(
-      <ToolRow
-        item={buildTool({
-          args: { path: "/workspace/src" },
-          summary: "src\nREADME.md",
-          toolName: "list_dir",
-        })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Listed /workspace/src");
-    expect(document.querySelector(".tc-thinking-tool-wrapper .codicon-folder")).toBeTruthy();
-
-    rerender(
-      <ToolRow
-        item={buildTool({
-          args: { key: "log.level", value: "debug" },
-          summary: "Updated log.level",
-          toolName: "config_set",
-        })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Updated config log.level");
-    expect(document.querySelector(".tc-thinking-tool-wrapper .codicon-gear")).toBeTruthy();
-  });
-
-  it("keeps running tools with no content collapsed and hides the toggle", () => {
-    render(
-      <ToolRow
-        item={buildTool({
-          args: { path: "/workspace/new-file.ts" },
-          status: "streaming",
-          summary: undefined,
-          toolName: "write",
-        })}
-        onOpenFile={vi.fn()}
-      />,
-    );
-
-    expect(screen.queryByTestId("tool-row-toggle")).toBeNull();
-    expect(screen.queryByTestId("tool-row-body")).toBeNull();
-    expect(screen.getByTestId("tool-row-running-indicator").textContent).toBe("...");
-  });
-
-  it("renders ask_question results as an answer card instead of raw JSON", () => {
+  it("ask_question renders an always-visible answer card", () => {
     render(
       <ToolRow
         item={buildTool({
@@ -278,10 +148,111 @@ describe("ToolRow", () => {
       />,
     );
 
-    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.queryByTestId("tool-row-toggle")).toBeNull();
     expect(screen.getByTestId("answer-card").textContent).toContain("Answers");
     expect(screen.getByTestId("answer-option-style").textContent).toContain("Run-and-gun");
-    expect(screen.queryByText('"optionIds":["run-gun"]')).toBeNull();
+  });
+
+  it("toolCategory maps built-ins into the new buckets", () => {
+    expect(toolCategory("edit")).toBe("edit");
+    expect(toolCategory("bash")).toBe("command");
+    expect(toolCategory("ask_question")).toBe("answer");
+    expect(toolCategory("read")).toBe("context");
+    expect(toolCategory("create_plan")).toBe("other");
+    expect(toolCategory("unknown_tool")).toBe("other");
+  });
+
+  it("context rows keep the minimalist style and stay collapsed by default", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { query: "config" },
+          status: "complete",
+          summary: "hit",
+          toolName: "search_workspace",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row").getAttribute("data-tool-category")).toBe("context");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Searched workspace for config",
+    );
+    expect(screen.queryByTestId("tool-row-body")).toBeNull();
+  });
+
+  it("maps additional built-in tools to readable labels and distinct icons", () => {
+    const { rerender } = render(
+      <ToolRow
+        item={buildTool({
+          args: { name: "sdk" },
+          summary: "Loaded skill",
+          toolName: "load_skill",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Loaded skill sdk");
+    expect(document.querySelector(".codicon-book")).toBeTruthy();
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/readme.md" },
+          display: { file: "/workspace/readme.md", kind: "file" },
+          summary: "# readme",
+          toolName: "read",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Read");
+    expect(document.querySelector(".codicon-eye")).toBeTruthy();
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/src" },
+          summary: "src\nREADME.md",
+          toolName: "list_dir",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Listed /workspace/src");
+    expect(document.querySelector(".codicon-folder")).toBeTruthy();
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { key: "log.level", value: "debug" },
+          summary: "Updated log.level",
+          toolName: "config_set",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Updated config log.level");
+    expect(document.querySelector(".codicon-gear")).toBeTruthy();
+  });
+
+  it("keeps running tools with no content collapsed and hides the toggle", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/new-file.ts" },
+          status: "streaming",
+          summary: undefined,
+          toolName: "write",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("tool-row-toggle")).toBeNull();
+    expect(screen.queryByTestId("tool-row-body")).toBeNull();
+    expect(screen.getByTestId("tool-row-running-indicator").textContent).toBe("...");
   });
 
   it("accepts snake_case ask_question results from the transcript", () => {
@@ -313,7 +284,6 @@ describe("ToolRow", () => {
       />,
     );
 
-    fireEvent.click(screen.getByTestId("tool-row-toggle"));
     expect(screen.getByTestId("answer-card-question").textContent).toContain("Deploy where?");
     expect(screen.getByTestId("answer-option-deploy_target").textContent).toContain("Staging");
   });

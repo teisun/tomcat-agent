@@ -618,6 +618,9 @@ fn path_display_shows_absolute_path() {
         &json!("已写入: ~/workspace/demo.rs (2 bytes)"),
         Some(&ToolDisplay::File {
             file: format!("~/{}", target.strip_prefix(&home).unwrap().display()),
+            added: Some(1),
+            removed: Some(0),
+            diff: None,
         }),
         false,
     );

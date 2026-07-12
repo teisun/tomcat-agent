@@ -28,7 +28,7 @@ use super::DefaultPrimitiveExecutor;
 use crate::core::tools::pipeline::edit_normalize::{
     detect_line_ending, fold_curly_quotes, normalize_to_lf, restore_line_endings, strip_bom,
 };
-use crate::core::tools::primitive::diff::build_simple_diff;
+use crate::core::tools::primitive::diff::{build_line_diff, build_simple_diff, line_diff_stat};
 use crate::core::tools::primitive::{
     EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor, PrimitiveOperation,
     WriteFileResult, EDIT_REPLACE_ALL_MARKER,
@@ -231,6 +231,9 @@ pub(super) async fn write_file_impl(
             written: false,
             bytes_written: 0,
             diff_hint: None,
+            added: None,
+            removed: None,
+            diff: None,
         });
     }
     executor.audit.record_primitive(PrimitiveAuditEntry {
@@ -245,17 +248,22 @@ pub(super) async fn write_file_impl(
         grant_trigger: Some(grant_trigger_str(grant.trigger)),
     });
 
+    let after = std::str::from_utf8(&final_bytes).unwrap_or("");
     let diff_hint = original.as_deref().map(|orig| {
         // 写盘后的字节再以 UTF-8 解码用于 diff；非 UTF-8（理论上 LF 规范化前 content 就已是 &str）回退为空。
-        let after = std::str::from_utf8(&final_bytes).unwrap_or("");
         build_simple_diff(orig, after)
     });
+    let (added, removed) = line_diff_stat(original.as_deref().unwrap_or(""), after);
+    let diff = build_line_diff(original.as_deref().unwrap_or(""), after);
 
     Ok(WriteFileResult {
         path: crate::infra::platform::format_home_path(&path_buf),
         written: true,
         bytes_written: final_bytes.len() as u64,
         diff_hint,
+        added: Some(added),
+        removed: Some(removed),
+        diff,
     })
 }
 
@@ -368,6 +376,9 @@ pub(super) async fn edit_file_impl(
         return Ok(EditFileResult {
             path: crate::infra::platform::format_home_path(&path_buf),
             applied: false,
+            added: None,
+            removed: None,
+            diff: None,
         });
     }
     executor.audit.record_primitive(PrimitiveAuditEntry {
@@ -381,9 +392,14 @@ pub(super) async fn edit_file_impl(
         grant_type: Some(grant_type_str(grant.grant_type)),
         grant_trigger: Some(grant_trigger_str(grant.trigger)),
     });
+    let (added, removed) = line_diff_stat(&original, &new_content);
+    let diff = build_line_diff(&original, &new_content);
     Ok(EditFileResult {
         path: crate::infra::platform::format_home_path(&path_buf),
         applied: true,
+        added: Some(added),
+        removed: Some(removed),
+        diff,
     })
 }
 

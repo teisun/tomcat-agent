@@ -35,6 +35,9 @@ pub(in super::super) async fn handle_write(
             if r.written {
                 *display_out = Some(ToolDisplay::File {
                     file: r.path.clone(),
+                    added: r.added,
+                    removed: r.removed,
+                    diff: r.diff.clone(),
                 });
                 let verb = if r.diff_hint.is_some() {
                     "已覆盖"

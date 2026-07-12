@@ -297,6 +297,13 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   );
   const toolRowEl = document.querySelector<HTMLElement>('[data-testid="tool-row"]');
   const fileChipEl = document.querySelector<HTMLElement>('[data-testid="file-chip"]');
+  const actionToolRows = document.querySelectorAll<HTMLElement>(
+    '[data-testid="tool-row"][data-tool-variant="standalone"]',
+  );
+  const editDiffBadges = document.querySelectorAll('[data-testid="tool-row-diff-badges"]').length;
+  const commandBlockCount = document.querySelectorAll(
+    '[data-testid="tool-row"][data-tool-category="command"]',
+  ).length;
   const ctxLabel =
     document.querySelector<HTMLElement>('[data-testid="context-ratio"]')?.textContent ?? null;
   const planCardTodoCountText =
@@ -426,6 +433,9 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     leftGuideLine: !!document.querySelector(".tc-thinking-tool-wrapper"),
     toolRowCount: document.querySelectorAll('[data-testid="tool-row"]').length,
     toolCardCount: document.querySelectorAll('[data-testid="tool-card"]').length,
+    actionToolRowCount: actionToolRows.length,
+    editDiffBadgeCount: editDiffBadges,
+    commandBlockCount,
   };
 }
 
@@ -1028,6 +1038,11 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 busy={!!activeSession.busy}
                 bottomSpacerHeight={bottomSpacerHeight}
                 onAnswer={handleAnswerQuestion}
+                onOpenDiff={(toolCallId) =>
+                  postIntent(vscodeApi, "openDiff", {
+                    toolCallId,
+                  })
+                }
                 onOpenFile={(path) =>
                   postIntent(vscodeApi, "openFile", {
                     path,
@@ -1075,12 +1090,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         </section>
         {userHasScrolled ? (
           <button
+            aria-label="Jump to latest"
             className="tc-scroll-jump"
             data-testid="scroll-to-bottom"
             onClick={scrollToLatest}
             type="button"
           >
-            Jump to latest
+            <span aria-hidden="true" className="codicon codicon-arrow-down" />
           </button>
         ) : null}
       </div>

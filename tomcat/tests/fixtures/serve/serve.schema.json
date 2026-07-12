@@ -1975,6 +1975,45 @@
       "AssistantMessageEvent": {
         "description": "占位：Assistant 消息流式事件。\n\n**payload schema（T2-P0-006 P3 起）**：\n\n```json { \"kind\": \"content_delta\" | \"thinking_delta\",   // 必有；老消费者可忽略 \"delta\": \"...\",                                 // 必有：增量文本 \"source\": \"summary\" | \"raw\",                   // thinking_delta 必有 \"signature\": \"...\"                              // 可选：仅 thinking_delta + Anthropic } ```\n\n兼容性：老订阅者只读 `delta` 时仍能拿到正文增量（thinking 不会被推到旧路径， 除非订阅者显式按 `kind` 分流）。"
       },
+      "DiffTag": {
+        "type": "string",
+        "enum": [
+          "add",
+          "del",
+          "ctx"
+        ]
+      },
+      "FileDiffLine": {
+        "type": "object",
+        "required": [
+          "tag",
+          "text"
+        ],
+        "properties": {
+          "newLine": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "oldLine": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "tag": {
+            "$ref": "#/definitions/DiffTag"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
       "Message": {
         "description": "占位：与 pi-mono / OpenAI 风格 Message 对齐，MVP 用 JSON 表示。"
       },
@@ -1988,6 +2027,23 @@
               "kind"
             ],
             "properties": {
+              "added": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "diff": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/definitions/FileDiffLine"
+                }
+              },
               "file": {
                 "type": "string"
               },
@@ -1996,6 +2052,14 @@
                 "enum": [
                   "file"
                 ]
+              },
+              "removed": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
               }
             }
           },
@@ -2144,6 +2208,45 @@
             }
           }
         ]
+      },
+      "DiffTag": {
+        "type": "string",
+        "enum": [
+          "add",
+          "del",
+          "ctx"
+        ]
+      },
+      "FileDiffLine": {
+        "type": "object",
+        "required": [
+          "tag",
+          "text"
+        ],
+        "properties": {
+          "newLine": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "oldLine": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "tag": {
+            "$ref": "#/definitions/DiffTag"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
       },
       "Message": {
         "description": "占位：与 pi-mono / OpenAI 风格 Message 对齐，MVP 用 JSON 表示。"
@@ -2843,6 +2946,23 @@
               "kind"
             ],
             "properties": {
+              "added": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "diff": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/definitions/FileDiffLine"
+                }
+              },
               "file": {
                 "type": "string"
               },
@@ -2851,6 +2971,14 @@
                 "enum": [
                   "file"
                 ]
+              },
+              "removed": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
               }
             }
           },

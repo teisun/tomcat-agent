@@ -10,6 +10,14 @@ export interface Capabilities {
   vision?: boolean;
   web_search?: boolean;
 }
+export type DiffTag = "add" | "del" | "ctx";
+
+export interface FileDiffLine {
+  newLine?: null | number;
+  oldLine?: null | number;
+  tag: DiffTag;
+  text: string;
+}
 export interface GetMessagesParams {
   cursor?: null | string;
   lastNTurns?: null | number;
@@ -188,8 +196,11 @@ export type ServeTurnEvent = {
 export type SetPlanModeAction = "enter" | "exit" | "build";
 
 export type ToolDisplay = {
+  added?: null | number;
+  diff?: FileDiffLine[] | null;
   file: string;
   kind: "file";
+  removed?: null | number;
 } | {
   kind: "plan";
   plan: string;

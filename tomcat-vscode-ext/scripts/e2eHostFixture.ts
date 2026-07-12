@@ -356,6 +356,56 @@ function emitCompletedTool(sessionId, tool) {
   });
 }
 
+function createAddedDiff(lines) {
+  return lines.map((text, index) => ({
+    tag: "add",
+    oldLine: null,
+    newLine: index + 1,
+    text,
+  }));
+}
+
+function createReplacementDiff(oldLines, newLines) {
+  const diff = [];
+  let oldLine = 1;
+  let newLine = 1;
+  const total = Math.max(oldLines.length, newLines.length);
+  for (let index = 0; index < total; index += 1) {
+    const before = oldLines[index];
+    const after = newLines[index];
+    if (before !== undefined && after !== undefined && before === after) {
+      diff.push({
+        tag: "ctx",
+        oldLine,
+        newLine,
+        text: before,
+      });
+      oldLine += 1;
+      newLine += 1;
+      continue;
+    }
+    if (before !== undefined) {
+      diff.push({
+        tag: "del",
+        oldLine,
+        newLine: null,
+        text: before,
+      });
+      oldLine += 1;
+    }
+    if (after !== undefined) {
+      diff.push({
+        tag: "add",
+        oldLine: null,
+        newLine,
+        text: after,
+      });
+      newLine += 1;
+    }
+  }
+  return diff;
+}
+
 function buildToolIconShowcaseTools() {
   const workspaceDir = process.cwd();
   const outputPath = path.join(workspaceDir, "output.txt");
@@ -379,21 +429,62 @@ function buildToolIconShowcaseTools() {
       toolCallId: "tc-showcase-write",
       toolName: "write",
       args: { path: outputPath },
-      display: { file: outputPath, kind: "file" },
+      display: {
+        added: 2,
+        diff: createAddedDiff([
+          "export const created = true;",
+          "console.log('done');",
+        ]),
+        file: outputPath,
+        kind: "file",
+        removed: 0,
+      },
       result: "Created output.txt",
     },
     {
       toolCallId: "tc-showcase-edit",
       toolName: "edit",
       args: { path: sourcePath },
-      display: { file: sourcePath, kind: "file" },
+      display: {
+        added: 2,
+        diff: createReplacementDiff(
+          [
+            "export const title = 'before';",
+            "export const count = 1;",
+          ],
+          [
+            "export const title = 'after';",
+            "export const count = 2;",
+          ],
+        ),
+        file: sourcePath,
+        kind: "file",
+        removed: 2,
+      },
       result: "Edited src/app.tsx",
     },
     {
       toolCallId: "tc-showcase-hashline-edit",
       toolName: "hashline_edit",
       args: { path: sourcePath },
-      display: { file: sourcePath, kind: "file" },
+      display: {
+        added: 1,
+        diff: createReplacementDiff(
+          [
+            "function keep() {",
+            "  return 'old';",
+            "}",
+          ],
+          [
+            "function keep() {",
+            "  return 'new';",
+            "}",
+          ],
+        ),
+        file: sourcePath,
+        kind: "file",
+        removed: 1,
+      },
       result: "Edited line anchors in src/app.tsx",
     },
     {
@@ -489,7 +580,7 @@ function buildGiantHistoryTools() {
   const sourcePath = path.join(workspaceDir, "src", "app.tsx");
   return Array.from({ length: 100 }, (_, index) => {
     const batch = index + 1;
-    switch (index % 4) {
+    switch (index % 3) {
       case 0:
         return {
           toolCallId: \`tc-giant-read-\${batch}\`,
@@ -499,13 +590,6 @@ function buildGiantHistoryTools() {
           result: \`Read src/app.tsx batch \${batch}\`,
         };
       case 1:
-        return {
-          toolCallId: \`tc-giant-bash-\${batch}\`,
-          toolName: "bash",
-          args: { command: \`echo batch-\${batch}\` },
-          result: \`Ran batch \${batch}\`,
-        };
-      case 2:
         return {
           toolCallId: \`tc-giant-search-\${batch}\`,
           toolName: "web_search",
@@ -1164,7 +1248,13 @@ function handleControlResponse(frame) {
     setTimeout(() => {
       fs.writeFileSync(editFilePath, "after\\n", "utf8");
       send({
-        display: { file: editFilePath, kind: "file" },
+        display: {
+          added: 1,
+          diff: createReplacementDiff(["before"], ["after"]),
+          file: editFilePath,
+          kind: "file",
+          removed: 1,
+        },
         isError: false,
         result: { ok: true },
         sessionId,

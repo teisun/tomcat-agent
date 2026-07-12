@@ -164,6 +164,9 @@ async fn async_timeout_produces_error() {
                 written: false,
                 bytes_written: 0,
                 diff_hint: None,
+                added: None,
+                removed: None,
+                diff: None,
             })
         }
         async fn edit_file(
@@ -175,6 +178,9 @@ async fn async_timeout_produces_error() {
             Ok(EditFileResult {
                 path: String::new(),
                 applied: false,
+                added: None,
+                removed: None,
+                diff: None,
             })
         }
         async fn execute_bash(

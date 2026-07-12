@@ -27,6 +27,7 @@ import {
   assertWebviewSessionTitleFlow,
   assertWebviewSessionSwitchRestoreFlow,
   assertWebviewStreamingFlow,
+  assertTranscriptUiFlow,
   assertTranscriptSwitchBackOrder,
   getTomcatExtensionApi,
 } from "./support/hostE2eScenario";
@@ -105,6 +106,11 @@ suite("Tomcat host E2E", () => {
   test("renders ask_question answers in the Tomcat webview transcript", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewAnswerCardFlow(api);
+  });
+
+  test("renders transcript action rows and context groups in the Tomcat webview", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertTranscriptUiFlow(api);
   });
 
   test("resets interrupted Tomcat webview sessions back to send mode", async () => {

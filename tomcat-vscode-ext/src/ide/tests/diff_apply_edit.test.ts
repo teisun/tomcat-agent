@@ -51,4 +51,23 @@ describe("VsCodeIde diff/apply", () => {
       "hello from tomcat\n",
     );
   });
+
+  it("opens reconstructed diffs through the existing virtual document flow", async () => {
+    const ide = new VsCodeIde();
+
+    await ide.openReconstructedDiff(
+      "tool-3",
+      "src/reconstructed.ts",
+      "before\nold line",
+      "before\nnew line",
+    );
+
+    const diff = __testing.lastDiffCommand;
+    expect(diff?.title).toContain("reconstructed.ts");
+
+    const original = await vscode.workspace.openTextDocument(diff!.original);
+    const proposed = await vscode.workspace.openTextDocument(diff!.modified);
+    expect(original.getText()).toBe("before\nold line");
+    expect(proposed.getText()).toBe("before\nnew line");
+  });
 });

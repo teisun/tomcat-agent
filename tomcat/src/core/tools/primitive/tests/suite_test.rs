@@ -194,6 +194,8 @@ async fn write_file_success() {
         .await
         .unwrap();
     assert!(res.written);
+    assert_eq!(res.added, Some(1));
+    assert_eq!(res.removed, Some(0));
     assert_eq!(std::fs::read_to_string(&f).unwrap(), "content");
     let _ = std::fs::remove_file(&f);
     let _ = std::fs::remove_dir(&dir);
@@ -221,6 +223,8 @@ async fn write_file_with_cancel_skips_disk_write() {
         .expect("cancelled write should return a structured non-write result");
     assert!(!result.written);
     assert_eq!(result.bytes_written, 0);
+    assert_eq!(result.added, None);
+    assert_eq!(result.removed, None);
     assert_eq!(std::fs::read_to_string(&f).unwrap(), "old");
 }
 
@@ -285,6 +289,8 @@ async fn edit_file_success() {
     }];
     let res = exec.edit_file(&path_str, edits, "p1").await.unwrap();
     assert!(res.applied);
+    assert_eq!(res.added, Some(1));
+    assert_eq!(res.removed, Some(1));
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
         "line1\nreplaced\nline3"
@@ -321,6 +327,8 @@ async fn edit_file_with_cancel_skips_disk_write() {
         .await
         .expect("cancelled edit should return a structured non-apply result");
     assert!(!result.applied);
+    assert_eq!(result.added, None);
+    assert_eq!(result.removed, None);
     assert_eq!(
         std::fs::read_to_string(&f).unwrap(),
         "line1\nline2\nline3\n"
@@ -356,7 +364,40 @@ async fn hashline_edit_with_cancel_skips_disk_write() {
         .await
         .expect("cancelled hashline_edit should return a structured non-apply result");
     assert!(!result.applied);
+    assert_eq!(result.added, None);
+    assert_eq!(result.removed, None);
     assert_eq!(std::fs::read_to_string(&f).unwrap(), "alpha\nbeta\ngamma\n");
+}
+
+#[tokio::test]
+async fn hashline_edit_success_returns_line_diff_stat() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = dir.path().canonicalize().unwrap();
+    let f = dir.join("hashline-success.txt");
+    std::fs::write(&f, "alpha\nbeta\ngamma\n").unwrap();
+    let path_str = f.to_string_lossy().to_string();
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(&dir),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(&dir),
+    );
+    let segment = crate::core::tools::primitive::HashlineSegment {
+        op: crate::core::tools::primitive::HashlineOp::Replace,
+        start_line: 2,
+        start_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        end_line: 2,
+        end_hash: crate::core::tools::primitive::compute_line_hash("beta", 2),
+        lines: "changed\n".to_string(),
+    };
+    let result = exec
+        .hashline_edit_with_cancel(&path_str, vec![segment], &CancellationToken::new(), "p1")
+        .await
+        .expect("hashline_edit should succeed");
+    assert!(result.applied);
+    assert_eq!(result.added, Some(1));
+    assert_eq!(result.removed, Some(1));
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), "alpha\nchanged\ngamma\n");
 }
 
 #[tokio::test]
@@ -1963,6 +2004,8 @@ async fn write_normalizes_crlf_when_enabled() {
     assert_eq!(on_disk, b"a\nb\nc\n", "CRLF 应被折叠为 LF");
     assert_eq!(res.bytes_written, on_disk.len() as u64);
     assert!(res.diff_hint.is_none(), "新建文件不带 diff hint");
+    assert_eq!(res.added, Some(3));
+    assert_eq!(res.removed, Some(0));
     let _ = std::fs::remove_file(&f);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1989,6 +2032,8 @@ async fn write_does_not_normalize_when_disabled() {
     let on_disk = std::fs::read(&f).unwrap();
     assert_eq!(on_disk, b"a\r\nb\r\n", "normalize_crlf=false 时字节透传");
     assert_eq!(res.bytes_written, on_disk.len() as u64);
+    assert_eq!(res.added, Some(2));
+    assert_eq!(res.removed, Some(0));
     let _ = std::fs::remove_file(&f);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2091,6 +2136,8 @@ async fn write_result_includes_byte_count_and_diff_hint() {
         .unwrap();
     assert!(res.written);
     assert_eq!(res.bytes_written, new_content.len() as u64);
+    assert_eq!(res.added, Some(1));
+    assert_eq!(res.removed, Some(1));
     let hint = res.diff_hint.expect("覆盖写应返回 diff hint");
     assert!(
         hint.contains("line2") && hint.contains("LINE2"),

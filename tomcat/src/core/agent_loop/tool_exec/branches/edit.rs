@@ -41,6 +41,9 @@ pub(in super::super) async fn handle_edit(
             if r.applied {
                 *display_out = Some(ToolDisplay::File {
                     file: r.path.clone(),
+                    added: r.added,
+                    removed: r.removed,
+                    diff: r.diff.clone(),
                 });
                 format!("已编辑: {}", r.path)
             } else {

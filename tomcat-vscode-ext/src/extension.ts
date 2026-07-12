@@ -187,6 +187,9 @@ export interface TomcatExtensionApi {
       leftGuideLine: boolean;
       toolRowCount: number;
       toolCardCount: number;
+      actionToolRowCount: number;
+      editDiffBadgeCount: number;
+      commandBlockCount: number;
       fileChipOpen: boolean;
       sessionTitleUpdated: boolean;
     }>;

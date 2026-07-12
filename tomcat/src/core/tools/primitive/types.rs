@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::infra::error::AppError;
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -12,6 +13,25 @@ use tokio_util::sync::CancellationToken;
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffTag {
+    Add,
+    Del,
+    Ctx,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDiffLine {
+    pub tag: DiffTag,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_line: Option<u32>,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +47,15 @@ pub struct WriteFileResult {
     /// 新建文件场景为 `None`；同样为兼容默认 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_hint: Option<String>,
+    /// transcript UI 用的逐行 diff 统计，缺省时表示未发生写入或调用方不关心。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<u32>,
+    /// transcript UI 用的逐行 diff 统计，缺省时表示未发生写入或调用方不关心。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u32>,
+    /// transcript / IDE diff 展示复用的结构化逐行 diff。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<Vec<FileDiffLine>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +63,15 @@ pub struct WriteFileResult {
 pub struct EditFileResult {
     pub path: String,
     pub applied: bool,
+    /// transcript UI 用的逐行 diff 统计，缺省时表示未发生写入或调用方不关心。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<u32>,
+    /// transcript UI 用的逐行 diff 统计，缺省时表示未发生写入或调用方不关心。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u32>,
+    /// transcript / IDE diff 展示复用的结构化逐行 diff。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<Vec<FileDiffLine>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -123,6 +123,24 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
     );
   }
 
+  async openReconstructedDiff(
+    toolCallId: string,
+    displayPath: string,
+    before: string,
+    after: string,
+  ): Promise<void> {
+    const absolutePath = this.resolveWorkspacePath(displayPath);
+    this.preparedChanges.set(toolCallId, {
+      absolutePath,
+      displayPath,
+      existedBefore: before.length > 0,
+      originalContent: before,
+      proposedContent: after,
+      toolCallId,
+    });
+    await this.openPreparedDiff(toolCallId);
+  }
+
   async applyPreparedEdit(toolCallId: string): Promise<boolean> {
     const change = this.requirePreparedChange(toolCallId);
     const targetUri = vscode.Uri.file(change.absolutePath);

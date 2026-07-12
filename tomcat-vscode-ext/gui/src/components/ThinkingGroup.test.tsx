@@ -169,7 +169,7 @@ describe("ThinkingGroup", () => {
     expect(screen.getByTestId("thinking-group-title").textContent).toBe("Asked question");
   });
 
-  it("shows a loading status icon while streaming and a check when done", () => {
+  it("shows a loading status icon while streaming and a search icon for context groups when done", () => {
     const { rerender } = render(
       <ThinkingGroup
         group={buildGroup()}
@@ -190,7 +190,7 @@ describe("ThinkingGroup", () => {
     );
 
     expect(screen.getByTestId("thinking-group-status").className).toContain(
-      "codicon-check",
+      "codicon-search",
     );
   });
 
@@ -215,5 +215,25 @@ describe("ThinkingGroup", () => {
     expect(screen.getByTestId("thinking-group-title").className).toContain(
       "tc-thinking__title--shimmer",
     );
+  });
+
+  it("ignores summaryTitle when the group only contains thinking text", () => {
+    render(
+      <ThinkingGroup
+        group={buildGroup({
+          thinking: {
+            assistantMessageId: "assistant-1",
+            id: "think-1",
+            summaryTitle: "Ran wc -l README.md",
+            text: "Still reasoning about the command output.",
+            type: "thinking",
+          },
+          tools: [],
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe("Thinking");
   });
 });

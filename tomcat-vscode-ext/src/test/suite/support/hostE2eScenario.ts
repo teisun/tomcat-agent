@@ -227,6 +227,25 @@ async function waitForWebviewState<T>(
   throw new Error("Timed out waiting for webview state to match the expected condition");
 }
 
+async function waitForPreparedChange(
+  api: TomcatExtensionApi,
+  toolCallId: string,
+  predicate?: (
+    change: NonNullable<ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>>,
+  ) => boolean,
+  timeoutMs = 15_000,
+): Promise<NonNullable<ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>>> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const change = api.__testing.getPreparedChange(toolCallId);
+    if (change && (!predicate || predicate(change))) {
+      return change;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for prepared change ${toolCallId}`);
+}
+
 async function waitForSettingsPanelState<T>(
   api: TomcatExtensionApi,
   predicate: (
@@ -444,6 +463,9 @@ async function waitForWebviewDomSnapshot<T>(
         todoWidgetTitle: lastSnapshot.todoWidgetTitle,
         toolRowFlat: lastSnapshot.toolRowFlat,
         toolRowExpandable: lastSnapshot.toolRowExpandable,
+        actionToolRowCount: lastSnapshot.actionToolRowCount,
+        editDiffBadgeCount: lastSnapshot.editDiffBadgeCount,
+        commandBlockCount: lastSnapshot.commandBlockCount,
         ellipsisAboveGroupHeader: lastSnapshot.ellipsisAboveGroupHeader,
         leftGuideLine: lastSnapshot.leftGuideLine,
         sessionTitleUpdated: lastSnapshot.sessionTitleUpdated,
@@ -1153,6 +1175,45 @@ export async function assertWebviewStreamingFlow(
       && !snapshot.html.includes('data-testid="stop-button"'),
     "expected normal completion to return the webview composer to send mode",
   );
+  const sessionId = snapshot.activeSessionId;
+  assert.ok(sessionId, "expected an active session after the streaming flow completes");
+
+  await api.__testing.injectServeEvent({
+    args: { command: "npm test -- --watch=false" },
+    sessionId,
+    toolCallId: "streaming-bash-error-1",
+    toolName: "bash",
+    type: "tool_execution_start",
+  });
+  await api.__testing.injectServeEvent({
+    isError: true,
+    result: "npm ERR! missing script: test",
+    sessionId,
+    toolCallId: "streaming-bash-error-1",
+    toolName: "bash",
+    type: "tool_execution_end",
+  });
+  const commandSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.commandBlockCount >= 1 &&
+      candidate.html.includes("npm test -- --watch=false") &&
+      candidate.html.includes("npm ERR! missing script: test")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    commandSnapshot.commandBlockCount >= 1,
+    `expected an errored bash tool to auto-expand into a terminal block, got ${commandSnapshot.commandBlockCount}`,
+  );
+  assert.ok(
+    commandSnapshot.expandedToolTitles.some(
+      (title) => title.startsWith("Ran") && title.includes("npm test -- --watch=false"),
+    ),
+    `expected the errored bash row to auto-expand, got ${JSON.stringify(commandSnapshot.expandedToolTitles)}`,
+  );
 }
 
 export async function assertWebviewInterruptFlow(
@@ -1321,29 +1382,22 @@ export async function assertWebviewAnswerCardFlow(
   );
 
   await waitForEvent(api, { type: "tool_execution_end" });
-  await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      candidate.activeSessionId === sessionId &&
-      candidate.toolTitles.some((title) => /Asked question/i.test(title))
-        ? candidate
-        : undefined,
-    20_000,
-  );
-  await api.__testing.sendWebviewDomAction({
-    kind: "clickTestId",
-    testId: "tool-row-toggle",
-  });
   const snapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
+      candidate.actionToolRowCount >= 1 &&
+      candidate.toolTitles.some((title) => /Asked question/i.test(title)) &&
       candidate.html.includes('data-testid="answer-card"') &&
       candidate.html.includes("Deploy where?") &&
       candidate.html.includes("Staging")
         ? candidate
         : undefined,
     20_000,
+  );
+  assert.ok(
+    snapshot.actionToolRowCount >= 1,
+    `expected the answered ask_question row to stay visible, got ${snapshot.actionToolRowCount}`,
   );
   assert.doesNotMatch(snapshot.html, /"optionIds"\s*:/u);
 }
@@ -1418,28 +1472,74 @@ export async function assertWebviewDiffFlow(
   const snapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
-      candidate.activeSessionId === activeSessionId && candidate.toolRowCount > 0
+      candidate.activeSessionId === activeSessionId &&
+      candidate.actionToolRowCount >= 1 &&
+      candidate.editDiffBadgeCount >= 1 &&
+      /\+[0-9]+/.test(candidate.html) &&
+      /-[0-9]+/.test(candidate.html)
         ? candidate
         : undefined,
     20_000,
   );
-  assert.doesNotMatch(snapshot.html, /Open Diff/u);
+  assert.ok(
+    snapshot.editDiffBadgeCount >= 1,
+    `expected at least one edit diff badge, got ${snapshot.editDiffBadgeCount}`,
+  );
+  assert.match(snapshot.html, /\+[0-9]+/u);
+  assert.match(snapshot.html, /-[0-9]+/u);
+  assert.match(snapshot.html, /View diff/u);
+  assert.match(snapshot.html, /before/u);
+  assert.match(snapshot.html, /after/u);
   assert.doesNotMatch(snapshot.html, /Apply Edit/u);
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: { toolCallId: "tool-edit-1" },
-      messageId: "webview-open-diff",
-      type: "openDiff",
-    }),
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "tool-row-open-diff",
+  });
+  const preparedChange = await waitForPreparedChange(
+    api,
+    "tool-edit-1",
+    (change) => change.originalContent === "before" && change.proposedContent === "after",
   );
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: { toolCallId: "tool-edit-1" },
-      messageId: "webview-apply-edit",
-      type: "applyEdit",
-    }),
-  );
+  assert.equal(preparedChange.displayPath, editFile);
+  assert.equal(preparedChange.originalContent, "before");
+  assert.equal(preparedChange.proposedContent, "after");
   assert.equal(await fs.readFile(editFile, "utf8"), "after\n");
+
+  await api.__testing.injectServeEvent({
+    assistantMessageId: "assistant-read-standalone",
+    assistantMessageEvent: { delta: "Inspecting README.md", kind: "content_delta" },
+    message: {},
+    sessionId: activeSessionId,
+    type: "message_update",
+  });
+  await api.__testing.injectServeEvent({
+    args: { path: "README.md" },
+    sessionId: activeSessionId,
+    toolCallId: "tool-read-standalone",
+    toolName: "read",
+    type: "tool_execution_start",
+  });
+  await api.__testing.injectServeEvent({
+    display: { file: "README.md", kind: "file" },
+    isError: false,
+    result: "# readme\n",
+    sessionId: activeSessionId,
+    toolCallId: "tool-read-standalone",
+    toolName: "read",
+    type: "tool_execution_end",
+  });
+  const readSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === activeSessionId &&
+      candidate.fileChipVisible &&
+      candidate.toolTitles.some((title) => /Read/u.test(title)) &&
+      candidate.html.includes("README.md")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(readSnapshot.fileChipVisible, "expected a standalone read row to render a file chip");
 }
 
 export async function assertWebviewMultiSessionFlow(
@@ -1994,24 +2094,10 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
     restored.groupFoldTitles.some((title) => title.includes("Giant history tool group")),
     "expected the giant tool group header to appear once the head arrives",
   );
-
-  await api.__testing.sendWebviewDomAction({
-    index: -1,
-    kind: "clickTestId",
-    testId: "thinking-group-toggle",
-  });
-  const expanded = await waitForWebviewDomSnapshot(
-    api,
-    (snapshot) =>
-      snapshot.activeSessionId === sessionId &&
-      snapshot.toolTitles.length >= 90
-        ? snapshot
-        : undefined,
-    20_000,
-  );
-  assert.ok(
-    expanded.toolTitles.length >= 90,
-    `expected nearly the full giant group after expansion, got ${expanded.toolTitles.length} tool rows`,
+  assert.equal(
+    restored.toolRowCount,
+    0,
+    "expected the recovered giant group to remain folded instead of rendering a half-loaded subset",
   );
 }
 
@@ -2991,12 +3077,12 @@ export async function assertTranscriptUiFlow(
   const busyStageTimeoutMs = requireBusyProgress ? 15_000 : 3_000;
   const collapsedPredicate = (candidate: Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureWebviewDom"]>>) =>
     candidate.assistantResponseGroups >= 1 &&
+    candidate.actionToolRowCount >= 1 &&
     candidate.planCardCount >= 1 &&
     !candidate.progressRow &&
     !candidate.todoWidgetVisible &&
     candidate.userPromptPill &&
     candidate.assistantNoCard &&
-    candidate.ellipsisAboveGroupHeader &&
     candidate.sessionTitleUpdated &&
     candidate.groupFoldTitles.some((title) => title.trim().length > 0) &&
     candidate.planCardTodoCountText === "4 todos" &&
@@ -3094,6 +3180,19 @@ export async function assertTranscriptUiFlow(
     "expected at least one assistant response group",
   );
   assert.ok(
+    collapsed.actionToolRowCount >= 1,
+    `expected at least one standalone action tool row before expanding context, got ${collapsed.actionToolRowCount}`,
+  );
+  assert.equal(
+    collapsed.commandBlockCount,
+    1,
+    `expected the successful bash showcase row to render once, got ${collapsed.commandBlockCount}`,
+  );
+  assert.ok(
+    !collapsed.expandedToolTitles.some((title) => title.includes("Ran git status --short")),
+    `expected the successful bash showcase row to stay collapsed, got ${JSON.stringify(collapsed.expandedToolTitles)}`,
+  );
+  assert.ok(
     collapsed.groupFoldTitles.some((title) => title.trim().length > 0),
     "expected a non-empty group fold title",
   );
@@ -3104,10 +3203,6 @@ export async function assertTranscriptUiFlow(
   assert.ok(
     collapsed.assistantNoCard,
     "expected an assistant message without a card border",
-  );
-  assert.ok(
-    collapsed.ellipsisAboveGroupHeader,
-    "expected the assistant preamble above the group header",
   );
   assert.ok(
     collapsed.planCardCount >= 1,
@@ -3147,161 +3242,35 @@ export async function assertTranscriptUiFlow(
     await api.__testing.focusWebview();
     captureTranscriptVisual("collapsed");
   }
-  await api.__testing.focusWebview();
-  await api.__testing.sendWebviewDomAction({
-    kind: "clickTestId",
-    testId: "thinking-group-toggle",
-  });
-  const expanded = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      candidate.toolRowFlat && candidate.leftGuideLine ? candidate : undefined,
+  assert.ok(
+    collapsed.groupFoldTitles.some((title) => title.includes("Reviewed 1 file")),
+    `expected the first context segment to fold into "Reviewed 1 file", got ${JSON.stringify(collapsed.groupFoldTitles)}`,
   );
   assert.ok(
-    expanded.toolRowFlat,
-    "expected a flat tool row not wrapped in a card",
-  );
-  assert.ok(
-    expanded.toolRowExpandable,
-    "expected an expandable tool row chevron",
-  );
-  assert.ok(
-    expanded.leftGuideLine,
-    "expected the thinking-tool guide line wrapper",
-  );
-  assert.ok(
-    expanded.toolRowCount >= 3,
-    `expected at least 3 flat tool rows (read/bash/web_search), got ${expanded.toolRowCount}`,
+    collapsed.toolTitles.some((title) => title.includes('Searched "vscode chat thinking collapsible"')),
+    `expected the trailing single web_search context tool to render as a standalone row, got ${JSON.stringify(collapsed.toolTitles)}`,
   );
   assert.equal(
-    expanded.toolCardCount,
+    collapsed.toolRowCount,
+    2,
+    `expected the standalone bash row plus the trailing single web_search context row while context stays folded, got ${collapsed.toolRowCount}`,
+  );
+  assert.equal(
+    collapsed.toolCardCount,
     0,
-    `expected no tool-call cards after grouping fix, got ${expanded.toolCardCount}`,
-  );
-  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    await api.__testing.focusWebview();
-    captureTranscriptVisual("expanded");
-  }
-
-  await api.__testing.sendWebviewDomAction({
-    kind: "scrollIntoView",
-    scrollBlock: "center",
-    testId: "file-chip",
-  });
-  const fileChipReady = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      candidate.fileChipVisible &&
-      typeof candidate.fileChipTopWithinStream === "number" &&
-      candidate.fileChipTopWithinStream > 40 &&
-      candidate.fileChipTopWithinStream < 380
-        ? candidate
-        : undefined,
-  );
-  assert.ok(fileChipReady.fileChipVisible, "expected the file chip to be visible before the close-up screenshot");
-  assert.ok(
-    typeof fileChipReady.fileChipTopWithinStream === "number" &&
-      fileChipReady.fileChipTopWithinStream > 40 &&
-      fileChipReady.fileChipTopWithinStream < 380,
-    `expected file chip to be near the upper viewport, got ${fileChipReady.fileChipTopWithinStream}`,
-  );
-  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    await api.__testing.focusWebview();
-    captureTranscriptVisual("file-chip");
-  }
-
-  await api.__testing.sendWebviewDomAction({
-    kind: "clickTestId",
-    testId: "file-chip",
-  });
-  const opened = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) => (candidate.fileChipOpen ? candidate : undefined),
+    `expected no tool-call cards after grouping fix, got ${collapsed.toolCardCount}`,
   );
   assert.ok(
-    opened.fileChipOpen,
-    "expected clicking a file chip to trigger an openFile intent",
-  );
-
-  api.__testing.clearObservedEvents();
-  const toolIconSessionId = await createFreshWebviewSession(
-    api,
-    "webview-tool-icons-new-session",
-  );
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: { sessionId: toolIconSessionId, text: "tool icon showcase" },
-      messageId: "webview-tool-icons-prompt",
-      type: "prompt",
-    }),
-  );
-  await waitForEvent(api, { sessionId: toolIconSessionId, type: "agent_end" });
-  const toolIconCollapsed = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) =>
-      candidate.assistantResponseGroups >= 1 &&
-      candidate.groupFoldTitles.some((title) => title.includes("Built-in tool icons"))
-        ? candidate
-        : undefined,
+    collapsed.html.includes("git status --short"),
+    "expected the standalone bash action row to keep its command chip visible",
   );
   assert.ok(
-    toolIconCollapsed.groupFoldTitles.some((title) => title.includes("Built-in tool icons")),
-    "expected the tool icon showcase group title",
+    collapsed.html.includes("plans/transcript-ui-showcase.plan.md"),
+    "expected the collapsed bash card to show a tail preview of command output",
   );
-  await api.__testing.focusWebview();
-  await api.__testing.sendWebviewDomAction({
-    kind: "clickTestId",
-    testId: "thinking-group-toggle",
-  });
-  let toolIconExpanded = await waitForWebviewDomSnapshot(
-    api,
-    (candidate) => (candidate.toolRowCount >= 16 ? candidate : undefined),
+  assert.equal(
+    (collapsed.html.match(/git status --short/g) ?? []).length,
+    1,
+    "expected the standalone bash command to render once without duplicate fold titles",
   );
-  if (toolIconExpanded.toolRowCount < 19) {
-    await api.__testing.sendWebviewDomAction({
-      kind: "clickTestId",
-      testId: "thinking-group-toggle",
-      index: -1,
-    });
-    toolIconExpanded = await waitForWebviewDomSnapshot(
-      api,
-      (candidate) => (candidate.toolRowCount >= 19 ? candidate : undefined),
-    );
-  }
-  assert.ok(
-    toolIconExpanded.toolRowCount >= 19,
-    `expected all built-in tool rows in the showcase, got ${toolIconExpanded.toolRowCount}`,
-  );
-  assert.ok(
-    toolIconExpanded.html.includes("Loaded skill sdk"),
-    "expected the showcase to include load_skill",
-  );
-  assert.ok(
-    toolIconExpanded.html.includes("Read config llm.default_model"),
-    "expected the showcase to include config_get",
-  );
-  assert.ok(
-    toolIconExpanded.html.includes("Created plan"),
-    "expected the showcase to include create_plan",
-  );
-  assert.ok(
-    toolIconExpanded.html.includes("Asked question"),
-    "expected the showcase to include ask_question",
-  );
-  await api.__testing.sendWebviewDomAction({
-    edge: "top",
-    kind: "scrollToEdge",
-    testId: "stream-container",
-  });
-  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    await api.__testing.focusWebview();
-    captureTranscriptVisual("tool-icons");
-    await api.__testing.sendWebviewDomAction({
-      edge: "bottom",
-      kind: "scrollToEdge",
-      testId: "stream-container",
-    });
-    await api.__testing.focusWebview();
-    captureTranscriptVisual("tool-icons-bottom");
-  }
 }

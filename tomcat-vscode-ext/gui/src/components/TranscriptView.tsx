@@ -14,12 +14,71 @@ import { PlanFileCard } from "./PlanFileCard";
 import { ProgressRow } from "./ProgressRow";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ThinkingGroup } from "./ThinkingGroup";
-import { ToolRow } from "./ToolRow";
+import { isActionTool, ToolRow } from "./ToolRow";
 import {
   groupTimelineByAssistantResponse,
   type AssistantResponseGroup,
   type GroupedTimelineEntry,
 } from "./sessionList/groupTimelineByAssistantResponse";
+
+export type AssistantRenderEntry =
+  | {
+      group: AssistantResponseGroup;
+      type: "context-group";
+    }
+  | {
+      tool: Extract<WebviewTimelineItem, { type: "tool" }>;
+      type: "action-tool";
+    };
+
+export function partitionAssistantResponseGroup(
+  group: AssistantResponseGroup,
+): AssistantRenderEntry[] {
+  const entries: AssistantRenderEntry[] = [];
+  const bufferedTools: AssistantResponseGroup["tools"] = [];
+  let thinkingConsumed = false;
+
+  const flushContext = () => {
+    const includeThinking =
+      !thinkingConsumed &&
+      !!group.thinking &&
+      (bufferedTools.length > 0 || Boolean(group.thinking.text.trim()));
+    if (!includeThinking && bufferedTools.length === 0) {
+      return;
+    }
+    entries.push({
+      group: {
+        assistantMessageId: group.assistantMessageId,
+        thinking: includeThinking ? group.thinking : undefined,
+        tools: [...bufferedTools],
+        type: "assistant-response-group",
+      },
+      type: "context-group",
+    });
+    bufferedTools.length = 0;
+    thinkingConsumed = thinkingConsumed || includeThinking;
+  };
+
+  if (group.tools.length === 0) {
+    flushContext();
+    return entries;
+  }
+
+  for (const tool of group.tools) {
+    if (isActionTool(tool)) {
+      flushContext();
+      entries.push({
+        tool,
+        type: "action-tool",
+      });
+      continue;
+    }
+    bufferedTools.push(tool);
+  }
+
+  flushContext();
+  return entries;
+}
 
 export function TranscriptView({
   busy,
@@ -27,6 +86,7 @@ export function TranscriptView({
   canBuildPlan,
   onAnswer,
   onBuildPlan,
+  onOpenDiff,
   onOpenFile,
   onOpenPlanFile,
   onRetryUserMessage,
@@ -41,6 +101,7 @@ export function TranscriptView({
   canBuildPlan: boolean;
   onAnswer(requestId: string, result: AskQuestionResult): void;
   onBuildPlan(planId: string | null, path: string): void;
+  onOpenDiff?(toolCallId: string): void;
   onOpenFile(path: string): void;
   onOpenPlanFile(path: string): void;
   onRetryUserMessage?(messageId: string): void;
@@ -62,36 +123,53 @@ export function TranscriptView({
   const renderGroupedItem = (item: GroupedTimelineEntry) => {
     if ("type" in item && item.type === "assistant-response-group") {
       const group = item as AssistantResponseGroup;
-      const hasMeaningfulThinking = Boolean(group.thinking?.text.trim());
-      if (group.tools.length === 1 && !hasMeaningfulThinking) {
-        return (
-          <Fragment key={`group-tool-${group.assistantMessageId}`}>
-            {group.preamble ? (
-              <MessageBubble
-                item={group.preamble}
-                key={`${group.preamble.id}-solo`}
-                onRetry={onRetryUserMessage}
-              />
-            ) : null}
-            <ToolRow
-              item={group.tools[0]}
-              key={`group-tool-row-${group.tools[0].id}`}
-              onOpenFile={onOpenFile}
-            />
-          </Fragment>
-        );
-      }
-      const isStreaming =
-        busy &&
-        (group.thinking?.id === lastThinkingId ||
-          group.tools.some((tool) => tool.status !== "complete"));
+      const segments = partitionAssistantResponseGroup(group);
       return (
-        <ThinkingGroup
-          group={group}
-          isStreaming={isStreaming}
-          key={`group-${group.assistantMessageId}`}
-          onOpenFile={onOpenFile}
-        />
+        <Fragment key={`group-${group.assistantMessageId}`}>
+          {group.preamble ? (
+            <MessageBubble
+              item={group.preamble}
+              key={`${group.preamble.id}-preamble`}
+              onRetry={onRetryUserMessage}
+            />
+          ) : null}
+          {segments.map((segment, index) => {
+            if (segment.type === "action-tool") {
+              return (
+                <ToolRow
+                  item={segment.tool}
+                  key={`group-action-${segment.tool.id}`}
+                  onOpenDiff={onOpenDiff}
+                  onOpenFile={onOpenFile}
+                />
+              );
+            }
+            const hasThinkingText = Boolean(segment.group.thinking?.text.trim());
+            if (segment.group.tools.length === 1 && !hasThinkingText) {
+              return (
+                <ToolRow
+                  item={segment.group.tools[0]}
+                  key={`group-context-standalone-${segment.group.tools[0].id}`}
+                  onOpenDiff={onOpenDiff}
+                  onOpenFile={onOpenFile}
+                />
+              );
+            }
+            const isStreaming =
+              busy &&
+              (segment.group.thinking?.id === lastThinkingId ||
+                segment.group.tools.some((tool) => tool.status !== "complete"));
+            return (
+              <ThinkingGroup
+                group={segment.group}
+                isStreaming={isStreaming}
+                key={`group-context-${group.assistantMessageId}-${index}`}
+                onOpenDiff={onOpenDiff}
+                onOpenFile={onOpenFile}
+              />
+            );
+          })}
+        </Fragment>
       );
     }
 
@@ -117,6 +195,7 @@ export function TranscriptView({
           <ToolRow
             item={item}
             key={item.id}
+            onOpenDiff={onOpenDiff}
             onOpenFile={onOpenFile}
           />
         );

@@ -527,3 +527,250 @@ describe("context search intent handling", () => {
     provider.dispose();
   });
 });
+
+describe("mutation diff stat injection", () => {
+  it("derives added/removed stats directly from file display metadata", async () => {
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      getUiMode: () => "webview",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      ownership: {
+        ownerOf() {
+          return null;
+        },
+        releaseAll() {},
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      display: {
+        added: 2,
+        diff: [
+          { newLine: 1, oldLine: null, tag: "add", text: "export const x = 1;" },
+          { newLine: 2, oldLine: null, tag: "add", text: "export const y = 2;" },
+        ],
+        file: "src/new.ts",
+        kind: "file",
+        removed: 0,
+      },
+      isError: false,
+      result: "created file",
+      sessionId: "s1",
+      toolCallId: "tool-write-1",
+      toolName: "write",
+      type: "tool_execution_end",
+    });
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      display: { added: 0, file: "src/steady.ts", kind: "file", removed: 0 },
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-edit-1",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+
+    const tools = provider
+      .currentState()
+      .sessionViews.s1.timeline.filter((item) => item.type === "tool");
+    expect(
+      tools.find((tool) => tool.toolCallId === "tool-write-1"),
+    ).toMatchObject({
+      diff: [
+        { newLine: 1, oldLine: null, tag: "add", text: "export const x = 1;" },
+        { newLine: 2, oldLine: null, tag: "add", text: "export const y = 2;" },
+      ],
+      diffStat: {
+        added: 2,
+        removed: 0,
+      },
+      toolCallId: "tool-write-1",
+    });
+    expect(
+      tools.find((tool) => tool.toolCallId === "tool-edit-1"),
+    ).toMatchObject({
+      diffStat: {
+        added: 0,
+        removed: 0,
+      },
+      toolCallId: "tool-edit-1",
+    });
+
+    provider.dispose();
+  });
+
+  it("keeps diff stats empty when file display omits counts", async () => {
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      getUiMode: () => "webview",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      ownership: {
+        ownerOf() {
+          return null;
+        },
+        releaseAll() {},
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      display: { file: "src/app.ts", kind: "file" },
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-edit-1",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+
+    const tool = provider
+      .currentState()
+      .sessionViews.s1.timeline.find((item) => item.type === "tool" && item.toolCallId === "tool-edit-1");
+    expect(tool).toMatchObject({
+      toolCallId: "tool-edit-1",
+      type: "tool",
+    });
+    expect(tool && "diffStat" in tool ? tool.diffStat : undefined).toBeUndefined();
+    expect(tool && "diff" in tool ? tool.diff : undefined).toBeUndefined();
+
+    provider.dispose();
+  });
+
+  it("routes openDiff intents into ide.openReconstructedDiff", async () => {
+    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
+    const showFile = vi.fn().mockResolvedValue(undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      getUiMode: () => "webview",
+      ide: {
+        openReconstructedDiff,
+        showFile,
+      } as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      ownership: {
+        ownerOf() {
+          return null;
+        },
+        releaseAll() {},
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      display: {
+        added: 1,
+        diff: [
+          { newLine: 1, oldLine: 1, tag: "ctx", text: "before" },
+          { newLine: null, oldLine: 2, tag: "del", text: "old line" },
+          { newLine: 2, oldLine: null, tag: "add", text: "new line" },
+        ],
+        file: "src/app.ts",
+        kind: "file",
+        removed: 1,
+      },
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-edit-1",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+
+    await provider.dispatchTestIntent({
+      data: { toolCallId: "tool-edit-1" },
+      messageId: "intent-open-diff-1",
+      type: "openDiff",
+    });
+
+    expect(openReconstructedDiff).toHaveBeenCalledWith(
+      "tool-edit-1",
+      "src/app.ts",
+      "before\nold line",
+      "before\nnew line",
+    );
+    expect(showFile).not.toHaveBeenCalled();
+
+    provider.dispose();
+  });
+
+  it("falls back to ide.showFile when openDiff has no structured diff", async () => {
+    const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
+    const showFile = vi.fn().mockResolvedValue(undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      getUiMode: () => "webview",
+      ide: {
+        openReconstructedDiff,
+        showFile,
+      } as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      ownership: {
+        ownerOf() {
+          return null;
+        },
+        releaseAll() {},
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      display: { added: 8, file: "src/huge.ts", kind: "file", removed: 2 },
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-edit-2",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+
+    await provider.dispatchTestIntent({
+      data: { toolCallId: "tool-edit-2" },
+      messageId: "intent-open-diff-2",
+      type: "openDiff",
+    });
+
+    expect(showFile).toHaveBeenCalledWith("src/huge.ts");
+    expect(openReconstructedDiff).not.toHaveBeenCalled();
+
+    provider.dispose();
+  });
+});

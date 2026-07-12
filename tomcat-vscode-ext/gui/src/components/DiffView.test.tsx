@@ -1,0 +1,75 @@
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+
+import type { FileDiffLine } from "../types";
+import { DiffView } from "./DiffView";
+
+function buildDiff(lines: FileDiffLine[]): FileDiffLine[] {
+  return lines;
+}
+
+describe("DiffView", () => {
+  it("renders add/delete rows with line numbers", () => {
+    render(
+      <DiffView
+        diff={buildDiff([
+          { newLine: 1, oldLine: 1, tag: "ctx", text: "const a = 1;" },
+          { newLine: null, oldLine: 2, tag: "del", text: "const b = 2;" },
+          { newLine: 2, oldLine: null, tag: "add", text: "const b = 3;" },
+        ])}
+      />,
+    );
+
+    expect(screen.getByTestId("diff-view").textContent).toContain("const b = 2;");
+    expect(screen.getByTestId("diff-view").textContent).toContain("const b = 3;");
+  });
+
+  it("folds long unchanged context runs in full mode", () => {
+    render(
+      <DiffView
+        diff={buildDiff([
+          { newLine: 1, oldLine: 1, tag: "ctx", text: "line 1" },
+          { newLine: 2, oldLine: 2, tag: "ctx", text: "line 2" },
+          { newLine: 3, oldLine: 3, tag: "ctx", text: "line 3" },
+          { newLine: 4, oldLine: 4, tag: "ctx", text: "line 4" },
+          { newLine: 5, oldLine: 5, tag: "ctx", text: "line 5" },
+          { newLine: 6, oldLine: 6, tag: "ctx", text: "line 6" },
+          { newLine: 7, oldLine: 7, tag: "ctx", text: "line 7" },
+          { newLine: 8, oldLine: 8, tag: "ctx", text: "line 8" },
+          { newLine: 9, oldLine: 9, tag: "add", text: "line 9" },
+        ])}
+      />,
+    );
+
+    expect(screen.getByTestId("diff-fold-marker").textContent).toContain("4 unmodified lines");
+    expect(screen.getByTestId("diff-view").textContent).toContain("line 1");
+    expect(screen.getByTestId("diff-view").textContent).toContain("line 8");
+  });
+
+  it("keeps only the last preview rows in preview mode", () => {
+    render(
+      <DiffView
+        diff={buildDiff([
+          { newLine: 1, oldLine: null, tag: "add", text: "line 1" },
+          { newLine: 2, oldLine: null, tag: "add", text: "line 2" },
+          { newLine: 3, oldLine: null, tag: "add", text: "line 3" },
+          { newLine: 4, oldLine: null, tag: "add", text: "line 4" },
+          { newLine: 5, oldLine: null, tag: "add", text: "line 5" },
+          { newLine: 6, oldLine: null, tag: "add", text: "line 6" },
+        ])}
+        previewLines={3}
+      />,
+    );
+
+    const preview = screen.getByTestId("diff-view-preview").textContent ?? "";
+    expect(preview).not.toContain("line 1");
+    expect(preview).toContain("line 4");
+    expect(preview).toContain("line 6");
+  });
+
+  it("shows a fallback message when inline diff is unavailable", () => {
+    render(<DiffView diff={undefined} />);
+
+    expect(screen.getByTestId("diff-view-empty").textContent).toContain("File too large");
+  });
+});

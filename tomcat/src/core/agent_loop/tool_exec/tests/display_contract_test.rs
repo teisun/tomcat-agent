@@ -46,6 +46,28 @@ impl PrimitiveExecutor for DisplayPrimitive {
             written: true,
             bytes_written: 12,
             diff_hint: None,
+            added: Some(3),
+            removed: Some(0),
+            diff: Some(vec![
+                crate::core::tools::primitive::FileDiffLine {
+                    tag: crate::core::tools::primitive::DiffTag::Add,
+                    old_line: None,
+                    new_line: Some(1),
+                    text: "hello".to_string(),
+                },
+                crate::core::tools::primitive::FileDiffLine {
+                    tag: crate::core::tools::primitive::DiffTag::Add,
+                    old_line: None,
+                    new_line: Some(2),
+                    text: "world".to_string(),
+                },
+                crate::core::tools::primitive::FileDiffLine {
+                    tag: crate::core::tools::primitive::DiffTag::Add,
+                    old_line: None,
+                    new_line: Some(3),
+                    text: "!".to_string(),
+                },
+            ]),
         })
     }
 
@@ -148,6 +170,28 @@ async fn write_success_populates_file_display() {
         outcome.display,
         Some(ToolDisplay::File {
             file: "~/workspace/demo.txt".to_string(),
+            added: Some(3),
+            removed: Some(0),
+            diff: Some(vec![
+                crate::core::tools::primitive::FileDiffLine {
+                    tag: crate::core::tools::primitive::DiffTag::Add,
+                    old_line: None,
+                    new_line: Some(1),
+                    text: "hello".to_string(),
+                },
+                crate::core::tools::primitive::FileDiffLine {
+                    tag: crate::core::tools::primitive::DiffTag::Add,
+                    old_line: None,
+                    new_line: Some(2),
+                    text: "world".to_string(),
+                },
+                crate::core::tools::primitive::FileDiffLine {
+                    tag: crate::core::tools::primitive::DiffTag::Add,
+                    old_line: None,
+                    new_line: Some(3),
+                    text: "!".to_string(),
+                },
+            ]),
         })
     );
 }

@@ -1,5 +1,6 @@
 mod common;
 
+use serial_test::serial;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -62,6 +63,7 @@ fn profile_real_llm_filter(config: &toml::Value) -> &str {
 }
 
 #[test]
+#[serial(env_lock)]
 fn temp_home_guard_switches_and_restores_home() {
     let original_home = std::env::var_os("HOME");
     let temp_home = {
@@ -100,6 +102,7 @@ fn temp_home_guard_switches_and_restores_home() {
 }
 
 #[test]
+#[serial(env_lock)]
 fn temp_home_guard_keeps_multiple_workdirs_isolated_under_same_temp_home() {
     let guard = common::TempHomeGuard::new();
     let first = common::dot_tomcat_e2e_workdir("first");

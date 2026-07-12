@@ -29,13 +29,23 @@
 use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str, url_like_fs_miss};
 use super::read::compute_line_hash;
 use super::DefaultPrimitiveExecutor;
+use crate::core::tools::primitive::diff::{build_line_diff, line_diff_stat};
 use crate::core::tools::primitive::{
-    EditFileResult, HashlineOp, HashlineSegment, PrimitiveOperation,
+    EditFileResult, FileDiffLine, HashlineOp, HashlineSegment, PrimitiveOperation,
 };
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
 use crate::infra::platform::{read_file_utf8, write_file_atomic};
 use tokio_util::sync::CancellationToken;
+
+enum HashlineEditOutcome {
+    Applied {
+        added: u32,
+        removed: u32,
+        diff: Option<Vec<FileDiffLine>>,
+    },
+    Cancelled,
+}
 
 /// 主执行入口（被 `DefaultPrimitiveExecutor` 的 trait 实现调用）。
 /// `PrimitiveExecutor` trait，避免再次牵动 dispatcher / mock）。
@@ -57,7 +67,7 @@ pub async fn hashline_edit_impl(
     let user_path = path.to_string();
     let segments_for_edit = segments.clone();
     let cancel_for_edit = cancel.clone();
-    let outcome = tokio::task::spawn_blocking(move || -> Result<bool, AppError> {
+    let outcome = tokio::task::spawn_blocking(move || -> Result<HashlineEditOutcome, AppError> {
         let original = read_file_utf8(&path_for_edit).map_err(|e| match e {
             AppError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData => {
                 AppError::Primitive(format!(
@@ -141,27 +151,33 @@ pub async fn hashline_edit_impl(
             };
             new_content.replace_range(s_byte..e_byte, &replacement);
         }
+        let (added, removed) = line_diff_stat(&original, &new_content);
+        let diff = build_line_diff(&original, &new_content);
 
         if cancel_for_edit.is_cancelled() {
-            return Ok(false);
+            return Ok(HashlineEditOutcome::Cancelled);
         }
         let backup_path = path_for_edit.with_extension("bak");
         std::fs::copy(&path_for_edit, &backup_path).map_err(AppError::Io)?;
         if cancel_for_edit.is_cancelled() {
             let _ = std::fs::remove_file(&backup_path);
-            return Ok(false);
+            return Ok(HashlineEditOutcome::Cancelled);
         }
         if let Err(e) = write_file_atomic(&path_for_edit, new_content.as_bytes()) {
             let _ = std::fs::copy(&backup_path, &path_for_edit);
             return Err(e);
         }
         let _ = std::fs::remove_file(&backup_path);
-        Ok(true)
+        Ok(HashlineEditOutcome::Applied {
+            added,
+            removed,
+            diff,
+        })
     })
     .await
     .map_err(|e| AppError::Primitive(format!("hashline_edit join error: {e}")))?;
     match outcome {
-        Ok(false) => {
+        Ok(HashlineEditOutcome::Cancelled) => {
             executor.audit.record_primitive(PrimitiveAuditEntry {
                 operation: AuditPrimitiveOp::Edit,
                 path_or_cmd: path_str.clone(),
@@ -176,6 +192,9 @@ pub async fn hashline_edit_impl(
             return Ok(EditFileResult {
                 path: crate::infra::platform::format_home_path(&path_buf),
                 applied: false,
+                added: None,
+                removed: None,
+                diff: None,
             });
         }
         Err(e) => {
@@ -192,23 +211,31 @@ pub async fn hashline_edit_impl(
             });
             return Err(e);
         }
-        Ok(true) => {}
+        Ok(HashlineEditOutcome::Applied {
+            added,
+            removed,
+            diff,
+        }) => {
+            executor.audit.record_primitive(PrimitiveAuditEntry {
+                operation: AuditPrimitiveOp::Edit,
+                path_or_cmd: path_str,
+                plugin_id: plugin_id.to_string(),
+                user_approved: true,
+                success: true,
+                detail: Some("hashline_edit".to_string()),
+                permission_scope: Some(permission_scope_str(scope)),
+                grant_type: Some(grant_type_str(grant.grant_type)),
+                grant_trigger: Some(grant_trigger_str(grant.trigger)),
+            });
+            return Ok(EditFileResult {
+                path: crate::infra::platform::format_home_path(&path_buf),
+                applied: true,
+                added: Some(added),
+                removed: Some(removed),
+                diff,
+            });
+        }
     }
-    executor.audit.record_primitive(PrimitiveAuditEntry {
-        operation: AuditPrimitiveOp::Edit,
-        path_or_cmd: path_str,
-        plugin_id: plugin_id.to_string(),
-        user_approved: true,
-        success: true,
-        detail: Some("hashline_edit".to_string()),
-        permission_scope: Some(permission_scope_str(scope)),
-        grant_type: Some(grant_type_str(grant.grant_type)),
-        grant_trigger: Some(grant_trigger_str(grant.trigger)),
-    });
-    Ok(EditFileResult {
-        path: crate::infra::platform::format_home_path(&path_buf),
-        applied: true,
-    })
 }
 
 fn strip_trailing_newline(line: &str) -> &str {

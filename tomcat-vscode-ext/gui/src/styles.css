@@ -1179,15 +1179,24 @@ input:focus-visible {
 }
 
 .tc-scroll-jump {
-  background: var(--vscode-button-background);
-  border: 1px solid var(--vscode-button-border, rgba(127, 127, 127, 0.3));
+  align-items: center;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.28));
   border-radius: 999px;
   bottom: 12px;
-  color: var(--vscode-button-foreground);
+  color: var(--vscode-descriptionForeground);
   cursor: pointer;
-  padding: 6px 12px;
+  display: inline-flex;
+  height: 30px;
+  justify-content: center;
+  padding: 0;
   position: absolute;
   right: 12px;
+  width: 30px;
+}
+
+.tc-scroll-jump:hover {
+  color: var(--vscode-foreground);
 }
 
 .tc-transcript {
@@ -1707,6 +1716,17 @@ input:focus-visible {
   white-space: pre-wrap;
 }
 
+.tc-tool-row-shell {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tc-tool-row-shell--standalone {
+  margin: 2px 0 8px;
+}
+
 .tc-thinking-tool-wrapper {
   padding-left: 24px;
   position: relative;
@@ -1736,11 +1756,26 @@ input:focus-visible {
   width: 16px;
 }
 
+.tc-tool-row__leading-icon {
+  align-items: center;
+  color: var(--vscode-descriptionForeground);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 16px;
+  justify-content: center;
+  line-height: 1;
+  margin-top: 3px;
+  width: 16px;
+}
+
 .tc-tool-row {
+  background: transparent;
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   font-size: 13px;
-  gap: 3px;
+  gap: 6px;
+  min-width: 0;
 }
 
 .tc-tool-row__header {
@@ -1791,6 +1826,19 @@ input:focus-visible {
   min-width: 0;
 }
 
+.tc-tool-row__link {
+  background: transparent;
+  border: 0;
+  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+  cursor: pointer;
+  line-height: 1.2;
+  padding: 0;
+}
+
+.tc-tool-row__link:hover {
+  text-decoration: underline;
+}
+
 .tc-tool-row__running {
   color: var(--vscode-descriptionForeground);
   flex: 0 0 auto;
@@ -1810,8 +1858,16 @@ input:focus-visible {
   padding: 8px 10px;
 }
 
+.tc-tool-row-shell--standalone .tc-tool-row__body {
+  border-left: 0;
+  margin-left: 0;
+  max-height: none;
+  padding: 2px 0 0;
+}
+
 .tc-tool-row__body pre {
   margin: 0;
+  white-space: pre-wrap;
 }
 
 .tc-tool-row__hits {
@@ -1820,24 +1876,275 @@ input:focus-visible {
 }
 
 .tc-tool-row__cmd {
-  align-items: center;
-  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.12));
-  border-radius: 3px;
-  display: inline-flex;
+  color: var(--vscode-textPreformat-foreground, #d7ba7d);
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 0.95em;
-  line-height: 1.2;
-  min-height: 18px;
-  padding: 0 4px;
-  vertical-align: middle;
+  line-height: 1.25;
   white-space: pre-wrap;
+}
+
+.tc-tool-row__diff-badges {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.tc-tool-row__diff-badge {
+  align-items: center;
+  display: inline-flex;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.1;
+  padding: 0;
+}
+
+.tc-tool-row__diff-badge--added {
+  color: var(--vscode-chat-linesAddedForeground, var(--vscode-charts-green, #3fb950));
+}
+
+.tc-tool-row__diff-badge--removed {
+  color: var(--vscode-chat-linesRemovedForeground, var(--vscode-errorForeground, #f14c4c));
+}
+
+.tc-tool-row__card-header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+  width: 100%;
+}
+
+.tc-tool-row__action-icon {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  padding: 0;
+}
+
+.tc-tool-row__action-icon:hover {
+  color: var(--vscode-foreground);
+}
+
+.tc-disclosure-card {
+  align-items: stretch;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tc-disclosure-card__status {
+  border-radius: 999px;
+  flex: 0 0 2px;
+}
+
+.tc-disclosure-card--success .tc-disclosure-card__status {
+  background: var(
+    --vscode-terminalCommandDecoration-successBackground,
+    var(--vscode-charts-green, #3fb950)
+  );
+}
+
+.tc-disclosure-card--error .tc-disclosure-card__status {
+  background: var(
+    --vscode-terminalCommandDecoration-errorBackground,
+    var(--vscode-errorForeground, #f14c4c)
+  );
+}
+
+.tc-disclosure-card--running .tc-disclosure-card__status {
+  background: var(
+    --vscode-terminalCommandDecoration-defaultBackground,
+    var(--vscode-focusBorder, rgba(0, 122, 204, 0.8))
+  );
+}
+
+.tc-disclosure-card__main {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tc-disclosure-card__header {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.tc-disclosure-card__header-content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tc-disclosure-card__toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  line-height: 1;
+  padding: 0;
+}
+
+.tc-disclosure-card__toggle:hover {
+  color: var(--vscode-foreground);
+}
+
+.tc-disclosure-card__preview,
+.tc-disclosure-card__body {
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  border-radius: 0;
+  min-width: 0;
+}
+
+.tc-disclosure-card__preview {
+  max-height: 180px;
+  overflow: hidden;
+  padding: 8px 10px;
+}
+
+.tc-disclosure-card__body {
+  max-height: 50vh;
+  overflow: auto;
+  padding: 8px 10px;
+}
+
+.tc-terminal-output,
+.tc-diff-view {
+  color: var(--vscode-terminal-foreground, var(--vscode-foreground));
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  margin: 0;
+  min-width: max-content;
+  white-space: pre;
+}
+
+.tc-terminal-output--preview {
+  opacity: 0.92;
+}
+
+.tc-diff-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.tc-diff-view__row {
+  align-items: flex-start;
+  display: grid;
+  grid-template-columns: 4ch 4ch 2ch minmax(0, 1fr);
+  min-width: max-content;
+}
+
+.tc-diff-view__row--add {
+  background: var(
+    --vscode-diffEditor-insertedLineBackground,
+    rgba(63, 185, 80, 0.12)
+  );
+}
+
+.tc-diff-view__row--del {
+  background: var(
+    --vscode-diffEditor-removedLineBackground,
+    rgba(241, 76, 76, 0.12)
+  );
+}
+
+.tc-diff-view__gutter {
+  color: var(--vscode-descriptionForeground);
+  padding-right: 8px;
+  text-align: right;
+  user-select: none;
+}
+
+.tc-diff-view__sign {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-diff-view__row--add .tc-diff-view__sign,
+.tc-diff-view__row--add .tc-diff-view__text {
+  color: var(--vscode-chat-linesAddedForeground, var(--vscode-charts-green, #3fb950));
+}
+
+.tc-diff-view__row--del .tc-diff-view__sign,
+.tc-diff-view__row--del .tc-diff-view__text {
+  color: var(--vscode-chat-linesRemovedForeground, var(--vscode-errorForeground, #f14c4c));
+}
+
+.tc-diff-view__text {
+  color: var(--vscode-foreground);
+  min-width: 0;
+  white-space: pre;
+}
+
+.tc-diff-view__fold,
+.tc-diff-view__empty {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.tc-diff-view__fold {
+  border-top: 1px dashed var(--vscode-panel-border, rgba(127, 127, 127, 0.25));
+  border-bottom: 1px dashed var(--vscode-panel-border, rgba(127, 127, 127, 0.25));
+  margin: 4px 0;
+  text-align: center;
+}
+
+.tc-tool-row--edit .tc-tool-row__leading-icon,
+.tc-tool-row--edit .tc-thinking-icon {
+  color: var(--vscode-chat-linesAddedForeground, var(--vscode-charts-green, #3fb950));
+}
+
+.tc-tool-row--command .tc-tool-row__leading-icon,
+.tc-tool-row--command .tc-thinking-icon {
+  color: var(
+    --vscode-terminalCommandDecoration-defaultBackground,
+    var(--vscode-focusBorder, rgba(0, 122, 204, 0.8))
+  );
+}
+
+.tc-tool-row--command .tc-tool-row__text {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-tool-row--answer .tc-tool-row__leading-icon,
+.tc-tool-row--answer .tc-thinking-icon {
+  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+}
+
+.tc-tool-row--context .tc-tool-row__text,
+.tc-tool-row--other .tc-tool-row__text {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-tool-row--answer .tc-tool-row__body {
+  border-left: 0;
+  margin-left: 0;
+  padding: 2px 0 0;
 }
 
 .tc-file-chip {
   align-items: center;
   background: transparent;
-  border: 0.5px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.35));
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.28));
   border-radius: 4px;
+  color: var(--vscode-foreground);
   cursor: pointer;
   display: inline-flex;
   font-size: var(--vscode-chat-font-size-body-s, 12px);
@@ -1853,6 +2160,7 @@ input:focus-visible {
 }
 
 .tc-file-chip__icon {
+  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
   flex: 0 0 auto;
   font-size: 13px;
   line-height: 1em;
@@ -1860,6 +2168,7 @@ input:focus-visible {
 }
 
 .tc-file-chip__label {
+  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
   display: inline-block;
   line-height: 1.15;
   max-width: 220px;

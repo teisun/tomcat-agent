@@ -284,6 +284,9 @@ impl PrimitiveExecutor for MockPrimitive {
             written: true,
             bytes_written: 0,
             diff_hint: None,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
 
@@ -296,6 +299,9 @@ impl PrimitiveExecutor for MockPrimitive {
         Ok(EditFileResult {
             path: path.to_string(),
             applied: true,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
 

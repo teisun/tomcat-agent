@@ -32,6 +32,17 @@ fn serve_dts_preserves_wire_event_session_id() {
 }
 
 #[test]
+fn serve_dts_includes_file_display_diff_fields() {
+    let dts = serve_dts();
+    assert!(dts.contains("export type ToolDisplay = "));
+    assert!(dts.contains("added?: null | number;"));
+    assert!(dts.contains("removed?: null | number;"));
+    assert!(dts.contains("export type DiffTag = "));
+    assert!(dts.contains("export interface FileDiffLine {"));
+    assert!(dts.contains("diff?: FileDiffLine[] | null;"));
+}
+
+#[test]
 fn serve_dts_includes_user_message_id_on_message_params() {
     let dts = serve_dts();
     assert!(dts.contains("export interface ServeMessageParams {"));
@@ -104,6 +115,35 @@ fn serve_emitted_event_validates_against_generated_schema() {
             },
         })
         .expect("tool_execution_end sample"),
+        serde_json::to_value(WireEvent {
+            session_id: Some("s1".to_string()),
+            event: AgentEvent::ToolExecutionEnd {
+                tool_call_id: "call_2".to_string(),
+                tool_name: "write".to_string(),
+                result: ToolOutput(json!({"path": "demo.txt"})),
+                display: Some(ToolDisplay::File {
+                    file: "demo.txt".to_string(),
+                    added: Some(545),
+                    removed: Some(0),
+                    diff: Some(vec![
+                        crate::core::tools::primitive::FileDiffLine {
+                            tag: crate::core::tools::primitive::DiffTag::Ctx,
+                            old_line: Some(1),
+                            new_line: Some(1),
+                            text: "before".to_string(),
+                        },
+                        crate::core::tools::primitive::FileDiffLine {
+                            tag: crate::core::tools::primitive::DiffTag::Add,
+                            old_line: None,
+                            new_line: Some(2),
+                            text: "after".to_string(),
+                        },
+                    ]),
+                }),
+                is_error: false,
+            },
+        })
+        .expect("tool_execution_end file sample"),
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
             event: AgentEvent::AgentEnd {

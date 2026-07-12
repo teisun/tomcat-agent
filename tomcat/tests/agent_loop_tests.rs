@@ -155,6 +155,9 @@ impl PrimitiveExecutor for MockPrimitive {
             written: overwrite || !content.is_empty(),
             bytes_written: 0,
             diff_hint: None,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
     async fn edit_file(
@@ -166,6 +169,9 @@ impl PrimitiveExecutor for MockPrimitive {
         Ok(EditFileResult {
             path: path.to_string(),
             applied: true,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
     async fn execute_bash(
@@ -218,6 +224,9 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
             written: overwrite || !content.is_empty(),
             bytes_written: 0,
             diff_hint: None,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
     async fn edit_file(
@@ -229,6 +238,9 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
         Ok(EditFileResult {
             path: path.to_string(),
             applied: true,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
     async fn execute_bash(
@@ -285,6 +297,9 @@ impl PrimitiveExecutor for SlowMockPrimitive {
             written: overwrite || !content.is_empty(),
             bytes_written: 0,
             diff_hint: None,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
     async fn edit_file(
@@ -296,6 +311,9 @@ impl PrimitiveExecutor for SlowMockPrimitive {
         Ok(EditFileResult {
             path: path.to_string(),
             applied: true,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
     async fn execute_bash(
@@ -348,6 +366,9 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
             written: overwrite || !content.is_empty(),
             bytes_written: 0,
             diff_hint: None,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
     async fn edit_file(
@@ -359,6 +380,9 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
         Ok(EditFileResult {
             path: path.to_string(),
             applied: true,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
     async fn execute_bash(

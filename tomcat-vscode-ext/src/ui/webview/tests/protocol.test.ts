@@ -91,6 +91,16 @@ describe("webview protocol helpers", () => {
         type: "openModelSettings",
       }),
     ).toBe(true);
+
+    expect(
+      isWebviewIntent({
+        data: {
+          toolCallId: "tool-1",
+        },
+        messageId: "open-diff-1",
+        type: "openDiff",
+      }),
+    ).toBe(true);
   });
 
   it("rejects malformed intents", () => {

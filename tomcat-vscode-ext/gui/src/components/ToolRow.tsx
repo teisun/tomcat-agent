@@ -1,8 +1,11 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type { AskQuestionResult, WebviewApprovalQuestion, WebviewToolCard } from "../types";
 import { AnswerCard } from "./AnswerCard";
+import { DiffView } from "./DiffView";
+import { DisclosureCard, type DisclosureStatusVariant } from "./DisclosureCard";
 import { FileChip } from "./FileChip";
+import { tailTerminalOutput, TerminalOutput } from "./TerminalOutput";
 
 function firstLine(value: string | undefined): string | undefined {
   if (!value) {
@@ -18,6 +21,24 @@ function asString(value: unknown): string | undefined {
 function humanizeToolName(toolName: string): string {
   return toolName.replace(/_/g, " ");
 }
+
+export type ToolCategory = "answer" | "command" | "context" | "edit" | "other";
+
+const EDIT_TOOLS = new Set(["edit", "hashline_edit", "write"]);
+const COMMAND_TOOLS = new Set(["bash", "execute_command", "shell"]);
+const ANSWER_TOOLS = new Set(["ask_question"]);
+const CONTEXT_TOOLS = new Set([
+  "grep",
+  "list_dir",
+  "load_skill",
+  "read",
+  "read_file",
+  "search_files",
+  "search_workspace",
+  "web_fetch",
+  "web_search",
+]);
+const OTHER_TOOLS = new Set(["config_get", "config_set", "create_plan", "todos", "update_plan"]);
 
 function basename(filePath: string): string {
   const normalized = filePath.replace(/\\/g, "/");
@@ -40,18 +61,28 @@ function formatToolSummary(summary: string | undefined): string | undefined {
   return summary.trim() === "[interrupted]" ? "Interrupted" : summary;
 }
 
-function isReadLikeTool(toolName: string): boolean {
-  return ["read", "read_file", "grep", "search_files"].includes(toolName);
+export function toolCategory(toolName: string): ToolCategory {
+  if (EDIT_TOOLS.has(toolName)) {
+    return "edit";
+  }
+  if (COMMAND_TOOLS.has(toolName)) {
+    return "command";
+  }
+  if (ANSWER_TOOLS.has(toolName)) {
+    return "answer";
+  }
+  if (CONTEXT_TOOLS.has(toolName)) {
+    return "context";
+  }
+  if (OTHER_TOOLS.has(toolName)) {
+    return "other";
+  }
+  return "other";
 }
 
-function isEditLikeTool(toolName: string): boolean {
-  return ["edit", "edit_file", "hashline_edit", "str_replace", "write", "write_file"].includes(
-    toolName,
-  );
-}
-
-function isCommandLikeTool(toolName: string): boolean {
-  return ["bash", "shell", "execute_command"].includes(toolName);
+export function isActionTool(item: WebviewToolCard): boolean {
+  const category = toolCategory(item.toolName);
+  return category === "answer" || category === "command" || category === "edit";
 }
 
 function countResults(summary: string | undefined): number | null {
@@ -71,7 +102,16 @@ function countResults(summary: string | undefined): number | null {
 
 function toolIconClass(toolName: string): string {
   switch (toolName) {
+    case "write":
+      return "codicon-new-file";
+    case "edit":
+    case "hashline_edit":
+      return "codicon-diff-modified";
+    case "ask_question":
+      return "codicon-question";
     case "read":
+    case "read_file":
+      return "codicon-eye";
     case "load_skill":
       return "codicon-book";
     case "grep":
@@ -80,16 +120,11 @@ function toolIconClass(toolName: string): string {
     case "search_workspace":
       return "codicon-search";
     case "bash":
-    case "task_output":
-    case "task_list":
-    case "task_stop":
+    case "execute_command":
+    case "shell":
       return "codicon-terminal";
     case "web_fetch":
       return "codicon-globe";
-    case "edit":
-    case "write":
-    case "hashline_edit":
-      return "codicon-edit";
     case "list_dir":
       return "codicon-folder";
     case "config_get":
@@ -107,12 +142,24 @@ function toolIconClass(toolName: string): string {
 export function buildFlatLabel(item: WebviewToolCard): string {
   const args = item.args ?? {};
   const running = isRunning(item);
+  const category = toolCategory(item.toolName);
+
   if (item.status === "interrupted") {
-    return `Interrupted ${humanizeToolName(item.toolName)}`;
+    switch (category) {
+      case "edit":
+        return item.toolName === "write" ? "Interrupted write" : "Interrupted edit";
+      case "command":
+        return "Interrupted command";
+      case "answer":
+        return "Interrupted question";
+      default:
+        return `Interrupted ${humanizeToolName(item.toolName)}`;
+    }
   }
 
   switch (item.toolName) {
     case "read":
+    case "read_file":
       return running ? "Reading file" : "Read file";
     case "load_skill": {
       const name = asString(args.name) ?? "skill";
@@ -178,9 +225,10 @@ export function buildFlatLabel(item: WebviewToolCard): string {
     case "ask_question":
       return running ? "Asking question" : "Asked question";
     case "edit":
-    case "write":
     case "hashline_edit":
       return running ? "Editing file" : "Edited file";
+    case "write":
+      return running ? "Creating file" : "Created file";
     default:
       return `${humanizeToolName(item.toolName)}${running ? "…" : ""}`;
   }
@@ -191,47 +239,77 @@ export function buildGroupTitleFromTool(item: WebviewToolCard): string {
   if (filePath && (item.toolName === "read" || item.toolName === "read_file")) {
     return `${buildFlatLabel(item)} ${basename(filePath)}`;
   }
-  if (filePath && isEditLikeTool(item.toolName)) {
+  if (filePath && toolCategory(item.toolName) === "edit") {
     return `${buildFlatLabel(item)} ${basename(filePath)}`;
   }
   return buildFlatLabel(item);
 }
 
 export function buildToolCollectionTitle(tools: WebviewToolCard[]): string {
+  if (tools.length === 0) {
+    return "Thinking";
+  }
   if (tools.length === 1) {
     return buildGroupTitleFromTool(tools[0]);
   }
 
-  if (tools.every((tool) => isReadLikeTool(tool.toolName))) {
+  if (tools.every((tool) => tool.toolName === "read" || tool.toolName === "read_file")) {
     return `Reviewed ${tools.length} files`;
   }
-  if (tools.every((tool) => isEditLikeTool(tool.toolName))) {
-    return `Edited ${tools.length} files`;
+  if (tools.every((tool) => toolCategory(tool.toolName) === "context")) {
+    return `Searched ${tools.length} sources`;
   }
-  if (tools.every((tool) => isCommandLikeTool(tool.toolName))) {
+  if (tools.every((tool) => toolCategory(tool.toolName) === "command")) {
     return tools.length === 1 ? buildGroupTitleFromTool(tools[0]) : `Executed ${tools.length} commands`;
+  }
+  if (tools.every((tool) => toolCategory(tool.toolName) === "edit")) {
+    return `Edited ${tools.length} files`;
   }
 
   return `Used ${tools.length} tools`;
 }
 
 export function hasMeaningfulContent(item: WebviewToolCard): boolean {
-  if (item.summary?.trim()) {
+  const summary = formatToolSummary(item.summary);
+  if (
+    toolCategory(item.toolName) === "edit" &&
+    item.status === "complete" &&
+    !item.isError
+  ) {
+    if ((item.diff?.length ?? 0) > 0) {
+      return true;
+    }
+    return Boolean(
+      item.diffStat && (item.diffStat.added > 0 || item.diffStat.removed > 0),
+    );
+  }
+  if (
+    item.toolName === "ask_question" &&
+    parseApprovalQuestions(item.args) &&
+    parseAskQuestionResult(item.summary)
+  ) {
     return true;
   }
-  if (!item.display) {
-    return false;
-  }
-  if (item.display.kind === "file") {
+  if (summary?.trim()) {
     return true;
   }
-  if (item.display.kind === "plan") {
+  if (item.display?.kind === "plan") {
     return Boolean(item.display.plan.trim());
   }
-  if (item.display.kind === "text") {
+  if (item.display?.kind === "text") {
     return Boolean(item.display.text.trim());
   }
   return false;
+}
+
+function commandText(item: WebviewToolCard): string {
+  const args = item.args ?? {};
+  return (
+    firstLine(asString(args.command)) ??
+    firstLine(asString(args.cmd)) ??
+    firstLine(asString(args.script)) ??
+    "command"
+  );
 }
 
 function parseApprovalQuestions(args: Record<string, unknown> | undefined): WebviewApprovalQuestion[] | null {
@@ -330,73 +408,137 @@ function parseAskQuestionResult(summary: string | undefined): AskQuestionResult 
   }
 }
 
+function renderPlainBody(item: WebviewToolCard): ReactNode {
+  return (
+    <>
+      {item.summary ? <pre data-testid="tool-row-result">{formatToolSummary(item.summary)}</pre> : null}
+      {item.display?.kind === "plan" ? <pre>{item.display.plan}</pre> : null}
+      {item.display?.kind === "text" && item.display.text !== item.summary ? (
+        <pre>{item.display.text}</pre>
+      ) : null}
+    </>
+  );
+}
+
 function renderFlatContent(
   item: WebviewToolCard,
   onOpenFile: (path: string) => void,
 ): ReactNode {
   const args = item.args ?? {};
   const filePath = filePathForTool(item);
+  const category = toolCategory(item.toolName);
+  const diffStat = item.diffStat;
 
-  switch (item.toolName) {
-    case "read":
+  switch (category) {
     case "edit":
-    case "write":
-    case "hashline_edit":
       if (filePath) {
         return (
           <span className="tc-tool-row__inline">
-            <span className="tc-tool-row__text">
-              {buildFlatLabel(item).replace(/ file$/, "")}
-            </span>
+            <span className="tc-tool-row__text">{buildFlatLabel(item).replace(/ file$/, "")}</span>
             <FileChip onOpenFile={onOpenFile} path={filePath} />
+            {diffStat ? (
+              <span className="tc-tool-row__diff-badges" data-testid="tool-row-diff-badges">
+                <span
+                  className="tc-tool-row__diff-badge tc-tool-row__diff-badge--added"
+                  data-testid="tool-row-diff-added"
+                >
+                  +{diffStat.added}
+                </span>
+                <span
+                  className="tc-tool-row__diff-badge tc-tool-row__diff-badge--removed"
+                  data-testid="tool-row-diff-removed"
+                >
+                  -{diffStat.removed}
+                </span>
+              </span>
+            ) : null}
           </span>
         );
       }
       return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
-    case "bash": {
-      const command = firstLine(asString(args.command)) ?? "command";
+    case "command": {
+      const command =
+        firstLine(asString(args.command)) ??
+        firstLine(asString(args.cmd)) ??
+        firstLine(asString(args.script)) ??
+        "command";
+      const verb =
+        item.status === "interrupted"
+          ? "Interrupted"
+          : isRunning(item)
+            ? "Running"
+            : "Ran";
       return (
         <span className="tc-tool-row__inline">
-          <span className="tc-tool-row__text">{isRunning(item) ? "Running" : "Ran"}</span>
+          <span className="tc-tool-row__text">{verb}</span>
           <code className="tc-tool-row__cmd" data-testid="tool-row-cmd">
             {command}
           </code>
         </span>
       );
     }
-    case "grep": {
-      const resultsCount = countResults(item.summary);
-      const suffix =
-        !isRunning(item) && resultsCount ? ` · ${resultsCount} results` : "";
-      const glob = asString(args.glob) ?? asString(args.path);
-      if (glob) {
-        return (
-          <span className="tc-tool-row__inline">
-            <span className="tc-tool-row__text">
-              {buildFlatLabel(item)}
-              {suffix}
-            </span>
-            <FileChip onOpenFile={onOpenFile} path={glob} />
-          </span>
-        );
+    case "answer":
+      return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
+    case "context":
+    case "other":
+      switch (item.toolName) {
+        case "grep": {
+          const resultsCount = countResults(item.summary);
+          const suffix =
+            !isRunning(item) && resultsCount ? ` · ${resultsCount} results` : "";
+          const glob = asString(args.glob) ?? asString(args.path);
+          if (glob) {
+            return (
+              <span className="tc-tool-row__inline">
+                <span className="tc-tool-row__text">
+                  {buildFlatLabel(item)}
+                  {suffix}
+                </span>
+                <FileChip onOpenFile={onOpenFile} path={glob} />
+              </span>
+            );
+          }
+          return <span className="tc-tool-row__text">{`${buildFlatLabel(item)}${suffix}`}</span>;
+        }
+        case "read":
+        case "read_file":
+          if (filePath) {
+            return (
+              <span className="tc-tool-row__inline">
+                <span className="tc-tool-row__text">{buildFlatLabel(item).replace(/ file$/, "")}</span>
+                <FileChip onOpenFile={onOpenFile} path={filePath} />
+              </span>
+            );
+          }
+          return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
+        default:
+          return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
       }
-      return <span className="tc-tool-row__text">{`${buildFlatLabel(item)}${suffix}`}</span>;
-    }
-    case "search_workspace":
-    case "web_search":
-    case "web_fetch":
     default:
       return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
   }
 }
 
 function renderExpandedBody(item: WebviewToolCard): ReactNode {
-  if (item.toolName === "ask_question") {
+  const category = toolCategory(item.toolName);
+  if (category === "answer") {
     const questions = parseApprovalQuestions(item.args);
     const result = parseAskQuestionResult(item.summary);
     if (questions && result) {
       return <AnswerCard questions={questions} result={result} />;
     }
+    return renderPlainBody(item);
+  }
+
+  if (category === "command") {
+    return (
+      <div
+        className={`tc-tool-row__terminal${item.isError ? " tc-tool-row__terminal--error" : item.status === "complete" ? " tc-tool-row__terminal--success" : " tc-tool-row__terminal--running"}`}
+        data-testid="tool-row-terminal"
+      >
+        {renderPlainBody(item)}
+      </div>
+    );
   }
 
   if (item.toolName === "web_search" && item.summary) {
@@ -415,26 +557,60 @@ function renderExpandedBody(item: WebviewToolCard): ReactNode {
     }
   }
 
+  return renderPlainBody(item);
+}
+
+function renderDiffBadges(item: WebviewToolCard): ReactNode {
+  if (!item.diffStat) {
+    return null;
+  }
   return (
-    <>
-      {item.summary ? <pre data-testid="tool-row-result">{formatToolSummary(item.summary)}</pre> : null}
-      {item.display?.kind === "plan" ? <pre>{item.display.plan}</pre> : null}
-      {item.display?.kind === "text" && item.display.text !== item.summary ? (
-        <pre>{item.display.text}</pre>
-      ) : null}
-    </>
+    <span className="tc-tool-row__diff-badges" data-testid="tool-row-diff-badges">
+      <span
+        className="tc-tool-row__diff-badge tc-tool-row__diff-badge--added"
+        data-testid="tool-row-diff-added"
+      >
+        +{item.diffStat.added}
+      </span>
+      <span
+        className="tc-tool-row__diff-badge tc-tool-row__diff-badge--removed"
+        data-testid="tool-row-diff-removed"
+      >
+        -{item.diffStat.removed}
+      </span>
+    </span>
   );
+}
+
+function shouldShowBodyByDefault(
+  item: WebviewToolCard,
+  contentVisible: boolean,
+): boolean {
+  if (!contentVisible) {
+    return false;
+  }
+  if (toolCategory(item.toolName) === "answer") {
+    return true;
+  }
+  return item.isError || item.status !== "complete";
 }
 
 export function ToolRow({
   item,
   onOpenFile,
+  onOpenDiff,
+  variant = "standalone",
 }: {
   item: WebviewToolCard;
   onOpenFile(path: string): void;
+  onOpenDiff?(toolCallId: string): void;
+  variant?: "grouped" | "standalone";
 }) {
+  const category = toolCategory(item.toolName);
   const contentVisible = hasMeaningfulContent(item);
-  const shouldExpandByDefault = item.isError || (item.status !== "complete" && contentVisible);
+  const alwaysVisibleBody = category === "answer" && contentVisible;
+  const canToggle = contentVisible && !alwaysVisibleBody;
+  const shouldExpandByDefault = shouldShowBodyByDefault(item, contentVisible);
   const [collapsed, setCollapsed] = useState(!shouldExpandByDefault);
   const [userInteracted, setUserInteracted] = useState(false);
 
@@ -449,46 +625,172 @@ export function ToolRow({
     }
   }, [shouldExpandByDefault, userInteracted]);
 
-  return (
-    <div className="tc-thinking-tool-wrapper" data-testid="tool-row-wrapper">
+  const iconClass = useMemo(() => toolIconClass(item.toolName), [item.toolName]);
+  const shellClassName =
+    variant === "grouped"
+      ? "tc-tool-row-shell tc-tool-row-shell--grouped tc-thinking-tool-wrapper"
+      : "tc-tool-row-shell tc-tool-row-shell--standalone";
+  const iconNode =
+    variant === "grouped" ? (
       <span
         aria-hidden="true"
-        className={`tc-thinking-icon codicon ${toolIconClass(item.toolName)}`}
+        className={`tc-thinking-icon codicon ${iconClass}`}
       />
-      <div className="tc-tool-row" data-testid="tool-row">
-        <div className="tc-tool-row__header">
-          <span className="tc-tool-row__label" data-testid="tool-row-label">
-            {renderFlatContent(item, onOpenFile)}
-            {isRunning(item) ? (
-              <span
-                aria-hidden="true"
-                className="tc-thinking__dots tc-tool-row__running"
-                data-testid="tool-row-running-indicator"
-              >
-                ...
+    ) : (
+      <span
+        aria-hidden="true"
+        className={`tc-tool-row__leading-icon codicon ${iconClass}`}
+      />
+    );
+  const hasStructuredDiff = (item.diff?.length ?? 0) > 0;
+  const hasLargeDiffFallback =
+    category === "edit" &&
+    item.display?.kind === "file" &&
+    !hasStructuredDiff &&
+    Boolean(item.diffStat && (item.diffStat.added > 0 || item.diffStat.removed > 0));
+  const usesDisclosureCard =
+    (category === "command" && contentVisible) ||
+    (category === "edit" && item.display?.kind === "file" && (hasStructuredDiff || hasLargeDiffFallback));
+  const disclosureStatusVariant: DisclosureStatusVariant = item.isError
+    ? "error"
+    : item.status === "complete"
+      ? "success"
+      : "running";
+  const showOpenDiffButton =
+    category === "edit" &&
+    item.display?.kind === "file" &&
+    hasStructuredDiff &&
+    Boolean(item.toolCallId) &&
+    Boolean(onOpenDiff);
+
+  const labelWithRunningIndicator = (label: ReactNode) => (
+    <>
+      {label}
+      {isRunning(item) ? (
+        <span
+          aria-hidden="true"
+          className="tc-thinking__dots tc-tool-row__running"
+          data-testid="tool-row-running-indicator"
+        >
+          ...
+        </span>
+      ) : null}
+    </>
+  );
+
+  const disclosureHeader =
+    category === "command" ? (
+      <span className="tc-tool-row__inline" data-testid="tool-row-label">
+        {labelWithRunningIndicator(
+          <>
+            <span className="tc-tool-row__text">
+              {item.status === "interrupted" ? "Interrupted" : isRunning(item) ? "Running" : "Ran"}
+            </span>
+            <code className="tc-tool-row__cmd" data-testid="tool-row-cmd">
+              {commandText(item)}
+            </code>
+          </>,
+        )}
+      </span>
+    ) : (
+      <div className="tc-tool-row__card-header">
+        <span className="tc-tool-row__inline" data-testid="tool-row-label">
+          {labelWithRunningIndicator(
+            <>
+              <span className="tc-tool-row__text">{buildFlatLabel(item).replace(/ file$/, "")}</span>
+              {item.display?.kind === "file" ? (
+                <FileChip onOpenFile={onOpenFile} path={item.display.file} />
+              ) : null}
+              {renderDiffBadges(item)}
+            </>,
+          )}
+        </span>
+        {showOpenDiffButton ? (
+          <button
+            aria-label="View diff"
+            className="tc-tool-row__action-icon"
+            data-testid="tool-row-open-diff"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onOpenDiff?.(item.toolCallId);
+            }}
+            type="button"
+          >
+            <span aria-hidden="true" className="codicon codicon-diff" />
+          </button>
+        ) : null}
+      </div>
+    );
+
+  return (
+    <div className={shellClassName} data-testid="tool-row-wrapper">
+      {iconNode}
+      <div
+        className={`tc-tool-row tc-tool-row--${category}${item.isError ? " tc-tool-row--error" : ""}`}
+        data-testid="tool-row"
+        data-tool-category={category}
+        data-tool-variant={variant}
+      >
+        {usesDisclosureCard ? (
+          <DisclosureCard
+            bodyTestId="tool-row-body"
+            defaultExpanded={shouldExpandByDefault}
+            header={disclosureHeader}
+            preview={
+              category === "command" ? (
+                <TerminalOutput preview text={tailTerminalOutput(item.summary, 5)} />
+              ) : (
+                <DiffView diff={item.diff} previewLines={5} />
+              )
+            }
+            resetKey={item.id}
+            statusVariant={disclosureStatusVariant}
+            toggleTestId="tool-row-toggle"
+          >
+            {category === "command" ? (
+              <TerminalOutput text={item.summary} />
+            ) : (
+              <DiffView diff={item.diff} />
+            )}
+          </DisclosureCard>
+        ) : (
+          <>
+            <div className="tc-tool-row__header">
+              <span className="tc-tool-row__label" data-testid="tool-row-label">
+                {renderFlatContent(item, onOpenFile)}
+                {isRunning(item) ? (
+                  <span
+                    aria-hidden="true"
+                    className="tc-thinking__dots tc-tool-row__running"
+                    data-testid="tool-row-running-indicator"
+                  >
+                    ...
+                  </span>
+                ) : null}
               </span>
-            ) : null}
-          </span>
-          {contentVisible ? (
-            <button
-              aria-expanded={!collapsed}
-              aria-label={collapsed ? "Expand tool result" : "Collapse tool result"}
-              className="tc-tool-row__toggle"
-              data-testid="tool-row-toggle"
-              onClick={() => {
-                setUserInteracted(true);
-                setCollapsed((value) => !value);
-              }}
-              type="button"
-            >
-              <span className="tc-tool-row__caret">{collapsed ? "▸" : "▾"}</span>
-            </button>
-          ) : null}
-        </div>
-        {collapsed || !contentVisible ? null : (
-          <div className="tc-tool-row__body" data-testid="tool-row-body">
-            {renderExpandedBody(item)}
-          </div>
+              {canToggle ? (
+                <button
+                  aria-expanded={!collapsed}
+                  aria-label={collapsed ? "Expand tool result" : "Collapse tool result"}
+                  className="tc-tool-row__toggle"
+                  data-testid="tool-row-toggle"
+                  onClick={() => {
+                    setUserInteracted(true);
+                    setCollapsed((value) => !value);
+                  }}
+                  type="button"
+                >
+                  <span className="tc-tool-row__caret">{collapsed ? "▸" : "▾"}</span>
+                </button>
+              ) : null}
+            </div>
+            {collapsed || !contentVisible ? null : (
+              <div className="tc-tool-row__body" data-testid="tool-row-body">
+                {renderExpandedBody(item)}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

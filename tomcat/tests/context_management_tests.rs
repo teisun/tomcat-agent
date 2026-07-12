@@ -200,6 +200,9 @@ impl PrimitiveExecutor for MockPrimitiveWithLargeFile {
             written: true,
             bytes_written: 0,
             diff_hint: None,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
     async fn edit_file(
@@ -211,6 +214,9 @@ impl PrimitiveExecutor for MockPrimitiveWithLargeFile {
         Ok(EditFileResult {
             path: path.to_string(),
             applied: true,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
     async fn execute_bash(

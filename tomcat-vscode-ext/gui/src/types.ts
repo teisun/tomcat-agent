@@ -75,9 +75,21 @@ export interface WebviewTodo {
   status: "cancelled" | "completed" | "in_progress" | "pending";
 }
 
+export type FileDiffTag = "add" | "ctx" | "del";
+
+export interface FileDiffLine {
+  newLine?: number | null;
+  oldLine?: number | null;
+  tag: FileDiffTag;
+  text: string;
+}
+
 export interface WebviewToolDisplayFile {
+  added?: number | null;
+  diff?: FileDiffLine[] | null;
   file: string;
   kind: "file";
+  removed?: number | null;
 }
 
 export interface WebviewToolDisplayPlan {
@@ -97,10 +109,17 @@ export type WebviewToolDisplay =
 
 export type WebviewToolStatus = "complete" | "interrupted" | "running" | "streaming";
 
+export interface WebviewToolDiffStat {
+  added: number;
+  removed: number;
+}
+
 export interface WebviewToolCard {
   args?: Record<string, unknown>;
   assistantMessageId?: string;
   display?: WebviewToolDisplay;
+  diff?: FileDiffLine[];
+  diffStat?: WebviewToolDiffStat;
   id: string;
   isError: boolean;
   status: WebviewToolStatus;
@@ -279,13 +298,6 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
-      type: "applyEdit" | "openDiff";
-      data: {
-        toolCallId: string;
-      };
-    }
-  | {
-      messageId: string;
       type: "closeSession" | "switchSession";
       data: {
         sessionId: string;
@@ -387,6 +399,13 @@ export type WebviewIntent =
       type: "openFile" | "openPlanFile";
       data: {
         path: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "openDiff";
+      data: {
+        toolCallId: string;
       };
     }
   | {
@@ -494,6 +513,9 @@ export type WebviewIntent =
         leftGuideLine: boolean;
         toolRowCount: number;
         toolCardCount: number;
+        actionToolRowCount: number;
+        editDiffBadgeCount: number;
+        commandBlockCount: number;
       };
     };
 

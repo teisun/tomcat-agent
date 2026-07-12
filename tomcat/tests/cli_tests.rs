@@ -349,6 +349,9 @@ impl PrimitiveExecutor for DeterministicMockPrimitive {
             written: overwrite || !content.is_empty(),
             bytes_written: content.len() as u64,
             diff_hint: None,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
 
@@ -361,6 +364,9 @@ impl PrimitiveExecutor for DeterministicMockPrimitive {
         Ok(EditFileResult {
             path: path.to_string(),
             applied: true,
+            added: Some(0),
+            removed: Some(0),
+            diff: None,
         })
     }
 
@@ -1952,6 +1958,7 @@ fn test_session_switch_nonexistent_shows_error() {
 /// 验证：new exit 0 + delete exit 0 且 stdout 含"已删除"
 /// 意义：TASK-02 10.6——session delete 端到端可用
 #[test]
+#[serial(env_lock)]
 fn test_session_delete_via_cli_removes_session() {
     common::setup_logging();
     let _span = info_span!("test_session_delete_via_cli_removes_session").entered();

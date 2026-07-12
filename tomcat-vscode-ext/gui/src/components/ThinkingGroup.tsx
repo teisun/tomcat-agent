@@ -6,19 +6,6 @@ import { ThinkingBlock } from "./ThinkingBlock";
 import { buildToolCollectionTitle, ToolRow } from "./ToolRow";
 import type { AssistantResponseGroup } from "./sessionList/groupTimelineByAssistantResponse";
 
-function summarizeThinking(text: string): string | null {
-  const firstMeaningfulLine = text
-    .split("\n")
-    .map((line) => line.trim())
-    .find(Boolean);
-  if (!firstMeaningfulLine) {
-    return null;
-  }
-  return firstMeaningfulLine.length > 140
-    ? `${firstMeaningfulLine.slice(0, 137).trimEnd()}...`
-    : firstMeaningfulLine;
-}
-
 function isDirtySummaryTitle(summaryTitle: string, tools: WebviewToolCard[]): boolean {
   if (/[{\[]/.test(summaryTitle) || /\b(path|command)=/.test(summaryTitle)) {
     return true;
@@ -32,31 +19,25 @@ function groupHeaderTitle(
   isStreaming: boolean,
 ): { shimmer: boolean; text: string } {
   const summaryTitle = group.thinking?.summaryTitle ?? null;
-  if (summaryTitle && !isDirtySummaryTitle(summaryTitle, group.tools)) {
+  if (summaryTitle && group.tools.length > 0 && !isDirtySummaryTitle(summaryTitle, group.tools)) {
     return { shimmer: false, text: summaryTitle };
   }
   if (group.tools.length > 0) {
     return { shimmer: isStreaming, text: buildToolCollectionTitle(group.tools) };
   }
-  if (isStreaming) {
-    const fallback = summarizeThinking(group.thinking?.text ?? "") ?? "Tomcat · Thinking";
-    return { shimmer: true, text: fallback };
-  }
-  const fallback = summarizeThinking(group.thinking?.text ?? "");
-  if (fallback) {
-    return { shimmer: false, text: `Tomcat · Thinking — ${fallback}` };
-  }
-  return { shimmer: false, text: "Tomcat · Thinking" };
+  return { shimmer: isStreaming, text: "Thinking" };
 }
 
 export function ThinkingGroup({
   group,
   isStreaming = false,
   onOpenFile,
+  onOpenDiff,
 }: {
   group: AssistantResponseGroup;
   isStreaming?: boolean;
   onOpenFile(path: string): void;
+  onOpenDiff?(toolCallId: string): void;
 }) {
   const streaming = isStreaming && group.tools.some((tool) => tool.status !== "complete");
   const [collapsed, setCollapsed] = useState(!streaming);
@@ -68,7 +49,9 @@ export function ThinkingGroup({
   const header = useMemo(() => groupHeaderTitle(group, isStreaming), [group, isStreaming]);
   const statusIconClass = isStreaming
     ? "tc-thinking-box__status codicon codicon-loading tc-codicon-spin"
-    : "tc-thinking-box__status codicon codicon-check";
+    : group.tools.length > 0
+      ? "tc-thinking-box__status codicon codicon-search"
+      : "tc-thinking-box__status codicon codicon-lightbulb";
 
   const preamble = group.preamble;
   const thinking = group.thinking;
@@ -113,7 +96,9 @@ export function ThinkingGroup({
               <ToolRow
                 item={tool}
                 key={tool.id}
+                onOpenDiff={onOpenDiff}
                 onOpenFile={onOpenFile}
+                variant="grouped"
               />
             ))}
           </>

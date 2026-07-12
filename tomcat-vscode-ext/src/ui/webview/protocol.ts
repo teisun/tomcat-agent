@@ -67,9 +67,21 @@ export interface WebviewTodo {
   status: "cancelled" | "completed" | "in_progress" | "pending";
 }
 
+export type FileDiffTag = "add" | "ctx" | "del";
+
+export interface FileDiffLine {
+  newLine?: number | null;
+  oldLine?: number | null;
+  tag: FileDiffTag;
+  text: string;
+}
+
 export interface WebviewToolDisplayFile {
+  added?: number | null;
+  diff?: FileDiffLine[] | null;
   file: string;
   kind: "file";
+  removed?: number | null;
 }
 
 export interface WebviewToolDisplayPlan {
@@ -89,10 +101,17 @@ export type WebviewToolDisplay =
 
 export type WebviewToolStatus = "complete" | "interrupted" | "running" | "streaming";
 
+export interface WebviewToolDiffStat {
+  added: number;
+  removed: number;
+}
+
 export interface WebviewToolCard {
   args?: Record<string, unknown>;
   assistantMessageId?: string;
   display?: WebviewToolDisplay;
+  diff?: FileDiffLine[];
+  diffStat?: WebviewToolDiffStat;
   id: string;
   isError: boolean;
   status: WebviewToolStatus;
@@ -231,13 +250,6 @@ export type WebviewIntent =
     }
   | {
       messageId: string;
-      type: "applyEdit";
-      data: {
-        toolCallId: string;
-      };
-    }
-  | {
-      messageId: string;
       type: "closeSession";
       data: {
         sessionId: string;
@@ -266,13 +278,6 @@ export type WebviewIntent =
       type: "newSession";
       data?: {
         cwd?: string | null;
-      };
-    }
-  | {
-      messageId: string;
-      type: "openDiff";
-      data: {
-        toolCallId: string;
       };
     }
   | {
@@ -350,6 +355,13 @@ export type WebviewIntent =
       type: "openFile";
       data: {
         path: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "openDiff";
+      data: {
+        toolCallId: string;
       };
     }
   | {
@@ -466,6 +478,9 @@ export type WebviewIntent =
         leftGuideLine: boolean;
         toolRowCount: number;
         toolCardCount: number;
+        actionToolRowCount: number;
+        editDiffBadgeCount: number;
+        commandBlockCount: number;
       };
     };
 
@@ -620,10 +635,10 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "switchSession":
     case "closeSession":
       return isRecord(value.data) && isString(value.data.sessionId);
-    case "openDiff":
-    case "applyEdit":
-      return isRecord(value.data) && isString(value.data.toolCallId);
     case "openFile":
+      return isRecord(value.data) && isString(value.data.path);
+    case "openDiff":
+      return isRecord(value.data) && isString(value.data.toolCallId);
     case "openPlanFile":
       return isRecord(value.data) && isString(value.data.path);
     case "openModelSettings":
@@ -708,7 +723,10 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         typeof value.data.ellipsisAboveGroupHeader === "boolean" &&
         typeof value.data.leftGuideLine === "boolean" &&
         typeof value.data.toolRowCount === "number" &&
-        typeof value.data.toolCardCount === "number"
+        typeof value.data.toolCardCount === "number" &&
+        typeof value.data.actionToolRowCount === "number" &&
+        typeof value.data.editDiffBadgeCount === "number" &&
+        typeof value.data.commandBlockCount === "number"
       );
     default:
       return false;

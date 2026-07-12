@@ -127,6 +127,9 @@ impl PrimitiveExecutor for EditOkPrimitive {
         Ok(crate::core::tools::primitive::EditFileResult {
             path: path.to_string(),
             applied: true,
+            added: Some(1),
+            removed: Some(1),
+            diff: None,
         })
     }
     async fn execute_bash(
