@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.14
+
+- Fix the newly sent prompt drifting back down instead of staying pinned to the top ("reveal-to-top") in the real webview. The true trigger was a viewport-height change: when `busy` flips true the composer grows, so the stream container's `clientHeight` increases mid-reveal. The reveal spacer was sized for the old (smaller) viewport and never recomputed, so the scroll clamped to the bottom and the resulting scroll event flipped the mode into bottom-follow — abandoning the pin. The reveal now survives `clientHeight` changes: the `ResizeObserver` re-pins (recomputing/growing the spacer) on any viewport resize while revealing, and a resize-induced clamp to the bottom re-pins instead of falling into bottom-follow as long as the latest turn still fits. This path was invisible to jsdom tests, which mock `clientHeight` as a constant; new regression tests drive a changing viewport height.
+
+## 0.1.13
+
+- Fix the newly sent prompt not scrolling to the top of the transcript ("reveal-to-top") in the real webview. The reveal trigger and the session-reset handler previously lived in two `useLayoutEffect`s that shared the same tracking ref, so a `resetKey` change landing in the same commit as a new user message could silently eat the reveal — a timing race invisible to jsdom unit tests. Both are now merged into a single deterministic effect keyed on `resetKey / latestUserMessageId / oldestItemKey / userMessageCount`, so a session load/switch is authoritative (lands at the bottom) while an in-conversation send always reveals to the top.
+
 ## 0.1.5
 
 - Fix **Add Model** official presets after `tomcat init`: seeded factory models now stay classified as built-in by the embedded preset list instead of being misread as user-only, so the official `Provider` picker is populated again in both the GUI and CLI `source` output.

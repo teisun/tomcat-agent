@@ -645,6 +645,382 @@ describe("useAutoScroll", () => {
     expect(root.style.overflowAnchor).toBe("none");
   });
 
+  it("prioritizes the session reset over a reveal when a switch carries a new latest user message", () => {
+    const { rerender } = render(
+      <Fixture
+        contentKey="initial"
+        latestUserMessageId="user-1"
+        oldestItemKey="s1-oldest"
+        resetKey="s1"
+        userMessageCount={1}
+      />,
+    );
+    const root = screen.getByTestId("scroll-root");
+    const content = screen.getByTestId("scroll-content");
+    const userAnchor = screen.getByTestId("user-anchor");
+
+    let scrollTop = 25;
+    const currentSpacerHeight = () =>
+      Number.parseFloat(screen.getByTestId("transcript-spacer").style.height || "0");
+
+    Object.defineProperty(root, "clientHeight", {
+      configurable: true,
+      get: () => 100,
+    });
+    Object.defineProperty(root, "scrollHeight", {
+      configurable: true,
+      get: () => 180 + currentSpacerHeight(),
+    });
+    Object.defineProperty(root, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(content, "scrollHeight", {
+      configurable: true,
+      get: () => 180 + currentSpacerHeight(),
+    });
+    root.getBoundingClientRect = vi.fn(
+      () => ({ top: 0, bottom: 100, height: 100, left: 0, right: 0, width: 0, x: 0, y: 0 }) as DOMRect,
+    );
+    content.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: -scrollTop,
+          bottom: 180 - scrollTop,
+          height: 180,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: -scrollTop,
+        }) as DOMRect,
+    );
+    userAnchor.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: 120 - scrollTop,
+          bottom: 150 - scrollTop,
+          height: 30,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: 120 - scrollTop,
+        }) as DOMRect,
+    );
+
+    act(() => {
+      fireEvent.scroll(root);
+    });
+    expect(screen.getByTestId("scroll-state").textContent).toBe("paused");
+
+    // A session switch that also carries a brand-new latest user message must be
+    // treated as a load (land at bottom), never as a half-applied reveal. This
+    // guards the single-effect design: the reset branch is authoritative and can
+    // never be clobbered/eaten by a coincident reveal trigger.
+    rerender(
+      <Fixture
+        contentKey="switch-with-new-user"
+        latestUserMessageId="user-9"
+        oldestItemKey="s2-oldest"
+        resetKey="s2"
+        userMessageCount={3}
+      />,
+    );
+
+    expect(scrollTop).toBe(80);
+    expect(screen.getByTestId("spacer-height").textContent).toBe("0");
+    expect(screen.getByTestId("scroll-state").textContent).toBe("following");
+    expect(screen.getByTestId("sticky-id").textContent).toBe("none");
+    expect(root.style.overflowAnchor).toBe("none");
+  });
+
+  it("reveals a freshly sent user message even immediately after a session load", () => {
+    const { rerender } = render(
+      <Fixture
+        contentKey="initial"
+        latestUserMessageId={null}
+        oldestItemKey="s1-oldest"
+        resetKey="s1"
+        userMessageCount={0}
+      />,
+    );
+    const root = screen.getByTestId("scroll-root");
+    const content = screen.getByTestId("scroll-content");
+    const userAnchor = screen.getByTestId("user-anchor");
+
+    let scrollTop = 0;
+    const currentSpacerHeight = () =>
+      Number.parseFloat(screen.getByTestId("transcript-spacer").style.height || "0");
+
+    Object.defineProperty(root, "clientHeight", {
+      configurable: true,
+      get: () => 100,
+    });
+    Object.defineProperty(root, "scrollHeight", {
+      configurable: true,
+      get: () => 180 + currentSpacerHeight(),
+    });
+    Object.defineProperty(root, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(content, "scrollHeight", {
+      configurable: true,
+      get: () => 180 + currentSpacerHeight(),
+    });
+    root.getBoundingClientRect = vi.fn(
+      () => ({ top: 0, bottom: 100, height: 100, left: 0, right: 0, width: 0, x: 0, y: 0 }) as DOMRect,
+    );
+    content.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: -scrollTop,
+          bottom: 180 - scrollTop,
+          height: 180,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: -scrollTop,
+        }) as DOMRect,
+    );
+    userAnchor.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: 120 - scrollTop,
+          bottom: 150 - scrollTop,
+          height: 30,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: 120 - scrollTop,
+        }) as DOMRect,
+    );
+
+    // Load a different session with history (webview remount / session switch):
+    // must land at the bottom without revealing a pre-existing message.
+    rerender(
+      <Fixture
+        contentKey="load-s2"
+        latestUserMessageId="history-user"
+        oldestItemKey="s2-oldest"
+        resetKey="s2"
+        userMessageCount={2}
+      />,
+    );
+    expect(scrollTop).toBe(80);
+    expect(screen.getByTestId("spacer-height").textContent).toBe("0");
+
+    // Now send a new message in that just-loaded session: reveal must still fire
+    // (the reset that just ran must not leave the trigger in a "seen" state).
+    rerender(
+      <Fixture
+        contentKey="send-in-s2"
+        latestUserMessageId="fresh-user"
+        oldestItemKey="s2-oldest"
+        resetKey="s2"
+        userMessageCount={3}
+      />,
+    );
+    expect(scrollTop).toBe(120);
+    expect(screen.getByTestId("spacer-height").textContent).toBe("40");
+  });
+
+  it("re-pins the reveal when the viewport grows mid-turn (busy flip resizes the composer)", () => {
+    const { rerender } = render(
+      <Fixture contentKey="initial" latestUserMessageId={null} resetKey="s1" userMessageCount={0} />,
+    );
+    const root = screen.getByTestId("scroll-root");
+    const content = screen.getByTestId("scroll-content");
+    const userAnchor = screen.getByTestId("user-anchor");
+
+    const baseContentHeight = 180;
+    let clientHeight = 100;
+    let scrollTop = 0;
+    const currentSpacerHeight = () =>
+      Number.parseFloat(screen.getByTestId("transcript-spacer").style.height || "0");
+
+    Object.defineProperty(root, "clientHeight", {
+      configurable: true,
+      get: () => clientHeight,
+    });
+    Object.defineProperty(root, "scrollHeight", {
+      configurable: true,
+      get: () => baseContentHeight + currentSpacerHeight(),
+    });
+    Object.defineProperty(root, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(content, "scrollHeight", {
+      configurable: true,
+      get: () => baseContentHeight + currentSpacerHeight(),
+    });
+    root.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: 0,
+          bottom: clientHeight,
+          height: clientHeight,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: 0,
+        }) as DOMRect,
+    );
+    content.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: -scrollTop,
+          bottom: baseContentHeight - scrollTop,
+          height: baseContentHeight,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: -scrollTop,
+        }) as DOMRect,
+    );
+    userAnchor.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: 120 - scrollTop,
+          bottom: 150 - scrollTop,
+          height: 30,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: 120 - scrollTop,
+        }) as DOMRect,
+    );
+
+    // Send a message: the reveal pins the user to the top with a spacer sized for
+    // a 100px viewport (latest turn is 60px tall -> 40px spacer).
+    rerender(
+      <Fixture contentKey="user-1" latestUserMessageId="user-1" resetKey="s1" userMessageCount={1} />,
+    );
+    expect(scrollTop).toBe(120);
+    expect(screen.getByTestId("spacer-height").textContent).toBe("40");
+
+    // `busy` flips true -> the composer grows -> the stream viewport grows 100 -> 130
+    // WITHOUT changing contentKey. The ResizeObserver must re-pin and grow the spacer
+    // (100 -> 130 viewport => 70px spacer), not leave the stale 40px spacer that lets
+    // the scroll clamp to the bottom and abandon the reveal.
+    clientHeight = 130;
+    act(() => {
+      ResizeObserverMock.latest().callback([], {} as ResizeObserver);
+    });
+    expect(scrollTop).toBe(120);
+    expect(screen.getByTestId("spacer-height").textContent).toBe("70");
+    expect(screen.getByTestId("scroll-state").textContent).toBe("following");
+  });
+
+  it("re-pins on the resize-induced scroll clamp instead of falling into bottom-follow", () => {
+    const { rerender } = render(
+      <Fixture contentKey="initial" latestUserMessageId={null} resetKey="s1" userMessageCount={0} />,
+    );
+    const root = screen.getByTestId("scroll-root");
+    const content = screen.getByTestId("scroll-content");
+    const userAnchor = screen.getByTestId("user-anchor");
+
+    const baseContentHeight = 180;
+    let clientHeight = 100;
+    let scrollTop = 0;
+    const currentSpacerHeight = () =>
+      Number.parseFloat(screen.getByTestId("transcript-spacer").style.height || "0");
+
+    Object.defineProperty(root, "clientHeight", {
+      configurable: true,
+      get: () => clientHeight,
+    });
+    Object.defineProperty(root, "scrollHeight", {
+      configurable: true,
+      get: () => baseContentHeight + currentSpacerHeight(),
+    });
+    Object.defineProperty(root, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(content, "scrollHeight", {
+      configurable: true,
+      get: () => baseContentHeight + currentSpacerHeight(),
+    });
+    root.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: 0,
+          bottom: clientHeight,
+          height: clientHeight,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: 0,
+        }) as DOMRect,
+    );
+    content.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: -scrollTop,
+          bottom: baseContentHeight - scrollTop,
+          height: baseContentHeight,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: -scrollTop,
+        }) as DOMRect,
+    );
+    userAnchor.getBoundingClientRect = vi.fn(
+      () =>
+        ({
+          top: 120 - scrollTop,
+          bottom: 150 - scrollTop,
+          height: 30,
+          left: 0,
+          right: 0,
+          width: 0,
+          x: 0,
+          y: 120 - scrollTop,
+        }) as DOMRect,
+    );
+
+    rerender(
+      <Fixture contentKey="user-1" latestUserMessageId="user-1" resetKey="s1" userMessageCount={1} />,
+    );
+    expect(scrollTop).toBe(120);
+    expect(screen.getByTestId("spacer-height").textContent).toBe("40");
+
+    // Viewport grows before the ResizeObserver re-pins: the 40px spacer is now too
+    // small (content 220, viewport 130 => maxTop 90), so the browser clamps the
+    // scroll from 120 to 90 and emits a scroll event. Because the latest turn still
+    // fits (60 <= 130), handleScroll must re-pin, not switch to bottom-follow.
+    clientHeight = 130;
+    scrollTop = 90;
+    act(() => {
+      fireEvent.scroll(root);
+    });
+    expect(scrollTop).toBe(120);
+    expect(screen.getByTestId("spacer-height").textContent).toBe("70");
+    expect(screen.getByTestId("scroll-state").textContent).toBe("following");
+  });
+
   it("preserves the viewport anchor when older history is prepended", () => {
     const { rerender } = render(
       <Fixture

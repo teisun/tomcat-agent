@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-13 21:12 +0800 | ACTIVE | feature/transcript-ui-and-checkpoints | — |
+| Nibbles | 2026-07-13 23:14 +0800 | ACTIVE | feature/transcript-ui-and-checkpoints | — |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** Checkpoint 最新一轮消失修复：`setCheckpoints` 不再触发 `rebuildHistoryTimeline`；分隔线改为 GUI 渲染层现算（`checkpointMarkers.ts` + `TranscriptView` checkpoints prop）@2026-07-13
@@ -9,18 +9,22 @@
 - [✓] **[P0]** Transcript checkpoint restore 落地：list/restore 协议、三态确认弹层、`revertFiles` 截断对话并可选回滚文件 @2026-07-13
 - [✓] **[P0]** 上一轮进行态收尾：`TranscriptView` 仅 live cluster 持有 thinking streaming；`agent_idle` 经 `settleRunningTools` 收敛残留 `running/streaming` 工具卡；GUI/state/provider 分层测试 + E2E-VSCEXT-026 @2026-07-13
 - [✓] **[P0]** Sticky reveal 触发加固：`useAutoScroll` 改按 `latestUserMessageId` 变化触发 reveal，护栏 `userMessageCount` 未减少；超一屏后切回 follow-bottom 并显示当前轮 sticky；分层测试 + E2E-VSCEXT-027；ext/gui bump `0.1.12` @2026-07-13
+- [✓] **[P0]** 真机「新提示词不置顶」真因修复：真实浏览器 smoke（Vite dev server + CDP）复现——reset effect 与 reveal effect 共享 `previous*Ref`，`resetKey` 与新 user **同帧变化**时，先声明的 reset 把 ref 洗成"已见过"，静默吞掉 reveal（jsdom mock 布局测不出）。合并为**单一确定性 `useLayoutEffect`**（`resetKey/latestUserMessageId/oldestItemKey/userMessageCount`），reset 分支权威落底、同会话追加必 reveal；真机复验 reveal 到顶→超一屏切 follow-bottom→sticky 全链路 + collision 落底；新增 `useAutoScroll.test.tsx` collision/remount-后发送 两条不变量 + E2E-VSCEXT-028；ext bump `0.1.13` @2026-07-13
+- [✓] **[P0]** 真机「新提示词不置顶」**第二真因**修复（0.1.13 仍复现）：用**生产构建 `gui/dist`** 静态服务 + CDP 复刻真机时序（`busy=false` echo→`busy=true` 翻转→流式）取证——`busy` 翻转使 composer 变高、stream 容器 `clientHeight` 变大，reveal spacer 仍按旧视口算导致**钳底 + `scroll` 事件翻成 follow-bottom**，reveal 当场丢失（jsdom mock `clientHeight` 恒定测不出）。修复：`ResizeObserver` 检测 `clientHeight` 变化即**重算 spacer 并重新固顶**（可增大 spacer）；钳底 `scroll` 事件在当前轮仍装得下时**重新固顶而非 follow-bottom**。生产构建复验：`busy` 翻转后 u2 保持 `top=0`、长回复溢出仍 follow-bottom；新增 `useAutoScroll.test.tsx` 可变 `clientHeight` 两条不变量 + E2E-VSCEXT-029；ext/gui bump `0.1.14` @2026-07-13
 
 ### 🔌 INTERFACE (接口变更)
 - Webview store：`session.checkpoints` 与 `timeline` 解耦；timeline 仅含消息/工具项，checkpoint 分隔线由 GUI `injectCheckpointMarkers(timeline, checkpoints)` 现算。
 - Checkpoint 文件计数：shadow git 上限计数改走 `git ls-files -z --cached --others --exclude-standard`，与 `git add -A` 快照口径一致；仅改 ignore 文件的一轮不产生新存档（设计行为）。
 - AutoScroll：reveal 触发输入由 `lastItemIsLatestUser` 改为 `latestUserMessageId`；`agent_idle` 必须结算残留 running 工具卡。
+- AutoScroll（0.1.13）：reset 与 reveal 合并为单一 `useLayoutEffect`，deps 增加 `oldestItemKey`；判定用单一 `revealTrackingRef`，消除双 effect 共享 ref 的同帧竞态。
+- AutoScroll（0.1.14）：reveal 对视口高度变化免疫——`ResizeObserver` 以 `previousClientHeightRef` 侦测 `clientHeight` 变化并重算 spacer 重新固顶；`handleScroll` 在钳底且当前轮仍装得下时重新固顶而非 follow-bottom。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| 真机「新提示词置顶」仍可能失败 | `0.1.12` 已含 `latestUserMessageId` 触发加固，单测绿，但真机仍见不置顶；疑为 webview 运行时/时序，非触发条件本身 | 下一轮证据优先排查 |
+| （空）真机「新提示词置顶」两处真因（同帧 resetKey 竞态 + `busy` 翻转视口变化）均已定位并修复（`0.1.14`），待用户真机复验 | — | — |
 
 ### 集成说明
-- 本分支目标：Transcript UI + checkpoint restore；本轮收口上一轮 live 动效泄漏，并加固 sticky reveal 触发。
-- 验收分层：GUI util / TranscriptView / App / state / provider 单测；E2E 场景登记 VSCEXT-026/027 以分层覆盖替代真机。
-- 已知后续：真机 reveal 到顶仍需证据优先定位（可能不是触发帧丢失）。
+- 本分支目标：Transcript UI + checkpoint restore；本轮收口上一轮 live 动效泄漏、加固 sticky reveal，并**定位修复真机 reveal 不置顶的两处真因**（同帧 resetKey 竞态 + `busy` 翻转导致 `clientHeight` 变化钳底）。
+- 验收分层：GUI util / TranscriptView / App / state / provider 单测；E2E 场景登记 VSCEXT-026/027/028/029；纯布局/时序真因以真实浏览器 smoke 取证（**生产构建 `gui/dist` + CDP**，且必须复刻 `busy=false→true` 翻转时序），逻辑不变量以 store props（含可变 `clientHeight`）驱动的 jsdom 单测锁定。
+- 已知后续：`0.1.14`（不含 CLI）已打包（`tomcat-vscode-ext-0.1.14.vsix`），待用户真机复验「置顶」。

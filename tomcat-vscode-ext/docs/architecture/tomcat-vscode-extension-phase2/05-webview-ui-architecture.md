@@ -286,9 +286,11 @@ assistant response group
 1. `ResizeObserver` 观察滚动容器及其直接子节点；
 2. 用户仍贴底时，内容变高就 `scrollTop = scrollHeight`；
 3. `scroll` 监听根据 `|scrollHeight - scrollTop - clientHeight| < 2` 判断是否贴底；
-4. reveal 触发不再依赖“当前帧最后一项恰好是 user”，而是看 **`latestUserMessageId` 是否变化**，并额外要求 `userMessageCount` **没有减少**。这样即使 host 同一帧把“新 user + 第一条 thinking”一起发来，也不会漏掉 reveal；历史 prepend 和 restore 截断也不会误触发。
+4. reveal 触发不再依赖“当前帧最后一项恰好是 user”，而是看 **`latestUserMessageId` 是否变化**，并额外要求 `oldestItemKey` **未变**（同一会话内的“追加”，区别于会话切换 / 历史翻页）且 `userMessageCount` **没有减少**（拒绝 restore 截断）。这样即使 host 同一帧把“新 user + 第一条 thinking”一起发来，也不会漏掉 reveal。
+   - **单一 effect、单一 tracking ref（关键修复）**：早先“会话重置”与“新 user reveal”是两个各自持有 `previous*Ref` 的 `useLayoutEffect`。当 `resetKey`（= 活动 sessionId）与 `latestUserMessageId` **同一次 commit 一起变化**（会话切换、webview 重挂后立即发送、或 `activeSession` 短暂 flicker）时，先声明的 reset effect 会把共享 ref 洗成“已见过”，导致后声明的 reveal effect 判定“没变化”而**静默吞掉 reveal**——这类竞态在 jsdom mock 布局里测不出、只在真机时序暴露（0.1.12 即栽在此）。现改为**合并为单一 `useLayoutEffect`**（deps: `resetKey / latestUserMessageId / oldestItemKey / userMessageCount`），用同一个 `revealTrackingRef` 做判定：`resetKey` 变化 → 走“会话加载/切换”分支（落底、不 reveal，且状态确定不残留 spacer）；否则才判断是否 reveal。这样 reset 分支是**权威的、不会被 reveal 触发清洗**，reveal 也不再依赖两个 effect 的声明顺序。
 5. 触发 reveal 时，`useAutoScroll.ts` 先把**当前轮 user message 滚到视口顶部**，再按“当前轮剩余高度”补一个底部 spacer，让回答先在它下方流式生长。
 6. 当当前轮内容长到**超过一屏**时，hook 会把 spacer 收缩到 0，并自动从 `revealUser` 切回 `followBottom`；这样最新 token 继续留在视口底部可见，而不是把用户永久钉死在顶部。
+   - **视口高度变化时重新固顶（关键修复）**：当 `busy` 翻转（发送 → 进行态）导致 composer 变高、进而 stream 容器 `clientHeight` 变大时，reveal spacer 仍按旧（更矮）视口计算就会“不够”——浏览器把 `scrollTop` 钳到底、随之而来的 `scroll` 事件把模式翻成 `followBottom`，reveal 当场丢失（0.1.13 即栽在此，只在真机、且要 `busy` 从 false→true 翻转才暴露）。现在 reveal 对视口高度变化免疫：`ResizeObserver` 每次检测到容器 `clientHeight` 变化就**重算 spacer 并重新固顶**（既能收缩、也能把 spacer **重新增大**）；万一钳底的 `scroll` 事件先到，只要当前轮仍能装进视口（`latestTurnHeight <= clientHeight`）就**重新固顶而非切 followBottom**，只有真正超一屏才交给 follow-bottom。
 7. `App.tsx` 在 `userHasScrolled=true` 时显示 `Jump to latest` 向下箭头图标按钮（保留 `scroll-to-bottom` test id，弱化视觉重量）；
 8. sticky prompt 不再只认“最后一条 user message”，而是扫描 transcript 里**所有** user message，先找出“当前视口顶部属于哪一轮”（`top <= scrollTop + threshold` 的 user message 里 `top` 最大者），再判断这一轮自己的 user message 是否已**完全**滚出顶部（`bottom <= scrollTop + threshold`）；只有完全滚出时才有资格显示 sticky。
 9. 在此基础上，再加一条更贴近真实对话流的保护：**只要最新一轮 user message 仍在屏幕内可见（顶部或底部都算），sticky 就保持隐藏**，绝不悬浮更旧的问题。这样既覆盖“新问题被 reveal 到顶部”的情况，也覆盖“新问题留在底部、回答在其下方流式生长”的真机情况。
@@ -299,6 +301,10 @@ assistant response group
 - **当前轮 sticky 不会被旧轮抑制规则误伤**：旧轮抑制只拦“更老的问题”，不会把 `owning===newest` 的当前轮 sticky 也一起吞掉。
 - **reveal 只由“新 user 到来”驱动**：tool / notice / thinking 流式更新不会把用户强行拉回顶部或底部。
 - **超一屏后优先保住最新 token 可见**：一旦当前轮超过一屏，系统宁可切回 follow-bottom，也不会继续把用户钉在顶部看不到新输出。
+- **reset 权威、reveal 不被同帧 resetKey 变化吞掉**：`resetKey` 与 `latestUserMessageId` 同帧变化时，reset 分支胜出（落底），reveal 触发绝不因为共享 ref 被清洗而丢失；同一会话内发送（`resetKey`/`oldestItemKey` 不变）则必定 reveal，即使紧跟在一次会话加载之后。
+- **reveal 对视口高度变化免疫**：`busy` 翻转 / composer 变高导致 stream 容器 `clientHeight` 变化时，reveal 会重算 spacer 并重新固顶，不会因为视口变大被钳到底而误切 follow-bottom；只有当前轮真正超过一屏才交给 follow-bottom。
+
+> 纯布局/时序类真因（如上面两条 reveal 真因：同帧 reset 竞态、视口高度变化钳底）无法靠 jsdom mock 布局取证：`getBoundingClientRect/scrollHeight/clientHeight` 全是假值且恒定，单测恒绿。定位手段是**真实浏览器 smoke**——把**生产构建** `gui/dist`（`vite build` 产物，与真机 webview 完全一致的压缩 React 生产版）用静态服务器起起来（而非只跑 `npm run dev` 的开发版），用 `window.postMessage` 灌真实 `state` 帧序列，且必须复刻真机时序：`busy=false` 的 echo 帧（reveal 到顶）→ `busy=true` 翻转帧（composer 变高、`clientHeight` 变化）→ 流式 thinking/tool。再用 CDP 读真实 `scrollTop / clientHeight / scrollHeight / spacer` 与 `[data-message-kind="user"]` 的 `getBoundingClientRect().top` 验证 reveal 是否**在 `busy` 翻转后仍保持置顶**。逻辑不变量则用 `useAutoScroll.test.tsx` 以 store 状态（props）+ 可变 `clientHeight` 驱动锁定，不 mock 触发条件。
 
 为什么不用虚拟列表：
 

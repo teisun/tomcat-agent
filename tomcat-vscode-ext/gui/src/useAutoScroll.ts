@@ -136,11 +136,20 @@ export function useAutoScroll({
   const pendingScrollActionRef = useRef<PendingScrollAction | null>(null);
   const previousOldestItemKeyRef = useRef<string | null>(oldestItemKey);
   const previousScrollHeightRef = useRef(0);
+  const previousClientHeightRef = useRef(0);
   const revealSettledRef = useRef(false);
   const skipAutoLayoutUntilRef = useRef(0);
   const userHasScrolledRef = useRef(false);
-  const previousLatestUserMessageIdRef = useRef<string | null>(latestUserMessageId);
-  const previousUserMessageCountRef = useRef(userMessageCount);
+  // Single source of truth for the reveal trigger. Both "session reset" and
+  // "new user message" decisions read/write this one ref, so their ordering can
+  // never clobber each other (the previous two-effect design let a coincident
+  // resetKey change silently eat a legitimate reveal).
+  const revealTrackingRef = useRef({
+    latestUserMessageId,
+    oldestItemKey,
+    resetKey,
+    userMessageCount,
+  });
 
   const syncUserHasScrolled = (next: boolean) => {
     userHasScrolledRef.current = next;
@@ -340,33 +349,44 @@ export function useAutoScroll({
   };
 
   useLayoutEffect(() => {
-    modeRef.current = "followBottom";
-    pendingScrollActionRef.current = null;
-    previousOldestItemKeyRef.current = oldestItemKey;
-    previousLatestUserMessageIdRef.current = latestUserMessageId;
-    previousUserMessageCountRef.current = userMessageCount;
-    revealSettledRef.current = false;
-    syncActiveStickyMessageId(null);
-    syncUserHasScrolled(false);
-    syncBottomSpacerHeight(0);
-    scrollToBottom(true);
-    previousScrollHeightRef.current = containerRef.current?.scrollHeight ?? 0;
-  }, [resetKey]);
+    const previous = revealTrackingRef.current;
+    const container = containerRef.current;
 
-  useLayoutEffect(() => {
-    const previousUserMessageCount = previousUserMessageCountRef.current;
-    const previousLatestUserMessageId = previousLatestUserMessageIdRef.current;
-    const latestUserChanged =
-      latestUserMessageId !== null && latestUserMessageId !== previousLatestUserMessageId;
-    if (userMessageCount >= previousUserMessageCount && latestUserChanged) {
-      modeRef.current = "revealUser";
+    if (resetKey !== previous.resetKey) {
+      // Session load / switch / webview remount: land at the bottom of the new
+      // conversation and never reveal a pre-existing message.
+      modeRef.current = "followBottom";
+      pendingScrollActionRef.current = null;
+      previousOldestItemKeyRef.current = oldestItemKey;
       revealSettledRef.current = false;
+      syncActiveStickyMessageId(null);
       syncUserHasScrolled(false);
-      revealLatestUser();
+      syncBottomSpacerHeight(0);
+      scrollToBottom(true);
+      previousScrollHeightRef.current = container?.scrollHeight ?? 0;
+    } else {
+      // Same conversation: reveal only when a genuinely new user message was
+      // appended. "oldestItemKey unchanged" distinguishes an append (send) from
+      // a switch / pagination, and the count guard rejects restore-truncation.
+      const sameConversation = oldestItemKey === previous.oldestItemKey;
+      const latestUserChanged =
+        latestUserMessageId !== null && latestUserMessageId !== previous.latestUserMessageId;
+      const notTruncated = userMessageCount >= previous.userMessageCount;
+      if (sameConversation && latestUserChanged && notTruncated) {
+        modeRef.current = "revealUser";
+        revealSettledRef.current = false;
+        syncUserHasScrolled(false);
+        revealLatestUser();
+      }
     }
-    previousLatestUserMessageIdRef.current = latestUserMessageId;
-    previousUserMessageCountRef.current = userMessageCount;
-  }, [latestUserMessageId, userMessageCount]);
+
+    revealTrackingRef.current = {
+      latestUserMessageId,
+      oldestItemKey,
+      resetKey,
+      userMessageCount,
+    };
+  }, [latestUserMessageId, oldestItemKey, resetKey, userMessageCount]);
 
   useLayoutEffect(() => {
     const container = containerRef.current;
@@ -467,6 +487,15 @@ export function useAutoScroll({
       }
 
       if (isAtBottom(element)) {
+        // While revealing, being clamped to the bottom even though the latest
+        // turn still fits in the viewport means a viewport resize (e.g. the
+        // composer growing when `busy` flips) shrank our reveal spacer out from
+        // under us. Re-pin instead of abandoning the reveal; only a genuinely
+        // overflowing turn should fall through to bottom-follow.
+        if (metrics && metrics.latestTurnHeight <= element.clientHeight) {
+          revealLatestUser();
+          return;
+        }
         modeRef.current = "followBottom";
         syncUserHasScrolled(false);
         return;
@@ -490,8 +519,23 @@ export function useAutoScroll({
       return;
     }
 
+    // Baseline the viewport height so the first callback only re-pins on a genuine
+    // viewport change (not on the observer's initial content-driven fire).
+    previousClientHeightRef.current = container.clientHeight;
+
     const observer = new ResizeObserver(() => {
+      const clientHeight = containerRef.current?.clientHeight ?? 0;
+      const clientHeightChanged = clientHeight !== previousClientHeightRef.current;
+      previousClientHeightRef.current = clientHeight;
       if (modeRef.current === "revealUser" && revealSettledRef.current) {
+        // A viewport-height change (the composer resizing when `busy` flips)
+        // shrinks the reveal spacer and can clamp the scroll to the bottom.
+        // Recompute the spacer for the new viewport and re-pin, rather than only
+        // shrinking (which can never grow the spacer back).
+        if (clientHeightChanged) {
+          revealLatestUser();
+          return;
+        }
         if (!shrinkRevealSpacer()) {
           updateStickyPromptState();
         }
