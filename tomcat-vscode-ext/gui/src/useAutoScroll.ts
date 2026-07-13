@@ -52,7 +52,7 @@ type UseAutoScrollOptions = {
   containerRef: RefObject<HTMLElement | null>;
   contentRef: RefObject<HTMLElement | null>;
   contentKey: string;
-  lastItemIsLatestUser: boolean;
+  latestUserMessageId: string | null;
   oldestItemKey: string | null;
   resetKey: string | null;
   userMessageCount: number;
@@ -121,7 +121,7 @@ export function useAutoScroll({
   containerRef,
   contentRef,
   contentKey,
-  lastItemIsLatestUser,
+  latestUserMessageId,
   oldestItemKey,
   resetKey,
   userMessageCount,
@@ -139,6 +139,7 @@ export function useAutoScroll({
   const revealSettledRef = useRef(false);
   const skipAutoLayoutUntilRef = useRef(0);
   const userHasScrolledRef = useRef(false);
+  const previousLatestUserMessageIdRef = useRef<string | null>(latestUserMessageId);
   const previousUserMessageCountRef = useRef(userMessageCount);
 
   const syncUserHasScrolled = (next: boolean) => {
@@ -216,7 +217,9 @@ export function useAutoScroll({
       return;
     }
 
-    const hadSpacer = bottomSpacerHeightRef.current > 0;
+    const removedSpacerHeight = bottomSpacerHeightRef.current;
+    const hadSpacer = removedSpacerHeight > 0;
+    const currentScrollHeight = container.scrollHeight;
     if (hadSpacer) {
       syncBottomSpacerHeight(0);
     }
@@ -227,25 +230,37 @@ export function useAutoScroll({
     }
 
     pendingScrollActionRef.current = null;
-    setScrollTop(container, container.scrollHeight);
+    setScrollTop(
+      container,
+      Math.max(0, currentScrollHeight - removedSpacerHeight - container.clientHeight),
+    );
   };
 
-  const shrinkRevealSpacer = () => {
+  const shrinkRevealSpacer = (): boolean => {
     const container = containerRef.current;
     const content = contentRef.current;
     if (!container || !content) {
-      return;
+      return false;
     }
 
     const metrics = latestTurnMetrics(container, content, bottomSpacerHeightRef.current);
     if (!metrics) {
-      return;
+      return false;
     }
 
     const nextSpacerHeight = Math.max(0, container.clientHeight - metrics.latestTurnHeight);
     if (nextSpacerHeight < bottomSpacerHeightRef.current) {
       syncBottomSpacerHeight(nextSpacerHeight);
     }
+    if (nextSpacerHeight === 0 && metrics.latestTurnHeight > container.clientHeight) {
+      modeRef.current = "followBottom";
+      revealSettledRef.current = false;
+      syncUserHasScrolled(false);
+      scrollToBottom(false);
+      updateStickyPromptState();
+      return true;
+    }
+    return false;
   };
 
   const revealLatestUser = () => {
@@ -294,8 +309,9 @@ export function useAutoScroll({
         return;
       }
       if (revealSettledRef.current) {
-        shrinkRevealSpacer();
-        updateStickyPromptState();
+        if (!shrinkRevealSpacer()) {
+          updateStickyPromptState();
+        }
         return;
       }
       revealLatestUser();
@@ -327,6 +343,8 @@ export function useAutoScroll({
     modeRef.current = "followBottom";
     pendingScrollActionRef.current = null;
     previousOldestItemKeyRef.current = oldestItemKey;
+    previousLatestUserMessageIdRef.current = latestUserMessageId;
+    previousUserMessageCountRef.current = userMessageCount;
     revealSettledRef.current = false;
     syncActiveStickyMessageId(null);
     syncUserHasScrolled(false);
@@ -336,14 +354,19 @@ export function useAutoScroll({
   }, [resetKey]);
 
   useLayoutEffect(() => {
-    if (userMessageCount > previousUserMessageCountRef.current && lastItemIsLatestUser) {
+    const previousUserMessageCount = previousUserMessageCountRef.current;
+    const previousLatestUserMessageId = previousLatestUserMessageIdRef.current;
+    const latestUserChanged =
+      latestUserMessageId !== null && latestUserMessageId !== previousLatestUserMessageId;
+    if (userMessageCount >= previousUserMessageCount && latestUserChanged) {
       modeRef.current = "revealUser";
       revealSettledRef.current = false;
       syncUserHasScrolled(false);
       revealLatestUser();
     }
+    previousLatestUserMessageIdRef.current = latestUserMessageId;
     previousUserMessageCountRef.current = userMessageCount;
-  }, [lastItemIsLatestUser, userMessageCount]);
+  }, [latestUserMessageId, userMessageCount]);
 
   useLayoutEffect(() => {
     const container = containerRef.current;
@@ -469,8 +492,9 @@ export function useAutoScroll({
 
     const observer = new ResizeObserver(() => {
       if (modeRef.current === "revealUser" && revealSettledRef.current) {
-        shrinkRevealSpacer();
-        updateStickyPromptState();
+        if (!shrinkRevealSpacer()) {
+          updateStickyPromptState();
+        }
         return;
       }
       updateAutoScrollLayout();

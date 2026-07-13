@@ -735,9 +735,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const userMessages = activeTimeline.filter(
     (item): item is WebviewMessageBlock => item.type === "message" && item.kind === "user",
   );
-  const lastTimelineItem = activeTimeline.at(-1);
-  const lastItemIsLatestUser =
-    lastTimelineItem?.type === "message" && lastTimelineItem.kind === "user";
+  const latestUserMessageId = userMessages.at(-1)?.id ?? null;
   const userMessageCount = userMessages.length;
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
   const readOnlyConflict = activeSession?.conflictMessage ?? null;
@@ -757,7 +755,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     containerRef: streamRef,
     contentRef: transcriptRef,
     contentKey: streamContentKey,
-    lastItemIsLatestUser,
+    latestUserMessageId,
     oldestItemKey: oldestTimelineItemId,
     resetKey: activeSession?.sessionId ?? null,
     userMessageCount,

@@ -1096,6 +1096,17 @@ function markRunningToolsInterrupted(session: WebviewSessionSnapshot): void {
   }
 }
 
+function settleRunningTools(session: WebviewSessionSnapshot): void {
+  for (const item of session.timeline) {
+    if (item.type !== "tool") {
+      continue;
+    }
+    if (item.status === "running" || item.status === "streaming") {
+      item.status = "complete";
+    }
+  }
+}
+
 function appendStreamingMessage(
   session: WebviewSessionSnapshot,
   runtime: SessionRuntimeState,
@@ -1531,6 +1542,7 @@ export class WebviewStateStore {
       case "agent_idle":
         session.busy = false;
         this.syncTabBusy(session.sessionId, false);
+        settleRunningTools(session);
         clearActiveAssistant(runtime);
         return;
       case "llm_notice":

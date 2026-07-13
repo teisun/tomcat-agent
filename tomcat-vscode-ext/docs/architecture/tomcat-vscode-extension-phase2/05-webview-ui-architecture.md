@@ -286,11 +286,19 @@ assistant response group
 1. `ResizeObserver` 观察滚动容器及其直接子节点；
 2. 用户仍贴底时，内容变高就 `scrollTop = scrollHeight`；
 3. `scroll` 监听根据 `|scrollHeight - scrollTop - clientHeight| < 2` 判断是否贴底；
-4. **只有 user message 数量增加**时才重置跟随，工具/notice/thinking 不会把用户强行拉回底部；
-5. `App.tsx` 在 `userHasScrolled=true` 时显示 `Jump to latest` 向下箭头图标按钮（保留 `scroll-to-bottom` test id，弱化视觉重量）；
-6. sticky prompt 不再只认“最后一条 user message”，而是扫描 transcript 里**所有** user message，先找出“当前视口顶部属于哪一轮”（`top <= scrollTop + threshold` 的 user message 里 `top` 最大者），再判断这一轮自己的 user message 是否已**完全**滚出顶部（`bottom <= scrollTop + threshold`）；只有完全滚出时才有资格显示 sticky。
-7. 在此基础上，再加一条更贴近真实对话流的保护：**只要最新一轮 user message 仍在屏幕内可见（顶部或底部都算），sticky 就保持隐藏**，绝不悬浮更旧的问题。这样既覆盖“新问题被 reveal 到顶部”的情况，也覆盖“新问题留在底部、回答在其下方流式生长”的真机情况。
-8. 因此，发出**新的提示词**时，旧 sticky 会立即消失；等新问题被它自己的回答顶出一屏后，sticky 才显示新问题。向上翻历史时，若最新问题已在屏幕外，sticky 会按视口实际落在哪一轮而切换；滚到第一条 user 之上时自动消失；经过某一轮 user message 头部的瞬间，sticky 仍会短暂隐藏，等该 user message 完全滚出顶部后再显示该轮问题。
+4. reveal 触发不再依赖“当前帧最后一项恰好是 user”，而是看 **`latestUserMessageId` 是否变化**，并额外要求 `userMessageCount` **没有减少**。这样即使 host 同一帧把“新 user + 第一条 thinking”一起发来，也不会漏掉 reveal；历史 prepend 和 restore 截断也不会误触发。
+5. 触发 reveal 时，`useAutoScroll.ts` 先把**当前轮 user message 滚到视口顶部**，再按“当前轮剩余高度”补一个底部 spacer，让回答先在它下方流式生长。
+6. 当当前轮内容长到**超过一屏**时，hook 会把 spacer 收缩到 0，并自动从 `revealUser` 切回 `followBottom`；这样最新 token 继续留在视口底部可见，而不是把用户永久钉死在顶部。
+7. `App.tsx` 在 `userHasScrolled=true` 时显示 `Jump to latest` 向下箭头图标按钮（保留 `scroll-to-bottom` test id，弱化视觉重量）；
+8. sticky prompt 不再只认“最后一条 user message”，而是扫描 transcript 里**所有** user message，先找出“当前视口顶部属于哪一轮”（`top <= scrollTop + threshold` 的 user message 里 `top` 最大者），再判断这一轮自己的 user message 是否已**完全**滚出顶部（`bottom <= scrollTop + threshold`）；只有完全滚出时才有资格显示 sticky。
+9. 在此基础上，再加一条更贴近真实对话流的保护：**只要最新一轮 user message 仍在屏幕内可见（顶部或底部都算），sticky 就保持隐藏**，绝不悬浮更旧的问题。这样既覆盖“新问题被 reveal 到顶部”的情况，也覆盖“新问题留在底部、回答在其下方流式生长”的真机情况。
+10. 因此，发出**新的提示词**时，旧 sticky 会立即消失；新问题先被 reveal 到顶部，等它被自己的回答顶出一屏后，sticky 再接棒显示当前轮问题。向上翻历史时，若最新问题已在屏幕外，sticky 会按视口实际落在哪一轮而切换；滚到第一条 user 之上时自动消失；经过某一轮 user message 头部的瞬间，sticky 仍会短暂隐藏，等该 user message 完全滚出顶部后再显示该轮问题。
+
+当前这套滚动/吸顶逻辑有三个必须守住的不变量：
+
+- **当前轮 sticky 不会被旧轮抑制规则误伤**：旧轮抑制只拦“更老的问题”，不会把 `owning===newest` 的当前轮 sticky 也一起吞掉。
+- **reveal 只由“新 user 到来”驱动**：tool / notice / thinking 流式更新不会把用户强行拉回顶部或底部。
+- **超一屏后优先保住最新 token 可见**：一旦当前轮超过一屏，系统宁可切回 follow-bottom，也不会继续把用户钉在顶部看不到新输出。
 
 为什么不用虚拟列表：
 
@@ -306,13 +314,19 @@ thinking 仍保持独立卡，而不是嵌入 assistant 气泡，原因有三：
 2. 历史与实时更容易复用同一条渲染路径；
 3. 后续若引入更多 reasoning 元信息（耗时、脱敏、可复制等）更容易扩展。
 
-[`gui/src/components/TranscriptView.tsx`](../../../gui/src/components/TranscriptView.tsx) 会在 `busy=true` 时找出最后一个 thinking 节点，把它标记为 `isStreaming`，供 [`ThinkingBlock.tsx`](../../../gui/src/components/ThinkingBlock.tsx) 做标题动画。
+[`gui/src/components/TranscriptView.tsx`](../../../gui/src/components/TranscriptView.tsx) 不再对**整条 transcript**找“最后一个 thinking”，而是只在 `liveClusterTimeline`（最后一条 user 之后、且 `showProgress=true` 的那一组）内部找 `clusterLastThinkingId`。也就是说：
+
+- 旧轮 thinking 永远是过去态，不会因为全局 `busy=true` 又重新转圈；
+- leading/history cluster 的 `ThinkingGroup` 不会被新一轮的 busy 连坐成 shimmer；
+- 只有当前 live cluster 里最后一个 thinking 才有资格拿到 `isStreaming=true`。
 
 ### 5.3 Transcript 工具行：标题恒显，结果体按类型折叠
 
 > 专业：这次优化后，Tomcat 不再把所有工具都画成同一种 `ToolCallCard`。统一入口仍是 [`gui/src/components/ToolRow.tsx`](../../../gui/src/components/ToolRow.tsx)，但视觉与展开规则由 `toolCategory()` 驱动。
 >
 > 说人话：用户第一眼应该先看到“发生了什么”，再决定要不要看细节；不是先看到一堆长得一样的白字卡片。
+
+状态收敛上还有一条更底层的不变量：**`agent_idle` 到来时，界面里不允许再残留任何“进行中”工具态**。因此 [`src/ui/webview/state.ts`](../../../src/ui/webview/state.ts) 在 `agent_idle` 分支会执行 `settleRunningTools(session)`，把残留的 `running/streaming` 工具卡统一收敛为 `complete`，但保留原有 `summary` / `isError`。这保证“上一轮 edit 还显示 Editing…”这类 UI 泄漏不会跨轮延续。
 
 视觉/交互模型：
 
@@ -410,15 +424,16 @@ ToolRow
 | 文件 | 覆盖点 |
 |------|--------|
 | [`gui/src/useAutoScroll.test.tsx`](../../../gui/src/useAutoScroll.test.tsx) | 贴底跟随、上滑暂停、session 切换与 user message 重置 |
-| [`gui/src/App.test.tsx`](../../../gui/src/App.test.tsx) | composer/DOM snapshot 埋点接线、跳底箭头按钮与 transcript snapshot 指标 |
+| [`gui/src/App.test.tsx`](../../../gui/src/App.test.tsx) | composer/DOM snapshot 埋点接线、跳底箭头按钮、上一轮进行态收尾，以及“reveal 到顶 → 超一屏切回当前 sticky”整链路 |
 | [`gui/src/components/DisclosureCard.test.tsx`](../../../gui/src/components/DisclosureCard.test.tsx) | 折叠/展开外壳、preview/body 切换 |
 | [`gui/src/components/DiffView.test.tsx`](../../../gui/src/components/DiffView.test.tsx) | 行号列、加删底色、长 context 折叠、大文件 fallback |
 | [`gui/src/components/ToolRow.test.tsx`](../../../gui/src/components/ToolRow.test.tsx) | edit diff 徽章 + View diff 按钮、command disclosure、answer/context 渲染语义、read 图标去重 |
 | [`gui/src/components/TranscriptView.partition.test.ts`](../../../gui/src/components/TranscriptView.partition.test.ts) | assistant-response 冲刷算法（context/action 交错边界） |
-| [`gui/src/components/TranscriptView.test.tsx`](../../../gui/src/components/TranscriptView.test.tsx) | 单 context 工具直出、action/context 分层 |
+| [`gui/src/components/TranscriptView.test.tsx`](../../../gui/src/components/TranscriptView.test.tsx) | 单 context 工具直出、action/context 分层、旧轮 thinking 不被新一轮 busy 连坐成 streaming |
 | [`gui/src/components/ThinkingGroup.test.tsx`](../../../gui/src/components/ThinkingGroup.test.tsx) | thinking-only 残组不复用 `summaryTitle` |
 | [`src/ui/webview/tests/dual_channel.test.ts`](../../../src/ui/webview/tests/dual_channel.test.ts) | thinking 在 assistant 前、历史 `role:tool` → 工具卡、历史/实时去重 |
-| [`src/ui/webview/tests/provider.test.ts`](../../../src/ui/webview/tests/provider.test.ts) | mutation 工具结束后从 `display.added/removed/diff` 注入 `diffStat/tool.diff`，以及 `openDiff -> ide.openReconstructedDiff` 路由 |
+| [`src/ui/webview/tests/provider.test.ts`](../../../src/ui/webview/tests/provider.test.ts) | mutation 工具结束后从 `display.added/removed/diff` 注入 `diffStat/tool.diff`、errored tool 收敛为 `complete+error`，以及 `openDiff -> ide.openReconstructedDiff` 路由 |
+| [`src/ui/webview/tests/state.test.ts`](../../../src/ui/webview/tests/state.test.ts) | `agent_idle` 收敛残留 `running/streaming` 工具卡，并保留 `summary/isError` |
 | [`src/ide/tests/diff_apply_edit.test.ts`](../../../src/ide/tests/diff_apply_edit.test.ts) | `openReconstructedDiff()` 复用原生虚拟文档 diff 链路 |
 | [`src/test/suite/support/hostE2eScenario.ts`](../../../src/test/suite/support/hostE2eScenario.ts) | 真实宿主 webview streaming/diff/multi-session/ownership 通路 |
 

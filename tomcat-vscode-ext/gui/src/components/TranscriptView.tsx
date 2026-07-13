@@ -162,9 +162,6 @@ export function TranscriptView({
     () => injectCheckpointMarkers(timeline, checkpoints),
     [checkpoints, timeline],
   );
-  const lastThinkingId = busy
-    ? [...renderedTimeline].reverse().find((item) => item.type === "thinking")?.id ?? null
-    : null;
   const latestUserIndex = renderedTimeline.reduce(
     (lastIndex, item, index) =>
       item.type === "message" && item.kind === "user" ? index : lastIndex,
@@ -173,6 +170,9 @@ export function TranscriptView({
 
   const renderCluster = (clusterTimeline: WebviewTimelineItem[], showProgress: boolean) => {
     const grouped = groupTimelineByAssistantResponse(clusterTimeline);
+    const clusterLastThinkingId = showProgress
+      ? [...clusterTimeline].reverse().find((item) => item.type === "thinking")?.id ?? null
+      : null;
     const activePlanTools = clusterTimeline.filter(isRunningPlanTool);
     const planCards = clusterTimeline.filter(
       (item): item is WebviewPlanFileCard => item.type === "plan",
@@ -203,7 +203,7 @@ export function TranscriptView({
         case "thinking":
           return (
             <ThinkingBlock
-              isStreaming={item.id === lastThinkingId}
+              isStreaming={showProgress && item.id === clusterLastThinkingId}
               item={item}
               key={item.id}
             />
@@ -282,8 +282,8 @@ export function TranscriptView({
                 );
               }
               const isStreaming =
-                busy &&
-                (segment.group.thinking?.id === lastThinkingId ||
+                showProgress &&
+                (segment.group.thinking?.id === clusterLastThinkingId ||
                   segment.group.tools.some((tool) => tool.status !== "complete"));
               return (
                 <ThinkingGroup

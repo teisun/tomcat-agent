@@ -111,6 +111,59 @@ async function emitCheckpointSessionState(
   });
 }
 
+async function emitTranscriptSessionState({
+  busy,
+  messageId,
+  sessionId = "s1",
+  timeline,
+}: {
+  busy: boolean;
+  messageId: string;
+  sessionId?: string;
+  timeline: Array<Record<string, unknown>>;
+}) {
+  await emitState({
+    channel: "state",
+    content: {
+      activeSessionId: sessionId,
+      availableModels: ["gpt-5.4"],
+      ready: true,
+      sessions: [
+        {
+          busy,
+          isCurrent: true,
+          ownedByThisFrontend: true,
+          owner: "webview",
+          sessionId,
+          title: null,
+          updatedAt: 1,
+        },
+      ],
+      sessionViews: {
+        [sessionId]: {
+          busy,
+          conflictMessage: null,
+          contextRatio: null,
+          hasMoreHistory: false,
+          historyLoading: false,
+          model: "gpt-5.4",
+          ownedByThisFrontend: true,
+          owner: "webview",
+          pendingAttachments: [],
+          planFile: null,
+          planId: null,
+          planState: "chat",
+          sessionId,
+          thinkingLevel: "high",
+          timeline,
+        },
+      },
+      uiMode: "both",
+    },
+    messageId,
+  });
+}
+
 beforeAll(() => {
   const emptyRect = () => ({
     bottom: 0,
@@ -1729,6 +1782,162 @@ describe("Tomcat webview App", () => {
     metrics.scrollTop = 360;
     fireEvent.scroll(screen.getByTestId("stream-container"));
     expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
+  });
+
+  it("settles the previous turn and auto-switches from reveal-to-top into the current sticky prompt", async () => {
+    mount();
+
+    const previousTurn = [
+      { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
+      {
+        assistantMessageId: "assistant-1",
+        id: "thinking-1",
+        text: "上一轮思考已经结束",
+        type: "thinking",
+      },
+      {
+        assistantMessageId: "assistant-1",
+        diffStat: { added: 2, removed: 1 },
+        display: { file: "src/app.ts", kind: "file" },
+        id: "tool-1",
+        isError: false,
+        status: "complete",
+        summary: "updated file",
+        toolCallId: "tool-1",
+        toolName: "edit",
+        type: "tool",
+      },
+      {
+        assistantMessageId: "assistant-1",
+        id: "assistant-1",
+        kind: "assistant",
+        text: "第一轮回答",
+        type: "message",
+      },
+    ];
+
+    await emitTranscriptSessionState({
+      busy: false,
+      messageId: "state-progress-initial",
+      timeline: previousTurn,
+    });
+
+    const stream = screen.getByTestId("stream-container");
+    const transcript = screen.getByLabelText("active-session");
+    let baseContentHeight = 160;
+    let scrollTop = 0;
+    const currentSpacerHeight = () =>
+      Number.parseFloat(screen.getByTestId("transcript-spacer").style.height || "0");
+    const rect = (top: number, bottom: number): DOMRect =>
+      ({
+        top,
+        bottom,
+        height: bottom - top,
+        left: 0,
+        right: 0,
+        width: 0,
+        x: 0,
+        y: top,
+      }) as DOMRect;
+
+    Object.defineProperty(stream, "clientHeight", {
+      configurable: true,
+      get: () => 100,
+    });
+    Object.defineProperty(stream, "scrollHeight", {
+      configurable: true,
+      get: () => baseContentHeight + currentSpacerHeight(),
+    });
+    Object.defineProperty(stream, "scrollTop", {
+      configurable: true,
+      get: () => Math.max(0, Math.min(scrollTop, baseContentHeight + currentSpacerHeight() - 100)),
+      set: (value: number) => {
+        const maxTop = Math.max(0, baseContentHeight + currentSpacerHeight() - 100);
+        scrollTop = Math.max(0, Math.min(value, maxTop));
+      },
+    });
+    Object.defineProperty(transcript, "scrollHeight", {
+      configurable: true,
+      get: () => baseContentHeight + currentSpacerHeight(),
+    });
+
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function mockRect(this: HTMLElement) {
+        if (this === stream) {
+          return rect(0, 100);
+        }
+        if (this === transcript) {
+          return rect(-scrollTop, baseContentHeight - scrollTop);
+        }
+        const messageId = this.getAttribute("data-message-id");
+        if (messageId === "user-1") {
+          return rect(80 - scrollTop, 120 - scrollTop);
+        }
+        if (messageId === "user-2") {
+          return rect(200 - scrollTop, 240 - scrollTop);
+        }
+        return rect(0, 0);
+      });
+
+    try {
+      baseContentHeight = 260;
+      await emitTranscriptSessionState({
+        busy: true,
+        messageId: "state-progress-reveal",
+        timeline: [
+          ...previousTurn,
+          { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
+          {
+            assistantMessageId: "assistant-2",
+            id: "thinking-2",
+            text: "正在回答第二轮问题",
+            type: "thinking",
+          },
+        ],
+      });
+
+      expect((stream as HTMLElement).scrollTop).toBe(200);
+      expect(screen.getByTestId("transcript-spacer").style.height).toBe("40px");
+      expect(screen.queryByTestId("sticky-user-prompt")).toBeNull();
+      expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
+      expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
+      expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(1);
+      expect(screen.getAllByTestId("thinking-streaming-indicator")).toHaveLength(1);
+
+      baseContentHeight = 340;
+      await emitTranscriptSessionState({
+        busy: true,
+        messageId: "state-progress-follow-bottom",
+        timeline: [
+          ...previousTurn,
+          { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
+          {
+            assistantMessageId: "assistant-2",
+            id: "thinking-2",
+            text: "正在回答第二轮问题，并继续补充足够多的内容，让当前轮超过一整屏。",
+            type: "thinking",
+          },
+          {
+            assistantMessageId: "assistant-2",
+            id: "assistant-2",
+            kind: "assistant",
+            text: "现在应该切回底部跟随，同时顶部显示当前轮 sticky。",
+            type: "message",
+          },
+        ],
+      });
+
+      expect((stream as HTMLElement).scrollTop).toBe(240);
+      expect(screen.getByTestId("transcript-spacer").style.height).toBe("0px");
+      expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
+      expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
+      expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
+      expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(1);
+      expect(screen.getAllByTestId("thinking-streaming-indicator")).toHaveLength(1);
+    } finally {
+      rectSpy.mockRestore();
+    }
   });
 
   it("keeps sticky hidden while the newest user turn is still visible at the bottom of the viewport", async () => {

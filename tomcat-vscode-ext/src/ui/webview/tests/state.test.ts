@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { isWebviewIntent, type WebviewPlanFileCard } from "../protocol";
+import {
+  isWebviewIntent,
+  type WebviewPlanFileCard,
+  type WebviewToolCard,
+} from "../protocol";
 import {
   buildToolCallToAssistantMap,
   WebviewStateStore,
@@ -667,6 +671,113 @@ describe("session state hydration", () => {
     const snapshot = store.snapshot();
     expect(snapshot.sessionViews.s1.busy).toBe(false);
     expect(snapshot.sessions.find((session) => session.sessionId === "s1")?.busy).toBe(false);
+  });
+
+  it("settles stale running tools when agent_idle arrives", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applyEvent({
+      args: { path: "src/app.ts" },
+      sessionId: "s1",
+      toolCallId: "tool-running",
+      toolName: "edit",
+      type: "tool_execution_start",
+    });
+
+    store.applyEvent({
+      sessionId: "s1",
+      type: "agent_idle",
+    });
+
+    const tool = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item): item is WebviewToolCard => item.type === "tool");
+    expect(tool).toMatchObject({
+      isError: false,
+      status: "complete",
+      toolCallId: "tool-running",
+      toolName: "edit",
+      type: "tool",
+    });
+  });
+
+  it("preserves summary and error flags when settling stale tools on agent_idle", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    const session = (
+      store as unknown as {
+        ensureSession(sessionId: string): { timeline: WebviewToolCard[] };
+      }
+    ).ensureSession("s1");
+    session.timeline.push({
+      assistantMessageId: "assistant-1",
+      id: "tool-streaming",
+      isError: true,
+      status: "streaming",
+      summary: "stale edit rejected",
+      toolCallId: "tool-streaming",
+      toolName: "edit",
+      type: "tool",
+    });
+
+    store.applyEvent({
+      sessionId: "s1",
+      type: "agent_idle",
+    });
+
+    const tool = store
+      .snapshot()
+      .sessionViews.s1.timeline.find(
+        (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === "tool-streaming",
+      );
+    expect(tool).toMatchObject({
+      isError: true,
+      status: "complete",
+      summary: "stale edit rejected",
+      toolCallId: "tool-streaming",
+      toolName: "edit",
+      type: "tool",
+    });
+  });
+
+  it("does not modify already complete background task cards on agent_idle", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    const session = (
+      store as unknown as {
+        ensureSession(sessionId: string): { timeline: WebviewToolCard[] };
+      }
+    ).ensureSession("s1");
+    session.timeline.push({
+      id: "tool-background",
+      isError: false,
+      status: "complete",
+      summary: "background task queued",
+      toolCallId: "tool-background",
+      toolName: "bash",
+      type: "tool",
+    });
+
+    store.applyEvent({
+      sessionId: "s1",
+      type: "agent_idle",
+    });
+
+    const tool = store
+      .snapshot()
+      .sessionViews.s1.timeline.find(
+        (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === "tool-background",
+      );
+    expect(tool).toMatchObject({
+      isError: false,
+      status: "complete",
+      summary: "background task queued",
+      toolCallId: "tool-background",
+      toolName: "bash",
+      type: "tool",
+    });
   });
 
   it("hydrates plan cards and context ratio from get_state without duplicating cards", () => {

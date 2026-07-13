@@ -529,6 +529,116 @@ describe("context search intent handling", () => {
 });
 
 describe("mutation diff stat injection", () => {
+  it("keeps an errored edit tool settled as complete+error through turn_end and agent_idle", async () => {
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      getUiMode: () => "webview",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      ownership: {
+        ownerOf() {
+          return null;
+        },
+        releaseAll() {},
+      } as never,
+      sessionRouter: {
+        getState: vi.fn().mockResolvedValue({
+          busy: false,
+          sessionId: "s1",
+        }),
+        listCheckpoints: vi.fn().mockResolvedValue({
+          checkpoints: [],
+          sessionId: "s1",
+        }),
+      } as never,
+    });
+
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      sessionId: "s1",
+      type: "agent_start",
+    });
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      assistantMessageEvent: { delta: "updating file", kind: "content_delta" },
+      assistantMessageId: "assistant-1",
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      args: { path: "src/app.ts" },
+      sessionId: "s1",
+      toolCallId: "tool-edit-err",
+      toolName: "edit",
+      type: "tool_execution_start",
+    });
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      display: { file: "src/app.ts", kind: "file" },
+      isError: true,
+      result: "stale edit rejected",
+      sessionId: "s1",
+      toolCallId: "tool-edit-err",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      assistantMessageId: "assistant-1",
+      message: {},
+      sessionId: "s1",
+      toolCallIds: ["tool-edit-err"],
+      toolResults: [{}],
+      turnIndex: 0,
+      type: "turn_end",
+    });
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      sessionId: "s1",
+      type: "agent_idle",
+    });
+
+    const tool = provider
+      .currentState()
+      .sessionViews.s1.timeline.find((item) => item.type === "tool" && item.toolCallId === "tool-edit-err");
+    expect(tool).toMatchObject({
+      assistantMessageId: "assistant-1",
+      isError: true,
+      status: "complete",
+      summary: "stale edit rejected",
+      toolCallId: "tool-edit-err",
+      toolName: "edit",
+      type: "tool",
+    });
+    expect(provider.currentState().sessionViews.s1.busy).toBe(false);
+
+    provider.dispose();
+  });
+
   it("derives added/removed stats directly from file display metadata", async () => {
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),

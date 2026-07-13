@@ -334,4 +334,127 @@ describe("TranscriptView", () => {
     expect(within(planCards[1]).getByTestId("plan-card-title").textContent).toBe("Plan B");
     expect(within(planCards[1]).getByTestId("view-plan")).toBeTruthy();
   });
+
+  it("does not keep the previous thinking block streaming when a new busy turn has no thinking yet", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        id: "user-1",
+        kind: "user",
+        text: "first prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "assistant-1",
+        id: "assistant-1-thinking",
+        summaryTitle: null,
+        text: "older reasoning",
+        type: "thinking",
+      },
+      {
+        assistantMessageId: "assistant-1",
+        id: "assistant-1",
+        kind: "assistant",
+        text: "older answer",
+        type: "message",
+      },
+      {
+        id: "user-2",
+        kind: "user",
+        text: "latest prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "assistant-2",
+        id: "assistant-2",
+        kind: "assistant",
+        text: "new turn has started",
+        type: "message",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.getByTestId("live-cluster")).toBeTruthy();
+    expect(screen.getByTestId("thinking-status").className).not.toContain("tc-codicon-spin");
+    expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
+  });
+
+  it("does not shimmer a leading thinking group when the live cluster has no thinking yet", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        id: "user-1",
+        kind: "user",
+        text: "first prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "assistant-1",
+        id: "assistant-1-thinking",
+        summaryTitle: null,
+        text: "inspect the file first",
+        type: "thinking",
+      },
+      {
+        args: { path: "/workspace/a.ts" },
+        assistantMessageId: "assistant-1",
+        id: "tool-read-1",
+        isError: false,
+        status: "complete",
+        summary: "const answer = 42;",
+        toolCallId: "tc-read-1",
+        toolName: "read",
+        type: "tool",
+      },
+      {
+        assistantMessageId: "assistant-1",
+        id: "assistant-1",
+        kind: "assistant",
+        text: "older answer",
+        type: "message",
+      },
+      {
+        id: "user-2",
+        kind: "user",
+        text: "latest prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "assistant-2",
+        id: "assistant-2",
+        kind: "assistant",
+        text: "new turn has started",
+        type: "message",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.getByTestId("live-cluster")).toBeTruthy();
+    expect(screen.getByTestId("thinking-group-title").className).not.toContain(
+      "tc-thinking__title--shimmer",
+    );
+    expect(screen.getByTestId("thinking-group-status").className).not.toContain(
+      "codicon-loading",
+    );
+  });
 });
