@@ -3,6 +3,7 @@ import type {
   ControlRequestFrame,
 } from "../../serveClient/protocol";
 import type {
+  SessionCheckpointPayload,
   SessionHistoryPayload,
   SessionListPayload,
   SessionStatePayload,
@@ -21,6 +22,7 @@ import type {
   TomcatUiMode,
   WebviewApprovalCard,
   WebviewBoundaryBlock,
+  WebviewCheckpointMarker,
   WebviewMessageBlock,
   WebviewMessageSegment,
   WebviewPendingAttachment,
@@ -96,6 +98,7 @@ function parseAskQuestionRequest(frame: ControlRequestFrame): AskQuestionWireReq
 function createEmptySession(sessionId: string): WebviewSessionSnapshot {
   return {
     busy: false,
+    checkpoints: [],
     conflictMessage: null,
     contextRatio: null,
     hasMoreHistory: false,
@@ -155,9 +158,65 @@ function timelineEntityKey(item: WebviewTimelineItem): string {
       return `approval:${item.request.requestId}`;
     case "boundary":
       return `boundary:${item.id}`;
+    case "checkpoint":
+      return `checkpoint:${item.checkpointId}`;
     case "plan":
       return `plan:${item.path}`;
   }
+}
+
+function isSupersededMessageEntry(entry: unknown): boolean {
+  return (
+    isRecord(entry) &&
+    entry.type === "message" &&
+    isRecord(entry.message) &&
+    entry.message.superseded === true
+  );
+}
+
+function isCheckpointRestoreEntry(entry: unknown): boolean {
+  return (
+    isRecord(entry) &&
+    entry.type === "custom" &&
+    (
+      entry.customType === "checkpoint.restore" ||
+      (isRecord(entry.extra) && entry.extra.customType === "checkpoint.restore")
+    )
+  );
+}
+
+function isVisibleUserMessageEntry(entry: unknown): boolean {
+  return (
+    isRecord(entry) &&
+    entry.type === "message" &&
+    isRecord(entry.message) &&
+    entry.message.role === "user" &&
+    entry.message.superseded !== true
+  );
+}
+
+function filterSupersededHistoryEntries(entries: unknown[]): unknown[] {
+  const filtered: unknown[] = [];
+  let inSupersededSpan = false;
+  for (const entry of entries) {
+    if (isSupersededMessageEntry(entry)) {
+      inSupersededSpan = true;
+      continue;
+    }
+    if (inSupersededSpan) {
+      if (isCheckpointRestoreEntry(entry)) {
+        inSupersededSpan = false;
+        continue;
+      }
+      if (isVisibleUserMessageEntry(entry)) {
+        inSupersededSpan = false;
+        filtered.push(entry);
+      }
+      continue;
+    }
+    filtered.push(entry);
+  }
+  return filtered;
 }
 
 function planEventMessageId(
@@ -664,6 +723,31 @@ function mergeHistoryEntries(older: unknown[], newer: unknown[]): unknown[] {
   return merged;
 }
 
+function mergeLatestHistoryEntries(existing: unknown[], latest: unknown[]): unknown[] {
+  const latestByKey = new Map<string, unknown>();
+  for (const entry of latest) {
+    latestByKey.set(historyEntryKey(entry), entry);
+  }
+
+  const seen = new Set<string>();
+  const merged = existing.map((entry) => {
+    const key = historyEntryKey(entry);
+    seen.add(key);
+    return latestByKey.get(key) ?? entry;
+  });
+
+  for (const entry of latest) {
+    const key = historyEntryKey(entry);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(entry);
+  }
+
+  return merged;
+}
+
 function isHistoryChildEntry(entry: unknown): boolean {
   if (!isRecord(entry) || typeof entry.type !== "string") {
     return false;
@@ -684,6 +768,79 @@ function trimLeadingHistoryEntries(entries: unknown[]): unknown[] {
     start += 1;
   }
   return start === 0 ? entries : entries.slice(start);
+}
+
+function createCheckpointMarker(
+  checkpoint: SessionCheckpointPayload,
+): WebviewCheckpointMarker | null {
+  if (!checkpoint.messageAnchor) {
+    return null;
+  }
+  return {
+    changedFiles: [...checkpoint.changedFiles],
+    checkpointId: checkpoint.id,
+    createdAt: checkpoint.createdAt,
+    id: `checkpoint:${checkpoint.id}`,
+    kind: checkpoint.kind,
+    label: checkpoint.label ?? null,
+    messageAnchor: checkpoint.messageAnchor,
+    type: "checkpoint",
+  };
+}
+
+function injectCheckpointMarkers(
+  timeline: WebviewTimelineItem[],
+  checkpoints: SessionCheckpointPayload[],
+): WebviewTimelineItem[] {
+  if (timeline.length === 0 || checkpoints.length === 0) {
+    return timeline;
+  }
+
+  const anchorIndexById = new Map<string, number>();
+  timeline.forEach((item, index) => {
+    anchorIndexById.set(item.id, index);
+  });
+
+  const markersByTargetIndex = new Map<number, WebviewCheckpointMarker[]>();
+  const ordered = [...checkpoints].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  for (const checkpoint of ordered) {
+    if (!checkpoint.messageAnchor) {
+      continue;
+    }
+    const anchorIndex =
+      anchorIndexById.get(checkpoint.messageAnchor) ??
+      anchorIndexById.get(`${checkpoint.messageAnchor}-thinking`);
+    if (anchorIndex === undefined) {
+      continue;
+    }
+    const targetIndex = timeline.findIndex(
+      (item, index) => index > anchorIndex && item.type === "message" && item.kind === "user",
+    );
+    if (targetIndex < 0) {
+      continue;
+    }
+    const marker = createCheckpointMarker(checkpoint);
+    if (!marker) {
+      continue;
+    }
+    const bucket = markersByTargetIndex.get(targetIndex) ?? [];
+    bucket.push(marker);
+    markersByTargetIndex.set(targetIndex, bucket);
+  }
+
+  if (markersByTargetIndex.size === 0) {
+    return timeline;
+  }
+
+  const next: WebviewTimelineItem[] = [];
+  timeline.forEach((item, index) => {
+    const markers = markersByTargetIndex.get(index);
+    if (markers?.length) {
+      next.push(...markers);
+    }
+    next.push(item);
+  });
+  return next;
 }
 
 function clearStreaming(runtime: SessionRuntimeState): void {
@@ -977,6 +1134,7 @@ function shouldRetainLiveTimelineItem(
     case "approval":
       return !item.resolved;
     case "boundary":
+    case "checkpoint":
     case "plan":
       return false;
   }
@@ -1189,6 +1347,19 @@ export class WebviewStateStore {
     this.ensureSession(sessionId).pendingAttachments = [...attachments];
   }
 
+  setCheckpoints(sessionId: string, checkpoints: SessionCheckpointPayload[]): void {
+    const session = this.ensureSession(sessionId);
+    session.checkpoints = checkpoints.map((checkpoint) => ({
+      changedFiles: [...checkpoint.changedFiles],
+      createdAt: checkpoint.createdAt,
+      id: checkpoint.id,
+      kind: checkpoint.kind,
+      label: checkpoint.label ?? null,
+      messageAnchor: checkpoint.messageAnchor ?? null,
+    }));
+    this.rebuildHistoryTimeline(sessionId);
+  }
+
   clearPendingAttachments(sessionId: string): void {
     this.ensureSession(sessionId).pendingAttachments = [];
   }
@@ -1206,7 +1377,7 @@ export class WebviewStateStore {
 
   appendLatestHistory(sessionId: string, history: SessionHistoryPayload): void {
     const runtime = this.ensureRuntime(sessionId);
-    runtime.historyEntries = mergeHistoryEntries(
+    runtime.historyEntries = mergeLatestHistoryEntries(
       runtime.historyEntries,
       Array.isArray(history.messages) ? history.messages : [],
     );
@@ -1644,7 +1815,9 @@ export class WebviewStateStore {
   private rebuildHistoryTimeline(sessionId: string): void {
     const session = this.ensureSession(sessionId);
     const runtime = this.ensureRuntime(sessionId);
-    const renderableEntries = trimLeadingHistoryEntries(runtime.historyEntries);
+    const renderableEntries = trimLeadingHistoryEntries(
+      filterSupersededHistoryEntries(runtime.historyEntries),
+    );
     const historyToolNames = buildHistoryToolNameLookup(renderableEntries);
     const toolCallToAssistant = buildToolCallToAssistantMap(renderableEntries);
     const historyToolArgs = buildHistoryToolArgsLookup(renderableEntries);
@@ -1684,7 +1857,7 @@ export class WebviewStateStore {
       }
     }
     runtime.localUserMessageIds = nextLocalUserMessageIds;
-    session.timeline = historySession.timeline;
+    session.timeline = injectCheckpointMarkers(historySession.timeline, session.checkpoints ?? []);
     if (session.planTodos.length === 0 && session.planId) {
       const activeCard = session.timeline.find(
         (item): item is WebviewPlanFileCard =>

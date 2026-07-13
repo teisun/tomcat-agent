@@ -36,7 +36,7 @@ describe("ToolRow", () => {
 
   it("edit row shows diff badges and routes the View diff action", () => {
     const onOpenDiff = vi.fn();
-    render(
+    const { container } = render(
       <ToolRow
         item={buildTool({
           args: { path: "/workspace/a.rs" },
@@ -59,6 +59,10 @@ describe("ToolRow", () => {
     expect(screen.getByTestId("tool-row-diff-added").textContent).toBe("+4");
     expect(screen.getByTestId("tool-row-diff-removed").textContent).toBe("-2");
     expect(screen.getByTestId("tool-row-open-diff")).toBeTruthy();
+    expect(screen.getByTestId("tool-row-open-diff").textContent).toContain("View diff");
+    expect(container.querySelector(".tc-tool-row__leading-icon")).toBeNull();
+    expect(screen.getByTestId("disclosure-card-leading-icon")).toBeTruthy();
+    expect(screen.getByTestId("diff-view-preview").closest(".tc-disclosure-card")).toBeTruthy();
     fireEvent.click(screen.getByTestId("tool-row-open-diff"));
     expect(onOpenDiff).toHaveBeenCalledWith("tc-1");
     expect(screen.queryByRole("button", { name: /apply/i })).toBeNull();
@@ -105,7 +109,7 @@ describe("ToolRow", () => {
   });
 
   it("bash row uses a terminal block and stays collapsed when complete", () => {
-    render(
+    const { container } = render(
       <ToolRow
         item={buildTool({
           args: { command: "cargo test" },
@@ -119,6 +123,8 @@ describe("ToolRow", () => {
 
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Ran");
     expect(screen.getByTestId("tool-row-cmd").textContent).toBe("cargo test");
+    expect(container.querySelector(".tc-tool-row__leading-icon")).toBeNull();
+    expect(screen.getByTestId("disclosure-card-leading-icon")).toBeTruthy();
     expect(screen.queryByTestId("tool-row-terminal")).toBeNull();
     const preview = screen.getByTestId("terminal-output-preview").textContent ?? "";
     expect(preview).not.toContain("line 1");

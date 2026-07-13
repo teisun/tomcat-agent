@@ -265,6 +265,13 @@ export type ServeCommand = {
   sessionId?: null | string;
   type: "set_plan_mode";
 } | {
+  checkpointId: string;
+  dryRun?: boolean | null;
+  id?: null | string;
+  revertFiles: boolean;
+  sessionId?: null | string;
+  type: "restore_checkpoint";
+} | {
   envName: string;
   id?: null | string;
   type: "set_provider_key";
@@ -335,6 +342,10 @@ export type ServeCommand = {
   id?: null | string;
   sessionId?: null | string;
   type: "interrupt";
+} | {
+  id?: null | string;
+  sessionId?: null | string;
+  type: "list_checkpoints";
 } | {
   id?: null | string;
   type: "list_models";

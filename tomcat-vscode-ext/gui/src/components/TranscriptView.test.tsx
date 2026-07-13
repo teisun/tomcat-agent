@@ -138,6 +138,55 @@ describe("TranscriptView", () => {
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Read");
   });
 
+  it("renders checkpoint markers in sequence and forwards restore clicks", () => {
+    const onRestoreCheckpoint = vi.fn();
+    const timeline: WebviewTimelineItem[] = [
+      {
+        id: "user-1",
+        kind: "user",
+        text: "first prompt",
+        type: "message",
+      },
+      {
+        changedFiles: ["src/app.ts"],
+        checkpointId: "ck-1",
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "checkpoint-1",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
+        type: "checkpoint",
+      },
+      {
+        id: "user-2",
+        kind: "user",
+        text: "second prompt",
+        type: "message",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy={false}
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        onRestoreCheckpoint={onRestoreCheckpoint}
+        timeline={timeline}
+      />,
+    );
+
+    const transcript = screen.getByLabelText("active-session");
+    const checkpointButton = screen.getByTestId("checkpoint-marker-button");
+    expect(transcript.textContent).toContain("first prompt");
+    expect(transcript.textContent).toContain("Restore Checkpoint");
+    expect(transcript.textContent).toContain("second prompt");
+
+    checkpointButton.click();
+    expect(onRestoreCheckpoint).toHaveBeenCalledWith("ck-1");
+  });
+
   it("keeps a grouped create_plan turn to a single header while showing a pending plan card affordance", () => {
     const timeline: WebviewTimelineItem[] = [
       {

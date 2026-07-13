@@ -137,6 +137,7 @@ export interface ComposerHandle {
   closeMention(): void;
   getDraft(): ComposerDraft;
   insertReference(reference: WebviewReference): void;
+  replaceDraft(draft: ComposerDraft): void;
 }
 
 type ComposerNoticeTone = "info" | "active" | "warning" | "plan";
@@ -234,6 +235,44 @@ export function serializeComposerDocument(
     ),
     segments,
     text: projection.join(""),
+  };
+}
+
+function pushTextNodes(content: JSONContent[], text: string): void {
+  const parts = text.split("\n");
+  parts.forEach((part, index) => {
+    if (part.length > 0) {
+      content.push({
+        text: part,
+        type: "text",
+      });
+    }
+    if (index < parts.length - 1) {
+      content.push({
+        type: "hardBreak",
+      });
+    }
+  });
+}
+
+function createComposerDocument(segments: WebviewMessageSegment[]): JSONContent {
+  const paragraphContent: JSONContent[] = [];
+  segments.forEach((segment) => {
+    if (segment.type === "text") {
+      pushTextNodes(paragraphContent, segment.text);
+      return;
+    }
+    paragraphContent.push({
+      attrs: segment,
+      type: REFERENCE_NODE_NAME,
+    });
+  });
+  return {
+    content: [{
+      content: paragraphContent,
+      type: "paragraph",
+    }],
+    type: "doc",
   };
 }
 
@@ -705,6 +744,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           },
         ])
         .run();
+      updateDraft(serializeComposerDocument(editor.getJSON()));
+    },
+    replaceDraft(nextDraft: ComposerDraft) {
+      if (!editor) {
+        updateDraft(nextDraft);
+        return;
+      }
+      const segments = nextDraft.segments.length
+        ? nextDraft.segments
+        : nextDraft.text
+          ? [{ text: nextDraft.text, type: "text" } satisfies WebviewMessageSegment]
+          : [];
+      editor.commands.setContent(createComposerDocument(segments), false);
+      editor.commands.focus("end");
       updateDraft(serializeComposerDocument(editor.getJSON()));
     },
   }), [editor, mentionSuggestion]);

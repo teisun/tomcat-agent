@@ -1454,6 +1454,275 @@ describe("local user message delivery state", () => {
   });
 });
 
+describe("checkpoint history replay", () => {
+  it("filters superseded spans and resumes rendering after checkpoint.restore", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: "first prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+        {
+          id: "assistant-1",
+          message: {
+            content: "first reply",
+            role: "assistant",
+          },
+          type: "message",
+        },
+        {
+          id: "user-2",
+          message: {
+            content: "hidden prompt",
+            role: "user",
+            superseded: true,
+          },
+          type: "message",
+        },
+        {
+          id: "thinking-hidden",
+          text: "hidden reasoning",
+          type: "thinking_trace",
+        },
+        {
+          id: "assistant-2",
+          message: {
+            content: "hidden reply",
+            role: "assistant",
+            superseded: true,
+          },
+          type: "message",
+        },
+        {
+          customType: "checkpoint.restore",
+          id: "restore-1",
+          type: "custom",
+        },
+        {
+          id: "user-3",
+          message: {
+            content: "visible again",
+            role: "user",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    expect(
+      session.timeline.map((item) => item.type === "message" ? item.id : item.type),
+    ).toEqual(["user-1", "assistant-1", "user-3"]);
+    expect(
+      session.timeline.some(
+        (item) => item.type === "thinking" && item.text.includes("hidden reasoning"),
+      ),
+    ).toBe(false);
+  });
+
+  it("closes a superseded span at the next live user message when checkpoint.restore is missing", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: "first prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+        {
+          id: "assistant-1",
+          message: {
+            content: "first reply",
+            role: "assistant",
+          },
+          type: "message",
+        },
+        {
+          id: "user-2",
+          message: {
+            content: "hidden prompt",
+            role: "user",
+            superseded: true,
+          },
+          type: "message",
+        },
+        {
+          id: "thinking-hidden",
+          text: "hidden reasoning",
+          type: "thinking_trace",
+        },
+        {
+          id: "assistant-2",
+          message: {
+            content: "hidden reply",
+            role: "assistant",
+            superseded: true,
+          },
+          type: "message",
+        },
+        {
+          id: "user-3",
+          message: {
+            content: "visible again",
+            role: "user",
+          },
+          type: "message",
+        },
+        {
+          id: "assistant-3",
+          message: {
+            content: "new reply",
+            role: "assistant",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.map((item) => item.type === "message" ? item.id : item.type),
+    ).toEqual(["user-1", "assistant-1", "user-3", "assistant-3"]);
+  });
+
+  it("injects checkpoint markers before the next user message only", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: "first prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+        {
+          id: "assistant-1",
+          message: {
+            content: "first reply",
+            role: "assistant",
+          },
+          type: "message",
+        },
+        {
+          id: "user-2",
+          message: {
+            content: "second prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+        {
+          id: "assistant-2",
+          message: {
+            content: "second reply",
+            role: "assistant",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+    store.setCheckpoints("s1", [
+      {
+        changedFiles: ["src/two.ts"],
+        createdAt: "2026-07-12T12:05:00Z",
+        id: "ck-2",
+        kind: "turn_end",
+        messageAnchor: "assistant-2",
+      },
+      {
+        changedFiles: ["src/one.ts"],
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "ck-1",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
+      },
+    ]);
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.map((item) =>
+        item.type === "checkpoint" ? item.checkpointId : item.id,
+      ),
+    ).toEqual(["user-1", "assistant-1", "ck-1", "user-2", "assistant-2"]);
+  });
+
+  it("injects checkpoint markers when the anchor assistant only rendered a thinking block", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: "first prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+        {
+          id: "assistant-1",
+          message: {
+            content: "",
+            role: "assistant",
+            tool_calls: [
+              {
+                function: {
+                  arguments: "{}",
+                  name: "read_file",
+                },
+                id: "tool-1",
+              },
+            ],
+          },
+          type: "message",
+        },
+        {
+          id: "user-2",
+          message: {
+            content: "second prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+    store.setCheckpoints("s1", [
+      {
+        changedFiles: ["src/one.ts"],
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "ck-thinking",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
+      },
+    ]);
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.map((item) =>
+        item.type === "checkpoint" ? item.checkpointId : item.id,
+      ),
+    ).toEqual(["user-1", "assistant-1-thinking", "ck-thinking", "user-2"]);
+  });
+});
+
 describe("openFile intent protocol", () => {
   it("accepts loadOlderHistory intent shape", () => {
     expect(
@@ -1496,6 +1765,20 @@ describe("openFile intent protocol", () => {
         },
         messageId: "retry-1",
         type: "retryUserMessage",
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts restoreCheckpoint intent shape", () => {
+    expect(
+      isWebviewIntent({
+        data: {
+          checkpointId: "ck-1",
+          revertFiles: false,
+          sessionId: "s1",
+        },
+        messageId: "restore-1",
+        type: "restoreCheckpoint",
       }),
     ).toBe(true);
   });

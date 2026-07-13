@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import type { InitializeResult } from "../src/serveClient/initialize";
-import type { SessionHistoryPayload } from "../src/serveClient/sessionRouter";
+import type {
+  RestoreCheckpointPayload,
+  SessionCheckpointListPayload,
+  SessionHistoryPayload,
+} from "../src/serveClient/sessionRouter";
 import { SessionOwnershipTracker } from "../src/ui/webview/ownership";
 import { TomcatWebviewViewProvider } from "../src/ui/webview/provider";
 import type { IdeHost } from "../src/ui/webview/types";
@@ -41,10 +45,16 @@ type BuildProviderOptions = {
   historyMessages?: unknown[];
   historyResponses?: Record<string, SessionHistoryPayload>;
   ideOverrides?: Partial<IdeHost>;
+  listCheckpointsImpl?: (sessionId?: string) => Promise<SessionCheckpointListPayload>;
   listModelsPayload?: Record<string, unknown>;
   listSessionsImpl?: () => Promise<Record<string, unknown>>;
   openModelSettings?: (route?: "models") => void;
   requestImpl?: (command: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  restoreCheckpointImpl?: (
+    sessionId: string,
+    checkpointId: string,
+    revertFiles: boolean,
+  ) => Promise<RestoreCheckpointPayload>;
   sessionState?: Partial<MutableSessionState>;
 };
 
@@ -302,8 +312,34 @@ function buildProvider(options: BuildProviderOptions = {}) {
     async newSession() {
       return "session-1";
     },
+    async listCheckpoints(sessionId?: string) {
+      if (options.listCheckpointsImpl) {
+        return options.listCheckpointsImpl(sessionId);
+      }
+      return {
+        checkpoints: [],
+        sessionId: sessionId ?? "session-1",
+      } satisfies SessionCheckpointListPayload;
+    },
     async resolveSessionId() {
       return "session-1";
+    },
+    async restoreCheckpoint(sessionId: string, checkpointId: string, revertFiles: boolean) {
+      if (options.restoreCheckpointImpl) {
+        return options.restoreCheckpointImpl(sessionId, checkpointId, revertFiles);
+      }
+      return {
+        changedPaths: [],
+        checkpointId,
+        createdAt: "2026-07-12T12:00:00Z",
+        dryRun: false,
+        kind: "turn_end",
+        restoredPaths: [],
+        revertFiles,
+        sessionId,
+        transcriptTruncated: true,
+        warnings: [],
+      } satisfies RestoreCheckpointPayload;
     },
     async switchSession(sessionId: string) {
       return sessionId;
@@ -2835,6 +2871,159 @@ describe("webview provider integration", () => {
       model: "gpt-5.4",
       thinkingLevel: "high",
     });
+
+    provider.dispose();
+  });
+
+  it("refreshes checkpoint markers and history after transcript-only restore", async () => {
+    let restored = false;
+    const restoreCalls: Array<{ checkpointId: string; revertFiles: boolean; sessionId: string }> = [];
+    const { provider } = buildProvider({
+      getMessagesImpl: async (sessionId) => ({
+        messages: restored
+          ? [
+              {
+                id: "hist-user-1",
+                message: {
+                  content: "first prompt",
+                  role: "user",
+                },
+                type: "message",
+              },
+              {
+                id: "hist-assistant-1",
+                message: {
+                  content: "first reply",
+                  role: "assistant",
+                },
+                type: "message",
+              },
+              {
+                id: "hist-user-2",
+                message: {
+                  content: "second prompt",
+                  role: "user",
+                  superseded: true,
+                },
+                type: "message",
+              },
+              {
+                id: "hist-assistant-2",
+                message: {
+                  content: "second reply",
+                  role: "assistant",
+                  superseded: true,
+                },
+                type: "message",
+              },
+              {
+                customType: "checkpoint.restore",
+                id: "restore-entry-1",
+                type: "custom",
+              },
+            ]
+          : [
+              {
+                id: "hist-user-1",
+                message: {
+                  content: "first prompt",
+                  role: "user",
+                },
+                type: "message",
+              },
+              {
+                id: "hist-assistant-1",
+                message: {
+                  content: "first reply",
+                  role: "assistant",
+                },
+                type: "message",
+              },
+              {
+                id: "hist-user-2",
+                message: {
+                  content: "second prompt",
+                  role: "user",
+                },
+                type: "message",
+              },
+              {
+                id: "hist-assistant-2",
+                message: {
+                  content: "second reply",
+                  role: "assistant",
+                },
+                type: "message",
+              },
+            ],
+        sessionId: sessionId ?? "session-1",
+        upToSeq: null,
+      }),
+      listCheckpointsImpl: async (sessionId) => ({
+        checkpoints: restored
+          ? []
+          : [
+              {
+                changedFiles: ["src/app.ts"],
+                createdAt: "2026-07-12T12:00:00Z",
+                id: "ck-1",
+                kind: "turn_end",
+                messageAnchor: "hist-assistant-1",
+              },
+            ],
+        sessionId: sessionId ?? "session-1",
+      }),
+      restoreCheckpointImpl: async (sessionId, checkpointId, revertFiles) => {
+        restoreCalls.push({ checkpointId, revertFiles, sessionId });
+        restored = true;
+        return {
+          changedPaths: ["src/app.ts"],
+          checkpointId,
+          createdAt: "2026-07-12T12:00:00Z",
+          dryRun: false,
+          kind: "turn_end",
+          restoredPaths: [],
+          revertFiles,
+          sessionId,
+          transcriptTruncated: true,
+          warnings: [],
+        };
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-restore-checkpoint",
+      type: "ready",
+    });
+
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.map((item) =>
+        item.type === "checkpoint" ? item.checkpointId : item.id,
+      ),
+    ).toEqual(["hist-user-1", "hist-assistant-1", "ck-1", "hist-user-2", "hist-assistant-2"]);
+
+    await provider.dispatchTestIntent({
+      data: {
+        checkpointId: "ck-1",
+        revertFiles: false,
+        sessionId: "session-1",
+      },
+      messageId: "restore-checkpoint-1",
+      type: "restoreCheckpoint",
+    });
+
+    expect(restoreCalls).toEqual([
+      {
+        checkpointId: "ck-1",
+        revertFiles: false,
+        sessionId: "session-1",
+      },
+    ]);
+    expect(
+      provider.currentState().sessionViews["session-1"]?.timeline.map((item) =>
+        item.type === "checkpoint" ? item.checkpointId : item.id,
+      ),
+    ).toEqual(["hist-user-1", "hist-assistant-1"]);
 
     provider.dispose();
   });

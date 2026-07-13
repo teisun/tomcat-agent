@@ -14,6 +14,8 @@ mod parse;
 
 pub use cmd_install::{InstallCommand, InstallTarget};
 pub use cmd_plan::PlanCommand;
+pub(crate) use cmd_ckpt::checkpoint_kind_label;
+pub(crate) use cmd_restore::{restore_core, RestoreCoreReport};
 
 #[cfg(test)]
 mod tests;

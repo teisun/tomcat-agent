@@ -63,6 +63,52 @@ async function emitReadySessionState(sessionId = "s1") {
   });
 }
 
+async function emitCheckpointSessionState(
+  timeline: Array<Record<string, unknown>>,
+  sessionId = "s1",
+) {
+  await emitState({
+    channel: "state",
+    content: {
+      activeSessionId: sessionId,
+      availableModels: ["gpt-5.4"],
+      ready: true,
+      sessions: [
+        {
+          busy: false,
+          isCurrent: true,
+          ownedByThisFrontend: true,
+          owner: "webview",
+          sessionId,
+          title: null,
+          updatedAt: 1,
+        },
+      ],
+      sessionViews: {
+        [sessionId]: {
+          busy: false,
+          conflictMessage: null,
+          contextRatio: null,
+          hasMoreHistory: false,
+          historyLoading: false,
+          model: "gpt-5.4",
+          ownedByThisFrontend: true,
+          owner: "webview",
+          pendingAttachments: [],
+          planFile: null,
+          planId: null,
+          planState: "chat",
+          sessionId,
+          thinkingLevel: "high",
+          timeline,
+        },
+      },
+      uiMode: "both",
+    },
+    messageId: `checkpoint-state-${sessionId}-${timeline.length}`,
+  });
+}
+
 beforeAll(() => {
   const emptyRect = () => ({
     bottom: 0,
@@ -2834,5 +2880,176 @@ describe("Tomcat webview App", () => {
     await emitReadySessionState("s2");
 
     expect(screen.queryByTestId("context-search-dropdown")).toBeNull();
+  });
+
+  it("opens the checkpoint dialog first, then posts don't-revert and refills the composer after truncation", async () => {
+    const { postMessage } = mount();
+    await emitCheckpointSessionState([
+      {
+        id: "assistant-1",
+        kind: "assistant",
+        text: "checkpoint reached",
+        type: "message",
+      },
+      {
+        changedFiles: ["src/app.ts", "src/state.ts"],
+        checkpointId: "ck-1",
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "checkpoint-marker-1",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
+        type: "checkpoint",
+      },
+      {
+        id: "user-2",
+        kind: "user",
+        text: "follow-up prompt",
+        type: "message",
+      },
+      {
+        id: "assistant-2",
+        kind: "assistant",
+        text: "newer answer",
+        type: "message",
+      },
+    ]);
+
+    postMessage.mockClear();
+    fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
+
+    expect(screen.getByTestId("cp-confirm-dialog")).toBeTruthy();
+    expect(postMessage).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("cp-confirm-dont-revert"));
+
+    expect(postMessage).toHaveBeenCalledWith({
+      data: {
+        checkpointId: "ck-1",
+        revertFiles: false,
+        sessionId: "s1",
+      },
+      messageId: expect.any(String),
+      type: "restoreCheckpoint",
+    });
+
+    await emitCheckpointSessionState([
+      {
+        id: "assistant-1",
+        kind: "assistant",
+        text: "checkpoint reached",
+        type: "message",
+      },
+      {
+        changedFiles: ["src/app.ts", "src/state.ts"],
+        checkpointId: "ck-1",
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "checkpoint-marker-1",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
+        type: "checkpoint",
+      },
+    ]);
+
+    expect(screen.queryByTestId("cp-confirm-dialog")).toBeNull();
+    expect(screen.getByTestId("composer-input").textContent).toContain("follow-up prompt");
+  });
+
+  it("does nothing when the checkpoint dialog is cancelled or dismissed with Escape", async () => {
+    const { postMessage } = mount();
+    await emitCheckpointSessionState([
+      {
+        id: "assistant-1",
+        kind: "assistant",
+        text: "checkpoint reached",
+        type: "message",
+      },
+      {
+        changedFiles: ["src/app.ts"],
+        checkpointId: "ck-cancel",
+        createdAt: "2026-07-12T12:03:00Z",
+        id: "checkpoint-marker-cancel",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
+        type: "checkpoint",
+      },
+      {
+        id: "user-2",
+        kind: "user",
+        text: "follow-up prompt",
+        type: "message",
+      },
+      {
+        id: "assistant-2",
+        kind: "assistant",
+        text: "newer answer",
+        type: "message",
+      },
+    ]);
+
+    const composerTextBefore = screen.getByTestId("composer-input").textContent ?? "";
+    postMessage.mockClear();
+
+    fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
+    expect(screen.getByTestId("cp-confirm-dialog")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("cp-confirm-cancel"));
+
+    expect(screen.queryByTestId("cp-confirm-dialog")).toBeNull();
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(screen.getByText("follow-up prompt")).toBeTruthy();
+    expect(screen.getByText("newer answer")).toBeTruthy();
+    expect(screen.getByTestId("composer-input").textContent ?? "").toBe(composerTextBefore);
+
+    fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
+    expect(screen.getByTestId("cp-confirm-dialog")).toBeTruthy();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(screen.queryByTestId("cp-confirm-dialog")).toBeNull();
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(screen.getByText("follow-up prompt")).toBeTruthy();
+    expect(screen.getByText("newer answer")).toBeTruthy();
+    expect(screen.getByTestId("composer-input").textContent ?? "").toBe(composerTextBefore);
+  });
+
+  it("posts revertFiles=true when the Revert action is chosen", async () => {
+    const { postMessage } = mount();
+    await emitCheckpointSessionState([
+      {
+        id: "assistant-1",
+        kind: "assistant",
+        text: "checkpoint reached",
+        type: "message",
+      },
+      {
+        changedFiles: ["src/app.ts"],
+        checkpointId: "ck-2",
+        createdAt: "2026-07-12T12:05:00Z",
+        id: "checkpoint-marker-2",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
+        type: "checkpoint",
+      },
+      {
+        id: "user-3",
+        kind: "user",
+        text: "revert me",
+        type: "message",
+      },
+    ]);
+
+    postMessage.mockClear();
+    fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
+    fireEvent.click(screen.getByTestId("cp-confirm-revert"));
+
+    expect(postMessage).toHaveBeenCalledWith({
+      data: {
+        checkpointId: "ck-2",
+        revertFiles: true,
+        sessionId: "s1",
+      },
+      messageId: expect.any(String),
+      type: "restoreCheckpoint",
+    });
   });
 });

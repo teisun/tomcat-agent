@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serial_test::serial;
+use serde_json::json;
 
 use crate::api::chat::commands::cmd_restore::{
-    effective_restore_paths, other_session_restore_conflicts, run as run_restore,
+    effective_restore_paths, other_session_restore_conflicts, restore_core, run as run_restore,
 };
 use crate::api::chat::ChatContext;
+use crate::core::session::transcript::TranscriptEntry;
 use crate::{
     AppConfig, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
     CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
@@ -535,5 +537,248 @@ fn restore_keeps_other_session_owned_paths_untouched() {
         std::fs::read_to_string(workspace.path().join("b.txt")).unwrap(),
         "b2",
         "restore 不应误伤其他会话独占修改的 b.txt"
+    );
+}
+
+#[test]
+#[serial(home_env_lock)]
+fn restore_core_without_reverting_files_truncates_transcript_only() {
+    if !git_available() {
+        return;
+    }
+
+    const API_ENV: &str = "TOMCAT_CMD_RESTORE_CORE_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let session = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .expect("current session id")
+        .expect("session id");
+
+    let _user_before = ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &session,
+            json!({
+                "role": "user",
+                "content": "before checkpoint"
+            }),
+        )
+        .expect("append user before checkpoint");
+    let assistant_anchor = ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &session,
+            json!({
+                "role": "assistant",
+                "content": "anchor reply"
+            }),
+        )
+        .expect("append assistant anchor");
+
+    std::fs::write(workspace.path().join("keep.txt"), "current-worktree").unwrap();
+    let checkpoint_id = ctx
+        .scope_services
+        .checkpoint_store
+        .record(CheckpointRecordRequest {
+            session_id: session.clone(),
+            turn_id: "turn-restore-core".to_string(),
+            kind: CheckpointKind::TurnEnd,
+            message_anchor: Some(assistant_anchor.clone()),
+            notes: Some(json!({
+                "changedPaths": ["keep.txt"]
+            })),
+        })
+        .expect("checkpoint");
+
+    let superseded_user_id = ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &session,
+            json!({
+                "role": "user",
+                "content": "prompt after checkpoint"
+            }),
+        )
+        .expect("append superseded user");
+    let superseded_assistant_id = ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &session,
+            json!({
+                "role": "assistant",
+                "content": "answer after checkpoint"
+            }),
+        )
+        .expect("append superseded assistant");
+
+    let report = restore_core(&ctx, checkpoint_id.clone(), false, false).expect("restore core");
+
+    assert_eq!(report.changed_paths, vec!["keep.txt".to_string()]);
+    assert!(!report.revert_files);
+    assert!(report.transcript_truncated);
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("keep.txt")).unwrap(),
+        "current-worktree",
+        "transcript-only restore 不应改动工作区文件"
+    );
+
+    let entries = ctx
+        .session_runtime
+        .session
+        .get_entries_for_session(&session, 64)
+        .expect("session entries");
+
+    let superseded_ids = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::Message(message)
+                if message
+                    .message
+                    .get("superseded")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true) =>
+            {
+                message.id.clone()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(superseded_ids.contains(&superseded_user_id));
+    assert!(superseded_ids.contains(&superseded_assistant_id));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        TranscriptEntry::Custom(custom)
+            if custom.extra.get("customType").and_then(serde_json::Value::as_str)
+                == Some("checkpoint.restore")
+    )));
+}
+
+#[test]
+#[serial(home_env_lock)]
+fn restore_core_without_reverting_files_skips_cross_session_conflict_warnings() {
+    if !git_available() {
+        return;
+    }
+
+    const API_ENV: &str = "TOMCAT_CMD_RESTORE_DONT_REVERT_WARNINGS_TEST_KEY";
+
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let work_dir = tempfile::tempdir().unwrap();
+    let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
+    let _api_guard = EnvGuard::set(API_ENV, "stub");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().to_string());
+    cfg.llm.api_key_env = Some(API_ENV.to_string());
+    let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
+    let session_a = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .expect("current session id")
+        .expect("session a");
+
+    let _user_before = ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &session_a,
+            json!({
+                "role": "user",
+                "content": "before checkpoint"
+            }),
+        )
+        .expect("append user before checkpoint");
+    let assistant_anchor = ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &session_a,
+            json!({
+                "role": "assistant",
+                "content": "anchor reply"
+            }),
+        )
+        .expect("append assistant anchor");
+
+    std::fs::write(workspace.path().join("shared.txt"), "current-worktree").unwrap();
+    let checkpoint_id = ctx
+        .scope_services
+        .checkpoint_store
+        .record(CheckpointRecordRequest {
+            session_id: session_a.clone(),
+            turn_id: "turn-restore-core".to_string(),
+            kind: CheckpointKind::TurnEnd,
+            message_anchor: Some(assistant_anchor),
+            notes: Some(json!({
+                "changedPaths": ["shared.txt"]
+            })),
+        })
+        .expect("checkpoint");
+
+    ctx.session_runtime
+        .session
+        .try_append_message_to_session(
+            &session_a,
+            json!({
+                "role": "user",
+                "content": "prompt after checkpoint"
+            }),
+        )
+        .expect("append superseded user");
+
+    let session_b = ctx
+        .session_runtime
+        .session
+        .new_current_session(Some(workspace.path().to_string_lossy().to_string()))
+        .expect("session b")
+        .session_id;
+    ctx.scope_services
+        .checkpoint_store
+        .record(CheckpointRecordRequest {
+            session_id: session_b,
+            turn_id: "turn-b".to_string(),
+            kind: CheckpointKind::Manual {
+                label: "other-session".to_string(),
+            },
+            message_anchor: None,
+            notes: Some(json!({
+                "changedPaths": ["shared.txt"]
+            })),
+        })
+        .expect("other-session checkpoint");
+
+    ctx.session_runtime
+        .session
+        .switch_current_to_session_id(&session_a)
+        .expect("switch back to session a");
+
+    let report = restore_core(&ctx, checkpoint_id, false, false).expect("restore core");
+
+    assert_eq!(report.changed_paths, vec!["shared.txt".to_string()]);
+    assert!(
+        report.warnings.is_empty(),
+        "transcript-only restore should skip cross-session conflict scanning"
     );
 }

@@ -3,7 +3,7 @@
 > 适用范围：`tomcat-vscode-ext` 的 webview / provider / state store 如何消费后端新增的 `assistantMessageId` / `userMessageId`，把当前“history + live 拼接再去重”的 timeline 模型改成“单一时间线 + 稳定键 upsert”的渲染模型。
 > 上位规范：[`ARCHITECTURE_SPEC.md`](../../../tomcat/docs/openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。本文 `## 1`–`## 10` 与规范 §1–§10 一一对应；文首导读置于 `## 1` 之前、不占用 § 编号。
 > 上游主方案：[`../../../tomcat/docs/architecture/transcript-stable-id-and-stream-reconciliation.md`](../../../tomcat/docs/architecture/transcript-stable-id-and-stream-reconciliation.md)。**协议字段真相以主方案 + [`../../src/serveClient/wire.d.ts`](../../src/serveClient/wire.d.ts) 为准**，本文只回答“扩展侧怎么消费它”。
-> 关联文档：[`tomcat-vscode-extension-phase2/05-webview-ui-architecture.md`](./tomcat-vscode-extension-phase2/05-webview-ui-architecture.md)、[`tomcat-vscode-extension-phase2/04-protocol-runtime.md`](./tomcat-vscode-extension-phase2/04-protocol-runtime.md)、[`tomcat-vscode-extension.md`](./tomcat-vscode-extension.md)。
+> 关联文档：[`tomcat-vscode-extension-phase2/05-webview-ui-architecture.md`](./tomcat-vscode-extension-phase2/05-webview-ui-architecture.md)、[`tomcat-vscode-extension-phase2/04-protocol-runtime.md`](./tomcat-vscode-extension-phase2/04-protocol-runtime.md)、[`transcript-checkpoint-restore.md`](./transcript-checkpoint-restore.md)、[`tomcat-vscode-extension.md`](./tomcat-vscode-extension.md)。
 > 单一事实源：
 > 1. host↔serve 协议消费以 [`../../src/serveClient/wire.d.ts`](../../src/serveClient/wire.d.ts) 为准；
 > 2. webview timeline 状态收敛以 [`../../src/ui/webview/state.ts`](../../src/ui/webview/state.ts) 为准；

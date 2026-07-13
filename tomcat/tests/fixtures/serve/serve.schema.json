@@ -132,6 +132,72 @@
       {
         "type": "object",
         "required": [
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "list_checkpoints"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "checkpointId",
+          "revertFiles",
+          "type"
+        ],
+        "properties": {
+          "checkpointId": {
+            "type": "string"
+          },
+          "dryRun": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revertFiles": {
+            "type": "boolean"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "restore_checkpoint"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
           "action",
           "type"
         ],

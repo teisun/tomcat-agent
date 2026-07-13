@@ -54,6 +54,8 @@ fn parse_command_line_accepts_all_known_command_types() {
         r#"{"type":"close_session","id":"u12","sessionId":"s1"}"#,
         r#"{"type":"list_sessions","id":"u13","scope":"disk"}"#,
         r#"{"type":"interrupt","id":"u14","sessionId":"s1"}"#,
+        r#"{"type":"list_checkpoints","id":"u15","sessionId":"s1"}"#,
+        r#"{"type":"restore_checkpoint","id":"u16","sessionId":"s1","checkpointId":"ck-1","revertFiles":false}"#,
         r#"{"type":"control_request","requestId":"req-1","subtype":"initialize","payload":{}}"#,
         r#"{"type":"control_response","requestId":"req-2","sessionId":"s1","payload":{"ok":true}}"#,
         r#"{"type":"control_cancel","requestId":"req-3","sessionId":"s1","payload":{"reason":"stop"}}"#,

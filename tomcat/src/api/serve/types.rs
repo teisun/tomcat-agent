@@ -225,6 +225,26 @@ pub enum ServeCommand {
         session_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
+    ListCheckpoints {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RestoreCheckpoint {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "checkpointId")]
+        checkpoint_id: String,
+        #[serde(rename = "revertFiles")]
+        revert_files: bool,
+        #[serde(default, rename = "dryRun", skip_serializing_if = "Option::is_none")]
+        dry_run: Option<bool>,
+    },
+    #[serde(rename_all = "camelCase")]
     SetPlanMode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -358,6 +378,8 @@ impl ServeCommand {
             | Self::Steer { id, .. }
             | Self::FollowUp { id, .. }
             | Self::GetState { id, .. }
+            | Self::ListCheckpoints { id, .. }
+            | Self::RestoreCheckpoint { id, .. }
             | Self::SetPlanMode { id, .. }
             | Self::SetModel { id, .. }
             | Self::SetThinkingLevel { id, .. }
@@ -384,6 +406,8 @@ impl ServeCommand {
             | Self::Steer { session_id, .. }
             | Self::FollowUp { session_id, .. }
             | Self::GetState { session_id, .. }
+            | Self::ListCheckpoints { session_id, .. }
+            | Self::RestoreCheckpoint { session_id, .. }
             | Self::SetPlanMode { session_id, .. }
             | Self::SetModel { session_id, .. }
             | Self::SetThinkingLevel { session_id, .. }
@@ -426,6 +450,8 @@ impl ServeCommand {
             Self::Steer { .. } => "steer",
             Self::FollowUp { .. } => "follow_up",
             Self::GetState { .. } => "get_state",
+            Self::ListCheckpoints { .. } => "list_checkpoints",
+            Self::RestoreCheckpoint { .. } => "restore_checkpoint",
             Self::SetPlanMode { .. } => "set_plan_mode",
             Self::SetModel { .. } => "set_model",
             Self::SetThinkingLevel { .. } => "set_thinking_level",

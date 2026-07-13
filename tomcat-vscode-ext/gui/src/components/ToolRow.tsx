@@ -653,6 +653,12 @@ export function ToolRow({
         className={`tc-tool-row__leading-icon codicon ${iconClass}`}
       />
     );
+  const disclosureLeadingIcon = (
+    <span
+      aria-hidden="true"
+      className={`tc-disclosure-card__leading-icon codicon ${iconClass}`}
+    />
+  );
   const hasStructuredDiff = (item.diff?.length ?? 0) > 0;
   const hasLargeDiffFallback =
     category === "edit" &&
@@ -689,54 +695,52 @@ export function ToolRow({
     </>
   );
 
-  const disclosureHeader =
-    category === "command" ? (
+  const disclosureHeader = (
+    <div className="tc-tool-row__card-header">
       <span className="tc-tool-row__inline" data-testid="tool-row-label">
         {labelWithRunningIndicator(
-          <>
-            <span className="tc-tool-row__text">
-              {item.status === "interrupted" ? "Interrupted" : isRunning(item) ? "Running" : "Ran"}
-            </span>
-            <code className="tc-tool-row__cmd" data-testid="tool-row-cmd">
-              {commandText(item)}
-            </code>
-          </>,
-        )}
-      </span>
-    ) : (
-      <div className="tc-tool-row__card-header">
-        <span className="tc-tool-row__inline" data-testid="tool-row-label">
-          {labelWithRunningIndicator(
+          category === "command" ? (
+            <>
+              <span className="tc-tool-row__text">
+                {item.status === "interrupted" ? "Interrupted" : isRunning(item) ? "Running" : "Ran"}
+              </span>
+              <code className="tc-tool-row__cmd" data-testid="tool-row-cmd">
+                {commandText(item)}
+              </code>
+            </>
+          ) : (
             <>
               <span className="tc-tool-row__text">{buildFlatLabel(item).replace(/ file$/, "")}</span>
               {item.display?.kind === "file" ? (
                 <FileChip onOpenFile={onOpenFile} path={item.display.file} />
               ) : null}
               {renderDiffBadges(item)}
-            </>,
-          )}
-        </span>
-        {showOpenDiffButton ? (
-          <button
-            aria-label="View diff"
-            className="tc-tool-row__action-icon"
-            data-testid="tool-row-open-diff"
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onOpenDiff?.(item.toolCallId);
-            }}
-            type="button"
-          >
-            <span aria-hidden="true" className="codicon codicon-diff" />
-          </button>
-        ) : null}
-      </div>
-    );
+            </>
+          ),
+        )}
+      </span>
+      {showOpenDiffButton ? (
+        <button
+          aria-label="View diff"
+          className="tc-tool-row__action-link"
+          data-testid="tool-row-open-diff"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onOpenDiff?.(item.toolCallId);
+          }}
+          type="button"
+        >
+          <span aria-hidden="true" className="codicon codicon-diff" />
+          <span>View diff</span>
+        </button>
+      ) : null}
+    </div>
+  );
 
   return (
     <div className={shellClassName} data-testid="tool-row-wrapper">
-      {iconNode}
+      {usesDisclosureCard ? null : iconNode}
       <div
         className={`tc-tool-row tc-tool-row--${category}${item.isError ? " tc-tool-row--error" : ""}`}
         data-testid="tool-row"
@@ -748,6 +752,7 @@ export function ToolRow({
             bodyTestId="tool-row-body"
             defaultExpanded={shouldExpandByDefault}
             header={disclosureHeader}
+            leadingIcon={disclosureLeadingIcon}
             preview={
               category === "command" ? (
                 <TerminalOutput preview text={tailTerminalOutput(item.summary, 5)} />

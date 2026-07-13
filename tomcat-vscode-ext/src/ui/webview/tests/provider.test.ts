@@ -872,3 +872,121 @@ describe("mutation diff stat injection", () => {
     provider.dispose();
   });
 });
+
+describe("checkpoint intent handling", () => {
+  function createCheckpointProvider(sessionRouter: Partial<Record<string, unknown>> = {}) {
+    return new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      getUiMode: () => "webview",
+      ide: {} as never,
+      initialize: async () => ({ sessionId: "s1" } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      ownership: {
+        claim() {
+          return { ok: true, record: { owner: "webview" } };
+        },
+        ownerOf() {
+          return { owner: "webview" };
+        },
+        releaseAll() {},
+        snapshot() {
+          return {};
+        },
+      } as never,
+      sessionRouter: sessionRouter as never,
+    });
+  }
+
+  it("dispatches restoreCheckpoint with revertFiles and refreshes state in order", async () => {
+    const restoreCheckpoint = vi.fn().mockResolvedValue({
+      checkpointId: "ck-1",
+      revertFiles: false,
+      sessionId: "s1",
+    });
+    const provider = createCheckpointProvider({ restoreCheckpoint });
+    const ensureInitialized = vi
+      .spyOn(provider as any, "ensureInitialized")
+      .mockResolvedValue({ sessionId: "s1" } as never);
+    const ensureWebviewSessionWithoutHistory = vi
+      .spyOn(provider as any, "ensureWebviewSessionWithoutHistory")
+      .mockResolvedValue("s1");
+    const refreshSessionState = vi
+      .spyOn(provider as any, "refreshSessionState")
+      .mockResolvedValue(undefined);
+    const refreshSessionHistory = vi
+      .spyOn(provider as any, "refreshSessionHistory")
+      .mockResolvedValue(undefined);
+    const refreshCheckpoints = vi
+      .spyOn(provider as any, "refreshCheckpoints")
+      .mockResolvedValue(undefined);
+    const refreshSessions = vi
+      .spyOn(provider as any, "refreshSessions")
+      .mockResolvedValue(undefined);
+    const postState = vi.spyOn(provider as any, "postState").mockResolvedValue(undefined);
+
+    await (provider as any).handleIntent({
+      data: {
+        checkpointId: "ck-1",
+        revertFiles: false,
+        sessionId: "s1",
+      },
+      messageId: "restore-1",
+      type: "restoreCheckpoint",
+    });
+
+    expect(ensureInitialized).toHaveBeenCalled();
+    expect(ensureWebviewSessionWithoutHistory).toHaveBeenCalledWith("s1");
+    expect(restoreCheckpoint).toHaveBeenCalledWith("s1", "ck-1", false);
+    expect(refreshSessionState).toHaveBeenCalledWith("s1", { trustBusy: true });
+    expect(refreshSessionHistory).toHaveBeenCalledWith("s1");
+    expect(refreshCheckpoints).toHaveBeenCalledWith("s1");
+    expect(refreshSessions).toHaveBeenCalled();
+    expect(postState).toHaveBeenCalled();
+    expect(refreshSessionState.mock.invocationCallOrder[0]).toBeLessThan(
+      refreshSessionHistory.mock.invocationCallOrder[0],
+    );
+    expect(refreshSessionHistory.mock.invocationCallOrder[0]).toBeLessThan(
+      refreshCheckpoints.mock.invocationCallOrder[0],
+    );
+    expect(refreshCheckpoints.mock.invocationCallOrder[0]).toBeLessThan(
+      refreshSessions.mock.invocationCallOrder[0],
+    );
+
+    provider.dispose();
+  });
+
+  it("stores checkpoint payloads returned by refreshCheckpoints", async () => {
+    const provider = createCheckpointProvider({
+      listCheckpoints: vi.fn().mockResolvedValue({
+        checkpoints: [
+          {
+            changedFiles: ["src/app.ts"],
+            createdAt: "2026-07-12T12:00:00Z",
+            id: "ck-1",
+            kind: "turn_end",
+            messageAnchor: "assistant-1",
+          },
+        ],
+        sessionId: "s1",
+      }),
+    });
+
+    await (provider as any).refreshCheckpoints("s1");
+
+    expect(provider.currentState().sessionViews.s1.checkpoints).toEqual([
+      {
+        changedFiles: ["src/app.ts"],
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "ck-1",
+        kind: "turn_end",
+        label: null,
+        messageAnchor: "assistant-1",
+      },
+    ]);
+
+    provider.dispose();
+  });
+});

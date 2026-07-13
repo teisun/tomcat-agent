@@ -791,6 +791,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
     await this.refreshSessionState(preferredSessionId, { trustBusy: true });
     await this.refreshSessionHistory(preferredSessionId);
+    await this.refreshCheckpoints(preferredSessionId);
     this.stateStore.setActiveSession(preferredSessionId);
     await this.postState();
   }
@@ -842,6 +843,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       case "listSessions":
         await this.refreshSessions();
         return;
+      case "listCheckpoints":
+        await this.refreshCheckpoints(intent.data.sessionId);
+        await this.postState();
+        return;
       case "loadOlderHistory":
         await this.loadOlderHistory(intent.data.sessionId);
         return;
@@ -866,6 +871,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           if (fallback) {
             await this.refreshSessionState(fallback, { trustBusy: true });
             await this.refreshSessionHistory(fallback);
+            await this.refreshCheckpoints(fallback);
             this.stateStore.setActiveSession(fallback);
           } else {
             this.stateStore.setActiveSession(null);
@@ -977,6 +983,35 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           sessionId,
           type: "interrupt",
         });
+        return;
+      }
+      case "restoreCheckpoint": {
+        await this.ensureInitialized();
+        const sessionId = await this.ensureWebviewSessionWithoutHistory(intent.data.sessionId);
+        if (!sessionId) {
+          await this.postState();
+          return;
+        }
+        try {
+          await this.deps.sessionRouter.restoreCheckpoint(
+            sessionId,
+            intent.data.checkpointId,
+            intent.data.revertFiles,
+          );
+        } catch (error) {
+          this.stateStore.appendMessage(
+            sessionId,
+            "error",
+            formatBridgeError("restore checkpoint", error),
+          );
+          await this.postState();
+          return;
+        }
+        await this.refreshSessionState(sessionId, { trustBusy: true });
+        await this.refreshSessionHistory(sessionId);
+        await this.refreshCheckpoints(sessionId);
+        await this.refreshSessions();
+        await this.postState();
         return;
       }
       case "setModel": {
@@ -1204,6 +1239,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       if (shouldReconcileSessionState(event)) {
         await this.refreshSessionState(event.sessionId, { trustBusy: false });
       }
+      if (event.type === "turn_end") {
+        await this.refreshCheckpoints(event.sessionId);
+      }
     }
     await this.postEvent(event);
     await this.postState();
@@ -1418,6 +1456,17 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.stateStore.hydrateHistory(sessionId, history);
   }
 
+  private async refreshCheckpoints(sessionId: string): Promise<void> {
+    if (typeof this.deps.sessionRouter.listCheckpoints !== "function") {
+      return;
+    }
+    const checkpoints = await this.deps.sessionRouter.listCheckpoints(sessionId).catch(() => null);
+    if (!checkpoints || checkpoints.sessionId !== sessionId) {
+      return;
+    }
+    this.stateStore.setCheckpoints(sessionId, checkpoints.checkpoints);
+  }
+
   private async loadOlderHistory(sessionId: string): Promise<void> {
     if (typeof this.deps.sessionRouter.getMessages !== "function") {
       return;
@@ -1526,6 +1575,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
     await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessionHistory(sessionId);
+    await this.refreshCheckpoints(sessionId);
     await this.refreshSessions();
     this.stateStore.setActiveSession(sessionId);
     await this.postState();
@@ -1539,6 +1589,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
     await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessionHistory(sessionId);
+    await this.refreshCheckpoints(sessionId);
     await this.refreshSessions();
     // Keep the user-selected session visible even when it cannot be claimed.
     this.stateStore.setActiveSession(sessionId);

@@ -1,7 +1,7 @@
 # Tomcat VSCode 扩展 · Phase 2 · 05 Webview UI 架构与实现细节
 
 > 总览见 [`../tomcat-vscode-extension-phase2.md`](../tomcat-vscode-extension-phase2.md)；Stage B 的落地选型与分层基线见 [`03-stage-b-webview.md`](03-stage-b-webview.md)；协议/运行时字段表见 [`04-protocol-runtime.md`](04-protocol-runtime.md)。
-> transcript 稳定 id / reload 切回错乱的专项 companion 见 [`../webview-transcript-stable-id-upsert.md`](../webview-transcript-stable-id-upsert.md)；本文仍以“当前实现是怎么跑的”为主。
+> transcript 稳定 id / reload 切回错乱的专项 companion 见 [`../webview-transcript-stable-id-upsert.md`](../webview-transcript-stable-id-upsert.md)；checkpoint 恢复点的专项 companion 见 [`../transcript-checkpoint-restore.md`](../transcript-checkpoint-restore.md)；本文仍以“当前实现是怎么跑的”为主。
 > 本文不是“想做什么”的方案文，而是“已经如何实现”的实现文：事实源以 [`gui/src/**`](../../../gui/src) 与 [`src/ui/webview/**`](../../../src/ui/webview) 为准。
 > 外部参考仓库（仅作实现思路来源，不进本仓）：`/Users/yankeben/workspace/cline`、`/Users/yankeben/workspace/continue`。
 
@@ -45,6 +45,7 @@ main.tsx
    ├─ tc-stream-shell
    │  ├─ TranscriptView
    │  │  ├─ MessageBubble
+   │  │  ├─ CheckpointMarker
    │  │  ├─ ThinkingBlock
    │  │  ├─ ThinkingGroup
    │  │  │  └─ ToolRow (grouped/context)
@@ -58,6 +59,7 @@ main.tsx
    │  └─ Jump to latest button
    ├─ TodoListWidget
    ├─ AttachmentChips
+   ├─ RestoreConfirmDialog
    └─ Composer
 ```
 
@@ -66,9 +68,11 @@ main.tsx
 | 文件 | 职责 | 关键点 |
 |------|------|--------|
 | [`gui/src/main.tsx`](../../../gui/src/main.tsx) | 挂载 React root，拿 `acquireVsCodeApi()` | 无宿主时回退到 no-op `vscodeApi`，方便 `vite` 独立调试。 |
-| [`gui/src/App.tsx`](../../../gui/src/App.tsx) | 接 `state` 帧、发 intent、组装整个页面 | 统一处理 `ready` / `prompt` / `setModel` / `setPlanMode` / `openFile` / `openDiff` 等 transcript 相关意图，并内置 DOM snapshot 埋点。 |
+| [`gui/src/App.tsx`](../../../gui/src/App.tsx) | 接 `state` 帧、发 intent、组装整个页面 | 统一处理 `ready` / `prompt` / `setModel` / `setPlanMode` / `openFile` / `openDiff` / `restoreCheckpoint` 等 transcript 相关意图，挂载 `RestoreConfirmDialog`，并在 restore 后把被截断轮次的 prompt 回填到 composer。 |
 | [`gui/src/components/SessionBar.tsx`](../../../gui/src/components/SessionBar.tsx) | 顶部会话选择栏 | 下拉显示 `sessionId + isCurrent/owner/busy` 元信息；右侧 `New / Refresh / Close`。 |
-| [`gui/src/components/TranscriptView.tsx`](../../../gui/src/components/TranscriptView.tsx) | timeline 分发器 + assistant-response 二次分层 | 先按 `message / thinking / tool / approval / plan` 5 种一等项分发，再把 assistant 回复内部拆成 `action` 恒显行和 `context` 折叠盒；单个无 thinking 的 context 工具会直接扁平渲染。 |
+| [`gui/src/components/TranscriptView.tsx`](../../../gui/src/components/TranscriptView.tsx) | timeline 分发器 + assistant-response 二次分层 | 先按 `message / checkpoint / thinking / tool / approval / plan` 6 种一等项分发；checkpoint 作为边界标记单独渲染，再把 assistant 回复内部拆成 `action` 恒显行和 `context` 折叠盒；单个无 thinking 的 context 工具会直接扁平渲染。 |
+| [`gui/src/components/CheckpointMarker.tsx`](../../../gui/src/components/CheckpointMarker.tsx) | transcript 中的 checkpoint 分隔条 | 不直接改状态，只负责把后端 checkpoint 元数据投影成可点击 marker，并把点击事件抛回 `App.tsx`。 |
+| [`gui/src/components/RestoreConfirmDialog.tsx`](../../../gui/src/components/RestoreConfirmDialog.tsx) | restore 确认浮层 | 承接 `Revert` / `Don't revert` / `Cancel` 三态，键盘语义与焦点圈定都在这一层完成。 |
 | [`gui/src/components/ThinkingBlock.tsx`](../../../gui/src/components/ThinkingBlock.tsx) | thinking 折叠卡 | 默认折叠；流式时标题显示 `Thinking...` 脉冲动画。 |
 | [`gui/src/components/ThinkingGroup.tsx`](../../../gui/src/components/ThinkingGroup.tsx) | “思考/上下文”折叠盒 | 只容纳 thinking + context/other 工具，默认收起；只有确实还挂着工具时才采信 `summaryTitle`，避免和独立 action 行重复。 |
 | [`gui/src/components/ToolRow.tsx`](../../../gui/src/components/ToolRow.tsx) | 统一工具行 | 用 `toolCategory()` 把工具分成 `edit / command / answer / context / other`，再决定图标、徽章、扁平样式、展开规则与内容体。 |
@@ -186,6 +190,10 @@ timeline 类型：
 2. **历史工具结果回放成 `tool` 卡**
    - 先扫描历史 assistant 的 `message.tool_calls[].{id,function.name}` 建 `toolCallId -> toolName` lookup。
    - 再把历史 `role:"tool"` 映射成 `WebviewToolCard`，保留 `toolCallId` 和工具名。
+
+3. **checkpoint 边界是 history replay 后再注入的合成节点**
+   - `filterSupersededHistoryEntries()` 正常靠 `checkpoint.restore` 哨兵闭合 superseded span；若哨兵缺失，则退化为“遇到下一条非 superseded 的 user message 就闭合”，避免把后续正常 turn 一起吞掉。
+   - `injectCheckpointMarkers()` 先按 `messageAnchor` 找锚点；若该 assistant 只有 tool/thinking、没有正文 message，则回退到 `${messageAnchor}-thinking`，保证 marker 还能落在下一条 user message 之前。
 
 ### 4.2 历史/实时去重：为什么改成稳定 key
 

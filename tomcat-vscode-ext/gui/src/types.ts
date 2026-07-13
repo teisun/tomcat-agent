@@ -69,6 +69,26 @@ export interface WebviewBoundaryBlock {
   type: "boundary";
 }
 
+export interface WebviewCheckpoint {
+  changedFiles: string[];
+  createdAt: string;
+  id: string;
+  kind: string;
+  label?: string | null;
+  messageAnchor?: string | null;
+}
+
+export interface WebviewCheckpointMarker {
+  changedFiles: string[];
+  checkpointId: string;
+  createdAt: string;
+  id: string;
+  kind: string;
+  label?: string | null;
+  messageAnchor: string;
+  type: "checkpoint";
+}
+
 export interface WebviewTodo {
   content: string;
   id: string;
@@ -206,6 +226,7 @@ export interface WebviewPendingAttachment {
 
 export interface WebviewSessionSnapshot {
   busy: boolean;
+  checkpoints?: WebviewCheckpoint[];
   conflictMessage?: string | null;
   contextRatio?: number | null;
   hasMoreHistory?: boolean;
@@ -248,6 +269,7 @@ export interface WebviewStateSnapshot {
 export type WebviewTimelineItem =
   | WebviewApprovalCard
   | WebviewBoundaryBlock
+  | WebviewCheckpointMarker
   | WebviewMessageBlock
   | WebviewPlanFileCard
   | WebviewThinkingBlock
@@ -431,6 +453,22 @@ export type WebviewIntent =
       type: "showWarningMessage";
       data: {
         message: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "listCheckpoints";
+      data: {
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "restoreCheckpoint";
+      data: {
+        checkpointId: string;
+        revertFiles: boolean;
+        sessionId: string;
       };
     }
   | {

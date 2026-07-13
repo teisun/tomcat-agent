@@ -11,7 +11,9 @@ use std::sync::Arc;
 use base64::Engine as _;
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
+use crate::api::chat::commands::{checkpoint_kind_label, restore_core, RestoreCoreReport};
 use crate::core::llm::{
     list_model_views, list_provider_keys, remove_user_model, set_provider_key, upsert_user_model,
     ChatMessage, ChatMessageContentPart, ContextRefKind, ContextReference, ProviderKeyInput,
@@ -23,7 +25,7 @@ use crate::core::session::transcript::{
 };
 use crate::infra::events::{AgentEvent, WireEvent};
 use crate::AppError;
-use crate::{SessionManager, SessionMode};
+use crate::{CheckpointId, ListOptions, SessionManager, SessionMode};
 
 use super::control;
 use super::types::{
@@ -335,6 +337,73 @@ pub(crate) async fn handle_command(
                     // TODO(next): wire up real seq/upToSeq when Phase-2 visibility resync lands.
                     "upToSeq": serde_json::Value::Null
                 })),
+            )))?;
+        }
+        ServeCommand::ListCheckpoints { id, session_id } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
+            else {
+                return Ok(());
+            };
+            let checkpoints = match slot
+                .ctx
+                .scope_services
+                .checkpoint_store
+                .list(&slot.session_id, ListOptions::default())
+            {
+                Ok(checkpoints) => checkpoints,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        Some(slot.session_id.clone()),
+                        format!("list_checkpoints failed: {error}"),
+                    )?;
+                    return Ok(());
+                }
+            };
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(slot.session_id.clone()),
+                Some(json!({
+                    "sessionId": slot.session_id,
+                    "checkpoints": checkpoints
+                        .into_iter()
+                        .map(checkpoint_meta_payload)
+                        .collect::<Vec<_>>(),
+                })),
+            )))?;
+        }
+        ServeCommand::RestoreCheckpoint {
+            id,
+            session_id,
+            checkpoint_id,
+            revert_files,
+            dry_run,
+        } => {
+            let Some(slot) = resolve_slot_or_error(&state, id.clone(), session_id.clone()).await?
+            else {
+                return Ok(());
+            };
+            if slot.is_busy() {
+                send_error(&state, id, Some(slot.session_id.clone()), "busy")?;
+                return Ok(());
+            }
+            let report = match restore_core(
+                &slot.ctx,
+                CheckpointId::new(checkpoint_id),
+                revert_files,
+                dry_run.unwrap_or(false),
+            ) {
+                Ok(report) => report,
+                Err(message) => {
+                    send_error(&state, id, Some(slot.session_id.clone()), message)?;
+                    return Ok(());
+                }
+            };
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                Some(slot.session_id.clone()),
+                Some(restore_core_payload(report)),
             )))?;
         }
         ServeCommand::ListSessions { id, scope } => {
@@ -933,6 +1002,93 @@ fn plan_state_payload(
         "planId": plan_id,
         "planPath": plan_path,
         "sessionKey": slot.ctx.session_runtime.session.current_session_key(),
+    })
+}
+
+fn checkpoint_label(kind: &crate::core::CheckpointKind) -> Option<&str> {
+    match kind {
+        crate::core::CheckpointKind::Manual { label } => Some(label.as_str()),
+        _ => None,
+    }
+}
+
+fn checkpoint_changed_files(meta: &crate::core::CheckpointMeta) -> Vec<String> {
+    meta.notes
+        .as_ref()
+        .and_then(|notes| notes.get("changedPaths"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn checkpoint_meta_payload(meta: crate::core::CheckpointMeta) -> serde_json::Value {
+    let kind = checkpoint_kind_label(&meta.kind).to_string();
+    let label = checkpoint_label(&meta.kind).map(ToOwned::to_owned);
+    let changed_files = checkpoint_changed_files(&meta);
+    let crate::core::CheckpointMeta {
+        id,
+        session_id,
+        turn_id,
+        git_commit,
+        message_anchor,
+        created_at,
+        ..
+    } = meta;
+    json!({
+        "id": id.to_string(),
+        "sessionId": session_id,
+        "turnId": turn_id,
+        "kind": kind,
+        "label": label,
+        "gitCommit": git_commit,
+        "messageAnchor": message_anchor,
+        "createdAt": created_at,
+        "changedFiles": changed_files,
+    })
+}
+
+fn restore_core_payload(report: RestoreCoreReport) -> serde_json::Value {
+    let kind = checkpoint_kind_label(&report.meta.kind).to_string();
+    let label = checkpoint_label(&report.meta.kind).map(ToOwned::to_owned);
+    let RestoreCoreReport {
+        changed_paths,
+        dry_run,
+        meta,
+        restored_paths,
+        revert_files,
+        reloaded_plan_id,
+        summary,
+        transcript_truncated,
+        warnings,
+    } = report;
+    let crate::core::CheckpointMeta {
+        id,
+        session_id,
+        turn_id,
+        message_anchor,
+        created_at,
+        ..
+    } = meta;
+    json!({
+        "checkpointId": id.to_string(),
+        "sessionId": session_id,
+        "turnId": turn_id,
+        "kind": kind,
+        "label": label,
+        "messageAnchor": message_anchor,
+        "createdAt": created_at,
+        "changedPaths": changed_paths,
+        "restoredPaths": restored_paths,
+        "dryRun": dry_run,
+        "revertFiles": revert_files,
+        "transcriptTruncated": transcript_truncated,
+        "reloadedPlanId": reloaded_plan_id,
+        "summary": summary,
+        "warnings": warnings,
     })
 }
 

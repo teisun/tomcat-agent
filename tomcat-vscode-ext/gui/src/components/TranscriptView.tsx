@@ -11,6 +11,7 @@ import type {
 } from "../types";
 import { ApprovalCard } from "./ApprovalCard";
 import { BoundaryBlock } from "./BoundaryBlock";
+import { CheckpointMarker } from "./CheckpointMarker";
 import { MessageBubble } from "./MessageBubble";
 import { PlanFileCard } from "./PlanFileCard";
 import { ProgressRow } from "./ProgressRow";
@@ -129,6 +130,7 @@ export function TranscriptView({
   onOpenDiff,
   onOpenFile,
   onOpenPlanFile,
+  onRestoreCheckpoint,
   onRetryUserMessage,
   planState,
   planTodos = [],
@@ -144,6 +146,7 @@ export function TranscriptView({
   onOpenDiff?(toolCallId: string): void;
   onOpenFile(path: string): void;
   onOpenPlanFile(path: string): void;
+  onRestoreCheckpoint?(checkpointId: string): void;
   onRetryUserMessage?(messageId: string): void;
   planState?: WebviewPlanState | null;
   planTodos?: WebviewTodo[];
@@ -181,6 +184,14 @@ export function TranscriptView({
           return <BoundaryBlock item={item} key={item.id} />;
         case "message":
           return <MessageBubble item={item} key={item.id} onRetry={onRetryUserMessage} />;
+        case "checkpoint":
+          return (
+            <CheckpointMarker
+              item={item}
+              key={item.id}
+              onRestore={(checkpoint) => onRestoreCheckpoint?.(checkpoint.checkpointId)}
+            />
+          );
         case "thinking":
           return (
             <ThinkingBlock

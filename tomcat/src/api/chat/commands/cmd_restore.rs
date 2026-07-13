@@ -26,6 +26,19 @@ pub(crate) struct RestoreConflict {
     pub paths: Vec<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RestoreCoreReport {
+    pub changed_paths: Vec<String>,
+    pub dry_run: bool,
+    pub meta: crate::core::CheckpointMeta,
+    pub restored_paths: Vec<String>,
+    pub revert_files: bool,
+    pub reloaded_plan_id: Option<String>,
+    pub summary: Option<String>,
+    pub transcript_truncated: bool,
+    pub warnings: Vec<String>,
+}
+
 pub(crate) fn run(
     ctx: &ChatContext,
     checkpoint_id: String,
@@ -33,127 +46,191 @@ pub(crate) fn run(
     dry_run: bool,
 ) -> ChatCommandOutcome {
     let checkpoint_id = CheckpointId::new(checkpoint_id);
-    let meta = match ctx.scope_services.checkpoint_store.show(&checkpoint_id) {
-        Ok(Some(meta)) => meta,
-        Ok(None) => {
-            println!("未找到 checkpoint: {checkpoint_id}");
-            return ChatCommandOutcome::Handled;
-        }
-        Err(err) => {
-            println!("读取 checkpoint 失败：{err}");
-            record_restore_audit(ctx, false, format!("show failed: {err}"));
-            return ChatCommandOutcome::Handled;
-        }
-    };
-
-    if !dry_run && matches!(meta.kind, CheckpointKind::TurnEnd) {
-        if let Err(err) = record_pre_rollback(ctx, &checkpoint_id) {
-            println!("pre-rollback 失败，已中止 restore：{err}");
-            record_restore_audit(ctx, false, format!("pre-rollback failed: {err}"));
-            return ChatCommandOutcome::Handled;
-        }
-    }
-
-    let restore_plan = effective_restore_paths(ctx, &checkpoint_id, &meta, &paths);
-    if let Some(message) = restore_plan.warning.as_deref() {
-        warn!(checkpoint_id = %checkpoint_id, "{message}");
-        println!("警告：{message}");
-    }
-    let current_session_id = ctx
-        .session_runtime
-        .session
-        .current_session_id()
-        .ok()
-        .flatten();
-    let conflicts =
-        other_session_restore_conflicts(ctx, current_session_id.as_deref(), &restore_plan.paths);
-    if !conflicts.is_empty() {
-        let detail = render_restore_conflicts(&conflicts);
-        warn!(
-            checkpoint_id = %checkpoint_id,
-            conflicts = %detail,
-            "restore may overlap other session changes"
-        );
-        println!("警告：本次 restore 可能影响其他会话改动：{detail}");
-    }
-    let report = match ctx.scope_services.checkpoint_store.restore(
-        &checkpoint_id,
-        RestoreOptions {
-            paths: restore_plan.paths.clone(),
-            dry_run,
-        },
-    ) {
+    let report = match restore_core_with_paths(ctx, checkpoint_id.clone(), &paths, true, dry_run) {
         Ok(report) => report,
-        Err(err) => {
-            println!("restore 失败：{err}");
-            record_restore_audit(ctx, false, format!("restore failed: {err}"));
+        Err(message) => {
+            println!("{message}");
             return ChatCommandOutcome::Handled;
         }
     };
 
-    if dry_run {
+    for warning in &report.warnings {
+        warn!(checkpoint_id = %checkpoint_id, "{warning}");
+        println!("警告：{warning}");
+    }
+
+    if report.dry_run {
         println!("dry-run: {}", checkpoint_id);
         if let Some(summary) = report.summary {
             print!("{}", summary);
         } else {
             println!("当前工作区与目标 checkpoint 无差异。");
         }
-        record_restore_audit(ctx, true, format!("dry-run restore {}", checkpoint_id));
         return ChatCommandOutcome::Handled;
     }
 
-    if matches!(
-        meta.kind,
-        CheckpointKind::TurnEnd | CheckpointKind::Interrupt
-    ) {
-        if let Err(err) = finalize_restore_transcript(ctx, &meta, &report, &restore_plan.paths) {
-            println!("restore 已改盘，但 transcript 回滚失败：{err}");
-            record_restore_audit(
-                ctx,
-                false,
-                format!("restore applied but transcript finalize failed: {err}"),
-            );
-            return ChatCommandOutcome::Handled;
-        }
-    }
-
-    let restored_paths = restored_paths_for_entry(&report, &restore_plan.paths);
-    if restored_paths.is_empty() {
+    if report.restored_paths.is_empty() {
         println!("已恢复 checkpoint {}。", checkpoint_id);
     } else {
         println!(
             "已恢复 checkpoint {}：{}",
             checkpoint_id,
-            restored_paths.join(", ")
+            report.restored_paths.join(", ")
         );
     }
-    // E7：树恢复完成后，把内存里的 plan 模式与磁盘对齐——若磁盘 active executing
-    // plan 与本 session 绑定，则把 PlanRuntime 切回 Executing；否则保持当前模式。
-    // 失败仅 warning，不影响树恢复的成功结果。
-    match ctx
-        .session_runtime
-        .plan_runtime
-        .reload_active_plan_from_disk()
-    {
-        Ok(Some(plan_id)) => {
-            println!("plan_runtime 已对齐磁盘：EXEC plan_id={plan_id}");
+    if let Some(plan_id) = report.reloaded_plan_id {
+        println!("plan_runtime 已对齐磁盘：EXEC plan_id={plan_id}");
+    }
+    ChatCommandOutcome::Handled
+}
+
+pub(crate) fn restore_core(
+    ctx: &ChatContext,
+    checkpoint_id: CheckpointId,
+    revert_files: bool,
+    dry_run: bool,
+) -> Result<RestoreCoreReport, String> {
+    restore_core_with_paths(ctx, checkpoint_id, &[], revert_files, dry_run)
+}
+
+fn restore_core_with_paths(
+    ctx: &ChatContext,
+    checkpoint_id: CheckpointId,
+    requested_paths: &[PathBuf],
+    revert_files: bool,
+    dry_run: bool,
+) -> Result<RestoreCoreReport, String> {
+    let meta = match ctx.scope_services.checkpoint_store.show(&checkpoint_id) {
+        Ok(Some(meta)) => meta,
+        Ok(None) => {
+            record_restore_audit(ctx, false, format!("checkpoint missing: {checkpoint_id}"));
+            return Err(format!("未找到 checkpoint: {checkpoint_id}"));
         }
-        Ok(None) => {}
         Err(err) => {
-            println!("plan_runtime 重新对齐失败（仅警告）：{err}");
+            record_restore_audit(ctx, false, format!("show failed: {err}"));
+            return Err(format!("读取 checkpoint 失败：{err}"));
+        }
+    };
+
+    let note_paths = checkpoint_note_paths(meta.notes.as_ref());
+    let restore_plan = if revert_files {
+        Some(effective_restore_paths(ctx, &checkpoint_id, &meta, requested_paths))
+    } else {
+        None
+    };
+    let mut warnings = Vec::new();
+    if let Some(restore_plan) = restore_plan.as_ref() {
+        warnings = collect_restore_warnings(ctx, &checkpoint_id, &restore_plan.paths);
+        if let Some(message) = restore_plan.warning.as_deref() {
+            warnings.insert(0, message.to_string());
         }
     }
+
+    if revert_files && !dry_run && matches!(meta.kind, CheckpointKind::TurnEnd) {
+        if let Err(err) = record_pre_rollback(ctx, &checkpoint_id) {
+            record_restore_audit(ctx, false, format!("pre-rollback failed: {err}"));
+            return Err(format!("pre-rollback 失败，已中止 restore：{err}"));
+        }
+    }
+
+    let mut summary = None;
+    let mut restored_paths = Vec::new();
+    let changed_paths = if revert_files {
+        let restore_plan = restore_plan
+            .as_ref()
+            .expect("revert restore should compute restore path plan");
+        let report = match ctx.scope_services.checkpoint_store.restore(
+            &checkpoint_id,
+            RestoreOptions {
+                paths: restore_plan.paths.clone(),
+                dry_run,
+            },
+        ) {
+            Ok(report) => report,
+            Err(err) => {
+                record_restore_audit(ctx, false, format!("restore failed: {err}"));
+                return Err(format!("restore 失败：{err}"));
+            }
+        };
+        summary = report.summary.clone();
+        restored_paths = resolved_restore_paths(&report, &restore_plan.paths);
+        if !dry_run
+            && matches!(meta.kind, CheckpointKind::TurnEnd | CheckpointKind::Interrupt)
+        {
+            if let Err(err) = finalize_restore_transcript(ctx, &meta, &restored_paths) {
+                record_restore_audit(
+                    ctx,
+                    false,
+                    format!("restore applied but transcript finalize failed: {err}"),
+                );
+                return Err(format!("restore 已改盘，但 transcript 回滚失败：{err}"));
+            }
+        }
+        changed_paths_for_report(&report, &restore_plan.paths)
+    } else {
+        if dry_run {
+            summary = checkpoint_diff_summary(ctx, &checkpoint_id);
+        }
+        if !dry_run
+            && matches!(meta.kind, CheckpointKind::TurnEnd | CheckpointKind::Interrupt)
+        {
+            if let Err(err) = finalize_restore_transcript(ctx, &meta, &[]) {
+                record_restore_audit(ctx, false, format!("transcript-only restore failed: {err}"));
+                return Err(format!("restore 对话截断失败：{err}"));
+            }
+        }
+        note_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect()
+    };
+
+    let mut reloaded_plan_id = None;
+    if revert_files && !dry_run {
+        match ctx
+            .session_runtime
+            .plan_runtime
+            .reload_active_plan_from_disk()
+        {
+            Ok(Some(plan_id)) => {
+                reloaded_plan_id = Some(plan_id);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                warnings.push(format!("plan_runtime 重新对齐失败（仅警告）：{err}"));
+            }
+        }
+    }
+
     record_restore_audit(
         ctx,
         true,
         format!(
-            "restore {} kind={} paths={}",
+            "restore {} kind={} revert_files={} dry_run={} paths={}",
             checkpoint_id,
             checkpoint_kind_label(&meta.kind),
-            restored_paths.join(",")
+            revert_files,
+            dry_run,
+            if restored_paths.is_empty() {
+                changed_paths.join(",")
+            } else {
+                restored_paths.join(",")
+            }
         ),
     );
-    ChatCommandOutcome::Handled
+
+    Ok(RestoreCoreReport {
+        changed_paths,
+        dry_run,
+        meta: meta.clone(),
+        restored_paths,
+        revert_files,
+        reloaded_plan_id,
+        summary,
+        transcript_truncated: !dry_run
+            && matches!(meta.kind, CheckpointKind::TurnEnd | CheckpointKind::Interrupt),
+        warnings,
+    })
 }
 
 fn record_pre_rollback(ctx: &ChatContext, checkpoint_id: &CheckpointId) -> Result<(), String> {
@@ -185,8 +262,7 @@ fn record_pre_rollback(ctx: &ChatContext, checkpoint_id: &CheckpointId) -> Resul
 fn finalize_restore_transcript(
     ctx: &ChatContext,
     meta: &crate::core::CheckpointMeta,
-    report: &crate::core::CheckpointRestoreReport,
-    requested_paths: &[PathBuf],
+    restored_paths: &[String],
 ) -> Result<(), String> {
     let anchor = meta
         .message_anchor
@@ -203,7 +279,7 @@ fn finalize_restore_transcript(
             "checkpointId": meta.id.to_string(),
             "checkpointKind": checkpoint_kind_label(&meta.kind),
             "anchorMessageId": anchor,
-            "restoredPaths": restored_paths_for_entry(report, requested_paths),
+            "restoredPaths": restored_paths,
         }))
         .map_err(|err| err.to_string())?;
     ctx.session_runtime
@@ -243,7 +319,7 @@ fn current_leaf_message_id(ctx: &ChatContext) -> Option<String> {
     }
 }
 
-fn restored_paths_for_entry(
+fn resolved_restore_paths(
     report: &crate::core::CheckpointRestoreReport,
     requested_paths: &[PathBuf],
 ) -> Vec<String> {
@@ -261,6 +337,59 @@ fn restored_paths_for_entry(
             .collect();
     }
     vec![".".to_string()]
+}
+
+fn changed_paths_for_report(
+    report: &crate::core::CheckpointRestoreReport,
+    requested_paths: &[PathBuf],
+) -> Vec<String> {
+    if !report.changed_paths.is_empty() {
+        return report
+            .changed_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+    }
+    requested_paths
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
+}
+
+fn checkpoint_diff_summary(
+    ctx: &ChatContext,
+    checkpoint_id: &CheckpointId,
+) -> Option<String> {
+    ctx.scope_services
+        .checkpoint_store
+        .diff(checkpoint_id)
+        .ok()
+        .and_then(|diff| (!diff.text.trim().is_empty()).then_some(diff.text))
+}
+
+fn collect_restore_warnings(
+    ctx: &ChatContext,
+    checkpoint_id: &CheckpointId,
+    restore_paths: &[PathBuf],
+) -> Vec<String> {
+    let current_session_id = ctx
+        .session_runtime
+        .session
+        .current_session_id()
+        .ok()
+        .flatten();
+    let conflicts =
+        other_session_restore_conflicts(ctx, current_session_id.as_deref(), restore_paths);
+    if conflicts.is_empty() {
+        return Vec::new();
+    }
+    let detail = render_restore_conflicts(&conflicts);
+    warn!(
+        checkpoint_id = %checkpoint_id,
+        conflicts = %detail,
+        "restore may overlap other session changes"
+    );
+    vec![format!("本次 restore 可能影响其他会话改动：{detail}")]
 }
 
 pub(crate) fn effective_restore_paths(

@@ -51,6 +51,16 @@ fn serve_dts_includes_user_message_id_on_message_params() {
 }
 
 #[test]
+fn serve_dts_includes_checkpoint_commands() {
+    let dts = serve_dts();
+    assert!(dts.contains("type: \"list_checkpoints\";"));
+    assert!(dts.contains("type: \"restore_checkpoint\";"));
+    assert!(dts.contains("checkpointId: string;"));
+    assert!(dts.contains("revertFiles: boolean;"));
+    assert!(dts.contains("dryRun?: boolean | null;"));
+}
+
+#[test]
 fn serve_dts_includes_context_reference_types() {
     let dts = serve_dts();
     assert!(dts.contains("export type ServeContextRefKind = \"selection\" | \"file\";"));
@@ -166,6 +176,39 @@ fn serve_emitted_event_validates_against_generated_schema() {
         assert!(
             validator.is_valid(&sample),
             "sample should validate against generated schema: {sample}"
+        );
+    }
+}
+
+#[test]
+fn serve_command_schema_validates_checkpoint_commands() {
+    let bundle = build_schema_bundle();
+    let bundle_value = serde_json::to_value(&bundle).expect("serialize schema bundle");
+    let schema = bundle_value
+        .get("serve_command")
+        .cloned()
+        .expect("serve_command schema should exist");
+    let validator = jsonschema::validator_for(&schema).expect("compile serve command schema");
+    let samples = [
+        json!({
+            "type": "list_checkpoints",
+            "id": "list-1",
+            "sessionId": "s1"
+        }),
+        json!({
+            "type": "restore_checkpoint",
+            "id": "restore-1",
+            "sessionId": "s1",
+            "checkpointId": "ck-1",
+            "revertFiles": false,
+            "dryRun": true
+        }),
+    ];
+
+    for sample in samples {
+        assert!(
+            validator.is_valid(&sample),
+            "checkpoint serve command should validate: {sample}"
         );
     }
 }

@@ -51,6 +51,7 @@ input:focus-visible {
   min-height: 100%;
   overflow: hidden;
   padding: 10px;
+  position: relative;
 }
 
 .tc-card__header,
@@ -1229,6 +1230,52 @@ input:focus-visible {
   width: 100%;
 }
 
+.tc-checkpoint-marker {
+  align-items: center;
+  color: var(--vscode-descriptionForeground);
+  display: flex;
+  gap: 10px;
+  width: 100%;
+}
+
+.tc-checkpoint-marker__line {
+  background: var(
+    --vscode-widget-border,
+    var(--vscode-panel-border, rgba(127, 127, 127, 0.24))
+  );
+  flex: 1 1 auto;
+  height: 1px;
+  min-width: 0;
+}
+
+.tc-checkpoint-marker__button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 12px;
+  gap: 6px;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.tc-checkpoint-marker__button:hover {
+  color: var(--vscode-foreground);
+}
+
+.tc-checkpoint-marker__dot,
+.tc-checkpoint-marker__icon {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-checkpoint-marker__button:hover .tc-checkpoint-marker__dot,
+.tc-checkpoint-marker__button:hover .tc-checkpoint-marker__icon {
+  color: var(--vscode-foreground);
+}
+
 .tc-boundary {
   background: color-mix(in srgb, var(--vscode-sideBar-background) 92%, transparent);
   border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.25));
@@ -1938,7 +1985,7 @@ input:focus-visible {
 }
 
 .tc-tool-row__card-header {
-  align-items: center;
+  align-items: flex-start;
   display: flex;
   gap: 8px;
   justify-content: space-between;
@@ -1946,7 +1993,7 @@ input:focus-visible {
   width: 100%;
 }
 
-.tc-tool-row__action-icon {
+.tc-tool-row__action-link {
   align-items: center;
   background: transparent;
   border: 0;
@@ -1954,24 +2001,33 @@ input:focus-visible {
   cursor: pointer;
   display: inline-flex;
   flex: 0 0 auto;
+  font-size: 12px;
+  gap: 4px;
   justify-content: center;
   padding: 0;
 }
 
-.tc-tool-row__action-icon:hover {
+.tc-tool-row__action-link:hover {
   color: var(--vscode-foreground);
 }
 
 .tc-disclosure-card {
-  align-items: stretch;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  border-radius: 4px;
   display: flex;
-  gap: 8px;
+  flex-direction: column;
   min-width: 0;
+  overflow: hidden;
+  position: relative;
 }
 
 .tc-disclosure-card__status {
-  border-radius: 999px;
-  flex: 0 0 2px;
+  bottom: 0;
+  left: 0;
+  position: absolute;
+  top: 0;
+  width: 2px;
 }
 
 .tc-disclosure-card--success .tc-disclosure-card__status {
@@ -1995,20 +2051,30 @@ input:focus-visible {
   );
 }
 
-.tc-disclosure-card__main {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-
 .tc-disclosure-card__header {
   align-items: flex-start;
   display: flex;
-  gap: 8px;
+  gap: 10px;
   justify-content: space-between;
   min-width: 0;
+  padding: 10px 12px 9px 12px;
+}
+
+.tc-disclosure-card__leading {
+  align-items: flex-start;
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding-top: 1px;
+}
+
+.tc-disclosure-card__leading-icon {
+  align-items: center;
+  color: var(--vscode-descriptionForeground);
+  display: inline-flex;
+  font-size: 16px;
+  justify-content: center;
+  line-height: 1;
+  width: 16px;
 }
 
 .tc-disclosure-card__header-content {
@@ -2035,22 +2101,21 @@ input:focus-visible {
 
 .tc-disclosure-card__preview,
 .tc-disclosure-card__body {
-  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
-  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
-  border-radius: 0;
+  background: transparent;
+  border-top: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.18));
   min-width: 0;
 }
 
 .tc-disclosure-card__preview {
   max-height: 180px;
   overflow: hidden;
-  padding: 8px 10px;
+  padding: 10px 12px;
 }
 
 .tc-disclosure-card__body {
   max-height: 50vh;
   overflow: auto;
-  padding: 8px 10px;
+  padding: 10px 12px 12px;
 }
 
 .tc-terminal-output,
@@ -2059,6 +2124,7 @@ input:focus-visible {
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 12px;
   margin: 0;
+  max-width: 100%;
   min-width: max-content;
   white-space: pre;
 }
@@ -2142,12 +2208,14 @@ input:focus-visible {
 }
 
 .tc-tool-row--edit .tc-tool-row__leading-icon,
-.tc-tool-row--edit .tc-thinking-icon {
+.tc-tool-row--edit .tc-thinking-icon,
+.tc-tool-row--edit .tc-disclosure-card__leading-icon {
   color: var(--vscode-chat-linesAddedForeground, var(--vscode-charts-green, #3fb950));
 }
 
 .tc-tool-row--command .tc-tool-row__leading-icon,
-.tc-tool-row--command .tc-thinking-icon {
+.tc-tool-row--command .tc-thinking-icon,
+.tc-tool-row--command .tc-disclosure-card__leading-icon {
   color: var(
     --vscode-terminalCommandDecoration-defaultBackground,
     var(--vscode-focusBorder, rgba(0, 122, 204, 0.8))
@@ -2159,7 +2227,8 @@ input:focus-visible {
 }
 
 .tc-tool-row--answer .tc-tool-row__leading-icon,
-.tc-tool-row--answer .tc-thinking-icon {
+.tc-tool-row--answer .tc-thinking-icon,
+.tc-tool-row--answer .tc-disclosure-card__leading-icon {
   color: var(--vscode-textLink-foreground, var(--vscode-foreground));
 }
 
@@ -2440,6 +2509,97 @@ input:focus-visible {
 .tc-composer__surface--drop-active {
   border-color: var(--vscode-focusBorder, rgba(64, 158, 255, 0.8));
   box-shadow: 0 0 0 1px var(--vscode-focusBorder, rgba(64, 158, 255, 0.35));
+}
+
+.tc-confirm-dialog__overlay {
+  align-items: flex-end;
+  display: flex;
+  inset: 0;
+  justify-content: flex-end;
+  padding: 0 10px 120px;
+  position: fixed;
+  z-index: 40;
+}
+
+.tc-confirm-dialog {
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  border: 1px solid
+    var(--vscode-widget-border, var(--vscode-panel-border, rgba(127, 127, 127, 0.28)));
+  border-radius: 8px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+  max-width: min(560px, calc(100vw - 20px));
+  padding: 14px;
+  width: min(560px, calc(100vw - 20px));
+}
+
+.tc-confirm-dialog__header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.tc-confirm-dialog__title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.tc-confirm-dialog__body {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 8px 0 0;
+}
+
+.tc-confirm-dialog__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.tc-confirm-dialog__button {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 10px;
+}
+
+.tc-confirm-dialog__button--ghost {
+  background: transparent;
+  border-color: var(--vscode-panel-border, rgba(127, 127, 127, 0.24));
+  color: var(--vscode-foreground);
+}
+
+.tc-confirm-dialog__button--secondary {
+  background: var(
+    --vscode-button-secondaryBackground,
+    rgba(127, 127, 127, 0.18)
+  );
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+}
+
+.tc-confirm-dialog__button--primary {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+}
+
+.tc-confirm-dialog__button:hover {
+  filter: brightness(1.04);
+}
+
+.tc-confirm-dialog__shortcut {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+.tc-confirm-dialog__button--primary .tc-confirm-dialog__shortcut {
+  color: color-mix(in srgb, var(--vscode-button-foreground, #fff) 72%, transparent);
 }
 
 .tc-composer__editor {

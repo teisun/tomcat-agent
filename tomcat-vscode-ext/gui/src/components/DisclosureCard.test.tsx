@@ -8,6 +8,7 @@ describe("DisclosureCard", () => {
     render(
       <DisclosureCard
         header={<span>Header</span>}
+        leadingIcon={<span data-testid="card-icon">icon</span>}
         preview={<div data-testid="preview-content">tail output</div>}
         statusVariant="success"
         toggleTestId="toggle"
@@ -16,6 +17,9 @@ describe("DisclosureCard", () => {
       </DisclosureCard>,
     );
 
+    expect(
+      screen.getByTestId("disclosure-card-leading-icon").contains(screen.getByTestId("card-icon")),
+    ).toBe(true);
     expect(screen.getByTestId("preview-content").textContent).toContain("tail output");
     expect(screen.queryByTestId("body-content")).toBeNull();
 

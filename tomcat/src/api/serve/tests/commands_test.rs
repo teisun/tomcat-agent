@@ -13,6 +13,36 @@ use crate::core::llm::{
     Capabilities, ChatMessageContent, ChatMessageContentPart, ContextRefKind, FileSource,
     ImageSource, LlmProvider, MessageKind, ModelEntryInput, StreamEvent,
 };
+use crate::{
+    CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
+    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
+};
+
+struct CurrentDirGuard {
+    previous: std::path::PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn set(path: &std::path::Path) -> Self {
+        let previous = std::env::current_dir().expect("current_dir");
+        std::env::set_current_dir(path).expect("set_current_dir");
+        Self { previous }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
+}
+
+fn git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
 
 async fn wait_for_line(
     buffer: &crate::api::serve::test_support::SharedWriterBuffer,
@@ -116,6 +146,76 @@ fn latest_user_entry(
                 == Some("user")
         })
         .expect("latest user entry")
+}
+
+struct FixedCheckpointStore {
+    checkpoints: Vec<CheckpointMeta>,
+    restore_report: CheckpointRestoreReport,
+}
+
+impl CheckpointStore for FixedCheckpointStore {
+    fn record(&self, _request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
+        Ok(self
+            .checkpoints
+            .first()
+            .map(|meta| meta.id.clone())
+            .unwrap_or_else(CheckpointId::null))
+    }
+
+    fn list(
+        &self,
+        session_id: &str,
+        _opts: ListOptions,
+    ) -> Result<Vec<CheckpointMeta>, CheckpointError> {
+        Ok(self
+            .checkpoints
+            .iter()
+            .filter(|meta| meta.session_id == session_id)
+            .cloned()
+            .collect())
+    }
+
+    fn show(&self, id: &CheckpointId) -> Result<Option<CheckpointMeta>, CheckpointError> {
+        Ok(self
+            .checkpoints
+            .iter()
+            .find(|meta| &meta.id == id)
+            .cloned())
+    }
+
+    fn diff(&self, _id: &CheckpointId) -> Result<CheckpointDiff, CheckpointError> {
+        Ok(CheckpointDiff::default())
+    }
+
+    fn restore(
+        &self,
+        _id: &CheckpointId,
+        _opts: RestoreOptions,
+    ) -> Result<CheckpointRestoreReport, CheckpointError> {
+        Ok(self.restore_report.clone())
+    }
+
+    fn prune(&self, _policy: crate::RetentionPolicy) -> Result<usize, CheckpointError> {
+        Ok(0)
+    }
+}
+
+fn install_checkpoint_store(
+    state: &Arc<ServeState>,
+    session_id: &str,
+    store: Arc<dyn CheckpointStore>,
+) -> Arc<crate::api::serve::SessionSlot> {
+    let slot = state
+        .registry
+        .get(session_id)
+        .expect("lookup slot for checkpoint store override");
+    // Test-only override: the fixture keeps the same Arc<ChatContext> in multiple places,
+    // so we swap the checkpoint store through the shared pointer instead of rebuilding the slot.
+    unsafe {
+        let ctx_ptr = Arc::as_ptr(&slot.ctx) as *mut ChatContext;
+        (*ctx_ptr).scope_services.checkpoint_store = store;
+    }
+    slot
 }
 
 #[tokio::test]
@@ -3194,4 +3294,290 @@ async fn serve_prompt_passes_per_model_thinking_level_to_main_loop_request() {
         captured[0].thinking_level,
         Some(crate::core::llm::ThinkingLevel::Xhigh)
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_list_checkpoints_returns_changed_files() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, initial_slot) = build_initialized_state_with_streams(vec![]).await;
+    let session_id = initial_slot.session_id.clone();
+    let anchor = append_history_message(&initial_slot, "assistant", "anchor reply");
+    drop(initial_slot);
+
+    let slot = install_checkpoint_store(
+        &state,
+        &session_id,
+        Arc::new(FixedCheckpointStore {
+            checkpoints: vec![CheckpointMeta {
+                id: CheckpointId::new("ck_list"),
+                session_id: session_id.clone(),
+                turn_id: "turn-list-checkpoints".to_string(),
+                kind: CheckpointKind::TurnEnd,
+                git_commit: Some("deadbeef".to_string()),
+                message_anchor: Some(anchor.clone()),
+                created_at: "2026-07-12T12:00:00Z".to_string(),
+                notes: Some(serde_json::json!({
+                    "changedPaths": ["src/app.ts"]
+                })),
+            }],
+            restore_report: CheckpointRestoreReport::default(),
+        }),
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListCheckpoints {
+            id: Some("list-checkpoints".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-checkpoints")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("list-checkpoints"))
+        .expect("list checkpoints response");
+
+    assert_eq!(response["success"].as_bool(), Some(true));
+    assert_eq!(response["payload"]["sessionId"].as_str(), Some(slot.session_id.as_str()));
+    let checkpoints = response["payload"]["checkpoints"]
+        .as_array()
+        .expect("checkpoints array");
+    let listed = checkpoints
+        .iter()
+        .find(|entry| {
+            entry["messageAnchor"].as_str() == Some(anchor.as_str())
+                && entry["kind"].as_str() == Some("turn_end")
+                && entry["changedFiles"] == serde_json::json!(["src/app.ts"])
+        })
+        .expect("checkpoint payload");
+    assert_eq!(listed["kind"].as_str(), Some("turn_end"));
+    assert_eq!(listed["messageAnchor"].as_str(), Some(anchor.as_str()));
+    assert_eq!(listed["changedFiles"], serde_json::json!(["src/app.ts"]));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_restore_checkpoint_transcript_only_reports_payload_and_supersedes_messages() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, temp, initial_slot) = build_initialized_state_with_streams(vec![]).await;
+    let session_id = initial_slot.session_id.clone();
+    let workspace_file = temp.path().join("notes.txt");
+    std::fs::write(&workspace_file, "keep current file").expect("write workspace file");
+
+    append_history_message(&initial_slot, "user", "before checkpoint");
+    let anchor = append_history_message(&initial_slot, "assistant", "anchor reply");
+    let superseded_user_id = append_history_message(&initial_slot, "user", "after checkpoint");
+    let superseded_assistant_id = append_history_message(&initial_slot, "assistant", "after reply");
+    drop(initial_slot);
+
+    let checkpoint_id = CheckpointId::new("ck_restore");
+    let slot = install_checkpoint_store(
+        &state,
+        &session_id,
+        Arc::new(FixedCheckpointStore {
+            checkpoints: vec![CheckpointMeta {
+                id: checkpoint_id.clone(),
+                session_id: session_id.clone(),
+                turn_id: "turn-restore-checkpoint".to_string(),
+                kind: CheckpointKind::TurnEnd,
+                git_commit: Some("cafebabe".to_string()),
+                message_anchor: Some(anchor.clone()),
+                created_at: "2026-07-12T12:05:00Z".to_string(),
+                notes: Some(serde_json::json!({
+                    "changedPaths": ["notes.txt"]
+                })),
+            }],
+            restore_report: CheckpointRestoreReport::default(),
+        }),
+    );
+    let checkpoint_id_string = checkpoint_id.to_string();
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RestoreCheckpoint {
+            id: Some("restore-checkpoint".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            checkpoint_id: checkpoint_id.to_string(),
+            revert_files: false,
+            dry_run: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("restore-checkpoint")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("restore-checkpoint"))
+        .expect("restore response");
+
+    assert_eq!(response["success"].as_bool(), Some(true));
+    assert_eq!(
+        response["payload"]["checkpointId"].as_str(),
+        Some(checkpoint_id_string.as_str())
+    );
+    assert_eq!(response["payload"]["revertFiles"].as_bool(), Some(false));
+    assert_eq!(response["payload"]["transcriptTruncated"].as_bool(), Some(true));
+    assert_eq!(response["payload"]["changedPaths"], serde_json::json!(["notes.txt"]));
+    assert_eq!(
+        std::fs::read_to_string(&workspace_file).unwrap(),
+        "keep current file",
+        "transcript-only restore should not modify workspace files"
+    );
+
+    let messages = session_message_entries(&slot);
+    let superseded_ids = messages
+        .iter()
+        .filter(|entry| {
+            entry
+                .message
+                .get("superseded")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .filter_map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    assert!(superseded_ids.contains(&superseded_user_id));
+    assert!(superseded_ids.contains(&superseded_assistant_id));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_restore_checkpoint_reverts_files_and_reports_payload() {
+    if !git_available() {
+        return;
+    }
+
+    let _api_key = install_test_api_key();
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let _cwd_guard = CurrentDirGuard::set(workspace.path());
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let session_id = slot.session_id.clone();
+    let workspace_file = workspace.path().join("notes.txt");
+    std::fs::write(&workspace_file, "before checkpoint").expect("write checkpoint file");
+
+    append_history_message(&slot, "user", "before checkpoint");
+    let anchor = append_history_message(&slot, "assistant", "anchor reply");
+    let checkpoint_id = slot
+        .ctx
+        .scope_services
+        .checkpoint_store
+        .record(CheckpointRecordRequest {
+            session_id: session_id.clone(),
+            turn_id: "turn-restore-checkpoint".to_string(),
+            kind: CheckpointKind::TurnEnd,
+            message_anchor: Some(anchor.clone()),
+            notes: Some(serde_json::json!({
+                "changedPaths": ["notes.txt"]
+            })),
+        })
+        .expect("checkpoint");
+    let checkpoint_id_string = checkpoint_id.to_string();
+
+    std::fs::write(&workspace_file, "after checkpoint").expect("mutate workspace file");
+    let superseded_user_id = append_history_message(&slot, "user", "after checkpoint");
+    let superseded_assistant_id = append_history_message(&slot, "assistant", "after reply");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RestoreCheckpoint {
+            id: Some("restore-checkpoint-revert".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            checkpoint_id: checkpoint_id.to_string(),
+            revert_files: true,
+            dry_run: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("restore-checkpoint-revert")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str)
+                == Some("restore-checkpoint-revert")
+        })
+        .expect("restore response");
+
+    assert_eq!(response["success"].as_bool(), Some(true));
+    assert_eq!(
+        response["payload"]["checkpointId"].as_str(),
+        Some(checkpoint_id_string.as_str())
+    );
+    assert_eq!(response["payload"]["revertFiles"].as_bool(), Some(true));
+    assert_eq!(response["payload"]["transcriptTruncated"].as_bool(), Some(true));
+    assert_eq!(response["payload"]["changedPaths"], serde_json::json!(["notes.txt"]));
+    assert_eq!(
+        response["payload"]["restoredPaths"],
+        serde_json::json!(["notes.txt"])
+    );
+    assert_eq!(
+        std::fs::read_to_string(&workspace_file).unwrap(),
+        "before checkpoint",
+        "revert restore should roll workspace files back to the checkpoint snapshot"
+    );
+
+    let messages = session_message_entries(&slot);
+    let superseded_ids = messages
+        .iter()
+        .filter(|entry| {
+            entry
+                .message
+                .get("superseded")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .filter_map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    assert!(superseded_ids.contains(&superseded_user_id));
+    assert!(superseded_ids.contains(&superseded_assistant_id));
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_restore_checkpoint_returns_busy_when_session_is_busy() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    slot.busy.store(true, Ordering::SeqCst);
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RestoreCheckpoint {
+            id: Some("restore-checkpoint-busy".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            checkpoint_id: "ck_busy".to_string(),
+            revert_files: true,
+            dry_run: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("restore-checkpoint-busy")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("restore-checkpoint-busy")
+        })
+        .expect("busy restore response");
+
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(response["error"].as_str(), Some("busy"));
 }

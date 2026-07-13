@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AttachmentChips } from "./components/AttachmentChips";
 import { Composer, type ComposerDraft, type ComposerHandle } from "./components/Composer";
+import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
 import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
 import { TodoListWidget } from "./components/TodoListWidget";
@@ -17,6 +18,7 @@ import type {
   WebviewMessageBlock,
   WebviewIntent,
   WebviewReference,
+  WebviewTimelineItem,
   WebviewStateSnapshot,
 } from "./types";
 import { useAutoScroll } from "./useAutoScroll";
@@ -61,6 +63,20 @@ interface PendingComposerSubmission {
   draft: ComposerDraft;
   messageId: string;
   sessionId: string | null;
+}
+
+interface PendingRestoreDialogState {
+  changedFiles: string[];
+  checkpointId: string;
+  draft: ComposerDraft | null;
+  originalMessageId: string | null;
+  sessionId: string;
+}
+
+interface PendingRestoreRefill {
+  draft: ComposerDraft;
+  originalMessageId: string;
+  sessionId: string;
 }
 
 function createMessageId(prefix: string): string {
@@ -195,6 +211,60 @@ function resolvePendingComposerSubmission(
     }
   }
   return null;
+}
+
+function draftTextFromSegments(segments: ComposerDraft["segments"]): string {
+  return segments.map((segment) => (segment.type === "text" ? segment.text : segment.label)).join("");
+}
+
+function draftFromUserMessage(message: WebviewMessageBlock): ComposerDraft {
+  const segments = message.segments?.length
+    ? message.segments.map((segment) => ({ ...segment }))
+    : [{ text: message.text, type: "text" } as const];
+  return {
+    hasContent: segments.some(
+      (segment) => segment.type === "reference" || segment.text.trim().length > 0,
+    ),
+    segments,
+    text: draftTextFromSegments(segments),
+  };
+}
+
+function checkpointMarkerById(
+  timeline: WebviewTimelineItem[],
+  checkpointId: string,
+): Extract<WebviewTimelineItem, { type: "checkpoint" }> | null {
+  return timeline.find(
+    (item): item is Extract<WebviewTimelineItem, { type: "checkpoint" }> =>
+      item.type === "checkpoint" && item.checkpointId === checkpointId,
+  ) ?? null;
+}
+
+function buildRestoreDialogState(
+  timeline: WebviewTimelineItem[],
+  sessionId: string,
+  checkpointId: string,
+): PendingRestoreDialogState | null {
+  const markerIndex = timeline.findIndex(
+    (item) => item.type === "checkpoint" && item.checkpointId === checkpointId,
+  );
+  if (markerIndex < 0) {
+    return null;
+  }
+  const marker = checkpointMarkerById(timeline, checkpointId);
+  if (!marker) {
+    return null;
+  }
+  const nextUserMessage = timeline.slice(markerIndex + 1).find(
+    (item): item is WebviewMessageBlock => item.type === "message" && item.kind === "user",
+  );
+  return {
+    changedFiles: [...marker.changedFiles],
+    checkpointId,
+    draft: nextUserMessage ? draftFromUserMessage(nextUserMessage) : null,
+    originalMessageId: nextUserMessage?.id ?? null,
+    sessionId,
+  };
 }
 
 function buildDomSnapshot(state: WebviewStateSnapshot) {
@@ -618,10 +688,14 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [contextSearch, setContextSearch] = useState<ContextSearchState>(
     EMPTY_CONTEXT_SEARCH_STATE,
   );
+  const [pendingRestoreDialog, setPendingRestoreDialog] = useState<PendingRestoreDialogState | null>(
+    null,
+  );
   const stateRef = useRef<WebviewStateSnapshot>(EMPTY_STATE);
   const composerRef = useRef<ComposerHandle | null>(null);
   const pendingInsertionsRef = useRef<Array<{ reference: WebviewReference; sessionId: string }>>([]);
   const pendingComposerSubmissionRef = useRef<PendingComposerSubmission | null>(null);
+  const pendingRestoreRefillRef = useRef<PendingRestoreRefill | null>(null);
   const contextSearchRequestSeqRef = useRef(0);
   const latestContextSearchRequestIdRef = useRef<string | null>(null);
   const contextSearchWarningShownRef = useRef(false);
@@ -713,6 +787,18 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   }, [activeSession?.sessionId]);
 
   useEffect(() => {
+    setPendingRestoreDialog((current) =>
+      current && current.sessionId !== (activeSession?.sessionId ?? "") ? null : current,
+    );
+    if (
+      pendingRestoreRefillRef.current &&
+      pendingRestoreRefillRef.current.sessionId !== (activeSession?.sessionId ?? "")
+    ) {
+      pendingRestoreRefillRef.current = null;
+    }
+  }, [activeSession?.sessionId]);
+
+  useEffect(() => {
     if (!contextSearch.open) {
       return;
     }
@@ -751,6 +837,30 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     if (draftsEqual(composer.getDraft(), pending.draft)) {
       composer.clear();
     }
+  }, [state]);
+
+  useEffect(() => {
+    const pending = pendingRestoreRefillRef.current;
+    const composer = composerRef.current;
+    if (!pending || !composer) {
+      return;
+    }
+    const session = state.sessionViews[pending.sessionId];
+    if (!session) {
+      pendingRestoreRefillRef.current = null;
+      return;
+    }
+    const originalMessageStillVisible = session.timeline.some(
+      (item) => item.type === "message" && item.id === pending.originalMessageId,
+    );
+    pendingRestoreRefillRef.current = null;
+    if (originalMessageStillVisible) {
+      return;
+    }
+    if (state.activeSessionId !== pending.sessionId) {
+      return;
+    }
+    composer.replaceDraft(pending.draft);
   }, [state]);
 
   useEffect(() => {
@@ -898,6 +1008,46 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       planId,
       sessionId: activeSession.sessionId,
     });
+  };
+
+  const handleOpenRestoreDialog = (checkpointId: string) => {
+    if (!activeSession?.sessionId) {
+      return;
+    }
+    const nextState = buildRestoreDialogState(
+      activeSession.timeline,
+      activeSession.sessionId,
+      checkpointId,
+    );
+    if (!nextState) {
+      return;
+    }
+    setPendingRestoreDialog(nextState);
+  };
+
+  const handleCancelRestore = () => {
+    setPendingRestoreDialog(null);
+  };
+
+  const handleConfirmRestore = (revertFiles: boolean) => {
+    if (!pendingRestoreDialog) {
+      return;
+    }
+    if (pendingRestoreDialog.draft && pendingRestoreDialog.originalMessageId) {
+      pendingRestoreRefillRef.current = {
+        draft: pendingRestoreDialog.draft,
+        originalMessageId: pendingRestoreDialog.originalMessageId,
+        sessionId: pendingRestoreDialog.sessionId,
+      };
+    } else {
+      pendingRestoreRefillRef.current = null;
+    }
+    postIntent(vscodeApi, "restoreCheckpoint", {
+      checkpointId: pendingRestoreDialog.checkpointId,
+      revertFiles,
+      sessionId: pendingRestoreDialog.sessionId,
+    });
+    setPendingRestoreDialog(null);
   };
 
   const requestOlderHistory = () => {
@@ -1070,6 +1220,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 onBuildPlan={handleBuildPlan}
                 planState={activeSession.planState}
                 planTodos={activeSession.planTodos ?? []}
+                onRestoreCheckpoint={handleOpenRestoreDialog}
                 sessionTodos={activeSession.sessionTodos ?? []}
                 timeline={activeSession.timeline}
                 transcriptRef={transcriptRef}
@@ -1121,6 +1272,15 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           })
         }
       />
+
+      {pendingRestoreDialog ? (
+        <RestoreConfirmDialog
+          changedFiles={pendingRestoreDialog.changedFiles}
+          onCancel={handleCancelRestore}
+          onDontRevert={() => handleConfirmRestore(false)}
+          onRevert={() => handleConfirmRestore(true)}
+        />
+      ) : null}
 
       <Composer
         availableModels={state.availableModels}
