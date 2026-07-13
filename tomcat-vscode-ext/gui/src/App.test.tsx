@@ -65,6 +65,7 @@ async function emitReadySessionState(sessionId = "s1") {
 
 async function emitCheckpointSessionState(
   timeline: Array<Record<string, unknown>>,
+  checkpoints: Array<Record<string, unknown>> = [],
   sessionId = "s1",
 ) {
   await emitState({
@@ -87,6 +88,7 @@ async function emitCheckpointSessionState(
       sessionViews: {
         [sessionId]: {
           busy: false,
+          checkpoints,
           conflictMessage: null,
           contextRatio: null,
           hasMoreHistory: false,
@@ -105,7 +107,7 @@ async function emitCheckpointSessionState(
       },
       uiMode: "both",
     },
-    messageId: `checkpoint-state-${sessionId}-${timeline.length}`,
+    messageId: `checkpoint-state-${sessionId}-${timeline.length}-${checkpoints.length}`,
   });
 }
 
@@ -2892,15 +2894,6 @@ describe("Tomcat webview App", () => {
         type: "message",
       },
       {
-        changedFiles: ["src/app.ts", "src/state.ts"],
-        checkpointId: "ck-1",
-        createdAt: "2026-07-12T12:00:00Z",
-        id: "checkpoint-marker-1",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-        type: "checkpoint",
-      },
-      {
         id: "user-2",
         kind: "user",
         text: "follow-up prompt",
@@ -2911,6 +2904,14 @@ describe("Tomcat webview App", () => {
         kind: "assistant",
         text: "newer answer",
         type: "message",
+      },
+    ], [
+      {
+        changedFiles: ["src/app.ts", "src/state.ts"],
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "ck-1",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
       },
     ]);
 
@@ -2939,14 +2940,13 @@ describe("Tomcat webview App", () => {
         text: "checkpoint reached",
         type: "message",
       },
+    ], [
       {
         changedFiles: ["src/app.ts", "src/state.ts"],
-        checkpointId: "ck-1",
         createdAt: "2026-07-12T12:00:00Z",
-        id: "checkpoint-marker-1",
+        id: "ck-1",
         kind: "turn_end",
         messageAnchor: "assistant-1",
-        type: "checkpoint",
       },
     ]);
 
@@ -2964,15 +2964,6 @@ describe("Tomcat webview App", () => {
         type: "message",
       },
       {
-        changedFiles: ["src/app.ts"],
-        checkpointId: "ck-cancel",
-        createdAt: "2026-07-12T12:03:00Z",
-        id: "checkpoint-marker-cancel",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-        type: "checkpoint",
-      },
-      {
         id: "user-2",
         kind: "user",
         text: "follow-up prompt",
@@ -2983,6 +2974,14 @@ describe("Tomcat webview App", () => {
         kind: "assistant",
         text: "newer answer",
         type: "message",
+      },
+    ], [
+      {
+        changedFiles: ["src/app.ts"],
+        createdAt: "2026-07-12T12:03:00Z",
+        id: "ck-cancel",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
       },
     ]);
 
@@ -3022,19 +3021,18 @@ describe("Tomcat webview App", () => {
         type: "message",
       },
       {
-        changedFiles: ["src/app.ts"],
-        checkpointId: "ck-2",
-        createdAt: "2026-07-12T12:05:00Z",
-        id: "checkpoint-marker-2",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-        type: "checkpoint",
-      },
-      {
         id: "user-3",
         kind: "user",
         text: "revert me",
         type: "message",
+      },
+    ], [
+      {
+        changedFiles: ["src/app.ts"],
+        createdAt: "2026-07-12T12:05:00Z",
+        id: "ck-2",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
       },
     ]);
 

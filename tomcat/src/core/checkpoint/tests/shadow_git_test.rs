@@ -189,6 +189,69 @@ fn record_returns_null_when_worktree_exceeds_limit() {
 }
 
 #[test]
+fn record_ignores_default_excludes_and_gitignored_dirs_when_counting_limit() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("workspace");
+    let trail = root.path().join("trail");
+    fs::create_dir_all(worktree.join("target")).unwrap();
+    fs::create_dir_all(worktree.join("ignored-dir")).unwrap();
+    fs::create_dir_all(worktree.join("src")).unwrap();
+    fs::create_dir_all(&trail).unwrap();
+    fs::write(worktree.join(".gitignore"), "ignored-dir/\n").unwrap();
+    for index in 0..8 {
+        fs::write(
+            worktree.join("target").join(format!("artifact-{index}.bin")),
+            format!("bin-{index}"),
+        )
+        .unwrap();
+        fs::write(
+            worktree.join("ignored-dir").join(format!("draft-{index}.txt")),
+            format!("draft-{index}"),
+        )
+        .unwrap();
+    }
+    fs::write(worktree.join("src").join("keep.ts"), "export const keep = true;\n").unwrap();
+
+    let store = ShadowGitStore::with_max_workdir_files(trail, worktree, 2);
+    let id = store.record(request("t1")).unwrap();
+    assert!(
+        !id.is_null(),
+        "target/ 与 .gitignore 目录都不应计入文件上限；真实可快照文件刚好卡在上限时也应成功 record"
+    );
+}
+
+#[test]
+fn ignored_only_changes_reuse_the_latest_checkpoint() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let worktree = root.path().join("workspace");
+    let trail = root.path().join("trail");
+    fs::create_dir_all(worktree.join("ignored-dir")).unwrap();
+    fs::create_dir_all(&trail).unwrap();
+    fs::write(worktree.join(".gitignore"), "ignored-dir/\n").unwrap();
+    fs::write(worktree.join("keep.txt"), "tracked").unwrap();
+
+    let store = ShadowGitStore::new(trail, worktree.clone());
+    let first = store.record(request("t1")).unwrap();
+    assert!(!first.is_null());
+
+    fs::write(worktree.join("ignored-dir").join("draft.txt"), "ignored change").unwrap();
+
+    let second = store.record(request("t2")).unwrap();
+    assert_eq!(
+        second, first,
+        "只改 .gitignore 忽略的文件时，不应生成新 checkpoint，而应复用最近一次"
+    );
+    let listed = store.list("s1", ListOptions::default()).unwrap();
+    assert_eq!(listed.len(), 1);
+}
+
+#[test]
 fn new_canonicalizes_existing_worktree_path() {
     let root = tempfile::tempdir().unwrap();
     let worktree = root.path().join("workspace");

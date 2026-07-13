@@ -989,4 +989,96 @@ describe("checkpoint intent handling", () => {
 
     provider.dispose();
   });
+
+  it("refreshCheckpoints preserves the latest live turn while updating checkpoint payloads", async () => {
+    const provider = createCheckpointProvider({
+      listCheckpoints: vi.fn().mockResolvedValue({
+        checkpoints: [
+          {
+            changedFiles: ["src/app.ts"],
+            createdAt: "2026-07-12T12:00:00Z",
+            id: "ck-1",
+            kind: "turn_end",
+            messageAnchor: "assistant-1",
+          },
+        ],
+        sessionId: "s1",
+      }),
+    });
+    const stateStore = (provider as unknown as { stateStore: Record<string, unknown> }).stateStore as {
+      appendLocalUserMessage(
+        sessionId: string,
+        text: string,
+        options: { messageId: string; submitKind: "prompt" | "steer" },
+      ): void;
+      applyEvent(frame: Record<string, unknown>): void;
+      hydrateHistory(sessionId: string, history: Record<string, unknown>): void;
+      markLocalUserMessageConfirmed(sessionId: string, messageId: string): void;
+      setActiveSession(sessionId: string): void;
+    };
+
+    stateStore.setActiveSession("s1");
+    stateStore.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: "first prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+        {
+          id: "assistant-1",
+          message: {
+            content: "first reply",
+            role: "assistant",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+    stateStore.appendLocalUserMessage("s1", "latest prompt", {
+      messageId: "user-2",
+      submitKind: "prompt",
+    });
+    stateStore.markLocalUserMessageConfirmed("s1", "user-2");
+    stateStore.applyEvent({
+      assistantMessageEvent: { delta: "latest answer", kind: "content_delta" },
+      assistantMessageId: "assistant-2",
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    stateStore.applyEvent({
+      assistantMessageId: "assistant-2",
+      message: {},
+      sessionId: "s1",
+      toolCallIds: [],
+      toolResults: [],
+      turnIndex: 1,
+      type: "turn_end",
+    });
+
+    const before = provider.currentState().sessionViews.s1.timeline.map((item) => item.id);
+
+    await (provider as any).refreshCheckpoints("s1");
+
+    const session = provider.currentState().sessionViews.s1;
+    expect(session.timeline.map((item) => item.id)).toEqual(before);
+    expect(session.timeline.every((item) => item.type !== "checkpoint")).toBe(true);
+    expect(session.checkpoints).toEqual([
+      {
+        changedFiles: ["src/app.ts"],
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "ck-1",
+        kind: "turn_end",
+        label: null,
+        messageAnchor: "assistant-1",
+      },
+    ]);
+
+    provider.dispose();
+  });
 });

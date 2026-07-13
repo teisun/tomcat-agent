@@ -2996,11 +2996,22 @@ describe("webview provider integration", () => {
       type: "ready",
     });
 
-    expect(
-      provider.currentState().sessionViews["session-1"]?.timeline.map((item) =>
-        item.type === "checkpoint" ? item.checkpointId : item.id,
-      ),
-    ).toEqual(["hist-user-1", "hist-assistant-1", "ck-1", "hist-user-2", "hist-assistant-2"]);
+    expect(provider.currentState().sessionViews["session-1"]?.timeline.map((item) => item.id)).toEqual([
+      "hist-user-1",
+      "hist-assistant-1",
+      "hist-user-2",
+      "hist-assistant-2",
+    ]);
+    expect(provider.currentState().sessionViews["session-1"]?.checkpoints).toEqual([
+      {
+        changedFiles: ["src/app.ts"],
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "ck-1",
+        kind: "turn_end",
+        label: null,
+        messageAnchor: "hist-assistant-1",
+      },
+    ]);
 
     await provider.dispatchTestIntent({
       data: {
@@ -3019,11 +3030,116 @@ describe("webview provider integration", () => {
         sessionId: "session-1",
       },
     ]);
-    expect(
-      provider.currentState().sessionViews["session-1"]?.timeline.map((item) =>
-        item.type === "checkpoint" ? item.checkpointId : item.id,
-      ),
-    ).toEqual(["hist-user-1", "hist-assistant-1"]);
+    expect(provider.currentState().sessionViews["session-1"]?.timeline.map((item) => item.id)).toEqual([
+      "hist-user-1",
+      "hist-assistant-1",
+    ]);
+    expect(provider.currentState().sessionViews["session-1"]?.checkpoints).toEqual([]);
+
+    provider.dispose();
+  });
+
+  it("keeps the latest live turn visible when checkpoint refresh runs against stale history", async () => {
+    const { messenger, provider } = buildProvider({
+      getMessagesImpl: async (sessionId) => ({
+        messages: [
+          {
+            id: "hist-user-1",
+            message: {
+              content: "first prompt",
+              role: "user",
+            },
+            type: "message",
+          },
+          {
+            id: "hist-assistant-1",
+            message: {
+              content: "first reply",
+              role: "assistant",
+            },
+            type: "message",
+          },
+        ],
+        sessionId: sessionId ?? "session-1",
+        upToSeq: null,
+      }),
+      listCheckpointsImpl: async (sessionId) => ({
+        checkpoints: [
+          {
+            changedFiles: ["src/app.ts"],
+            createdAt: "2026-07-12T12:00:00Z",
+            id: "ck-1",
+            kind: "turn_end",
+            messageAnchor: "hist-assistant-1",
+          },
+        ],
+        sessionId: sessionId ?? "session-1",
+      }),
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-live-checkpoint-refresh",
+      type: "ready",
+    });
+    await provider.dispatchTestIntent({
+      data: {
+        sessionId: "session-1",
+        text: "latest prompt",
+      },
+      messageId: "prompt-live-checkpoint-refresh",
+      type: "prompt",
+    });
+
+    messenger.emit({
+      assistantMessageEvent: { delta: "latest answer", kind: "content_delta" },
+      assistantMessageId: "assistant-live-1",
+      message: {},
+      sessionId: "session-1",
+      type: "message_update",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    messenger.emit({
+      assistantMessageId: "assistant-live-1",
+      message: {},
+      sessionId: "session-1",
+      toolCallIds: [],
+      toolResults: [],
+      turnIndex: 1,
+      type: "turn_end",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const afterTurnEnd = provider.currentState().sessionViews["session-1"];
+    const textsAfterTurnEnd = (afterTurnEnd?.timeline ?? []).flatMap((item) =>
+      item.type === "message" ? [item.text] : [],
+    );
+    expect(textsAfterTurnEnd).toContain("first prompt");
+    expect(textsAfterTurnEnd).toContain("first reply");
+    expect(textsAfterTurnEnd).toContain("latest prompt");
+    expect(textsAfterTurnEnd).toContain("latest answer");
+    expect((afterTurnEnd?.timeline ?? []).every((item) => item.type !== "checkpoint")).toBe(true);
+    expect(afterTurnEnd?.checkpoints).toEqual([
+      {
+        changedFiles: ["src/app.ts"],
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "ck-1",
+        kind: "turn_end",
+        label: null,
+        messageAnchor: "hist-assistant-1",
+      },
+    ]);
+
+    const beforeListCheckpoints = (afterTurnEnd?.timeline ?? []).map((item) => item.id);
+
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1" },
+      messageId: "list-checkpoints-live-checkpoint-refresh",
+      type: "listCheckpoints",
+    });
+
+    expect(provider.currentState().sessionViews["session-1"]?.timeline.map((item) => item.id)).toEqual(
+      beforeListCheckpoints,
+    );
 
     provider.dispose();
   });

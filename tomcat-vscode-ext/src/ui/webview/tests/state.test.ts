@@ -1598,7 +1598,7 @@ describe("checkpoint history replay", () => {
     ).toEqual(["user-1", "assistant-1", "user-3", "assistant-3"]);
   });
 
-  it("injects checkpoint markers before the next user message only", () => {
+  it("keeps the latest confirmed user turn visible when checkpoints refresh after turn_end", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
 
@@ -1639,14 +1639,32 @@ describe("checkpoint history replay", () => {
       ],
       sessionId: "s1",
     });
+    store.appendLocalUserMessage("s1", "latest prompt", {
+      messageId: "user-3",
+      submitKind: "prompt",
+    });
+    store.markLocalUserMessageConfirmed("s1", "user-3");
+    store.applyEvent({
+      assistantMessageEvent: { delta: "latest answer", kind: "content_delta" },
+      assistantMessageId: "assistant-3",
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    store.applyEvent({
+      assistantMessageId: "assistant-3",
+      message: {},
+      sessionId: "s1",
+      toolCallIds: [],
+      toolResults: [],
+      turnIndex: 2,
+      type: "turn_end",
+    });
+
+    const before = store.snapshot().sessionViews.s1.timeline.map((item) => item.id);
+    expect(before).toEqual(["user-1", "assistant-1", "user-2", "assistant-2", "user-3", "assistant-3"]);
+
     store.setCheckpoints("s1", [
-      {
-        changedFiles: ["src/two.ts"],
-        createdAt: "2026-07-12T12:05:00Z",
-        id: "ck-2",
-        kind: "turn_end",
-        messageAnchor: "assistant-2",
-      },
       {
         changedFiles: ["src/one.ts"],
         createdAt: "2026-07-12T12:00:00Z",
@@ -1656,18 +1674,26 @@ describe("checkpoint history replay", () => {
       },
     ]);
 
-    expect(
-      store.snapshot().sessionViews.s1.timeline.map((item) =>
-        item.type === "checkpoint" ? item.checkpointId : item.id,
-      ),
-    ).toEqual(["user-1", "assistant-1", "ck-1", "user-2", "assistant-2"]);
+    const session = store.snapshot().sessionViews.s1;
+    expect(session.timeline.map((item) => item.id)).toEqual(before);
+    expect(session.timeline.every((item) => item.type !== "checkpoint")).toBe(true);
+    expect(session.checkpoints).toEqual([
+      {
+        changedFiles: ["src/one.ts"],
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "ck-1",
+        kind: "turn_end",
+        label: null,
+        messageAnchor: "assistant-1",
+      },
+    ]);
   });
 
-  it("injects checkpoint markers when the anchor assistant only rendered a thinking block", () => {
+  it("keeps checkpoint data separate from timeline items across later rebuilds", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
 
-    store.hydrateHistory("s1", {
+    const history = {
       messages: [
         {
           id: "user-1",
@@ -1675,7 +1701,7 @@ describe("checkpoint history replay", () => {
             content: "first prompt",
             role: "user",
           },
-          type: "message",
+          type: "message" as const,
         },
         {
           id: "assistant-1",
@@ -1692,7 +1718,7 @@ describe("checkpoint history replay", () => {
               },
             ],
           },
-          type: "message",
+          type: "message" as const,
         },
         {
           id: "user-2",
@@ -1700,11 +1726,13 @@ describe("checkpoint history replay", () => {
             content: "second prompt",
             role: "user",
           },
-          type: "message",
+          type: "message" as const,
         },
       ],
       sessionId: "s1",
-    });
+    };
+
+    store.hydrateHistory("s1", history);
     store.setCheckpoints("s1", [
       {
         changedFiles: ["src/one.ts"],
@@ -1714,12 +1742,62 @@ describe("checkpoint history replay", () => {
         messageAnchor: "assistant-1",
       },
     ]);
+    store.hydrateHistory("s1", history);
 
-    expect(
-      store.snapshot().sessionViews.s1.timeline.map((item) =>
-        item.type === "checkpoint" ? item.checkpointId : item.id,
-      ),
-    ).toEqual(["user-1", "assistant-1-thinking", "ck-thinking", "user-2"]);
+    const session = store.snapshot().sessionViews.s1;
+    expect(session.timeline.map((item) => item.id)).toEqual([
+      "user-1",
+      "assistant-1-thinking",
+      "user-2",
+    ]);
+    expect(session.timeline.every((item) => item.type !== "checkpoint")).toBe(true);
+    expect(session.checkpoints).toHaveLength(1);
+  });
+
+  it("keeps repeated setCheckpoints calls idempotent", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: "first prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+        {
+          id: "assistant-1",
+          message: {
+            content: "first reply",
+            role: "assistant",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const checkpoints = [
+      {
+        changedFiles: ["src/one.ts"],
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "ck-1",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
+      },
+    ];
+
+    store.setCheckpoints("s1", checkpoints);
+    const first = store.snapshot().sessionViews.s1;
+    store.setCheckpoints("s1", checkpoints);
+    const second = store.snapshot().sessionViews.s1;
+
+    expect(first.timeline).toEqual(second.timeline);
+    expect(second.timeline.every((item) => item.type !== "checkpoint")).toBe(true);
+    expect(first.checkpoints).toEqual(second.checkpoints);
   });
 });
 

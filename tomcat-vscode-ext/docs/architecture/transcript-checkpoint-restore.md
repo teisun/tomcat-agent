@@ -237,10 +237,14 @@ serve: list_checkpoints
 state.ts.setCheckpoints()
         │
         ▼
-injectCheckpointMarkers()
+只更新 session.checkpoints
         │
         ▼
-TranscriptView 在“下一条 user 消息之前”画出 marker
+GUI TranscriptView
+  useMemo(injectCheckpointMarkers(timeline, checkpoints))
+        │
+        ▼
+在“下一条 user 消息之前”画出 marker
 ```
 
 这里最关键的一点：
@@ -249,7 +253,7 @@ TranscriptView 在“下一条 user 消息之前”画出 marker
 checkpoint 本体 ≠ transcript 原始消息
 
 checkpoint 本体存在于后端元数据里
-marker 是前端根据 checkpoint 元数据“注入出来”的 timeline 项
+marker 是前端在渲染前根据 checkpoint 元数据“临时注入出来”的 timeline 合成项
 ```
 
 所以分隔条不是落盘文本，而是一个 UI 投影。
@@ -261,8 +265,24 @@ marker 是前端根据 checkpoint 元数据“注入出来”的 timeline 项
 2. 但前端 timeline 不一定总有同名 message 节点
    - 若 assistant 没有正文、只有 tool_calls / thinking
    - timeline 里可能只有 `${messageAnchor}-thinking`
-3. injectCheckpointMarkers() 会先找 messageAnchor
+3. GUI 侧 injectCheckpointMarkers() 会先找 messageAnchor
    找不到再回退 `${messageAnchor}-thinking`
+```
+
+再补一个“为什么有时根本不会长出 checkpoint”的实现约束：
+
+```text
+checkpoint_store.record() 在真正拍快照前
+先让 shadow git 用
+  git ls-files --cached --others --exclude-standard
+去数“会被 git add -A 纳入的文件”
+
+这带来 3 个直接结论：
+1. .gitignore 命中的目录/文件不计入上限
+2. DEFAULT_EXCLUDE_RULES（target/ node_modules/ ...）不计入上限
+3. 若这一轮只改了被忽略文件（如 test-stuff/），git status --ignored=no 会把它视为“没改动”
+   → 不新建 checkpoint
+   → transcript 里自然也不会出现新的 marker
 ```
 
 ---
@@ -276,7 +296,9 @@ marker 是前端根据 checkpoint 元数据“注入出来”的 timeline 项
         │
         ▼
 App.tsx
-  先找到 marker 后第一条 user 消息
+  先用 injectCheckpointMarkers(timeline, checkpoints)
+  临时还原出“可见 marker 位置”
+  再找到 marker 后第一条 user 消息
   暂存它的 prompt + references
         │
         ▼
@@ -349,7 +371,8 @@ provider.ts
    ▼
 state.ts
   filterSupersededHistoryEntries()
-  injectCheckpointMarkers()
+GUI TranscriptView
+  useMemo(injectCheckpointMarkers(timeline, checkpoints))
    │
    ▼
 React 重渲染 transcript
@@ -445,7 +468,7 @@ transcript 原始数据
   保持干净：message / tool / custom
 
 checkpoint marker
-  作为 timeline 合成项注入
+  作为 GUI 渲染前的 timeline 合成项临时注入
 ```
 
 这样 UI 可以自由调整 marker 位置，而不污染底层 transcript 形态。

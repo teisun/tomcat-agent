@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AttachmentChips } from "./components/AttachmentChips";
+import { injectCheckpointMarkers } from "./components/checkpointMarkers";
 import { Composer, type ComposerDraft, type ComposerHandle } from "./components/Composer";
 import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
 import { SessionBar } from "./components/SessionBar";
@@ -18,6 +19,7 @@ import type {
   WebviewMessageBlock,
   WebviewIntent,
   WebviewReference,
+  WebviewCheckpoint,
   WebviewTimelineItem,
   WebviewStateSnapshot,
 } from "./types";
@@ -242,20 +244,22 @@ function checkpointMarkerById(
 
 function buildRestoreDialogState(
   timeline: WebviewTimelineItem[],
+  checkpoints: WebviewCheckpoint[],
   sessionId: string,
   checkpointId: string,
 ): PendingRestoreDialogState | null {
-  const markerIndex = timeline.findIndex(
+  const renderedTimeline = injectCheckpointMarkers(timeline, checkpoints);
+  const markerIndex = renderedTimeline.findIndex(
     (item) => item.type === "checkpoint" && item.checkpointId === checkpointId,
   );
   if (markerIndex < 0) {
     return null;
   }
-  const marker = checkpointMarkerById(timeline, checkpointId);
+  const marker = checkpointMarkerById(renderedTimeline, checkpointId);
   if (!marker) {
     return null;
   }
-  const nextUserMessage = timeline.slice(markerIndex + 1).find(
+  const nextUserMessage = renderedTimeline.slice(markerIndex + 1).find(
     (item): item is WebviewMessageBlock => item.type === "message" && item.kind === "user",
   );
   return {
@@ -1016,6 +1020,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     }
     const nextState = buildRestoreDialogState(
       activeSession.timeline,
+      activeSession.checkpoints ?? [],
       activeSession.sessionId,
       checkpointId,
     );
@@ -1192,6 +1197,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 busy={!!activeSession.busy}
                 bottomSpacerHeight={bottomSpacerHeight}
                 onAnswer={handleAnswerQuestion}
+                checkpoints={activeSession.checkpoints ?? []}
                 onOpenDiff={(toolCallId) =>
                   postIntent(vscodeApi, "openDiff", {
                     toolCallId,

@@ -70,7 +70,7 @@ main.tsx
 | [`gui/src/main.tsx`](../../../gui/src/main.tsx) | 挂载 React root，拿 `acquireVsCodeApi()` | 无宿主时回退到 no-op `vscodeApi`，方便 `vite` 独立调试。 |
 | [`gui/src/App.tsx`](../../../gui/src/App.tsx) | 接 `state` 帧、发 intent、组装整个页面 | 统一处理 `ready` / `prompt` / `setModel` / `setPlanMode` / `openFile` / `openDiff` / `restoreCheckpoint` 等 transcript 相关意图，挂载 `RestoreConfirmDialog`，并在 restore 后把被截断轮次的 prompt 回填到 composer。 |
 | [`gui/src/components/SessionBar.tsx`](../../../gui/src/components/SessionBar.tsx) | 顶部会话选择栏 | 下拉显示 `sessionId + isCurrent/owner/busy` 元信息；右侧 `New / Refresh / Close`。 |
-| [`gui/src/components/TranscriptView.tsx`](../../../gui/src/components/TranscriptView.tsx) | timeline 分发器 + assistant-response 二次分层 | 先按 `message / checkpoint / thinking / tool / approval / plan` 6 种一等项分发；checkpoint 作为边界标记单独渲染，再把 assistant 回复内部拆成 `action` 恒显行和 `context` 折叠盒；单个无 thinking 的 context 工具会直接扁平渲染。 |
+| [`gui/src/components/TranscriptView.tsx`](../../../gui/src/components/TranscriptView.tsx) | timeline 分发器 + assistant-response 二次分层 | 输入是 **raw timeline + checkpoints**：先在组件顶部 `useMemo(injectCheckpointMarkers(timeline, checkpoints))` 临时投影出 checkpoint marker，再按 `message / checkpoint / thinking / tool / approval / plan` 6 种一等项分发；assistant 回复内部继续拆成 `action` 恒显行和 `context` 折叠盒；单个无 thinking 的 context 工具会直接扁平渲染。 |
 | [`gui/src/components/CheckpointMarker.tsx`](../../../gui/src/components/CheckpointMarker.tsx) | transcript 中的 checkpoint 分隔条 | 不直接改状态，只负责把后端 checkpoint 元数据投影成可点击 marker，并把点击事件抛回 `App.tsx`。 |
 | [`gui/src/components/RestoreConfirmDialog.tsx`](../../../gui/src/components/RestoreConfirmDialog.tsx) | restore 确认浮层 | 承接 `Revert` / `Don't revert` / `Cancel` 三态，键盘语义与焦点圈定都在这一层完成。 |
 | [`gui/src/components/ThinkingBlock.tsx`](../../../gui/src/components/ThinkingBlock.tsx) | thinking 折叠卡 | 默认折叠；流式时标题显示 `Thinking...` 脉冲动画。 |
@@ -191,9 +191,11 @@ timeline 类型：
    - 先扫描历史 assistant 的 `message.tool_calls[].{id,function.name}` 建 `toolCallId -> toolName` lookup。
    - 再把历史 `role:"tool"` 映射成 `WebviewToolCard`，保留 `toolCallId` 和工具名。
 
-3. **checkpoint 边界是 history replay 后再注入的合成节点**
-   - `filterSupersededHistoryEntries()` 正常靠 `checkpoint.restore` 哨兵闭合 superseded span；若哨兵缺失，则退化为“遇到下一条非 superseded 的 user message 就闭合”，避免把后续正常 turn 一起吞掉。
-   - `injectCheckpointMarkers()` 先按 `messageAnchor` 找锚点；若该 assistant 只有 tool/thinking、没有正文 message，则回退到 `${messageAnchor}-thinking`，保证 marker 还能落在下一条 user message 之前。
+3. **checkpoint 边界不再写回 host timeline，而是在 GUI 渲染前临时投影**
+   - `state.ts.setCheckpoints()` 现在只更新 `session.checkpoints`，不再触发 `rebuildHistoryTimeline()`；`state.ts` 里的 raw `timeline` 只保留 message / thinking / tool / plan / approval / boundary 等“事实节点”。
+   - `TranscriptView.tsx` 在 render 前执行 `useMemo(injectCheckpointMarkers(timeline, checkpoints))`；若锚点 assistant 只有 tool/thinking、没有正文 message，则回退 `${messageAnchor}-thinking`，保证 marker 仍能落在下一条 user message 之前。
+   - 这让 `refreshCheckpoints()` 对 live timeline 没有副作用：它只换一份 checkpoint 数据，最新一轮 user/assistant 不会因“刷 marker”被重建丢失。
+   - marker 是否存在仍由后端 `list_checkpoints` 真相决定；后端计数现改为 `git ls-files --cached --others --exclude-standard`，所以 `.gitignore` 与 `DEFAULT_EXCLUDE_RULES`（如 `target/` / `node_modules/`）都不会误占上限，而“只改 ignored 文件”的 turn 也不会新建 marker。
 
 ### 4.2 历史/实时去重：为什么改成稳定 key
 

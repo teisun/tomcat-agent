@@ -1,8 +1,9 @@
-import { Fragment, type RefObject } from "react";
+import { Fragment, type RefObject, useMemo } from "react";
 
 import { selectActiveTodoSource } from "../hooks/useActiveTodoProgress";
 import type {
   AskQuestionResult,
+  WebviewCheckpoint,
   WebviewPlanFileCard,
   WebviewPlanState,
   WebviewTimelineItem,
@@ -12,6 +13,7 @@ import type {
 import { ApprovalCard } from "./ApprovalCard";
 import { BoundaryBlock } from "./BoundaryBlock";
 import { CheckpointMarker } from "./CheckpointMarker";
+import { injectCheckpointMarkers } from "./checkpointMarkers";
 import { MessageBubble } from "./MessageBubble";
 import { PlanFileCard } from "./PlanFileCard";
 import { ProgressRow } from "./ProgressRow";
@@ -125,6 +127,7 @@ export function TranscriptView({
   busy,
   bottomSpacerHeight = 0,
   canBuildPlan,
+  checkpoints = [],
   onAnswer,
   onBuildPlan,
   onOpenDiff,
@@ -141,6 +144,7 @@ export function TranscriptView({
   busy: boolean;
   bottomSpacerHeight?: number;
   canBuildPlan: boolean;
+  checkpoints?: WebviewCheckpoint[];
   onAnswer(requestId: string, result: AskQuestionResult): void;
   onBuildPlan(planId: string | null, path: string): void;
   onOpenDiff?(toolCallId: string): void;
@@ -154,10 +158,14 @@ export function TranscriptView({
   timeline: WebviewTimelineItem[];
   transcriptRef?: RefObject<HTMLElement | null>;
 }) {
+  const renderedTimeline = useMemo(
+    () => injectCheckpointMarkers(timeline, checkpoints),
+    [checkpoints, timeline],
+  );
   const lastThinkingId = busy
-    ? [...timeline].reverse().find((item) => item.type === "thinking")?.id ?? null
+    ? [...renderedTimeline].reverse().find((item) => item.type === "thinking")?.id ?? null
     : null;
-  const latestUserIndex = timeline.reduce(
+  const latestUserIndex = renderedTimeline.reduce(
     (lastIndex, item, index) =>
       item.type === "message" && item.kind === "user" ? index : lastIndex,
     -1,
@@ -326,9 +334,11 @@ export function TranscriptView({
   };
 
   const leadingTimeline =
-    busy && latestUserIndex >= 0 ? timeline.slice(0, latestUserIndex + 1) : timeline;
+    busy && latestUserIndex >= 0
+      ? renderedTimeline.slice(0, latestUserIndex + 1)
+      : renderedTimeline;
   const liveClusterTimeline =
-    busy && latestUserIndex >= 0 ? timeline.slice(latestUserIndex + 1) : [];
+    busy && latestUserIndex >= 0 ? renderedTimeline.slice(latestUserIndex + 1) : [];
 
   return (
     <section

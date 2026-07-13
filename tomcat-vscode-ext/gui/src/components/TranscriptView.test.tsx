@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { WebviewTimelineItem } from "../types";
+import type { WebviewCheckpoint, WebviewTimelineItem } from "../types";
 import { TranscriptView } from "./TranscriptView";
 
 describe("TranscriptView", () => {
@@ -148,13 +148,11 @@ describe("TranscriptView", () => {
         type: "message",
       },
       {
-        changedFiles: ["src/app.ts"],
-        checkpointId: "ck-1",
-        createdAt: "2026-07-12T12:00:00Z",
-        id: "checkpoint-1",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-        type: "checkpoint",
+        assistantMessageId: "assistant-1",
+        id: "assistant-1",
+        kind: "assistant",
+        text: "first reply",
+        type: "message",
       },
       {
         id: "user-2",
@@ -163,11 +161,21 @@ describe("TranscriptView", () => {
         type: "message",
       },
     ];
+    const checkpoints: WebviewCheckpoint[] = [
+      {
+        changedFiles: ["src/app.ts"],
+        createdAt: "2026-07-12T12:00:00Z",
+        id: "ck-1",
+        kind: "turn_end",
+        messageAnchor: "assistant-1",
+      },
+    ];
 
     render(
       <TranscriptView
         busy={false}
         canBuildPlan={false}
+        checkpoints={checkpoints}
         onAnswer={vi.fn()}
         onBuildPlan={vi.fn()}
         onOpenFile={vi.fn()}

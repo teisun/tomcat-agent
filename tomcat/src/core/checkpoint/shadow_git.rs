@@ -362,7 +362,18 @@ impl ShadowGitStore {
     fn count_worktree_files_until(&self, max: usize) -> Result<usize, CheckpointError> {
         #[cfg(test)]
         self.file_count_calls.fetch_add(1, Ordering::SeqCst);
-        count_regular_files_until(&self.work_tree, max)
+        let output = self.run_git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])?;
+        let mut count = 0usize;
+        for entry in output.stdout.split(|byte| *byte == b'\0') {
+            if entry.is_empty() {
+                continue;
+            }
+            count += 1;
+            if count > max {
+                return Ok(count);
+            }
+        }
+        Ok(count)
     }
 
     fn make_meta(
@@ -887,29 +898,6 @@ fn render_duration(duration: Duration) -> String {
 #[cfg(test)]
 fn store_set_git_timeout(store: &mut ShadowGitStore, git_timeout: Duration) {
     store.git_timeout = git_timeout;
-}
-
-fn count_regular_files_until(path: &Path, max: usize) -> Result<usize, CheckpointError> {
-    let mut count = 0usize;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if count > max {
-            break;
-        }
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                stack.push(entry.path());
-            } else if file_type.is_file() || file_type.is_symlink() {
-                count += 1;
-                if count > max {
-                    return Ok(count);
-                }
-            }
-        }
-    }
-    Ok(count)
 }
 
 #[cfg(test)]
