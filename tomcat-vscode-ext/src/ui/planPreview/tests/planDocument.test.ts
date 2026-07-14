@@ -161,4 +161,60 @@ More text.
     const parsed = parsePlanDocument(RUNTIME_PLAN);
     expect(parsed.raw).toBe(RUNTIME_PLAN);
   });
+
+  const lineOf = (parsed: { bodyLineMap: number[]; bodyMarkdown: string }, needle: string): number => {
+    const index = parsed.bodyMarkdown.split("\n").indexOf(needle);
+    return parsed.bodyLineMap[index];
+  };
+
+  it("maps body lines to absolute file lines across the frontmatter offset", () => {
+    const parsed = parsePlanDocument(RUNTIME_PLAN);
+    expect(parsed.bodyLineMap).toHaveLength(parsed.bodyMarkdown.split("\n").length);
+    // `# Heading` is the 23rd line of RUNTIME_PLAN, `Body paragraph.` the 25th.
+    expect(lineOf(parsed, "# Heading")).toBe(23);
+    expect(lineOf(parsed, "Body paragraph.")).toBe(25);
+  });
+
+  it("maps body lines starting at line 1 when there is no frontmatter", () => {
+    const parsed = parsePlanDocument("# just a body\nno frontmatter here");
+    expect(parsed.bodyLineMap[0]).toBe(1);
+    expect(lineOf(parsed, "no frontmatter here")).toBe(2);
+  });
+
+  it("maps lines non-linearly around a spliced-out Todos Board", () => {
+    const parsed = parsePlanDocument(`---
+name: Board Plan
+todos:
+- id: t1
+  content: First
+  status: pending
+---
+# My Plan
+
+Intro paragraph.
+
+## Todos Board
+
+<!-- todos-board:auto:begin -->
+### Todos
+- [ ] t1: First
+<!-- todos-board:auto:end -->
+
+## Next Section
+
+More text.
+`);
+    expect(lineOf(parsed, "# My Plan")).toBe(8);
+    expect(lineOf(parsed, "Intro paragraph.")).toBe(10);
+    // The board occupied lines 12-17; `## Next Section` must jump to its real
+    // source line (19), not the linear body offset.
+    expect(lineOf(parsed, "## Next Section")).toBe(19);
+    expect(lineOf(parsed, "More text.")).toBe(21);
+  });
+
+  it("keeps line mapping identical for CRLF documents", () => {
+    const parsed = parsePlanDocument(RUNTIME_PLAN.replace(/\n/g, "\r\n"));
+    expect(lineOf(parsed, "# Heading")).toBe(23);
+    expect(lineOf(parsed, "Body paragraph.")).toBe(25);
+  });
 });

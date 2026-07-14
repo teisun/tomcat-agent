@@ -227,6 +227,11 @@ describe("PlanPreviewEditorProvider.buildState", () => {
     expect(snapshot.availableModels).toEqual(["gpt-5.4"]);
     expect(snapshot.canBuild).toBe(true);
     expect(snapshot.bodyMarkdown).toContain("# Heading");
+    // `# Heading` is line 15 and `Body paragraph.` line 17 of PLAN_TEXT.
+    const bodyLines = snapshot.bodyMarkdown.split("\n");
+    expect(snapshot.bodyLineMap).toHaveLength(bodyLines.length);
+    expect(snapshot.bodyLineMap[0]).toBe(15);
+    expect(snapshot.bodyLineMap[bodyLines.indexOf("Body paragraph.")]).toBe(17);
   });
 
   it("keeps the build model when it is a known model", async () => {

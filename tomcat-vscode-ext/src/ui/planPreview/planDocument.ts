@@ -31,6 +31,13 @@ export function truncatePlanTitle(value: string): string {
 }
 
 export interface ParsedPlanDocument {
+  /**
+   * 1-based source line in the original file for each line of `bodyMarkdown`
+   * (`bodyLineMap[i]` ↔ `bodyMarkdown.split("\n")[i]`). Lets the preview map a
+   * rendered selection back to an absolute file line even though the body is
+   * offset by the frontmatter and may have the Todos Board spliced out.
+   */
+  bodyLineMap: number[];
   bodyMarkdown: string;
   overview: string | null;
   planId: string | null;
@@ -38,6 +45,44 @@ export interface ParsedPlanDocument {
   state: PlanFileState | null;
   title: string | null;
   todos: PlanTodo[];
+}
+
+/**
+ * Map each line of the (already frontmatter-stripped, board-stripped) body back
+ * to its 1-based line in the original file. `bodyMarkdown` lines are a forward
+ * subsequence of the raw lines (blank lines and the Todos Board are dropped, the
+ * last line may be right-trimmed, and a single blank spacer may be inserted), so
+ * a monotonic forward scan recovers the mapping. Unmatched lines (spacer /
+ * trimmed) reuse the previous mapping to stay monotonic.
+ */
+export function mapBodyLinesToRaw(
+  rawLines: string[],
+  bodyMarkdown: string,
+  bodyStartRawLine: number,
+): number[] {
+  const bodyLines = bodyMarkdown.split("\n");
+  const map: number[] = new Array(bodyLines.length);
+  let rawCursor = Math.max(0, bodyStartRawLine - 1);
+  let lastMapped = bodyStartRawLine;
+  for (let b = 0; b < bodyLines.length; b += 1) {
+    const needle = bodyLines[b];
+    let found = -1;
+    for (let r = rawCursor; r < rawLines.length; r += 1) {
+      const rawLine = rawLines[r];
+      if (rawLine === needle || rawLine.replace(/[ \t]+$/u, "") === needle) {
+        found = r;
+        break;
+      }
+    }
+    if (found === -1) {
+      map[b] = lastMapped;
+      continue;
+    }
+    map[b] = found + 1;
+    lastMapped = found + 1;
+    rawCursor = found + 1;
+  }
+  return map;
 }
 
 const TODO_BOARD_BEGIN = "<!-- todos-board:auto:begin -->";
@@ -147,6 +192,7 @@ function matchTopLevelKey(line: string): { key: string; value: string } | null {
 export function parsePlanDocument(text: string): ParsedPlanDocument {
   const normalized = text.replace(/\r\n/g, "\n");
   const empty: ParsedPlanDocument = {
+    bodyLineMap: [],
     bodyMarkdown: "",
     overview: null,
     planId: null,
@@ -158,9 +204,11 @@ export function parsePlanDocument(text: string): ParsedPlanDocument {
 
   const lines = normalized.split("\n");
   if (lines[0]?.trim() !== "---") {
+    const bodyMarkdown = stripTodosBoard(normalized).replace(/^\n+/, "").replace(/[ \t\n]+$/, "");
     return {
       ...empty,
-      bodyMarkdown: stripTodosBoard(normalized).replace(/^\n+/, "").replace(/[ \t\n]+$/, ""),
+      bodyLineMap: mapBodyLinesToRaw(lines, bodyMarkdown, 1),
+      bodyMarkdown,
     };
   }
 
@@ -172,9 +220,11 @@ export function parsePlanDocument(text: string): ParsedPlanDocument {
     }
   }
   if (fmEnd === -1) {
+    const bodyMarkdown = stripTodosBoard(normalized).replace(/^\n+/, "").replace(/[ \t\n]+$/, "");
     return {
       ...empty,
-      bodyMarkdown: stripTodosBoard(normalized).replace(/^\n+/, "").replace(/[ \t\n]+$/, ""),
+      bodyLineMap: mapBodyLinesToRaw(lines, bodyMarkdown, 1),
+      bodyMarkdown,
     };
   }
 
@@ -265,8 +315,10 @@ export function parsePlanDocument(text: string): ParsedPlanDocument {
     title = truncatePlanTitle(goalValue);
   }
 
+  const bodyMarkdown = stripTodosBoard(body).replace(/^\n+/, "").replace(/[ \t\n]+$/, "");
   return {
-    bodyMarkdown: stripTodosBoard(body).replace(/^\n+/, "").replace(/[ \t\n]+$/, ""),
+    bodyLineMap: mapBodyLinesToRaw(lines, bodyMarkdown, fmEnd + 2),
+    bodyMarkdown,
     overview,
     planId,
     raw: text,

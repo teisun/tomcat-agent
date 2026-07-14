@@ -30,6 +30,8 @@ export type PlanToolbarStyle = "hybrid" | "native";
  */
 export interface PlanPreviewStateSnapshot {
   availableModels: string[];
+  /** 1-based source file line for each line of `bodyMarkdown` (see planDocument). */
+  bodyLineMap: number[];
   bodyMarkdown: string;
   buildModel: string;
   canBuild: boolean;

@@ -339,6 +339,47 @@ describe("Composer", () => {
     });
   });
 
+  it("keeps distinct line-less selections from the same file as separate chips", async () => {
+    const { ref } = renderComposer();
+
+    await act(async () => {
+      ref.current?.insertReference({
+        kind: "selection",
+        label: "notes.plan.md",
+        lineEnd: null,
+        lineStart: null,
+        path: "plans/notes.plan.md",
+        text: "first selected snippet",
+        type: "reference",
+      });
+      ref.current?.insertReference({
+        kind: "selection",
+        label: "notes.plan.md",
+        lineEnd: null,
+        lineStart: null,
+        path: "plans/notes.plan.md",
+        text: "a totally different snippet",
+        type: "reference",
+      });
+    });
+
+    // Both distinct snippets must survive; only exact re-adds should dedupe.
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+
+    await act(async () => {
+      ref.current?.insertReference({
+        kind: "selection",
+        label: "notes.plan.md",
+        lineEnd: null,
+        lineStart: null,
+        path: "plans/notes.plan.md",
+        text: "first selected snippet",
+        type: "reference",
+      });
+    });
+    expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
+  });
+
   it("extracts drop uris across vscode mime variants without duplicates", () => {
     const file = Object.assign(new File([""], "local.ts"), {
       path: "/workspace/from-file.ts",

@@ -11,6 +11,8 @@ import { PlanPreviewApp } from "./PlanPreviewApp";
 function makeState(overrides: Partial<PlanPreviewStateSnapshot> = {}): PlanPreviewStateSnapshot {
   return {
     availableModels: ["gpt-5.6", "claude-opus"],
+    // 6 body lines → mapped to arbitrary absolute file lines 10..15.
+    bodyLineMap: [10, 11, 12, 13, 14, 15],
     bodyMarkdown: "# Plan Heading\n\nSome **bold** intro with `code`.\n\n- item one\n- item two",
     buildModel: "",
     canBuild: true,
@@ -57,6 +59,17 @@ function pushCaptureSelectionEvent(): void {
 
 function mockSelectionText(text: string): void {
   vi.spyOn(window, "getSelection").mockReturnValue({
+    toString: () => text,
+  } as unknown as Selection);
+}
+
+/** Mock a live selection whose range spans the contents of `element`. */
+function mockSelectionOn(element: Element, text: string): void {
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  vi.spyOn(window, "getSelection").mockReturnValue({
+    getRangeAt: () => range,
+    rangeCount: 1,
     toString: () => text,
   } as unknown as Selection);
 }
@@ -184,29 +197,38 @@ describe("PlanPreviewApp", () => {
     expect(intentsOfType(api, "openInTextEditor")).toHaveLength(1);
   });
 
-  it("captures the live selection and sends addSelectionToChat with matched line numbers", () => {
+  it("stamps blocks with data-source-line and derives lines from the selection (even with inline markdown)", () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);
-    pushState(makeState({ raw: "line0\nfirst line\nsecond line\nline3" }));
+    pushState(makeState());
 
-    mockSelectionText("first line\nsecond line");
+    // The paragraph contains inline `**bold**`/`code` that the old raw-search
+    // could never match; the source line now comes from the DOM attribute.
+    const paragraph = document.querySelector(
+      '[data-testid="plan-markdown-body"] p[data-source-line]',
+    ) as HTMLElement;
+    expect(paragraph).not.toBeNull();
+    expect(paragraph.getAttribute("data-source-line")).toBe("12");
+
+    mockSelectionOn(paragraph, "Some bold intro with code.");
     pushCaptureSelectionEvent();
 
     const intents = intentsOfType(api, "addSelectionToChat") as {
       data: { lineEnd?: number; lineStart?: number; text: string };
     }[];
     expect(intents).toHaveLength(1);
-    expect(intents[0].data.text).toBe("first line\nsecond line");
-    expect(intents[0].data.lineStart).toBe(2);
-    expect(intents[0].data.lineEnd).toBe(3);
+    expect(intents[0].data.text).toBe("Some bold intro with code.");
+    expect(intents[0].data.lineStart).toBe(12);
+    expect(intents[0].data.lineEnd).toBe(12);
   });
 
-  it("omits line numbers when the selection cannot be located in the source", () => {
+  it("omits line numbers when the selection is outside any source-mapped block", () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);
-    pushState(makeState({ raw: "alpha\nbeta\ngamma" }));
+    pushState(makeState());
 
-    mockSelectionText("text that is not in the source");
+    // The To-dos count lives outside MarkdownBody, so it has no data-source-line.
+    mockSelectionOn(screen.getByTestId("plan-todos-count"), "3 To-dos");
     pushCaptureSelectionEvent();
 
     const intents = intentsOfType(api, "addSelectionToChat") as {

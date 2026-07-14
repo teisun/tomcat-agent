@@ -380,6 +380,7 @@ export class PlanPreviewEditorProvider
     const canBuild = deriveCanBuild(parsed.state, await this.hasSetPlanModeCapability());
     return {
       availableModels,
+      bodyLineMap: parsed.bodyLineMap,
       bodyMarkdown: parsed.bodyMarkdown,
       buildModel,
       canBuild,

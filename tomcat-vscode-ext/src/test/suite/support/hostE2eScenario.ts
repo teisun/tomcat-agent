@@ -3581,6 +3581,14 @@ export async function assertPlanPreviewCustomEditorFlow(
     const applied = await vscode.workspace.applyEdit(edit);
     assert.equal(applied, true, "expected the plan document edit to apply");
 
+    // Expected 1-based source lines of the rendered blocks, derived from the
+    // (post hot-update) document so the assertions can't drift.
+    const updatedLines = updatedText.split("\n");
+    const headingLine = updatedLines.indexOf("# E2E heading") + 1;
+    const paragraphLine = updatedLines.indexOf("Body paragraph for the preview.") + 1;
+    const headingChip = `${planBasename}:${headingLine}`;
+    const paragraphChip = `${planBasename}:${paragraphLine}`;
+
     const hotUpdated = await waitForPlanPreviewDom(
       api,
       planPath,
@@ -3623,7 +3631,8 @@ export async function assertPlanPreviewCustomEditorFlow(
     const baseChips = chipCount(baseline.html);
 
     // Selection → chat, path 1: the right-click command captures the live
-    // selection (heading) inside the focused plan editor.
+    // selection (heading) inside the focused plan editor. The chip must carry
+    // the exact source line derived from the block's data-source-line attribute.
     await api.__testing.openPlanPreview(planPath);
     await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.mode === "preview");
     await api.__testing.dispatchPlanPreviewDomAction(planPath, {
@@ -3634,19 +3643,18 @@ export async function assertPlanPreviewCustomEditorFlow(
     const afterCommand = await waitForWebviewDomSnapshot(
       api,
       (snapshot) =>
-        chipCount(snapshot.html) === baseChips + 1 &&
-        snapshot.html.includes(planBasename)
+        chipCount(snapshot.html) === baseChips + 1 && snapshot.html.includes(headingChip)
           ? snapshot
           : undefined,
       20_000,
     );
     assert.ok(
-      afterCommand.html.includes(planBasename),
-      "expected the right-click command to add a plan selection chip",
+      afterCommand.html.includes(headingChip),
+      `expected the right-click command to add a plan selection chip with source line (${headingChip})`,
     );
 
     // Selection → chat, path 2: the floating button on a different selection
-    // (body paragraph) yields a second, distinct chip.
+    // (body paragraph) yields a second, distinct chip carrying its own line.
     await api.__testing.openPlanPreview(planPath);
     await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.mode === "preview");
     await api.__testing.dispatchPlanPreviewDomAction(planPath, {
@@ -3655,11 +3663,41 @@ export async function assertPlanPreviewCustomEditorFlow(
     });
     await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.selectionButtonVisible);
     await api.__testing.dispatchPlanPreviewDomAction(planPath, { kind: "clickSelectionAdd" });
-    await waitForWebviewDomSnapshot(
+    const afterFloating = await waitForWebviewDomSnapshot(
       api,
-      (snapshot) => (chipCount(snapshot.html) === baseChips + 2 ? snapshot : undefined),
+      (snapshot) =>
+        chipCount(snapshot.html) === baseChips + 2 && snapshot.html.includes(paragraphChip)
+          ? snapshot
+          : undefined,
       20_000,
     );
+    assert.ok(
+      afterFloating.html.includes(paragraphChip),
+      `expected the floating button to add a plan selection chip with source line (${paragraphChip})`,
+    );
+
+    // Selection → chat, path 3 (P0 regression): two DIFFERENT line-less
+    // selections from the same plan (todo items carry no source line) must BOTH
+    // land as distinct chips. Before the dedupe fix they collapsed to a single
+    // `selection::<path>::::` identity and every selection after the first was
+    // silently dropped — the "add to chat 总是失败" the user reported.
+    for (const [index, expectedChips] of [
+      [1, baseChips + 3],
+      [2, baseChips + 4],
+    ] as const) {
+      await api.__testing.openPlanPreview(planPath);
+      await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.mode === "preview");
+      await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+        kind: "selectText",
+        selector: `.tc-plan-todos li:nth-child(${index}) .tc-plan-todo__content`,
+      });
+      await api.__testing.executeCommand(TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND);
+      await waitForWebviewDomSnapshot(
+        api,
+        (snapshot) => (chipCount(snapshot.html) === expectedChips ? snapshot : undefined),
+        20_000,
+      );
+    }
 
     // A regression: switching to native hides the in-body strip.
     await vscode.workspace

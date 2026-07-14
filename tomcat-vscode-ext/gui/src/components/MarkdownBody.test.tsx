@@ -30,6 +30,30 @@ describe("MarkdownBody", () => {
     expect(body.querySelectorAll("li")).toHaveLength(2);
   });
 
+  it("stamps blocks with absolute data-source-line from the source map (inline markdown included)", () => {
+    render(
+      <MarkdownBody
+        markdown={"# Title\n\nA **bold** word.\n\n- one\n- two"}
+        onOpenLink={() => undefined}
+        sourceLineMap={[5, 6, 7, 8, 9, 10]}
+      />,
+    );
+    const body = screen.getByTestId("plan-markdown-body");
+    expect(body.querySelector("h1")?.getAttribute("data-source-line")).toBe("5");
+    const paragraph = body.querySelector("p");
+    expect(paragraph?.getAttribute("data-source-line")).toBe("7");
+    // The inline **bold** survives and no longer breaks the line mapping.
+    expect(paragraph?.querySelector("strong")?.textContent).toBe("bold");
+    expect(body.querySelector("ul")?.getAttribute("data-source-line")).toBe("9");
+  });
+
+  it("omits data-source-line when no source map is provided", () => {
+    render(<MarkdownBody markdown={"# Title\n\ntext"} onOpenLink={() => undefined} />);
+    const body = screen.getByTestId("plan-markdown-body");
+    expect(body.querySelector("h1")?.hasAttribute("data-source-line")).toBe(false);
+    expect(body.querySelector("p")?.hasAttribute("data-source-line")).toBe(false);
+  });
+
   it("intercepts link clicks and forwards them without navigating", () => {
     const onOpenLink = vi.fn();
     render(

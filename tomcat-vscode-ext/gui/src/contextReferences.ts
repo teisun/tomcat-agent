@@ -35,11 +35,36 @@ export function isWebviewReference(value: unknown): value is WebviewReference {
   );
 }
 
+/**
+ * Bounded, stable string hash (FNV-1a, 32-bit) used only to keep dedupe keys
+ * short. Not cryptographic.
+ */
+function hashText(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 export function referenceIdentity(reference: WebviewReference): string {
-  return [
+  const parts: Array<number | string> = [
     reference.kind,
     reference.path,
     reference.lineStart ?? "",
     reference.lineEnd ?? "",
-  ].join("::");
+  ];
+  // Line-less selections (e.g. plan-preview text whose source line could not be
+  // resolved) would otherwise all collapse to `selection::<path>::::` and dedupe
+  // each other away, so only the first snippet per file could ever be inserted.
+  // Discriminate them by a hash of the selected text.
+  if (
+    reference.kind === "selection" &&
+    reference.lineStart == null &&
+    reference.lineEnd == null
+  ) {
+    parts.push(hashText(reference.text ?? ""));
+  }
+  return parts.join("::");
 }

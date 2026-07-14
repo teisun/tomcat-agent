@@ -29,38 +29,40 @@ function todoCountLabel(count: number): string {
   return `${count} ${count === 1 ? "To-do" : "To-dos"}`;
 }
 
+/** 1-based source line for a DOM node via the nearest `[data-source-line]` block. */
+function sourceLineOf(node: Node | null): number | null {
+  const element =
+    node instanceof Element ? node : (node?.parentElement ?? null);
+  const host = element?.closest("[data-source-line]") ?? null;
+  const raw = host?.getAttribute("data-source-line");
+  if (!raw) {
+    return null;
+  }
+  const line = Number.parseInt(raw, 10);
+  return Number.isFinite(line) ? line : null;
+}
+
 /**
- * Best-effort 1-based line range of a selection inside the plan source. The
- * preview shows rendered markdown, so we locate the first and last non-empty
- * selected lines back in the raw source by substring match. Returns null when
- * they cannot be found (the caller then omits line numbers from the reference).
+ * 1-based inclusive source line range of the live selection, read from the
+ * `data-source-line` attributes MarkdownBody stamps on each rendered block.
+ * Unlike matching rendered text back to the raw source, this is exact and
+ * unaffected by inline markdown. Returns null when the selection is not inside a
+ * source-mapped block (e.g. the todo checklist), so the caller omits line info.
  */
-function deriveSelectionLines(
-  raw: string,
-  selectedText: string,
-): { lineEnd: number; lineStart: number } | null {
-  const selLines = selectedText
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (selLines.length === 0) {
+function readSelectionSourceLines(): { lineEnd: number; lineStart: number } | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
     return null;
   }
-  const rawLines = raw.split("\n");
-  const firstNeedle = selLines[0];
-  const lastNeedle = selLines[selLines.length - 1];
-  const startIdx = rawLines.findIndex((line) => line.includes(firstNeedle));
-  if (startIdx === -1) {
+  const range = selection.getRangeAt(0);
+  const startLine = sourceLineOf(range.startContainer);
+  const endLine = sourceLineOf(range.endContainer);
+  const first = startLine ?? endLine;
+  const last = endLine ?? startLine;
+  if (first == null || last == null) {
     return null;
   }
-  let endIdx = startIdx;
-  for (let i = rawLines.length - 1; i >= startIdx; i -= 1) {
-    if (rawLines[i].includes(lastNeedle)) {
-      endIdx = i;
-      break;
-    }
-  }
-  return { lineEnd: endIdx + 1, lineStart: startIdx + 1 };
+  return { lineEnd: Math.max(first, last), lineStart: Math.min(first, last) };
 }
 
 /** Read the rendered DOM for E2E assertions (test-only). */
@@ -156,7 +158,7 @@ export function PlanPreviewApp({
       if (!trimmed) {
         return;
       }
-      const lines = deriveSelectionLines(stateRef.current?.raw ?? "", trimmed);
+      const lines = readSelectionSourceLines();
       send(vscodeApi, {
         data: lines
           ? { lineEnd: lines.lineEnd, lineStart: lines.lineStart, text: trimmed }
@@ -230,6 +232,7 @@ export function PlanPreviewApp({
             <MarkdownBody
               markdown={state.bodyMarkdown}
               onOpenLink={(href) => send(vscodeApi, { data: { href }, type: "openLink" })}
+              sourceLineMap={state.bodyLineMap}
             />
             <div className="tc-plan-preview__todos-count" data-testid="plan-todos-count">
               {todoCountLabel(state.todos.length)}
