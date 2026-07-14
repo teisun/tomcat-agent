@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   isPlanPreviewHostFrame,
-  type PlanEditorMode,
   type PlanPreviewDomAction,
   type PlanPreviewDomSnapshot,
   type PlanPreviewIntent,
@@ -75,7 +74,7 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
   const items = document.querySelectorAll('[data-testid="plan-todo-item"]');
   const icons = document.querySelectorAll(".tc-plan-todo__icon");
   const body = document.querySelector('[data-testid="plan-markdown-body"]');
-  const source = document.querySelector('[data-testid="plan-source"]');
+  const content = document.querySelector('[data-testid="plan-content"]');
   const options = select
     ? Array.from(select.options)
         .map((option) => option.value)
@@ -84,22 +83,23 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
   const todoIconSizes = Array.from(icons).map((icon) =>
     Math.round(icon.getBoundingClientRect().width),
   );
-  const mode: PlanEditorMode = source ? "markdown" : "preview";
   const toolbarStyle: PlanToolbarStyle = state?.toolbarStyle ?? "native";
   const mermaidSvgCount = document.querySelectorAll(
     '[data-testid="plan-mermaid"] svg',
   ).length;
+  // The fixed action strip must sit outside the scrolling content column so it
+  // never scrolls away; assert the structural invariant here for E2E.
+  const stripOutsideContent = Boolean(strip && content && !content.contains(strip));
   return {
     bodyHasContent: Boolean(body && (body.textContent ?? "").trim().length > 0),
     buildModelOptions: options,
     buildModelValue: select ? select.value : "",
     hasActionStrip: Boolean(strip),
-    markdownSourceText: source ? source.textContent ?? "" : null,
     mermaidSvgCount,
-    mode,
     selectionButtonVisible: Boolean(
       document.querySelector('[data-testid="plan-selection-add"]'),
     ),
+    stripOutsideContent,
     todoCountText: countEl ? countEl.textContent : null,
     todoIconSizes,
     todoItemCount: items.length,
@@ -215,48 +215,28 @@ export function PlanPreviewApp({
 
   return (
     <div className="tc-plan-preview">
+      {isHybrid ? (
+        <PlanActionStrip
+          availableModels={state.availableModels}
+          buildModel={state.buildModel}
+          canBuild={state.canBuild}
+          onBuild={() => send(vscodeApi, { type: "build" })}
+          onSetBuildModel={(modelId) =>
+            send(vscodeApi, { data: { modelId }, type: "setBuildModel" })
+          }
+        />
+      ) : null}
       <div className="tc-plan-preview__content" data-testid="plan-content">
-        {isHybrid ? (
-          <PlanActionStrip
-            availableModels={state.availableModels}
-            buildModel={state.buildModel}
-            canBuild={state.canBuild}
-            onBuild={() => send(vscodeApi, { type: "build" })}
-            onSetBuildModel={(modelId) =>
-              send(vscodeApi, { data: { modelId }, type: "setBuildModel" })
-            }
-          />
-        ) : null}
-        {state.mode === "preview" ? (
-          <>
-            <MarkdownBody
-              markdown={state.bodyMarkdown}
-              onOpenLink={(href) => send(vscodeApi, { data: { href }, type: "openLink" })}
-              sourceLineMap={state.bodyLineMap}
-            />
-            <div className="tc-plan-preview__todos-count" data-testid="plan-todos-count">
-              {todoCountLabel(state.todos.length)}
-            </div>
-            <hr className="tc-plan-preview__divider" />
-            <TodoList todos={state.todos} />
-          </>
-        ) : (
-          <div className="tc-plan-preview__markdown" data-testid="plan-source-wrapper">
-            <div className="tc-plan-preview__markdown-actions">
-              <button
-                className="tc-button tc-button--secondary"
-                data-testid="plan-open-editor"
-                onClick={() => send(vscodeApi, { type: "openInTextEditor" })}
-                type="button"
-              >
-                Open in Editor
-              </button>
-            </div>
-            <pre className="tc-plan-preview__source" data-testid="plan-source">
-              <code>{state.raw}</code>
-            </pre>
-          </div>
-        )}
+        <MarkdownBody
+          markdown={state.bodyMarkdown}
+          onOpenLink={(href) => send(vscodeApi, { data: { href }, type: "openLink" })}
+          sourceLineMap={state.bodyLineMap}
+        />
+        <div className="tc-plan-preview__todos-count" data-testid="plan-todos-count">
+          {todoCountLabel(state.todos.length)}
+        </div>
+        <hr className="tc-plan-preview__divider" />
+        <TodoList todos={state.todos} />
       </div>
       <PlanSelectionActionButton onAdd={sendSelection} />
     </div>

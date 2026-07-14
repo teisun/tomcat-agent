@@ -23,12 +23,9 @@ import {
   TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
   TOMCAT_PLAN_BUILD_COMMAND,
   TOMCAT_PLAN_CAN_BUILD_CONTEXT_KEY,
-  TOMCAT_PLAN_MODE_CONTEXT_KEY,
   TOMCAT_PLAN_SELECT_BUILD_MODEL_COMMAND,
   TOMCAT_PLAN_TOOLBAR_STYLE_SETTING,
-  TOMCAT_PLAN_VIEW_AS_MARKDOWN_ACTIVE_COMMAND,
   TOMCAT_PLAN_VIEW_AS_MARKDOWN_COMMAND,
-  TOMCAT_PLAN_VIEW_AS_PREVIEW_ACTIVE_COMMAND,
   TOMCAT_PLAN_VIEW_AS_PREVIEW_COMMAND,
   TOMCAT_RESTART_COMMAND,
   TOMCAT_WEBVIEW_CONTAINER_ID,
@@ -915,13 +912,6 @@ export async function activate(
     openExternal: async (href) => {
       await vscode.env.openExternal(vscode.Uri.parse(href));
     },
-    openInTextEditor: async (planPath) => {
-      await vscode.commands.executeCommand(
-        "vscode.openWith",
-        vscode.Uri.file(planPath),
-        "default",
-      );
-    },
     openWorkspaceFile: (filePath) => ide.showFile(filePath),
     setBuildModel: async (modelId) => {
       await vscode.workspace
@@ -930,18 +920,13 @@ export async function activate(
     },
   });
 
-  // Mirror the focused plan editor into context keys so the native title-bar
-  // menu can gate the Build icon (canBuild) and show the ✓ on the active mode.
+  // Mirror the focused plan editor into a context key so the native title-bar
+  // menu can gate the Build icon (canBuild).
   const applyPlanContextKeys = (info: PlanActivePanelInfo | null): void => {
     void vscode.commands.executeCommand(
       "setContext",
       TOMCAT_PLAN_CAN_BUILD_CONTEXT_KEY,
       info?.canBuild ?? false,
-    );
-    void vscode.commands.executeCommand(
-      "setContext",
-      TOMCAT_PLAN_MODE_CONTEXT_KEY,
-      info?.mode ?? "",
     );
   };
   const planContextSubscription = planPreviewProvider.onDidChangeActivePlan(
@@ -982,26 +967,35 @@ export async function activate(
       }
     },
   );
+  const PLAN_FILE_SUFFIX = ".plan.md";
+  // "Preview" runs from the native text editor: reopen the focused *.plan.md in
+  // the custom preview editor.
   const planViewAsPreview = async (): Promise<void> => {
-    await planPreviewProvider.setModeForActive("preview");
+    const uri = vscode.window.activeTextEditor?.document.uri;
+    if (!uri || !uri.fsPath.endsWith(PLAN_FILE_SUFFIX)) {
+      return;
+    }
+    await vscode.commands.executeCommand("vscode.openWith", uri, PLAN_PREVIEW_VIEW_TYPE);
   };
+  // "Markdown" runs from the custom preview editor: reopen the focused plan in
+  // the plain native text editor (VS Code's `default` editor).
   const planViewAsMarkdown = async (): Promise<void> => {
-    await planPreviewProvider.setModeForActive("markdown");
+    const path = planPreviewProvider.getActivePlanPath();
+    if (!path) {
+      return;
+    }
+    await vscode.commands.executeCommand(
+      "vscode.openWith",
+      vscode.Uri.file(path),
+      "default",
+    );
   };
   const planViewPreviewCommand = vscode.commands.registerCommand(
     TOMCAT_PLAN_VIEW_AS_PREVIEW_COMMAND,
     planViewAsPreview,
   );
-  const planViewPreviewActiveCommand = vscode.commands.registerCommand(
-    TOMCAT_PLAN_VIEW_AS_PREVIEW_ACTIVE_COMMAND,
-    planViewAsPreview,
-  );
   const planViewMarkdownCommand = vscode.commands.registerCommand(
     TOMCAT_PLAN_VIEW_AS_MARKDOWN_COMMAND,
-    planViewAsMarkdown,
-  );
-  const planViewMarkdownActiveCommand = vscode.commands.registerCommand(
-    TOMCAT_PLAN_VIEW_AS_MARKDOWN_ACTIVE_COMMAND,
     planViewAsMarkdown,
   );
   const planAddSelectionToChatCommand = vscode.commands.registerCommand(
@@ -1289,9 +1283,7 @@ export async function activate(
     planBuildCommand,
     planSelectBuildModelCommand,
     planViewPreviewCommand,
-    planViewPreviewActiveCommand,
     planViewMarkdownCommand,
-    planViewMarkdownActiveCommand,
     planAddSelectionToChatCommand,
     codeLensRegistration,
     selectionChangeSubscription,

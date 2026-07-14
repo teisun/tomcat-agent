@@ -16,7 +16,6 @@ function makeState(overrides: Partial<PlanPreviewStateSnapshot> = {}): PlanPrevi
     bodyMarkdown: "# Plan Heading\n\nSome **bold** intro with `code`.\n\n- item one\n- item two",
     buildModel: "",
     canBuild: true,
-    mode: "preview",
     overview: "OVERVIEW_SHOULD_NOT_RENDER",
     path: "/home/u/.tomcat/plans/demo.plan.md",
     planId: "plan-1",
@@ -131,19 +130,28 @@ describe("PlanPreviewApp", () => {
     expect(screen.getByTestId("plan-todos-count").textContent).toBe("0 To-dos");
   });
 
-  it("renders the mode chosen by the host (no local toggle)", () => {
+  it("always renders the preview (there is no in-webview markdown/source view)", () => {
     const api = makeApi();
-    const { rerender } = render(<PlanPreviewApp vscodeApi={api} />);
-
-    pushState(makeState({ mode: "markdown" }));
-    expect(screen.getByTestId("plan-source")).toBeTruthy();
-    expect(screen.queryByTestId("plan-markdown-body")).toBeNull();
-    expect((screen.getByTestId("plan-source").textContent ?? "")).toContain("# Plan Heading");
-
-    rerender(<PlanPreviewApp vscodeApi={api} />);
-    pushState(makeState({ mode: "preview" }));
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(makeState());
     expect(screen.getByTestId("plan-markdown-body")).toBeTruthy();
     expect(screen.queryByTestId("plan-source")).toBeNull();
+    expect(screen.queryByTestId("plan-open-editor")).toBeNull();
+  });
+
+  it("keeps the hybrid action strip outside the scrolling content column (fixed header)", () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(makeState({ toolbarStyle: "hybrid" }));
+
+    const strip = screen.getByTestId("plan-action-strip");
+    const content = screen.getByTestId("plan-content");
+    // Sibling, not nested: the header never scrolls with the body.
+    expect(content.contains(strip)).toBe(false);
+    expect(strip.parentElement?.classList.contains("tc-plan-preview")).toBe(true);
+    expect(
+      strip.compareDocumentPosition(content) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("shows no in-body action controls in native toolbar style", () => {
@@ -187,14 +195,6 @@ describe("PlanPreviewApp", () => {
     const intents = intentsOfType(api, "setBuildModel");
     expect(intents).toHaveLength(1);
     expect((intents[0] as { data: { modelId: string } }).data.modelId).toBe("claude-opus");
-  });
-
-  it("forwards Open in Editor to the host from the Markdown view", () => {
-    const api = makeApi();
-    render(<PlanPreviewApp vscodeApi={api} />);
-    pushState(makeState({ mode: "markdown" }));
-    fireEvent.click(screen.getByTestId("plan-open-editor"));
-    expect(intentsOfType(api, "openInTextEditor")).toHaveLength(1);
   });
 
   it("stamps blocks with data-source-line and derives lines from the selection (even with inline markdown)", () => {

@@ -146,7 +146,6 @@ function makeDeps(
       }),
     } as never,
     openExternal: vi.fn().mockResolvedValue(undefined),
-    openInTextEditor: vi.fn().mockResolvedValue(undefined),
     openWorkspaceFile: vi.fn().mockResolvedValue(undefined),
     setBuildModel: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -283,17 +282,6 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
     expect(postState).toHaveBeenCalledTimes(1);
   });
 
-  it("opens the raw file in the text editor", async () => {
-    const deps = makeDeps();
-    const provider = new PlanPreviewEditorProvider(deps);
-    await provider.handleIntent(
-      { messageId: "1", type: "openInTextEditor" },
-      makeDoc(PLAN_TEXT, "/workspace/plans/sample.plan.md"),
-      vi.fn(),
-    );
-    expect(deps.openInTextEditor).toHaveBeenCalledWith("/workspace/plans/sample.plan.md");
-  });
-
   it("routes external links to the browser", async () => {
     const deps = makeDeps();
     const provider = new PlanPreviewEditorProvider(deps);
@@ -388,21 +376,18 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
 });
 
 describe("PlanPreviewEditorProvider.buildState UI fields", () => {
-  it("defaults to preview mode and hybrid toolbar style", async () => {
+  it("defaults to the hybrid toolbar style", async () => {
     const provider = new PlanPreviewEditorProvider(makeDeps());
     const snapshot = await provider.buildState(PLAN_TEXT, "/p/sample.plan.md");
-    expect(snapshot.mode).toBe("preview");
     expect(snapshot.toolbarStyle).toBe("hybrid");
   });
 
-  it("passes through host-provided mode and toolbar style", async () => {
+  it("passes through the host-provided toolbar style", async () => {
     const provider = new PlanPreviewEditorProvider(makeDeps());
     const snapshot = await provider.buildState(PLAN_TEXT, "/p/sample.plan.md", {
-      mode: "markdown",
-      toolbarStyle: "hybrid",
+      toolbarStyle: "native",
     });
-    expect(snapshot.mode).toBe("markdown");
-    expect(snapshot.toolbarStyle).toBe("hybrid");
+    expect(snapshot.toolbarStyle).toBe("native");
   });
 });
 
@@ -422,37 +407,24 @@ describe("PlanPreviewEditorProvider active-panel + native controls", () => {
     return { deps, events, provider };
   }
 
-  it("tracks the focused panel and derives canBuild + mode context", async () => {
+  it("tracks the focused panel and derives canBuild + active path", async () => {
     const { provider } = setup();
     await resolveEditor(provider, PLAN_TEXT, docPath);
 
     const info = provider.getActivePlanInfo();
     expect(info).not.toBeNull();
     expect(info?.path).toBe(docPath);
-    expect(info?.mode).toBe("preview");
     expect(info?.canBuild).toBe(true);
+    expect(provider.getActivePlanPath()).toBe(docPath);
   });
 
-  it("merges host mode + toolbarStyle into the posted state frame", async () => {
+  it("merges the host toolbarStyle into the posted state frame", async () => {
     const { provider } = setup();
     __testing.setConfiguration("tomcat.plan.toolbarStyle", "hybrid");
     const { panel } = await resolveEditor(provider, PLAN_TEXT, docPath);
 
     const state = panel.webview.lastState();
-    expect(state?.mode).toBe("preview");
     expect(state?.toolbarStyle).toBe("hybrid");
-  });
-
-  it("setModeForActive flips the mode, re-posts, and updates context", async () => {
-    const { events, provider } = setup();
-    const { panel } = await resolveEditor(provider, PLAN_TEXT, docPath);
-
-    await provider.setModeForActive("markdown");
-    await flush();
-
-    expect(provider.getActivePlanInfo()?.mode).toBe("markdown");
-    expect(panel.webview.lastState()?.mode).toBe("markdown");
-    expect(events.at(-1)?.mode).toBe("markdown");
   });
 
   it("runBuildForActive builds the focused plan's planId", async () => {
@@ -473,12 +445,12 @@ describe("PlanPreviewEditorProvider active-panel + native controls", () => {
     expect(events.at(-1)).toBeNull();
   });
 
-  it("does nothing on build/mode when no plan editor is focused", async () => {
+  it("does nothing on build when no plan editor is focused", async () => {
     const { deps, provider } = setup();
     await provider.runBuildForActive();
-    await provider.setModeForActive("markdown");
     expect(deps.buildPlan).not.toHaveBeenCalled();
     expect(provider.getActivePlanInfo()).toBeNull();
+    expect(provider.getActivePlanPath()).toBeNull();
   });
 
   it("exposes available models for the QuickPick", async () => {

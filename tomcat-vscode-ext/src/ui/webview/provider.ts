@@ -322,6 +322,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private readonly sessionPool: TomcatSessionPool;
   private readonly stateStore: WebviewStateStore;
   private readonly eventSubscription: { dispose(): void };
+  /** Plan paths already auto-opened on `plan.create`, so repeats don't reopen. */
+  private readonly autoOpenedPlanPaths = new Set<string>();
   private initialized?: InitializeResult;
   private isReady = false;
   private lastContextSearchIntent: Extract<WebviewIntent, { type: "searchContext" }> | null = null;
@@ -1204,6 +1206,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       }
     }
     this.stateStore.applyEvent(event);
+    await this.maybeAutoOpenPlanPreview(event);
     if (event.sessionId) {
       this.stateStore.setOwnership(
         event.sessionId,
@@ -1219,6 +1222,36 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
     await this.postEvent(event);
     await this.postState();
+  }
+
+  /**
+   * Auto-open the plan preview the moment a plan is written to disk. `plan.create`
+   * is the contract for "draft persisted" (serve fires it only after `write_plan`
+   * succeeds), so this is the correct "written" trigger — never on the path first
+   * appearing, mid-write, or on later `plan.update`s (which would steal focus
+   * while the user reads). Deduped per path so repeated creates don't reopen.
+   */
+  private async maybeAutoOpenPlanPreview(event: ServeEvent): Promise<void> {
+    if (event.type !== "plan.create") {
+      return;
+    }
+    const path = "path" in event && typeof event.path === "string" ? event.path : "";
+    if (!path || this.autoOpenedPlanPaths.has(path)) {
+      return;
+    }
+    if (typeof this.deps.ide.openWith !== "function") {
+      return;
+    }
+    this.autoOpenedPlanPaths.add(path);
+    try {
+      await this.deps.ide.openWith(path, "tomcat.planPreview");
+    } catch {
+      try {
+        await this.deps.ide.showFile(path);
+      } catch {
+        // Best-effort: opening is a convenience, never fatal to event handling.
+      }
+    }
   }
 
   private async handleWebviewMessage(message: unknown): Promise<void> {

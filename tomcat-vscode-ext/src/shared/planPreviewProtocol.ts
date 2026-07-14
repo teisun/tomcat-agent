@@ -13,8 +13,6 @@ export interface PlanTodo {
 
 export type PlanFileState = "completed" | "executing" | "pending" | "planning";
 
-export type PlanEditorMode = "markdown" | "preview";
-
 /**
  * Which surface hosts the plan's action controls (Build / model). `native` puts
  * them on the VS Code editor title bar as commands; `hybrid` keeps a slim in-body
@@ -24,9 +22,9 @@ export type PlanToolbarStyle = "hybrid" | "native";
 
 /**
  * Everything the plan preview webview needs to render, derived on the host from
- * the `.plan.md` document text plus VS Code config / serve catalog. `mode` and
- * `toolbarStyle` are host-owned UI state (the native title-bar menu needs a
- * context key to drive the mode checkmark, so the host is the source of truth).
+ * the `.plan.md` document text plus VS Code config / serve catalog. The custom
+ * editor always renders the preview; "Markdown" opens the native text editor
+ * instead (a separate editor), so there is no in-webview mode any more.
  */
 export interface PlanPreviewStateSnapshot {
   availableModels: string[];
@@ -35,7 +33,6 @@ export interface PlanPreviewStateSnapshot {
   bodyMarkdown: string;
   buildModel: string;
   canBuild: boolean;
-  mode: PlanEditorMode;
   overview: string | null;
   path: string;
   planId: string | null;
@@ -52,11 +49,11 @@ export interface PlanPreviewDomSnapshot {
   buildModelOptions: string[];
   buildModelValue: string;
   hasActionStrip: boolean;
-  markdownSourceText: string | null;
   /** Rendered mermaid diagrams (fenced ```mermaid``` blocks turned into SVG). */
   mermaidSvgCount: number;
-  mode: PlanEditorMode;
   selectionButtonVisible: boolean;
+  /** True when the action strip is a sibling of (not nested in) the scroll column. */
+  stripOutsideContent: boolean;
   todoCountText: string | null;
   todoIconSizes: number[];
   todoItemCount: number;
@@ -109,10 +106,6 @@ export type PlanPreviewIntent =
     }
   | {
       messageId: string;
-      type: "openInTextEditor";
-    }
-  | {
-      messageId: string;
       type: "openLink";
       data: {
         href: string;
@@ -149,7 +142,6 @@ export function isPlanPreviewIntent(value: unknown): value is PlanPreviewIntent 
   }
   switch (value.type) {
     case "plan.ready":
-    case "openInTextEditor":
     case "build":
       return true;
     case "openLink":

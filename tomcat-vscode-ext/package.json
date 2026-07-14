@@ -91,16 +91,6 @@
       },
       {
         "category": "Tomcat Plan",
-        "command": "tomcat.plan.viewAsPreview.active",
-        "title": "✓ Preview"
-      },
-      {
-        "category": "Tomcat Plan",
-        "command": "tomcat.plan.viewAsMarkdown.active",
-        "title": "✓ Markdown"
-      },
-      {
-        "category": "Tomcat Plan",
         "command": "tomcat.plan.addSelectionToChat",
         "icon": "$(comment-add)",
         "title": "Add Selection to Tomcat Chat"
@@ -180,24 +170,14 @@
           "when": "activeCustomEditorId == 'tomcat.planPreview' && config.tomcat.plan.toolbarStyle == 'native'"
         },
         {
-          "command": "tomcat.plan.viewAsPreview.active",
+          "command": "tomcat.plan.viewAsMarkdown",
           "group": "1_tcplanmode@1",
-          "when": "activeCustomEditorId == 'tomcat.planPreview' && tomcat.plan.mode == 'preview'"
+          "when": "activeCustomEditorId == 'tomcat.planPreview'"
         },
         {
           "command": "tomcat.plan.viewAsPreview",
           "group": "1_tcplanmode@1",
-          "when": "activeCustomEditorId == 'tomcat.planPreview' && tomcat.plan.mode == 'markdown'"
-        },
-        {
-          "command": "tomcat.plan.viewAsMarkdown.active",
-          "group": "1_tcplanmode@2",
-          "when": "activeCustomEditorId == 'tomcat.planPreview' && tomcat.plan.mode == 'markdown'"
-        },
-        {
-          "command": "tomcat.plan.viewAsMarkdown",
-          "group": "1_tcplanmode@2",
-          "when": "activeCustomEditorId == 'tomcat.planPreview' && tomcat.plan.mode == 'preview'"
+          "when": "resourceFilename =~ /\\.plan\\.md$/ && activeEditor == 'workbench.editors.files.textFileEditor'"
         }
       ],
       "webview/context": [
@@ -222,19 +202,11 @@
         },
         {
           "command": "tomcat.plan.viewAsPreview",
-          "when": "activeCustomEditorId == 'tomcat.planPreview'"
+          "when": "resourceFilename =~ /\\.plan\\.md$/ && activeEditor == 'workbench.editors.files.textFileEditor'"
         },
         {
           "command": "tomcat.plan.viewAsMarkdown",
           "when": "activeCustomEditorId == 'tomcat.planPreview'"
-        },
-        {
-          "command": "tomcat.plan.viewAsPreview.active",
-          "when": "false"
-        },
-        {
-          "command": "tomcat.plan.viewAsMarkdown.active",
-          "when": "false"
         }
       ]
     },

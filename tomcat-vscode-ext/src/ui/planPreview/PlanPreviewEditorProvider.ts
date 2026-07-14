@@ -14,7 +14,6 @@ import type { TomcatMessenger } from "../../serveClient/TomcatMessenger";
 import {
   isPlanPreviewDomSnapshotReply,
   isPlanPreviewIntent,
-  type PlanEditorMode,
   type PlanFileState,
   type PlanPreviewDomAction,
   type PlanPreviewDomSnapshot,
@@ -34,7 +33,6 @@ export const PLAN_BUILD_MODEL_SETTING = "plan.buildModel";
 /** Snapshot of the plan editor VS Code currently has focused (drives context keys). */
 export interface PlanActivePanelInfo {
   canBuild: boolean;
-  mode: PlanEditorMode;
   path: string;
 }
 
@@ -115,7 +113,6 @@ export interface PlanPreviewEditorProviderDeps {
   getBuildModel(): string;
   messenger: TomcatMessenger;
   openExternal(href: string): Promise<void> | void;
-  openInTextEditor(planPath: string): Promise<void> | void;
   openWorkspaceFile(filePath: string): Promise<void> | void;
   /** Persist the global build model to `settings.json` (Global scope). */
   setBuildModel(modelId: string): Promise<void> | void;
@@ -133,8 +130,6 @@ export class PlanPreviewEditorProvider
 
   /** Live panels keyed by document fsPath, so commands + E2E hooks can target one. */
   private readonly panels = new Map<string, PlanPanelEntry>();
-  /** Per-panel editor mode (host-owned so the native "..." menu can show the ✓). */
-  private readonly panelModes = new Map<string, PlanEditorMode>();
   /** Latest derived `canBuild` per panel, so context keys stay in sync. */
   private readonly panelCanBuild = new Map<string, boolean>();
   /** fsPath of the plan editor VS Code currently has focused, or null. */
@@ -163,9 +158,6 @@ export class PlanPreviewEditorProvider
 
     const fsPath = document.uri.fsPath;
     this.panels.set(fsPath, { getText: () => document.getText(), panel: webviewPanel });
-    if (!this.panelModes.has(fsPath)) {
-      this.panelModes.set(fsPath, "preview");
-    }
     if (webviewPanel.active) {
       this.activePanelPath = fsPath;
     }
@@ -216,7 +208,6 @@ export class PlanPreviewEditorProvider
       viewStateSub.dispose();
       if (this.panels.get(fsPath)?.panel === webviewPanel) {
         this.panels.delete(fsPath);
-        this.panelModes.delete(fsPath);
         this.panelCanBuild.delete(fsPath);
       }
       if (this.activePanelPath === fsPath) {
@@ -257,25 +248,20 @@ export class PlanPreviewEditorProvider
     await entry.panel.webview.postMessage(frame);
   }
 
-  /** Switch the focused plan editor's mode; re-posts + refreshes context keys. */
-  async setModeForActive(mode: PlanEditorMode): Promise<void> {
+  /** fsPath of the focused plan preview editor, or null when none is focused. */
+  getActivePlanPath(): string | null {
     const path = this.activePanelPath;
-    if (!path || !this.panels.has(path)) {
-      return;
-    }
-    this.panelModes.set(path, mode);
-    await this.postFor(path);
+    return path && this.panels.has(path) ? path : null;
   }
 
   /** Info about the focused plan editor (for seeding context keys). */
   getActivePlanInfo(): PlanActivePanelInfo | null {
-    const path = this.activePanelPath;
-    if (!path || !this.panels.has(path)) {
+    const path = this.getActivePlanPath();
+    if (!path) {
       return null;
     }
     return {
       canBuild: this.panelCanBuild.get(path) ?? false,
-      mode: this.panelModes.get(path) ?? "preview",
       path,
     };
   }
@@ -313,7 +299,6 @@ export class PlanPreviewEditorProvider
       return;
     }
     const snapshot = await this.buildState(entry.getText(), path, {
-      mode: this.panelModes.get(path) ?? "preview",
       toolbarStyle: this.readToolbarStyle(),
     });
     this.panelCanBuild.set(path, snapshot.canBuild);
@@ -365,10 +350,7 @@ export class PlanPreviewEditorProvider
   async buildState(
     text: string,
     planPath: string,
-    ui: { mode: PlanEditorMode; toolbarStyle: PlanToolbarStyle } = {
-      mode: "preview",
-      toolbarStyle: "hybrid",
-    },
+    ui: { toolbarStyle: PlanToolbarStyle } = { toolbarStyle: "hybrid" },
   ): Promise<PlanPreviewStateSnapshot> {
     const parsed = parsePlanDocument(text);
     const availableModels = await this.fetchAvailableModels();
@@ -384,7 +366,6 @@ export class PlanPreviewEditorProvider
       bodyMarkdown: parsed.bodyMarkdown,
       buildModel,
       canBuild,
-      mode: ui.mode,
       overview: parsed.overview,
       path: planPath,
       planId: parsed.planId,
@@ -405,9 +386,6 @@ export class PlanPreviewEditorProvider
     switch (intent.type) {
       case "plan.ready":
         await postState();
-        return;
-      case "openInTextEditor":
-        await this.deps.openInTextEditor(doc.path);
         return;
       case "openLink": {
         const target = classifyPlanLink(intent.data.href, doc.path);

@@ -3450,13 +3450,32 @@ async function waitForPlanPreviewDom(
   );
 }
 
+/** Poll until the active text editor satisfies `predicate` (used for Markdown → native). */
+async function waitForActiveTextEditor(
+  predicate: (editor: vscode.TextEditor | undefined) => boolean,
+  timeoutMs = 20_000,
+): Promise<vscode.TextEditor> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const editor = vscode.window.activeTextEditor;
+    if (predicate(editor) && editor) {
+      return editor;
+    }
+    await pause(200);
+  }
+  throw new Error(
+    `Timed out waiting for the active text editor. active=${vscode.window.activeTextEditor?.document.uri.fsPath ?? "none"}`,
+  );
+}
+
 /**
  * The one automated check of the real `.plan.md` custom editor resolve + webview:
- * open a plan file, verify the hybrid (default B) in-body action strip and the
- * Preview four-state checklist, flip to Markdown source via the native title-bar
- * command, hot-reload on document edits, persist the build model, add a
- * selection to chat via both entry points (right-click command + floating
- * button), then regress the native (A) toolbar style.
+ * open a plan file, verify the hybrid (default B) in-body action strip is a fixed
+ * header and the Preview four-state checklist renders, open the raw file in the
+ * native text editor via the "Markdown" title-bar command, return via "Preview",
+ * hot-reload on document edits, persist the build model, add a selection to chat
+ * via both entry points (right-click command + floating button), then regress the
+ * native (A) toolbar style.
  */
 export async function assertPlanPreviewCustomEditorFlow(
   api: TomcatExtensionApi,
@@ -3521,7 +3540,7 @@ export async function assertPlanPreviewCustomEditorFlow(
       api,
       planPath,
       (snapshot) =>
-        snapshot.mode === "preview" &&
+        snapshot.bodyHasContent &&
         snapshot.toolbarStyle === "hybrid" &&
         snapshot.todoItemCount === 3,
     );
@@ -3529,6 +3548,11 @@ export async function assertPlanPreviewCustomEditorFlow(
       preview.hasActionStrip,
       true,
       "expected the hybrid in-body action strip by default",
+    );
+    assert.equal(
+      preview.stripOutsideContent,
+      true,
+      "expected the action strip to be a fixed header outside the scrolling content",
     );
     assert.equal(
       preview.todoCountText,
@@ -3549,21 +3573,21 @@ export async function assertPlanPreviewCustomEditorFlow(
       `expected at least one rendered mermaid SVG, got ${mermaid.mermaidSvgCount}`,
     );
 
-    // Native title-bar command → Markdown reveals the read-only source.
+    // Native title-bar command → "Markdown" opens the plain native text editor
+    // for the same file (no in-webview source view any more).
     await api.__testing.executeCommand("tomcat.plan.viewAsMarkdown");
-    const markdown = await waitForPlanPreviewDom(
-      api,
-      planPath,
-      (snapshot) => snapshot.mode === "markdown" && snapshot.markdownSourceText !== null,
+    const nativeEditor = await waitForActiveTextEditor(
+      (editor) => editor?.document.uri.fsPath === planPath,
     );
     assert.ok(
-      (markdown.markdownSourceText ?? "").includes("# E2E heading"),
-      "expected the Markdown source view to show the raw plan text",
+      nativeEditor.document.getText().includes("# E2E heading"),
+      "expected 'Markdown' to open the raw plan file in the native text editor",
     );
 
-    // Back to Preview, then hot-update the document and expect the checklist to grow.
+    // "Preview" from the native editor reopens the custom preview; hot-update the
+    // document afterwards and expect the checklist to grow.
     await api.__testing.executeCommand("tomcat.plan.viewAsPreview");
-    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.mode === "preview");
+    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
 
     const updatedText = initialText.replace(
       "---\n\n# E2E heading",
@@ -3592,7 +3616,7 @@ export async function assertPlanPreviewCustomEditorFlow(
     const hotUpdated = await waitForPlanPreviewDom(
       api,
       planPath,
-      (snapshot) => snapshot.mode === "preview" && snapshot.todoItemCount === 4,
+      (snapshot) => snapshot.bodyHasContent && snapshot.todoItemCount === 4,
     );
     assert.equal(
       hotUpdated.todoCountText,
@@ -3634,7 +3658,7 @@ export async function assertPlanPreviewCustomEditorFlow(
     // selection (heading) inside the focused plan editor. The chip must carry
     // the exact source line derived from the block's data-source-line attribute.
     await api.__testing.openPlanPreview(planPath);
-    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.mode === "preview");
+    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
     await api.__testing.dispatchPlanPreviewDomAction(planPath, {
       kind: "selectText",
       selector: ".tc-plan-preview__body h1",
@@ -3656,7 +3680,7 @@ export async function assertPlanPreviewCustomEditorFlow(
     // Selection → chat, path 2: the floating button on a different selection
     // (body paragraph) yields a second, distinct chip carrying its own line.
     await api.__testing.openPlanPreview(planPath);
-    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.mode === "preview");
+    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
     await api.__testing.dispatchPlanPreviewDomAction(planPath, {
       kind: "selectText",
       selector: ".tc-plan-preview__body p",
@@ -3686,7 +3710,7 @@ export async function assertPlanPreviewCustomEditorFlow(
       [2, baseChips + 4],
     ] as const) {
       await api.__testing.openPlanPreview(planPath);
-      await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.mode === "preview");
+      await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
       await api.__testing.dispatchPlanPreviewDomAction(planPath, {
         kind: "selectText",
         selector: `.tc-plan-todos li:nth-child(${index}) .tc-plan-todo__content`,

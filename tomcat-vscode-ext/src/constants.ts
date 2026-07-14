@@ -25,13 +25,12 @@ export const TOMCAT_APPLY_EDIT_COMMAND = "tomcat.applyEdit";
 export const TOMCAT_PLAN_BUILD_COMMAND = "tomcat.plan.build";
 export const TOMCAT_PLAN_SELECT_BUILD_MODEL_COMMAND = "tomcat.plan.selectBuildModel";
 export const TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND = "tomcat.plan.addSelectionToChat";
+/** "Preview" (from the native text editor) and "Markdown" (from the custom
+ * preview) each open the *other* editor via `vscode.openWith`; there is no
+ * in-webview mode toggle, so no display-only ✓ twins are needed. */
 export const TOMCAT_PLAN_VIEW_AS_PREVIEW_COMMAND = "tomcat.plan.viewAsPreview";
 export const TOMCAT_PLAN_VIEW_AS_MARKDOWN_COMMAND = "tomcat.plan.viewAsMarkdown";
-/** Display-only twins: render the ✓ on the active mode inside the "..." menu. */
-export const TOMCAT_PLAN_VIEW_AS_PREVIEW_ACTIVE_COMMAND = "tomcat.plan.viewAsPreview.active";
-export const TOMCAT_PLAN_VIEW_AS_MARKDOWN_ACTIVE_COMMAND = "tomcat.plan.viewAsMarkdown.active";
 
-export const TOMCAT_PLAN_MODE_CONTEXT_KEY = "tomcat.plan.mode";
 export const TOMCAT_PLAN_CAN_BUILD_CONTEXT_KEY = "tomcat.plan.canBuild";
 export const TOMCAT_PLAN_TOOLBAR_STYLE_SETTING = "plan.toolbarStyle";
 

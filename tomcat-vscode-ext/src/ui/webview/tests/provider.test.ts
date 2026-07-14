@@ -1346,3 +1346,84 @@ describe("plan build orchestration", () => {
     provider.dispose();
   });
 });
+
+describe("plan.create auto-open", () => {
+  function makeProvider(
+    openWith: ReturnType<typeof vi.fn>,
+    showFile: ReturnType<typeof vi.fn>,
+  ): TomcatWebviewViewProvider {
+    return new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      getUiMode: () => "webview",
+      ide: { openWith, showFile } as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      ownership: {
+        ownerOf() {
+          return null;
+        },
+        releaseAll() {},
+      } as never,
+      sessionRouter: {
+        getState: vi.fn().mockResolvedValue({ busy: false, sessionId: "s1" }),
+        listCheckpoints: vi.fn().mockResolvedValue({ checkpoints: [], sessionId: "s1" }),
+      } as never,
+    });
+  }
+
+  const emit = (provider: TomcatWebviewViewProvider, event: Record<string, unknown>) =>
+    (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent(event);
+
+  it("opens the preview once on plan.create, never on later create/update of the same path", async () => {
+    const openWith = vi.fn().mockResolvedValue(undefined);
+    const provider = makeProvider(openWith, vi.fn().mockResolvedValue(undefined));
+    const planPath = "/workspace/plans/new.plan.md";
+
+    await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.create" });
+    expect(openWith).toHaveBeenCalledTimes(1);
+    expect(openWith).toHaveBeenCalledWith(planPath, "tomcat.planPreview");
+
+    // Repeated create + later update for the same path must NOT steal focus again.
+    await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.create" });
+    await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.update" });
+    expect(openWith).toHaveBeenCalledTimes(1);
+
+    provider.dispose();
+  });
+
+  it("does not auto-open on plan.update or a path-less plan.create", async () => {
+    const openWith = vi.fn().mockResolvedValue(undefined);
+    const provider = makeProvider(openWith, vi.fn().mockResolvedValue(undefined));
+
+    await emit(provider, {
+      path: "/workspace/plans/mid.plan.md",
+      planId: "p1",
+      sessionId: "s1",
+      type: "plan.update",
+    });
+    await emit(provider, { planId: "p1", sessionId: "s1", type: "plan.create" });
+    expect(openWith).not.toHaveBeenCalled();
+
+    provider.dispose();
+  });
+
+  it("falls back to showFile when opening the custom editor throws", async () => {
+    const openWith = vi.fn().mockRejectedValue(new Error("no custom editor"));
+    const showFile = vi.fn().mockResolvedValue(undefined);
+    const provider = makeProvider(openWith, showFile);
+    const planPath = "/workspace/plans/fallback.plan.md";
+
+    await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.create" });
+    expect(openWith).toHaveBeenCalledWith(planPath, "tomcat.planPreview");
+    expect(showFile).toHaveBeenCalledWith(planPath);
+
+    provider.dispose();
+  });
+});
