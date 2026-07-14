@@ -23,7 +23,7 @@ import {
   type PlanPreviewStateSnapshot,
   type PlanToolbarStyle,
 } from "../../shared/planPreviewProtocol";
-import { resolveGuiStylesheet } from "../guiAssets";
+import { resolveWebviewEntryAssets } from "../guiAssets";
 import { parseModelCatalog } from "../webview/provider";
 import { PendingMessageTracker } from "../webview/protocol";
 import { parsePlanDocument } from "./planDocument";
@@ -470,9 +470,8 @@ export class PlanPreviewEditorProvider
 
   private renderHtml(webview: vscode.Webview): string {
     const distRoot = path.join(this.deps.extensionUri.fsPath, "gui", "dist");
-    const jsPath = path.join(distRoot, "plan.js");
-    const cssPath = resolveGuiStylesheet(distRoot);
-    if (!fs.existsSync(jsPath)) {
+    const assets = resolveWebviewEntryAssets(distRoot, "plan.html", "plan.js");
+    if (assets.scripts.length === 0) {
       return `<!DOCTYPE html>
 <html lang="en">
   <body>
@@ -480,9 +479,19 @@ export class PlanPreviewEditorProvider
   </body>
 </html>`;
     }
-    const scriptUri = webview.asWebviewUri(vscode.Uri.file(jsPath));
-    const styleUri = cssPath ? webview.asWebviewUri(vscode.Uri.file(cssPath)).toString() : null;
     const nonce = getNonce();
+    const styleTags = assets.stylesheets
+      .map(
+        (file) =>
+          `<link rel="stylesheet" href="${webview.asWebviewUri(vscode.Uri.file(file)).toString()}" />`,
+      )
+      .join("\n    ");
+    const scriptTags = assets.scripts
+      .map(
+        (file) =>
+          `<script nonce="${nonce}" type="module" src="${webview.asWebviewUri(vscode.Uri.file(file)).toString()}"></script>`,
+      )
+      .join("\n    ");
     return `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -492,12 +501,12 @@ export class PlanPreviewEditorProvider
       content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' 'strict-dynamic';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    ${styleUri ? `<link rel="stylesheet" href="${styleUri}" />` : ""}
+    ${styleTags}
     <title>Tomcat Plan Preview</title>
   </head>
   <body>
     <div id="root"></div>
-    <script nonce="${nonce}" type="module" src="${scriptUri}"></script>
+    ${scriptTags}
   </body>
 </html>`;
   }

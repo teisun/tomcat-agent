@@ -1,6 +1,8 @@
+import * as fsPromises from "node:fs/promises";
+import * as os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as vscode from "vscode";
 
 import type { InitializeResult } from "../../../serveClient/initialize";
@@ -503,5 +505,50 @@ describe("PlanPreviewEditorProvider active-panel + native controls", () => {
   it("requestCaptureSelection is a no-op when no plan editor is focused", async () => {
     const { provider } = setup();
     await expect(provider.requestCaptureSelection()).resolves.toBeUndefined();
+  });
+});
+
+describe("PlanPreviewEditorProvider html asset resolution", () => {
+  const tempDirs: string[] = [];
+
+  afterEach(async () => {
+    await Promise.all(tempDirs.map((dir) => fsPromises.rm(dir, { force: true, recursive: true })));
+    tempDirs.length = 0;
+  });
+
+  async function createExtensionRoot(files: Record<string, string>): Promise<vscode.Uri> {
+    const dir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "tomcat-plan-assets-"));
+    tempDirs.push(dir);
+    await Promise.all(
+      Object.entries(files).map(async ([relativePath, contents]) => {
+        const filePath = path.join(dir, relativePath);
+        await fsPromises.mkdir(path.dirname(filePath), { recursive: true });
+        await fsPromises.writeFile(filePath, contents, "utf8");
+      }),
+    );
+    return vscode.Uri.file(dir);
+  }
+
+  it("carries every stylesheet the built plan.html declares (codicon.css guard)", async () => {
+    const extensionUri = await createExtensionRoot({
+      "gui/dist/plan.html": `<!doctype html><html><head>
+        <script type="module" crossorigin src="./plan.js"></script>
+        <link rel="stylesheet" crossorigin href="./styles.css">
+        <link rel="stylesheet" crossorigin href="./codicon.css">
+      </head><body><div id="root"></div></body></html>`,
+      "gui/dist/plan.js": "console.log('plan');",
+      "gui/dist/styles.css": "body {}",
+      "gui/dist/codicon.css": "@font-face { font-family: codicon; }",
+    });
+    const provider = new PlanPreviewEditorProvider(makeDeps({ extensionUri }));
+
+    const html = (
+      provider as unknown as {
+        renderHtml(webview: vscode.Webview): string;
+      }
+    ).renderHtml(new FakeWebview() as unknown as vscode.Webview);
+
+    expect(html).toContain("styles.css");
+    expect(html).toContain("codicon.css");
   });
 });

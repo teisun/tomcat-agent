@@ -2805,6 +2805,16 @@ input:focus-visible {
   color: var(--vscode-button-foreground);
 }
 
+/* Busy "stop" glyph: a solid rounded square (Cursor-style), drawn in CSS
+   because the codicon font has no clean filled square. */
+.tc-stop-square {
+  background: currentColor;
+  border-radius: 2px;
+  display: inline-block;
+  height: 10px;
+  width: 10px;
+}
+
 .tc-icon-button,
 .tc-send-button {
   flex: 0 0 34px;

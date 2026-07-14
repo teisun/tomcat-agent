@@ -1,6 +1,7 @@
 import ReactDOM from "react-dom/client";
 
 import { acquireVsCodeApiLike } from "../../../src/shared/planPreviewProtocol";
+import "@vscode/codicons/dist/codicon.css";
 import "../styles.css";
 import { PlanPreviewApp } from "./PlanPreviewApp";
 

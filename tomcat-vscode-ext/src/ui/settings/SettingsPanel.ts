@@ -33,7 +33,7 @@ import type {
   SettingsStateSnapshot,
 } from "../../shared/settingsProtocol";
 import { isSettingsIntent as isSettingsIntentMessage } from "../../shared/settingsProtocol";
-import { resolveGuiStylesheet } from "../guiAssets";
+import { resolveWebviewEntryAssets } from "../guiAssets";
 
 function getNonce(): string {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
@@ -396,18 +396,25 @@ export class SettingsPanel implements vscode.Disposable {
 
   private renderHtml(webview: vscode.Webview): string {
     const distRoot = path.join(this.deps.extensionUri.fsPath, "gui", "dist");
-    const jsPath = path.join(distRoot, "settings.js");
-    const cssPath = resolveGuiStylesheet(distRoot);
-    if (!fs.existsSync(jsPath)) {
+    const assets = resolveWebviewEntryAssets(distRoot, "settings.html", "settings.js");
+    if (assets.scripts.length === 0) {
       return this.renderFallbackHtml(
         "Tomcat settings assets are missing. Run `npm run build` in `tomcat-vscode-ext` first.",
       );
     }
-    const scriptUri = webview.asWebviewUri(vscode.Uri.file(jsPath));
-    const styleUri = cssPath
-      ? webview.asWebviewUri(vscode.Uri.file(cssPath)).toString()
-      : null;
     const nonce = getNonce();
+    const styleTags = assets.stylesheets
+      .map(
+        (file) =>
+          `<link rel="stylesheet" href="${webview.asWebviewUri(vscode.Uri.file(file)).toString()}" />`,
+      )
+      .join("\n    ");
+    const scriptTags = assets.scripts
+      .map(
+        (file) =>
+          `<script nonce="${nonce}" type="module" src="${webview.asWebviewUri(vscode.Uri.file(file)).toString()}"></script>`,
+      )
+      .join("\n    ");
     return `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -417,12 +424,12 @@ export class SettingsPanel implements vscode.Disposable {
       content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    ${styleUri ? `<link rel="stylesheet" href="${styleUri}" />` : ""}
+    ${styleTags}
     <title>Tomcat Settings</title>
   </head>
   <body>
     <div id="root"></div>
-    <script nonce="${nonce}" type="module" src="${scriptUri}"></script>
+    ${scriptTags}
   </body>
 </html>`;
   }

@@ -826,13 +826,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           text: "松手加入上下文",
           tone: "active",
         }
-      : !draft.hasContent
-        ? {
-            id: "drag",
-            text: "拖文件请按住 Shift",
-            tone: "info",
-          }
-        : null
+      : {
+          id: "drag",
+          text: "拖文件请按住 Shift",
+          tone: "info",
+        }
     : null;
   const planNotice: ComposerNotice | null = !warningNotice && planStatus
     ? {
@@ -1110,7 +1108,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             onClick={busy ? onInterrupt : onSubmit}
             type="button"
           >
-            {busy ? <span aria-hidden="true" className="codicon codicon-stop" /> : "↑"}
+            {busy ? (
+              <span aria-hidden="true" className="tc-stop-square" data-testid="stop-glyph" />
+            ) : (
+              "↑"
+            )}
           </button>
         </div>
       </div>

@@ -297,6 +297,44 @@ describe("webview html asset resolution", () => {
     expect(html).toContain("styles.css");
     provider.dispose();
   });
+
+  it("carries every stylesheet the built index.html declares (codicon.css guard)", async () => {
+    const extensionUri = await createExtensionRoot({
+      "gui/dist/index.html": `<!doctype html><html><head>
+        <script type="module" crossorigin src="./index.js"></script>
+        <link rel="stylesheet" crossorigin href="./styles.css">
+        <link rel="stylesheet" crossorigin href="./codicon.css">
+      </head><body><div id="root"></div></body></html>`,
+      "gui/dist/index.js": "console.log('index');",
+      "gui/dist/styles.css": "body { color: red; }",
+      "gui/dist/codicon.css": "@font-face { font-family: codicon; }",
+    });
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri,
+      getDefaultCwd: () => undefined,
+      getUiMode: () => "webview",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      ownership: {
+        releaseAll() {},
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    const html = (
+      provider as unknown as {
+        renderHtml(webview: vscode.Webview): string;
+      }
+    ).renderHtml(createWebview());
+
+    // The icon font stylesheet must be linked, or every codicon renders blank.
+    expect(html).toContain("styles.css");
+    expect(html).toContain("codicon.css");
+    provider.dispose();
+  });
 });
 
 function buildSearchProvider(): {

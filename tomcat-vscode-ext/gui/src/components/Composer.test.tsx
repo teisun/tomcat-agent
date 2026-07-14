@@ -274,7 +274,11 @@ describe("Composer", () => {
     });
 
     expect(screen.queryByTestId("send-button")).toBeNull();
-    fireEvent.click(screen.getByTestId("stop-button"));
+    const stopButton = screen.getByTestId("stop-button");
+    // Busy renders the Cursor-style solid square (CSS-drawn), not a codicon glyph.
+    expect(stopButton.querySelector(".tc-stop-square")).not.toBeNull();
+    expect(screen.getByTestId("stop-glyph")).toBeTruthy();
+    fireEvent.click(stopButton);
     expect(onInterrupt).toHaveBeenCalledTimes(1);
   });
 
@@ -436,7 +440,7 @@ describe("Composer", () => {
     expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
   });
 
-  it("prevents default on dragenter and hides the Shift hint once content exists", () => {
+  it("prevents default on dragenter and keeps the Shift hint even after content exists", () => {
     const { ref } = renderComposer();
     const surface = screen.getByTestId("composer-surface");
     const enterEvent = createEvent.dragEnter(surface, {
@@ -462,7 +466,7 @@ describe("Composer", () => {
       });
     });
 
-    expect(screen.queryByTestId("composer-notice-drag")).toBeNull();
+    expect(screen.getByTestId("composer-notice-drag").textContent).toBe("Tip: 拖文件请按住 Shift");
   });
 
   it("suppresses raw editor drops and forwards file uris once", () => {

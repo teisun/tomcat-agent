@@ -41,7 +41,7 @@ import {
   type WebviewStateSnapshot,
   type WebviewToolCard,
 } from "./protocol";
-import { resolveGuiStylesheet } from "../guiAssets";
+import { resolveWebviewEntryAssets } from "../guiAssets";
 import { parsePlanDocument } from "../planPreview/planDocument";
 import { ContextSearchService } from "./contextSearch";
 import { buildFileReference } from "./contextReferences";
@@ -1567,22 +1567,26 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private renderHtml(webview: vscode.Webview): string {
     const distRoot = path.join(this.deps.extensionUri.fsPath, "gui", "dist");
-    const jsPath = path.join(distRoot, "index.js");
-    const cssPath = resolveGuiStylesheet(distRoot);
-    if (!fs.existsSync(jsPath)) {
+    const assets = resolveWebviewEntryAssets(distRoot, "index.html", "index.js");
+    if (assets.scripts.length === 0) {
       return this.renderFallbackHtml(
         "Tomcat webview assets are missing. Run `npm run build` in `tomcat-vscode-ext` to generate `gui/dist`.",
       );
     }
 
-    const scriptUri = webview.asWebviewUri(vscode.Uri.file(jsPath));
-    const styleUri = cssPath
-      ? webview.asWebviewUri(vscode.Uri.file(cssPath)).toString()
-      : null;
     const nonce = getNonce();
-    const styleTag = styleUri
-      ? `<link rel="stylesheet" href="${styleUri}" />`
-      : "";
+    const styleTags = assets.stylesheets
+      .map(
+        (file) =>
+          `<link rel="stylesheet" href="${webview.asWebviewUri(vscode.Uri.file(file)).toString()}" />`,
+      )
+      .join("\n    ");
+    const scriptTags = assets.scripts
+      .map(
+        (file) =>
+          `<script nonce="${nonce}" type="module" src="${webview.asWebviewUri(vscode.Uri.file(file)).toString()}"></script>`,
+      )
+      .join("\n    ");
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -1593,12 +1597,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    ${styleTag}
+    ${styleTags}
     <title>Tomcat</title>
   </head>
   <body>
     <div id="root"></div>
-    <script nonce="${nonce}" type="module" src="${scriptUri}"></script>
+    ${scriptTags}
   </body>
 </html>`;
   }

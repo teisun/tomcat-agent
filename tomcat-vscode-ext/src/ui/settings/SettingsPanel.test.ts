@@ -62,6 +62,33 @@ describe("settings panel html asset resolution", () => {
     expect(html).toContain('rel="stylesheet"');
     expect(html).toContain("theme.css");
   });
+
+  it("carries every stylesheet the built settings.html declares (codicon.css guard)", async () => {
+    const extensionUri = await createExtensionRoot({
+      "gui/dist/settings.html": `<!doctype html><html><head>
+        <script type="module" crossorigin src="./settings.js"></script>
+        <link rel="stylesheet" crossorigin href="./styles.css">
+        <link rel="stylesheet" crossorigin href="./codicon.css">
+      </head><body><div id="root"></div></body></html>`,
+      "gui/dist/settings.js": "console.log('settings');",
+      "gui/dist/styles.css": "body { color: blue; }",
+      "gui/dist/codicon.css": "@font-face { font-family: codicon; }",
+    });
+    const panel = new SettingsPanel({
+      ensureInitialized: async () => ({} as never),
+      extensionUri,
+      messenger: {} as never,
+    });
+
+    const html = (
+      panel as unknown as {
+        renderHtml(webview: vscode.Webview): string;
+      }
+    ).renderHtml(createWebview());
+
+    expect(html).toContain("styles.css");
+    expect(html).toContain("codicon.css");
+  });
 });
 
 describe("settings panel model management flow", () => {
