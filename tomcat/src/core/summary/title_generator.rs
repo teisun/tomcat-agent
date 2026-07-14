@@ -26,6 +26,9 @@ impl ToolSnapshot {
 }
 
 /// 生成 thinking 折叠块标题（≤10 词、过去时）；失败时回退规则摘要。
+///
+/// 若最终标题落到无上下文的裸计数（"Used N tools"），再补一次"目的"从句，
+/// 拼成用户要求的 "Used N tools for <purpose>"；补句失败才保留裸计数。
 pub async fn generate_turn_summary(
     thinking_text: Option<&str>,
     tools: &[ToolSnapshot],
@@ -36,10 +39,64 @@ pub async fn generate_turn_summary(
         return String::new();
     }
     let prompt = build_turn_summary_prompt(thinking_text, tools);
-    match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
+    let title = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await
+    {
         Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 10),
         _ => fallback_turn_summary(tools),
+    };
+    if is_bare_tool_count(&title) {
+        if let Some(clause) = generate_purpose_clause(thinking_text, tools, llm, model).await {
+            return format!("Used {} tools for {clause}", tools.len());
+        }
     }
+    title
+}
+
+/// 追加一次聚焦"目的"的短调用，返回小写名词/动名词短语（≤6 词）；失败返回 `None`。
+async fn generate_purpose_clause(
+    thinking_text: Option<&str>,
+    tools: &[ToolSnapshot],
+    llm: &dyn LlmProvider,
+    model: &str,
+) -> Option<String> {
+    let prompt = build_purpose_clause_prompt(thinking_text, tools);
+    let raw = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
+        Ok(Ok(text)) if !text.trim().is_empty() => text,
+        _ => return None,
+    };
+    let clause = sanitize_purpose_clause(raw);
+    if clause.is_empty() {
+        None
+    } else {
+        Some(clause)
+    }
+}
+
+/// 判断标题是否是无上下文的裸计数："Used <N> tool" / "Used <N> tools"。
+pub(super) fn is_bare_tool_count(title: &str) -> bool {
+    let Some(rest) = title.trim().strip_prefix("Used ") else {
+        return false;
+    };
+    let mut parts = rest.split_whitespace();
+    let (Some(count), Some(noun), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !count.is_empty()
+        && count.chars().all(|c| c.is_ascii_digit())
+        && matches!(noun, "tool" | "tools")
+}
+
+/// 清洗"目的"从句：去引号/尾标点、剥离多余前缀、限词数。
+pub(super) fn sanitize_purpose_clause(raw: String) -> String {
+    let mut clause = sanitize_title(raw, 6);
+    // 模型偶尔会带上 "for "/"to " 前缀或裸动词，剥掉让 "Used N tools for {clause}" 读起来自然。
+    for prefix in ["for ", "For ", "to ", "To "] {
+        if let Some(stripped) = clause.strip_prefix(prefix) {
+            clause = stripped.to_string();
+            break;
+        }
+    }
+    clause.trim().to_string()
 }
 
 /// 生成会话标题（3–6 词）；失败返回 `Err`，上层保留规则占位。
@@ -55,6 +112,102 @@ pub async fn generate_session_title(
         Ok(Err(e)) => Err(e),
         Err(_) => Err(AppError::internal("session title generation timed out")),
     }
+}
+
+/// 生成单条 shell 命令的"目的"短句（祈使句 2–6 词、无标点）；失败回落 `Run <首个命令名>`。
+///
+/// 供 bash 卡片标题异步升级用（不阻塞命令执行）。
+pub async fn generate_command_summary(
+    command: &str,
+    output_excerpt: Option<&str>,
+    llm: &dyn LlmProvider,
+    model: &str,
+) -> String {
+    let command = command.trim();
+    if command.is_empty() {
+        return String::new();
+    }
+    let prompt = build_command_summary_prompt(command, output_excerpt);
+    match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
+        Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 6),
+        _ => fallback_command_summary(command),
+    }
+}
+
+/// 命令目的的规则回退：`Run <首个命令名>`（如 `Run git`）；无法识别时 `Ran command`。
+pub fn fallback_command_summary(command: &str) -> String {
+    match first_command_binary(command) {
+        Some(bin) => format!("Run {bin}"),
+        None => "Ran command".to_string(),
+    }
+}
+
+/// 提取命令里第一个"真正的可执行名"：跳过 `VAR=...` 环境赋值与 `sudo`，
+/// 取第一个非空段的首 token（去掉 `./` 前缀）。
+fn first_command_binary(command: &str) -> Option<String> {
+    for segment in split_command_segments(command) {
+        for token in segment.split_whitespace() {
+            if token == "sudo" || token == "command" || token == "then" || token == "do" {
+                continue;
+            }
+            // 形如 FOO=bar 的环境赋值（有 `=` 且左侧是合法变量名）跳过；`--flag=value` 不算。
+            if let Some((lhs, _)) = token.split_once('=') {
+                if is_env_var_name(lhs) {
+                    continue;
+                }
+            }
+            // 去掉 `./` 前缀与目录路径，只留 basename（与客户端 commandBinaries 一致）。
+            let name = token
+                .trim_start_matches("./")
+                .rsplit('/')
+                .next()
+                .unwrap_or(token);
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 是否是合法环境变量名（用于识别 `FOO=bar` 前缀）。
+fn is_env_var_name(candidate: &str) -> bool {
+    !candidate.is_empty()
+        && candidate
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !candidate.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// 把命令按 `&& || | ; 换行` 切成段（用于取每段首个可执行名）。
+fn split_command_segments(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let bytes: Vec<char> = command.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        let is_double = matches!((c, next), ('&', Some('&')) | ('|', Some('|')));
+        if is_double {
+            segments.push(std::mem::take(&mut current));
+            i += 2;
+            continue;
+        }
+        if matches!(c, '|' | ';' | '\n') {
+            segments.push(std::mem::take(&mut current));
+            i += 1;
+            continue;
+        }
+        current.push(c);
+        i += 1;
+    }
+    segments.push(current);
+    segments
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// 规则回退：按工具类型计数拼自然语言摘要。
@@ -163,10 +316,48 @@ fn build_turn_summary_prompt(thinking_text: Option<&str>, tools: &[ToolSnapshot]
          - Past tense\n\
          - First word must be a past tense verb (Reviewed, Updated, Created, Ran, Searched, etc.)\n\
          - For multiple file reads use \"Reviewed N files\"\n\
+         - NEVER answer with only a bare tool count like \"Used 4 tools\"; always describe what was done. \
+           If the tools are mixed and no single verb fits, use the form \"Used N tools for <short purpose>\".\n\
          - No quotes, no trailing punctuation\n\
          - Output only the title\n\n\
          Thinking:\n{thinking}\n\n\
          Tools:\n{tools_block}"
+    )
+}
+
+/// "目的"从句 prompt：只要一个小写名词/动名词短语，用于拼 "Used N tools for <clause>"。
+fn build_purpose_clause_prompt(thinking_text: Option<&str>, tools: &[ToolSnapshot]) -> String {
+    let thinking = thinking_text.unwrap_or("").trim();
+    let mut tools_block = String::new();
+    for t in tools {
+        tools_block.push_str(&format!("- {}: {}\n", t.tool_name, t.summary));
+    }
+    format!(
+        "In 2-6 words, describe the PURPOSE of this batch of tool calls.\n\
+         Requirements:\n\
+         - Lowercase\n\
+         - A noun or gerund phrase, e.g. \"finding coffee shops in Shenzhen\" or \"the plan preview layout\"\n\
+         - Do NOT start with a verb like Used/Ran/Reviewed and do NOT include the word \"tools\"\n\
+         - Do NOT start with \"for\" or \"to\"\n\
+         - No quotes, no trailing punctuation\n\
+         - Output only the phrase\n\n\
+         Thinking:\n{thinking}\n\n\
+         Tools:\n{tools_block}"
+    )
+}
+
+/// bash 卡片标题 prompt：只要一句祈使目的短语（2–6 词），不复述命令本身。
+fn build_command_summary_prompt(command: &str, output_excerpt: Option<&str>) -> String {
+    let output = output_excerpt.unwrap_or("").trim();
+    format!(
+        "In 2-6 words, summarize WHY this shell command is run (its goal, not how it works).\n\
+         Requirements:\n\
+         - Imperative mood, e.g. \"Gather git status and recent commits\" or \"Create output directory\"\n\
+         - Do NOT repeat the raw command verbatim and do NOT include flags or paths\n\
+         - No quotes, no backticks, no trailing punctuation\n\
+         - Output only the phrase\n\n\
+         Command:\n{command}\n\n\
+         Output (may be truncated):\n{output}"
     )
 }
 

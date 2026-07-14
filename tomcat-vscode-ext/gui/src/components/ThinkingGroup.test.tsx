@@ -138,6 +138,27 @@ describe("ThinkingGroup", () => {
     expect(screen.getByTestId("thinking-group-title").textContent).toBe("Reviewed 2 files");
   });
 
+  it("renders a 'Used N tools for <purpose>' summary title verbatim (treated as clean)", () => {
+    render(
+      <ThinkingGroup
+        group={buildGroup({
+          thinking: {
+            assistantMessageId: "assistant-1",
+            id: "think-1",
+            summaryTitle: "Used 4 tools for finding coffee shops in Shenzhen",
+            text: "Mixed batch of reads and edits.",
+            type: "thinking",
+          },
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe(
+      "Used 4 tools for finding coffee shops in Shenzhen",
+    );
+  });
+
   it("replaces raw tool-argument summary titles with a clean tool label", () => {
     render(
       <ThinkingGroup

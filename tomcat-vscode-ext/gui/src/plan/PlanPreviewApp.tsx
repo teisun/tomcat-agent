@@ -90,6 +90,9 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
   // The fixed action strip must sit outside the scrolling content column so it
   // never scrolls away; assert the structural invariant here for E2E.
   const stripOutsideContent = Boolean(strip && content && !content.contains(strip));
+  // Left inset of the strip: ~0 confirms the full-bleed header (no leftover VS
+  // Code body padding). null when the strip isn't rendered (native toolbar mode).
+  const stripInsetLeft = strip ? Math.round(strip.getBoundingClientRect().left) : null;
   return {
     bodyHasContent: Boolean(body && (body.textContent ?? "").trim().length > 0),
     buildModelOptions: options,
@@ -99,6 +102,7 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
     selectionButtonVisible: Boolean(
       document.querySelector('[data-testid="plan-selection-add"]'),
     ),
+    stripInsetLeft,
     stripOutsideContent,
     todoCountText: countEl ? countEl.textContent : null,
     todoIconSizes,

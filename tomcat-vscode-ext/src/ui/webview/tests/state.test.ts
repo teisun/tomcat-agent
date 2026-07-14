@@ -110,6 +110,66 @@ describe("WebviewStateStore wire routing", () => {
     );
   });
 
+  it("maps tool.summary_updated onto the matching tool card by toolCallId", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      args: { command: "git status" },
+      sessionId: "s1",
+      toolCallId: "tc-bash",
+      toolName: "bash",
+      type: "tool_execution_start",
+    });
+    store.applyEvent({
+      isError: false,
+      result: "On branch main",
+      sessionId: "s1",
+      toolCallId: "tc-bash",
+      toolName: "bash",
+      type: "tool_execution_end",
+    });
+
+    store.applyEvent({
+      sessionId: "s1",
+      summaryTitle: "Gather git status",
+      toolCallId: "tc-bash",
+      type: "tool.summary_updated",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    const tool = session.timeline.find(
+      (item) => item.type === "tool" && item.toolCallId === "tc-bash",
+    );
+    expect(tool?.type === "tool" ? tool.summaryTitle : null).toBe("Gather git status");
+  });
+
+  it("ignores tool.summary_updated for an unknown toolCallId", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      args: { command: "ls" },
+      sessionId: "s1",
+      toolCallId: "tc-known",
+      toolName: "bash",
+      type: "tool_execution_start",
+    });
+
+    store.applyEvent({
+      sessionId: "s1",
+      summaryTitle: "should not attach",
+      toolCallId: "tc-missing",
+      type: "tool.summary_updated",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    const tool = session.timeline.find(
+      (item) => item.type === "tool" && item.toolCallId === "tc-known",
+    );
+    expect(tool?.type === "tool" ? tool.summaryTitle : undefined).toBeUndefined();
+  });
+
   it("updates session tab title on session.title_updated", () => {
     const store = new WebviewStateStore();
     store.syncSessionList(

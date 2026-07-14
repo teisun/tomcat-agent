@@ -112,8 +112,12 @@ impl LlmProvider for MainStreamLlm {
 }
 
 /// Title / utility provider：`chat` 返回脚本化标题或错误（驱动成功 / 回退两条路径）。
+///
+/// `purpose` 非空时，识别到"目的从句" prompt（含 `describe the PURPOSE`）返回它，
+/// 用于覆盖 "Used N tools" → "Used N tools for <purpose>" 的二次调用路径。
 struct TitleChatLlm {
     title: String,
+    purpose: String,
     fail: bool,
     call_count: AtomicUsize,
 }
@@ -122,6 +126,15 @@ impl TitleChatLlm {
     fn ok(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
+            purpose: String::new(),
+            fail: false,
+            call_count: AtomicUsize::new(0),
+        }
+    }
+    fn ok_two_phase(title: impl Into<String>, purpose: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            purpose: purpose.into(),
             fail: false,
             call_count: AtomicUsize::new(0),
         }
@@ -129,6 +142,7 @@ impl TitleChatLlm {
     fn failing() -> Self {
         Self {
             title: String::new(),
+            purpose: String::new(),
             fail: true,
             call_count: AtomicUsize::new(0),
         }
@@ -144,16 +158,26 @@ impl LlmProvider for TitleChatLlm {
     fn provider_name(&self) -> &str {
         "mock-title"
     }
-    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+    async fn chat(&self, req: ChatRequest) -> Result<ChatResponse, AppError> {
         self.call_count.fetch_add(1, Ordering::Relaxed);
         if self.fail {
             return Err(AppError::Llm("title mock failure".to_string()));
         }
+        let prompt = req
+            .messages
+            .last()
+            .and_then(|m| m.text_content())
+            .unwrap_or("");
+        let text = if !self.purpose.is_empty() && prompt.contains("describe the PURPOSE") {
+            &self.purpose
+        } else {
+            &self.title
+        };
         Ok(ChatResponse {
             id: None,
             choices: vec![ChatResponseChoice {
                 index: 0,
-                message: ChatMessage::assistant(&self.title),
+                message: ChatMessage::assistant(text),
                 finish_reason: Some("stop".to_string()),
             }],
             usage: None,
@@ -655,6 +679,35 @@ async fn turnend_summary_title_falls_back_to_rule_on_utility_failure() {
     assert!(
         captured.turn_summary_updated_payloads.is_empty(),
         "utility 失败时不应再 emit turn.summary_updated，实际: {:?}",
+        captured.turn_summary_updated_payloads
+    );
+}
+
+/// utility 首答落到裸计数 "Used N tools" → 二次"目的"调用补成 "Used N tools for <purpose>"。
+#[tokio::test]
+async fn turn_summary_updated_appends_purpose_when_utility_returns_bare_count() {
+    common::setup_logging();
+    info!(target: "test", phase = "arrange", "title 首答 'Used 3 tools'（裸计数），目的从句答 'finding the bug'");
+    let title = Arc::new(TitleChatLlm::ok_two_phase("Used 3 tools", "finding the bug"));
+
+    info!(target: "test", phase = "act", "驱动 3-tool 回合 + text 收敛");
+    let captured = run_and_collect_summaries(
+        vec![thinking_read_tool_stream(3), text_stream("Done reviewing.")],
+        title,
+        "sess-summary-bare-count",
+    )
+    .await;
+
+    info!(target: "test", phase = "assert", " turn.summary_updated = {:?}", captured.turn_summary_updated_payloads);
+    assert!(
+        captured
+            .turn_summary_updated_payloads
+            .iter()
+            .any(|payload| {
+                payload.get("summaryTitle").and_then(|v| v.as_str())
+                    == Some("Used 3 tools for finding the bug")
+            }),
+        "裸计数应补成 \"Used 3 tools for finding the bug\"，实际: {:?}",
         captured.turn_summary_updated_payloads
     );
 }

@@ -52,6 +52,9 @@ export interface PlanPreviewDomSnapshot {
   /** Rendered mermaid diagrams (fenced ```mermaid``` blocks turned into SVG). */
   mermaidSvgCount: number;
   selectionButtonVisible: boolean;
+  /** Left inset (px) of the action strip's bounding box; ~0 means it spans the
+   * full editor width with no leftover VS Code body padding. */
+  stripInsetLeft: number | null;
   /** True when the action strip is a sibling of (not nested in) the scroll column. */
   stripOutsideContent: boolean;
   todoCountText: string | null;

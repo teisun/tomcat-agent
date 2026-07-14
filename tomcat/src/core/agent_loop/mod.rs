@@ -136,6 +136,7 @@ mod steering_injection;
 mod stream_handler;
 mod tool_dispatcher;
 mod tool_exec;
+mod tool_summary_update;
 mod turn_finalize;
 mod turn_summary;
 mod types;

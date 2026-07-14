@@ -323,6 +323,64 @@ function commandText(item: WebviewToolCard): string {
   );
 }
 
+/** 完整命令串（多行/多段保留），用于终端正文 `$ …` 提示行。 */
+function fullCommandText(item: WebviewToolCard): string {
+  const args = item.args ?? {};
+  return asString(args.command) ?? asString(args.cmd) ?? asString(args.script) ?? "";
+}
+
+/**
+ * 客户端解析命令名标签（零 LLM）：按 `&& || | ; \n` 切段，取每段首个"可执行名"，
+ * 剔除 `VAR=…` 环境赋值与 `sudo`，去掉路径前缀，去重、上限 4 个。
+ * 例：`git status && echo '---'` → `["git", "echo"]`。
+ */
+export function commandBinaries(command: string | undefined): string[] {
+  if (!command || !command.trim()) {
+    return [];
+  }
+  const segments = command
+    .split(/\n|&&|\|\||[|;]/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const names: string[] = [];
+  for (const segment of segments) {
+    let binary: string | undefined;
+    for (const token of segment.split(/\s+/)) {
+      if (!token) {
+        continue;
+      }
+      // 环境赋值 FOO=bar（非 --flag=value）跳过。
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+        continue;
+      }
+      if (token === "sudo" || token === "command") {
+        continue;
+      }
+      binary = token;
+      break;
+    }
+    if (!binary) {
+      continue;
+    }
+    const name = binary.replace(/^\.\//, "").split("/").pop();
+    if (name && !names.includes(name)) {
+      names.push(name);
+    }
+    if (names.length >= 4) {
+      break;
+    }
+  }
+  return names;
+}
+
+/** bash 卡片头的占位动词（summaryTitle 未到时）：中断/运行中/已完成三态。 */
+function commandPlaceholderVerb(item: WebviewToolCard): string {
+  if (item.status === "interrupted") {
+    return "Interrupted";
+  }
+  return isRunning(item) ? "Running" : "Ran";
+}
+
 function parseApprovalQuestions(args: Record<string, unknown> | undefined): WebviewApprovalQuestion[] | null {
   const questions = args?.questions;
   if (!Array.isArray(questions)) {
@@ -468,22 +526,15 @@ function renderFlatContent(
       }
       return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
     case "command": {
-      const command =
-        firstLine(asString(args.command)) ??
-        firstLine(asString(args.cmd)) ??
-        firstLine(asString(args.script)) ??
-        "command";
-      const verb =
-        item.status === "interrupted"
-          ? "Interrupted"
-          : isRunning(item)
-            ? "Running"
-            : "Ran";
+      // Flat rows have no terminal body to host the command, so keep the command
+      // visible inline; the async summaryTitle (when present) leads as the purpose.
       return (
         <span className="tc-tool-row__inline">
-          <span className="tc-tool-row__text">{verb}</span>
+          <span className="tc-tool-row__text" data-testid="tool-row-cmd-purpose">
+            {asString(item.summaryTitle) ?? commandPlaceholderVerb(item)}
+          </span>
           <code className="tc-tool-row__cmd" data-testid="tool-row-cmd">
-            {command}
+            {commandText(item)}
           </code>
         </span>
       );
@@ -701,12 +752,14 @@ export function ToolRow({
         {labelWithRunningIndicator(
           category === "command" ? (
             <>
-              <span className="tc-tool-row__text">
-                {item.status === "interrupted" ? "Interrupted" : isRunning(item) ? "Running" : "Ran"}
+              <span className="tc-tool-row__text" data-testid="tool-row-cmd-purpose">
+                {asString(item.summaryTitle) ?? commandPlaceholderVerb(item)}
               </span>
-              <code className="tc-tool-row__cmd" data-testid="tool-row-cmd">
-                {commandText(item)}
-              </code>
+              {commandBinaries(fullCommandText(item)).length > 0 ? (
+                <span className="tc-tool-row__cmd-tags" data-testid="tool-row-cmd-tags">
+                  {commandBinaries(fullCommandText(item)).join(", ")}
+                </span>
+              ) : null}
             </>
           ) : (
             <>
@@ -755,7 +808,11 @@ export function ToolRow({
             leadingIcon={disclosureLeadingIcon}
             preview={
               category === "command" ? (
-                <TerminalOutput preview text={tailTerminalOutput(item.summary, 5)} />
+                <TerminalOutput
+                  command={fullCommandText(item)}
+                  preview
+                  text={tailTerminalOutput(item.summary, 5)}
+                />
               ) : (
                 <DiffView diff={item.diff} previewRows={5} />
               )
@@ -765,7 +822,7 @@ export function ToolRow({
             toggleTestId="tool-row-toggle"
           >
             {category === "command" ? (
-              <TerminalOutput text={item.summary} />
+              <TerminalOutput command={fullCommandText(item)} text={item.summary} />
             ) : (
               <DiffView diff={item.diff} />
             )}

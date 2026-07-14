@@ -81,7 +81,7 @@ export type ServeContentSegment = {
 
 export type ServeContextRefKind = "selection" | "file";
 
-export type ServeEvent = ServePlanEvent | ServeSessionEvent | ServeTurnEvent | WireEvent;
+export type ServeEvent = ServePlanEvent | ServeSessionEvent | ServeToolEvent | ServeTurnEvent | WireEvent;
 
 export interface ServeMessageParams {
   attachments?: ServeAttachment[];
@@ -184,6 +184,13 @@ export interface ServeTodoItem {
   id: string;
   status: string;
 }
+export type ServeToolEvent = {
+  sessionId?: null | string;
+  summaryTitle?: null | string;
+  toolCallId: string;
+  type: "tool.summary_updated";
+};
+
 export type ServeTurnEvent = {
   assistantMessageId?: null | string;
   sessionId?: null | string;

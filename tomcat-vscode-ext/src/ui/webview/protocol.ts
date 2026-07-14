@@ -136,6 +136,8 @@ export interface WebviewToolCard {
   isError: boolean;
   status: WebviewToolStatus;
   summary?: string;
+  /** utility-flash 异步生成的命令"目的"短句（bash 卡片标题）；live-only。 */
+  summaryTitle?: string | null;
   toolCallId: string;
   toolName: string;
   type: "tool";

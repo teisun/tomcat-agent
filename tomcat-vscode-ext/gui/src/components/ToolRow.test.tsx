@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { WebviewToolCard } from "../types";
-import { toolCategory, ToolRow } from "./ToolRow";
+import { commandBinaries, toolCategory, ToolRow } from "./ToolRow";
 
 function buildTool(overrides: Partial<WebviewToolCard> = {}): WebviewToolCard {
   return {
@@ -122,17 +122,65 @@ describe("ToolRow", () => {
     );
 
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Ran");
-    expect(screen.getByTestId("tool-row-cmd").textContent).toBe("cargo test");
+    // The full command moved to the terminal body; the header keeps a short command tag.
+    expect(screen.queryByTestId("tool-row-cmd")).toBeNull();
+    expect(screen.getByTestId("tool-row-cmd-tags").textContent).toBe("cargo");
     expect(container.querySelector(".tc-tool-row__leading-icon")).toBeNull();
     expect(screen.getByTestId("disclosure-card-leading-icon")).toBeTruthy();
     expect(screen.queryByTestId("tool-row-terminal")).toBeNull();
     const preview = screen.getByTestId("terminal-output-preview").textContent ?? "";
+    expect(preview).toContain("$ cargo test");
     expect(preview).not.toContain("line 1");
     expect(preview).toContain("line 2");
     expect(preview).toContain("line 6");
     fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain("$ cargo test");
     expect(screen.getByTestId("tool-row-terminal").textContent).toContain("line 1");
     expect(screen.getByTestId("tool-row-terminal").textContent).toContain("line 6");
+  });
+
+  it("bash header shows the utility purpose title and command-name tags", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { command: "git status && echo '---' && git log -1" },
+          status: "complete",
+          summary: "On branch main\n---\ncommit abc",
+          summaryTitle: "Gather git status and recent commit",
+          toolName: "bash",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-cmd-purpose").textContent).toBe(
+      "Gather git status and recent commit",
+    );
+    // Deduped command-name tags parsed client-side from the full command.
+    expect(screen.getByTestId("tool-row-cmd-tags").textContent).toBe("git, echo");
+    // Full command surfaces as a `$ …` prompt line in the terminal body.
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain(
+      "$ git status && echo '---' && git log -1",
+    );
+  });
+
+  it("bash header falls back to a placeholder verb before the summary title arrives", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { command: "npm run build" },
+          status: "complete",
+          summary: "built ok",
+          summaryTitle: null,
+          toolName: "bash",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-cmd-purpose").textContent).toBe("Ran");
+    expect(screen.getByTestId("tool-row-cmd-tags").textContent).toBe("npm");
   });
 
   it("bash row auto expands when it errors", () => {
@@ -337,6 +385,17 @@ describe("ToolRow", () => {
 
     expect(screen.getByTestId("answer-card-question").textContent).toContain("Deploy where?");
     expect(screen.getByTestId("answer-option-deploy_target").textContent).toContain("Staging");
+  });
+
+  it("commandBinaries parses, dedupes and caps command-name tags", () => {
+    expect(commandBinaries("git status")).toEqual(["git"]);
+    expect(commandBinaries("git status && echo '---' && git log")).toEqual(["git", "echo"]);
+    expect(commandBinaries("cat a | grep foo | sort")).toEqual(["cat", "grep", "sort"]);
+    expect(commandBinaries("FOO=bar sudo ./deploy.sh")).toEqual(["deploy.sh"]);
+    expect(commandBinaries("/usr/local/bin/node script.js")).toEqual(["node"]);
+    expect(commandBinaries("a; b; c; d; e")).toEqual(["a", "b", "c", "d"]);
+    expect(commandBinaries("")).toEqual([]);
+    expect(commandBinaries(undefined)).toEqual([]);
   });
 
   it("stops showing the running indicator for interrupted tools", () => {

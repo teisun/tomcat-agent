@@ -2365,6 +2365,9 @@
           },
           {
             "$ref": "#/definitions/ServeTurnEvent"
+          },
+          {
+            "$ref": "#/definitions/ServeToolEvent"
           }
         ]
       },
@@ -2947,6 +2950,41 @@
             "type": "string"
           }
         }
+      },
+      "ServeToolEvent": {
+        "description": "`tool.*` 自定义事件的 schema 入口（当前仅 `tool.summary_updated`）。\n\n单条工具卡片（bash）的标题在命令执行后由 utility 模型异步生成，通过该事件 按 `toolCallId` 热更新到前端；仅 live 生效，历史重载回落客户端占位。",
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "toolCallId",
+              "type"
+            ],
+            "properties": {
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "summaryTitle": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "toolCallId": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool.summary_updated"
+                ]
+              }
+            }
+          }
+        ]
       },
       "ServeTurnEvent": {
         "description": "`turn.*` 自定义事件的 schema 入口（当前仅 `turn.summary_updated`）。",

@@ -957,6 +957,20 @@ function upsertTool(
   return next;
 }
 
+/** 把 utility-flash 异步生成的命令"目的"短句写到对应工具卡片（按 toolCallId 定位）。 */
+function applyToolSummaryTitle(
+  session: WebviewSessionSnapshot,
+  toolCallId: string,
+  summaryTitle: string,
+): void {
+  const tool = session.timeline.find(
+    (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
+  );
+  if (tool) {
+    tool.summaryTitle = summaryTitle;
+  }
+}
+
 function upsertApproval(
   session: WebviewSessionSnapshot,
   request: AskQuestionWireRequest,
@@ -1713,6 +1727,21 @@ export class WebviewStateStore {
                 )
               : [],
         });
+        return;
+      }
+      case "tool.summary_updated": {
+        const toolCallId =
+          "toolCallId" in frame && typeof frame.toolCallId === "string"
+            ? frame.toolCallId
+            : null;
+        const summaryTitle =
+          "summaryTitle" in frame && typeof frame.summaryTitle === "string"
+            ? frame.summaryTitle
+            : null;
+        if (!toolCallId || !summaryTitle) {
+          return;
+        }
+        applyToolSummaryTitle(session, toolCallId, summaryTitle);
         return;
       }
       default:

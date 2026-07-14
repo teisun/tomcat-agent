@@ -171,6 +171,8 @@ pub mod wire {
     pub const WIRE_SESSION_TODOS: &str = "session.todos";
     /// turn 折叠标题异步 utility 覆盖后推送。
     pub const WIRE_TURN_SUMMARY_UPDATED: &str = "turn.summary_updated";
+    /// 单条工具（bash）标题异步 utility 覆盖后推送。
+    pub const WIRE_TOOL_SUMMARY_UPDATED: &str = "tool.summary_updated";
 
     // --- ExtensionEvent ---
     pub const WIRE_STARTUP: &str = "startup";

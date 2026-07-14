@@ -4,7 +4,8 @@ mod title_generator;
 mod tool_summary;
 
 pub use title_generator::{
-    fallback_turn_summary, generate_session_title, generate_turn_summary, ToolSnapshot,
+    fallback_command_summary, fallback_turn_summary, generate_command_summary,
+    generate_session_title, generate_turn_summary, ToolSnapshot,
 };
 pub use tool_summary::one_line_summary;
 

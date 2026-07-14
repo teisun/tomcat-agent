@@ -1215,11 +1215,60 @@ export async function assertWebviewStreamingFlow(
     commandSnapshot.commandBlockCount >= 1,
     `expected an errored bash tool to auto-expand into a terminal block, got ${commandSnapshot.commandBlockCount}`,
   );
+  // The full command now lives in the terminal body as a `$ …` prompt line; the
+  // header shows a short purpose ("Ran" placeholder) + command-name tags.
   assert.ok(
-    commandSnapshot.expandedToolTitles.some(
-      (title) => title.startsWith("Ran") && title.includes("npm test -- --watch=false"),
+    commandSnapshot.expandedToolTitles.some((title) => title.startsWith("Ran")),
+    `expected the errored bash row to auto-expand with a "Ran" header, got ${JSON.stringify(commandSnapshot.expandedToolTitles)}`,
+  );
+  assert.ok(
+    commandSnapshot.html.includes("npm test -- --watch=false"),
+    "expected the full command to render in the bash terminal body",
+  );
+
+  // A successful bash whose title is asynchronously upgraded by utility-flash via
+  // a `tool.summary_updated` event; assert the header adopts the purpose phrase
+  // while the full command stays in the terminal body.
+  await api.__testing.injectServeEvent({
+    args: { command: "git status && echo done" },
+    sessionId,
+    toolCallId: "streaming-bash-summary-1",
+    toolName: "bash",
+    type: "tool_execution_start",
+  });
+  await api.__testing.injectServeEvent({
+    isError: false,
+    result: "On branch main\ndone",
+    sessionId,
+    toolCallId: "streaming-bash-summary-1",
+    toolName: "bash",
+    type: "tool_execution_end",
+  });
+  await api.__testing.injectServeEvent({
+    sessionId,
+    summaryTitle: "Check git status",
+    toolCallId: "streaming-bash-summary-1",
+    type: "tool.summary_updated",
+  });
+  const summarySnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.toolTitles.some((title) => title.includes("Check git status")) &&
+      candidate.html.includes("git status &amp;&amp; echo done")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    summarySnapshot.toolTitles.some(
+      (title) => title.includes("Check git status") && title.includes("git"),
     ),
-    `expected the errored bash row to auto-expand, got ${JSON.stringify(commandSnapshot.expandedToolTitles)}`,
+    `expected the bash header to show the utility purpose + command tags, got ${JSON.stringify(summarySnapshot.toolTitles)}`,
+  );
+  assert.ok(
+    !summarySnapshot.toolTitles.some((title) => title.includes("git status && echo done")),
+    "expected the full command to stay out of the bash header",
   );
 }
 
@@ -3553,6 +3602,10 @@ export async function assertPlanPreviewCustomEditorFlow(
       preview.stripOutsideContent,
       true,
       "expected the action strip to be a fixed header outside the scrolling content",
+    );
+    assert.ok(
+      preview.stripInsetLeft !== null && preview.stripInsetLeft <= 2,
+      `expected the action strip to span the full editor width (stripInsetLeft ~0), got ${String(preview.stripInsetLeft)}`,
     );
     assert.equal(
       preview.todoCountText,

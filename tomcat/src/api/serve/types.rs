@@ -627,6 +627,7 @@ pub enum ServeEvent {
     Plan(ServePlanEvent),
     Session(ServeSessionEvent),
     Turn(ServeTurnEvent),
+    Tool(ServeToolEvent),
 }
 
 /// `session.*` 自定义事件的 schema 入口（`session.todos` / `session.title_updated`）。
@@ -666,6 +667,24 @@ pub enum ServeTurnEvent {
         assistant_message_id: Option<String>,
         #[serde(rename = "toolCallIds", skip_serializing_if = "Option::is_none")]
         tool_call_ids: Option<Vec<String>>,
+        #[serde(rename = "summaryTitle", skip_serializing_if = "Option::is_none")]
+        summary_title: Option<String>,
+    },
+}
+
+/// `tool.*` 自定义事件的 schema 入口（当前仅 `tool.summary_updated`）。
+///
+/// 单条工具卡片（bash）的标题在命令执行后由 utility 模型异步生成，通过该事件
+/// 按 `toolCallId` 热更新到前端；仅 live 生效，历史重载回落客户端占位。
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ServeToolEvent {
+    #[serde(rename = "tool.summary_updated")]
+    ToolSummaryUpdated {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "toolCallId")]
+        tool_call_id: String,
         #[serde(rename = "summaryTitle", skip_serializing_if = "Option::is_none")]
         summary_title: Option<String>,
     },

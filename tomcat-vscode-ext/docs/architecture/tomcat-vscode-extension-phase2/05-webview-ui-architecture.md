@@ -77,7 +77,7 @@ main.tsx
 | [`gui/src/components/ThinkingGroup.tsx`](../../../gui/src/components/ThinkingGroup.tsx) | “思考/上下文”折叠盒 | 只容纳 thinking + context/other 工具，默认收起；只有确实还挂着工具时才采信 `summaryTitle`，避免和独立 action 行重复。 |
 | [`gui/src/components/ToolRow.tsx`](../../../gui/src/components/ToolRow.tsx) | 统一工具行 | 用 `toolCategory()` 把工具分成 `edit / command / answer / context / other`，再决定图标、徽章、扁平样式、展开规则与内容体。 |
 | [`gui/src/components/DisclosureCard.tsx`](../../../gui/src/components/DisclosureCard.tsx) | 内容无关的折叠外壳 | 只管 header / preview / expanded body / 左侧状态条，不关心里面是 terminal 还是 diff。 |
-| [`gui/src/components/TerminalOutput.tsx`](../../../gui/src/components/TerminalOutput.tsx) | 命令输出体 | 负责等宽输出渲染与 `tail(n)` 预览。 |
+| [`gui/src/components/TerminalOutput.tsx`](../../../gui/src/components/TerminalOutput.tsx) | 命令输出体 | 负责等宽输出渲染与 `tail(n)` 预览；可选 `command` prop 会在输出前加一行 `$ <命令>` 提示行（终端观感）。 |
 | [`gui/src/components/DiffView.tsx`](../../../gui/src/components/DiffView.tsx) | 结构化 diff 输出体 | 把核心下发的 `FileDiffLine[]` 渲染成行号列、加删底色、长 context 折叠与大文件 fallback。 |
 | [`gui/src/components/AnswerCard.tsx`](../../../gui/src/components/AnswerCard.tsx) | ask_question 已回答卡片 | 作为 answer 类工具行的常显内容体，展示问题与已选答案。 |
 | [`gui/src/components/ApprovalCard.tsx`](../../../gui/src/components/ApprovalCard.tsx) | AskQuestion 待审批卡 | 直接把宿主 `control_request.ask_question` 渲染成按钮组。 |
@@ -345,9 +345,9 @@ ToolRow
   │         └─ body    = DiffView
   ├─ command
   │    └─ DisclosureCard
-  │         ├─ header  = Ran + 命令
-  │         ├─ preview = TerminalOutput.tail(5)
-  │         └─ body    = TerminalOutput
+  │         ├─ header  = 目的短句(utility-flash) + 命令名标签(git, echo)
+  │         ├─ preview = TerminalOutput(command=$完整命令).tail(5)
+  │         └─ body    = TerminalOutput(command=$完整命令)
   ├─ answer  -> 直接挂 AnswerCard，始终展开
   └─ context -> 极简单行；单条 read/search 可直接扁平直出
 ```
@@ -362,11 +362,16 @@ ToolRow
    - 宿主 [`src/ui/webview/provider.ts`](../../../src/ui/webview/provider.ts) 会按 `ctx+del` 重建 before、按 `ctx+add` 重建 after，再通过 [`src/ide/VsCodeIde.ts`](../../../src/ide/VsCodeIde.ts) 复用既有 `tomcat-diff://` + `vscode.diff` 原生链路打开 diff 编辑器；虚拟文档键现编码进 URI path，规避 authority 被小写化后的空白 diff。
    - 大文件拿不到 `diff` 时，仍保留 `+N/-M` 徽章，但 `DiffView` 只显示 fallback 提示，`View diff` 自动隐藏。
 
-2. **command**
+2. **command**（抄 Cursor 的终端观感，见 §5.3.1）
    - `bash / shell / execute_command` 作为 standalone action 行常驻。
-   - 用 `DisclosureCard(header=Ran + 命令, preview/body=TerminalOutput)` 统一折叠行为。
+   - 卡片头**不再塞完整命令**：改成「目的短句 + 命令名标签」。
+     - **目的短句**由后端 utility 模型（`utility-flash`）在命令执行完后**异步**生成，经 `tool.summary_updated` 事件按 `toolCallId` 热更新（见 §5.3.1 数据流）；短句到达前用确定性占位动词（运行中 `Running` / 完成 `Ran` / 中断 `Interrupted`）。
+     - **命令名标签**（灰字、逗号分隔，如 `git, echo`）由 GUI 端零 LLM 解析：`commandBinaries(cmd)` 按 `&& || | ; \n` 切段，取每段首个可执行名，剔除 `VAR=…` 环境赋值与 `sudo`，去重、上限 4 个。
+   - **完整命令下沉到正文**：`TerminalOutput` 支持可选 `command` prop，在输出前面加一行 `$ <完整命令>` 提示行（终端观感），预览态与展开态都带。
+   - 用 `DisclosureCard(header=目的短句+标签, preview/body=TerminalOutput)` 统一折叠行为。
    - `complete && !isError` 默认折叠；`running / isError` 默认展开。
-   - 折叠态不是“什么都不看见”，而是直接给尾部 5 行 preview；展开态上/下/左/右都可滚动，避免长命令输出把 transcript 拉爆。
+   - 折叠态不是“什么都不看见”，而是直接给 `$ 命令` + 尾部 5 行 preview；展开态上/下/左/右都可滚动，避免长命令输出把 transcript 拉爆。
+   - **无输出的 command 走扁平行**（没有正文可承载命令），此时仍把命令 `<code>` 内联保留，目的短句到达后作为前缀，信息不丢。
 
 3. **answer**
    - `ask_question` 的已回答态不再躲在折叠体里，而是直接渲染 [`AnswerCard.tsx`](../../../gui/src/components/AnswerCard.tsx)。
@@ -388,6 +393,27 @@ ToolRow
 - thinking-only 残组不会继续拿 `summaryTitle` 当折叠标题，避免命令标题在 action 行和折叠头各出现一次。
 - `DisclosureCard` 是内容无关外壳，terminal / diff 细节全部留给 `TerminalOutput` / `DiffView`；这比在一个万能组件里堆 `mode` 开关更稳。
 - transcript 外层 `.tc-stream` 现在只允许**纵向**滚动；消息文本、cluster 容器和其直接子节点都强制 `min-width: 0` + `overflow-wrap: anywhere`，所以 Markdown 里的长横杠分隔线、长文件名或其他无空格 token 只会在局部断行，不会再把整条 transcript 横向撑出视口。真正需要横向滚的只有 diff / terminal / code block 这类局部内容体。
+
+#### 5.3.1 bash 卡片标题：`tool.summary_updated` 异步升级（抄 Cursor）
+
+**为什么**：过去 bash 卡片标题是硬编码的 `Ran <命令首行>`，命令一长标题就爆。Cursor 的做法是标题只放「这条命令想干嘛」的短句，命令本身留给终端正文。
+
+**怎么做**：复用 turn summary 那套「先占位、后升级」——命令执行不被阻塞，标题事后被 utility 模型的短句覆盖。
+
+```text
+agent_loop            tool_dispatcher                utility-flash        ext host(state.ts)   ToolRow
+   │  run bash              │                              │                    │                │
+   │───────────────────────▶  ToolExecutionEnd(命令+输出) ──────────────────────▶ 卡片(占位: Ran + 命令名标签) ──▶ 渲染
+   │                        │  spawn 目的短句(fire&forget)  │                    │                │
+   │                        │─────────────────────────────▶│                    │                │
+   │                        │                              │  tool.summary_updated {toolCallId, summaryTitle}
+   │                        │                              │───────────────────▶ 按 toolCallId 写 tool.summaryTitle ──▶ 头部升级为目的短句
+```
+
+- **后端**：[`tool_dispatcher.rs`](../../../../tomcat/src/core/agent_loop/tool_dispatcher.rs) 发出 `ToolExecutionEnd` 后，对 `bash/shell/execute_command` 调 [`tool_summary_update::maybe_spawn_tool_summary_update`](../../../../tomcat/src/core/agent_loop/tool_summary_update.rs)（`tokio::spawn`，8s 超时，复用 `title_provider/title_model/emitter`）。短句由 [`generate_command_summary`](../../../../tomcat/src/core/summary/title_generator.rs)（祈使句 2–6 词）产出，失败回落 `Run <首个命令名>`。
+- **事件**：新增 `WIRE_TOOL_SUMMARY_UPDATED = "tool.summary_updated"`（[`infra/events/mod.rs`](../../../../tomcat/src/infra/events/mod.rs)）与 `ServeToolEvent::ToolSummaryUpdated { sessionId?, toolCallId, summaryTitle? }`（[`api/serve/types.rs`](../../../../tomcat/src/api/serve/types.rs)，并入 `ServeEvent` union）；`serve --print-schema` 已同步到 [`wire.d.ts`](../../../src/serveClient/wire.d.ts) 与 serve fixture。
+- **宿主**：[`state.ts`](../../../src/ui/webview/state.ts) 新增 `case "tool.summary_updated"`：按 `toolCallId` 找到工具卡片写 `summaryTitle`（未命中则忽略）。与 `turn.summary_updated`（写 thinking 分组头）互不干扰。
+- **已知限制（v1）**：per-tool 摘要**只在 live 生效、不回写 transcript**。历史重载时 bash 卡片回落到确定性占位（`Ran` + 命令名标签 + 正文 `$ 命令`），不会重放短句；持久化留作后续项。这与 turn summary 会回写 assistant message 的做法不同，是刻意的成本权衡（每条前台 bash 已多一次 utility 轻量调用）。
 
 ### 5.4 Composer：不换行、只压缩可压缩项
 

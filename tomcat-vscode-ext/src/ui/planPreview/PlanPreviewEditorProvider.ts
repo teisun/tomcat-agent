@@ -482,7 +482,7 @@ export class PlanPreviewEditorProvider
     ${styleTags}
     <title>Tomcat Plan Preview</title>
   </head>
-  <body>
+  <body class="tc-plan-webview">
     <div id="root"></div>
     ${scriptTags}
   </body>

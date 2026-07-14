@@ -25,6 +25,7 @@ use crate::infra::events::{AgentEvent, ContentBlock, ExtensionEvent, Message, To
 
 use super::steering_injection::inject_steering_messages;
 use super::tool_exec;
+use super::tool_summary_update;
 use super::turn_summary;
 use super::types::{AgentLoop, DispatchOutcome, LoopError, ToolCallInfo};
 
@@ -338,7 +339,7 @@ pub(super) async fn run_tool_calls(
         agent.emit_extension_event(ExtensionEvent::ToolResult {
             tool_name: tc.name.clone(),
             tool_call_id: tc.id.clone(),
-            input: args,
+            input: args.clone(),
             content: vec![ContentBlock(
                 serde_json::json!({ "text": model_text.clone() }),
             )],
@@ -353,6 +354,16 @@ pub(super) async fn run_tool_calls(
             display: display.clone(),
             is_error,
         });
+
+        // bash 卡片标题异步升级：命令执行完后由 utility 模型生成"目的短句"，
+        // 经 `tool.summary_updated` 按 toolCallId 热更新前端；不阻塞后续调度。
+        tool_summary_update::maybe_spawn_tool_summary_update(
+            agent,
+            &tc.id,
+            &tc.name,
+            &args,
+            &model_text,
+        );
 
         if let Some(ref mut ctx_state) = agent.context_state {
             ctx_state.on_message_appended(model_text.len());
