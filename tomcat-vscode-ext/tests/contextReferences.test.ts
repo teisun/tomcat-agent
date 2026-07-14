@@ -5,6 +5,7 @@ import { __testing } from "vscode";
 import {
   buildFileReference,
   buildSelectionReference,
+  buildSelectionReferenceFromParts,
   resolveUriToFileReference,
   truncateSelectionSnapshot,
 } from "../src/ui/webview/contextReferences";
@@ -90,6 +91,61 @@ describe("context references", () => {
       text: "const beta = 2;\nconst gamma = alpha + beta;",
       type: "reference",
     });
+  });
+
+  it("builds a parts-based selection reference with a multi-line label", () => {
+    const reference = buildSelectionReferenceFromParts(
+      vscode.Uri.file("/workspace/plans/sample.plan.md"),
+      "first line\nsecond line",
+      12,
+      14,
+    );
+
+    expect(reference).toEqual({
+      kind: "selection",
+      label: "sample.plan.md:12-14",
+      lineEnd: 14,
+      lineStart: 12,
+      path: "plans/sample.plan.md",
+      text: "first line\nsecond line",
+      type: "reference",
+    });
+  });
+
+  it("uses a single-line label when start and end match", () => {
+    const reference = buildSelectionReferenceFromParts(
+      vscode.Uri.file("/workspace/plans/sample.plan.md"),
+      "only line",
+      7,
+      7,
+    );
+
+    expect(reference?.label).toBe("sample.plan.md:7");
+    expect(reference?.lineStart).toBe(7);
+    expect(reference?.lineEnd).toBe(7);
+  });
+
+  it("omits line numbers (file-name label) when the range is unknown", () => {
+    const reference = buildSelectionReferenceFromParts(
+      vscode.Uri.file("/workspace/plans/sample.plan.md"),
+      "orphan selection",
+    );
+
+    expect(reference).toEqual({
+      kind: "selection",
+      label: "sample.plan.md",
+      lineEnd: null,
+      lineStart: null,
+      path: "plans/sample.plan.md",
+      text: "orphan selection",
+      type: "reference",
+    });
+  });
+
+  it("returns null when the selection text is empty", () => {
+    expect(
+      buildSelectionReferenceFromParts(vscode.Uri.file("/workspace/plans/sample.plan.md"), ""),
+    ).toBeNull();
   });
 
   it("truncates the selection snapshot before sending it to the webview", () => {

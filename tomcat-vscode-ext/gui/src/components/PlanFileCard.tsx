@@ -1,3 +1,4 @@
+import { PlanBuildModelSelect } from "./PlanBuildModelSelect";
 import type { WebviewPlanFileCard, WebviewTodo } from "../types";
 
 function basename(filePath: string): string {
@@ -38,18 +39,24 @@ function todoCountLabel(count: number): string {
 }
 
 export function PlanFileCard({
+  availableModels = [],
+  buildModel = "",
   canBuild,
   creating = false,
   item,
   onBuild,
   onOpenPlanFile,
+  onSetBuildModel,
   planTodos = [],
 }: {
+  availableModels?: string[];
+  buildModel?: string;
   canBuild: boolean;
   creating?: boolean;
   item: WebviewPlanFileCard;
   onBuild(planId: string | null, path: string): void;
   onOpenPlanFile(path: string): void;
+  onSetBuildModel?(modelId: string): void;
   planTodos?: WebviewTodo[];
 }) {
   const fileName = basename(item.path);
@@ -113,6 +120,15 @@ export function PlanFileCard({
             View Plan
           </button>
         )}
+        {onSetBuildModel ? (
+          <PlanBuildModelSelect
+            availableModels={availableModels}
+            label="Model"
+            onChange={onSetBuildModel}
+            testId="plan-card-build-model"
+            value={buildModel}
+          />
+        ) : null}
         <button
           className="tc-button tc-button--primary"
           data-testid="build-plan"

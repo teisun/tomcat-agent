@@ -9,6 +9,7 @@ const configuration = new Map<string, unknown>();
 const configurationListeners = new Set<
   (event: { affectsConfiguration(section: string): boolean }) => void
 >();
+const textDocumentChangeListeners = new Set<(event: { document: TextDocument }) => void>();
 const fileWatchers = new Set<{
   createListeners: Set<(uri: Uri) => void>;
   deleteListeners: Set<(uri: Uri) => void>;
@@ -522,6 +523,14 @@ export const workspace = {
       configurationListeners.delete(listener);
     });
   },
+  onDidChangeTextDocument(
+    listener: (event: { document: TextDocument }) => void,
+  ): Disposable {
+    textDocumentChangeListeners.add(listener);
+    return new Disposable(() => {
+      textDocumentChangeListeners.delete(listener);
+    });
+  },
   openTextDocument: async (uri: Uri): Promise<TextDocument> => {
     const existing = textDocuments.find((document) => document.uri.toString() === uri.toString());
     if (existing) {
@@ -643,6 +652,7 @@ export const __testing = {
     fileWatchers.clear();
     configuration.clear();
     configurationListeners.clear();
+    textDocumentChangeListeners.clear();
     quickPickHandler = undefined;
     inputBoxHandler = undefined;
     infoMessageHandler = undefined;
@@ -662,6 +672,11 @@ export const __testing = {
           return key === section || key.startsWith(`${section}.`);
         },
       });
+    }
+  },
+  fireDidChangeTextDocument(document: TextDocument): void {
+    for (const listener of textDocumentChangeListeners) {
+      listener({ document });
     }
   },
   setInfoMessageHandler(handler: typeof infoMessageHandler): void {

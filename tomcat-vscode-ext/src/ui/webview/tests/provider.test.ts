@@ -21,6 +21,7 @@ const __testing = (
       registerDirectory(dirPath: string): void;
       registerFile(filePath: string, text: string): void;
       reset(): void;
+      setConfiguration(key: string, value: unknown): void;
     };
   }
 ).__testing;
@@ -1188,6 +1189,121 @@ describe("checkpoint intent handling", () => {
         messageAnchor: "assistant-1",
       },
     ]);
+
+    provider.dispose();
+  });
+});
+
+describe("plan build orchestration", () => {
+  function createBuildProvider(
+    messenger: Record<string, unknown>,
+  ): TomcatWebviewViewProvider {
+    return new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      getUiMode: () => "webview",
+      ide: {} as never,
+      initialize: async () => ({ sessionId: "s1" } as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+        ...messenger,
+      } as never,
+      ownership: {
+        ownerOf() {
+          return { owner: "webview" };
+        },
+        releaseAll() {},
+      } as never,
+      sessionRouter: {} as never,
+    });
+  }
+
+  function stubBuildInternals(provider: TomcatWebviewViewProvider): {
+    postState: ReturnType<typeof vi.spyOn>;
+    refreshModels: ReturnType<typeof vi.spyOn>;
+    refreshSessionState: ReturnType<typeof vi.spyOn>;
+  } {
+    vi.spyOn(provider as any, "ensureInitialized").mockResolvedValue({ sessionId: "s1" } as never);
+    vi.spyOn(provider as any, "ensureWebviewSessionWithoutHistory").mockResolvedValue("s1");
+    const refreshModels = vi
+      .spyOn(provider as any, "refreshModels")
+      .mockResolvedValue(undefined);
+    const refreshSessionState = vi
+      .spyOn(provider as any, "refreshSessionState")
+      .mockResolvedValue(undefined);
+    const postState = vi.spyOn(provider as any, "postState").mockResolvedValue(undefined);
+    return { postState, refreshModels, refreshSessionState };
+  }
+
+  afterEach(() => {
+    __testing.reset();
+    vi.restoreAllMocks();
+  });
+
+  it("buildPlan applies the configured build model before entering build mode", async () => {
+    __testing.setConfiguration("tomcat.plan.buildModel", "gpt-5.4");
+    const sendSetModel = vi.fn().mockResolvedValue({ success: true });
+    const sendSetPlanMode = vi.fn().mockResolvedValue({ success: true });
+    const provider = createBuildProvider({ sendSetModel, sendSetPlanMode });
+    const { refreshModels } = stubBuildInternals(provider);
+
+    await provider.buildPlan("plan-1");
+
+    expect(sendSetModel).toHaveBeenCalledWith("s1", "gpt-5.4");
+    expect(sendSetPlanMode).toHaveBeenCalledWith({
+      action: "build",
+      planId: "plan-1",
+      sessionId: "s1",
+    });
+    expect(sendSetModel.mock.invocationCallOrder[0]).toBeLessThan(
+      sendSetPlanMode.mock.invocationCallOrder[0],
+    );
+    expect(refreshModels).toHaveBeenCalled();
+
+    provider.dispose();
+  });
+
+  it("buildPlan skips the model switch when no build model is configured", async () => {
+    const sendSetModel = vi.fn().mockResolvedValue({ success: true });
+    const sendSetPlanMode = vi.fn().mockResolvedValue({ success: true });
+    const provider = createBuildProvider({ sendSetModel, sendSetPlanMode });
+    const { refreshModels } = stubBuildInternals(provider);
+
+    await provider.buildPlan("plan-1");
+
+    expect(sendSetModel).not.toHaveBeenCalled();
+    expect(sendSetPlanMode).toHaveBeenCalledWith({
+      action: "build",
+      planId: "plan-1",
+      sessionId: "s1",
+    });
+    expect(refreshModels).not.toHaveBeenCalled();
+
+    provider.dispose();
+  });
+
+  it("routes a card setPlanMode build intent through the same build path", async () => {
+    __testing.setConfiguration("tomcat.plan.buildModel", "gpt-5.4");
+    const sendSetModel = vi.fn().mockResolvedValue({ success: true });
+    const sendSetPlanMode = vi.fn().mockResolvedValue({ success: true });
+    const provider = createBuildProvider({ sendSetModel, sendSetPlanMode });
+    stubBuildInternals(provider);
+
+    await (provider as any).handleIntent({
+      data: { action: "build", planId: "plan-1", sessionId: "s1" },
+      messageId: "build-1",
+      type: "setPlanMode",
+    });
+
+    expect(sendSetModel).toHaveBeenCalledWith("s1", "gpt-5.4");
+    expect(sendSetPlanMode).toHaveBeenCalledWith({
+      action: "build",
+      planId: "plan-1",
+      sessionId: "s1",
+    });
+    expect(sendSetModel.mock.invocationCallOrder[0]).toBeLessThan(
+      sendSetPlanMode.mock.invocationCallOrder[0],
+    );
 
     provider.dispose();
   });

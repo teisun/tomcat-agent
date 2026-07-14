@@ -207,6 +207,7 @@ export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
   availableModels: string[];
+  buildModel?: string;
   modelAdminSupported: boolean;
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
@@ -345,6 +346,13 @@ export type WebviewIntent =
       data: {
         modelId: string;
         sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "setBuildModel";
+      data: {
+        modelId: string;
       };
     }
   | {
@@ -643,6 +651,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "interrupt":
       return value.data === undefined || isRecord(value.data);
     case "setModel":
+      return isRecord(value.data) && isString(value.data.modelId);
+    case "setBuildModel":
       return isRecord(value.data) && isString(value.data.modelId);
     case "setThinkingLevel":
       return (

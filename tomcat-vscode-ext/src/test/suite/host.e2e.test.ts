@@ -8,6 +8,7 @@ import {
   assertMultiSessionRoutingViaChatUi,
   assertParticipantHappyPath,
   assertParticipantHappyPathViaChatUi,
+  assertPlanPreviewCustomEditorFlow,
   assertPlanSlashFlowViaChatUi,
   assertWebviewPlanModeSwitchFlow,
   assertWebviewAnswerCardFlow,
@@ -83,6 +84,11 @@ suite("Tomcat host E2E", () => {
   test("switches an executing plan back to chat in the webview", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewPlanModeSwitchFlow(api);
+  });
+
+  test("renders the .plan.md custom editor (hybrid default), mode switch, hot reload, and selection-to-chat", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertPlanPreviewCustomEditorFlow(api);
   });
 
   test("runs /model via the real chat UI", async () => {

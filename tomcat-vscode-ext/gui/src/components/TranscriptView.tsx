@@ -124,6 +124,8 @@ export function partitionAssistantResponseGroup(
 }
 
 export function TranscriptView({
+  availableModels = [],
+  buildModel = "",
   busy,
   bottomSpacerHeight = 0,
   canBuildPlan,
@@ -135,12 +137,15 @@ export function TranscriptView({
   onOpenPlanFile,
   onRestoreCheckpoint,
   onRetryUserMessage,
+  onSetBuildModel,
   planState,
   planTodos = [],
   sessionTodos = [],
   timeline,
   transcriptRef,
 }: {
+  availableModels?: string[];
+  buildModel?: string;
   busy: boolean;
   bottomSpacerHeight?: number;
   canBuildPlan: boolean;
@@ -152,6 +157,7 @@ export function TranscriptView({
   onOpenPlanFile(path: string): void;
   onRestoreCheckpoint?(checkpointId: string): void;
   onRetryUserMessage?(messageId: string): void;
+  onSetBuildModel?(modelId: string): void;
   planState?: WebviewPlanState | null;
   planTodos?: WebviewTodo[];
   sessionTodos?: WebviewTodo[];
@@ -223,6 +229,8 @@ export function TranscriptView({
         case "plan":
           return (
             <PlanFileCard
+              availableModels={availableModels}
+              buildModel={buildModel}
               canBuild={canBuildPlan}
               creating={
                 matchedPlanCardIds.has(item.id) ||
@@ -232,6 +240,7 @@ export function TranscriptView({
               key={item.id}
               onBuild={onBuildPlan}
               onOpenPlanFile={onOpenPlanFile}
+              onSetBuildModel={onSetBuildModel}
               planTodos={planTodos}
             />
           );

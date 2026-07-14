@@ -205,6 +205,62 @@ describe("PlanFileCard", () => {
     expect(screen.getByTestId("plan-todos-count").textContent).toBe("1 todo");
   });
 
+  it("renders the build-model dropdown between View Plan and Build when onSetBuildModel is provided", () => {
+    const onSetBuildModel = vi.fn();
+    const onBuild = vi.fn();
+
+    render(
+      <PlanFileCard
+        availableModels={["gpt-5.6", "claude-opus"]}
+        buildModel="gpt-5.6"
+        canBuild
+        item={{
+          id: "plan-model",
+          path: "/tmp/model.plan.md",
+          planId: "pm",
+          state: "planning",
+          type: "plan",
+        }}
+        onBuild={onBuild}
+        onOpenPlanFile={() => undefined}
+        onSetBuildModel={onSetBuildModel}
+        planTodos={[]}
+      />,
+    );
+
+    const select = screen.getByTestId("plan-card-build-model") as HTMLSelectElement;
+    expect(select.value).toBe("gpt-5.6");
+    fireEvent.change(select, { target: { value: "claude-opus" } });
+    expect(onSetBuildModel).toHaveBeenCalledWith("claude-opus");
+
+    fireEvent.click(screen.getByTestId("build-plan"));
+    expect(onBuild).toHaveBeenCalledWith("pm", "/tmp/model.plan.md");
+
+    // Flat dropdown: no visible "Model" text label, but an accessible name stays.
+    expect(document.querySelector(".tc-plan-model-select__label")).toBeNull();
+    expect(screen.queryByText("Model")).toBeNull();
+    expect(screen.getByLabelText("Model")).toBeTruthy();
+  });
+
+  it("omits the build-model dropdown when onSetBuildModel is not provided", () => {
+    render(
+      <PlanFileCard
+        canBuild
+        item={{
+          id: "plan-no-model",
+          path: "/tmp/no-model.plan.md",
+          planId: "pnm",
+          state: "planning",
+          type: "plan",
+        }}
+        onBuild={() => undefined}
+        onOpenPlanFile={() => undefined}
+        planTodos={[]}
+      />,
+    );
+    expect(screen.queryByTestId("plan-card-build-model")).toBeNull();
+  });
+
   it("shows a breathing pending affordance while the plan file is still being created", () => {
     const onOpenPlanFile = vi.fn();
 

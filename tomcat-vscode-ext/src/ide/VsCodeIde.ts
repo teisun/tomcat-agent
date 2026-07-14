@@ -196,6 +196,23 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
     await vscode.window.showTextDocument(document, { preview: false });
   }
 
+  /**
+   * Open a file with a specific custom editor (view type). Falls back to the
+   * regular text editor when the custom editor cannot be resolved.
+   */
+  async openWith(displayPath: string, viewType: string): Promise<void> {
+    const uri = vscode.Uri.file(this.resolveWorkspacePath(displayPath));
+    if (!(await this.fileExists(uri))) {
+      throw new Error(`File not found: ${uri.fsPath}`);
+    }
+    try {
+      await vscode.commands.executeCommand("vscode.openWith", uri, viewType);
+    } catch {
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document, { preview: false });
+    }
+  }
+
   provideTextDocumentContent(uri: vscode.Uri): string {
     const side = new URLSearchParams(uri.query).get("side") as DiffSide | null;
     const changeKey = preparedDiffKeyFromPath(uri.path);

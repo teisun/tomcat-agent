@@ -508,6 +508,65 @@ describe("Tomcat webview App", () => {
     expect(screen.getByTestId("context-ratio").textContent).toContain("Ctx 42%");
   });
 
+  it("forwards a plan card build-model selection as a setBuildModel intent", async () => {
+    const { postMessage } = mount();
+
+    await emitState({
+      channel: "state",
+      content: {
+        activeSessionId: "s1",
+        availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        buildModel: "",
+        ready: true,
+        sessions: [
+          {
+            busy: false,
+            isCurrent: true,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            sessionId: "s1",
+            title: null,
+            updatedAt: 1,
+          },
+        ],
+        sessionViews: {
+          s1: {
+            busy: false,
+            conflictMessage: null,
+            ownedByThisFrontend: true,
+            owner: "webview",
+            pendingAttachments: [],
+            planTodos: [],
+            sessionTodos: [],
+            sessionId: "s1",
+            timeline: [
+              {
+                id: "plan-card-1",
+                path: "/workspace/login-refactor.plan.md",
+                planId: "plan-1",
+                state: "planning",
+                type: "plan",
+              },
+            ],
+          },
+        },
+        uiMode: "both",
+      },
+      messageId: "state-build-model",
+    });
+
+    fireEvent.change(screen.getByTestId("plan-card-build-model"), {
+      target: { value: "claude-4.6-sonnet" },
+    });
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { modelId: "claude-4.6-sonnet" },
+        type: "setBuildModel",
+      }),
+    );
+  });
+
   it("requests older history when the transcript is underfilled or scrolled near the top", async () => {
     const { postMessage } = mount();
     const stream = screen.getByTestId("stream-container");

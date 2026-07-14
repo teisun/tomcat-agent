@@ -441,7 +441,12 @@ ToolRow
 | [`src/ui/webview/tests/provider.test.ts`](../../../src/ui/webview/tests/provider.test.ts) | mutation 工具结束后从 `display.added/removed/diff` 注入 `diffStat/tool.diff`、errored tool 收敛为 `complete+error`，以及 `openDiff -> ide.openReconstructedDiff` 路由 |
 | [`src/ui/webview/tests/state.test.ts`](../../../src/ui/webview/tests/state.test.ts) | `agent_idle` 收敛残留 `running/streaming` 工具卡，并保留 `summary/isError` |
 | [`src/ide/tests/diff_apply_edit.test.ts`](../../../src/ide/tests/diff_apply_edit.test.ts) | `openReconstructedDiff()` 复用原生虚拟文档 diff 链路 |
-| [`src/test/suite/support/hostE2eScenario.ts`](../../../src/test/suite/support/hostE2eScenario.ts) | 真实宿主 webview streaming/diff/multi-session/ownership 通路 |
+| [`src/ui/planPreview/tests/planDocument.test.ts`](../../../src/ui/planPreview/tests/planDocument.test.ts) | `.plan.md` 解析：四态 todos、缺 frontmatter、`name`/`goal` 回退、`bodyMarkdown` 剥离 `## Todos Board`、CRLF |
+| [`src/ui/planPreview/tests/PlanPreviewEditorProvider.test.ts`](../../../src/ui/planPreview/tests/PlanPreviewEditorProvider.test.ts) | 编辑器 Provider 纯逻辑：`buildState`（buildModel 回退 / canBuild 派生 / init 失败降级 / 帧含 mode+toolbarStyle、**默认 hybrid**）、`handleIntent`（ready/openInTextEditor/openLink/setBuildModel/build/**addSelectionToChat 含/不含行号**）、`classifyPlanLink`；活动面板机账（伪造 panel 驱动 `runBuildForActive` / `setModeForActive` / `getActivePlanInfo` / `onDidChangeActivePlan` / 失焦清理 / **`requestCaptureSelection` 发 `captureSelectionForChat` 事件、无焦点 no-op**） |
+| [`tests/contextReferences.test.ts`](../../../tests/contextReferences.test.ts) | `buildSelectionReferenceFromParts`（多行/单行 label、无行号回落文件名、空文本 null、截断）+ `buildSelectionReference` 薄封装复用 |
+| [`gui/src/plan/PlanPreviewApp.test.tsx`](../../../gui/src/plan/PlanPreviewApp.test.tsx) / [`gui/src/plan/PlanSelectionActionButton.test.tsx`](../../../gui/src/plan/PlanSelectionActionButton.test.tsx) / [`gui/src/components/PlanActionStrip.test.tsx`](../../../gui/src/components/PlanActionStrip.test.tsx) / [`gui/src/components/PlanFileCard.test.tsx`](../../../gui/src/components/PlanFileCard.test.tsx) / [`gui/src/components/TodoList.test.tsx`](../../../gui/src/components/TodoList.test.tsx) / [`gui/src/components/MarkdownBody.test.tsx`](../../../gui/src/components/MarkdownBody.test.tsx) / [`gui/src/components/PlanBuildModelSelect.test.tsx`](../../../gui/src/components/PlanBuildModelSelect.test.tsx) | 预览渲染顺序（正文→N To-dos→分割线→四态清单）、不渲染 name/overview、mode 由 host 帧驱动（无本地 toggle）、native 无动作条 / hybrid 渲染 `PlanActionStrip`（黄 Build 发 build、下拉发 `setBuildModel`、canBuild=false 禁用）、**strip/卡片/下拉无可见 “Build model”/“Model” 白字但保留 `aria-label`**、**`captureSelectionForChat` 读选区→发 `addSelectionToChat`（含/不含行号、空选区不发）**、**`PlanSelectionActionButton` 有选区显示/空/越界隐藏/滚动隐藏/点击 onAdd**、`<a>` 拦截 + DOMPurify、`mermaid` 代码块渲染成 SVG（mock）+ 失败回退保留代码块 |
+| [`src/ui/webview/tests/provider.test.ts`](../../../src/ui/webview/tests/provider.test.ts)（plan build orchestration） | `runPlanBuild` 顺序：配置非空先 `sendSetModel` 再 `sendSetPlanMode`；卡片 `setPlanMode build` 与编辑器 `buildPlan` 共用同一路径 |
+| [`src/test/suite/support/hostE2eScenario.ts`](../../../src/test/suite/support/hostE2eScenario.ts) | 真实宿主 webview streaming/diff/multi-session/ownership 通路；以及 `.plan.md` 自定义编辑器真实 resolve/webview（**默认 hybrid 出内联条** + Preview 四态 + `executeCommand` 切 Markdown/Preview + 文档编辑热更新 + 建模型落配置 + **选中正文经右键命令/浮动按钮两路 → chat 出现 selection chip** + 切 native 回归无动作条） |
 
 实际 UI 验收（本次体验优化）：
 
@@ -479,6 +484,11 @@ ToolRow
 | 类型化工具行 / disclosure 外壳 / answer 卡 | [`gui/src/components/ToolRow.tsx`](../../../gui/src/components/ToolRow.tsx) / [`gui/src/components/DisclosureCard.tsx`](../../../gui/src/components/DisclosureCard.tsx) / [`gui/src/components/TerminalOutput.tsx`](../../../gui/src/components/TerminalOutput.tsx) / [`gui/src/components/AnswerCard.tsx`](../../../gui/src/components/AnswerCard.tsx) |
 | composer 响应式 | [`gui/src/components/Composer.tsx`](../../../gui/src/components/Composer.tsx) / [`gui/src/styles.css`](../../../gui/src/styles.css) |
 | 手工验收辅助 no-op 宿主 | [`gui/src/main.tsx`](../../../gui/src/main.tsx) |
+| `.plan.md` 自定义编辑器（host） | [`src/ui/planPreview/PlanPreviewEditorProvider.ts`](../../../src/ui/planPreview/PlanPreviewEditorProvider.ts) / [`src/ui/planPreview/planDocument.ts`](../../../src/ui/planPreview/planDocument.ts) / [`src/shared/planPreviewProtocol.ts`](../../../src/shared/planPreviewProtocol.ts) |
+| plan 预览 webview（GUI） | [`gui/src/plan/PlanPreviewApp.tsx`](../../../gui/src/plan/PlanPreviewApp.tsx) / [`gui/src/plan/PlanSelectionActionButton.tsx`](../../../gui/src/plan/PlanSelectionActionButton.tsx) / [`gui/src/components/PlanActionStrip.tsx`](../../../gui/src/components/PlanActionStrip.tsx) / [`gui/src/components/TodoList.tsx`](../../../gui/src/components/TodoList.tsx) / [`gui/src/components/MarkdownBody.tsx`](../../../gui/src/components/MarkdownBody.tsx) / [`gui/src/components/PlanBuildModelSelect.tsx`](../../../gui/src/components/PlanBuildModelSelect.tsx) |
+| plan 预览原生标题栏（命令 + 上下文键） | [`src/extension.ts`](../../../src/extension.ts)（5 命令 + `setContext`）/ [`package.json`](../../../package.json)（`editor/title` + `webview/context` 菜单 + `tomcat.plan.toolbarStyle`） |
+| plan 选中加入聊天 | [`src/ui/webview/contextReferences.ts`](../../../src/ui/webview/contextReferences.ts)（`buildSelectionReferenceFromParts`）/ [`src/extension.ts`](../../../src/extension.ts)（`addSelectionToChat` dep + `tomcat.plan.addSelectionToChat` 命令） |
+| plan build 统一入口（卡片/编辑器共用） | [`src/ui/webview/provider.ts`](../../../src/ui/webview/provider.ts)（`runPlanBuild` / `buildPlan` / `setBuildModel`）/ [`src/extension.ts`](../../../src/extension.ts)（`registerCustomEditorProvider` + `focusWebviewSurface`） |
 
 ---
 
@@ -493,3 +503,50 @@ ToolRow
 5. 把“协议改了但前端/fixture/安装包没追上”的工程风险显式制度化：`gen:wire`、serve fixture、版本 bump 必须一起做。
 
 这意味着后续若继续迭代 webview UX，大多数样式/分组问题仍应优先在 [`state.ts`](../../../src/ui/webview/state.ts) 和 [`gui/src/**`](../../../gui/src) 内完成；但凡涉及“文件改动真相”（如 diff 行数、before/after 重建），必须优先回到核心事件层处理。
+
+---
+
+## 10. Plan 预览自定义编辑器（`.plan.md`）
+
+> 专业：这是 phase 2 里**第二个** webview 表面——不再是侧边栏的 `WebviewViewProvider`，而是一个 `vscode.CustomTextEditorProvider`（viewType `tomcat.planPreview`，`selector: *.plan.md`）。它照抄 Cursor 的 Plan 预览：`Preview`（渲染正文 + 四态清单）/`Markdown`（只读源码）两态，全程**只读**（不写回 `.plan.md`），但正文**可选中**，选中的文字能通过浮动按钮或右键菜单**加入 Tomcat 聊天**（复用现有 selection 引用链路）。**Preview·Markdown 切换**挂到 VS Code 原生编辑器标题栏 “...” 溢出菜单（tab + 面包屑已经天然固定并显示路径）。
+>
+> 说人话：打开一个 `.plan.md`，看到的不是原始 YAML，而是像 Cursor 那样把 `todos` 画成勾选清单的漂亮预览。顶部路径由 VS Code 自己的标题栏承载——省得我们再画一条重复的路径条。要编辑就在 “...” 里切 Markdown 再点 “Open in Editor” 回到普通文本编辑器。选中一段正文会浮现一个「Add to Tomcat Chat」小按钮（也可右键），点它就把这段文字塞进侧边栏聊天的输入框当引用。
+>
+> **临时 A/B 开关** `tomcat.plan.toolbarStyle`（enum `hybrid` | `native`，**默认 `hybrid`(B)**）：`hybrid`(B) 标题栏不出 Build/选模型图标，改在正文顶部渲染一小条 `PlanActionStrip`——按 Cursor 风格做成**细、右对齐、半透明 + `backdrop-filter` 模糊、`sticky` 顶部**（正文可从条下透视滚动），里面是黄色 Build（圆角 5）+ 无边框扁平模型下拉（圆角 4、无可见文字标签、自绘 chevron）；`native`(A) 把 Build/选模型做成标题栏单色图标（点开 QuickPick），正文不出内联条。两者的 Preview/Markdown 都收在原生 “...” 溢出菜单里，当前项打勾。定稿后删掉另一套 + 移除该开关。
+
+数据流一图（命令 + 上下文键 + host + webview）：
+
+```text
+.plan.md 文档 ──vscode.openWith(uri,"tomcat.planPreview")──▶ PlanPreviewEditorProvider.resolveCustomTextEditor()
+                                                                     │
+原生 editor/title (命令+图标)                                         ├─ parsePlanDocument(text) 唯一解析器
+   │ executeCommand                                                  │   title/overview/todos[4态]/bodyMarkdown/raw/planId/state
+   ├─ tomcat.plan.build ─────────▶ provider.runBuildForActive()      ├─ buildState(text,path,{mode,toolbarStyle})
+   │                                → deps.buildPlan → focus 侧栏     │   + availableModels(sendListModels)+buildModel(配置)+canBuild(能力)
+   ├─ tomcat.plan.selectBuildModel▶ showQuickPick → 写 buildModel     ├─ onDidChangeViewState  维护 active panel + per-panel mode
+   └─ viewAsPreview/viewAsMarkdown▶ provider.setModeForActive(mode)   ├─ onDidChangeTextDocument  agent update_plan → 预览热更新
+                                                                     └─ onDidChangeConfiguration  buildModel / toolbarStyle → 回推
+provider.onDidChangeActivePlan ──▶ extension.ts setContext            │  postMessage(state 帧: 含 mode + toolbarStyle)
+   tomcat.plan.canBuild / tomcat.plan.mode ──驱动图标可见 + "..."打勾   ▼
+                                                          PlanPreviewApp (gui/src/plan)   ← mode 读 state.mode（host 主导）
+                                                           ├─ hybrid: PlanActionStrip(黄 Build + 扁平模型下拉, 细/半透明/sticky)
+                                                           ├─ Preview : MarkdownBody(marked+DOMPurify+mermaid) → 『N To-dos』计数头 → 分割线 → TodoList(四态 SVG)
+                                                           ├─ Markdown: 只读源码 <pre> + 「Open in Editor」
+                                                           └─ 选中正文 → PlanSelectionActionButton(浮动) / 右键命令
+                                                                └─ addSelectionToChat intent ─▶ deps.addSelectionToChat
+                                                                     → focus 侧栏 + buildSelectionReferenceFromParts → postInsertReference → chat selection chip
+```
+
+关键实现约束：
+
+1. **薄 Provider、纯逻辑可测**：`buildState(text, path, ui?)`（文本 + host UI 态 → state 帧）与 `handleIntent(intent, doc, postState)`（意图处理）抽成纯方法，连同 `deriveCanBuild` / `classifyPlanLink` 都不碰真实 webview panel。原生控件的活动面板机账（`onDidChangeViewState` 记 active panel、per-panel `mode`、`runBuildForActive` / `setModeForActive` / `getActivePlanInfo`）由单测用**伪造的 `WebviewPanel`** 驱动（[`tests/stubs/vscode.ts`](../../../tests/stubs/vscode.ts) 补了 `onDidChangeTextDocument`，但仍不含 `createWebviewPanel`）。真实 resolve/webview 由 §7 的 E2E 场景 `assertPlanPreviewCustomEditorFlow` 覆盖。
+2. **唯一解析器**：`.plan.md` 的解析全部收敛在 [`planDocument.ts`](../../../src/ui/planPreview/planDocument.ts)；侧边栏卡片用的 `parsePlanFrontmatter` / `readPlanMetadata` 也委托它，`truncatePlanTitle` / `PLAN_TITLE_MAX` / `stripYamlQuotes` 一并下沉，避免两处各写。`bodyMarkdown` 在解析层就剥掉自动维护的 `## Todos Board` 段（标题在 `<!-- todos-board:auto:begin -->` 之上，剥离范围从标题行到 `end` 标记含尾随空行），避免与底部四态清单重复。
+3. **Preview 顺序照抄 Cursor**：自上而下 = 渲染后的正文 → 『N To-dos』计数头 → 分割线 → 四态清单；**不渲染** `name`/`overview`（这两个字段仍解析出来给卡片等其它组件用）。四态图标为内联 SVG（pending 空心圈 / in_progress 虚线圈 / cancelled 圈+斜杠 / completed 勾选），尺寸由 `--tc-todo-icon-size` 控制。
+4. **原生标题栏承载动作（照抄 Cursor 的复用思路）**：`.plan.md` 以自定义编辑器打开时，用 `when: activeCustomEditorId == 'tomcat.planPreview'` 把命令挂到原生 `editor/title`。因为原生标题栏按钮**只能单色图标**、且第三方扩展**不能声明式打勾**：Build/选模型仅在 `config.tomcat.plan.toolbarStyle == 'native'` 时进 `navigation` 组显示为图标（B 下由正文内联条承载）；Preview/Markdown 放非 navigation 组自动收进 “...” 溢出菜单，`✓` 用「两个命令 + `tomcat.plan.mode` 上下文键」互斥切换模拟（`viewAsX` 与 `viewAsX.active` 双生命令，`.active` 从命令面板隐藏）。
+5. **mode 由 host 主导 + 上下文键**：原生 “...” 打勾必须靠上下文键，所以 mode 不再是 webview 本地状态——存在 Provider 的 per-panel `mode`，随 state 帧下发（webview 只读 `state.mode`）。Provider 通过 `onDidChangeActivePlan` 在「active 计划编辑器 / 其 mode / canBuild」变化时通知 [`extension.ts`](../../../src/extension.ts)，后者 `setContext tomcat.plan.canBuild` / `tomcat.plan.mode`；面板失焦或销毁即清理（用 `onDidChangeViewState` 的 `active=false` 兜住「切到普通文本编辑器」）。
+6. **全局唯一 build 模型 + Cursor 扁平下拉**：真源是 VS Code 配置 `tomcat.plan.buildModel`（`scope: application`，空=用会话当前模型）。原生 `selectBuildModel` 用 `showQuickPick`（列 availableModels + “Session default”，当前项 `$(check)`）写回配置；hybrid 内联条与侧边栏 `PlanFileCard` 共用 [`PlanBuildModelSelect`](../../../gui/src/components/PlanBuildModelSelect.tsx)；任一处改动写回配置后，`onDidChangeConfiguration` 让各处 UI 同步。**扁平化**：组件里已**删掉可见文字标签**（原来的 “Build model”/“Model” 白字），`label` prop 只喂 `<select>` 的 `aria-label`（无障碍/测试用）；扁平无边框样式落在组件独有的共享类 `.tc-plan-model-select select`（`appearance:none`、透明背景、圆角 4、自绘 chevron），strip 与卡片**一起变**，且用 `select` 后代选择器把作用域锁在原生下拉，composer 的 `.tc-topbar__trigger` 结构不同故不受影响。
+7. **两个 Build 入口零差异**：卡片的 `setPlanMode {action:"build"}` 与编辑器 Build（原生命令 `runBuildForActive` 或 hybrid 内联条 intent）都汇入宿主 [`provider.ts`](../../../src/ui/webview/provider.ts) 的私有 `runPlanBuild(sessionId, planId)`——读配置 → 非空则先 `sendSetModel` 再 `sendSetPlanMode` → 刷新状态；编辑器 Build 额外先 `focusWebviewSurface()` 把侧边栏弹出聚焦，让用户立刻看到 build 进度（照抄 Cursor 体验）。**零 serve 改动**，全部复用既有 RPC。
+8. **只读 + 链接不导航**：预览不写回文件（无交互写盘、无 “+ New”、无 Cursor 的 “Save to Workspace”）。正文里的 `<a>` 点击被拦截成 `openLink` intent 交宿主：`http(s)`/`mailto`/带 scheme → `env.openExternal`；仓库相对/绝对路径 → `ide.showFile`（失败兜底 `openExternal`）；纯锚点忽略。
+9. **正文里的 `mermaid` 渲染成图（照抄 Cursor）**：[`MarkdownBody`](../../../gui/src/components/MarkdownBody.tsx) 在 marked+DOMPurify 消毒后的 DOM 里找 `code.language-mermaid`，**懒加载** `mermaid`（独立 chunk，无 mermaid 的计划零开销）后 `mermaid.render()` 成 SVG 替换代码块；`securityLevel:"strict"`、主题按 `body.vscode-dark` 派生，渲染失败则保留原代码块（打 `data-mermaid-error`）。为此 CSP 相较 `SettingsPanel` 放宽两处：`script-src 'nonce-…' 'strict-dynamic'`（放行由已授信脚本发起的懒加载 chunk）、`style-src … 'unsafe-inline'`（mermaid 注入 SVG 内联 `<style>` 主题；脚本仍锁死 nonce，正文仍过 DOMPurify，XSS 面不变）。
+10. **E2E DOM 取证接线**：Provider 按文档 fsPath 记账 live panel，并新增测试专用 `captureDomSnapshot(path)` / `dispatchDomAction(path, action)`（经 `channel:"event"` 的 `__test.capture_dom` / `__test.dom_action` 与 webview 往返，复用 `PendingMessageTracker`）；宿主 `__testing` 暴露 `openPlanPreview` / `capturePlanPreviewDom` / `dispatchPlanPreviewDomAction` 给场景库调用。因原生标题栏没有 DOM，切 mode/Build 改用 `executeCommand('tomcat.plan.viewAsX' | ...)` 驱动、hybrid 内联条仍用 `dispatchDomAction`；DOM 快照验证正文四态 / 源码 / `selectionButtonVisible` /（新增）`mermaidSvgCount`（E2E fixture 里塞一个 ```mermaid``` 块，断言懒加载渲染出 `[data-testid="plan-mermaid"] svg`，把 mermaid 出图作为回归项锁死），DOM 动作新增 `selectText{selector}` / `clickSelectionAdd` 供选中加入聊天的两路 E2E 驱动。这套只在 E2E 生效，不影响生产渲染。
+11. **只读但可选中 → 加入聊天**：正文/清单默认 `user-select:text`（预览容器显式加，兜住 webview 默认）。两条入口最终都汇聚到同一个 `addSelectionToChat` intent：①浮动按钮 [`PlanSelectionActionButton`](../../../gui/src/plan/PlanSelectionActionButton.tsx) 监听 `selectionchange`/`mouseup`，选区非空且落在 `plan-content` 内时按选区 `getBoundingClientRect()` 定位浮现，滚动/失焦/收起即隐藏；②右键命令 `tomcat.plan.addSelectionToChat`（`menus.webview/context`，`when: webviewId == 'tomcat.planPreview'`）→ `provider.requestCaptureSelection()` 向 active 面板发 `captureSelectionForChat` 事件 → webview 读 `window.getSelection()` 回发同一 intent。host 侧 `handleIntent` 调注入的 `deps.addSelectionToChat(path,text,lineRange?)`：`focusWebviewSurface()` 取 sessionId → [`buildSelectionReferenceFromParts`](../../../src/ui/webview/contextReferences.ts)（`buildSelectionReference` 现为其薄封装）→ `postInsertReference` 渲染 chat 里的 `selection` chip。行号对 `state.raw` **best-effort** 匹配（渲染文本 ≠ 源码，取选区首/末非空行 substring 定位；匹配不到就只带文件名 label）。选中能力属共享正文组件，A/B 都可用。

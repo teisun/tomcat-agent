@@ -2921,3 +2921,302 @@ input:focus-visible {
     max-width: 40px;
   }
 }
+
+/* ── Plan preview custom editor ─────────────────────────────────────────── */
+
+.tc-plan-preview {
+  --tc-todo-icon-size: 18px;
+  --tc-build-btn: #e5b567;
+  --tc-build-btn-fg: #1c1c1c;
+  color: var(--vscode-foreground);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.tc-plan-preview--loading {
+  align-items: center;
+  color: var(--vscode-descriptionForeground);
+  display: flex;
+  justify-content: center;
+}
+
+/* Slim, right-aligned, translucent strip that sticks to the top of the scroll
+ * container so the body scrolls underneath it (Cursor-style). */
+.tc-plan-action-strip {
+  align-items: center;
+  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--vscode-editor-background) 72%, transparent);
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin: 0 0 10px;
+  padding: 6px 12px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.tc-plan-build-button {
+  background: var(--tc-build-btn);
+  border-radius: 5px;
+  color: var(--tc-build-btn-fg);
+  font-weight: 600;
+  min-height: 24px;
+  padding: 3px 12px;
+}
+
+/* Floating "add selection to chat" action, positioned near the selection. */
+.tc-plan-selection-action {
+  background: var(--vscode-button-background);
+  border: none;
+  border-radius: 6px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.32);
+  color: var(--vscode-button-foreground);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 5px 10px;
+  position: fixed;
+  transform: translate(-50%, -100%);
+  white-space: nowrap;
+  z-index: 30;
+}
+
+.tc-plan-selection-action:hover {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
+}
+
+.tc-plan-build-button:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+/* Shared flat dropdown: borderless, transparent, self-drawn chevron. Applies to
+ * both the action strip and the chat PlanFileCard (the only two users of this
+ * class), so they stay visually consistent. Scoped to a native `select` so the
+ * composer's custom `.tc-topbar__trigger` dropdown is never affected. */
+.tc-plan-model-select {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.tc-plan-model-select select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  font: inherit;
+  min-width: 0;
+  padding: 2px 18px 2px 6px;
+  width: auto;
+}
+
+.tc-plan-model-select select:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.16));
+}
+
+.tc-plan-model-select select:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, rgba(127, 127, 127, 0.6));
+  outline-offset: -1px;
+}
+
+.tc-plan-model-select select:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.tc-plan-model-select::after {
+  background-color: currentColor;
+  content: "";
+  height: 9px;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4z' fill='%23000'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4 6l4 4 4-4z' fill='%23000'/%3E%3C/svg%3E") center / contain no-repeat;
+  opacity: 0.7;
+  pointer-events: none;
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 9px;
+}
+
+.tc-plan-preview__content {
+  flex: 1 1 auto;
+  margin: 0 auto;
+  max-width: 820px;
+  padding: 10px 24px 48px;
+  -webkit-user-select: text;
+  user-select: text;
+  width: 100%;
+}
+
+.tc-plan-preview__body {
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.tc-plan-preview__body h1,
+.tc-plan-preview__body h2,
+.tc-plan-preview__body h3 {
+  line-height: 1.3;
+  margin: 1.2em 0 0.5em;
+}
+
+.tc-plan-preview__body h1 {
+  font-size: 1.6em;
+}
+
+.tc-plan-preview__body h2 {
+  font-size: 1.3em;
+}
+
+.tc-plan-preview__body p,
+.tc-plan-preview__body ul,
+.tc-plan-preview__body ol {
+  margin: 0.5em 0;
+}
+
+.tc-plan-preview__body code {
+  background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.16));
+  border-radius: 4px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+  padding: 0.1em 0.35em;
+}
+
+.tc-plan-preview__body pre {
+  background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.16));
+  border-radius: 8px;
+  overflow-x: auto;
+  padding: 12px 14px;
+}
+
+.tc-plan-preview__body pre code {
+  background: transparent;
+  padding: 0;
+}
+
+.tc-plan-preview__body blockquote {
+  border-left: 3px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.3));
+  color: var(--vscode-descriptionForeground);
+  margin: 0.6em 0;
+  padding: 0.1em 0 0.1em 12px;
+}
+
+.tc-plan-preview__mermaid {
+  display: flex;
+  justify-content: center;
+  margin: 1em 0;
+  overflow-x: auto;
+}
+
+.tc-plan-preview__mermaid svg {
+  height: auto;
+  max-width: 100%;
+}
+
+.tc-plan-preview__body a {
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+}
+
+.tc-plan-preview__todos-count {
+  color: var(--vscode-foreground);
+  font-size: 15px;
+  font-weight: 600;
+  margin-top: 28px;
+}
+
+.tc-plan-preview__divider {
+  border: 0;
+  border-top: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  margin: 12px 0 16px;
+}
+
+.tc-plan-todos {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tc-plan-todos__empty {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-plan-todo {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+  line-height: 1.5;
+}
+
+.tc-plan-todo__icon {
+  flex: 0 0 auto;
+  height: var(--tc-todo-icon-size);
+  margin-top: 0.12em;
+  width: var(--tc-todo-icon-size);
+}
+
+.tc-plan-todo__icon-ring {
+  stroke: var(--vscode-descriptionForeground, rgba(127, 127, 127, 0.8));
+  stroke-width: 1.4;
+}
+
+.tc-plan-todo__icon-fill {
+  fill: var(--vscode-charts-green, #4ec06f);
+}
+
+.tc-plan-todo__icon-check {
+  stroke: var(--vscode-editor-background, #1c1c1c);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.tc-plan-todo__icon-slash {
+  stroke: var(--vscode-descriptionForeground, rgba(127, 127, 127, 0.8));
+  stroke-linecap: round;
+  stroke-width: 1.4;
+}
+
+.tc-plan-todo[data-status="cancelled"] .tc-plan-todo__content {
+  color: var(--vscode-descriptionForeground);
+  text-decoration: line-through;
+}
+
+.tc-plan-todo[data-status="completed"] .tc-plan-todo__content {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-plan-preview__markdown {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tc-plan-preview__markdown-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.tc-plan-preview__source {
+  background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.12));
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
+  border-radius: 8px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+  margin: 0;
+  overflow-x: auto;
+  padding: 14px 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

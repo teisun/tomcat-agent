@@ -47,6 +47,42 @@ export function truncateSelectionSnapshot(text: string): string {
   return `${text.slice(0, maxPrefixLength).trimEnd()}${SELECTION_TRUNCATION_SUFFIX}`;
 }
 
+/**
+ * Assemble a `selection` reference from raw parts (not an editor). Shared by the
+ * text-editor path (`buildSelectionReference`) and the plan preview webview,
+ * whose selection lives in the DOM. Line numbers are optional: when they are
+ * omitted (e.g. the rendered plan text could not be located in the source) the
+ * label falls back to just the file name.
+ */
+export function buildSelectionReferenceFromParts(
+  uri: vscode.Uri,
+  rawText: string,
+  lineStart?: number,
+  lineEnd?: number,
+): WebviewReference | null {
+  if (!rawText) {
+    return null;
+  }
+  const displayPath = relativeLabel(uri, false);
+  const base = basenameLabel(displayPath);
+  const text = truncateSelectionSnapshot(rawText);
+  const hasLines = typeof lineStart === "number" && typeof lineEnd === "number";
+  const label = hasLines
+    ? lineStart === lineEnd
+      ? `${base}:${lineStart}`
+      : `${base}:${lineStart}-${lineEnd}`
+    : base;
+  return {
+    kind: "selection",
+    label,
+    lineEnd: hasLines ? lineEnd : null,
+    lineStart: hasLines ? lineStart : null,
+    path: displayPath,
+    text,
+    type: "reference",
+  };
+}
+
 export function buildSelectionReference(
   editor: vscode.TextEditor,
 ): WebviewReference | null {
@@ -58,22 +94,12 @@ export function buildSelectionReference(
   if (!rawText) {
     return null;
   }
-  const lineStart = selection.start.line + 1;
-  const lineEnd = inclusiveSelectionEndLine(editor);
-  const displayPath = relativeLabel(editor.document.uri, false);
-  const text = truncateSelectionSnapshot(rawText);
-  return {
-    kind: "selection",
-    label:
-      lineStart === lineEnd
-        ? `${basenameLabel(displayPath)}:${lineStart}`
-        : `${basenameLabel(displayPath)}:${lineStart}-${lineEnd}`,
-    lineEnd,
-    lineStart,
-    path: displayPath,
-    text,
-    type: "reference",
-  };
+  return buildSelectionReferenceFromParts(
+    editor.document.uri,
+    rawText,
+    selection.start.line + 1,
+    inclusiveSelectionEndLine(editor),
+  );
 }
 
 export function buildFileReference(

@@ -66,6 +66,44 @@
         "command": "tomcat.addFileToChat",
         "icon": "$(file-add)",
         "title": "Add File to Tomcat Chat"
+      },
+      {
+        "category": "Tomcat Plan",
+        "command": "tomcat.plan.build",
+        "icon": "$(run)",
+        "title": "Build Plan"
+      },
+      {
+        "category": "Tomcat Plan",
+        "command": "tomcat.plan.selectBuildModel",
+        "icon": "$(sparkle)",
+        "title": "Select Build Model"
+      },
+      {
+        "category": "Tomcat Plan",
+        "command": "tomcat.plan.viewAsPreview",
+        "title": "Preview"
+      },
+      {
+        "category": "Tomcat Plan",
+        "command": "tomcat.plan.viewAsMarkdown",
+        "title": "Markdown"
+      },
+      {
+        "category": "Tomcat Plan",
+        "command": "tomcat.plan.viewAsPreview.active",
+        "title": "✓ Preview"
+      },
+      {
+        "category": "Tomcat Plan",
+        "command": "tomcat.plan.viewAsMarkdown.active",
+        "title": "✓ Markdown"
+      },
+      {
+        "category": "Tomcat Plan",
+        "command": "tomcat.plan.addSelectionToChat",
+        "icon": "$(comment-add)",
+        "title": "Add Selection to Tomcat Chat"
       }
     ],
     "chatParticipants": [
@@ -104,6 +142,18 @@
         }
       ]
     },
+    "customEditors": [
+      {
+        "viewType": "tomcat.planPreview",
+        "displayName": "Tomcat Plan Preview",
+        "selector": [
+          {
+            "filenamePattern": "*.plan.md"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
     "menus": {
       "editor/context": [
         {
@@ -116,6 +166,75 @@
         {
           "command": "tomcat.addFileToChat",
           "group": "navigation@20"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "tomcat.plan.build",
+          "group": "navigation@1",
+          "when": "activeCustomEditorId == 'tomcat.planPreview' && config.tomcat.plan.toolbarStyle == 'native' && tomcat.plan.canBuild"
+        },
+        {
+          "command": "tomcat.plan.selectBuildModel",
+          "group": "navigation@2",
+          "when": "activeCustomEditorId == 'tomcat.planPreview' && config.tomcat.plan.toolbarStyle == 'native'"
+        },
+        {
+          "command": "tomcat.plan.viewAsPreview.active",
+          "group": "1_tcplanmode@1",
+          "when": "activeCustomEditorId == 'tomcat.planPreview' && tomcat.plan.mode == 'preview'"
+        },
+        {
+          "command": "tomcat.plan.viewAsPreview",
+          "group": "1_tcplanmode@1",
+          "when": "activeCustomEditorId == 'tomcat.planPreview' && tomcat.plan.mode == 'markdown'"
+        },
+        {
+          "command": "tomcat.plan.viewAsMarkdown.active",
+          "group": "1_tcplanmode@2",
+          "when": "activeCustomEditorId == 'tomcat.planPreview' && tomcat.plan.mode == 'markdown'"
+        },
+        {
+          "command": "tomcat.plan.viewAsMarkdown",
+          "group": "1_tcplanmode@2",
+          "when": "activeCustomEditorId == 'tomcat.planPreview' && tomcat.plan.mode == 'preview'"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "tomcat.plan.addSelectionToChat",
+          "group": "navigation@20",
+          "when": "webviewId == 'tomcat.planPreview'"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "tomcat.plan.addSelectionToChat",
+          "when": "activeCustomEditorId == 'tomcat.planPreview'"
+        },
+        {
+          "command": "tomcat.plan.build",
+          "when": "activeCustomEditorId == 'tomcat.planPreview' && tomcat.plan.canBuild"
+        },
+        {
+          "command": "tomcat.plan.selectBuildModel",
+          "when": "activeCustomEditorId == 'tomcat.planPreview'"
+        },
+        {
+          "command": "tomcat.plan.viewAsPreview",
+          "when": "activeCustomEditorId == 'tomcat.planPreview'"
+        },
+        {
+          "command": "tomcat.plan.viewAsMarkdown",
+          "when": "activeCustomEditorId == 'tomcat.planPreview'"
+        },
+        {
+          "command": "tomcat.plan.viewAsPreview.active",
+          "when": "false"
+        },
+        {
+          "command": "tomcat.plan.viewAsMarkdown.active",
+          "when": "false"
         }
       ]
     },
@@ -169,6 +288,25 @@
           ],
           "default": "both",
           "description": "Choose whether Tomcat shows the native chat participant, the Tomcat Agent Box, or both."
+        },
+        "tomcat.plan.buildModel": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Model used when building a plan from the plan preview or a plan card. Empty means the session's current model is used."
+        },
+        "tomcat.plan.toolbarStyle": {
+          "type": "string",
+          "enum": [
+            "hybrid",
+            "native"
+          ],
+          "enumDescriptions": [
+            "Hybrid (default): the editor title bar omits Build/model; a slim in-body action strip keeps the yellow Build button and the model dropdown.",
+            "Full native: Build and model live on the editor title bar (icons + QuickPick); the body has no action strip."
+          ],
+          "default": "hybrid",
+          "description": "Temporary A/B switch for where the plan preview shows its Build / model controls. Preview/Markdown always lives in the editor title bar overflow menu."
         }
       }
     }

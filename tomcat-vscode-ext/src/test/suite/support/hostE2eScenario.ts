@@ -10,6 +10,7 @@ import {
   TEST_DEFAULT_CWD_ENV,
   TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
   TOMCAT_ANSWER_COMMAND,
+  TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
 } from "../../../constants";
 import { resolveUriToFileReference } from "../../../ui/webview/contextReferences";
 import type { PendingQuestionSnapshot } from "../../../ui/participant/commands";
@@ -3417,4 +3418,270 @@ export async function assertWebviewStickyHistoryFlow(
     prompts.slice(0, -1).includes(historicalTurn.stickyPromptText ?? ""),
     `expected sticky prompt to switch to a historical turn, got ${historicalTurn.stickyPromptText}`,
   );
+}
+
+type PlanPreviewDomSnapshot = Awaited<
+  ReturnType<TomcatExtensionApi["__testing"]["capturePlanPreviewDom"]>
+>;
+
+async function waitForPlanPreviewDom(
+  api: TomcatExtensionApi,
+  planPath: string,
+  predicate: (snapshot: PlanPreviewDomSnapshot) => boolean,
+  timeoutMs = 30_000,
+): Promise<PlanPreviewDomSnapshot> {
+  const startedAt = Date.now();
+  let lastError: unknown;
+  let lastSnapshot: PlanPreviewDomSnapshot | undefined;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const snapshot = await api.__testing.capturePlanPreviewDom(planPath);
+      lastSnapshot = snapshot;
+      if (predicate(snapshot)) {
+        return snapshot;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await pause(200);
+  }
+  throw new Error(
+    `Timed out waiting for plan preview DOM. lastSnapshot=${JSON.stringify(lastSnapshot)} lastError=${String(lastError)}`,
+  );
+}
+
+/**
+ * The one automated check of the real `.plan.md` custom editor resolve + webview:
+ * open a plan file, verify the hybrid (default B) in-body action strip and the
+ * Preview four-state checklist, flip to Markdown source via the native title-bar
+ * command, hot-reload on document edits, persist the build model, add a
+ * selection to chat via both entry points (right-click command + floating
+ * button), then regress the native (A) toolbar style.
+ */
+export async function assertPlanPreviewCustomEditorFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  assert.ok(workspaceRoot, "expected a real workspace folder for the plan preview E2E");
+
+  // A live chat session must exist so "add selection to chat" can insert a chip.
+  // The chip lands in whichever session `focusWebviewSurface()` reveals (the
+  // sidebar's active session), so we don't pin assertions to this id.
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  await createFreshWebviewSession(api, "plan-preview-selection-session");
+
+  const scratchDir = path.join(
+    workspaceRoot,
+    `tmp-plan-preview-${Date.now().toString(36)}`,
+  );
+  const planBasename = "e2e-preview.plan.md";
+  const planPath = path.join(scratchDir, planBasename);
+  const planUri = vscode.Uri.file(planPath);
+  const initialText = [
+    "---",
+    `plan_id: e2e-plan-${Date.now().toString(36)}`,
+    "name: E2E Plan Preview",
+    "overview: Verify the custom editor renders",
+    "state: planning",
+    "todos:",
+    "- id: t1",
+    "  content: First task",
+    "  status: completed",
+    "- id: t2",
+    "  content: Second task",
+    "  status: in_progress",
+    "- id: t3",
+    "  content: Third task",
+    "  status: pending",
+    "---",
+    "",
+    "# E2E heading",
+    "",
+    "Body paragraph for the preview.",
+    "",
+    "```mermaid",
+    "flowchart LR",
+    "  a[Start] --> b[Finish]",
+    "```",
+    "",
+  ].join("\n");
+
+  const chipCount = (html: string): number =>
+    (html.match(/data-testid="composer-reference-chip"/gu) ?? []).length;
+
+  try {
+    await fs.mkdir(scratchDir, { recursive: true });
+    await fs.writeFile(planPath, initialText, "utf8");
+
+    await api.__testing.openPlanPreview(planPath);
+
+    // Default is now hybrid (B): the slim in-body action strip is present.
+    const preview = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) =>
+        snapshot.mode === "preview" &&
+        snapshot.toolbarStyle === "hybrid" &&
+        snapshot.todoItemCount === 3,
+    );
+    assert.equal(
+      preview.hasActionStrip,
+      true,
+      "expected the hybrid in-body action strip by default",
+    );
+    assert.equal(
+      preview.todoCountText,
+      "3 To-dos",
+      `expected a "3 To-dos" count header, got ${preview.todoCountText}`,
+    );
+    assert.equal(preview.bodyHasContent, true, "expected the rendered body to have content");
+
+    // The ```mermaid``` fence renders to an inline SVG diagram (lazy-loaded).
+    const mermaid = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.mermaidSvgCount >= 1,
+      20_000,
+    );
+    assert.ok(
+      mermaid.mermaidSvgCount >= 1,
+      `expected at least one rendered mermaid SVG, got ${mermaid.mermaidSvgCount}`,
+    );
+
+    // Native title-bar command → Markdown reveals the read-only source.
+    await api.__testing.executeCommand("tomcat.plan.viewAsMarkdown");
+    const markdown = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.mode === "markdown" && snapshot.markdownSourceText !== null,
+    );
+    assert.ok(
+      (markdown.markdownSourceText ?? "").includes("# E2E heading"),
+      "expected the Markdown source view to show the raw plan text",
+    );
+
+    // Back to Preview, then hot-update the document and expect the checklist to grow.
+    await api.__testing.executeCommand("tomcat.plan.viewAsPreview");
+    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.mode === "preview");
+
+    const updatedText = initialText.replace(
+      "---\n\n# E2E heading",
+      ["- id: t4", "  content: Fourth task", "  status: cancelled", "---", "", "# E2E heading"].join(
+        "\n",
+      ),
+    );
+    const document = await vscode.workspace.openTextDocument(planUri);
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(
+      planUri,
+      new vscode.Range(new vscode.Position(0, 0), new vscode.Position(document.lineCount, 0)),
+      updatedText,
+    );
+    const applied = await vscode.workspace.applyEdit(edit);
+    assert.equal(applied, true, "expected the plan document edit to apply");
+
+    const hotUpdated = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.mode === "preview" && snapshot.todoItemCount === 4,
+    );
+    assert.equal(
+      hotUpdated.todoCountText,
+      "4 To-dos",
+      `expected the count header to hot-update to "4 To-dos", got ${hotUpdated.todoCountText}`,
+    );
+
+    // When the serve exposes ready models, selecting one on the hybrid strip
+    // persists it to the global config.
+    if (hotUpdated.buildModelOptions.length > 0) {
+      const targetModel = hotUpdated.buildModelOptions[0];
+      await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+        kind: "selectBuildModel",
+        modelId: targetModel,
+      });
+      await waitForPlanPreviewDom(
+        api,
+        planPath,
+        (snapshot) => snapshot.buildModelValue === targetModel,
+      );
+      const persisted = vscode.workspace
+        .getConfiguration("tomcat")
+        .get<string>("plan.buildModel", "");
+      assert.equal(
+        persisted,
+        targetModel,
+        `expected tomcat.plan.buildModel to persist ${targetModel}, got ${persisted}`,
+      );
+      await vscode.workspace
+        .getConfiguration("tomcat")
+        .update("plan.buildModel", "", vscode.ConfigurationTarget.Global);
+    }
+
+    // Baseline chip count before adding any selection to the chat.
+    const baseline = await api.__testing.captureWebviewDom();
+    const baseChips = chipCount(baseline.html);
+
+    // Selection → chat, path 1: the right-click command captures the live
+    // selection (heading) inside the focused plan editor.
+    await api.__testing.openPlanPreview(planPath);
+    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.mode === "preview");
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "selectText",
+      selector: ".tc-plan-preview__body h1",
+    });
+    await api.__testing.executeCommand(TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND);
+    const afterCommand = await waitForWebviewDomSnapshot(
+      api,
+      (snapshot) =>
+        chipCount(snapshot.html) === baseChips + 1 &&
+        snapshot.html.includes(planBasename)
+          ? snapshot
+          : undefined,
+      20_000,
+    );
+    assert.ok(
+      afterCommand.html.includes(planBasename),
+      "expected the right-click command to add a plan selection chip",
+    );
+
+    // Selection → chat, path 2: the floating button on a different selection
+    // (body paragraph) yields a second, distinct chip.
+    await api.__testing.openPlanPreview(planPath);
+    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.mode === "preview");
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "selectText",
+      selector: ".tc-plan-preview__body p",
+    });
+    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.selectionButtonVisible);
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, { kind: "clickSelectionAdd" });
+    await waitForWebviewDomSnapshot(
+      api,
+      (snapshot) => (chipCount(snapshot.html) === baseChips + 2 ? snapshot : undefined),
+      20_000,
+    );
+
+    // A regression: switching to native hides the in-body strip.
+    await vscode.workspace
+      .getConfiguration("tomcat")
+      .update("plan.toolbarStyle", "native", vscode.ConfigurationTarget.Global);
+    const native = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.toolbarStyle === "native" && !snapshot.hasActionStrip,
+    );
+    assert.equal(
+      native.hasActionStrip,
+      false,
+      "expected no in-body action strip in native toolbar style",
+    );
+  } finally {
+    await vscode.workspace
+      .getConfiguration("tomcat")
+      .update("plan.toolbarStyle", undefined, vscode.ConfigurationTarget.Global);
+    await vscode.workspace
+      .getConfiguration("tomcat")
+      .update("plan.buildModel", "", vscode.ConfigurationTarget.Global);
+    await fs.rm(scratchDir, { force: true, recursive: true }).catch(() => undefined);
+  }
 }

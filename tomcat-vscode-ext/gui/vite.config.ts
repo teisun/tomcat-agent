@@ -16,6 +16,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         index: path.resolve(__dirname, "index.html"),
+        plan: path.resolve(__dirname, "plan.html"),
         settings: path.resolve(__dirname, "settings.html"),
       },
       output: {

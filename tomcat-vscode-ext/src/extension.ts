@@ -20,6 +20,16 @@ import {
   TOMCAT_LIST_SESSIONS_COMMAND,
   TOMCAT_NEW_SESSION_COMMAND,
   TOMCAT_OPEN_SETTINGS_COMMAND,
+  TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
+  TOMCAT_PLAN_BUILD_COMMAND,
+  TOMCAT_PLAN_CAN_BUILD_CONTEXT_KEY,
+  TOMCAT_PLAN_MODE_CONTEXT_KEY,
+  TOMCAT_PLAN_SELECT_BUILD_MODEL_COMMAND,
+  TOMCAT_PLAN_TOOLBAR_STYLE_SETTING,
+  TOMCAT_PLAN_VIEW_AS_MARKDOWN_ACTIVE_COMMAND,
+  TOMCAT_PLAN_VIEW_AS_MARKDOWN_COMMAND,
+  TOMCAT_PLAN_VIEW_AS_PREVIEW_ACTIVE_COMMAND,
+  TOMCAT_PLAN_VIEW_AS_PREVIEW_COMMAND,
   TOMCAT_RESTART_COMMAND,
   TOMCAT_WEBVIEW_CONTAINER_ID,
   TOMCAT_WEBVIEW_ID,
@@ -53,10 +63,20 @@ import {
 } from "./ui/webview/protocol";
 import {
   buildSelectionReference,
+  buildSelectionReferenceFromParts,
   resolveUriToFileReference,
 } from "./ui/webview/contextReferences";
 import { SettingsPanel } from "./ui/settings/SettingsPanel";
 import type { SettingsIntent, SettingsStateSnapshot } from "./shared/settingsProtocol";
+import type {
+  PlanPreviewDomAction,
+  PlanPreviewDomSnapshot,
+} from "./shared/planPreviewProtocol";
+import {
+  type PlanActivePanelInfo,
+  PLAN_PREVIEW_VIEW_TYPE,
+  PlanPreviewEditorProvider,
+} from "./ui/planPreview/PlanPreviewEditorProvider";
 import { TomcatWebviewViewProvider } from "./ui/webview/provider";
 
 export type { WebviewIntent } from "./ui/webview/protocol";
@@ -246,6 +266,12 @@ export interface TomcatExtensionApi {
     waitForEvent(filter: ObservedEventFilter): Promise<ServeEvent>;
     waitForPendingQuestion(timeoutMs?: number): Promise<PendingQuestionSnapshot>;
     waitForWebviewReady(timeoutMs?: number): Promise<void>;
+    openPlanPreview(planPath: string): Promise<void>;
+    capturePlanPreviewDom(planPath: string): Promise<PlanPreviewDomSnapshot>;
+    dispatchPlanPreviewDomAction(
+      planPath: string,
+      action: PlanPreviewDomAction,
+    ): Promise<void>;
   };
 }
 
@@ -854,6 +880,137 @@ export async function activate(
     return webviewProvider.currentState().activeSessionId;
   };
 
+  const planPreviewProvider = new PlanPreviewEditorProvider({
+    addSelectionToChat: async (planPath, text, lineRange) => {
+      const reference = buildSelectionReferenceFromParts(
+        vscode.Uri.file(planPath),
+        text,
+        lineRange?.lineStart,
+        lineRange?.lineEnd,
+      );
+      if (!reference) {
+        return;
+      }
+      const sessionId = await focusWebviewSurface();
+      if (!sessionId) {
+        await showWarningMessage(
+          promptHistory,
+          "Tomcat sidebar is not ready yet. Please try again.",
+        );
+        return;
+      }
+      await webviewProvider.postInsertReference(sessionId, reference);
+    },
+    buildPlan: async (planId) => {
+      await focusWebviewSurface();
+      await webviewProvider.buildPlan(planId);
+    },
+    ensureInitialized,
+    extensionUri: context.extensionUri,
+    getBuildModel: () =>
+      vscode.workspace
+        .getConfiguration(TOMCAT_CONFIG_SECTION)
+        .get<string>("plan.buildModel", "") ?? "",
+    messenger,
+    openExternal: async (href) => {
+      await vscode.env.openExternal(vscode.Uri.parse(href));
+    },
+    openInTextEditor: async (planPath) => {
+      await vscode.commands.executeCommand(
+        "vscode.openWith",
+        vscode.Uri.file(planPath),
+        "default",
+      );
+    },
+    openWorkspaceFile: (filePath) => ide.showFile(filePath),
+    setBuildModel: async (modelId) => {
+      await vscode.workspace
+        .getConfiguration(TOMCAT_CONFIG_SECTION)
+        .update("plan.buildModel", modelId, vscode.ConfigurationTarget.Global);
+    },
+  });
+
+  // Mirror the focused plan editor into context keys so the native title-bar
+  // menu can gate the Build icon (canBuild) and show the ✓ on the active mode.
+  const applyPlanContextKeys = (info: PlanActivePanelInfo | null): void => {
+    void vscode.commands.executeCommand(
+      "setContext",
+      TOMCAT_PLAN_CAN_BUILD_CONTEXT_KEY,
+      info?.canBuild ?? false,
+    );
+    void vscode.commands.executeCommand(
+      "setContext",
+      TOMCAT_PLAN_MODE_CONTEXT_KEY,
+      info?.mode ?? "",
+    );
+  };
+  const planContextSubscription = planPreviewProvider.onDidChangeActivePlan(
+    applyPlanContextKeys,
+  );
+  applyPlanContextKeys(planPreviewProvider.getActivePlanInfo());
+
+  const planBuildCommand = vscode.commands.registerCommand(
+    TOMCAT_PLAN_BUILD_COMMAND,
+    async () => {
+      await planPreviewProvider.runBuildForActive();
+    },
+  );
+  const planSelectBuildModelCommand = vscode.commands.registerCommand(
+    TOMCAT_PLAN_SELECT_BUILD_MODEL_COMMAND,
+    async () => {
+      const current = planPreviewProvider.getBuildModel();
+      const available = await planPreviewProvider.getAvailableModels();
+      type ModelQuickPickItem = vscode.QuickPickItem & { modelId: string };
+      const items: ModelQuickPickItem[] = [
+        {
+          description: current === "" ? "$(check)" : undefined,
+          label: "Session default",
+          modelId: "",
+        },
+        ...available.map<ModelQuickPickItem>((model) => ({
+          description: model === current ? "$(check)" : undefined,
+          label: model,
+          modelId: model,
+        })),
+      ];
+      const picked = await vscode.window.showQuickPick(items, {
+        placeHolder: "Select the model used when building plans",
+        title: "Tomcat: Build Model",
+      });
+      if (picked) {
+        await planPreviewProvider.setBuildModel(picked.modelId);
+      }
+    },
+  );
+  const planViewAsPreview = async (): Promise<void> => {
+    await planPreviewProvider.setModeForActive("preview");
+  };
+  const planViewAsMarkdown = async (): Promise<void> => {
+    await planPreviewProvider.setModeForActive("markdown");
+  };
+  const planViewPreviewCommand = vscode.commands.registerCommand(
+    TOMCAT_PLAN_VIEW_AS_PREVIEW_COMMAND,
+    planViewAsPreview,
+  );
+  const planViewPreviewActiveCommand = vscode.commands.registerCommand(
+    TOMCAT_PLAN_VIEW_AS_PREVIEW_ACTIVE_COMMAND,
+    planViewAsPreview,
+  );
+  const planViewMarkdownCommand = vscode.commands.registerCommand(
+    TOMCAT_PLAN_VIEW_AS_MARKDOWN_COMMAND,
+    planViewAsMarkdown,
+  );
+  const planViewMarkdownActiveCommand = vscode.commands.registerCommand(
+    TOMCAT_PLAN_VIEW_AS_MARKDOWN_ACTIVE_COMMAND,
+    planViewAsMarkdown,
+  );
+  const planAddSelectionToChatCommand = vscode.commands.registerCommand(
+    TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
+    async () => {
+      await planPreviewProvider.requestCaptureSelection();
+    },
+  );
+
   const askQuestionHandler = messenger.registerAskQuestionHandler(
     async (request, frame) => {
       const owner = frame.sessionId
@@ -1048,8 +1205,21 @@ export async function activate(
       },
     },
   );
+  const planPreviewRegistration = vscode.window.registerCustomEditorProvider(
+    PLAN_PREVIEW_VIEW_TYPE,
+    planPreviewProvider,
+    {
+      supportsMultipleEditorsPerDocument: false,
+      webviewOptions: {
+        retainContextWhenHidden: true,
+      },
+    },
+  );
   const configurationSubscription = vscode.workspace.onDidChangeConfiguration(
     (event) => {
+      if (event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.plan.buildModel`)) {
+        void webviewProvider.syncBuildModel().catch(() => undefined);
+      }
       if (
         !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.path`) &&
         !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.serve.extraArgs`) &&
@@ -1113,6 +1283,16 @@ export async function activate(
     settingsPanel,
     webviewProvider,
     webviewRegistration,
+    planPreviewProvider,
+    planPreviewRegistration,
+    planContextSubscription,
+    planBuildCommand,
+    planSelectBuildModelCommand,
+    planViewPreviewCommand,
+    planViewPreviewActiveCommand,
+    planViewMarkdownCommand,
+    planViewMarkdownActiveCommand,
+    planAddSelectionToChatCommand,
     codeLensRegistration,
     selectionChangeSubscription,
     activeEditorSubscription,
@@ -1323,6 +1503,17 @@ export async function activate(
       sendSettingsIntent: async (intent) => {
         await settingsPanel.__testingDispatchIntent(intent);
       },
+      openPlanPreview: async (planPath) => {
+        await vscode.commands.executeCommand(
+          "vscode.openWith",
+          vscode.Uri.file(planPath),
+          PLAN_PREVIEW_VIEW_TYPE,
+        );
+      },
+      capturePlanPreviewDom: (planPath) =>
+        planPreviewProvider.captureDomSnapshot(planPath),
+      dispatchPlanPreviewDomAction: (planPath, action) =>
+        planPreviewProvider.dispatchDomAction(planPath, action),
       sendWebviewDomAction: async (action) => {
         await webviewProvider.dispatchTestDomAction(action);
       },

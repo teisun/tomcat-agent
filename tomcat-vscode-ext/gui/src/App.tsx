@@ -1192,9 +1192,16 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             activeSession.historyLoading ||
             activeSession.hasMoreHistory ? (
               <TranscriptView
+                availableModels={state.availableModels}
+                buildModel={state.buildModel ?? ""}
                 busy={!!activeSession.busy}
                 bottomSpacerHeight={bottomSpacerHeight}
                 onAnswer={handleAnswerQuestion}
+                onSetBuildModel={(modelId) =>
+                  postIntent(vscodeApi, "setBuildModel", {
+                    modelId,
+                  })
+                }
                 checkpoints={activeSession.checkpoints ?? []}
                 onOpenDiff={(toolCallId) =>
                   postIntent(vscodeApi, "openDiff", {

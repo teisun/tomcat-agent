@@ -259,6 +259,7 @@ export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
   availableModels: string[];
+  buildModel?: string;
   modelAdminSupported: boolean;
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
@@ -389,6 +390,13 @@ export type WebviewIntent =
       data: {
         modelId: string;
         sessionId?: string | null;
+      };
+    }
+  | {
+      messageId: string;
+      type: "setBuildModel";
+      data: {
+        modelId: string;
       };
     }
   | {

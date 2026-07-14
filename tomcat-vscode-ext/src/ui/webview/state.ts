@@ -1156,6 +1156,7 @@ export class WebviewStateStore {
       activeSessionId: null,
       availableModelCapabilities: {},
       availableModels: [],
+      buildModel: "",
       modelAdminSupported: false,
       ready: false,
       sessionViews: {},
@@ -1177,6 +1178,10 @@ export class WebviewStateStore {
     this.state.availableModels = [...models];
   }
 
+  setBuildModel(buildModel: string): void {
+    this.state.buildModel = buildModel;
+  }
+
   setModelAdminSupported(supported: boolean): void {
     this.state.modelAdminSupported = supported;
   }
@@ -1192,6 +1197,7 @@ export class WebviewStateStore {
       activeSessionId: null,
       availableModelCapabilities: {},
       availableModels: [],
+      buildModel: "",
       modelAdminSupported: false,
       ready: false,
       sessionViews: {},

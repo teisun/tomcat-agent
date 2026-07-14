@@ -5,6 +5,7 @@ import * as path from "node:path";
 
 import * as vscode from "vscode";
 
+import { TOMCAT_CONFIG_SECTION } from "../../constants";
 import type { VsCodeIde } from "../../ide/VsCodeIde";
 import {
   hasAnyModelAdminCapability,
@@ -41,6 +42,7 @@ import {
   type WebviewToolCard,
 } from "./protocol";
 import { resolveGuiStylesheet } from "../guiAssets";
+import { parsePlanDocument } from "../planPreview/planDocument";
 import { ContextSearchService } from "./contextSearch";
 import { buildFileReference } from "./contextReferences";
 import { SessionOwnershipTracker } from "./ownership";
@@ -240,17 +242,6 @@ type PlanMetadataCacheEntry = {
   title?: string;
 };
 
-function stripYamlQuotes(value: string): string {
-  const trimmed = value.trim();
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return trimmed.slice(1, -1).trim();
-  }
-  return trimmed;
-}
-
 function expandHomePath(filePath: string): string {
   if (filePath === "~") {
     return os.homedir();
@@ -264,49 +255,16 @@ function expandHomePath(filePath: string): string {
   return filePath;
 }
 
-const PLAN_TITLE_MAX = 96;
-
-function truncatePlanTitle(value: string): string {
-  const firstLine = value.split("\n")[0]?.trim() ?? "";
-  if (firstLine.length <= PLAN_TITLE_MAX) {
-    return firstLine;
-  }
-  return `${firstLine.slice(0, PLAN_TITLE_MAX - 3).trimEnd()}...`;
-}
-
 export function parsePlanFrontmatter(
   text: string,
 ): Pick<WebviewPlanFileCard, "overview" | "title"> {
-  const normalized = text.replace(/\r\n/g, "\n");
-  if (!normalized.startsWith("---\n")) {
-    return {};
-  }
-
-  let goalValue: string | undefined;
+  const parsed = parsePlanDocument(text);
   const metadata: Pick<WebviewPlanFileCard, "overview" | "title"> = {};
-  for (const line of normalized.slice(4).split("\n")) {
-    if (line.trim() === "---") {
-      break;
-    }
-    const match = line.match(/^([A-Za-z][\w-]*):\s*(.*)$/);
-    if (!match) {
-      continue;
-    }
-    const [, key, rawValue] = match;
-    const value = stripYamlQuotes(rawValue);
-    if (!value) {
-      continue;
-    }
-    if (key === "title" || key === "name") {
-      metadata.title = value;
-    } else if (key === "goal") {
-      goalValue = value;
-    } else if (key === "overview") {
-      metadata.overview = value;
-    }
+  if (parsed.title) {
+    metadata.title = parsed.title;
   }
-  if (!metadata.title && goalValue) {
-    metadata.title = truncatePlanTitle(goalValue);
+  if (parsed.overview) {
+    metadata.overview = parsed.overview;
   }
   return metadata;
 }
@@ -1079,6 +1037,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         }
         this.deps.openModelSettings?.(intent.data?.route ?? "models");
         return;
+      case "setBuildModel": {
+        await vscode.workspace
+          .getConfiguration(TOMCAT_CONFIG_SECTION)
+          .update("plan.buildModel", intent.data.modelId, vscode.ConfigurationTarget.Global);
+        this.stateStore.setBuildModel(intent.data.modelId);
+        await this.postState();
+        return;
+      }
       case "setPlanMode": {
         await this.ensureInitialized();
         const sessionId = await this.ensureWebviewSessionWithoutHistory(
@@ -1086,6 +1052,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         );
         if (!sessionId) {
           await this.postState();
+          return;
+        }
+        if (intent.data.action === "build") {
+          await this.runPlanBuild(sessionId, intent.data.planId);
           return;
         }
         try {
@@ -1168,16 +1138,20 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       }
       case "openPlanFile":
         try {
-          await this.deps.ide.showFile(intent.data.path);
+          await this.deps.ide.openWith(intent.data.path, "tomcat.planPreview");
         } catch (error) {
-          const sessionId = this.currentState().activeSessionId;
-          if (sessionId) {
-            this.stateStore.appendMessage(
-              sessionId,
-              "error",
-              formatBridgeError(`open plan file ${intent.data.path}`, error),
-            );
-            await this.postState();
+          try {
+            await this.deps.ide.showFile(intent.data.path);
+          } catch {
+            const sessionId = this.currentState().activeSessionId;
+            if (sessionId) {
+              this.stateStore.appendMessage(
+                sessionId,
+                "error",
+                formatBridgeError(`open plan file ${intent.data.path}`, error),
+              );
+              await this.postState();
+            }
           }
         }
         return;
@@ -1382,7 +1356,78 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.view.webview.html = this.renderHtml(this.view.webview);
   }
 
+  private readBuildModelConfig(): string {
+    return (
+      vscode.workspace
+        .getConfiguration(TOMCAT_CONFIG_SECTION)
+        .get<string>("plan.buildModel", "") ?? ""
+    );
+  }
+
+  /** Re-read `tomcat.plan.buildModel` and push it to the webview (config sync). */
+  async syncBuildModel(): Promise<void> {
+    this.stateStore.setBuildModel(this.readBuildModelConfig());
+    if (this.isReady && this.uiMode !== "participant") {
+      await this.postState();
+    }
+  }
+
+  /**
+   * Single build path shared by the chat PlanFileCard and the plan preview
+   * editor: apply the global build model (when set) before entering build mode.
+   */
+  private async runPlanBuild(sessionId: string, planId?: string | null): Promise<void> {
+    const buildModel = this.readBuildModelConfig();
+    try {
+      if (buildModel) {
+        const modelResponse = await this.deps.messenger.sendSetModel(sessionId, buildModel);
+        if (!modelResponse.success) {
+          this.stateStore.appendMessage(
+            sessionId,
+            "error",
+            modelResponse.error ?? "Unable to switch model",
+          );
+        }
+      }
+      const response = await this.deps.messenger.sendSetPlanMode({
+        action: "build",
+        planId,
+        sessionId,
+      });
+      if (!response.success) {
+        this.stateStore.appendMessage(
+          sessionId,
+          "error",
+          response.error ?? "Unable to change plan mode",
+        );
+      }
+    } catch (error) {
+      this.stateStore.appendMessage(
+        sessionId,
+        "error",
+        formatBridgeError("change plan mode", error),
+      );
+    }
+    if (buildModel) {
+      await this.refreshModels();
+    }
+    await this.refreshSessionState(sessionId, { trustBusy: true });
+    await this.postState();
+  }
+
+  /** Public build entry for the plan preview editor (ensures a session first). */
+  async buildPlan(planId: string | null): Promise<void> {
+    await this.ensureInitialized();
+    const sessionId = await this.ensureWebviewSessionWithoutHistory(null);
+    if (!sessionId) {
+      await this.postState();
+      return;
+    }
+    await this.runPlanBuild(sessionId, planId);
+  }
+
   private async refreshModels(): Promise<void> {
+    this.stateStore.setBuildModel(this.readBuildModelConfig());
     const initializeResult = await this.ensureInitialized();
     this.stateStore.setModelAdminSupported(
       hasAnyModelAdminCapability(initializeResult),
