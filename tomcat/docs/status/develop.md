@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-15 17:40 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-16 06:08 +0800 | ACTIVE | develop | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** `feature/prompt-optimization` 已 fast-forward 合入 `develop`（`9f940b7 -> 46b7ef7`）：系统提示词/工具描述瘦身、`prompt_guidelines` 聚合、工程规范 #6–#10 固化进 `core_identity`/`planner`、`parallel_tools`/`verification` 段与预算门；同提交附带 `cloud-scale-serving-01/` 方案文档与 `commit-with-status` 路径迁移。详情见 `docs/status/feature-prompt-optimization.md` @2026-07-16
 - [✓] **[P1]** 云化服务技术方案已落盘：`tomcat/docs/architecture/cloud-scale-serving/` 新增 `01-overview` + Phase A/B/C（`02/03/04`），并在架构 README 登记「扩展性与云化」阅读顺序；纠正「全站单 EventBus」误诊，明确 A 期单机 mailbox/热温冷为先落地、本地 `stdio` 零回退；尚未进入 Phase A 编码 @2026-07-15
 - [✓] **[P0]** `feature/transcript-ui-and-checkpoints` 已 fast-forward 合入 `develop`（`866752c -> 62c8811`）；develop-side review 发现并修复跨 session restore 漏洞：`restore_checkpoint` / `/restore` 现拒绝不属于当前会话的 checkpoint，避免 `revertFiles=true` 把共享工作区回滚到别的会话快照；新增 `serve_restore_checkpoint_rejects_foreign_session_checkpoint` 回归测试，`cargo test -p tomcat serve_restore_checkpoint -- --nocapture` 4/4 通过 @2026-07-15
 - [✓] **[P0]** develop-side 扩展快门禁与真实宿主高风险复核完成：`npm run gate:fast` 全绿；`TOMCAT_E2E_GREP='renders the \\.plan\\.md custom editor|renders transcript action rows and context groups|keeps sticky user prompts aligned with historical turns in the Tomcat webview|restores plan cards and Ctx after switching sessions' npm run test:e2e:vscode-devhost` 4/4 通过 @2026-07-15
@@ -14,7 +15,8 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
-- 无代码接口变更。新增架构文档入口：`tomcat/docs/architecture/cloud-scale-serving/01-overview.md`（父导航）及 Phase A/B/C 子文档；不改变现有 `serve` / `stdio` 对外契约。
+- `BuiltinToolCatalogEntry::prompt_guidelines` + `render_tool_guidelines_with_policy`；`PromptKey::SystemParallelTools` / `SystemVerification`（系统提示词 section priority 22/50）。无对外部客户端的破坏性 API 变更。
+- 新增架构文档入口：`tomcat/docs/architecture/cloud-scale-serving/` 与 `cloud-scale-serving-01/`；不改变现有 `serve` / `stdio` 对外契约。
 - `restore_checkpoint` / `/restore` 现强制 checkpoint 的 `session_id` 必须等于当前会话；跨 session restore 返回错误 `checkpoint 不属于当前会话，不能跨会话 restore`，不再允许误回滚共享工作区。
 
 ### ⚠️ BLOCKED (阻塞/风险)
