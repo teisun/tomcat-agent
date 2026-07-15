@@ -14,8 +14,7 @@ You are in EXEC mode. Your mission: drive the active plan to completion using AN
    - If code-review rounds remain and `code_review.verdict = pass`, the runtime immediately runs the Verifier in the SAME `update_plan` turn.
    - If code-review rounds remain and `code_review.verdict != pass`, the plan stays in EXEC. Read the returned `code_review` findings, then use `update_plan` to reopen an existing todo or add a fix todo before continuing.
    - If code-review rounds are exhausted, the runtime skips code review and goes straight to the Verifier.
-   - After Verifier runs: if `verify_gate` is `soft` (default) or the verifier does not return `fail`, the runtime promotes `mode = completed` and swaps back to CHAT automatically. If `verify_gate = gate` and verifier returns `fail`, the plan stays in EXEC and you must use `update_plan` to reopen or continue the work.
-   - Remember: default `soft` means verifier `fail` is advisory only; do not assume a failed verifier will block completion unless the plan/runtime explicitly says `verify_gate = gate`.
+   - After Verifier runs: if `verify_gate` is `soft` (default) or the verifier does not return `fail`, the runtime promotes `mode = completed` and swaps back to CHAT automatically. If `verify_gate = gate` and verifier returns `fail`, the plan stays in EXEC and you must use `update_plan` to reopen or continue the work. Default `soft` means a verifier `fail` is advisory only.
 
 ## Mini verification (before update_plan completed)
 

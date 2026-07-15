@@ -9,7 +9,7 @@
    - 宿主主链：[`host-core-layer.md`](./host-core-layer.md)
    - 插件系统：[`plugin-system-overview.md`](./plugin-system-overview.md)
    - 会话与上下文：[`session-modes.md`](./session-modes.md)、[`session-storage.md`](./session-storage.md)、[`context-management.md`](./context-management.md)
-   - 扩展性与云化：[`cloud-scale-serving/01-overview.md`](./cloud-scale-serving/01-overview.md) → [`02-phase-a-session-mailbox-hot-cold.md`](./cloud-scale-serving/02-phase-a-session-mailbox-hot-cold.md) → [`03-phase-b-gateway-shard-storage-trait.md`](./cloud-scale-serving/03-phase-b-gateway-shard-storage-trait.md) → [`04-phase-c-cluster-multitenant.md`](./cloud-scale-serving/04-phase-c-cluster-multitenant.md)
+   - 扩展性与云化：[`cloud-scale-serving-01/01-overview.md`](./cloud-scale-serving-01/01-overview.md) → [`02-phase-a-session-mailbox-hot-cold.md`](./cloud-scale-serving-01/02-phase-a-session-mailbox-hot-cold.md) → [`03-phase-b-gateway-shard-storage-trait.md`](./cloud-scale-serving-01/03-phase-b-gateway-shard-storage-trait.md) → [`04-phase-c-cluster-multitenant.md`](./cloud-scale-serving-01/04-phase-c-cluster-multitenant.md)；需要看隔离 / 验收 / WBS 时继续读 [`05-sandbox-workspace-isolation.md`](./cloud-scale-serving-01/05-sandbox-workspace-isolation.md) → [`06-test-strategy-and-rollout.md`](./cloud-scale-serving-01/06-test-strategy-and-rollout.md) → [`07-development-plan-todos.md`](./cloud-scale-serving-01/07-development-plan-todos.md)
    - 计划与执行态：[`plan-runtime.md`](./plan-runtime.md)、[`plan-exec-code-verification.md`](./plan-exec-code-verification.md)
 3. 最后按需下钻到工具、LLM、权限、审计和实现侧 README。
 
@@ -45,12 +45,15 @@
 
 ### 扩展性与云化
 
-- [`cloud-scale-serving/01-overview.md`](./cloud-scale-serving/01-overview.md)：总入口；解释 Tomcat 为什么不能靠继续调大本地 `serve` 撑到云端，并给出 A/B/C 三期边界与阅读地图。
-- [`cloud-scale-serving/02-phase-a-session-mailbox-hot-cold.md`](./cloud-scale-serving/02-phase-a-session-mailbox-hot-cold.md)：Phase A，先在单机收口 `SessionMailbox`、热/温/冷分层、run identity、背压与本地 `stdio` 零回退。
-- [`cloud-scale-serving/03-phase-b-gateway-shard-storage-trait.md`](./cloud-scale-serving/03-phase-b-gateway-shard-storage-trait.md)：Phase B，把 `serve` 演进成带订阅、分片路由、WS transport 与 `Storage trait` 的 gateway dispatcher。
-- [`cloud-scale-serving/04-phase-c-cluster-multitenant.md`](./cloud-scale-serving/04-phase-c-cluster-multitenant.md)：Phase C，外部 gateway、控制面/数据面拆分、跨 worker 恢复、多租户配额与断线续流。
+- [`cloud-scale-serving-01/01-overview.md`](./cloud-scale-serving-01/01-overview.md)：总入口；解释 Tomcat 为什么不能靠继续调大本地 `serve` 撑到云端，并给出 A/B/C 三期边界、统一协议、测试门槛与阅读地图。
+- [`cloud-scale-serving-01/02-phase-a-session-mailbox-hot-cold.md`](./cloud-scale-serving-01/02-phase-a-session-mailbox-hot-cold.md)：Phase A，先在单机收口 `SessionMailbox`、热/温/冷分层、run identity、背压与本地 `stdio` 零回退。
+- [`cloud-scale-serving-01/03-phase-b-gateway-shard-storage-trait.md`](./cloud-scale-serving-01/03-phase-b-gateway-shard-storage-trait.md)：Phase B，把 `serve` 演进成带订阅、分片路由、WS transport 与 `Storage trait` 的 gateway / worker / storage 三层。
+- [`cloud-scale-serving-01/04-phase-c-cluster-multitenant.md`](./cloud-scale-serving-01/04-phase-c-cluster-multitenant.md)：Phase C，外部 gateway、控制面/数据面拆分、跨 worker 恢复、多租户配额与断线续流。
+- [`cloud-scale-serving-01/05-sandbox-workspace-isolation.md`](./cloud-scale-serving-01/05-sandbox-workspace-isolation.md)：每会话执行沙箱、workspace overlay / snapshot、网络出站策略、凭证与资源生命周期。
+- [`cloud-scale-serving-01/06-test-strategy-and-rollout.md`](./cloud-scale-serving-01/06-test-strategy-and-rollout.md)：单元 / 集成 / E2E / 负载 / 混沌测试矩阵，SLO，灰度与回滚策略。
+- [`cloud-scale-serving-01/07-development-plan-todos.md`](./cloud-scale-serving-01/07-development-plan-todos.md)：按里程碑与工作流拆解的详细 WBS、依赖与 DoD。
 
-阅读顺序固定为：`01 → 02 → 03 → 04`。`01-overview.md` 负责向下导航；`02/03/04` 只回链 `01`，避免链式跳转。
+阅读顺序固定为：`01 → 02 → 03 → 04`；需要看执行隔离、测试门槛和实施 WBS 时继续读 `05 → 06 → 07`。`01-overview.md` 负责向下导航；专题页默认只回链 `01`，避免链式跳转。
 
 ### 插件系统
 

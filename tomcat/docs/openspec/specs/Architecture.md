@@ -136,6 +136,7 @@ PLAN / EXEC、`todos`、checkpoint、verifier 与执行态收口链路。
 详见：
 
 - [`../../architecture/multi-agent.md`](../../architecture/multi-agent.md)
+- [`../../architecture/cloud-scale-serving-01/01-overview.md`](../../architecture/cloud-scale-serving-01/01-overview.md)
 - [`../../architecture/skill-system.md`](../../architecture/skill-system.md)
 - [`../../architecture/package-manager.md`](../../architecture/package-manager.md)
 - [`../../architecture/README.md`](../../architecture/README.md)

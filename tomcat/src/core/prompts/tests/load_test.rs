@@ -39,3 +39,83 @@ fn workspace_context_template_contains_placeholders() {
     assert!(s.contains("{agent_workspace_dir}"));
     assert!(s.contains("{agent_trail_dir}"));
 }
+
+#[test]
+fn tool_instructions_template_uses_guidelines_placeholder_not_inline_rules() {
+    let s = load(PromptKey::SystemToolInstructions);
+    // 跨工具规则已下沉到 catalog.prompt_guidelines，模板只留框架句 + 占位符。
+    assert!(
+        s.contains("{tool_guidelines}"),
+        "tool_instructions 应保留 {{tool_guidelines}} 占位符"
+    );
+    // 防双份复活：逐工具规则不得再内联在模板里。
+    assert!(!s.contains("read(hashline=true) -> hashline_edit"));
+    assert!(!s.contains("grep/find/ls -R"));
+    assert!(!s.contains("Only claim you can access"));
+}
+
+#[test]
+fn core_identity_has_operating_principles_and_tool_lines_placeholder() {
+    let s = load(PromptKey::SystemCoreIdentity);
+    assert!(s.contains("coding assistant"));
+    assert!(s.contains("{tool_lines}"));
+    assert!(s.contains("Operating principles:"));
+    assert!(s.contains("Evidence first"));
+    assert!(s.contains("Act, don't over-ask"));
+    assert!(s.contains("no fabrication"));
+    assert!(s.contains("first principles"));
+    // #7 人话/ASCII 与 #8 UI 现常驻 core_identity。
+    assert!(s.contains("plain, jargon-free language"));
+    assert!(s.contains("ASCII diagram"));
+    assert!(s.contains("Put user experience first"));
+}
+
+#[test]
+fn parallel_tools_template_guides_batching() {
+    let s = load(PromptKey::SystemParallelTools);
+    assert!(s.contains("Parallel tool calls"));
+    assert!(s.contains("single response"));
+    assert!(s.contains("depends on"));
+}
+
+#[test]
+fn verification_template_references_mini_verification_and_forbids_default_test() {
+    let s = load(PromptKey::SystemVerification);
+    assert!(s.contains("fabricate"));
+    assert!(s.contains("Mini verification"));
+    assert!(s.contains("P0-P6"));
+    assert!(s.contains("npm test"));
+}
+
+#[test]
+fn planner_prompt_prefers_thorough_decomposition_and_multi_perspective_tests() {
+    let s = load(PromptKey::PlannerReminder);
+    // engineering-standards #10：宁多勿少，取代原"避免过度拆解"。
+    assert!(!s.contains("Avoid over-decomposition"));
+    assert!(s.contains("err on the side of more"));
+    // engineering-standards #9：多视角测试。
+    assert!(s.contains("unit, integration, and E2E"));
+    // engineering-standards #6-8 在 planner 的重申锚点。
+    assert!(s.contains("first principles"));
+    assert!(s.contains("ASCII diagram"));
+    assert!(s.contains("Put user experience first"));
+}
+
+/// engineering-standards #6/#7/#8 必须在 core_identity 与 planner 两处一字不差出现，
+/// 防止日后单边改动导致两处漂移。
+#[test]
+fn standards_6_7_8_are_byte_identical_in_core_identity_and_planner() {
+    const S6: &str = "Reason from first principles: when planning or coding, work out the architecture and the implementation from first principles, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.";
+    const S7: &str = "Explain in plain, jargon-free language, assuming the reader knows nothing about the problem or the code; when explaining a design, a solution, or a root cause, include one overall ASCII diagram of the whole picture by default and add an ASCII diagram for each complex section.";
+    const S8: &str = "Put user experience first: when a task involves UI, design it from the user's experience and default to a clean, modern interface unless the user specifies otherwise.";
+
+    let identity = load(PromptKey::SystemCoreIdentity);
+    let planner = load(PromptKey::PlannerReminder);
+    for (label, sentence) in [("S6", S6), ("S7", S7), ("S8", S8)] {
+        assert!(
+            identity.contains(sentence),
+            "{label} 应逐字出现在 core_identity"
+        );
+        assert!(planner.contains(sentence), "{label} 应逐字出现在 planner");
+    }
+}

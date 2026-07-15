@@ -8,8 +8,10 @@
 pub enum PromptKey {
     SystemCoreIdentity,
     SystemToolInstructions,
+    SystemParallelTools,
     SystemPagedReading,
     SystemBackgroundShellMonitor,
+    SystemVerification,
     SystemAvailableSkills,
     SystemWorkspaceContext,
     SystemWorkspaceState,
@@ -28,10 +30,12 @@ pub fn load(key: PromptKey) -> &'static str {
     match key {
         PromptKey::SystemCoreIdentity => include_str!("templates/system/core_identity.txt"),
         PromptKey::SystemToolInstructions => include_str!("templates/system/tool_instructions.txt"),
+        PromptKey::SystemParallelTools => include_str!("templates/system/parallel_tools.txt"),
         PromptKey::SystemPagedReading => include_str!("templates/system/paged_reading.txt"),
         PromptKey::SystemBackgroundShellMonitor => {
             include_str!("templates/system/background_shell_monitor.txt")
         }
+        PromptKey::SystemVerification => include_str!("templates/system/verification.txt"),
         PromptKey::SystemAvailableSkills => include_str!("templates/system/available_skills.txt"),
         PromptKey::SystemWorkspaceContext => include_str!("templates/system/workspace_context.txt"),
         PromptKey::SystemWorkspaceState => include_str!("templates/system/workspace_state.txt"),

@@ -77,6 +77,49 @@ fn build_system_prompt_contains_edit_workflow_guidance() {
 }
 
 #[test]
+fn build_system_prompt_contains_parallel_and_verification_sections() {
+    let prompt = build_system_prompt("/tmp");
+    assert!(
+        prompt.contains("Parallel tool calls"),
+        "system prompt 应包含并行工具段"
+    );
+    assert!(
+        prompt.contains("Finishing and verifying"),
+        "system prompt 应包含收尾/验证段"
+    );
+    // 收尾段引用 EXEC Mini 验证，不复制全文。
+    assert!(prompt.contains("Mini verification P0-P6"));
+}
+
+#[test]
+fn build_system_prompt_injects_aggregated_tool_guidelines() {
+    let prompt = build_system_prompt("/tmp");
+    // 占位符必须被替换（不能把 `{tool_guidelines}` 原样发给模型）。
+    assert!(!prompt.contains("{tool_guidelines}"));
+    assert!(prompt.contains("clickable `path:line`"));
+    assert!(prompt.contains("never print a code block pretending to edit"));
+    // UI 内核（#8）不再来自工具 guidelines，而是 core_identity 的运营原则。
+    assert!(prompt.contains("Put user experience first"));
+}
+
+#[test]
+fn new_sections_sit_in_priority_order() {
+    let prompt = build_system_prompt("/tmp");
+    let tool_pos = prompt.find("Guidelines:").expect("tool instructions");
+    let parallel_pos = prompt.find("Parallel tool calls").expect("parallel");
+    let paged_pos = prompt.find("Tool result persisted").expect("paged");
+    let bg_pos = prompt.find("Background bash tasks").expect("background");
+    let verify_pos = prompt.find("Finishing and verifying").expect("verification");
+    let ctx_pos = prompt.find("Current date and time:").expect("workspace ctx");
+    // tool(20) < parallel(22) < paged(25) < background(30) < verification(50) < workspace_ctx(200)
+    assert!(tool_pos < parallel_pos, "parallel 应在 tool_instructions 之后");
+    assert!(parallel_pos < paged_pos, "parallel 应在 paged 之前");
+    assert!(paged_pos < bg_pos, "paged 应在 background 之前");
+    assert!(bg_pos < verify_pos, "verification 应在 background 之后");
+    assert!(verify_pos < ctx_pos, "verification 应在 workspace ctx 之前");
+}
+
+#[test]
 fn builder_sections_ordered_by_priority() {
     struct HighPriority;
     impl SystemPromptSection for HighPriority {

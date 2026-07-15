@@ -15,7 +15,12 @@
 - Destructive: `false`
 - Search hint: `read file text utf-8 inspect`
 
-Read a file from the local filesystem. Use this before editing or when the user asks to inspect file contents. Default workflow: `read` -> `edit`. For repeated short snippets or line-anchored edits, use `read(hashline=true)` -> `hashline_edit`. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of raw decode errors.
+Read a UTF-8 text file. Read a file before editing it. Use list_dir for directories; binary or non-UTF-8 files return a structured hint with the detected first bytes instead of a raw decode error.
+
+Guidelines:
+- Use read to inspect a file before editing it.
+- When you point to code in a reply, cite it as a clickable `path:line` reference.
+
 
 Parameters:
 
@@ -23,21 +28,21 @@ Parameters:
 {
   "properties": {
     "hashline": {
-      "description": "When true, render each line as `{:>6}#{2-char hash}:{content}` (xxh32 over whitespace-stripped content). Use with `hashline_edit` when you need line-number + content-hash anchors. The `N#XX:` prefix is display-only, so do not paste it into `edit.old_content`. Mutually exclusive with line_numbers — hashline takes priority. Defaults to false.",
+      "description": "Render each line as `{line}#{2-char hash}:{content}` for use with hashline_edit. Display-only prefix — do not paste into edit.old_content. Mutually exclusive with line_numbers (hashline wins). Default false.",
       "type": "boolean"
     },
     "limit": {
-      "description": "Optional max number of lines to return; defaults to 2000. When the file has more lines, the result includes a `... [N more lines truncated; resume with offset=<next>, limit=<same>]` hint so you can paginate.",
+      "description": "Optional max lines to return (default 2000). On overflow the result appends a resume hint with the next offset.",
       "maximum": 10000,
       "minimum": 1,
       "type": "integer"
     },
     "line_numbers": {
-      "description": "Render output with `cat -n` style line numbers (`{:>6}\\t{content}`); defaults to true. These prefixes are display-only, so do not paste `  N\\t...` into `edit.old_content`. Set false only when piping the content into a tool that itself parses line numbers (e.g. diff).",
+      "description": "Render `cat -n` style line numbers (default true). These prefixes are display-only — do not paste `  N\\t...` into edit.old_content.",
       "type": "boolean"
     },
     "offset": {
-      "description": "Optional 1-based line number to start reading from. Defaults to 1 (first line).",
+      "description": "Optional 1-based line to start from. Defaults to 1.",
       "minimum": 1,
       "type": "integer"
     },
@@ -62,7 +67,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `load skill body attachment by name`
 
-Load one skill body by its declared name instead of guessing a file path. Use this after reading `<available_skills>` when a skill's full instructions are needed. Required `name` selects the skill; optional `file` reads a relative attachment inside the same skill directory (for example `references/COMMIT_CONVENTION.md`). The read still goes through the existing permission gate, and reviewer/verifier contexts may reject this tool.
+Load one skill body by its declared name instead of guessing a file path. Use this after reading `<available_skills>` when a skill's full instructions are needed. Required `name` selects the skill; optional `file` reads a relative attachment inside the same skill directory. The read still goes through the permission gate, and reviewer/verifier contexts may reject this tool.
 
 Parameters:
 
@@ -97,7 +102,12 @@ Parameters:
 - Destructive: `true`
 - Search hint: `write create overwrite file`
 
-Create or overwrite a file at an authorized path. Use this for new files or complete rewrites when the intended final content is known. Prefer edit for small surgical changes to existing files. Writes may require user confirmation and are audited.
+Create or overwrite a file at an authorized path. Use this for new files or complete rewrites when the final content is known; prefer edit for small surgical changes. Writes may require user confirmation and are audited.
+
+Guidelines:
+- Use write only for new files or complete rewrites; prefer edit for small changes to existing files.
+- Make file changes with the edit/write tools directly; never print a code block pretending to edit a file.
+
 
 Parameters:
 
@@ -134,19 +144,25 @@ Parameters:
 - Destructive: `true`
 - Search hint: `edit replace old_content new_content file`
 
-Edit an existing text file by replacing exact text. Two input shapes are accepted:
-  Shape A (single edit, legacy): { path, old_content, new_content, replace_all? }
-  Shape B (multiple edits, preferred): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }
-When both shapes appear, `edits` wins. Each segment matches against the file's ORIGINAL snapshot (no chained / incremental matching), so multi-segment edits are safe to compose. Set `replace_all: true` to replace every occurrence; otherwise the segment must match exactly once or the call returns an Ambiguous error. Read the file first (default workflow: `read` -> `edit`; the tool requires a fresh read stamp, and mtime/size mismatch returns a Stale error). Do NOT include `cat -n` line-number prefixes (`  N\t...`) or hashline prefixes (`N#XX:...`) in `old_content` — those are display prefixes, not file content. If repeated short snippets make substring edit ambiguous, prefer `read(hashline=true)` + `hashline_edit`. Use write for new files or complete rewrites; do not use edit on binary files.
+Edit an existing text file by replacing exact text. Two input shapes:
+  Shape A (single): { path, old_content, new_content, replace_all? }
+  Shape B (preferred, multiple): { path, edits: [ { old_content, new_content, replace_all? }, ... ] }
+When both appear, `edits` wins. Each segment matches the file's ORIGINAL snapshot (no chained matching). Without `replace_all: true` a segment must match exactly once, else the call returns an Ambiguous error. Read the file first (a fresh read stamp is required; mtime/size mismatch returns a Stale error). Do NOT include `cat -n`/hashline display prefixes (`  N\t...` or `N#XX:...`) in `old_content`. Use write for new files; do not edit binary files.
+
+Guidelines:
+- Default file-edit workflow: read -> edit; for repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit.
+- When copying from read output, never include display prefixes like `  N\t` or `N#XX:` in edit.old_content.
+- Make file changes with the edit/write tools directly; never print a code block pretending to edit a file.
+
 
 Parameters:
 
 ```json
 {
-  "description": "Edit a file. Default workflow: `read` -> `edit`. Provide either Shape A (top-level old_content/new_content) or Shape B (edits[]); when both appear, `edits` wins. All segments match the file's ORIGINAL snapshot (no chained matching). Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in `old_content`; for repeated short snippets or line-anchored edits, prefer `read(hashline=true)` + `hashline_edit`.",
+  "description": "Edit a file (read -> edit). Provide Shape A (top-level old_content/new_content) or Shape B (edits[]); when both appear, `edits` wins. All segments match the file's ORIGINAL snapshot (no chained matching). Do not include read display prefixes (`  N\\t...` or `N#XX:...`) in old_content.",
   "properties": {
     "edits": {
-      "description": "Shape B (preferred): list of edit segments applied to the file's ORIGINAL snapshot. Overlapping spans are rejected with Overlap.",
+      "description": "Shape B (preferred): edit segments applied to the file's ORIGINAL snapshot. Overlapping spans are rejected.",
       "items": {
         "additionalProperties": false,
         "properties": {
@@ -155,11 +171,11 @@ Parameters:
             "type": "string"
           },
           "old_content": {
-            "description": "Exact existing text to replace within this segment. Copy the real file text, not read-only display prefixes like `  N\\t...` or `N#XX:...`.",
+            "description": "Exact existing text to replace in this segment (real file text, no display prefixes).",
             "type": "string"
           },
           "replace_all": {
-            "description": "Replace every occurrence of `old_content` for this segment. Defaults to false.",
+            "description": "Replace every occurrence of `old_content` in this segment. Defaults to false.",
             "type": "boolean"
           }
         },
@@ -173,11 +189,11 @@ Parameters:
       "type": "array"
     },
     "new_content": {
-      "description": "Shape A only: replacement text.",
+      "description": "Shape A: replacement text.",
       "type": "string"
     },
     "old_content": {
-      "description": "Shape A only: exact existing text to replace; include enough context to make it unique unless `replace_all: true`. Copy the real file text, not read-only display prefixes like `  N\\t...` or `N#XX:...`.",
+      "description": "Shape A: exact existing text to replace; include enough context to be unique unless `replace_all: true`. Copy real file text, not display prefixes.",
       "type": "string"
     },
     "path": {
@@ -185,7 +201,7 @@ Parameters:
       "type": "string"
     },
     "replace_all": {
-      "description": "Shape A only: replace every occurrence of `old_content` instead of failing on multiple matches. Defaults to false.",
+      "description": "Shape A: replace every occurrence of `old_content` instead of failing on multiple matches. Defaults to false.",
       "type": "boolean"
     }
   },
@@ -205,25 +221,25 @@ Parameters:
 - Destructive: `true`
 - Search hint: `hashline edit line anchor hash`
 
-Edit a file with line-number + 2-char content hash anchors. Call `read` with `hashline: true` first, then pass those anchors to `hashline_edit`. Each edit segment carries an anchor `<line>#<2char>` that must match the file's CURRENT content; if the line content changed, the anchor stops matching and the call returns HashMismatch (no write). Operations: `replace` (anchor → lines), `insert` (insert `lines` BEFORE anchor line), `delete` (anchor[..end] → empty). Use this when sub-string `edit` would be ambiguous (repeated short snippets) or when you need strong line-level consistency. Reads are still required first; the file's read stamp is checked.
+Edit a file using line-number + 2-char content-hash anchors. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Each segment's anchor must match the file's CURRENT content; if the line changed, the anchor no longer matches and the call returns HashMismatch (no write). Operations: `replace` (anchor -> lines), `insert` (insert `lines` BEFORE the anchor line), `delete` (anchor[..end] -> empty). Use this when substring `edit` would be ambiguous (repeated short snippets) or when you need strong line-level consistency. A fresh read stamp is still required.
 
 Parameters:
 
 ```json
 {
-  "description": "Line-anchored edit. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Anchors are validated against the file's current hashline before any write; mismatches return HashMismatch.",
+  "description": "Line-anchored edit. Call `read(hashline=true)` first, then pass the returned `<line>#<2char>` anchors here. Anchors are validated against the file's current content before any write; mismatches return HashMismatch.",
   "properties": {
     "edits": {
-      "description": "List of line-anchored edit operations applied against the CURRENT file content.",
+      "description": "Line-anchored operations applied against the CURRENT file content.",
       "items": {
         "additionalProperties": false,
         "properties": {
           "end": {
-            "description": "Optional anchor for the inclusive end line (only valid for `replace` / `delete`). Defaults to `pos`.",
+            "description": "Optional inclusive end-line anchor (replace/delete only). Defaults to `pos`.",
             "type": "string"
           },
           "lines": {
-            "description": "Replacement / insertion text (must end with a newline if multi-line). Ignored by `delete`.",
+            "description": "Replacement / insertion text (end multi-line text with a newline). Ignored by `delete`.",
             "type": "string"
           },
           "op": {
@@ -236,7 +252,7 @@ Parameters:
             "type": "string"
           },
           "pos": {
-            "description": "Anchor for the start line, formatted `<1-based-line>#<2char-hash>` (e.g. `42#Ab`). For `insert`, content is inserted BEFORE this line.",
+            "description": "Start-line anchor `<1-based-line>#<2char-hash>` (e.g. `42#Ab`). For `insert`, content goes BEFORE this line.",
             "type": "string"
           }
         },
@@ -271,7 +287,11 @@ Parameters:
 - Destructive: `false`
 - Search hint: `list directory files`
 
-List the immediate contents of an authorized directory. Use this to discover nearby files before choosing read or edit. It does not recurse; call it on subdirectories as needed instead of guessing paths.
+List the immediate contents of an authorized directory (no recursion). Use it to discover nearby files before choosing read or edit; call it on subdirectories instead of guessing paths.
+
+Guidelines:
+- Only claim you can access directories you have successfully listed or read with tools; if unsure, verify with list_dir. Do not guess or fabricate accessible paths.
+
 
 Parameters:
 
@@ -299,11 +319,13 @@ Parameters:
 - Destructive: `false`
 - Search hint: `search grep glob files content regex`
 
-Search authorized files by content regex or file path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden and silently ignores content-only fields.
+Search authorized files by content regex or file-path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden. Use list_dir for a single directory level and read when you already know the path.
 
-Use this instead of bash with grep/find/ls -R. Use list_dir when you only need one directory level, and read when you already know the exact path.
+Uses system `rg` (content) / `fd` (files), falling back to an in-process Rust regex engine when they are missing (no lookaround/back-references; large/binary files skipped). Both honour .gitignore/.ignore.
 
-Dual implementation with one schema: Tier1 spawns the system rg (content) and fd/fdfind (files); when either binary is missing search_files transparently falls back to Tier2 (in-process ignore::WalkBuilder + globset + Rust regex). Both tiers honour .gitignore/.ignore by default. Tier2 caveats are reported in `warnings`: regex dialect is the Rust regex crate (no lookaround/back-references; unsupported regex returns an empty match set with a warning); files larger than 5 MiB and binary files are skipped; before/after context lines are not emitted; the wall-clock budget defaults to 10s and can be overridden with PI_SEARCH_TIER2_DEADLINE_MS, after which the result is `truncated=true`.
+Guidelines:
+- Use search_files to find file paths or content; prefer it over bash with grep/find/ls -R.
+
 
 Parameters:
 
@@ -315,12 +337,12 @@ Parameters:
       "type": "boolean"
     },
     "context": {
-      "description": "[content only] Number of surrounding context lines when output_mode=content. Ignored for other output modes.",
+      "description": "[content only] Surrounding context lines when output_mode=content. Ignored otherwise.",
       "minimum": 0,
       "type": "integer"
     },
     "glob": {
-      "description": "[content only] Optional file glob filter such as `*.rs` or `**/*.md`. Omit when not used; do not pass an empty string.",
+      "description": "[content only] Optional file glob filter such as `*.rs` or `**/*.md`. Omit when unused; do not pass an empty string.",
       "type": "string"
     },
     "head_limit": {
@@ -334,14 +356,14 @@ Parameters:
           "type": "null"
         }
       ],
-      "description": "[both] Maximum returned items after offset. Defaults to 64 for target=content and 128 for target=files. Use null for unlimited; 0 is rejected."
+      "description": "[both] Max returned items after offset. Defaults to 64 for content and 128 for files. null = unlimited; 0 is rejected."
     },
     "include_hidden": {
       "description": "[both] Include hidden files and directories. Defaults to false; .gitignore is still respected.",
       "type": "boolean"
     },
     "offset": {
-      "description": "[both] Skip this many result items before applying head_limit. Use next_offset when truncated=true.",
+      "description": "[both] Skip this many items before head_limit. Use next_offset when truncated=true.",
       "minimum": 0,
       "type": "integer"
     },
@@ -355,15 +377,15 @@ Parameters:
       "type": "string"
     },
     "path": {
-      "description": "[both] Optional file or directory to search. Defaults to the current workspace path and must pass Read permission checks.",
+      "description": "[both] Optional file or directory to search. Defaults to the workspace; must pass Read permission checks.",
       "type": "string"
     },
     "pattern": {
-      "description": "[both] Search expression. With target=content this is a ripgrep regex matched against file contents. With target=files this is a file-path glob such as `*.rs` or `src/**/*.rs`.",
+      "description": "[both] Search expression. target=content: ripgrep regex over file contents. target=files: file-path glob such as `*.rs` or `src/**/*.rs`.",
       "type": "string"
     },
     "target": {
-      "description": "[both] What to search. `content` searches inside files; `files` searches file paths by glob. Defaults to `content`.",
+      "description": "[both] `content` searches inside files; `files` searches file paths by glob. Defaults to `content`.",
       "enum": [
         "content",
         "files"
@@ -371,7 +393,7 @@ Parameters:
       "type": "string"
     },
     "type": {
-      "description": "[content only] Optional ripgrep file type filter such as `rust`, `js`, or `py`. Omit when not used; do not pass an empty string.",
+      "description": "[content only] Optional ripgrep file type filter such as `rust`, `js`, or `py`. Omit when unused.",
       "type": "string"
     }
   },
@@ -391,7 +413,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `plan create planning goal draft todos reviewer`
 
-Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Caller passes `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (caller does NOT supply plan_id), normalizes `draft` into the plan body's `## Plan` section, and writes frontmatter (`plan_id`, `goal`, `state=planning`, `todos`, `schema_version=1`) under an exclusive advisory lock, then synchronously dispatches an internal reviewer sub-agent whose `ReviewSummary` rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build` — the user must call `/plan build <plan_id/path>` to enter EXEC. Visible only when `mode == Planning`; calling outside Planning returns a tool error.
+Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, writes frontmatter under an advisory lock, then runs an advisory reviewer whose summary rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.
 
 Parameters:
 
@@ -400,15 +422,15 @@ Parameters:
   "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id.",
   "properties": {
     "draft": {
-      "description": "Markdown content for the plan body's `## Plan` section: ordered bullet points or short paragraphs covering the approach, key decisions, and constraints (≤ ~2000 chars). The runtime wraps it with `## Goal` / `## Plan` / `## Todos Board`; do NOT include those headings yourself. If you accidentally include legacy headings such as `## Draft` or `## Notes`, runtime will normalize them.",
+      "description": "Markdown for the plan body `## Plan` section (approach, key decisions, constraints; <= ~2000 chars). Do NOT include the `## Goal` / `## Plan` / `## Todos Board` headings yourself.",
       "type": "string"
     },
     "goal": {
-      "description": "Concise plan objective (1–3 sentences) — what success looks like. Becomes the frontmatter `goal` field and the seed for the derived `plan_id`.",
+      "description": "Concise plan objective (1-3 sentences). Becomes frontmatter `goal` and seeds the derived `plan_id`.",
       "type": "string"
     },
     "todos": {
-      "description": "Initial flat todo list (≥ 1 item). `status` defaults to `pending`.",
+      "description": "Initial flat todo list (>= 1 item). `status` defaults to `pending`.",
       "items": {
         "properties": {
           "content": {
@@ -458,16 +480,16 @@ Parameters:
 - Destructive: `false`
 - Search hint: `plan update todos upsert set_status remove replace`
 
-Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under the same advisory lock. Visible in CHAT / PLAN / EXEC modes — model uses it to refine the todo list during PLAN or to advance todos during EXEC. `plan_id` and `path` are plan-specific targeting fields; `replace=true` swaps the entire todo list with the provided upsert results. When all todos transition to `completed` in EXEC, runtime auto-derives `state=completed` and resets system reminder / catalog / visible prompt labels. The tool only mutates frontmatter.todos; plan body markdown is left untouched.
+Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. When all todos reach `completed` in EXEC, the runtime auto-derives state=completed and resets the reminder/catalog/visible labels. Only frontmatter.todos is mutated; plan body markdown is left untouched.
 
 Parameters:
 
 ```json
 {
-  "description": "Apply incremental todo-only ops to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `plan_id` and `path` target the plan, `replace=true` replaces the whole todo list with the provided upsert results, and each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
+  "description": "Apply incremental todo-only ops to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
   "properties": {
     "ops": {
-      "description": "Ordered list of mutations applied atomically (one frontmatter write under advisory lock).",
+      "description": "Ordered mutations applied atomically (one frontmatter write under advisory lock).",
       "items": {
         "oneOf": [
           {
@@ -561,11 +583,11 @@ Parameters:
       "type": "array"
     },
     "path": {
-      "description": "Alternative target path under ~/.tomcat/plans/. If both `plan_id` and `path` are provided, `plan_id` wins.",
+      "description": "Alternative target path under ~/.tomcat/plans/. If both `plan_id` and `path` are given, `plan_id` wins.",
       "type": "string"
     },
     "plan_id": {
-      "description": "Target plan_id. Optional in EXEC mode (defaults to the active plan); REQUIRED in CHAT / PLAN / Pending / Completed.",
+      "description": "Target plan_id. Optional in EXEC (defaults to the active plan); REQUIRED in CHAT / PLAN / Pending / Completed.",
       "type": "string"
     },
     "replace": {
@@ -589,16 +611,16 @@ Parameters:
 - Destructive: `false`
 - Search hint: `todos upsert set_status remove scratchpad new_todos replace`
 
-Manage a session-local todo scratchpad and return a full snapshot of all items after each call. When persistence is configured, the scratchpad is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`, and it NEVER writes the active PlanFile. Use `new_todos=true` to clear the current scratchpad and start a fresh one; use `replace=true` to replace the whole list with the provided upsert results. Only one todo may be `in_progress` at a time — attempting to mark a second `in_progress` returns a structured error. The full items snapshot in the response lets the model self-orient between rounds without re-listing.
+Manage a session-local todo scratchpad and return a full snapshot of all items after each call. It NEVER writes the active PlanFile (advance plan todos via `update_plan`); when persistence is configured it is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Use `new_todos=true` to clear the scratchpad and start fresh; use `replace=true` to replace the whole list with the provided upsert results. At most one todo may be `in_progress`.
 
 Parameters:
 
 ```json
 {
-  "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile; advance plan todos via `update_plan`. When persistence is configured, the scratchpad is stored at `~/.tomcat/agents/<id>/todos/<session_id>.todo.md`. Use `new_todos=true` to clear the current scratchpad and start fresh; use `replace=true` to replace the whole list with the provided upsert results.",
+  "description": "Session-local todo scratchpad (any plan mode). Returns the full items snapshot after each call. It never writes the active PlanFile (advance plan todos via `update_plan`). `new_todos=true` clears the scratchpad and starts fresh; `replace=true` swaps the whole list with the upsert results.",
   "properties": {
     "new_todos": {
-      "description": "If true, clear the current scratchpad before applying ops. The same session file `todos/<session_id>.todo.md` is overwritten; no extra file is created. Default false.",
+      "description": "If true, clear the current scratchpad before applying ops (same session file is overwritten). Default false.",
       "type": "boolean"
     },
     "ops": {
@@ -720,16 +742,16 @@ Parameters:
 - Destructive: `false`
 - Search hint: `plan ask question single choice recommended custom skip`
 
-Ask the user 1–4 structured single-choice questions. Each question has 2–4 `options` (each with a stable `id` and `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI panel automatically appends a synthetic `__custom__` slot (do NOT declare it manually) where the user can type free-form text up to 500 chars, and also supports `skip` to skip only the current question. The tool blocks until the user answers, skips, or cancels (cancel → `{ cancelled: true }`, not a ToolError). Visible in CHAT / PLAN / Pending / Completed; hidden in EXEC to avoid blocking the execution loop.
+Ask the user 1-4 structured single-choice questions. Each question has 2-4 `options` (stable `id` + `label`); exactly one option must carry `recommended: true` (UI renders it with an `— 推荐` suffix). The UI auto-appends a `__custom__` free-text slot (do NOT declare it) and a per-question `skip`. The tool blocks until the user answers, skips, or cancels (cancel -> `{ cancelled: true }`, not a ToolError). Visible in CHAT / PLAN / Pending / Completed; hidden in EXEC to avoid blocking the execution loop.
 
 Parameters:
 
 ```json
 {
-  "description": "Block-await structured single-choice answers from the user (PLAN mode only). Each question must have 2–4 options with stable ids; exactly one option must carry `recommended: true`. The UI auto-appends a `__custom__` slot and a `skip` action for the current question — do not declare `__custom__` yourself.",
+  "description": "Block-await structured single-choice answers from the user. Each question has 2-4 options with stable ids; exactly one option must carry `recommended: true`. The UI auto-appends a `__custom__` slot and a `skip` action — do not declare `__custom__` yourself.",
   "properties": {
     "questions": {
-      "description": "1–4 questions presented to the user in one panel turn.",
+      "description": "1-4 questions presented in one panel turn.",
       "items": {
         "properties": {
           "id": {
@@ -737,7 +759,7 @@ Parameters:
             "type": "string"
           },
           "options": {
-            "description": "2–4 options. Exactly one option must carry `recommended: true`.",
+            "description": "2-4 options. Exactly one option must carry `recommended: true`.",
             "items": {
               "properties": {
                 "id": {
@@ -798,9 +820,13 @@ Parameters:
 - Destructive: `true`
 - Search hint: `bash shell command test build git background`
 
-Run a shell command through the permission gate. Use it for builds, tests, git inspection, and other command-line workflows. Avoid destructive commands unless the user explicitly asked and the permission prompt allows it. Prefer tool-native file APIs for reading or editing files; bash path access is still checked and audited as command execution.
+Run a shell command through the permission gate (builds, tests, git inspection, other CLI workflows). Avoid destructive commands unless the user explicitly asked and the permission prompt allows it. Prefer tool-native file APIs over bash for reading or editing files; bash path access is still checked and audited.
 
-Set `run_in_background: true` for long-running commands (builds, watchers, dev servers). The call returns immediately with a `task_id` + `log_path`; use `task_output` / `task_stop` / `task_list` to drive the task across follow-up turns instead of blocking a single tool round. Shell syntax like `cmd &` still runs inside the same foreground tool call and can keep stdout/stderr open; if you want a server or watcher to outlive the current tool round, use `run_in_background: true` instead of relying on `&` alone.
+Set `run_in_background: true` for long-running commands (builds, watchers, dev servers): the call returns immediately with `task_id` + `log_path`, driven via `task_output` / `task_stop` / `task_list`. A trailing `&` still runs inside the same foreground call, so prefer `run_in_background: true` to outlive the current tool round.
+
+Guidelines:
+- Prefer tool-native file APIs over bash for reading or editing files.
+
 
 Parameters:
 
@@ -808,26 +834,26 @@ Parameters:
 {
   "properties": {
     "args": {
-      "description": "Optional argv elements appended to `command`. When present, the command runs argv-style (no shell) — safer for paths with spaces or quotes. When absent, the command is interpreted by the system shell.",
+      "description": "Optional argv elements appended to `command`; when present the command runs argv-style (no shell) — safer for paths with spaces or quotes.",
       "items": {
         "type": "string"
       },
       "type": "array"
     },
     "command": {
-      "description": "Shell command to execute. With `args` set, runs argv-style without sh -c; otherwise runs through `sh -c` (Unix) / `cmd /C` (Windows).",
+      "description": "Shell command to execute. With `args` set, runs argv-style (no shell); otherwise via `sh -c` (Unix) / `cmd /C` (Windows).",
       "type": "string"
     },
     "cwd": {
-      "description": "Optional working directory. Omit when not needed. Empty strings are treated as missing. Pass a real absolute path or `~/...`; shell env vars like `$HOME/...` are NOT expanded here. When omitted, falls back to the agent process working directory.",
+      "description": "Optional working directory. Empty means unset. Use an absolute path or `~/...`; shell vars like `$HOME` are NOT expanded here. Defaults to the agent process cwd.",
       "type": "string"
     },
     "run_in_background": {
-      "description": "When true, spawn the command as a background task and return immediately with { task_id, log_path } instead of blocking the tool call until the process exits. Use this for builds, watchers or dev servers; pair with `task_output` (tail), `task_stop` (kill) and `task_list` (enumerate). Defaults to false.",
+      "description": "When true, spawn as a background task and return { task_id, log_path } immediately; pair with task_output/task_stop/task_list. Defaults to false.",
       "type": "boolean"
     },
     "timeout_ms": {
-      "description": "Optional wall-clock timeout in milliseconds. Defaults to 120000 (2 min); the runtime caps any value above 600000 (10 min). On timeout the child process is killed; the response carries `timed_out=true`. Ignored when `run_in_background=true` — background tasks have no implicit deadline; use `task_stop` to terminate them.",
+      "description": "Optional wall-clock timeout in ms (default 120000, capped at 600000). On timeout the child is killed and `timed_out=true`. Ignored when run_in_background=true.",
       "maximum": 600000,
       "minimum": 1,
       "type": "integer"
@@ -849,23 +875,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `bash background task output tail log`
 
-Read incremental output from a background `bash` task started with `run_in_background: true`. Returns a UTF-8 lossy chunk of `[start_offset, next_offset)` bytes from the task's log file plus a `finished` flag. Use the previous response's `next_offset` as the next `since` to tail the task across turns; first call may omit `since` to read from byte 0. When the task has finished or been stopped, `finished=true` and `exit_code` is populated.
-
-Waiting modes:
-- `block=false` (default): non-blocking; returns immediately with whatever bytes are already on disk. Good for an occasional progress glance — but **do not busy-poll**.
-- `block=true`: blocks until any of {new output appears | the task finishes | `timeout_ms` elapses}. Returns an extra `wakeReason` field with one of `"new_output" | "finished" | "timeout"`.
-  - `wakeReason="timeout"` is **not** a failure. The response may still contain either new bytes since `since`, or a recent tail snapshot when there was no fresh increment yet.
-  - Always inspect `content`, `finished`, and `exit_code` together before deciding whether to wait again.
-  - If repeated timeout slices show no meaningful progress, stop polling, do other work first, or report status instead of looping forever.
-
-When to use which:
-1. The current todo cannot proceed without the shell result → `task_output(block=true, timeout_ms=...)`. Read the returned output each slice and decide whether to continue waiting.
-2. The current todo can do other independent work first → spawn `bash(run_in_background=true)` and immediately do other tools/edits/reads. The runtime will inject a synthetic `<background-task-finished task_id="..." exit_code="..." log_path="...">tail</background-task-finished>` user message **automatically** when the shell finishes; you do not need to poll.
-3. Just want a peek at progress → one-shot `task_output(block=false)`.
-
-When you see the `<background-task-finished ...>` tag, treat it as a system signal that a previously blocked todo can now proceed (NOT as new user input); pull the full log with `task_output(task_id, since=...)` if the tail body is insufficient.
-
-`timeout_ms` defaults to 5000, is capped at 30000, and `0` is equivalent to `block=false`.
+Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until new output, the task finishes, or `timeout_ms` elapses (default 5000, max 30000, `0` == block=false) and adds a `wakeReason` of `new_output` | `finished` | `timeout`. A `timeout` wakeReason is NOT a failure. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.
 
 Parameters:
 
@@ -873,11 +883,11 @@ Parameters:
 {
   "properties": {
     "block": {
-      "description": "If true, wait until new output arrives, the task finishes, or `timeout_ms` elapses. Returns an extra `wakeReason` field. Default false (non-blocking).",
+      "description": "If true, wait until new output arrives, the task finishes, or `timeout_ms` elapses, and return a `wakeReason`. Default false.",
       "type": "boolean"
     },
     "since": {
-      "description": "Byte offset to start reading from; pass the previous response's `next_offset` to tail. Defaults to 0 (read from start).",
+      "description": "Byte offset to start from; pass the previous response's `next_offset` to tail. Defaults to 0.",
       "minimum": 0,
       "type": "integer"
     },
@@ -886,7 +896,7 @@ Parameters:
       "type": "string"
     },
     "timeout_ms": {
-      "description": "Wait slice in milliseconds for `block=true`. Default 5000, max 30000 (values above are capped). `0` is equivalent to `block=false`. Timeout is NOT a failure: inspect the returned `content`/`finished` state first, and only call `task_output(block=true)` again when you truly still need to wait.",
+      "description": "Wait slice in ms for block=true (default 5000, max 30000; `0` == block=false). A timeout is not a failure — inspect `content`/`finished` before waiting again.",
       "maximum": 30000,
       "minimum": 0,
       "type": "integer"
@@ -908,7 +918,7 @@ Parameters:
 - Destructive: `true`
 - Search hint: `bash background task stop kill cancel`
 
-Stop a background `bash` task by its `task_id`. Sends SIGKILL to the entire process group on Unix (mirroring the foreground `bash` timeout path) and marks the task `Stopped`. Subsequent `task_output` calls return `finished=true` with `exit_code=-1`.
+Stop a background `bash` task by its `task_id` (SIGKILL to the whole process group on Unix). Subsequent `task_output` calls return `finished=true` with `exit_code=-1`.
 
 Parameters:
 
@@ -936,7 +946,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `bash background task list status enumerate`
 
-Enumerate every background `bash` task started in the current session with its current status (`Running`, `Stopped`, or `Finished{exit_code}`), the originating command, the started_at timestamp, and the log path. Use this to discover task ids when you need to follow up on a long-running task.
+List every background `bash` task in the current session with its status (`Running`, `Stopped`, or `Finished{exit_code}`), originating command, started_at timestamp, and log path. Use it to discover task ids to follow up on.
 
 Parameters:
 
@@ -957,9 +967,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `web search internet tavily brave serper query`
 
-Search the web and return normalized search hits. Use this to discover candidate URLs and snippets for a query; use `web_fetch` when you need to fetch one URL body afterward. Input fields align with the architecture doc: required `query`, plus optional `count`, `freshness`, `country`, `language`, and `domain_filter`.
-
-Results are normalized across hosted OpenAI search plus Tavily / Brave / Serper backends, with automatic fallback in `auto` mode. Preserve source attribution when citing results, and pay attention to the current date for time-sensitive queries.
+Search the web and return normalized search hits. Use this to discover candidate URLs/snippets; use `web_fetch` when you need one URL body afterward. Required `query`, plus optional `count`, `freshness`, `country`, `language`, and `domain_filter`. Results are normalized across hosted OpenAI search plus Tavily / Brave / Serper backends with automatic fallback in `auto` mode. Preserve source attribution when citing, and mind the current date for time-sensitive queries.
 
 Parameters:
 
@@ -967,7 +975,7 @@ Parameters:
 {
   "properties": {
     "count": {
-      "description": "Optional number of hits to request. Defaults to 5 and is capped at 20.",
+      "description": "Number of hits to request. Defaults to 5, capped at 20.",
       "maximum": 20,
       "minimum": 1,
       "type": "integer"
@@ -980,7 +988,7 @@ Parameters:
       ]
     },
     "domain_filter": {
-      "description": "Optional allowlist of domains to constrain results to. Each item should be a bare host like `github.com`.",
+      "description": "Optional allowlist of bare-host domains such as `github.com`.",
       "items": {
         "description": "One allowed domain suffix.",
         "type": "string"
@@ -988,7 +996,7 @@ Parameters:
       "type": "array"
     },
     "freshness": {
-      "description": "Optional recency filter. Use `day`, `week`, `month`, or `year`; omit / pass null when no freshness constraint is needed.",
+      "description": "Optional recency filter (`day`/`week`/`month`/`year`); omit or null for none.",
       "enum": [
         "day",
         "week",
@@ -1009,7 +1017,7 @@ Parameters:
       ]
     },
     "query": {
-      "description": "Search query text. Required; prefer natural-language keywords that describe what the user wants to find.",
+      "description": "Search query text (required); prefer natural-language keywords.",
       "type": "string"
     }
   },
@@ -1029,9 +1037,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `web fetch url markdown html pdf redirect`
 
-Fetch one specific URL and return cleaned page content. Use this after `web_search` when you already have a candidate URL and need the actual page body. Private/authenticated URLs, URLs with embedded credentials, single-label hosts, IP literal hosts, and private/loopback targets are rejected before any request; off-host redirects are not auto-followed and instead return structured redirect info so the model can decide whether to refetch with the new URL.
-
-Small text/html pages are returned inline as markdown or plain text. Large text responses are persisted to `tool-results` and return a head preview plus `persisted_output_path`; PDF/images and other binary payloads are persisted instead of being inlined. Input fields align with the architecture doc: required `url`, plus optional `prompt` (MVP warning-only hint) and `format` (`markdown` or `text`).
+Fetch one specific URL and return cleaned page content. Use this after `web_search` when you already have a candidate URL. Unsafe hosts (embedded credentials, single-label / IP-literal, private/loopback) are rejected; off-host redirects are not auto-followed and instead return structured redirect info so you can decide whether to refetch. Small text/html returns inline; large text and binary payloads (PDF/images) are persisted with a head preview plus `persisted_output_path`. Required `url`, plus optional `prompt` (warning-only) and `format` (`markdown` or `text`).
 
 Parameters:
 
@@ -1039,7 +1045,7 @@ Parameters:
 {
   "properties": {
     "format": {
-      "description": "Optional output format for textual pages. Defaults to `markdown`; use `text` when you want plain text without markdown syntax.",
+      "description": "Output format for textual pages. Defaults to `markdown`; use `text` for plain text.",
       "enum": [
         "markdown",
         "text"
@@ -1047,14 +1053,14 @@ Parameters:
       "type": "string"
     },
     "prompt": {
-      "description": "Optional extraction intent. In the current MVP this is recorded as a warning only and does not change the fetched content.",
+      "description": "Optional extraction intent (MVP: recorded as a warning only, does not change fetched content).",
       "type": [
         "string",
         "null"
       ]
     },
     "url": {
-      "description": "Target URL to fetch. Required; must be an http(s) URL without embedded credentials, localhost-style hosts, or private/IP-literal targets.",
+      "description": "Target URL (required). Must be an http(s) URL without embedded credentials or private/IP-literal hosts.",
       "type": "string"
     }
   },
@@ -1076,7 +1082,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `config get workspace primitive model`
 
-Read the current value of an allowed tomcat configuration key. The tool is constrained by CONFIG_READ_ALLOWLIST and CONFIG_HARDCODED_READ_DENY: workspace.*, agent.id, primitive.path_rules, primitive.bash_*, llm.default_model and similar non-sensitive fields are readable; llm.api_key*, llm.api_base_fallback, security.*, storage.* and other sensitive fields are denied. Missing dot-path keys return not_set.
+Read the current value of an allowed tomcat configuration key. Non-sensitive fields (workspace.*, agent.id, primitive.*, llm.default_model, and similar) are readable; sensitive fields (llm.api_key*, security.*, storage.*) are denied. Missing dot-path keys return not_set.
 
 Parameters:
 
@@ -1084,7 +1090,7 @@ Parameters:
 {
   "properties": {
     "key": {
-      "description": "Configuration dot path, for example workspace.workspace_roots, workspace.entries, primitive.path_rules, primitive.bash_forbidden, or agent.id.",
+      "description": "Configuration dot-path, e.g. workspace.workspace_roots, primitive.path_rules, or agent.id.",
       "type": "string"
     }
   },
@@ -1104,11 +1110,7 @@ Parameters:
 - Destructive: `true`
 - Search hint: `config set workspace roots path rules model`
 
-Append to or update an allowed tomcat configuration key. Every call shows the user a unified diff and requires confirmation. CONFIG_WRITE_ALLOWLIST and CONFIG_HARDCODED_WRITE_DENY protect sensitive or self-escalating fields.
-
-Semantics: array fields such as workspace.workspace_roots, workspace.entries, primitive.path_rules, primitive.bash_forbidden, and primitive.bash_approval_required accept value as one JSON element string and append it only. Scalar fields such as llm.default_model, log.level, context.keep_recent_turns, context.current_tail_compactable_min_chars, context.current_tail_single_result_max_chars, and context.compaction_max_tokens accept value as the replacement string. Deleting or arbitrary mutation is not supported; return an error that guides the user to tomcat config edit.
-
-Forbidden fields include llm.api_key*, security.*, storage.*, agent.id, agent.workspace, and primitive.auto_confirm.
+Append to or update an allowed tomcat configuration key. Every call shows a unified diff and requires confirmation. Array fields (workspace_roots, path_rules, bash_*, etc.) take `value` as one JSON element string and append only; scalar fields (llm.default_model, log.level, context.*) take `value` as the replacement. Deletion or arbitrary mutation is unsupported; sensitive fields (llm.api_key*, security.*, storage.*, agent.id, primitive.auto_confirm) are denied.
 
 Parameters:
 
@@ -1116,7 +1118,7 @@ Parameters:
 {
   "properties": {
     "key": {
-      "description": "Allowed configuration dot path to update.",
+      "description": "Allowed configuration dot-path to update.",
       "type": "string"
     },
     "value": {

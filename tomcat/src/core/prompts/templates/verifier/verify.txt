@@ -29,8 +29,8 @@ P6. Last resort: run one minimal inferred smoke command tied to the changed dire
 
 Forbidden guesses:
 - Do NOT default to repo-wide `npm test`, workspace-wide `cargo test`, or whole-repo
-  `pytest` without first reading a manifest or doc in this workspace.
-- Prefer the smallest scoped check that meaningfully exercises the deliverable.
+  `pytest` without first reading a manifest or doc; prefer the smallest scoped check
+  that meaningfully exercises the deliverable.
 
 Verification workflow:
 1. Read the plan file and inspect the workspace around the target area.

@@ -3,9 +3,85 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use super::{
-    build_function_definitions, derive_default_category, ToolCategory, BUILTIN_TOOL_CATALOG,
+    build_function_definitions, derive_default_category, render_tool_guidelines_with_policy,
+    ToolCategory, BUILTIN_TOOL_CATALOG,
 };
 use crate::core::permission::PermissionScope;
+
+fn desc_of(name: &str) -> &'static str {
+    BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|e| e.name == name)
+        .unwrap_or_else(|| panic!("{name} catalog entry"))
+        .description
+}
+
+/// 成功率红线：精简 description 时，影响调用成功率的格式/枚举/互斥/唯一性/坑点
+/// 必须留在原地。删了这些模型就会调错工具。
+#[test]
+fn success_rate_redline_keeps_critical_usage_in_descriptions() {
+    // hashline_edit：行号#哈希锚点格式 + HashMismatch 坑点。
+    let hashline = desc_of("hashline_edit");
+    assert!(
+        hashline.contains("<line>#<2char>"),
+        "hashline_edit 必须保留 `<line>#<2char>` 锚点格式"
+    );
+    assert!(hashline.contains("HashMismatch"));
+
+    // edit：唯一性/精确匹配约束（Ambiguous）+ ORIGINAL 快照语义 + Stale。
+    let edit = desc_of("edit");
+    assert!(edit.contains("Ambiguous"));
+    assert!(edit.contains("exactly once"));
+    assert!(edit.contains("ORIGINAL"));
+    assert!(edit.contains("Stale"));
+
+    // search_files：系统二进制依赖 + Tier2 regex 限制。
+    let search = desc_of("search_files");
+    assert!(search.contains("rg") && search.contains("fd"));
+    assert!(search.contains("regex"));
+
+    // update_plan：ops 三种 kind 枚举。
+    let update_plan = desc_of("update_plan");
+    assert!(update_plan.contains("upsert"));
+    assert!(update_plan.contains("set_status"));
+    assert!(update_plan.contains("remove"));
+
+    // config_set：append-only vs scalar 语义（删了会写错字段）。
+    let config_set = desc_of("config_set");
+    assert!(config_set.contains("append"));
+    assert!(config_set.contains("scalar"));
+
+    // bash：run_in_background 语义（后台任务全套用法在系统段）。
+    assert!(desc_of("bash").contains("run_in_background"));
+}
+
+/// 聚合去重：跨工具规则只说一遍，且包含被测试依赖的关键锚点。
+#[test]
+fn tool_guidelines_aggregate_dedup_and_contain_key_anchors() {
+    let g = render_tool_guidelines_with_policy(true);
+
+    // 关键跨工具锚点（原 tool_instructions 内联，现从 guidelines 注入）。
+    assert!(g.contains("Default file-edit workflow: read -> edit"));
+    assert!(g.contains("read(hashline=true) -> hashline_edit"));
+    assert!(g.contains("never include display prefixes"));
+    assert!(g.contains("prefer it over bash with grep/find/ls -R"));
+    assert!(g.contains("Only claim you can access"));
+    // 新增：path:line 引用 + 禁 codeblock 假编辑。
+    assert!(g.contains("`path:line`"));
+    assert!(g.contains("never print a code block pretending to edit"));
+    // UI 内核（#8）已移出工具 guidelines，改由 core_identity/planner 承载。
+    assert!(!g.contains("user-experience-first"));
+
+    // 去重：write + edit 共享的 no-fake-edit 只出现一次。
+    assert_eq!(
+        g.matches("never print a code block pretending to edit")
+            .count(),
+        1,
+        "no-fake-edit guideline 应去重为一条"
+    );
+    // 每条 guideline 以 `- ` 起头。
+    assert!(g.lines().all(|l| l.starts_with("- ")));
+}
 
 #[test]
 fn catalog_entries_are_well_formed() {

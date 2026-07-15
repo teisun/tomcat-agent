@@ -9,6 +9,18 @@
 //! `SystemPromptSection` trait 允许注册任意 section，`SystemPromptBuilder`
 //! 按 `priority` 升序拼接。`build_system_prompt` 保留为便捷 wrapper。
 //!
+//! 默认 section 链（priority）：`CoreIdentity(10)` → `ToolInstructions(20)` →
+//! `ParallelTools(22)` → `PagedReading(25)` → `BackgroundShellMonitor(30)` →
+//! `Verification(50)` →（可选 `AvailableSkills(35)`）→ `WorkspaceState(150)` →
+//! `WorkspaceContext(200)`。
+//!
+//! ## 跨工具规则注入
+//!
+//! `ToolInstructionsSection` 渲染时把 `catalog::render_tool_guidelines_with_policy`
+//! 聚合去重后的跨工具规则注入 `tool_instructions.txt` 的 `{tool_guidelines}` 占位，
+//! 使每条规则只说一遍（read-before-edit / 别粘显示前缀 / 优先 search_files /
+//! `path:line` 引用 / 别用 codeblock 假编辑 / UI 以 UX 为先 / 防幻觉）。
+//!
 //! ## `WorkspaceStateSection`（plan §8）
 //!
 //! `WorkspaceContextSection` 负责解释三类工作目录；`WorkspaceStateSection` 只按权限
@@ -68,8 +80,10 @@ impl Default for SystemPromptBuilder {
         let mut builder = Self::new();
         builder.register(Box::new(CoreIdentitySection));
         builder.register(Box::new(ToolInstructionsSection));
+        builder.register(Box::new(ParallelToolsSection));
         builder.register(Box::new(PagedReadingSection));
         builder.register(Box::new(BackgroundShellMonitorSection));
+        builder.register(Box::new(VerificationSection));
         builder.register(Box::new(WorkspaceContextSection));
         builder
     }
@@ -108,10 +122,47 @@ impl SystemPromptSection for ToolInstructionsSection {
         "tool_instructions"
     }
     fn render(&self, _context: &WorkspaceContext) -> String {
-        load_prompt(PromptKey::SystemToolInstructions).to_string()
+        // 跨工具规则从 catalog 的 prompt_guidelines 聚合去重后注入 {tool_guidelines}，
+        // 只说一遍，避免在每条 description 里逐工具重复（见 catalog.rs 成功率红线注释）。
+        let guidelines =
+            crate::core::tools::contract::catalog::render_tool_guidelines_with_policy(true);
+        render_prompt(
+            PromptKey::SystemToolInstructions,
+            &[("tool_guidelines", &guidelines)],
+        )
     }
     fn priority(&self) -> u32 {
         20
+    }
+}
+
+/// 并行工具调用引导（priority 22）：无依赖的调用同轮批量发出，省 LLM 往返 + 上下文重发。
+struct ParallelToolsSection;
+
+impl SystemPromptSection for ParallelToolsSection {
+    fn section_name(&self) -> &str {
+        "parallel_tools"
+    }
+    fn render(&self, _context: &WorkspaceContext) -> String {
+        load_prompt(PromptKey::SystemParallelTools).to_string()
+    }
+    fn priority(&self) -> u32 {
+        22
+    }
+}
+
+/// 收尾 + 验证引导（priority 50）：finish-the-job + 反捏造 + 引用 EXEC Mini 验证。
+struct VerificationSection;
+
+impl SystemPromptSection for VerificationSection {
+    fn section_name(&self) -> &str {
+        "verification"
+    }
+    fn render(&self, _context: &WorkspaceContext) -> String {
+        load_prompt(PromptKey::SystemVerification).to_string()
+    }
+    fn priority(&self) -> u32 {
+        50
     }
 }
 
@@ -394,7 +445,8 @@ impl SystemPromptSection for WorkspaceStateSection {
 /// 构建发送给 LLM 的 system message 内容。
 ///
 /// 内部使用 `SystemPromptBuilder` 的默认注册（CoreIdentity + ToolInstructions
-/// + PagedReading + WorkspaceContext），与旧版输出功能等价。
+/// + ParallelTools + PagedReading + BackgroundShellMonitor + Verification
+/// + WorkspaceContext）。
 pub fn build_system_prompt(workspace_dir: &str) -> String {
     let context = WorkspaceContext {
         agent_workspace_dir: workspace_dir.to_string(),

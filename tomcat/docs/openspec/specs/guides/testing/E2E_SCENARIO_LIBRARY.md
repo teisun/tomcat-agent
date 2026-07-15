@@ -378,6 +378,19 @@
 
 ---
 
+## 系统提示词行为契约（提示词优化，prompt-only）
+
+> 本组来自「系统提示词瘦身优先版」优化：跨工具规则下沉到 catalog `prompt_guidelines` 聚合注入，新增并行/收尾两段行为契约。均为 prompt-only 断言（不需要真 LLM），由下列单测/集成锁定。
+
+| 编号 | 验收 | 用例名（所在文件） | 用户意图 | 断言点 | 必须断言 |
+| ---- | ---- | ------------------ | -------- | ------ | -------- |
+| E2E-PROMPT-026 | 自动 | `build_system_prompt_injects_aggregated_tool_guidelines`（`src/core/llm/tests/system_prompt_test.rs`） | 模型回复引用代码位置时给出可点击 `path:line` 引用，且不用 codeblock 假装编辑 | 拼装后系统提示词 | 含 `clickable path:line`、`never print a code block pretending to edit`；UI(#8) `Put user experience first` 现由 core_identity 承载；不含未替换的 `{tool_guidelines}` |
+| E2E-PROMPT-027 | 自动 | `build_system_prompt_contains_parallel_and_verification_sections` / `new_sections_sit_in_priority_order`（同上） | 无依赖工具调用批量发出；任务干到底、不捏造、按 EXEC Mini 验证收尾 | 拼装后系统提示词 | 含 `Parallel tool calls`、`Finishing and verifying`、`Mini verification P0-P6`；两新段按 priority(22/50) 落位 |
+| E2E-PROMPT-028 | 自动 | `success_rate_redline_keeps_critical_usage_in_descriptions` / `tool_guidelines_aggregate_dedup_and_contain_key_anchors`（`src/core/tools/contract/tests/catalog_test.rs`） | 精简后难用工具仍可被正确调用；跨工具规则只说一遍 | catalog description + 聚合 guidelines | 保留 hashline `<line>#<2char>`、edit `Ambiguous/ORIGINAL/exactly once`、update_plan `upsert/set_status/remove`；no-fake-edit 在聚合中仅一条（UI #8 已移出聚合，改由 core_identity/planner 同文承载） |
+| E2E-PROMPT-029 | 自动 | `standards_6_7_8_are_byte_identical_in_core_identity_and_planner`（`src/core/prompts/tests/load_test.rs`） | 工程规范 #6/#7/#8 在常驻身份与 PLAN 提示词两处一字不差，防单边漂移 | `core_identity.txt` + `planner.txt` | S6（第一性原理/极致优雅/敢推翻坏设计）、S7（人话+总览及每复杂章节 ASCII 图）、S8（UI 从 UX 出发）三句逐字同时出现在两个模板 |
+
+---
+
 ## 跨平台（无独立 E2E 编号）
 
 与 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](../agents/INTEGRATION_MERGE_AND_ACCEPTANCE.md) §4 **人工验收第 8 条**一致：在 Windows / macOS / Linux 条件具备时，各至少执行一次 `cargo build` + `cargo test`（或 CI matrix）。**不占用**上表编号；发布前在 checklist 中单独勾选。
