@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-15 12:26 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-15 17:40 +0800 | ACTIVE | develop | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1]** 云化服务技术方案已落盘：`tomcat/docs/architecture/cloud-scale-serving/` 新增 `01-overview` + Phase A/B/C（`02/03/04`），并在架构 README 登记「扩展性与云化」阅读顺序；纠正「全站单 EventBus」误诊，明确 A 期单机 mailbox/热温冷为先落地、本地 `stdio` 零回退；尚未进入 Phase A 编码 @2026-07-15
 - [✓] **[P0]** `feature/transcript-ui-and-checkpoints` 已 fast-forward 合入 `develop`（`866752c -> 62c8811`）；develop-side review 发现并修复跨 session restore 漏洞：`restore_checkpoint` / `/restore` 现拒绝不属于当前会话的 checkpoint，避免 `revertFiles=true` 把共享工作区回滚到别的会话快照；新增 `serve_restore_checkpoint_rejects_foreign_session_checkpoint` 回归测试，`cargo test -p tomcat serve_restore_checkpoint -- --nocapture` 4/4 通过 @2026-07-15
 - [✓] **[P0]** develop-side 扩展快门禁与真实宿主高风险复核完成：`npm run gate:fast` 全绿；`TOMCAT_E2E_GREP='renders the \\.plan\\.md custom editor|renders transcript action rows and context groups|keeps sticky user prompts aligned with historical turns in the Tomcat webview|restores plan cards and Ctx after switching sessions' npm run test:e2e:vscode-devhost` 4/4 通过 @2026-07-15
 - [✓] **[P0]** develop-side Rust web-search 门禁已收口：把 `tomcat/tests/cli_tests.rs` 与 `tomcat/tests/web_search_tool_tests.rs` 中真实 HTTPS mock + plugin runtime 成功路径的外层 wall-clock budget 与 timeout 失败 teardown 对齐，消除 nextest 满并发下的假红 / slow / hung；focused 复核全绿，`./scripts/run-integration-tests.sh integration-parallel` 364/364 通过（仅 `real_mimo_web_search` 被标 slow 但 PASS）@2026-07-15
@@ -13,12 +14,15 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- 无代码接口变更。新增架构文档入口：`tomcat/docs/architecture/cloud-scale-serving/01-overview.md`（父导航）及 Phase A/B/C 子文档；不改变现有 `serve` / `stdio` 对外契约。
 - `restore_checkpoint` / `/restore` 现强制 checkpoint 的 `session_id` 必须等于当前会话；跨 session restore 返回错误 `checkpoint 不属于当前会话，不能跨会话 restore`，不再允许误回滚共享工作区。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 - 当前无 develop-side 阻塞项。`real_mimo_web_search` 在 nextest 中 86.99s 被标记为 slow，但结果为 PASS，仅作为性能观察项保留，不构成门禁阻塞。
+- Phase A 编码尚未启动；待评审确认后再按 `02-phase-a-session-mailbox-hot-cold.md` 落地。
 
 ### 集成说明
+- 本轮仅文档：云化技术方案四篇 + 架构 README 地图；无 Rust/扩展代码变更，不触发集成门禁。
 - `feature/transcript-ui-and-checkpoints` 已本地 fast-forward 合入 `develop`（HEAD `62c8811`），覆盖 checkpoint restore / transcript UI / `.plan.md` custom editor / bash summary upgrade；develop-side acceptance 现已 **通过**，结论更新为 **GO**（尚未推送远端）。
 - Rust develop-side 复核确认：先前 web-search 红点并非产品逻辑回归，而是测试自身的预算/清理脆弱。真实 HTTPS mock + plugin runtime 成功路径在 nextest 满并发下会逼近 5s/10s 外层 timeout；部分用例又在 `end_session` 前 panic，导致大盘表现为 slow/hung。现已在 `tomcat/tests/cli_tests.rs` 与 `tomcat/tests/web_search_tool_tests.rs` 放宽 success-path wall-clock budget，并保证 timeout/result error 时先 teardown 再失败；focused `cargo test --test web_search_tool_tests works_from_public_api -- --nocapture`、`cargo test --test web_search_tool_tests runtime_auto_routes_to_plugin_backends_after_retryable_failures -- --nocapture`、`cargo test --test web_search_tool_tests runtime_session_vm_survives_idle_beyond_call_timeout -- --nocapture`、`cargo test --test cli_tests test_chat_path_executes_web_search_tool_with_mock_server -- --nocapture` 全绿。
 - Rust 默认快门禁已重新闭环：`cargo clippy --all-targets -- -D warnings`、`cargo test --lib`、`cargo test --doc` 与 `./scripts/run-integration-tests.sh integration-parallel` 全绿；其中 integration-parallel 为 `364/364 passed`，仅 `real_mimo_web_search` 被 nextest 标 slow 但正常 PASS。
