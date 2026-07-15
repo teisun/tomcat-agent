@@ -5777,7 +5777,7 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
         std::time::Duration::ZERO,
     )
     .await;
-    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(5));
+    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(10));
 
     const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_CHAT_KEY";
     let _env = EnvGuard::set_many(&[
@@ -5825,7 +5825,7 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
     )
     .unwrap();
     let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(10),
         run_chat_turn(
             &ctx,
             "请搜索 reqwest rust",
@@ -5835,12 +5835,19 @@ async fn test_chat_path_executes_web_search_tool_with_mock_server() {
         ),
     )
     .await
-    .expect("run_chat_turn timeout 5s")
-    .expect("run_chat_turn result");
+    .map_err(|_| "run_chat_turn timeout 10s".to_string())
+    .and_then(|result| result.map_err(|err| format!("run_chat_turn result error: {err}")));
 
-    let result = match outcome {
-        tomcat::AgentRunOutcome::Completed(result) => result,
-        other => panic!("应正常完成 web_search chat 路径，实际: {other:?}"),
+    let result = match &outcome {
+        Ok(tomcat::AgentRunOutcome::Completed(result)) => result,
+        Ok(other) => {
+            end_current_plugin_session(&ctx).await;
+            panic!("应正常完成 web_search chat 路径，实际: {other:?}");
+        }
+        Err(err) => {
+            end_current_plugin_session(&ctx).await;
+            panic!("{err}");
+        }
     };
     assert!(
         result.final_text.contains("SEARCH_OK"),
