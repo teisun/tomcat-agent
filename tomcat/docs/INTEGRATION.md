@@ -9,7 +9,18 @@
 
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-05 14:43 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-15 09:52 +0800 | PAUSED | develop | — |
+
+### 2026-07-15 | merge `feature/transcript-ui-and-checkpoints` → develop（develop-side review / acceptance）
+
+- **合并范围**：已在本地 `develop` 上 fast-forward 合入 `feature/transcript-ui-and-checkpoints`（`866752c -> 62c8811`），带入 transcript checkpoint restore、checkpoint marker / restore dialog、auto-scroll 真机修复、`.plan.md` custom editor、plan selection-to-chat、thinking purpose title、bash `tool.summary_updated` UI 升级，以及对应 Rust / extension / GUI / host E2E 测试与架构文档。
+- **develop-side 补修**：review 发现 `restore_checkpoint` / `/restore` 只按 `checkpointId` 取 checkpoint，未校验 `session_id`；这会让 `revertFiles=true` 在多 session 共享工作区里存在跨会话误回滚风险。已在 `tomcat/src/api/chat/commands/cmd_restore.rs` 加当前会话归属校验，并补 `serve_restore_checkpoint_rejects_foreign_session_checkpoint` 回归测试；`cargo test -p tomcat serve_restore_checkpoint -- --nocapture` 4/4 通过。
+- **扩展侧验收**：`tomcat-vscode-ext` 的 `npm run gate:fast` **PASS**。merge 影响面复核按高风险场景精跑真实宿主：`TOMCAT_E2E_GREP='renders the \\.plan\\.md custom editor|renders transcript action rows and context groups|keeps sticky user prompts aligned with historical turns in the Tomcat webview|restores plan cards and Ctx after switching sessions' npm run test:e2e:vscode-devhost` **4 passing**，覆盖 plan preview、transcript action rows、sticky history、session switch restore。
+- **Rust gate-fast 结果**：`./scripts/run-integration-tests.sh gate-fast` 的 `clippy` / `cargo test --lib` / `cargo test --doc` **PASS**；`integration-parallel` 在 web-search 热区暴露两条 develop-side 异常：  
+  1. `web_search_tool_tests::runtime_auto_routes_to_plugin_backends_after_retryable_failures` 在 nextest 大盘里失败，但 focused `cargo test --test web_search_tool_tests runtime_auto_routes_to_plugin_backends_after_retryable_failures -- --nocapture` **10.35s 复绿**，更像外部后端/时序抖动。  
+  2. `cli_tests::test_chat_path_executes_web_search_tool_with_mock_server` 在 nextest 大盘里持续 **slow/hung > 10 分钟**；focused `cargo test --test cli_tests test_chat_path_executes_web_search_tool_with_mock_server -- --nocapture` 又命中 `run_chat_turn timeout 5s` 后挂死，已人工 `kill` 终止。  
+  两者都不在本次 transcript / plan / restore 热区，但当前环境下会阻塞 develop-side “全绿验收”。
+- **任务卡 / 结论**：此分支无独立 `PENDING_INTEGRATION` 任务卡映射，分支侧证据以 `docs/status/feature-transcript-ui-and-checkpoints.md` 为准。**结论：本地 merge 已完成，但 develop-side acceptance 当前为 NO-GO**，需先单独排查 web-search / CLI 这两条不稳定项，再决定是否将本地 `develop` 推送远端。
 
 ### 2026-07-05 | merge `feature/tomcat-vscode-extension` → develop（T2-P1-019 / T2-P1-020 集成验收）
 
