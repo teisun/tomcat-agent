@@ -2998,7 +2998,7 @@ input:focus-visible {
   gap: 8px;
   justify-content: flex-end;
   margin: 0;
-  padding: 6px 12px;
+  padding: 6px 16px;
   width: 100%;
   z-index: 2;
 }
@@ -3098,7 +3098,7 @@ input:focus-visible {
   overflow-y: auto;
   /* Extra bottom padding so the last todo never sits flush against the editor
    * status bar when scrolled to the end. */
-  padding: 4px 4px 40px;
+  padding: 4px 16px 40px;
   -webkit-user-select: text;
   user-select: text;
   width: 100%;

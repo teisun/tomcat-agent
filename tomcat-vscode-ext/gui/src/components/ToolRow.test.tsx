@@ -393,7 +393,11 @@ describe("ToolRow", () => {
     expect(commandBinaries("cat a | grep foo | sort")).toEqual(["cat", "grep", "sort"]);
     expect(commandBinaries("FOO=bar sudo ./deploy.sh")).toEqual(["deploy.sh"]);
     expect(commandBinaries("/usr/local/bin/node script.js")).toEqual(["node"]);
-    expect(commandBinaries("a; b; c; d; e")).toEqual(["a", "b", "c", "d"]);
+    expect(commandBinaries("a; b; c; d; e")).toEqual(["a", "b", "c"]);
+    expect(
+      commandBinaries("cd /tmp\n# generate icon\ncat <<'SVG' > icon.svg\n<svg>\n</svg>\nSVG\nsvgcleaner icon.svg"),
+    ).toEqual(["cd", "cat", "svgcleaner"]);
+    expect(commandBinaries("git status && # comment only\n<svg>\n> out.txt")).toEqual(["git"]);
     expect(commandBinaries("")).toEqual([]);
     expect(commandBinaries(undefined)).toEqual([]);
   });

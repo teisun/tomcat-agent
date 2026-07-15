@@ -11,7 +11,7 @@ use crate::EventListenerId;
 use super::types::OutFrame;
 use super::writer::WriterHandle;
 
-const EVENT_NAMES: &[&str] = &[
+pub(super) const EVENT_NAMES: &[&str] = &[
     wire::WIRE_AGENT_START,
     wire::WIRE_AGENT_END,
     wire::WIRE_TURN_START,
@@ -59,6 +59,7 @@ const EVENT_NAMES: &[&str] = &[
     wire::WIRE_SESSION_TITLE_UPDATED,
     wire::WIRE_SESSION_TODOS,
     wire::WIRE_TURN_SUMMARY_UPDATED,
+    wire::WIRE_TOOL_SUMMARY_UPDATED,
 ];
 
 pub fn register_session_event_pump(

@@ -3537,7 +3537,7 @@ export async function assertPlanPreviewCustomEditorFlow(
   // sidebar's active session), so we don't pin assertions to this id.
   await api.__testing.focusWebview();
   await api.__testing.waitForWebviewReady();
-  await createFreshWebviewSession(api, "plan-preview-selection-session");
+  const sessionId = await createFreshWebviewSession(api, "plan-preview-selection-session");
 
   const scratchDir = path.join(
     workspaceRoot,
@@ -3546,9 +3546,10 @@ export async function assertPlanPreviewCustomEditorFlow(
   const planBasename = "e2e-preview.plan.md";
   const planPath = path.join(scratchDir, planBasename);
   const planUri = vscode.Uri.file(planPath);
+  const planId = `e2e-plan-${Date.now().toString(36)}`;
   const initialText = [
     "---",
-    `plan_id: e2e-plan-${Date.now().toString(36)}`,
+    `plan_id: ${planId}`,
     "name: E2E Plan Preview",
     "overview: Verify the custom editor renders",
     "state: planning",
@@ -3582,7 +3583,25 @@ export async function assertPlanPreviewCustomEditorFlow(
     await fs.mkdir(scratchDir, { recursive: true });
     await fs.writeFile(planPath, initialText, "utf8");
 
-    await api.__testing.openPlanPreview(planPath);
+    await api.__testing.injectServeEvent({
+      path: planPath,
+      planId,
+      sessionId,
+      state: "planning",
+      type: "plan.create",
+    });
+    await pause(400);
+    await assert.rejects(
+      () => api.__testing.capturePlanPreviewDom(planPath),
+      /No plan preview panel is open/u,
+      "expected plan.create alone to record the path but not open the preview before review completes",
+    );
+    await api.__testing.injectServeEvent({
+      planId,
+      sessionId,
+      summary: "Tomcat plan review: looks good",
+      type: "plan.review",
+    });
 
     // Default is now hybrid (B): the slim in-body action strip is present.
     const preview = await waitForPlanPreviewDom(
@@ -3606,6 +3625,10 @@ export async function assertPlanPreviewCustomEditorFlow(
     assert.ok(
       preview.stripInsetLeft !== null && preview.stripInsetLeft <= 2,
       `expected the action strip to span the full editor width (stripInsetLeft ~0), got ${String(preview.stripInsetLeft)}`,
+    );
+    assert.ok(
+      preview.bodyInsetLeft !== null && preview.bodyInsetLeft >= 12,
+      `expected the rendered body to keep left/right breathing room (bodyInsetLeft >= 12), got ${String(preview.bodyInsetLeft)}`,
     );
     assert.equal(
       preview.todoCountText,
@@ -3791,6 +3814,9 @@ export async function assertPlanPreviewCustomEditorFlow(
       "expected no in-body action strip in native toolbar style",
     );
   } finally {
+    await api.__testing.focusWebview().catch(() => undefined);
+    await api.__testing.waitForWebviewReady().catch(() => undefined);
+    await clearComposerDraft(api, sessionId).catch(() => undefined);
     await vscode.workspace
       .getConfiguration("tomcat")
       .update("plan.toolbarStyle", undefined, vscode.ConfigurationTarget.Global);

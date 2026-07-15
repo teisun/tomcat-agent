@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-07-15 07:47 +0800 | ACTIVE | feature/transcript-ui-and-checkpoints | — |
+| tomcat | 2026-07-15 08:53 +0800 | ACTIVE | feature/transcript-ui-and-checkpoints | — |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **[P0]** Checkpoint 最新一轮消失修复：`setCheckpoints` 不再触发 `rebuildHistoryTimeline`；分隔线改为 GUI 渲染层现算（`checkpointMarkers.ts` + `TranscriptView` checkpoints prop）@2026-07-13
@@ -16,6 +16,7 @@
 - [✓] **[P0]** Plan 预览顶栏铺满 + 正文底部留白：`body.tc-plan-webview{padding:0}` 去掉 VS Code webview 默认 20px；`.tc-plan-preview__content` 底部 padding 提到 40px；DOM 快照加 `stripInsetLeft` 断言顶栏 inset≈0 @2026-07-15
 - [✓] **[P0]** Thinking 分组标题带目的：`generate_turn_summary` 禁止裸 `Used N tools`；命中后二次 utility 调取 purpose clause，拼成 `Used N tools for <clause>`；title_generator/集成/ThinkingGroup 单测覆盖 @2026-07-15
 - [✓] **[P0]** Bash 卡片终端化（抄 Cursor）：后端 `generate_command_summary` + `tool.summary_updated`（`ServeToolEvent`）异步升级目的短句；ToolRow 头改为 `summaryTitle|Ran` + 命令名标签，正文 `TerminalOutput` 前置 `$ 完整命令`；host/GUI/state/E2E 覆盖；已知限制：live-only，history 重载回落占位 @2026-07-15
+- [✓] **[P0]** Round2：`tool.summary_updated` 补进 serve `event_pump` 白名单（真因：emit 了但未转发）；`commandBinaries` 跳过注释/heredoc/非法 token、上限 3；plan 预览改为 `plan.create` 登记、`plan.review` 后打开；正文左右 padding 16px + `bodyInsetLeft` 断言；event_pump/provider/ToolRow/host E2E 覆盖；`0.1.14` VSIX 已重打 @2026-07-15
 
 ### 🔌 INTERFACE (接口变更)
 - Webview store：`session.checkpoints` 与 `timeline` 解耦；timeline 仅含消息/工具项，checkpoint 分隔线由 GUI `injectCheckpointMarkers(timeline, checkpoints)` 现算。
@@ -24,15 +25,16 @@
 - AutoScroll（0.1.13）：reset 与 reveal 合并为单一 `useLayoutEffect`，deps 增加 `oldestItemKey`；判定用单一 `revealTrackingRef`，消除双 effect 共享 ref 的同帧竞态。
 - AutoScroll（0.1.14）：reveal 对视口高度变化免疫——`ResizeObserver` 以 `previousClientHeightRef` 侦测 `clientHeight` 变化并重算 spacer 重新固顶；`handleScroll` 在钳底且当前轮仍装得下时重新固顶而非 follow-bottom。
 - Plan Preview：自定义编辑器 `tomcat.planPreview`；协议 `planPreviewProtocol`（state 帧含 mode/toolbarStyle/`bodyLineMap`；intent `setBuildModel`/`build`/`addSelectionToChat`；事件 `captureSelectionForChat`）；配置 `tomcat.plan.buildModel` + 临时 A/B `tomcat.plan.toolbarStyle`（默认 hybrid）；聊天 `PlanFileCard` 与预览共享扁平 `PlanBuildModelSelect` 与统一 Build 行为；`buildSelectionReferenceFromParts` 供编辑器选区与预览选区共用；`MarkdownBody` 块级打 `data-source-line`；`referenceIdentity` 对无行号 selection 追加文字 hash。
-- Serve/wire：新增 `tool.summary_updated`（`ServeToolEvent`，含 `toolCallId` + `summaryTitle`）；`WebviewToolCard.summaryTitle?`；command 工具结束后异步 spawn utility 生成目的短句并热更新前端（不回写 transcript）。
+- Serve/wire：新增 `tool.summary_updated`（`ServeToolEvent`，含 `toolCallId` + `summaryTitle`）；**必须列入 `event_pump.EVENT_NAMES` 白名单才会转发到插件**。
+- Plan auto-open：`plan.create` 只登记 `planId→path`；`plan.review` 到达后才 `openWith`（审稿完成再开，避免抢焦点）。
 - Turn summary：裸 `Used N tools` 触发二次 purpose 调用，前端 ThinkingGroup 可渲染 `Used N tools for <purpose>`。
 
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| bash `tool.summary_updated` 真机标题未进 UI；plan 打开时机偏早；正文左右留白不足 | 初步定位 serve `event_pump` 白名单漏 `WIRE_TOOL_SUMMARY_UPDATED`；整改计划已拟（round2） | 下一轮 |
+| （空）round2 三项已修；`tomcat.plan.toolbarStyle` 仍为临时 A/B | 待合并前决定是否去掉 native 分支 | — |
 
 ### 集成说明
-- 本分支目标：Transcript UI + checkpoint restore；已落地 `.plan.md` Cursor 风预览，并完成顶栏铺满/正文底留白、thinking 目的标题、bash 卡片终端化（`tool.summary_updated`）。
-- 验收分层：GUI util / TranscriptView / App / state / provider 单测；E2E 场景登记 VSCEXT-026/027/028/029；plan 预览另含 host/GUI/E2E（hybrid 出条、selection 行号、mermaid、stripInsetLeft、bash summaryTitle）；纯布局/时序真因以真实浏览器 smoke 取证。
-- 已知后续：修 `event_pump` 白名单使 `tool.summary_updated` 真机生效；`plan.review` 后再自动打开预览；正文左右留白；`tomcat.plan.toolbarStyle` 为临时 A/B，选定后应删 flag 与 native 分支。
+- 本分支目标：Transcript UI + checkpoint restore；已落地 `.plan.md` Cursor 风预览，并完成顶栏铺满/正文留白、thinking 目的标题、bash 卡片终端化，以及 round2 真机断链修复（白名单 + 审稿后打开）。
+- 验收分层：GUI util / TranscriptView / App / state / provider 单测；E2E 场景登记 VSCEXT-026/027/028/029；plan 预览另含 host/GUI/E2E（hybrid 出条、selection 行号、mermaid、stripInsetLeft、bodyInsetLeft、`plan.create`→`plan.review` 才打开、bash summaryTitle）；纯布局/时序真因以真实浏览器 smoke 取证。
+- 已知后续：`tomcat.plan.toolbarStyle` 为临时 A/B，选定后应删 flag 与 native 分支；devhost 全量偶发失败项 `lazy loads a giant historical tool group` 与本轮无关，待另案排查。

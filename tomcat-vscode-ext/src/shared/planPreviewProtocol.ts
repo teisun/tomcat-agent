@@ -46,6 +46,9 @@ export interface PlanPreviewStateSnapshot {
 /** DOM/state readout the plan preview webview reports back during E2E tests. */
 export interface PlanPreviewDomSnapshot {
   bodyHasContent: boolean;
+  /** Left inset (px) of the rendered markdown body; proves the content column has
+   * deliberate side padding instead of sitting flush against the editor edge. */
+  bodyInsetLeft: number | null;
   buildModelOptions: string[];
   buildModelValue: string;
   hasActionStrip: boolean;

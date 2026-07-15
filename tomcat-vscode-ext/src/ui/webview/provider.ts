@@ -322,8 +322,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private readonly sessionPool: TomcatSessionPool;
   private readonly stateStore: WebviewStateStore;
   private readonly eventSubscription: { dispose(): void };
-  /** Plan paths already auto-opened on `plan.create`, so repeats don't reopen. */
+  /** Plan paths already auto-opened after review, so repeats don't reopen. */
   private readonly autoOpenedPlanPaths = new Set<string>();
+  /** `plan.create` gives us the path; `plan.review` is the actual open trigger. */
+  private readonly pendingPlanOpenByPlanId = new Map<string, string>();
   private initialized?: InitializeResult;
   private isReady = false;
   private lastContextSearchIntent: Extract<WebviewIntent, { type: "searchContext" }> | null = null;
@@ -1225,17 +1227,26 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   /**
-   * Auto-open the plan preview the moment a plan is written to disk. `plan.create`
-   * is the contract for "draft persisted" (serve fires it only after `write_plan`
-   * succeeds), so this is the correct "written" trigger — never on the path first
-   * appearing, mid-write, or on later `plan.update`s (which would steal focus
-   * while the user reads). Deduped per path so repeated creates don't reopen.
+   * Record the persisted `planId -> path` on `plan.create`, but only auto-open the
+   * preview once the reviewer finishes (`plan.review`). This avoids stealing focus
+   * while the draft is still under review, yet still opens deterministically once
+   * the reviewed plan is ready to read. Deduped per path so repeated review events
+   * don't reopen the same preview.
    */
   private async maybeAutoOpenPlanPreview(event: ServeEvent): Promise<void> {
-    if (event.type !== "plan.create") {
+    if (event.type === "plan.create") {
+      const planId = "planId" in event && typeof event.planId === "string" ? event.planId : "";
+      const path = "path" in event && typeof event.path === "string" ? event.path : "";
+      if (planId && path && !this.autoOpenedPlanPaths.has(path)) {
+        this.pendingPlanOpenByPlanId.set(planId, path);
+      }
       return;
     }
-    const path = "path" in event && typeof event.path === "string" ? event.path : "";
+    if (event.type !== "plan.review") {
+      return;
+    }
+    const planId = "planId" in event && typeof event.planId === "string" ? event.planId : "";
+    const path = planId ? (this.pendingPlanOpenByPlanId.get(planId) ?? "") : "";
     if (!path || this.autoOpenedPlanPaths.has(path)) {
       return;
     }
@@ -1243,6 +1254,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       return;
     }
     this.autoOpenedPlanPaths.add(path);
+    if (planId) {
+      this.pendingPlanOpenByPlanId.delete(planId);
+    }
     try {
       await this.deps.ide.openWith(path, "tomcat.planPreview");
     } catch {

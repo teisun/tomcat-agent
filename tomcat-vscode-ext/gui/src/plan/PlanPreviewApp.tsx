@@ -95,6 +95,7 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
   const stripInsetLeft = strip ? Math.round(strip.getBoundingClientRect().left) : null;
   return {
     bodyHasContent: Boolean(body && (body.textContent ?? "").trim().length > 0),
+    bodyInsetLeft: body ? Math.round(body.getBoundingClientRect().left) : null,
     buildModelOptions: options,
     buildModelValue: select ? select.value : "",
     hasActionStrip: Boolean(strip),

@@ -174,3 +174,15 @@ async fn serve_event_pump_streams_plan_transition_events() {
         ]
     );
 }
+
+#[test]
+fn serve_event_pump_allowlist_includes_summary_upgrade_events() {
+    assert!(
+        super::super::event_pump::EVENT_NAMES.contains(&wire::WIRE_TURN_SUMMARY_UPDATED),
+        "turn.summary_updated must stay on the serve allowlist"
+    );
+    assert!(
+        super::super::event_pump::EVENT_NAMES.contains(&wire::WIRE_TOOL_SUMMARY_UPDATED),
+        "tool.summary_updated must stay on the serve allowlist"
+    );
+}

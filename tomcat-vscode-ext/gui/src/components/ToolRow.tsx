@@ -331,44 +331,70 @@ function fullCommandText(item: WebviewToolCard): string {
 
 /**
  * 客户端解析命令名标签（零 LLM）：按 `&& || | ; \n` 切段，取每段首个"可执行名"，
- * 剔除 `VAR=…` 环境赋值与 `sudo`，去掉路径前缀，去重、上限 4 个。
+ * 剔除注释、heredoc 正文、`VAR=…` 环境赋值与 `sudo`，去掉路径前缀，去重、上限 3 个。
  * 例：`git status && echo '---'` → `["git", "echo"]`。
  */
+const COMMAND_NAME_RE = /^[A-Za-z_][A-Za-z0-9_.+-]*$/u;
+const ENV_ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+const HEREDOC_OPEN_RE = /<<-?\s*(['"]?)([^'"`\s;|&<>]+)\1/u;
+
+function heredocTerminator(line: string): string | null {
+  return line.match(HEREDOC_OPEN_RE)?.[2] ?? null;
+}
+
+function firstCommandName(segment: string): string | null {
+  const trimmed = segment.trim();
+  if (!trimmed || trimmed.startsWith("#")) {
+    return null;
+  }
+  let binary: string | undefined;
+  for (const token of trimmed.split(/\s+/)) {
+    if (!token) {
+      continue;
+    }
+    if (ENV_ASSIGNMENT_RE.test(token)) {
+      continue;
+    }
+    if (token === "sudo" || token === "command") {
+      continue;
+    }
+    binary = token;
+    break;
+  }
+  if (!binary) {
+    return null;
+  }
+  const name = binary.replace(/^\.\//u, "").split("/").pop() ?? "";
+  return COMMAND_NAME_RE.test(name) ? name : null;
+}
+
 export function commandBinaries(command: string | undefined): string[] {
   if (!command || !command.trim()) {
     return [];
   }
-  const segments = command
-    .split(/\n|&&|\|\||[|;]/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
   const names: string[] = [];
-  for (const segment of segments) {
-    let binary: string | undefined;
-    for (const token of segment.split(/\s+/)) {
-      if (!token) {
-        continue;
+  let heredocEnd: string | null = null;
+  for (const line of command.split("\n")) {
+    const trimmedLine = line.trim();
+    if (heredocEnd) {
+      if (trimmedLine === heredocEnd) {
+        heredocEnd = null;
       }
-      // 环境赋值 FOO=bar（非 --flag=value）跳过。
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
-        continue;
-      }
-      if (token === "sudo" || token === "command") {
-        continue;
-      }
-      binary = token;
-      break;
-    }
-    if (!binary) {
       continue;
     }
-    const name = binary.replace(/^\.\//, "").split("/").pop();
-    if (name && !names.includes(name)) {
-      names.push(name);
+    if (!trimmedLine || trimmedLine.startsWith("#")) {
+      continue;
     }
-    if (names.length >= 4) {
-      break;
+    for (const segment of line.split(/&&|\|\||[|;]/)) {
+      const name = firstCommandName(segment);
+      if (name && !names.includes(name)) {
+        names.push(name);
+      }
+      if (names.length >= 3) {
+        return names;
+      }
     }
+    heredocEnd = heredocTerminator(line);
   }
   return names;
 }
