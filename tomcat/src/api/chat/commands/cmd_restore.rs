@@ -112,6 +112,29 @@ fn restore_core_with_paths(
         }
     };
 
+    let current_session_id = match ctx.session_runtime.session.current_session_id() {
+        Ok(Some(session_id)) => session_id,
+        Ok(None) => {
+            record_restore_audit(ctx, false, "restore missing current session".to_string());
+            return Err("当前无活动会话，无法执行 restore".to_string());
+        }
+        Err(err) => {
+            record_restore_audit(ctx, false, format!("current_session_id failed: {err}"));
+            return Err(format!("读取当前会话失败：{err}"));
+        }
+    };
+    if meta.session_id != current_session_id {
+        record_restore_audit(
+            ctx,
+            false,
+            format!(
+                "checkpoint session mismatch: checkpoint={checkpoint_id} checkpoint_session={} current_session={current_session_id}",
+                meta.session_id
+            ),
+        );
+        return Err("checkpoint 不属于当前会话，不能跨会话 restore".to_string());
+    }
+
     let note_paths = checkpoint_note_paths(meta.notes.as_ref());
     let restore_plan = if revert_files {
         Some(effective_restore_paths(ctx, &checkpoint_id, &meta, requested_paths))

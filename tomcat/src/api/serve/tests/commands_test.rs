@@ -3581,3 +3581,63 @@ async fn serve_restore_checkpoint_returns_busy_when_session_is_busy() {
     assert_eq!(response["success"].as_bool(), Some(false));
     assert_eq!(response["error"].as_str(), Some("busy"));
 }
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_restore_checkpoint_rejects_foreign_session_checkpoint() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let checkpoint_id = CheckpointId::new("ck_foreign_session");
+
+    install_checkpoint_store(
+        &state,
+        &slot.session_id,
+        Arc::new(FixedCheckpointStore {
+            checkpoints: vec![CheckpointMeta {
+                id: checkpoint_id.clone(),
+                session_id: "other-session".to_string(),
+                turn_id: "turn-foreign".to_string(),
+                kind: CheckpointKind::TurnEnd,
+                git_commit: Some("cafebabe".to_string()),
+                message_anchor: Some("assistant-anchor".to_string()),
+                created_at: "2026-07-12T12:10:00Z".to_string(),
+                notes: Some(serde_json::json!({
+                    "changedPaths": ["notes.txt"]
+                })),
+            }],
+            restore_report: CheckpointRestoreReport::default(),
+        }),
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::RestoreCheckpoint {
+            id: Some("restore-checkpoint-foreign".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            checkpoint_id: checkpoint_id.to_string(),
+            revert_files: true,
+            dry_run: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str)
+            == Some("restore-checkpoint-foreign")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str)
+                == Some("restore-checkpoint-foreign")
+        })
+        .expect("foreign restore response");
+
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert_eq!(
+        response["error"].as_str(),
+        Some("checkpoint 不属于当前会话，不能跨会话 restore")
+    );
+}
