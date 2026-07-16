@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-16 06:08 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-16 14:29 +0800 | ACTIVE | develop | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1]** reviewer 提示词现统一继承 engineering-standards #6–#8：`code_review.txt` 与 `plan_review.txt` 新增与 `core_identity` / `planner` 一字不差的 first-principles、plain-language+ASCII、UX-first 三句原则；`load_test.rs` 同步扩展 reviewer 双模板逐字守卫。验证：`cargo test --manifest-path tomcat/Cargo.toml --lib standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers` 通过 @2026-07-16
 - [✓] **[P0]** `feature/prompt-optimization` 已 fast-forward 合入 `develop`（`9f940b7 -> 46b7ef7`）：系统提示词/工具描述瘦身、`prompt_guidelines` 聚合、工程规范 #6–#10 固化进 `core_identity`/`planner`、`parallel_tools`/`verification` 段与预算门；同提交附带 `cloud-scale-serving-01/` 方案文档与 `commit-with-status` 路径迁移。详情见 `docs/status/feature-prompt-optimization.md` @2026-07-16
 - [✓] **[P1]** 云化服务技术方案已落盘：`tomcat/docs/architecture/cloud-scale-serving/` 新增 `01-overview` + Phase A/B/C（`02/03/04`），并在架构 README 登记「扩展性与云化」阅读顺序；纠正「全站单 EventBus」误诊，明确 A 期单机 mailbox/热温冷为先落地、本地 `stdio` 零回退；尚未进入 Phase A 编码 @2026-07-15
 - [✓] **[P0]** `feature/transcript-ui-and-checkpoints` 已 fast-forward 合入 `develop`（`866752c -> 62c8811`）；develop-side review 发现并修复跨 session restore 漏洞：`restore_checkpoint` / `/restore` 现拒绝不属于当前会话的 checkpoint，避免 `revertFiles=true` 把共享工作区回滚到别的会话快照；新增 `serve_restore_checkpoint_rejects_foreign_session_checkpoint` 回归测试，`cargo test -p tomcat serve_restore_checkpoint -- --nocapture` 4/4 通过 @2026-07-15
@@ -15,6 +16,7 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- `PromptKey::ReviewerPlan` / `PromptKey::ReviewerCode` 对应模板现内联共享的三条 operating principles（与 `SystemCoreIdentity` / `PlannerReminder` 文案逐字一致）；无对外部客户端的破坏性 API 变更。
 - `BuiltinToolCatalogEntry::prompt_guidelines` + `render_tool_guidelines_with_policy`；`PromptKey::SystemParallelTools` / `SystemVerification`（系统提示词 section priority 22/50）。无对外部客户端的破坏性 API 变更。
 - 新增架构文档入口：`tomcat/docs/architecture/cloud-scale-serving/` 与 `cloud-scale-serving-01/`；不改变现有 `serve` / `stdio` 对外契约。
 - `restore_checkpoint` / `/restore` 现强制 checkpoint 的 `session_id` 必须等于当前会话；跨 session restore 返回错误 `checkpoint 不属于当前会话，不能跨会话 restore`，不再允许误回滚共享工作区。
@@ -24,6 +26,7 @@
 - Phase A 编码尚未启动；待评审确认后再按 `02-phase-a-session-mailbox-hot-cold.md` 落地。
 
 ### 集成说明
+- 本轮 reviewer prompt 对齐已做 focused 验证：`cargo test --manifest-path tomcat/Cargo.toml --lib standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers` 通过；未额外触发更大范围门禁。
 - 本轮仅文档：云化技术方案四篇 + 架构 README 地图；无 Rust/扩展代码变更，不触发集成门禁。
 - `feature/transcript-ui-and-checkpoints` 已本地 fast-forward 合入 `develop`（HEAD `62c8811`），覆盖 checkpoint restore / transcript UI / `.plan.md` custom editor / bash summary upgrade；develop-side acceptance 现已 **通过**，结论更新为 **GO**（尚未推送远端）。
 - Rust develop-side 复核确认：先前 web-search 红点并非产品逻辑回归，而是测试自身的预算/清理脆弱。真实 HTTPS mock + plugin runtime 成功路径在 nextest 满并发下会逼近 5s/10s 外层 timeout；部分用例又在 `end_session` 前 panic，导致大盘表现为 slow/hung。现已在 `tomcat/tests/cli_tests.rs` 与 `tomcat/tests/web_search_tool_tests.rs` 放宽 success-path wall-clock budget，并保证 timeout/result error 时先 teardown 再失败；focused `cargo test --test web_search_tool_tests works_from_public_api -- --nocapture`、`cargo test --test web_search_tool_tests runtime_auto_routes_to_plugin_backends_after_retryable_failures -- --nocapture`、`cargo test --test web_search_tool_tests runtime_session_vm_survives_idle_beyond_call_timeout -- --nocapture`、`cargo test --test cli_tests test_chat_path_executes_web_search_tool_with_mock_server -- --nocapture` 全绿。

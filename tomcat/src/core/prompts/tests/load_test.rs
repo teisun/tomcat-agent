@@ -101,21 +101,31 @@ fn planner_prompt_prefers_thorough_decomposition_and_multi_perspective_tests() {
     assert!(s.contains("Put user experience first"));
 }
 
-/// engineering-standards #6/#7/#8 必须在 core_identity 与 planner 两处一字不差出现，
-/// 防止日后单边改动导致两处漂移。
+/// engineering-standards #6/#7/#8 必须在 core_identity、planner、两类 reviewer
+/// 模板中一字不差出现，防止不同角色提示词逐渐漂移。
 #[test]
-fn standards_6_7_8_are_byte_identical_in_core_identity_and_planner() {
+fn standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers() {
     const S6: &str = "Reason from first principles: when planning or coding, work out the architecture and the implementation from first principles, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.";
     const S7: &str = "Explain in plain, jargon-free language, assuming the reader knows nothing about the problem or the code; when explaining a design, a solution, or a root cause, include one overall ASCII diagram of the whole picture by default and add an ASCII diagram for each complex section.";
     const S8: &str = "Put user experience first: when a task involves UI, design it from the user's experience and default to a clean, modern interface unless the user specifies otherwise.";
 
     let identity = load(PromptKey::SystemCoreIdentity);
     let planner = load(PromptKey::PlannerReminder);
+    let reviewer_plan = load(PromptKey::ReviewerPlan);
+    let reviewer_code = load(PromptKey::ReviewerCode);
     for (label, sentence) in [("S6", S6), ("S7", S7), ("S8", S8)] {
         assert!(
             identity.contains(sentence),
             "{label} 应逐字出现在 core_identity"
         );
         assert!(planner.contains(sentence), "{label} 应逐字出现在 planner");
+        assert!(
+            reviewer_plan.contains(sentence),
+            "{label} 应逐字出现在 reviewer_plan"
+        );
+        assert!(
+            reviewer_code.contains(sentence),
+            "{label} 应逐字出现在 reviewer_code"
+        );
     }
 }
