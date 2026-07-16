@@ -302,12 +302,12 @@ export class SettingsPanel implements vscode.Disposable {
   private async refreshState(error: string | null = null, status: string | null = null): Promise<void> {
     const initializeResult = await this.deps.ensureInitialized();
     const capabilities = this.buildCapabilities(initializeResult);
-    const modelsResult = capabilities.listModels
-      ? await this.fetchModels(this.state.models)
-      : { error: null, models: [] };
     const providerKeysResult = capabilities.listProviderKeys
       ? await this.fetchProviderKeys(this.state.providerKeys)
       : { error: null, providerKeys: [] };
+    const modelsResult = capabilities.listModels
+      ? await this.fetchModels(this.state.models)
+      : { error: null, models: [] };
     this.state = {
       capabilities,
       error: error ?? modelsResult.error ?? providerKeysResult.error,

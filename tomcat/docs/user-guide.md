@@ -270,6 +270,18 @@ What these commands do:
 - `tomcat model list` shows whether each model comes from the built-in table or the user catalog, plus whether its API key is already present.
 - `tomcat model default` switches `[llm].default_model` in `tomcat.config.toml`.
 
+**Tomcat Settings → Models** in VS Code uses the same credential rules:
+
+- The key-slot inventory comes only from non-empty, valid `*_API_KEY` entries in `~/.tomcat/assets/.env`. **Refresh** reloads `.env` first and then refreshes each model's `Configured` / `Missing` state; restarting serve is unnecessary.
+- Key slot is the only place to edit the environment-variable name. You can search saved slots or type a new one. Relay suggestions combine the site and API family, for example `FCODEX_OPENAI_API_KEY` and `FCODEX_ANTHROPIC_API_KEY`. Existing models keep their saved `api_key_env` and are not migrated automatically.
+- While entering a new key, the focused field uses password dots; on blur, only that unsaved in-memory draft gets a local prefix/suffix preview. Saving clears the draft. Saved keys expose status only: the backend never returns complete or partial key characters to the Webview.
+- Writing a new value into a configured slot shared by other models requires confirmation with the affected model list. Leaving the API-key field blank safely reuses the slot without rewriting `.env`.
+
+```text
+valid *_API_KEY entries in .env ──> Key slot combobox ──> model.api_key_env
+                   Refresh ───────> Configured / Missing
+```
+
 **Minimal MiMo Token Plan config** (written by `init` by default):
 
 ```toml

@@ -31,7 +31,7 @@ fn custom_claude_input() -> ModelEntryInput {
         model_name: Some("claude-opus-4-6".to_string()),
         api: "anthropic-messages".to_string(),
         provider: "anthropic".to_string(),
-        api_key_env: Some("ADMIN_TEST_ANTHROPIC_KEY".to_string()),
+        api_key_env: Some("ADMIN_TEST_ANTHROPIC_API_KEY".to_string()),
         base_url: Some("https://api.anthropic.com/v1".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
@@ -196,18 +196,18 @@ fn set_provider_key_persists_env_and_flips_key_presence() {
     let status = set_provider_key(
         &cfg,
         ProviderKeyInput {
-            env_name: "ADMIN_TEST_ANTHROPIC_KEY".to_string(),
+            env_name: "ADMIN_TEST_ANTHROPIC_API_KEY".to_string(),
             value: "super-secret".to_string(),
         },
     )
     .expect("persist provider key");
-    assert_eq!(status.env_name, "ADMIN_TEST_ANTHROPIC_KEY");
+    assert_eq!(status.env_name, "ADMIN_TEST_ANTHROPIC_API_KEY");
     assert!(status.key_present);
 
     let env_path = work_dir.path().join("assets").join(".env");
     let env_text = fs::read_to_string(&env_path).expect("read .env");
     assert!(
-        env_text.contains("ADMIN_TEST_ANTHROPIC_KEY=super-secret"),
+        env_text.contains("ADMIN_TEST_ANTHROPIC_API_KEY=super-secret"),
         "expected persisted env entry, got: {env_text}"
     );
     #[cfg(unix)]
@@ -227,13 +227,85 @@ fn set_provider_key_persists_env_and_flips_key_presence() {
         .expect("custom claude view");
     assert!(custom.key_present);
 
-    let key_view = list_provider_keys(&catalog)
+    let key_view = list_provider_keys(&cfg)
+        .expect("list provider keys")
         .into_iter()
-        .find(|entry| entry.env_name == "ADMIN_TEST_ANTHROPIC_KEY")
+        .find(|entry| entry.env_name == "ADMIN_TEST_ANTHROPIC_API_KEY")
         .expect("provider key view");
     assert!(key_view.key_present);
-    assert_eq!(key_view.provider, "anthropic");
-    assert_eq!(key_view.model_ids, vec!["custom-claude".to_string()]);
+    assert!(key_view.provider.is_empty());
+    assert!(key_view.model_ids.is_empty());
+}
+
+#[test]
+#[serial(env_lock)]
+fn list_provider_keys_reloads_env_and_uses_env_as_the_only_inventory() {
+    clear_managed_credentials_for_test();
+    let (work_dir, cfg) = temp_cfg();
+    upsert_user_model(&cfg, custom_claude_input()).expect("seed model-only key reference");
+    let env_path = work_dir.path().join("assets").join(".env");
+    std::fs::create_dir_all(env_path.parent().expect("env parent")).expect("mkdir assets");
+    std::fs::write(
+        &env_path,
+        "FCODEX_OPENAI_API_KEY=secret-openai\nFCODEX_ANTHROPIC_API_KEY=secret-anthropic\nNOT_A_CREDENTIAL=value\nlower_API_KEY=value\nEMPTY_API_KEY=\n",
+    )
+    .expect("seed env file");
+
+    let first = list_provider_keys(&cfg).expect("first key inventory");
+    assert_eq!(
+        first
+            .iter()
+            .map(|entry| entry.env_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["FCODEX_ANTHROPIC_API_KEY", "FCODEX_OPENAI_API_KEY"]
+    );
+    assert!(first.iter().all(|entry| entry.key_present));
+    assert!(first.iter().all(|entry| entry.provider.is_empty()));
+    assert!(first.iter().all(|entry| entry.model_ids.is_empty()));
+    let serialized = serde_json::to_string(&first).expect("serialize key inventory");
+    assert!(!serialized.contains("secret-openai"));
+    assert!(!serialized.contains("secret-anthropic"));
+    assert!(!serialized.contains("ADMIN_TEST_ANTHROPIC_API_KEY"));
+
+    std::fs::write(&env_path, "FCODEX_ANTHROPIC_API_KEY=rotated\n")
+        .expect("replace env file externally");
+    let second = list_provider_keys(&cfg).expect("reloaded key inventory");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].env_name, "FCODEX_ANTHROPIC_API_KEY");
+
+    let catalog = ModelCatalog::load(&cfg).expect("reload catalog after credential refresh");
+    let custom = list_model_views(&catalog)
+        .into_iter()
+        .find(|entry| entry.id == "custom-claude")
+        .expect("custom model");
+    assert!(
+        !custom.key_present,
+        "removed model key must stop being present"
+    );
+}
+
+#[test]
+#[serial(env_lock)]
+fn model_and_key_writes_reject_invalid_environment_variable_names() {
+    clear_managed_credentials_for_test();
+    let (_work_dir, cfg) = temp_cfg();
+
+    let mut invalid_model = custom_claude_input();
+    invalid_model.api_key_env = Some("bad-key\nname".to_string());
+    let model_error = upsert_user_model(&cfg, invalid_model).expect_err("invalid model key env");
+    assert!(model_error.to_string().contains("^[A-Z_][A-Z0-9_]*$"));
+
+    for env_name in ["lower_API_KEY", "9STARTS_WITH_DIGIT", "BAD-KEY", "BAD\nKEY"] {
+        let error = set_provider_key(
+            &cfg,
+            ProviderKeyInput {
+                env_name: env_name.to_string(),
+                value: "secret".to_string(),
+            },
+        )
+        .expect_err("invalid provider key env");
+        assert!(error.to_string().contains("^[A-Z_][A-Z0-9_]*$"));
+    }
 }
 
 #[test]
@@ -254,7 +326,7 @@ fn set_provider_key_preserves_other_env_entries() {
     set_provider_key(
         &cfg,
         ProviderKeyInput {
-            env_name: "ADMIN_TEST_ANTHROPIC_KEY".to_string(),
+            env_name: "ADMIN_TEST_ANTHROPIC_API_KEY".to_string(),
             value: "rotated-secret".to_string(),
         },
     )
@@ -262,7 +334,7 @@ fn set_provider_key_preserves_other_env_entries() {
 
     let env_text = fs::read_to_string(&env_path).expect("read .env");
     assert!(env_text.contains("OTHER_KEEP=keep-me"));
-    assert!(env_text.contains("ADMIN_TEST_ANTHROPIC_KEY=rotated-secret"));
+    assert!(env_text.contains("ADMIN_TEST_ANTHROPIC_API_KEY=rotated-secret"));
     assert!(env_text.contains("HTTPS_PROXY=http://127.0.0.1:9999"));
 }
 
@@ -295,7 +367,7 @@ fn set_provider_key_waits_for_env_lock_and_then_succeeds() {
         let result = set_provider_key(
             &cfg_for_thread,
             ProviderKeyInput {
-                env_name: "ADMIN_TEST_ANTHROPIC_KEY".to_string(),
+                env_name: "ADMIN_TEST_ANTHROPIC_API_KEY".to_string(),
                 value: "after-lock".to_string(),
             },
         );
@@ -363,12 +435,18 @@ fn remove_user_model_rejects_models_still_referenced_by_config_or_sessions() {
 
     let error = remove_user_model(&cfg, "custom-claude").expect_err("in-use model must fail");
     let message = error.to_string();
-    assert!(message.contains("llm.default_model"), "unexpected error: {message}");
+    assert!(
+        message.contains("llm.default_model"),
+        "unexpected error: {message}"
+    );
     assert!(
         message.contains("context.compaction_model"),
         "unexpected error: {message}"
     );
-    assert!(message.contains("session `session-1`"), "unexpected error: {message}");
+    assert!(
+        message.contains("session `session-1`"),
+        "unexpected error: {message}"
+    );
 }
 
 #[test]
@@ -433,7 +511,7 @@ fn set_provider_key_rejects_invalid_env_file() {
     let error = set_provider_key(
         &cfg,
         ProviderKeyInput {
-            env_name: "ADMIN_TEST_ANTHROPIC_KEY".to_string(),
+            env_name: "ADMIN_TEST_ANTHROPIC_API_KEY".to_string(),
             value: "should-not-write".to_string(),
         },
     )
@@ -459,7 +537,7 @@ fn key_rotation_rebuilds_provider_for_same_resolver() {
     set_provider_key(
         &cfg,
         ProviderKeyInput {
-            env_name: "ADMIN_TEST_ANTHROPIC_KEY".to_string(),
+            env_name: "ADMIN_TEST_ANTHROPIC_API_KEY".to_string(),
             value: "first-secret".to_string(),
         },
     )
@@ -474,7 +552,7 @@ fn key_rotation_rebuilds_provider_for_same_resolver() {
     set_provider_key(
         &cfg,
         ProviderKeyInput {
-            env_name: "ADMIN_TEST_ANTHROPIC_KEY".to_string(),
+            env_name: "ADMIN_TEST_ANTHROPIC_API_KEY".to_string(),
             value: "second-secret".to_string(),
         },
     )

@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
@@ -132,6 +131,9 @@ impl ModelEntryInput {
         }
         let model_name = normalize_optional(self.model_name);
         let api_key_env = normalize_optional(self.api_key_env);
+        if let Some(env_name) = api_key_env.as_deref() {
+            validate_api_key_env_name(env_name)?;
+        }
         let base_url = normalize_optional(self.base_url);
         let thinking_format = normalize_optional(self.thinking_format);
         Ok(ModelEntry {
@@ -156,28 +158,24 @@ pub fn list_model_views(catalog: &ModelCatalog) -> Vec<ModelView> {
         .collect()
 }
 
-pub fn list_provider_keys(catalog: &ModelCatalog) -> Vec<ProviderKeyView> {
-    let mut by_env = BTreeMap::<String, ProviderKeyView>::new();
-    for entry in catalog.entries_in_merge_order() {
-        let env_name = inferred_api_key_env(&entry);
-        let key_present = key_present_for_env(&env_name);
-        let slot = by_env
-            .entry(env_name.clone())
-            .or_insert_with(|| ProviderKeyView {
-                provider: entry.provider.clone(),
-                env_name: env_name.clone(),
-                key_present,
-                model_ids: Vec::new(),
-            });
-        slot.key_present = key_present;
-        if slot.provider.is_empty() {
-            slot.provider = entry.provider.clone();
-        }
-        if !slot.model_ids.iter().any(|existing| existing == &entry.id) {
-            slot.model_ids.push(entry.id.clone());
-        }
-    }
-    by_env.into_values().collect()
+pub fn list_provider_keys(cfg: &AppConfig) -> Result<Vec<ProviderKeyView>, AppError> {
+    let env_path = runtime_env_path(cfg)?;
+    refresh_managed_credentials(&env_path)?;
+    let vars = read_env_entries(&env_path)?;
+    Ok(vars
+        .into_iter()
+        .filter(|(env_name, value)| {
+            is_valid_api_key_env_name(env_name)
+                && env_name.ends_with("_API_KEY")
+                && !value.trim().is_empty()
+        })
+        .map(|(env_name, _)| ProviderKeyView {
+            provider: String::new(),
+            env_name,
+            key_present: true,
+            model_ids: Vec::new(),
+        })
+        .collect())
 }
 
 pub fn resolve_provider_key_env_name(catalog: &ModelCatalog, raw: &str) -> String {
@@ -185,7 +183,7 @@ pub fn resolve_provider_key_env_name(catalog: &ModelCatalog, raw: &str) -> Strin
     if candidate.is_empty() {
         return String::new();
     }
-    if looks_like_env_name(candidate) {
+    if is_valid_api_key_env_name(candidate) {
         return candidate.to_string();
     }
     if let Some(entry) = catalog
@@ -268,8 +266,10 @@ pub fn set_provider_key(
 ) -> Result<ModelKeyStatus, AppError> {
     let env_name = input.env_name.trim().to_string();
     let value = input.value.trim().to_string();
-    if env_name.is_empty() {
-        return Err(AppError::Config("envName 不能为空。".to_string()));
+    if !is_valid_api_key_env_name(&env_name) {
+        return Err(AppError::Config(format!(
+            "envName `{env_name}` 必须匹配大写环境变量格式 `^[A-Z_][A-Z0-9_]*$`。"
+        )));
     }
     if value.is_empty() {
         return Err(AppError::Config(format!("`{env_name}` 不能为空。")));
@@ -468,9 +468,17 @@ fn with_file_lock<T>(
     result
 }
 
-fn looks_like_env_name(candidate: &str) -> bool {
-    candidate
-        .chars()
-        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
-        && candidate.contains('_')
+fn validate_api_key_env_name(env_name: &str) -> Result<(), AppError> {
+    if !is_valid_api_key_env_name(env_name) {
+        return Err(AppError::Config(format!(
+            "api_key_env `{env_name}` 必须匹配大写环境变量格式 `^[A-Z_][A-Z0-9_]*$`。"
+        )));
+    }
+    Ok(())
+}
+
+fn is_valid_api_key_env_name(candidate: &str) -> bool {
+    let mut chars = candidate.chars();
+    matches!(chars.next(), Some(ch) if ch.is_ascii_uppercase() || ch == '_')
+        && chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
 }

@@ -270,6 +270,18 @@ tomcat model remove claude-opus-gateway
 - `tomcat model list` 会显示模型来自内置表还是用户目录，以及对应 API Key 是否已就绪。
 - `tomcat model default` 用来切换 `tomcat.config.toml` 中的 `[llm].default_model`。
 
+VS Code 的 **Tomcat Settings → Models** 使用同一套凭证规则：
+
+- Key slot 列表只来自 `~/.tomcat/assets/.env` 中名称合法、值非空的 `*_API_KEY`；点击 **Refresh** 会先重读 `.env`，再刷新模型的 `Configured` / `Missing` 状态，无需重启 serve。
+- Key slot 是唯一的变量名编辑入口，可搜索已有槽或直接输入新名称；Relay 会按站点和 API 家族建议名称，例如 `FCODEX_OPENAI_API_KEY` 与 `FCODEX_ANTHROPIC_API_KEY`。旧模型保留原有 `api_key_env`，不会自动迁移。
+- 新 Key 聚焦输入时显示密码圆点，失焦后只对当前尚未保存的输入做本地前后脱敏；保存后清空。已保存 Key 永远只显示状态，后端不会把完整值或部分字符返回 Webview。
+- 向已配置且被其他模型共享的槽写新值时，界面会列出受影响模型并要求确认；API Key 留空表示复用，不会改写 `.env`。
+
+```text
+.env 中合法 *_API_KEY ──> Key slot 组合框 ──> model.api_key_env
+        Refresh ─────────> Configured / Missing
+```
+
 **MiMo Token Plan 最小配置**（init 默认就帮你写好一条）：
 
 ```toml

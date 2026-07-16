@@ -18,7 +18,7 @@
 | `upsert_model`       | `model: ModelEntryInput`           | 是   | 新增/覆盖用户模型 → `models.toml`（同 id 覆盖）       | 存一条模型配置。        |
 | `remove_model`       | `id: string`                       | 是   | 删除 User 源模型；Builtin 拒绝                   | 删掉自己加的模型。       |
 | `set_provider_key`   | `envName: string`, `value: string` | 是   | 写 `.env`(0600)；`value` 只入不出              | 存一把钥匙（永不回显）。    |
-| `list_provider_keys` | —                                  | 否   | 列各 env 变量是否已配（仅布尔）                       | 看哪些钥匙已配好。       |
+| `list_provider_keys` | —                                  | 否   | 每次重读 `.env`，仅列名称合法且非空的 `*_API_KEY`；只回名称/布尔，不按模型引用补名称 | 热刷新有哪些已保存钥匙。       |
 | `list_models`（扩展）    | `id?`                              | 否   | 出参每项**新增** `source/apiKeyEnv/keyPresent` | 列模型时带上来源和有没有钥匙。 |
 
 ### 4.2 出参：`ModelView`（`list_models.payload.models[]`）
@@ -37,7 +37,7 @@
 | `apiKeyEnv`      | string               | 是   | 推断      | 凭证**变量名**（非密钥值）                                  | 钥匙放哪个抽屉。    |
 | `keyPresent`     | bool                 | 是   | —       | 对应变量是否非空                                         | 有没有钥匙。      |
 
-> **安全三态**：协议中**永远没有** Key 明文字段；`set_provider_key` 响应只回 `{ envName, keyPresent:true }`；`ModelView` 与 webview 状态快照均不含密钥。
+> **安全三态**：协议中**永远没有** Key 明文或部分字符字段；`set_provider_key` 响应只回 `{ envName, keyPresent:true }`；`ModelView` 与 webview 状态快照均不含密钥。`list_provider_keys` 以 `~/.tomcat/assets/.env` 为唯一清单来源，每次调用重读文件，因此手工新增/删除合法的非空 `*_API_KEY` 后无需重启 serve。
 
 ### 4.3 webview↔host intent（新增）
 
@@ -78,7 +78,7 @@ Rust（tomcat/src/）
   core/llm/admin.rs 【NEW ★写盘中枢】
     · list_model_views(cfg) → Vec<ModelView>（合并+标 source/key_present）
     · upsert_user_model / remove_user_model（models.toml：文件锁+原子写+load 校验）
-    · set_provider_key / list_provider_keys（.env：0600、保留其余键、只入不出、脱敏）
+    · set_provider_key / list_provider_keys（.env：0600、每次 list 热重读、仅合法 *_API_KEY、完整值只入不出）
     · 写后 reload catalog 句柄            [core/llm/tests/admin_test.rs]
         │ 读/写
         ▼

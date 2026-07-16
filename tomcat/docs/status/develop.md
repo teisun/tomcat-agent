@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-16 14:29 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-16 19:02 +0800 | ACTIVE | develop | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1]** Add Model Key slot 整改完成：凭证清单现每次从 `~/.tomcat/assets/.env` 热重读且只列合法非空 `*_API_KEY`；Relay 建议名按站点 + API 家族区分；Key slot 收敛为可搜索/可输入的唯一入口；新增输入失焦脱敏、共享 Key 覆盖确认、Refresh 与中英文文档。Rust admin 14/14、serve focused 1/1、GUI 12/12、SettingsPanel 5/5、TypeScript lint 均通过 @2026-07-16
 - [✓] **[P1]** reviewer 提示词现统一继承 engineering-standards #6–#8：`code_review.txt` 与 `plan_review.txt` 新增与 `core_identity` / `planner` 一字不差的 first-principles、plain-language+ASCII、UX-first 三句原则；`load_test.rs` 同步扩展 reviewer 双模板逐字守卫。验证：`cargo test --manifest-path tomcat/Cargo.toml --lib standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers` 通过 @2026-07-16
 - [✓] **[P0]** `feature/prompt-optimization` 已 fast-forward 合入 `develop`（`9f940b7 -> 46b7ef7`）：系统提示词/工具描述瘦身、`prompt_guidelines` 聚合、工程规范 #6–#10 固化进 `core_identity`/`planner`、`parallel_tools`/`verification` 段与预算门；同提交附带 `cloud-scale-serving-01/` 方案文档与 `commit-with-status` 路径迁移。详情见 `docs/status/feature-prompt-optimization.md` @2026-07-16
 - [✓] **[P1]** 云化服务技术方案已落盘：`tomcat/docs/architecture/cloud-scale-serving/` 新增 `01-overview` + Phase A/B/C（`02/03/04`），并在架构 README 登记「扩展性与云化」阅读顺序；纠正「全站单 EventBus」误诊，明确 A 期单机 mailbox/热温冷为先落地、本地 `stdio` 零回退；尚未进入 Phase A 编码 @2026-07-15
@@ -16,16 +17,19 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- `list_provider_keys` 的 wire 形状保持兼容，但语义调整为 `.env` 唯一清单来源：每次调用热重读，仅返回合法非空 `*_API_KEY` 的名称/状态；不再用模型引用补充名称，也不返回完整或部分 Key。`ModelEntryInput.api_key_env` 与 `set_provider_key.envName` 统一校验 `^[A-Z_][A-Z0-9_]*$`。
 - `PromptKey::ReviewerPlan` / `PromptKey::ReviewerCode` 对应模板现内联共享的三条 operating principles（与 `SystemCoreIdentity` / `PlannerReminder` 文案逐字一致）；无对外部客户端的破坏性 API 变更。
 - `BuiltinToolCatalogEntry::prompt_guidelines` + `render_tool_guidelines_with_policy`；`PromptKey::SystemParallelTools` / `SystemVerification`（系统提示词 section priority 22/50）。无对外部客户端的破坏性 API 变更。
 - 新增架构文档入口：`tomcat/docs/architecture/cloud-scale-serving/` 与 `cloud-scale-serving-01/`；不改变现有 `serve` / `stdio` 对外契约。
 - `restore_checkpoint` / `/restore` 现强制 checkpoint 的 `session_id` 必须等于当前会话；跨 session restore 返回错误 `checkpoint 不属于当前会话，不能跨会话 restore`，不再允许误回滚共享工作区。
 
 ### ⚠️ BLOCKED (阻塞/风险)
+- Focused VS Code devhost E2E 两次均在测试代码启动前被现有 harness 阻断：Electron 将工作区路径 `/Users/yankeben/workspace/tomcat-agent` 当作 Node 模块加载并报 `MODULE_NOT_FOUND`；扩展 build 已通过，相关 Rust/GUI/host 单元与集成测试全绿。该项记录为测试基础设施风险，不是功能断言失败。
 - 当前无 develop-side 阻塞项。`real_mimo_web_search` 在 nextest 中 86.99s 被标记为 slow，但结果为 PASS，仅作为性能观察项保留，不构成门禁阻塞。
 - Phase A 编码尚未启动；待评审确认后再按 `02-phase-a-session-mailbox-hot-cold.md` 落地。
 
 ### 集成说明
+- 本轮 Add Model Key slot 验证：`cargo test --manifest-path tomcat/Cargo.toml --lib admin_test` 14/14、`serve_model_admin_roundtrip_updates_key_presence` 1/1、`npm --prefix tomcat-vscode-ext run lint`、GUI `relayDerive.test.ts + SettingsApp.test.tsx` 12/12、`SettingsPanel.test.ts` 5/5 全绿；devhost E2E 的 harness 启动阻塞见上方 BLOCKED。
 - 本轮 reviewer prompt 对齐已做 focused 验证：`cargo test --manifest-path tomcat/Cargo.toml --lib standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers` 通过；未额外触发更大范围门禁。
 - 本轮仅文档：云化技术方案四篇 + 架构 README 地图；无 Rust/扩展代码变更，不触发集成门禁。
 - `feature/transcript-ui-and-checkpoints` 已本地 fast-forward 合入 `develop`（HEAD `62c8811`），覆盖 checkpoint restore / transcript UI / `.plan.md` custom editor / bash summary upgrade；develop-side acceptance 现已 **通过**，结论更新为 **GO**（尚未推送远端）。

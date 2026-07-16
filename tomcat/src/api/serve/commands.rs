@@ -841,8 +841,18 @@ pub(crate) async fn handle_command(
             )))?;
         }
         ServeCommand::ListProviderKeys { id } => {
-            let catalog = resolve_model_catalog_snapshot(&state)?;
-            let keys = list_provider_keys(catalog.as_ref());
+            let keys = match list_provider_keys(&state.cfg) {
+                Ok(keys) => keys,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),

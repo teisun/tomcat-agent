@@ -231,4 +231,21 @@ describe("settings panel model management flow", () => {
     expect(snapshot.error).toBe("models broken");
     expect(snapshot.models.map((model) => model.id)).toEqual(["gpt-5.4"]);
   });
+
+  it("refreshes provider keys before models so keyPresent uses the latest env snapshot", async () => {
+    const { messenger, panel } = createPanel();
+
+    await panel.__testingDispatchIntent({
+      messageId: "refresh-in-order",
+      type: "listModels",
+    } satisfies SettingsIntent);
+
+    const listProviderKeysMock = vi.mocked(messenger.sendListProviderKeys);
+    const listModelsMock = vi.mocked(messenger.sendListModels);
+    expect(listProviderKeysMock).toHaveBeenCalledTimes(1);
+    expect(listModelsMock).toHaveBeenCalledTimes(1);
+    expect(listProviderKeysMock.mock.invocationCallOrder[0]).toBeLessThan(
+      listModelsMock.mock.invocationCallOrder[0],
+    );
+  });
 });

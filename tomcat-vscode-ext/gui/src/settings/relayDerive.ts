@@ -95,14 +95,19 @@ function pickBrand(host: string): string {
   return sanitizeBrand(label);
 }
 
-export function envNameForRelaySlug(slug: string): string {
+export function envNameForRelaySlug(slug: string, api = "openai"): string {
   const normalized = slug.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-  return normalized ? `${normalized}_API_KEY` : "";
+  if (!normalized) {
+    return "";
+  }
+  const family = api.trim() === "anthropic-messages" ? "ANTHROPIC" : "OPENAI";
+  return `${normalized}_${family}_API_KEY`;
 }
 
 export function deriveRelayFields(
   baseUrl: string,
   modelName: string,
+  api = "openai",
   separator = RELAY_ID_SEPARATOR,
 ): RelayDerivedFields {
   const trimmedBaseUrl = baseUrl.trim();
@@ -122,7 +127,7 @@ export function deriveRelayFields(
   const trimmedModelName = modelName.trim();
 
   return {
-    apiKeyEnv: envNameForRelaySlug(slug),
+    apiKeyEnv: envNameForRelaySlug(slug, api),
     host,
     id: trimmedModelName ? `${slug}${separator}${trimmedModelName}` : "",
     provider: slug,

@@ -294,7 +294,7 @@ describe("SettingsApp", () => {
     });
 
     expect(within(dialog).getByText("chatanywhere")).toBeTruthy();
-    expect(within(dialog).getByText("CHATANYWHERE_API_KEY")).toBeTruthy();
+    expect(within(dialog).getByText("CHATANYWHERE_OPENAI_API_KEY")).toBeTruthy();
     expect(within(dialog).getByText("chatanywhere/gpt-5.4")).toBeTruthy();
 
     fireEvent.change(getPasswordInput(dialog), {
@@ -315,7 +315,7 @@ describe("SettingsApp", () => {
       data: {
         model: {
           api: "openai",
-          apiKeyEnv: "CHATANYWHERE_API_KEY",
+          apiKeyEnv: "CHATANYWHERE_OPENAI_API_KEY",
           baseUrl: "https://api.chatanywhere.tech/v1",
           capabilities: {
             files: false,
@@ -331,7 +331,7 @@ describe("SettingsApp", () => {
           thinkingFormat: "deepseek",
         },
         providerKey: {
-          envName: "CHATANYWHERE_API_KEY",
+          envName: "CHATANYWHERE_OPENAI_API_KEY",
           value: "relay-secret",
         },
       },
@@ -606,5 +606,73 @@ describe("SettingsApp", () => {
     expect(
       within(dialog).getByText("当前后端不支持保存 API Key，请先升级 `tomcat serve`。"),
     ).toBeTruthy();
+  });
+
+  it("refreshes models, validates custom key slots, removes the advanced duplicate, and masks drafts on blur", async () => {
+    const { postMessage } = mount();
+    await emitState(readyState({ models: [builtinModel()] }));
+    postMessage.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
+    expect(postMessage.mock.calls[0][0]).toMatchObject({ type: "listModels" });
+    postMessage.mockClear();
+
+    const dialog = openAddModelDialog();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
+      target: { value: "gpt-5.6" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
+    expect(within(dialog).queryByText("API key env override")).toBeNull();
+
+    const keySlot = within(dialog).getByRole("combobox", { name: "Key slot" });
+    fireEvent.change(keySlot, { target: { value: "bad-key-slot" } });
+    expect(within(dialog).getByText("Key slot must match ^[A-Z_][A-Z0-9_]*$.")).toBeTruthy();
+    fireEvent.change(keySlot, { target: { value: "FCODEX_OPENAI_API_KEY" } });
+
+    const keyInput = within(dialog).getByLabelText("API key") as HTMLInputElement;
+    fireEvent.focus(keyInput);
+    fireEvent.change(keyInput, { target: { value: "sk-1234567890abcdef" } });
+    expect(keyInput.type).toBe("password");
+    fireEvent.blur(keyInput);
+    expect(keyInput.type).toBe("text");
+    expect(keyInput.value).toMatch(/^sk-12345•+cdef$/);
+    expect(keyInput.value).not.toContain("67890ab");
+  });
+
+  it("requires confirmation before replacing a configured key shared by other models", async () => {
+    const { postMessage } = mount();
+    await emitState(
+      readyState({
+        models: [
+          builtinModel({ keyPresent: true }),
+          builtinModel({ id: "gpt-4.1", keyPresent: true, modelName: "gpt-4.1" }),
+        ],
+        providerKeys: [providerKey({ keyPresent: true })],
+      }),
+    );
+    postMessage.mockClear();
+
+    const dialog = openAddModelDialog();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
+      target: { value: "gpt-5.6" },
+    });
+    const keyInput = within(dialog).getByLabelText("API key");
+    fireEvent.focus(keyInput);
+    fireEvent.change(keyInput, { target: { value: "rotated-secret" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+
+    expect(postMessage).not.toHaveBeenCalled();
+    const confirmation = screen.getByRole("alertdialog");
+    expect(within(confirmation).getByText("gpt-5.4")).toBeTruthy();
+    expect(within(confirmation).getByText("gpt-4.1")).toBeTruthy();
+    fireEvent.click(within(confirmation).getByRole("button", { name: /replace shared key/i }));
+    expect(postMessage).toHaveBeenCalledTimes(1);
+    expect(postMessage.mock.calls[0][0]).toMatchObject({
+      data: {
+        model: { apiKeyEnv: "OPENAI_API_KEY", id: "gpt-5.6" },
+        providerKey: { envName: "OPENAI_API_KEY", value: "rotated-secret" },
+      },
+      type: "upsertModel",
+    });
   });
 });

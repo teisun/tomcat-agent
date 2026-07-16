@@ -81,9 +81,21 @@ function fieldText(value: string | null | undefined): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function maskDraftApiKey(value: string): string {
+  const chars = Array.from(value);
+  if (chars.length <= 12) {
+    return "•".repeat(chars.length);
+  }
+  return `${chars.slice(0, 8).join("")}${"•".repeat(chars.length - 12)}${chars.slice(-4).join("")}`;
+}
+
 function normalizeOptionalText(value: string | null | undefined): string | null {
   const trimmed = fieldText(value);
   return trimmed ? trimmed : null;
+}
+
+function isValidKeySlotName(value: string | null | undefined): boolean {
+  return /^[A-Z_][A-Z0-9_]*$/.test(fieldText(value));
 }
 
 function hasScheme(value: string): boolean {
@@ -320,7 +332,12 @@ function buildEditForm(
     return form;
   }
 
-  const relayDerived = deriveRelayFields(form.baseUrl ?? "", form.modelName ?? "", RELAY_ID_SEPARATOR);
+  const relayDerived = deriveRelayFields(
+    form.baseUrl ?? "",
+    form.modelName ?? "",
+    form.api,
+    RELAY_ID_SEPARATOR,
+  );
   if (fieldText(form.provider) === relayDerived.provider) {
     form.provider = "";
   }
@@ -361,6 +378,7 @@ export function SettingsApp({
   const [dialogKind, setDialogKind] = useState<DialogKind>("official");
   const [form, setForm] = useState<FormState>(() => createEmptyForm());
   const [draftApiKey, setDraftApiKey] = useState("");
+  const [isApiKeyFocused, setIsApiKeyFocused] = useState(false);
   const [inlineApiKeys, setInlineApiKeys] = useState<Record<string, string>>({});
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedProvider, setSelectedProvider] = useState("");
@@ -368,6 +386,10 @@ export function SettingsApp({
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [replacementConfirmation, setReplacementConfirmation] = useState<{
+    envName: string;
+    modelIds: string[];
+  } | null>(null);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent<unknown>) => {
@@ -451,9 +473,10 @@ export function SettingsApp({
       deriveRelayFields(
         form.baseUrl ?? "",
         form.modelName ?? "",
+        fieldText(form.api) || "openai",
         RELAY_ID_SEPARATOR,
       ),
-    [form.baseUrl, form.modelName],
+    [form.api, form.baseUrl, form.modelName],
   );
 
   const effectiveModelName = fieldText(form.modelName);
@@ -517,10 +540,12 @@ export function SettingsApp({
     const nextDialogKind = defaultDialogKindForPresets(providerPresets);
     setDialogKind(nextDialogKind);
     setDraftApiKey("");
+    setIsApiKeyFocused(false);
     setSelectedModelId(null);
     setSelectedProvider(providerPresets[0]?.provider ?? "");
     setShowAdvanced(false);
     setValidationError(null);
+    setReplacementConfirmation(null);
     setForm({
       ...createEmptyForm(),
       capabilities: cloneCapabilities(
@@ -549,6 +574,7 @@ export function SettingsApp({
         : null;
     setSelectedModelId(model.id);
     setDraftApiKey("");
+    setIsApiKeyFocused(false);
     setValidationError(null);
     setDialogKind(inferred.dialogKind);
     setSelectedProvider(inferred.selectedProvider);
@@ -668,6 +694,23 @@ export function SettingsApp({
     }));
   }
 
+  function submitModelSave() {
+    send(vscodeApi, {
+      data: {
+        model: effectiveModel,
+        providerKey:
+          draftApiKey.trim() && effectiveApiKeyEnv
+            ? {
+                envName: effectiveApiKeyEnv,
+                value: draftApiKey.trim(),
+              }
+            : undefined,
+      },
+      type: "upsertModel",
+    });
+    closeForm();
+  }
+
   function handleSave() {
     if (dialogKind === "official" && !selectedPreset) {
       setValidationError("Choose an official provider preset first.");
@@ -695,6 +738,12 @@ export function SettingsApp({
       setValidationError("Choose or derive an API key slot before saving.");
       return;
     }
+    if (!isValidKeySlotName(effectiveApiKeyEnv)) {
+      setValidationError(
+        "Key slot must match ^[A-Z_][A-Z0-9_]*$ (uppercase letters, numbers, and underscores).",
+      );
+      return;
+    }
     if (!effectiveKeyPresent && !draftApiKey.trim()) {
       setValidationError(
         `Add an API key or switch to a configured slot such as ${effectiveApiKeyEnv}.`,
@@ -706,20 +755,20 @@ export function SettingsApp({
       return;
     }
     setValidationError(null);
-    send(vscodeApi, {
-      data: {
-        model: effectiveModel,
-        providerKey:
-          draftApiKey.trim() && effectiveApiKeyEnv
-            ? {
-                envName: effectiveApiKeyEnv,
-                value: draftApiKey.trim(),
-              }
-            : undefined,
-      },
-      type: "upsertModel",
-    });
-    closeForm();
+    const affectedModelIds = state.models
+      .filter(
+        (model) =>
+          model.apiKeyEnv === effectiveApiKeyEnv && model.id !== selectedModel?.id,
+      )
+      .map((model) => model.id);
+    if (effectiveKeyPresent && draftApiKey.trim() && affectedModelIds.length > 0) {
+      setReplacementConfirmation({
+        envName: effectiveApiKeyEnv,
+        modelIds: affectedModelIds,
+      });
+      return;
+    }
+    submitModelSave();
   }
 
   function handleDelete() {
@@ -769,7 +818,9 @@ export function SettingsApp({
           ? "Enter a model name to continue."
           : !effectiveApiKeyEnv
             ? "Choose or derive an API key slot before saving."
-            : dialogKind === "relay" && !fieldText(form.baseUrl)
+            : !isValidKeySlotName(effectiveApiKeyEnv)
+              ? "Key slot must match ^[A-Z_][A-Z0-9_]*$."
+              : dialogKind === "relay" && !fieldText(form.baseUrl)
               ? "Enter a base URL to continue."
               : !effectiveKeyPresent && !draftApiKey.trim()
                 ? `Add an API key or choose a configured slot such as ${effectiveApiKeyEnv}.`
@@ -803,6 +854,14 @@ export function SettingsApp({
             </p>
           </div>
           <div className="tc-button-row">
+            <button
+              className="tc-button tc-button--ghost"
+              disabled={!state.capabilities.listModels}
+              onClick={() => send(vscodeApi, { type: "listModels" })}
+              type="button"
+            >
+              ↻ Refresh
+            </button>
             <button
               className="tc-button tc-button--secondary"
               disabled={!state.capabilities.upsertModel}
@@ -1223,35 +1282,51 @@ export function SettingsApp({
                     <div className="tc-settings-form__row">
                       <label className="tc-field">
                         <span>Key slot</span>
-                        <select
+                        <input
                           aria-label="Key slot"
+                          autoComplete="off"
+                          className="tc-input"
+                          list="tc-settings-key-slot-options"
                           onChange={(event) => handleKeySlotChange(event.target.value)}
+                          placeholder={suggestedApiKeyEnv || "EXAMPLE_API_KEY"}
+                          role="combobox"
                           value={effectiveApiKeyEnv}
-                        >
+                        />
+                        <datalist id="tc-settings-key-slot-options">
                           {keySlotOptions.map((entry) => (
                             <option key={entry.envName} value={entry.envName}>
                               {entry.label}
                             </option>
                           ))}
-                        </select>
+                        </datalist>
                         <small className="tc-field__hint">
-                          Reuse a configured key, or keep the suggested slot for this
-                          model.
+                          Search a configured key slot or type a new environment variable name.
                         </small>
                       </label>
                       <label className="tc-field">
                         <span>{effectiveKeyPresent ? "New API key (optional)" : "API key"}</span>
                         <input
+                          aria-label="API key"
                           autoComplete="off"
                           className="tc-input"
-                          onChange={(event) => setDraftApiKey(event.target.value)}
+                          onBlur={() => setIsApiKeyFocused(false)}
+                          onChange={(event) => {
+                            setIsApiKeyFocused(true);
+                            setDraftApiKey(event.target.value);
+                          }}
+                          onFocus={() => setIsApiKeyFocused(true)}
                           placeholder={
                             effectiveKeyPresent
                               ? `Leave blank to reuse ${effectiveApiKeyEnv}`
                               : `Save ${effectiveApiKeyEnv || "the selected key slot"}`
                           }
-                          type="password"
-                          value={draftApiKey}
+                          readOnly={!isApiKeyFocused && draftApiKey.length > 0}
+                          type={isApiKeyFocused || !draftApiKey ? "password" : "text"}
+                          value={
+                            isApiKeyFocused || !draftApiKey
+                              ? draftApiKey
+                              : maskDraftApiKey(draftApiKey)
+                          }
                         />
                         <small className="tc-field__hint">
                           {effectiveKeyPresent
@@ -1347,23 +1422,6 @@ export function SettingsApp({
                         </div>
 
                         <div className="tc-settings-form__row">
-                          <label className="tc-field">
-                            <span>API key env override</span>
-                            <input
-                              className="tc-input"
-                              onChange={(event) =>
-                                setForm((current) => ({
-                                  ...current,
-                                  apiKeyEnv: event.target.value,
-                                }))
-                              }
-                              placeholder={suggestedApiKeyEnv || "Derived from the current mode"}
-                              value={form.apiKeyEnv ?? ""}
-                            />
-                            <small className="tc-field__hint">
-                              Leave this empty to keep the suggested key slot.
-                            </small>
-                          </label>
                           <label className="tc-field">
                             <span>Context window</span>
                             <input
@@ -1471,6 +1529,52 @@ export function SettingsApp({
                     {saveDisabledReason}
                   </div>
                 ) : null}
+              </div>
+            </section>
+          </div>
+        ) : null}
+        {replacementConfirmation ? (
+          <div className="tc-settings-modal" role="presentation">
+            <section
+              aria-labelledby="replace-shared-key-title"
+              aria-modal="true"
+              className="tc-card tc-settings-modal__card"
+              role="alertdialog"
+            >
+              <div className="tc-settings-modal__header">
+                <div>
+                  <h3 id="replace-shared-key-title">Replace shared API key?</h3>
+                  <p>
+                    You are about to replace <strong>{replacementConfirmation.envName}</strong>.
+                  </p>
+                </div>
+              </div>
+              <div className="tc-settings-form">
+                <p>The following models will use the new key immediately:</p>
+                <ul>
+                  {replacementConfirmation.modelIds.map((modelId) => (
+                    <li key={modelId}>{modelId}</li>
+                  ))}
+                </ul>
+                <div className="tc-button-row tc-settings-form__actions">
+                  <button
+                    className="tc-button tc-button--ghost"
+                    onClick={() => setReplacementConfirmation(null)}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="tc-button tc-button--primary"
+                    onClick={() => {
+                      setReplacementConfirmation(null);
+                      submitModelSave();
+                    }}
+                    type="button"
+                  >
+                    Replace shared key
+                  </button>
+                </div>
               </div>
             </section>
           </div>

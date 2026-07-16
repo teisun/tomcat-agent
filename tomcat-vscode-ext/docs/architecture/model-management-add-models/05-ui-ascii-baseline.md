@@ -97,23 +97,29 @@ Model ▾
   - Ready（`key_present=true`）：可用，行内 Edit / 删除（内置不可删，可覆盖）。
   - Needs API key（`key_present=false`，多为官方内置预置）：行内一个**密文 API Key 输入框 + Save**，保存即调 `set_provider_key` 写 `.env`，`key_present` 翻转为 true、升入 Ready 组并进入下拉。
 - 行内的圆形 info 按钮 hover/focus 后，显示带字段名的提示卡：`Source / API / Provider / API Key Env / Base URL / Thinking / Context Window / Upstream Model`；不再把 `user · openai · deepseek` 这种裸值直接印在列表上。
-- 新增/编辑整条模型通过弹窗完成，字段对齐 `models.toml`：`id / model_name / api(下拉) / provider / base_url / thinking_format(下拉) / context_window / capabilities(多选)`；外加两个 Key 相关字段：
-  - **API Key（密文输入，masked）**：模型的密钥值本身；保存时经 `set_provider_key` 写入 `.env`，供该 provider 复用。
-  - `api_key_env`（高级/可选）：显式环境变量名；留空则按 provider 自动推断 `<PROVIDER>_API_KEY`（不是密钥值，只是变量名）。
-- **Key 保护**：两处 Key 输入均 `type=password` 不回显、`autocomplete=off`；保存后仅回传 `key_present`，serve/host 决不把 Key 明文回吐 webview；`.env` 0600、日志脱敏。
+- 新增/编辑整条模型通过弹窗完成。Key 相关交互收敛为两个主流程字段：
+  - **Key slot（可搜索/可输入组合框）**：它是 `api_key_env` 的唯一编辑入口；候选来自当前建议名与 `.env` 中合法的非空 `*_API_KEY`，Advanced 不再重复显示 `API key env override`。
+  - **API Key**：完整值仅在当前 Webview 内存中暂存；聚焦时密码遮罩，失焦时在同一输入框显示前后脱敏预览。保存后清空；已保存凭证只显示 Configured/Missing，后端不返回任何 Key 字符。
+- Relay 建议名按站点与 API 家族分离，例如 `FCODEX_OPENAI_API_KEY` 与 `FCODEX_ANTHROPIC_API_KEY`；编辑旧模型时保留其已保存名称，不自动迁移。
+- 替换已配置 Key 前，根据 `state.models[].apiKeyEnv` 列出受影响模型并要求确认；留空则安全复用。
+- **Key 保护**：`.env` 以 0600 权限保存完整值；查询协议、host 状态、Webview 状态和日志不含完整值或部分值。
 
 ```text
-                         ┌ Add Model ──────────────────────── x ┐
-                         │ Model ID        [                ]   │
-                         │ Model Name      [                ]   │
-                         │ API ▾           Thinking ▾           │
-                         │ Provider        [                ]   │
-                         │ API Key Env     [                ]   │
-                         │ Base URL        [ https://...    ]   │
-                         │ Context Window  [      ] API Key ●●  │
-                         │ caps  □vision □files □tools ...      │
-                         │                    [Cancel][Save]    │
-                         └───────────────────────────────────────┘
+                         ┌ Add Model ─────────────────────────────── x ┐
+                         │ Base URL       [ https://...           ]   │
+                         │ API ▾          Model Name [ gpt-5.4    ]   │
+                         │ Key slot       [ FCODEX_OPENAI_API_KEY ▾]  │
+                         │                 可搜索已有槽 / 输入新名称   │
+                         │ API Key        [ sk-abcd••••wxyz        ]  │
+                         │ ▸ Advanced（无 API key env override）      │
+                         │                         [Cancel][Save]     │
+                         └─────────────────────────────────────────────┘
+
+Models                                      [↻ Refresh] [ + Add Model ]
+  Ready:      Key slot · Configured
+  Needs key:  Key slot · Missing
+
+Refresh: list_provider_keys（重读 .env）→ list_models（重算 keyPresent）
 ```
 
 ### A.分图 4：后端 provider 分派 + endpoint 构造

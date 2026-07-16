@@ -102,17 +102,9 @@ pub(crate) fn run_model(sub: ModelSub, cfg: &AppConfig) -> Result<(), AppError> 
                 );
             }
             ModelKeySub::List => {
-                let catalog = ModelCatalog::load(cfg)?;
                 println!("Provider Keys:");
-                for item in list_provider_keys(&catalog) {
-                    let status = if item.key_present { "ready" } else { "missing" };
-                    println!(
-                        "- {} [{}] provider={} models={}",
-                        item.env_name,
-                        status,
-                        item.provider,
-                        item.model_ids.join(", ")
-                    );
+                for item in list_provider_keys(cfg)? {
+                    println!("- {} [ready]", item.env_name);
                 }
             }
         },

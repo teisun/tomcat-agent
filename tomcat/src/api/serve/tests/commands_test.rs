@@ -176,11 +176,7 @@ impl CheckpointStore for FixedCheckpointStore {
     }
 
     fn show(&self, id: &CheckpointId) -> Result<Option<CheckpointMeta>, CheckpointError> {
-        Ok(self
-            .checkpoints
-            .iter()
-            .find(|meta| &meta.id == id)
-            .cloned())
+        Ok(self.checkpoints.iter().find(|meta| &meta.id == id).cloned())
     }
 
     fn diff(&self, _id: &CheckpointId) -> Result<CheckpointDiff, CheckpointError> {
@@ -2448,7 +2444,7 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
                 model_name: Some("claude-opus-4-6".to_string()),
                 api: "anthropic-messages".to_string(),
                 provider: "anthropic".to_string(),
-                api_key_env: Some("SERVE_TEST_GATEWAY_KEY".to_string()),
+                api_key_env: Some("SERVE_TEST_GATEWAY_API_KEY".to_string()),
                 base_url: Some("https://api.example.test/v1".to_string()),
                 capabilities: Capabilities {
                     tools: true,
@@ -2504,7 +2500,7 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
         Arc::clone(&state),
         ServeCommand::SetProviderKey {
             id: Some("set-provider-key".to_string()),
-            env_name: "SERVE_TEST_GATEWAY_KEY".to_string(),
+            env_name: "SERVE_TEST_GATEWAY_API_KEY".to_string(),
             value: "relay-secret".to_string(),
         },
     )
@@ -2521,15 +2517,21 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
     assert_eq!(set_key["success"].as_bool(), Some(true));
     assert_eq!(
         set_key["payload"]["envName"].as_str(),
-        Some("SERVE_TEST_GATEWAY_KEY")
+        Some("SERVE_TEST_GATEWAY_API_KEY")
     );
     assert_eq!(set_key["payload"]["keyPresent"].as_bool(), Some(true));
     assert!(
         !set_key.to_string().contains("relay-secret"),
         "set_provider_key response must not leak plaintext secrets: {set_key}"
     );
-    let env_text = std::fs::read_to_string(temp.path().join("assets").join(".env")).unwrap();
-    assert!(env_text.contains("SERVE_TEST_GATEWAY_KEY=relay-secret"));
+    let env_path = temp.path().join("assets").join(".env");
+    let env_text = std::fs::read_to_string(&env_path).unwrap();
+    assert!(env_text.contains("SERVE_TEST_GATEWAY_API_KEY=relay-secret"));
+    std::fs::write(
+        &env_path,
+        "SERVE_TEST_GATEWAY_API_KEY=relay-secret\nFCODEX_OPENAI_API_KEY=external-secret\n",
+    )
+    .expect("externally add key slot");
 
     handle_command(
         Arc::clone(&state),
@@ -2554,12 +2556,18 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
         .as_array()
         .expect("provider keys array")
         .iter()
-        .find(|entry| entry["envName"].as_str() == Some("SERVE_TEST_GATEWAY_KEY"))
+        .find(|entry| entry["envName"].as_str() == Some("SERVE_TEST_GATEWAY_API_KEY"))
         .expect("provider key entry");
     assert_eq!(provider_key["keyPresent"].as_bool(), Some(true));
-    assert_eq!(provider_key["provider"].as_str(), Some("anthropic"));
+    assert_eq!(provider_key["provider"].as_str(), Some(""));
+    assert!(key_list["payload"]["keys"]
+        .as_array()
+        .expect("provider keys array")
+        .iter()
+        .any(|entry| entry["envName"].as_str() == Some("FCODEX_OPENAI_API_KEY")));
     assert!(
-        !key_list.to_string().contains("relay-secret"),
+        !key_list.to_string().contains("relay-secret")
+            && !key_list.to_string().contains("external-secret"),
         "list_provider_keys must not leak plaintext secrets: {key_list}"
     );
 
@@ -2592,6 +2600,34 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
         !listed.to_string().contains("relay-secret"),
         "list_models must not leak plaintext secrets: {listed}"
     );
+
+    std::fs::write(&env_path, "SERVE_TEST_GATEWAY_API_KEY=relay-secret\n")
+        .expect("externally remove key slot");
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListProviderKeys {
+            id: Some("list-provider-keys-after-delete".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str)
+            == Some("list-provider-keys-after-delete")
+    })
+    .await;
+    let after_delete = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str)
+                == Some("list-provider-keys-after-delete")
+        })
+        .expect("list_provider_keys after external delete");
+    assert!(!after_delete["payload"]["keys"]
+        .as_array()
+        .expect("provider keys after delete")
+        .iter()
+        .any(|entry| entry["envName"].as_str() == Some("FCODEX_OPENAI_API_KEY")));
 
     handle_command(
         Arc::clone(&state),
@@ -3345,7 +3381,10 @@ async fn serve_list_checkpoints_returns_changed_files() {
         .expect("list checkpoints response");
 
     assert_eq!(response["success"].as_bool(), Some(true));
-    assert_eq!(response["payload"]["sessionId"].as_str(), Some(slot.session_id.as_str()));
+    assert_eq!(
+        response["payload"]["sessionId"].as_str(),
+        Some(slot.session_id.as_str())
+    );
     let checkpoints = response["payload"]["checkpoints"]
         .as_array()
         .expect("checkpoints array");
@@ -3418,7 +3457,9 @@ async fn serve_restore_checkpoint_transcript_only_reports_payload_and_supersedes
     .await;
     let response = lines
         .iter()
-        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("restore-checkpoint"))
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("restore-checkpoint")
+        })
         .expect("restore response");
 
     assert_eq!(response["success"].as_bool(), Some(true));
@@ -3427,8 +3468,14 @@ async fn serve_restore_checkpoint_transcript_only_reports_payload_and_supersedes
         Some(checkpoint_id_string.as_str())
     );
     assert_eq!(response["payload"]["revertFiles"].as_bool(), Some(false));
-    assert_eq!(response["payload"]["transcriptTruncated"].as_bool(), Some(true));
-    assert_eq!(response["payload"]["changedPaths"], serde_json::json!(["notes.txt"]));
+    assert_eq!(
+        response["payload"]["transcriptTruncated"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        response["payload"]["changedPaths"],
+        serde_json::json!(["notes.txt"])
+    );
     assert_eq!(
         std::fs::read_to_string(&workspace_file).unwrap(),
         "keep current file",
@@ -3508,8 +3555,7 @@ async fn serve_restore_checkpoint_reverts_files_and_reports_payload() {
     let response = lines
         .iter()
         .find(|line| {
-            line.get("id").and_then(serde_json::Value::as_str)
-                == Some("restore-checkpoint-revert")
+            line.get("id").and_then(serde_json::Value::as_str) == Some("restore-checkpoint-revert")
         })
         .expect("restore response");
 
@@ -3519,8 +3565,14 @@ async fn serve_restore_checkpoint_reverts_files_and_reports_payload() {
         Some(checkpoint_id_string.as_str())
     );
     assert_eq!(response["payload"]["revertFiles"].as_bool(), Some(true));
-    assert_eq!(response["payload"]["transcriptTruncated"].as_bool(), Some(true));
-    assert_eq!(response["payload"]["changedPaths"], serde_json::json!(["notes.txt"]));
+    assert_eq!(
+        response["payload"]["transcriptTruncated"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        response["payload"]["changedPaths"],
+        serde_json::json!(["notes.txt"])
+    );
     assert_eq!(
         response["payload"]["restoredPaths"],
         serde_json::json!(["notes.txt"])
@@ -3623,15 +3675,13 @@ async fn serve_restore_checkpoint_rejects_foreign_session_checkpoint() {
     .unwrap();
 
     let lines = wait_for_line(&buffer, |line| {
-        line.get("id").and_then(serde_json::Value::as_str)
-            == Some("restore-checkpoint-foreign")
+        line.get("id").and_then(serde_json::Value::as_str) == Some("restore-checkpoint-foreign")
     })
     .await;
     let response = lines
         .iter()
         .find(|line| {
-            line.get("id").and_then(serde_json::Value::as_str)
-                == Some("restore-checkpoint-foreign")
+            line.get("id").and_then(serde_json::Value::as_str) == Some("restore-checkpoint-foreign")
         })
         .expect("foreign restore response");
 

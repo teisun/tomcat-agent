@@ -5,7 +5,7 @@ import { deriveRelayFields, envNameForRelaySlug } from "./relayDerive";
 describe("relayDerive", () => {
   it("derives stable slugs from common relay hosts", () => {
     expect(deriveRelayFields("api.chatanywhere.tech/v1", "gpt-5.4")).toMatchObject({
-      apiKeyEnv: "CHATANYWHERE_API_KEY",
+      apiKeyEnv: "CHATANYWHERE_OPENAI_API_KEY",
       host: "api.chatanywhere.tech",
       id: "chatanywhere/gpt-5.4",
       provider: "chatanywhere",
@@ -15,13 +15,13 @@ describe("relayDerive", () => {
     expect(
       deriveRelayFields("https://open.bigmodel.cn/api/paas/v4", "glm-5.2"),
     ).toMatchObject({
-      apiKeyEnv: "BIGMODEL_API_KEY",
+      apiKeyEnv: "BIGMODEL_OPENAI_API_KEY",
       id: "bigmodel/glm-5.2",
       provider: "bigmodel",
     });
 
     expect(deriveRelayFields("https://foo.com.cn/v1", "kimi-k2")).toMatchObject({
-      apiKeyEnv: "FOO_API_KEY",
+      apiKeyEnv: "FOO_OPENAI_API_KEY",
       id: "foo/kimi-k2",
       provider: "foo",
     });
@@ -29,13 +29,13 @@ describe("relayDerive", () => {
 
   it("handles ports, IPs, localhost, IDNs, and parse failures without throwing", () => {
     expect(deriveRelayFields("http://localhost:11434/v1", "qwen3")).toMatchObject({
-      apiKeyEnv: "LOCALHOST_API_KEY",
+      apiKeyEnv: "LOCALHOST_OPENAI_API_KEY",
       id: "localhost/qwen3",
       provider: "localhost",
     });
 
     expect(deriveRelayFields("http://127.0.0.1:4000/v1", "gpt-oss")).toMatchObject({
-      apiKeyEnv: "127001_API_KEY",
+      apiKeyEnv: "127001_OPENAI_API_KEY",
       id: "127001/gpt-oss",
       provider: "127001",
     });
@@ -46,7 +46,7 @@ describe("relayDerive", () => {
     expect(idn.id.endsWith("/glm")).toBe(true);
 
     expect(deriveRelayFields("::::", "gpt-5.4")).toMatchObject({
-      apiKeyEnv: "CUSTOM_API_KEY",
+      apiKeyEnv: "CUSTOM_OPENAI_API_KEY",
       id: "custom/gpt-5.4",
       provider: "custom",
     });
@@ -59,8 +59,14 @@ describe("relayDerive", () => {
     });
   });
 
-  it("builds env names directly from relay slugs", () => {
-    expect(envNameForRelaySlug("chatanywhere")).toBe("CHATANYWHERE_API_KEY");
-    expect(envNameForRelaySlug("local_llm")).toBe("LOCAL_LLM_API_KEY");
+  it("builds protocol-aware env names directly from relay slugs", () => {
+    expect(envNameForRelaySlug("chatanywhere")).toBe("CHATANYWHERE_OPENAI_API_KEY");
+    expect(envNameForRelaySlug("local_llm")).toBe("LOCAL_LLM_OPENAI_API_KEY");
+    expect(envNameForRelaySlug("fcodex", "openai-responses")).toBe(
+      "FCODEX_OPENAI_API_KEY",
+    );
+    expect(envNameForRelaySlug("fcodex", "anthropic-messages")).toBe(
+      "FCODEX_ANTHROPIC_API_KEY",
+    );
   });
 });
