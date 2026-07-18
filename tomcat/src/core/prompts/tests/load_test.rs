@@ -6,6 +6,10 @@ fn planner_prompt_mentions_create_plan_and_ask_question() {
     assert!(s.contains("create_plan"));
     assert!(s.contains("ask_question"));
     assert!(s.contains("PLAN mode"));
+    assert!(s.contains("plan or proposal/solution"));
+    assert!(s.contains("MUST use `create_plan` or `update_plan`"));
+    assert!(s.contains("Do NOT emit a plan/proposal as prose"));
+    assert!(s.contains("技术方案"));
 }
 
 #[test]

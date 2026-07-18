@@ -697,17 +697,40 @@ function mergeCurrentPlanCardsIntoHistory(
     if (item.type !== "plan") {
       continue;
     }
-    const card = upsertPlanFile(historySession, item.path, item.state, item.planId ?? null);
-    card.title = item.title;
-    card.overview = item.overview;
+    const card = historySession.timeline.find(
+      (entry): entry is WebviewPlanFileCard => entry.type === "plan" && entry.path === item.path,
+    );
+    if (!card) {
+      continue;
+    }
+    mergePlanCardMetadata(card, item);
   }
   if (liveSession.planFile?.path) {
-    upsertPlanFile(
-      historySession,
-      liveSession.planFile.path,
-      liveSession.planFile.state,
-      liveSession.planFile.planId ?? liveSession.planId ?? null,
+    const activeCard = historySession.timeline.find(
+      (entry): entry is WebviewPlanFileCard =>
+        entry.type === "plan" && entry.path === liveSession.planFile?.path,
     );
+    if (activeCard) {
+      activeCard.planId = liveSession.planFile.planId ?? liveSession.planId ?? activeCard.planId ?? null;
+      activeCard.state = liveSession.planFile.state ?? activeCard.state ?? null;
+    }
+  }
+}
+
+function mergePlanCardMetadata(
+  target: WebviewPlanFileCard,
+  source: WebviewPlanFileCard,
+): void {
+  target.planId = source.planId ?? target.planId ?? null;
+  target.state = source.state ?? target.state ?? null;
+  if (source.title !== undefined) {
+    target.title = source.title;
+  }
+  if (source.overview !== undefined) {
+    target.overview = source.overview;
+  }
+  if (source.todos !== undefined) {
+    target.todos = source.todos;
   }
 }
 
@@ -1070,6 +1093,35 @@ function liveAssistantGroupIds(runtime: SessionRuntimeState): Set<string> {
   return ids;
 }
 
+function collectOptimisticTailKeys(
+  session: WebviewSessionSnapshot,
+  runtime: SessionRuntimeState,
+  existingKeys: Set<string>,
+): Set<string> {
+  const keys = new Set<string>();
+  let collecting = false;
+  for (let index = session.timeline.length - 1; index >= 0; index -= 1) {
+    const item = session.timeline[index];
+    if (
+      item.type === "message" &&
+      item.kind === "user" &&
+      runtime.localUserMessageIds.has(item.id) &&
+      (item.deliveryState === "pending" || item.deliveryState === "failed")
+    ) {
+      collecting = true;
+    }
+    if (!collecting) {
+      continue;
+    }
+    const key = timelineEntityKey(item);
+    if (existingKeys.has(key)) {
+      break;
+    }
+    keys.add(key);
+  }
+  return keys;
+}
+
 function shouldRetainLiveTimelineItem(
   item: WebviewTimelineItem,
   runtime: SessionRuntimeState,
@@ -1105,8 +1157,9 @@ function shouldRetainLiveTimelineItem(
       return !item.resolved;
     case "boundary":
     case "checkpoint":
-    case "plan":
       return false;
+    case "plan":
+      return true;
   }
 }
 
@@ -1789,10 +1842,17 @@ export class WebviewStateStore {
     }
     mergeCurrentPlanCardsIntoHistory(historySession, session);
     const existingKeys = new Set(historySession.timeline.map((item) => timelineEntityKey(item)));
+    const optimisticTailKeys = collectOptimisticTailKeys(session, runtime, existingKeys);
     const assistantGroupIds = liveAssistantGroupIds(runtime);
     const nextLocalUserMessageIds = new Set<string>();
     for (const item of session.timeline) {
-      if (item.type === "plan") {
+      if (item.type === "plan" && existingKeys.has(timelineEntityKey(item))) {
+        const existingCard = historySession.timeline.find(
+          (entry): entry is WebviewPlanFileCard => entry.type === "plan" && entry.path === item.path,
+        );
+        if (existingCard) {
+          mergePlanCardMetadata(existingCard, item);
+        }
         continue;
       }
       const key = timelineEntityKey(item);
@@ -1803,7 +1863,10 @@ export class WebviewStateStore {
       if (existingKeys.has(key)) {
         continue;
       }
-      if (!shouldRetainLiveTimelineItem(item, runtime, assistantGroupIds)) {
+      if (
+        !optimisticTailKeys.has(key) &&
+        !shouldRetainLiveTimelineItem(item, runtime, assistantGroupIds)
+      ) {
         continue;
       }
       upsertTimelineItem(historySession, item);

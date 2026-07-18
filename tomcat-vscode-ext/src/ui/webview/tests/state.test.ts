@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isWebviewIntent,
+  type WebviewMessageBlock,
   type WebviewPlanFileCard,
   type WebviewToolCard,
 } from "../protocol";
@@ -887,6 +888,114 @@ describe("session state hydration", () => {
       path: "/workspace/plan-a.plan.md",
       planId: "plan-1",
       state: "chat",
+    });
+  });
+
+  it("keeps live plan cards in chronological order when rebuilding against stale history", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const session = (
+      store as unknown as {
+        ensureSession(sessionId: string): { timeline: Array<WebviewPlanFileCard | WebviewMessageBlock> };
+        ensureRuntime(sessionId: string): { historyEntries: unknown[]; localUserMessageIds: Set<string> };
+        rebuildHistoryTimeline(sessionId: string): void;
+      }
+    ).ensureSession("s1");
+    const runtime = (
+      store as unknown as {
+        ensureRuntime(sessionId: string): { historyEntries: unknown[]; localUserMessageIds: Set<string> };
+      }
+    ).ensureRuntime("s1");
+    session.timeline = [
+      { id: "user-1", kind: "user", text: "older prompt", type: "message" },
+      {
+        assistantMessageId: "assistant-1",
+        id: "assistant-1",
+        kind: "assistant",
+        text: "older answer",
+        type: "message",
+      },
+      {
+        id: "plan:/workspace/snake.plan.md",
+        path: "/workspace/snake.plan.md",
+        planId: "plan-snake",
+        state: "planning",
+        type: "plan",
+      },
+      {
+        id: "user-2",
+        kind: "user",
+        text: "latest prompt",
+        type: "message",
+        deliveryState: "pending",
+      },
+    ];
+    runtime.localUserMessageIds.add("user-2");
+    runtime.historyEntries = [
+      {
+        id: "user-1",
+        message: { content: "older prompt", role: "user" },
+        type: "message",
+      },
+    ];
+
+    (
+      store as unknown as {
+        rebuildHistoryTimeline(sessionId: string): void;
+      }
+    ).rebuildHistoryTimeline("s1");
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.map((item) => item.id),
+    ).toEqual(["user-1", "assistant-1", "plan:/workspace/snake.plan.md", "user-2"]);
+  });
+
+  it("updates an existing active plan from get_state without moving its timeline position", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const session = (
+      store as unknown as {
+        ensureSession(sessionId: string): { timeline: WebviewPlanFileCard[] | Array<WebviewMessageBlock | WebviewPlanFileCard> };
+      }
+    ).ensureSession("s1");
+    session.timeline = [
+      { id: "user-1", kind: "user", text: "older prompt", type: "message" },
+      {
+        id: "plan:/workspace/active.plan.md",
+        path: "/workspace/active.plan.md",
+        planId: "plan-1",
+        state: "planning",
+        type: "plan",
+      },
+      { id: "user-2", kind: "user", text: "latest prompt", type: "message" },
+    ];
+
+    store.applySessionState(
+      {
+        busy: false,
+        model: "gpt-5.4",
+        planId: "plan-1",
+        planPath: "/workspace/active.plan.md",
+        planState: "pending",
+        sessionId: "s1",
+      },
+    );
+
+    const timeline = store.snapshot().sessionViews.s1.timeline;
+    expect(timeline.map((item) => item.id)).toEqual([
+      "user-1",
+      "plan:/workspace/active.plan.md",
+      "user-2",
+    ]);
+    expect(
+      timeline.find(
+        (item): item is WebviewPlanFileCard =>
+          item.type === "plan" && item.path === "/workspace/active.plan.md",
+      ),
+    ).toMatchObject({
+      path: "/workspace/active.plan.md",
+      planId: "plan-1",
+      state: "pending",
     });
   });
 

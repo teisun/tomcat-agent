@@ -3528,7 +3528,7 @@ input:focus-visible {
   overflow-y: auto;
   /* Extra bottom padding so the last todo never sits flush against the editor
    * status bar when scrolled to the end. */
-  padding: 4px 16px 40px;
+  padding: 8px 28px 40px;
   -webkit-user-select: text;
   user-select: text;
   width: 100%;
@@ -3536,6 +3536,8 @@ input:focus-visible {
 
 .tc-plan-preview__body {
   line-height: 1.6;
+  margin: 0 auto;
+  max-width: 920px;
   word-break: break-word;
 }
 
@@ -3608,13 +3610,17 @@ input:focus-visible {
   color: var(--vscode-foreground);
   font-size: 15px;
   font-weight: 600;
+  margin-left: auto;
+  margin-right: auto;
   margin-top: 28px;
+  max-width: 920px;
 }
 
 .tc-plan-preview__divider {
   border: 0;
   border-top: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
-  margin: 12px 0 16px;
+  margin: 12px auto 16px;
+  max-width: 920px;
 }
 
 .tc-plan-todos {
@@ -3622,7 +3628,8 @@ input:focus-visible {
   flex-direction: column;
   gap: 10px;
   list-style: none;
-  margin: 0;
+  margin: 0 auto;
+  max-width: 920px;
   padding: 0;
 }
 

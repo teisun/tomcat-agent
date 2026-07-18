@@ -52,6 +52,7 @@ export interface PlanPreviewDomSnapshot {
   buildModelOptions: string[];
   buildModelValue: string;
   hasActionStrip: boolean;
+  inlinePathCount: number;
   /** Rendered mermaid diagrams (fenced ```mermaid``` blocks turned into SVG). */
   mermaidSvgCount: number;
   selectionButtonVisible: boolean;
@@ -69,6 +70,7 @@ export interface PlanPreviewDomSnapshot {
 /** Test-only DOM drive actions issued by the host during E2E tests. */
 export type PlanPreviewDomAction =
   | { kind: "clickBuild" }
+  | { kind: "clickSelector"; selector: string }
   | { kind: "clickSelectionAdd" }
   | { kind: "selectBuildModel"; modelId: string }
   | { kind: "selectText"; selector: string };
@@ -119,6 +121,14 @@ export type PlanPreviewIntent =
     }
   | {
       messageId: string;
+      type: "openFile";
+      data: {
+        line?: number;
+        path: string;
+      };
+    }
+  | {
+      messageId: string;
       type: "setBuildModel";
       data: {
         modelId: string;
@@ -152,6 +162,12 @@ export function isPlanPreviewIntent(value: unknown): value is PlanPreviewIntent 
       return true;
     case "openLink":
       return isRecord(value.data) && typeof value.data.href === "string";
+    case "openFile":
+      return (
+        isRecord(value.data) &&
+        typeof value.data.path === "string" &&
+        (value.data.line === undefined || typeof value.data.line === "number")
+      );
     case "setBuildModel":
       return isRecord(value.data) && typeof value.data.modelId === "string";
     case "addSelectionToChat":

@@ -202,4 +202,56 @@ describe("ChatMarkdown", () => {
     expect(figure.querySelector("svg")).not.toBeNull();
     expect(renderMock).toHaveBeenCalledTimes(1);
   });
+
+  it("waits for streaming to settle before running highlight and mermaid enhancement", async () => {
+    vi.useFakeTimers();
+    renderMock.mockClear();
+    try {
+      const { rerender } = render(
+        <ChatMarkdown
+          isStreaming
+          markdown={"```ts\nconst answer ="}
+          onOpenFile={() => undefined}
+        />,
+      );
+
+      rerender(
+        <ChatMarkdown
+          isStreaming
+          markdown={"```ts\nconst answer = 42;\n```\n\n```mermaid\nflowchart LR"}
+          onOpenFile={() => undefined}
+        />,
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(119);
+      });
+      expect(screen.getByTestId("chat-markdown").querySelector("code.hljs")).toBeNull();
+      expect(screen.queryByTestId("plan-mermaid")).toBeNull();
+      expect(renderMock).toHaveBeenCalledTimes(0);
+
+      rerender(
+        <ChatMarkdown
+          isStreaming={false}
+          markdown={"```ts\nconst answer = 42;\n```\n\n```mermaid\nflowchart LR\n  start --> finish\n```\n"}
+          onOpenFile={() => undefined}
+        />,
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+        await vi.runAllTimersAsync();
+        await Promise.resolve();
+      });
+      vi.useRealTimers();
+      await waitFor(() => {
+        expect(screen.getByTestId("chat-markdown").querySelector("code.hljs")).not.toBeNull();
+      });
+      const figure = await screen.findByTestId("plan-mermaid");
+      expect(figure.querySelector("svg")).not.toBeNull();
+      expect(renderMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

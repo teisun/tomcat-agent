@@ -75,6 +75,7 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
   const icons = document.querySelectorAll(".tc-plan-todo__icon");
   const body = document.querySelector('[data-testid="plan-markdown-body"]');
   const content = document.querySelector('[data-testid="plan-content"]');
+  const inlinePathCount = document.querySelectorAll(".tc-inline-path").length;
   const options = select
     ? Array.from(select.options)
         .map((option) => option.value)
@@ -99,6 +100,7 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
     buildModelOptions: options,
     buildModelValue: select ? select.value : "",
     hasActionStrip: Boolean(strip),
+    inlinePathCount,
     mermaidSvgCount,
     selectionButtonVisible: Boolean(
       document.querySelector('[data-testid="plan-selection-add"]'),
@@ -119,6 +121,9 @@ function runDomAction(action: PlanPreviewDomAction): void {
       return;
     case "clickSelectionAdd":
       document.querySelector<HTMLButtonElement>('[data-testid="plan-selection-add"]')?.click();
+      return;
+    case "clickSelector":
+      document.querySelector<HTMLElement>(action.selector)?.click();
       return;
     case "selectText": {
       const target = document.querySelector(action.selector);
@@ -234,6 +239,7 @@ export function PlanPreviewApp({
       <div className="tc-plan-preview__content" data-testid="plan-content">
         <MarkdownBody
           markdown={state.bodyMarkdown}
+          onOpenFile={(path, line) => send(vscodeApi, { data: { line, path }, type: "openFile" })}
           onOpenLink={(href) => send(vscodeApi, { data: { href }, type: "openLink" })}
           sourceLineMap={state.bodyLineMap}
         />

@@ -4,6 +4,7 @@ import {
   renderMermaidBlocks,
   sanitizeMarkdownHtml,
 } from "./markdown/markdownRuntime";
+import { linkifyInlineFilePaths } from "./markdown/markdownDecorators";
 
 /**
  * Render the plan body markdown as sanitized HTML. Links never navigate the
@@ -12,17 +13,26 @@ import {
  */
 export function MarkdownBody({
   markdown,
+  onOpenFile,
   onOpenLink,
   sourceLineMap,
 }: {
   markdown: string;
+  onOpenFile?(path: string, line?: number): void;
   onOpenLink(href: string): void;
   /** 1-based source file line for each line of `markdown` (see planDocument). */
   sourceLineMap?: number[];
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const html = useMemo(() => {
-    return sanitizeMarkdownHtml(renderMarkdownHtml(markdown, sourceLineMap));
+    const rendered = sanitizeMarkdownHtml(renderMarkdownHtml(markdown, sourceLineMap));
+    if (typeof document === "undefined") {
+      return rendered;
+    }
+    const container = document.createElement("div");
+    container.innerHTML = rendered;
+    linkifyInlineFilePaths(container);
+    return container.innerHTML;
   }, [markdown, sourceLineMap]);
 
   useEffect(() => {
@@ -38,6 +48,14 @@ export function MarkdownBody({
   }, [html]);
 
   const handleClick = (event: MouseEvent<HTMLDivElement>) => {
+    const fileTarget = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-tc-file-path]");
+    if (fileTarget) {
+      event.preventDefault();
+      event.stopPropagation();
+      const line = fileTarget.dataset.tcLine ? Number(fileTarget.dataset.tcLine) : undefined;
+      onOpenFile?.(fileTarget.dataset.tcFilePath ?? "", Number.isFinite(line) ? line : undefined);
+      return;
+    }
     const anchor = (event.target as HTMLElement | null)?.closest("a");
     if (!anchor) {
       return;

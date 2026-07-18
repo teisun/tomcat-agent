@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { MarkdownBody } from "./MarkdownBody";
@@ -64,6 +64,41 @@ describe("MarkdownBody", () => {
     anchor.dispatchEvent(event);
     expect(onOpenLink).toHaveBeenCalledWith("https://example.com/docs");
     expect(event.defaultPrevented).toBe(true);
+  });
+
+  it("keeps ordinary markdown links on the openLink path", () => {
+    const onOpenLink = vi.fn();
+    const onOpenFile = vi.fn();
+    render(
+      <MarkdownBody
+        markdown={"Read [the design doc](docs/design.md)."}
+        onOpenFile={onOpenFile}
+        onOpenLink={onOpenLink}
+      />,
+    );
+    const anchor = screen.getByTestId("plan-markdown-body").querySelector("a") as HTMLAnchorElement;
+    fireEvent.click(anchor);
+    expect(onOpenLink).toHaveBeenCalledWith("docs/design.md");
+    expect(onOpenFile).not.toHaveBeenCalled();
+  });
+
+  it("linkifies inline file paths and routes clicks to onOpenFile", () => {
+    const onOpenFile = vi.fn();
+    const onOpenLink = vi.fn();
+    render(
+      <MarkdownBody
+        markdown={"Review `src/test/fixtures/plan-preview.ts:18` before shipping."}
+        onOpenFile={onOpenFile}
+        onOpenLink={onOpenLink}
+      />,
+    );
+    const link = screen.getByTestId("assistant-clickable-path");
+    expect(link.textContent).toContain("plan-preview.ts:18");
+    expect(link.textContent).not.toContain("src/test/fixtures/");
+    expect(link.getAttribute("title")).toBe("src/test/fixtures/plan-preview.ts:18");
+    fireEvent.click(link);
+    expect(onOpenFile).toHaveBeenCalledWith("src/test/fixtures/plan-preview.ts", 18);
+    expect(onOpenLink).not.toHaveBeenCalled();
   });
 
   it("strips dangerous script content via DOMPurify", () => {

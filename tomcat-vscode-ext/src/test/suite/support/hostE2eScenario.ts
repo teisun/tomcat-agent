@@ -54,6 +54,21 @@ async function pause(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 20_000,
+  errorMessage = "Timed out waiting for condition",
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) {
+      return;
+    }
+    await pause(100);
+  }
+  throw new Error(errorMessage);
+}
+
 type MacWindowInfo = {
   bounds: {
     height: number;
@@ -398,6 +413,7 @@ async function waitForWebviewDomSnapshot<T>(
         fileChipTopWithinStream: lastSnapshot.fileChipTopWithinStream,
         fileChipVisible: lastSnapshot.fileChipVisible,
         historyLoaderVisible: lastSnapshot.historyLoaderVisible,
+        planCardTopWithinStream: lastSnapshot.planCardTopWithinStream,
         planNoticeReplayed: lastSnapshot.planNoticeReplayed,
         planStateText: lastSnapshot.planStateText,
         progressRow: lastSnapshot.progressRow,
@@ -1997,7 +2013,9 @@ export async function assertWebviewSelectionReferenceFlow(
     new vscode.Position(2, document.lineAt(2).text.length),
   );
   await pause(1_100);
-  captureTranscriptVisual("selection-reference-codelens", "editor", "selection-context.ts");
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    captureTranscriptVisual("selection-reference-codelens", "editor", "selection-context.ts");
+  }
 
   await api.__testing.executeCommand(TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND);
 
@@ -2021,7 +2039,9 @@ export async function assertWebviewSelectionReferenceFlow(
     composerSnapshot.html.includes("selection-context.ts:2-3"),
     "expected the composer chip label to include the selected file and lines",
   );
-  captureTranscriptVisual("selection-reference-composer", "sidebar", "selection-context.ts");
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    captureTranscriptVisual("selection-reference-composer", "sidebar", "selection-context.ts");
+  }
 
   await api.__testing.sendWebviewDomAction({
     kind: "clickTestId",
@@ -2085,7 +2105,9 @@ export async function assertWebviewSelectionReferenceFlow(
     restoredSnapshot.messageTexts.some((text) => text.includes("selection-context.ts:2-3")),
     "expected the restored transcript bubble to render the selection reference label",
   );
-  captureTranscriptVisual("selection-reference-history", "sidebar", "selection-context.ts");
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    captureTranscriptVisual("selection-reference-history", "sidebar", "selection-context.ts");
+  }
 }
 
 export async function assertWebviewFileDropReferenceFlow(
@@ -2147,7 +2169,9 @@ export async function assertWebviewFileDropReferenceFlow(
     dragSnapshot.html.includes("松手加入上下文"),
     "expected the active drag hint to confirm the drop target",
   );
-  captureTranscriptVisual("file-drop-reference-hover", "sidebar", "drop-context.md");
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    captureTranscriptVisual("file-drop-reference-hover", "sidebar", "drop-context.md");
+  }
   await api.__testing.sendWebviewDomAction({
     kind: "dragLeaveTestId",
     testId: "composer-surface",
@@ -2196,7 +2220,9 @@ export async function assertWebviewFileDropReferenceFlow(
     2,
     "expected distinct file drops to remain while duplicate file drops dedupe away",
   );
-  captureTranscriptVisual("file-drop-reference", "sidebar", "drop-context.md");
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    captureTranscriptVisual("file-drop-reference", "sidebar", "drop-context.md");
+  }
 }
 
 export async function assertWebviewAtMentionReferenceFlow(
@@ -3036,35 +3062,46 @@ export async function assertTranscriptRichRenderingFlow(
     "utf8",
   );
 
-  await api.__testing.injectServeEvent({
-    assistantMessageEvent: {
-      delta: [
-        "## Fix plan",
-        "",
-        "Start with `src/test/fixtures/missing-link.ts:9`, then compare the snippet below.",
-        "",
-        "```ts src/test/fixtures/rich-render.ts:6",
-        "export function otherLine() {",
-        "  return 42;",
-        "}",
-        "```",
-        "",
-        "```text",
-        "A --> B --> C",
-        "```",
-        "",
-        "```mermaid",
-        "flowchart LR",
-        "  Start --> Finish",
-        "```",
-      ].join("\n"),
-      kind: "content_delta",
-    },
-    assistantMessageId: "assistant-rich-render",
-    message: {},
+  await api.__testing.hydrateWebviewHistory({
+    messages: [
+      {
+        id: "user-rich-render",
+        message: {
+          content: "Render the streamed markdown sample.",
+          role: "user",
+        },
+        type: "message",
+      },
+    ],
     sessionId,
-    type: "message_update",
   });
+  await api.__testing.applyWebviewSessionState({
+    busy: true,
+    model: "gpt-5.4",
+    sessionId,
+  });
+
+  const contentDeltas = [
+    "## Fix ",
+    "plan\n\nStart with `src/test/fixtures/missing-link.ts:9`, ",
+    "then compare the snippet below.\n\n```ts src/test/fixtures/rich-render.ts:6\n",
+    "export function otherLine() {\n  return 42;\n}\n```\n\n```text\n",
+    "A --> B --> C\n```\n\n```mermaid\nflowchart LR\n",
+    "  Start --> Finish\n```",
+  ];
+  for (const delta of contentDeltas) {
+    await api.__testing.injectServeEvent({
+      assistantMessageEvent: {
+        delta,
+        kind: "content_delta",
+      },
+      assistantMessageId: "assistant-rich-render",
+      message: {},
+      sessionId,
+      type: "message_update",
+    });
+    await pause(30);
+  }
   await api.__testing.injectServeEvent({
     assistantMessageEvent: {
       delta: "## Inspect\n\nStart with `src/thinking/plain.ts:9`.",
@@ -3075,6 +3112,17 @@ export async function assertTranscriptRichRenderingFlow(
     sessionId,
     type: "message_update",
   });
+  await api.__testing.injectServeEvent({
+    assistantMessageId: "assistant-rich-render",
+    message: {},
+    sessionId,
+    type: "message_end",
+  });
+  await api.__testing.applyWebviewSessionState({
+    busy: false,
+    model: "gpt-5.4",
+    sessionId,
+  });
 
   const snapshot = await waitForWebviewDomSnapshot(
     api,
@@ -3083,7 +3131,8 @@ export async function assertTranscriptRichRenderingFlow(
       candidate.assistantCodeCardCount >= 2 &&
       candidate.assistantClickablePathCount >= 1 &&
       candidate.html.includes("assistant-code-copy") &&
-      candidate.html.includes("Fix plan")
+      candidate.html.includes("Fix plan") &&
+      candidate.html.includes("Start --&gt; Finish")
         ? candidate
         : undefined,
     20_000,
@@ -3104,6 +3153,7 @@ export async function assertTranscriptRichRenderingFlow(
   assert.match(snapshot.html, /A --&gt; B --&gt; C/u);
   assert.match(snapshot.html, /tc-code-card--bare/u);
   assert.doesNotMatch(snapshot.html, /tc-code-card__lang/u);
+  assert.match(snapshot.html, /Start --&gt; Finish/u);
 
   await new Promise((resolve) => setTimeout(resolve, 150));
   const settledSnapshot = await waitForWebviewDomSnapshot(
@@ -3269,6 +3319,12 @@ export async function assertWebviewPlanToolUxFlow(
     settled.html.includes("View Plan"),
     "expected View Plan to return after the plan tool finishes",
   );
+  assert.ok(
+    settled.latestUserTopWithinStream !== null &&
+      settled.planCardTopWithinStream !== null &&
+      settled.planCardTopWithinStream > settled.latestUserTopWithinStream,
+    `expected the live plan card to stay below the latest user message, got user=${String(settled.latestUserTopWithinStream)} plan=${String(settled.planCardTopWithinStream)}`,
+  );
 }
 
 export async function assertWebviewStickyHistoryFlow(
@@ -3420,6 +3476,11 @@ export async function assertPlanPreviewCustomEditorFlow(
   );
   const planBasename = "e2e-preview.plan.md";
   const planPath = path.join(scratchDir, planBasename);
+  const linkedFilePath = path.join(scratchDir, "fixtures", "preview-target.ts");
+  const linkedDisplayPath = path
+    .relative(workspaceRoot, linkedFilePath)
+    .split(path.sep)
+    .join("/");
   const planUri = vscode.Uri.file(planPath);
   const planId = `e2e-plan-${Date.now().toString(36)}`;
   const initialText = [
@@ -3444,6 +3505,8 @@ export async function assertPlanPreviewCustomEditorFlow(
     "",
     "Body paragraph for the preview.",
     "",
+    `Open \`${linkedDisplayPath}:2\` before building.`,
+    "",
     "```mermaid",
     "flowchart LR",
     "  a[Start] --> b[Finish]",
@@ -3456,6 +3519,16 @@ export async function assertPlanPreviewCustomEditorFlow(
 
   try {
     await fs.mkdir(scratchDir, { recursive: true });
+    await fs.mkdir(path.dirname(linkedFilePath), { recursive: true });
+    await fs.writeFile(
+      linkedFilePath,
+      [
+        "export function previewTarget() {",
+        "  return 'ready';",
+        "}",
+      ].join("\n"),
+      "utf8",
+    );
     await fs.writeFile(planPath, initialText, "utf8");
 
     await api.__testing.injectServeEvent({
@@ -3523,6 +3596,40 @@ export async function assertPlanPreviewCustomEditorFlow(
       mermaid.mermaidSvgCount >= 1,
       `expected at least one rendered mermaid SVG, got ${mermaid.mermaidSvgCount}`,
     );
+
+    const inlinePathSnapshot = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => snapshot.inlinePathCount >= 1,
+      20_000,
+    );
+    assert.ok(
+      inlinePathSnapshot.inlinePathCount >= 1,
+      `expected at least one clickable inline path in the plan preview, got ${inlinePathSnapshot.inlinePathCount}`,
+    );
+    api.__testing.clearObservedFileOpens();
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "clickSelector",
+      selector: ".tc-inline-path",
+    });
+    await waitFor(
+      () =>
+        api.__testing
+          .getObservedFileOpens()
+          .some((entry) => entry.path === linkedDisplayPath && entry.line === 2),
+      20_000,
+      `expected the inline path click to call ide.showFile(${linkedDisplayPath}, 2)`,
+    );
+    const linkedEditor = await waitForActiveTextEditor(
+      (editor) => editor?.document.uri.fsPath === linkedFilePath,
+    );
+    assert.equal(
+      linkedEditor.document.uri.fsPath,
+      linkedFilePath,
+      `expected the inline path click to open ${linkedDisplayPath}`,
+    );
+    await api.__testing.openPlanPreview(planPath);
+    await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
 
     // Native title-bar command → "Markdown" opens the plain native text editor
     // for the same file (no in-webview source view any more).

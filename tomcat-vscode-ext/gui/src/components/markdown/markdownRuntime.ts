@@ -1,6 +1,8 @@
 import DOMPurify from "dompurify";
 import { Marked, Renderer, type Token, type Tokens } from "marked";
 
+import { getMermaid, logRichRender } from "./richRenderRuntime";
+
 const BLOCK_RENDERERS = [
   "heading",
   "paragraph",
@@ -121,23 +123,29 @@ export async function renderMermaidBlocks(
   isCancelled: () => boolean,
 ): Promise<void> {
   let blocks = collectMermaidCodeBlocks(container);
+  let retryCount = 0;
   if (blocks.length === 0) {
     await waitForNextFrame(container);
+    retryCount = 1;
     if (isCancelled()) {
+      logRichRender("mermaid: cancelled", { blocks: 0, cancelled: true, retry: retryCount });
       return;
     }
     blocks = collectMermaidCodeBlocks(container);
   }
   if (blocks.length === 0) {
+    logRichRender("mermaid: blocks=0", { blocks: 0, retry: retryCount, svg: 0 });
     return;
   }
-  const mermaid = (await import("mermaid")).default;
+  const mermaid = await getMermaid();
   if (isCancelled()) {
+    logRichRender("mermaid: cancelled", { blocks: blocks.length, cancelled: true, retry: retryCount });
     return;
   }
+  const documentRef = container.ownerDocument;
   const dark =
-    document.body.classList.contains("vscode-dark")
-    || document.body.classList.contains("vscode-high-contrast");
+    documentRef.body.classList.contains("vscode-dark")
+    || documentRef.body.classList.contains("vscode-high-contrast");
   mermaid.initialize({
     fontFamily: "var(--vscode-font-family, sans-serif)",
     securityLevel: "strict",
@@ -145,6 +153,7 @@ export async function renderMermaidBlocks(
     theme: dark ? "dark" : "default",
   });
 
+  let renderedSvgCount = 0;
   for (const [index, code] of blocks.entries()) {
     const host = code.closest("pre") ?? code;
     const graph = code.textContent ?? "";
@@ -153,14 +162,21 @@ export async function renderMermaidBlocks(
     try {
       const { svg } = await mermaid.render(id, graph);
       if (isCancelled()) {
+        logRichRender("mermaid: cancelled", {
+          blocks: blocks.length,
+          cancelled: true,
+          retry: retryCount,
+          svg: renderedSvgCount,
+        });
         return;
       }
-      const figure = document.createElement("figure");
+      const figure = documentRef.createElement("figure");
       figure.className = "tc-plan-preview__mermaid";
       figure.setAttribute("data-tc-mermaid-rendered", "1");
       figure.setAttribute("data-testid", "plan-mermaid");
       figure.innerHTML = svg;
       host.replaceWith(figure);
+      renderedSvgCount += 1;
     } catch {
       if (!isCancelled()) {
         host.removeAttribute("data-tc-mermaid-pending");
@@ -168,4 +184,10 @@ export async function renderMermaidBlocks(
       }
     }
   }
+  logRichRender("mermaid: done", {
+    blocks: blocks.length,
+    cancelled: false,
+    retry: retryCount,
+    svg: renderedSvgCount,
+  });
 }

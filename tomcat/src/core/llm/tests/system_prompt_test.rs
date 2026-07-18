@@ -26,6 +26,14 @@ fn build_system_prompt_contains_tools_and_workspace() {
 }
 
 #[test]
+fn planner_reminder_forces_plan_requests_to_use_plan_tools() {
+    let prompt = crate::core::prompts::load(crate::core::prompts::PromptKey::PlannerReminder);
+    assert!(prompt.contains("MUST use `create_plan` or `update_plan`"));
+    assert!(prompt.contains("Do NOT emit a plan/proposal as prose"));
+    assert!(prompt.contains("设计方案"));
+}
+
+#[test]
 fn build_system_prompt_contains_current_time() {
     let prompt = build_system_prompt("/tmp");
     assert!(prompt.contains("Current date and time:"));

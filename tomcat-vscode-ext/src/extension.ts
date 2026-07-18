@@ -39,7 +39,11 @@ import {
   initializeServe,
   type InitializeResult,
 } from "./serveClient/initialize";
-import { SessionRouter } from "./serveClient/sessionRouter";
+import {
+  SessionRouter,
+  type SessionHistoryPayload,
+  type SessionStatePayload,
+} from "./serveClient/sessionRouter";
 import { TomcatMessenger } from "./serveClient/TomcatMessenger";
 import type { ServeEvent } from "./serveClient/wire";
 import {
@@ -116,6 +120,7 @@ export interface TomcatExtensionApi {
       historyLoaderVisible: boolean;
       html: string;
       jumpToLatestVisible: boolean;
+      planCardTopWithinStream: number | null;
       latestUserTopWithinStream: number | null;
       messageTexts: string[];
       modelDropdownBottom: number | null;
@@ -174,9 +179,11 @@ export interface TomcatExtensionApi {
       sessionTitleUpdated: boolean;
     }>;
     clearObservedEvents(): void;
+    clearObservedFileOpens(): void;
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
     focusWebview(): Promise<void>;
     getObservedEvents(): ServeEvent[];
+    getObservedFileOpens(): Array<{ line?: number; path: string }>;
     getPromptHistory(): PromptRecord[];
     getPreparedChange(toolCallId: string): {
       displayPath: string;
@@ -194,6 +201,8 @@ export interface TomcatExtensionApi {
       webviewReady: boolean;
     };
     getWebviewState(): ReturnType<TomcatWebviewViewProvider["currentState"]>;
+    hydrateWebviewHistory(payload: SessionHistoryPayload): Promise<void>;
+    applyWebviewSessionState(payload: SessionStatePayload): Promise<void>;
     injectServeEvent(event: ServeEvent): Promise<void>;
     listSessions(
       scope?: Parameters<SessionRouter["listSessions"]>[0],
@@ -499,6 +508,7 @@ export async function activate(
   const output = vscode.window.createOutputChannel("Tomcat");
   const ide = new VsCodeIde();
   const observedEvents: ServeEvent[] = [];
+  const observedFileOpens: Array<{ line?: number; path: string }> = [];
   const promptHistory: PromptRecord[] = [];
   const eventWaiters = new Set<{
     filter: ObservedEventFilter;
@@ -516,6 +526,11 @@ export async function activate(
       eventWaiters.delete(waiter);
       waiter.resolve(event);
     }
+  };
+  const rawShowFile = ide.showFile.bind(ide);
+  ide.showFile = async (displayPath: string, line?: number) => {
+    await rawShowFile(displayPath, line);
+    observedFileOpens.push({ line, path: displayPath });
   };
   let resolvedExecutable = await resolveExecutable(context);
 
@@ -855,7 +870,7 @@ export async function activate(
     openExternal: async (href) => {
       await vscode.env.openExternal(vscode.Uri.parse(href));
     },
-    openWorkspaceFile: (filePath) => ide.showFile(filePath),
+    openFile: (filePath, line) => ide.showFile(filePath, line),
     setBuildModel: async (modelId) => {
       await vscode.workspace
         .getConfiguration(TOMCAT_CONFIG_SECTION)
@@ -1233,12 +1248,16 @@ export async function activate(
         observedEvents.length = 0;
         webviewProvider.resetOpenFileObserved();
       },
+      clearObservedFileOpens: () => {
+        observedFileOpens.length = 0;
+      },
       executeCommand: (command, ...args) =>
         vscode.commands.executeCommand(command, ...args),
       focusWebview: async () => {
         await vscode.commands.executeCommand(TOMCAT_FOCUS_WEBVIEW_COMMAND);
       },
       getObservedEvents: () => [...observedEvents],
+      getObservedFileOpens: () => [...observedFileOpens],
       getPromptHistory: () => [...promptHistory],
       getPreparedChange: (toolCallId) => {
         const change = ide.getPreparedChange(toolCallId);
@@ -1256,6 +1275,38 @@ export async function activate(
       getLastContextSearchIntent: () => webviewProvider.getLastContextSearchIntent(),
       getSettingsPanelState: () => settingsPanel.__testingSnapshot(),
       getWebviewState: () => webviewProvider.currentState(),
+      hydrateWebviewHistory: async (payload) => {
+        await webviewProvider.waitUntilReady();
+        (
+          webviewProvider as unknown as {
+            stateStore: {
+              hydrateHistory(sessionId: string, history: SessionHistoryPayload): void;
+            };
+            postState(): Promise<void>;
+          }
+        ).stateStore.hydrateHistory(payload.sessionId, payload);
+        await (
+          webviewProvider as unknown as {
+            postState(): Promise<void>;
+          }
+        ).postState();
+      },
+      applyWebviewSessionState: async (payload) => {
+        await webviewProvider.waitUntilReady();
+        (
+          webviewProvider as unknown as {
+            stateStore: {
+              applySessionState(payload: SessionStatePayload): void;
+            };
+            postState(): Promise<void>;
+          }
+        ).stateStore.applySessionState(payload);
+        await (
+          webviewProvider as unknown as {
+            postState(): Promise<void>;
+          }
+        ).postState();
+      },
       injectServeEvent: async (event) => {
         recordObservedEvent(event);
         await (

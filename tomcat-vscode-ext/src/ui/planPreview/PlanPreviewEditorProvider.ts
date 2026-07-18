@@ -113,7 +113,7 @@ export interface PlanPreviewEditorProviderDeps {
   getBuildModel(): string;
   messenger: TomcatMessenger;
   openExternal(href: string): Promise<void> | void;
-  openWorkspaceFile(filePath: string): Promise<void> | void;
+  openFile(filePath: string, line?: number): Promise<void> | void;
   /** Persist the global build model to `settings.json` (Global scope). */
   setBuildModel(modelId: string): Promise<void> | void;
 }
@@ -393,13 +393,22 @@ export class PlanPreviewEditorProvider
           await this.deps.openExternal(target.href);
         } else if (target.kind === "file") {
           try {
-            await this.deps.openWorkspaceFile(target.path);
+            await this.deps.openFile(target.path);
           } catch {
             await this.deps.openExternal(intent.data.href);
           }
         }
         return;
       }
+      case "openFile":
+        try {
+          await this.deps.openFile(intent.data.path, intent.data.line);
+        } catch (error) {
+          await vscode.window.showErrorMessage(
+            error instanceof Error ? error.message : `Unable to open file: ${intent.data.path}`,
+          );
+        }
+        return;
       case "setBuildModel":
         await this.deps.setBuildModel(intent.data.modelId);
         await postState();

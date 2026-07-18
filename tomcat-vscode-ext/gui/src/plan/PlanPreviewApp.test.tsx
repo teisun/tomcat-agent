@@ -197,6 +197,25 @@ describe("PlanPreviewApp", () => {
     expect((intents[0] as { data: { modelId: string } }).data.modelId).toBe("claude-opus");
   });
 
+  it("sends openFile for linkified inline file paths in the plan body", () => {
+    const api = makeApi();
+    render(<PlanPreviewApp vscodeApi={api} />);
+    pushState(
+      makeState({
+        bodyMarkdown: "Check `src/test/fixtures/plan-preview.ts:18` before shipping.",
+      }),
+    );
+    fireEvent.click(screen.getByTestId("assistant-clickable-path"));
+    const intents = intentsOfType(api, "openFile") as {
+      data: { line?: number; path: string };
+    }[];
+    expect(intents).toHaveLength(1);
+    expect(intents[0].data).toEqual({
+      line: 18,
+      path: "src/test/fixtures/plan-preview.ts",
+    });
+  });
+
   it("stamps blocks with data-source-line and derives lines from the selection (even with inline markdown)", () => {
     const api = makeApi();
     render(<PlanPreviewApp vscodeApi={api} />);

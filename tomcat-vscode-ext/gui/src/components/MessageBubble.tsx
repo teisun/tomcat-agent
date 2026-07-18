@@ -11,12 +11,15 @@ const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
   user: "You",
   warn: "Warn",
 };
+const NOOP_OPEN_FILE = () => undefined;
 
 export function MessageBubble({
+  isStreaming = false,
   item,
   onOpenFile,
   onRetry,
 }: {
+  isStreaming?: boolean;
   item: WebviewMessageBlock;
   onOpenFile?: (path: string, line?: number) => void;
   onRetry?: (messageId: string) => void;
@@ -70,7 +73,11 @@ export function MessageBubble({
       ) : null}
       <div className="message-text rendered-markdown" data-testid="message-text">
         {item.kind === "assistant" ? (
-          <ChatMarkdown markdown={item.text} onOpenFile={onOpenFile ?? (() => undefined)} />
+          <ChatMarkdown
+            isStreaming={isStreaming}
+            markdown={item.text}
+            onOpenFile={onOpenFile ?? NOOP_OPEN_FILE}
+          />
         ) : (
           segments.map((segment, index) =>
             segment.type === "text" ? (

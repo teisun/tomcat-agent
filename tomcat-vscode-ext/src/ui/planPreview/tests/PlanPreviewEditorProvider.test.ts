@@ -146,7 +146,7 @@ function makeDeps(
       }),
     } as never,
     openExternal: vi.fn().mockResolvedValue(undefined),
-    openWorkspaceFile: vi.fn().mockResolvedValue(undefined),
+    openFile: vi.fn().mockResolvedValue(undefined),
     setBuildModel: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -291,7 +291,7 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
       vi.fn(),
     );
     expect(deps.openExternal).toHaveBeenCalledWith("https://example.com");
-    expect(deps.openWorkspaceFile).not.toHaveBeenCalled();
+    expect(deps.openFile).not.toHaveBeenCalled();
   });
 
   it("routes relative links to the workspace file opener", async () => {
@@ -302,14 +302,14 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
       makeDoc(PLAN_TEXT, "/workspace/plans/sample.plan.md"),
       vi.fn(),
     );
-    expect(deps.openWorkspaceFile).toHaveBeenCalledWith(
+    expect(deps.openFile).toHaveBeenCalledWith(
       path.resolve("/workspace/plans", "docs/design.md"),
     );
   });
 
   it("falls back to external open when the workspace file cannot be opened", async () => {
     const deps = makeDeps({
-      openWorkspaceFile: vi.fn().mockRejectedValue(new Error("missing")),
+      openFile: vi.fn().mockRejectedValue(new Error("missing")),
     });
     const provider = new PlanPreviewEditorProvider(deps);
     await provider.handleIntent(
@@ -318,6 +318,45 @@ describe("PlanPreviewEditorProvider.handleIntent", () => {
       vi.fn(),
     );
     expect(deps.openExternal).toHaveBeenCalledWith("docs/design.md");
+  });
+
+  it("opens inline file-path intents through the IDE with line numbers", async () => {
+    const deps = makeDeps();
+    const provider = new PlanPreviewEditorProvider(deps);
+    await provider.handleIntent(
+      {
+        data: { line: 7, path: "src/test/fixtures/plan-preview.ts" },
+        messageId: "1",
+        type: "openFile",
+      },
+      makeDoc(),
+      vi.fn(),
+    );
+    expect(deps.openFile).toHaveBeenCalledWith("src/test/fixtures/plan-preview.ts", 7);
+  });
+
+  it("shows a toast when an inline file-path open fails", async () => {
+    const deps = makeDeps({
+      openFile: vi.fn().mockRejectedValue(new Error("cannot open inline path")),
+    });
+    const toastSpy = vi
+      .spyOn(vscode.window, "showErrorMessage")
+      .mockResolvedValue(undefined as never);
+    const provider = new PlanPreviewEditorProvider(deps);
+    try {
+      await provider.handleIntent(
+        {
+          data: { line: 7, path: "src/test/fixtures/plan-preview.ts" },
+          messageId: "1",
+          type: "openFile",
+        },
+        makeDoc(),
+        vi.fn(),
+      );
+      expect(toastSpy).toHaveBeenCalledWith("cannot open inline path");
+    } finally {
+      toastSpy.mockRestore();
+    }
   });
 
   it("persists the build model and re-posts state", async () => {

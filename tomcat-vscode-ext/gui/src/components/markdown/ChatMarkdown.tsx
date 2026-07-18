@@ -1,166 +1,13 @@
-import { useEffect, useMemo, useRef, type MouseEvent } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, type MouseEvent } from "react";
 
-import { fileChipIconClass } from "../FileChip";
-import { parseCodeFenceInfo } from "./codeFence";
-import { basenameOf, detectInlineFilePath, inferLanguageFromPath } from "./inlinePath";
 import {
-  renderMarkdownHtml,
-  renderMermaidBlocks,
-  sanitizeMarkdownHtml,
-} from "./markdownRuntime";
+  buildDecoratedHtml,
+  normalizeHighlightLanguage,
+} from "./markdownDecorators";
+import { renderMermaidBlocks } from "./markdownRuntime";
+import { getHighlighter, logRichRender } from "./richRenderRuntime";
 
-type HighlightJsCore = typeof import("highlight.js/lib/core");
-
-let highlighterPromise: Promise<HighlightJsCore["default"]> | null = null;
-
-function withLocationSuffix(label: string, line?: number, column?: number): string {
-  if (typeof line !== "number") {
-    return label;
-  }
-  return typeof column === "number" ? `${label}:${line}:${column}` : `${label}:${line}`;
-}
-
-function displayFileLabel(path: string, line?: number, column?: number): string {
-  return withLocationSuffix(path, line, column);
-}
-
-function displayBasenameLabel(path: string, line?: number, column?: number): string {
-  return withLocationSuffix(basenameOf(path), line, column);
-}
-
-function normalizeHighlightLanguage(value: string | undefined): string {
-  switch (value?.toLowerCase()) {
-    case undefined:
-      return "plaintext";
-    case "cjs":
-    case "js":
-    case "jsx":
-    case "mjs":
-      return "javascript";
-    case "html":
-      return "xml";
-    case "md":
-      return "markdown";
-    case "py":
-      return "python";
-    case "rb":
-      return "ruby";
-    case "rs":
-      return "rust";
-    case "sh":
-    case "shell":
-    case "zsh":
-      return "bash";
-    case "text":
-    case "txt":
-      return "plaintext";
-    case "ts":
-    case "tsx":
-      return "typescript";
-    case "yml":
-      return "yaml";
-    default:
-      return value.toLowerCase();
-  }
-}
-
-async function getHighlighter(): Promise<HighlightJsCore["default"]> {
-  if (!highlighterPromise) {
-    const pending = (async () => {
-      const [
-        { default: hljs },
-        { default: bash },
-        { default: c },
-        { default: cpp },
-        { default: css },
-        { default: diff },
-        { default: go },
-        { default: ini },
-        { default: java },
-        { default: javascript },
-        { default: json },
-        { default: kotlin },
-        { default: markdown },
-        { default: php },
-        { default: plaintext },
-        { default: python },
-        { default: ruby },
-        { default: rust },
-        { default: scala },
-        { default: sql },
-        { default: swift },
-        { default: typescript },
-        { default: xml },
-        { default: yaml },
-      ] = await Promise.all([
-        import("highlight.js/lib/core"),
-        import("highlight.js/lib/languages/bash"),
-        import("highlight.js/lib/languages/c"),
-        import("highlight.js/lib/languages/cpp"),
-        import("highlight.js/lib/languages/css"),
-        import("highlight.js/lib/languages/diff"),
-        import("highlight.js/lib/languages/go"),
-        import("highlight.js/lib/languages/ini"),
-        import("highlight.js/lib/languages/java"),
-        import("highlight.js/lib/languages/javascript"),
-        import("highlight.js/lib/languages/json"),
-        import("highlight.js/lib/languages/kotlin"),
-        import("highlight.js/lib/languages/markdown"),
-        import("highlight.js/lib/languages/php"),
-        import("highlight.js/lib/languages/plaintext"),
-        import("highlight.js/lib/languages/python"),
-        import("highlight.js/lib/languages/ruby"),
-        import("highlight.js/lib/languages/rust"),
-        import("highlight.js/lib/languages/scala"),
-        import("highlight.js/lib/languages/sql"),
-        import("highlight.js/lib/languages/swift"),
-        import("highlight.js/lib/languages/typescript"),
-        import("highlight.js/lib/languages/xml"),
-        import("highlight.js/lib/languages/yaml"),
-      ]);
-
-      hljs.registerLanguage("bash", bash);
-      hljs.registerLanguage("c", c);
-      hljs.registerLanguage("cpp", cpp);
-      hljs.registerLanguage("css", css);
-      hljs.registerLanguage("diff", diff);
-      hljs.registerLanguage("go", go);
-      hljs.registerLanguage("ini", ini);
-      hljs.registerLanguage("java", java);
-      hljs.registerLanguage("javascript", javascript);
-      hljs.registerLanguage("json", json);
-      hljs.registerLanguage("kotlin", kotlin);
-      hljs.registerLanguage("markdown", markdown);
-      hljs.registerLanguage("php", php);
-      hljs.registerLanguage("plaintext", plaintext);
-      hljs.registerLanguage("python", python);
-      hljs.registerLanguage("ruby", ruby);
-      hljs.registerLanguage("rust", rust);
-      hljs.registerLanguage("scala", scala);
-      hljs.registerLanguage("sql", sql);
-      hljs.registerLanguage("swift", swift);
-      hljs.registerLanguage("typescript", typescript);
-      hljs.registerLanguage("xml", xml);
-      hljs.registerLanguage("yaml", yaml);
-      hljs.registerAliases?.(["sh", "shell", "zsh"], { languageName: "bash" });
-      hljs.registerAliases?.(["js", "jsx", "mjs", "cjs"], { languageName: "javascript" });
-      hljs.registerAliases?.(["ts", "tsx"], { languageName: "typescript" });
-      hljs.registerAliases?.(["html"], { languageName: "xml" });
-      hljs.registerAliases?.(["md"], { languageName: "markdown" });
-      hljs.registerAliases?.(["py"], { languageName: "python" });
-      hljs.registerAliases?.(["rb"], { languageName: "ruby" });
-      hljs.registerAliases?.(["rs"], { languageName: "rust" });
-      hljs.registerAliases?.(["text", "txt"], { languageName: "plaintext" });
-      hljs.registerAliases?.(["yml"], { languageName: "yaml" });
-      return hljs;
-    })();
-    highlighterPromise = pending.catch((error) => {
-      highlighterPromise = null;
-      throw error;
-    });
-  }
-  return highlighterPromise;
-}
+const STREAMING_ENHANCEMENT_DEBOUNCE_MS = 120;
 
 function closeOpenFenceIfNeeded(markdown: string): string {
   const lines = markdown.split("\n");
@@ -184,100 +31,27 @@ function closeOpenFenceIfNeeded(markdown: string): string {
   return `${markdown}\n${fenceStack.map((char) => char.repeat(3)).join("\n")}`;
 }
 
-function createCopyButton(documentRef: Document): HTMLButtonElement {
-  const copyButton = documentRef.createElement("button");
-  copyButton.className = "tc-code-card__copy";
-  copyButton.dataset.tcCopyCode = "1";
-  copyButton.dataset.testid = "assistant-code-copy";
-  copyButton.type = "button";
-  copyButton.title = "Copy code";
-  copyButton.setAttribute("aria-label", "Copy code");
-
-  const copyIcon = documentRef.createElement("span");
-  copyIcon.setAttribute("aria-hidden", "true");
-  copyIcon.className = "tc-code-card__copy-icon codicon codicon-copy";
-  copyButton.appendChild(copyIcon);
-
-  return copyButton;
-}
-
-function decorateCodeCards(container: HTMLElement): void {
-  const documentRef = container.ownerDocument;
-  const blocks = Array.from(container.querySelectorAll<HTMLPreElement>("pre")).filter(
-    (pre) => !pre.closest(".tc-code-card"),
-  );
-  for (const pre of blocks) {
-    const code = pre.querySelector("code");
-    if (!code || code.classList.contains("language-mermaid")) {
-      continue;
-    }
-    const parsed = parseCodeFenceInfo(pre.getAttribute("data-fence-info"));
-    if (parsed.isMermaid) {
-      continue;
-    }
-
-    const language = normalizeHighlightLanguage(parsed.language ?? inferLanguageFromPath(parsed.filePath ?? ""));
-    code.classList.add(`language-${language}`);
-
-    const wrapper = documentRef.createElement("section");
-    wrapper.className = "tc-code-card";
-    wrapper.setAttribute("data-testid", "assistant-code-card");
-    const copyButton = createCopyButton(documentRef);
-
-    if (parsed.filePath) {
-      const header = documentRef.createElement("div");
-      header.className = "tc-code-card__header";
-
-      const meta = documentRef.createElement("div");
-      meta.className = "tc-code-card__meta";
-
-      const fileButton = documentRef.createElement("button");
-      fileButton.className = "tc-code-card__file";
-      fileButton.dataset.tcFilePath = parsed.filePath;
-      fileButton.dataset.testid = "assistant-code-file";
-      fileButton.type = "button";
-      if (typeof parsed.line === "number") {
-        fileButton.dataset.tcLine = String(parsed.line);
-      }
-      fileButton.title = displayFileLabel(parsed.filePath, parsed.line);
-
-      const icon = documentRef.createElement("span");
-      icon.className = `tc-code-card__file-icon codicon ${fileChipIconClass(parsed.filePath)}`;
-      icon.setAttribute("aria-hidden", "true");
-      fileButton.appendChild(icon);
-
-      const label = documentRef.createElement("span");
-      label.className = "tc-code-card__file-label";
-      label.textContent = displayBasenameLabel(parsed.filePath, parsed.line);
-      fileButton.appendChild(label);
-
-      meta.appendChild(fileButton);
-
-      header.append(meta, copyButton);
-      pre.replaceWith(wrapper);
-      wrapper.append(header, pre);
-      continue;
-    }
-
-    wrapper.classList.add("tc-code-card--bare");
-    pre.replaceWith(wrapper);
-    wrapper.append(pre, copyButton);
-  }
-}
-
 async function highlightCodeBlocks(container: HTMLElement, isCancelled: () => boolean): Promise<void> {
   const codes = Array.from(container.querySelectorAll<HTMLElement>("pre > code")).filter(
     (node) => !node.classList.contains("language-mermaid"),
   );
   if (codes.length === 0) {
+    logRichRender("highlight: done", { cancelled: false, done: 0, nodes: 0 });
     return;
   }
   const hljs = await getHighlighter();
   if (isCancelled()) {
+    logRichRender("highlight: cancelled", { cancelled: true, done: 0, nodes: codes.length });
     return;
   }
+  let highlightedCount = 0;
   for (const code of codes) {
     if (isCancelled()) {
+      logRichRender("highlight: cancelled", {
+        cancelled: true,
+        done: highlightedCount,
+        nodes: codes.length,
+      });
       return;
     }
     if (code.dataset.tcHighlighted === "1") {
@@ -292,42 +66,13 @@ async function highlightCodeBlocks(container: HTMLElement, isCancelled: () => bo
     code.classList.add("hljs", `language-${language}`);
     code.innerHTML = hljs.highlight(rawText, { ignoreIllegals: true, language }).value;
     code.dataset.tcHighlighted = "1";
+    highlightedCount += 1;
   }
-}
-
-function linkifyInlineFilePaths(container: HTMLElement): void {
-  const documentRef = container.ownerDocument;
-  const inlineCodes = Array.from(container.querySelectorAll<HTMLElement>("code")).filter(
-    (node) => !node.closest("pre"),
-  );
-  for (const code of inlineCodes) {
-    const text = code.textContent ?? "";
-    const match = detectInlineFilePath(text);
-    if (!match) {
-      continue;
-    }
-    const link = documentRef.createElement("a");
-    link.className = "tc-inline-path";
-    link.dataset.tcFilePath = match.path;
-    link.dataset.testid = "assistant-clickable-path";
-    link.href = "#";
-    link.title = displayFileLabel(match.path, match.line, match.column);
-    if (typeof match.line === "number") {
-      link.dataset.tcLine = String(match.line);
-    }
-
-    const icon = documentRef.createElement("span");
-    icon.className = `tc-inline-path__icon codicon ${fileChipIconClass(match.path)}`;
-    icon.setAttribute("aria-hidden", "true");
-    link.appendChild(icon);
-
-    const label = documentRef.createElement("span");
-    label.className = "tc-inline-path__label";
-    label.textContent = displayBasenameLabel(match.path, match.line, match.column);
-    link.appendChild(label);
-
-    code.replaceWith(link);
-  }
+  logRichRender("highlight: done", {
+    cancelled: false,
+    done: highlightedCount,
+    nodes: codes.length,
+  });
 }
 
 function setCopyButtonCopiedState(button: HTMLElement, copied: boolean): void {
@@ -356,63 +101,103 @@ function flashCopyButton(button: HTMLElement): void {
   );
 }
 
-function buildDecoratedHtml(markdown: string): string {
-  if (typeof document === "undefined") {
-    return sanitizeMarkdownHtml(renderMarkdownHtml(markdown));
+function scheduleEnhancement(isStreaming: boolean, callback: () => void): () => void {
+  if (isStreaming) {
+    const timeoutId = window.setTimeout(callback, STREAMING_ENHANCEMENT_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }
-  const container = document.createElement("div");
-  container.innerHTML = sanitizeMarkdownHtml(renderMarkdownHtml(markdown));
-  decorateCodeCards(container);
-  linkifyInlineFilePaths(container);
-  return container.innerHTML;
+  let disposed = false;
+  Promise.resolve().then(() => {
+    if (!disposed) {
+      callback();
+    }
+  });
+  return () => {
+    disposed = true;
+  };
 }
 
-export function ChatMarkdown({
+function ChatMarkdownComponent({
+  isStreaming = false,
   markdown,
   onOpenFile,
   onOpenLink,
 }: {
+  isStreaming?: boolean;
   markdown: string;
   onOpenFile(path: string, line?: number): void;
   onOpenLink?(href: string): void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const appliedHtmlRef = useRef<string | null>(null);
   const stableMarkdown = useMemo(() => closeOpenFenceIfNeeded(markdown), [markdown]);
   const decoratedHtml = useMemo(() => buildDecoratedHtml(stableMarkdown), [stableMarkdown]);
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+    if (appliedHtmlRef.current === decoratedHtml) {
+      logRichRender("innerHTML: skip(same)", { len: decoratedHtml.length });
+      return;
+    }
+    container.innerHTML = decoratedHtml;
+    appliedHtmlRef.current = decoratedHtml;
+    logRichRender("innerHTML: apply", { len: decoratedHtml.length });
+  }, [decoratedHtml]);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) {
       return;
     }
+    logRichRender("effect fire", { len: decoratedHtml.length, streaming: isStreaming });
     let cancelled = false;
-    void (async () => {
-      try {
-        await highlightCodeBlocks(container, () => cancelled);
-      } catch {
-        // Rich rendering should degrade to plain code, not block clickable paths.
-      }
-      if (cancelled) {
-        return;
-      }
-      try {
-        await renderMermaidBlocks(container, () => cancelled);
-      } catch {
-        // Mermaid should degrade to plain code without affecting other transcript affordances.
-      }
-      if (cancelled) {
-        return;
-      }
-      try {
-        await highlightCodeBlocks(container, () => cancelled);
-      } catch {
-        // A final highlight pass lets the transcript settle after async mermaid rendering.
-      }
-    })();
+    const cancelScheduled = scheduleEnhancement(isStreaming, () => {
+      void (async () => {
+        try {
+          await highlightCodeBlocks(container, () => cancelled);
+        } catch (error) {
+          logRichRender(
+            "highlight: FAILED",
+            { error: error instanceof Error ? error.message : String(error) },
+            "warn",
+          );
+        }
+        if (cancelled) {
+          return;
+        }
+        try {
+          await renderMermaidBlocks(container, () => cancelled);
+        } catch (error) {
+          logRichRender(
+            "mermaid: FAILED",
+            { error: error instanceof Error ? error.message : String(error) },
+            "warn",
+          );
+        }
+        if (cancelled) {
+          return;
+        }
+        try {
+          await highlightCodeBlocks(container, () => cancelled);
+        } catch (error) {
+          logRichRender(
+            "highlight: FAILED",
+            { error: error instanceof Error ? error.message : String(error) },
+            "warn",
+          );
+        }
+      })();
+    });
     return () => {
       cancelled = true;
+      cancelScheduled();
     };
-  }, [decoratedHtml]);
+  }, [decoratedHtml, isStreaming]);
 
   const handleClick = (event: MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
@@ -456,9 +241,10 @@ export function ChatMarkdown({
     <div
       className="rendered-markdown tc-chat-markdown"
       data-testid="chat-markdown"
-      dangerouslySetInnerHTML={{ __html: decoratedHtml }}
       onClick={handleClick}
       ref={containerRef}
     />
   );
 }
+
+export const ChatMarkdown = memo(ChatMarkdownComponent);

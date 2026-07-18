@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AttachmentChips } from "./components/AttachmentChips";
 import { injectCheckpointMarkers } from "./components/checkpointMarkers";
@@ -7,6 +7,7 @@ import { RestoreConfirmDialog } from "./components/RestoreConfirmDialog";
 import { SessionBar } from "./components/SessionBar";
 import { StickyUserPrompt } from "./components/StickyUserPrompt";
 import { TodoListWidget } from "./components/TodoListWidget";
+import { warmRichRenderModules } from "./components/markdown/richRenderRuntime";
 import { TranscriptView } from "./components/TranscriptView";
 import { readContextSearchDebounceMs } from "./contextSearchConfig";
 import { isWebviewReference } from "./contextReferences";
@@ -387,6 +388,9 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     document.querySelector<HTMLElement>('[data-testid="plan-todos-count"]')?.textContent ?? null;
   const planCardTitleText =
     document.querySelector<HTMLElement>('[data-testid="plan-card-title"]')?.textContent ?? null;
+  const latestPlanCard = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-testid="plan-card"]'),
+  ).at(-1);
   const viewPlanButton = document.querySelector<HTMLElement>('[data-testid="view-plan"]');
   const buildPlanButton = document.querySelector<HTMLElement>('[data-testid="build-plan"]');
   const planFooterSameRow =
@@ -413,6 +417,7 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   });
   const streamRect = stream?.getBoundingClientRect();
   const latestUserRect = latestUserMessage?.getBoundingClientRect();
+  const latestPlanCardRect = latestPlanCard?.getBoundingClientRect();
   const fileChipRect = fileChipEl?.getBoundingClientRect();
   const modelDropdownRect = document
     .querySelector<HTMLElement>('[data-testid="model-dropdown"]')
@@ -461,6 +466,8 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     historyLoaderVisible: !!document.querySelector('[data-testid="history-loader"]'),
     html: root?.innerHTML ?? "",
     jumpToLatestVisible: !!document.querySelector('[data-testid="scroll-to-bottom"]'),
+    planCardTopWithinStream:
+      streamRect && latestPlanCardRect ? latestPlanCardRect.top - streamRect.top : null,
     latestUserTopWithinStream:
       streamRect && latestUserRect ? latestUserRect.top - streamRect.top : null,
     messageTexts: queryText('[data-testid="message-text"]'),
@@ -958,9 +965,39 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     flushPendingInsertions();
   }, [state.activeSessionId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const scheduleWarmup = () => {
+      if (!cancelled) {
+        void warmRichRenderModules();
+      }
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const idleId = window.requestIdleCallback(scheduleWarmup);
+      return () => {
+        cancelled = true;
+        window.cancelIdleCallback?.(idleId);
+      };
+    }
+    const timeoutId = window.setTimeout(scheduleWarmup, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, []);
+
   const handleAnswerQuestion = (requestId: string, result: AskQuestionResult) => {
     answerQuestion(vscodeApi, requestId, result);
   };
+  const handleOpenFile = useCallback(
+    (path: string, line?: number) => {
+      postIntent(vscodeApi, "openFile", {
+        line,
+        path,
+      });
+    },
+    [vscodeApi],
+  );
 
   const handleContextSearchOpen = () => {
     setContextSearch({
@@ -1200,12 +1237,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                     toolCallId,
                   })
                 }
-                onOpenFile={(path, line) =>
-                  postIntent(vscodeApi, "openFile", {
-                    line,
-                    path,
-                  })
-                }
+                onOpenFile={handleOpenFile}
                 onOpenPlanFile={(path) =>
                   postIntent(vscodeApi, "openPlanFile", {
                     path,

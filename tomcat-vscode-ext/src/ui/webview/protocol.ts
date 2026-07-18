@@ -472,6 +472,7 @@ export type WebviewIntent =
         historyLoaderVisible: boolean;
         html: string;
         jumpToLatestVisible: boolean;
+        planCardTopWithinStream: number | null;
         latestUserTopWithinStream: number | null;
         messageTexts: string[];
         modelDropdownBottom: number | null;
@@ -746,6 +747,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         typeof value.data.approvalCount === "number" &&
         typeof value.data.html === "string" &&
         typeof value.data.jumpToLatestVisible === "boolean" &&
+        (value.data.planCardTopWithinStream === null ||
+          typeof value.data.planCardTopWithinStream === "number") &&
         (value.data.latestUserTopWithinStream === null ||
           typeof value.data.latestUserTopWithinStream === "number") &&
         (value.data.overflowAnchor === null || typeof value.data.overflowAnchor === "string") &&

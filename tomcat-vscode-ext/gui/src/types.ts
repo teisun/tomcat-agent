@@ -507,6 +507,7 @@ export type WebviewIntent =
         historyLoaderVisible: boolean;
         html: string;
         jumpToLatestVisible: boolean;
+        planCardTopWithinStream: number | null;
         latestUserTopWithinStream: number | null;
         messageTexts: string[];
         modelDropdownBottom: number | null;
