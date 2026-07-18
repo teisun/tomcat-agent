@@ -4,6 +4,8 @@ serial = { max-threads = 1 }
 real-llm = { max-threads = 2 }
 
 [profile.default]
+# 默认 integration 组固定 4 并发，避免按 CPU 满开时放大本机 I/O 与网络 mock 抖动。
+test-threads = 4
 # 默认门禁不跑显式 real-llm 层，也不跑 cli_tests 里那 5 个真 LLM 慢用例。
 default-filter = 'not (binary(current_tail_guard_real_llm_tests) or binary(openai_files_integration_tests) or binary(openai_responses_integration_tests) or binary(plan_real_llm_inprocess_tests) or binary(plan_real_llm_cli_e2e) or binary(reasoning_continuity_real_llm_tests) or (binary(cli_tests) and test(/_real_llm_cli$/)))'
 

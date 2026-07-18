@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 集成测试：默认路径不依赖外部 Wasm 运行时。
-# 测试执行按资源需求分类：默认门禁走 cargo-nextest 满并发，显式 real-llm 层单独触发。
+# 测试执行按资源需求分类：默认 integration 门禁走 cargo-nextest 4 并发，显式 real-llm 层单独触发。
 # 非 TTY 下强制 EDITOR/PAGER 为无交互，避免子进程阻塞；说明见 docs/reports/integration_test_hang_remediation.md。
 #
 # 用法（在项目根）：
@@ -8,10 +8,10 @@
 #   ./scripts/run-integration-tests.sh all                  # 同上（保留兼容别名）
 #   ./scripts/run-integration-tests.sh release              # 仅 cargo build --release
 #   ./scripts/run-integration-tests.sh clippy               # 仅 cargo clippy --all-targets -- -D warnings
-#   ./scripts/run-integration-tests.sh lib                  # 仅库内单元测试（nextest 满并发）
+#   ./scripts/run-integration-tests.sh lib                  # 仅库内单元测试（cargo test --lib）
 #   ./scripts/run-integration-tests.sh doctest              # 仅文档测试（cargo test --doc）
-#   ./scripts/run-integration-tests.sh integration          # 默认 integration 门禁（nextest 满并发 + serial 兜底空组）
-#   ./scripts/run-integration-tests.sh integration-parallel # 默认 integration 组（含原串行组已放开的 binary）
+#   ./scripts/run-integration-tests.sh integration          # 默认 integration 门禁（nextest 4 并发 + serial 兜底空组）
+#   ./scripts/run-integration-tests.sh integration-parallel # 默认 integration 组（nextest 4 并发，含原串行组已放开的 binary）
 #   ./scripts/run-integration-tests.sh integration-serial   # 仅 serial 兜底组（默认空）
 #   ./scripts/run-integration-tests.sh integration-real-llm # 真 LLM 显式层（nextest real-llm profile，max-threads=2）
 #   ./scripts/run-integration-tests.sh integration-openai-responses-wire # 只跑 OpenAI Responses wire 真链路组（需当前 OpenAI target 对应 key）
@@ -134,7 +134,7 @@ run_integration_parallel() {
   done < <(build_test_args "${TOMCAT_INTEGRATION_PARALLEL_TESTS[@]}")
 
   ensure_nextest
-  log_phase "开始 integration-parallel（默认 integration 门禁，nextest 满并发）"
+  log_phase "开始 integration-parallel（默认 integration 门禁，nextest 4 并发）"
   cargo nextest run --no-fail-fast "${args[@]}"
   local status=$?
   log_phase "结束 integration-parallel"

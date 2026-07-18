@@ -23,7 +23,7 @@
 
 集成测试与 E2E 测试可能因死锁、无限循环、外部依赖超时等原因**长时间挂起不返回**。为避免浪费时间和阻塞交付流程，**所有 §2–§4 中的测试执行**必须采用以下模式。
 
-> **与 [INTEGRATION_TEST_SPEC.md §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#7-执行与持续集成-ci) 对齐**：Rust 分类执行的唯一入口仍是 [`scripts/run-integration-tests.sh`](../../scripts/run-integration-tests.sh)，但 `lib` / `integration*` 已统一切到 `cargo-nextest`。默认策略是 **nextest 满并发 + 每测试进程临时 HOME**；`serial` 只剩证伪兜底默认空，`real-llm` 则是显式 profile（`max-threads=2`）。测试目标的分组 SSoT 仍是 [`scripts/test-groups.sh`](../../scripts/test-groups.sh)，对应的 nextest 过滤与 test-group 则在 [`tomcat/.config/nextest.toml`](../../.config/nextest.toml)。**交付前顺序**：凡新增或调整 integration 测试二进制，须先更新这两处，再跑门禁；工程师侧流程见 [Dispatcher.md §5](./Dispatcher.md)。下面的模板与 §4 自动化门禁均围绕这些入口设计，禁止在交付步骤里手写散装 `cargo test --test xxx` 序列绕开分组约束。
+> **与 [INTEGRATION_TEST_SPEC.md §7](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md#7-执行与持续集成-ci) 对齐**：Rust 分类执行的唯一入口仍是 [`scripts/run-integration-tests.sh`](../../scripts/run-integration-tests.sh)；其中 `lib` 继续走 `cargo test --lib`，`integration*` 统一走 `cargo-nextest`。默认策略是 **nextest 4 并发 + 每测试进程临时 HOME**；`serial` 只剩证伪兜底默认空，`real-llm` 则是显式 profile（`max-threads=2`）。测试目标的分组 SSoT 仍是 [`scripts/test-groups.sh`](../../scripts/test-groups.sh)，对应的 nextest 过滤与 test-group 则在 [`tomcat/.config/nextest.toml`](../../.config/nextest.toml)。**交付前顺序**：凡新增或调整 integration 测试二进制，须先更新这两处，再跑门禁；工程师侧流程见 [Dispatcher.md §5](./Dispatcher.md)。下面的模板与 §4 自动化门禁均围绕这些入口设计，禁止在交付步骤里手写散装 `cargo test --test xxx` 序列绕开分组约束。
 
 ### 执行模式
 
@@ -35,7 +35,7 @@ cd tomcat
 RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-full \
   > .integration_test_output.log 2>&1 &
 TEST_PID=$!
-# 脚本内部按 nextest 默认满并发 / real-llm 显式层执行，无需手填 -j 1 / --test-threads=1
+# 脚本内部按 nextest 默认 4 并发 / real-llm 显式层执行，无需手填 -j 1 / --test-threads=1
 # 轮询：反复执行 tail -80 .integration_test_output.log（间隔按指数退避 5s→10s→20s→30s，上限 30s）
 # 超时：kill $TEST_PID（单用例约 120s 无新输出、全量约 10 分钟仍不结束则介入，见下文）
 # 结束判定：日志文件末尾出现 EXIT_CODE=0 为通过；非 0 为失败
@@ -171,7 +171,7 @@ cargo nextest run --no-fail-fast --test cli_tests --test llm_tests --test openai
 3. **集成测试（§7.1/§7.2 分类执行 + §9/§10 门禁）**：首选 `RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-fast`；若本次变更触及 `TOMCAT_INTEGRATION_REAL_LLM_TESTS` 或 `cli_tests` 里的 `*_real_llm_cli`，还必须显式执行 `set -a && source .env && set +a && ./scripts/run-integration-tests.sh integration-real-llm`，或直接跑 `gate-full`。**禁止**用 `cargo test --test '<某 binary>'` 序列拼凑全量集成验证。
    - `integration` / `all` / `gate-fast` 会自动排除显式 real-llm binary 与 `*_real_llm_cli` 慢用例；这是默认过滤策略，不是漏跑。
    - 若本次改动触及 host-facing `functions[]` / `FunctionRegistry` / `web_search.backend`，除全量门禁外，工程师侧还应先跑 focused 回归：`runtime_split_test`（三层发现 + point override）、`plugin_function_invoker_test`（不跨插件 fallback）、以及至少一条官方 `web-search-backends` 单插件内 `auto` 路由用例。
-4. **E2E**：`RUST_LOG=tomcat=debug,info cargo nextest run --test cli_tests` 通过；插件运行时链路执行 `RUST_LOG=tomcat=debug,info cargo nextest run --test quickjs_e2e_tests` 通过；须符合 E2E_TEST_SPEC §6。它们已进入默认满并发车道，无需再手写 `-j 1 --test-threads=1`。
+4. **E2E**：`RUST_LOG=tomcat=debug,info cargo nextest run --test cli_tests` 通过；插件运行时链路执行 `RUST_LOG=tomcat=debug,info cargo nextest run --test quickjs_e2e_tests` 通过；须符合 E2E_TEST_SPEC §6。它们已进入默认 4 并发车道，无需再手写 `-j 1 --test-threads=1`。
 5. **真实插件运行时（若任务涉及插件）**：按 INTEGRATION_TEST_SPEC 5.4 与当前 nextest 分组模型执行；若 3x 连跑证明确有互踩/OOM，再最小范围回退到 serial 兜底组。
 
 #### 人工验收（条件具备时）

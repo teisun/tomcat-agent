@@ -47,7 +47,7 @@ Agent 根据自身角色定义读取主项目 [openspec/specs 规范文档](../o
    - 阅读 [编码规范](../openspec/specs/guides/coding/Codeing&Architecture_Spec.md)
 2. **开发流程**：
    - 编码（带注释）→ 测试 → 修 bug → 单测通过。
-   - **全量集成测试前（必做）**：若本次变更新增或调整了 `tests/` 下需以 **integration 测试二进制**（`cargo nextest run --test <name>` / `cargo test --test <name>` 之 `<name>`，与 `tests/<name>.rs` 对应）跑验收的用例，须在执行 `./scripts/run-integration-tests.sh` 等门禁命令**之前**，按 [INTEGRATION_TEST_SPEC §7.2](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 判定该目标应进 **默认满并发组**、**serial 兜底组**，还是 **显式 real-llm 层**，并同步更新 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 与 [`tomcat/.config/nextest.toml`](../../.config/nextest.toml)。只改其中一处视为不完整；漏登记则默认门禁会漏跑或误跑该 crate。
+   - **全量集成测试前（必做）**：若本次变更新增或调整了 `tests/` 下需以 **integration 测试二进制**（`cargo nextest run --test <name>` / `cargo test --test <name>` 之 `<name>`，与 `tests/<name>.rs` 对应）跑验收的用例，须在执行 `./scripts/run-integration-tests.sh` 等门禁命令**之前**，按 [INTEGRATION_TEST_SPEC §7.2](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md) 判定该目标应进 **默认 4 并发组**、**serial 兜底组**，还是 **显式 real-llm 层**，并同步更新 [`scripts/test-groups.sh`](../../scripts/test-groups.sh) 与 [`tomcat/.config/nextest.toml`](../../.config/nextest.toml)。只改其中一处视为不完整；漏登记则默认门禁会漏跑或误跑该 crate。
    - 集成&E2E测试 → 写技术[文档](../)：验收顺序与命令见 [INTEGRATION_MERGE_AND_ACCEPTANCE.md](./INTEGRATION_MERGE_AND_ACCEPTANCE.md)，分类执行见 [INTEGRATION_TEST_SPEC §7.1 / §7.2](../openspec/specs/guides/testing/INTEGRATION_TEST_SPEC.md)。
 3. **提交前**：
    - 更新**当前 Git 分支**对应的 status 文件：文件名为「当前分支名（`/` 替换为 `-`）.md」，位于 `docs/status/` 目录；若在 develop 上开发则更新 `docs/status/develop.md`。填入 Cov% 等元数据。
@@ -71,7 +71,7 @@ Agent 根据自身角色定义读取主项目 [openspec/specs 规范文档](../o
 3. 将 **`TASK_BOARD_002/tasks/T2-*.md`** 中该任务状态改为 `PENDING_INTEGRATION`。集成测试通过后，由合并/集成流程（见 Nibbles）将状态更新为 `DONE`；工程师只负责在自测完成并推送后标记为 `PENDING_INTEGRATION`。
 4. **完成前自检（必做）**：
    - 已确认**当前分支**，并已更新 **docs/status/当前分支对应.md**（分支名中 `/` → `-`）。
-   - **test-groups / nextest**：若本次有新增或调整 integration 测试二进制，已按 §5 同步更新 `scripts/test-groups.sh` 与 `tomcat/.config/nextest.toml`（§7.2 默认满并发 / serial 兜底 / real-llm 显式层口径一致）。
+   - **test-groups / nextest**：若本次有新增或调整 integration 测试二进制，已按 §5 同步更新 `scripts/test-groups.sh` 与 `tomcat/.config/nextest.toml`（§7.2 默认 4 并发 / serial 兜底 / real-llm 显式层口径一致）。
    - **集成与 E2E**：已按 `INTEGRATION_MERGE_AND_ACCEPTANCE.md` 完成规格/场景库（若任务涉及用户可见行为或 P0/P1 故事）、集成测试与 E2E；失败项已在**本分支**修复；**无**为通过测试而弱化断言或糊弄 `#[ignore]` 的情况。
    - **覆盖率**（可选）：若需要测量覆盖率，可手动执行 `/update-coverage` Command 或 `cargo tarpaulin --lib --package tomcat`，将结果填入 status 文件元数据表的 Cov% 列；不强制执行，不阻塞任务完成。
    - **技术文档**：若有接口/行为变更，已按 [技术文档规范](../openspec/specs/guides/workflow/DOCUMENTATION_GUIDE.md) 更新 `docs/` 下对应文档。

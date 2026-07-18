@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-18 09:30 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-18 09:41 +0800 | ACTIVE | develop | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1]** nextest 默认并发已从按 CPU 满开收敛为固定 `4`：`tomcat/.config/nextest.toml` 新增 `profile.default.test-threads = 4`，`integration_gate_config_tests` 加守卫断言，`run-integration-tests.sh` 与 `INTEGRATION_TEST_SPEC` / `INTEGRATION_MERGE_AND_ACCEPTANCE` / `Dispatcher` 文档口径同步改为“默认 4 并发”，避免本机 CPU 满载时放大 I/O、网络 mock 与外部依赖抖动。验证：`cargo test --test integration_gate_config_tests -- --nocapture` 通过 @2026-07-18
 - [✓] **[P0]** 验收整改收尾已合入 `develop`：① 失败错误 `detail` 脱敏补全（`Cookie/Set-Cookie`、`x-api-key`、`password/secret`、裸 `sk-*`、`Basic`）并 8KB 截断；② 失败轮恢复边界/幂等加固（append-invariant 不写 Error、同失败尾幂等）；③ 删除 `@tomcat` participant 与单前端后不可达的 `ownership/uiMode/conflict` 死代码，仅保留 sidebar webview chat box；④ View diff 窄窗并排（`renderSideBySideInlineBreakpoint=0`）、live 403→`agent_idle` 摘要回填、Key slot 对齐与 `KeySlotCombobox` 单测/CSS token。门禁：`cargo test --lib`、`npm run lint`、`npm run test:unit`、目标 host E2E（settings/diff/retry/multi-session/switch-restore）全绿；新包 `tomcat-vscode-ext-0.1.16.vsix`。详情见 `docs/status/feature-transcript-ui-and-checkpoints.md` @2026-07-18
 - [✓] **[P1]** Add Model Key slot 整改完成：凭证清单现每次从 `~/.tomcat/assets/.env` 热重读且只列合法非空 `*_API_KEY`；Relay 建议名按站点 + API 家族区分；Key slot 收敛为可搜索/可输入的唯一入口；新增输入失焦脱敏、共享 Key 覆盖确认、Refresh 与中英文文档。Rust admin 14/14、serve focused 1/1、GUI 12/12、SettingsPanel 5/5、TypeScript lint 均通过 @2026-07-16
 - [✓] **[P1]** reviewer 提示词现统一继承 engineering-standards #6–#8：`code_review.txt` 与 `plan_review.txt` 新增与 `core_identity` / `planner` 一字不差的 first-principles、plain-language+ASCII、UX-first 三句原则；`load_test.rs` 同步扩展 reviewer 双模板逐字守卫。验证：`cargo test --manifest-path tomcat/Cargo.toml --lib standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers` 通过 @2026-07-16
@@ -18,6 +19,7 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- 测试门禁调度：`tomcat/.config/nextest.toml` 的 `profile.default.test-threads` 固定为 `4`；默认 integration / E2E 车道不再按 `num-cpus` 满并发运行，`real-llm` 仍保持 `max-threads=2`。
 - transcript / history：新增 `TranscriptEntry::Error { summary/detail/... }` 与失败 user `turn_failed:true`；`Error.detail` 脱敏覆盖 `authorization/bearer/api_key/token/cookie/set-cookie/x-api-key/password/secret/basic/sk-*`，超 8KB 截断。
 - webview 单前端：删除 `@tomcat` chat participant 与 `ownership/uiMode/conflict` 仲裁层；webview 协议不再携带 `owner/conflictMessage/uiMode`。
 - diff：`VsCodeIde.openPreparedDiff` 在用户未显式配置时将 `diffEditor.renderSideBySideInlineBreakpoint` 设为 `0`，保证窄窗左右并排。

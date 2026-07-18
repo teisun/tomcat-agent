@@ -184,6 +184,11 @@ fn promoted_parallel_and_nextest_real_llm_filters_stay_in_sync() {
         "serial 兜底组必须保持 max-threads=1"
     );
     assert_eq!(
+        config["profile"]["default"]["test-threads"].as_integer(),
+        Some(4),
+        "默认 nextest profile 应固定为 4 并发，避免按 CPU 满开导致门禁抖动"
+    );
+    assert_eq!(
         config["test-groups"]["real-llm"]["max-threads"].as_integer(),
         Some(2),
         "real-llm profile 应限制为 max-threads=2"

@@ -139,7 +139,7 @@ my_project/
 
 **当前模型（默认追求最省时间）**：
 
-1. **默认满并发车道**：`cargo nextest run` 的默认 `test-threads = num-cpus`。凡已证实不共享进程级全局状态或真实 `~/.tomcat` 盘目录的 binary，全部放这里，包括原先的 `cli_tests`、`checkpoint_cli_e2e`、`resume_hydration_cli_e2e`、`quickjs_e2e_tests`、`hostcall_tests`、`long_lived_vm_tests`、`primitives_tools_tests`、`tool_catalog_doc`、`serve_*` 等。
+1. **默认 4 并发车道**：仓库通过 `.config/nextest.toml` 将 `profile.default.test-threads` 固定为 `4`，不再按 `num-cpus` 满开。凡已证实不共享进程级全局状态或真实 `~/.tomcat` 盘目录的 binary，全部放这里，包括原先的 `cli_tests`、`checkpoint_cli_e2e`、`resume_hydration_cli_e2e`、`quickjs_e2e_tests`、`hostcall_tests`、`long_lived_vm_tests`、`primitives_tools_tests`、`tool_catalog_doc`、`serve_*` 等。
 2. **serial 兜底组**：`test-groups.serial.max-threads = 1`，默认空。只有 3x 连跑证明确实互踩、OOM 或明显抖动时，才把个别 binary 临时回退到这里。
 3. **real-llm 显式层**：`.config/nextest.toml` 的 `profile.real-llm` 负责收口 `TOMCAT_INTEGRATION_REAL_LLM_TESTS` 以及 `cli_tests` 里 `*_real_llm_cli` 慢用例；其 `test-groups.real-llm.max-threads = 2` 只为规避 provider API 限流，不是正确性要求。
 
@@ -159,7 +159,7 @@ my_project/
 ### 7.4 全量集成测试
 默认门禁与分层流程如下：
 
-*   **快门禁**（默认 / `all` / `gate-fast`）：`clippy` → `lib(cargo test)` → `doctest` → `integration(nextest 默认满并发)`  
+*   **快门禁**（默认 / `all` / `gate-fast`）：`clippy` → `lib(cargo test)` → `doctest` → `integration(nextest 默认 4 并发)`  
     命令：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-fast`
 *   **全门禁**（合并前显式一次）：`gate-fast` → `integration-real-llm`  
     命令：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-full`
