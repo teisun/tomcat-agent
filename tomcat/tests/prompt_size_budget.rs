@@ -22,6 +22,7 @@ fn serialized_len(defs: &[serde_json::Value]) -> usize {
 const SYSTEM_TEMPLATES: &[(&str, PromptKey)] = &[
     ("core_identity", PromptKey::SystemCoreIdentity),
     ("tool_instructions", PromptKey::SystemToolInstructions),
+    ("output_conventions", PromptKey::SystemOutputConventions),
     ("parallel_tools", PromptKey::SystemParallelTools),
     ("paged_reading", PromptKey::SystemPagedReading),
     (

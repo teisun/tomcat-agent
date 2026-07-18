@@ -1615,7 +1615,7 @@ describe("Tomcat webview App", () => {
     expect(screen.getByTestId("live-cluster")).toBeTruthy();
     expect(screen.getByTestId("thinking-summary").textContent).toContain("先整理美国热点新闻");
     expect(
-      document.querySelector(".tc-thinking pre")?.textContent,
+      document.querySelector('.tc-thinking [data-testid="thinking-body"]')?.textContent,
     ).toBeFalsy();
 
     mockScrollableTranscript({
@@ -1631,7 +1631,7 @@ describe("Tomcat webview App", () => {
     );
 
     fireEvent.click(screen.getByTestId("thinking-toggle"));
-    expect(document.querySelector(".tc-thinking pre")?.textContent).toContain(
+    expect(document.querySelector('.tc-thinking [data-testid="thinking-body"]')?.textContent).toContain(
       "先整理美国热点新闻，再决定是否需要补 fetch。",
     );
   });

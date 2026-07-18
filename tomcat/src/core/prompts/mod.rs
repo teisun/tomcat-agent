@@ -8,6 +8,7 @@
 pub enum PromptKey {
     SystemCoreIdentity,
     SystemToolInstructions,
+    SystemOutputConventions,
     SystemParallelTools,
     SystemPagedReading,
     SystemBackgroundShellMonitor,
@@ -30,6 +31,9 @@ pub fn load(key: PromptKey) -> &'static str {
     match key {
         PromptKey::SystemCoreIdentity => include_str!("templates/system/core_identity.txt"),
         PromptKey::SystemToolInstructions => include_str!("templates/system/tool_instructions.txt"),
+        PromptKey::SystemOutputConventions => {
+            include_str!("templates/system/output_conventions.txt")
+        }
         PromptKey::SystemParallelTools => include_str!("templates/system/parallel_tools.txt"),
         PromptKey::SystemPagedReading => include_str!("templates/system/paged_reading.txt"),
         PromptKey::SystemBackgroundShellMonitor => {

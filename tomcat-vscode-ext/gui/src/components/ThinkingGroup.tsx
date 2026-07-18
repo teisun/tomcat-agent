@@ -40,7 +40,7 @@ export function ThinkingGroup({
 }: {
   group: AssistantResponseGroup;
   isStreaming?: boolean;
-  onOpenFile(path: string): void;
+  onOpenFile(path: string, line?: number): void;
   onOpenDiff?(toolCallId: string): void;
 }) {
   const streaming = isStreaming && group.tools.some((tool) => tool.status !== "complete");
@@ -68,7 +68,7 @@ export function ThinkingGroup({
       data-testid="thinking-group"
     >
       {preamble ? (
-        <MessageBubble item={preamble as WebviewMessageBlock} />
+        <MessageBubble item={preamble as WebviewMessageBlock} onOpenFile={onOpenFile} />
       ) : null}
       <div className="tc-thinking-list">
         <button
@@ -95,7 +95,7 @@ export function ThinkingGroup({
         </button>
         {collapsed ? null : (
           <>
-            {thinking ? <ThinkingBlock item={thinking} variant="embedded" /> : null}
+            {thinking ? <ThinkingBlock item={thinking} onOpenFile={onOpenFile} variant="embedded" /> : null}
             {tools.map((tool: WebviewToolCard) => (
               <ToolRow
                 item={tool}

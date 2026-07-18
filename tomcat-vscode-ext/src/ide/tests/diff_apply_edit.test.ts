@@ -8,6 +8,7 @@ const __testing = (
     __testing: {
       deleteFile(filePath: string): void;
       lastDiffCommand?: { modified: vscode.Uri; original: vscode.Uri; title?: string };
+      lastRevealRange?: { range: vscode.Range; revealType?: number };
       readFile(filePath: string): string | undefined;
       registerFile(filePath: string, text: string): void;
       reset(): void;
@@ -119,6 +120,18 @@ describe("VsCodeIde diff/apply", () => {
     const proposed = await vscode.workspace.openTextDocument(diff!.modified);
     expect(original.getText()).toBe("before\nold line");
     expect(proposed.getText()).toBe("before\nnew line");
+  });
+
+  it("opens files at a specific line and reveals the selection", async () => {
+    const ide = new VsCodeIde();
+    __testing.registerFile("/workspace/src/reveal.ts", "alpha\nbeta\ngamma\n");
+
+    await ide.showFile("src/reveal.ts", 2);
+
+    expect(vscode.window.activeTextEditor?.document.uri.fsPath).toBe("/workspace/src/reveal.ts");
+    expect(vscode.window.activeTextEditor?.selection.start.line).toBe(1);
+    expect(vscode.window.activeTextEditor?.selection.end.line).toBe(1);
+    expect(__testing.lastRevealRange?.range.start.line).toBe(1);
   });
 
   it("preserves mixed-case tool ids when reconstructing diff documents", async () => {

@@ -2022,7 +2022,7 @@ describe("openFile intent protocol", () => {
   it("accepts openFile intent shape", () => {
     expect(
       isWebviewIntent({
-        data: { path: "/tmp/file.rs" },
+        data: { line: 42, path: "/tmp/file.rs" },
         messageId: "open-1",
         type: "openFile",
       }),

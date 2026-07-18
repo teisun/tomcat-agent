@@ -381,6 +381,7 @@ export type WebviewIntent =
       messageId: string;
       type: "openFile";
       data: {
+        line?: number;
         path: string;
       };
     }
@@ -499,6 +500,8 @@ export type WebviewIntent =
         }>;
         toolTitles: string[];
         assistantResponseGroups: number;
+        assistantClickablePathCount: number;
+        assistantCodeCardCount: number;
         groupFoldTitles: string[];
         userPromptPill: boolean;
         assistantNoCard: boolean;
@@ -680,7 +683,11 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "closeSession":
       return isRecord(value.data) && isString(value.data.sessionId);
     case "openFile":
-      return isRecord(value.data) && isString(value.data.path);
+      return (
+        isRecord(value.data) &&
+        isString(value.data.path) &&
+        (value.data.line === undefined || typeof value.data.line === "number")
+      );
     case "openDiff":
       return isRecord(value.data) && isString(value.data.toolCallId);
     case "openPlanFile":
@@ -756,6 +763,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         typeof value.data.streamMetrics.distanceFromBottom === "number" &&
         Array.isArray(value.data.toolBodyMetrics) &&
         typeof value.data.assistantResponseGroups === "number" &&
+        typeof value.data.assistantClickablePathCount === "number" &&
+        typeof value.data.assistantCodeCardCount === "number" &&
         Array.isArray(value.data.groupFoldTitles) &&
         typeof value.data.userPromptPill === "boolean" &&
         typeof value.data.assistantNoCard === "boolean" &&

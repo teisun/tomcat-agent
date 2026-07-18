@@ -81,6 +81,7 @@ describe("ThinkingGroup", () => {
     );
 
     fireEvent.click(screen.getByTestId("thinking-group-toggle"));
+    expect(screen.getByTestId("thinking-group-body").tagName).toBe("PRE");
     expect(screen.getByTestId("thinking-group-body").textContent).toContain("Need to inspect");
     expect(screen.getAllByTestId("tool-row")).toHaveLength(2);
   });

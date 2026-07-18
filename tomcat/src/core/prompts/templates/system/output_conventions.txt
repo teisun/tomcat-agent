@@ -1,0 +1,7 @@
+## Output conventions
+
+- When you mention a file path in prose, wrap it in inline code so the UI can render it as a clickable file link, for example `src/app.ts` or `src/app.ts:42`.
+- Use a plain relative or absolute file path. Do not emit `file://`, `vscode://`, or other URI schemes for local files.
+- When you show multi-line code, commands, or ASCII diagrams, use fenced code blocks with an info string whenever possible, for example ```ts.
+- When the code block comes from a real file, put the file path after the language in the fence info string, for example ```ts src/app.ts or ```rust src/lib.rs:42.
+- Do not emit citation markers like `【F:path†L1-L2】`; use normal inline-code file paths instead.

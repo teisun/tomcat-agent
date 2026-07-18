@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { WebviewCheckpoint, WebviewTimelineItem } from "../types";
@@ -136,6 +136,54 @@ describe("TranscriptView", () => {
     expect(screen.queryByTestId("thinking-group")).toBeNull();
     expect(screen.getByTestId("file-chip").textContent).toContain("README.md");
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Read");
+  });
+
+  it("keeps assistant rich rendering while showing thinking as plain text", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        assistantMessageId: "assistant-rich",
+        id: "assistant-msg-rich",
+        kind: "assistant",
+        text: [
+          "Check `src/body/keep.ts:3`.",
+          "",
+          "```ts src/body/keep.ts:7",
+          "export const value = 42;",
+          "```",
+        ].join("\n"),
+        type: "message",
+      },
+      {
+        assistantMessageId: "assistant-rich",
+        id: "think-rich",
+        summaryTitle: "Reviewed 1 file",
+        text: "## Inspect\n\nStart with `src/thinking/plain.ts:9`.",
+        type: "thinking",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy={false}
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    const assistantMessage = screen.getByTestId("message-block");
+    expect(within(assistantMessage).getByTestId("assistant-code-card")).toBeTruthy();
+    expect(within(assistantMessage).getByTestId("assistant-clickable-path")).toBeTruthy();
+
+    expect(screen.queryByTestId("thinking-body")).toBeNull();
+    fireEvent.click(screen.getByTestId("thinking-toggle"));
+    const thinkingBody = screen.getByTestId("thinking-body");
+    expect(thinkingBody.tagName).toBe("PRE");
+    expect(thinkingBody.textContent).toContain("## Inspect");
+    expect(thinkingBody.querySelector("[data-testid='assistant-clickable-path']")).toBeNull();
   });
 
   it("renders checkpoint markers in sequence and forwards restore clicks", () => {

@@ -22,13 +22,13 @@ describe("MessageBubble", () => {
     expect(screen.getByTestId("message-text").textContent).toContain("Hello Tomcat");
   });
 
-  it("renders assistant message without card or header", () => {
+  it("renders assistant markdown without the old assistant header", () => {
     render(
       <MessageBubble
         item={{
           id: "a1",
           kind: "assistant",
-          text: "Here is the answer.",
+          text: "Here is **the** answer.",
           type: "message",
         }}
       />,
@@ -38,6 +38,26 @@ describe("MessageBubble", () => {
     expect(node.className).toContain("tc-message--assistant");
     expect(screen.queryByText("Tomcat")).toBeNull();
     expect(screen.queryByText("assistant")).toBeNull();
+    expect(screen.getByTestId("message-text").querySelector("strong")?.textContent).toBe("the");
+  });
+
+  it("renders assistant code fences as clickable code cards", async () => {
+    const onOpenFile = vi.fn();
+    render(
+      <MessageBubble
+        item={{
+          id: "a-code",
+          kind: "assistant",
+          text: "```rust src/lib.rs:9\nfn answer() -> i32 { 42 }\n```",
+          type: "message",
+        }}
+        onOpenFile={onOpenFile}
+      />,
+    );
+
+    await screen.findByTestId("assistant-code-card");
+    fireEvent.click(screen.getByTestId("assistant-code-file"));
+    expect(onOpenFile).toHaveBeenCalledWith("src/lib.rs", 9);
   });
 
   it("keeps left border for error and notice", () => {

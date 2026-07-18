@@ -42,4 +42,24 @@ describe("ThinkingBlock", () => {
       "historical assistantMessageId mapping",
     );
   });
+
+  it("renders expanded thinking as plain preformatted text", () => {
+    render(
+      <ThinkingBlock
+        item={{
+          id: "thinking-3",
+          text: "## Inspect\n\nStart with `src/ui/provider.ts:12`.",
+          type: "thinking",
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("thinking-toggle"));
+    const body = screen.getByTestId("thinking-body");
+    expect(body.tagName).toBe("PRE");
+    expect(body.textContent).toContain("## Inspect");
+    expect(body.textContent).toContain("`src/ui/provider.ts:12`");
+    expect(body.querySelector("h2")).toBeNull();
+    expect(body.querySelector("strong")).toBeNull();
+  });
 });

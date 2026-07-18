@@ -976,6 +976,32 @@ describe("mutation diff stat injection", () => {
     provider.dispose();
   });
 
+  it("routes openFile intents into ide.showFile with an optional line number", async () => {
+    const showFile = vi.fn().mockResolvedValue(undefined);
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {
+        showFile,
+      } as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    await provider.dispatchTestIntent({
+      data: { line: 42, path: "src/app.ts" },
+      messageId: "intent-open-file-1",
+      type: "openFile",
+    });
+
+    expect(showFile).toHaveBeenCalledWith("src/app.ts", 42);
+
+    provider.dispose();
+  });
+
   it("routes openDiff intents into ide.openReconstructedDiff", async () => {
     const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
     const rememberToolResult = vi.fn().mockResolvedValue({

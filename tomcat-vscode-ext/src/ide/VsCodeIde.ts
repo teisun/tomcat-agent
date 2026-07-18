@@ -157,13 +157,36 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
     return true;
   }
 
-  async showFile(displayPath: string): Promise<void> {
+  async showFile(displayPath: string, line?: number): Promise<void> {
     const uri = vscode.Uri.file(this.resolveWorkspacePath(displayPath));
     if (!(await this.fileExists(uri))) {
       throw new Error(`File not found: ${uri.fsPath}`);
     }
     const document = await vscode.workspace.openTextDocument(uri);
-    await vscode.window.showTextDocument(document, { preview: false });
+    const editor = await vscode.window.showTextDocument(document, { preview: false });
+    if (typeof line === "number" && Number.isFinite(line) && line > 0) {
+      const targetLine = Math.min(Math.max(0, Math.trunc(line) - 1), Math.max(document.lineCount - 1, 0));
+      const targetCharacter = document.lineAt(targetLine).text.length;
+      const range = new vscode.Range(targetLine, 0, targetLine, targetCharacter);
+      const selection = new vscode.Selection(
+        new vscode.Position(targetLine, 0),
+        new vscode.Position(targetLine, targetCharacter),
+      );
+      if ("selection" in editor) {
+        editor.selection = selection;
+      }
+      if (vscode.window.activeTextEditor) {
+        vscode.window.activeTextEditor.selection = selection;
+      }
+      if ("revealRange" in editor && typeof editor.revealRange === "function") {
+        editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+      } else if (vscode.window.activeTextEditor?.revealRange) {
+        vscode.window.activeTextEditor.revealRange(
+          range,
+          vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+        );
+      }
+    }
   }
 
   /**

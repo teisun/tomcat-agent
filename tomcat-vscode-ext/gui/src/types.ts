@@ -425,6 +425,7 @@ export type WebviewIntent =
       messageId: string;
       type: "openFile" | "openPlanFile";
       data: {
+        line?: number;
         path: string;
       };
     }
@@ -534,6 +535,8 @@ export type WebviewIntent =
         }>;
         toolTitles: string[];
         assistantResponseGroups: number;
+        assistantClickablePathCount: number;
+        assistantCodeCardCount: number;
         groupFoldTitles: string[];
         userPromptPill: boolean;
         assistantNoCard: boolean;

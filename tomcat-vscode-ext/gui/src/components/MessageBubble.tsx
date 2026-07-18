@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { ReferenceChip } from "./ReferenceChip";
+import { ChatMarkdown } from "./markdown/ChatMarkdown";
 import type { WebviewMessageBlock, WebviewMessageSegment } from "../types";
 
 const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
@@ -13,9 +14,11 @@ const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
 
 export function MessageBubble({
   item,
+  onOpenFile,
   onRetry,
 }: {
   item: WebviewMessageBlock;
+  onOpenFile?: (path: string, line?: number) => void;
   onRetry?: (messageId: string) => void;
 }) {
   const [detailsExpanded, setDetailsExpanded] = useState(false);
@@ -66,18 +69,22 @@ export function MessageBubble({
         </div>
       ) : null}
       <div className="message-text rendered-markdown" data-testid="message-text">
-        {segments.map((segment, index) =>
-          segment.type === "text" ? (
-            <span className="tc-message__text-segment" key={`${item.id}-text-${index}`}>
-              {segment.text}
-            </span>
-          ) : (
-            <ReferenceChip
-              key={`${item.id}-reference-${index}`}
-              reference={segment}
-              testId="history-reference-chip"
-            />
-          ),
+        {item.kind === "assistant" ? (
+          <ChatMarkdown markdown={item.text} onOpenFile={onOpenFile ?? (() => undefined)} />
+        ) : (
+          segments.map((segment, index) =>
+            segment.type === "text" ? (
+              <span className="tc-message__text-segment" key={`${item.id}-text-${index}`}>
+                {segment.text}
+              </span>
+            ) : (
+              <ReferenceChip
+                key={`${item.id}-reference-${index}`}
+                reference={segment}
+                testId="history-reference-chip"
+              />
+            ),
+          )
         )}
       </div>
       {canToggleRawError ? (

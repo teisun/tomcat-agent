@@ -1041,7 +1041,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       case "openFile":
         this.openFileObserved = true;
         try {
-          await this.deps.ide.showFile(intent.data.path);
+          await this.deps.ide.showFile(intent.data.path, intent.data.line);
         } catch (error) {
           const sessionId = this.currentState().activeSessionId;
           if (sessionId) {

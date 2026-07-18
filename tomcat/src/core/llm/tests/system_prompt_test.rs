@@ -92,6 +92,14 @@ fn build_system_prompt_contains_parallel_and_verification_sections() {
 }
 
 #[test]
+fn build_system_prompt_contains_output_conventions_section() {
+    let prompt = build_system_prompt("/tmp");
+    assert!(prompt.contains("Output conventions"));
+    assert!(prompt.contains("clickable file link"));
+    assert!(prompt.contains("Do not emit `file://`, `vscode://`"));
+}
+
+#[test]
 fn build_system_prompt_injects_aggregated_tool_guidelines() {
     let prompt = build_system_prompt("/tmp");
     // 占位符必须被替换（不能把 `{tool_guidelines}` 原样发给模型）。
@@ -106,6 +114,9 @@ fn build_system_prompt_injects_aggregated_tool_guidelines() {
 fn new_sections_sit_in_priority_order() {
     let prompt = build_system_prompt("/tmp");
     let tool_pos = prompt.find("Guidelines:").expect("tool instructions");
+    let output_pos = prompt
+        .find("Output conventions")
+        .expect("output conventions");
     let parallel_pos = prompt.find("Parallel tool calls").expect("parallel");
     let paged_pos = prompt.find("Tool result persisted").expect("paged");
     let bg_pos = prompt.find("Background bash tasks").expect("background");
@@ -115,11 +126,12 @@ fn new_sections_sit_in_priority_order() {
     let ctx_pos = prompt
         .find("Current date and time:")
         .expect("workspace ctx");
-    // tool(20) < parallel(22) < paged(25) < background(30) < verification(50) < workspace_ctx(200)
+    // tool(20) < output(21) < parallel(22) < paged(25) < background(30) < verification(50) < workspace_ctx(200)
     assert!(
-        tool_pos < parallel_pos,
-        "parallel 应在 tool_instructions 之后"
+        tool_pos < output_pos,
+        "output conventions 应在 tool_instructions 之后"
     );
+    assert!(output_pos < parallel_pos, "output conventions 应在 parallel 之前");
     assert!(parallel_pos < paged_pos, "parallel 应在 paged 之前");
     assert!(paged_pos < bg_pos, "paged 应在 background 之前");
     assert!(bg_pos < verify_pos, "verification 应在 background 之后");

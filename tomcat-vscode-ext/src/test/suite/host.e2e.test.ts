@@ -20,6 +20,7 @@ import {
   assertWebviewStickyHistoryFlow,
   assertWebviewStreamingFlow,
   assertTranscriptUiFlow,
+  assertTranscriptRichRenderingFlow,
   assertTranscriptSwitchBackOrder,
   getTomcatExtensionApi,
 } from "./support/hostE2eScenario";
@@ -63,6 +64,11 @@ suite("Tomcat host E2E", () => {
   test("renders transcript action rows and context groups in the Tomcat webview", async () => {
     const api = await getTomcatExtensionApi();
     await assertTranscriptUiFlow(api);
+  });
+
+  test("renders transcript markdown as rich code cards and clickable file paths", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertTranscriptRichRenderingFlow(api);
   });
 
   test("keeps plan tool UX clean in the Tomcat webview transcript", async () => {

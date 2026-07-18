@@ -2741,6 +2741,7 @@ function captureTranscriptVisual(
     | "model-dropdown-open"
     | "progress"
     | "reload-replay"
+    | "rich-render"
     | "same-session-retry-success"
     | "selection-reference-codelens"
     | "selection-reference-composer"
@@ -3004,6 +3005,166 @@ export async function assertTranscriptUiFlow(
     1,
     "expected the standalone bash command to render once without duplicate fold titles",
   );
+}
+
+export async function assertTranscriptRichRenderingFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  await waitForWebviewBootstrapSettled(api);
+  const sessionId = await createFreshWebviewSession(api, "webview-rich-render-session");
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  assert.ok(workspaceRoot, "expected a workspace root for transcript rich-render E2E");
+
+  const richFilePath = path.join(workspaceRoot, "src", "test", "fixtures", "rich-render.ts");
+  await fs.mkdir(path.dirname(richFilePath), { recursive: true });
+  await fs.writeFile(
+    richFilePath,
+    [
+      "export function richRenderFixture() {",
+      '  return "line two";',
+      "}",
+      "",
+      "export function otherLine() {",
+      "  return 42;",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+
+  await api.__testing.injectServeEvent({
+    assistantMessageEvent: {
+      delta: [
+        "## Fix plan",
+        "",
+        "Start with `src/test/fixtures/rich-render.ts:2`, then compare the snippet below.",
+        "",
+        "```ts src/test/fixtures/rich-render.ts:6",
+        "export function otherLine() {",
+        "  return 42;",
+        "}",
+        "```",
+        "",
+        "```text",
+        "A --> B --> C",
+        "```",
+      ].join("\n"),
+      kind: "content_delta",
+    },
+    assistantMessageId: "assistant-rich-render",
+    message: {},
+    sessionId,
+    type: "message_update",
+  });
+  await api.__testing.injectServeEvent({
+    assistantMessageEvent: {
+      delta: "## Inspect\n\nStart with `src/thinking/plain.ts:9`.",
+      kind: "thinking_delta",
+    },
+    assistantMessageId: "assistant-rich-render",
+    message: {},
+    sessionId,
+    type: "message_update",
+  });
+
+  const snapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.assistantCodeCardCount >= 2 &&
+      candidate.assistantClickablePathCount >= 1 &&
+      candidate.html.includes("assistant-code-copy") &&
+      candidate.html.includes("Fix plan")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    snapshot.assistantCodeCardCount >= 2,
+    `expected at least two assistant code cards, got ${snapshot.assistantCodeCardCount}`,
+  );
+  assert.ok(
+    snapshot.assistantClickablePathCount >= 1,
+    `expected at least one clickable assistant inline path, got ${snapshot.assistantClickablePathCount}`,
+  );
+  assert.match(snapshot.html, /assistant-code-copy/u);
+  assert.match(snapshot.html, /src\/test\/fixtures\/rich-render\.ts:6/u);
+  assert.match(snapshot.html, /A --&gt; B --&gt; C/u);
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const settledSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) => (candidate.activeSessionId === sessionId ? candidate : undefined),
+    5_000,
+  );
+  assert.equal(
+    settledSnapshot.assistantCodeCardCount,
+    snapshot.assistantCodeCardCount,
+    "expected assistant code-card count to stay stable across consecutive DOM snapshots",
+  );
+  assert.equal(
+    settledSnapshot.assistantClickablePathCount,
+    snapshot.assistantClickablePathCount,
+    "expected assistant inline-path count to stay stable across consecutive DOM snapshots",
+  );
+  assert.equal(
+    (settledSnapshot.html.match(/assistant-code-copy/g) ?? []).length,
+    (snapshot.html.match(/assistant-code-copy/g) ?? []).length,
+    "expected copy-button structure to stay stable across consecutive DOM snapshots",
+  );
+
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "assistant-code-file",
+  });
+  const fileCardEditor = await waitForActiveTextEditor(
+    (editor) =>
+      editor?.document.uri.fsPath === richFilePath && editor.selection.start.line === 5,
+  );
+  assert.equal(fileCardEditor.selection.start.line, 5, "expected code-card click to reveal line 6");
+
+  await api.__testing.focusWebview();
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "assistant-clickable-path",
+  });
+  const inlinePathEditor = await waitForActiveTextEditor(
+    (editor) =>
+      editor?.document.uri.fsPath === richFilePath && editor.selection.start.line === 1,
+  );
+  assert.equal(
+    inlinePathEditor.selection.start.line,
+    1,
+    "expected inline path click to reveal line 2",
+  );
+
+  await api.__testing.focusWebview();
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "thinking-toggle",
+  });
+  const expandedThinking = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId
+      && candidate.html.includes("## Inspect")
+      && candidate.html.includes("src/thinking/plain.ts:9")
+        ? candidate
+        : undefined,
+    10_000,
+  );
+  assert.equal(
+    expandedThinking.assistantClickablePathCount,
+    1,
+    "expected only assistant-body inline paths to remain clickable after thinking expands as plain text",
+  );
+
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    captureTranscriptVisual("rich-render");
+  }
 }
 
 export async function assertWebviewPlanToolUxFlow(

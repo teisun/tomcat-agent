@@ -22,6 +22,7 @@ export function ThinkingBlock({
 }: {
   isStreaming?: boolean;
   item: WebviewThinkingBlock;
+  onOpenFile?: (path: string, line?: number) => void;
   variant?: "embedded" | "standalone";
 }) {
   const [collapsed, setCollapsed] = useState(true);

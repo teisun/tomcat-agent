@@ -377,6 +377,10 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
   const commandBlockCount = document.querySelectorAll(
     '[data-testid="tool-row"][data-tool-category="command"]',
   ).length;
+  const assistantCodeCardCount = document.querySelectorAll('[data-testid="assistant-code-card"]').length;
+  const assistantClickablePathCount = document.querySelectorAll(
+    '[data-testid="assistant-clickable-path"]',
+  ).length;
   const ctxLabel =
     document.querySelector<HTMLElement>('[data-testid="context-ratio"]')?.textContent ?? null;
   const planCardTodoCountText =
@@ -483,6 +487,8 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     toolBodyMetrics,
     toolTitles: queryText('[data-testid="tool-row-label"]'),
     assistantResponseGroups: transcriptGroups.length,
+    assistantClickablePathCount,
+    assistantCodeCardCount,
     groupFoldTitles,
     userPromptPill,
     assistantNoCard:
@@ -1194,8 +1200,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                     toolCallId,
                   })
                 }
-                onOpenFile={(path) =>
+                onOpenFile={(path, line) =>
                   postIntent(vscodeApi, "openFile", {
+                    line,
                     path,
                   })
                 }

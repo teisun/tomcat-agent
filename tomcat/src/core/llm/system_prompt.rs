@@ -10,7 +10,7 @@
 //! 按 `priority` 升序拼接。`build_system_prompt` 保留为便捷 wrapper。
 //!
 //! 默认 section 链（priority）：`CoreIdentity(10)` → `ToolInstructions(20)` →
-//! `ParallelTools(22)` → `PagedReading(25)` → `BackgroundShellMonitor(30)` →
+//! `OutputConventions(21)` → `ParallelTools(22)` → `PagedReading(25)` → `BackgroundShellMonitor(30)` →
 //! `Verification(50)` →（可选 `AvailableSkills(35)`）→ `WorkspaceState(150)` →
 //! `WorkspaceContext(200)`。
 //!
@@ -80,6 +80,7 @@ impl Default for SystemPromptBuilder {
         let mut builder = Self::new();
         builder.register(Box::new(CoreIdentitySection));
         builder.register(Box::new(ToolInstructionsSection));
+        builder.register(Box::new(OutputConventionsSection));
         builder.register(Box::new(ParallelToolsSection));
         builder.register(Box::new(PagedReadingSection));
         builder.register(Box::new(BackgroundShellMonitorSection));
@@ -133,6 +134,20 @@ impl SystemPromptSection for ToolInstructionsSection {
     }
     fn priority(&self) -> u32 {
         20
+    }
+}
+
+struct OutputConventionsSection;
+
+impl SystemPromptSection for OutputConventionsSection {
+    fn section_name(&self) -> &str {
+        "output_conventions"
+    }
+    fn render(&self, _context: &WorkspaceContext) -> String {
+        load_prompt(PromptKey::SystemOutputConventions).to_string()
+    }
+    fn priority(&self) -> u32 {
+        21
     }
 }
 
@@ -445,8 +460,8 @@ impl SystemPromptSection for WorkspaceStateSection {
 /// 构建发送给 LLM 的 system message 内容。
 ///
 /// 内部使用 `SystemPromptBuilder` 的默认注册（CoreIdentity + ToolInstructions
-/// + ParallelTools + PagedReading + BackgroundShellMonitor + Verification
-/// + WorkspaceContext）。
+/// + OutputConventions + ParallelTools + PagedReading + BackgroundShellMonitor
+/// + Verification + WorkspaceContext）。
 pub fn build_system_prompt(workspace_dir: &str) -> String {
     let context = WorkspaceContext {
         agent_workspace_dir: workspace_dir.to_string(),

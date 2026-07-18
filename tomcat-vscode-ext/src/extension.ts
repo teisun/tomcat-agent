@@ -144,6 +144,8 @@ export interface TomcatExtensionApi {
       }>;
       toolTitles: string[];
       assistantResponseGroups: number;
+      assistantClickablePathCount: number;
+      assistantCodeCardCount: number;
       groupFoldTitles: string[];
       userPromptPill: boolean;
       assistantNoCard: boolean;

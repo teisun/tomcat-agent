@@ -153,7 +153,7 @@ export function TranscriptView({
   onAnswer(requestId: string, result: AskQuestionResult): void;
   onBuildPlan(planId: string | null, path: string): void;
   onOpenDiff?(toolCallId: string): void;
-  onOpenFile(path: string): void;
+  onOpenFile(path: string, line?: number): void;
   onOpenPlanFile(path: string): void;
   onRestoreCheckpoint?(checkpointId: string): void;
   onRetryUserMessage?(messageId: string): void;
@@ -197,7 +197,14 @@ export function TranscriptView({
         case "boundary":
           return <BoundaryBlock item={item} key={item.id} />;
         case "message":
-          return <MessageBubble item={item} key={item.id} onRetry={onRetryUserMessage} />;
+          return (
+            <MessageBubble
+              item={item}
+              key={item.id}
+              onOpenFile={onOpenFile}
+              onRetry={onRetryUserMessage}
+            />
+          );
         case "checkpoint":
           return (
             <CheckpointMarker
@@ -212,6 +219,7 @@ export function TranscriptView({
               isStreaming={showProgress && item.id === clusterLastThinkingId}
               item={item}
               key={item.id}
+              onOpenFile={onOpenFile}
             />
           );
         case "tool":
@@ -259,6 +267,7 @@ export function TranscriptView({
               <MessageBubble
                 item={group.preamble}
                 key={`${group.preamble.id}-preamble`}
+                onOpenFile={onOpenFile}
                 onRetry={onRetryUserMessage}
               />
             ) : null}

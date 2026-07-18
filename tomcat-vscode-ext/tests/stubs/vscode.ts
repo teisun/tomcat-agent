@@ -30,6 +30,12 @@ let lastDiffCommand:
       title?: string;
     }
   | undefined;
+let lastRevealRange:
+  | {
+      range: Range;
+      revealType?: number;
+    }
+  | undefined;
 
 export class Disposable {
   constructor(private readonly callback: () => void = () => undefined) {}
@@ -288,6 +294,13 @@ export const ConfigurationTarget = {
   Global: 1,
   Workspace: 2,
   WorkspaceFolder: 3,
+} as const;
+
+export const TextEditorRevealType = {
+  Default: 0,
+  InCenter: 1,
+  InCenterIfOutsideViewport: 2,
+  AtTop: 3,
 } as const;
 
 export class WorkspaceEdit {
@@ -583,11 +596,13 @@ export const window = {
   activeTextEditor: undefined as
     | {
         document: TextDocument;
+        revealRange(range: Range, revealType?: number): void;
         selection: Selection;
       }
     | undefined,
   visibleTextEditors: [] as Array<{
     document: TextDocument;
+    revealRange(range: Range, revealType?: number): void;
     selection: Selection;
   }>,
   async showInformationMessage(message: string, ...items: string[]): Promise<string | undefined> {
@@ -608,9 +623,19 @@ export const window = {
   async showInputBox(options: InputBoxOptions): Promise<string | undefined> {
     return inputBoxHandler?.(options);
   },
-  async showTextDocument(document: TextDocument, _options?: unknown): Promise<{ document: TextDocument }> {
+  async showTextDocument(
+    document: TextDocument,
+    _options?: unknown,
+  ): Promise<{
+    document: TextDocument;
+    revealRange(range: Range, revealType?: number): void;
+    selection: Selection;
+  }> {
     const editor = {
       document,
+      revealRange(range: Range, revealType?: number) {
+        lastRevealRange = { range, revealType };
+      },
       selection: new Selection(new Position(0, 0), new Position(0, 0)),
     };
     window.activeTextEditor = editor;
@@ -653,6 +678,9 @@ export const __testing = {
   get lastDiffCommand() {
     return lastDiffCommand;
   },
+  get lastRevealRange() {
+    return lastRevealRange;
+  },
   readFile(filePath: string): string | undefined {
     return files.get(Uri.file(filePath).toString())?.text;
   },
@@ -680,6 +708,7 @@ export const __testing = {
     warningMessageHandler = undefined;
     openDialogHandler = undefined;
     lastDiffCommand = undefined;
+    lastRevealRange = undefined;
     textDocuments.length = 0;
     window.activeTextEditor = undefined;
     window.visibleTextEditors = [];

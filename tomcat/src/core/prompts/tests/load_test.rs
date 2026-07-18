@@ -55,6 +55,17 @@ fn tool_instructions_template_uses_guidelines_placeholder_not_inline_rules() {
 }
 
 #[test]
+fn output_conventions_template_mentions_clickable_paths_and_forbidden_uris() {
+    let s = load(PromptKey::SystemOutputConventions);
+    assert!(s.contains("inline code"));
+    assert!(s.contains("clickable file link"));
+    assert!(s.contains("src/app.ts:42"));
+    assert!(s.contains("file://"));
+    assert!(s.contains("vscode://"));
+    assert!(s.contains("【F:path†L1-L2】"));
+}
+
+#[test]
 fn core_identity_has_operating_principles_and_tool_lines_placeholder() {
     let s = load(PromptKey::SystemCoreIdentity);
     assert!(s.contains("coding assistant"));
