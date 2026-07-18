@@ -106,8 +106,10 @@ pub fn summarize_tool_description(description: &str) -> String {
 const G_EDIT_WORKFLOW: &str = "Default file-edit workflow: read -> edit; for repeated short snippets or line-anchored edits, use read(hashline=true) -> hashline_edit.";
 const G_NO_DISPLAY_PREFIX: &str = "When copying from read output, never include display prefixes like `  N\\t` or `N#XX:` in edit.old_content.";
 const G_NO_FAKE_EDIT: &str = "Make file changes with the edit/write tools directly; never print a code block pretending to edit a file.";
-const G_PATH_LINE: &str = "When you point to code in a reply, cite it as a clickable `path:line` reference.";
-const G_SEARCH_OVER_BASH: &str = "Use search_files to find file paths or content; prefer it over bash with grep/find/ls -R.";
+const G_PATH_LINE: &str =
+    "When you point to code in a reply, cite it as a clickable `path:line` reference.";
+const G_SEARCH_OVER_BASH: &str =
+    "Use search_files to find file paths or content; prefer it over bash with grep/find/ls -R.";
 const G_ANTI_HALLUCINATION: &str = "Only claim you can access directories you have successfully listed or read with tools; if unsure, verify with list_dir. Do not guess or fabricate accessible paths.";
 
 pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[

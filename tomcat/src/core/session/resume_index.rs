@@ -48,6 +48,7 @@ pub(crate) struct ResumeIndexLoad {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ResumeEntryKind {
     Message,
+    Error,
     ModelChange,
     ThinkingLevelChange,
     ThinkingTrace,
@@ -73,6 +74,12 @@ impl ResumeAnchor {
                 ordinal,
                 timestamp: e.timestamp.clone(),
                 entry_kind: ResumeEntryKind::Message,
+            },
+            TranscriptEntry::Error(e) => Self {
+                entry_id: e.id.clone(),
+                ordinal,
+                timestamp: e.timestamp.clone(),
+                entry_kind: ResumeEntryKind::Error,
             },
             TranscriptEntry::ModelChange(e) => Self {
                 entry_id: e.id.clone(),
@@ -232,6 +239,7 @@ fn transcript_mtime_ms(path: &Path) -> Result<u64, AppError> {
 fn parse_entry_id(entry: &TranscriptEntry) -> Option<String> {
     match entry {
         TranscriptEntry::Message(e) => e.id.clone(),
+        TranscriptEntry::Error(e) => e.id.clone(),
         TranscriptEntry::ModelChange(e) => e.id.clone(),
         TranscriptEntry::ThinkingLevelChange(e) => e.id.clone(),
         TranscriptEntry::ThinkingTrace(e) => e.id.clone(),
@@ -245,6 +253,7 @@ fn parse_entry_id(entry: &TranscriptEntry) -> Option<String> {
 fn parse_entry_timestamp(entry: &TranscriptEntry) -> &str {
     match entry {
         TranscriptEntry::Message(e) => &e.timestamp,
+        TranscriptEntry::Error(e) => &e.timestamp,
         TranscriptEntry::ModelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingLevelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingTrace(e) => &e.timestamp,

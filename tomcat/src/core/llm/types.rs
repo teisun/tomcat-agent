@@ -548,6 +548,10 @@ pub enum ReplayRequirement {
 pub struct ProviderRefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_response_id: Option<String>,
+    /// Stable replay-profile identity for route-sensitive providers (for example different
+    /// OpenAI-compatible relays sharing the same wire protocol).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_profile_id: Option<String>,
 }
 
 /// 可供下一轮继续推理的 opaque continuity 材料。

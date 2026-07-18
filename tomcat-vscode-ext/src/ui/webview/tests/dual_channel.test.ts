@@ -4,7 +4,7 @@ import { WebviewStateStore } from "../state";
 
 describe("webview dual-channel state store", () => {
   it("maps state snapshots, history, and live events into timeline state", () => {
-    const store = new WebviewStateStore("both");
+    const store = new WebviewStateStore();
 
     store.syncSessionList(
       {
@@ -20,8 +20,6 @@ describe("webview dual-channel state store", () => {
           },
         ],
       },
-      new Map([["s1", "webview"]]),
-      "webview",
     );
     store.applySessionState(
       {
@@ -31,8 +29,6 @@ describe("webview dual-channel state store", () => {
         planState: "chat",
         sessionId: "s1",
       },
-      "webview",
-      "webview",
     );
     store.hydrateHistory("s1", {
       messages: [
@@ -175,7 +171,6 @@ describe("webview dual-channel state store", () => {
     expect(snapshot.activeSessionId).toBe("s1");
     expect(snapshot.sessions[0]).toMatchObject({
       ownedByThisFrontend: true,
-      owner: "webview",
       sessionId: "s1",
     });
     expect(snapshot.sessionViews.s1.timeline).toEqual(
@@ -227,7 +222,7 @@ describe("webview dual-channel state store", () => {
   });
 
   it("deduplicates live assistant, thinking, and tool entries when history rehydrates", () => {
-    const store = new WebviewStateStore("both");
+    const store = new WebviewStateStore();
 
     store.syncSessionList(
       {
@@ -235,8 +230,6 @@ describe("webview dual-channel state store", () => {
         scope: "disk",
         sessions: [{ busy: false, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
       },
-      new Map([["s1", "webview"]]),
-      "webview",
     );
 
     store.applyEvent({
@@ -317,7 +310,7 @@ describe("webview dual-channel state store", () => {
   });
 
   it("ignores late deltas after message_end clears the current stream", () => {
-    const store = new WebviewStateStore("both");
+    const store = new WebviewStateStore();
 
     store.syncSessionList(
       {
@@ -325,8 +318,6 @@ describe("webview dual-channel state store", () => {
         scope: "disk",
         sessions: [{ busy: false, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
       },
-      new Map([["s1", "webview"]]),
-      "webview",
     );
 
     store.applyEvent({
@@ -386,7 +377,7 @@ describe("webview dual-channel state store", () => {
   });
 
   it("keeps repeated history hydration idempotent after live entries have already converged by id", () => {
-    const store = new WebviewStateStore("both");
+    const store = new WebviewStateStore();
 
     store.syncSessionList(
       {
@@ -394,8 +385,6 @@ describe("webview dual-channel state store", () => {
         scope: "disk",
         sessions: [{ busy: false, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
       },
-      new Map([["s1", "webview"]]),
-      "webview",
     );
 
     store.applyEvent({
@@ -444,7 +433,7 @@ describe("webview dual-channel state store", () => {
   });
 
   it("drops stale persisted user items that are not tracked as in-flight during rebuild", () => {
-    const store = new WebviewStateStore("both");
+    const store = new WebviewStateStore();
 
     store.syncSessionList(
       {
@@ -452,8 +441,6 @@ describe("webview dual-channel state store", () => {
         scope: "disk",
         sessions: [{ busy: true, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
       },
-      new Map([["s1", "webview"]]),
-      "webview",
     );
     store.applySessionState(
       {
@@ -463,8 +450,6 @@ describe("webview dual-channel state store", () => {
         planState: "chat",
         sessionId: "s1",
       },
-      "webview",
-      "webview",
     );
 
     store.appendMessage("s1", "user", "ghost prompt", {
@@ -515,7 +500,7 @@ describe("webview dual-channel state store", () => {
   });
 
   it("keeps in-flight user bubbles until history catches up, then converges them by id", () => {
-    const store = new WebviewStateStore("both");
+    const store = new WebviewStateStore();
 
     store.syncSessionList(
       {
@@ -523,8 +508,6 @@ describe("webview dual-channel state store", () => {
         scope: "disk",
         sessions: [{ busy: false, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
       },
-      new Map([["s1", "webview"]]),
-      "webview",
     );
     store.applySessionState(
       {
@@ -534,8 +517,6 @@ describe("webview dual-channel state store", () => {
         planState: "chat",
         sessionId: "s1",
       },
-      "webview",
-      "webview",
     );
 
     const baseHistory = {
@@ -603,7 +584,7 @@ describe("webview dual-channel state store", () => {
   });
 
   it("drops confirmed user bubbles outside the latest window but restores them when older history loads", () => {
-    const store = new WebviewStateStore("both");
+    const store = new WebviewStateStore();
 
     store.syncSessionList(
       {
@@ -611,8 +592,6 @@ describe("webview dual-channel state store", () => {
         scope: "disk",
         sessions: [{ busy: false, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
       },
-      new Map([["s1", "webview"]]),
-      "webview",
     );
     store.applySessionState(
       {
@@ -622,8 +601,6 @@ describe("webview dual-channel state store", () => {
         planState: "chat",
         sessionId: "s1",
       },
-      "webview",
-      "webview",
     );
 
     const latestWindowMessages = Array.from({ length: 80 }, (_, index) => ({
@@ -723,7 +700,7 @@ describe("webview dual-channel state store", () => {
   });
 
   it("keeps in-flight assistant tails at the end until disk catches up, then converges in place", () => {
-    const store = new WebviewStateStore("both");
+    const store = new WebviewStateStore();
 
     store.syncSessionList(
       {
@@ -731,8 +708,6 @@ describe("webview dual-channel state store", () => {
         scope: "disk",
         sessions: [{ busy: true, isCurrent: true, sessionId: "s1", title: null, updatedAt: 123 }],
       },
-      new Map([["s1", "webview"]]),
-      "webview",
     );
     store.applySessionState(
       {
@@ -742,8 +717,6 @@ describe("webview dual-channel state store", () => {
         planState: "chat",
         sessionId: "s1",
       },
-      "webview",
-      "webview",
     );
 
     const olderHistory = {
@@ -922,7 +895,7 @@ describe("webview dual-channel state store", () => {
   });
 
   it("replaces session metadata idempotently from fresh state snapshots", () => {
-    const store = new WebviewStateStore("both");
+    const store = new WebviewStateStore();
 
     store.applySessionState(
       {
@@ -932,8 +905,6 @@ describe("webview dual-channel state store", () => {
         planState: "chat",
         sessionId: "s1",
       },
-      null,
-      "webview",
     );
     store.applyEvent({
       path: "/workspace/plan-a.plan.md",
@@ -965,8 +936,6 @@ describe("webview dual-channel state store", () => {
         planState: "executing",
         sessionId: "s1",
       },
-      "webview",
-      "webview",
     );
 
     expect(store.snapshot().sessionViews.s1).toMatchObject({

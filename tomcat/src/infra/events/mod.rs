@@ -68,9 +68,9 @@
 //! 中以"任意 JSON"携带，不强制 wire schema——避免 LLM provider 升级时全链路
 //! 改 enum；强类型断言留在调用方（如 `agent_loop::reasoning_loop`）。
 
+use crate::core::tools::primitive::FileDiffLine;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use crate::core::tools::primitive::FileDiffLine;
 
 /// JSON `type` 字段与 pi-mono / 审计展示用字符串；业务与测试请引用此处常量，避免散落字面量。
 pub mod wire {
@@ -232,8 +232,12 @@ pub enum ToolDisplay {
         #[serde(skip_serializing_if = "Option::is_none")]
         diff: Option<Vec<FileDiffLine>>,
     },
-    Plan { plan: String },
-    Text { text: String },
+    Plan {
+        plan: String,
+    },
+    Text {
+        text: String,
+    },
 }
 
 /// transcript `Custom` 行里 plan.* 事件共用的最小 payload。

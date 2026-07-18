@@ -203,17 +203,25 @@ fn record_ignores_default_excludes_and_gitignored_dirs_when_counting_limit() {
     fs::write(worktree.join(".gitignore"), "ignored-dir/\n").unwrap();
     for index in 0..8 {
         fs::write(
-            worktree.join("target").join(format!("artifact-{index}.bin")),
+            worktree
+                .join("target")
+                .join(format!("artifact-{index}.bin")),
             format!("bin-{index}"),
         )
         .unwrap();
         fs::write(
-            worktree.join("ignored-dir").join(format!("draft-{index}.txt")),
+            worktree
+                .join("ignored-dir")
+                .join(format!("draft-{index}.txt")),
             format!("draft-{index}"),
         )
         .unwrap();
     }
-    fs::write(worktree.join("src").join("keep.ts"), "export const keep = true;\n").unwrap();
+    fs::write(
+        worktree.join("src").join("keep.ts"),
+        "export const keep = true;\n",
+    )
+    .unwrap();
 
     let store = ShadowGitStore::with_max_workdir_files(trail, worktree, 2);
     let id = store.record(request("t1")).unwrap();
@@ -240,7 +248,11 @@ fn ignored_only_changes_reuse_the_latest_checkpoint() {
     let first = store.record(request("t1")).unwrap();
     assert!(!first.is_null());
 
-    fs::write(worktree.join("ignored-dir").join("draft.txt"), "ignored change").unwrap();
+    fs::write(
+        worktree.join("ignored-dir").join("draft.txt"),
+        "ignored change",
+    )
+    .unwrap();
 
     let second = store.record(request("t2")).unwrap();
     assert_eq!(

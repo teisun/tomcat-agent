@@ -12,8 +12,9 @@ pub fn read_env_entries(env_path: &Path) -> Result<BTreeMap<String, String>, App
     let iter = dotenvy::from_path_iter(env_path)
         .map_err(|error| AppError::Config(format!("解析 {} 失败: {error}", env_path.display())))?;
     for entry in iter {
-        let (key, value) = entry
-            .map_err(|error| AppError::Config(format!("解析 {} 失败: {error}", env_path.display())))?;
+        let (key, value) = entry.map_err(|error| {
+            AppError::Config(format!("解析 {} 失败: {error}", env_path.display()))
+        })?;
         if !key.trim().is_empty() {
             vars.insert(key, value);
         }

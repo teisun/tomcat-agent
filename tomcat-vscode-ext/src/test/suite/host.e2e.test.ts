@@ -1,28 +1,17 @@
 import {
-  assertApprovalDiffFlow,
-  assertApprovalDiffFlowViaChatUi,
-  assertInterruptAndRestartFlow,
-  assertInterruptAndRestartFlowViaChatUi,
-  assertModelSlashFlowViaChatUi,
-  assertMultiSessionRouting,
-  assertMultiSessionRoutingViaChatUi,
-  assertParticipantHappyPath,
-  assertParticipantHappyPathViaChatUi,
   assertPlanPreviewCustomEditorFlow,
-  assertPlanSlashFlowViaChatUi,
   assertWebviewPlanModeSwitchFlow,
   assertWebviewAnswerCardFlow,
   assertWebviewAddModelsFlow,
   assertWebviewDiffFlow,
-  assertWebviewCrossOwnerPlanFlow,
   assertWebviewAtMentionDirectoryAndWarningFlow,
   assertWebviewAtMentionReferenceFlow,
   assertWebviewFileDropReferenceFlow,
   assertWebviewPickContextFlow,
+  assertWebviewRetryRecoveryFlow,
   assertWebviewGiantGroupLazyLoadFlow,
   assertWebviewInterruptFlow,
   assertWebviewMultiSessionFlow,
-  assertWebviewOwnershipFlow,
   assertWebviewPlanToolUxFlow,
   assertWebviewReloadReplayFlow,
   assertWebviewSelectionReferenceFlow,
@@ -36,51 +25,6 @@ import {
 } from "./support/hostE2eScenario";
 
 suite("Tomcat host E2E", () => {
-  test("runs the participant happy path", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertParticipantHappyPath(api);
-  });
-
-  test("handles approval and diff/apply in a real host", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertApprovalDiffFlow(api);
-  });
-
-  test("supports interrupt and restart in a real host", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertInterruptAndRestartFlow(api);
-  });
-
-  test("keeps chat-thread to session routing stable in a real host", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertMultiSessionRouting(api);
-  });
-
-  test("runs the participant happy path via the real chat UI", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertParticipantHappyPathViaChatUi(api);
-  });
-
-  test("handles approval and diff/apply via the real chat UI", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertApprovalDiffFlowViaChatUi(api);
-  });
-
-  test("supports interrupt and restart via the real chat UI", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertInterruptAndRestartFlowViaChatUi(api);
-  });
-
-  test("keeps chat-thread routing stable via the real chat UI", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertMultiSessionRoutingViaChatUi(api);
-  });
-
-  test("runs /plan via the real chat UI", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertPlanSlashFlowViaChatUi(api);
-  });
-
   test("switches an executing plan back to chat in the webview", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewPlanModeSwitchFlow(api);
@@ -89,11 +33,6 @@ suite("Tomcat host E2E", () => {
   test("renders the .plan.md custom editor (hybrid default), mode switch, hot reload, and selection-to-chat", async () => {
     const api = await getTomcatExtensionApi();
     await assertPlanPreviewCustomEditorFlow(api);
-  });
-
-  test("runs /model via the real chat UI", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertModelSlashFlowViaChatUi(api);
   });
 
   test("adds a model through settings and uses it in the webview", async () => {
@@ -109,6 +48,11 @@ suite("Tomcat host E2E", () => {
   test("applies edits from the Tomcat webview", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewDiffFlow(api);
+  });
+
+  test("recovers from a failed same-session retry and keeps the error in transcript history", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewRetryRecoveryFlow(api);
   });
 
   test("renders ask_question answers in the Tomcat webview transcript", async () => {
@@ -141,11 +85,6 @@ suite("Tomcat host E2E", () => {
     await assertWebviewMultiSessionFlow(api);
   });
 
-  test("enforces single-owner Tomcat webview sessions", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertWebviewOwnershipFlow(api);
-  });
-
   test("restores plan cards and Ctx after switching sessions", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewSessionSwitchRestoreFlow(api);
@@ -164,11 +103,6 @@ suite("Tomcat host E2E", () => {
   test("lazy loads a giant historical tool group without rendering half a group", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewGiantGroupLazyLoadFlow(api);
-  });
-
-  test("keeps cross-owner plan state in sync in the webview", async () => {
-    const api = await getTomcatExtensionApi();
-    await assertWebviewCrossOwnerPlanFlow(api);
   });
 
   test("adds editor selections to the webview composer and rehydrates them from history", async () => {

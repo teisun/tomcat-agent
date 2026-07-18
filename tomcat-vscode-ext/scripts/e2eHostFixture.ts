@@ -20,7 +20,11 @@ const CHAT_E2E_SETTINGS = {
   "chat.disableAIFeatures": false,
   "chat.mcp.discovery.enabled": false,
   "chat.mcp.enabled": false,
+  // Keep side-by-side enabled, but leave the inline breakpoint untouched so the
+  // runtime diff fix is what forces narrow editors to stay double-pane.
+  "diffEditor.renderSideBySide": true,
   "github.copilot.chat.githubMcpServer.enabled": false,
+  "workbench.startupEditor": "none",
 } as const;
 
 export async function seedChatUserSettings(userDataDir: string): Promise<void> {
@@ -746,6 +750,30 @@ function recordHistoryMessage(sessionId, role, content, forcedId = null) {
   });
 }
 
+function markLatestUserMessageFailed(sessionId) {
+  const session = touchSession(ensureSession(sessionId));
+  for (let index = session.history.length - 1; index >= 0; index -= 1) {
+    const entry = session.history[index];
+    if (entry?.type !== "message" || entry?.message?.role !== "user") {
+      continue;
+    }
+    entry.message.superseded = true;
+    entry.message.turn_failed = true;
+    return entry;
+  }
+  return null;
+}
+
+function recordHistoryError(sessionId, summary, detail) {
+  const session = touchSession(ensureSession(sessionId));
+  session.history.push({
+    detail,
+    id: "error-" + String(historyCounter++),
+    summary,
+    type: "error",
+  });
+}
+
 function seedTranscriptSwitchBackHistory(sessionId) {
   const session = touchSession(ensureSession(sessionId));
   if (session.seededSwitchBackHistory) {
@@ -940,6 +968,23 @@ function handlePrompt(frame) {
       emitContextMetrics(sessionId, 0.36);
       finishTurn(sessionId, null);
     }, 1000);
+    return;
+  }
+
+  if (text.includes("retry 403 showcase")) {
+    const failureSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
+    const failureDetail = "API 错误 403: <html>forbidden</html>\\nHost: aigateway.sunmi.com\\nRequest-Id: req-host-retry";
+    session.retry403ShowcaseAttempts = Number(session.retry403ShowcaseAttempts || 0) + 1;
+    if (session.retry403ShowcaseAttempts === 1) {
+      markLatestUserMessageFailed(sessionId);
+      recordHistoryError(sessionId, failureSummary, failureDetail);
+      finishTurn(sessionId, failureSummary);
+      return;
+    }
+    emitMessageDelta(sessionId, "same session retry succeeded");
+    recordHistoryMessage(sessionId, "assistant", "same session retry succeeded");
+    emitContextMetrics(sessionId, 0.44);
+    finishTurn(sessionId, null);
     return;
   }
 
@@ -1240,34 +1285,6 @@ function handlePrompt(frame) {
     );
     emitContextMetrics(sessionId, 0.62);
     finishTurn(sessionId, null);
-    return;
-  }
-
-  if (text.includes("cross owner plan")) {
-    session.planId = "participant-plan";
-    session.planPath = path.join(process.cwd(), "plans", "participant-plan.plan.md");
-    fs.mkdirSync(path.dirname(session.planPath), { recursive: true });
-    fs.writeFileSync(session.planPath, "# Participant plan\\n\\n- Enter\\n- Build\\n- Exit\\n", "utf8");
-    session.planState = "planning";
-    emitPlanEvent(sessionId, "plan.enter");
-    setTimeout(() => {
-      session.planState = "executing";
-      emitPlanEvent(sessionId, "plan.build");
-    }, 1000);
-    setTimeout(() => {
-      const lastPlanId = session.planId;
-      const lastPlanPath = session.planPath;
-      session.planState = "chat";
-      emitCustomPlanEvent(sessionId, "plan.exit", {
-        path: lastPlanPath,
-        planId: lastPlanId,
-        state: "chat",
-      });
-      session.planId = null;
-      session.planPath = null;
-      recordHistoryMessage(sessionId, "assistant", "participant plan lifecycle finished");
-      finishTurn(sessionId, null);
-    }, 2000);
     return;
   }
 

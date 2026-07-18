@@ -275,14 +275,10 @@ describe("webview html asset resolution", () => {
     const provider = new TomcatWebviewViewProvider({
       extensionUri,
       getDefaultCwd: () => undefined,
-      getUiMode: () => "webview",
       ide: {} as never,
       initialize: async () => ({} as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
-      } as never,
-      ownership: {
-        releaseAll() {},
       } as never,
       sessionRouter: {} as never,
     });
@@ -312,14 +308,10 @@ describe("webview html asset resolution", () => {
     const provider = new TomcatWebviewViewProvider({
       extensionUri,
       getDefaultCwd: () => undefined,
-      getUiMode: () => "webview",
       ide: {} as never,
       initialize: async () => ({} as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
-      } as never,
-      ownership: {
-        releaseAll() {},
       } as never,
       sessionRouter: {} as never,
     });
@@ -345,14 +337,10 @@ function buildSearchProvider(): {
   const provider = new TomcatWebviewViewProvider({
     extensionUri: vscode.Uri.file("/workspace/extension"),
     getDefaultCwd: () => "/workspace",
-    getUiMode: () => "webview",
     ide: {} as never,
     initialize: async () => ({} as never),
     messenger: {
       onEvent: () => ({ dispose() {} }),
-    } as never,
-    ownership: {
-      releaseAll() {},
     } as never,
     sessionRouter: {} as never,
   });
@@ -568,21 +556,81 @@ describe("context search intent handling", () => {
 });
 
 describe("mutation diff stat injection", () => {
+  it("serializes mutation snapshot events so tool results cannot overtake tool starts", async () => {
+    let emitEvent: ((event: Record<string, unknown>) => void) | undefined;
+    let releaseStart:
+      | ((value?: void | PromiseLike<void>) => void)
+      | null = null;
+    const rememberToolStart = vi.fn().mockImplementation(
+      async () =>
+        new Promise<void>((resolve) => {
+          releaseStart = resolve;
+        }),
+    );
+    const rememberToolResult = vi.fn().mockResolvedValue({
+      displayPath: "src/app.ts",
+    });
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {
+        rememberToolResult,
+        rememberToolStart,
+      } as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: (listener: (event: Record<string, unknown>) => void) => {
+          emitEvent = listener;
+          return { dispose() {} };
+        },
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    emitEvent?.({
+      args: { path: "src/app.ts" },
+      sessionId: "s1",
+      toolCallId: "tool-edit-race",
+      toolName: "edit",
+      type: "tool_execution_start",
+    });
+    emitEvent?.({
+      display: { file: "src/app.ts", kind: "file" },
+      isError: false,
+      result: "updated file",
+      sessionId: "s1",
+      toolCallId: "tool-edit-race",
+      toolName: "edit",
+      type: "tool_execution_end",
+    });
+
+    await Promise.resolve();
+    expect(rememberToolStart).toHaveBeenCalledTimes(1);
+    expect(rememberToolResult).not.toHaveBeenCalled();
+
+    if (!releaseStart) {
+      throw new Error("Expected queued tool-start release handle.");
+    }
+    (releaseStart as (value?: void | PromiseLike<void>) => void)(undefined);
+    await vi.waitFor(() => {
+      expect(rememberToolResult).toHaveBeenCalledWith(
+        "tool-edit-race",
+        "src/app.ts",
+        undefined,
+      );
+    });
+
+    provider.dispose();
+  });
+
   it("keeps an errored edit tool settled as complete+error through turn_end and agent_idle", async () => {
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      getUiMode: () => "webview",
       ide: {} as never,
       initialize: async () => ({} as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
-      } as never,
-      ownership: {
-        ownerOf() {
-          return null;
-        },
-        releaseAll() {},
       } as never,
       sessionRouter: {
         getState: vi.fn().mockResolvedValue({
@@ -678,21 +726,148 @@ describe("mutation diff stat injection", () => {
     provider.dispose();
   });
 
-  it("derives added/removed stats directly from file display metadata", async () => {
+  it("replaces a live raw error bubble with the hydrated transcript summary on agent_idle", async () => {
+    const getMessages = vi.fn().mockResolvedValue({
+      messages: [
+        {
+          detail: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
+          id: "history-error-1",
+          summary: "API 错误 403 · aigateway.sunmi.com · Request-Id req-123",
+          type: "error",
+        },
+      ],
+      sessionId: "s1",
+    });
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      getUiMode: () => "webview",
       ide: {} as never,
       initialize: async () => ({} as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
-      ownership: {
-        ownerOf() {
-          return null;
-        },
-        releaseAll() {},
+      sessionRouter: {
+        getMessages,
+        getState: vi.fn().mockResolvedValue({
+          busy: true,
+          sessionId: "s1",
+        }),
+      } as never,
+    });
+
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      sessionId: "s1",
+      type: "agent_start",
+    });
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      error: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
+      messages: [],
+      sessionId: "s1",
+      type: "agent_end",
+    });
+
+    expect(getMessages).not.toHaveBeenCalled();
+    let errorBubble = provider
+      .currentState()
+      .sessionViews.s1.timeline.find((item) => item.type === "message" && item.kind === "error");
+    expect(errorBubble).toMatchObject({
+      text: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
+      type: "message",
+    });
+    expect(errorBubble && "detailText" in errorBubble ? errorBubble.detailText : undefined).toBeUndefined();
+
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      sessionId: "s1",
+      type: "agent_idle",
+    });
+
+    expect(getMessages).toHaveBeenCalledTimes(1);
+    errorBubble = provider
+      .currentState()
+      .sessionViews.s1.timeline.find((item) => item.type === "message" && item.kind === "error");
+    expect(errorBubble).toMatchObject({
+      detailText: "LLM调用错误: API 错误 403: <!DOCTYPE html><html><title>403 Forbidden</title>",
+      text: "API 错误 403 · aigateway.sunmi.com · Request-Id req-123",
+      type: "message",
+    });
+
+    provider.dispose();
+  });
+
+  it("does not refresh history on a clean agent_end/agent_idle cycle", async () => {
+    const getMessages = vi.fn().mockResolvedValue({
+      messages: [],
+      sessionId: "s1",
+    });
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      sessionRouter: {
+        getMessages,
+        getState: vi.fn().mockResolvedValue({
+          busy: false,
+          sessionId: "s1",
+        }),
+      } as never,
+    });
+
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      sessionId: "s1",
+      type: "agent_start",
+    });
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      error: null,
+      messages: [],
+      sessionId: "s1",
+      type: "agent_end",
+    });
+    await (
+      provider as unknown as {
+        handleServeEvent(event: Record<string, unknown>): Promise<void>;
+      }
+    ).handleServeEvent({
+      sessionId: "s1",
+      type: "agent_idle",
+    });
+
+    expect(getMessages).not.toHaveBeenCalled();
+
+    provider.dispose();
+  });
+
+  it("derives added/removed stats directly from file display metadata", async () => {
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
       } as never,
       sessionRouter: {} as never,
     });
@@ -766,17 +941,10 @@ describe("mutation diff stat injection", () => {
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      getUiMode: () => "webview",
       ide: {} as never,
       initialize: async () => ({} as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
-      } as never,
-      ownership: {
-        ownerOf() {
-          return null;
-        },
-        releaseAll() {},
       } as never,
       sessionRouter: {} as never,
     });
@@ -817,7 +985,6 @@ describe("mutation diff stat injection", () => {
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      getUiMode: () => "webview",
       ide: {
         getPreparedChange: () => undefined,
         openReconstructedDiff,
@@ -827,12 +994,6 @@ describe("mutation diff stat injection", () => {
       initialize: async () => ({} as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
-      } as never,
-      ownership: {
-        ownerOf() {
-          return null;
-        },
-        releaseAll() {},
       } as never,
       sessionRouter: {} as never,
     });
@@ -878,11 +1039,12 @@ describe("mutation diff stat injection", () => {
     provider.dispose();
   });
 
-  it("prefers ide.openPreparedDiff when live tool snapshots are available", async () => {
+  it("reconstructs live diffs even when prepared changes already exist", async () => {
     const getPreparedChange = vi.fn().mockReturnValue({
       displayPath: "src/app.ts",
+      existedBefore: true,
+      hasStructuredDiff: true,
     });
-    const openPreparedDiff = vi.fn().mockResolvedValue(undefined);
     const openReconstructedDiff = vi.fn().mockResolvedValue(undefined);
     const rememberToolResult = vi.fn().mockResolvedValue({
       displayPath: "src/app.ts",
@@ -892,10 +1054,8 @@ describe("mutation diff stat injection", () => {
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      getUiMode: () => "webview",
       ide: {
         getPreparedChange,
-        openPreparedDiff,
         openReconstructedDiff,
         rememberToolResult,
         rememberToolStart,
@@ -904,12 +1064,6 @@ describe("mutation diff stat injection", () => {
       initialize: async () => ({} as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
-      } as never,
-      ownership: {
-        ownerOf() {
-          return null;
-        },
-        releaseAll() {},
       } as never,
       sessionRouter: {} as never,
     });
@@ -950,7 +1104,10 @@ describe("mutation diff stat injection", () => {
     });
 
     expect(rememberToolStart).toHaveBeenCalledWith("tool-edit-live", { path: "src/app.ts" });
-    expect(rememberToolResult).toHaveBeenCalledWith("tool-edit-live", "src/app.ts");
+    expect(rememberToolResult).toHaveBeenCalledWith("tool-edit-live", "src/app.ts", {
+      after: "before\nnew line",
+      before: "before\nold line",
+    });
 
     await provider.dispatchTestIntent({
       data: { toolCallId: "tool-edit-live" },
@@ -958,9 +1115,13 @@ describe("mutation diff stat injection", () => {
       type: "openDiff",
     });
 
-    expect(getPreparedChange).toHaveBeenCalledWith("tool-edit-live");
-    expect(openPreparedDiff).toHaveBeenCalledWith("tool-edit-live");
-    expect(openReconstructedDiff).not.toHaveBeenCalled();
+    expect(getPreparedChange).not.toHaveBeenCalled();
+    expect(openReconstructedDiff).toHaveBeenCalledWith(
+      "tool-edit-live",
+      "src/app.ts",
+      "before\nold line",
+      "before\nnew line",
+    );
     expect(showFile).not.toHaveBeenCalled();
 
     provider.dispose();
@@ -975,7 +1136,6 @@ describe("mutation diff stat injection", () => {
     const provider = new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      getUiMode: () => "webview",
       ide: {
         getPreparedChange: () => undefined,
         openReconstructedDiff,
@@ -985,12 +1145,6 @@ describe("mutation diff stat injection", () => {
       initialize: async () => ({} as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
-      } as never,
-      ownership: {
-        ownerOf() {
-          return null;
-        },
-        releaseAll() {},
       } as never,
       sessionRouter: {} as never,
     });
@@ -1017,6 +1171,15 @@ describe("mutation diff stat injection", () => {
 
     expect(showFile).toHaveBeenCalledWith("src/huge.ts");
     expect(openReconstructedDiff).not.toHaveBeenCalled();
+    const session = provider.currentState().sessionViews.s1;
+    expect(
+      session.timeline.some(
+        (item) =>
+          item.type === "message" &&
+          item.kind === "notice" &&
+          item.text.includes("File too large for inline diff"),
+      ),
+    ).toBe(true);
 
     provider.dispose();
   });
@@ -1027,23 +1190,10 @@ describe("checkpoint intent handling", () => {
     return new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      getUiMode: () => "webview",
       ide: {} as never,
       initialize: async () => ({ sessionId: "s1" } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
-      } as never,
-      ownership: {
-        claim() {
-          return { ok: true, record: { owner: "webview" } };
-        },
-        ownerOf() {
-          return { owner: "webview" };
-        },
-        releaseAll() {},
-        snapshot() {
-          return {};
-        },
       } as never,
       sessionRouter: sessionRouter as never,
     });
@@ -1239,18 +1389,11 @@ describe("plan build orchestration", () => {
     return new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      getUiMode: () => "webview",
       ide: {} as never,
       initialize: async () => ({ sessionId: "s1" } as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
         ...messenger,
-      } as never,
-      ownership: {
-        ownerOf() {
-          return { owner: "webview" };
-        },
-        releaseAll() {},
       } as never,
       sessionRouter: {} as never,
     });
@@ -1355,17 +1498,10 @@ describe("plan preview auto-open after review", () => {
     return new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
       getDefaultCwd: () => "/workspace",
-      getUiMode: () => "webview",
       ide: { openWith, showFile } as never,
       initialize: async () => ({} as never),
       messenger: {
         onEvent: () => ({ dispose() {} }),
-      } as never,
-      ownership: {
-        ownerOf() {
-          return null;
-        },
-        releaseAll() {},
       } as never,
       sessionRouter: {
         getState: vi.fn().mockResolvedValue({ busy: false, sessionId: "s1" }),

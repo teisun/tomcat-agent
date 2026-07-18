@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| Nibbles | 2026-07-16 19:02 +0800 | ACTIVE | develop | — |
+| Nibbles | 2026-07-18 09:30 +0800 | ACTIVE | develop | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** 验收整改收尾已合入 `develop`：① 失败错误 `detail` 脱敏补全（`Cookie/Set-Cookie`、`x-api-key`、`password/secret`、裸 `sk-*`、`Basic`）并 8KB 截断；② 失败轮恢复边界/幂等加固（append-invariant 不写 Error、同失败尾幂等）；③ 删除 `@tomcat` participant 与单前端后不可达的 `ownership/uiMode/conflict` 死代码，仅保留 sidebar webview chat box；④ View diff 窄窗并排（`renderSideBySideInlineBreakpoint=0`）、live 403→`agent_idle` 摘要回填、Key slot 对齐与 `KeySlotCombobox` 单测/CSS token。门禁：`cargo test --lib`、`npm run lint`、`npm run test:unit`、目标 host E2E（settings/diff/retry/multi-session/switch-restore）全绿；新包 `tomcat-vscode-ext-0.1.16.vsix`。详情见 `docs/status/feature-transcript-ui-and-checkpoints.md` @2026-07-18
 - [✓] **[P1]** Add Model Key slot 整改完成：凭证清单现每次从 `~/.tomcat/assets/.env` 热重读且只列合法非空 `*_API_KEY`；Relay 建议名按站点 + API 家族区分；Key slot 收敛为可搜索/可输入的唯一入口；新增输入失焦脱敏、共享 Key 覆盖确认、Refresh 与中英文文档。Rust admin 14/14、serve focused 1/1、GUI 12/12、SettingsPanel 5/5、TypeScript lint 均通过 @2026-07-16
 - [✓] **[P1]** reviewer 提示词现统一继承 engineering-standards #6–#8：`code_review.txt` 与 `plan_review.txt` 新增与 `core_identity` / `planner` 一字不差的 first-principles、plain-language+ASCII、UX-first 三句原则；`load_test.rs` 同步扩展 reviewer 双模板逐字守卫。验证：`cargo test --manifest-path tomcat/Cargo.toml --lib standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers` 通过 @2026-07-16
 - [✓] **[P0]** `feature/prompt-optimization` 已 fast-forward 合入 `develop`（`9f940b7 -> 46b7ef7`）：系统提示词/工具描述瘦身、`prompt_guidelines` 聚合、工程规范 #6–#10 固化进 `core_identity`/`planner`、`parallel_tools`/`verification` 段与预算门；同提交附带 `cloud-scale-serving-01/` 方案文档与 `commit-with-status` 路径迁移。详情见 `docs/status/feature-prompt-optimization.md` @2026-07-16
@@ -17,6 +18,9 @@
 - [✓] **[P1]** 会话标题修复已落地：后端新增 `ChatMessage::first_text()` + `extract_user_text_from_content()`，让 `content` 为 `Parts`/`input_text` 的首条 user 消息也能正确派生标题；`run_loop` 叠加 L0 即时 `session.title_updated` 与 title scene 失败时降级到主模型；扩展状态机/E2E fake host 同步补齐。验证：`cargo test --lib first_text`、`cargo test --lib extract_user_text_from_content`、`cargo test --lib append_user_message_with_structured_parts_derives_title_from_input_text`、`cargo test --lib read_first_user_message_text_supports_structured_input_text_parts`、`cargo test --test transcript_summary_integration_tests session_title_updated_`、`npm run lint`、`npx vitest run src/ui/webview/tests/state.test.ts`、`TOMCAT_E2E_GREP='derives non-placeholder session titles from first webview prompt segments' npm run test:e2e:vscode-devhost` 全绿。
 
 ### 🔌 INTERFACE (接口变更)
+- transcript / history：新增 `TranscriptEntry::Error { summary/detail/... }` 与失败 user `turn_failed:true`；`Error.detail` 脱敏覆盖 `authorization/bearer/api_key/token/cookie/set-cookie/x-api-key/password/secret/basic/sk-*`，超 8KB 截断。
+- webview 单前端：删除 `@tomcat` chat participant 与 `ownership/uiMode/conflict` 仲裁层；webview 协议不再携带 `owner/conflictMessage/uiMode`。
+- diff：`VsCodeIde.openPreparedDiff` 在用户未显式配置时将 `diffEditor.renderSideBySideInlineBreakpoint` 设为 `0`，保证窄窗左右并排。
 - `list_provider_keys` 的 wire 形状保持兼容，但语义调整为 `.env` 唯一清单来源：每次调用热重读，仅返回合法非空 `*_API_KEY` 的名称/状态；不再用模型引用补充名称，也不返回完整或部分 Key。`ModelEntryInput.api_key_env` 与 `set_provider_key.envName` 统一校验 `^[A-Z_][A-Z0-9_]*$`。
 - `PromptKey::ReviewerPlan` / `PromptKey::ReviewerCode` 对应模板现内联共享的三条 operating principles（与 `SystemCoreIdentity` / `PlannerReminder` 文案逐字一致）；无对外部客户端的破坏性 API 变更。
 - `BuiltinToolCatalogEntry::prompt_guidelines` + `render_tool_guidelines_with_policy`；`PromptKey::SystemParallelTools` / `SystemVerification`（系统提示词 section priority 22/50）。无对外部客户端的破坏性 API 变更。
@@ -24,12 +28,13 @@
 - `restore_checkpoint` / `/restore` 现强制 checkpoint 的 `session_id` 必须等于当前会话；跨 session restore 返回错误 `checkpoint 不属于当前会话，不能跨会话 restore`，不再允许误回滚共享工作区。
 
 ### ⚠️ BLOCKED (阻塞/风险)
-- Focused VS Code devhost E2E 两次均在测试代码启动前被现有 harness 阻断：Electron 将工作区路径 `/Users/yankeben/workspace/tomcat-agent` 当作 Node 模块加载并报 `MODULE_NOT_FOUND`；扩展 build 已通过，相关 Rust/GUI/host 单元与集成测试全绿。该项记录为测试基础设施风险，不是功能断言失败。
-- 当前无 develop-side 阻塞项。`real_mimo_web_search` 在 nextest 中 86.99s 被标记为 slow，但结果为 PASS，仅作为性能观察项保留，不构成门禁阻塞。
+- 当前无 develop-side 阻塞项。`real_mimo_web_search` 在 nextest 中被标记为 slow，但结果为 PASS，仅作为性能观察项保留，不构成门禁阻塞。
 - Phase A 编码尚未启动；待评审确认后再按 `02-phase-a-session-mailbox-hot-cold.md` 落地。
+- 「同会话关内网后反复 403、新会话可恢复」现象已验收可接受（通网后摘要正常），根因未再钉死到 `previous_response_id`；临时诊断日志已移除，后续若复现再开文件日志排障。
 
 ### 集成说明
-- 本轮 Add Model Key slot 验证：`cargo test --manifest-path tomcat/Cargo.toml --lib admin_test` 14/14、`serve_model_admin_roundtrip_updates_key_presence` 1/1、`npm --prefix tomcat-vscode-ext run lint`、GUI `relayDerive.test.ts + SettingsApp.test.tsx` 12/12、`SettingsPanel.test.ts` 5/5 全绿；devhost E2E 的 harness 启动阻塞见上方 BLOCKED。
+- 本轮验收整改收尾验证：`cargo test --lib` 全绿；`npm run lint` + `npm run test:unit`（ext+gui）全绿；`TOMCAT_E2E_GREP='adds a model through settings|applies edits from the Tomcat webview|recovers from a failed same-session retry|keeps multiple Tomcat webview sessions isolated|restores plan cards and Ctx after switching sessions' npm run test:e2e:vscode-devhost` 全绿；`npm run package:vsix` 产出 `tomcat-vscode-ext-0.1.16.vsix`。分支侧细节见 `docs/status/feature-transcript-ui-and-checkpoints.md`。
+- 本轮 Add Model Key slot 验证：`cargo test --manifest-path tomcat/Cargo.toml --lib admin_test` 14/14、`serve_model_admin_roundtrip_updates_key_presence` 1/1、`npm --prefix tomcat-vscode-ext run lint`、GUI `relayDerive.test.ts + SettingsApp.test.tsx` 12/12、`SettingsPanel.test.ts` 5/5 全绿。
 - 本轮 reviewer prompt 对齐已做 focused 验证：`cargo test --manifest-path tomcat/Cargo.toml --lib standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers` 通过；未额外触发更大范围门禁。
 - 本轮仅文档：云化技术方案四篇 + 架构 README 地图；无 Rust/扩展代码变更，不触发集成门禁。
 - `feature/transcript-ui-and-checkpoints` 已本地 fast-forward 合入 `develop`（HEAD `62c8811`），覆盖 checkpoint restore / transcript UI / `.plan.md` custom editor / bash summary upgrade；develop-side acceptance 现已 **通过**，结论更新为 **GO**（尚未推送远端）。

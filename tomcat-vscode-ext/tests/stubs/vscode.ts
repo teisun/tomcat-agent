@@ -284,6 +284,12 @@ export const FileType = {
   Directory: 2,
 } as const;
 
+export const ConfigurationTarget = {
+  Global: 1,
+  Workspace: 2,
+  WorkspaceFolder: 3,
+} as const;
+
 export class WorkspaceEdit {
   readonly entries: Array<
     | { type: "replace"; uri: Uri; range: Range; text: string }
@@ -447,6 +453,21 @@ export const workspace = {
         return {
           globalValue: value,
         };
+      },
+      async update<T>(key: string, value: T): Promise<void> {
+        const configKey = `${section}.${key}`;
+        if (value === undefined) {
+          configuration.delete(configKey);
+        } else {
+          configuration.set(configKey, value);
+        }
+        for (const listener of configurationListeners) {
+          listener({
+            affectsConfiguration(changedSection: string): boolean {
+              return configKey === changedSection || configKey.startsWith(`${changedSection}.`);
+            },
+          });
+        }
       },
     };
   },

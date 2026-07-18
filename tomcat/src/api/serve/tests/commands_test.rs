@@ -1,10 +1,15 @@
 use super::*;
 use base64::Engine as _;
+use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serial_test::serial;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 use crate::core::llm::multimodal::{
     UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
@@ -14,8 +19,9 @@ use crate::core::llm::{
     ImageSource, LlmProvider, MessageKind, ModelEntryInput, StreamEvent,
 };
 use crate::{
-    CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind, CheckpointMeta,
-    CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions,
+    init_context_state, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
+    CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore,
+    ListOptions, RestoreOptions,
 };
 
 struct CurrentDirGuard {
@@ -146,6 +152,147 @@ fn latest_user_entry(
                 == Some("user")
         })
         .expect("latest user entry")
+}
+
+#[derive(Debug, Clone)]
+struct ScriptedHttpResponse {
+    status: u16,
+    content_type: &'static str,
+    body: String,
+}
+
+impl ScriptedHttpResponse {
+    fn sse(lines: &[&str]) -> Self {
+        Self {
+            status: 200,
+            content_type: "text/event-stream",
+            body: lines.join(""),
+        }
+    }
+
+    fn html(status: u16, body: &str) -> Self {
+        Self {
+            status,
+            content_type: "text/html; charset=utf-8",
+            body: body.to_string(),
+        }
+    }
+}
+
+struct RecordingHttpServer {
+    base_url: String,
+    requests: Arc<parking_lot::Mutex<Vec<String>>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    join_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RecordingHttpServer {
+    async fn start(initial_responses: Vec<ScriptedHttpResponse>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock server");
+        let addr = listener.local_addr().expect("local addr");
+        let base_url = format!("http://{addr}");
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let responses = Arc::new(parking_lot::Mutex::new(VecDeque::from(initial_responses)));
+        let requests_clone = Arc::clone(&requests);
+        let responses_clone = Arc::clone(&responses);
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+        let join_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let Ok((mut socket, _)) = accepted else { continue; };
+                        let request_text = read_full_http_request(&mut socket).await;
+                        requests_clone.lock().push(request_text);
+                        let response = responses_clone
+                            .lock()
+                            .pop_front()
+                            .unwrap_or_else(|| ScriptedHttpResponse::html(500, "{\"error\":\"unplanned request\"}"));
+                        let reason = match response.status {
+                            200 => "OK",
+                            400 => "Bad Request",
+                            401 => "Unauthorized",
+                            403 => "Forbidden",
+                            429 => "Too Many Requests",
+                            500 => "Internal Server Error",
+                            _ => "Unknown",
+                        };
+                        let raw = format!(
+                            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            response.status,
+                            reason,
+                            response.content_type,
+                            response.body.len(),
+                            response.body
+                        );
+                        let _ = socket.write_all(raw.as_bytes()).await;
+                        let _ = socket.shutdown().await;
+                    }
+                }
+            }
+        });
+        Self {
+            base_url,
+            requests,
+            shutdown_tx: Some(shutdown_tx),
+            join_handle: Some(join_handle),
+        }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.requests.lock().clone()
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+async fn read_full_http_request(socket: &mut tokio::net::TcpStream) -> String {
+    let mut buf = Vec::new();
+    let mut header_end = None;
+    let mut content_len = 0usize;
+    loop {
+        let mut chunk = [0u8; 4096];
+        let n = socket.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if header_end.is_none() {
+            if let Some(pos) = find_header_end(&buf) {
+                header_end = Some(pos);
+                content_len = parse_content_length(&buf[..pos]);
+            }
+        }
+        if let Some(pos) = header_end {
+            let body_start = pos + 4;
+            if buf.len() >= body_start + content_len {
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&buf).to_string()
+}
+
+fn find_header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn parse_content_length(header_bytes: &[u8]) -> usize {
+    let header = String::from_utf8_lossy(header_bytes);
+    for line in header.lines() {
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
+            return rest.trim().parse::<usize>().unwrap_or(0);
+        }
+    }
+    0
 }
 
 struct FixedCheckpointStore {
@@ -2068,6 +2215,362 @@ async fn serve_prompt_with_stale_invalid_model_override_emits_single_agent_end_a
         all_agent_ends, 2,
         "expected one failed + one recovered terminal event: {recovered:?}"
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_failed_turn_retry_does_not_replay_superseded_user_tail() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    crate::test_support::write_models_override(
+        temp.path(),
+        &[
+            crate::test_support::TestModelOverride {
+                id: "deepseek-v4-pro",
+                model_name: None,
+                api: "openai",
+                provider: "deepseek",
+                api_key_env: TEST_API_KEY_ENV,
+                base_url: "http://127.0.0.1:1",
+                thinking_format: None,
+                vision: false,
+                files: false,
+                tools: true,
+                reasoning: true,
+                web_search: false,
+            },
+            crate::test_support::TestModelOverride::gpt54_openai_responses(TEST_API_KEY_ENV)
+                .with_base_url("http://127.0.0.1:1"),
+        ],
+    );
+    cfg.llm.default_model = "deepseek-v4-pro".to_string();
+    cfg.context.compaction_model = "deepseek-v4-pro".to_string();
+
+    let first_stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "first ok".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let fail_stream = vec![Err(crate::AppError::Llm("sunmi 403".to_string()))];
+    let third_stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: "retry ok".to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ];
+    let (provider, requests) = RecordingMockLlm::new(vec![first_stream, fail_stream, third_stream]);
+    let provider: Arc<dyn LlmProvider> = Arc::new(provider);
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("stuck-history-ok".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "history prompt".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+    })
+    .await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetModel {
+            id: Some("switch-to-responses".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("stuck-fail".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "will fail".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let failed_lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("sunmi 403"))
+    })
+    .await;
+    assert!(
+        failed_lines.iter().any(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                && line
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|message| message.contains("sunmi 403"))
+        }),
+        "expected failed turn terminal event: {failed_lines:?}"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("stuck-retry".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "retry after reconnect".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let after_retry = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if lines
+                .iter()
+                .filter(|line| {
+                    line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                })
+                .count()
+                >= 3
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+    let agent_ends = after_retry
+        .iter()
+        .filter(|line| line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        agent_ends.len(),
+        3,
+        "expected three terminal events: {after_retry:?}"
+    );
+    assert!(
+        agent_ends
+            .last()
+            .and_then(|line| line.get("error"))
+            .map(|value| value.is_null())
+            .unwrap_or(true),
+        "retry turn should recover successfully: {after_retry:?}"
+    );
+
+    let recorded = requests.0.lock().clone();
+    assert_eq!(recorded.len(), 3, "expected three provider requests");
+    let third_texts: Vec<String> = recorded[2]
+        .messages
+        .iter()
+        .filter_map(|message| message.text_content().map(str::to_string))
+        .collect();
+    assert!(
+        third_texts.iter().any(|text| text == "history prompt"),
+        "successful history before the failure should still be replayed: {third_texts:?}"
+    );
+    assert!(
+        third_texts
+            .iter()
+            .any(|text| text == "retry after reconnect"),
+        "latest retry prompt should be present: {third_texts:?}"
+    );
+    assert!(
+        !third_texts.iter().any(|text| text == "will fail"),
+        "failed-turn user tail must be superseded before the retry request: {third_texts:?}"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_failed_turn_retry_keeps_previous_response_id_hint() {
+    let _api_key = install_test_api_key();
+    let server = RecordingHttpServer::start(vec![
+        ScriptedHttpResponse::html(
+            403,
+            "<html><body><h1>403 Forbidden</h1><p>Host: PS-SHA-01JfN78</p><p>Request-Id: req_turn2</p></body></html>",
+        ),
+        ScriptedHttpResponse::sse(&[
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m2\",\"content_index\":0,\"delta\":\"retry ok\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_turn3\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+        ]),
+    ])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), &server.base_url);
+    cfg.llm.default_model = "gpt-5.4".to_string();
+    cfg.context.compaction_model = "gpt-5.4".to_string();
+    cfg.llm.reasoning_continuity.enabled = true;
+    cfg.llm.openai_responses.use_previous_response_id = true;
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "gpt-5.4"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "{env}"
+base_url = "{base_url}"
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+            base_url = server.base_url,
+        ),
+    )
+    .expect("write responses override");
+    let (state, buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+    let credential_fingerprint = {
+        let digest = Sha256::digest(b"test-key");
+        format!("{digest:x}")[..16].to_string()
+    };
+
+    append_history_message(&slot, "user", "seed user");
+    let seeded_assistant = crate::core::llm::ChatMessage::assistant("seed assistant")
+        .with_reasoning_state(
+            Some("safe summary".to_string()),
+            Some(crate::core::llm::ReasoningContinuation {
+                source_provider: "openai".to_string(),
+                source_api: "responses".to_string(),
+                source_model: "gpt-5".to_string(),
+                format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
+                opaque_payload: serde_json::json!([{
+                    "id": "rs_1",
+                    "type": "reasoning",
+                    "encrypted_content": "enc_turn1",
+                    "summary": [{"type": "summary_text", "text": "safe summary"}]
+                }]),
+                fallback_text: Some("safe summary".to_string()),
+                provider_refs: Some(crate::core::llm::ProviderRefs {
+                    openai_response_id: Some("resp_turn1".to_string()),
+                    replay_profile_id: Some(
+                        crate::core::llm::ProviderCompatProfile::openai_responses_routed(
+                            "gpt-5",
+                            "openai",
+                            &server.base_url,
+                            &credential_fingerprint,
+                        )
+                        .profile_id,
+                    ),
+                }),
+            }),
+            Some(crate::core::llm::ContinuityMetadata {
+                had_tool_call: false,
+                replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
+            }),
+        );
+    slot.ctx
+        .session_runtime
+        .session
+        .try_append_message_to_session(
+            &slot.session_id,
+            serde_json::to_value(&seeded_assistant).expect("serialize seeded assistant"),
+        )
+        .expect("append seeded assistant");
+    let system_text = {
+        let guard = slot.turn_state.lock();
+        guard
+            .as_ref()
+            .expect("session turn state")
+            .system_text
+            .clone()
+    };
+    let seeded_state =
+        init_context_state(&slot.ctx.session_runtime.session, &slot.ctx.config.context, &system_text)
+            .expect("rehydrate seeded context");
+    if let Some(turn_state) = slot.turn_state.lock().as_mut() {
+        turn_state.context_state = seeded_state;
+    }
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("responses-turn-2".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "second".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let _ = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            && line
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("403"))
+    })
+    .await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("responses-turn-3".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "third".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if lines
+                .iter()
+                .filter(|line| {
+                    line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+                })
+                .count()
+                >= 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+    assert!(
+        lines.iter().filter(|line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+        }).count() >= 2,
+        "expected failed turn + retry success terminal events: {lines:?}"
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "expected two upstream requests");
+    assert!(
+        requests[0].contains("\"previous_response_id\":\"resp_turn1\""),
+        "failed turn should still attempt previous_response_id fast path first: {}",
+        requests[0]
+    );
+    assert!(
+        requests[1].contains("\"previous_response_id\":\"resp_turn1\""),
+        "改动A 已回退：瞬时失败后同会话重发应仍携带 previous_response_id 续写线索: {}",
+        requests[1]
+    );
+
+    server.shutdown().await;
 }
 
 #[tokio::test]

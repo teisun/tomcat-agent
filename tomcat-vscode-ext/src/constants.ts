@@ -1,5 +1,4 @@
 export const EXTENSION_ID = "tomcat.tomcat-vscode-ext";
-export const PARTICIPANT_ID = "tomcat.tomcat";
 
 export const TEST_PATH_ENV = "TOMCAT_VSCODE_TEST_PATH";
 export const TEST_DEFAULT_CWD_ENV = "TOMCAT_VSCODE_TEST_DEFAULT_CWD";
@@ -18,9 +17,6 @@ export const TOMCAT_FOCUS_WEBVIEW_COMMAND = "tomcat.ui.focus";
 export const TOMCAT_OPEN_SETTINGS_COMMAND = "tomcat.openSettings";
 export const TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND = "tomcat.addSelectionToChat";
 export const TOMCAT_ADD_FILE_TO_CHAT_COMMAND = "tomcat.addFileToChat";
-export const TOMCAT_ANSWER_COMMAND = "tomcat.answer";
-export const TOMCAT_OPEN_DIFF_COMMAND = "tomcat.openDiff";
-export const TOMCAT_APPLY_EDIT_COMMAND = "tomcat.applyEdit";
 
 export const TOMCAT_PLAN_BUILD_COMMAND = "tomcat.plan.build";
 export const TOMCAT_PLAN_SELECT_BUILD_MODEL_COMMAND = "tomcat.plan.selectBuildModel";
@@ -34,6 +30,5 @@ export const TOMCAT_PLAN_VIEW_AS_MARKDOWN_COMMAND = "tomcat.plan.viewAsMarkdown"
 export const TOMCAT_PLAN_CAN_BUILD_CONTEXT_KEY = "tomcat.plan.canBuild";
 export const TOMCAT_PLAN_TOOLBAR_STYLE_SETTING = "plan.toolbarStyle";
 
-export const TOMCAT_UI_MODE_SETTING = "ui";
 export const TOMCAT_WEBVIEW_CONTAINER_ID = "tomcat-sidebar";
 export const TOMCAT_WEBVIEW_ID = "tomcat.chatView";

@@ -124,6 +124,32 @@ impl ProviderCompatProfile {
         }
     }
 
+    pub fn openai_responses_routed(
+        model: &str,
+        provider: &str,
+        base_url: &str,
+        credential_fingerprint: &str,
+    ) -> Self {
+        let provider = normalized_route_component(provider, "openai");
+        let base_url = normalized_route_component(base_url, "default-base");
+        let credential_fingerprint =
+            normalized_route_component(credential_fingerprint, "anonymous-credential");
+        let model_family = model_family(model);
+        Self {
+            profile_id: format!(
+                "openai.responses.route/{provider}/{model_family}/{base_url}/{credential_fingerprint}"
+            ),
+            provider,
+            api_family: "responses".to_string(),
+            model_family,
+            capture_mode: CaptureMode::OpaqueItems,
+            replay_acceptance: ReplayAcceptance::SameProfileOnly,
+            requires_tool_turn_replay: false,
+            supports_response_id_hint: true,
+            downgrade_mode: DowngradeMode::FallbackText,
+        }
+    }
+
     pub fn chat_completions(model: &str) -> Self {
         let family = model_family(model);
         match CHAT_COMPLETIONS_CONTINUITY_RULES
@@ -448,8 +474,8 @@ fn is_compatible(target: &ProviderCompatProfile, continuation: &ReasoningContinu
     match continuation.format {
         ReasoningFormat::OpenaiResponsesReasoningItems => {
             matches!(target.capture_mode, CaptureMode::OpaqueItems)
-                && continuation.source_provider == "openai"
                 && continuation.source_api == "responses"
+                && target.api_family == "responses"
                 && same_profile(target, continuation)
         }
         // chat-completions reasoning_content：不再按厂商名硬编码，改为按 profile 数据判定。
@@ -472,9 +498,35 @@ fn is_compatible(target: &ProviderCompatProfile, continuation: &ReasoningContinu
 }
 
 fn same_profile(target: &ProviderCompatProfile, continuation: &ReasoningContinuation) -> bool {
+    if let Some(replay_profile_id) = continuation
+        .provider_refs
+        .as_ref()
+        .and_then(|refs| refs.replay_profile_id.as_deref())
+    {
+        return continuation.source_api == target.api_family
+            && model_family(&continuation.source_model) == target.model_family
+            && replay_profile_id == target.profile_id;
+    }
+    if continuation.source_api == "responses"
+        && target.api_family == "responses"
+        && target.profile_id != "openai.responses.default"
+    {
+        // New routed profiles must carry an explicit replay profile id; otherwise we fail closed
+        // and downgrade to visible text instead of risking cross-relay opaque replay.
+        return false;
+    }
     continuation.source_provider == target.provider
         && continuation.source_api == target.api_family
         && model_family(&continuation.source_model) == target.model_family
+}
+
+fn normalized_route_component(raw: &str, fallback: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/').to_ascii_lowercase();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed
+    }
 }
 
 /// 归一到 profile 粒度的 model family。

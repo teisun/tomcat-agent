@@ -3,8 +3,7 @@
 use super::super::thinking_policy::{
     resolve_anthropic_request, resolve_request_fields, should_persist_thinking,
     should_strip_on_resend, strip_anthropic_thinking_blocks, thinking_format_for_api,
-    thinking_format_for_model,
-    ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
+    thinking_format_for_model, ThinkingFormat, ThinkingLevel, ThinkingRequestFields,
 };
 use crate::infra::config::ThinkingConfig;
 
@@ -62,10 +61,7 @@ fn format_resolve_auto_by_wire_api() {
         ThinkingFormat::Auto.resolve_for_api("anthropic-messages"),
         ThinkingFormat::Anthropic
     );
-    assert_eq!(
-        thinking_format_for_api("openai"),
-        ThinkingFormat::Openai
-    );
+    assert_eq!(thinking_format_for_api("openai"), ThinkingFormat::Openai);
     assert_eq!(
         thinking_format_for_api("openai-responses"),
         ThinkingFormat::Openai
@@ -74,10 +70,7 @@ fn format_resolve_auto_by_wire_api() {
         thinking_format_for_api("deepseek"),
         ThinkingFormat::Deepseek
     );
-    assert_eq!(
-        thinking_format_for_api("doubao"),
-        ThinkingFormat::Doubao
-    );
+    assert_eq!(thinking_format_for_api("doubao"), ThinkingFormat::Doubao);
     // 已显式指定的 format 不会被改写
     assert_eq!(
         ThinkingFormat::Doubao.resolve_for_api("openai"),

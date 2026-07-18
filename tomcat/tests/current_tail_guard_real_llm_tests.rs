@@ -10,22 +10,22 @@ use std::time::Duration;
 use chrono::Utc;
 use serial_test::serial;
 use tomcat::core::agent_loop::{
-    CollapseSummaryArtifacts, build_collapse_summary_artifacts_for_test,
+    build_collapse_summary_artifacts_for_test, CollapseSummaryArtifacts,
 };
 use tomcat::core::llm::MessageKind;
-use tomcat::core::plan_runtime::PlanRuntime;
 use tomcat::core::plan_runtime::file_store::{
-    PLAN_FILE_SCHEMA_VERSION, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
-    plan_path_for_id, read_plan, write_plan,
+    plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
+    TodoItem, TodoStatus, PLAN_FILE_SCHEMA_VERSION,
 };
 use tomcat::core::plan_runtime::state::PlanState;
+use tomcat::core::plan_runtime::PlanRuntime;
 use tomcat::core::session::transcript::append_entry;
 use tomcat::core::session::{PlanEventKind, PlanEventRef};
 use tomcat::core::tools::contract::catalog::builtin_tool_by_name;
 use tomcat::core::tools::plan_tool::update_plan::{self, UpdatePlanArgs};
 use tomcat::{
-    AppConfig, ChatMessage, ChatRequest, ChatResponse, ContextConfig, SessionManager,
-    init_context_state,
+    init_context_state, AppConfig, ChatMessage, ChatRequest, ChatResponse, ContextConfig,
+    SessionManager,
 };
 
 const COMPACTION_MODEL: &str = "deepseek-v4-pro";
@@ -476,26 +476,20 @@ async fn real_llm_collapse_summary_includes_programmatic_keepalive() {
         artifacts.summary_message.kind,
         MessageKind::CompactionSummary
     );
-    assert!(
-        artifacts
-            .summary_text
-            .starts_with("## Structured Summary\n")
-    );
-    assert!(
-        artifacts
-            .summary_text
-            .contains("\n\n## Execution Keepalive\n")
-    );
+    assert!(artifacts
+        .summary_text
+        .starts_with("## Structured Summary\n"));
+    assert!(artifacts
+        .summary_text
+        .contains("\n\n## Execution Keepalive\n"));
     assert!(artifacts.summary_text.contains("- mode: executing"));
     assert!(artifacts.summary_text.contains(&format!(
         "- active_plan_path: {}",
         fixture.plan_path.display()
     )));
-    assert!(
-        artifacts
-            .summary_text
-            .contains(&format!("- current_step: {}", fixture.active_content))
-    );
+    assert!(artifacts
+        .summary_text
+        .contains(&format!("- current_step: {}", fixture.active_content)));
     assert!(artifacts.summary_text.contains(&fixture.next_content));
     assert!(artifacts.summary_text.contains(&format!(
         "latest_plan_event: build:{}:{}",

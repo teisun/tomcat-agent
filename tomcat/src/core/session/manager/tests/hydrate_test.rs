@@ -1112,6 +1112,53 @@ fn init_context_state_skips_superseded_messages() {
 }
 
 #[test]
+fn init_context_state_skips_error_entries_and_failed_turn_tail() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+
+    mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({"role":"assistant","content":"a1"}))
+        .unwrap();
+    mgr.append_message(serde_json::json!({
+        "role":"user",
+        "content":"retry me",
+        "superseded": true,
+        "turn_failed": true
+    }))
+    .unwrap();
+    mgr.append_error_entry(crate::core::session::ErrorEntry {
+        id: Some("err_1".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:03.000Z".to_string(),
+        phase: Some("Llm".to_string()),
+        provider: Some("openai".to_string()),
+        model: Some("gpt-5.4".to_string()),
+        api_family: Some("responses".to_string()),
+        status_code: Some(403),
+        request_id: Some("req_123".to_string()),
+        summary: "API 错误 403 · gateway".to_string(),
+        detail: "API 错误 403 原文".to_string(),
+    })
+    .unwrap();
+
+    let cfg = ContextConfig::default();
+    let state = init_context_state(&mgr, &cfg, "sys").unwrap();
+    let texts: Vec<String> = state
+        .messages
+        .iter()
+        .filter_map(|m| m.text_content().map(str::to_string))
+        .collect();
+    assert_eq!(texts, vec!["q1".to_string(), "a1".to_string()]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn init_context_state_heals_single_dangling_tool_call_and_appends_marker() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

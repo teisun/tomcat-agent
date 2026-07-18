@@ -41,8 +41,8 @@ use std::time::Duration;
 
 use serial_test::serial;
 use tomcat::core::plan_runtime::file_store::{
-    PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus, plan_path_for_id,
-    read_plan, write_plan,
+    plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
+    TodoItem, TodoStatus,
 };
 use tomcat::{
     load_config_toml_file, normalize_path, resolve_sessions_dir, resolve_workspace_roots_paths,
@@ -298,7 +298,11 @@ fn setup_fixture(
     std::fs::create_dir_all(home.join(".tomcat").join("plans")).unwrap();
     let user_config_path = {
         let p = home.join(".tomcat").join("tomcat.config.toml");
-        if p.exists() { Some(p) } else { None }
+        if p.exists() {
+            Some(p)
+        } else {
+            None
+        }
     };
     let mut cfg = load_user_config(user_config_path.as_deref());
     cfg.plan.max_code_review_rounds = max_code_review_rounds;
@@ -642,7 +646,11 @@ fn text_delta_from_bytes(bytes: &[u8], cursor: &mut Utf8StreamCursor) -> Option<
                     let valid = err.valid_up_to();
                     let text = String::from_utf8_lossy(&chunk[..valid]).to_string();
                     cursor.carry = chunk[valid..].to_vec();
-                    if text.is_empty() { None } else { Some(text) }
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    }
                 }
             }
         }

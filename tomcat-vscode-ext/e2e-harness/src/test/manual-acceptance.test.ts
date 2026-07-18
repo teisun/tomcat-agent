@@ -23,7 +23,6 @@ type TomcatApi = {
       composerRowCount: number;
       expandedThinkingCount: number;
       expandedToolTitles: string[];
-      hasConflict: boolean;
       html: string;
       jumpToLatestVisible: boolean;
       latestUserTopWithinStream: number | null;

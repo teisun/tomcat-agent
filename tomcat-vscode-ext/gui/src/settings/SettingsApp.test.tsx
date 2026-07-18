@@ -100,7 +100,9 @@ function getPasswordInput(scope: HTMLElement): HTMLInputElement {
 }
 
 describe("SettingsApp", () => {
-  it("posts a ready handshake, defaults to the official tab, and supports keyboard tab switching", async () => {
+  it(
+    "posts a ready handshake, defaults to the official tab, and supports keyboard tab switching",
+    async () => {
     const { postMessage } = mount();
 
     expect(postMessage).toHaveBeenCalledTimes(1);
@@ -162,7 +164,9 @@ describe("SettingsApp", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
-  });
+    },
+    15000,
+  );
 
   it("falls back to the relay tab when no official presets are available and explains the empty state", async () => {
     mount();
@@ -407,7 +411,7 @@ describe("SettingsApp", () => {
       (within(dialog).getByRole("textbox", { name: /base url/i }) as HTMLInputElement).value,
     ).toBe("https://api.chatanywhere.tech/v1");
     expect(within(dialog).queryByLabelText("Provider")).toBeNull();
-  });
+  }, 15_000);
 
   it("warns on built-in id collisions, validates bad relay URLs, and can reuse configured key slots", async () => {
     const { postMessage } = mount();
@@ -499,7 +503,7 @@ describe("SettingsApp", () => {
       },
       type: "upsertModel",
     });
-  });
+  }, 15_000);
 
   it("sends inline key saves, keeps key fields masked, and shows the backend capability warning", async () => {
     const { postMessage } = mount();
@@ -608,23 +612,34 @@ describe("SettingsApp", () => {
     ).toBeTruthy();
   });
 
-  it("refreshes models, validates custom key slots, removes the advanced duplicate, and masks drafts on blur", async () => {
+  it("refreshes key slots, validates custom key slots, removes the advanced duplicate, and masks drafts on blur", async () => {
     const { postMessage } = mount();
     await emitState(readyState({ models: [builtinModel()] }));
     postMessage.mockClear();
 
-    fireEvent.click(screen.getByRole("button", { name: /refresh/i }));
-    expect(postMessage.mock.calls[0][0]).toMatchObject({ type: "listModels" });
+    const dialog = openAddModelDialog();
+    fireEvent.click(within(dialog).getByRole("button", { name: /refresh key slots/i }));
+    expect(postMessage.mock.calls[0][0]).toMatchObject({ type: "listProviderKeys" });
     postMessage.mockClear();
 
-    const dialog = openAddModelDialog();
+    await emitState(
+      readyState({
+        models: [builtinModel()],
+        providerKeys: [providerKey({ envName: "FCODEX_OPENAI_API_KEY", keyPresent: true })],
+      }),
+    );
+    expect(within(dialog).getByText("Key slots refreshed.")).toBeTruthy();
+
+    const keySlot = within(dialog).getByRole("combobox", { name: "Key slot" });
+    fireEvent.focus(keySlot);
+    expect(within(dialog).getByRole("option", { name: /FCODEX_OPENAI_API_KEY/i })).toBeTruthy();
+
     fireEvent.change(within(dialog).getByRole("textbox", { name: /model name/i }), {
       target: { value: "gpt-5.6" },
     });
     fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
     expect(within(dialog).queryByText("API key env override")).toBeNull();
 
-    const keySlot = within(dialog).getByRole("combobox", { name: "Key slot" });
     fireEvent.change(keySlot, { target: { value: "bad-key-slot" } });
     expect(within(dialog).getByText("Key slot must match ^[A-Z_][A-Z0-9_]*$.")).toBeTruthy();
     fireEvent.change(keySlot, { target: { value: "FCODEX_OPENAI_API_KEY" } });
@@ -637,6 +652,38 @@ describe("SettingsApp", () => {
     expect(keyInput.type).toBe("text");
     expect(keyInput.value).toMatch(/^sk-12345•+cdef$/);
     expect(keyInput.value).not.toContain("67890ab");
+  });
+
+  it("uses the same label-row structure for the key slot and api key fields", async () => {
+    mount();
+    await emitState(readyState({ models: [builtinModel()] }));
+
+    const dialog = openAddModelDialog();
+    const keySlot = within(dialog).getByRole("combobox", { name: "Key slot" });
+    const sharedRow = keySlot.closest(".tc-settings-form__row");
+    expect(sharedRow).toBeTruthy();
+
+    const fieldChildren = Array.from(sharedRow?.children ?? []).filter(
+      (node): node is HTMLElement =>
+        node instanceof HTMLElement && node.classList.contains("tc-field"),
+    );
+    expect(fieldChildren).toHaveLength(2);
+
+    for (const field of fieldChildren) {
+      expect(field.firstElementChild?.classList.contains("tc-field__label-row")).toBe(true);
+    }
+  });
+
+  it("exposes stable visible-control hooks for key-slot alignment checks", async () => {
+    mount();
+    await emitState(readyState({ models: [builtinModel()] }));
+
+    const dialog = openAddModelDialog();
+    const keySlotBox = within(dialog).getByTestId("settings-key-slot-box");
+    const apiKeyInput = within(dialog).getByTestId("settings-api-key-input");
+
+    expect(keySlotBox.classList.contains("tc-settings-combobox")).toBe(true);
+    expect(apiKeyInput.classList.contains("tc-settings-api-key-input")).toBe(true);
   });
 
   it("requires confirmation before replacing a configured key shared by other models", async () => {

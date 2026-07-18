@@ -10,9 +10,6 @@ function formatSessionLabel(session: WebviewSessionTab): string {
   if (session.isCurrent) {
     meta.push("*");
   }
-  if (session.owner) {
-    meta.push(session.owner);
-  }
   if (session.busy) {
     meta.push("running");
   }

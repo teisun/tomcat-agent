@@ -137,7 +137,12 @@ fn restore_core_with_paths(
 
     let note_paths = checkpoint_note_paths(meta.notes.as_ref());
     let restore_plan = if revert_files {
-        Some(effective_restore_paths(ctx, &checkpoint_id, &meta, requested_paths))
+        Some(effective_restore_paths(
+            ctx,
+            &checkpoint_id,
+            &meta,
+            requested_paths,
+        ))
     } else {
         None
     };
@@ -178,7 +183,10 @@ fn restore_core_with_paths(
         summary = report.summary.clone();
         restored_paths = resolved_restore_paths(&report, &restore_plan.paths);
         if !dry_run
-            && matches!(meta.kind, CheckpointKind::TurnEnd | CheckpointKind::Interrupt)
+            && matches!(
+                meta.kind,
+                CheckpointKind::TurnEnd | CheckpointKind::Interrupt
+            )
         {
             if let Err(err) = finalize_restore_transcript(ctx, &meta, &restored_paths) {
                 record_restore_audit(
@@ -195,7 +203,10 @@ fn restore_core_with_paths(
             summary = checkpoint_diff_summary(ctx, &checkpoint_id);
         }
         if !dry_run
-            && matches!(meta.kind, CheckpointKind::TurnEnd | CheckpointKind::Interrupt)
+            && matches!(
+                meta.kind,
+                CheckpointKind::TurnEnd | CheckpointKind::Interrupt
+            )
         {
             if let Err(err) = finalize_restore_transcript(ctx, &meta, &[]) {
                 record_restore_audit(ctx, false, format!("transcript-only restore failed: {err}"));
@@ -251,7 +262,10 @@ fn restore_core_with_paths(
         reloaded_plan_id,
         summary,
         transcript_truncated: !dry_run
-            && matches!(meta.kind, CheckpointKind::TurnEnd | CheckpointKind::Interrupt),
+            && matches!(
+                meta.kind,
+                CheckpointKind::TurnEnd | CheckpointKind::Interrupt
+            ),
         warnings,
     })
 }
@@ -379,10 +393,7 @@ fn changed_paths_for_report(
         .collect()
 }
 
-fn checkpoint_diff_summary(
-    ctx: &ChatContext,
-    checkpoint_id: &CheckpointId,
-) -> Option<String> {
+fn checkpoint_diff_summary(ctx: &ChatContext, checkpoint_id: &CheckpointId) -> Option<String> {
     ctx.scope_services
         .checkpoint_store
         .diff(checkpoint_id)

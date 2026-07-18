@@ -19,11 +19,11 @@ pub(crate) use executor::compute_line_hash;
 pub(crate) use executor::simulate_failed_commit_with_backup_for_test;
 pub use executor::DefaultPrimitiveExecutor;
 pub use types::{
-    BashResult, DiffTag, DirEntry, EditFileResult, EditOperation, EditOperationType,
-    FileDiffLine, HashlineOp, HashlineSegment, PrimitiveExecutor, PrimitiveOperation,
-    ReadBinaryResult, ReadResult, ReadTextResult, SearchFileCount, SearchFileMatch,
-    SearchFilesArgs, SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery,
-    SearchFilesResultMode, SearchFilesStats, SearchFilesTarget, WriteFileResult,
+    BashResult, DiffTag, DirEntry, EditFileResult, EditOperation, EditOperationType, FileDiffLine,
+    HashlineOp, HashlineSegment, PrimitiveExecutor, PrimitiveOperation, ReadBinaryResult,
+    ReadResult, ReadTextResult, SearchFileCount, SearchFileMatch, SearchFilesArgs,
+    SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery, SearchFilesResultMode,
+    SearchFilesStats, SearchFilesTarget, WriteFileResult,
 };
 
 /// T2-P0-017 PR-D：`replace_all` 信号 sentinel。

@@ -7,7 +7,6 @@ import type {
   SessionCheckpointListPayload,
   SessionHistoryPayload,
 } from "../src/serveClient/sessionRouter";
-import { SessionOwnershipTracker } from "../src/ui/webview/ownership";
 import { TomcatWebviewViewProvider } from "../src/ui/webview/provider";
 import type { IdeHost } from "../src/ui/webview/types";
 
@@ -345,13 +344,11 @@ function buildProvider(options: BuildProviderOptions = {}) {
       return sessionId;
     },
   };
-  const ownership = new SessionOwnershipTracker();
   const openModelSettings = options.openModelSettings ?? vi.fn();
 
   const provider = new TomcatWebviewViewProvider({
     extensionUri: vscode.Uri.file("/extension"),
     getDefaultCwd: () => "/workspace",
-    getUiMode: () => "both",
     ide: {
       applyPreparedEdit: async () => true,
       openPreparedDiff: async () => undefined,
@@ -368,12 +365,11 @@ function buildProvider(options: BuildProviderOptions = {}) {
     initialize: async () => initializeResult(),
     messenger: messenger as never,
     openModelSettings,
-    ownership,
     sessionRouter: sessionRouter as never,
   });
 
   messenger.listModelsPayload = options.listModelsPayload ?? messenger.listModelsPayload;
-  return { historyCalls, messenger, ownership, provider, sessionState };
+  return { historyCalls, messenger, provider, sessionState };
 }
 
 describe("webview provider integration", () => {
@@ -742,54 +738,6 @@ describe("webview provider integration", () => {
     ]);
 
     provider.dispose();
-  });
-
-  it("blocks interrupt requests when the participant owns the active session", async () => {
-    const { messenger, ownership, provider } = buildProvider();
-    ownership.claim("session-1", "participant");
-
-    await provider.dispatchTestIntent({
-      messageId: "ready-participant-owner",
-      type: "ready",
-    });
-
-    await provider.dispatchTestIntent({
-      data: { sessionId: "session-1" },
-      messageId: "interrupt-participant-owner",
-      type: "interrupt",
-    });
-
-    expect(messenger.requestCalls.filter((call) => call.type === "interrupt")).toHaveLength(0);
-    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
-      conflictMessage: "This session is currently owned by the Tomcat participant.",
-      owner: "participant",
-      ownedByThisFrontend: false,
-    });
-
-    provider.dispose();
-  });
-
-  it("releases webview ownership when the provider is disposed", async () => {
-    const { ownership, provider } = buildProvider();
-
-    await provider.dispatchTestIntent({
-      messageId: "ready-dispose-release",
-      type: "ready",
-    });
-    await provider.dispatchTestIntent({
-      data: {
-        modelId: "gpt-5.4",
-        sessionId: "session-1",
-      },
-      messageId: "claim-webview-owner",
-      type: "setModel",
-    });
-
-    expect(ownership.ownerOf("session-1")?.owner).toBe("webview");
-
-    provider.dispose();
-
-    expect(ownership.ownerOf("session-1")).toBeUndefined();
   });
 
   it("opens model settings when the composer footer intent fires", async () => {
@@ -2192,6 +2140,7 @@ describe("webview provider integration", () => {
       ],
       type: "plan.todos",
     });
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     const session = provider.currentState().sessionViews["session-1"];
     const planCard = session.timeline.find(
@@ -2378,7 +2327,7 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
-  it("converges plan state from cross-owner transition events", async () => {
+  it("converges plan state from sequential transition events", async () => {
     const { messenger, provider } = buildProvider();
 
     await provider.dispatchTestIntent({

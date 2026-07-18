@@ -63,6 +63,81 @@ fn replay_policy_openai_responses_keeps_encrypted_reasoning() {
 }
 
 #[test]
+fn replay_policy_openai_responses_routed_profile_match_keeps_opaque() {
+    let target = ProviderCompatProfile::openai_responses_routed(
+        "gpt-5",
+        "relay-a",
+        "https://relay-a.example/v1",
+        "cred-a",
+    );
+    let msg = ChatMessage::assistant("answer").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "relay-a".to_string(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: serde_json::json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_123"
+            }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: Some(crate::core::llm::ProviderRefs {
+                openai_response_id: Some("resp_123".to_string()),
+                replay_profile_id: Some(target.profile_id.clone()),
+            }),
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    assert_eq!(plan(&target, &msg), ReplayAction::KeepOpaque);
+}
+
+#[test]
+fn replay_policy_openai_responses_routed_profile_mismatch_downgrades() {
+    let source = ProviderCompatProfile::openai_responses_routed(
+        "gpt-5",
+        "relay-a",
+        "https://relay-a.example/v1",
+        "cred-a",
+    );
+    let target = ProviderCompatProfile::openai_responses_routed(
+        "gpt-5",
+        "relay-b",
+        "https://relay-b.example/v1",
+        "cred-b",
+    );
+    let msg = ChatMessage::assistant("answer").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(ReasoningContinuation {
+            source_provider: "relay-a".to_string(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: serde_json::json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_123"
+            }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: Some(crate::core::llm::ProviderRefs {
+                openai_response_id: Some("resp_123".to_string()),
+                replay_profile_id: Some(source.profile_id.clone()),
+            }),
+        }),
+        Some(ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    assert_eq!(
+        plan(&target, &msg),
+        ReplayAction::ConvertToText("safe summary".to_string())
+    );
+}
+
+#[test]
 fn replay_policy_anthropic_same_profile_keeps_signed_thinking_blocks() {
     let msg = anthropic_reasoning_message();
     let profile = ProviderCompatProfile::anthropic_messages("claude-opus-4-8");

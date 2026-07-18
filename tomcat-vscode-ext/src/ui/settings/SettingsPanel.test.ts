@@ -248,4 +248,30 @@ describe("settings panel model management flow", () => {
       listModelsMock.mock.invocationCallOrder[0],
     );
   });
+
+  it("can refresh only provider keys without reloading models", async () => {
+    const { messenger, panel } = createPanel();
+
+    await panel.__testingDispatchIntent({
+      messageId: "refresh-keys-only",
+      type: "listProviderKeys",
+    } satisfies SettingsIntent);
+
+    expect(messenger.sendListProviderKeys).toHaveBeenCalledTimes(1);
+    expect(messenger.sendListModels).not.toHaveBeenCalled();
+  });
+
+  it("marks the webview ready only after the settings.ready handshake arrives", async () => {
+    const { panel } = createPanel();
+
+    expect(panel.__testingSnapshot().webviewReady).toBe(false);
+
+    await panel.__testingDispatchIntent({
+      data: { route: "models" },
+      messageId: "handshake",
+      type: "settings.ready",
+    } satisfies SettingsIntent);
+
+    expect(panel.__testingSnapshot().webviewReady).toBe(true);
+  });
 });

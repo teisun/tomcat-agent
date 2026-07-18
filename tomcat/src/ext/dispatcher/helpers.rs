@@ -73,6 +73,7 @@ pub(super) fn transcript_entry_id(entry: &crate::core::session::TranscriptEntry)
     use crate::core::session::TranscriptEntry;
     match entry {
         TranscriptEntry::Message(e) => e.id.as_deref(),
+        TranscriptEntry::Error(e) => e.id.as_deref(),
         TranscriptEntry::ModelChange(e) => e.id.as_deref(),
         TranscriptEntry::ThinkingLevelChange(e) => e.id.as_deref(),
         TranscriptEntry::ThinkingTrace(e) => e.id.as_deref(),

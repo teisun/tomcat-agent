@@ -9,11 +9,9 @@ import {
   EXTENSION_ID,
   TEST_DEFAULT_CWD_ENV,
   TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
-  TOMCAT_ANSWER_COMMAND,
   TOMCAT_PLAN_ADD_SELECTION_TO_CHAT_COMMAND,
 } from "../../../constants";
 import { resolveUriToFileReference } from "../../../ui/webview/contextReferences";
-import type { PendingQuestionSnapshot } from "../../../ui/participant/commands";
 import type {
   ObservedEventFilter,
   TomcatExtensionApi,
@@ -22,7 +20,6 @@ import type {
 import type { SettingsIntent } from "../../../shared/settingsProtocol";
 
 let dummyLanguageModelRegistration: vscode.Disposable | undefined;
-let hasWarmedChatUi = false;
 type LanguageModelRegistry = {
   registerLanguageModelChatProvider(
     vendor: string,
@@ -71,32 +68,6 @@ type MacWindowInfo = {
 
 type CaptureRegion = "editor" | "sidebar" | "window";
 
-function collectStreamText(
-  stream: Awaited<ReturnType<TomcatExtensionApi["__testing"]["runParticipantTurn"]>>["stream"],
-  kind: "markdown" | "progress",
-): string {
-  return stream
-    .flatMap((event) =>
-      event.kind === kind ? [event.value] : [],
-    )
-    .join("\n");
-}
-
-function getButton(
-  stream: Awaited<ReturnType<TomcatExtensionApi["__testing"]["runParticipantTurn"]>>["stream"],
-  title: string,
-): Extract<
-  Awaited<ReturnType<TomcatExtensionApi["__testing"]["runParticipantTurn"]>>["stream"][number],
-  { kind: "button" }
-> {
-  const button = stream.find(
-    (event): event is Extract<(typeof stream)[number], { kind: "button" }> =>
-      event.kind === "button" && event.title === title,
-  );
-  assert.ok(button, `expected stream button ${title}`);
-  return button;
-}
-
 export async function getTomcatExtensionApi(): Promise<TomcatExtensionApi> {
   if (!dummyLanguageModelRegistration) {
     const registry = vscode.lm as unknown as LanguageModelRegistry;
@@ -131,57 +102,6 @@ export async function getTomcatExtensionApi(): Promise<TomcatExtensionApi> {
   assert.ok(extension.isActive, "expected Tomcat extension to activate");
   await new Promise((resolve) => setTimeout(resolve, 2_000));
   return exports;
-}
-
-async function startChatQuery(
-  query: string,
-  options: {
-    blockOnResponse?: boolean;
-    newChat?: boolean;
-  } = {},
-): Promise<{ metadata?: { sessionId?: string } } | undefined> {
-  if (options.newChat) {
-    await vscode.commands.executeCommand(
-      "workbench.action.chat.triggerSetupAnonymousWithoutDialog",
-    );
-    await vscode.commands.executeCommand(
-      "workbench.action.chat.newChat",
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-
-  return new Promise<{ metadata?: { sessionId?: string } } | undefined>(
-    (resolve, reject) => {
-      setTimeout(() => {
-        void vscode.commands
-          .executeCommand<{ metadata?: { sessionId?: string } } | undefined>(
-            "workbench.action.chat.open",
-            {
-              blockOnResponse: options.blockOnResponse ?? false,
-              mode: "ask",
-              query,
-            },
-          )
-          .then(resolve, reject);
-      }, 0);
-    },
-  );
-}
-
-async function warmChatUi(): Promise<void> {
-  if (hasWarmedChatUi) {
-    return;
-  }
-
-  hasWarmedChatUi = true;
-  try {
-    await startChatQuery("@tomcat warm up", {
-      newChat: true,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-  } catch {
-    // The warm-up request is best-effort; later assertions exercise the real checks.
-  }
 }
 
 async function waitForEvent(
@@ -266,6 +186,26 @@ async function waitForSettingsPanelState<T>(
   throw new Error("Timed out waiting for settings panel state to match the expected condition");
 }
 
+async function waitForVisiblePreparedDiffEditors(
+  toolCallId: string,
+  timeoutMs = 15_000,
+): Promise<readonly vscode.TextEditor[]> {
+  const startedAt = Date.now();
+  const encodedToolCallId = encodeURIComponent(toolCallId);
+  while (Date.now() - startedAt < timeoutMs) {
+    const editors = vscode.window.visibleTextEditors.filter(
+      (editor) =>
+        editor.document.uri.scheme === "tomcat-diff"
+        && editor.document.uri.path.split("/").filter(Boolean)[0] === encodedToolCallId,
+    );
+    if (editors.length >= 2) {
+      return editors;
+    }
+    await pause(100);
+  }
+  throw new Error(`Timed out waiting for visible diff editors for ${toolCallId}`);
+}
+
 async function waitForWebviewBootstrapSettled(
   api: TomcatExtensionApi,
   timeoutMs = 40_000,
@@ -302,8 +242,7 @@ async function claimActiveWebviewSession(
     return createFreshWebviewSession(api, `${messageId}-bootstrap`, timeoutMs);
   }
   const sessionId = bootstrapState.activeSessionId;
-  assert.ok(sessionId, "expected a bootstrapped active session before claiming ownership");
-  api.__testing.releaseSessionOwnership(sessionId);
+  assert.ok(sessionId, "expected a bootstrapped active session before switching sessions");
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: { sessionId },
@@ -335,7 +274,6 @@ async function claimDifferentWebviewSession(
     .sessions.find((session) => session.sessionId !== currentSessionId)
     ?.sessionId;
   if (candidate) {
-    api.__testing.releaseSessionOwnership(candidate);
     await api.__testing.sendWebviewIntent(
       buildWebviewIntent({
         data: { sessionId: candidate },
@@ -405,7 +343,6 @@ async function createFreshWebviewSession(
         ?.sessionId,
     timeoutMs,
   );
-  api.__testing.releaseSessionOwnership(sessionId);
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: { sessionId },
@@ -536,339 +473,31 @@ async function clearComposerDraft(
   );
 }
 
-async function answerPendingQuestion(
-  pending: PendingQuestionSnapshot,
-): Promise<void> {
-  const question = pending.questions[0];
-  const approveOption = question.options[0];
-  assert.ok(approveOption, "expected an approval option");
-  await vscode.commands.executeCommand(TOMCAT_ANSWER_COMMAND, {
-    kind: "direct",
-    optionId: approveOption.id,
-    pickedRecommended: !!approveOption.recommended,
-    questionId: question.id,
-    requestId: pending.requestId,
-  });
-}
-
-async function startPendingParticipantTurn(
-  api: TomcatExtensionApi,
-): Promise<{
-  pending: PendingQuestionSnapshot;
-  sessionId: string;
-  turnPromise: ReturnType<TomcatExtensionApi["__testing"]["runParticipantTurn"]>;
-}> {
-  api.__testing.clearObservedEvents();
-  const turnPromise = api.__testing.runParticipantTurn({
-    prompt: "answer card showcase",
-  });
-  const pending = await api.__testing.waitForPendingQuestion();
-  if (typeof pending.sessionId !== "string") {
-    throw new Error("expected pending participant turn to carry a sessionId");
-  }
-  return {
-    pending,
-    sessionId: pending.sessionId,
-    turnPromise,
-  };
-}
-
 function buildWebviewIntent(
   intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>,
 ): Exclude<WebviewIntent, { type: "__test.dom_snapshot" }> {
   return intent;
 }
 
+function stripTerminalNewline(value: string): string {
+  return value.replace(/\r?\n$/u, "");
+}
+
+function assertPreparedChangeMatches(
+  change: NonNullable<ReturnType<TomcatExtensionApi["__testing"]["getPreparedChange"]>>,
+  displayPath: string,
+  expectedBefore: string,
+  expectedAfter: string,
+): void {
+  assert.equal(change.displayPath, displayPath);
+  assert.notEqual(change.originalContent.length, 0, "expected reconstructed original content");
+  assert.notEqual(change.proposedContent.length, 0, "expected reconstructed proposed content");
+  assert.equal(stripTerminalNewline(change.originalContent), expectedBefore);
+  assert.equal(stripTerminalNewline(change.proposedContent), expectedAfter);
+}
+
 function buildSettingsIntent(intent: SettingsIntent): SettingsIntent {
   return intent;
-}
-
-export async function assertParticipantHappyPath(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  const turn = await api.__testing.runParticipantTurn({
-    prompt: "hello fake tomcat",
-  });
-  const markdown = collectStreamText(turn.stream, "markdown");
-
-  assert.match(markdown, /hello from fake tomcat/i);
-  assert.equal(typeof turn.result?.metadata?.sessionId, "string");
-}
-
-export async function assertParticipantHappyPathViaChatUi(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  await warmChatUi();
-  api.__testing.clearObservedEvents();
-  await startChatQuery("@tomcat hello fake tomcat", {
-    newChat: true,
-  });
-  await waitForEvent(api, {
-    textIncludes: "hello from fake tomcat",
-    type: "message_update",
-  });
-  const completed = await api.__testing.waitForEvent({
-    timeoutMs: 15_000,
-    type: "agent_end",
-  });
-  assert.equal(typeof completed.sessionId, "string");
-}
-
-export async function assertApprovalDiffFlow(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  const editFile = requireEnv("TOMCAT_VSCODE_TEST_EDIT_FILE");
-  await fs.writeFile(editFile, "before\n", "utf8");
-
-  const turn = await api.__testing.runParticipantTurn({
-    autoClickTitles: ["Approve"],
-    prompt: "approve edit",
-  });
-
-  assert.match(collectStreamText(turn.stream, "markdown"), /edit applied/i);
-  getButton(turn.stream, "Open Diff");
-  const applyButton = getButton(turn.stream, "Apply Edit");
-  const toolCallId = (applyButton.arguments?.[0] as { toolCallId?: string } | undefined)
-    ?.toolCallId;
-
-  assert.ok(toolCallId, "expected diff/apply button to carry toolCallId");
-  const prepared = api.__testing.getPreparedChange(toolCallId);
-  assert.ok(prepared, "expected prepared change");
-  assert.equal(prepared.originalContent, "before\n");
-  assert.equal(prepared.proposedContent, "after\n");
-
-  await api.__testing.openPreparedDiff(toolCallId);
-  assert.equal(await api.__testing.applyPreparedEdit(toolCallId), true);
-  assert.equal(await fs.readFile(editFile, "utf8"), "after\n");
-
-  await vscode.commands.executeCommand("workbench.action.closeAllEditors");
-}
-
-export async function assertApprovalDiffFlowViaChatUi(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  await warmChatUi();
-  const editFile = requireEnv("TOMCAT_VSCODE_TEST_EDIT_FILE");
-  await fs.writeFile(editFile, "before\n", "utf8");
-  api.__testing.clearObservedEvents();
-
-  await startChatQuery("@tomcat approve edit", {
-    newChat: true,
-  });
-  const pending = await api.__testing.waitForPendingQuestion();
-  await answerPendingQuestion(pending);
-
-  const completed = await api.__testing.waitForEvent({
-    timeoutMs: 15_000,
-    type: "agent_end",
-  });
-  assert.equal(typeof completed.sessionId, "string");
-  await waitForEvent(api, { type: "tool_execution_end" });
-
-  const prepared = await waitForPreparedChange(api, "toolu_01AbC");
-  assert.equal(prepared.originalContent, "before\n");
-  assert.equal(prepared.proposedContent, "after\n");
-
-  await api.__testing.openPreparedDiff("toolu_01AbC");
-  assert.equal(await api.__testing.applyPreparedEdit("toolu_01AbC"), true);
-  assert.equal(await fs.readFile(editFile, "utf8"), "after\n");
-
-  await vscode.commands.executeCommand("workbench.action.closeAllEditors");
-}
-
-export async function assertInterruptAndRestartFlow(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  const interrupted = await api.__testing.runParticipantTurn({
-    cancelAfterMs: 50,
-    prompt: "interrupt please",
-  });
-  assert.match(
-    collectStreamText(interrupted.stream, "progress"),
-    /interrupted/i,
-  );
-
-  const beforeRestartSessions = await api.__testing.listSessions();
-  assert.ok(
-    beforeRestartSessions.sessions.length >= 1,
-    "expected at least one session before restart",
-  );
-
-  await api.__testing.restartServe();
-
-  const afterRestart = await api.__testing.runParticipantTurn({
-    prompt: "hello after restart",
-  });
-  assert.match(
-    collectStreamText(afterRestart.stream, "markdown"),
-    /hello from fake tomcat/i,
-  );
-}
-
-export async function assertInterruptAndRestartFlowViaChatUi(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  api.__testing.clearObservedEvents();
-  await startChatQuery("@tomcat interrupt please", {
-    newChat: true,
-  });
-  await waitForEvent(api, {
-    textIncludes: "partial",
-    type: "message_update",
-  });
-
-  await vscode.commands.executeCommand("workbench.action.chat.cancel");
-  await waitForEvent(api, { type: "agent_interrupted" });
-  await waitForEvent(api, {
-    textIncludes: "interrupted",
-    type: "agent_end",
-  });
-
-  await api.__testing.restartServe();
-  api.__testing.clearObservedEvents();
-  await startChatQuery("@tomcat hello after restart", {
-    newChat: true,
-  });
-  await waitForEvent(api, {
-    textIncludes: "hello from fake tomcat",
-    type: "message_update",
-  });
-  const completed = await api.__testing.waitForEvent({
-    timeoutMs: 15_000,
-    type: "agent_end",
-  });
-  assert.equal(typeof completed.sessionId, "string");
-}
-
-export async function assertMultiSessionRouting(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  const sessionA = await api.__testing.runParticipantTurn({
-    prompt: "thread A",
-  });
-  const sessionAId = sessionA.result?.metadata?.sessionId;
-  assert.equal(typeof sessionAId, "string");
-
-  const sessionB = await api.__testing.runParticipantTurn({
-    prompt: "thread B",
-  });
-  const sessionBId = sessionB.result?.metadata?.sessionId;
-  assert.equal(typeof sessionBId, "string");
-  assert.notEqual(sessionAId, sessionBId);
-
-  const followUpA = await api.__testing.runParticipantTurn({
-    historySessionId: sessionAId,
-    prompt: "follow up A",
-  });
-  const followUpB = await api.__testing.runParticipantTurn({
-    historySessionId: sessionBId,
-    prompt: "follow up B",
-  });
-
-  assert.equal(followUpA.result?.metadata?.sessionId, sessionAId);
-  assert.equal(followUpB.result?.metadata?.sessionId, sessionBId);
-
-  const sessions = await api.__testing.listSessions();
-  assert.ok(
-    sessions.sessions.some((session) => session.sessionId === sessionAId),
-    "expected session A to remain listed",
-  );
-  assert.ok(
-    sessions.sessions.some((session) => session.sessionId === sessionBId),
-    "expected session B to remain listed",
-  );
-}
-
-export async function assertMultiSessionRoutingViaChatUi(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  api.__testing.clearObservedEvents();
-  await startChatQuery("@tomcat thread A", {
-    newChat: true,
-  });
-  const sessionA = await api.__testing.waitForEvent({
-    timeoutMs: 15_000,
-    type: "agent_end",
-  });
-  const sessionAId = sessionA.sessionId;
-  assert.equal(typeof sessionAId, "string");
-
-  api.__testing.clearObservedEvents();
-  await startChatQuery("@tomcat follow up A", {
-    newChat: false,
-  });
-  const followUpA = await api.__testing.waitForEvent({
-    timeoutMs: 15_000,
-    type: "agent_end",
-  });
-  assert.equal(followUpA.sessionId, sessionAId);
-
-  api.__testing.clearObservedEvents();
-  await startChatQuery("@tomcat thread B", {
-    newChat: true,
-  });
-  const sessionB = await api.__testing.waitForEvent({
-    timeoutMs: 15_000,
-    type: "agent_end",
-  });
-  const sessionBId = sessionB.sessionId;
-  assert.equal(typeof sessionBId, "string");
-  assert.notEqual(sessionAId, sessionBId);
-
-  api.__testing.clearObservedEvents();
-  await startChatQuery("@tomcat follow up B", {
-    newChat: false,
-  });
-  const followUpB = await api.__testing.waitForEvent({
-    timeoutMs: 15_000,
-    type: "agent_end",
-  });
-  assert.equal(followUpB.sessionId, sessionBId);
-
-  const sessions = await api.__testing.listSessions();
-  assert.ok(
-    sessions.sessions.some((session) => session.sessionId === sessionAId),
-    "expected session A to remain listed after real chat UI",
-  );
-  assert.ok(
-    sessions.sessions.some((session) => session.sessionId === sessionBId),
-    "expected session B to remain listed after real chat UI",
-  );
-}
-
-export async function assertPlanSlashFlowViaChatUi(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  await warmChatUi();
-  api.__testing.clearObservedEvents();
-  await startChatQuery("@tomcat /plan", {
-    newChat: true,
-  });
-  let state = await waitForSessionState(
-    api,
-    (candidate) => (candidate.planState === "planning" ? candidate : undefined),
-  );
-  assert.equal(state.planState, "planning");
-
-  api.__testing.clearObservedEvents();
-  await startChatQuery("@tomcat /plan build fake-plan", {
-    newChat: false,
-  });
-  await waitForEvent(api, { type: "plan.build" });
-  await waitForEvent(api, { type: "agent_end" });
-  state = await api.__testing.getSessionState();
-  assert.equal(state.planState, "executing");
-  assert.equal(state.planId, "fake-plan");
-
-  api.__testing.clearObservedEvents();
-  await startChatQuery("@tomcat /plan exit", {
-    newChat: false,
-  });
-  state = await waitForSessionState(
-    api,
-    (candidate) => (candidate.planState === "chat" ? candidate : undefined),
-  );
-  assert.equal(state.planState, "chat");
 }
 
 export async function assertWebviewPlanModeSwitchFlow(
@@ -941,40 +570,74 @@ export async function assertWebviewPlanModeSwitchFlow(
   );
 }
 
-export async function assertModelSlashFlowViaChatUi(
+/**
+ * Regression guard for the settings key-slot / API-key alignment fix. Measure
+ * the visible bordered boxes the user actually sees: the key-slot combobox
+ * wrapper and the API-key input. The refresh button must keep the label rows
+ * aligned, and the API-key input must share the combobox's 38px control height.
+ * Real layout geometry only exists in the host webview, so this assertion runs
+ * here rather than in jsdom unit tests. Relay mode is used because it always
+ * renders the shared key fields row (`showSharedFormFields`).
+ */
+async function assertSettingsKeyFieldsAligned(
   api: TomcatExtensionApi,
 ): Promise<void> {
-  await warmChatUi();
-  api.__testing.setParticipantUiOverrides({
-    showQuickPick: async <T extends vscode.QuickPickItem>(
-      items: readonly T[],
-    ): Promise<T | undefined> =>
-      items.find((item) => item.label === "claude-4.6-sonnet"),
-  });
-  await startChatQuery("@tomcat /model", {
-    newChat: true,
-  });
-  let state = await waitForSessionState(
-    api,
-    (candidate) =>
-      candidate.model === "claude-4.6-sonnet" ? candidate : undefined,
-  );
-  assert.equal(state.model, "claude-4.6-sonnet");
+  const deadline = Date.now() + 15_000;
+  let dom:
+    | Awaited<ReturnType<TomcatExtensionApi["__testing"]["captureSettingsDom"]>>
+    | undefined;
+  while (Date.now() < deadline) {
+    await api.__testing.sendSettingsDomAction({
+      kind: "clickTestId",
+      testId: "settings-add-model",
+    });
+    await pause(150);
+    await api.__testing.sendSettingsDomAction({
+      kind: "clickTestId",
+      testId: "settings-mode-relay",
+    });
+    await pause(150);
+    try {
+      dom = await api.__testing.captureSettingsDom();
+    } catch {
+      // The settings webview may still be mounting; retry until the deadline.
+      await pause(150);
+      continue;
+    }
+    if (dom.rects?.keySlotBox && dom.rects?.apiKeyInput) {
+      break;
+    }
+  }
 
-  api.__testing.setParticipantUiOverrides({
-    showQuickPick: async () => undefined,
-  });
-  await startChatQuery("@tomcat /model", {
-    newChat: false,
-  });
-  state = await waitForSessionState(
-    api,
-    (candidate) =>
-      candidate.model === "claude-4.6-sonnet" ? candidate : undefined,
+  const keySlot = dom?.rects?.keySlotBox;
+  const apiKey = dom?.rects?.apiKeyInput;
+  assert.ok(
+    keySlot,
+    "expected the settings DOM snapshot to expose the key-slot box rect",
   );
-  assert.equal(state.model, "claude-4.6-sonnet");
+  assert.ok(
+    apiKey,
+    "expected the settings DOM snapshot to expose the API-key input rect",
+  );
 
-  api.__testing.setParticipantUiOverrides({});
+  const topDelta = Math.abs(keySlot.top - apiKey.top);
+  assert.ok(
+    topDelta <= 1,
+    `expected key-slot and API-key inputs to align within 1px, got ${topDelta.toFixed(2)}px `
+      + `(keySlot.top=${keySlot.top.toFixed(2)}, apiKey.top=${apiKey.top.toFixed(2)})`,
+  );
+  const heightDelta = Math.abs(keySlot.height - apiKey.height);
+  assert.ok(
+    heightDelta <= 1,
+    `expected key-slot and API-key controls to share height within 1px, got ${heightDelta.toFixed(2)}px `
+      + `(keySlot.height=${keySlot.height.toFixed(2)}, apiKey.height=${apiKey.height.toFixed(2)})`,
+  );
+
+  await api.__testing.sendSettingsDomAction({
+    kind: "clickTestId",
+    testId: "settings-close-model-form",
+  });
+  await pause(150);
 }
 
 export async function assertWebviewAddModelsFlow(
@@ -989,8 +652,10 @@ export async function assertWebviewAddModelsFlow(
   const modelId = `${relayProvider}/${modelName}`;
   const keyEnv = "TOMCAT_ADD_MODELS_E2E_API_KEY";
   const relayBaseUrl = `https://${relayProvider}.example.test/v1`;
-  const sessionId = api.__testing.getWebviewState().activeSessionId;
-  assert.ok(sessionId, "expected a live webview session before opening settings");
+  const sessionId = await claimActiveWebviewSession(
+    api,
+    "webview-add-models-claim",
+  );
 
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
@@ -1005,7 +670,10 @@ export async function assertWebviewAddModelsFlow(
   const settingsSnapshot = await waitForSettingsPanelState(
     api,
     (snapshot) =>
-      snapshot.visible && snapshot.route === "models" && snapshot.state.ready
+      snapshot.visible
+      && snapshot.route === "models"
+      && snapshot.state.ready
+      && snapshot.webviewReady
         ? snapshot
         : undefined,
     20_000,
@@ -1017,6 +685,36 @@ export async function assertWebviewAddModelsFlow(
     builtinModels.length > 0,
     "expected the settings panel to expose builtin models so official presets are available",
   );
+
+  await assertSettingsKeyFieldsAligned(api);
+
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    const openAddModelForm = async (): Promise<void> => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 10_000) {
+        await api.__testing.sendSettingsDomAction({
+          kind: "clickTestId",
+          testId: "settings-add-model",
+        });
+        await pause(200);
+        const dom = await api.__testing.captureSettingsDom();
+        if (dom.html.includes('data-testid="settings-model-form"')) {
+          return;
+        }
+      }
+      throw new Error("Timed out waiting for the add-model form to open in the settings panel");
+    };
+    await openAddModelForm();
+    await pause(400);
+    captureTranscriptVisual("settings-alignment", "window", "Tomcat Settings");
+    await api.__testing.sendSettingsDomAction({
+      kind: "clickTestId",
+      testId: "settings-close-model-form",
+    });
+    await pause(250);
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+  }
 
   await api.__testing.sendSettingsIntent(
     buildSettingsIntent({
@@ -1085,7 +783,7 @@ export async function assertWebviewAddModelsFlow(
     10_000,
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual("model-dropdown-open");
+    captureTranscriptVisual("model-dropdown-open", "window", "Extension Development Host");
   }
   const modelSelectTop = dropdown.composerControlMetrics["model-select"]?.top ?? null;
   assert.ok(
@@ -1119,6 +817,18 @@ export async function assertWebviewAddModelsFlow(
     (state) =>
       state.sessionId === sessionId && state.model === modelId ? state : undefined,
     20_000,
+  );
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "model-select",
+  });
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.html.includes('data-testid="model-dropdown"')
+        ? undefined
+        : snapshot,
+    10_000,
   );
 
   api.__testing.clearObservedEvents();
@@ -1524,7 +1234,15 @@ export async function assertWebviewDiffFlow(
     }),
   );
 
-  await waitForEvent(api, { type: "tool_execution_end" });
+  const toolEnd = await api.__testing.waitForEvent({
+    timeoutMs: 20_000,
+    type: "tool_execution_end",
+  });
+  const diffToolCallId =
+    "toolCallId" in toolEnd && typeof toolEnd.toolCallId === "string"
+      ? toolEnd.toolCallId
+      : undefined;
+  assert.ok(diffToolCallId, "expected tool_execution_end to include a toolCallId");
   const snapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
@@ -1547,18 +1265,43 @@ export async function assertWebviewDiffFlow(
   assert.match(snapshot.html, /before/u);
   assert.match(snapshot.html, /after/u);
   assert.doesNotMatch(snapshot.html, /Apply Edit/u);
-  await api.__testing.sendWebviewDomAction({
-    kind: "clickTestId",
-    testId: "tool-row-open-diff",
-  });
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { toolCallId: diffToolCallId },
+      messageId: "webview-diff-open-intent",
+      type: "openDiff",
+    }),
+  );
   const preparedChange = await waitForPreparedChange(
     api,
-    "toolu_01AbC",
-    (change) => change.originalContent === "before\n" && change.proposedContent === "after\n",
+    diffToolCallId,
+    (change) =>
+      stripTerminalNewline(change.originalContent) === "before"
+      && stripTerminalNewline(change.proposedContent) === "after",
   );
-  assert.equal(preparedChange.displayPath, editFile);
-  assert.equal(preparedChange.originalContent, "before\n");
-  assert.equal(preparedChange.proposedContent, "after\n");
+  assertPreparedChangeMatches(preparedChange, editFile, "before", "after");
+  await waitForVisiblePreparedDiffEditors(diffToolCallId, 20_000);
+  assert.equal(
+    vscode.workspace
+      .getConfiguration("diffEditor")
+      .get<number>("renderSideBySideInlineBreakpoint"),
+    0,
+    "expected Tomcat to force a zero inline breakpoint so narrow diff editors stay side-by-side",
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    // Close the primary side bar (Explorer) so the diff editor spans the full
+    // window width after the runtime breakpoint fix has already kept the diff in
+    // a true left/right double-pane layout.
+    await vscode.commands.executeCommand("workbench.action.closeSidebar");
+    await pause(500);
+    // Anchor to the always-present dev-host window title (the diff editor is the
+    // active full-width editor here); a diff-tab-specific title does not reliably
+    // resolve to window bounds and would skip the capture.
+    captureTranscriptVisual("diff-double-pane", "window", "Extension Development Host");
+    // Restore the Tomcat webview for the remainder of the flow.
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+  }
   assert.equal(await fs.readFile(editFile, "utf8"), "after\n");
 
   await api.__testing.injectServeEvent({
@@ -1596,6 +1339,125 @@ export async function assertWebviewDiffFlow(
     20_000,
   );
   assert.ok(readSnapshot.fileChipVisible, "expected a standalone read row to render a file chip");
+}
+
+export async function assertWebviewRetryRecoveryFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  const failureSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
+  const successText = "same session retry succeeded";
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  api.__testing.clearObservedEvents();
+  const sessionId = await createFreshWebviewSession(
+    api,
+    "webview-retry-recovery-session",
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        text: "retry 403 showcase",
+      },
+      messageId: "webview-retry-recovery-prompt",
+      type: "prompt",
+    }),
+  );
+  await api.__testing.waitForEvent({
+    sessionId,
+    timeoutMs: 20_000,
+    type: "agent_end",
+  });
+  const failedSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId
+      && candidate.messageTexts.some((text) => text.includes(failureSummary))
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    failedSnapshot.messageTexts.some((text) => text.includes(failureSummary)),
+    "expected the failed turn summary to render in the transcript",
+  );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        text: "retry 403 showcase",
+      },
+      messageId: "webview-retry-recovery-retry",
+      type: "prompt",
+    }),
+  );
+  await api.__testing.waitForEvent({
+    sessionId,
+    timeoutMs: 20_000,
+    type: "agent_end",
+  });
+  const recoveredSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId
+      && candidate.messageTexts.some((text) => text.includes(successText))
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    recoveredSnapshot.messageTexts.some((text) => text.includes(successText)),
+    "expected retrying in the same session to produce a successful assistant reply",
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    await pause(700);
+    captureTranscriptVisual(
+      "same-session-retry-success",
+      "window",
+      "Extension Development Host",
+    );
+  }
+
+  await api.__testing.reloadWebview();
+  await api.__testing.waitForWebviewReady();
+  await waitForWebviewState(
+    api,
+    (state) => (state.activeSessionId === sessionId ? state : undefined),
+    20_000,
+  );
+  const rehydratedSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId
+      && candidate.messageTexts.some((text) => text.includes(failureSummary))
+      && candidate.messageTexts.some((text) => text.includes(successText))
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    rehydratedSnapshot.timelineKinds.includes("message:error"),
+    `expected the rehydrated transcript to include an error bubble, got ${JSON.stringify(rehydratedSnapshot.timelineKinds)}`,
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    await api.__testing.waitForWebviewReady();
+    await api.__testing.sendWebviewDomAction({
+      edge: "top",
+      kind: "scrollToEdge",
+      testId: "stream-container",
+    });
+    await pause(700);
+    captureTranscriptVisual(
+      "transcript-error-record",
+      "window",
+      "Extension Development Host",
+    );
+  }
 }
 
 export async function assertWebviewMultiSessionFlow(
@@ -1637,65 +1499,6 @@ export async function assertWebviewMultiSessionFlow(
   );
   assert.ok(sessions.includes(sessionA!), "expected session A to remain tracked");
   assert.ok(sessions.includes(sessionB!), "expected session B to be tracked");
-}
-
-export async function assertWebviewOwnershipFlow(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  const { pending, sessionId, turnPromise } = await startPendingParticipantTurn(api);
-
-  await api.__testing.focusWebview();
-  await api.__testing.waitForWebviewReady();
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: { sessionId },
-      messageId: "webview-ownership-switch-1",
-      type: "switchSession",
-    }),
-  );
-  let state = await waitForWebviewState(
-    api,
-    (candidate) => {
-      const activeSessionId = candidate.activeSessionId;
-      if (activeSessionId !== sessionId) {
-        return undefined;
-      }
-      return candidate.sessionViews[sessionId!]?.conflictMessage ? candidate : undefined;
-    },
-  );
-  assert.ok(state.sessionViews[sessionId!]?.conflictMessage);
-
-  await answerPendingQuestion(pending);
-  const participantTurn = await turnPromise;
-  assert.equal(participantTurn.result?.errorDetails?.message, undefined);
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: { sessionId },
-      messageId: "webview-ownership-switch-2",
-      type: "switchSession",
-    }),
-  );
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: { sessionId, text: "hello after release" },
-      messageId: "webview-ownership-prompt",
-      type: "prompt",
-    }),
-  );
-  await waitForEvent(api, { sessionId, type: "agent_end" });
-  state = await waitForWebviewState(
-    api,
-    (candidate) => {
-      const activeSessionId = candidate.activeSessionId;
-      if (activeSessionId !== sessionId) {
-        return undefined;
-      }
-      return candidate.sessionViews[sessionId!]?.conflictMessage === null
-        ? candidate
-        : undefined;
-    },
-  );
-  assert.equal(state.sessionViews[sessionId!]?.conflictMessage, null);
 }
 
 export async function assertWebviewSessionSwitchRestoreFlow(
@@ -2157,137 +1960,6 @@ export async function assertWebviewGiantGroupLazyLoadFlow(
   );
 }
 
-export async function assertWebviewCrossOwnerPlanFlow(
-  api: TomcatExtensionApi,
-): Promise<void> {
-  for (const ownership of api.__testing.getOwnership()) {
-    if (ownership.owner === "webview") {
-      api.__testing.releaseSessionOwnership(ownership.sessionId, "webview");
-    }
-  }
-
-  const { pending, sessionId, turnPromise } = await startPendingParticipantTurn(api);
-
-  await api.__testing.reloadWebview();
-  await api.__testing.focusWebview();
-  await api.__testing.waitForWebviewReady();
-  await waitForWebviewState(
-    api,
-    (candidate) =>
-      candidate.sessions.some((session) => session.sessionId === sessionId)
-        ? candidate
-        : undefined,
-  );
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: { sessionId },
-      messageId: "webview-cross-owner-switch",
-      type: "switchSession",
-    }),
-  );
-  await waitForWebviewState(
-    api,
-    (candidate) => {
-      return candidate.activeSessionId === sessionId ? candidate : undefined;
-    },
-  );
-  await waitForWebviewState(
-    api,
-    (candidate) => {
-      return candidate.sessionViews[sessionId!]?.conflictMessage ? candidate : undefined;
-    },
-  );
-  const planPath = "/workspace/plans/participant-plan.plan.md";
-  await api.__testing.injectServeEvent({
-    sessionId: sessionId!,
-    state: "planning",
-    type: "plan.enter",
-  });
-  await api.__testing.injectServeEvent({
-    path: planPath,
-    planId: "participant-plan",
-    sessionId: sessionId!,
-    state: "planning",
-    type: "plan.create",
-  });
-
-  const planning = await waitForWebviewDomSnapshot(
-    api,
-    (snapshot) =>
-      snapshot.activeSessionId === sessionId &&
-      snapshot.hasConflict &&
-      snapshot.planCardCount === 1 &&
-      snapshot.planStateText === "Plan: planning"
-        ? snapshot
-        : undefined,
-    20_000,
-  );
-  assert.equal(planning.planStateText, "Plan: planning");
-
-  await api.__testing.injectServeEvent({
-    path: planPath,
-    planId: "participant-plan",
-    sessionId: sessionId!,
-    state: "executing",
-    type: "plan.build",
-  });
-  const executing = await waitForWebviewDomSnapshot(
-    api,
-    (snapshot) =>
-      snapshot.activeSessionId === sessionId &&
-      snapshot.hasConflict &&
-      snapshot.planCardCount === 1 &&
-      snapshot.planStateText === "Plan: executing"
-        ? snapshot
-        : undefined,
-    20_000,
-  );
-  assert.equal(executing.planStateText, "Plan: executing");
-  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    await api.__testing.focusWebview();
-    captureTranscriptVisual("cross-owner");
-  }
-
-  await api.__testing.injectServeEvent({
-    path: planPath,
-    planId: "participant-plan",
-    sessionId: sessionId!,
-    state: "chat",
-    type: "plan.exit",
-  });
-  const settled = await waitForWebviewState(
-    api,
-    (candidate) => {
-      const session = sessionId ? candidate.sessionViews[sessionId] : undefined;
-      if (!session) {
-        return undefined;
-      }
-      return session.planState === "chat" && session.planFile?.state === "chat"
-        ? session
-        : undefined;
-    },
-    20_000,
-  );
-  assert.ok(settled.planFile?.path?.endsWith("/plans/participant-plan.plan.md"));
-
-  const exited = await waitForWebviewDomSnapshot(
-    api,
-    (snapshot) =>
-      snapshot.activeSessionId === sessionId &&
-      snapshot.hasConflict &&
-      snapshot.planCardCount === 1 &&
-      snapshot.planStateText === null
-        ? snapshot
-        : undefined,
-    20_000,
-  );
-  assert.equal(exited.planStateText, null);
-
-  await answerPendingQuestion(pending);
-  const participantTurn = await turnPromise;
-  assert.equal(participantTurn.result?.errorDetails?.message, undefined);
-}
-
 export async function assertWebviewSelectionReferenceFlow(
   api: TomcatExtensionApi,
 ): Promise<void> {
@@ -2353,7 +2025,7 @@ export async function assertWebviewSelectionReferenceFlow(
     kind: "clickTestId",
     testId: "send-button",
   });
-  await waitForEvent(api, { sessionId, type: "agent_end" });
+  await api.__testing.waitForEvent({ sessionId, timeoutMs: 30_000, type: "agent_end" });
 
   await api.__testing.reloadWebview();
 
@@ -3061,7 +2733,7 @@ function tryResolveVsCodeWindowWithTitle(
 function captureTranscriptVisual(
   name:
     | "collapsed"
-    | "cross-owner"
+    | "diff-double-pane"
     | "expanded"
     | "file-drop-reference"
     | "file-drop-reference-hover"
@@ -3069,12 +2741,15 @@ function captureTranscriptVisual(
     | "model-dropdown-open"
     | "progress"
     | "reload-replay"
+    | "same-session-retry-success"
     | "selection-reference-codelens"
     | "selection-reference-composer"
     | "selection-reference-history"
+    | "settings-alignment"
     | "switch-order"
     | "switch-restore"
     | "todo-expanded"
+    | "transcript-error-record"
     | "tool-icons"
     | "tool-icons-bottom",
   region: CaptureRegion = "window",

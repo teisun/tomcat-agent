@@ -32,7 +32,6 @@ async function emitReadySessionState(sessionId = "s1") {
           busy: false,
           isCurrent: true,
           ownedByThisFrontend: true,
-          owner: "webview",
           sessionId,
           title: null,
           updatedAt: 1,
@@ -41,13 +40,11 @@ async function emitReadySessionState(sessionId = "s1") {
       sessionViews: {
         [sessionId]: {
           busy: false,
-          conflictMessage: null,
           contextRatio: null,
           hasMoreHistory: false,
           historyLoading: false,
           model: "gpt-5.4",
           ownedByThisFrontend: true,
-          owner: "webview",
           pendingAttachments: [],
           planFile: null,
           planId: null,
@@ -57,7 +54,6 @@ async function emitReadySessionState(sessionId = "s1") {
           timeline: [],
         },
       },
-      uiMode: "both",
     },
     messageId: `state-ready-${sessionId}`,
   });
@@ -79,7 +75,6 @@ async function emitCheckpointSessionState(
           busy: false,
           isCurrent: true,
           ownedByThisFrontend: true,
-          owner: "webview",
           sessionId,
           title: null,
           updatedAt: 1,
@@ -89,13 +84,11 @@ async function emitCheckpointSessionState(
         [sessionId]: {
           busy: false,
           checkpoints,
-          conflictMessage: null,
           contextRatio: null,
           hasMoreHistory: false,
           historyLoading: false,
           model: "gpt-5.4",
           ownedByThisFrontend: true,
-          owner: "webview",
           pendingAttachments: [],
           planFile: null,
           planId: null,
@@ -105,7 +98,6 @@ async function emitCheckpointSessionState(
           timeline,
         },
       },
-      uiMode: "both",
     },
     messageId: `checkpoint-state-${sessionId}-${timeline.length}-${checkpoints.length}`,
   });
@@ -133,7 +125,6 @@ async function emitTranscriptSessionState({
           busy,
           isCurrent: true,
           ownedByThisFrontend: true,
-          owner: "webview",
           sessionId,
           title: null,
           updatedAt: 1,
@@ -142,13 +133,11 @@ async function emitTranscriptSessionState({
       sessionViews: {
         [sessionId]: {
           busy,
-          conflictMessage: null,
           contextRatio: null,
           hasMoreHistory: false,
           historyLoading: false,
           model: "gpt-5.4",
           ownedByThisFrontend: true,
-          owner: "webview",
           pendingAttachments: [],
           planFile: null,
           planId: null,
@@ -158,7 +147,6 @@ async function emitTranscriptSessionState({
           timeline,
         },
       },
-      uiMode: "both",
     },
     messageId,
   });
@@ -344,7 +332,6 @@ describe("Tomcat webview App", () => {
         ready: false,
         sessions: [],
         sessionViews: {},
-        uiMode: "both",
       },
       messageId: "state-loading",
     });
@@ -370,7 +357,6 @@ describe("Tomcat webview App", () => {
         ready: true,
         sessions: [],
         sessionViews: {},
-        uiMode: "both",
       },
       messageId: "state-ready-empty",
     });
@@ -394,7 +380,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -403,14 +388,12 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: 0.42,
             hasMoreHistory: true,
             historyLoading: true,
             model: "gpt-5.4",
             thinkingLevel: "high",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [
               {
                 attachment: {
@@ -483,7 +466,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-1",
     });
@@ -523,7 +505,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -532,9 +513,7 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planTodos: [],
             sessionTodos: [],
@@ -550,7 +529,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-build-model",
     });
@@ -599,7 +577,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -608,12 +585,10 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             hasMoreHistory: true,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planId: null,
             planState: "chat",
@@ -624,7 +599,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-underfill",
     });
@@ -660,7 +634,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -669,12 +642,10 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             hasMoreHistory: false,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planId: null,
             planState: "chat",
@@ -684,7 +655,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-no-more-history",
     });
@@ -724,7 +694,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -733,12 +702,10 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             hasMoreHistory: true,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planId: null,
             planState: "chat",
@@ -746,7 +713,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-empty-history",
     });
@@ -773,7 +739,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: "Restored plan session",
             updatedAt: 1,
@@ -782,12 +747,10 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             hasMoreHistory: false,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -804,7 +767,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-restored-plan-build",
     });
@@ -844,7 +806,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -853,12 +814,10 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             hasMoreHistory: true,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planId: null,
             planState: "chat",
@@ -866,7 +825,6 @@ describe("Tomcat webview App", () => {
             timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-top-pagination-ready",
     });
@@ -889,7 +847,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -898,12 +855,10 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             hasMoreHistory: true,
             historyLoading: true,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planId: null,
             planState: "chat",
@@ -911,7 +866,6 @@ describe("Tomcat webview App", () => {
             timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-top-pagination-loading",
     });
@@ -927,7 +881,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -936,12 +889,10 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             hasMoreHistory: true,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planId: null,
             planState: "chat",
@@ -949,7 +900,6 @@ describe("Tomcat webview App", () => {
             timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-top-pagination-still-buffered",
     });
@@ -993,7 +943,6 @@ describe("Tomcat webview App", () => {
               busy: false,
               isCurrent: true,
               ownedByThisFrontend: true,
-              owner: "webview",
               sessionId: "s1",
               title: null,
               updatedAt: 1,
@@ -1002,12 +951,10 @@ describe("Tomcat webview App", () => {
           sessionViews: {
             s1: {
               busy: false,
-              conflictMessage: null,
               hasMoreHistory: true,
               historyLoading: true,
               model: "gpt-5.4",
               ownedByThisFrontend: true,
-              owner: "webview",
               pendingAttachments: [],
               planId: null,
               planState: "chat",
@@ -1015,7 +962,6 @@ describe("Tomcat webview App", () => {
               timeline: [{ id: `m-${index}`, kind: "assistant", text: "chunk", type: "message" }],
             },
           },
-          uiMode: "both",
         },
         messageId: `state-underfill-loading-${index}`,
       });
@@ -1031,7 +977,6 @@ describe("Tomcat webview App", () => {
               busy: false,
               isCurrent: true,
               ownedByThisFrontend: true,
-              owner: "webview",
               sessionId: "s1",
               title: null,
               updatedAt: 1,
@@ -1040,12 +985,10 @@ describe("Tomcat webview App", () => {
           sessionViews: {
             s1: {
               busy: false,
-              conflictMessage: null,
               hasMoreHistory: true,
               historyLoading: false,
               model: "gpt-5.4",
               ownedByThisFrontend: true,
-              owner: "webview",
               pendingAttachments: [],
               planId: null,
               planState: "chat",
@@ -1053,7 +996,6 @@ describe("Tomcat webview App", () => {
               timeline: [{ id: `m-${index}`, kind: "assistant", text: "chunk", type: "message" }],
             },
           },
-          uiMode: "both",
         },
         messageId: `state-underfill-cap-${index}`,
       });
@@ -1079,7 +1021,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -1088,12 +1029,10 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             hasMoreHistory: true,
             historyLoading: true,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planId: null,
             planState: "chat",
@@ -1101,7 +1040,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-loader-on",
     });
@@ -1119,7 +1057,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -1128,12 +1065,10 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             hasMoreHistory: false,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planId: null,
             planState: "chat",
@@ -1141,7 +1076,6 @@ describe("Tomcat webview App", () => {
             timeline: [{ id: "m1", kind: "assistant", text: "done", type: "message" }],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-loader-off",
     });
@@ -1163,7 +1097,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -1172,11 +1105,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: 0.42,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [
               {
                 attachment: {
@@ -1230,7 +1161,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-2",
     });
@@ -1353,7 +1283,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -1362,11 +1291,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -1404,7 +1331,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-batched-approval",
     });
@@ -1457,7 +1383,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -1466,11 +1391,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -1479,7 +1402,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-enter",
     });
@@ -1500,52 +1422,6 @@ describe("Tomcat webview App", () => {
     ).toBe(true);
   });
 
-  it("renders a conflict banner for read-only sessions", async () => {
-    mount();
-
-    await emitState({
-      channel: "state",
-      content: {
-        activeSessionId: "locked-session",
-        availableModels: [],
-        ready: true,
-        sessions: [
-          {
-            busy: false,
-            isCurrent: false,
-            ownedByThisFrontend: false,
-            owner: "participant",
-            sessionId: "locked-session",
-            title: null,
-            updatedAt: 1,
-          },
-        ],
-        sessionViews: {
-          "locked-session": {
-            busy: false,
-            conflictMessage: "This session is currently owned by the Tomcat participant.",
-            contextRatio: null,
-            model: null,
-            ownedByThisFrontend: false,
-            owner: "participant",
-            pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
-            sessionId: "locked-session",
-            timeline: [],
-          },
-        },
-        uiMode: "both",
-      },
-      messageId: "state-conflict",
-    });
-
-    expect(
-      screen.getByText("This session is currently owned by the Tomcat participant."),
-    ).toBeTruthy();
-  });
-
   it("renders the top bar without legacy title or refresh button", async () => {
     mount();
 
@@ -1560,7 +1436,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -1569,11 +1444,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -1583,7 +1456,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-topbar",
     });
@@ -1617,7 +1489,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -1626,11 +1497,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -1640,7 +1509,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-thinking-gpt",
     });
@@ -1658,7 +1526,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 2,
@@ -1667,11 +1534,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             model: "claude-4.6-sonnet",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -1681,7 +1546,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-thinking-claude",
     });
@@ -1703,7 +1567,6 @@ describe("Tomcat webview App", () => {
             busy: true,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -1712,11 +1575,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: true,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -1747,7 +1608,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-live-cluster",
     });
@@ -1790,7 +1650,6 @@ describe("Tomcat webview App", () => {
             busy: true,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -1799,13 +1658,11 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: true,
-            conflictMessage: null,
             contextRatio: null,
             hasMoreHistory: false,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -1820,7 +1677,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-sticky-reveal",
     });
@@ -2013,7 +1869,6 @@ describe("Tomcat webview App", () => {
             busy: true,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -2022,13 +1877,11 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: true,
-            conflictMessage: null,
             contextRatio: null,
             hasMoreHistory: false,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2045,7 +1898,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-sticky-live-bottom",
     });
@@ -2083,7 +1935,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -2092,13 +1943,11 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             hasMoreHistory: false,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2115,7 +1964,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-sticky-history",
     });
@@ -2180,7 +2028,6 @@ describe("Tomcat webview App", () => {
             busy: true,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: "Busy session",
             updatedAt: 1,
@@ -2189,11 +2036,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: true,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2203,7 +2048,6 @@ describe("Tomcat webview App", () => {
             timeline: danglingTimeline,
           },
         },
-        uiMode: "both",
       },
       messageId: "state-busy-tail",
     });
@@ -2223,7 +2067,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: "Busy session",
             updatedAt: 2,
@@ -2232,11 +2075,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2246,7 +2087,6 @@ describe("Tomcat webview App", () => {
             timeline: danglingTimeline,
           },
         },
-        uiMode: "both",
       },
       messageId: "state-idle-tail",
     });
@@ -2271,7 +2111,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "1781621492962_3ee132361e6832e6",
             title: "帮我重构 session 列表",
             updatedAt: now,
@@ -2280,11 +2119,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           "1781621492962_3ee132361e6832e6": {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2294,7 +2131,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-title",
     });
@@ -2327,7 +2163,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "empty-session",
             title: null,
             updatedAt: now,
@@ -2336,7 +2171,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: false,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "whitespace-session",
             title: "   ",
             updatedAt: now - 1000,
@@ -2345,11 +2179,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           "empty-session": {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2359,7 +2191,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-empty-title",
     });
@@ -2381,7 +2212,6 @@ describe("Tomcat webview App", () => {
       busy: false,
       isCurrent: index === 0,
       ownedByThisFrontend: true,
-      owner: "webview" as const,
       sessionId: `s${index}`,
       title: `topic ${index}`,
       updatedAt: now - index * 1000,
@@ -2397,11 +2227,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s0: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2411,7 +2239,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-cap",
     });
@@ -2441,7 +2268,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "today-s",
             title: "today topic",
             updatedAt: now - 60_000,
@@ -2450,7 +2276,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: false,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "yesterday-s",
             title: "yesterday topic",
             updatedAt: now - day - 60_000,
@@ -2459,7 +2284,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: false,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "last7-s",
             title: "last7 topic",
             updatedAt: now - 4 * day,
@@ -2468,7 +2292,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: false,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "last30-s",
             title: "last30 topic",
             updatedAt: now - 20 * day,
@@ -2477,7 +2300,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: false,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "older-s",
             title: "older topic",
             updatedAt: now - 400 * day,
@@ -2486,11 +2308,9 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           "today-s": {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2500,7 +2320,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-groups",
     });
@@ -2581,7 +2400,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -2590,13 +2408,11 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             hasMoreHistory: false,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2606,7 +2422,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-clear-success",
     });
@@ -2636,7 +2451,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 2,
@@ -2645,13 +2459,11 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             hasMoreHistory: false,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2668,7 +2480,6 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-clear-success-confirmed",
     });
@@ -2690,7 +2501,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 1,
@@ -2699,13 +2509,11 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             hasMoreHistory: false,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2715,7 +2523,6 @@ describe("Tomcat webview App", () => {
             timeline: [],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-clear-failed",
     });
@@ -2743,7 +2550,6 @@ describe("Tomcat webview App", () => {
             busy: false,
             isCurrent: true,
             ownedByThisFrontend: true,
-            owner: "webview",
             sessionId: "s1",
             title: null,
             updatedAt: 2,
@@ -2752,13 +2558,11 @@ describe("Tomcat webview App", () => {
         sessionViews: {
           s1: {
             busy: false,
-            conflictMessage: null,
             contextRatio: null,
             hasMoreHistory: false,
             historyLoading: false,
             model: "gpt-5.4",
             ownedByThisFrontend: true,
-            owner: "webview",
             pendingAttachments: [],
             planFile: null,
             planId: null,
@@ -2778,109 +2582,11 @@ describe("Tomcat webview App", () => {
             ],
           },
         },
-        uiMode: "both",
       },
       messageId: "state-clear-failed-result",
     });
 
     expect(screen.getByTestId("composer-input").textContent).toContain("keep me");
-  });
-
-  it("preserves composer content when the session flips to read-only", async () => {
-    mount();
-
-    await emitState({
-      channel: "state",
-      content: {
-        activeSessionId: "s1",
-        availableModels: ["gpt-5.4"],
-        ready: true,
-        sessions: [
-          {
-            busy: false,
-            isCurrent: true,
-            ownedByThisFrontend: true,
-            owner: "webview",
-            sessionId: "s1",
-            title: null,
-            updatedAt: 1,
-          },
-        ],
-        sessionViews: {
-          s1: {
-            busy: false,
-            conflictMessage: null,
-            contextRatio: null,
-            hasMoreHistory: false,
-            historyLoading: false,
-            model: "gpt-5.4",
-            ownedByThisFrontend: true,
-            owner: "webview",
-            pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
-            sessionId: "s1",
-            thinkingLevel: "high",
-            timeline: [],
-          },
-        },
-        uiMode: "both",
-      },
-      messageId: "state-readonly-before",
-    });
-
-    const textbox = screen.getByTestId("composer-input");
-    fireEvent.paste(textbox, {
-      clipboardData: {
-        getData: (type: string) => (type === "text/plain" ? "keep this draft" : ""),
-      },
-    });
-    expect(textbox.textContent).toContain("keep this draft");
-
-    await emitState({
-      channel: "state",
-      content: {
-        activeSessionId: "s1",
-        availableModels: ["gpt-5.4"],
-        ready: true,
-        sessions: [
-          {
-            busy: false,
-            isCurrent: true,
-            ownedByThisFrontend: true,
-            owner: "webview",
-            sessionId: "s1",
-            title: null,
-            updatedAt: 2,
-          },
-        ],
-        sessionViews: {
-          s1: {
-            busy: false,
-            conflictMessage: "This live session is currently read-only in the webview.",
-            contextRatio: null,
-            hasMoreHistory: false,
-            historyLoading: false,
-            model: "gpt-5.4",
-            ownedByThisFrontend: true,
-            owner: "webview",
-            pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
-            sessionId: "s1",
-            thinkingLevel: "high",
-            timeline: [],
-          },
-        },
-        uiMode: "both",
-      },
-      messageId: "state-readonly-after",
-    });
-
-    expect(screen.getByTestId("conflict-banner").textContent).toContain("read-only");
-    expect(screen.getByTestId("composer-input").textContent).toContain("keep this draft");
   });
 
   it("ignores malformed insertReference events without a concrete session id", async () => {

@@ -2,8 +2,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serial_test::serial;
 use serde_json::json;
+use serial_test::serial;
 
 use crate::api::chat::commands::cmd_restore::{
     effective_restore_paths, other_session_restore_conflicts, restore_core, run as run_restore,

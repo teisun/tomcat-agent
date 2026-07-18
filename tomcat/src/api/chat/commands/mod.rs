@@ -12,9 +12,9 @@ mod cmd_skill;
 mod cmd_thinking;
 mod parse;
 
+pub(crate) use cmd_ckpt::checkpoint_kind_label;
 pub use cmd_install::{InstallCommand, InstallTarget};
 pub use cmd_plan::PlanCommand;
-pub(crate) use cmd_ckpt::checkpoint_kind_label;
 pub(crate) use cmd_restore::{restore_core, RestoreCoreReport};
 
 #[cfg(test)]

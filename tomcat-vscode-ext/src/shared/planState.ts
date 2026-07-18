@@ -1,4 +1,4 @@
-import type { ServePlanEvent } from "../../serveClient/wire";
+import type { ServePlanEvent } from "../serveClient/wire";
 
 export type ParticipantPlanState =
   | "chat"

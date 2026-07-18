@@ -193,28 +193,27 @@ impl ReasoningState {
             return None;
         }
         let thinking_text = self.thinking_text();
-        let reasoning_continuation = if !self.items.is_empty()
-            && source_profile.provider == "openai"
-            && source_profile.api_family == "responses"
-        {
-            Some(ReasoningContinuation {
-                source_provider: source_profile.provider.clone(),
-                source_api: source_profile.api_family.clone(),
-                source_model: source_profile.model_family.clone(),
-                format: ReasoningFormat::OpenaiResponsesReasoningItems,
-                opaque_payload: Value::Array(self.items.clone()),
-                fallback_text: thinking_text.clone(),
-                provider_refs: if source_profile.supports_response_id_hint {
-                    self.response_id.clone().map(|id| ProviderRefs {
-                        openai_response_id: Some(id),
-                    })
-                } else {
-                    None
-                },
-            })
-        } else {
-            None
-        };
+        let reasoning_continuation =
+            if !self.items.is_empty() && source_profile.api_family == "responses" {
+                Some(ReasoningContinuation {
+                    source_provider: source_profile.provider.clone(),
+                    source_api: source_profile.api_family.clone(),
+                    source_model: source_profile.model_family.clone(),
+                    format: ReasoningFormat::OpenaiResponsesReasoningItems,
+                    opaque_payload: Value::Array(self.items.clone()),
+                    fallback_text: thinking_text.clone(),
+                    provider_refs: Some(ProviderRefs {
+                        openai_response_id: if source_profile.supports_response_id_hint {
+                            self.response_id.clone()
+                        } else {
+                            None
+                        },
+                        replay_profile_id: Some(source_profile.profile_id.clone()),
+                    }),
+                })
+            } else {
+                None
+            };
         if thinking_text.is_none() && reasoning_continuation.is_none() {
             return None;
         }

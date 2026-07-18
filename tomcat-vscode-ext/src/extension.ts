@@ -7,7 +7,6 @@ import * as vscode from "vscode";
 import {
   TOMCAT_ADD_FILE_TO_CHAT_COMMAND,
   TOMCAT_ADD_SELECTION_TO_CHAT_COMMAND,
-  PARTICIPANT_ID,
   TOMCAT_FOCUS_WEBVIEW_COMMAND,
   TEST_DEFAULT_CWD_ENV,
   TEST_EXTRA_ARGS_ENV,
@@ -16,7 +15,6 @@ import {
   TEST_WARNING_ACTION_ENV,
   TOMCAT_CONFIG_SECTION,
   TOMCAT_EXECUTABLE_NAME,
-  TOMCAT_UI_MODE_SETTING,
   TOMCAT_LIST_SESSIONS_COMMAND,
   TOMCAT_NEW_SESSION_COMMAND,
   TOMCAT_OPEN_SETTINGS_COMMAND,
@@ -44,17 +42,9 @@ import {
 import { SessionRouter } from "./serveClient/sessionRouter";
 import { TomcatMessenger } from "./serveClient/TomcatMessenger";
 import type { ServeEvent } from "./serveClient/wire";
-import { createParticipantHandler } from "./ui/participant/handler";
-import {
-  ParticipantCommands,
-  type PendingQuestionSnapshot,
-} from "./ui/participant/commands";
-import { SessionOwnershipTracker } from "./ui/webview/ownership";
 import {
   createHostFrameMessageId,
   type HostEventFrameContent,
-  type FrontendOwnerKind,
-  type TomcatUiMode,
   type WebviewDomAction,
   type WebviewIntent,
 } from "./ui/webview/protocol";
@@ -63,7 +53,7 @@ import {
   buildSelectionReferenceFromParts,
   resolveUriToFileReference,
 } from "./ui/webview/contextReferences";
-import { SettingsPanel } from "./ui/settings/SettingsPanel";
+import { SettingsPanel, type SettingsDomSnapshot } from "./ui/settings/SettingsPanel";
 import type { SettingsIntent, SettingsStateSnapshot } from "./shared/settingsProtocol";
 import type {
   PlanPreviewDomAction,
@@ -87,35 +77,6 @@ const OPEN_GUIDE_ACTION = "View Guide";
 const OPEN_SETTINGS_ACTION = "Open Settings";
 const OPEN_TERMINAL_ACTION = "Open Terminal";
 
-type CapturedStreamEvent =
-  | {
-      kind: "anchor";
-      label: string;
-      uri: string;
-    }
-  | {
-      arguments?: unknown[];
-      command: string;
-      kind: "button";
-      title: string;
-    }
-  | {
-      kind: "markdown" | "progress";
-      value: string;
-    };
-
-export interface RunParticipantTurnOptions {
-  autoClickTitles?: string[];
-  cancelAfterMs?: number;
-  historySessionId?: string;
-  prompt: string;
-}
-
-export interface RunParticipantTurnResult {
-  result: vscode.ChatResult | undefined;
-  stream: CapturedStreamEvent[];
-}
-
 type PromptRecord = {
   actions: string[];
   message: string;
@@ -132,6 +93,7 @@ export interface ObservedEventFilter {
 export interface TomcatExtensionApi {
   __testing: {
     applyPreparedEdit(toolCallId: string): Promise<boolean>;
+    captureSettingsDom(): Promise<SettingsDomSnapshot>;
     captureWebviewDom(): Promise<{
       activeSessionId: string | null;
       approvalCount: number;
@@ -151,7 +113,6 @@ export interface TomcatExtensionApi {
       expandedToolTitles: string[];
       fileChipTopWithinStream: number | null;
       fileChipVisible: boolean;
-      hasConflict: boolean;
       historyLoaderVisible: boolean;
       html: string;
       jumpToLatestVisible: boolean;
@@ -214,8 +175,6 @@ export interface TomcatExtensionApi {
     executeCommand(command: string, ...args: unknown[]): Thenable<unknown>;
     focusWebview(): Promise<void>;
     getObservedEvents(): ServeEvent[];
-    getOwnership(): Array<{ owner: FrontendOwnerKind; sessionId: string }>;
-    getPendingQuestion(requestId?: string): PendingQuestionSnapshot | undefined;
     getPromptHistory(): PromptRecord[];
     getPreparedChange(toolCallId: string): {
       displayPath: string;
@@ -230,6 +189,7 @@ export interface TomcatExtensionApi {
       route: "models";
       state: SettingsStateSnapshot;
       visible: boolean;
+      webviewReady: boolean;
     };
     getWebviewState(): ReturnType<TomcatWebviewViewProvider["currentState"]>;
     injectServeEvent(event: ServeEvent): Promise<void>;
@@ -237,13 +197,13 @@ export interface TomcatExtensionApi {
       scope?: Parameters<SessionRouter["listSessions"]>[0],
     ): Promise<Awaited<ReturnType<SessionRouter["listSessions"]>>>;
     openPreparedDiff(toolCallId: string): Promise<void>;
-    releaseSessionOwnership(
-      sessionId: string,
-      owner?: FrontendOwnerKind,
-    ): boolean;
     reloadWebview(): Promise<void>;
     restartServe(): Promise<void>;
-    runParticipantTurn(options: RunParticipantTurnOptions): Promise<RunParticipantTurnResult>;
+    sendSettingsDomAction(action: {
+      kind: "clickTestId" | "setInputValue";
+      testId?: string;
+      value?: string;
+    }): Promise<void>;
     sendWebviewDomAction(action: WebviewDomAction): Promise<void>;
     sendWebviewHostEvent(content: HostEventFrameContent): Promise<void>;
     sendWebviewIntent(
@@ -257,11 +217,7 @@ export interface TomcatExtensionApi {
           ) => Thenable<readonly vscode.Uri[] | undefined> | readonly vscode.Uri[] | undefined)
         | undefined,
     ): void;
-    setParticipantUiOverrides(
-      overrides: Parameters<ParticipantCommands["setUiOverrides"]>[0],
-    ): void;
     waitForEvent(filter: ObservedEventFilter): Promise<ServeEvent>;
-    waitForPendingQuestion(timeoutMs?: number): Promise<PendingQuestionSnapshot>;
     waitForWebviewReady(timeoutMs?: number): Promise<void>;
     openPlanPreview(planPath: string): Promise<void>;
     capturePlanPreviewDom(planPath: string): Promise<PlanPreviewDomSnapshot>;
@@ -328,16 +284,6 @@ export class TomcatSelectionCodeLensProvider implements vscode.CodeLensProvider,
 
 function getTomcatConfiguration(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration(TOMCAT_CONFIG_SECTION);
-}
-
-function getTomcatUiMode(): TomcatUiMode {
-  const configured = getTomcatConfiguration().get<TomcatUiMode>(
-    TOMCAT_UI_MODE_SETTING,
-    "both",
-  );
-  return configured === "participant" || configured === "webview"
-    ? configured
-    : "both";
 }
 
 function isTomcatPathConfigured(): boolean {
@@ -550,8 +496,6 @@ export async function activate(
 ): Promise<TomcatExtensionApi> {
   const output = vscode.window.createOutputChannel("Tomcat");
   const ide = new VsCodeIde();
-  const commands = new ParticipantCommands(ide);
-  commands.register(context);
   const observedEvents: ServeEvent[] = [];
   const promptHistory: PromptRecord[] = [];
   const eventWaiters = new Set<{
@@ -585,7 +529,6 @@ export async function activate(
     },
   });
   const sessionRouter = new SessionRouter(messenger, getDefaultCwd);
-  const ownership = new SessionOwnershipTracker();
 
   let initializePromise: Promise<InitializeResult> | undefined;
   let hasShownInitializationHint = false;
@@ -830,7 +773,6 @@ export async function activate(
   const webviewProvider = new TomcatWebviewViewProvider({
     extensionUri: context.extensionUri,
     getDefaultCwd,
-    getUiMode: getTomcatUiMode,
     ide,
     initialize: ensureInitialized,
     messenger,
@@ -841,7 +783,6 @@ export async function activate(
         }
       });
     },
-    ownership,
     sessionRouter,
     showOpenDialog: (options) =>
       testOpenDialogHandler?.(options) ?? vscode.window.showOpenDialog(options),
@@ -1007,13 +948,7 @@ export async function activate(
 
   const askQuestionHandler = messenger.registerAskQuestionHandler(
     async (request, frame) => {
-      const owner = frame.sessionId
-        ? ownership.ownerOf(frame.sessionId)?.owner
-        : undefined;
-      if (owner === "webview") {
-        return webviewProvider.askUser(request, frame.sessionId);
-      }
-      return commands.askUser(request, frame.sessionId);
+      return webviewProvider.askUser(request, frame.sessionId);
     },
   );
   const stderrSubscription = messenger.onStderr((chunk) => {
@@ -1055,33 +990,6 @@ export async function activate(
         }
       });
   });
-
-  const participantHandler = createParticipantHandler({
-    commands,
-    getUiMode: getTomcatUiMode,
-    ide,
-    initialize: ensureInitialized,
-    messenger,
-    ownership,
-    sessionRouter,
-  });
-  let participant: vscode.ChatParticipant | undefined;
-  const syncParticipantRegistration = (): void => {
-    if (getTomcatUiMode() === "webview") {
-      participant?.dispose();
-      participant = undefined;
-      return;
-    }
-    if (participant) {
-      return;
-    }
-    participant = vscode.chat.createChatParticipant(
-      PARTICIPANT_ID,
-      participantHandler,
-    );
-    participant.iconPath = vscode.Uri.joinPath(context.extensionUri, "media", "icon.png");
-  };
-  syncParticipantRegistration();
 
   const restartCommand = vscode.commands.registerCommand(
     TOMCAT_RESTART_COMMAND,
@@ -1217,27 +1125,12 @@ export async function activate(
       if (
         !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.path`) &&
         !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.serve.extraArgs`) &&
-        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.session.defaultCwd`) &&
-        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.${TOMCAT_UI_MODE_SETTING}`)
+        !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.session.defaultCwd`)
       ) {
         return;
       }
 
       void (async () => {
-        const uiModeChanged = event.affectsConfiguration(
-          `${TOMCAT_CONFIG_SECTION}.${TOMCAT_UI_MODE_SETTING}`,
-        );
-        if (uiModeChanged) {
-          webviewProvider.setUiMode(getTomcatUiMode());
-          syncParticipantRegistration();
-        }
-        if (
-          !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.path`) &&
-          !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.serve.extraArgs`) &&
-          !event.affectsConfiguration(`${TOMCAT_CONFIG_SECTION}.session.defaultCwd`)
-        ) {
-          return;
-        }
         await applyRuntimeConfiguration();
         initializePromise = undefined;
         sessionRouter.clearBootstrapSessionId();
@@ -1246,7 +1139,6 @@ export async function activate(
           await ensureInitialized();
           await showInformationMessage(promptHistory, "Tomcat settings changed. Restarted Tomcat serve.");
         }
-        webviewProvider.setUiMode(getTomcatUiMode());
       })().catch((error: unknown) => {
         appendOutput(output, "error", `config update failed: ${String(error)}`);
       });
@@ -1304,7 +1196,6 @@ export async function activate(
   disposeRuntime = () => {
     clearFirstRunRetryTimer();
     setupTerminal?.dispose();
-    participant?.dispose();
     askQuestionHandler.dispose();
     observedEventSubscription.dispose();
     stderrSubscription.dispose();
@@ -1324,6 +1215,7 @@ export async function activate(
   const api: TomcatExtensionApi = {
     __testing: {
       applyPreparedEdit: (toolCallId) => ide.applyPreparedEdit(toolCallId),
+      captureSettingsDom: async () => settingsPanel.__testingCaptureDom(),
       captureWebviewDom: async () => {
         await webviewProvider.waitUntilReady();
         const dom = await webviewProvider.captureDomSnapshot();
@@ -1345,12 +1237,6 @@ export async function activate(
         await vscode.commands.executeCommand(TOMCAT_FOCUS_WEBVIEW_COMMAND);
       },
       getObservedEvents: () => [...observedEvents],
-      getOwnership: () =>
-        [...ownership.snapshot().entries()].map(([sessionId, owner]) => ({
-          owner,
-          sessionId,
-        })),
-      getPendingQuestion: (requestId?: string) => commands.getPendingQuestion(requestId),
       getPromptHistory: () => [...promptHistory],
       getPreparedChange: (toolCallId) => {
         const change = ide.getPreparedChange(toolCallId);
@@ -1385,8 +1271,6 @@ export async function activate(
         return sessionRouter.listSessions(scope);
       },
       openPreparedDiff: (toolCallId) => ide.openPreparedDiff(toolCallId),
-      releaseSessionOwnership: (sessionId, owner) =>
-        ownership.release(sessionId, owner),
       reloadWebview: async () => {
         webviewProvider.resetForTestReload();
         await webviewProvider.dispatchTestIntent({
@@ -1397,103 +1281,14 @@ export async function activate(
       restartServe: async () => {
         await vscode.commands.executeCommand(TOMCAT_RESTART_COMMAND);
       },
-      runParticipantTurn: async (
-        options: RunParticipantTurnOptions,
-      ): Promise<RunParticipantTurnResult> => {
-        const stream: CapturedStreamEvent[] = [];
-        const autoClickTitles = new Set(options.autoClickTitles ?? []);
-        const tokenSource = new vscode.CancellationTokenSource();
-        const history = options.historySessionId
-          ? ([
-              {
-                participant: PARTICIPANT_ID,
-                result: {
-                  metadata: {
-                    sessionId: options.historySessionId,
-                  },
-                },
-              },
-            ] as unknown as readonly (
-              | vscode.ChatRequestTurn
-              | vscode.ChatResponseTurn
-            )[])
-          : [];
-
-        const streamCapture = {
-          anchor(uri: vscode.Uri, label: string) {
-            stream.push({
-              kind: "anchor",
-              label,
-              uri: uri.toString(),
-            });
-          },
-          button(payload: {
-            arguments?: unknown[];
-            command: string;
-            title: string;
-          }) {
-            stream.push({
-              arguments: payload.arguments,
-              command: payload.command,
-              kind: "button",
-              title: payload.title,
-            });
-
-            if (!autoClickTitles.has(payload.title)) {
-              return;
-            }
-            autoClickTitles.delete(payload.title);
-            queueMicrotask(() => {
-              void vscode.commands.executeCommand(
-                payload.command,
-                ...(payload.arguments ?? []),
-              );
-            });
-          },
-          markdown(value: string) {
-            stream.push({
-              kind: "markdown",
-              value,
-            });
-          },
-          progress(value: string) {
-            stream.push({
-              kind: "progress",
-              value,
-            });
-          },
-        } as vscode.ChatResponseStream;
-
-        const cancelTimer =
-          typeof options.cancelAfterMs === "number"
-            ? setTimeout(() => tokenSource.cancel(), options.cancelAfterMs)
-            : undefined;
-
-        try {
-          const result = await participantHandler(
-            {
-              prompt: options.prompt,
-            } as vscode.ChatRequest,
-            {
-              history,
-            } as vscode.ChatContext,
-            streamCapture,
-            tokenSource.token,
-          );
-          await new Promise((resolve) => setTimeout(resolve, 0));
-          return { result: result ?? undefined, stream };
-        } finally {
-          if (cancelTimer) {
-            clearTimeout(cancelTimer);
-          }
-          tokenSource.dispose();
-        }
-      },
       sendWebviewIntent: async (intent) => {
         await webviewProvider.dispatchTestIntent(intent);
       },
       sendSettingsIntent: async (intent) => {
         await settingsPanel.__testingDispatchIntent(intent);
+      },
+      sendSettingsDomAction: async (action) => {
+        await settingsPanel.__testingDispatchDomAction(action);
       },
       openPlanPreview: async (planPath) => {
         await vscode.commands.executeCommand(
@@ -1514,9 +1309,6 @@ export async function activate(
       },
       setOpenDialogHandler: (handler) => {
         testOpenDialogHandler = handler;
-      },
-      setParticipantUiOverrides: (overrides) => {
-        commands.setUiOverrides(overrides);
       },
       waitForEvent: async (filter: ObservedEventFilter): Promise<ServeEvent> => {
         const existing = observedEvents.find((event) => matchesObservedEvent(event, filter));
@@ -1544,26 +1336,6 @@ export async function activate(
       },
       waitForWebviewReady: async (timeoutMs = 15_000) => {
         await webviewProvider.waitUntilReady(timeoutMs);
-      },
-      waitForPendingQuestion: async (
-        timeoutMs = 10_000,
-      ): Promise<PendingQuestionSnapshot> => {
-        const existing = commands.getPendingQuestion();
-        if (existing) {
-          return existing;
-        }
-
-        return new Promise<PendingQuestionSnapshot>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            subscription.dispose();
-            reject(new Error("Timed out waiting for a Tomcat approval prompt"));
-          }, timeoutMs);
-          const subscription = commands.onPendingQuestion((question) => {
-            clearTimeout(timeout);
-            subscription.dispose();
-            resolve(question);
-          });
-        });
       },
     },
   };

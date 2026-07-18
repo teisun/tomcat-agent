@@ -122,8 +122,68 @@ export interface SettingsPanelDeps {
   onModelCatalogChanged?(): Promise<void> | void;
 }
 
+type SettingsDomAction = {
+  kind: "clickTestId" | "setInputValue";
+  testId?: string;
+  value?: string;
+};
+
+export type SettingsDomRect = {
+  height: number;
+  left: number;
+  top: number;
+  width: number;
+};
+
+export type SettingsDomSnapshot = {
+  html: string;
+  rects?: {
+    apiKeyInput?: SettingsDomRect;
+    keySlotBox?: SettingsDomRect;
+    keySlotInput?: SettingsDomRect;
+  };
+};
+
+function parseSettingsDomRect(value: unknown): SettingsDomRect | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const { height, left, top, width } = value;
+  if (
+    typeof height === "number"
+    && typeof left === "number"
+    && typeof top === "number"
+    && typeof width === "number"
+  ) {
+    return { height, left, top, width };
+  }
+  return undefined;
+}
+
+function parseSettingsDomRects(value: unknown): SettingsDomSnapshot["rects"] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const apiKeyInput = parseSettingsDomRect(value.apiKeyInput);
+  const keySlotBox = parseSettingsDomRect(value.keySlotBox);
+  const keySlotInput = parseSettingsDomRect(value.keySlotInput);
+  if (!apiKeyInput && !keySlotBox && !keySlotInput) {
+    return undefined;
+  }
+  return { apiKeyInput, keySlotBox, keySlotInput };
+}
+
 export class SettingsPanel implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
+  private webviewReady = false;
+  private readonly pendingDomSnapshots = new Map<
+    string,
+    {
+      reject(error: Error): void;
+      resolve(snapshot: SettingsDomSnapshot): void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  >();
   private route: SettingsRoute = "models";
   private state: SettingsStateSnapshot = {
     capabilities: {
@@ -141,7 +201,16 @@ export class SettingsPanel implements vscode.Disposable {
 
   constructor(private readonly deps: SettingsPanelDeps) {}
 
+  private shouldPreserveFocus(): boolean {
+    return process.env.TOMCAT_E2E_SCREENSHOT !== "1";
+  }
+
   dispose(): void {
+    for (const pending of this.pendingDomSnapshots.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("Settings panel disposed before DOM snapshot completed."));
+    }
+    this.pendingDomSnapshots.clear();
     this.panel?.dispose();
     this.panel = undefined;
   }
@@ -149,15 +218,16 @@ export class SettingsPanel implements vscode.Disposable {
   reveal(route: SettingsRoute = "models"): void {
     this.route = route;
     if (this.panel) {
-      this.panel.reveal(vscode.ViewColumn.Active, true);
+      this.panel.reveal(vscode.ViewColumn.Active, this.shouldPreserveFocus());
       void this.refreshState();
       return;
     }
+    this.webviewReady = false;
     this.panel = vscode.window.createWebviewPanel(
       "tomcat.settings",
       "Tomcat Settings",
       {
-        preserveFocus: true,
+        preserveFocus: this.shouldPreserveFocus(),
         viewColumn: vscode.ViewColumn.Active,
       },
       {
@@ -167,9 +237,32 @@ export class SettingsPanel implements vscode.Disposable {
       },
     );
     this.panel.onDidDispose(() => {
+      for (const pending of this.pendingDomSnapshots.values()) {
+        clearTimeout(pending.timeout);
+        pending.reject(new Error("Settings panel closed before DOM snapshot completed."));
+      }
+      this.pendingDomSnapshots.clear();
+      this.webviewReady = false;
       this.panel = undefined;
     });
     this.panel.webview.onDidReceiveMessage((message: unknown) => {
+      if (
+        isRecord(message)
+        && message.type === "__test.dom_snapshot"
+        && typeof message.messageId === "string"
+      ) {
+        const pending = this.pendingDomSnapshots.get(message.messageId);
+        if (!pending) {
+          return;
+        }
+        clearTimeout(pending.timeout);
+        this.pendingDomSnapshots.delete(message.messageId);
+        const rawData = isRecord(message.data) ? message.data : {};
+        const html = typeof rawData.html === "string" ? rawData.html : "";
+        const rects = parseSettingsDomRects(rawData.rects);
+        pending.resolve(rects ? { html, rects } : { html });
+        return;
+      }
       if (!isSettingsIntentMessage(message)) {
         return;
       }
@@ -183,11 +276,13 @@ export class SettingsPanel implements vscode.Disposable {
     route: SettingsRoute;
     state: SettingsStateSnapshot;
     visible: boolean;
+    webviewReady: boolean;
   } {
     return {
       route: this.route,
       state: JSON.parse(JSON.stringify(this.state)) as SettingsStateSnapshot,
       visible: Boolean(this.panel?.visible),
+      webviewReady: this.webviewReady,
     };
   }
 
@@ -195,14 +290,53 @@ export class SettingsPanel implements vscode.Disposable {
     await this.handleIntent(intent);
   }
 
+  async __testingCaptureDom(): Promise<SettingsDomSnapshot> {
+    if (!this.panel) {
+      throw new Error("Settings panel is not open.");
+    }
+    const messageId = `settings-dom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise<SettingsDomSnapshot>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingDomSnapshots.delete(messageId);
+        reject(new Error("Timed out waiting for settings DOM snapshot."));
+      }, 20_000);
+      this.pendingDomSnapshots.set(messageId, { reject, resolve, timeout });
+      void this.panel?.webview.postMessage({
+        channel: "event",
+        content: {
+          type: "__test.capture_dom",
+        },
+        messageId,
+      });
+    });
+  }
+
+  async __testingDispatchDomAction(action: SettingsDomAction): Promise<void> {
+    if (!this.panel) {
+      throw new Error("Settings panel is not open.");
+    }
+    await this.panel.webview.postMessage({
+      channel: "event",
+      content: {
+        action,
+        type: "__test.dom_action",
+      },
+      messageId: `settings-dom-action-${Date.now()}`,
+    });
+  }
+
   private async handleIntent(intent: SettingsIntent): Promise<void> {
     switch (intent.type) {
       case "settings.ready":
+        this.webviewReady = true;
         this.route = intent.data?.route ?? this.route;
         await this.refreshState();
         return;
       case "listModels":
         await this.refreshState();
+        return;
+      case "listProviderKeys":
+        await this.refreshProviderKeys();
         return;
       case "upsertModel":
         await this.handleUpsertModel(intent.data.model, intent.data.providerKey);
@@ -312,6 +446,27 @@ export class SettingsPanel implements vscode.Disposable {
       capabilities,
       error: error ?? modelsResult.error ?? providerKeysResult.error,
       models: modelsResult.models,
+      providerKeys: providerKeysResult.providerKeys,
+      ready: true,
+      route: this.route,
+      status,
+    };
+    this.postState();
+  }
+
+  private async refreshProviderKeys(
+    error: string | null = null,
+    status: string | null = null,
+  ): Promise<void> {
+    const initializeResult = await this.deps.ensureInitialized();
+    const capabilities = this.buildCapabilities(initializeResult);
+    const providerKeysResult = capabilities.listProviderKeys
+      ? await this.fetchProviderKeys(this.state.providerKeys)
+      : { error: null, providerKeys: [] };
+    this.state = {
+      ...this.state,
+      capabilities,
+      error: error ?? providerKeysResult.error,
       providerKeys: providerKeysResult.providerKeys,
       ready: true,
       route: this.route,

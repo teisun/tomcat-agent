@@ -1,6 +1,3 @@
-import * as vscode from "vscode";
-
-import { PARTICIPANT_ID } from "../constants";
 import { isRecord, parseTodos } from "../shared/todos";
 import type { TomcatMessenger } from "./TomcatMessenger";
 import type { GetMessagesParams, ListSessionsScope, ResponseFrame } from "./wire";
@@ -83,17 +80,6 @@ export interface RestoreCheckpointPayload {
   warnings: string[];
 }
 
-function readSessionIdFromHistoryTurn(turn: unknown): string | undefined {
-  if (!isRecord(turn) || turn.participant !== PARTICIPANT_ID || !isRecord(turn.result)) {
-    return undefined;
-  }
-
-  const metadata = turn.result.metadata;
-  return isRecord(metadata) && typeof metadata.sessionId === "string"
-    ? metadata.sessionId
-    : undefined;
-}
-
 function requireSessionId(response: ResponseFrame): string {
   if (typeof response.sessionId === "string") {
     return response.sessionId;
@@ -159,39 +145,6 @@ export class SessionRouter {
 
   clearBootstrapSessionId(): void {
     this.bootstrapSessionId = null;
-  }
-
-  buildResultMetadata(sessionId: string): vscode.ChatResult["metadata"] {
-    return { sessionId };
-  }
-
-  extractSessionId(
-    history: readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn)[],
-  ): string | undefined {
-    for (let index = history.length - 1; index >= 0; index -= 1) {
-      const sessionId = readSessionIdFromHistoryTurn(history[index]);
-      if (sessionId) {
-        return sessionId;
-      }
-    }
-
-    return undefined;
-  }
-
-  async resolveSessionId(
-    history: readonly (vscode.ChatRequestTurn | vscode.ChatResponseTurn)[],
-  ): Promise<string> {
-    const historySessionId = this.extractSessionId(history);
-    if (historySessionId) {
-      return historySessionId;
-    }
-
-    const bootstrapSessionId = this.takeBootstrapSessionId();
-    if (bootstrapSessionId) {
-      return bootstrapSessionId;
-    }
-
-    return this.newSession();
   }
 
   async newSession(cwd = this.getDefaultCwd()): Promise<string> {

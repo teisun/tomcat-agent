@@ -231,8 +231,8 @@ async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std
 #[tokio::test]
 #[ignore = "T2-P0-015: 待可用 Files API 的 key；手动 cargo test --test openai_files_integration_tests -- --ignored"]
 #[serial]
-async fn openai_files_cli_single_turn_image_describe_real_api()
--> Result<(), Box<dyn std::error::Error>> {
+async fn openai_files_cli_single_turn_image_describe_real_api(
+) -> Result<(), Box<dyn std::error::Error>> {
     common::setup_logging();
     if !require_live_openai_files_opt_in("openai_files_cli_single_turn_image_describe_real_api") {
         return Ok(());

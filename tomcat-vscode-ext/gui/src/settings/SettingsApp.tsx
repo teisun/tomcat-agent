@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
@@ -21,10 +22,17 @@ import {
   type ProviderPreset,
 } from "./providerPresets";
 import { deriveRelayFields, RELAY_ID_SEPARATOR } from "./relayDerive";
+import { KeySlotCombobox, type KeySlotOption } from "./KeySlotCombobox";
+import { isValidKeySlotName } from "./keySlot";
 
 type FormState = SettingsModelInput;
 type FormMode = "create" | "edit";
 type DialogKind = "official" | "relay";
+type SettingsDomAction = {
+  kind: "clickTestId" | "setInputValue";
+  testId?: string;
+  value?: string;
+};
 
 const RELAY_DEFAULT_CAPABILITIES: SettingsModelCapabilities = {
   files: false,
@@ -94,10 +102,6 @@ function normalizeOptionalText(value: string | null | undefined): string | null 
   return trimmed ? trimmed : null;
 }
 
-function isValidKeySlotName(value: string | null | undefined): boolean {
-  return /^[A-Z_][A-Z0-9_]*$/.test(fieldText(value));
-}
-
 function hasScheme(value: string): boolean {
   return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
 }
@@ -146,6 +150,72 @@ function frameIsState(message: unknown): message is SettingsHostFrame {
     message !== null &&
     (message as { channel?: unknown }).channel === "state"
   );
+}
+
+function frameIsTestEvent(
+  message: unknown,
+): message is {
+  channel: "event";
+  content: {
+    action?: SettingsDomAction;
+    type: "__test.capture_dom" | "__test.dom_action";
+  };
+  messageId?: string;
+} {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    (message as { channel?: unknown }).channel === "event" &&
+    typeof (message as { content?: { type?: unknown } }).content?.type === "string"
+  );
+}
+
+function readTestIdRect(
+  testId: string,
+): { height: number; left: number; top: number; width: number } | undefined {
+  const el = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
+  if (!el) {
+    return undefined;
+  }
+  const rect = el.getBoundingClientRect();
+  return { height: rect.height, left: rect.left, top: rect.top, width: rect.width };
+}
+
+function buildSettingsDomSnapshot(): {
+  html: string;
+  rects: {
+    apiKeyInput?: { height: number; left: number; top: number; width: number };
+    keySlotBox?: { height: number; left: number; top: number; width: number };
+    keySlotInput?: { height: number; left: number; top: number; width: number };
+  };
+} {
+  return {
+    html: document.getElementById("root")?.innerHTML ?? "",
+    rects: {
+      apiKeyInput: readTestIdRect("settings-api-key-input"),
+      keySlotBox: readTestIdRect("settings-key-slot-box"),
+      keySlotInput: readTestIdRect("settings-key-slot-input"),
+    },
+  };
+}
+
+function runSettingsDomAction(action: SettingsDomAction | undefined): void {
+  if (!action || !action.testId) {
+    return;
+  }
+  const target = document.querySelector<HTMLElement>(`[data-testid="${action.testId}"]`);
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+  if (action.kind === "clickTestId") {
+    target.click();
+    return;
+  }
+  if (action.kind === "setInputValue" && target instanceof HTMLInputElement) {
+    target.value = action.value ?? "";
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    target.dispatchEvent(new Event("change", { bubbles: true }));
+  }
 }
 
 function modelToForm(model: SettingsModelView): FormState {
@@ -235,13 +305,14 @@ function buildConfiguredKeyLabel(entry: SettingsProviderKeyView): string {
 function buildKeySlotOptions(
   suggestedEnvName: string,
   providerKeys: SettingsProviderKeyView[],
-): Array<{ envName: string; keyPresent: boolean; label: string }> {
-  const options: Array<{ envName: string; keyPresent: boolean; label: string }> = [];
+): KeySlotOption[] {
+  const options: KeySlotOption[] = [];
   const seen = new Set<string>();
   if (suggestedEnvName) {
     const existing = providerKeys.find((entry) => entry.envName === suggestedEnvName);
     options.push({
       envName: suggestedEnvName,
+      group: "suggested",
       keyPresent: existing?.keyPresent ?? false,
       label: existing?.keyPresent
         ? `${suggestedEnvName} (configured)`
@@ -255,6 +326,7 @@ function buildKeySlotOptions(
     }
     options.push({
       envName: entry.envName,
+      group: "saved",
       keyPresent: entry.keyPresent,
       label: buildConfiguredKeyLabel(entry),
     });
@@ -386,15 +458,37 @@ export function SettingsApp({
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [isKeySlotRefreshing, setIsKeySlotRefreshing] = useState(false);
+  const [keySlotRefreshFeedback, setKeySlotRefreshFeedback] = useState<string | null>(null);
   const [replacementConfirmation, setReplacementConfirmation] = useState<{
     envName: string;
     modelIds: string[];
   } | null>(null);
+  const keySlotRefreshPendingRef = useRef(false);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent<unknown>) => {
+      if (frameIsTestEvent(event.data)) {
+        if (event.data.content.type === "__test.capture_dom") {
+          (vscodeApi as VsCodeApiLike<unknown>).postMessage({
+            data: buildSettingsDomSnapshot(),
+            messageId: event.data.messageId ?? `settings-dom-${Date.now()}`,
+            type: "__test.dom_snapshot",
+          });
+          return;
+        }
+        if (event.data.content.type === "__test.dom_action") {
+          runSettingsDomAction(event.data.content.action);
+          return;
+        }
+      }
       if (!frameIsState(event.data)) {
         return;
+      }
+      if (keySlotRefreshPendingRef.current) {
+        keySlotRefreshPendingRef.current = false;
+        setIsKeySlotRefreshing(false);
+        setKeySlotRefreshFeedback(event.data.content.error ? null : "Key slots refreshed.");
       }
       setState(event.data.content);
     };
@@ -409,6 +503,18 @@ export function SettingsApp({
       window.removeEventListener("message", handleMessage);
     };
   }, [vscodeApi]);
+
+  useEffect(() => {
+    if (!keySlotRefreshFeedback) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setKeySlotRefreshFeedback(null);
+    }, 2500);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [keySlotRefreshFeedback]);
 
   const providerPresets = useMemo(
     () => buildProviderPresets(state.models),
@@ -541,11 +647,14 @@ export function SettingsApp({
     setDialogKind(nextDialogKind);
     setDraftApiKey("");
     setIsApiKeyFocused(false);
+    setIsKeySlotRefreshing(false);
+    setKeySlotRefreshFeedback(null);
     setSelectedModelId(null);
     setSelectedProvider(providerPresets[0]?.provider ?? "");
     setShowAdvanced(false);
     setValidationError(null);
     setReplacementConfirmation(null);
+    keySlotRefreshPendingRef.current = false;
     setForm({
       ...createEmptyForm(),
       capabilities: cloneCapabilities(
@@ -692,6 +801,16 @@ export function SettingsApp({
         [key]: checked,
       },
     }));
+  }
+
+  function handleKeySlotRefresh() {
+    if (!state.capabilities.listProviderKeys || isKeySlotRefreshing) {
+      return;
+    }
+    keySlotRefreshPendingRef.current = true;
+    setIsKeySlotRefreshing(true);
+    setKeySlotRefreshFeedback(null);
+    send(vscodeApi, { type: "listProviderKeys" });
   }
 
   function submitModelSave() {
@@ -853,24 +972,15 @@ export function SettingsApp({
               echoing them back into the UI.
             </p>
           </div>
-          <div className="tc-button-row">
-            <button
-              className="tc-button tc-button--ghost"
-              disabled={!state.capabilities.listModels}
-              onClick={() => send(vscodeApi, { type: "listModels" })}
-              type="button"
-            >
-              ↻ Refresh
-            </button>
-            <button
-              className="tc-button tc-button--secondary"
-              disabled={!state.capabilities.upsertModel}
-              onClick={openCreateForm}
-              type="button"
-            >
-              + Add Model
-            </button>
-          </div>
+          <button
+            className="tc-button tc-button--secondary"
+            data-testid="settings-add-model"
+            disabled={!state.capabilities.upsertModel}
+            onClick={openCreateForm}
+            type="button"
+          >
+            + Add Model
+          </button>
         </header>
 
         {state.error ? <div className="tc-banner tc-banner--warning">{state.error}</div> : null}
@@ -1042,6 +1152,7 @@ export function SettingsApp({
               aria-labelledby="settings-model-form-title"
               aria-modal="true"
               className="tc-card tc-settings-modal__card"
+              data-testid="settings-model-form"
               onClick={(event) => event.stopPropagation()}
               role="dialog"
             >
@@ -1053,6 +1164,7 @@ export function SettingsApp({
                 <button
                   aria-label="Close model form"
                   className="tc-icon-button tc-settings-modal__close"
+                  data-testid="settings-close-model-form"
                   onClick={closeForm}
                   type="button"
                 >
@@ -1092,6 +1204,7 @@ export function SettingsApp({
                     aria-controls={panelIdForDialogKind("relay")}
                     aria-selected={dialogKind === "relay"}
                     className={`tc-settings-tabs__tab${dialogKind === "relay" ? " tc-settings-tabs__tab--active" : ""}`}
+                    data-testid="settings-mode-relay"
                     id={tabIdForDialogKind("relay")}
                     onClick={() => handleDialogKindChange("relay")}
                     onKeyDown={(event) => handleDialogTabKeyDown("relay", event)}
@@ -1279,36 +1392,28 @@ export function SettingsApp({
 
                 {showSharedFormFields ? (
                   <>
-                    <div className="tc-settings-form__row">
+                    <div className="tc-settings-form__row" data-testid="settings-key-fields-row">
+                      <KeySlotCombobox
+                        feedback={keySlotRefreshFeedback}
+                        hint="Search a configured key slot or type a new environment variable name."
+                        onChange={handleKeySlotChange}
+                        onRefresh={handleKeySlotRefresh}
+                        options={keySlotOptions}
+                        placeholder={suggestedApiKeyEnv || "EXAMPLE_API_KEY"}
+                        refreshDisabled={!state.capabilities.listProviderKeys || isKeySlotRefreshing}
+                        refreshLabel="Refresh key slots"
+                        refreshing={isKeySlotRefreshing}
+                        value={effectiveApiKeyEnv}
+                      />
                       <label className="tc-field">
-                        <span>Key slot</span>
-                        <input
-                          aria-label="Key slot"
-                          autoComplete="off"
-                          className="tc-input"
-                          list="tc-settings-key-slot-options"
-                          onChange={(event) => handleKeySlotChange(event.target.value)}
-                          placeholder={suggestedApiKeyEnv || "EXAMPLE_API_KEY"}
-                          role="combobox"
-                          value={effectiveApiKeyEnv}
-                        />
-                        <datalist id="tc-settings-key-slot-options">
-                          {keySlotOptions.map((entry) => (
-                            <option key={entry.envName} value={entry.envName}>
-                              {entry.label}
-                            </option>
-                          ))}
-                        </datalist>
-                        <small className="tc-field__hint">
-                          Search a configured key slot or type a new environment variable name.
-                        </small>
-                      </label>
-                      <label className="tc-field">
-                        <span>{effectiveKeyPresent ? "New API key (optional)" : "API key"}</span>
+                        <div className="tc-field__label-row">
+                          <span>{effectiveKeyPresent ? "New API key (optional)" : "API key"}</span>
+                        </div>
                         <input
                           aria-label="API key"
                           autoComplete="off"
-                          className="tc-input"
+                          className="tc-input tc-settings-api-key-input"
+                          data-testid="settings-api-key-input"
                           onBlur={() => setIsApiKeyFocused(false)}
                           onChange={(event) => {
                             setIsApiKeyFocused(true);

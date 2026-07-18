@@ -212,3 +212,66 @@ fn serve_command_schema_validates_checkpoint_commands() {
         );
     }
 }
+
+#[test]
+fn response_frame_schema_validates_get_messages_payload_with_error_entries() {
+    let bundle = build_schema_bundle();
+    let bundle_value = serde_json::to_value(&bundle).expect("serialize schema bundle");
+    let schema = bundle_value
+        .get("response_frame")
+        .cloned()
+        .expect("response_frame schema should exist");
+    let validator = jsonschema::validator_for(&schema).expect("compile response frame schema");
+    let sample = json!({
+        "type": "response",
+        "id": "messages-1",
+        "success": true,
+        "sessionId": "s1",
+        "payload": {
+            "sessionId": "s1",
+            "header": {
+                "type": "session",
+                "version": 3,
+                "id": "s1",
+                "timestamp": "2026-07-17T05:00:00.000Z",
+                "cwd": null
+            },
+            "messages": [
+                {
+                    "type": "message",
+                    "id": "m1",
+                    "parentId": null,
+                    "timestamp": "2026-07-17T05:00:01.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": "retry",
+                        "superseded": true,
+                        "turn_failed": true
+                    }
+                },
+                {
+                    "type": "error",
+                    "id": "err_1",
+                    "parentId": null,
+                    "timestamp": "2026-07-17T05:00:02.000Z",
+                    "phase": "Llm",
+                    "provider": "openai",
+                    "model": "gpt-5.4",
+                    "apiFamily": "responses",
+                    "statusCode": 403,
+                    "requestId": "req_123",
+                    "summary": "API 错误 403 · PS-SHA-01JfN78 · Request-Id req_123",
+                    "detail": "API 错误 403 原文"
+                }
+            ],
+            "nextCursor": null,
+            "hasMore": false,
+            "upToSeq": null
+        }
+    });
+
+    assert!(
+        validator.is_valid(&sample),
+        "get_messages response with error entry should validate: {sample}"
+    );
+}

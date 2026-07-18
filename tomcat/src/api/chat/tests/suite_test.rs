@@ -887,6 +887,81 @@ fn append_message_chain_rehydrate_falls_back_when_transcript_reload_fails() {
 }
 
 #[test]
+fn append_message_chain_failed_turn_recovery_does_not_append_error_or_mark_turn_failed() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_REHYDRATE_NO_TRANSCRIPT_MUTATION_KEY";
+
+    let (_dir, ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({"role":"assistant","content":"a1"}))
+        .unwrap();
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({"role":"user","content":"retry-tail"}))
+        .unwrap();
+
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+    let changed = crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+        &ctx,
+        &ctx.config.context,
+        "sys",
+        &crate::AppError::invariant(
+            "append_message_chain",
+            "tool must follow assistant+tool_calls or tool",
+        ),
+        &mut state,
+    );
+
+    assert!(changed, "append_message_chain 失败也应走恢复 helper");
+    assert_eq!(
+        state.messages.last().and_then(|m| m.text_content()),
+        Some("retry-tail"),
+        "append invariant 分支只重载 transcript，不应把 user tail 标成失败"
+    );
+    let entries = crate::core::session::read_entries_tail(&transcript_path, 8).unwrap();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| !matches!(entry, crate::core::TranscriptEntry::Error(_))),
+        "append invariant 恢复不应追加结构化 Error 记录"
+    );
+    let trailing_user = entries
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            crate::core::TranscriptEntry::Message(me)
+                if me.message.get("role").and_then(serde_json::Value::as_str) == Some("user") =>
+            {
+                Some(me)
+            }
+            _ => None,
+        })
+        .expect("expected trailing user message");
+    assert_eq!(
+        trailing_user
+            .message
+            .get("superseded")
+            .and_then(serde_json::Value::as_bool),
+        None
+    );
+    assert_eq!(
+        trailing_user
+            .message
+            .get("turn_failed")
+            .and_then(serde_json::Value::as_bool),
+        None
+    );
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
 fn non_append_invariant_does_not_rehydrate_context() {
     const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_REHYDRATE_NOOP_KEY";
 
@@ -912,6 +987,341 @@ fn non_append_invariant_does_not_rehydrate_context() {
         Some("keep me"),
         "非目标错误应保持当前 context_state 不变"
     );
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn failed_turn_recovery_supersedes_trailing_user_tail_and_rehydrates() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_FAILED_TAIL_RECOVERY_KEY";
+
+    let (_dir, ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role":"user","content":"q1"}))
+        .unwrap();
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role":"assistant","content":"a1"}))
+        .unwrap();
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role":"user","content":"retry-1"}))
+        .unwrap();
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role":"user","content":"retry-2"}))
+        .unwrap();
+
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+    let changed = crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+        &ctx,
+        &ctx.config.context,
+        "sys",
+        &crate::AppError::Llm("gateway 403".to_string()),
+        &mut state,
+    );
+
+    assert!(changed, "failed turn should trigger a context recovery");
+    let texts: Vec<String> = state
+        .messages
+        .iter()
+        .filter_map(|message| message.text_content().map(str::to_string))
+        .collect();
+    assert_eq!(texts, vec!["q1".to_string(), "a1".to_string()]);
+
+    let entries = crate::core::session::read_entries_tail(&transcript_path, 8).unwrap();
+    let superseded_flags: Vec<(Option<bool>, Option<bool>)> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            crate::core::TranscriptEntry::Message(me) => Some((
+                me.message
+                    .get("superseded")
+                    .and_then(serde_json::Value::as_bool),
+                me.message
+                    .get("turn_failed")
+                    .and_then(serde_json::Value::as_bool),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        superseded_flags,
+        vec![
+            (None, None),
+            (None, None),
+            (Some(true), Some(true)),
+            (Some(true), Some(true)),
+        ]
+    );
+    let error_entry = entries
+        .iter()
+        .find_map(|entry| match entry {
+            crate::core::TranscriptEntry::Error(error) => Some(error),
+            _ => None,
+        })
+        .expect("failed turn recovery should append an error entry");
+    assert_eq!(error_entry.status_code, None);
+    assert_eq!(error_entry.summary, "gateway 403");
+    assert!(error_entry.detail.contains("gateway 403"));
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn failed_turn_recovery_is_idempotent_for_the_same_failed_tail() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_FAILED_TAIL_RECOVERY_IDEMPOTENT_KEY";
+
+    let (_dir, ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role":"user","content":"q1"}))
+        .unwrap();
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role":"assistant","content":"a1"}))
+        .unwrap();
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role":"user","content":"retry-once"}))
+        .unwrap();
+
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+    let error = crate::AppError::Llm("gateway 403".to_string());
+    assert!(crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+        &ctx,
+        &ctx.config.context,
+        "sys",
+        &error,
+        &mut state,
+    ));
+    assert!(crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+        &ctx,
+        &ctx.config.context,
+        "sys",
+        &error,
+        &mut state,
+    ));
+
+    let texts: Vec<String> = state
+        .messages
+        .iter()
+        .filter_map(|message| message.text_content().map(str::to_string))
+        .collect();
+    assert_eq!(texts, vec!["q1".to_string(), "a1".to_string()]);
+
+    let entries = crate::core::session::read_entries_tail(&transcript_path, 8).unwrap();
+    let error_count = entries
+        .iter()
+        .filter(|entry| matches!(entry, crate::core::TranscriptEntry::Error(_)))
+        .count();
+    assert_eq!(error_count, 1, "同一 failed tail 重复恢复不应重复追加 Error");
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn failed_turn_recovery_summarizes_403_html_and_redacts_sensitive_detail() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_FAILED_TURN_403_SUMMARY_KEY";
+
+    let (_dir, ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role":"user","content":"retry this"}))
+        .unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+    let err = crate::infra::error::llm_http_status_error(
+        "openai-responses",
+        403,
+        r#"<html><body><h1>403 Forbidden</h1><p>Host: PS-SHA-01JfN78</p><p>Request-Id: req_turn2</p><p>Authorization: Bearer sk-secret</p><p>api_key="raw-key"</p><p>token=raw-token</p><p>Cookie: SID=raw-cookie; Path=/</p><p>Set-Cookie: refresh=raw-set-cookie; HttpOnly</p><p>x-api-key: raw-x-key</p><p>password=raw-password</p><p>secret="raw-secret"</p><p>Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==</p><p>direct-key sk-direct-secret-1234567890</p></body></html>"#,
+    );
+
+    assert_eq!(
+        crate::api::chat::render_error_message(&err),
+        "API 错误 403 · PS-SHA-01JfN78 · Request-Id req_turn2"
+    );
+
+    let changed = crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+        &ctx,
+        &ctx.config.context,
+        "sys",
+        &err,
+        &mut state,
+    );
+    assert!(changed, "403 failed turn should trigger recovery");
+
+    let error_entry = crate::core::session::read_entries_tail(&transcript_path, 8)
+        .unwrap()
+        .into_iter()
+        .find_map(|entry| match entry {
+            crate::core::TranscriptEntry::Error(error) => Some(error),
+            _ => None,
+        })
+        .expect("expected structured error entry");
+    assert_eq!(
+        error_entry.summary,
+        "API 错误 403 · PS-SHA-01JfN78 · Request-Id req_turn2"
+    );
+    assert!(error_entry.detail.contains("Request-Id: req_turn2"));
+    assert!(error_entry.detail.contains("Host: PS-SHA-01JfN78"));
+    assert!(error_entry.detail.contains("Authorization: [REDACTED]"));
+    assert!(error_entry.detail.contains("api_key=\"[REDACTED]\""));
+    assert!(error_entry.detail.contains("token=[REDACTED]"));
+    assert!(error_entry.detail.contains("Cookie: [REDACTED]"));
+    assert!(error_entry.detail.contains("Set-Cookie: [REDACTED]"));
+    assert!(error_entry.detail.contains("x-api-key: [REDACTED]"));
+    assert!(error_entry.detail.contains("password=[REDACTED]"));
+    assert!(error_entry.detail.contains("secret=\"[REDACTED]\""));
+    assert!(error_entry.detail.contains("Basic [REDACTED]"));
+    assert!(!error_entry.detail.contains("sk-secret"));
+    assert!(!error_entry.detail.contains("raw-key"));
+    assert!(!error_entry.detail.contains("raw-token"));
+    assert!(!error_entry.detail.contains("raw-cookie"));
+    assert!(!error_entry.detail.contains("raw-set-cookie"));
+    assert!(!error_entry.detail.contains("raw-x-key"));
+    assert!(!error_entry.detail.contains("raw-password"));
+    assert!(!error_entry.detail.contains("raw-secret"));
+    assert!(!error_entry.detail.contains("QWxhZGRpbjpvcGVuIHNlc2FtZQ=="));
+    assert!(!error_entry.detail.contains("sk-direct-secret-1234567890"));
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn failed_turn_recovery_truncates_large_error_detail_after_redaction() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_FAILED_TURN_DETAIL_TRUNCATION_KEY";
+
+    let (_dir, ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role":"user","content":"retry giant error"}))
+        .unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+    let huge_body = format!(
+        "<html><body><p>Host: huge.gateway</p><p>Request-Id: req_big</p><p>Cookie: SID=raw-cookie</p><p>{}</p><p>TAIL-SHOULD-NOT-APPEAR</p></body></html>",
+        "A".repeat(9000)
+    );
+    let err = crate::infra::error::llm_http_status_error("openai-responses", 403, &huge_body);
+
+    let changed = crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+        &ctx,
+        &ctx.config.context,
+        "sys",
+        &err,
+        &mut state,
+    );
+    assert!(changed, "large failed turn should still trigger recovery");
+
+    let error_entry = crate::core::session::read_entries_tail(&transcript_path, 8)
+        .unwrap()
+        .into_iter()
+        .find_map(|entry| match entry {
+            crate::core::TranscriptEntry::Error(error) => Some(error),
+            _ => None,
+        })
+        .expect("expected structured error entry");
+    assert!(error_entry.detail.contains("Cookie: [REDACTED]"));
+    assert!(
+        error_entry.detail.ends_with("\n...[truncated]"),
+        "oversized detail should end with a truncation marker"
+    );
+    assert!(
+        !error_entry.detail.contains("TAIL-SHOULD-NOT-APPEAR"),
+        "content beyond the truncation limit must be dropped"
+    );
+
+    // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+/// 用真实抓到的 sunmi 网关 403 页面（关内网复现，节点 PS-CZX-01wky52）回归：
+/// `render_error_message` 应从正文里的 URL 解析出网关域名、从 `Request-Id:` 提取
+/// 真实请求号，摘要保持“状态码 · 域名 · Request-Id”的干净格式；结构化 Error 记录的
+/// `status_code`/`request_id` 正确，`detail` 完整保留原始正文（含节点/URL/请求号）供排查。
+#[test]
+fn failed_turn_recovery_summarizes_real_sunmi_gateway_403_html() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_FAILED_TURN_REAL_403_SUMMARY_KEY";
+
+    // 真实网关返回的 403 页面（原文，未改造）。
+    const REAL_403_HTML: &str = r#"<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<meta http-equiv="X-UA-Compatible" content="IE=edge">
+		<meta name="viewport" content="width=device-width, initial-scale=1">
+		<title>403 Forbidden</title>
+		<style type="text/css">body{margin:5% auto 0 auto;padding:0 18px}.P{margin:0 22%}.O{margin-top:20px}.N{margin-top:10px}.M{margin:10px 0 30px 0}.L{margin-bottom:60px}.K{font-size:25px;color:#F90}.J{font-size:14px}.I{font-size:20px}.H{font-size:18px}.G{font-size:16px}.F{width:230px;float:left}.E{margin-top:5px}.D{margin:8px 0 0 -20px}.C{color:#3CF;cursor:pointer}.B{color:#909090;margin-top:15px}.A{line-height:30px}.hide_me{display:none}</style>
+	</head>
+	<body>
+		<div id="p" class="P">
+			<div class="K">403</div>
+			<div class="O I">Forbidden</div>
+			<p class="J A L">Error Times: Fri, 17 Jul 2026 00:03:40 GMT
+				<br>
+				<span class="F">IP: 112.65.39.1</span>Node information: PS-CZX-01wky52
+				<br>URL: https://aigateway.sunmi.com/v1/responses
+				<br>Request-Id: 6a59715c_PS-CZX-01wky52_16724-27663
+				<br>Check:
+				<span class="C G" onclick="s(0)">Details</span></p>
+		</div>
+	</body>
+</html>"#;
+
+    let (_dir, ctx, transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(json!({"role":"user","content":"retry after intranet 403"}))
+        .unwrap();
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+    let err = crate::infra::error::llm_http_status_error("openai-responses", 403, REAL_403_HTML);
+
+    assert_eq!(
+        crate::api::chat::render_error_message(&err),
+        "API 错误 403 · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663"
+    );
+
+    let changed = crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+        &ctx,
+        &ctx.config.context,
+        "sys",
+        &err,
+        &mut state,
+    );
+    assert!(changed, "真实 403 失败轮应触发上下文恢复并落一条 Error 记录");
+
+    let error_entry = crate::core::session::read_entries_tail(&transcript_path, 8)
+        .unwrap()
+        .into_iter()
+        .find_map(|entry| match entry {
+            crate::core::TranscriptEntry::Error(error) => Some(error),
+            _ => None,
+        })
+        .expect("expected structured error entry");
+    assert_eq!(error_entry.status_code, Some(403));
+    assert_eq!(
+        error_entry.request_id.as_deref(),
+        Some("6a59715c_PS-CZX-01wky52_16724-27663")
+    );
+    assert_eq!(
+        error_entry.summary,
+        "API 错误 403 · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663"
+    );
+    assert!(error_entry.detail.contains("Node information: PS-CZX-01wky52"));
+    assert!(error_entry
+        .detail
+        .contains("URL: https://aigateway.sunmi.com/v1/responses"));
+    assert!(error_entry
+        .detail
+        .contains("Request-Id: 6a59715c_PS-CZX-01wky52_16724-27663"));
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };

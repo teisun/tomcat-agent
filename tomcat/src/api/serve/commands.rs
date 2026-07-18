@@ -1242,10 +1242,7 @@ fn emit_agent_idle(state: &ServeState, slot: &super::registry::SessionSlot) {
 }
 
 fn render_error_message(error: &AppError) -> String {
-    match error {
-        AppError::Config(message) => message.clone(),
-        _ => error.to_string(),
-    }
+    crate::api::chat::render_error_message(error)
 }
 
 fn to_context_ref_kind(kind: ServeContextRefKind) -> ContextRefKind {

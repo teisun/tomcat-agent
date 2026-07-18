@@ -74,6 +74,12 @@ describe("real tomcat serve plan integration", () => {
         runtime.messenger,
         (event) => event.type === "agent_end",
       );
+      // busy 标志随 agent_idle 清除，且 agent_idle 按设计晚于 agent_end；
+      // 因此必须等到 agent_idle 再发下一条命令，否则会命中 busy。
+      const agentIdle = waitForEvent(
+        runtime.messenger,
+        (event) => event.type === "agent_idle",
+      );
 
       const build = await runtime.messenger.sendSetPlanMode({
         action: "build",
@@ -97,6 +103,7 @@ describe("real tomcat serve plan integration", () => {
         ),
       ).toBe(true);
       expect(endEvents.at(-1)?.type).toBe("agent_end");
+      await agentIdle;
 
       const exitAfterExecuting = await runtime.messenger.sendSetPlanMode({
         action: "exit",

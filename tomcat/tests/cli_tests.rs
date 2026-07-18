@@ -8,7 +8,7 @@ mod common;
 use assert_cmd::Command;
 use async_trait::async_trait;
 use predicates::prelude::*;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use serial_test::serial;
 use std::collections::VecDeque;
 use std::fs;
@@ -17,10 +17,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tomcat::{
-    AppConfig, AppError, BashResult, Capabilities, ChatContext, ChatMessage, ChatRequest,
-    ChatResponse, DirEntry, EditFileResult, EditOperation, LlmProvider, LlmResolver, LlmScene,
-    PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent,
-    WriteFileResult, init_context_state, llm_http_status_error, run_chat_turn,
+    init_context_state, llm_http_status_error, run_chat_turn, AppConfig, AppError, BashResult,
+    Capabilities, ChatContext, ChatMessage, ChatRequest, ChatResponse, DirEntry, EditFileResult,
+    EditOperation, LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation,
+    ResolvedCall, SessionManager, StreamEvent, WriteFileResult,
 };
 use tracing::{info, info_span};
 use wiremock::matchers::{method, path};
@@ -5573,10 +5573,10 @@ async fn test_cli_chat_path_retries_gateway_503_and_recovers_same_turn() {
 }
 
 #[tokio::test]
-async fn test_cli_chat_path_retry_exhausted_503_preserves_progress_for_next_turn() {
+async fn test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_next_turn() {
     common::setup_logging();
     let _span =
-        info_span!("test_cli_chat_path_retry_exhausted_503_preserves_progress_for_next_turn")
+        info_span!("test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_next_turn")
             .entered();
 
     const ENV_KEY: &str = "TOMCAT_CLI_GATEWAY_503_EXHAUST_KEY";
@@ -5628,11 +5628,11 @@ async fn test_cli_chat_path_retry_exhausted_503_preserves_progress_for_next_turn
         .map(|msg| format!("{:?}:{:?}", msg.role, msg.text_content()))
         .collect::<Vec<_>>();
     assert!(
-        state
+        !state
             .messages
             .iter()
             .any(|msg| msg.text_content() == Some("第一轮会失败但应保留进度")),
-        "失败轮的用户输入应仍保留在 context_state，actual messages: {:?}",
+        "失败轮的用户输入不应继续留在 context_state，actual messages: {:?}",
         carried_messages
     );
 

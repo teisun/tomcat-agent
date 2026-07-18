@@ -317,10 +317,7 @@ fn thinking_level_override_updates_openai_reasoning_effort() {
     };
 
     let cfg = provider.thinking_cfg_for_request(&request);
-    let fields = resolve_request_fields(
-        &cfg,
-        provider.thinking_format_for_wire(),
-    );
+    let fields = resolve_request_fields(&cfg, provider.thinking_format_for_wire());
 
     assert_eq!(cfg.level, "low");
     assert_eq!(fields.reasoning_effort.as_deref(), Some("low"));
@@ -348,10 +345,7 @@ fn thinking_level_override_updates_deepseek_reasoning_effort() {
     };
 
     let cfg = provider.thinking_cfg_for_request(&request);
-    let fields = resolve_request_fields(
-        &cfg,
-        provider.thinking_format_for_wire(),
-    );
+    let fields = resolve_request_fields(&cfg, provider.thinking_format_for_wire());
 
     assert_eq!(cfg.level, "xhigh");
     assert_eq!(fields.reasoning_effort.as_deref(), Some("max"));
@@ -367,16 +361,17 @@ fn openai_auto_thinking_format_ignores_claude_model_name_on_openai_wire() {
         value: "stub-key".to_string(),
     };
     let provider = OpenAiProvider::new(&entry, &runtime, &credential).unwrap();
-    let fields = resolve_request_fields(
-        &provider.thinking_cfg,
-        provider.thinking_format_for_wire(),
-    );
+    let fields =
+        resolve_request_fields(&provider.thinking_cfg, provider.thinking_format_for_wire());
     assert_eq!(
         provider.thinking_format_for_wire(),
         crate::core::llm::thinking_policy::ThinkingFormat::Openai
     );
     assert_eq!(fields.reasoning_effort.as_deref(), Some("high"));
-    assert!(fields.thinking.is_none(), "openai wire 不应被 claude 名字误导出 anthropic/deepseek thinking");
+    assert!(
+        fields.thinking.is_none(),
+        "openai wire 不应被 claude 名字误导出 anthropic/deepseek thinking"
+    );
 }
 
 #[test]
@@ -389,14 +384,15 @@ fn openai_auto_thinking_format_ignores_deepseek_model_name_on_openai_wire() {
         value: "stub-key".to_string(),
     };
     let provider = OpenAiProvider::new(&entry, &runtime, &credential).unwrap();
-    let fields = resolve_request_fields(
-        &provider.thinking_cfg,
-        provider.thinking_format_for_wire(),
-    );
+    let fields =
+        resolve_request_fields(&provider.thinking_cfg, provider.thinking_format_for_wire());
     assert_eq!(
         provider.thinking_format_for_wire(),
         crate::core::llm::thinking_policy::ThinkingFormat::Openai
     );
     assert_eq!(fields.reasoning_effort.as_deref(), Some("high"));
-    assert!(fields.thinking.is_none(), "openai wire 的 Auto 不应自动补 deepseek thinking 方言");
+    assert!(
+        fields.thinking.is_none(),
+        "openai wire 的 Auto 不应自动补 deepseek thinking 方言"
+    );
 }

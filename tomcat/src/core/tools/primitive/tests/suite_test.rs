@@ -397,7 +397,10 @@ async fn hashline_edit_success_returns_line_diff_stat() {
     assert!(result.applied);
     assert_eq!(result.added, Some(1));
     assert_eq!(result.removed, Some(1));
-    assert_eq!(std::fs::read_to_string(&f).unwrap(), "alpha\nchanged\ngamma\n");
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "alpha\nchanged\ngamma\n"
+    );
 }
 
 #[tokio::test]

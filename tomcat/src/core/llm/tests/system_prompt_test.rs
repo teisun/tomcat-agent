@@ -109,10 +109,17 @@ fn new_sections_sit_in_priority_order() {
     let parallel_pos = prompt.find("Parallel tool calls").expect("parallel");
     let paged_pos = prompt.find("Tool result persisted").expect("paged");
     let bg_pos = prompt.find("Background bash tasks").expect("background");
-    let verify_pos = prompt.find("Finishing and verifying").expect("verification");
-    let ctx_pos = prompt.find("Current date and time:").expect("workspace ctx");
+    let verify_pos = prompt
+        .find("Finishing and verifying")
+        .expect("verification");
+    let ctx_pos = prompt
+        .find("Current date and time:")
+        .expect("workspace ctx");
     // tool(20) < parallel(22) < paged(25) < background(30) < verification(50) < workspace_ctx(200)
-    assert!(tool_pos < parallel_pos, "parallel 应在 tool_instructions 之后");
+    assert!(
+        tool_pos < parallel_pos,
+        "parallel 应在 tool_instructions 之后"
+    );
     assert!(parallel_pos < paged_pos, "parallel 应在 paged 之前");
     assert!(paged_pos < bg_pos, "paged 应在 background 之前");
     assert!(bg_pos < verify_pos, "verification 应在 background 之后");

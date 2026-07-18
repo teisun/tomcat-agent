@@ -186,8 +186,6 @@ describe("WebviewStateStore wire routing", () => {
           },
         ],
       },
-      new Map(),
-      "webview",
     );
 
     store.applyEvent({
@@ -215,8 +213,6 @@ describe("WebviewStateStore wire routing", () => {
           },
         ],
       },
-      new Map(),
-      "webview",
     );
 
     store.applyEvent({
@@ -259,8 +255,6 @@ describe("WebviewStateStore wire routing", () => {
           },
         ],
       },
-      new Map(),
-      "webview",
     );
 
     expect(store.snapshot().activeSessionId).toBe("s1");
@@ -283,8 +277,6 @@ describe("WebviewStateStore wire routing", () => {
           },
         ],
       },
-      new Map(),
-      "webview",
     );
 
     expect(store.snapshot().activeSessionId).toBe("s2");
@@ -666,8 +658,6 @@ describe("session state hydration", () => {
         model: "gpt-5.4",
         sessionId: "s1",
       },
-      null,
-      "webview",
     );
 
     expect(store.snapshot().sessionViews.s1.busy).toBe(false);
@@ -693,8 +683,6 @@ describe("session state hydration", () => {
         sessionId: "s1",
         thinkingLevel: "high",
       },
-      null,
-      "webview",
       { trustBusy: false },
     );
 
@@ -854,8 +842,6 @@ describe("session state hydration", () => {
         planState: "planning",
         sessionId: "s1",
       },
-      null,
-      "webview",
     );
 
     store.applyEvent({
@@ -874,8 +860,6 @@ describe("session state hydration", () => {
         planState: "pending",
         sessionId: "s1",
       },
-      null,
-      "webview",
     );
     store.applySessionState(
       {
@@ -886,8 +870,6 @@ describe("session state hydration", () => {
         planState: "chat",
         sessionId: "s1",
       },
-      null,
-      "webview",
     );
 
     const session = store.snapshot().sessionViews.s1;
@@ -959,8 +941,6 @@ describe("custom history replay", () => {
         planState: "executing",
         sessionId: "s1",
       },
-      null,
-      "webview",
     );
 
     store.hydrateHistory("s1", {
@@ -1126,8 +1106,6 @@ describe("custom history replay", () => {
         planState: "executing",
         sessionId: "s1",
       },
-      null,
-      "webview",
     );
 
     store.hydrateHistory("s1", {
@@ -1268,8 +1246,6 @@ describe("plan.todos routing", () => {
         planState: "planning",
         sessionId: "s1",
       },
-      null,
-      "webview",
     );
 
     store.hydrateHistory("s1", {
@@ -1320,8 +1296,6 @@ describe("plan.todos routing", () => {
         planState: "planning",
         sessionId: "s1",
       },
-      null,
-      "webview",
     );
     store.applyEvent({
       planId: "plan-a",
@@ -1522,7 +1496,7 @@ describe("reference segment hydration", () => {
 
 describe("local user message delivery state", () => {
   it("retains pending and failed user bubbles during rebuild but drops confirmed ones", () => {
-    const store = new WebviewStateStore("both");
+    const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState(
       {
@@ -1532,8 +1506,6 @@ describe("local user message delivery state", () => {
         planState: "chat",
         sessionId: "s1",
       },
-      "webview",
-      "webview",
     );
 
     const baseHistory = {
@@ -1626,6 +1598,68 @@ describe("local user message delivery state", () => {
 });
 
 describe("checkpoint history replay", () => {
+  it("keeps turn_failed superseded users and their adjacent error entries visible", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "user-1",
+          message: {
+            content: "first prompt",
+            role: "user",
+          },
+          type: "message",
+        },
+        {
+          id: "assistant-1",
+          message: {
+            content: "first reply",
+            role: "assistant",
+          },
+          type: "message",
+        },
+        {
+          id: "user-failed",
+          message: {
+            content: "retry me",
+            role: "user",
+            superseded: true,
+            turn_failed: true,
+          },
+          type: "message",
+        },
+        {
+          detail: "API 错误 403: <html>forbidden</html>",
+          id: "error-1",
+          summary: "API 错误 403 · aigateway.sunmi.com · Request-Id req-1",
+          type: "error",
+        },
+        {
+          id: "user-2",
+          message: {
+            content: "visible again",
+            role: "user",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    expect(
+      session.timeline.map((item) => item.type === "message" ? item.id : item.type),
+    ).toEqual(["user-1", "assistant-1", "user-failed", "error-1", "user-2"]);
+    const errorBubble = session.timeline.find(
+      (item): item is Extract<(typeof session.timeline)[number], { type: "message" }> =>
+        item.type === "message" && item.id === "error-1",
+    );
+    expect(errorBubble?.kind).toBe("error");
+    expect(errorBubble?.detailText).toBe("API 错误 403: <html>forbidden</html>");
+  });
+
   it("filters superseded spans and resumes rendering after checkpoint.restore", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");

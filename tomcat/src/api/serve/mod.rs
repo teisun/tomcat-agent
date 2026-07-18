@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::chat::run_chat_turn_with_message;
-use crate::api::chat::{ChatContext, ChatContextOverrides};
+use crate::api::chat::{recover_context_state_after_failed_turn, ChatContext, ChatContextOverrides};
 use crate::core::agent_registry::AgentRegistry;
 use crate::core::llm::ChatMessage;
 use crate::{
@@ -392,12 +392,27 @@ pub(crate) async fn run_slot_turn(
         next_system_text.len(),
     );
     turn_state.replace_system_text(next_system_text.clone());
-    run_chat_turn_with_message(
+    let result = run_chat_turn_with_message(
         &slot.ctx,
         Some(input_message),
         &next_system_text,
         turn_state.context_state_mut(),
         turn_token,
     )
-    .await
+    .await;
+    if let Err(error) = &result {
+        let _ = recover_context_state_after_failed_turn(
+            &slot.ctx,
+            &slot.ctx.config.context,
+            &next_system_text,
+            error,
+            turn_state.context_state_mut(),
+        );
+        let _ = slot
+            .ctx
+            .session_runtime
+            .session
+            .persist_context_observability(turn_state.context_state_mut());
+    }
+    result
 }

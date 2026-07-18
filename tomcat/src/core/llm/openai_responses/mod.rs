@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::stream::TryStreamExt;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
@@ -41,6 +42,7 @@ use super::super::catalog::{infer_default_base_url, Capabilities, ModelEntry};
 use super::super::endpoint::build_path_aware_endpoint;
 use crate::core::llm::degrade_unsupported_multimodal;
 use crate::core::llm::http_client::build_http_client;
+use crate::core::llm::replay_policy::{plan, ProviderCompatProfile, ReplayAction};
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
     is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,
@@ -51,7 +53,7 @@ use super::super::retry_delay::provider_retry_delay;
 use crate::core::llm::openai_files::{OpenAiFilesClient, OpenAiFilesProviderContext};
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent,
+    ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, ChatResponse, StreamEvent,
 };
 
 mod payload;
@@ -182,6 +184,8 @@ fn map_http_status_error(status: reqwest::StatusCode, body: &[u8]) -> AppError {
 pub struct OpenAiResponsesProvider {
     client: reqwest::Client,
     base_url: String,
+    route_provider: String,
+    credential_fingerprint: String,
     /// 主 base 不通时自动用此 URL 重试；None 表示不降级。
     api_base_fallback: Option<String>,
     api_key: String,
@@ -228,14 +232,23 @@ where
     )
 }
 
-fn latest_openai_response_id(messages: &[ChatMessage]) -> Option<String> {
-    messages.iter().rev().find_map(|msg| {
-        msg.reasoning_continuation
-            .as_ref()
-            .and_then(|continuation| continuation.provider_refs.as_ref())
-            .and_then(|refs| refs.openai_response_id.clone())
-            .filter(|id| !id.is_empty())
-    })
+fn latest_openai_response_id_for_profile(
+    messages: &[ChatMessage],
+    target_profile: &ProviderCompatProfile,
+) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|msg| matches!(msg.role, ChatMessageRole::Assistant))
+        .and_then(|msg| match plan(target_profile, msg) {
+            ReplayAction::KeepOpaque => msg
+                .reasoning_continuation
+                .as_ref()
+                .and_then(|continuation| continuation.provider_refs.as_ref())
+                .and_then(|refs| refs.openai_response_id.clone())
+                .filter(|id| !id.is_empty()),
+            ReplayAction::ConvertToText(_) | ReplayAction::StripOpaque => None,
+        })
 }
 
 fn request_uses_previous_response_id(body: &Value) -> bool {
@@ -252,6 +265,11 @@ fn is_previous_response_id_error(err: &AppError) -> bool {
 }
 
 impl OpenAiResponsesProvider {
+    fn credential_fingerprint(api_key: &str) -> String {
+        let digest = Sha256::digest(api_key.as_bytes());
+        format!("{digest:x}")[..16].to_string()
+    }
+
     /// 从模型条目 + 全局运行时配置构建。
     pub fn new(
         entry: &ModelEntry,
@@ -290,6 +308,8 @@ impl OpenAiResponsesProvider {
         Ok(Self {
             client,
             base_url,
+            route_provider: entry.provider.trim().to_string(),
+            credential_fingerprint: Self::credential_fingerprint(&credential.value),
             api_base_fallback,
             api_key: credential.value.clone(),
             catalog_model_id: entry.id.clone(),
@@ -307,6 +327,15 @@ impl OpenAiResponsesProvider {
             use_previous_response_id: runtime.openai_responses.use_previous_response_id,
             capabilities: entry.capabilities.clone(),
         })
+    }
+
+    fn replay_profile_for_model(&self, model: &str) -> ProviderCompatProfile {
+        ProviderCompatProfile::openai_responses_routed(
+            model,
+            &self.route_provider,
+            &self.base_url,
+            &self.credential_fingerprint,
+        )
     }
 
     fn effective_model(&self, request: &ChatRequest) -> String {
@@ -374,8 +403,7 @@ impl OpenAiResponsesProvider {
         let degraded_messages =
             degrade_unsupported_multimodal(&request.messages, &self.capabilities);
         let model = self.effective_model(request);
-        let target_profile =
-            crate::core::llm::replay_policy::ProviderCompatProfile::openai_responses(&model);
+        let target_profile = self.replay_profile_for_model(&model);
         let thinking_format = self.thinking_format_for_wire();
         let thinking_cfg = self.thinking_cfg_for_request(request);
         let previous_response_id = if self.continuity_enabled
@@ -383,7 +411,7 @@ impl OpenAiResponsesProvider {
             && allow_response_id_hint
             && target_profile.supports_response_id_hint
         {
-            latest_openai_response_id(&request.messages)
+            latest_openai_response_id_for_profile(&request.messages, &target_profile)
         } else {
             None
         };
@@ -671,8 +699,7 @@ impl LlmProvider for OpenAiResponsesProvider {
         };
 
         let model = self.effective_model(&request);
-        let source_profile =
-            crate::core::llm::replay_policy::ProviderCompatProfile::openai_responses(&model);
+        let source_profile = self.replay_profile_for_model(&model);
         let body = self.build_request_body(&request, true);
         let resp = match self.stream_post_with_base_fallback(&body).await {
             Ok(r) => r,

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use serde_json::json;
 use serial_test::serial;
-use tomcat::core::tools::web_search::WebSearchRuntime;
 use tomcat::core::tools::web_search::types::WebSearchArgs;
+use tomcat::core::tools::web_search::WebSearchRuntime;
 use tomcat::{
     AppConfig, DefaultEventBus, DefaultLlmResolver, ExtPluginSearchInvoker, FunctionRegistry,
     HostApiDispatcher, ManifestFunction, ModelCatalog, PluginEngine, PluginFunctionInvoker,
@@ -123,10 +123,7 @@ async fn runtime_auto_routes_to_plugin_backends_after_retryable_failures() {
     let harness = build_runtime_with_builtin_plugin_without_mimo_and_fetch_client(
         cfg,
         None,
-        Some(brave.client_for(
-            "api.search.brave.com",
-            std::time::Duration::from_secs(20),
-        )),
+        Some(brave.client_for("api.search.brave.com", std::time::Duration::from_secs(20))),
     );
 
     let search_result = tokio::time::timeout(
@@ -158,18 +155,14 @@ async fn runtime_auto_routes_to_plugin_backends_after_retryable_failures() {
 
     assert_eq!(output.backend, "brave");
     assert_eq!(output.hits.len(), 1);
-    assert!(
-        output
-            .warnings
-            .iter()
-            .any(|warning| warning == "backend_unavailable:tavily, fallback=brave")
-    );
-    assert!(
-        output
-            .warnings
-            .iter()
-            .any(|warning| warning == "brave_domain_filter_via_query_rewrite")
-    );
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning == "backend_unavailable:tavily, fallback=brave"));
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning == "brave_domain_filter_via_query_rewrite"));
 }
 
 #[tokio::test]
@@ -255,10 +248,7 @@ async fn runtime_explicit_brave_works_from_public_api() {
     let harness = build_runtime_with_builtin_plugin_and_fetch_client(
         cfg,
         None,
-        Some(brave.client_for(
-            "api.search.brave.com",
-            std::time::Duration::from_secs(20),
-        )),
+        Some(brave.client_for("api.search.brave.com", std::time::Duration::from_secs(20))),
     );
 
     let search_result = tokio::time::timeout(
@@ -291,12 +281,10 @@ async fn runtime_explicit_brave_works_from_public_api() {
     assert_eq!(output.backend, "brave");
     assert_eq!(output.hits.len(), 1);
     assert_eq!(output.hits[0].url, "https://docs.rs/reqwest");
-    assert!(
-        output
-            .warnings
-            .iter()
-            .any(|warning| warning == "brave_domain_filter_via_query_rewrite")
-    );
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning == "brave_domain_filter_via_query_rewrite"));
 }
 
 #[tokio::test]
@@ -333,10 +321,7 @@ async fn runtime_explicit_serper_works_from_public_api() {
     let harness = build_runtime_with_builtin_plugin_and_fetch_client(
         cfg,
         None,
-        Some(serper.client_for(
-            "google.serper.dev",
-            std::time::Duration::from_secs(20),
-        )),
+        Some(serper.client_for("google.serper.dev", std::time::Duration::from_secs(20))),
     );
 
     let search_result = tokio::time::timeout(
@@ -369,12 +354,10 @@ async fn runtime_explicit_serper_works_from_public_api() {
     assert_eq!(output.backend, "serper");
     assert_eq!(output.hits.len(), 1);
     assert_eq!(output.hits[0].url, "https://doc.rust-lang.org/book/");
-    assert!(
-        output
-            .warnings
-            .iter()
-            .any(|warning| warning == "serper_domain_filter_via_query_rewrite")
-    );
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning == "serper_domain_filter_via_query_rewrite"));
 }
 
 #[tokio::test]
@@ -1085,12 +1068,10 @@ async fn runtime_auto_timeout_falls_back_to_brave_after_tavily_timeout() {
     );
     assert_eq!(output.backend, "brave");
     assert_eq!(output.hits.len(), 1);
-    assert!(
-        output
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("tavily") && warning.contains("fallback=brave"))
-    );
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("tavily") && warning.contains("fallback=brave")));
 }
 
 #[tokio::test]

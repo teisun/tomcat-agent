@@ -10,7 +10,6 @@ function makeSession(sessionId: string, updatedAt: number | null): WebviewSessio
     busy: false,
     isCurrent: false,
     ownedByThisFrontend: true,
-    owner: "webview",
     sessionId,
     title: null,
     updatedAt,

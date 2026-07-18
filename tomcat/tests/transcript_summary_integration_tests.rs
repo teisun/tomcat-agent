@@ -688,7 +688,10 @@ async fn turnend_summary_title_falls_back_to_rule_on_utility_failure() {
 async fn turn_summary_updated_appends_purpose_when_utility_returns_bare_count() {
     common::setup_logging();
     info!(target: "test", phase = "arrange", "title 首答 'Used 3 tools'（裸计数），目的从句答 'finding the bug'");
-    let title = Arc::new(TitleChatLlm::ok_two_phase("Used 3 tools", "finding the bug"));
+    let title = Arc::new(TitleChatLlm::ok_two_phase(
+        "Used 3 tools",
+        "finding the bug",
+    ));
 
     info!(target: "test", phase = "act", "驱动 3-tool 回合 + text 收敛");
     let captured = run_and_collect_summaries(

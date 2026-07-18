@@ -38,6 +38,7 @@ use self::background::spawn_completion_subscriber;
 use self::cleanup::ensure_session;
 use self::persist::push_turn_message;
 use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
+pub(crate) use self::rehydrate::{recover_context_state_after_failed_turn, render_error_message};
 use self::session_title::{maybe_emit_rule_session_title, maybe_spawn_semantic_session_title};
 use self::workspace_state::compute_workspace_state;
 
@@ -53,8 +54,7 @@ pub(crate) use self::persist::{
 };
 #[cfg(test)]
 pub(crate) use self::rehydrate::{
-    is_append_message_chain_invariant, is_fatal_error,
-    try_rehydrate_context_state_after_append_invariant,
+    is_append_message_chain_invariant, is_fatal_error, try_rehydrate_context_state_after_append_invariant,
 };
 #[cfg(test)]
 pub(crate) use self::thinking_persist::{
@@ -808,7 +808,7 @@ pub async fn run_chat_turn_with_message(
             .unwrap_or_else(|_| make_fallback_context_state(ctx, system_text, &context_config))
     });
     if let AgentRunOutcome::Failed(error) = &outcome {
-        let _ = rehydrate::try_rehydrate_context_state_after_append_invariant(
+        let _ = rehydrate::recover_context_state_after_failed_turn(
             ctx,
             &context_config,
             system_text,

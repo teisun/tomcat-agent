@@ -1,13 +1,13 @@
 mod common;
 
 use futures_util::StreamExt;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tomcat::core::llm::{ContinuityMetadata, ReasoningContinuation};
 use tomcat::{
-    AppConfig, AppError, ChatMessage, ChatRequest, ContextConfig, LlmProvider, SessionManager,
-    StreamEvent, TranscriptEntry, build_context_from_state, init_context_state,
+    build_context_from_state, init_context_state, AppConfig, AppError, ChatMessage, ChatRequest,
+    ContextConfig, LlmProvider, SessionManager, StreamEvent, TranscriptEntry,
 };
 
 const STREAM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -248,8 +248,8 @@ async fn run_chat(
 }
 
 #[tokio::test]
-async fn openai_responses_roundtrip_replays_reasoning_items()
--> Result<(), Box<dyn std::error::Error>> {
+async fn openai_responses_roundtrip_replays_reasoning_items(
+) -> Result<(), Box<dyn std::error::Error>> {
     if !live_openai_responses_opt_in("openai_responses_roundtrip_replays_reasoning_items") {
         return Ok(());
     }
@@ -341,8 +341,8 @@ async fn openai_responses_roundtrip_replays_reasoning_items()
 }
 
 #[tokio::test]
-async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content()
--> Result<(), Box<dyn std::error::Error>> {
+async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
+) -> Result<(), Box<dyn std::error::Error>> {
     require_api_key("DEEPSEEK_API_KEY");
 
     let fixture = deepseek_continuity_config();
@@ -451,8 +451,8 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content()
 }
 
 #[tokio::test]
-async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content()
--> Result<(), Box<dyn std::error::Error>> {
+async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
+) -> Result<(), Box<dyn std::error::Error>> {
     require_api_key("MIMO_API_KEY");
 
     let fixture = mimo_continuity_config();
@@ -561,8 +561,8 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content()
 }
 
 #[tokio::test]
-async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content()
--> Result<(), Box<dyn std::error::Error>> {
+async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
+) -> Result<(), Box<dyn std::error::Error>> {
     require_api_key("DEEPSEEK_API_KEY");
 
     let fixture = deepseek_continuity_config();
@@ -694,8 +694,8 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content()
 }
 
 #[tokio::test]
-async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content()
--> Result<(), Box<dyn std::error::Error>> {
+async fn deepseek_non_tool_turn_roundtrip_replays_reasoning_content(
+) -> Result<(), Box<dyn std::error::Error>> {
     require_api_key("DEEPSEEK_API_KEY");
 
     let fixture = deepseek_continuity_config();

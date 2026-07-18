@@ -7,8 +7,8 @@
 //!
 //! 详见 `docs/architecture/tools/search_files.md` 与 plan §5–§7。
 
-use super::DefaultPrimitiveExecutor;
 use super::helpers::{find_binary, grant_trigger_str, grant_type_str, permission_scope_str};
+use super::DefaultPrimitiveExecutor;
 use crate::core::permission::{PathRule, PathRuleMode};
 use crate::core::tools::primitive::{
     PrimitiveOperation, SearchFileCount, SearchFileMatch, SearchFilesArgs, SearchFilesOutput,
@@ -121,7 +121,11 @@ fn paginate<T>(
 
 fn absolute_result_path(root: &Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() { p } else { root.join(p) }
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
+    }
 }
 
 fn filter_denied_files(

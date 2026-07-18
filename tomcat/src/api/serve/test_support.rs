@@ -419,6 +419,33 @@ pub async fn build_initialized_state_with_provider(
     (state, buffer, temp, slot)
 }
 
+pub async fn build_initialized_state_with_config(
+    temp: tempfile::TempDir,
+    cfg: AppConfig,
+) -> (
+    Arc<ServeState>,
+    SharedWriterBuffer,
+    tempfile::TempDir,
+    Arc<SessionSlot>,
+) {
+    ensure_work_dir_structure(&cfg).expect("work dir");
+    let (writer, buffer) = spawn_buffered_writer(&cfg.serve);
+    let shared_model_thinking = build_shared_model_thinking(&cfg).expect("shared model thinking");
+    let state = ServeState::new(cfg, writer, shared_model_thinking).expect("serve state");
+    let slot = create_session_slot(Arc::clone(&state), NewSessionParams::default(), false)
+        .await
+        .expect("initial session");
+    state
+        .registry
+        .insert(Arc::clone(&slot))
+        .expect("insert initial session");
+    register_slot_hooks(&state, &slot);
+    state
+        .initialized
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    (state, buffer, temp, slot)
+}
+
 pub async fn build_initialized_state_with_streams(
     streams: Vec<Vec<Result<StreamEvent, AppError>>>,
 ) -> (

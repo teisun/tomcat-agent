@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import { MessageBubble } from "./MessageBubble";
 
@@ -153,5 +153,34 @@ describe("MessageBubble", () => {
     expect(screen.getByTestId("history-reference-chip").getAttribute("title")).toBe(
       "src/app.ts:3-5",
     );
+  });
+
+  it("shows and copies the original raw error detail on demand", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.navigator, {
+      clipboard: {
+        writeText,
+      },
+    });
+
+    render(
+      <MessageBubble
+        item={{
+          detailText: "API 错误 403: <html>forbidden</html>",
+          id: "err-detail",
+          kind: "error",
+          text: "API 错误 403 · aigateway.sunmi.com · Request-Id req-1",
+          type: "message",
+        }}
+      />,
+    );
+
+    expect(screen.queryByTestId("error-detail-text")).toBeNull();
+    fireEvent.click(screen.getByTestId("toggle-error-detail"));
+    expect(screen.getByTestId("error-detail-text").textContent).toContain("forbidden");
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("copy-error-detail"));
+    });
+    expect(writeText).toHaveBeenCalledWith("API 错误 403: <html>forbidden</html>");
   });
 });

@@ -1,4 +1,3 @@
-export type TomcatUiMode = "both" | "participant" | "webview";
 export type WebviewReferenceKind = "selection" | "file";
 
 export type WebviewMessageSegment =
@@ -39,10 +38,10 @@ export interface WebviewDomAction {
   value?: string;
   widthPx?: number | null;
 }
-export type FrontendOwnerKind = "participant" | "webview";
 
 export interface WebviewMessageBlock {
   assistantMessageId?: string;
+  detailText?: string | null;
   deliveryError?: string | null;
   deliveryState?: "failed" | "pending";
   id: string;
@@ -229,7 +228,6 @@ export interface WebviewPendingAttachment {
 export interface WebviewSessionSnapshot {
   busy: boolean;
   checkpoints?: WebviewCheckpoint[];
-  conflictMessage?: string | null;
   contextRatio?: number | null;
   hasMoreHistory?: boolean;
   historyLoading?: boolean;
@@ -238,7 +236,6 @@ export interface WebviewSessionSnapshot {
   sessionTodos: WebviewTodo[];
   thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
-  owner: FrontendOwnerKind | null;
   pendingAttachments: WebviewPendingAttachment[];
   planFile?: WebviewPlanFileRef | null;
   planId?: string | null;
@@ -251,7 +248,6 @@ export interface WebviewSessionTab {
   busy: boolean;
   isCurrent: boolean;
   ownedByThisFrontend: boolean;
-  owner: FrontendOwnerKind | null;
   sessionId: string;
   title: string | null;
   updatedAt: number | null;
@@ -266,7 +262,6 @@ export interface WebviewStateSnapshot {
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
   sessions: WebviewSessionTab[];
-  uiMode: TomcatUiMode;
 }
 
 export type WebviewTimelineItem =
@@ -508,7 +503,6 @@ export type WebviewIntent =
         expandedToolTitles: string[];
         fileChipTopWithinStream: number | null;
         fileChipVisible: boolean;
-        hasConflict: boolean;
         historyLoaderVisible: boolean;
         html: string;
         jumpToLatestVisible: boolean;

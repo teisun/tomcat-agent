@@ -370,6 +370,99 @@ fn mark_message_entries_after_anchor_superseded_requires_anchor() {
 }
 
 #[test]
+fn mark_trailing_user_messages_superseded_marks_only_active_user_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tail_superseded.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "sid".to_string(),
+            timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+
+    for (id, role, content) in [
+        ("m1", "user", "q1"),
+        ("m2", "assistant", "a1"),
+        ("m3", "user", "retry-1"),
+        ("m4", "user", "retry-2"),
+    ] {
+        append_entry(
+            &path,
+            &TranscriptEntry::Message(MessageEntry {
+                id: Some(id.to_string()),
+                parent_id: None,
+                timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+                message: serde_json::json!({"role": role, "content": content}),
+            }),
+        )
+        .unwrap();
+    }
+
+    let changed = mark_trailing_user_messages_superseded(&path).unwrap();
+    assert_eq!(changed, 2);
+
+    let entries = read_entries_tail(&path, 10).unwrap();
+    let flags: Vec<(Option<bool>, Option<bool>)> = entries
+        .into_iter()
+        .map(|entry| match entry {
+            TranscriptEntry::Message(me) => (
+                me.message
+                    .get("superseded")
+                    .and_then(|value| value.as_bool()),
+                me.message
+                    .get("turn_failed")
+                    .and_then(|value| value.as_bool()),
+            ),
+            other => panic!("unexpected non-message entry: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        flags,
+        vec![
+            (None, None),
+            (None, None),
+            (Some(true), Some(true)),
+            (Some(true), Some(true)),
+        ]
+    );
+}
+
+#[test]
+fn error_entry_roundtrips_as_type_error() {
+    let entry = TranscriptEntry::Error(ErrorEntry {
+        id: Some("err-1".to_string()),
+        parent_id: None,
+        timestamp: "2025-01-01T00:00:01.000Z".to_string(),
+        phase: Some("Connect".to_string()),
+        provider: Some("openai".to_string()),
+        model: Some("gpt-5.4".to_string()),
+        api_family: Some("openai-responses".to_string()),
+        status_code: Some(403),
+        request_id: Some("req-123".to_string()),
+        summary: "API 错误 403 · aigateway.sunmi.com · Request-Id req-123".to_string(),
+        detail: "API 错误 403: <html>...</html>".to_string(),
+    });
+
+    let json = serde_json::to_value(&entry).unwrap();
+    assert_eq!(json.get("type").and_then(|value| value.as_str()), Some("error"));
+    assert_eq!(json.get("summary").and_then(|value| value.as_str()), Some("API 错误 403 · aigateway.sunmi.com · Request-Id req-123"));
+
+    let roundtrip: TranscriptEntry = serde_json::from_value(json).unwrap();
+    match roundtrip {
+        TranscriptEntry::Error(error) => {
+            assert_eq!(error.request_id.as_deref(), Some("req-123"));
+            assert_eq!(error.status_code, Some(403));
+            assert_eq!(error.provider.as_deref(), Some("openai"));
+        }
+        other => panic!("expected error entry, got {other:?}"),
+    }
+}
+#[test]
 fn rewrite_message_text_entries_by_id_updates_target_messages_only() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rewrite_messages.jsonl");

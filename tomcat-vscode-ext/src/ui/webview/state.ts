@@ -15,11 +15,9 @@ import {
   normalizePlanState,
   planEventState,
   type ParticipantPlanState,
-} from "../participant/planState";
+} from "../../shared/planState";
 import type {
-  FrontendOwnerKind,
   HostEventFrameContent,
-  TomcatUiMode,
   WebviewApprovalCard,
   WebviewBoundaryBlock,
   WebviewMessageBlock,
@@ -53,6 +51,7 @@ type SessionRuntimeState = {
 type UserSubmitKind = "prompt" | "steer";
 
 type AppendMessageOptions = {
+  detailText?: string | null;
   deliveryError?: string | null;
   deliveryState?: "failed" | "pending";
   preferredId?: string | null;
@@ -98,7 +97,6 @@ function createEmptySession(sessionId: string): WebviewSessionSnapshot {
   return {
     busy: false,
     checkpoints: [],
-    conflictMessage: null,
     contextRatio: null,
     hasMoreHistory: false,
     historyLoading: false,
@@ -106,8 +104,7 @@ function createEmptySession(sessionId: string): WebviewSessionSnapshot {
     planTodos: [],
     sessionTodos: [],
     thinkingLevel: null,
-    ownedByThisFrontend: false,
-    owner: null,
+    ownedByThisFrontend: true,
     pendingAttachments: [],
     planFile: null,
     planId: null,
@@ -184,6 +181,15 @@ function isCheckpointRestoreEntry(entry: unknown): boolean {
   );
 }
 
+function isTurnFailedMessageEntry(entry: unknown): boolean {
+  return (
+    isRecord(entry) &&
+    entry.type === "message" &&
+    isRecord(entry.message) &&
+    entry.message.turn_failed === true
+  );
+}
+
 function isVisibleUserMessageEntry(entry: unknown): boolean {
   return (
     isRecord(entry) &&
@@ -199,6 +205,10 @@ function filterSupersededHistoryEntries(entries: unknown[]): unknown[] {
   let inSupersededSpan = false;
   for (const entry of entries) {
     if (isSupersededMessageEntry(entry)) {
+      if (isTurnFailedMessageEntry(entry)) {
+        filtered.push(entry);
+        continue;
+      }
       inSupersededSpan = true;
       continue;
     }
@@ -579,6 +589,23 @@ function applyHistoryEntry(
       summary: typeof entry.summary === "string" ? entry.summary : null,
       type: "boundary",
     } satisfies WebviewBoundaryBlock);
+    return;
+  }
+
+  if (entry.type === "error") {
+    const summary =
+      typeof entry.summary === "string" && entry.summary.length > 0
+        ? entry.summary
+        : typeof entry.detail === "string" && entry.detail.length > 0
+          ? entry.detail
+          : "Unknown error";
+    session.timeline.push({
+      detailText: typeof entry.detail === "string" ? entry.detail : null,
+      id: typeof entry.id === "string" ? entry.id : `history-error-${session.timeline.length + 1}`,
+      kind: "error",
+      text: summary,
+      type: "message",
+    } satisfies WebviewMessageBlock);
     return;
   }
 
@@ -1013,6 +1040,9 @@ function pushMessage(
   if (options.deliveryError !== undefined) {
     next.deliveryError = options.deliveryError;
   }
+  if (options.detailText !== undefined) {
+    next.detailText = options.detailText;
+  }
   if (options.deliveryState) {
     next.deliveryState = options.deliveryState;
   }
@@ -1147,14 +1177,11 @@ function appendStreamingMessage(
 
 function mapSessionToTab(
   session: SessionSummary,
-  owner: FrontendOwnerKind | null,
-  ownedByThisFrontend: boolean,
 ): WebviewSessionTab {
   return {
     busy: effectiveBusy(session.busy, session.interrupted),
     isCurrent: session.isCurrent,
-    ownedByThisFrontend,
-    owner,
+    ownedByThisFrontend: true,
     sessionId: session.sessionId,
     title: session.title,
     updatedAt: session.updatedAt,
@@ -1165,7 +1192,7 @@ export class WebviewStateStore {
   private state: WebviewStateSnapshot;
   private readonly runtimes = new Map<string, SessionRuntimeState>();
 
-  constructor(uiMode: TomcatUiMode = "both") {
+  constructor() {
     this.state = {
       activeSessionId: null,
       availableModelCapabilities: {},
@@ -1175,7 +1202,6 @@ export class WebviewStateStore {
       ready: false,
       sessionViews: {},
       sessions: [],
-      uiMode,
     };
   }
 
@@ -1200,12 +1226,7 @@ export class WebviewStateStore {
     this.state.modelAdminSupported = supported;
   }
 
-  setUiMode(mode: TomcatUiMode): void {
-    this.state.uiMode = mode;
-  }
-
   resetForReload(): void {
-    const uiMode = this.state.uiMode;
     this.runtimes.clear();
     this.state = {
       activeSessionId: null,
@@ -1216,7 +1237,6 @@ export class WebviewStateStore {
       ready: false,
       sessionViews: {},
       sessions: [],
-      uiMode,
     };
   }
 
@@ -1227,18 +1247,8 @@ export class WebviewStateStore {
     }
   }
 
-  syncSessionList(
-    payload: SessionListPayload,
-    ownership: Map<string, FrontendOwnerKind>,
-    frontend: FrontendOwnerKind,
-  ): void {
-    this.state.sessions = payload.sessions.map((session) =>
-      mapSessionToTab(
-        session,
-        ownership.get(session.sessionId) ?? null,
-        ownership.get(session.sessionId) === frontend,
-      ),
-    );
+  syncSessionList(payload: SessionListPayload): void {
+    this.state.sessions = payload.sessions.map((session) => mapSessionToTab(session));
     if (!this.state.activeSessionId && payload.activeSessionId) {
       this.setActiveSession(payload.activeSessionId);
     }
@@ -1246,8 +1256,6 @@ export class WebviewStateStore {
 
   applySessionState(
     payload: SessionStatePayload,
-    owner: FrontendOwnerKind | null,
-    frontend: FrontendOwnerKind,
     options: {
       trustBusy?: boolean;
     } = {},
@@ -1291,13 +1299,8 @@ export class WebviewStateStore {
       };
       upsertPlanFile(session, session.planFile.path, nextState, nextPlanId);
     }
-    session.owner = owner;
-    session.ownedByThisFrontend = owner === frontend;
-    this.syncTabOwnership(payload.sessionId, owner, frontend);
-  }
-
-  setConflict(sessionId: string, message: string | null): void {
-    this.ensureSession(sessionId).conflictMessage = message;
+    session.ownedByThisFrontend = true;
+    this.syncTabOwnedByFrontend(payload.sessionId);
   }
 
   setPendingAttachments(sessionId: string, attachments: WebviewPendingAttachment[]): void {
@@ -1449,25 +1452,6 @@ export class WebviewStateStore {
     delete message.deliveryState;
     delete message.deliveryError;
     delete message.retryable;
-  }
-
-  setOwnership(
-    sessionId: string,
-    owner: FrontendOwnerKind | null,
-    frontend: FrontendOwnerKind,
-  ): void {
-    const session = this.ensureSession(sessionId);
-    session.owner = owner;
-    session.ownedByThisFrontend = owner === frontend;
-    if (owner === null || owner === frontend) {
-      session.conflictMessage = null;
-    } else if (!session.conflictMessage) {
-      session.conflictMessage =
-        owner === "participant"
-          ? "This session is currently owned by the Tomcat participant."
-          : "This session is currently owned by the Tomcat webview.";
-    }
-    this.syncTabOwnership(sessionId, owner, frontend);
   }
 
   resolveApproval(requestId: string): void {
@@ -1908,22 +1892,16 @@ export class WebviewStateStore {
     }
   }
 
-  private syncTabOwnership(
-    sessionId: string,
-    owner: FrontendOwnerKind | null,
-    frontend: FrontendOwnerKind,
-  ): void {
+  private syncTabOwnedByFrontend(sessionId: string): void {
     const existing = this.state.sessions.find((session) => session.sessionId === sessionId);
     if (existing) {
-      existing.owner = owner;
-      existing.ownedByThisFrontend = owner === frontend;
+      existing.ownedByThisFrontend = true;
       return;
     }
     this.state.sessions.push({
       busy: false,
       isCurrent: false,
-      ownedByThisFrontend: owner === frontend,
-      owner,
+      ownedByThisFrontend: true,
       sessionId,
       title: null,
       updatedAt: null,
@@ -1939,8 +1917,7 @@ export class WebviewStateStore {
     this.state.sessions.push({
       busy,
       isCurrent: false,
-      ownedByThisFrontend: false,
-      owner: null,
+      ownedByThisFrontend: true,
       sessionId,
       title: null,
       updatedAt: null,

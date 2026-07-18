@@ -4,10 +4,8 @@ import type {
   ControlRequestFrame,
 } from "../../serveClient/protocol";
 import type { ServeAttachment, ServeContentSegment, ServeEvent } from "../../serveClient/wire";
-import type { ParticipantPlanState } from "../participant/planState";
+import type { ParticipantPlanState } from "../../shared/planState";
 
-export type TomcatUiMode = "both" | "participant" | "webview";
-export type FrontendOwnerKind = "participant" | "webview";
 export type WebviewMessageSegment = ServeContentSegment;
 export type WebviewReference = Extract<ServeContentSegment, { type: "reference" }>;
 
@@ -35,6 +33,7 @@ export interface WebviewDomAction {
 
 export interface WebviewMessageBlock {
   assistantMessageId?: string;
+  detailText?: string | null;
   deliveryError?: string | null;
   deliveryState?: "failed" | "pending";
   id: string;
@@ -177,7 +176,6 @@ export interface WebviewPendingAttachment {
 export interface WebviewSessionSnapshot {
   busy: boolean;
   checkpoints?: WebviewCheckpoint[];
-  conflictMessage?: string | null;
   contextRatio?: number | null;
   hasMoreHistory?: boolean;
   historyLoading?: boolean;
@@ -186,7 +184,6 @@ export interface WebviewSessionSnapshot {
   sessionTodos: WebviewTodo[];
   thinkingLevel?: string | null;
   ownedByThisFrontend: boolean;
-  owner: FrontendOwnerKind | null;
   pendingAttachments: WebviewPendingAttachment[];
   planFile?: WebviewPlanFileRef | null;
   planId?: string | null;
@@ -199,7 +196,6 @@ export interface WebviewSessionTab {
   busy: boolean;
   isCurrent: boolean;
   ownedByThisFrontend: boolean;
-  owner: FrontendOwnerKind | null;
   sessionId: string;
   title: string | null;
   updatedAt: number | null;
@@ -214,7 +210,6 @@ export interface WebviewStateSnapshot {
   ready: boolean;
   sessionViews: Record<string, WebviewSessionSnapshot>;
   sessions: WebviewSessionTab[];
-  uiMode: TomcatUiMode;
 }
 
 export type WebviewTimelineItem =
@@ -473,7 +468,6 @@ export type WebviewIntent =
         expandedToolTitles: string[];
         fileChipTopWithinStream: number | null;
         fileChipVisible: boolean;
-        hasConflict: boolean;
         historyLoaderVisible: boolean;
         html: string;
         jumpToLatestVisible: boolean;
@@ -743,7 +737,6 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         Array.isArray(value.data.sessionMoreButtons) &&
         Array.isArray(value.data.toolTitles) &&
         typeof value.data.approvalCount === "number" &&
-        typeof value.data.hasConflict === "boolean" &&
         typeof value.data.html === "string" &&
         typeof value.data.jumpToLatestVisible === "boolean" &&
         (value.data.latestUserTopWithinStream === null ||

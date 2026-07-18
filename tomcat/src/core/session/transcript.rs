@@ -25,11 +25,12 @@
 //! └─────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! ## 9 种 TranscriptEntry（tag = "type"）
+//! ## 10 种 TranscriptEntry（tag = "type"）
 //!
 //! ```text
 //! TranscriptEntry
 //! ├─ Message               role + kind + content[]    （主流：user/assistant/tool）
+//! ├─ Error                 失败轮次错误锚点            （403 / 断网 / 凭证缺失等）
 //! ├─ ModelChange           model_id 切换记录          （/model 命令）
 //! ├─ ThinkingLevelChange   thinking_level 切换记录    （/thinking 命令）
 //! ├─ ThinkingTrace         thinking 独立持久化条目    （`persist=true` 时写入）
@@ -147,6 +148,7 @@ pub struct EntryBase {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TranscriptEntry {
     Message(MessageEntry),
+    Error(ErrorEntry),
     ModelChange(ModelChangeEntry),
     ThinkingLevelChange(ThinkingLevelChangeEntry),
     /// 模型思考链条独立条目：仅在 `llm.thinking.persist=true` 时写入；
@@ -171,6 +173,28 @@ pub struct MessageEntry {
     pub parent_id: Option<String>,
     pub timestamp: String,
     pub message: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorEntry {
+    pub id: Option<String>,
+    pub parent_id: Option<String>,
+    pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    pub summary: String,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -716,6 +740,80 @@ pub fn mark_message_entries_after_anchor_superseded(
     Ok(changed)
 }
 
+/// 将 transcript 尾部连续、尚未 superseded 的 user message 标记为
+/// `superseded=true + turn_failed=true`。
+///
+/// 用于 failed turn 恢复：当 user prompt 已落盘但本轮没有成功落 assistant 结果时，
+/// 下一轮不应继续把这串悬空 user 尾巴重放给 provider。
+pub fn mark_trailing_user_messages_superseded(path: &Path) -> Result<usize, AppError> {
+    let f = std::fs::File::open(path).map_err(AppError::Io)?;
+    let reader = BufReader::new(f);
+    let mut lines: Vec<String> = reader
+        .lines()
+        .map(|r| r.map_err(AppError::Io))
+        .collect::<Result<Vec<_>, _>>()?;
+    if lines.is_empty() {
+        return Err(AppError::Config("transcript 文件为空".to_string()));
+    }
+
+    let mut tail_indices: Vec<usize> = Vec::new();
+    for idx in (1..lines.len()).rev() {
+        let trimmed = lines[idx].trim();
+        if trimmed.is_empty() {
+            if tail_indices.is_empty() {
+                continue;
+            }
+            break;
+        }
+        match serde_json::from_str::<TranscriptEntry>(trimmed)? {
+            TranscriptEntry::Message(me) => {
+                let role = me
+                    .message
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let superseded = me
+                    .message
+                    .get("superseded")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if role == "user" && !superseded {
+                    tail_indices.push(idx);
+                    continue;
+                }
+                if tail_indices.is_empty() {
+                    return Ok(0);
+                }
+                break;
+            }
+            _ if tail_indices.is_empty() => continue,
+            _ => break,
+        }
+    }
+
+    if tail_indices.is_empty() {
+        return Ok(0);
+    }
+
+    let changed = tail_indices.len();
+    for idx in tail_indices {
+        let trimmed = lines[idx].trim();
+        let TranscriptEntry::Message(mut me) = serde_json::from_str(trimmed)? else {
+            continue;
+        };
+        if let Some(message_obj) = me.message.as_object_mut() {
+            message_obj.insert("superseded".to_string(), serde_json::json!(true));
+            message_obj.insert("turn_failed".to_string(), serde_json::json!(true));
+        }
+        lines[idx] = serde_json::to_string(&TranscriptEntry::Message(me))?;
+    }
+
+    let mut content = lines.join("\n");
+    content.push('\n');
+    write_file_atomic(path, content.as_bytes())?;
+    let _ = rebuild_resume_index_from_lines(path, &lines)?;
+    Ok(changed)
+}
 /// 按 `message.id` 批量重写 `message.content` 为纯文本。
 ///
 /// 非 message 行与未命中的行保持原样；命中但不是对象结构的 message 会被跳过。
@@ -996,6 +1094,7 @@ pub fn write_header(path: &Path, header: &SessionHeader) -> Result<(), AppError>
 pub(crate) fn entry_id(entry: &TranscriptEntry) -> Option<&str> {
     match entry {
         TranscriptEntry::Message(e) => e.id.as_deref(),
+        TranscriptEntry::Error(e) => e.id.as_deref(),
         TranscriptEntry::ModelChange(e) => e.id.as_deref(),
         TranscriptEntry::ThinkingLevelChange(e) => e.id.as_deref(),
         TranscriptEntry::ThinkingTrace(e) => e.id.as_deref(),
@@ -1054,6 +1153,7 @@ pub(crate) fn read_entry_at_offset(
 fn entry_parent_id(entry: &TranscriptEntry) -> Option<&str> {
     match entry {
         TranscriptEntry::Message(e) => e.parent_id.as_deref(),
+        TranscriptEntry::Error(e) => e.parent_id.as_deref(),
         TranscriptEntry::ModelChange(e) => e.parent_id.as_deref(),
         TranscriptEntry::ThinkingLevelChange(e) => e.parent_id.as_deref(),
         TranscriptEntry::ThinkingTrace(e) => e.parent_id.as_deref(),

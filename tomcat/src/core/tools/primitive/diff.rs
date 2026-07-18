@@ -359,7 +359,13 @@ mod tests {
         let tags: Vec<_> = diff.iter().map(|line| line.tag).collect();
         assert_eq!(
             tags,
-            vec![DiffTag::Ctx, DiffTag::Del, DiffTag::Add, DiffTag::Ctx, DiffTag::Add]
+            vec![
+                DiffTag::Ctx,
+                DiffTag::Del,
+                DiffTag::Add,
+                DiffTag::Ctx,
+                DiffTag::Add
+            ]
         );
         assert_eq!(diff[0].old_line, Some(1));
         assert_eq!(diff[0].new_line, Some(1));

@@ -45,16 +45,16 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use tomcat::core::llm::system_prompt::{
-    WorkspaceContext, WorkspaceState, build_system_prompt_with_state,
+    build_system_prompt_with_state, WorkspaceContext, WorkspaceState,
 };
 use tomcat::core::plan_runtime::file_store::{
-    PlanFileState, TodoStatus, plan_path_for_id, read_plan,
+    plan_path_for_id, read_plan, PlanFileState, TodoStatus,
 };
 use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::session::ContextState;
 use tomcat::{
-    AgentRunOutcome, ChatContext, SessionManager, init_context_state, load_config_toml_file,
-    resolve_sessions_dir, run_chat_turn,
+    init_context_state, load_config_toml_file, resolve_sessions_dir, run_chat_turn,
+    AgentRunOutcome, ChatContext, SessionManager,
 };
 
 const COUNTER_PLAN_GOAL: &str = "inprocess e2e: write counter.py that prints 0";

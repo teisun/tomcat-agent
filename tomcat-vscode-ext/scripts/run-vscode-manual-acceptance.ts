@@ -23,7 +23,6 @@ async function seedManualAcceptanceSettings(
     "security.workspace.trust.enabled": false,
     "telemetry.telemetryLevel": "off",
     "tomcat.path": fakeServePath,
-    "tomcat.ui": "webview",
     "update.mode": "none",
     "window.commandCenter": false,
     "workbench.startupEditor": "none",

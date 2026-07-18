@@ -11,6 +11,7 @@ const __testing = (
       readFile(filePath: string): string | undefined;
       registerFile(filePath: string, text: string): void;
       reset(): void;
+      setConfiguration(key: string, value: unknown): void;
     };
   }
 ).__testing;
@@ -20,13 +21,14 @@ describe("VsCodeIde diff/apply", () => {
     __testing.reset();
   });
 
-  it("captures file snapshots and opens a virtual diff", async () => {
-    __testing.registerFile("/workspace/src/example.ts", "before\n");
+  it("captures structured diff pairs and opens a virtual diff", async () => {
     const ide = new VsCodeIde();
 
-    await ide.rememberToolStart("tool-1", { path: "src/example.ts" });
     __testing.registerFile("/workspace/src/example.ts", "after\n");
-    await ide.rememberToolResult("tool-1", "src/example.ts");
+    await ide.rememberToolResult("tool-1", "src/example.ts", {
+      after: "after\n",
+      before: "before\n",
+    });
     await ide.openPreparedDiff("tool-1");
 
     const diff = __testing.lastDiffCommand;
@@ -36,14 +38,62 @@ describe("VsCodeIde diff/apply", () => {
     const proposed = await vscode.workspace.openTextDocument(diff!.modified);
     expect(original.getText()).toBe("before\n");
     expect(proposed.getText()).toBe("after\n");
+    expect(
+      vscode.workspace.getConfiguration("diffEditor").get<number>("renderSideBySideInlineBreakpoint"),
+    ).toBe(0);
+  });
+
+  it("respects an explicit side-by-side disable when opening diffs", async () => {
+    const ide = new VsCodeIde();
+    __testing.setConfiguration("diffEditor.renderSideBySide", false);
+    __testing.registerFile("/workspace/src/no-side-by-side.ts", "after\n");
+
+    await ide.rememberToolResult("tool-no-side", "src/no-side-by-side.ts", {
+      after: "after\n",
+      before: "before\n",
+    });
+    await ide.openPreparedDiff("tool-no-side");
+
+    expect(
+      vscode.workspace.getConfiguration("diffEditor").get<number>("renderSideBySideInlineBreakpoint"),
+    ).toBeUndefined();
+  });
+
+  it("does not overwrite an existing inline breakpoint", async () => {
+    const ide = new VsCodeIde();
+    __testing.setConfiguration("diffEditor.renderSideBySideInlineBreakpoint", 400);
+    __testing.registerFile("/workspace/src/custom-breakpoint.ts", "after\n");
+
+    await ide.rememberToolResult("tool-custom-breakpoint", "src/custom-breakpoint.ts", {
+      after: "after\n",
+      before: "before\n",
+    });
+    await ide.openPreparedDiff("tool-custom-breakpoint");
+
+    expect(
+      vscode.workspace.getConfiguration("diffEditor").get<number>("renderSideBySideInlineBreakpoint"),
+    ).toBe(400);
+  });
+
+  it("marks oversize fallbacks as non-structured changes", async () => {
+    const ide = new VsCodeIde();
+    __testing.registerFile("/workspace/src/huge.ts", "current contents\n");
+
+    const change = await ide.rememberToolResult("tool-huge", "src/huge.ts");
+
+    expect(change.hasStructuredDiff).toBe(false);
+    expect(change.originalContent).toBe("");
+    expect(change.proposedContent).toBe("current contents\n");
   });
 
   it("applies prepared edits back into the workspace", async () => {
     const ide = new VsCodeIde();
 
-    await ide.rememberToolStart("tool-2", { path: "src/new-file.ts" });
     __testing.registerFile("/workspace/src/new-file.ts", "hello from tomcat\n");
-    await ide.rememberToolResult("tool-2", "src/new-file.ts");
+    await ide.rememberToolResult("tool-2", "src/new-file.ts", {
+      after: "hello from tomcat\n",
+      before: "",
+    });
     __testing.deleteFile("/workspace/src/new-file.ts");
 
     await expect(ide.applyPreparedEdit("tool-2")).resolves.toBe(true);

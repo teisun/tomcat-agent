@@ -1,8 +1,8 @@
 //! `SkillsConfig` 默认值、TOML 覆盖与环境变量覆盖。
 
 use super::super::*;
-use std::io::Write;
 use serial_test::serial;
+use std::io::Write;
 
 #[test]
 fn skills_config_default_values() {

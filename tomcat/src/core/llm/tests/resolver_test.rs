@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use serial_test::serial;
 
+use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::llm::{
     auth::clear_managed_credentials_for_test, DefaultLlmResolver, LlmResolver, LlmScene,
     ModelCatalog, SharedModelCatalog,
 };
-use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::infra::config::AppConfig;
 
 #[test]

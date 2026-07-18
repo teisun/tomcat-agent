@@ -1225,11 +1225,15 @@ async fn net_fetch_hostcall_enforces_response_size_limit() {
         .expect("hostcall should resolve with HostResponse");
 
     assert!(!response.ok);
-    assert!(response
-        .error
-        .as_deref()
-        .unwrap_or("")
-        .contains("response_too_large"), "unexpected response: {:?}", response);
+    assert!(
+        response
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("response_too_large"),
+        "unexpected response: {:?}",
+        response
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -348,9 +348,13 @@ async fn generate_command_summary_success_returns_sanitized_phrase() {
     let llm = MockUtilityLlm::ok("Gather git status and recent commits");
 
     info!(target: "test", phase = "act");
-    let title =
-        generate_command_summary("git status && git log -1", None, llm.as_ref(), "utility-flash")
-            .await;
+    let title = generate_command_summary(
+        "git status && git log -1",
+        None,
+        llm.as_ref(),
+        "utility-flash",
+    )
+    .await;
 
     info!(target: "test", phase = "assert");
     assert_eq!(title, "Gather git status and recent commits");
@@ -377,9 +381,18 @@ async fn generate_command_summary_failure_falls_back_to_run_first_binary() {
 #[test]
 fn fallback_command_summary_extracts_first_real_binary() {
     info!(target: "test", phase = "assert");
-    assert_eq!(fallback_command_summary("git status && echo done"), "Run git");
-    assert_eq!(fallback_command_summary("/usr/local/bin/node app.js"), "Run node");
-    assert_eq!(fallback_command_summary("FOO=1 BAR=2 python x.py"), "Run python");
+    assert_eq!(
+        fallback_command_summary("git status && echo done"),
+        "Run git"
+    );
+    assert_eq!(
+        fallback_command_summary("/usr/local/bin/node app.js"),
+        "Run node"
+    );
+    assert_eq!(
+        fallback_command_summary("FOO=1 BAR=2 python x.py"),
+        "Run python"
+    );
     assert_eq!(fallback_command_summary("   "), "Ran command");
 }
 

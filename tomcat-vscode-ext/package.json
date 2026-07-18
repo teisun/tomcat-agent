@@ -30,7 +30,6 @@
   },
   "main": "./out/extension.js",
   "activationEvents": [
-    "onChatParticipant:tomcat.tomcat",
     "onStartupFinished"
   ],
   "contributes": {
@@ -94,24 +93,6 @@
         "command": "tomcat.plan.addSelectionToChat",
         "icon": "$(comment-add)",
         "title": "Add Selection to Tomcat Chat"
-      }
-    ],
-    "chatParticipants": [
-      {
-        "id": "tomcat.tomcat",
-        "name": "tomcat",
-        "fullName": "Tomcat",
-        "description": "Tomcat agent runtime backed by tomcat serve --stdio.",
-        "commands": [
-          {
-            "name": "plan",
-            "description": "Enter, build, or exit Tomcat plan mode."
-          },
-          {
-            "name": "model",
-            "description": "Switch the active Tomcat model."
-          }
-        ]
       }
     ],
     "viewsContainers": {
@@ -218,12 +199,6 @@
         "when": "editorTextFocus && editorHasSelection"
       }
     ],
-    "languageModelChatProviders": [
-      {
-        "vendor": "tomcat-test",
-        "displayName": "Tomcat Test Model Vendor"
-      }
-    ],
     "configuration": {
       "title": "Tomcat",
       "properties": {
@@ -250,16 +225,6 @@
           "minimum": 1,
           "default": 20000,
           "description": "Maximum workspace files indexed for `@` context search. Larger workspaces stop at this cap to keep the sidebar responsive."
-        },
-        "tomcat.ui": {
-          "type": "string",
-          "enum": [
-            "both",
-            "participant",
-            "webview"
-          ],
-          "default": "both",
-          "description": "Choose whether Tomcat shows the native chat participant, the Tomcat Agent Box, or both."
         },
         "tomcat.plan.buildModel": {
           "type": "string",

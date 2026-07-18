@@ -3,10 +3,6 @@ import * as path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import {
-  PARTICIPANT_ID,
-} from "../src/constants";
-
 type Manifest = {
   activationEvents?: string[];
   contributes?: {
@@ -14,7 +10,6 @@ type Manifest = {
       properties?: Record<string, unknown>;
     };
     commands?: Array<Record<string, unknown>>;
-    chatParticipants?: Array<Record<string, unknown>>;
     keybindings?: Array<Record<string, unknown>>;
     menus?: Record<string, Array<Record<string, unknown>>>;
     views?: Record<string, Array<Record<string, unknown>>>;
@@ -29,29 +24,21 @@ async function readManifest(): Promise<Manifest> {
 }
 
 describe("extension manifest contract", () => {
-  it("keeps the chat participant id aligned with the runtime constant", async () => {
+  it("does not contribute a chat participant after the webview-only migration", async () => {
     const manifest = await readManifest();
-    const participant = manifest.contributes?.chatParticipants?.[0];
 
-    expect(participant?.id).toBe(PARTICIPANT_ID);
+    expect(manifest.contributes).not.toHaveProperty("chatParticipants");
+    expect(manifest.contributes).not.toHaveProperty("languageModelChatProviders");
+    for (const event of manifest.activationEvents ?? []) {
+      expect(event.startsWith("onChatParticipant:")).toBe(false);
+    }
   });
 
-  it("does not reintroduce proposed-only chat participant fields", async () => {
-    const manifest = await readManifest();
-    const participant = manifest.contributes?.chatParticipants?.[0] ?? {};
-
-    expect(participant).not.toHaveProperty("isDefault");
-    expect(participant).not.toHaveProperty("modes");
-  });
-
-  it("declares the explicit chat participant activation event", async () => {
+  it("activates on startup", async () => {
     const manifest = await readManifest();
 
     expect(manifest.activationEvents).toEqual(
-      expect.arrayContaining([
-        `onChatParticipant:${PARTICIPANT_ID}`,
-        "onStartupFinished",
-      ]),
+      expect.arrayContaining(["onStartupFinished"]),
     );
   });
 
@@ -68,21 +55,6 @@ describe("extension manifest contract", () => {
     expect(manifest.scripts?.["test:integration"]).toBe("vitest run --maxWorkers 1 tests");
     expect(manifest.scripts?.["gate:fast"]).toBe("npm run lint && npm run test:unit");
     expect(manifest.scripts?.["gate:full"]).toBe("tsx scripts/run-vscode-full-gate.ts");
-  });
-
-  it("registers the stable slash commands for the chat participant", async () => {
-    const manifest = await readManifest();
-    const participant = manifest.contributes?.chatParticipants?.[0];
-    const commands = Array.isArray(participant?.commands)
-      ? participant.commands
-      : [];
-
-    expect(commands).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: "plan" }),
-        expect.objectContaining({ name: "model" }),
-      ]),
-    );
   });
 
   it("declares the Tomcat webview container and view", async () => {
@@ -106,14 +78,12 @@ describe("extension manifest contract", () => {
     );
   });
 
-  it("declares the ui mode configuration contract", async () => {
+  it("does not declare the removed tomcat.ui configuration", async () => {
     const manifest = await readManifest();
-    const uiSetting = manifest.contributes?.configuration?.properties?.["tomcat.ui"] as
-      | { default?: string; enum?: string[] }
-      | undefined;
 
-    expect(uiSetting?.default).toBe("both");
-    expect(uiSetting?.enum).toEqual(["both", "participant", "webview"]);
+    expect(manifest.contributes?.configuration?.properties).not.toHaveProperty(
+      "tomcat.ui",
+    );
   });
 
   it("registers add-to-chat commands and affordances", async () => {

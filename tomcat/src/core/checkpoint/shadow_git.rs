@@ -362,7 +362,13 @@ impl ShadowGitStore {
     fn count_worktree_files_until(&self, max: usize) -> Result<usize, CheckpointError> {
         #[cfg(test)]
         self.file_count_calls.fetch_add(1, Ordering::SeqCst);
-        let output = self.run_git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])?;
+        let output = self.run_git([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])?;
         let mut count = 0usize;
         for entry in output.stdout.split(|byte| *byte == b'\0') {
             if entry.is_empty() {

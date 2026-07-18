@@ -294,6 +294,7 @@ fn targeted_hydration_entries(
 fn entry_timestamp(entry: &TranscriptEntry) -> &str {
     match entry {
         TranscriptEntry::Message(e) => &e.timestamp,
+        TranscriptEntry::Error(e) => &e.timestamp,
         TranscriptEntry::ModelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingLevelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingTrace(e) => &e.timestamp,

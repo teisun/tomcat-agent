@@ -86,6 +86,10 @@ export type SettingsIntent =
     }
   | {
       messageId: string;
+      type: "listProviderKeys";
+    }
+  | {
+      messageId: string;
       type: "upsertModel";
       data: {
         model: SettingsModelInput;
@@ -177,6 +181,7 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
           (value.data.route === undefined || value.data.route === null || isSettingsRoute(value.data.route)))
       );
     case "listModels":
+    case "listProviderKeys":
       return true;
     case "upsertModel":
       return (

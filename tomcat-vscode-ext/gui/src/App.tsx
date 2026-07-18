@@ -33,7 +33,6 @@ const EMPTY_STATE: WebviewStateSnapshot = {
   ready: false,
   sessionViews: {},
   sessions: [],
-  uiMode: "both",
 };
 
 const MAX_BOOTSTRAP_FILL_REQUESTS = 4;
@@ -455,7 +454,6 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     expandedToolTitles: toolBodyMetrics.filter((entry) => entry.expanded).map((entry) => entry.title),
     fileChipTopWithinStream,
     fileChipVisible,
-    hasConflict: !!document.querySelector('[data-testid="conflict-banner"]'),
     historyLoaderVisible: !!document.querySelector('[data-testid="history-loader"]'),
     html: root?.innerHTML ?? "",
     jumpToLatestVisible: !!document.querySelector('[data-testid="scroll-to-bottom"]'),
@@ -738,10 +736,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const latestUserMessageId = userMessages.at(-1)?.id ?? null;
   const userMessageCount = userMessages.length;
   const streamContentKey = `${activeSession?.sessionId ?? "none"}:${activeTimeline.length}:${activeApprovalCount}`;
-  const readOnlyConflict = activeSession?.conflictMessage ?? null;
-  const canPrompt = state.uiMode !== "participant" && !activeSession?.busy && !readOnlyConflict;
-  const canInterrupt = state.uiMode !== "participant" && !readOnlyConflict;
-  const canBuildPlan = !!activeSession && !activeSession.busy && !readOnlyConflict;
+  const canPrompt = !activeSession?.busy;
+  const canInterrupt = true;
+  const canBuildPlan = !!activeSession && !activeSession.busy;
   const modelAdminSupported = state.modelAdminSupported;
   const activeModelCapabilities = activeSession?.model
     ? state.availableModelCapabilities?.[activeSession.model]
@@ -1162,17 +1159,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         }
         sessions={state.sessions}
       />
-
-      {state.uiMode === "participant" ? (
-        <section className="tc-banner tc-banner--warning" data-testid="disabled-banner">
-          The Tomcat webview is disabled by `tomcat.ui=participant`.
-        </section>
-      ) : null}
-      {readOnlyConflict ? (
-        <section className="tc-banner tc-banner--warning" data-testid="conflict-banner">
-          {readOnlyConflict}
-        </section>
-      ) : null}
 
       <div className="tc-stream-shell">
         <section className="tc-stream" data-testid="stream-container" ref={streamRef}>

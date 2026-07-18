@@ -1,6 +1,8 @@
 :root {
   color: var(--vscode-foreground);
   font-family: var(--vscode-font-family);
+  --tc-field-control-height: 38px;
+  --tc-field-label-height: 26px;
 }
 
 * {
@@ -407,6 +409,7 @@ input:focus-visible {
 }
 
 .tc-field select,
+.tc-settings-combobox,
 .tc-input,
 .tc-composer textarea,
 .tc-approval-custom__input {
@@ -418,9 +421,90 @@ input:focus-visible {
   width: 100%;
 }
 
-.tc-field span:first-child {
+.tc-settings-combobox {
+  /* Stretch (not center) so the inner input's top edge sits at the container
+     top, matching the bare `.tc-input` in the API-key field. Centering inside
+     the taller 38px combobox otherwise offsets the input ~3.5px lower and
+     breaks the two label rows' input alignment. */
+  align-items: stretch;
+  display: flex;
+  gap: 0;
+  min-height: var(--tc-field-control-height);
+  padding: 0;
+  position: relative;
+}
+
+.tc-settings-combobox:focus-within {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.tc-settings-combobox__input {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  flex: 1 1 auto;
+  min-width: 0;
+  outline: none;
+  padding: 8px 10px;
+}
+
+.tc-settings-combobox__toggle {
+  align-items: center;
+  align-self: stretch;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--vscode-input-border, rgba(127, 127, 127, 0.2));
   color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 34px;
+  justify-content: center;
+}
+
+.tc-settings-combobox__toggle:hover {
+  color: var(--vscode-foreground);
+}
+
+.tc-settings-combobox__dropdown {
+  left: 0;
+  max-height: min(36vh, 280px);
+  right: 0;
+  top: calc(100% + 6px);
+}
+
+.tc-settings-combobox__item {
+  align-items: center;
+  gap: 10px;
+}
+
+.tc-settings-combobox__item--disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.tc-settings-combobox__meta {
+  color: var(--vscode-descriptionForeground);
+  flex: 0 0 auto;
+  font-size: 12px;
+  text-align: right;
+}
+
+.tc-field > span:first-child,
+.tc-field__label-row > span:first-child {
+  color: var(--vscode-descriptionForeground);
+  display: flex;
   font-size: 11px;
+  min-height: var(--tc-field-label-height);
+  align-items: center;
+}
+
+.tc-field__label-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-height: var(--tc-field-label-height);
 }
 
 .tc-field__hint {
@@ -429,8 +513,16 @@ input:focus-visible {
   line-height: 1.4;
 }
 
+.tc-field__hint--success {
+  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+}
+
 .tc-input--readonly {
   background: var(--vscode-editorWidget-background, var(--vscode-input-background));
+}
+
+.tc-settings-api-key-input {
+  min-height: var(--tc-field-control-height);
 }
 
 .tc-field--compact {
@@ -547,6 +639,30 @@ input:focus-visible {
   color: var(--vscode-descriptionForeground);
   margin-top: 6px;
   max-width: 780px;
+}
+
+.tc-settings-keyslot__refresh {
+  background: transparent;
+  border-color: var(--vscode-button-border, rgba(127, 127, 127, 0.24));
+  border-radius: 999px;
+  color: var(--vscode-descriptionForeground);
+  height: var(--tc-field-label-height);
+  width: var(--tc-field-label-height);
+}
+
+/* Win over the generic `.tc-icon-button { height/width: 34px; flex: 0 0 34px }`
+   rules (equal single-class specificity, but declared later) so the key-slot
+   refresh button stays label-height sized and its label-row keeps parity with
+   the API-key label-row. */
+.tc-icon-button.tc-settings-keyslot__refresh {
+  flex: 0 0 var(--tc-field-label-height);
+  height: var(--tc-field-label-height);
+  width: var(--tc-field-label-height);
+}
+
+.tc-settings-keyslot__refresh:hover:not(:disabled),
+.tc-settings-keyslot__refresh:focus-visible {
+  color: var(--vscode-foreground);
 }
 
 .tc-settings-card {
@@ -1368,6 +1484,37 @@ input:focus-visible {
   flex-wrap: wrap;
   gap: 8px;
   font-size: 12px;
+}
+
+.tc-message__detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.tc-message__detail-button {
+  align-items: center;
+  background: transparent;
+  border: none;
+  color: var(--vscode-textLink-foreground, var(--vscode-focusBorder));
+  cursor: pointer;
+  display: inline-flex;
+  gap: 6px;
+  padding: 0;
+}
+
+.tc-message__detail-button:hover {
+  color: var(--vscode-textLink-activeForeground, var(--vscode-focusBorder));
+}
+
+.tc-message__detail {
+  background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.08));
+  border-radius: 8px;
+  margin: 0;
+  overflow-x: auto;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tc-message--user-pending {

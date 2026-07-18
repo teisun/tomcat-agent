@@ -11,28 +11,15 @@ interface PreparedFileChange {
   absolutePath: string;
   displayPath: string;
   existedBefore: boolean;
+  hasStructuredDiff: boolean;
   originalContent: string;
   proposedContent: string;
   toolCallId: string;
 }
 
-interface PreparedSnapshot {
-  absolutePath: string;
-  displayPath: string;
-  existedBefore: boolean;
-  originalContent: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function getFilePathFromArgs(args: unknown): string | undefined {
-  if (!isRecord(args) || typeof args.path !== "string") {
-    return undefined;
-  }
-
-  return args.path;
+interface FallbackDiffPair {
+  after: string;
+  before: string;
 }
 
 function toSearchParams(side: DiffSide): string {
@@ -61,7 +48,6 @@ function preparedDiffKeyFromPath(diffPath: string): string | null {
 
 export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Disposable {
   private readonly preparedChanges = new Map<string, PreparedFileChange>();
-  private readonly preparedSnapshots = new Map<string, PreparedSnapshot>();
   private readonly providerRegistration: vscode.Disposable;
 
   constructor() {
@@ -74,45 +60,27 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
   dispose(): void {
     this.providerRegistration.dispose();
     this.preparedChanges.clear();
-    this.preparedSnapshots.clear();
   }
 
-  async rememberToolStart(toolCallId: string, args: unknown): Promise<void> {
-    const displayPath = getFilePathFromArgs(args);
-    if (!displayPath) {
-      return;
-    }
+  async rememberToolStart(_toolCallId: string, _args: unknown): Promise<void> {
+    // Structured diffs from Rust are the only trustworthy source of "before".
+  }
 
+  async rememberToolResult(
+    toolCallId: string,
+    displayPath: string,
+    fallbackDiff?: FallbackDiffPair,
+  ): Promise<PreparedFileChange> {
     const absolutePath = this.resolveWorkspacePath(displayPath);
-    const uri = vscode.Uri.file(absolutePath);
-    const originalContent = await this.readFileIfExists(uri);
-
-    this.preparedSnapshots.set(toolCallId, {
-      absolutePath,
-      displayPath,
-      existedBefore: originalContent !== undefined,
-      originalContent: originalContent ?? "",
-    });
-  }
-
-  async rememberToolResult(toolCallId: string, displayPath: string): Promise<PreparedFileChange> {
-    const snapshot =
-      this.preparedSnapshots.get(toolCallId) ??
-      ({
-        absolutePath: this.resolveWorkspacePath(displayPath),
-        displayPath,
-        existedBefore: false,
-        originalContent: "",
-      } satisfies PreparedSnapshot);
-
-    const proposedUri = vscode.Uri.file(snapshot.absolutePath);
-    const proposedContent = (await this.readFileIfExists(proposedUri)) ?? "";
+    const proposedUri = vscode.Uri.file(absolutePath);
+    const proposedContent = (await this.readFileIfExists(proposedUri)) ?? fallbackDiff?.after ?? "";
 
     const change: PreparedFileChange = {
-      absolutePath: snapshot.absolutePath,
-      displayPath: snapshot.displayPath,
-      existedBefore: snapshot.existedBefore,
-      originalContent: snapshot.originalContent,
+      absolutePath,
+      displayPath,
+      existedBefore: fallbackDiff ? fallbackDiff.before.length > 0 : proposedContent.length > 0,
+      hasStructuredDiff: Boolean(fallbackDiff),
+      originalContent: fallbackDiff?.before ?? "",
       proposedContent,
       toolCallId,
     };
@@ -133,6 +101,7 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
     const title = `${path.basename(change.absolutePath)}: Original ↔ Tomcat`;
     const originalUri = this.createPreparedDiffUri(toolCallId, path.basename(change.absolutePath), "original");
     const proposedUri = this.createPreparedDiffUri(toolCallId, path.basename(change.absolutePath), "proposed");
+    await this.ensureSideBySideDiffRendering();
 
     await vscode.commands.executeCommand(
       "vscode.diff",
@@ -154,6 +123,7 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
       absolutePath,
       displayPath,
       existedBefore: before.length > 0,
+      hasStructuredDiff: true,
       originalContent: before,
       proposedContent: after,
       toolCallId,
@@ -283,5 +253,36 @@ export class VsCodeIde implements vscode.TextDocumentContentProvider, vscode.Dis
     }
 
     return path.resolve(filePath);
+  }
+
+  private async ensureSideBySideDiffRendering(): Promise<void> {
+    try {
+      const diffEditorConfig = vscode.workspace.getConfiguration("diffEditor");
+      const renderSideBySide = diffEditorConfig.inspect<boolean>("renderSideBySide");
+      if (
+        renderSideBySide?.globalValue === false
+        || renderSideBySide?.workspaceValue === false
+        || renderSideBySide?.workspaceFolderValue === false
+      ) {
+        return;
+      }
+
+      const inlineBreakpoint = diffEditorConfig.inspect<number>("renderSideBySideInlineBreakpoint");
+      if (
+        inlineBreakpoint?.globalValue !== undefined
+        || inlineBreakpoint?.workspaceValue !== undefined
+        || inlineBreakpoint?.workspaceFolderValue !== undefined
+      ) {
+        return;
+      }
+
+      await diffEditorConfig.update(
+        "renderSideBySideInlineBreakpoint",
+        0,
+        vscode.ConfigurationTarget.Global,
+      );
+    } catch {
+      // Never block diff open because a config write failed.
+    }
   }
 }

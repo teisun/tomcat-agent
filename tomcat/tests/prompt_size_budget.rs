@@ -24,7 +24,10 @@ const SYSTEM_TEMPLATES: &[(&str, PromptKey)] = &[
     ("tool_instructions", PromptKey::SystemToolInstructions),
     ("parallel_tools", PromptKey::SystemParallelTools),
     ("paged_reading", PromptKey::SystemPagedReading),
-    ("background_shell_monitor", PromptKey::SystemBackgroundShellMonitor),
+    (
+        "background_shell_monitor",
+        PromptKey::SystemBackgroundShellMonitor,
+    ),
     ("verification", PromptKey::SystemVerification),
     ("available_skills", PromptKey::SystemAvailableSkills),
     ("workspace_context", PromptKey::SystemWorkspaceContext),
@@ -58,8 +61,14 @@ fn print_prompt_static_sizes() {
     let full = build_function_definitions();
     let chat = visible_tools_for_mode(&PlanState::Chat);
     println!("\n=== TOOL DEFS serialized (chars) ===");
-    println!("  full  build_function_definitions : {}", serialized_len(&full));
-    println!("  chat  visible_tools_for_mode(Chat): {}", serialized_len(&chat));
+    println!(
+        "  full  build_function_definitions : {}",
+        serialized_len(&full)
+    );
+    println!(
+        "  chat  visible_tools_for_mode(Chat): {}",
+        serialized_len(&chat)
+    );
 
     let guidelines = render_tool_guidelines_with_policy(true);
     let tool_instr_rendered = load(PromptKey::SystemToolInstructions)
@@ -68,7 +77,10 @@ fn print_prompt_static_sizes() {
         .count();
     let assembled = build_system_prompt("/Users/yan/proj").chars().count();
     println!("\n=== ASSEMBLED (chars) ===");
-    println!("  aggregated tool_guidelines        : {}", guidelines.chars().count());
+    println!(
+        "  aggregated tool_guidelines        : {}",
+        guidelines.chars().count()
+    );
     println!("  tool_instructions rendered        : {tool_instr_rendered}");
     println!("  build_system_prompt (default)     : {assembled}");
     println!("=== END ===\n");

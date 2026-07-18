@@ -26,10 +26,8 @@ import {
   isWebviewIntent,
   PendingMessageTracker,
   type FileDiffLine,
-  type FrontendOwnerKind,
   type HostEventFrameContent,
   type HostToWebviewFrame,
-  type TomcatUiMode,
   type WebviewApprovalCard,
   type WebviewDomAction,
   type WebviewMessageBlock,
@@ -45,7 +43,6 @@ import { resolveWebviewEntryAssets } from "../guiAssets";
 import { parsePlanDocument } from "../planPreview/planDocument";
 import { ContextSearchService } from "./contextSearch";
 import { buildFileReference } from "./contextReferences";
-import { SessionOwnershipTracker } from "./ownership";
 import { TomcatSessionPool } from "./sessionPool";
 import { WebviewStateStore } from "./state";
 
@@ -88,12 +85,10 @@ function reconstructDiffPair(diff: FileDiffLine[]): { after: string; before: str
 export interface TomcatWebviewProviderDeps {
   extensionUri: vscode.Uri;
   getDefaultCwd(): string | undefined;
-  getUiMode(): TomcatUiMode;
   ide: VsCodeIde;
   initialize(): Promise<InitializeResult>;
   messenger: TomcatMessenger;
   openModelSettings?(route?: "models"): void;
-  ownership: SessionOwnershipTracker;
   sessionRouter: SessionRouter;
   showOpenDialog?(
     options: vscode.OpenDialogOptions,
@@ -314,11 +309,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private readonly historyFetchGen = new Map<string, number>();
   private readonly pendingQuestions = new Map<string, PendingQuestion>();
   private readonly planMetadataCache = new Map<string, PlanMetadataCacheEntry>();
+  private readonly sessionsAwaitingErrorHistoryRefresh = new Set<string>();
   private readonly readyWaiters = new Set<{
     reject(error: Error): void;
     resolve(): void;
     timeout: NodeJS.Timeout;
   }>();
+  private serveEventQueue: Promise<void> = Promise.resolve();
   private readonly sessionPool: TomcatSessionPool;
   private readonly stateStore: WebviewStateStore;
   private readonly eventSubscription: { dispose(): void };
@@ -332,21 +329,22 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private openFileObserved = false;
   private contextSearchTokenSource?: vscode.CancellationTokenSource;
   private messageSubscription?: vscode.Disposable;
-  private uiMode: TomcatUiMode;
   private visibilitySubscription?: vscode.Disposable;
   private view?: vscode.WebviewView;
 
   constructor(private readonly deps: TomcatWebviewProviderDeps) {
     this.sessionPool = new TomcatSessionPool(deps.sessionRouter);
-    this.uiMode = deps.getUiMode();
-    this.stateStore = new WebviewStateStore(this.uiMode);
+    this.stateStore = new WebviewStateStore();
     this.eventSubscription = deps.messenger.onEvent((event) => {
-      void this.handleServeEvent(event);
+      this.serveEventQueue = this.serveEventQueue
+        .then(() => this.handleServeEvent(event))
+        .catch((error) => {
+          console.error("Tomcat webview failed to process serve event", error);
+        });
     });
   }
 
   dispose(): void {
-    this.deps.ownership.releaseAll("webview");
     this.contextSearchTokenSource?.cancel();
     this.contextSearchTokenSource?.dispose();
     this.contextSearch.dispose();
@@ -402,7 +400,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   async captureDomSnapshot(): Promise<DomSnapshot> {
     await this.waitUntilReady();
     const messageId = createHostFrameMessageId("webview-dom");
-    const pending = this.domSnapshots.create(messageId, 10_000);
+    const pending = this.domSnapshots.create(messageId, 20_000);
     await this.postMessage({
       channel: "event",
       content: { type: "__test.capture_dom" },
@@ -453,19 +451,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.handleIntent(intent);
   }
 
-  setUiMode(mode: TomcatUiMode): void {
-    this.uiMode = mode;
-    this.stateStore.setUiMode(mode);
-    if (mode === "participant") {
-      this.deps.ownership.releaseAll("webview");
-    }
-    if (mode !== "participant" && this.isReady && !this.currentState().activeSessionId) {
-      void this.bootstrap();
-      return;
-    }
-    void this.postState();
-  }
-
   async askUser(
     request: AskQuestionWireRequest,
     sessionId?: string | null,
@@ -500,13 +485,15 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return this.stateStore.snapshot();
   }
 
-  private findToolCard(toolCallId: string): WebviewToolCard | undefined {
-    for (const session of Object.values(this.currentState().sessionViews)) {
+  private findToolCard(
+    toolCallId: string,
+  ): { sessionId: string; tool: WebviewToolCard } | undefined {
+    for (const [sessionId, session] of Object.entries(this.currentState().sessionViews)) {
       const tool = session.timeline.find(
         (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
       );
       if (tool) {
-        return tool;
+        return { sessionId, tool };
       }
     }
     return undefined;
@@ -514,7 +501,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   async refreshModelCatalog(): Promise<void> {
     await this.refreshModels();
-    if (this.isReady && this.uiMode !== "participant") {
+    if (this.isReady) {
       await this.postState();
     }
   }
@@ -736,7 +723,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     await this.ensureInitialized();
     await this.refreshModels();
     const sessions = await this.sessionPool.refresh();
-    this.stateStore.syncSessionList(sessions, this.deps.ownership.snapshot(), "webview");
+    this.stateStore.syncSessionList(sessions);
     const preferredSessionId =
       this.sessionPool.pickDefaultSession(sessions) ??
       this.initialized?.sessionId ??
@@ -746,31 +733,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       await this.selectSession(sessionId);
       return;
     }
-    const claimed = this.claimWebviewOwner(preferredSessionId);
-    if (claimed) {
-      await this.selectSession(preferredSessionId);
-      return;
-    }
-    await this.refreshSessionState(preferredSessionId, { trustBusy: true });
-    await this.refreshSessionHistory(preferredSessionId);
-    await this.refreshCheckpoints(preferredSessionId);
-    this.stateStore.setActiveSession(preferredSessionId);
-    await this.postState();
-  }
-
-  private claimWebviewOwner(sessionId: string): boolean {
-    const result = this.deps.ownership.claim(sessionId, "webview");
-    if (!result.ok) {
-      this.stateStore.setOwnership(sessionId, result.record.owner, "webview");
-      this.stateStore.setConflict(
-        sessionId,
-        "This session is currently owned by the Tomcat participant.",
-      );
-      return false;
-    }
-    this.stateStore.setConflict(sessionId, null);
-    this.stateStore.setOwnership(sessionId, "webview", "webview");
-    return true;
+    await this.selectSession(preferredSessionId);
   }
 
   private async ensureInitialized(): Promise<InitializeResult> {
@@ -782,11 +745,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async handleIntent(intent: Exclude<WebviewIntent, { type: "__test.dom_snapshot" }>): Promise<void> {
-    if (intent.type !== "ready" && this.uiMode === "participant") {
-      await this.postState();
-      return;
-    }
-
     switch (intent.type) {
       case "ready":
         this.isReady = true;
@@ -795,10 +753,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           clearTimeout(waiter.timeout);
           waiter.resolve();
           this.readyWaiters.delete(waiter);
-        }
-        if (this.uiMode === "participant") {
-          await this.postState();
-          return;
         }
         await this.bootstrap();
         return;
@@ -817,7 +771,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         const sessionId = await this.sessionPool.createSession(
           intent.data?.cwd ?? this.deps.getDefaultCwd(),
         );
-        this.claimWebviewOwner(sessionId);
         await this.selectSession(sessionId);
         return;
       }
@@ -827,7 +780,6 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       case "closeSession": {
         const closed = await this.sessionPool.release(intent.data.sessionId);
         if (closed) {
-          this.deps.ownership.release(intent.data.sessionId, "webview");
           await this.refreshSessions();
           const fallback = this.sessionPool.pickDefaultSession(this.currentStateToSessionList());
           if (fallback) {
@@ -1103,7 +1055,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         }
         return;
       case "openDiff": {
-        const tool = this.findToolCard(intent.data.toolCallId);
+        const toolInfo = this.findToolCard(intent.data.toolCallId);
+        const tool = toolInfo?.tool;
         const displayPath =
           tool?.display?.kind === "file"
             ? tool.display.file
@@ -1114,9 +1067,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           return;
         }
         try {
-          if (this.deps.ide.getPreparedChange(intent.data.toolCallId)) {
-            await this.deps.ide.openPreparedDiff(intent.data.toolCallId);
-          } else if (tool.diff?.length) {
+          if (tool.diff?.length) {
             const { after, before } = reconstructDiffPair(tool.diff);
             await this.deps.ide.openReconstructedDiff(
               intent.data.toolCallId,
@@ -1126,6 +1077,15 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             );
           } else {
             await this.deps.ide.showFile(displayPath);
+            const sessionId = toolInfo?.sessionId ?? this.currentState().activeSessionId;
+            if (sessionId) {
+              this.stateStore.appendMessage(
+                sessionId,
+                "notice",
+                "File too large for inline diff. Opened the current file instead.",
+              );
+              await this.postState();
+            }
           }
         } catch (error) {
           const sessionId = this.currentState().activeSessionId;
@@ -1202,24 +1162,35 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       typeof this.deps.ide.rememberToolResult === "function"
     ) {
       try {
-        await this.deps.ide.rememberToolResult(event.toolCallId, event.display.file);
+        await this.deps.ide.rememberToolResult(
+          event.toolCallId,
+          event.display.file,
+          event.display.diff?.length ? reconstructDiffPair(event.display.diff) : undefined,
+        );
       } catch (error) {
         console.warn("Tomcat webview failed to capture tool result snapshot", error);
       }
     }
+    if (
+      event.type === "agent_end"
+      && event.sessionId
+      && typeof event.error === "string"
+      && event.error !== "interrupted"
+    ) {
+      this.sessionsAwaitingErrorHistoryRefresh.add(event.sessionId);
+    }
     this.stateStore.applyEvent(event);
     await this.maybeAutoOpenPlanPreview(event);
     if (event.sessionId) {
-      this.stateStore.setOwnership(
-        event.sessionId,
-        this.deps.ownership.ownerOf(event.sessionId)?.owner ?? null,
-        "webview",
-      );
       if (shouldReconcileSessionState(event)) {
         await this.refreshSessionState(event.sessionId, { trustBusy: false });
       }
       if (event.type === "turn_end") {
         await this.refreshCheckpoints(event.sessionId);
+      }
+      if (event.type === "agent_idle" && this.sessionsAwaitingErrorHistoryRefresh.has(event.sessionId)) {
+        this.sessionsAwaitingErrorHistoryRefresh.delete(event.sessionId);
+        await this.refreshSessionHistory(event.sessionId);
       }
     }
     await this.postEvent(event);
@@ -1297,12 +1268,8 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     const target = sessionId ?? this.currentState().activeSessionId;
     if (!target) {
       const created = await this.sessionPool.createSession(this.deps.getDefaultCwd());
-      this.claimWebviewOwner(created);
       await this.selectSession(created);
       return created;
-    }
-    if (!this.claimWebviewOwner(target)) {
-      return null;
     }
     await this.selectSession(target);
     return target;
@@ -1314,23 +1281,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     const target = sessionId ?? this.currentState().activeSessionId;
     if (!target) {
       const created = await this.sessionPool.createSession(this.deps.getDefaultCwd());
-      if (!this.claimWebviewOwner(created)) {
-        return null;
-      }
       this.stateStore.setActiveSession(created);
       await this.sessionPool.switchTo(created);
       await this.refreshSessions();
       return created;
     }
 
-    if (!this.claimWebviewOwner(target)) {
-      return null;
-    }
-
     this.stateStore.setActiveSession(target);
-    if (this.deps.ownership.ownerOf(target)?.owner === "webview") {
-      await this.sessionPool.switchTo(target);
-    }
+    await this.sessionPool.switchTo(target);
     return target;
   }
 
@@ -1414,7 +1372,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   /** Re-read `tomcat.plan.buildModel` and push it to the webview (config sync). */
   async syncBuildModel(): Promise<void> {
     this.stateStore.setBuildModel(this.readBuildModelConfig());
-    if (this.isReady && this.uiMode !== "participant") {
+    if (this.isReady) {
       await this.postState();
     }
   }
@@ -1499,7 +1457,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private async refreshSessions(): Promise<void> {
     await this.ensureInitialized();
     const sessions = await this.sessionPool.refresh();
-    this.stateStore.syncSessionList(sessions, this.deps.ownership.snapshot(), "webview");
+    this.stateStore.syncSessionList(sessions);
     await this.postState();
   }
 
@@ -1513,12 +1471,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (!state) {
       return;
     }
-    this.stateStore.applySessionState(
-      state,
-      this.deps.ownership.ownerOf(sessionId)?.owner ?? null,
-      "webview",
-      { trustBusy: options.trustBusy ?? true },
-    );
+    this.stateStore.applySessionState(state, { trustBusy: options.trustBusy ?? true });
   }
 
   private bumpHistoryFetchGen(sessionId: string): number {
@@ -1666,9 +1619,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private async selectSession(sessionId: string): Promise<void> {
     await this.ensureInitialized();
     this.stateStore.setActiveSession(sessionId);
-    if (this.deps.ownership.ownerOf(sessionId)?.owner === "webview") {
-      await this.sessionPool.switchTo(sessionId);
-    }
+    await this.sessionPool.switchTo(sessionId);
     await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessionHistory(sessionId);
     await this.refreshCheckpoints(sessionId);
@@ -1679,15 +1630,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
 
   private async switchSessionView(sessionId: string): Promise<void> {
     await this.ensureInitialized();
-    const claimed = this.claimWebviewOwner(sessionId);
-    if (claimed) {
-      await this.sessionPool.switchTo(sessionId);
-    }
+    await this.sessionPool.switchTo(sessionId);
     await this.refreshSessionState(sessionId, { trustBusy: true });
     await this.refreshSessionHistory(sessionId);
     await this.refreshCheckpoints(sessionId);
     await this.refreshSessions();
-    // Keep the user-selected session visible even when it cannot be claimed.
     this.stateStore.setActiveSession(sessionId);
     await this.postState();
   }

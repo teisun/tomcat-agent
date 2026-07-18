@@ -8,8 +8,8 @@
 //!   防止 example 与代码失去同步。
 
 use super::super::*;
-use std::io::Write;
 use serial_test::serial;
+use std::io::Write;
 
 #[test]
 fn load_config_none_path_returns_default_or_env() {

@@ -755,8 +755,7 @@ fn responses_auto_thinking_format_ignores_claude_model_name_on_responses_wire() 
     };
     let body = provider.build_request_body(&req, true);
     assert_eq!(
-        body["reasoning"]["effort"],
-        "high",
+        body["reasoning"]["effort"], "high",
         "responses wire 不应被 claude 名字误导成 anthropic thinking"
     );
     assert!(body.get("thinking").is_none());
@@ -883,11 +882,12 @@ fn openai_responses_roundtrip_replays_reasoning_items() {
         ..LlmConfig::default()
     };
     let p = provider_from_cfg(cfg.clone());
+    let route_profile = p.replay_profile_for_model("gpt-5");
 
     let assistant = ChatMessage::assistant("prior answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(crate::core::llm::ReasoningContinuation {
-            source_provider: "openai".to_string(),
+            source_provider: route_profile.provider.clone(),
             source_api: "responses".to_string(),
             source_model: "gpt-5".to_string(),
             format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
@@ -896,7 +896,10 @@ fn openai_responses_roundtrip_replays_reasoning_items() {
                 "encrypted_content": "enc_123"
             }]),
             fallback_text: Some("safe summary".to_string()),
-            provider_refs: None,
+            provider_refs: Some(crate::core::llm::ProviderRefs {
+                openai_response_id: None,
+                replay_profile_id: Some(route_profile.profile_id.clone()),
+            }),
         }),
         Some(crate::core::llm::ContinuityMetadata {
             had_tool_call: false,
@@ -928,11 +931,12 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
         ..LlmConfig::default()
     };
     let p = provider_from_cfg(cfg.clone());
+    let route_profile = p.replay_profile_for_model("gpt-5");
 
     let assistant = ChatMessage::assistant("prior answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(crate::core::llm::ReasoningContinuation {
-            source_provider: "openai".to_string(),
+            source_provider: route_profile.provider.clone(),
             source_api: "responses".to_string(),
             source_model: "gpt-5".to_string(),
             format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
@@ -943,6 +947,7 @@ fn responses_build_request_body_previous_response_id_switches_to_store_true() {
             fallback_text: Some("safe summary".to_string()),
             provider_refs: Some(crate::core::llm::ProviderRefs {
                 openai_response_id: Some("resp_123".to_string()),
+                replay_profile_id: Some(route_profile.profile_id.clone()),
             }),
         }),
         Some(crate::core::llm::ContinuityMetadata {
@@ -986,11 +991,12 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
         ..LlmConfig::default()
     };
     let p = provider_from_cfg(cfg.clone());
+    let route_profile = p.replay_profile_for_model("gpt-5");
 
     let assistant = ChatMessage::assistant("prior answer").with_reasoning_state(
         Some("safe summary".to_string()),
         Some(crate::core::llm::ReasoningContinuation {
-            source_provider: "openai".to_string(),
+            source_provider: route_profile.provider.clone(),
             source_api: "responses".to_string(),
             source_model: "gpt-5".to_string(),
             format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
@@ -1001,6 +1007,7 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
             fallback_text: Some("safe summary".to_string()),
             provider_refs: Some(crate::core::llm::ProviderRefs {
                 openai_response_id: Some("resp_123".to_string()),
+                replay_profile_id: Some(route_profile.profile_id.clone()),
             }),
         }),
         Some(crate::core::llm::ContinuityMetadata {
@@ -1023,6 +1030,245 @@ fn responses_build_request_body_without_hint_falls_back_to_explicit_replay() {
     assert_eq!(body["include"][0], "reasoning.encrypted_content");
     assert!(body.get("previous_response_id").is_none());
     assert_eq!(body["input"][1]["type"], "reasoning");
+}
+
+#[test]
+fn responses_build_request_body_deepseek_history_with_dangling_user_tail_never_uses_previous_response_id(
+) {
+    let cfg = LlmConfig {
+        reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
+        openai_responses: crate::infra::config::OpenAiResponsesConfig {
+            use_previous_response_id: true,
+        },
+        ..LlmConfig::default()
+    };
+    let p = provider_from_cfg(cfg.clone());
+    let deepseek_tool_turn = ChatMessage::assistant_with_tool_calls(
+        Some("calling tool"),
+        vec![json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "read", "arguments": "{\"path\":\"a.txt\"}"}
+        })],
+    )
+    .with_reasoning_state(
+        Some("tool summary".to_string()),
+        Some(crate::core::llm::ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-pro".to_string(),
+            format: crate::core::llm::ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: json!({"reasoning_content":"internal"}),
+            fallback_text: Some("tool summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(crate::core::llm::ContinuityMetadata {
+            had_tool_call: true,
+            replay_requirement: crate::core::llm::ReplayRequirement::SameProfileRequired,
+        }),
+    );
+    let deepseek_final = ChatMessage::assistant("here are the links").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(crate::core::llm::ReasoningContinuation {
+            source_provider: "deepseek".to_string(),
+            source_api: "chat_completions".to_string(),
+            source_model: "deepseek-v4-flash".to_string(),
+            format: crate::core::llm::ReasoningFormat::DeepseekReasoningContent,
+            opaque_payload: json!({"reasoning_content":"internal"}),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: None,
+        }),
+        Some(crate::core::llm::ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let req = ChatRequest {
+        messages: vec![
+            ChatMessage::user("first prompt"),
+            deepseek_tool_turn,
+            ChatMessage::tool("call_1", "file content"),
+            deepseek_final,
+            ChatMessage::user("retry 1"),
+            ChatMessage::user("retry 2"),
+            ChatMessage::user("retry 3"),
+            ChatMessage::user("retry 4"),
+        ],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        thinking_level: None,
+        tools: None,
+    };
+    let body = p.build_request_body(&req, true);
+    assert!(
+        body.get("previous_response_id").is_none(),
+        "chat-completions history + dangling user tail must not invent a responses continuation hint"
+    );
+    let input = body["input"].as_array().expect("input array");
+    assert!(
+        input.iter().any(|item| item["type"] == "function_call"),
+        "tool-call history should still translate into responses input items"
+    );
+    assert!(
+        input
+            .iter()
+            .any(|item| item["type"] == "function_call_output"),
+        "tool-result history should still translate into responses input items"
+    );
+    let trailing_user_count = input
+        .iter()
+        .rev()
+        .take_while(|item| item.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        .count();
+    assert_eq!(trailing_user_count, 4);
+}
+
+#[test]
+fn responses_build_request_body_skips_previous_response_id_across_routed_relays() {
+    let cfg = LlmConfig {
+        reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
+        openai_responses: crate::infra::config::OpenAiResponsesConfig {
+            use_previous_response_id: true,
+        },
+        ..LlmConfig::default()
+    };
+    let mut source_entry = responses_entry();
+    source_entry.provider = "relay-a".to_string();
+    source_entry.base_url = Some("https://relay-a.example/v1".to_string());
+    let source_provider = provider_from_entry(source_entry, cfg.clone());
+    let source_profile = source_provider.replay_profile_for_model("gpt-5");
+
+    let mut target_entry = responses_entry();
+    target_entry.provider = "relay-b".to_string();
+    target_entry.base_url = Some("https://relay-b.example/v1".to_string());
+    let target_provider = provider_from_entry(target_entry, cfg.clone());
+
+    let assistant = ChatMessage::assistant("prior answer").with_reasoning_state(
+        Some("safe summary".to_string()),
+        Some(crate::core::llm::ReasoningContinuation {
+            source_provider: "relay-a".to_string(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_123"
+            }]),
+            fallback_text: Some("safe summary".to_string()),
+            provider_refs: Some(crate::core::llm::ProviderRefs {
+                openai_response_id: Some("resp_123".to_string()),
+                replay_profile_id: Some(source_profile.profile_id.clone()),
+            }),
+        }),
+        Some(crate::core::llm::ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let req = ChatRequest {
+        messages: vec![ChatMessage::user("hi"), assistant],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        thinking_level: None,
+        tools: None,
+    };
+    let body = target_provider.build_request_body(&req, true);
+    assert!(body.get("previous_response_id").is_none());
+    assert!(
+        body["input"][1]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("[reasoning continuity]")),
+        "cross-relay replay should downgrade to visible continuity text instead of reusing response_id"
+    );
+}
+
+#[test]
+fn responses_build_request_body_does_not_fall_back_to_older_same_route_response_id() {
+    let cfg = LlmConfig {
+        reasoning_continuity: crate::infra::config::ReasoningContinuityConfig { enabled: true },
+        openai_responses: crate::infra::config::OpenAiResponsesConfig {
+            use_previous_response_id: true,
+        },
+        ..LlmConfig::default()
+    };
+    let provider = provider_from_cfg(cfg.clone());
+    let target_profile = provider.replay_profile_for_model("gpt-5");
+    let latest_cross_route = crate::core::llm::ProviderCompatProfile::openai_responses_routed(
+        "gpt-5",
+        "relay-b",
+        "https://relay-b.example/v1",
+        "cred-b",
+    );
+    let older_same_route = ChatMessage::assistant("older same route").with_reasoning_state(
+        Some("older summary".to_string()),
+        Some(crate::core::llm::ReasoningContinuation {
+            source_provider: target_profile.provider.clone(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_old"
+            }]),
+            fallback_text: Some("older summary".to_string()),
+            provider_refs: Some(crate::core::llm::ProviderRefs {
+                openai_response_id: Some("resp_old".to_string()),
+                replay_profile_id: Some(target_profile.profile_id.clone()),
+            }),
+        }),
+        Some(crate::core::llm::ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let latest_cross_route = ChatMessage::assistant("latest cross route").with_reasoning_state(
+        Some("latest summary".to_string()),
+        Some(crate::core::llm::ReasoningContinuation {
+            source_provider: "relay-b".to_string(),
+            source_api: "responses".to_string(),
+            source_model: "gpt-5".to_string(),
+            format: crate::core::llm::ReasoningFormat::OpenaiResponsesReasoningItems,
+            opaque_payload: json!([{
+                "type": "reasoning",
+                "encrypted_content": "enc_new"
+            }]),
+            fallback_text: Some("latest summary".to_string()),
+            provider_refs: Some(crate::core::llm::ProviderRefs {
+                openai_response_id: Some("resp_new".to_string()),
+                replay_profile_id: Some(latest_cross_route.profile_id.clone()),
+            }),
+        }),
+        Some(crate::core::llm::ContinuityMetadata {
+            had_tool_call: false,
+            replay_requirement: crate::core::llm::ReplayRequirement::SameProfileOptional,
+        }),
+    );
+    let req = ChatRequest {
+        messages: vec![
+            ChatMessage::user("old user"),
+            older_same_route,
+            ChatMessage::user("switch route"),
+            latest_cross_route,
+        ],
+        model: "gpt-5".into(),
+        temperature: None,
+        max_tokens: None,
+        stream: Some(true),
+        model_override: None,
+        thinking_level: None,
+        tools: None,
+    };
+    let body = provider.build_request_body(&req, true);
+    assert!(
+        body.get("previous_response_id").is_none(),
+        "latest assistant is cross-route, so the provider must not revive an older same-route response_id"
+    );
 }
 
 #[test]
