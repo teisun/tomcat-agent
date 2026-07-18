@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, type MouseEvent } from "react";
 
 import { fileChipIconClass } from "../FileChip";
 import { parseCodeFenceInfo } from "./codeFence";
-import { detectInlineFilePath, inferLanguageFromPath } from "./inlinePath";
+import { basenameOf, detectInlineFilePath, inferLanguageFromPath } from "./inlinePath";
 import {
   renderMarkdownHtml,
   renderMermaidBlocks,
@@ -13,8 +13,19 @@ type HighlightJsCore = typeof import("highlight.js/lib/core");
 
 let highlighterPromise: Promise<HighlightJsCore["default"]> | null = null;
 
-function displayFileLabel(path: string, line?: number): string {
-  return typeof line === "number" ? `${path}:${line}` : path;
+function withLocationSuffix(label: string, line?: number, column?: number): string {
+  if (typeof line !== "number") {
+    return label;
+  }
+  return typeof column === "number" ? `${label}:${line}:${column}` : `${label}:${line}`;
+}
+
+function displayFileLabel(path: string, line?: number, column?: number): string {
+  return withLocationSuffix(path, line, column);
+}
+
+function displayBasenameLabel(path: string, line?: number, column?: number): string {
+  return withLocationSuffix(basenameOf(path), line, column);
 }
 
 function normalizeHighlightLanguage(value: string | undefined): string {
@@ -55,7 +66,7 @@ function normalizeHighlightLanguage(value: string | undefined): string {
 
 async function getHighlighter(): Promise<HighlightJsCore["default"]> {
   if (!highlighterPromise) {
-    highlighterPromise = (async () => {
+    const pending = (async () => {
       const [
         { default: hljs },
         { default: bash },
@@ -143,6 +154,10 @@ async function getHighlighter(): Promise<HighlightJsCore["default"]> {
       hljs.registerAliases?.(["yml"], { languageName: "yaml" });
       return hljs;
     })();
+    highlighterPromise = pending.catch((error) => {
+      highlighterPromise = null;
+      throw error;
+    });
   }
   return highlighterPromise;
 }
@@ -169,6 +184,23 @@ function closeOpenFenceIfNeeded(markdown: string): string {
   return `${markdown}\n${fenceStack.map((char) => char.repeat(3)).join("\n")}`;
 }
 
+function createCopyButton(documentRef: Document): HTMLButtonElement {
+  const copyButton = documentRef.createElement("button");
+  copyButton.className = "tc-code-card__copy";
+  copyButton.dataset.tcCopyCode = "1";
+  copyButton.dataset.testid = "assistant-code-copy";
+  copyButton.type = "button";
+  copyButton.title = "Copy code";
+  copyButton.setAttribute("aria-label", "Copy code");
+
+  const copyIcon = documentRef.createElement("span");
+  copyIcon.setAttribute("aria-hidden", "true");
+  copyIcon.className = "tc-code-card__copy-icon codicon codicon-copy";
+  copyButton.appendChild(copyIcon);
+
+  return copyButton;
+}
+
 function decorateCodeCards(container: HTMLElement): void {
   const documentRef = container.ownerDocument;
   const blocks = Array.from(container.querySelectorAll<HTMLPreElement>("pre")).filter(
@@ -190,19 +222,15 @@ function decorateCodeCards(container: HTMLElement): void {
     const wrapper = documentRef.createElement("section");
     wrapper.className = "tc-code-card";
     wrapper.setAttribute("data-testid", "assistant-code-card");
-
-    const header = documentRef.createElement("div");
-    header.className = "tc-code-card__header";
-
-    const meta = documentRef.createElement("div");
-    meta.className = "tc-code-card__meta";
-
-    const lang = documentRef.createElement("span");
-    lang.className = "tc-code-card__lang";
-    lang.textContent = parsed.languageLabel;
-    meta.appendChild(lang);
+    const copyButton = createCopyButton(documentRef);
 
     if (parsed.filePath) {
+      const header = documentRef.createElement("div");
+      header.className = "tc-code-card__header";
+
+      const meta = documentRef.createElement("div");
+      meta.className = "tc-code-card__meta";
+
       const fileButton = documentRef.createElement("button");
       fileButton.className = "tc-code-card__file";
       fileButton.dataset.tcFilePath = parsed.filePath;
@@ -220,27 +248,20 @@ function decorateCodeCards(container: HTMLElement): void {
 
       const label = documentRef.createElement("span");
       label.className = "tc-code-card__file-label";
-      label.textContent = displayFileLabel(parsed.filePath, parsed.line);
+      label.textContent = displayBasenameLabel(parsed.filePath, parsed.line);
       fileButton.appendChild(label);
 
       meta.appendChild(fileButton);
+
+      header.append(meta, copyButton);
+      pre.replaceWith(wrapper);
+      wrapper.append(header, pre);
+      continue;
     }
 
-    const copyButton = documentRef.createElement("button");
-    copyButton.className = "tc-code-card__copy";
-    copyButton.dataset.tcCopyCode = "1";
-    copyButton.dataset.testid = "assistant-code-copy";
-    copyButton.type = "button";
-    const copyIcon = documentRef.createElement("span");
-    copyIcon.setAttribute("aria-hidden", "true");
-    copyIcon.className = "codicon codicon-copy";
-    const copyLabel = documentRef.createElement("span");
-    copyLabel.textContent = "Copy";
-    copyButton.append(copyIcon, copyLabel);
-
-    header.append(meta, copyButton);
+    wrapper.classList.add("tc-code-card--bare");
     pre.replaceWith(wrapper);
-    wrapper.append(header, pre);
+    wrapper.append(pre, copyButton);
   }
 }
 
@@ -290,7 +311,7 @@ function linkifyInlineFilePaths(container: HTMLElement): void {
     link.dataset.tcFilePath = match.path;
     link.dataset.testid = "assistant-clickable-path";
     link.href = "#";
-    link.title = displayFileLabel(match.path, match.line);
+    link.title = displayFileLabel(match.path, match.line, match.column);
     if (typeof match.line === "number") {
       link.dataset.tcLine = String(match.line);
     }
@@ -302,11 +323,37 @@ function linkifyInlineFilePaths(container: HTMLElement): void {
 
     const label = documentRef.createElement("span");
     label.className = "tc-inline-path__label";
-    label.textContent = match.originalText;
+    label.textContent = displayBasenameLabel(match.path, match.line, match.column);
     link.appendChild(label);
 
     code.replaceWith(link);
   }
+}
+
+function setCopyButtonCopiedState(button: HTMLElement, copied: boolean): void {
+  button.classList.toggle("is-copied", copied);
+  button.setAttribute("aria-label", copied ? "Copied" : "Copy code");
+  button.title = copied ? "Copied" : "Copy code";
+  const icon = button.querySelector<HTMLElement>(".tc-code-card__copy-icon");
+  if (!icon) {
+    return;
+  }
+  icon.classList.toggle("codicon-copy", !copied);
+  icon.classList.toggle("codicon-check", copied);
+}
+
+function flashCopyButton(button: HTMLElement): void {
+  const existingTimer = button.dataset.tcCopyResetTimer;
+  if (existingTimer) {
+    window.clearTimeout(Number(existingTimer));
+  }
+  setCopyButtonCopiedState(button, true);
+  button.dataset.tcCopyResetTimer = String(
+    window.setTimeout(() => {
+      setCopyButtonCopiedState(button, false);
+      delete button.dataset.tcCopyResetTimer;
+    }, 1_500),
+  );
 }
 
 function buildDecoratedHtml(markdown: string): string {
@@ -340,14 +387,26 @@ export function ChatMarkdown({
     }
     let cancelled = false;
     void (async () => {
-      await renderMermaidBlocks(container, () => cancelled);
+      try {
+        await highlightCodeBlocks(container, () => cancelled);
+      } catch {
+        // Rich rendering should degrade to plain code, not block clickable paths.
+      }
+      if (cancelled) {
+        return;
+      }
+      try {
+        await renderMermaidBlocks(container, () => cancelled);
+      } catch {
+        // Mermaid should degrade to plain code without affecting other transcript affordances.
+      }
       if (cancelled) {
         return;
       }
       try {
         await highlightCodeBlocks(container, () => cancelled);
       } catch {
-        // Rich rendering should degrade to plain code, not block clickable paths.
+        // A final highlight pass lets the transcript settle after async mermaid rendering.
       }
     })();
     return () => {
@@ -364,7 +423,10 @@ export function ChatMarkdown({
       const card = copyButton.closest(".tc-code-card");
       const codeText = card?.querySelector("pre code")?.textContent ?? "";
       if (typeof navigator?.clipboard?.writeText === "function") {
-        void navigator.clipboard.writeText(codeText);
+        void navigator.clipboard.writeText(codeText).then(
+          () => flashCopyButton(copyButton),
+          () => undefined,
+        );
       }
       return;
     }

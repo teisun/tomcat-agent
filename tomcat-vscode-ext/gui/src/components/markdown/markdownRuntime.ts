@@ -91,6 +91,27 @@ export function sanitizeMarkdownHtml(renderedHtml: string): string {
   });
 }
 
+function collectMermaidCodeBlocks(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLPreElement>("pre[data-fence-info]"))
+    .filter((pre) => /^(?:mermaid)(?:\s|$)/u.test(pre.getAttribute("data-fence-info") ?? ""))
+    .filter((pre) => pre.getAttribute("data-tc-mermaid-pending") !== "1")
+    .map((pre) => pre.querySelector<HTMLElement>("code"))
+    .filter((code): code is HTMLElement => code !== null);
+}
+
+async function waitForNextFrame(container: HTMLElement): Promise<void> {
+  const view = container.ownerDocument.defaultView;
+  if (typeof view?.requestAnimationFrame === "function") {
+    await new Promise<void>((resolve) => {
+      view.requestAnimationFrame(() => resolve());
+    });
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 16);
+  });
+}
+
 /**
  * Render mermaid fenced code blocks (```mermaid```) into inline SVG diagrams.
  * The import stays lazy so regular markdown pays nothing for mermaid.
@@ -99,10 +120,14 @@ export async function renderMermaidBlocks(
   container: HTMLElement,
   isCancelled: () => boolean,
 ): Promise<void> {
-  const blocks = Array.from(container.querySelectorAll<HTMLElement>("code.language-mermaid")).filter((code) => {
-    const host = code.closest("pre") ?? code;
-    return host.getAttribute("data-tc-mermaid-pending") !== "1";
-  });
+  let blocks = collectMermaidCodeBlocks(container);
+  if (blocks.length === 0) {
+    await waitForNextFrame(container);
+    if (isCancelled()) {
+      return;
+    }
+    blocks = collectMermaidCodeBlocks(container);
+  }
   if (blocks.length === 0) {
     return;
   }

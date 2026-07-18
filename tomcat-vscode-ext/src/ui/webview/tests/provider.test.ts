@@ -19,6 +19,7 @@ const __testing = (
   vscode as typeof vscode & {
     __testing: {
       registerDirectory(dirPath: string): void;
+      setErrorMessageHandler(handler: ((message: string, items: string[]) => string | undefined) | undefined): void;
       registerFile(filePath: string, text: string): void;
       reset(): void;
       setConfiguration(key: string, value: unknown): void;
@@ -325,6 +326,34 @@ describe("webview html asset resolution", () => {
     // The icon font stylesheet must be linked, or every codicon renders blank.
     expect(html).toContain("styles.css");
     expect(html).toContain("codicon.css");
+    provider.dispose();
+  });
+
+  it("allows dynamic import chunks and mermaid inline styles in the chat webview CSP", async () => {
+    const extensionUri = await createExtensionRoot({
+      "gui/dist/index.js": "console.log('index');",
+      "gui/dist/styles.css": "body { color: red; }",
+    });
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri,
+      getDefaultCwd: () => undefined,
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      sessionRouter: {} as never,
+    });
+
+    const html = (
+      provider as unknown as {
+        renderHtml(webview: vscode.Webview): string;
+      }
+    ).renderHtml(createWebview());
+
+    expect(html).toContain("style-src vscode-test-webview 'unsafe-inline';");
+    expect(html).toContain("script-src 'nonce-");
+    expect(html).toContain("'strict-dynamic';");
     provider.dispose();
   });
 });
@@ -998,6 +1027,44 @@ describe("mutation diff stat injection", () => {
     });
 
     expect(showFile).toHaveBeenCalledWith("src/app.ts", 42);
+
+    provider.dispose();
+  });
+
+  it("shows a toast instead of appending a transcript error when openFile fails", async () => {
+    const showFile = vi.fn().mockRejectedValue(new Error("boom"));
+    const toastMessages: string[] = [];
+    __testing.setErrorMessageHandler((message) => {
+      toastMessages.push(message);
+      return undefined;
+    });
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {
+        showFile,
+      } as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+      } as never,
+      sessionRouter: {} as never,
+    });
+    const stateStore = (provider as unknown as { stateStore: { appendMessage: (...args: unknown[]) => void; setActiveSession(sessionId: string): void } }).stateStore;
+    stateStore.setActiveSession("s1");
+    const appendMessageSpy = vi.spyOn(stateStore, "appendMessage");
+
+    await provider.dispatchTestIntent({
+      data: { line: 42, path: "src/app.ts" },
+      messageId: "intent-open-file-failure",
+      type: "openFile",
+    });
+
+    expect(showFile).toHaveBeenCalledWith("src/app.ts", 42);
+    expect(appendMessageSpy).not.toHaveBeenCalled();
+    expect(toastMessages).toEqual([
+      expect.stringContaining("Unable to open file src/app.ts"),
+    ]);
 
     provider.dispose();
   });

@@ -51,14 +51,14 @@ function hasUriScheme(value: string): boolean {
   return /^(?:[a-z][a-z0-9+.-]*:\/\/|mailto:|command:)/iu.test(value);
 }
 
-function basename(value: string): string {
+export function basenameOf(value: string): string {
   const normalized = value.replaceAll("\\", "/");
   const last = normalized.split("/").pop();
   return last && last.length > 0 ? last : normalized;
 }
 
 function fileExtension(value: string): string | undefined {
-  const base = basename(value);
+  const base = basenameOf(value);
   const ext = base.split(".").pop()?.toLowerCase();
   return ext && base.includes(".") ? ext : undefined;
 }

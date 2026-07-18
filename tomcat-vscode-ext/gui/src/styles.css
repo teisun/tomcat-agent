@@ -1549,6 +1549,7 @@ input:focus-visible {
   border-radius: 8px;
   margin: 0.75em 0;
   overflow: hidden;
+  position: relative;
 }
 
 .tc-code-card__header {
@@ -1556,35 +1557,24 @@ input:focus-visible {
   background: var(--vscode-sideBarSectionHeader-background, rgba(127, 127, 127, 0.08));
   border-bottom: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.2));
   display: flex;
-  gap: 10px;
+  gap: 8px;
   justify-content: space-between;
   min-width: 0;
-  padding: 8px 12px;
+  padding: 8px 10px;
 }
 
 .tc-code-card__meta {
   align-items: center;
   display: inline-flex;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
-}
-
-.tc-code-card__lang {
-  background: var(--vscode-badge-background, rgba(127, 127, 127, 0.16));
-  border-radius: 999px;
-  color: var(--vscode-badge-foreground, var(--vscode-foreground));
-  flex: 0 0 auto;
-  font-size: 11px;
-  letter-spacing: 0.02em;
-  padding: 2px 8px;
-  text-transform: lowercase;
 }
 
 .tc-code-card__file {
   align-items: center;
   background: transparent;
   border: 0;
-  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+  color: var(--vscode-foreground);
   cursor: pointer;
   display: inline-flex;
   gap: 6px;
@@ -1612,19 +1602,32 @@ input:focus-visible {
 .tc-code-card__copy {
   align-items: center;
   background: transparent;
-  border: 1px solid var(--vscode-button-border, rgba(127, 127, 127, 0.25));
+  border: 0;
   border-radius: 6px;
-  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  color: var(--vscode-descriptionForeground, var(--vscode-foreground));
   cursor: pointer;
   display: inline-flex;
   flex: 0 0 auto;
-  gap: 6px;
-  padding: 4px 8px;
+  justify-content: center;
+  min-height: 20px;
+  min-width: 20px;
+  padding: 0;
+  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
 }
 
 .tc-code-card__copy:hover,
 .tc-code-card__copy:focus-visible {
-  background: var(--vscode-button-secondaryBackground, rgba(127, 127, 127, 0.12));
+  background: var(--vscode-toolbar-hoverBackground, rgba(127, 127, 127, 0.12));
+  color: var(--vscode-foreground);
+}
+
+.tc-code-card__copy.is-copied {
+  color: var(--vscode-testing-iconPassed, var(--vscode-terminal-ansiGreen, #73c991));
+}
+
+.tc-code-card__copy-icon {
+  font-size: 14px;
+  line-height: 1;
 }
 
 .tc-code-card pre {
@@ -1638,24 +1641,44 @@ input:focus-visible {
   display: block;
 }
 
+.tc-code-card--bare pre {
+  padding-right: 46px;
+}
+
+.tc-code-card--bare .tc-code-card__copy {
+  background: var(--vscode-editorWidget-background, rgba(30, 30, 30, 0.82));
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.24));
+  opacity: 0;
+  padding: 4px;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+}
+
+.tc-code-card--bare:hover .tc-code-card__copy,
+.tc-code-card--bare .tc-code-card__copy:focus-visible {
+  opacity: 1;
+}
+
 .tc-inline-path {
   align-items: center;
-  background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.16));
-  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.2));
-  border-radius: 6px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   color: var(--vscode-textLink-foreground, var(--vscode-foreground));
   cursor: pointer;
   display: inline-flex;
-  gap: 6px;
-  padding: 0.08em 0.45em;
+  gap: 4px;
+  padding: 0;
   text-decoration: none;
   vertical-align: baseline;
 }
 
 .tc-inline-path:hover,
 .tc-inline-path:focus-visible {
-  background: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.12));
+  background: transparent;
   color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground));
+  text-decoration: underline;
 }
 
 .tc-inline-path__icon {

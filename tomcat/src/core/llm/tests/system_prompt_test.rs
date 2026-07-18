@@ -97,6 +97,8 @@ fn build_system_prompt_contains_output_conventions_section() {
     assert!(prompt.contains("Output conventions"));
     assert!(prompt.contains("clickable file link"));
     assert!(prompt.contains("Do not emit `file://`, `vscode://`"));
+    assert!(prompt.contains("workspace-relative path"));
+    assert!(prompt.contains("Do not emit bare filenames"));
 }
 
 #[test]

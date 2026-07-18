@@ -1043,15 +1043,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         try {
           await this.deps.ide.showFile(intent.data.path, intent.data.line);
         } catch (error) {
-          const sessionId = this.currentState().activeSessionId;
-          if (sessionId) {
-            this.stateStore.appendMessage(
-              sessionId,
-              "error",
-              formatBridgeError(`open file ${intent.data.path}`, error),
-            );
-            await this.postState();
-          }
+          await vscode.window.showErrorMessage(
+            formatBridgeError(`open file ${intent.data.path}`, error),
+          );
         }
         return;
       case "openDiff": {
@@ -1594,7 +1588,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';"
+      content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' 'strict-dynamic';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     ${styleTags}

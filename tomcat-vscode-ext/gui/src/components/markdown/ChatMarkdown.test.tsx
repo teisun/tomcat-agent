@@ -39,12 +39,21 @@ describe("ChatMarkdown", () => {
       />,
     );
 
-    expect(screen.getByTestId("assistant-code-card")).toBeTruthy();
-    fireEvent.click(screen.getByTestId("assistant-code-file"));
+    const card = screen.getByTestId("assistant-code-card");
+    expect(card.querySelector(".tc-code-card__header")).not.toBeNull();
+    expect(card.querySelector(".tc-code-card__lang")).toBeNull();
+
+    const fileButton = screen.getByTestId("assistant-code-file");
+    expect(fileButton.textContent).toContain("foo.rs:42");
+    expect(fileButton.textContent).not.toContain("src/core/");
+    expect(fileButton.getAttribute("title")).toBe("src/core/foo.rs:42");
+
+    fireEvent.click(fileButton);
     expect(onOpenFile).toHaveBeenCalledWith("src/core/foo.rs", 42);
   });
 
-  it("copies the raw fenced code from the code-card button", async () => {
+  it("renders no-path fences as bare cards with icon-only copy feedback", async () => {
+    vi.useFakeTimers();
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(globalThis.navigator, {
       clipboard: {
@@ -59,11 +68,34 @@ describe("ChatMarkdown", () => {
       />,
     );
 
-    expect(screen.getByTestId("assistant-code-card")).toBeTruthy();
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("assistant-code-copy"));
-    });
-    expect(writeText).toHaveBeenCalledWith("const answer = 42;\n");
+    try {
+      const card = screen.getByTestId("assistant-code-card");
+      expect(card.classList.contains("tc-code-card--bare")).toBe(true);
+      expect(card.querySelector(".tc-code-card__header")).toBeNull();
+
+      const copyButton = screen.getByTestId("assistant-code-copy");
+      expect(copyButton.textContent).toBe("");
+      expect(copyButton.getAttribute("aria-label")).toBe("Copy code");
+      expect(copyButton.querySelector(".codicon-copy")).not.toBeNull();
+
+      await act(async () => {
+        fireEvent.click(copyButton);
+        await Promise.resolve();
+      });
+
+      expect(writeText).toHaveBeenCalledWith("const answer = 42;\n");
+      expect(copyButton.classList.contains("is-copied")).toBe(true);
+      expect(copyButton.querySelector(".codicon-check")).not.toBeNull();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1_500);
+      });
+
+      expect(copyButton.classList.contains("is-copied")).toBe(false);
+      expect(copyButton.querySelector(".codicon-copy")).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("linkifies inline file paths and forwards clicks with the parsed line number", async () => {
@@ -76,6 +108,9 @@ describe("ChatMarkdown", () => {
     );
 
     const link = screen.getByTestId("assistant-clickable-path");
+    expect(link.textContent).toContain("App.tsx:18");
+    expect(link.textContent).not.toContain("src/gui/");
+    expect(link.getAttribute("title")).toBe("src/gui/App.tsx:18");
     fireEvent.click(link);
     expect(onOpenFile).toHaveBeenCalledWith("src/gui/App.tsx", 18);
   });
@@ -131,10 +166,11 @@ describe("ChatMarkdown", () => {
     );
 
     const card = screen.getByTestId("assistant-code-card");
+    expect(card.classList.contains("tc-code-card--bare")).toBe(true);
     expect(card.textContent).toContain("const answer = 42;");
   });
 
-  it("adds syntax highlighting without changing the baked code-card structure", async () => {
+  it("adds syntax highlighting without adding a header to no-path code fences", async () => {
     render(
       <ChatMarkdown
         markdown={"```ts\nconst answer = 42;\n```\n"}
@@ -143,7 +179,8 @@ describe("ChatMarkdown", () => {
     );
 
     const card = screen.getByTestId("assistant-code-card");
-    expect(card.querySelector(".tc-code-card__header")).not.toBeNull();
+    expect(card.classList.contains("tc-code-card--bare")).toBe(true);
+    expect(card.querySelector(".tc-code-card__header")).toBeNull();
 
     await waitFor(() => {
       const code = card.querySelector("code.hljs");

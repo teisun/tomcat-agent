@@ -19,6 +19,7 @@ const textDocuments: TextDocument[] = [];
 
 let quickPickHandler: ((items: QuickPickItem[]) => any) | undefined;
 let inputBoxHandler: ((options: InputBoxOptions) => any) | undefined;
+let errorMessageHandler: ((message: string, items: string[]) => any) | undefined;
 let infoMessageHandler: ((message: string, items: string[]) => any) | undefined;
 let warningMessageHandler: ((message: string, items: string[]) => any) | undefined;
 let openDialogHandler: ((options: unknown) => Uri[] | Promise<Uri[] | undefined> | undefined) | undefined;
@@ -605,6 +606,9 @@ export const window = {
     revealRange(range: Range, revealType?: number): void;
     selection: Selection;
   }>,
+  async showErrorMessage(message: string, ...items: string[]): Promise<string | undefined> {
+    return errorMessageHandler?.(message, items);
+  },
   async showInformationMessage(message: string, ...items: string[]): Promise<string | undefined> {
     return infoMessageHandler?.(message, items);
   },
@@ -704,6 +708,7 @@ export const __testing = {
     textDocumentChangeListeners.clear();
     quickPickHandler = undefined;
     inputBoxHandler = undefined;
+    errorMessageHandler = undefined;
     infoMessageHandler = undefined;
     warningMessageHandler = undefined;
     openDialogHandler = undefined;
@@ -728,6 +733,9 @@ export const __testing = {
     for (const listener of textDocumentChangeListeners) {
       listener({ document });
     }
+  },
+  setErrorMessageHandler(handler: typeof errorMessageHandler): void {
+    errorMessageHandler = handler;
   },
   setInfoMessageHandler(handler: typeof infoMessageHandler): void {
     infoMessageHandler = handler;
