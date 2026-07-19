@@ -54,6 +54,21 @@ describe("MarkdownBody", () => {
     expect(body.querySelector("p")?.hasAttribute("data-source-line")).toBe(false);
   });
 
+  it("renders fenced code as a highlighted code card in the plan preview", () => {
+    render(
+      <MarkdownBody
+        markdown={"```ts src/plan-preview.ts:3\nconst answer = 42;\n```\n"}
+        onOpenFile={() => undefined}
+        onOpenLink={() => undefined}
+      />,
+    );
+
+    const card = screen.getByTestId("assistant-code-card");
+    expect(card.querySelector(".tc-code-card__header")).not.toBeNull();
+    expect(card.querySelector("code.hljs")?.textContent).toBe("const answer = 42;\n");
+    expect(card.querySelector("[data-testid='assistant-code-copy']")).not.toBeNull();
+  });
+
   it("intercepts link clicks and forwards them without navigating", () => {
     const onOpenLink = vi.fn();
     render(

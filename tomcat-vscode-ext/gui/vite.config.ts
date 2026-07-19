@@ -23,6 +23,12 @@ export default defineConfig({
         assetFileNames: "[name][extname]",
         chunkFileNames: "chunks/[name].js",
         entryFileNames: "[name].js",
+        manualChunks(id) {
+          if (id.includes("/highlight.js/")) {
+            return "highlight";
+          }
+          return undefined;
+        },
       },
     },
   },

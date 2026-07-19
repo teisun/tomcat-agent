@@ -1465,6 +1465,10 @@ input:focus-visible {
   word-break: break-word;
 }
 
+.tc-chat-markdown__block {
+  display: contents;
+}
+
 .tc-chat-markdown h1,
 .tc-chat-markdown h2,
 .tc-chat-markdown h3,

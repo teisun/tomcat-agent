@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-07-19 07:42 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-07-19 09:55 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** TranscriptView 富渲染四次整改已完成：第三轮虽然补齐了真流式 E2E、预热 `highlight.js`/`mermaid`，但聊天正文仍是“整条消息一次 `useMemo` 烤 HTML，再异步高亮”的架构，所以代码块会先无色再上色（FOUC），而且 streaming 每来新 token 都可能把整篇旧内容重新过一遍。现已正式对齐 cline 的低爆炸半径方案：**保留现有 `marked + DOMPurify + DOM 装饰` 管线，不迁 `react-markdown`，只吸收「按 markdown 顶层块切分 + `React.memo` 逐块冻结 + `highlight.js` 静态 import/同步上色」这两个关键点**。结果是“已完成块永不重算，只有尾块重渲染”，代码一出现就是带 `hljs-*` span 的彩色 HTML；mermaid 继续按块异步渲染。配套还做了：`splitTopLevelBlocks()`、`highlightToHtml()`、`MarkdownBody` 复用同一套同步高亮/代码卡片/内联文件链接、`display: contents` 透明块 wrapper、`isStreaming` 死代码拆线，以及 Vite `manualChunks` 把 `highlight.js` 单独切成 `dist/chunks/highlight.js`（本次构建约 **104.58 kB min / 35.64 kB gzip**）。门禁新增/收紧：GUI 单测验证“同步即有 `code.hljs`、追加尾块只重算新块”，devhost E2E 明确卡住“流式尚未结束时已完成代码块已带 `hljs-*`，收尾后再出现 mermaid `<svg>`”，把这轮架构切换真正锁住。@2026-07-19
 - [✓] **[P0]** TranscriptView 富渲染三次整改已闭环：这次不是只修“静态整段 markdown 一次性渲染”的假场景，而是按真机/devhost 的**逐 token 流式输出**重新取证。最终结论是：上一轮的“假绿”不只是 CSP，还包括 **E2E 根本没模拟真流式**，以及 `ChatMarkdown` 的异步增强（高亮 / mermaid）会在 streaming 期间被反复重渲染打断或抹掉。现已补上统一 `[tc-richrender]` 诊断日志、启动空闲预热 `highlight.js` / `mermaid`、`ChatMarkdown` 的 streaming 去抖 + 收尾必达 + `memo` 化，并把富渲染 E2E 改成分段灌 `content_delta` 后断言真实 `hljs-*` token 与 mermaid `<svg>`，把“看起来过了、真机还是坏”的口子彻底堵死。@2026-07-19
 - [✓] **[P0]** plan 卡片排序与 plan 预览体验一并收口：历史重建改成按时间锚定 plan 卡片，只更新已有卡片元数据、不再把 plan 漂到最新 user message 上方；plan 预览复用 transcript 的内联文件链接逻辑，支持 `openFile(path, line)` 打开并定位源码，同时把左右 padding 和正文最大宽度调到更接近 Cursor。对应 GUI/ext 单测与 devhost E2E 已覆盖到真实点击链路。@2026-07-19
 - [✓] **[P0]** PLAN 模式下“随便写个计划 / 技术方案 / 设计方案”类请求的真根因已订正：问题不是 `create_plan` 工具不可见，而是模型在 PLAN 模式里把请求误当成“正文写一段方案文字”，没有真正调 plan 工具落盘。现已强化 `planner.txt`：只要用户要求写/改计划或方案，就必须调用 `create_plan` / `update_plan` 真正写文件，禁止再产出 prose 伪计划；Rust 守卫测试同步补齐。@2026-07-19
@@ -12,8 +13,10 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- 前端四次整改新增 `splitTopLevelBlocks(markdown)`、同步 `highlightToHtml(code, language)` 与 `dist/chunks/highlight.js` 独立分包；聊天正文改为“父组件切块 + 子块 `React.memo(raw)` + 同步高亮 + mermaid 按块异步”，`ChatMarkdown` / `MessageBubble` / `TranscriptView` 的 assistant 富渲染链不再透传 `isStreaming`。
 - 前端新增 `ChatMarkdown` / `markdownRuntime` / `codeFence` / `inlinePath`；assistant 正文富渲染；**代码围栏不再显示语言标签**：有文件路径时显示 basename 头部并可点击打开，无路径时为 `bare` 块 + 内容区右上角浮动 copy；正文内联路径显示 basename，`title` 保留完整相对路径；thinking 为弱化纯文本 `<pre>`。
 - 前端新增 `markdownDecorators` / `richRenderRuntime`；`ChatMarkdown` 支持 streaming 去抖增强、启动预热与统一 `[tc-richrender]` 诊断日志。
+- `MarkdownBody` 现复用 `buildDecoratedHtml(markdown, sourceLineMap?)`，因此 plan 预览与 transcript 共享同一套同步高亮、代码卡片、copy 按钮与内联文件链接语义，同时保留 `data-source-line` 能力。
 - `openFile.data.line?: number`；`VsCodeIde.showFile(path, line?)` → `selection + revealRange`。
 - plan 预览协议新增 `openFile { path, line? }`；plan body 内联路径与 transcript 复用同一套 linkify/open-file 语义。
 - `PromptKey::SystemOutputConventions` 插入系统提示词链（`ToolInstructions(20) -> OutputConventions(21) -> ParallelTools(22)`）。

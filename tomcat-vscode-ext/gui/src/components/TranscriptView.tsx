@@ -199,7 +199,6 @@ export function TranscriptView({
         case "message":
           return (
             <MessageBubble
-              isStreaming={showProgress && item.kind === "assistant"}
               item={item}
               key={item.id}
               onOpenFile={onOpenFile}
@@ -266,7 +265,6 @@ export function TranscriptView({
           <Fragment key={`group-${group.assistantMessageId}`}>
             {group.preamble ? (
               <MessageBubble
-                isStreaming={showProgress}
                 item={group.preamble}
                 key={`${group.preamble.id}-preamble`}
                 onOpenFile={onOpenFile}

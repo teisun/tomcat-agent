@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest";
 
 import { ChatMarkdown } from "./ChatMarkdown";
+import * as richRenderRuntime from "./richRenderRuntime";
 
 const renderMock = vi.fn(async (_id: string, _graph: string) => ({
   svg: '<svg data-testid="mermaid-svg"><g>flow</g></svg>',
@@ -181,12 +182,9 @@ describe("ChatMarkdown", () => {
     const card = screen.getByTestId("assistant-code-card");
     expect(card.classList.contains("tc-code-card--bare")).toBe(true);
     expect(card.querySelector(".tc-code-card__header")).toBeNull();
-
-    await waitFor(() => {
-      const code = card.querySelector("code.hljs");
-      expect(code).not.toBeNull();
-      expect(code?.textContent).toBe("const answer = 42;\n");
-    });
+    const code = card.querySelector("code.hljs");
+    expect(code).not.toBeNull();
+    expect(code?.textContent).toBe("const answer = 42;\n");
   });
 
   it("renders mermaid fences into inline diagrams", async () => {
@@ -203,55 +201,54 @@ describe("ChatMarkdown", () => {
     expect(renderMock).toHaveBeenCalledTimes(1);
   });
 
-  it("waits for streaming to settle before running highlight and mermaid enhancement", async () => {
-    vi.useFakeTimers();
+  it("highlights code synchronously while leaving mermaid rendering async", async () => {
     renderMock.mockClear();
-    try {
-      const { rerender } = render(
-        <ChatMarkdown
-          isStreaming
-          markdown={"```ts\nconst answer ="}
-          onOpenFile={() => undefined}
-        />,
-      );
+    const { rerender } = render(
+      <ChatMarkdown
+        markdown={"```ts\nconst answer ="}
+        onOpenFile={() => undefined}
+      />,
+    );
 
-      rerender(
-        <ChatMarkdown
-          isStreaming
-          markdown={"```ts\nconst answer = 42;\n```\n\n```mermaid\nflowchart LR"}
-          onOpenFile={() => undefined}
-        />,
-      );
+    const initialCode = screen.getByTestId("chat-markdown").querySelector("code.hljs");
+    expect(initialCode).not.toBeNull();
+    expect(initialCode?.textContent).toContain("const answer =");
 
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(119);
-      });
-      expect(screen.getByTestId("chat-markdown").querySelector("code.hljs")).toBeNull();
-      expect(screen.queryByTestId("plan-mermaid")).toBeNull();
-      expect(renderMock).toHaveBeenCalledTimes(0);
+    rerender(
+      <ChatMarkdown
+        markdown={"```ts\nconst answer = 42;\n```\n\n```mermaid\nflowchart LR\n  start --> finish\n```\n"}
+        onOpenFile={() => undefined}
+      />,
+    );
 
-      rerender(
-        <ChatMarkdown
-          isStreaming={false}
-          markdown={"```ts\nconst answer = 42;\n```\n\n```mermaid\nflowchart LR\n  start --> finish\n```\n"}
-          onOpenFile={() => undefined}
-        />,
-      );
+    expect(screen.getByTestId("chat-markdown").querySelector("code.hljs")).not.toBeNull();
+    expect(screen.queryByTestId("plan-mermaid")).toBeNull();
 
-      await act(async () => {
-        await Promise.resolve();
-        await vi.runAllTimersAsync();
-        await Promise.resolve();
-      });
-      vi.useRealTimers();
-      await waitFor(() => {
-        expect(screen.getByTestId("chat-markdown").querySelector("code.hljs")).not.toBeNull();
-      });
-      const figure = await screen.findByTestId("plan-mermaid");
-      expect(figure.querySelector("svg")).not.toBeNull();
-      expect(renderMock).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.useRealTimers();
-    }
+    const figure = await screen.findByTestId("plan-mermaid");
+    expect(figure.querySelector("svg")).not.toBeNull();
+    expect(renderMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("only re-highlights a newly appended tail code block", () => {
+    const spy = vi.spyOn(richRenderRuntime, "highlightToHtml");
+    const { rerender } = render(
+      <ChatMarkdown
+        markdown={"```ts\nconst first = 1;\n```\n\nTail paragraph."}
+        onOpenFile={() => undefined}
+      />,
+    );
+
+    expect(spy.mock.calls.filter(([code]) => code.includes("const first = 1;"))).toHaveLength(1);
+
+    rerender(
+      <ChatMarkdown
+        markdown={"```ts\nconst first = 1;\n```\n\nTail paragraph.\n\n```ts\nconst second = 2;\n```\n"}
+        onOpenFile={() => undefined}
+      />,
+    );
+
+    expect(spy.mock.calls.filter(([code]) => code.includes("const first = 1;"))).toHaveLength(1);
+    expect(spy.mock.calls.filter(([code]) => code.includes("const second = 2;"))).toHaveLength(1);
+    spy.mockRestore();
   });
 });

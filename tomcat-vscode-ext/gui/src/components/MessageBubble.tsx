@@ -14,12 +14,10 @@ const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
 const NOOP_OPEN_FILE = () => undefined;
 
 export function MessageBubble({
-  isStreaming = false,
   item,
   onOpenFile,
   onRetry,
 }: {
-  isStreaming?: boolean;
   item: WebviewMessageBlock;
   onOpenFile?: (path: string, line?: number) => void;
   onRetry?: (messageId: string) => void;
@@ -74,7 +72,6 @@ export function MessageBubble({
       <div className="message-text rendered-markdown" data-testid="message-text">
         {item.kind === "assistant" ? (
           <ChatMarkdown
-            isStreaming={isStreaming}
             markdown={item.text}
             onOpenFile={onOpenFile ?? NOOP_OPEN_FILE}
           />

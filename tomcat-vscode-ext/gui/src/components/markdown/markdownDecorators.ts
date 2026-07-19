@@ -2,6 +2,7 @@ import { fileChipIconClass } from "../FileChip";
 import { parseCodeFenceInfo } from "./codeFence";
 import { basenameOf, detectInlineFilePath, inferLanguageFromPath } from "./inlinePath";
 import { renderMarkdownHtml, sanitizeMarkdownHtml } from "./markdownRuntime";
+import { highlightToHtml } from "./richRenderRuntime";
 
 function withLocationSuffix(label: string, line?: number, column?: number): string {
   if (typeof line !== "number") {
@@ -71,6 +72,32 @@ function createCopyButton(documentRef: Document): HTMLButtonElement {
   return copyButton;
 }
 
+export function setCopyButtonCopiedState(button: HTMLElement, copied: boolean): void {
+  button.classList.toggle("is-copied", copied);
+  button.setAttribute("aria-label", copied ? "Copied" : "Copy code");
+  button.title = copied ? "Copied" : "Copy code";
+  const icon = button.querySelector<HTMLElement>(".tc-code-card__copy-icon");
+  if (!icon) {
+    return;
+  }
+  icon.classList.toggle("codicon-copy", !copied);
+  icon.classList.toggle("codicon-check", copied);
+}
+
+export function flashCopyButton(button: HTMLElement): void {
+  const existingTimer = button.dataset.tcCopyResetTimer;
+  if (existingTimer) {
+    window.clearTimeout(Number(existingTimer));
+  }
+  setCopyButtonCopiedState(button, true);
+  button.dataset.tcCopyResetTimer = String(
+    window.setTimeout(() => {
+      setCopyButtonCopiedState(button, false);
+      delete button.dataset.tcCopyResetTimer;
+    }, 1_500),
+  );
+}
+
 export function decorateCodeCards(container: HTMLElement): void {
   const documentRef = container.ownerDocument;
   const blocks = Array.from(container.querySelectorAll<HTMLPreElement>("pre")).filter(
@@ -87,7 +114,12 @@ export function decorateCodeCards(container: HTMLElement): void {
     }
 
     const language = normalizeHighlightLanguage(parsed.language ?? inferLanguageFromPath(parsed.filePath ?? ""));
-    code.classList.add(`language-${language}`);
+    const rawText = code.textContent ?? "";
+    const highlighted = highlightToHtml(rawText, language);
+    code.classList.remove(...[...code.classList].filter((className) => className.startsWith("language-")));
+    code.classList.add("hljs", `language-${highlighted.language}`);
+    code.dataset.tcHighlighted = "1";
+    code.innerHTML = highlighted.html;
 
     const wrapper = documentRef.createElement("section");
     wrapper.className = "tc-code-card";
@@ -170,12 +202,12 @@ export function linkifyInlineFilePaths(container: HTMLElement): void {
   }
 }
 
-export function buildDecoratedHtml(markdown: string): string {
+export function buildDecoratedHtml(markdown: string, sourceLineMap?: number[]): string {
   if (typeof document === "undefined") {
-    return sanitizeMarkdownHtml(renderMarkdownHtml(markdown));
+    return sanitizeMarkdownHtml(renderMarkdownHtml(markdown, sourceLineMap));
   }
   const container = document.createElement("div");
-  container.innerHTML = sanitizeMarkdownHtml(renderMarkdownHtml(markdown));
+  container.innerHTML = sanitizeMarkdownHtml(renderMarkdownHtml(markdown, sourceLineMap));
   decorateCodeCards(container);
   linkifyInlineFilePaths(container);
   return container.innerHTML;

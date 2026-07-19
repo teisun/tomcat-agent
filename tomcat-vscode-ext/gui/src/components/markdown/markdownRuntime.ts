@@ -71,8 +71,18 @@ function createMarkedWithSourceLines(): Marked {
 
 const markedInstance = createMarkedWithSourceLines();
 
+function lexMarkdownTokens(markdown: string): TokenWithSourceLine[] {
+  return markedInstance.lexer(markdown) as Tokens.Generic[] as TokenWithSourceLine[];
+}
+
+export function splitTopLevelBlocks(markdown: string): string[] {
+  return lexMarkdownTokens(markdown)
+    .filter((token) => token.type !== "space" && token.raw.trim() !== "")
+    .map((token) => token.raw);
+}
+
 export function renderMarkdownHtml(markdown: string, sourceLineMap?: number[]): string {
-  const tokens = markedInstance.lexer(markdown) as Tokens.Generic[] as TokenWithSourceLine[];
+  const tokens = lexMarkdownTokens(markdown);
   if (sourceLineMap && sourceLineMap.length > 0) {
     let bodyLine = 1;
     for (const token of tokens) {

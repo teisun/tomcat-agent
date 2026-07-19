@@ -1,10 +1,6 @@
 import { useEffect, useMemo, useRef, type MouseEvent } from "react";
-import {
-  renderMarkdownHtml,
-  renderMermaidBlocks,
-  sanitizeMarkdownHtml,
-} from "./markdown/markdownRuntime";
-import { linkifyInlineFilePaths } from "./markdown/markdownDecorators";
+import { buildDecoratedHtml, flashCopyButton } from "./markdown/markdownDecorators";
+import { renderMermaidBlocks } from "./markdown/markdownRuntime";
 
 /**
  * Render the plan body markdown as sanitized HTML. Links never navigate the
@@ -24,16 +20,7 @@ export function MarkdownBody({
   sourceLineMap?: number[];
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const html = useMemo(() => {
-    const rendered = sanitizeMarkdownHtml(renderMarkdownHtml(markdown, sourceLineMap));
-    if (typeof document === "undefined") {
-      return rendered;
-    }
-    const container = document.createElement("div");
-    container.innerHTML = rendered;
-    linkifyInlineFilePaths(container);
-    return container.innerHTML;
-  }, [markdown, sourceLineMap]);
+  const html = useMemo(() => buildDecoratedHtml(markdown, sourceLineMap), [markdown, sourceLineMap]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -48,6 +35,21 @@ export function MarkdownBody({
   }, [html]);
 
   const handleClick = (event: MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    const copyButton = target?.closest<HTMLElement>("[data-tc-copy-code]");
+    if (copyButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      const card = copyButton.closest(".tc-code-card");
+      const codeText = card?.querySelector("pre code")?.textContent ?? "";
+      if (typeof navigator?.clipboard?.writeText === "function") {
+        void navigator.clipboard.writeText(codeText).then(
+          () => flashCopyButton(copyButton),
+          () => undefined,
+        );
+      }
+      return;
+    }
     const fileTarget = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-tc-file-path]");
     if (fileTarget) {
       event.preventDefault();

@@ -3089,7 +3089,8 @@ export async function assertTranscriptRichRenderingFlow(
     "A --> B --> C\n```\n\n```mermaid\nflowchart LR\n",
     "  Start --> Finish\n```",
   ];
-  for (const delta of contentDeltas) {
+  let streamingHighlightSnapshot: { html: string } | null = null;
+  for (const [index, delta] of contentDeltas.entries()) {
     await api.__testing.injectServeEvent({
       assistantMessageEvent: {
         delta,
@@ -3101,7 +3102,23 @@ export async function assertTranscriptRichRenderingFlow(
       type: "message_update",
     });
     await pause(30);
+    if (index === 3) {
+      streamingHighlightSnapshot = await waitForWebviewDomSnapshot(
+        api,
+        (candidate) =>
+          candidate.activeSessionId === sessionId &&
+          /hljs-[\w-]+/u.test(candidate.html) &&
+          candidate.html.includes(">rich-render.ts:6<") &&
+          !candidate.html.includes('data-testid="plan-mermaid"')
+            ? candidate
+            : undefined,
+        20_000,
+      );
+    }
   }
+  assert.ok(streamingHighlightSnapshot, "expected a streaming snapshot after the first code block completed");
+  assert.match(streamingHighlightSnapshot.html, /hljs-[\w-]+/u);
+  assert.doesNotMatch(streamingHighlightSnapshot.html, /data-testid="plan-mermaid"/u);
   await api.__testing.injectServeEvent({
     assistantMessageEvent: {
       delta: "## Inspect\n\nStart with `src/thinking/plain.ts:9`.",
@@ -3131,8 +3148,7 @@ export async function assertTranscriptRichRenderingFlow(
       candidate.assistantCodeCardCount >= 2 &&
       candidate.assistantClickablePathCount >= 1 &&
       candidate.html.includes("assistant-code-copy") &&
-      candidate.html.includes("Fix plan") &&
-      candidate.html.includes("Start --&gt; Finish")
+      candidate.html.includes("Fix plan")
         ? candidate
         : undefined,
     20_000,
@@ -3153,9 +3169,6 @@ export async function assertTranscriptRichRenderingFlow(
   assert.match(snapshot.html, /A --&gt; B --&gt; C/u);
   assert.match(snapshot.html, /tc-code-card--bare/u);
   assert.doesNotMatch(snapshot.html, /tc-code-card__lang/u);
-  assert.match(snapshot.html, /Start --&gt; Finish/u);
-
-  await new Promise((resolve) => setTimeout(resolve, 150));
   const settledSnapshot = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
