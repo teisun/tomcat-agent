@@ -1,10 +1,18 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
-import type { AskQuestionResult, WebviewApprovalQuestion, WebviewToolCard } from "../types";
+import type {
+  AskQuestionResult,
+  WebviewApprovalQuestion,
+  WebviewPlanFileCard,
+  WebviewPlanState,
+  WebviewTodo,
+  WebviewToolCard,
+} from "../types";
 import { AnswerCard } from "./AnswerCard";
 import { DiffView } from "./DiffView";
 import { DisclosureCard, type DisclosureStatusVariant } from "./DisclosureCard";
 import { FileChip } from "./FileChip";
+import { PlanFileCard } from "./PlanFileCard";
 import { tailTerminalOutput, TerminalOutput } from "./TerminalOutput";
 
 function firstLine(value: string | undefined): string | undefined {
@@ -50,19 +58,74 @@ function filePathForTool(item: WebviewToolCard): string | undefined {
   return item.display?.kind === "file" ? item.display.file : asString(args.path);
 }
 
-export function isRunning(item: WebviewToolCard): boolean {
-  return (item.status === "running" || item.status === "streaming") && !item.isError;
+function isPlanTool(item: WebviewToolCard): boolean {
+  return item.toolName === "create_plan" || item.toolName === "update_plan";
 }
 
-export function isSuppressedPlanToolRow(item: WebviewToolCard): boolean {
-  return (
-    !item.isError &&
-    (
-      item.toolName === "create_plan" ||
-      item.toolName === "update_plan" ||
-      item.display?.kind === "plan"
-    )
-  );
+function planPathForTool(item: WebviewToolCard): string | undefined {
+  return item.planPath ?? asString(item.args?.path);
+}
+
+function createPlanTodosFromArgs(args: Record<string, unknown> | undefined): WebviewTodo[] | undefined {
+  const todos = args?.todos;
+  if (!Array.isArray(todos)) {
+    return undefined;
+  }
+  const parsed = todos.flatMap((todo, index) => {
+    if (typeof todo !== "object" || todo === null) {
+      return [];
+    }
+    const entry = todo as Record<string, unknown>;
+    const content = asString(entry.content) ?? `Todo ${index + 1}`;
+    const id = asString(entry.id) ?? `todo-${index + 1}`;
+    const status =
+      entry.status === "cancelled" ||
+      entry.status === "completed" ||
+      entry.status === "in_progress" ||
+      entry.status === "pending"
+        ? entry.status
+        : "pending";
+    return [{ content, id, status } satisfies WebviewTodo];
+  });
+  return parsed.length > 0 ? parsed : undefined;
+}
+
+function createPlanCardFromTool(
+  item: WebviewToolCard,
+  options: {
+    currentPlanId?: string | null;
+    currentPlanState?: WebviewPlanState | null;
+    planTodos?: WebviewTodo[];
+  },
+): WebviewPlanFileCard | null {
+  if (item.toolName !== "create_plan" || item.isError) {
+    return null;
+  }
+  const creating = isRunning(item);
+  if (!creating && item.status !== "complete") {
+    return null;
+  }
+  const path = planPathForTool(item);
+  if (!path) {
+    return null;
+  }
+  const isActivePlan = !!item.planId && item.planId === options.currentPlanId;
+  const argTodos = createPlanTodosFromArgs(item.args);
+  const ambientTodos = options.planTodos && options.planTodos.length > 0 ? options.planTodos : undefined;
+  return {
+    id: item.id,
+    overview: item.planActivity?.overview ?? undefined,
+    path,
+    planId: item.planId ?? null,
+    state: isActivePlan ? options.currentPlanState ?? item.planActivity?.stateAfter ?? null : item.planActivity?.stateAfter ?? null,
+    title: item.planActivity?.title ?? asString(item.args?.goal) ?? undefined,
+    todos: isActivePlan ? ambientTodos ?? argTodos : argTodos,
+    type: "plan",
+  };
+}
+
+export function isRunning(item: WebviewToolCard): boolean {
+  return (item.status === "running" || item.status === "streaming") && !item.isError;
 }
 
 function formatToolSummary(summary: string | undefined): string | undefined {
@@ -92,8 +155,40 @@ export function toolCategory(toolName: string): ToolCategory {
 }
 
 export function isActionTool(item: WebviewToolCard): boolean {
+  if (isPlanTool(item)) {
+    return true;
+  }
   const category = toolCategory(item.toolName);
   return category === "answer" || category === "command" || category === "edit";
+}
+
+function buildPlanUpdateLabel(item: WebviewToolCard): string {
+  if (isRunning(item)) {
+    return "Updating plan";
+  }
+  const activity = item.planActivity;
+  if (!activity || activity.kind !== "update") {
+    return "Updated plan";
+  }
+  const hasProgress =
+    typeof activity.completed === "number" && typeof activity.total === "number";
+  const progressSuffix = hasProgress ? ` · ${activity.completed}/${activity.total}` : "";
+  if (
+    activity.stateBefore &&
+    activity.stateAfter &&
+    activity.stateBefore !== activity.stateAfter
+  ) {
+    return `Plan: ${activity.stateBefore} → ${activity.stateAfter}${progressSuffix}`;
+  }
+  if ((activity.checked ?? 0) > 0) {
+    return hasProgress
+      ? `Checked ${activity.checked} · ${activity.completed}/${activity.total}`
+      : `Checked ${activity.checked}`;
+  }
+  if ((activity.applied ?? 0) > 0) {
+    return hasProgress ? `Updated plan · ${activity.completed}/${activity.total}` : "Updated plan";
+  }
+  return "Updated plan";
 }
 
 function countResults(summary: string | undefined): number | null {
@@ -168,6 +263,10 @@ export function buildFlatLabel(item: WebviewToolCard): string {
     }
   }
 
+  if (item.isError && isPlanTool(item)) {
+    return `${item.toolName} failed`;
+  }
+
   switch (item.toolName) {
     case "read":
     case "read_file":
@@ -229,7 +328,7 @@ export function buildFlatLabel(item: WebviewToolCard): string {
       return running ? "Creating plan" : "Created plan";
     }
     case "update_plan": {
-      return running ? "Updating plan" : "Updated plan";
+      return buildPlanUpdateLabel(item);
     }
     case "todos":
       return running ? "Updating todos" : "Updated todos";
@@ -281,6 +380,9 @@ export function buildToolCollectionTitle(tools: WebviewToolCard[]): string {
 }
 
 export function hasMeaningfulContent(item: WebviewToolCard): boolean {
+  if (isPlanTool(item) && !item.isError) {
+    return false;
+  }
   const summary = formatToolSummary(item.summary);
   if (
     toolCategory(item.toolName) === "edit" &&
@@ -503,6 +605,33 @@ function parseAskQuestionResult(summary: string | undefined): AskQuestionResult 
   }
 }
 
+function renderPlanActionLink(
+  path: string | undefined,
+  onOpenPlanFile: ((path: string) => void) | undefined,
+): ReactNode {
+  if (!path || !onOpenPlanFile) {
+    return null;
+  }
+  return (
+    <button
+      className="tc-tool-row__action-link tc-tool-row__action-link--plan"
+      data-testid="view-plan"
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onOpenPlanFile(path);
+      }}
+      type="button"
+    >
+      <span className="tc-tool-row__action-link-text">View Plan</span>
+      <span
+        aria-hidden="true"
+        className="codicon codicon-chevron-right tc-tool-row__action-link-chevron"
+      />
+    </button>
+  );
+}
+
 function renderPlainBody(item: WebviewToolCard): ReactNode {
   return (
     <>
@@ -518,9 +647,11 @@ function renderPlainBody(item: WebviewToolCard): ReactNode {
 function renderFlatContent(
   item: WebviewToolCard,
   onOpenFile: (path: string) => void,
+  onOpenPlanFile?: (path: string) => void,
 ): ReactNode {
   const args = item.args ?? {};
   const filePath = filePathForTool(item);
+  const planPath = planPathForTool(item);
   const category = toolCategory(item.toolName);
   const diffStat = item.diffStat;
 
@@ -570,6 +701,14 @@ function renderFlatContent(
     case "context":
     case "other":
       switch (item.toolName) {
+        case "create_plan":
+        case "update_plan":
+          return (
+            <span className="tc-tool-row__inline">
+              <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>
+              {isRunning(item) || item.isError ? null : renderPlanActionLink(planPath, onOpenPlanFile)}
+            </span>
+          );
         case "grep": {
           const resultsCount = countResults(item.summary);
           const suffix =
@@ -684,14 +823,32 @@ function shouldShowBodyByDefault(
 }
 
 export function ToolRow({
+  availableModels = [],
+  buildModel = "",
+  canBuildPlan = false,
+  currentPlanId = null,
+  currentPlanState = null,
   item,
+  onBuildPlan,
   onOpenFile,
   onOpenDiff,
+  onOpenPlanFile,
+  onSetBuildModel,
+  planTodos = [],
   variant = "standalone",
 }: {
+  availableModels?: string[];
+  buildModel?: string;
+  canBuildPlan?: boolean;
+  currentPlanId?: string | null;
+  currentPlanState?: WebviewPlanState | null;
   item: WebviewToolCard;
+  onBuildPlan?(planId: string | null, path: string): void;
   onOpenFile(path: string): void;
   onOpenDiff?(toolCallId: string): void;
+  onOpenPlanFile?(path: string): void;
+  onSetBuildModel?(modelId: string): void;
+  planTodos?: WebviewTodo[];
   variant?: "grouped" | "standalone";
 }) {
   const category = toolCategory(item.toolName);
@@ -713,7 +870,31 @@ export function ToolRow({
     }
   }, [shouldExpandByDefault, userInteracted]);
 
+  const createPlanCard = useMemo(
+    () =>
+      createPlanCardFromTool(item, {
+        currentPlanId,
+        currentPlanState,
+        planTodos,
+      }),
+    [currentPlanId, currentPlanState, item, planTodos],
+  );
   const iconClass = useMemo(() => toolIconClass(item.toolName), [item.toolName]);
+  if (createPlanCard) {
+    return (
+      <PlanFileCard
+        availableModels={availableModels}
+        buildModel={buildModel}
+        canBuild={canBuildPlan}
+        creating={isRunning(item)}
+        item={createPlanCard}
+        onBuild={(planId, path) => onBuildPlan?.(planId, path)}
+        onOpenPlanFile={(path) => onOpenPlanFile?.(path)}
+        onSetBuildModel={onSetBuildModel}
+        planTodos={planTodos}
+      />
+    );
+  }
   const shellClassName =
     variant === "grouped"
       ? "tc-tool-row-shell tc-tool-row-shell--grouped tc-thinking-tool-wrapper"
@@ -857,7 +1038,7 @@ export function ToolRow({
           <>
             <div className="tc-tool-row__header">
               <span className="tc-tool-row__label" data-testid="tool-row-label">
-                {renderFlatContent(item, onOpenFile)}
+                {renderFlatContent(item, onOpenFile, onOpenPlanFile)}
                 {isRunning(item) ? (
                   <span
                     aria-hidden="true"

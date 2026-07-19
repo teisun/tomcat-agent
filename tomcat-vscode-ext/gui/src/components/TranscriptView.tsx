@@ -4,22 +4,19 @@ import { selectActiveTodoSource } from "../hooks/useActiveTodoProgress";
 import type {
   AskQuestionResult,
   WebviewCheckpoint,
-  WebviewPlanFileCard,
   WebviewPlanState,
   WebviewTimelineItem,
   WebviewTodo,
-  WebviewToolCard,
 } from "../types";
 import { ApprovalCard } from "./ApprovalCard";
 import { BoundaryBlock } from "./BoundaryBlock";
 import { CheckpointMarker } from "./CheckpointMarker";
 import { injectCheckpointMarkers } from "./checkpointMarkers";
 import { MessageBubble } from "./MessageBubble";
-import { PlanFileCard } from "./PlanFileCard";
 import { ProgressRow } from "./ProgressRow";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ThinkingGroup } from "./ThinkingGroup";
-import { isActionTool, isSuppressedPlanToolRow, ToolRow } from "./ToolRow";
+import { isActionTool, ToolRow } from "./ToolRow";
 import {
   groupTimelineByAssistantResponse,
   type AssistantResponseGroup,
@@ -35,44 +32,6 @@ export type AssistantRenderEntry =
       tool: Extract<WebviewTimelineItem, { type: "tool" }>;
       type: "action-tool";
     };
-
-function asString(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function isPlanWorkflowTool(tool: WebviewToolCard): boolean {
-  return (
-    tool.toolName === "create_plan" ||
-    tool.toolName === "update_plan" ||
-    tool.display?.kind === "plan"
-  );
-}
-
-function isRunningPlanTool(item: WebviewTimelineItem): item is WebviewToolCard {
-  return (
-    item.type === "tool" &&
-    !item.isError &&
-    (item.status === "running" || item.status === "streaming") &&
-    isPlanWorkflowTool(item)
-  );
-}
-
-function toolPlanId(tool: WebviewToolCard): string | null {
-  return asString(tool.args?.plan_id) ?? asString(tool.args?.planId);
-}
-
-function toolPlanPath(tool: WebviewToolCard): string | null {
-  return tool.display?.kind === "plan" ? tool.display.plan : asString(tool.args?.path);
-}
-
-function matchesPlanCard(tool: WebviewToolCard, item: WebviewPlanFileCard): boolean {
-  const candidatePlanId = toolPlanId(tool);
-  if (candidatePlanId && item.planId && candidatePlanId === item.planId) {
-    return true;
-  }
-  const candidatePath = toolPlanPath(tool);
-  return candidatePath === item.path;
-}
 
 export function partitionAssistantResponseGroup(
   group: AssistantResponseGroup,
@@ -138,6 +97,7 @@ export function TranscriptView({
   onRestoreCheckpoint,
   onRetryUserMessage,
   onSetBuildModel,
+  planId,
   planState,
   planTodos = [],
   sessionTodos = [],
@@ -158,6 +118,7 @@ export function TranscriptView({
   onRestoreCheckpoint?(checkpointId: string): void;
   onRetryUserMessage?(messageId: string): void;
   onSetBuildModel?(modelId: string): void;
+  planId?: string | null;
   planState?: WebviewPlanState | null;
   planTodos?: WebviewTodo[];
   sessionTodos?: WebviewTodo[];
@@ -179,18 +140,6 @@ export function TranscriptView({
     const clusterLastThinkingId = showProgress
       ? [...clusterTimeline].reverse().find((item) => item.type === "thinking")?.id ?? null
       : null;
-    const activePlanTools = clusterTimeline.filter(isRunningPlanTool);
-    const planCards = clusterTimeline.filter(
-      (item): item is WebviewPlanFileCard => item.type === "plan",
-    );
-    const latestPlanCardId = [...planCards].reverse()[0]?.id ?? null;
-    const matchedPlanCardIds = new Set(
-      planCards
-        .filter((item) => activePlanTools.some((tool) => matchesPlanCard(tool, item)))
-        .map((item) => item.id),
-    );
-    const shouldFallbackToLatestPlanCard =
-      activePlanTools.length > 0 && matchedPlanCardIds.size === 0;
 
     const renderTimelineItem = (item: WebviewTimelineItem) => {
       switch (item.type) {
@@ -223,35 +172,25 @@ export function TranscriptView({
             />
           );
         case "tool":
-          if (isSuppressedPlanToolRow(item)) {
-            return null;
-          }
           return (
             <ToolRow
-              item={item}
-              key={item.id}
-              onOpenDiff={onOpenDiff}
-              onOpenFile={onOpenFile}
-            />
-          );
-        case "plan":
-          return (
-            <PlanFileCard
               availableModels={availableModels}
               buildModel={buildModel}
-              canBuild={canBuildPlan}
-              creating={
-                matchedPlanCardIds.has(item.id) ||
-                (shouldFallbackToLatestPlanCard && latestPlanCardId === item.id)
-              }
+              canBuildPlan={canBuildPlan}
+              currentPlanId={planId}
+              currentPlanState={planState}
               item={item}
               key={item.id}
-              onBuild={onBuildPlan}
+              onBuildPlan={onBuildPlan}
+              onOpenDiff={onOpenDiff}
+              onOpenFile={onOpenFile}
               onOpenPlanFile={onOpenPlanFile}
               onSetBuildModel={onSetBuildModel}
               planTodos={planTodos}
             />
           );
+        case "plan":
+          return null;
         case "approval":
           return <ApprovalCard item={item} key={item.id} onAnswer={onAnswer} />;
       }
@@ -275,25 +214,31 @@ export function TranscriptView({
               if (segment.type === "action-tool") {
                 return (
                   <ToolRow
+                    availableModels={availableModels}
+                    buildModel={buildModel}
+                    canBuildPlan={canBuildPlan}
+                    currentPlanId={planId}
+                    currentPlanState={planState}
                     item={segment.tool}
                     key={`group-action-${segment.tool.id}`}
+                    onBuildPlan={onBuildPlan}
                     onOpenDiff={onOpenDiff}
                     onOpenFile={onOpenFile}
+                    onOpenPlanFile={onOpenPlanFile}
+                    onSetBuildModel={onSetBuildModel}
+                    planTodos={planTodos}
                   />
                 );
               }
               const hasThinkingText = Boolean(segment.group.thinking?.text.trim());
-              const renderableTools = segment.group.tools.filter(
-                (tool) => !isSuppressedPlanToolRow(tool),
-              );
-              if (renderableTools.length === 0 && !hasThinkingText) {
+              if (segment.group.tools.length === 0 && !hasThinkingText) {
                 return null;
               }
-              if (renderableTools.length === 1 && !hasThinkingText) {
+              if (segment.group.tools.length === 1 && !hasThinkingText) {
                 return (
                   <ToolRow
-                    item={renderableTools[0]}
-                    key={`group-context-standalone-${renderableTools[0].id}`}
+                    item={segment.group.tools[0]}
+                    key={`group-context-standalone-${segment.group.tools[0].id}`}
                     onOpenDiff={onOpenDiff}
                     onOpenFile={onOpenFile}
                   />

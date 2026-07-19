@@ -70,12 +70,12 @@ main.tsx
 | [`gui/src/main.tsx`](../../../gui/src/main.tsx) | 挂载 React root，拿 `acquireVsCodeApi()` | 无宿主时回退到 no-op `vscodeApi`，方便 `vite` 独立调试。 |
 | [`gui/src/App.tsx`](../../../gui/src/App.tsx) | 接 `state` 帧、发 intent、组装整个页面 | 统一处理 `ready` / `prompt` / `setModel` / `setPlanMode` / `openFile` / `openDiff` / `restoreCheckpoint` 等 transcript 相关意图，挂载 `RestoreConfirmDialog`，并在 restore 后把被截断轮次的 prompt 回填到 composer。 |
 | [`gui/src/components/SessionBar.tsx`](../../../gui/src/components/SessionBar.tsx) | 顶部会话选择栏 | 下拉显示 `sessionId + isCurrent/owner/busy` 元信息；右侧 `New / Refresh / Close`。 |
-| [`gui/src/components/TranscriptView.tsx`](../../../gui/src/components/TranscriptView.tsx) | timeline 分发器 + assistant-response 二次分层 | 输入是 **raw timeline + checkpoints**：先在组件顶部 `useMemo(injectCheckpointMarkers(timeline, checkpoints))` 临时投影出 checkpoint marker，再按 `message / checkpoint / thinking / tool / approval / plan` 6 种一等项分发；assistant 回复内部继续拆成 `action` 恒显行和 `context` 折叠盒；单个无 thinking 的 context 工具会直接扁平渲染。 |
+| [`gui/src/components/TranscriptView.tsx`](../../../gui/src/components/TranscriptView.tsx) | timeline 分发器 + assistant-response 二次分层 | 输入是 **raw timeline + checkpoints**：先在组件顶部 `useMemo(injectCheckpointMarkers(timeline, checkpoints))` 临时投影出 checkpoint marker，再按 `message / checkpoint / thinking / tool / approval` 5 种一等项分发；旧 `type:"plan"` 只作兼容输入并在 render 层忽略。assistant 回复内部继续拆成 `action` 恒显行和 `context` 折叠盒；`create_plan / update_plan` 也属于恒显 `action`，因此不会再被折叠藏起。 |
 | [`gui/src/components/CheckpointMarker.tsx`](../../../gui/src/components/CheckpointMarker.tsx) | transcript 中的 checkpoint 分隔条 | 不直接改状态，只负责把后端 checkpoint 元数据投影成可点击 marker，并把点击事件抛回 `App.tsx`。 |
 | [`gui/src/components/RestoreConfirmDialog.tsx`](../../../gui/src/components/RestoreConfirmDialog.tsx) | restore 确认浮层 | 承接 `Revert` / `Don't revert` / `Cancel` 三态，键盘语义与焦点圈定都在这一层完成。 |
 | [`gui/src/components/ThinkingBlock.tsx`](../../../gui/src/components/ThinkingBlock.tsx) | thinking 折叠卡 | 默认折叠；流式时标题显示 `Thinking...` 脉冲动画。 |
-| [`gui/src/components/ThinkingGroup.tsx`](../../../gui/src/components/ThinkingGroup.tsx) | “思考/上下文”折叠盒 | 只容纳 thinking + context/other 工具，默认收起；只有确实还挂着工具时才采信 `summaryTitle`，避免和独立 action 行重复。 |
-| [`gui/src/components/ToolRow.tsx`](../../../gui/src/components/ToolRow.tsx) | 统一工具行 | 用 `toolCategory()` 把工具分成 `edit / command / answer / context / other`，再决定图标、徽章、扁平样式、展开规则与内容体。 |
+| [`gui/src/components/ThinkingGroup.tsx`](../../../gui/src/components/ThinkingGroup.tsx) | “思考/上下文”折叠盒 | 只容纳 thinking + context/other 工具，默认收起；当 action 工具被拎出去后，thinking-only 残组仍可直接显示 `summaryTitle`，保住“这一轮在做什么”的目的句。 |
+| [`gui/src/components/ToolRow.tsx`](../../../gui/src/components/ToolRow.tsx) | 统一工具行 | 用 `toolCategory()` 把工具分成 `edit / command / answer / context / other`，再决定图标、徽章、扁平样式、展开规则与内容体；其中 `create_plan / update_plan` 额外走 `isActionTool()`，前者完成后升格成 pinned `PlanFileCard`，后者渲染增量事件行。 |
 | [`gui/src/components/DisclosureCard.tsx`](../../../gui/src/components/DisclosureCard.tsx) | 内容无关的折叠外壳 | 只管 header / preview / expanded body / 左侧状态条，不关心里面是 terminal 还是 diff。 |
 | [`gui/src/components/TerminalOutput.tsx`](../../../gui/src/components/TerminalOutput.tsx) | 命令输出体 | 负责等宽输出渲染与 `tail(n)` 预览；可选 `command` prop 会在输出前加一行 `$ <命令>` 提示行（终端观感）。 |
 | [`gui/src/components/DiffView.tsx`](../../../gui/src/components/DiffView.tsx) | 结构化 diff 输出体 | 把核心下发的 `FileDiffLine[]` 渲染成行号列、加删底色、长 context 折叠与大文件 fallback。 |
@@ -177,7 +177,9 @@ timeline 类型：
 | `thinking` | 历史 `thinking_trace` / `message.thinking_text` / `reasoning_continuation.fallback_text`；实时 `thinking_delta` | `ThinkingBlock` | 与 assistant 平级，保证“先思考、再回答”。 |
 | `tool` | 实时 `tool_execution_*`；历史 `role:tool` | `ToolRow` / `ThinkingGroup` | timeline 里仍是一等 `tool` 项，但 assistant 回复内部会二次分层成 `action` 恒显行 与 `context` 折叠盒。 |
 | `approval` | `control_request.ask_question` | `ApprovalCard` | 宿主 resolve 后 `resolved=true`，UI 自动消失。 |
-| `plan` | `plan.*` 事件 | `PlanFileCard` | transcript 内保留 plan 文件足迹；执行中的 todo 状态另由底部 `TodoListWidget` 承接。 |
+| `boundary` | `branch_summary(isBoundary=true)` | `BoundaryBlock` | 历史压缩边界，说明前文已被总结折叠。 |
+
+补充一条最容易误解的规则：`plan.*` 事件**不再**在 transcript 里生成独立 `plan` 项。它们主要更新 `session.planFile / planState / planTodos` 这份 ambient 当前态；真正可见的 transcript 足迹由 `create_plan / update_plan` 工具事件承担。唯一和“卡片何时出现”直接相关的例外是：`plan.create` 一到，`state.ts` 会把 `path/planId` 盖到**正在 running 的 `create_plan` 工具**上，借此提前解锁同一张 `PlanFileCard` 的 pending 视觉，但底层仍然没有额外 `type:"plan"` 时间线项。
 
 ### 4.1 历史水合：`hydrateHistory()`
 
@@ -192,7 +194,7 @@ timeline 类型：
    - 再把历史 `role:"tool"` 映射成 `WebviewToolCard`，保留 `toolCallId` 和工具名。
 
 3. **checkpoint 边界不再写回 host timeline，而是在 GUI 渲染前临时投影**
-   - `state.ts.setCheckpoints()` 现在只更新 `session.checkpoints`，不再触发 `rebuildHistoryTimeline()`；`state.ts` 里的 raw `timeline` 只保留 message / thinking / tool / plan / approval / boundary 等“事实节点”。
+  - `state.ts.setCheckpoints()` 现在只更新 `session.checkpoints`，不再触发 `rebuildHistoryTimeline()`；`state.ts` 里的 raw `timeline` 只保留 message / thinking / tool / approval / boundary 等“事实节点”。旧 `type:"plan"` 若从历史/缓存漏进来，只在 GUI render 层当 legacy 输入忽略，不再参与新模型。
    - `TranscriptView.tsx` 在 render 前执行 `useMemo(injectCheckpointMarkers(timeline, checkpoints))`；若锚点 assistant 只有 tool/thinking、没有正文 message，则回退 `${messageAnchor}-thinking`，保证 marker 仍能落在下一条 user message 之前。
    - 这让 `refreshCheckpoints()` 对 live timeline 没有副作用：它只换一份 checkpoint 数据，最新一轮 user/assistant 不会因“刷 marker”被重建丢失。
    - marker 是否存在仍由后端 `list_checkpoints` 真相决定；后端计数现改为 `git ls-files --cached --others --exclude-standard`，所以 `.gitignore` 与 `DEFAULT_EXCLUDE_RULES`（如 `target/` / `node_modules/`）都不会误占上限，而“只改 ignored 文件”的 turn 也不会新建 marker。
@@ -212,13 +214,14 @@ message  -> message:id + message:text
 thinking -> thinking:id + thinking:text
 tool     -> tool:toolCallId
 approval -> approval:requestId
-plan     -> plan:path:planId:state
+boundary -> boundary:id
 ```
 
 `hydrateHistory()` 先产出 history items，再用上面的 merge keys 过滤掉已被历史覆盖的 live items，因此：
 
 - assistant / thinking 仍可在不同 ID 场景下靠文本兜底去重；
-- tool / approval / plan 走稳定业务 key；
+- tool / approval / boundary 走稳定业务 key；
+- `create_plan` 富卡虽然视觉上像“卡片”，但底层仍是 `tool:toolCallId`，因此天然继承了历史/实时 merge 的稳定锚点，不再需要额外的 plan find-or-push 逻辑；
 - “先思考再回答”顺序可以在历史与实时两条路径上统一。
 
 ### 4.3 实时流式：`appendStreamingMessage()`
@@ -242,12 +245,14 @@ plan     -> plan:path:planId:state
 assistant response group
   ├─ preamble message
   ├─ [ThinkingGroup]
-  │    └─ thinking + context/other tools (collapsed)
+  │    └─ thinking + context tools (collapsed)
   ├─ [ToolRow standalone] edit / write / hashline_edit
   ├─ [ToolRow standalone] bash / shell / execute_command
   ├─ [ToolRow standalone] ask_question
+  ├─ [ToolRow standalone] create_plan  -> complete 时升格为 PlanFileCard
+  ├─ [ToolRow standalone] update_plan  -> Checked N / state transition / fallback
   └─ [ThinkingGroup]
-       └─ trailing context/other tools (collapsed)
+       └─ trailing context tools (collapsed)
 ```
 
 冲刷算法（flush）：
@@ -265,7 +270,7 @@ assistant response group
 - `command`：`bash / shell / execute_command`
 - `answer`：`ask_question`
 - `context`：`read / read_file / grep / search_files / search_workspace / list_dir / web_search / web_fetch / load_skill`
-- `other`：`create_plan / update_plan / todos / config_get / config_set` 等无专属 UI 的工具
+- `other`：`todos / config_get / config_set` 等无专属 UI 的工具；`create_plan / update_plan` 虽然仍属 `other` 语义，但被 `isActionTool()` 单独提升成恒显 action，不再留在折叠组里。
 
 这样做的结果是：
 
@@ -381,16 +386,18 @@ ToolRow
    - `read/search/web_*` 等保持小图标 + 描述色的一行摘要。
    - 连续多个会被 `ThinkingGroup` 收纳，避免 transcript 变成工具日志墙；单个无 thinking 的 context 工具直接扁平显示，保留 `FileChip` 与配色。
    - `read / read_file` 前导图标改成 `codicon-eye`，避免和 Markdown `FileChip` 的书本图标撞语义。
-  - `create_plan / update_plan` 在 grouped 场景采用 Variant B：分组头仍可显示 `Creating plan`（或更具体的 thinking summary），但 transcript 里任何**非 error** 的 plan 工具行都会被抑制，避免“分组头 + 内层行”双重重复。关键点是抑制判据不能只看 `display.kind === "plan"`，因为运行中的 plan 工具直到 `tool_execution_end` 才拿到 `display`；真正可靠的真源是 `toolName === create_plan/update_plan`（再兼容结束态 `display.kind === "plan"`）。
+  - `create_plan / update_plan` 不再走 Variant B 抑制逻辑：两者都被提升成恒显 action。`create_plan` 启动瞬间因为还没有 `path` 会先保持空；等 `plan.create`（写盘完成）把 `path/planId` 盖到运行中的工具上后，同一条工具立即升格成旧样式的 pending `PlanFileCard`，完成后无缝切成正常 pinned `PlanFileCard`；`update_plan` 始终保留一条增量行（`Checked N · x/total` / `Plan: before → after` / `Updated plan` 回退），并带 `View Plan` 入口。
 
 5. **plan 卡片**
-   - `PlanFileCard` 始终是 plan 文件的正式足迹：文件名、语义标题、todo 数、`View Plan / Build` 都在这里。
-   - 当 `create_plan / update_plan` 仍处于 `running / streaming` 时，卡片底部 `View Plan` 会切成呼吸省略号按钮（disabled + `aria-busy=true`）；完成后恢复普通 `View Plan`。卡片优先按 `planId` 与运行中的工具匹配；只有工具暂时拿不到 `planId/path` 时，才兜底点亮当前 cluster 里的最新 plan 卡。
+  - `PlanFileCard` 现在由 `create_plan` 工具事件承载：`tool_execution_start` 阶段若尚无 `path` 不会画假卡；等 `plan.create` 到来（文件已落盘）后，running 工具被盖上 `planPath/planId`，于是创建中保留旧的 `view-plan-pending` 点点点 footer，完成后展示文件名、语义标题、todo 总数、`View Plan / Build`，位置固定在创建那一轮。
+   - 运行态职责拆分为：`create_plan` 继续沿用卡片自己的 pending 视觉，`update_plan` 的运行/增量反馈则落到事件行（`Updating plan ...` / `Checked N · x/total`）。
+   - 卡片展示的“当前计划态”来自 ambient `planId / planState / planTodos`，所以后续 `plan.todos` / `plan.pending` 能刷新进度，但不会把卡片在 transcript 里搬来搬去。
+  - 事件行里的 `View Plan` 继续走扁平文本按钮，但现在会常显一条淡下划线并带一个小 chevron，hover 时文字与下划线一起提亮；而卡片 footer 里的 `View Plan` 则只补 hover 变白，不额外引入复杂装饰，保持现有 UI 语言。
 
 还有三个实现细节很关键：
 
 - 结果体仍是懒挂载，展开前不进 DOM，减少长输出的布局压力。
-- thinking-only 残组不会继续拿 `summaryTitle` 当折叠标题，避免命令标题在 action 行和折叠头各出现一次。
+- thinking-only 残组若带 `summaryTitle` 会直接显示目的句；因为高信号 action 已经被拎出去，保留这句能告诉用户“这一轮为什么做这些动作”，不会再和 plan/action 行形成同词回声。
 - `DisclosureCard` 是内容无关外壳，terminal / diff 细节全部留给 `TerminalOutput` / `DiffView`；这比在一个万能组件里堆 `mode` 开关更稳。
 - transcript 外层 `.tc-stream` 现在只允许**纵向**滚动；消息文本、cluster 容器和其直接子节点都强制 `min-width: 0` + `overflow-wrap: anywhere`，所以 Markdown 里的长横杠分隔线、长文件名或其他无空格 token 只会在局部断行，不会再把整条 transcript 横向撑出视口。真正需要横向滚的只有 diff / terminal / code block 这类局部内容体。
 

@@ -94,7 +94,7 @@ describe("partitionAssistantResponseGroup", () => {
     expect(entries.map((entry) => entry.type)).toEqual(["context-group", "action-tool"]);
   });
 
-  it("keeps a plan workflow tool inside a context segment so the plan card can own the UX", () => {
+  it("promotes a plan workflow tool to an action segment so ToolRow can own the UX", () => {
     const entries = partitionAssistantResponseGroup(
       buildGroup({
         tools: [
@@ -114,10 +114,8 @@ describe("partitionAssistantResponseGroup", () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
-      type: "context-group",
-      group: {
-        tools: [{ id: "plan-1", toolName: "create_plan" }],
-      },
+      type: "action-tool",
+      tool: { id: "plan-1", toolName: "create_plan" },
     });
   });
 

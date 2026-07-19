@@ -125,6 +125,18 @@ export interface WebviewToolDiffStat {
   removed: number;
 }
 
+export interface WebviewPlanActivity {
+  applied?: number;
+  checked?: number;
+  completed?: number;
+  kind: "create" | "update";
+  overview?: string | null;
+  stateAfter?: ParticipantPlanState | null;
+  stateBefore?: ParticipantPlanState | null;
+  title?: string | null;
+  total?: number;
+}
+
 export interface WebviewToolCard {
   args?: Record<string, unknown>;
   assistantMessageId?: string;
@@ -133,6 +145,9 @@ export interface WebviewToolCard {
   diffStat?: WebviewToolDiffStat;
   id: string;
   isError: boolean;
+  planActivity?: WebviewPlanActivity;
+  planId?: string | null;
+  planPath?: string | null;
   status: WebviewToolStatus;
   summary?: string;
   /** utility-flash 异步生成的命令"目的"短句（bash 卡片标题）；live-only。 */

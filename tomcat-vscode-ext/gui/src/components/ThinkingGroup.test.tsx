@@ -239,7 +239,7 @@ describe("ThinkingGroup", () => {
     );
   });
 
-  it("ignores summaryTitle when the group only contains thinking text", () => {
+  it("shows summaryTitle when the group only contains thinking text", () => {
     render(
       <ThinkingGroup
         group={buildGroup({
@@ -256,17 +256,17 @@ describe("ThinkingGroup", () => {
       />,
     );
 
-    expect(screen.getByTestId("thinking-group-title").textContent).toBe("Thinking");
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe("Ran wc -l README.md");
   });
 
-  it("keeps the grouped plan header but hides the inner non-error plan tool row", () => {
+  it("does not apply any extra suppression when a plan tool is explicitly grouped", () => {
     render(
       <ThinkingGroup
         group={buildGroup({
           thinking: {
             assistantMessageId: "assistant-1",
             id: "think-1",
-            summaryTitle: "Creating plan",
+            summaryTitle: "Updated plan for transcript cleanup",
             text: "Let me structure the work first.",
             type: "thinking",
           },
@@ -275,22 +275,32 @@ describe("ThinkingGroup", () => {
               assistantMessageId: "assistant-1",
               id: "tool-plan",
               isError: false,
-              status: "streaming",
-              summary: "Creating plan",
+              planActivity: {
+                checked: 1,
+                completed: 2,
+                kind: "update",
+                total: 4,
+              },
+              planId: "plan-1",
+              planPath: "/tmp/demo.plan.md",
+              status: "complete",
+              summary: "{\"applied\":1}",
               toolCallId: "tc-plan",
-              toolName: "create_plan",
+              toolName: "update_plan",
               type: "tool",
             },
           ],
         })}
-        isStreaming
         onOpenFile={vi.fn()}
       />,
     );
 
-    expect(screen.getByTestId("thinking-group-title").textContent).toBe("Creating plan");
+    fireEvent.click(screen.getByTestId("thinking-group-toggle"));
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe(
+      "Updated plan for transcript cleanup",
+    );
     expect(screen.getByTestId("thinking-group-body").textContent).toContain("structure the work");
-    expect(screen.queryByTestId("tool-row")).toBeNull();
+    expect(screen.getByTestId("tool-row").textContent).toContain("Checked 1 · 2/4");
   });
 
   it("still renders failed plan tool rows for debugging feedback", () => {
@@ -315,6 +325,7 @@ describe("ThinkingGroup", () => {
     );
 
     fireEvent.click(screen.getByTestId("thinking-group-toggle"));
-    expect(screen.getByTestId("tool-row").textContent).toContain("Updated plan");
+    expect(screen.getByTestId("tool-row").textContent).toContain("update_plan failed");
+    expect(screen.getByTestId("tool-row-body").textContent).toContain("Unable to update plan");
   });
 });

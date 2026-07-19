@@ -3277,14 +3277,72 @@ export async function assertWebviewPlanToolUxFlow(
     api,
     "webview-plan-tool-ux-session",
   );
+  const planId = "plan-tool-ux";
+  const planPath = `/tmp/${planId}.plan.md`;
+  const renderPlanMarkdown = (
+    todos: Array<{ content: string; id: string; status: "completed" | "pending" }>,
+  ) =>
+    [
+      "---",
+      `plan_id: ${planId}`,
+      "name: Plan tool ux",
+      "overview: Keep one create card and many update rows.",
+      "state: planning",
+      "todos:",
+      ...todos.flatMap((todo) => [
+        `- id: ${todo.id}`,
+        `  content: ${todo.content}`,
+        `  status: ${todo.status}`,
+      ]),
+      "---",
+      "",
+      "# Plan tool ux",
+      "",
+      "Keep one create card and many update rows.",
+      "",
+    ].join("\n");
+  const initialTodos = [
+    { content: "Draft the immutable create card", id: "todo-1", status: "pending" as const },
+    { content: "Render update rows", id: "todo-2", status: "pending" as const },
+    { content: "Guard against drift", id: "todo-3", status: "pending" as const },
+  ];
+  const afterFirstUpdateTodos = [
+    { content: "Draft the immutable create card", id: "todo-1", status: "completed" as const },
+    { content: "Render update rows", id: "todo-2", status: "pending" as const },
+    { content: "Guard against drift", id: "todo-3", status: "pending" as const },
+  ];
+  const afterSecondUpdateTodos = [
+    { content: "Draft the immutable create card", id: "todo-1", status: "completed" as const },
+    { content: "Render update rows", id: "todo-2", status: "completed" as const },
+    { content: "Guard against drift", id: "todo-3", status: "pending" as const },
+  ];
+  await fs.mkdir(path.dirname(planPath), { recursive: true });
+  await fs.writeFile(planPath, renderPlanMarkdown(initialTodos), "utf8");
 
-  await api.__testing.sendWebviewIntent(
-    buildWebviewIntent({
-      data: { sessionId, text: "plan tool ux" },
-      messageId: "webview-plan-tool-ux-prompt",
-      type: "prompt",
-    }),
-  );
+  await api.__testing.injectServeEvent({
+    args: {
+      draft: "Keep one create card and many update rows.",
+      goal: "Plan tool ux",
+      todos: initialTodos,
+    },
+    sessionId,
+    toolCallId: "plan-create-1",
+    toolName: "create_plan",
+    type: "tool_execution_start",
+  });
+  await api.__testing.injectServeEvent({
+    path: planPath,
+    planId,
+    sessionId,
+    state: "planning",
+    type: "plan.create",
+  });
+  await api.__testing.injectServeEvent({
+    planId,
+    sessionId,
+    todos: initialTodos,
+    type: "plan.todos",
+  });
 
   const pending = await waitForWebviewDomSnapshot(
     api,
@@ -3295,48 +3353,163 @@ export async function assertWebviewPlanToolUxFlow(
         ? candidate
         : undefined,
     5_000,
-  ).catch(() => undefined);
-  if (pending) {
-    assert.ok(
-      pending.html.includes('data-testid="view-plan-pending"'),
-      "expected the plan card to show the busy View Plan affordance while update_plan is running",
-    );
-    assert.equal(
-      (pending.html.match(/>\s*Creating plan\s*</g) ?? []).length,
-      1,
-      "expected the running plan UX to show a single Creating plan label while the inner tool row stays hidden",
-    );
-  }
+  );
+  assert.equal(
+    pending.planCardCount,
+    1,
+    `expected the legacy pending plan card before create_plan completes, got ${pending.planCardCount}`,
+  );
+  assert.ok(
+    pending.html.includes('data-testid="view-plan-pending"'),
+    "expected the pending create_plan card to show the dot-state footer",
+  );
 
-  await waitForEvent(api, { type: "agent_end" });
+  await api.__testing.injectServeEvent({
+    isError: false,
+    result: JSON.stringify({
+      path: planPath,
+      plan_id: planId,
+      state: "planning",
+    }),
+    sessionId,
+    toolCallId: "plan-create-1",
+    toolName: "create_plan",
+    type: "tool_execution_end",
+  });
+
+  await api.__testing.injectServeEvent({
+    args: {
+      ops: [{ kind: "set_status", status: "completed", todo_id: "todo-1" }],
+      path: planPath,
+      plan_id: planId,
+    },
+    sessionId,
+    toolCallId: "plan-update-1",
+    toolName: "update_plan",
+    type: "tool_execution_start",
+  });
+  await api.__testing.injectServeEvent({
+    isError: false,
+    result: JSON.stringify({
+      applied: 1,
+      items: [
+        { id: "todo-1", status: "completed" },
+        { id: "todo-2", status: "pending" },
+        { id: "todo-3", status: "pending" },
+      ],
+      path: planPath,
+      plan_id: planId,
+      plan_state_after: "planning",
+      plan_state_before: "planning",
+    }),
+    sessionId,
+    toolCallId: "plan-update-1",
+    toolName: "update_plan",
+    type: "tool_execution_end",
+  });
+  await api.__testing.injectServeEvent({
+    planId,
+    sessionId,
+    todos: afterFirstUpdateTodos,
+    type: "plan.todos",
+  });
+  await fs.writeFile(planPath, renderPlanMarkdown(afterFirstUpdateTodos), "utf8");
+
+  await api.__testing.injectServeEvent({
+    args: {
+      ops: [{ kind: "set_status", status: "completed", todo_id: "todo-2" }],
+      path: planPath,
+      plan_id: planId,
+    },
+    sessionId,
+    toolCallId: "plan-update-2",
+    toolName: "update_plan",
+    type: "tool_execution_start",
+  });
+  await api.__testing.injectServeEvent({
+    isError: false,
+    result: JSON.stringify({
+      applied: 1,
+      items: [
+        { id: "todo-1", status: "completed" },
+        { id: "todo-2", status: "completed" },
+        { id: "todo-3", status: "pending" },
+      ],
+      path: planPath,
+      plan_id: planId,
+      plan_state_after: "planning",
+      plan_state_before: "planning",
+    }),
+    sessionId,
+    toolCallId: "plan-update-2",
+    toolName: "update_plan",
+    type: "tool_execution_end",
+  });
+  await api.__testing.injectServeEvent({
+    planId,
+    sessionId,
+    todos: afterSecondUpdateTodos,
+    type: "plan.todos",
+  });
+  await fs.writeFile(planPath, renderPlanMarkdown(afterSecondUpdateTodos), "utf8");
+
   const settled = await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
       candidate.planCardCount === 1 &&
+      candidate.toolTitles.some((title) => title.includes("Checked 1 · 1/3")) &&
+      candidate.toolTitles.some((title) => title.includes("Checked 1 · 2/3")) &&
       candidate.html.includes("View Plan")
         ? candidate
         : undefined,
     20_000,
   );
+  assert.equal(settled.planCardCount, 1, `expected a single plan card, got ${settled.planCardCount}`);
+  assert.ok(
+    settled.html.includes("Plan tool ux"),
+    "expected the completed create_plan card to keep the original title",
+  );
   assert.equal(
-    settled.groupFoldTitles.filter((title) => title === "Creating plan").length,
-    1,
-    `expected one grouped Creating plan header, got ${JSON.stringify(settled.groupFoldTitles)}`,
+    settled.planCardTodoCountText,
+    "3 todos",
+    `expected the pinned create_plan card to keep its original todo count, got ${settled.planCardTodoCountText}`,
+  );
+  assert.equal(
+    settled.toolTitles.filter((title) => title.includes("Checked 1 ·")).length,
+    2,
+    `expected two standalone update_plan event rows, got ${JSON.stringify(settled.toolTitles)}`,
   );
   assert.ok(
     !settled.toolTitles.some((title) => title.includes("Creating plan")),
-    `expected no inline plan tool row to repeat Creating plan, got ${JSON.stringify(settled.toolTitles)}`,
+    `expected the completed create_plan row to promote into the plan card, got ${JSON.stringify(settled.toolTitles)}`,
+  );
+  assert.ok(
+    !settled.groupFoldTitles.some(
+      (title) =>
+        title.includes("Creating plan")
+        || title.includes("Checked 1")
+        || title.includes("Updated plan"),
+    ),
+    `expected no folded thinking header to echo plan tool labels, got ${JSON.stringify(settled.groupFoldTitles)}`,
   );
   assert.ok(
     settled.html.includes("View Plan"),
     "expected View Plan to return after the plan tool finishes",
   );
-  assert.ok(
-    settled.latestUserTopWithinStream !== null &&
-      settled.planCardTopWithinStream !== null &&
-      settled.planCardTopWithinStream > settled.latestUserTopWithinStream,
-    `expected the live plan card to stay below the latest user message, got user=${String(settled.latestUserTopWithinStream)} plan=${String(settled.planCardTopWithinStream)}`,
+  await api.__testing.openPlanPreview(planPath);
+  const preview = await waitForPlanPreviewDom(
+    api,
+    planPath,
+    (snapshot) =>
+      snapshot.bodyHasContent &&
+      snapshot.todoItemCount === 3 &&
+      snapshot.todoStatuses.join(",") === "completed,completed,pending",
+  );
+  assert.deepEqual(
+    preview.todoStatuses,
+    ["completed", "completed", "pending"],
+    `expected the plan preview to reflect the latest todo statuses, got ${JSON.stringify(preview.todoStatuses)}`,
   );
 }
 

@@ -60,6 +60,12 @@ describe("ToolRow", () => {
     expect(screen.getByTestId("tool-row-diff-removed").textContent).toBe("-2");
     expect(screen.getByTestId("tool-row-open-diff")).toBeTruthy();
     expect(screen.getByTestId("tool-row-open-diff").textContent).toContain("View diff");
+    expect(screen.getByTestId("tool-row-open-diff").className).not.toContain(
+      "tc-tool-row__action-link--plan",
+    );
+    expect(
+      screen.getByTestId("tool-row-open-diff").querySelector(".tc-tool-row__action-link-chevron"),
+    ).toBeNull();
     expect(container.querySelector(".tc-tool-row__leading-icon")).toBeNull();
     expect(screen.getByTestId("disclosure-card-leading-icon")).toBeTruthy();
     expect(screen.getByTestId("diff-view-preview").closest(".tc-disclosure-card")).toBeTruthy();
@@ -250,6 +256,275 @@ describe("ToolRow", () => {
     expect(screen.queryByTestId("tool-row-toggle")).toBeNull();
     expect(screen.getByTestId("answer-card").textContent).toContain("Answers");
     expect(screen.getByTestId("answer-option-style").textContent).toContain("Run-and-gun");
+  });
+
+  it("renders a completed create_plan as a pinned plan card", () => {
+    const onBuildPlan = vi.fn();
+    const onOpenPlanFile = vi.fn();
+    render(
+      <ToolRow
+        availableModels={["gpt-5.4"]}
+        buildModel="gpt-5.4"
+        canBuildPlan
+        currentPlanId="plan-1"
+        currentPlanState="planning"
+        item={buildTool({
+          args: {
+            goal: "Login refactor plan",
+            path: "/workspace/login-refactor.plan.md",
+            todos: [
+              { content: "Audit the transcript path", id: "todo-1", status: "completed" },
+              { content: "Render update_plan events", id: "todo-2", status: "in_progress" },
+            ],
+          },
+          planActivity: {
+            completed: 1,
+            kind: "create",
+            stateAfter: "planning",
+            title: "Login refactor plan",
+            total: 2,
+          },
+          planId: "plan-1",
+          planPath: "/workspace/login-refactor.plan.md",
+          summary: "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login-refactor.plan.md\",\"state\":\"planning\"}",
+          toolName: "create_plan",
+        })}
+        onBuildPlan={onBuildPlan}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={onOpenPlanFile}
+        planTodos={[
+          { content: "Audit the transcript path", id: "todo-1", status: "completed" },
+          { content: "Render update_plan events", id: "todo-2", status: "in_progress" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("plan-card-title").textContent).toBe("Login refactor plan");
+    expect(screen.getByTestId("plan-card-file-name").textContent).toBe("login-refactor.plan.md");
+    expect(screen.getByTestId("plan-todos-count").textContent).toBe("2 todos");
+    expect((screen.getByTestId("build-plan") as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(screen.getByTestId("view-plan"));
+    expect(onOpenPlanFile).toHaveBeenCalledWith("/workspace/login-refactor.plan.md");
+
+    fireEvent.click(screen.getByTestId("build-plan"));
+    expect(onBuildPlan).toHaveBeenCalledWith("plan-1", "/workspace/login-refactor.plan.md");
+  });
+
+  it("renders a running create_plan as the legacy pending plan card", () => {
+    const { rerender } = render(
+      <ToolRow
+        availableModels={["gpt-5.4"]}
+        buildModel="gpt-5.4"
+        canBuildPlan
+        item={buildTool({
+          args: {
+            draft: "Keep one create card and many update rows.",
+            goal: "Login refactor plan",
+            todos: [
+              { content: "Audit the transcript path", id: "todo-1", status: "completed" },
+              { content: "Render update_plan events", id: "todo-2", status: "pending" },
+            ],
+          },
+          planId: "plan-1",
+          planPath: "/workspace/login-refactor.plan.md",
+          status: "running",
+          toolName: "create_plan",
+        })}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("plan-card-title").textContent).toBe("Login refactor plan");
+    expect(screen.getByTestId("plan-todos-count").textContent).toBe("2 todos");
+    expect((screen.getByTestId("view-plan-pending") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getAllByTestId("plan-card")).toHaveLength(1);
+    expect(screen.queryByTestId("tool-row-label")).toBeNull();
+
+    rerender(
+      <ToolRow
+        availableModels={["gpt-5.4"]}
+        buildModel="gpt-5.4"
+        canBuildPlan
+        item={buildTool({
+          args: {
+            draft: "Keep one create card and many update rows.",
+            goal: "Login refactor plan",
+            todos: [
+              { content: "Audit the transcript path", id: "todo-1", status: "completed" },
+              { content: "Render update_plan events", id: "todo-2", status: "pending" },
+            ],
+          },
+          planActivity: {
+            completed: 1,
+            kind: "create",
+            stateAfter: "planning",
+            title: "Login refactor plan",
+            total: 2,
+          },
+          planId: "plan-1",
+          planPath: "/workspace/login-refactor.plan.md",
+          status: "complete",
+          summary:
+            "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login-refactor.plan.md\",\"state\":\"planning\"}",
+          toolName: "create_plan",
+        })}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("view-plan-pending")).toBeNull();
+    expect(screen.getByTestId("view-plan").textContent).toBe("View Plan");
+    expect(screen.getAllByTestId("plan-card")).toHaveLength(1);
+  });
+
+  it("renders update_plan checked progress with a View Plan action", () => {
+    const onOpenPlanFile = vi.fn();
+    render(
+      <ToolRow
+        item={buildTool({
+          args: {
+            ops: [
+              { kind: "set_status", status: "completed", todo_id: "todo-1" },
+              { kind: "set_status", status: "completed", todo_id: "todo-2" },
+            ],
+            path: "/workspace/login-refactor.plan.md",
+            plan_id: "plan-1",
+          },
+          planActivity: {
+            applied: 2,
+            checked: 2,
+            completed: 4,
+            kind: "update",
+            total: 9,
+          },
+          planId: "plan-1",
+          planPath: "/workspace/login-refactor.plan.md",
+          summary: "{\"applied\":2}",
+          toolName: "update_plan",
+        })}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={onOpenPlanFile}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Checked 2 · 4/9");
+    expect(screen.getByTestId("view-plan").className).toContain("tc-tool-row__action-link--plan");
+    expect(
+      screen.getByTestId("view-plan").querySelector(".tc-tool-row__action-link-text")?.textContent,
+    ).toBe("View Plan");
+    expect(
+      screen.getByTestId("view-plan").querySelector(".tc-tool-row__action-link-chevron")?.className,
+    ).toContain("codicon-chevron-right");
+    fireEvent.click(screen.getByTestId("view-plan"));
+    expect(onOpenPlanFile).toHaveBeenCalledWith("/workspace/login-refactor.plan.md");
+  });
+
+  it("renders update_plan state transitions without inventing missing data", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/login-refactor.plan.md", plan_id: "plan-1" },
+          planActivity: {
+            completed: 8,
+            kind: "update",
+            stateAfter: "executing",
+            stateBefore: "planning",
+            total: 9,
+          },
+          planId: "plan-1",
+          planPath: "/workspace/login-refactor.plan.md",
+          toolName: "update_plan",
+        })}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Plan: planning → executing · 8/9",
+    );
+  });
+
+  it("renders update_plan edit and fallback labels distinctly", () => {
+    const { rerender } = render(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/login-refactor.plan.md", plan_id: "plan-1" },
+          planActivity: {
+            applied: 3,
+            checked: 0,
+            completed: 6,
+            kind: "update",
+            total: 9,
+          },
+          planId: "plan-1",
+          planPath: "/workspace/login-refactor.plan.md",
+          toolName: "update_plan",
+        })}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Updated plan · 6/9");
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/login-refactor.plan.md", plan_id: "plan-1" },
+          planId: "plan-1",
+          planPath: "/workspace/login-refactor.plan.md",
+          toolName: "update_plan",
+        })}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Updated plan");
+    expect(screen.getByTestId("tool-row-label").textContent).not.toContain("/9");
+  });
+
+  it("keeps running update_plan rows lightweight and hides View Plan until complete", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/login-refactor.plan.md", plan_id: "plan-1" },
+          planId: "plan-1",
+          planPath: "/workspace/login-refactor.plan.md",
+          status: "streaming",
+          summary: undefined,
+          toolName: "update_plan",
+        })}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Updating plan");
+    expect(screen.queryByTestId("view-plan")).toBeNull();
+    expect(screen.getByTestId("tool-row-running-indicator").textContent).toBe("...");
+  });
+
+  it("keeps failed update_plan rows visible for debugging", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          isError: true,
+          summary: "Unable to update plan",
+          toolName: "update_plan",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("update_plan failed");
+    expect(screen.getByTestId("tool-row-body").textContent).toContain("Unable to update plan");
   });
 
   it("toolCategory maps built-ins into the new buckets", () => {

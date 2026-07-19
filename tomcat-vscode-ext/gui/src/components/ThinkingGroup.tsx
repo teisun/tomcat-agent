@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { WebviewMessageBlock, WebviewToolCard } from "../types";
 import { MessageBubble } from "./MessageBubble";
 import { ThinkingBlock } from "./ThinkingBlock";
-import { buildToolCollectionTitle, isSuppressedPlanToolRow, ToolRow } from "./ToolRow";
+import { buildToolCollectionTitle, ToolRow } from "./ToolRow";
 import type { AssistantResponseGroup } from "./sessionList/groupTimelineByAssistantResponse";
 
 function isDirtySummaryTitle(summaryTitle: string, tools: WebviewToolCard[]): boolean {
@@ -19,17 +19,13 @@ function groupHeaderTitle(
   isStreaming: boolean,
 ): { shimmer: boolean; text: string } {
   const summaryTitle = group.thinking?.summaryTitle ?? null;
-  if (summaryTitle && group.tools.length > 0 && !isDirtySummaryTitle(summaryTitle, group.tools)) {
+  if (summaryTitle && (group.tools.length === 0 || !isDirtySummaryTitle(summaryTitle, group.tools))) {
     return { shimmer: false, text: summaryTitle };
   }
   if (group.tools.length > 0) {
     return { shimmer: isStreaming, text: buildToolCollectionTitle(group.tools) };
   }
   return { shimmer: isStreaming, text: "Thinking" };
-}
-
-function shouldHideGroupedToolRow(tool: WebviewToolCard): boolean {
-  return isSuppressedPlanToolRow(tool);
 }
 
 export function ThinkingGroup({
@@ -59,7 +55,7 @@ export function ThinkingGroup({
 
   const preamble = group.preamble;
   const thinking = group.thinking;
-  const tools = group.tools.filter((tool) => !shouldHideGroupedToolRow(tool));
+  const tools = group.tools;
 
   return (
     <section

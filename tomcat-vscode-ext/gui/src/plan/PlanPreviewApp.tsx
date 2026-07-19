@@ -165,6 +165,15 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
   const todoIconSizes = Array.from(icons).map((icon) =>
     Math.round(icon.getBoundingClientRect().width),
   );
+  const todoStatuses = Array.from(items).flatMap((item) => {
+    const status = item.getAttribute("data-status");
+    return status === "cancelled" ||
+        status === "completed" ||
+        status === "in_progress" ||
+        status === "pending"
+      ? [status]
+      : [];
+  });
   const toolbarStyle: PlanToolbarStyle = state?.toolbarStyle ?? "native";
   const mermaidSvgCount = document.querySelectorAll(
     '[data-testid="plan-mermaid"] svg',
@@ -193,6 +202,7 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
     todoCountText: countEl ? countEl.textContent : null,
     todoIconSizes,
     todoItemCount: items.length,
+    todoStatuses,
     topVisibleSourceLine,
     toolbarStyle,
   };

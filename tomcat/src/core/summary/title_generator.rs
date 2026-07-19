@@ -227,8 +227,8 @@ pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
                 format!("Ran {cmd}")
             }
             "ask_question" => "Asked question".to_string(),
-            "create_plan" => "Created plan".to_string(),
-            "update_plan" => "Updated plan".to_string(),
+            "create_plan" => "Drafted the plan".to_string(),
+            "update_plan" => "Revised the plan".to_string(),
             "todos" => "Updated todos".to_string(),
             "web_search" => "Searched web".to_string(),
             "web_fetch" => "Fetched url".to_string(),
@@ -303,7 +303,7 @@ async fn call_utility(
     Ok(text)
 }
 
-fn build_turn_summary_prompt(thinking_text: Option<&str>, tools: &[ToolSnapshot]) -> String {
+pub(super) fn build_turn_summary_prompt(thinking_text: Option<&str>, tools: &[ToolSnapshot]) -> String {
     let thinking = thinking_text.unwrap_or("").trim();
     let mut tools_block = String::new();
     for t in tools {
@@ -315,6 +315,8 @@ fn build_turn_summary_prompt(thinking_text: Option<&str>, tools: &[ToolSnapshot]
          - At most 10 words\n\
          - Past tense\n\
          - First word must be a past tense verb (Reviewed, Updated, Created, Ran, Searched, etc.)\n\
+         - If this turn only creates or updates a plan, use exactly \"Created plan for <purpose>\" \
+           or \"Updated plan for <purpose>\" where <purpose> is a 2-6 word purpose phrase\n\
          - For multiple file reads use \"Reviewed N files\"\n\
          - NEVER answer with only a bare tool count like \"Used 4 tools\"; always describe what was done. \
            If the tools are mixed and no single verb fits, use the form \"Used N tools for <short purpose>\".\n\

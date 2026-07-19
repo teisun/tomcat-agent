@@ -35,6 +35,8 @@ describe("PlanFileCard", () => {
     expect(screen.getByTestId("plan-card-title").textContent).toBe("Demo Plan UI");
     expect(screen.getByTestId("plan-card-overview").textContent).toContain("transcript UI polish");
     expect(screen.getByTestId("plan-todos-count").textContent).toBe("4 todos");
+    expect(screen.getByTestId("build-plan").classList.contains("tc-plan-build-button")).toBe(true);
+    expect(screen.getByTestId("build-plan").classList.contains("tc-button--primary")).toBe(false);
 
     fireEvent.click(screen.getByTestId("plan-card-file-link"));
     fireEvent.click(screen.getByTestId("plan-card-title"));
@@ -261,9 +263,7 @@ describe("PlanFileCard", () => {
     expect(screen.queryByTestId("plan-card-build-model")).toBeNull();
   });
 
-  it("shows a breathing pending affordance while the plan file is still being created", () => {
-    const onOpenPlanFile = vi.fn();
-
+  it("restores the legacy pending footer while a plan card is still creating", () => {
     render(
       <PlanFileCard
         canBuild
@@ -276,16 +276,13 @@ describe("PlanFileCard", () => {
           type: "plan",
         }}
         onBuild={() => undefined}
-        onOpenPlanFile={onOpenPlanFile}
+        onOpenPlanFile={() => undefined}
         planTodos={[]}
       />,
     );
 
+    expect((screen.getByTestId("view-plan-pending") as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByTestId("view-plan")).toBeNull();
-    const pending = screen.getByTestId("view-plan-pending") as HTMLButtonElement;
-    expect(pending.disabled).toBe(true);
-    expect(pending.getAttribute("aria-busy")).toBe("true");
-    expect(pending.textContent).toContain("...");
-    expect(onOpenPlanFile).not.toHaveBeenCalled();
+    expect(screen.getByTestId("build-plan")).toBeTruthy();
   });
 });

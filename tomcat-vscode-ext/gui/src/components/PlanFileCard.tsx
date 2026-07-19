@@ -130,7 +130,7 @@ export function PlanFileCard({
           />
         ) : null}
         <button
-          className="tc-button tc-button--primary"
+          className="tc-button tc-plan-build-button"
           data-testid="build-plan"
           disabled={!buildAllowed}
           onClick={() => onBuild(item.planId ?? null, item.path)}

@@ -23,7 +23,6 @@ import type {
   WebviewMessageBlock,
   WebviewMessageSegment,
   WebviewPendingAttachment,
-  WebviewPlanFileCard,
   WebviewPlanFileRef,
   WebviewSessionSnapshot,
   WebviewSessionTab,
@@ -157,7 +156,7 @@ function timelineEntityKey(item: WebviewTimelineItem): string {
     case "checkpoint":
       return `checkpoint:${item.checkpointId}`;
     case "plan":
-      return `plan:${item.path}`;
+      return `plan:${item.planId ?? item.path}`;
   }
 }
 
@@ -488,6 +487,171 @@ function parseToolArgs(value: unknown): Record<string, unknown> | undefined {
   return undefined;
 }
 
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function asFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function parseToolSummaryJson(resultText: string | undefined): Record<string, unknown> | undefined {
+  if (!resultText) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(resultText) as unknown;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function countCompletedItems(items: unknown): { completed: number; total: number } | undefined {
+  if (!Array.isArray(items)) {
+    return undefined;
+  }
+  let completed = 0;
+  let total = 0;
+  for (const item of items) {
+    if (!isRecord(item)) {
+      return undefined;
+    }
+    total += 1;
+    if (item.status === "completed") {
+      completed += 1;
+    }
+  }
+  return { completed, total };
+}
+
+function countTodosFromArgs(todos: unknown): { completed: number; total: number } | undefined {
+  if (!Array.isArray(todos)) {
+    return undefined;
+  }
+  let completed = 0;
+  for (const todo of todos) {
+    if (isRecord(todo) && todo.status === "completed") {
+      completed += 1;
+    }
+  }
+  return { completed, total: todos.length };
+}
+
+function countCheckedOps(args: Record<string, unknown> | undefined): number {
+  const ops = args?.ops;
+  if (!Array.isArray(ops)) {
+    return 0;
+  }
+  return ops.reduce((count, op) => {
+    if (!isRecord(op)) {
+      return count;
+    }
+    const kind = asNonEmptyString(op.kind);
+    const status = asNonEmptyString(op.status);
+    if ((kind === "set_status" || kind === "upsert") && status === "completed") {
+      return count + 1;
+    }
+    return count;
+  }, 0);
+}
+
+function derivePlanReference(
+  toolName: string,
+  args: Record<string, unknown> | undefined,
+  resultText: string | undefined,
+): { planId?: string; planPath?: string } {
+  if (toolName !== "create_plan" && toolName !== "update_plan") {
+    return {};
+  }
+  const parsed = parseToolSummaryJson(resultText);
+  return {
+    planId:
+      asNonEmptyString(parsed?.plan_id) ??
+      asNonEmptyString(args?.plan_id) ??
+      asNonEmptyString(args?.planId),
+    planPath: asNonEmptyString(parsed?.path) ?? asNonEmptyString(args?.path),
+  };
+}
+
+export function derivePlanActivity(
+  toolName: string,
+  resultText: string | undefined,
+  args: Record<string, unknown> | undefined,
+): WebviewToolCard["planActivity"] | undefined {
+  if (toolName !== "create_plan" && toolName !== "update_plan") {
+    return undefined;
+  }
+  const parsed = parseToolSummaryJson(resultText);
+  if (!parsed) {
+    return undefined;
+  }
+
+  if (toolName === "create_plan") {
+    const counts = countTodosFromArgs(args?.todos);
+    const stateAfter = normalizePlanState(parsed.state);
+    return {
+      completed: counts?.completed,
+      kind: "create",
+      stateAfter,
+      title: asNonEmptyString(args?.goal) ?? null,
+      total: counts?.total,
+    };
+  }
+
+  const counts = countCompletedItems(parsed.items);
+  const applied = asFiniteNumber(parsed.applied);
+  const stateBefore = normalizePlanState(parsed.plan_state_before);
+  const stateAfter = normalizePlanState(parsed.plan_state_after);
+  if (applied === undefined && !counts && !stateBefore && !stateAfter) {
+    return undefined;
+  }
+  return {
+    applied,
+    checked: countCheckedOps(args),
+    completed: counts?.completed,
+    kind: "update",
+    stateAfter,
+    stateBefore,
+    total: counts?.total,
+  };
+}
+
+function applyPlanReference(tool: WebviewToolCard, resultText?: string): void {
+  const reference = derivePlanReference(tool.toolName, tool.args, resultText);
+  if (reference.planId) {
+    tool.planId = reference.planId;
+  }
+  if (reference.planPath) {
+    tool.planPath = reference.planPath;
+  }
+}
+
+function stampRunningCreatePlan(
+  session: WebviewSessionSnapshot,
+  path: string,
+  planId: string | null | undefined,
+): void {
+  for (let index = session.timeline.length - 1; index >= 0; index -= 1) {
+    const item = session.timeline[index];
+    if (item.type !== "tool") {
+      continue;
+    }
+    if (
+      item.toolName !== "create_plan" ||
+      item.isError ||
+      (item.status !== "running" && item.status !== "streaming")
+    ) {
+      continue;
+    }
+    item.planPath = path;
+    if (planId) {
+      item.planId = planId;
+    }
+    return;
+  }
+}
+
 function applyHistoryPlanCustomEntry(
   session: WebviewSessionSnapshot,
   entry: Record<string, unknown>,
@@ -503,27 +667,40 @@ function applyHistoryPlanCustomEntry(
     normalizePlanState(entry.state) ??
     planEventState({ type: eventName } as ServePlanEvent);
 
+  if (state) {
+    session.planState = state;
+  }
+  if (planId) {
+    session.planId = planId;
+  }
+
+  const syncHistoryPlanRef = () => {
+    const nextState = state ?? session.planState ?? null;
+    if (path) {
+      syncPlanRef(session, path, nextState, planId ?? session.planId ?? null);
+      return;
+    }
+    if (session.planFile) {
+      session.planFile = {
+        ...session.planFile,
+        planId: planId ?? session.planFile.planId ?? null,
+        state: nextState ?? session.planFile.state ?? null,
+      };
+    }
+  };
+
   switch (eventName) {
     case "plan.create":
     case "plan.build":
     case "plan.update":
     case "plan.complete":
     case "plan.pending":
-      if (!path) {
-        return;
-      }
-      upsertPlanFile(session, path, state, planId);
+      syncHistoryPlanRef();
       return;
     case "plan.todos": {
-      if (!planId) {
-        return;
-      }
-      const card = session.timeline.find(
-        (item): item is WebviewPlanFileCard =>
-          item.type === "plan" && item.planId === planId,
-      );
-      if (card) {
-        card.todos = parseTodos(entry.todos);
+      const todos = parseTodos(entry.todos);
+      if (todos.length > 0 || Array.isArray(entry.todos)) {
+        session.planTodos = todos;
       }
       return;
     }
@@ -660,15 +837,21 @@ function applyHistoryEntry(
       }
       const toolCallId = extractToolCallId(entry.message) ?? id;
       const args = historyToolArgs.get(toolCallId);
+      const toolName = historyToolNames.get(toolCallId) ?? "tool";
+      const planReference = derivePlanReference(toolName, args, text);
+      const planActivity = derivePlanActivity(toolName, text, args);
       session.timeline.push({
         args,
         assistantMessageId: toolCallToAssistant.get(toolCallId),
         id,
         isError: false,
+        planActivity,
+        planId: planReference.planId,
+        planPath: planReference.planPath,
         status: "complete",
         summary: text,
         toolCallId,
-        toolName: historyToolNames.get(toolCallId) ?? "tool",
+        toolName,
         type: "tool",
       } satisfies WebviewToolCard);
       return;
@@ -686,51 +869,6 @@ function applyHistoryEntry(
 
   if (entry.type === "custom") {
     applyHistoryPlanCustomEntry(session, entry);
-  }
-}
-
-function mergeCurrentPlanCardsIntoHistory(
-  historySession: WebviewSessionSnapshot,
-  liveSession: WebviewSessionSnapshot,
-): void {
-  for (const item of liveSession.timeline) {
-    if (item.type !== "plan") {
-      continue;
-    }
-    const card = historySession.timeline.find(
-      (entry): entry is WebviewPlanFileCard => entry.type === "plan" && entry.path === item.path,
-    );
-    if (!card) {
-      continue;
-    }
-    mergePlanCardMetadata(card, item);
-  }
-  if (liveSession.planFile?.path) {
-    const activeCard = historySession.timeline.find(
-      (entry): entry is WebviewPlanFileCard =>
-        entry.type === "plan" && entry.path === liveSession.planFile?.path,
-    );
-    if (activeCard) {
-      activeCard.planId = liveSession.planFile.planId ?? liveSession.planId ?? activeCard.planId ?? null;
-      activeCard.state = liveSession.planFile.state ?? activeCard.state ?? null;
-    }
-  }
-}
-
-function mergePlanCardMetadata(
-  target: WebviewPlanFileCard,
-  source: WebviewPlanFileCard,
-): void {
-  target.planId = source.planId ?? target.planId ?? null;
-  target.state = source.state ?? target.state ?? null;
-  if (source.title !== undefined) {
-    target.title = source.title;
-  }
-  if (source.overview !== undefined) {
-    target.overview = source.overview;
-  }
-  if (source.todos !== undefined) {
-    target.todos = source.todos;
   }
 }
 
@@ -832,31 +970,6 @@ function clearActiveAssistant(runtime: SessionRuntimeState): void {
   runtime.activeAssistantId = null;
   runtime.streamingAssistantId = null;
   runtime.activeThinkingId = null;
-}
-
-function upsertPlanFile(
-  session: WebviewSessionSnapshot,
-  path: string,
-  state: ParticipantPlanState | null,
-  planId?: string | null,
-): WebviewPlanFileCard {
-  const existing = session.timeline.find(
-    (item): item is WebviewPlanFileCard => item.type === "plan" && item.path === path,
-  );
-  if (existing) {
-    existing.planId = planId ?? existing.planId ?? null;
-    existing.state = state ?? existing.state ?? null;
-    return existing;
-  }
-  const created: WebviewPlanFileCard = {
-    id: createTimelineId(session, "plan", path),
-    path,
-    planId: planId ?? null,
-    state,
-    type: "plan",
-  };
-  session.timeline.push(created);
-  return created;
 }
 
 function syncPlanRef(
@@ -1157,9 +1270,8 @@ function shouldRetainLiveTimelineItem(
       return !item.resolved;
     case "boundary":
     case "checkpoint":
-      return false;
     case "plan":
-      return true;
+      return false;
   }
 }
 
@@ -1336,12 +1448,6 @@ export class WebviewStateStore {
         session.planState ?? null,
         session.planId ?? null,
       );
-      upsertPlanFile(
-        session,
-        payload.planPath,
-        session.planState ?? null,
-        session.planId ?? null,
-      );
     } else if (session.planFile) {
       const nextState = session.planState ?? session.planFile.state ?? null;
       const nextPlanId = session.planId ?? session.planFile.planId ?? null;
@@ -1350,7 +1456,6 @@ export class WebviewStateStore {
         planId: nextPlanId,
         state: nextState,
       };
-      upsertPlanFile(session, session.planFile.path, nextState, nextPlanId);
     }
     session.ownedByThisFrontend = true;
     this.syncTabOwnedByFrontend(payload.sessionId);
@@ -1669,6 +1774,8 @@ export class WebviewStateStore {
         tool.isError = false;
         tool.args = parseToolArgs(frame.args) ?? tool.args;
         tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
+        applyPlanReference(tool);
+        delete tool.planActivity;
         return;
       }
       case "tool_call_streaming":
@@ -1681,6 +1788,7 @@ export class WebviewStateStore {
           tool.args = parseToolArgs(frame.args) ?? tool.args;
         }
         tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
+        applyPlanReference(tool);
         return;
       }
       case "tool_execution_end": {
@@ -1709,20 +1817,24 @@ export class WebviewStateStore {
         tool.status = toolResultWasInterrupted(frame.result) ? "interrupted" : "complete";
         tool.summary = toolResultWasInterrupted(frame.result) ? "Interrupted" : asText(frame.result);
         tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
+        applyPlanReference(tool, tool.summary);
+        if (!tool.isError && tool.status === "complete") {
+          tool.planActivity = derivePlanActivity(tool.toolName, tool.summary, tool.args);
+        } else {
+          delete tool.planActivity;
+        }
         return;
       }
       case "plan.todos": {
         const todos = parseTodos("todos" in frame ? frame.todos : undefined);
         session.planTodos = todos;
-        const planId =
-          "planId" in frame && typeof frame.planId === "string" ? frame.planId : null;
-        if (planId) {
-          const card = session.timeline.find(
-            (item): item is WebviewPlanFileCard =>
-              item.type === "plan" && item.planId === planId,
-          );
-          if (card) {
-            card.todos = todos;
+        if ("planId" in frame && typeof frame.planId === "string") {
+          session.planId = frame.planId;
+          if (session.planFile) {
+            session.planFile = {
+              ...session.planFile,
+              planId: frame.planId,
+            };
           }
         }
         return;
@@ -1840,21 +1952,11 @@ export class WebviewStateStore {
         historyToolArgs,
       );
     }
-    mergeCurrentPlanCardsIntoHistory(historySession, session);
     const existingKeys = new Set(historySession.timeline.map((item) => timelineEntityKey(item)));
     const optimisticTailKeys = collectOptimisticTailKeys(session, runtime, existingKeys);
     const assistantGroupIds = liveAssistantGroupIds(runtime);
     const nextLocalUserMessageIds = new Set<string>();
     for (const item of session.timeline) {
-      if (item.type === "plan" && existingKeys.has(timelineEntityKey(item))) {
-        const existingCard = historySession.timeline.find(
-          (entry): entry is WebviewPlanFileCard => entry.type === "plan" && entry.path === item.path,
-        );
-        if (existingCard) {
-          mergePlanCardMetadata(existingCard, item);
-        }
-        continue;
-      }
       const key = timelineEntityKey(item);
       const trackedLocalUserMessage =
         item.type === "message" &&
@@ -1877,17 +1979,27 @@ export class WebviewStateStore {
     }
     runtime.localUserMessageIds = nextLocalUserMessageIds;
     session.timeline = historySession.timeline;
-    if (session.planTodos.length === 0 && session.planId) {
-      const activeCard = session.timeline.find(
-        (item): item is WebviewPlanFileCard =>
-          item.type === "plan" &&
-          item.planId === session.planId &&
-          Array.isArray(item.todos) &&
-          item.todos.length > 0,
-      );
-      if (activeCard?.todos) {
-        session.planTodos = activeCard.todos;
-      }
+    if (!session.planFile && historySession.planFile) {
+      session.planFile = historySession.planFile;
+    } else if (session.planFile && historySession.planFile && session.planFile.path === historySession.planFile.path) {
+      session.planFile = {
+        ...session.planFile,
+        planId: session.planFile.planId ?? historySession.planFile.planId ?? null,
+        state: session.planFile.state ?? historySession.planFile.state ?? null,
+      };
+    }
+    if (!session.planId && historySession.planId) {
+      session.planId = historySession.planId;
+    }
+    if (session.planTodos.length === 0 && historySession.planTodos.length > 0) {
+      session.planTodos = historySession.planTodos;
+    }
+    if (
+      (!session.planState || session.planState === "chat") &&
+      historySession.planState &&
+      historySession.planState !== "chat"
+    ) {
+      session.planState = historySession.planState;
     }
     session.hasMoreHistory = runtime.hasMoreHistory;
     session.historyLoading = runtime.historyLoading;
@@ -1907,7 +2019,7 @@ export class WebviewStateStore {
     if ("path" in event && typeof event.path === "string" && event.path.length > 0) {
       const nextState = state ?? session.planState ?? null;
       syncPlanRef(session, event.path, nextState, event.planId ?? session.planId ?? null);
-      upsertPlanFile(session, event.path, nextState, event.planId ?? session.planId ?? null);
+      stampRunningCreatePlan(session, event.path, event.planId ?? session.planId ?? null);
     } else if (session.planFile) {
       session.planFile = {
         ...session.planFile,

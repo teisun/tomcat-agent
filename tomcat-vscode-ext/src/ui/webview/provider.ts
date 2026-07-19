@@ -1357,19 +1357,43 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         const planCards = session.timeline.filter(
           (item): item is WebviewPlanFileCard => item.type === "plan",
         );
+        const createPlanTools = session.timeline.filter(
+          (item): item is WebviewToolCard =>
+            item.type === "tool" &&
+            item.toolName === "create_plan" &&
+            item.planActivity?.kind === "create" &&
+            typeof item.planPath === "string" &&
+            item.planPath.length > 0,
+        );
         await Promise.all(
-          planCards.map(async (item) => {
-            const metadata = await readPlanMetadata(item.path, this.planMetadataCache);
-            if (metadata.title) {
-              item.title = metadata.title;
-            } else {
-              delete item.title;
+          [...planCards, ...createPlanTools].map(async (item) => {
+            const planPath = item.type === "plan" ? item.path : item.planPath;
+            if (!planPath) {
+              return;
             }
-            if (metadata.overview) {
-              item.overview = metadata.overview;
-            } else {
-              delete item.overview;
+            const metadata = await readPlanMetadata(planPath, this.planMetadataCache);
+            if (item.type === "plan") {
+              if (metadata.title) {
+                item.title = metadata.title;
+              } else {
+                delete item.title;
+              }
+              if (metadata.overview) {
+                item.overview = metadata.overview;
+              } else {
+                delete item.overview;
+              }
+              return;
             }
+            const planActivity = item.planActivity;
+            if (!planActivity) {
+              return;
+            }
+            item.planActivity = {
+              ...planActivity,
+              overview: metadata.overview ?? null,
+              title: metadata.title ?? planActivity.title ?? null,
+            };
           }),
         );
       }),

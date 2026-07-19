@@ -194,12 +194,6 @@ describe("webview dual-channel state store", () => {
           type: "tool",
         }),
         expect.objectContaining({
-          path: "/workspace/login.plan.md",
-          planId: "plan-1",
-          state: "planning",
-          type: "plan",
-        }),
-        expect.objectContaining({
           request: expect.objectContaining({ requestId: "ask-1" }),
           type: "approval",
         }),
@@ -209,6 +203,7 @@ describe("webview dual-channel state store", () => {
     expect(historicAssistantIndex).toBeGreaterThan(historicThinkingIndex);
     expect(liveThinkingIndex).toBeGreaterThanOrEqual(0);
     expect(liveAssistantIndex).toBeGreaterThan(liveThinkingIndex);
+    expect(snapshot.sessionViews.s1.timeline.some((item) => item.type === "plan")).toBe(false);
     expect(snapshot.sessionViews.s1.planFile).toMatchObject({
       path: "/workspace/login.plan.md",
       planId: "plan-1",

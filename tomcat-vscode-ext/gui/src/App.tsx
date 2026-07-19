@@ -1254,6 +1254,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 }}
                 canBuildPlan={canBuildPlan}
                 onBuildPlan={handleBuildPlan}
+                planId={activeSession.planId}
                 planState={activeSession.planState}
                 planTodos={activeSession.planTodos ?? []}
                 onRestoreCheckpoint={handleOpenRestoreDialog}

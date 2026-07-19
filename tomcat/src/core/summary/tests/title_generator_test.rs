@@ -6,7 +6,9 @@ use tracing::info;
 use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, StreamEvent,
 };
-use crate::core::summary::title_generator::{is_bare_tool_count, sanitize_purpose_clause};
+use crate::core::summary::title_generator::{
+    build_turn_summary_prompt, is_bare_tool_count, sanitize_purpose_clause,
+};
 use crate::core::summary::{
     fallback_command_summary, fallback_turn_summary, generate_command_summary,
     generate_session_title, generate_turn_summary, ToolSnapshot,
@@ -220,6 +222,43 @@ fn fallback_turn_summary_avoids_raw_json_for_ask_question() {
     let title = fallback_turn_summary(&tools);
 
     assert_eq!(title, "Asked question");
+}
+
+#[test]
+fn fallback_turn_summary_uses_non_repetitive_plan_phrasing() {
+    let create = vec![ToolSnapshot {
+        tool_name: "create_plan".into(),
+        summary: "goal=rollback sequencing".into(),
+    }];
+    let update = vec![ToolSnapshot {
+        tool_name: "update_plan".into(),
+        summary: "plan_id=plan_rollback".into(),
+    }];
+
+    assert_eq!(fallback_turn_summary(&create), "Drafted the plan");
+    assert_eq!(fallback_turn_summary(&update), "Revised the plan");
+    assert_ne!(fallback_turn_summary(&create), "Created plan");
+    assert_ne!(fallback_turn_summary(&update), "Updated plan");
+}
+
+#[test]
+fn build_turn_summary_prompt_guides_plan_only_titles() {
+    let prompt = build_turn_summary_prompt(
+        Some("work out the rollback ordering"),
+        &[ToolSnapshot {
+            tool_name: "update_plan".into(),
+            summary: "plan_id=plan_rollback".into(),
+        }],
+    );
+
+    assert!(
+        prompt.contains("Created plan for <purpose>"),
+        "prompt should mention the create_plan plan-only title rule: {prompt}"
+    );
+    assert!(
+        prompt.contains("Updated plan for <purpose>"),
+        "prompt should mention the update_plan plan-only title rule: {prompt}"
+    );
 }
 
 /// 两阶段 mock：purpose 从句调用（prompt 含 "PURPOSE"）返回 purpose，其余返回 title。

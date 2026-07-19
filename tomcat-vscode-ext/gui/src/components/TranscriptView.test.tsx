@@ -243,122 +243,36 @@ describe("TranscriptView", () => {
     expect(onRestoreCheckpoint).toHaveBeenCalledWith("ck-1");
   });
 
-  it("keeps a grouped create_plan turn to a single header while showing a pending plan card affordance", () => {
+  it("lifts update_plan out of the thinking group into a standalone event row", () => {
     const timeline: WebviewTimelineItem[] = [
       {
-        assistantMessageId: "assistant-plan",
-        id: "think-plan",
-        summaryTitle: "Creating plan",
-        text: "Let me break the work down first.",
+        assistantMessageId: "assistant-update",
+        id: "think-update",
+        summaryTitle: "Updated plan for transcript rendering",
+        text: "I should check off the next execution step.",
         type: "thinking",
       },
       {
-        args: { plan_id: "demo-plan" },
-        assistantMessageId: "assistant-plan",
-        id: "tool-plan",
-        isError: false,
-        status: "streaming",
-        summary: "Creating plan",
-        toolCallId: "tc-plan",
-        toolName: "create_plan",
-        type: "tool",
-      },
-      {
-        id: "plan-card-1",
-        path: "/tmp/demo.plan.md",
-        planId: "demo-plan",
-        state: "planning",
-        title: "Demo plan",
-        type: "plan",
-      },
-    ];
-
-    render(
-      <TranscriptView
-        busy
-        canBuildPlan={false}
-        onAnswer={vi.fn()}
-        onBuildPlan={vi.fn()}
-        onOpenFile={vi.fn()}
-        onOpenPlanFile={vi.fn()}
-        timeline={timeline}
-      />,
-    );
-
-    expect(screen.getAllByText("Creating plan")).toHaveLength(1);
-    expect(screen.getByTestId("thinking-group")).toBeTruthy();
-    expect(screen.queryByTestId("tool-row")).toBeNull();
-    expect(screen.getByTestId("plan-card-title").textContent).toBe("Demo plan");
-    expect(screen.getByTestId("view-plan-pending")).toBeTruthy();
-  });
-
-  it("suppresses a standalone running create_plan tool when the plan card carries the workflow", () => {
-    const timeline: WebviewTimelineItem[] = [
-      {
-        args: { plan_id: "mini-plan" },
-        assistantMessageId: "assistant-plan-standalone",
-        id: "tool-plan-only",
-        isError: false,
-        status: "streaming",
-        summary: "Creating plan",
-        toolCallId: "tc-plan-only",
-        toolName: "create_plan",
-        type: "tool",
-      },
-      {
-        id: "plan-card-mini",
-        path: "/tmp/mini.plan.md",
-        planId: "mini-plan",
-        state: "planning",
-        title: "Mini plan",
-        type: "plan",
-      },
-    ];
-
-    render(
-      <TranscriptView
-        busy
-        canBuildPlan={false}
-        onAnswer={vi.fn()}
-        onBuildPlan={vi.fn()}
-        onOpenFile={vi.fn()}
-        onOpenPlanFile={vi.fn()}
-        timeline={timeline}
-      />,
-    );
-
-    expect(screen.queryByTestId("thinking-group")).toBeNull();
-    expect(screen.queryByTestId("tool-row")).toBeNull();
-    expect(screen.getByTestId("plan-card-title").textContent).toBe("Mini plan");
-    expect(screen.getByTestId("view-plan-pending")).toBeTruthy();
-  });
-
-  it("prefers matching by planId before falling back to the newest plan card", () => {
-    const timeline: WebviewTimelineItem[] = [
-      {
-        id: "plan-card-a",
-        path: "/tmp/plan-a.plan.md",
-        planId: "plan-a",
-        state: "planning",
-        title: "Plan A",
-        type: "plan",
-      },
-      {
-        id: "plan-card-b",
-        path: "/tmp/plan-b.plan.md",
-        planId: "plan-b",
-        state: "planning",
-        title: "Plan B",
-        type: "plan",
-      },
-      {
-        args: { plan_id: "plan-a" },
+        args: {
+          ops: [{ kind: "set_status", status: "completed", todo_id: "todo-2" }],
+          path: "/tmp/demo.plan.md",
+          plan_id: "demo-plan",
+        },
         assistantMessageId: "assistant-update",
-        id: "tool-update-plan",
+        id: "tool-update",
         isError: false,
-        status: "streaming",
-        summary: "Updating plan",
-        toolCallId: "tc-update-plan",
+        planActivity: {
+          applied: 1,
+          checked: 1,
+          completed: 2,
+          kind: "update",
+          total: 4,
+        },
+        planId: "demo-plan",
+        planPath: "/tmp/demo.plan.md",
+        status: "complete",
+        summary: "{\"applied\":1}",
+        toolCallId: "tc-update",
         toolName: "update_plan",
         type: "tool",
       },
@@ -366,7 +280,7 @@ describe("TranscriptView", () => {
 
     render(
       <TranscriptView
-        busy
+        busy={false}
         canBuildPlan={false}
         onAnswer={vi.fn()}
         onBuildPlan={vi.fn()}
@@ -376,11 +290,191 @@ describe("TranscriptView", () => {
       />,
     );
 
-    const planCards = screen.getAllByTestId("plan-card");
-    expect(within(planCards[0]).getByTestId("plan-card-title").textContent).toBe("Plan A");
-    expect(within(planCards[0]).getByTestId("view-plan-pending")).toBeTruthy();
-    expect(within(planCards[1]).getByTestId("plan-card-title").textContent).toBe("Plan B");
-    expect(within(planCards[1]).getByTestId("view-plan")).toBeTruthy();
+    expect(screen.getByTestId("thinking-group")).toBeTruthy();
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe(
+      "Updated plan for transcript rendering",
+    );
+    expect(screen.getByTestId("tool-row-label").textContent).toContain("Checked 1 · 2/4");
+  });
+
+  it("renders a completed create_plan as the single visible plan card for the turn", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        assistantMessageId: "assistant-plan",
+        id: "think-plan",
+        summaryTitle: "Created plan for transcript cleanup",
+        text: "Let me break the work down first.",
+        type: "thinking",
+      },
+      {
+        args: {
+          goal: "Transcript cleanup",
+          path: "/tmp/mini.plan.md",
+          plan_id: "mini-plan",
+          todos: [
+            { content: "Audit the transcript path", id: "todo-1", status: "pending" },
+            { content: "Render update_plan events", id: "todo-2", status: "pending" },
+          ],
+        },
+        assistantMessageId: "assistant-plan",
+        id: "tool-plan-only",
+        isError: false,
+        planActivity: {
+          completed: 0,
+          kind: "create",
+          stateAfter: "planning",
+          title: "Transcript cleanup",
+          total: 2,
+        },
+        planId: "mini-plan",
+        planPath: "/tmp/mini.plan.md",
+        status: "complete",
+        summary: "{\"plan_id\":\"mini-plan\",\"path\":\"/tmp/mini.plan.md\",\"state\":\"planning\"}",
+        toolCallId: "tc-plan-only",
+        toolName: "create_plan",
+        type: "tool",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy={false}
+        canBuildPlan
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        planId="mini-plan"
+        planState="planning"
+        planTodos={[
+          { content: "Audit the transcript path", id: "todo-1", status: "pending" },
+          { content: "Render update_plan events", id: "todo-2", status: "pending" },
+        ]}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.getByTestId("thinking-group")).toBeTruthy();
+    expect(screen.getByTestId("plan-card-title").textContent).toBe("Transcript cleanup");
+    expect(screen.getByTestId("plan-card-file-name").textContent).toBe("mini.plan.md");
+    expect(screen.queryByTestId("tool-row")).toBeNull();
+  });
+
+  it("keeps exactly one visible plan card while create_plan flips from running to complete", () => {
+    const runningTimeline: WebviewTimelineItem[] = [
+      {
+        assistantMessageId: "assistant-plan",
+        id: "think-plan",
+        summaryTitle: "Created plan for transcript cleanup",
+        text: "Let me break the work down first.",
+        type: "thinking",
+      },
+      {
+        args: {
+          draft: "Keep one create card and many update rows.",
+          goal: "Transcript cleanup",
+          todos: [
+            { content: "Audit the transcript path", id: "todo-1", status: "pending" },
+            { content: "Render update_plan events", id: "todo-2", status: "pending" },
+          ],
+        },
+        assistantMessageId: "assistant-plan",
+        id: "tool-plan-only",
+        isError: false,
+        planId: "mini-plan",
+        planPath: "/tmp/mini.plan.md",
+        status: "running",
+        toolCallId: "tc-plan-only",
+        toolName: "create_plan",
+        type: "tool",
+      },
+    ];
+    const completedTimeline: WebviewTimelineItem[] = [
+      runningTimeline[0],
+      {
+        ...runningTimeline[1],
+        planActivity: {
+          completed: 0,
+          kind: "create",
+          stateAfter: "planning",
+          title: "Transcript cleanup",
+          total: 2,
+        },
+        status: "complete",
+        summary: "{\"plan_id\":\"mini-plan\",\"path\":\"/tmp/mini.plan.md\",\"state\":\"planning\"}",
+      },
+    ];
+
+    const { rerender } = render(
+      <TranscriptView
+        busy
+        canBuildPlan
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        planId="mini-plan"
+        planState="planning"
+        planTodos={[
+          { content: "Audit the transcript path", id: "todo-1", status: "pending" },
+          { content: "Render update_plan events", id: "todo-2", status: "pending" },
+        ]}
+        timeline={runningTimeline}
+      />,
+    );
+
+    expect(screen.getAllByTestId("plan-card")).toHaveLength(1);
+    expect(screen.getByTestId("view-plan-pending")).toBeTruthy();
+    expect(screen.queryByTestId("tool-row")).toBeNull();
+
+    rerender(
+      <TranscriptView
+        busy={false}
+        canBuildPlan
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        planId="mini-plan"
+        planState="planning"
+        planTodos={[
+          { content: "Audit the transcript path", id: "todo-1", status: "pending" },
+          { content: "Render update_plan events", id: "todo-2", status: "pending" },
+        ]}
+        timeline={completedTimeline}
+      />,
+    );
+
+    expect(screen.getAllByTestId("plan-card")).toHaveLength(1);
+    expect(screen.queryByTestId("view-plan-pending")).toBeNull();
+    expect(screen.getByTestId("view-plan").textContent).toBe("View Plan");
+  });
+
+  it("ignores legacy type plan timeline items once create_plan cards own the transcript", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        id: "legacy-plan-card",
+        path: "/tmp/legacy.plan.md",
+        planId: "legacy-plan",
+        state: "planning",
+        title: "Legacy plan",
+        type: "plan",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy={false}
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.queryByTestId("plan-card")).toBeNull();
   });
 
   it("does not keep the previous thinking block streaming when a new busy turn has no thinking yet", () => {

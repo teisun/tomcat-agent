@@ -1073,71 +1073,79 @@ function handlePrompt(frame) {
       sessionId,
       type: "message_update",
     });
-    send({
+    const readTool = {
       args: { path: readPath },
-      sessionId,
-      toolCallId: "tc-transcript-read",
-      toolName: "read",
-      type: "tool_execution_start",
-    });
-    send({
       display: { file: readPath, kind: "file" },
-      isError: false,
       result: "fake file contents for transcript ui showcase",
-      sessionId,
       toolCallId: "tc-transcript-read",
       toolName: "read",
-      type: "tool_execution_end",
-    });
-    send({
+    };
+    emitCompletedTool(sessionId, readTool);
+    const bashTool = {
       args: { command: "git status --short" },
-      sessionId,
-      toolCallId: "tc-transcript-bash",
-      toolName: "bash",
-      type: "tool_execution_start",
-    });
-    send({
-      isError: false,
       result: "M src/app.tsx\\n M README.md\\n?? plans/transcript-ui-showcase.plan.md",
-      sessionId,
       toolCallId: "tc-transcript-bash",
       toolName: "bash",
-      type: "tool_execution_end",
-    });
-    send({
+    };
+    emitCompletedTool(sessionId, bashTool);
+    const webSearchTool = {
       args: { query: "vscode chat thinking collapsible" },
-      sessionId,
+      result:
+        "Found 3 results.\\n- vscode/chatThinkingContentPart.ts\\n- chatCollapsibleContentPart.ts\\n- chatToolInvocationPart.ts",
       toolCallId: "tc-transcript-web-search",
       toolName: "web_search",
-      type: "tool_execution_start",
-    });
-    send({
-      isError: false,
-      result: "Found 3 results.\\n- vscode/chatThinkingContentPart.ts\\n- chatCollapsibleContentPart.ts\\n- chatToolInvocationPart.ts",
-      sessionId,
-      toolCallId: "tc-transcript-web-search",
-      toolName: "web_search",
-      type: "tool_execution_end",
-    });
+    };
+    emitCompletedTool(sessionId, webSearchTool);
     const planPath = path.join(process.cwd(), "plans", "transcript-ui-showcase.plan.md");
     fs.mkdirSync(path.dirname(planPath), { recursive: true });
     fs.writeFileSync(planPath, ${transcriptPlanMarkdown}, "utf8");
     session.planId = "transcript-ui-showcase";
     session.planPath = planPath;
     session.planState = "planning";
-    emitPlanEvent(sessionId, "plan.create");
     const planTodos = [
       { id: "t1", content: "Read the file", status: "completed" },
       { id: "t2", content: "Render the transcript UI", status: "in_progress" },
       { id: "t3", content: "Verify the screenshot crop", status: "pending" },
       { id: "t4", content: "Review the merged plan card", status: "pending" },
     ];
+    const createPlanTool = {
+      args: {
+        draft: "Refresh the transcript UI and keep the plan card stable.",
+        goal: "Transcript UI Showcase",
+        todos: planTodos,
+      },
+      display: { kind: "plan", plan: planPath },
+      result: JSON.stringify({
+        path: planPath,
+        plan_id: session.planId,
+        state: "planning",
+      }),
+      toolCallId: "tc-transcript-create-plan",
+      toolName: "create_plan",
+    };
+    send({
+      args: createPlanTool.args,
+      sessionId,
+      toolCallId: createPlanTool.toolCallId,
+      toolName: createPlanTool.toolName,
+      type: "tool_execution_start",
+    });
+    emitPlanEvent(sessionId, "plan.create");
     session.planTodos = planTodos;
     send({
       planId: session.planId,
       sessionId,
       todos: planTodos,
       type: "plan.todos",
+    });
+    send({
+      display: createPlanTool.display,
+      isError: false,
+      result: createPlanTool.result,
+      sessionId,
+      toolCallId: createPlanTool.toolCallId,
+      toolName: createPlanTool.toolName,
+      type: "tool_execution_end",
     });
     emitCustomPlanEvent(sessionId, "plan.review.warning", {
       reason: "rounds_exhausted",
@@ -1154,9 +1162,18 @@ function handlePrompt(frame) {
       toolResults: [],
       turnIndex: 1,
     });
+    const transcriptTools = [readTool, bashTool, webSearchTool, createPlanTool];
     const finishTranscriptTurn = () => {
       emitContextMetrics(sessionId, 0.55);
-      recordHistoryMessage(sessionId, "assistant", "I will read the file and refresh the plan.");
+      recordHistoryAssistantWithTools(
+        sessionId,
+        "I will read the file and refresh the plan.",
+        transcriptTools,
+        "Reviewed 1 file",
+      );
+      for (const tool of transcriptTools) {
+        recordHistoryToolResult(sessionId, tool);
+      }
       finishTurn(sessionId, null);
     };
     const finishDelayMs = text.includes("switch back order")
@@ -1253,14 +1270,47 @@ function handlePrompt(frame) {
       "---\\ngoal: Replay the plan review and verify history\\noverview: Confirm the merged plan card after reload.\\n---\\n\\n# History plan\\n\\n- Review\\n- Verify\\n",
       "utf8",
     );
-    session.planState = "pending";
-    emitPlanEvent(sessionId, "plan.create");
-    emitPlanEvent(sessionId, "plan.build");
+    session.planState = "planning";
     const replayTodos = [
       { id: "rp-1", content: "Review the plan", status: "completed" },
       { id: "rp-2", content: "Verify the plan", status: "in_progress" },
       { id: "rp-3", content: "Confirm the merged card", status: "pending" },
     ];
+    const createPlanTool = {
+      args: {
+        draft: "Replay the review and verify history without drifting the plan card.",
+        goal: "Replay the plan review and verify history",
+        todos: replayTodos,
+      },
+      display: { kind: "plan", plan: session.planPath },
+      result: JSON.stringify({
+        path: session.planPath,
+        plan_id: session.planId,
+        state: "planning",
+      }),
+      toolCallId: "tc-plan-replay-create",
+      toolName: "create_plan",
+    };
+    send({
+      args: createPlanTool.args,
+      sessionId,
+      toolCallId: createPlanTool.toolCallId,
+      toolName: createPlanTool.toolName,
+      type: "tool_execution_start",
+    });
+    emitPlanEvent(sessionId, "plan.create");
+    send({
+      display: createPlanTool.display,
+      isError: false,
+      result: createPlanTool.result,
+      sessionId,
+      toolCallId: createPlanTool.toolCallId,
+      toolName: createPlanTool.toolName,
+      type: "tool_execution_end",
+    });
+    session.planState = "executing";
+    emitPlanEvent(sessionId, "plan.build");
+    session.planTodos = replayTodos;
     send({
       planId: session.planId,
       sessionId,
@@ -1276,13 +1326,16 @@ function handlePrompt(frame) {
     });
     emitCustomPlanEvent(sessionId, "plan.review", { summary: "looks good" });
     emitCustomPlanEvent(sessionId, "plan.verify", { verdict: "pass" });
+    session.planState = "pending";
     emitPlanEvent(sessionId, "plan.pending");
     emitMessageDelta(sessionId, "I replayed the plan review and verify history.");
-    recordHistoryMessage(
+    recordHistoryAssistantWithTools(
       sessionId,
-      "assistant",
       "I replayed the plan review and verify history.",
+      [createPlanTool],
+      "Replayed the plan review and verify history",
     );
+    recordHistoryToolResult(sessionId, createPlanTool);
     emitContextMetrics(sessionId, 0.62);
     finishTurn(sessionId, null);
     return;

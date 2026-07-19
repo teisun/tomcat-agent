@@ -3,13 +3,118 @@ import { describe, expect, it } from "vitest";
 import {
   isWebviewIntent,
   type WebviewMessageBlock,
-  type WebviewPlanFileCard,
   type WebviewToolCard,
 } from "../protocol";
 import {
   buildToolCallToAssistantMap,
+  derivePlanActivity,
   WebviewStateStore,
 } from "../state";
+
+describe("derivePlanActivity", () => {
+  it("derives create_plan counts from args.todos", () => {
+    expect(
+      derivePlanActivity(
+        "create_plan",
+        "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login.plan.md\",\"state\":\"planning\"}",
+        {
+          goal: "Login refactor plan",
+          todos: [
+            { content: "Audit transcript rendering", id: "todo-1", status: "completed" },
+            { content: "Render update_plan rows", id: "todo-2", status: "pending" },
+          ],
+        },
+      ),
+    ).toEqual({
+      completed: 1,
+      kind: "create",
+      stateAfter: "planning",
+      title: "Login refactor plan",
+      total: 2,
+    });
+  });
+
+  it("derives checked progress and state transitions for update_plan", () => {
+    expect(
+      derivePlanActivity(
+        "update_plan",
+        JSON.stringify({
+          applied: 2,
+          items: [
+            { id: "todo-1", status: "completed" },
+            { id: "todo-2", status: "completed" },
+            { id: "todo-3", status: "in_progress" },
+          ],
+          plan_state_after: "executing",
+          plan_state_before: "planning",
+        }),
+        {
+          ops: [
+            { kind: "set_status", status: "completed", todo_id: "todo-1" },
+            { kind: "set_status", status: "completed", todo_id: "todo-2" },
+          ],
+        },
+      ),
+    ).toEqual({
+      applied: 2,
+      checked: 2,
+      completed: 2,
+      kind: "update",
+      stateAfter: "executing",
+      stateBefore: "planning",
+      total: 3,
+    });
+  });
+
+  it("keeps non-check edits distinct from fallback and tolerates missing counts", () => {
+    expect(
+      derivePlanActivity(
+        "update_plan",
+        JSON.stringify({
+          applied: 1,
+          items: [
+            { id: "todo-1", status: "completed" },
+            { id: "todo-2", status: "pending" },
+          ],
+        }),
+        {
+          ops: [{ kind: "remove", todo_id: "todo-3" }],
+        },
+      ),
+    ).toEqual({
+      applied: 1,
+      checked: 0,
+      completed: 1,
+      kind: "update",
+      stateAfter: null,
+      stateBefore: null,
+      total: 2,
+    });
+
+    expect(
+      derivePlanActivity(
+        "update_plan",
+        "{\"applied\":1}",
+        {
+          ops: [{ kind: "set_status", status: "completed", todo_id: "todo-1" }],
+        },
+      ),
+    ).toEqual({
+      applied: 1,
+      checked: 1,
+      completed: undefined,
+      kind: "update",
+      stateAfter: null,
+      stateBefore: null,
+      total: undefined,
+    });
+  });
+
+  it("returns undefined for malformed or non-plan results", () => {
+    expect(derivePlanActivity("update_plan", "not json", { ops: [] })).toBeUndefined();
+    expect(derivePlanActivity("read", "{\"ok\":true}", undefined)).toBeUndefined();
+  });
+});
 
 describe("WebviewStateStore wire routing", () => {
   it("upserts plan.todos and session.todos", () => {
@@ -34,6 +139,51 @@ describe("WebviewStateStore wire routing", () => {
     expect(session.sessionTodos).toEqual([
       { content: "Chat step", id: "s1", status: "in_progress" },
     ]);
+  });
+
+  it("stamps a running create_plan with path metadata when plan.create arrives", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applyEvent({
+      args: {
+        draft: "Keep one create card and many update rows.",
+        goal: "Plan tool ux",
+        todos: [{ content: "Render the plan card", id: "pt-1", status: "pending" }],
+      },
+      sessionId: "s1",
+      toolCallId: "tc-plan-create",
+      toolName: "create_plan",
+      type: "tool_execution_start",
+    });
+
+    const beforeCreate = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item) => item.type === "tool" && item.toolCallId === "tc-plan-create");
+    expect(beforeCreate?.type === "tool" ? beforeCreate.planPath : undefined).toBeUndefined();
+    expect(beforeCreate?.type === "tool" ? beforeCreate.planId : undefined).toBeUndefined();
+
+    store.applyEvent({
+      path: "/workspace/plan-tool-ux.plan.md",
+      planId: "plan-tool-ux",
+      sessionId: "s1",
+      state: "planning",
+      type: "plan.create",
+    });
+
+    const session = store.snapshot().sessionViews.s1;
+    const tool = session.timeline.find(
+      (item) => item.type === "tool" && item.toolCallId === "tc-plan-create",
+    );
+    expect(tool?.type === "tool" ? tool.planPath : undefined).toBe(
+      "/workspace/plan-tool-ux.plan.md",
+    );
+    expect(tool?.type === "tool" ? tool.planId : undefined).toBe("plan-tool-ux");
+    expect(session.timeline.filter((item) => item.type === "plan")).toEqual([]);
+    expect(session.planFile).toMatchObject({
+      path: "/workspace/plan-tool-ux.plan.md",
+      planId: "plan-tool-ux",
+      state: "planning",
+    });
   });
 
   it("maps turn_end summaryTitle onto the matching tool group", () => {
@@ -412,6 +562,113 @@ describe("history tool attribution", () => {
       .sessionViews.s1.timeline.find((item) => item.type === "tool");
     expect(tool?.type === "tool" ? tool.assistantMessageId : undefined).toBe("assistant-1");
     expect(tool?.type === "tool" ? tool.args : undefined).toEqual({ command: "ls" });
+  });
+
+  it("hydrates the same update_plan activity from history and live events", () => {
+    const historyStore = new WebviewStateStore();
+    historyStore.setActiveSession("s1");
+    historyStore.hydrateHistory("s1", {
+      messages: [
+        {
+          id: "assistant-1",
+          message: {
+            role: "assistant",
+            tool_calls: [
+              {
+                function: {
+                  arguments: JSON.stringify({
+                    ops: [
+                      { kind: "set_status", status: "completed", todo_id: "todo-1" },
+                      { kind: "set_status", status: "completed", todo_id: "todo-2" },
+                    ],
+                    path: "/workspace/login.plan.md",
+                    plan_id: "plan-1",
+                  }),
+                  name: "update_plan",
+                },
+                id: "tc-plan",
+              },
+            ],
+          },
+          type: "message",
+        },
+        {
+          id: "tool-plan-result",
+          message: {
+            content: JSON.stringify({
+              applied: 2,
+              items: [
+                { id: "todo-1", status: "completed" },
+                { id: "todo-2", status: "completed" },
+                { id: "todo-3", status: "pending" },
+              ],
+              plan_state_after: "executing",
+              plan_state_before: "planning",
+            }),
+            role: "tool",
+            tool_call_id: "tc-plan",
+          },
+          type: "message",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    const liveStore = new WebviewStateStore();
+    liveStore.setActiveSession("s1");
+    liveStore.applyEvent({
+      assistantMessageId: "assistant-live",
+      assistantMessageEvent: { delta: "planning", kind: "thinking_delta" },
+      message: {},
+      sessionId: "s1",
+      type: "message_update",
+    });
+    liveStore.applyEvent({
+      args: {
+        ops: [
+          { kind: "set_status", status: "completed", todo_id: "todo-1" },
+          { kind: "set_status", status: "completed", todo_id: "todo-2" },
+        ],
+        path: "/workspace/login.plan.md",
+        plan_id: "plan-1",
+      },
+      sessionId: "s1",
+      toolCallId: "tc-plan",
+      toolName: "update_plan",
+      type: "tool_execution_start",
+    });
+    liveStore.applyEvent({
+      isError: false,
+      result: JSON.stringify({
+        applied: 2,
+        items: [
+          { id: "todo-1", status: "completed" },
+          { id: "todo-2", status: "completed" },
+          { id: "todo-3", status: "pending" },
+        ],
+        plan_state_after: "executing",
+        plan_state_before: "planning",
+      }),
+      sessionId: "s1",
+      toolCallId: "tc-plan",
+      toolName: "update_plan",
+      type: "tool_execution_end",
+    });
+
+    const historyTool = historyStore
+      .snapshot()
+      .sessionViews.s1.timeline.find((item) => item.type === "tool" && item.toolCallId === "tc-plan");
+    const liveTool = liveStore
+      .snapshot()
+      .sessionViews.s1.timeline.find((item) => item.type === "tool" && item.toolCallId === "tc-plan");
+
+    expect(historyTool?.type === "tool" ? historyTool.planActivity : undefined).toEqual(
+      liveTool?.type === "tool" ? liveTool.planActivity : undefined,
+    );
+    expect(liveTool?.type === "tool" ? liveTool.planPath : undefined).toBe(
+      "/workspace/login.plan.md",
+    );
+    expect(liveTool?.type === "tool" ? liveTool.planId : undefined).toBe("plan-1");
   });
 
   it("hydrates persisted summary_title even when assistant had no thinking_text", () => {
@@ -829,7 +1086,7 @@ describe("session state hydration", () => {
     });
   });
 
-  it("hydrates plan cards and context ratio from get_state without duplicating cards", () => {
+  it("hydrates plan refs and context ratio from get_state without creating timeline cards", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
 
@@ -874,29 +1131,22 @@ describe("session state hydration", () => {
     );
 
     const session = store.snapshot().sessionViews.s1;
-    const planCards = session.timeline.filter(
-      (item) => item.type === "plan" && item.path === "/workspace/plan-a.plan.md",
-    );
-    expect(planCards).toHaveLength(1);
+    const planCards = session.timeline.filter((item) => item.type === "plan");
+    expect(planCards).toEqual([]);
     expect(session.contextRatio).toBe(0.42);
     expect(session.planFile).toMatchObject({
       path: "/workspace/plan-a.plan.md",
       planId: "plan-1",
       state: "chat",
     });
-    expect(planCards[0]).toMatchObject({
-      path: "/workspace/plan-a.plan.md",
-      planId: "plan-1",
-      state: "chat",
-    });
   });
 
-  it("keeps live plan cards in chronological order when rebuilding against stale history", () => {
+  it("keeps live create_plan cards in chronological order when rebuilding against stale history", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     const session = (
       store as unknown as {
-        ensureSession(sessionId: string): { timeline: Array<WebviewPlanFileCard | WebviewMessageBlock> };
+        ensureSession(sessionId: string): { timeline: Array<WebviewToolCard | WebviewMessageBlock> };
         ensureRuntime(sessionId: string): { historyEntries: unknown[]; localUserMessageIds: Set<string> };
         rebuildHistoryTimeline(sessionId: string): void;
       }
@@ -916,11 +1166,27 @@ describe("session state hydration", () => {
         type: "message",
       },
       {
-        id: "plan:/workspace/snake.plan.md",
-        path: "/workspace/snake.plan.md",
+        args: {
+          goal: "Snake plan",
+          path: "/workspace/snake.plan.md",
+          todos: [{ content: "Ship the refactor", id: "todo-1", status: "pending" }],
+        },
+        id: "tool-plan-create",
+        isError: false,
+        planActivity: {
+          completed: 0,
+          kind: "create",
+          stateAfter: "planning",
+          title: "Snake plan",
+          total: 1,
+        },
+        planPath: "/workspace/snake.plan.md",
         planId: "plan-snake",
-        state: "planning",
-        type: "plan",
+        status: "complete",
+        summary: "{\"plan_id\":\"plan-snake\",\"path\":\"/workspace/snake.plan.md\",\"state\":\"planning\"}",
+        toolCallId: "tc-plan-create",
+        toolName: "create_plan",
+        type: "tool",
       },
       {
         id: "user-2",
@@ -947,25 +1213,41 @@ describe("session state hydration", () => {
 
     expect(
       store.snapshot().sessionViews.s1.timeline.map((item) => item.id),
-    ).toEqual(["user-1", "assistant-1", "plan:/workspace/snake.plan.md", "user-2"]);
+    ).toEqual(["user-1", "assistant-1", "tool-plan-create", "user-2"]);
   });
 
-  it("updates an existing active plan from get_state without moving its timeline position", () => {
+  it("updates plan refs from get_state without moving existing create_plan events", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     const session = (
       store as unknown as {
-        ensureSession(sessionId: string): { timeline: WebviewPlanFileCard[] | Array<WebviewMessageBlock | WebviewPlanFileCard> };
+        ensureSession(sessionId: string): { timeline: Array<WebviewMessageBlock | WebviewToolCard> };
       }
     ).ensureSession("s1");
     session.timeline = [
       { id: "user-1", kind: "user", text: "older prompt", type: "message" },
       {
-        id: "plan:/workspace/active.plan.md",
-        path: "/workspace/active.plan.md",
+        args: {
+          goal: "Active plan",
+          path: "/workspace/active.plan.md",
+          todos: [{ content: "First step", id: "todo-1", status: "pending" }],
+        },
+        id: "tool-plan-create",
+        isError: false,
+        planActivity: {
+          completed: 0,
+          kind: "create",
+          stateAfter: "planning",
+          title: "Active plan",
+          total: 1,
+        },
+        planPath: "/workspace/active.plan.md",
         planId: "plan-1",
-        state: "planning",
-        type: "plan",
+        status: "complete",
+        summary: "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/active.plan.md\",\"state\":\"planning\"}",
+        toolCallId: "tc-plan-create",
+        toolName: "create_plan",
+        type: "tool",
       },
       { id: "user-2", kind: "user", text: "latest prompt", type: "message" },
     ];
@@ -984,15 +1266,10 @@ describe("session state hydration", () => {
     const timeline = store.snapshot().sessionViews.s1.timeline;
     expect(timeline.map((item) => item.id)).toEqual([
       "user-1",
-      "plan:/workspace/active.plan.md",
+      "tool-plan-create",
       "user-2",
     ]);
-    expect(
-      timeline.find(
-        (item): item is WebviewPlanFileCard =>
-          item.type === "plan" && item.path === "/workspace/active.plan.md",
-      ),
-    ).toMatchObject({
+    expect(store.snapshot().sessionViews.s1.planFile).toMatchObject({
       path: "/workspace/active.plan.md",
       planId: "plan-1",
       state: "pending",
@@ -1038,7 +1315,7 @@ describe("session state hydration", () => {
 });
 
 describe("custom history replay", () => {
-  it("replays plan custom entries into one card and preserves current state", () => {
+  it("replays plan custom entries into ambient plan state without timeline cards", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState(
@@ -1124,21 +1401,19 @@ describe("custom history replay", () => {
     });
 
     const session = store.snapshot().sessionViews.s1;
-    const planCards = session.timeline.filter(
-      (item) => item.type === "plan" && item.path === "/workspace/plan-a.plan.md",
-    );
     const notices = session.timeline.filter(
       (item) => item.type === "message" && item.kind === "notice",
     );
     const warnings = session.timeline.filter(
       (item) => item.type === "message" && item.kind === "warn",
     );
-    expect(planCards).toHaveLength(1);
-    expect(planCards[0]).toMatchObject({
+    expect(session.timeline.filter((item) => item.type === "plan")).toEqual([]);
+    expect(session.planFile).toMatchObject({
       path: "/workspace/plan-a.plan.md",
       planId: "plan-1",
       state: "executing",
     });
+    expect(session.planState).toBe("executing");
     expect(notices).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ text: "Tomcat plan review: looks good" }),
@@ -1245,13 +1520,11 @@ describe("custom history replay", () => {
     });
 
     const session = store.snapshot().sessionViews.s1;
-    const planCard = session.timeline.find(
-      (item) => item.type === "plan" && item.path === "/workspace/plan-a.plan.md",
-    );
     const notice = session.timeline.find(
       (item) => item.type === "message" && item.kind === "notice",
     );
-    expect(planCard).toMatchObject({
+    expect(session.timeline.filter((item) => item.type === "plan")).toEqual([]);
+    expect(session.planFile).toMatchObject({
       path: "/workspace/plan-a.plan.md",
       planId: "plan-1",
       state: "executing",
@@ -1301,23 +1574,17 @@ describe("custom history replay", () => {
 });
 
 describe("plan.todos routing", () => {
-  it("routes live plan.todos onto the matching card by planId without cross-talk", () => {
+  it("stores live plan.todos as ambient state for the active plan", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
 
-    store.applyEvent({
-      path: "/workspace/plan-a.plan.md",
+    store.applySessionState({
+      busy: false,
+      model: "gpt-5.4",
       planId: "plan-a",
+      planPath: "/workspace/plan-a.plan.md",
+      planState: "planning",
       sessionId: "s1",
-      state: "planning",
-      type: "plan.create",
-    });
-    store.applyEvent({
-      path: "/workspace/plan-b.plan.md",
-      planId: "plan-b",
-      sessionId: "s1",
-      state: "planning",
-      type: "plan.create",
     });
     store.applyEvent({
       planId: "plan-a",
@@ -1330,20 +1597,19 @@ describe("plan.todos routing", () => {
     });
 
     const session = store.snapshot().sessionViews.s1;
-    const findCard = (planId: string) =>
-      session.timeline.find(
-        (item): item is WebviewPlanFileCard =>
-          item.type === "plan" && item.planId === planId,
-      );
-    expect(findCard("plan-a")?.todos).toEqual([
+    expect(session.planTodos).toEqual([
       { content: "A step 1", id: "a1", status: "pending" },
       { content: "A step 2", id: "a2", status: "in_progress" },
     ]);
-    expect(findCard("plan-b")?.todos).toBeUndefined();
-    expect(session.planTodos).toHaveLength(2);
+    expect(session.planId).toBe("plan-a");
+    expect(session.planFile).toMatchObject({
+      path: "/workspace/plan-a.plan.md",
+      planId: "plan-a",
+      state: "planning",
+    });
   });
 
-  it("attaches plan.todos to the card during history replay", () => {
+  it("hydrates plan.todos into ambient state during history replay", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState(
@@ -1381,16 +1647,10 @@ describe("plan.todos routing", () => {
     });
 
     const session = store.snapshot().sessionViews.s1;
-    const card = session.timeline.find(
-      (item): item is WebviewPlanFileCard =>
-        item.type === "plan" && item.planId === "plan-a",
-    );
-    expect(card?.todos).toEqual([
-      { content: "history step", id: "h1", status: "pending" },
-    ]);
     expect(session.planTodos).toEqual([
       { content: "history step", id: "h1", status: "pending" },
     ]);
+    expect(session.timeline.filter((item) => item.type === "plan")).toEqual([]);
   });
 
   it("does not overwrite existing live planTodos when history has no todos for the active plan", () => {

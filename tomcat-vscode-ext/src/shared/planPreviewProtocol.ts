@@ -66,6 +66,7 @@ export interface PlanPreviewDomSnapshot {
   todoCountText: string | null;
   todoIconSizes: number[];
   todoItemCount: number;
+  todoStatuses: PlanTodoStatus[];
   /** 1-based source line of the first visible markdown block, when present. */
   topVisibleSourceLine: number | null;
   toolbarStyle: PlanToolbarStyle;

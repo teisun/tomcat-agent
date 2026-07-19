@@ -1963,6 +1963,10 @@ input:focus-visible {
   white-space: nowrap;
 }
 
+.tc-plan-card__footer-link:not(:disabled):hover {
+  color: var(--vscode-foreground);
+}
+
 .tc-plan-card__footer-link--busy,
 .tc-plan-card__footer-link:disabled {
   cursor: default;
@@ -2463,6 +2467,20 @@ input:focus-visible {
 
 .tc-tool-row__action-link:hover {
   color: var(--vscode-foreground);
+}
+
+.tc-tool-row__action-link--plan .tc-tool-row__action-link-text {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+  text-underline-offset: 2px;
+}
+
+.tc-tool-row__action-link--plan:hover .tc-tool-row__action-link-text {
+  text-decoration-color: currentColor;
+}
+
+.tc-tool-row__action-link-chevron {
+  font-size: 12px;
 }
 
 .tc-disclosure-card {
@@ -3438,10 +3456,10 @@ input:focus-visible {
 }
 
 .tc-plan-build-button {
-  background: var(--tc-build-btn);
+  background: var(--tc-build-btn, #e5b567);
   border-radius: 5px;
-  color: var(--tc-build-btn-fg);
-  font-weight: 600;
+  color: var(--tc-build-btn-fg, #1c1c1c);
+  font-weight: 400;
   min-height: 24px;
   padding: 3px 12px;
 }

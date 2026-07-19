@@ -408,6 +408,10 @@ describe("Tomcat webview App", () => {
                 path: "/workspace/README.md",
               },
             ],
+            planTodos: [
+              { content: "Audit transcript rendering", id: "todo-1", status: "pending" },
+              { content: "Render update_plan rows", id: "todo-2", status: "pending" },
+            ],
             planFile: {
               path: "/workspace/login-refactor.plan.md",
               planId: "plan-1",
@@ -437,11 +441,31 @@ describe("Tomcat webview App", () => {
                 type: "tool",
               },
               {
-                id: "plan-card-1",
-                path: "/workspace/login-refactor.plan.md",
+                args: {
+                  goal: "Login refactor plan",
+                  path: "/workspace/login-refactor.plan.md",
+                  todos: [
+                    { content: "Audit transcript rendering", id: "todo-1", status: "pending" },
+                    { content: "Render update_plan rows", id: "todo-2", status: "pending" },
+                  ],
+                },
+                id: "plan-create-1",
+                isError: false,
+                planActivity: {
+                  completed: 0,
+                  kind: "create",
+                  stateAfter: "planning",
+                  title: "Login refactor plan",
+                  total: 2,
+                },
+                planPath: "/workspace/login-refactor.plan.md",
                 planId: "plan-1",
-                state: "planning",
-                type: "plan",
+                status: "complete",
+                summary:
+                  "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login-refactor.plan.md\",\"state\":\"planning\"}",
+                toolCallId: "tc-plan-create-1",
+                toolName: "create_plan",
+                type: "tool",
               },
               {
                 id: "approval-1",
@@ -517,14 +541,33 @@ describe("Tomcat webview App", () => {
             pendingAttachments: [],
             planTodos: [],
             sessionTodos: [],
+            planId: "plan-1",
+            planState: "planning",
             sessionId: "s1",
             timeline: [
               {
-                id: "plan-card-1",
-                path: "/workspace/login-refactor.plan.md",
+                args: {
+                  goal: "Login refactor plan",
+                  path: "/workspace/login-refactor.plan.md",
+                  todos: [{ content: "Audit transcript rendering", id: "todo-1", status: "pending" }],
+                },
+                id: "plan-create-1",
+                isError: false,
+                planActivity: {
+                  completed: 0,
+                  kind: "create",
+                  stateAfter: "planning",
+                  title: "Login refactor plan",
+                  total: 1,
+                },
+                planPath: "/workspace/login-refactor.plan.md",
                 planId: "plan-1",
-                state: "planning",
-                type: "plan",
+                status: "complete",
+                summary:
+                  "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login-refactor.plan.md\",\"state\":\"planning\"}",
+                toolCallId: "tc-plan-create-1",
+                toolName: "create_plan",
+                type: "tool",
               },
             ],
           },
@@ -758,11 +801,28 @@ describe("Tomcat webview App", () => {
             sessionId: "s1",
             timeline: [
               {
-                id: "plan-card-1",
-                path: "/workspace/restored.plan.md",
+                args: {
+                  goal: "Restored plan",
+                  path: "/workspace/restored.plan.md",
+                  todos: [{ content: "Resume execution", id: "todo-1", status: "pending" }],
+                },
+                id: "plan-create-1",
+                isError: false,
+                planActivity: {
+                  completed: 0,
+                  kind: "create",
+                  stateAfter: "planning",
+                  title: "Restored plan",
+                  total: 1,
+                },
+                planPath: "/workspace/restored.plan.md",
                 planId: "plan-restored",
-                state: "planning",
-                type: "plan",
+                status: "complete",
+                summary:
+                  "{\"plan_id\":\"plan-restored\",\"path\":\"/workspace/restored.plan.md\",\"state\":\"planning\"}",
+                toolCallId: "tc-plan-create-1",
+                toolName: "create_plan",
+                type: "tool",
               },
             ],
           },
@@ -1122,6 +1182,9 @@ describe("Tomcat webview App", () => {
                 path: "/workspace/README.md",
               },
             ],
+            planTodos: [
+              { content: "Audit transcript rendering", id: "todo-1", status: "pending" },
+            ],
             planFile: {
               path: "/workspace/login-refactor.plan.md",
               planId: "plan-1",
@@ -1132,11 +1195,36 @@ describe("Tomcat webview App", () => {
             sessionId: "s1",
             timeline: [
               {
-                id: "plan-card-1",
-                path: "/workspace/login-refactor.plan.md",
+                args: {
+                  goal: "Login refactor plan",
+                  path: "/workspace/login-refactor.plan.md",
+                  todos: [{ content: "Audit transcript rendering", id: "todo-1", status: "pending" }],
+                },
+                id: "plan-create-1",
+                isError: false,
+                planActivity: {
+                  completed: 0,
+                  kind: "create",
+                  stateAfter: "planning",
+                  title: "Login refactor plan",
+                  total: 1,
+                },
+                planPath: "/workspace/login-refactor.plan.md",
                 planId: "plan-1",
-                state: "planning",
-                type: "plan",
+                status: "complete",
+                summary:
+                  "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login-refactor.plan.md\",\"state\":\"planning\"}",
+                toolCallId: "tc-plan-create-1",
+                toolName: "create_plan",
+                type: "tool",
+              },
+              {
+                assistantMessageId: "assistant-plan",
+                planId: "plan-1",
+                kind: "assistant",
+                id: "assistant-plan",
+                text: "Plan is ready to build.",
+                type: "message",
               },
               {
                 id: "approval-1",
