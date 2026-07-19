@@ -89,6 +89,7 @@ export interface TomcatWebviewProviderDeps {
   initialize(): Promise<InitializeResult>;
   messenger: TomcatMessenger;
   openModelSettings?(route?: "models"): void;
+  refreshPlanPreview?(planId: string | null, path: string | null): Promise<void> | void;
   sessionRouter: SessionRouter;
   showOpenDialog?(
     options: vscode.OpenDialogOptions,
@@ -109,6 +110,26 @@ function parseCapabilityNames(value: unknown): string[] {
   return Object.entries(value)
     .filter(([, enabled]) => enabled === true)
     .map(([name]) => name);
+}
+
+function extractPlanPreviewRefreshArgs(
+  event: ServeEvent,
+): { path: string | null; planId: string | null } | null {
+  switch (event.type) {
+    case "plan.create":
+    case "plan.update":
+      return {
+        path: typeof event.path === "string" ? event.path : null,
+        planId: typeof event.planId === "string" ? event.planId : null,
+      };
+    case "plan.todos":
+      return {
+        path: null,
+        planId: typeof event.planId === "string" ? event.planId : null,
+      };
+    default:
+      return null;
+  }
 }
 
 export function parseModelCatalog(payload: unknown): {
@@ -1175,6 +1196,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     }
     this.stateStore.applyEvent(event);
     await this.maybeAutoOpenPlanPreview(event);
+    const previewRefresh = extractPlanPreviewRefreshArgs(event);
+    if (previewRefresh && this.deps.refreshPlanPreview) {
+      void Promise.resolve(
+        this.deps.refreshPlanPreview(previewRefresh.planId, previewRefresh.path),
+      ).catch((error) => {
+        console.warn("Tomcat webview failed to refresh the plan preview", error);
+      });
+    }
     if (event.sessionId) {
       if (shouldReconcileSessionState(event)) {
         await this.refreshSessionState(event.sessionId, { trustBusy: false });

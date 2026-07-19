@@ -156,6 +156,23 @@ function makeDoc(text = PLAN_TEXT, docPath = "/workspace/plans/sample.plan.md"):
   return { getText: () => text, path: docPath };
 }
 
+const refreshTempDirs: string[] = [];
+
+async function createTempPlanFile(text: string): Promise<string> {
+  const dir = await fsPromises.mkdtemp(path.join(os.tmpdir(), "tomcat-plan-refresh-"));
+  refreshTempDirs.push(dir);
+  const planPath = path.join(dir, "sample.plan.md");
+  await fsPromises.writeFile(planPath, text, "utf8");
+  return planPath;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    refreshTempDirs.map((dir) => fsPromises.rm(dir, { force: true, recursive: true })),
+  );
+  refreshTempDirs.length = 0;
+});
+
 describe("deriveCanBuild", () => {
   it("is false whenever the serve lacks set_plan_mode", () => {
     expect(deriveCanBuild("planning", false)).toBe(false);
@@ -516,6 +533,62 @@ describe("PlanPreviewEditorProvider active-panel + native controls", () => {
   it("requestCaptureSelection is a no-op when no plan editor is focused", async () => {
     const { provider } = setup();
     await expect(provider.requestCaptureSelection()).resolves.toBeUndefined();
+  });
+});
+
+describe("PlanPreviewEditorProvider.refreshFromServeEvent", () => {
+  it("refreshes an open preview from disk even when the VS Code document is stale", async () => {
+    const oldText = PLAN_TEXT.replace("Body paragraph.", "Old buffered paragraph.");
+    const newText = PLAN_TEXT.replace("Body paragraph.", "Disk refreshed paragraph.");
+    const planPath = await createTempPlanFile(oldText);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, oldText, planPath);
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("Old buffered paragraph.");
+
+    await fsPromises.writeFile(planPath, newText, "utf8");
+    await provider.refreshFromServeEvent("plan-xyz");
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("Disk refreshed paragraph.");
+  });
+
+  it("falls back to the canonicalized path hint when the event has no planId", async () => {
+    const oldText = PLAN_TEXT.replace("Body paragraph.", "Old buffered paragraph.");
+    const newText = PLAN_TEXT.replace("Body paragraph.", "Canonical refresh paragraph.");
+    const planPath = await createTempPlanFile(oldText);
+    const aliasPath = path.join(path.dirname(planPath), "alias.plan.md");
+    await fsPromises.symlink(planPath, aliasPath);
+
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, oldText, planPath);
+    await fsPromises.writeFile(planPath, newText, "utf8");
+
+    await provider.refreshFromServeEvent(null, aliasPath);
+
+    expect(panel.webview.lastState()?.bodyMarkdown).toContain("Canonical refresh paragraph.");
+  });
+
+  it("is a no-op when no open preview matches the incoming event", async () => {
+    const planPath = await createTempPlanFile(PLAN_TEXT);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, PLAN_TEXT, planPath);
+    const frameCount = panel.webview.stateFrames().length;
+
+    await provider.refreshFromServeEvent("missing-plan");
+
+    expect(panel.webview.stateFrames()).toHaveLength(frameCount);
+  });
+
+  it("swallows disk read failures during an external refresh", async () => {
+    const planPath = await createTempPlanFile(PLAN_TEXT);
+    const provider = new PlanPreviewEditorProvider(makeDeps());
+    const { panel } = await resolveEditor(provider, PLAN_TEXT, planPath);
+    const frameCount = panel.webview.stateFrames().length;
+
+    await fsPromises.rm(planPath, { force: true });
+    await provider.refreshFromServeEvent("plan-xyz");
+
+    expect(panel.webview.stateFrames()).toHaveLength(frameCount);
   });
 });
 

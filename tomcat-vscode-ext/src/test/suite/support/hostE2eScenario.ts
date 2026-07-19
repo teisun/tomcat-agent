@@ -3496,6 +3496,10 @@ export async function assertPlanPreviewCustomEditorFlow(
     .join("/");
   const planUri = vscode.Uri.file(planPath);
   const planId = `e2e-plan-${Date.now().toString(36)}`;
+  const fillerParagraphs = Array.from(
+    { length: 24 },
+    (_, index) => `Scroll filler paragraph ${index + 1}.`,
+  );
   const initialText = [
     "---",
     `plan_id: ${planId}`,
@@ -3525,6 +3529,7 @@ export async function assertPlanPreviewCustomEditorFlow(
     "  a[Start] --> b[Finish]",
     "```",
     "",
+    ...fillerParagraphs.flatMap((line) => [line, ""]),
   ].join("\n");
 
   const chipCount = (html: string): number =>
@@ -3656,9 +3661,19 @@ export async function assertPlanPreviewCustomEditorFlow(
     );
 
     // "Preview" from the native editor reopens the custom preview; hot-update the
-    // document afterwards and expect the checklist to grow.
+    // document afterwards via disk write + serve event, and expect the checklist
+    // to grow without kicking the user back to the top of the scroll column.
     await api.__testing.executeCommand("tomcat.plan.viewAsPreview");
     await waitForPlanPreviewDom(api, planPath, (snapshot) => snapshot.bodyHasContent);
+    await api.__testing.dispatchPlanPreviewDomAction(planPath, {
+      kind: "setContentScrollTop",
+      scrollTop: 280,
+    });
+    const scrollBeforeHotUpdate = await waitForPlanPreviewDom(
+      api,
+      planPath,
+      (snapshot) => (snapshot.contentScrollTop ?? 0) >= 200,
+    );
 
     const updatedText = initialText.replace(
       "---\n\n# E2E heading",
@@ -3666,15 +3681,14 @@ export async function assertPlanPreviewCustomEditorFlow(
         "\n",
       ),
     );
-    const document = await vscode.workspace.openTextDocument(planUri);
-    const edit = new vscode.WorkspaceEdit();
-    edit.replace(
-      planUri,
-      new vscode.Range(new vscode.Position(0, 0), new vscode.Position(document.lineCount, 0)),
-      updatedText,
-    );
-    const applied = await vscode.workspace.applyEdit(edit);
-    assert.equal(applied, true, "expected the plan document edit to apply");
+    await fs.writeFile(planPath, updatedText, "utf8");
+    await api.__testing.injectServeEvent({
+      path: planPath,
+      planId,
+      sessionId,
+      state: "planning",
+      type: "plan.update",
+    });
 
     // Expected 1-based source lines of the rendered blocks, derived from the
     // (post hot-update) document so the assertions can't drift.
@@ -3693,6 +3707,12 @@ export async function assertPlanPreviewCustomEditorFlow(
       hotUpdated.todoCountText,
       "4 To-dos",
       `expected the count header to hot-update to "4 To-dos", got ${hotUpdated.todoCountText}`,
+    );
+    assert.ok(
+      hotUpdated.contentScrollTop !== null
+      && scrollBeforeHotUpdate.contentScrollTop !== null
+      && Math.abs(hotUpdated.contentScrollTop - scrollBeforeHotUpdate.contentScrollTop) <= 32,
+      `expected hot-update to preserve the reading position, before=${String(scrollBeforeHotUpdate.contentScrollTop)} after=${String(hotUpdated.contentScrollTop)}`,
     );
 
     // When the serve exposes ready models, selecting one on the hybrid strip

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import {
   isPlanPreviewHostFrame,
@@ -64,6 +64,87 @@ function readSelectionSourceLines(): { lineEnd: number; lineStart: number } | nu
   return { lineEnd: Math.max(first, last), lineStart: Math.min(first, last) };
 }
 
+type ScrollRestoreState = {
+  anchorLine: number | null;
+  anchorOffset: number;
+  anchorTagName: string | null;
+  anchorText: string;
+  scrollTop: number;
+};
+
+function normalizeAnchorText(text: string): string {
+  return text.replace(/\s+/gu, " ").trim().slice(0, 160);
+}
+
+function findFirstVisibleSourceBlock(container: HTMLElement): HTMLElement | null {
+  const containerRect = container.getBoundingClientRect();
+  const blocks = Array.from(container.querySelectorAll<HTMLElement>("[data-source-line]"));
+  return (
+    blocks.find((block) => {
+      const rect = block.getBoundingClientRect();
+      return rect.bottom > containerRect.top && rect.top < containerRect.bottom;
+    }) ?? blocks[0] ?? null
+  );
+}
+
+function captureScrollRestore(container: HTMLElement | null): ScrollRestoreState | null {
+  if (!container) {
+    return null;
+  }
+  const anchor = findFirstVisibleSourceBlock(container);
+  if (!anchor) {
+    return {
+      anchorLine: null,
+      anchorOffset: 0,
+      anchorTagName: null,
+      anchorText: "",
+      scrollTop: container.scrollTop,
+    };
+  }
+  const containerRect = container.getBoundingClientRect();
+  return {
+    anchorLine: sourceLineOf(anchor),
+    anchorOffset: anchor.getBoundingClientRect().top - containerRect.top,
+    anchorTagName: anchor.tagName,
+    anchorText: normalizeAnchorText(anchor.textContent ?? ""),
+    scrollTop: container.scrollTop,
+  };
+}
+
+function findAnchorByText(
+  container: HTMLElement,
+  tagName: string | null,
+  anchorText: string,
+): HTMLElement | null {
+  if (!tagName || !anchorText) {
+    return null;
+  }
+  return (
+    Array.from(container.querySelectorAll<HTMLElement>("[data-source-line]")).find(
+      (candidate) =>
+        candidate.tagName === tagName
+        && normalizeAnchorText(candidate.textContent ?? "").startsWith(anchorText),
+    ) ?? null
+  );
+}
+
+function restoreScrollPosition(container: HTMLElement, restore: ScrollRestoreState): void {
+  let anchor: HTMLElement | null = null;
+  if (restore.anchorLine !== null) {
+    anchor = container.querySelector<HTMLElement>(`[data-source-line="${restore.anchorLine}"]`);
+  }
+  if (!anchor) {
+    anchor = findAnchorByText(container, restore.anchorTagName, restore.anchorText);
+  }
+  if (!anchor) {
+    container.scrollTop = restore.scrollTop;
+    return;
+  }
+  const containerRect = container.getBoundingClientRect();
+  const absoluteTop = anchor.getBoundingClientRect().top - containerRect.top + container.scrollTop;
+  container.scrollTop = Math.max(0, absoluteTop - restore.anchorOffset);
+}
+
 /** Read the rendered DOM for E2E assertions (test-only). */
 function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDomSnapshot {
   const strip = document.querySelector('[data-testid="plan-action-strip"]');
@@ -94,11 +175,13 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
   // Left inset of the strip: ~0 confirms the full-bleed header (no leftover VS
   // Code body padding). null when the strip isn't rendered (native toolbar mode).
   const stripInsetLeft = strip ? Math.round(strip.getBoundingClientRect().left) : null;
+  const topVisibleSourceLine = sourceLineOf(content ? findFirstVisibleSourceBlock(content) : null);
   return {
     bodyHasContent: Boolean(body && (body.textContent ?? "").trim().length > 0),
     bodyInsetLeft: body ? Math.round(body.getBoundingClientRect().left) : null,
     buildModelOptions: options,
     buildModelValue: select ? select.value : "",
+    contentScrollTop: content ? Math.round(content.scrollTop) : null,
     hasActionStrip: Boolean(strip),
     inlinePathCount,
     mermaidSvgCount,
@@ -110,6 +193,7 @@ function readDomSnapshot(state: PlanPreviewStateSnapshot | null): PlanPreviewDom
     todoCountText: countEl ? countEl.textContent : null,
     todoIconSizes,
     todoItemCount: items.length,
+    topVisibleSourceLine,
     toolbarStyle,
   };
 }
@@ -125,6 +209,14 @@ function runDomAction(action: PlanPreviewDomAction): void {
     case "clickSelector":
       document.querySelector<HTMLElement>(action.selector)?.click();
       return;
+    case "setContentScrollTop": {
+      const content = document.querySelector<HTMLElement>('[data-testid="plan-content"]');
+      if (content) {
+        content.scrollTop = action.scrollTop;
+        content.dispatchEvent(new Event("scroll", { bubbles: true }));
+      }
+      return;
+    }
     case "selectText": {
       const target = document.querySelector(action.selector);
       const selection = window.getSelection();
@@ -160,6 +252,8 @@ export function PlanPreviewApp({
 }) {
   const [state, setState] = useState<PlanPreviewStateSnapshot | null>(null);
   const stateRef = useRef<PlanPreviewStateSnapshot | null>(state);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const pendingScrollRestoreRef = useRef<ScrollRestoreState | null>(null);
   stateRef.current = state;
 
   const sendSelection = useCallback(
@@ -186,6 +280,9 @@ export function PlanPreviewApp({
         return;
       }
       if (frame.channel === "state") {
+        pendingScrollRestoreRef.current = stateRef.current
+          ? captureScrollRestore(contentRef.current)
+          : null;
         setState(frame.content);
         return;
       }
@@ -213,6 +310,16 @@ export function PlanPreviewApp({
     };
   }, [sendSelection, vscodeApi]);
 
+  useLayoutEffect(() => {
+    const container = contentRef.current;
+    const restore = pendingScrollRestoreRef.current;
+    if (!container || !restore) {
+      return;
+    }
+    pendingScrollRestoreRef.current = null;
+    restoreScrollPosition(container, restore);
+  }, [state]);
+
   if (!state) {
     return (
       <div className="tc-plan-preview tc-plan-preview--loading" data-testid="plan-loading">
@@ -236,7 +343,7 @@ export function PlanPreviewApp({
           }
         />
       ) : null}
-      <div className="tc-plan-preview__content" data-testid="plan-content">
+      <div className="tc-plan-preview__content" data-testid="plan-content" ref={contentRef}>
         <MarkdownBody
           markdown={state.bodyMarkdown}
           onOpenFile={(path, line) => send(vscodeApi, { data: { line, path }, type: "openFile" })}

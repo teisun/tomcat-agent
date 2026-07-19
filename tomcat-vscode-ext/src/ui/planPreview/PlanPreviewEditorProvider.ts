@@ -61,6 +61,15 @@ function hasUriScheme(value: string): boolean {
   return /^[a-z][a-z0-9+.-]*:/i.test(value);
 }
 
+function normalizePlanPath(value: string): string {
+  const resolved = path.resolve(value);
+  try {
+    return path.normalize(fs.realpathSync.native(resolved));
+  } catch {
+    return path.normalize(resolved);
+  }
+}
+
 /**
  * Decide how a link inside the rendered plan body should be handled. Pure and
  * exported for unit testing: external URLs open in the browser, anchors are
@@ -119,6 +128,7 @@ export interface PlanPreviewEditorProviderDeps {
 }
 
 interface PlanPanelEntry {
+  canonicalPath: string;
   getText(): string;
   panel: vscode.WebviewPanel;
 }
@@ -132,6 +142,8 @@ export class PlanPreviewEditorProvider
   private readonly panels = new Map<string, PlanPanelEntry>();
   /** Latest derived `canBuild` per panel, so context keys stay in sync. */
   private readonly panelCanBuild = new Map<string, boolean>();
+  /** Latest parsed planId per panel, so serve events can target an open preview. */
+  private readonly panelPlanId = new Map<string, string | null>();
   /** fsPath of the plan editor VS Code currently has focused, or null. */
   private activePanelPath: string | null = null;
   private readonly domSnapshots = new PendingMessageTracker<PlanPreviewDomSnapshot>();
@@ -157,7 +169,11 @@ export class PlanPreviewEditorProvider
     webviewPanel.webview.html = this.renderHtml(webviewPanel.webview);
 
     const fsPath = document.uri.fsPath;
-    this.panels.set(fsPath, { getText: () => document.getText(), panel: webviewPanel });
+    this.panels.set(fsPath, {
+      canonicalPath: normalizePlanPath(fsPath),
+      getText: () => document.getText(),
+      panel: webviewPanel,
+    });
     if (webviewPanel.active) {
       this.activePanelPath = fsPath;
     }
@@ -209,6 +225,7 @@ export class PlanPreviewEditorProvider
       if (this.panels.get(fsPath)?.panel === webviewPanel) {
         this.panels.delete(fsPath);
         this.panelCanBuild.delete(fsPath);
+        this.panelPlanId.delete(fsPath);
       }
       if (this.activePanelPath === fsPath) {
         this.activePanelPath = null;
@@ -298,10 +315,39 @@ export class PlanPreviewEditorProvider
     if (!entry) {
       return;
     }
-    const snapshot = await this.buildState(entry.getText(), path, {
+    await this.postSnapshot(path, entry.getText(), {
       toolbarStyle: this.readToolbarStyle(),
     });
+  }
+
+  async refreshFromServeEvent(planId: string | null, pathHint?: string | null): Promise<void> {
+    const panelPath = this.findPanelPath(planId, pathHint);
+    if (!panelPath) {
+      return;
+    }
+    let text: string;
+    try {
+      text = fs.readFileSync(panelPath, "utf8");
+    } catch {
+      return;
+    }
+    await this.postSnapshot(panelPath, text, {
+      toolbarStyle: this.readToolbarStyle(),
+    });
+  }
+
+  private async postSnapshot(
+    path: string,
+    text: string,
+    ui: { toolbarStyle: PlanToolbarStyle },
+  ): Promise<void> {
+    const entry = this.panels.get(path);
+    if (!entry) {
+      return;
+    }
+    const snapshot = await this.buildState(text, path, ui);
     this.panelCanBuild.set(path, snapshot.canBuild);
+    this.panelPlanId.set(path, snapshot.planId);
     const frame: PlanPreviewHostFrame = {
       channel: "state",
       content: snapshot,
@@ -311,6 +357,23 @@ export class PlanPreviewEditorProvider
     if (path === this.activePanelPath) {
       this.emitActive();
     }
+  }
+
+  private findPanelPath(planId: string | null, pathHint?: string | null): string | null {
+    if (planId) {
+      const byPlanId = [...this.panelPlanId.entries()].find(([, value]) => value === planId)?.[0];
+      if (byPlanId) {
+        return byPlanId;
+      }
+    }
+    if (!pathHint) {
+      return null;
+    }
+    const normalizedHint = normalizePlanPath(pathHint);
+    return (
+      [...this.panels.entries()].find(([, entry]) => entry.canonicalPath === normalizedHint)?.[0]
+      ?? null
+    );
   }
 
   /** Test-only: capture the rendered DOM of the panel showing `planPath`. */

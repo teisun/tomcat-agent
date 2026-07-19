@@ -462,17 +462,19 @@ agent_loop            tool_dispatcher                utility-flash        ext ho
 | [`gui/src/components/ToolRow.test.tsx`](../../../gui/src/components/ToolRow.test.tsx) | edit diff 徽章 + View diff 按钮、command disclosure、answer/context 渲染语义、read 图标去重 |
 | [`gui/src/components/TranscriptView.partition.test.ts`](../../../gui/src/components/TranscriptView.partition.test.ts) | assistant-response 冲刷算法（context/action 交错边界） |
 | [`gui/src/components/TranscriptView.test.tsx`](../../../gui/src/components/TranscriptView.test.tsx) | 单 context 工具直出、action/context 分层、旧轮 thinking 不被新一轮 busy 连坐成 streaming |
+| [`gui/src/components/markdown/ChatMarkdown.test.tsx`](../../../gui/src/components/markdown/ChatMarkdown.test.tsx) | assistant 正文 markdown 富渲染：标题/普通段落、代码卡片（bare / 路径头）、inline path、copy、普通 `<a>`、sanitize、未闭合围栏；**流式过程中代码块同步出现 `code.hljs`、mermaid 仍异步；追加尾块只重算新块（按块 memo）** |
+| [`gui/src/components/markdown/markdownRuntime.test.ts`](../../../gui/src/components/markdown/markdownRuntime.test.ts) / [`gui/src/components/markdown/richRenderRuntime.test.ts`](../../../gui/src/components/markdown/richRenderRuntime.test.ts) | `splitTopLevelBlocks()` 过滤 `space` token / 未闭合围栏尾块、`highlightToHtml()` 在模块加载期完成语言注册、别名与未知语言回退 |
 | [`gui/src/components/ThinkingGroup.test.tsx`](../../../gui/src/components/ThinkingGroup.test.tsx) | thinking-only 残组不复用 `summaryTitle` |
 | [`src/ui/webview/tests/dual_channel.test.ts`](../../../src/ui/webview/tests/dual_channel.test.ts) | thinking 在 assistant 前、历史 `role:tool` → 工具卡、历史/实时去重 |
 | [`src/ui/webview/tests/provider.test.ts`](../../../src/ui/webview/tests/provider.test.ts) | mutation 工具结束后从 `display.added/removed/diff` 注入 `diffStat/tool.diff`、errored tool 收敛为 `complete+error`，以及 `openDiff -> ide.openReconstructedDiff` 路由 |
 | [`src/ui/webview/tests/state.test.ts`](../../../src/ui/webview/tests/state.test.ts) | `agent_idle` 收敛残留 `running/streaming` 工具卡，并保留 `summary/isError` |
 | [`src/ide/tests/diff_apply_edit.test.ts`](../../../src/ide/tests/diff_apply_edit.test.ts) | `openReconstructedDiff()` 复用原生虚拟文档 diff 链路 |
 | [`src/ui/planPreview/tests/planDocument.test.ts`](../../../src/ui/planPreview/tests/planDocument.test.ts) | `.plan.md` 解析：四态 todos、缺 frontmatter、`name`/`goal` 回退、`bodyMarkdown` 剥离 `## Todos Board`、CRLF；**`bodyLineMap` 源码行映射（frontmatter 偏移 / 无 frontmatter / board 剪除后非线性 / CRLF）** |
-| [`src/ui/planPreview/tests/PlanPreviewEditorProvider.test.ts`](../../../src/ui/planPreview/tests/PlanPreviewEditorProvider.test.ts) | 编辑器 Provider 纯逻辑：`buildState`（buildModel 回退 / canBuild 派生 / init 失败降级 / 帧含 toolbarStyle、**默认 hybrid**）、`handleIntent`（ready/openLink/setBuildModel/build/**addSelectionToChat 含/不含行号**）、`classifyPlanLink`；活动面板机账（伪造 panel 驱动 `runBuildForActive` / `getActivePlanPath` / `getActivePlanInfo` / `onDidChangeActivePlan` / 失焦清理 / **`requestCaptureSelection` 发 `captureSelectionForChat` 事件、无焦点 no-op**） |
+| [`src/ui/planPreview/tests/PlanPreviewEditorProvider.test.ts`](../../../src/ui/planPreview/tests/PlanPreviewEditorProvider.test.ts) | 编辑器 Provider 纯逻辑：`buildState`（buildModel 回退 / canBuild 派生 / init 失败降级 / 帧含 toolbarStyle、**默认 hybrid**）、`handleIntent`（ready/openLink/setBuildModel/build/**addSelectionToChat 含/不含行号**）、`classifyPlanLink`；活动面板机账（伪造 panel 驱动 `runBuildForActive` / `getActivePlanPath` / `getActivePlanInfo` / `onDidChangeActivePlan` / 失焦清理 / **`requestCaptureSelection` 发 `captureSelectionForChat` 事件、无焦点 no-op**）；**`refreshFromServeEvent(planId,pathHint)` 从磁盘重读而非旧缓冲，并支持 canonical path hint 命中** |
 | [`tests/contextReferences.test.ts`](../../../tests/contextReferences.test.ts) | `buildSelectionReferenceFromParts`（多行/单行 label、无行号回落文件名、空文本 null、截断）+ `buildSelectionReference` 薄封装复用 |
-| [`gui/src/plan/PlanPreviewApp.test.tsx`](../../../gui/src/plan/PlanPreviewApp.test.tsx) / [`gui/src/plan/PlanSelectionActionButton.test.tsx`](../../../gui/src/plan/PlanSelectionActionButton.test.tsx) / [`gui/src/components/PlanActionStrip.test.tsx`](../../../gui/src/components/PlanActionStrip.test.tsx) / [`gui/src/components/PlanFileCard.test.tsx`](../../../gui/src/components/PlanFileCard.test.tsx) / [`gui/src/components/TodoList.test.tsx`](../../../gui/src/components/TodoList.test.tsx) / [`gui/src/components/MarkdownBody.test.tsx`](../../../gui/src/components/MarkdownBody.test.tsx) / [`gui/src/components/PlanBuildModelSelect.test.tsx`](../../../gui/src/components/PlanBuildModelSelect.test.tsx) | 预览渲染顺序（正文→N To-dos→分割线→四态清单）、不渲染 name/overview、**恒渲染 Preview（无 webview 内 markdown/源码视图）**、**hybrid 固定头 strip 是 `plan-content` 的兄弟节点而非后代（滚正文不带走）**、native 无动作条 / hybrid 渲染 `PlanActionStrip`（黄 Build 发 build、下拉发 `setBuildModel`、canBuild=false 禁用）、**strip/卡片/下拉无可见 “Build model”/“Model” 白字但保留 `aria-label`**、**`captureSelectionForChat` 读选区→发 `addSelectionToChat`（选区落在 `data-source-line` 块→带精确行号，落在无映射块/todo→不带行号，空选区不发）**、**`MarkdownBody` 按 `sourceLineMap` 给块级标签盖 `data-source-line`（含 `**bold**` 内联、无 map 时不盖）**、**`PlanSelectionActionButton` 有选区显示/空/越界隐藏/滚动隐藏/点击 onAdd**、**`Composer` 同一 `.plan.md` 两个不同无行号选区不互相去重**、`<a>` 拦截 + DOMPurify、`mermaid` 代码块渲染成 SVG（mock）+ 失败回退保留代码块 |
+| [`gui/src/plan/PlanPreviewApp.test.tsx`](../../../gui/src/plan/PlanPreviewApp.test.tsx) / [`gui/src/plan/PlanSelectionActionButton.test.tsx`](../../../gui/src/plan/PlanSelectionActionButton.test.tsx) / [`gui/src/components/PlanActionStrip.test.tsx`](../../../gui/src/components/PlanActionStrip.test.tsx) / [`gui/src/components/PlanFileCard.test.tsx`](../../../gui/src/components/PlanFileCard.test.tsx) / [`gui/src/components/TodoList.test.tsx`](../../../gui/src/components/TodoList.test.tsx) / [`gui/src/components/MarkdownBody.test.tsx`](../../../gui/src/components/MarkdownBody.test.tsx) / [`gui/src/components/PlanBuildModelSelect.test.tsx`](../../../gui/src/components/PlanBuildModelSelect.test.tsx) | 预览渲染顺序（正文→N To-dos→分割线→四态清单）、不渲染 name/overview、**恒渲染 Preview（无 webview 内 markdown/源码视图）**、**hybrid 固定头 strip 是 `plan-content` 的兄弟节点而非后代（滚正文不带走）**、native 无动作条 / hybrid 渲染 `PlanActionStrip`（黄 Build 发 build、下拉发 `setBuildModel`、canBuild=false 禁用）、**strip/卡片/下拉无可见 “Build model”/“Model” 白字但保留 `aria-label`**、**`captureSelectionForChat` 读选区→发 `addSelectionToChat`（选区落在 `data-source-line` 块→带精确行号，落在无映射块/todo→不带行号，空选区不发）**、**`MarkdownBody` 复用 transcript 同一套 `buildDecoratedHtml()`，因此 plan 预览也有同步 `hljs` 代码卡片 / copy / inline path**、**`PlanSelectionActionButton` 有选区显示/空/越界隐藏/滚动隐藏/点击 onAdd**、**`Composer` 同一 `.plan.md` 两个不同无行号选区不互相去重**、`<a>` 拦截 + DOMPurify、`mermaid` 代码块渲染成 SVG（mock）+ 失败回退保留代码块 |
 | [`src/ui/webview/tests/provider.test.ts`](../../../src/ui/webview/tests/provider.test.ts)（plan build orchestration + auto-open） | `runPlanBuild` 顺序：配置非空先 `sendSetModel` 再 `sendSetPlanMode`；卡片 `setPlanMode build` 与编辑器 `buildPlan` 共用同一路径；**auto-open：`plan.create` 只登记 `planId -> path`，后续 `plan.review` 才 `ide.openWith(...,"tomcat.planPreview")`，重复 review / 后续 `plan.update` / 无 path / 未登记 planId 不再开；openWith 抛错降级 `showFile`** |
-| [`src/test/suite/support/hostE2eScenario.ts`](../../../src/test/suite/support/hostE2eScenario.ts) | 真实宿主 webview streaming/diff/multi-session/ownership 通路；以及 `.plan.md` 自定义编辑器真实 resolve/webview（**`plan.create` 不会抢开，`plan.review` 后才自动弹出预览**；默认 hybrid 出全宽固定头 strip（`stripOutsideContent`、`stripInsetLeft<=2`）且**正文左侧 inset 有留白**（`bodyInsetLeft>=12`） + Preview 四态 + **`viewAsMarkdown` 打开原生文本编辑器（断言 `activeTextEditor` 变该文件）→ `viewAsPreview` 切回预览** + 文档编辑热更新 + 建模型落配置 + **选中正文经右键命令/浮动按钮两路 → chat 出现带 `文件名:行号` 的 selection chip（源码行映射）；path3：同一 plan 两个不同「无行号」选区（todo 项）都能落 chip，锁死去重碰撞回归** + 切 native 回归无动作条） |
+| [`src/test/suite/support/hostE2eScenario.ts`](../../../src/test/suite/support/hostE2eScenario.ts) | 真实宿主 webview streaming/diff/multi-session/ownership 通路；以及 `.plan.md` 自定义编辑器真实 resolve/webview（**`plan.create` 不会抢开，`plan.review` 后才自动弹出预览**；默认 hybrid 出全宽固定头 strip（`stripOutsideContent`、`stripInsetLeft<=2`）且**正文左侧 inset 有留白**（`bodyInsetLeft>=12`） + Preview 四态 + **`viewAsMarkdown` 打开原生文本编辑器（断言 `activeTextEditor` 变该文件）→ `viewAsPreview` 切回预览** + **Agent 外部写盘(`fs.writeFile`) + `plan.update` 事件触发预览热更新，并保持滚动阅读位置** + 建模型落配置 + **选中正文经右键命令/浮动按钮两路 → chat 出现带 `文件名:行号` 的 selection chip（源码行映射）；path3：同一 plan 两个不同「无行号」选区（todo 项）都能落 chip，锁死去重碰撞回归** + 切 native 回归无动作条） |
 
 实际 UI 验收（本次体验优化）：
 
@@ -505,6 +507,7 @@ agent_loop            tool_dispatcher                utility-flash        ext ho
 | transcript 原生 `View diff` 打开链路 | [`src/ui/webview/provider.ts`](../../../src/ui/webview/provider.ts) / [`src/ide/VsCodeIde.ts`](../../../src/ide/VsCodeIde.ts) |
 | 自动滚动与跳底按钮 | [`gui/src/useAutoScroll.ts`](../../../gui/src/useAutoScroll.ts) / [`gui/src/App.tsx`](../../../gui/src/App.tsx) |
 | transcript 分发 / action-context 冲刷 | [`gui/src/components/TranscriptView.tsx`](../../../gui/src/components/TranscriptView.tsx) |
+| assistant 正文 markdown 富渲染（四次整改） | [`gui/src/components/MessageBubble.tsx`](../../../gui/src/components/MessageBubble.tsx) / [`gui/src/components/markdown/ChatMarkdown.tsx`](../../../gui/src/components/markdown/ChatMarkdown.tsx) / [`gui/src/components/markdown/markdownRuntime.ts`](../../../gui/src/components/markdown/markdownRuntime.ts) / [`gui/src/components/markdown/markdownDecorators.ts`](../../../gui/src/components/markdown/markdownDecorators.ts) / [`gui/src/components/markdown/richRenderRuntime.ts`](../../../gui/src/components/markdown/richRenderRuntime.ts) / [`gui/src/components/MarkdownBody.tsx`](../../../gui/src/components/MarkdownBody.tsx) |
 | thinking UI | [`gui/src/components/ThinkingBlock.tsx`](../../../gui/src/components/ThinkingBlock.tsx) |
 | 思考/上下文折叠盒 | [`gui/src/components/ThinkingGroup.tsx`](../../../gui/src/components/ThinkingGroup.tsx) |
 | 类型化工具行 / disclosure 外壳 / answer 卡 | [`gui/src/components/ToolRow.tsx`](../../../gui/src/components/ToolRow.tsx) / [`gui/src/components/DisclosureCard.tsx`](../../../gui/src/components/DisclosureCard.tsx) / [`gui/src/components/TerminalOutput.tsx`](../../../gui/src/components/TerminalOutput.tsx) / [`gui/src/components/AnswerCard.tsx`](../../../gui/src/components/AnswerCard.tsx) |
@@ -532,6 +535,51 @@ agent_loop            tool_dispatcher                utility-flash        ext ho
 
 ---
 
+## 9a. Transcript assistant 正文富渲染（2026-07-19 四次整改）
+
+> 专业：assistant 正文的 markdown 富渲染没有引入 `react-markdown` 之类全新栈，而是继续保留 `marked + DOMPurify + DOM 装饰` 这条低爆炸半径管线；四次整改只吸收 cline 的两点关键思想：**按 markdown 顶层块切分**、**`highlight.js` 静态 import + 同步上色**。这样既复用了已有代码卡片 / inline path / mermaid / DOMPurify / 测试资产，又从根上消掉了 streaming 时“先白后彩”的 FOUC 与整篇重算卡顿。
+>
+> 说人话：以前聊天里的代码块是“先冒出来一坨白字，过一会儿再变彩色”，而且模型每吐一个 token，前端都可能把整篇老消息重新处理一遍。现在改成了“按块冻结”——已经完成的块永远不重算，只有最后正在长的尾块会动；同时高亮颜色直接烤进 HTML，所以代码一出现就是彩色的。`mermaid` 仍然慢一点，因为它天生要异步出 SVG。
+
+数据流一图：
+
+```text
+Serve assistant message / history replay
+        │
+        ▼
+TranscriptView
+  └─ MessageBubble
+      └─ ChatMarkdown(markdown)
+           ├─ splitTopLevelBlocks(markdown)              ← marked lexer, 过滤 space token
+           ├─ blocks.map(raw => <ChatMarkdownBlock raw>) ← React.memo(只收 raw 单 prop)
+           │      ├─ closeOpenFenceIfNeeded(raw)
+           │      ├─ buildDecoratedHtml(raw)
+           │      │    ├─ renderMarkdownHtml(marked)
+           │      │    ├─ DOMPurify
+           │      │    ├─ decorateCodeCards
+           │      │    │    └─ highlightToHtml(code, language)  ← 静态 import, 同步产出 hljs span
+           │      │    └─ linkifyInlineFilePaths
+           │      ├─ dangerouslySetInnerHTML(首帧即成品, 无 FOUC)
+           │      └─ renderMermaidBlocks(ref)            ← 仅 mermaid 异步
+           └─ 父级 onClick 事件委托
+                ├─ copy
+                ├─ data-tc-file-path → openFile(path, line)
+                └─ 普通 <a> → openLink
+```
+
+关键约束（这轮为什么这样拍板）：
+
+1. **同步高亮必须和按块 memo 成对出现**：只把 `highlight.js` 改成同步, streaming 时仍会每 token 重高亮整篇旧消息,把之前异步防抖规避掉的 O(n²) 卡顿又请回来。现在 `splitTopLevelBlocks()` + `ChatMarkdownBlock`(只收 `raw`) 把成本限制在尾块,同步上色才真正付得起。
+2. **子块只收 `raw` 一个 prop**：点击交互继续放在父级事件委托,避免函数 prop 让 `React.memo` 失效。
+3. **代码高亮前移到字符串阶段**：[`richRenderRuntime.ts`](../../../gui/src/components/markdown/richRenderRuntime.ts) 模块加载时注册 `highlight.js` core + 语言; [`markdownDecorators.ts`](../../../gui/src/components/markdown/markdownDecorators.ts) 的 `decorateCodeCards()` 同步写入 `code.innerHTML` 与 `hljs` class。结果是第一帧 HTML 就自带颜色,不再依赖 `useEffect`“术后补丁”。
+4. **`MarkdownBody` 与 transcript 共享同一装饰管线**：计划预览以前只有 inline path,没有代码卡片/同步高亮。现在它也走 `buildDecoratedHtml(markdown, sourceLineMap?)`,于是聊天与 plan 预览的代码卡片、copy、inline path 观感一致,同时保留 `data-source-line` 这项 plan 专属能力。
+5. **`mermaid` 仍保留异步**：`mermaid.render()` 天生要依赖真实 DOM/SVG,而且包很重;这部分继续留在 `renderMermaidBlocks()` 中按块异步执行。同步的是 `highlight.js`,不是把所有富渲染都粗暴挪进 `useMemo`。
+6. **聊天 CSP 已与 plan 预览对齐**：为了让 `highlight.js` / `mermaid` 分包和 SVG 内联样式都能安全工作,聊天 webview 的 CSP 已补上 `'strict-dynamic'` 与 `style-src ... 'unsafe-inline'`;正文仍先过 DOMPurify,脚本执行面没有放开。
+7. **代码卡片分两形态**：带 `path[:line]` 的围栏显示 basename 头部并可点击打开;无路径围栏是 `bare` 卡片,只有右上角 copy。正文里的 `` `path:line` `` 会 linkify 成 basename chip,点击走同一套 `openFile(path, line?)`。
+8. **`isStreaming` 已从富渲染链拆除**：`ChatMarkdown` / `MessageBubble` / `TranscriptView` 的 assistant 富渲染不再透传 `isStreaming`; streaming 语义只影响真正需要它的 thinking/tool 展示层。
+
+---
+
 ## 10. Plan 预览自定义编辑器（`.plan.md`）
 
 > 专业：这是 phase 2 里**第二个** webview 表面——不再是侧边栏的 `WebviewViewProvider`，而是一个 `vscode.CustomTextEditorProvider`（viewType `tomcat.planPreview`，`selector: *.plan.md`）。它照抄 Cursor 的 Plan 预览：自定义编辑器**恒为 Preview**（渲染正文 + 四态清单），全程**只读**（不写回 `.plan.md`），但正文**可选中**，选中的文字能通过浮动按钮或右键菜单**加入 Tomcat 聊天**（复用现有 selection 引用链路）。**没有 webview 内的 Markdown 视图**：标题栏 “...” 里的 **Markdown** 直接 `openWith(uri,"default")` 打开原生文本编辑器；原生文本编辑器的 “...” 里的 **Preview** 再 `openWith(uri,"tomcat.planPreview")` 切回——两态是两个真实编辑器，靠 `vscode.openWith` 互切，而非 webview 内部 `mode`。
@@ -552,9 +600,10 @@ serve plan.review(审稿完成) ─▶ provider.handleServeEvent ─▶ ide.open
    ├─ tomcat.plan.build ─────────▶ provider.runBuildForActive()      ├─ buildState(text,path,{toolbarStyle})
    │                                → deps.buildPlan → focus 侧栏     │   + availableModels(sendListModels)+buildModel(配置)+canBuild(能力)
    ├─ tomcat.plan.selectBuildModel▶ showQuickPick → 写 buildModel     ├─ onDidChangeViewState  维护 active panel
-   ├─ tomcat.plan.viewAsMarkdown ─▶ openWith(activePlanPath,"default")├─ onDidChangeTextDocument  agent update_plan → 预览热更新
-   └─ tomcat.plan.viewAsPreview ──▶ openWith(activeTextUri,          └─ onDidChangeConfiguration  buildModel / toolbarStyle → 回推
-        (原生文本编辑器上)             "tomcat.planPreview")            │
+   ├─ tomcat.plan.viewAsMarkdown ─▶ openWith(activePlanPath,"default")├─ onDidChangeTextDocument  用户手改/缓冲重载 → 预览热更新
+   └─ tomcat.plan.viewAsPreview ──▶ openWith(activeTextUri,          ├─ serve plan.update/plan.todos → provider 桥接 → 从磁盘重读后热更新
+        (原生文本编辑器上)             "tomcat.planPreview")            └─ onDidChangeConfiguration  buildModel / toolbarStyle → 回推
+                                                                     │
 provider.onDidChangeActivePlan ──▶ extension.ts setContext            │  postMessage(state 帧: 含 toolbarStyle)
    tomcat.plan.canBuild ──────────驱动 native Build 图标可见            ▼
                                                           PlanPreviewApp (gui/src/plan)   ← 恒渲染 Preview
@@ -569,7 +618,7 @@ provider.onDidChangeActivePlan ──▶ extension.ts setContext            │ 
 
 关键实现约束：
 
-1. **薄 Provider、纯逻辑可测**：`buildState(text, path, ui?)`（文本 + host UI 态 → state 帧）与 `handleIntent(intent, doc, postState)`（意图处理）抽成纯方法，连同 `deriveCanBuild` / `classifyPlanLink` 都不碰真实 webview panel。原生控件的活动面板机账（`onDidChangeViewState` 记 active panel、`runBuildForActive` / `getActivePlanPath` / `getActivePlanInfo`）由单测用**伪造的 `WebviewPanel`** 驱动（[`tests/stubs/vscode.ts`](../../../tests/stubs/vscode.ts) 补了 `onDidChangeTextDocument`，但仍不含 `createWebviewPanel`）。真实 resolve/webview 由 §7 的 E2E 场景 `assertPlanPreviewCustomEditorFlow` 覆盖。
+1. **薄 Provider、纯逻辑可测**：`buildState(text, path, ui?)`（文本 + host UI 态 → state 帧）与 `handleIntent(intent, doc, postState)`（意图处理）抽成纯方法，连同 `deriveCanBuild` / `classifyPlanLink` 都不碰真实 webview panel。原生控件的活动面板机账（`onDidChangeViewState` 记 active panel、`runBuildForActive` / `getActivePlanPath` / `getActivePlanInfo`）由单测用**伪造的 `WebviewPanel`** 驱动（[`tests/stubs/vscode.ts`](../../../tests/stubs/vscode.ts) 补了 `onDidChangeTextDocument`，但仍不含 `createWebviewPanel`）。后续又补了 `refreshFromServeEvent(planId,pathHint)`，专门覆盖 Agent 外部写盘场景：触发来自 serve `plan.update`/`plan.todos`，数据源来自磁盘而不是旧 `TextDocument` 缓冲。真实 resolve/webview 由 §7 的 E2E 场景 `assertPlanPreviewCustomEditorFlow` 覆盖。
 2. **唯一解析器**：`.plan.md` 的解析全部收敛在 [`planDocument.ts`](../../../src/ui/planPreview/planDocument.ts)；侧边栏卡片用的 `parsePlanFrontmatter` / `readPlanMetadata` 也委托它，`truncatePlanTitle` / `PLAN_TITLE_MAX` / `stripYamlQuotes` 一并下沉，避免两处各写。`bodyMarkdown` 在解析层就剥掉自动维护的 `## Todos Board` 段（标题在 `<!-- todos-board:auto:begin -->` 之上，剥离范围从标题行到 `end` 标记含尾随空行），避免与底部四态清单重复。
 3. **Preview 顺序照抄 Cursor**：自上而下 = 渲染后的正文 → 『N To-dos』计数头 → 分割线 → 四态清单；**不渲染** `name`/`overview`（这两个字段仍解析出来给卡片等其它组件用）。四态图标为内联 SVG（pending 空心圈 / in_progress 虚线圈 / cancelled 圈+斜杠 / completed 勾选），尺寸由 `--tc-todo-icon-size` 控制。
 4. **原生标题栏承载动作（照抄 Cursor 的复用思路）**：`.plan.md` 以自定义编辑器打开时，用 `when: activeCustomEditorId == 'tomcat.planPreview'` 把命令挂到原生 `editor/title`。因为原生标题栏按钮**只能单色图标**：Build/选模型仅在 `config.tomcat.plan.toolbarStyle == 'native'` 时进 `navigation` 组显示为图标（B 下由正文固定头承载）。Markdown/Preview 放非 navigation 组自动收进 “...” 溢出菜单——但它们不再是「同一编辑器里的两个 mode」，而是**互开对方编辑器**：自定义编辑器活跃时 “...” 只出 **Markdown**（`viewAsMarkdown`）；原生文本编辑器活跃且文件名匹配 `/\.plan\.md$/`（`when: resourceFilename =~ /\.plan\.md$/ && activeEditor == 'workbench.editors.files.textFileEditor'`）时 “...” 只出 **Preview**（`viewAsPreview`）。因此**不需要 `✓` 打勾、也删掉了 `viewAsX.active` 双生命令与 `tomcat.plan.mode` 上下文键**——「哪个编辑器在前台」本身就是当前态。

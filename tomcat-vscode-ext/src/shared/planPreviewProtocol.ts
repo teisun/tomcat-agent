@@ -51,6 +51,8 @@ export interface PlanPreviewDomSnapshot {
   bodyInsetLeft: number | null;
   buildModelOptions: string[];
   buildModelValue: string;
+  /** Current scrollTop of the content scroller. */
+  contentScrollTop: number | null;
   hasActionStrip: boolean;
   inlinePathCount: number;
   /** Rendered mermaid diagrams (fenced ```mermaid``` blocks turned into SVG). */
@@ -64,6 +66,8 @@ export interface PlanPreviewDomSnapshot {
   todoCountText: string | null;
   todoIconSizes: number[];
   todoItemCount: number;
+  /** 1-based source line of the first visible markdown block, when present. */
+  topVisibleSourceLine: number | null;
   toolbarStyle: PlanToolbarStyle;
 }
 
@@ -72,6 +76,7 @@ export type PlanPreviewDomAction =
   | { kind: "clickBuild" }
   | { kind: "clickSelector"; selector: string }
   | { kind: "clickSelectionAdd" }
+  | { kind: "setContentScrollTop"; scrollTop: number }
   | { kind: "selectBuildModel"; modelId: string }
   | { kind: "selectText"; selector: string };
 

@@ -1587,6 +1587,7 @@ describe("plan preview auto-open after review", () => {
   function makeProvider(
     openWith: ReturnType<typeof vi.fn>,
     showFile: ReturnType<typeof vi.fn>,
+    refreshPlanPreview?: ReturnType<typeof vi.fn>,
   ): TomcatWebviewViewProvider {
     return new TomcatWebviewViewProvider({
       extensionUri: vscode.Uri.file("/workspace/extension"),
@@ -1596,6 +1597,7 @@ describe("plan preview auto-open after review", () => {
       messenger: {
         onEvent: () => ({ dispose() {} }),
       } as never,
+      refreshPlanPreview,
       sessionRouter: {
         getState: vi.fn().mockResolvedValue({ busy: false, sessionId: "s1" }),
         listCheckpoints: vi.fn().mockResolvedValue({ checkpoints: [], sessionId: "s1" }),
@@ -1659,6 +1661,68 @@ describe("plan preview auto-open after review", () => {
     await emit(provider, { planId: "p1", sessionId: "s1", summary: "looks good", type: "plan.review" });
     expect(openWith).toHaveBeenCalledWith(planPath, "tomcat.planPreview");
     expect(showFile).toHaveBeenCalledWith(planPath);
+
+    provider.dispose();
+  });
+
+  it("bridges plan.create/update/todos events into the preview refresher", async () => {
+    const refreshPlanPreview = vi.fn().mockResolvedValue(undefined);
+    const provider = makeProvider(
+      vi.fn().mockResolvedValue(undefined),
+      vi.fn().mockResolvedValue(undefined),
+      refreshPlanPreview,
+    );
+    const planPath = "/workspace/plans/live.plan.md";
+
+    await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.create" });
+    await emit(provider, { path: planPath, planId: "p1", sessionId: "s1", type: "plan.update" });
+    await emit(provider, {
+      planId: "p1",
+      sessionId: "s1",
+      todos: [{ content: "Live item", id: "t1", status: "pending" }],
+      type: "plan.todos",
+    });
+
+    expect(refreshPlanPreview).toHaveBeenNthCalledWith(1, "p1", planPath);
+    expect(refreshPlanPreview).toHaveBeenNthCalledWith(2, "p1", planPath);
+    expect(refreshPlanPreview).toHaveBeenNthCalledWith(3, "p1", null);
+
+    provider.dispose();
+  });
+
+  it("does not refresh the preview for unrelated serve events", async () => {
+    const refreshPlanPreview = vi.fn().mockResolvedValue(undefined);
+    const provider = makeProvider(
+      vi.fn().mockResolvedValue(undefined),
+      vi.fn().mockResolvedValue(undefined),
+      refreshPlanPreview,
+    );
+
+    await emit(provider, { sessionId: "s1", type: "turn_end" });
+    await emit(provider, {
+      args: "{}",
+      sessionId: "s1",
+      toolCallId: "tc-1",
+      toolName: "read",
+      type: "tool_execution_start",
+    });
+
+    expect(refreshPlanPreview).not.toHaveBeenCalled();
+
+    provider.dispose();
+  });
+
+  it("tolerates plan refresh events when no preview refresher is injected", async () => {
+    const provider = makeProvider(vi.fn().mockResolvedValue(undefined), vi.fn().mockResolvedValue(undefined));
+
+    await expect(
+      emit(provider, {
+        path: "/workspace/plans/nohook.plan.md",
+        planId: "p1",
+        sessionId: "s1",
+        type: "plan.update",
+      }),
+    ).resolves.toBeUndefined();
 
     provider.dispose();
   });

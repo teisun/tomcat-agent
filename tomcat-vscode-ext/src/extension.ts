@@ -787,6 +787,7 @@ export async function activate(
       ) => Thenable<readonly vscode.Uri[] | undefined> | readonly vscode.Uri[] | undefined)
     | undefined;
   let settingsPanel: SettingsPanel;
+  let planPreviewProvider!: PlanPreviewEditorProvider;
   const webviewProvider = new TomcatWebviewViewProvider({
     extensionUri: context.extensionUri,
     getDefaultCwd,
@@ -800,6 +801,7 @@ export async function activate(
         }
       });
     },
+    refreshPlanPreview: (planId, path) => planPreviewProvider.refreshFromServeEvent(planId, path),
     sessionRouter,
     showOpenDialog: (options) =>
       testOpenDialogHandler?.(options) ?? vscode.window.showOpenDialog(options),
@@ -835,7 +837,7 @@ export async function activate(
     return webviewProvider.currentState().activeSessionId;
   };
 
-  const planPreviewProvider = new PlanPreviewEditorProvider({
+  planPreviewProvider = new PlanPreviewEditorProvider({
     addSelectionToChat: async (planPath, text, lineRange) => {
       const reference = buildSelectionReferenceFromParts(
         vscode.Uri.file(planPath),
