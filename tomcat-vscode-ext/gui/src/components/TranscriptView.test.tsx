@@ -553,7 +553,9 @@ describe("TranscriptView", () => {
     );
 
     expect(screen.getByTestId("live-cluster")).toBeTruthy();
-    expect(screen.getByTestId("progress-row-dots").textContent).toBe("...");
+    expect(screen.getByTestId("progress-row-dots").querySelectorAll(".tc-loading-dots__dot")).toHaveLength(
+      3,
+    );
     expect(screen.queryByTestId("progress-row-label")).toBeNull();
     expect(screen.queryByText("Thinking")).toBeNull();
 
@@ -638,7 +640,9 @@ describe("TranscriptView", () => {
       />,
     );
 
-    expect(screen.getByTestId("progress-row-dots").textContent).toBe("...");
+    expect(screen.getByTestId("progress-row-dots").querySelectorAll(".tc-loading-dots__dot")).toHaveLength(
+      3,
+    );
     expect(screen.queryByText("Thinking")).toBeNull();
     expect(screen.getByTestId("thinking-group-title").textContent).toBe("Used 1 tool");
     expect(screen.getByTestId("thinking-group-title").className).not.toContain(
@@ -664,7 +668,9 @@ describe("TranscriptView", () => {
       />,
     );
 
-    expect(screen.getByTestId("progress-row-dots").textContent).toBe("...");
+    expect(screen.getByTestId("progress-row-dots").querySelectorAll(".tc-loading-dots__dot")).toHaveLength(
+      3,
+    );
     expect(screen.getByTestId("thinking-group-title").textContent).toBe(
       "Used 1 tool for checking the README",
     );

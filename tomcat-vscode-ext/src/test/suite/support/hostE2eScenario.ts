@@ -1143,7 +1143,6 @@ export async function assertWebviewMaxReasoningAndLoadingGapFlow(
       candidate.activeSessionId === sessionId &&
       !candidate.progressRow &&
       candidate.loadingShimmerCount > 0 &&
-      candidate.html.includes('data-testid="thinking-streaming-indicator"') &&
       candidate.standaloneThinkingTitles.includes("Thinking") &&
       !candidate.standaloneThinkingTitles.includes("Tomcat · Thinking")
         ? candidate
@@ -1519,7 +1518,7 @@ export async function assertWebviewInterruptFlow(
     (snapshot) =>
       snapshot.activeSessionId === sessionId &&
       snapshot.html.includes('data-testid="stop-button"') &&
-      snapshot.html.includes('data-testid="tool-row-running-indicator"')
+      snapshot.loadingShimmerCount > 0
         ? snapshot
         : undefined,
     20_000,
@@ -1545,7 +1544,7 @@ export async function assertWebviewInterruptFlow(
       snapshot.activeSessionId === sessionId &&
       snapshot.html.includes('data-testid="send-button"') &&
       !snapshot.html.includes('data-testid="stop-button"') &&
-      !snapshot.html.includes('data-testid="tool-row-running-indicator"') &&
+      snapshot.loadingShimmerCount === 0 &&
       snapshot.messageTexts.includes("interrupt please")
         ? snapshot
         : undefined,
@@ -1574,7 +1573,7 @@ export async function assertWebviewInterruptFlow(
       snapshot.activeSessionId === sessionId &&
       snapshot.html.includes('data-testid="send-button"') &&
       !snapshot.html.includes('data-testid="stop-button"') &&
-      !snapshot.html.includes('data-testid="tool-row-running-indicator"') &&
+      snapshot.loadingShimmerCount === 0 &&
       snapshot.messageTexts.includes("interrupt please")
         ? snapshot
         : undefined,

@@ -282,6 +282,9 @@ describe("PlanFileCard", () => {
     );
 
     expect((screen.getByTestId("view-plan-pending") as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      screen.getByTestId("view-plan-pending").querySelectorAll(".tc-loading-dots__dot"),
+    ).toHaveLength(3);
     expect(screen.queryByTestId("view-plan")).toBeNull();
     expect(screen.getByTestId("build-plan")).toBeTruthy();
   });

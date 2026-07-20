@@ -33,6 +33,7 @@ describe("ThinkingBlock", () => {
     expect(screen.getByTestId("thinking-status").className).toContain("codicon-lightbulb");
     expect(screen.getByTestId("thinking-status").className).not.toContain("codicon-loading");
     expect(screen.getByTestId("thinking-status").className).not.toContain("tc-codicon-spin");
+    expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
 
     rerender(<ThinkingBlock item={item} />);
 
@@ -41,6 +42,7 @@ describe("ThinkingBlock", () => {
     );
     expect(screen.getByTestId("thinking-status").className).toContain("codicon-lightbulb");
     expect(screen.getByTestId("thinking-status").className).not.toContain("codicon-check");
+    expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
   });
 
   it("expands the body when toggled", () => {

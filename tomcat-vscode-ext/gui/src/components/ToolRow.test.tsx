@@ -509,7 +509,7 @@ describe("ToolRow", () => {
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Updating plan");
     expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
     expect(screen.queryByTestId("view-plan")).toBeNull();
-    expect(screen.getByTestId("tool-row-running-indicator").textContent).toBe("...");
+    expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
   });
 
   it("keeps failed update_plan rows visible for debugging", () => {
@@ -658,7 +658,7 @@ describe("ToolRow", () => {
     expect(screen.queryByTestId("tool-row-toggle")).toBeNull();
     expect(screen.queryByTestId("tool-row-body")).toBeNull();
     expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
-    expect(screen.getByTestId("tool-row-running-indicator").textContent).toBe("...");
+    expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
   });
 
   it("applies shimmer to running disclosure-card headers and removes it after completion", () => {

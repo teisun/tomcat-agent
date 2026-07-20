@@ -65,15 +65,6 @@ export function ThinkingBlock({
               className={`tc-thinking__title${isStreaming ? " tc-thinking__title--shimmer tc-loading-shimmer" : ""}`}
             >
               <span>Thinking</span>
-              {isStreaming ? (
-                <span
-                  aria-hidden="true"
-                  className="tc-thinking__dots"
-                  data-testid="thinking-streaming-indicator"
-                >
-                  ...
-                </span>
-              ) : null}
             </span>
             {collapsed && summary ? (
               <span className="tc-thinking__summary" data-testid="thinking-summary">

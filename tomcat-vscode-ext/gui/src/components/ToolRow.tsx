@@ -943,50 +943,33 @@ export function ToolRow({
     Boolean(item.toolCallId) &&
     Boolean(onOpenDiff);
 
-  const labelWithRunningIndicator = (label: ReactNode) => (
-    <>
-      {label}
-      {isRunning(item) ? (
-        <span
-          aria-hidden="true"
-          className="tc-thinking__dots tc-tool-row__running"
-          data-testid="tool-row-running-indicator"
-        >
-          ...
-        </span>
-      ) : null}
-    </>
-  );
-
   const disclosureHeader = (
     <div className="tc-tool-row__card-header">
       <span className="tc-tool-row__inline" data-testid="tool-row-label">
-        {labelWithRunningIndicator(
-          category === "command" ? (
-            <>
-              <span
-                className={`tc-tool-row__text${loadingTextClass(isRunning(item))}`}
-                data-testid="tool-row-cmd-purpose"
-              >
-                {asString(item.summaryTitle) ?? commandPlaceholderVerb(item)}
+        {category === "command" ? (
+          <>
+            <span
+              className={`tc-tool-row__text${loadingTextClass(isRunning(item))}`}
+              data-testid="tool-row-cmd-purpose"
+            >
+              {asString(item.summaryTitle) ?? commandPlaceholderVerb(item)}
+            </span>
+            {commandBinaries(fullCommandText(item)).length > 0 ? (
+              <span className="tc-tool-row__cmd-tags" data-testid="tool-row-cmd-tags">
+                {commandBinaries(fullCommandText(item)).join(", ")}
               </span>
-              {commandBinaries(fullCommandText(item)).length > 0 ? (
-                <span className="tc-tool-row__cmd-tags" data-testid="tool-row-cmd-tags">
-                  {commandBinaries(fullCommandText(item)).join(", ")}
-                </span>
-              ) : null}
-            </>
-          ) : (
-            <>
-              <span className={`tc-tool-row__text${loadingTextClass(isRunning(item))}`}>
-                {buildFlatLabel(item).replace(/ file$/, "")}
-              </span>
-              {item.display?.kind === "file" ? (
-                <FileChip onOpenFile={onOpenFile} path={item.display.file} />
-              ) : null}
-              {renderDiffBadges(item)}
-            </>
-          ),
+            ) : null}
+          </>
+        ) : (
+          <>
+            <span className={`tc-tool-row__text${loadingTextClass(isRunning(item))}`}>
+              {buildFlatLabel(item).replace(/ file$/, "")}
+            </span>
+            {item.display?.kind === "file" ? (
+              <FileChip onOpenFile={onOpenFile} path={item.display.file} />
+            ) : null}
+            {renderDiffBadges(item)}
+          </>
         )}
       </span>
       {showOpenDiffButton ? (
@@ -1049,15 +1032,6 @@ export function ToolRow({
             <div className="tc-tool-row__header">
               <span className="tc-tool-row__label" data-testid="tool-row-label">
                 {renderFlatContent(item, onOpenFile, onOpenPlanFile)}
-                {isRunning(item) ? (
-                  <span
-                    aria-hidden="true"
-                    className="tc-thinking__dots tc-tool-row__running"
-                    data-testid="tool-row-running-indicator"
-                  >
-                    ...
-                  </span>
-                ) : null}
               </span>
               {canToggle ? (
                 <button

@@ -1,5 +1,6 @@
 import { PlanBuildModelSelect } from "./PlanBuildModelSelect";
 import type { WebviewPlanFileCard, WebviewTodo } from "../types";
+import { LoadingDots } from "./LoadingDots";
 
 function basename(filePath: string): string {
   const normalized = filePath.replace(/\\/g, "/");
@@ -105,9 +106,7 @@ export function PlanFileCard({
             disabled
             type="button"
           >
-            <span aria-hidden="true" className="tc-thinking__dots tc-plan-card__footer-dots">
-              ...
-            </span>
+            <LoadingDots className="tc-plan-card__footer-dots" />
           </button>
         ) : (
           <button

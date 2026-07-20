@@ -18,7 +18,9 @@ describe("ProgressRow", () => {
     expect(screen.getByRole("status", { name: "Waiting for more output" })).toBeTruthy();
     expect(screen.queryByTestId("progress-row-label")).toBeNull();
     expect(screen.queryByText("Thinking")).toBeNull();
-    expect(screen.getByTestId("progress-row-dots").textContent).toBe("...");
+    expect(screen.getByTestId("progress-row-dots").querySelectorAll(".tc-loading-dots__dot")).toHaveLength(
+      3,
+    );
   });
 
   it("stays hidden when a more specific signal exists", () => {

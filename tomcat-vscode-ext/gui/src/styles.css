@@ -1983,8 +1983,6 @@ input:focus-visible {
 
 .tc-plan-card__footer-dots {
   color: var(--vscode-descriptionForeground);
-  display: inline-block;
-  letter-spacing: 0.08em;
 }
 
 .tc-plan-card__footer .tc-button {
@@ -2153,8 +2151,20 @@ input:focus-visible {
   white-space: nowrap;
 }
 
-.tc-thinking__dots {
-  animation: tc-thinking-pulse 1s ease-in-out infinite;
+.tc-loading-dots {
+  align-items: baseline;
+  display: inline-flex;
+  gap: 0;
+  white-space: nowrap;
+}
+
+.tc-loading-dots__dot {
+  display: inline-block;
+  visibility: hidden;
+}
+
+.tc-loading-dots__dot[data-visible="true"] {
+  visibility: visible;
 }
 
 .tc-thinking__body {
@@ -2376,11 +2386,6 @@ input:focus-visible {
 
 .tc-tool-row__link:hover {
   text-decoration: underline;
-}
-
-.tc-tool-row__running {
-  color: var(--vscode-descriptionForeground);
-  flex: 0 0 auto;
 }
 
 .tc-tool-row .codicon-check,
@@ -3346,17 +3351,6 @@ input:focus-visible {
   right: auto;
   top: auto;
   width: max-content;
-}
-
-@keyframes tc-thinking-pulse {
-  0%,
-  100% {
-    opacity: 0.22;
-  }
-
-  50% {
-    opacity: 1;
-  }
 }
 
 @keyframes tc-tool-spin {

@@ -1923,7 +1923,7 @@ describe("Tomcat webview App", () => {
       expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
       expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
       expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(0);
-      expect(screen.getAllByTestId("thinking-streaming-indicator")).toHaveLength(1);
+      expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
 
       baseContentHeight = 340;
       await emitTranscriptSessionState({
@@ -1954,7 +1954,7 @@ describe("Tomcat webview App", () => {
       expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
       expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
       expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(0);
-      expect(screen.getAllByTestId("thinking-streaming-indicator")).toHaveLength(1);
+      expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
     } finally {
       rectSpy.mockRestore();
     }

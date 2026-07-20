@@ -1,3 +1,5 @@
+import { LoadingDots } from "./LoadingDots";
+
 export function ProgressRow({
   busy,
   hasActiveThinking,
@@ -22,13 +24,7 @@ export function ProgressRow({
       data-testid="progress-row"
       role="status"
     >
-      <span
-        aria-hidden="true"
-        className="tc-thinking__dots tc-progress-row__dots"
-        data-testid="progress-row-dots"
-      >
-        ...
-      </span>
+      <LoadingDots className="tc-progress-row__dots" testId="progress-row-dots" />
     </div>
   );
 }
