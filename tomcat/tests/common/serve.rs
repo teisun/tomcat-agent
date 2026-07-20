@@ -202,6 +202,8 @@ pub fn spawn_serve_child(fx: &ServeFixture) -> ServeChild {
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .env("OPENAI_API_KEY", "dummy-key")
+        .env("MOONSHOT_API_KEY", "dummy-key")
+        .env("ANTHROPIC_API_KEY", "dummy-key")
         .env("RUST_LOG", "tomcat=debug,info")
         .current_dir(&fx.workspace)
         .args(["serve", "--stdio"])

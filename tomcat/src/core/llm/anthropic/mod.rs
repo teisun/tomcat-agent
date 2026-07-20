@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -7,22 +8,25 @@ use tokio_stream::Stream;
 use tracing::warn;
 
 use crate::core::llm::endpoint::build_path_aware_endpoint;
+use crate::core::llm::files_api::FilesApiAdapter;
 use crate::core::llm::http_client::build_http_client;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::replay_policy::ProviderCompatProfile;
 use crate::core::llm::retry_delay::provider_retry_delay;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatRequest, ChatResponse, StreamEvent,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ChatResponse,
+    FileSource, ImageSource, StreamEvent,
 };
-use crate::infra::config::LlmRuntimeConfig;
+use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
     is_retryable_llm_error, llm_error, llm_error_with_source, llm_http_status_error, AppError,
     LlmErrorStage,
 };
 
 use super::super::auth::Credential;
-use super::super::catalog::{infer_default_base_url, ModelEntry};
+use super::super::catalog::{infer_default_base_url, Capabilities, ModelEntry};
 use super::super::thinking_policy::ThinkingFormat;
+use crate::core::llm::{AnthropicFilesAdapter, FilesApiProviderContext, ANTHROPIC_FILES_BETA};
 
 mod stream;
 mod wire;
@@ -37,9 +41,12 @@ pub(super) struct AnthropicProvider {
     catalog_model_id: String,
     retry_count: u32,
     non_stream_stale_timeout_sec: u64,
+    files_adapter: std::sync::OnceLock<Arc<dyn FilesApiAdapter>>,
+    files_expires_after_seconds: u64,
     thinking_cfg: crate::infra::config::ThinkingConfig,
     configured_thinking_format: ThinkingFormat,
     continuity_enabled: bool,
+    capabilities: Capabilities,
 }
 
 impl AnthropicProvider {
@@ -68,9 +75,12 @@ impl AnthropicProvider {
             catalog_model_id: entry.id.clone(),
             retry_count: runtime.retry_count,
             non_stream_stale_timeout_sec: runtime.non_stream_stale_timeout_sec,
+            files_adapter: std::sync::OnceLock::new(),
+            files_expires_after_seconds: runtime.files.expires_after_seconds,
             thinking_cfg: runtime.thinking.clone(),
             configured_thinking_format,
             continuity_enabled: runtime.reasoning_continuity.enabled,
+            capabilities: entry.capabilities.clone(),
         })
     }
 
@@ -127,10 +137,67 @@ impl AnthropicProvider {
         }
     }
 
-    fn auth_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        builder
+    fn cached_files_adapter(
+        &self,
+        files_cfg: &LlmFilesConfig,
+    ) -> Option<Arc<dyn FilesApiAdapter>> {
+        if !self.capabilities.files {
+            return None;
+        }
+        let expires = if files_cfg.expires_after_seconds == self.files_expires_after_seconds {
+            self.files_expires_after_seconds
+        } else {
+            files_cfg.expires_after_seconds
+        };
+        let cfg = LlmFilesConfig {
+            expires_after_seconds: expires,
+        };
+        let adapter = self.files_adapter.get_or_init(|| {
+            Arc::new(AnthropicFilesAdapter::from_provider_context(
+                FilesApiProviderContext {
+                    client: self.client.clone(),
+                    base_url: self.base_url.clone(),
+                    api_key: self.api_key.clone(),
+                    retry_count: self.retry_count,
+                },
+                &cfg,
+            ))
+        });
+        Some(adapter.clone())
+    }
+
+    fn auth_headers(
+        &self,
+        builder: reqwest::RequestBuilder,
+        include_files_beta: bool,
+    ) -> reqwest::RequestBuilder {
+        let builder = builder
             .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", "2023-06-01");
+        if include_files_beta {
+            builder.header("anthropic-beta", ANTHROPIC_FILES_BETA)
+        } else {
+            builder
+        }
+    }
+
+    fn request_uses_uploaded_files(messages: &[ChatMessage]) -> bool {
+        messages.iter().any(|message| {
+            let Some(ChatMessageContent::Parts(parts)) = &message.content else {
+                return false;
+            };
+            parts.iter().any(|part| {
+                matches!(
+                    part,
+                    ChatMessageContentPart::InputImage {
+                        source: ImageSource::Uploaded(_),
+                        ..
+                    } | ChatMessageContentPart::InputFile {
+                        source: FileSource::Uploaded(_),
+                    }
+                )
+            })
+        })
     }
 
     async fn chat_once(
@@ -141,6 +208,10 @@ impl AnthropicProvider {
         let model = self.effective_model(request);
         let thinking_cfg = self.thinking_cfg_for_request(request);
         let thinking_format = self.thinking_format_for_wire();
+        let files_cfg = LlmFilesConfig {
+            expires_after_seconds: self.files_expires_after_seconds,
+        };
+        let files_adapter = self.cached_files_adapter(&files_cfg);
         let body = wire::build_request_body(
             request,
             &model,
@@ -148,10 +219,14 @@ impl AnthropicProvider {
             thinking_format,
             self.continuity_enabled,
             stream,
+            &self.capabilities,
+            files_adapter.as_deref(),
         );
         let url = build_path_aware_endpoint(&self.base_url, "messages");
+        let include_files_beta =
+            self.capabilities.files && Self::request_uses_uploaded_files(&request.messages);
         let response = self
-            .auth_headers(self.client.post(url))
+            .auth_headers(self.client.post(url), include_files_beta)
             .json(&body)
             .send()
             .await
@@ -273,5 +348,9 @@ impl LlmProvider for AnthropicProvider {
             })
             .sum();
         Ok((total_chars / 3).max(1) as u32)
+    }
+
+    fn files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
+        self.cached_files_adapter(files_cfg)
     }
 }

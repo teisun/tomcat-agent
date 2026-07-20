@@ -5,6 +5,7 @@ import {
   isHostToWebviewFrame,
   isWebviewIntent,
   PendingMessageTracker,
+  THINKING_LEVELS,
 } from "../protocol";
 
 describe("webview protocol helpers", () => {
@@ -103,6 +104,22 @@ describe("webview protocol helpers", () => {
     ).toBe(true);
   });
 
+  it("accepts every supported thinking level from the shared source of truth", () => {
+    for (const level of THINKING_LEVELS) {
+      expect(
+        isWebviewIntent({
+          data: {
+            level,
+            modelId: "claude-4.6-sonnet",
+            sessionId: "s1",
+          },
+          messageId: `thinking-${level}`,
+          type: "setThinkingLevel",
+        }),
+      ).toBe(true);
+    }
+  });
+
   it("rejects malformed intents", () => {
     expect(
       isWebviewIntent({
@@ -151,6 +168,17 @@ describe("webview protocol helpers", () => {
         },
         messageId: "prompt-2",
         type: "prompt",
+      }),
+    ).toBe(false);
+    expect(
+      isWebviewIntent({
+        data: {
+          level: "ultra",
+          modelId: "claude-4.6-sonnet",
+          sessionId: "s1",
+        },
+        messageId: "thinking-bad-level",
+        type: "setThinkingLevel",
       }),
     ).toBe(false);
     expect(

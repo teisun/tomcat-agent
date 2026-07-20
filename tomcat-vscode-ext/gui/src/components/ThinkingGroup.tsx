@@ -81,7 +81,7 @@ export function ThinkingGroup({
               data-testid="thinking-group-status"
             />
             <span
-              className={`tc-thinking__title${header.shimmer ? " tc-thinking__title--shimmer" : ""}`}
+              className={`tc-thinking__title${header.shimmer ? " tc-thinking__title--shimmer tc-loading-shimmer" : ""}`}
               data-testid="thinking-group-title"
             >
               {header.text}

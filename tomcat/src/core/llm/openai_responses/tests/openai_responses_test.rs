@@ -92,20 +92,19 @@ fn new_responses_stream<S>(stream: S, prefer_ndjson: bool) -> ResponsesStream<S>
 }
 
 #[test]
-fn openai_files_client_is_lazy_once_per_provider() {
+fn files_adapter_is_lazy_once_per_provider() {
     let cfg = LlmConfig::default();
     let p = provider_from_cfg(cfg.clone());
 
-    let c1 = p
-        .openai_files_client(&cfg.files)
+    let a1 = p
+        .files_adapter(&cfg.files)
         .expect("openai-responses should support files");
-    let c2 = p
-        .openai_files_client(&cfg.files)
+    let a2 = p
+        .files_adapter(&cfg.files)
         .expect("openai-responses should support files");
-    assert_eq!(
-        c1.instance_id(),
-        c2.instance_id(),
-        "same provider should lazily init files client once"
+    assert!(
+        std::sync::Arc::ptr_eq(&a1, &a2),
+        "same provider should lazily init files adapter once"
     );
 }
 

@@ -241,6 +241,55 @@ describe("model catalog parsing", () => {
   });
 });
 
+describe("thinking level intent handling", () => {
+  it("routes max through handleWebviewMessage and refreshes session state", async () => {
+    const sendSetThinkingLevel = vi.fn().mockResolvedValue({ success: true });
+    const provider = new TomcatWebviewViewProvider({
+      extensionUri: vscode.Uri.file("/workspace/extension"),
+      getDefaultCwd: () => "/workspace",
+      ide: {} as never,
+      initialize: async () => ({} as never),
+      messenger: {
+        onEvent: () => ({ dispose() {} }),
+        sendSetThinkingLevel,
+      } as never,
+      sessionRouter: {
+        getState: vi.fn().mockResolvedValue({
+          busy: false,
+          model: "claude-4.6-sonnet",
+          sessionId: "s1",
+          thinkingLevel: "max",
+        }),
+      } as never,
+    });
+    vi.spyOn(provider as any, "ensureInitialized").mockResolvedValue(undefined);
+    vi.spyOn(provider as any, "ensureWebviewSession").mockResolvedValue("s1");
+    vi.spyOn(provider as any, "postState").mockResolvedValue(undefined);
+
+    await (
+      provider as unknown as {
+        handleWebviewMessage(message: unknown): Promise<void>;
+      }
+    ).handleWebviewMessage({
+      data: {
+        level: "max",
+        modelId: "claude-4.6-sonnet",
+        sessionId: "s1",
+      },
+      messageId: "thinking-max",
+      type: "setThinkingLevel",
+    });
+
+    expect(sendSetThinkingLevel).toHaveBeenCalledWith("s1", "claude-4.6-sonnet", "max");
+    expect(provider.currentState().sessionViews.s1).toMatchObject({
+      model: "claude-4.6-sonnet",
+      thinkingLevel: "max",
+    });
+
+    provider.dispose();
+  });
+});
+
 describe("webview html asset resolution", () => {
   const tempDirs: string[] = [];
 

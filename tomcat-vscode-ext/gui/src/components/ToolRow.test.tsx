@@ -507,6 +507,7 @@ describe("ToolRow", () => {
     );
 
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Updating plan");
+    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
     expect(screen.queryByTestId("view-plan")).toBeNull();
     expect(screen.getByTestId("tool-row-running-indicator").textContent).toBe("...");
   });
@@ -626,7 +627,60 @@ describe("ToolRow", () => {
 
     expect(screen.queryByTestId("tool-row-toggle")).toBeNull();
     expect(screen.queryByTestId("tool-row-body")).toBeNull();
+    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
     expect(screen.getByTestId("tool-row-running-indicator").textContent).toBe("...");
+  });
+
+  it("applies shimmer to running disclosure-card headers and removes it after completion", () => {
+    const { rerender } = render(
+      <ToolRow
+        item={buildTool({
+          args: { command: "npm run build" },
+          status: "running",
+          summary: "building…",
+          summaryTitle: null,
+          toolName: "bash",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-cmd-purpose").className).toContain("tc-loading-shimmer");
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { path: "/workspace/a.rs" },
+          diff: [
+            { newLine: 1, oldLine: 1, tag: "ctx", text: "fn main() {" },
+            { newLine: null, oldLine: 2, tag: "del", text: "  old();" },
+            { newLine: 2, oldLine: null, tag: "add", text: "  new();" },
+          ],
+          display: { file: "/workspace/a.rs", kind: "file" },
+          status: "running",
+          summary: "editing file",
+          toolName: "edit",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { command: "npm run build" },
+          status: "complete",
+          summary: "built ok",
+          summaryTitle: "Build the project",
+          toolName: "bash",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-cmd-purpose").className).not.toContain("tc-loading-shimmer");
   });
 
   it("accepts snake_case ask_question results from the transcript", () => {

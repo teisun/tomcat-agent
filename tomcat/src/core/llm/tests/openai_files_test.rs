@@ -7,10 +7,16 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
+use crate::core::llm::files_api::{
+    AnthropicFilesAdapter, FilesApiAdapter, ImageRefSlot, MoonshotFilesAdapter, OpenAiFilesAdapter,
+    ANTHROPIC_FILES_BETA,
+};
 use crate::core::llm::openai_files::{
-    upload_decision_by_size, FilePurpose, OpenAiFilesClient, OpenAiFilesRuntime, UploadDecision,
+    upload_decision_by_size, FilePurpose, FilesApiProviderContext, OpenAiFilesClient,
+    OpenAiFilesRuntime, UploadDecision,
 };
 use crate::core::llm::types::ChatMessageContentPart;
+use crate::infra::config::LlmFilesConfig;
 use crate::infra::error::{llm_error, llm_http_status, llm_http_status_error, LlmErrorStage};
 
 #[derive(Debug, Clone)]
@@ -676,5 +682,135 @@ async fn tui_two_phase_attachment_order_interface() {
             source: crate::core::llm::FileSource::Uploaded(ref uploaded),
         } if uploaded.file_id == "file-tui-phase"
     ));
+    server.shutdown().await;
+}
+
+#[test]
+fn files_adapters_expose_expected_reference_hints() {
+    let openai = OpenAiFilesAdapter::new(OpenAiFilesClient::new_for_test(
+        test_http_client(),
+        "https://api.openai.com".to_string(),
+        "stub".to_string(),
+        0,
+        86_400,
+    ));
+    assert_eq!(openai.reference_token("file-1"), "file-1");
+    assert_eq!(openai.image_ref_slot(), ImageRefSlot::FileIdField);
+
+    let ctx = FilesApiProviderContext {
+        client: test_http_client(),
+        base_url: "https://api.moonshot.cn".to_string(),
+        api_key: "stub".to_string(),
+        retry_count: 0,
+    };
+    let moonshot = MoonshotFilesAdapter::from_provider_context(
+        ctx.clone(),
+        &LlmFilesConfig {
+            expires_after_seconds: 86_400,
+        },
+    );
+    assert_eq!(moonshot.reference_token("file-2"), "ms://file-2");
+    assert_eq!(moonshot.image_ref_slot(), ImageRefSlot::UrlField);
+
+    let anthropic = AnthropicFilesAdapter::from_provider_context(
+        ctx,
+        &LlmFilesConfig {
+            expires_after_seconds: 86_400,
+        },
+    );
+    assert_eq!(anthropic.reference_token("file-3"), "file-3");
+    assert_eq!(anthropic.image_ref_slot(), ImageRefSlot::FileIdField);
+}
+
+#[tokio::test]
+async fn moonshot_files_adapter_maps_purpose_names() {
+    let server = MockServer::start(vec![
+        ScriptedResponse::json(
+            200,
+            r#"{"id":"file-image","filename":"x.png","bytes":3,"created_at":1700000000}"#,
+        ),
+        ScriptedResponse::json(
+            200,
+            r#"{"id":"file-doc","filename":"x.pdf","bytes":3,"created_at":1700000001}"#,
+        ),
+    ])
+    .await;
+    let adapter = MoonshotFilesAdapter::from_provider_context(
+        FilesApiProviderContext {
+            client: test_http_client(),
+            base_url: server.base_url.clone(),
+            api_key: "stub".to_string(),
+            retry_count: 0,
+        },
+        &LlmFilesConfig {
+            expires_after_seconds: 86_400,
+        },
+    );
+
+    let image = adapter
+        .upload(FilePurpose::Vision, "x.png", "image/png", b"png")
+        .await
+        .unwrap();
+    assert_eq!(image.id, "file-image");
+    let doc = adapter
+        .upload(FilePurpose::UserData, "x.pdf", "application/pdf", b"pdf")
+        .await
+        .unwrap();
+    assert_eq!(doc.id, "file-doc");
+
+    let requests = server.request_texts();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0].contains("name=\"purpose\"\r\n\r\nimage"),
+        "vision upload should map to purpose=image: {}",
+        requests[0]
+    );
+    assert!(
+        requests[1].contains("name=\"purpose\"\r\n\r\nfile-extract"),
+        "user data upload should map to purpose=file-extract: {}",
+        requests[1]
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn anthropic_files_adapter_upload_and_delete_include_beta_header() {
+    let server = MockServer::start(vec![
+        ScriptedResponse::json(
+            200,
+            r#"{"id":"file-anth","filename":"doc.pdf","size_bytes":3,"created_at":"2026-07-20T00:00:00Z","type":"file"}"#,
+        ),
+        ScriptedResponse::json(200, r#"{"id":"file-anth","deleted":true}"#),
+    ])
+    .await;
+    let adapter = AnthropicFilesAdapter::from_provider_context(
+        FilesApiProviderContext {
+            client: test_http_client(),
+            base_url: server.base_url.clone(),
+            api_key: "stub".to_string(),
+            retry_count: 0,
+        },
+        &LlmFilesConfig {
+            expires_after_seconds: 86_400,
+        },
+    );
+
+    let meta = adapter
+        .upload(FilePurpose::UserData, "doc.pdf", "application/pdf", b"pdf")
+        .await
+        .unwrap();
+    assert_eq!(meta.id, "file-anth");
+    adapter.delete("file-anth").await.unwrap();
+
+    let requests = server.request_texts();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains(&format!("anthropic-beta: {ANTHROPIC_FILES_BETA}")),
+            "anthropic files requests must carry beta header: {request}"
+        );
+    }
     server.shutdown().await;
 }

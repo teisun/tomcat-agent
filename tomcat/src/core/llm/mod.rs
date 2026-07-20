@@ -14,6 +14,7 @@ pub mod admin;
 pub mod auth;
 pub mod catalog;
 pub(crate) mod endpoint;
+pub mod files_api;
 pub(crate) mod http_client;
 pub(crate) mod multimodal;
 pub mod openai_files;
@@ -34,7 +35,12 @@ pub use admin::{
 };
 pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
 pub use catalog::{Capabilities, ModelCatalog, ModelEntry, SharedModelCatalog};
+pub use files_api::{
+    build_openai_compatible_files_adapter, AnthropicFilesAdapter, FilesApiAdapter,
+    ImageRefSlot, MoonshotFilesAdapter, OpenAiFilesAdapter, ANTHROPIC_FILES_BETA,
+};
 pub(crate) use multimodal::degrade_unsupported_multimodal;
+pub use openai_files::FilesApiProviderContext;
 pub use provider::LlmProvider;
 pub use registry::{build_provider, registered_provider_ids};
 #[allow(unused_imports)]

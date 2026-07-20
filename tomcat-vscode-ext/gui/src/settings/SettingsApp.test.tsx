@@ -748,25 +748,25 @@ describe("SettingsApp", () => {
 
     await emitState(
       readyState({
-        expectedCliVersion: "0.1.15",
-        extensionVersion: "0.1.18",
-        serverVersion: "0.1.15",
+        expectedCliVersion: "0.1.16",
+        extensionVersion: "0.1.19",
+        serverVersion: "0.1.16",
       }),
     );
 
     expect(screen.getByTestId("settings-version-footer").textContent).toContain(
-      "Extension v0.1.18",
+      "Extension v0.1.19",
     );
     expect(screen.getByTestId("settings-version-footer").textContent).toContain(
-      "Serve v0.1.15",
+      "Serve v0.1.16",
     );
     expect(screen.queryByText(/did not report a version/i)).toBeNull();
     expect(screen.queryByText(/expects tomcat cli/i)).toBeNull();
 
     await emitState(
       readyState({
-        expectedCliVersion: "0.1.15",
-        extensionVersion: "0.1.18",
+        expectedCliVersion: "0.1.16",
+        extensionVersion: "0.1.19",
         serverVersion: null,
       }),
     );
@@ -778,15 +778,15 @@ describe("SettingsApp", () => {
 
     await emitState(
       readyState({
-        expectedCliVersion: "0.1.15",
-        extensionVersion: "0.1.18",
+        expectedCliVersion: "0.1.16",
+        extensionVersion: "0.1.19",
         serverVersion: "0.1.13",
       }),
     );
 
     expect(
       screen.getByText(
-        "This extension expects tomcat CLI v0.1.15, but the connected serve reports v0.1.13. Rebuild or update the CLI binary, then restart serve.",
+        "This extension expects tomcat CLI v0.1.16, but the connected serve reports v0.1.13. Rebuild or update the CLI binary, then restart serve.",
       ),
     ).toBeTruthy();
   });

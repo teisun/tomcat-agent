@@ -347,7 +347,7 @@ async fn tool_exec_pdf_oversize_without_files_runtime_returns_error() {
         "without files runtime, oversize pdf must fail by policy"
     );
     assert!(
-        msg.contains("requires OpenAI Files upload"),
+        msg.contains("requires Files API upload"),
         "should guide to Files upload path, got: {:?}",
         msg
     );

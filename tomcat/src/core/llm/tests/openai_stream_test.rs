@@ -432,7 +432,7 @@ fn deepseek_tool_turn_replays_reasoning_content() {
             replay_requirement: ReplayRequirement::SameProfileRequired,
         }),
     );
-    let wire = transport_messages(&[message], "deepseek-v4-flash", true);
+    let wire = transport_messages(&[message], "deepseek-v4-flash", true, None);
     assert_eq!(wire[0]["reasoning_content"], "internal plan");
 }
 
@@ -454,7 +454,7 @@ fn test_transport_messages_deepseek_non_tool_turn_replays_reasoning_content() {
             replay_requirement: ReplayRequirement::SameProfileOptional,
         }),
     );
-    let wire = transport_messages(&[message], "deepseek-v4-pro", true);
+    let wire = transport_messages(&[message], "deepseek-v4-pro", true, None);
     assert_eq!(wire[0]["reasoning_content"], "internal plan");
 }
 
@@ -468,7 +468,7 @@ fn test_transport_messages_deepseek_tool_turn_without_reasoning_state_keeps_plai
             "function":{"name":"read","arguments":"{}"}
         })],
     );
-    let wire = transport_messages(&[message], "deepseek-v4-pro", true);
+    let wire = transport_messages(&[message], "deepseek-v4-pro", true, None);
     assert_eq!(wire[0]["content"], "calling tool");
     assert_eq!(wire[0]["tool_calls"][0]["id"], "call_1");
     assert!(wire[0].get("reasoning_content").is_none());
@@ -527,6 +527,7 @@ fn test_transport_messages_deepseek_post_tool_final_assistant_replays_reasoning_
         ],
         "deepseek-v4-flash",
         true,
+        None,
     );
 
     // 历史 tool turn（wire[1]）在「answer directly」这条真实 user 之前，落在可 replay 窗口外，
@@ -591,7 +592,7 @@ fn mimo_tool_turn_replays_reasoning_content() {
             replay_requirement: ReplayRequirement::SameProfileRequired,
         }),
     );
-    let wire = transport_messages(&[message], "mimo-v2.5-pro", true);
+    let wire = transport_messages(&[message], "mimo-v2.5-pro", true, None);
     assert_eq!(wire[0]["reasoning_content"], "mimo plan");
 }
 
@@ -784,7 +785,7 @@ async fn stream_post_once_gateway_503_sets_connect_stage() {
     let provider = stream_test_provider(server.base_url.clone(), None, 0);
     let body = OpenAiRequestBody {
         model: "gpt-4.1".to_string(),
-        messages: transport_messages(&stream_test_request().messages, "gpt-4.1", true),
+        messages: transport_messages(&stream_test_request().messages, "gpt-4.1", true, None),
         temperature: Some(0.0),
         max_tokens: Some(16),
         stream: true,
@@ -821,7 +822,7 @@ async fn stream_post_once_header_read_timeout_maps_to_retryable_read_timeout() {
         .expect("build read-timeout reqwest client");
     let body = OpenAiRequestBody {
         model: "gpt-4.1".to_string(),
-        messages: transport_messages(&stream_test_request().messages, "gpt-4.1", true),
+        messages: transport_messages(&stream_test_request().messages, "gpt-4.1", true, None),
         temperature: Some(0.0),
         max_tokens: Some(16),
         stream: true,

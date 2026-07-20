@@ -28,7 +28,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use super::thinking_policy::ThinkingLevel;
-use crate::core::llm::openai_files::{FilePurpose, OpenAiFilesClient};
+use crate::core::llm::files_api::FilesApiAdapter;
+use crate::core::llm::openai_files::FilePurpose;
 use crate::infra::error::AppError;
 
 /// inline 图片字节上限（解码后），与 [`pi_agent_rust/src/tools.rs`] 对齐。
@@ -447,7 +448,7 @@ impl ChatMessageContentPart {
     ///
     /// 仅在当前 provider 声明支持 Files API 时应调用；否则请回退 inline helper。
     pub async fn image_upload(
-        client: &OpenAiFilesClient,
+        adapter: &(impl FilesApiAdapter + ?Sized),
         mime_type: impl Into<String>,
         bytes: &[u8],
         filename: impl Into<String>,
@@ -464,7 +465,7 @@ impl ChatMessageContentPart {
         if bytes.is_empty() {
             return Err(AppError::Llm("image_upload: 文件内容为空".to_string()));
         }
-        let upload = client
+        let upload = adapter
             .upload(FilePurpose::Vision, &filename, &mime, bytes)
             .await?;
         Self::image_file_id(upload.id)
@@ -472,7 +473,7 @@ impl ChatMessageContentPart {
 
     /// 上传通用文件到 OpenAI Files（B 通道），并返回 `file_id` part。
     pub async fn file_upload(
-        client: &OpenAiFilesClient,
+        adapter: &(impl FilesApiAdapter + ?Sized),
         filename: impl Into<String>,
         mime_type: impl Into<String>,
         bytes: &[u8],
@@ -482,7 +483,7 @@ impl ChatMessageContentPart {
         if bytes.is_empty() {
             return Err(AppError::Llm("file_upload: 文件内容为空".to_string()));
         }
-        let upload = client
+        let upload = adapter
             .upload(FilePurpose::UserData, &filename, &mime, bytes)
             .await?;
         Self::file_file_id(upload.id, Some(filename))

@@ -531,6 +531,54 @@ describe("TranscriptView", () => {
     expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
   });
 
+  it("shows a progress row during the pre-stream gap and hides it after the first live item", () => {
+    const userOnlyTimeline: WebviewTimelineItem[] = [
+      {
+        id: "user-1",
+        kind: "user",
+        text: "latest prompt",
+        type: "message",
+      },
+    ];
+    const { rerender } = render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={userOnlyTimeline}
+      />,
+    );
+
+    expect(screen.getByTestId("live-cluster")).toBeTruthy();
+    expect(screen.getByTestId("progress-row-label").textContent).toBe("Thinking");
+
+    rerender(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[
+          ...userOnlyTimeline,
+          {
+            assistantMessageId: "assistant-1",
+            id: "assistant-1",
+            kind: "assistant",
+            text: "first streamed token",
+            type: "message",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByTestId("progress-row")).toBeNull();
+  });
+
   it("does not shimmer a leading thinking group when the live cluster has no thinking yet", () => {
     const timeline: WebviewTimelineItem[] = [
       {

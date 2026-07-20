@@ -116,7 +116,19 @@ base_url = "https://api.moonshot.cn"
 thinking_format = "doubao"
 supported_reasoning_levels = []
 context_window = 400000
-capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
+
+[[models]]
+id = "kimi-k3"
+model_name = "kimi-k3"
+api = "openai"
+provider = "moonshot"
+api_key_env = "MOONSHOT_API_KEY"
+base_url = "https://api.moonshot.cn"
+thinking_format = "openai"
+supported_reasoning_levels = ["low", "high", "max"]
+context_window = 1000000
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
 id = "claude-opus-4-8"
@@ -128,7 +140,7 @@ base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 400000
-capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
 id = "claude-opus-4-7"
@@ -140,7 +152,7 @@ base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 400000
-capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
 [[models]]
 id = "claude-opus-4-6"
@@ -152,4 +164,4 @@ base_url = "https://api.anthropic.com"
 thinking_format = "anthropic-adaptive"
 supported_reasoning_levels = ["low", "medium", "high", "max"]
 context_window = 400000
-capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
+capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }

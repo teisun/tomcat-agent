@@ -64,9 +64,9 @@ export function ThinkingBlock({
           />
           <span className="tc-thinking__heading">
             <span
-              className={`tc-thinking__title${isStreaming ? " tc-thinking__title--shimmer" : ""}`}
+              className={`tc-thinking__title${isStreaming ? " tc-thinking__title--shimmer tc-loading-shimmer" : ""}`}
             >
-              <span>Tomcat · Thinking</span>
+              <span>Thinking</span>
               {isStreaming ? (
                 <span
                   aria-hidden="true"

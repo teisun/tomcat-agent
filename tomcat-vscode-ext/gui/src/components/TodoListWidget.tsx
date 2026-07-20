@@ -99,7 +99,10 @@ export function TodoListWidget({
               )} ${statusIconClass(progress.activeTodo.status)}`}
             />
           ) : null}
-          <span className="tc-todo-widget__title" data-testid="todo-widget-title">
+          <span
+            className={`tc-todo-widget__title${!progress.isComplete ? " tc-loading-shimmer" : ""}`}
+            data-testid="todo-widget-title"
+          >
             {title}
           </span>
         </div>

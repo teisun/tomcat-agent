@@ -4,6 +4,21 @@ import { describe, expect, it } from "vitest";
 import { ThinkingBlock } from "./ThinkingBlock";
 
 describe("ThinkingBlock", () => {
+  it("labels the standalone block as Thinking without the product prefix", () => {
+    render(
+      <ThinkingBlock
+        item={{
+          id: "thinking-label",
+          text: "Trace the bridge event before the first streamed token arrives.",
+          type: "thinking",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Thinking")).toBeTruthy();
+    expect(screen.queryByText("Tomcat · Thinking")).toBeNull();
+  });
+
   it("keeps the summary visible after streaming completes", () => {
     const item = {
       id: "thinking-1",

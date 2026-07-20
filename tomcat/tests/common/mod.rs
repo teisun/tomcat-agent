@@ -32,13 +32,18 @@ pub const OPENAI_TEST_MODEL_ENV: &str = "TOMCAT_E2E_OPENAI_TARGET";
 pub const OPENAI_TEST_DEFAULT_MODEL: &str = "gpt-5.4_litellm-sunmi";
 pub const OPENAI_GATEWAY_TEST_API_KEY_ENV: &str = "LITELLM_SUNMI_API_KEY";
 pub const OPENAI_GATEWAY_TEST_BASE_URL: &str = "https://aigateway.sunmi.com";
+pub const FCODEX_TEST_MODEL_ENV: &str = "TOMCAT_E2E_FCODEX_MODEL";
+pub const FCODEX_TEST_DEFAULT_MODEL: &str = "fcodex/gpt-5.6-sol";
+pub const FCODEX_TEST_API_KEY_ENV: &str = "FCODEX_OPENAI_API_KEY";
+pub const FCODEX_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_FCODEX_BASE_URL";
+pub const FCODEX_TEST_DEFAULT_BASE_URL: &str = "https://fcodex.top";
 pub const MIMO_TEST_MODEL_ENV: &str = "TOMCAT_E2E_MIMO_MODEL";
 pub const MIMO_TEST_DEFAULT_MODEL: &str = "mimo-v2.5-pro";
 pub const MIMO_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_MIMO_BASE_URL";
 pub const MIMO_TEST_DEFAULT_BASE_URL: &str = "https://token-plan-cn.xiaomimimo.com";
 pub const MIMO_TEST_API_KEY_ENV: &str = "MIMO_API_KEY";
 pub const KIMI_TEST_MODEL_ENV: &str = "TOMCAT_E2E_KIMI_MODEL";
-pub const KIMI_TEST_DEFAULT_MODEL: &str = "kimi-k2.7-code";
+pub const KIMI_TEST_DEFAULT_MODEL: &str = "kimi-k3";
 pub const KIMI_TEST_API_KEY_ENV: &str = "MOONSHOT_API_KEY";
 pub const KIMI_TEST_BASE_URL_ENV: &str = "TOMCAT_E2E_KIMI_BASE_URL";
 pub const KIMI_TEST_DEFAULT_BASE_URL: &str = "https://api.moonshot.cn";
@@ -75,6 +80,15 @@ pub fn e2e_openai_model() -> String {
 
 pub fn mimo_test_model() -> String {
     std::env::var(MIMO_TEST_MODEL_ENV).unwrap_or_else(|_| MIMO_TEST_DEFAULT_MODEL.to_string())
+}
+
+pub fn fcodex_test_model() -> String {
+    std::env::var(FCODEX_TEST_MODEL_ENV).unwrap_or_else(|_| FCODEX_TEST_DEFAULT_MODEL.to_string())
+}
+
+pub fn fcodex_test_base_url() -> String {
+    std::env::var(FCODEX_TEST_BASE_URL_ENV)
+        .unwrap_or_else(|_| FCODEX_TEST_DEFAULT_BASE_URL.to_string())
 }
 
 pub fn mimo_test_base_url() -> String {
@@ -137,9 +151,31 @@ pub fn apply_openai_app_config(cfg: &mut AppConfig) {
     maybe_write_test_models(cfg);
 }
 
+pub fn apply_fcodex_app_config(cfg: &mut AppConfig) {
+    let model_id = fcodex_test_model();
+    let base_url = fcodex_test_base_url();
+    cfg.llm.default_model = model_id.clone();
+    cfg.context.compaction_model = model_id.clone();
+    write_model_override(
+        cfg,
+        ModelOverrideSpec {
+            model_id: &model_id,
+            api: "openai-responses",
+            provider: "fcodex",
+            env_key: FCODEX_TEST_API_KEY_ENV,
+            base_url: Some(base_url.as_str()),
+            model_name: Some("gpt-5.6-sol"),
+            thinking_format: Some("openai"),
+            supports_files: true,
+            supports_reasoning: true,
+        },
+    );
+}
+
 pub fn apply_kimi_app_config(cfg: &mut AppConfig) {
     let model_id = kimi_test_model();
     let base_url = kimi_test_base_url();
+    let is_kimi_k3 = model_id.eq_ignore_ascii_case("kimi-k3");
     cfg.llm.default_model = model_id.clone();
     cfg.context.compaction_model = model_id;
     write_model_override(
@@ -151,8 +187,8 @@ pub fn apply_kimi_app_config(cfg: &mut AppConfig) {
             env_key: KIMI_TEST_API_KEY_ENV,
             base_url: Some(base_url.as_str()),
             model_name: None,
-            thinking_format: Some("doubao"),
-            supports_files: false,
+            thinking_format: Some(if is_kimi_k3 { "openai" } else { "doubao" }),
+            supports_files: true,
             supports_reasoning: true,
         },
     );
@@ -173,7 +209,7 @@ pub fn apply_anthropic_app_config(cfg: &mut AppConfig) {
             base_url: Some(base_url.as_str()),
             model_name: None,
             thinking_format: Some("anthropic"),
-            supports_files: false,
+            supports_files: true,
             supports_reasoning: true,
         },
     );

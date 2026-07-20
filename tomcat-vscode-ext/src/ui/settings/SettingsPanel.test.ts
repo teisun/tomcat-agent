@@ -49,9 +49,9 @@ describe("settings panel html asset resolution", () => {
     });
     const panel = new SettingsPanel({
       ensureInitialized: async () => ({} as never),
-      expectedCliVersion: "0.1.15",
+      expectedCliVersion: "0.1.16",
       extensionUri,
-      extensionVersion: "0.1.18",
+      extensionVersion: "0.1.19",
       messenger: {} as never,
     });
 
@@ -78,9 +78,9 @@ describe("settings panel html asset resolution", () => {
     });
     const panel = new SettingsPanel({
       ensureInitialized: async () => ({} as never),
-      expectedCliVersion: "0.1.15",
+      expectedCliVersion: "0.1.16",
       extensionUri,
-      extensionVersion: "0.1.18",
+      extensionVersion: "0.1.19",
       messenger: {} as never,
     });
 
@@ -138,12 +138,12 @@ describe("settings panel model management flow", () => {
             "upsert_model",
           ],
           protocolVersion: 1,
-          serverVersion: "0.1.15",
+          serverVersion: "0.1.16",
           sessionId: null,
         })),
-      expectedCliVersion: overrides?.expectedCliVersion ?? "0.1.15",
+      expectedCliVersion: overrides?.expectedCliVersion ?? "0.1.16",
       extensionUri: vscode.Uri.file("/tmp/tomcat-ext"),
-      extensionVersion: overrides?.extensionVersion ?? "0.1.18",
+      extensionVersion: overrides?.extensionVersion ?? "0.1.19",
       messenger: messenger as never,
       onModelCatalogChanged: overrides?.onModelCatalogChanged,
     });
@@ -240,9 +240,9 @@ describe("settings panel model management flow", () => {
       type: "settings.ready",
     } satisfies SettingsIntent);
 
-    expect(panel.__testingSnapshot().state.extensionVersion).toBe("0.1.18");
-    expect(panel.__testingSnapshot().state.expectedCliVersion).toBe("0.1.15");
-    expect(panel.__testingSnapshot().state.serverVersion).toBe("0.1.15");
+    expect(panel.__testingSnapshot().state.extensionVersion).toBe("0.1.19");
+    expect(panel.__testingSnapshot().state.expectedCliVersion).toBe("0.1.16");
+    expect(panel.__testingSnapshot().state.serverVersion).toBe("0.1.16");
   });
 
   it("keeps previous models and exposes list failures", async () => {

@@ -3,11 +3,12 @@
 //! 与 design CODE_BLOCK_P1_005 一致，供宿主 API 与 chat 调用。
 
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio_stream::Stream;
 
 use crate::infra::error::AppError;
 
-use super::openai_files::{OpenAiFilesClient, OpenAiFilesProviderContext};
+use super::files_api::FilesApiAdapter;
 use super::types::{ChatMessage, ChatRequest, ChatResponse, StreamEvent};
 
 /// 统一 LLM 接入 Trait：非流式/流式调用、Token 统计。
@@ -28,29 +29,13 @@ pub trait LlmProvider: Send + Sync + 'static {
     /// Token 计数（近似实现），用于上下文窗口估算等。
     fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, AppError>;
 
-    /// 当前 provider 是否声明支持 OpenAI Files API（`POST /v1/files`）。
+    /// 当前 provider 是否声明支持 Files API 上传能力，并返回对应适配器。
     ///
-    /// 默认 `false`：仅文本 provider 或未显式实现 Files 能力的 provider 不可走上传路径。
-    fn supports_openai_files_api(&self) -> bool {
-        false
-    }
-
-    /// 暴露 OpenAI Files 所需的 provider 上下文（共享 HTTP client/base_url/api_key/retry_count）。
-    ///
-    /// 默认 `None`。仅当 [`Self::supports_openai_files_api`] 返回 `true` 时才应返回 `Some`。
-    fn openai_files_context(&self) -> Option<OpenAiFilesProviderContext> {
-        None
-    }
-
-    /// 获取 OpenAI Files 客户端。
-    ///
-    /// 默认实现：基于 [`Self::openai_files_context`] 即时构造一个客户端副本。
-    /// 需要懒加载复用（OnceCell）时，provider 可覆盖该方法并返回同一实例 clone。
-    fn openai_files_client(
+    /// 默认 `None`：仅文本 provider 或未显式实现 Files 能力的 provider 不可走上传路径。
+    fn files_adapter(
         &self,
-        files_cfg: &crate::infra::config::LlmFilesConfig,
-    ) -> Option<OpenAiFilesClient> {
-        self.openai_files_context()
-            .map(|ctx| OpenAiFilesClient::from_provider_context(ctx, files_cfg))
+        _files_cfg: &crate::infra::config::LlmFilesConfig,
+    ) -> Option<Arc<dyn FilesApiAdapter>> {
+        None
     }
 }

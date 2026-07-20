@@ -128,7 +128,7 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
-const serverVersion = "0.1.15";
+const serverVersion = "0.1.16";
 
 if (process.argv[2] === "--version") {
   process.stdout.write("tomcat fake " + serverVersion + "\\n");
@@ -1067,6 +1067,29 @@ function handlePrompt(frame) {
       emitContextMetrics(sessionId, 0.36);
       finishTurn(sessionId, null);
     }, 1000);
+    return;
+  }
+
+  if (text.includes("loading gap showcase")) {
+    const assistantMessageId = ensurePendingAssistantMessageId(session);
+    setTimeout(() => {
+      send({
+        assistantMessageEvent: {
+          delta: "Working through the first response.",
+          kind: "thinking_delta",
+        },
+        assistantMessageId,
+        message: {},
+        sessionId,
+        type: "message_update",
+      });
+    }, 250);
+    setTimeout(() => {
+      emitMessageDelta(sessionId, "loading gap complete");
+      recordHistoryMessage(sessionId, "assistant", "loading gap complete");
+      emitContextMetrics(sessionId, 0.33);
+      finishTurn(sessionId, null);
+    }, 550);
     return;
   }
 

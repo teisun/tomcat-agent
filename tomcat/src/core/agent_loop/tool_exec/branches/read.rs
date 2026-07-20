@@ -131,7 +131,7 @@ pub(in super::super) async fn handle_read(
                         crate::core::llm::openai_files::UploadDecision::UploadRequired
                     ) {
                         return Err(
-                            "Read attachment requires OpenAI Files upload, but current provider/runtime does not support it; 请改用支持 Files API 的 provider 或缩小附件后走 inline".to_string(),
+                            "Read attachment requires Files API upload, but current provider/runtime does not support it; 请改用支持 Files API 的 provider 或缩小附件后走 inline".to_string(),
                         );
                     }
 
@@ -206,7 +206,7 @@ pub(in super::super) async fn handle_read(
                         crate::core::llm::openai_files::UploadDecision::UploadRequired
                     ) {
                         return Err(
-                            "Read attachment requires OpenAI Files upload, but current provider/runtime does not support it; 请改用支持 Files API 的 provider 或缩小附件后走 inline".to_string(),
+                            "Read attachment requires Files API upload, but current provider/runtime does not support it; 请改用支持 Files API 的 provider 或缩小附件后走 inline".to_string(),
                         );
                     }
 

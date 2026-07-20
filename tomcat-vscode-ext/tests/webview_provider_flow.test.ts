@@ -1185,19 +1185,15 @@ describe("webview provider integration", () => {
 
     expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
       contextRatio: 0.42,
+      planFile: {
+        path: "/workspace/plans/plan-1.plan.md",
+        planId: "plan-1",
+        state: "executing",
+      },
       planId: "plan-1",
       planState: "executing",
     });
-    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          path: "/workspace/plans/plan-1.plan.md",
-          planId: "plan-1",
-          state: "executing",
-          type: "plan",
-        }),
-      ]),
-    );
+    expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual([]);
     expect(
       provider.currentState().sessionViews["session-1"]?.timeline.some(
         (item) => item.type === "message" && item.kind === "user",
@@ -2114,7 +2110,7 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
-  it("routes plan.todos events onto the matching plan card", async () => {
+  it("routes plan.todos events onto the active plan state", async () => {
     const { messenger, provider } = buildProvider();
 
     await provider.dispatchTestIntent({
@@ -2143,17 +2139,19 @@ describe("webview provider integration", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const session = provider.currentState().sessionViews["session-1"];
-    const planCard = session.timeline.find(
-      (item) => item.type === "plan" && item.planId === "plan-1",
-    );
-    expect(planCard).toMatchObject({ type: "plan" });
-    expect((planCard as { todos?: unknown[] }).todos).toHaveLength(3);
+    expect(session.planFile).toMatchObject({
+      path: "/workspace/plans/plan-1.plan.md",
+      planId: "plan-1",
+      state: "planning",
+    });
     expect(session.planTodos).toHaveLength(3);
+    expect(session.timeline.filter((item) => item.type === "plan")).toEqual([]);
 
     provider.dispose();
   });
 
-  it("appends an error message when opening a file fails", async () => {
+  it("shows a VS Code error message when opening a file fails", async () => {
+    const showErrorSpy = vi.spyOn(vscode.window, "showErrorMessage").mockResolvedValue(undefined);
     const { provider } = buildProvider({
       ideOverrides: {
         showFile: vi.fn().mockRejectedValue(new Error("boom")),
@@ -2172,12 +2170,16 @@ describe("webview provider integration", () => {
     });
 
     const timeline = provider.currentState().sessionViews["session-1"]?.timeline ?? [];
+    expect(showErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("open file /workspace/missing.ts"),
+    );
     expect(timeline.at(-1)).toMatchObject({
-      kind: "error",
-      text: expect.stringContaining("open file /workspace/missing.ts"),
+      kind: "assistant",
+      text: "restored answer",
       type: "message",
     });
 
+    showErrorSpy.mockRestore();
     provider.dispose();
   });
 
@@ -2236,7 +2238,7 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
-  it("restores an active plan card and context ratio from getState on ready", async () => {
+  it("restores an active plan ref and context ratio from getState on ready", async () => {
     const { provider } = buildProvider({
       sessionState: {
         contextRatio: 0.42,
@@ -2252,7 +2254,6 @@ describe("webview provider integration", () => {
     });
 
     const session = provider.currentState().sessionViews["session-1"];
-    const planCards = session?.timeline.filter((item) => item.type === "plan");
     expect(session).toMatchObject({
       contextRatio: 0.42,
       planFile: {
@@ -2263,12 +2264,12 @@ describe("webview provider integration", () => {
       planId: "plan-1",
       planState: "executing",
     });
-    expect(planCards).toHaveLength(1);
+    expect(session?.timeline.filter((item) => item.type === "plan")).toEqual([]);
 
     provider.dispose();
   });
 
-  it("replays custom plan history into one card while keeping current state truth", async () => {
+  it("replays custom plan history while keeping current state truth", async () => {
     const { provider } = buildProvider({
       historyMessages: [
         {
@@ -2307,16 +2308,15 @@ describe("webview provider integration", () => {
     });
 
     const session = provider.currentState().sessionViews["session-1"];
-    const planCards = session?.timeline.filter((item) => item.type === "plan");
     const notices = session?.timeline.filter(
       (item) => item.type === "message" && item.kind === "notice",
     );
-    expect(planCards).toHaveLength(1);
-    expect(planCards?.[0]).toMatchObject({
+    expect(session?.planFile).toMatchObject({
       path: "/workspace/plans/plan-1.plan.md",
       planId: "plan-1",
       state: "executing",
     });
+    expect(session?.timeline.filter((item) => item.type === "plan")).toEqual([]);
     expect(notices).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ text: "Tomcat plan review: looks good" }),
@@ -2371,11 +2371,7 @@ describe("webview provider integration", () => {
       planId: null,
       planState: "chat",
     });
-    expect(
-      session?.timeline.filter(
-        (item) => item.type === "plan" && item.path === "/workspace/plans/plan-1.plan.md",
-      ),
-    ).toHaveLength(1);
+    expect(session?.timeline.filter((item) => item.type === "plan")).toEqual([]);
 
     provider.dispose();
   });

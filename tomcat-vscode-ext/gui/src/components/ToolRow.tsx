@@ -379,6 +379,10 @@ export function buildToolCollectionTitle(tools: WebviewToolCard[]): string {
   return `Used ${tools.length} tools`;
 }
 
+function loadingTextClass(active: boolean): string {
+  return active ? " tc-loading-shimmer" : "";
+}
+
 export function hasMeaningfulContent(item: WebviewToolCard): boolean {
   if (isPlanTool(item) && !item.isError) {
     return false;
@@ -654,13 +658,14 @@ function renderFlatContent(
   const planPath = planPathForTool(item);
   const category = toolCategory(item.toolName);
   const diffStat = item.diffStat;
+  const textClassName = `tc-tool-row__text${loadingTextClass(isRunning(item))}`;
 
   switch (category) {
     case "edit":
       if (filePath) {
         return (
           <span className="tc-tool-row__inline">
-            <span className="tc-tool-row__text">{buildFlatLabel(item).replace(/ file$/, "")}</span>
+            <span className={textClassName}>{buildFlatLabel(item).replace(/ file$/, "")}</span>
             <FileChip onOpenFile={onOpenFile} path={filePath} />
             {diffStat ? (
               <span className="tc-tool-row__diff-badges" data-testid="tool-row-diff-badges">
@@ -681,13 +686,13 @@ function renderFlatContent(
           </span>
         );
       }
-      return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
+      return <span className={textClassName}>{buildFlatLabel(item)}</span>;
     case "command": {
       // Flat rows have no terminal body to host the command, so keep the command
       // visible inline; the async summaryTitle (when present) leads as the purpose.
       return (
         <span className="tc-tool-row__inline">
-          <span className="tc-tool-row__text" data-testid="tool-row-cmd-purpose">
+          <span className={textClassName} data-testid="tool-row-cmd-purpose">
             {asString(item.summaryTitle) ?? commandPlaceholderVerb(item)}
           </span>
           <code className="tc-tool-row__cmd" data-testid="tool-row-cmd">
@@ -697,7 +702,7 @@ function renderFlatContent(
       );
     }
     case "answer":
-      return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
+      return <span className={textClassName}>{buildFlatLabel(item)}</span>;
     case "context":
     case "other":
       switch (item.toolName) {
@@ -705,7 +710,7 @@ function renderFlatContent(
         case "update_plan":
           return (
             <span className="tc-tool-row__inline">
-              <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>
+              <span className={textClassName}>{buildFlatLabel(item)}</span>
               {isRunning(item) || item.isError ? null : renderPlanActionLink(planPath, onOpenPlanFile)}
             </span>
           );
@@ -717,7 +722,7 @@ function renderFlatContent(
           if (glob) {
             return (
               <span className="tc-tool-row__inline">
-                <span className="tc-tool-row__text">
+                <span className={textClassName}>
                   {buildFlatLabel(item)}
                   {suffix}
                 </span>
@@ -725,24 +730,24 @@ function renderFlatContent(
               </span>
             );
           }
-          return <span className="tc-tool-row__text">{`${buildFlatLabel(item)}${suffix}`}</span>;
+          return <span className={textClassName}>{`${buildFlatLabel(item)}${suffix}`}</span>;
         }
         case "read":
         case "read_file":
           if (filePath) {
             return (
               <span className="tc-tool-row__inline">
-                <span className="tc-tool-row__text">{buildFlatLabel(item).replace(/ file$/, "")}</span>
+                <span className={textClassName}>{buildFlatLabel(item).replace(/ file$/, "")}</span>
                 <FileChip onOpenFile={onOpenFile} path={filePath} />
               </span>
             );
           }
-          return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
+          return <span className={textClassName}>{buildFlatLabel(item)}</span>;
         default:
-          return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
+          return <span className={textClassName}>{buildFlatLabel(item)}</span>;
       }
     default:
-      return <span className="tc-tool-row__text">{buildFlatLabel(item)}</span>;
+      return <span className={textClassName}>{buildFlatLabel(item)}</span>;
   }
 }
 
@@ -959,7 +964,10 @@ export function ToolRow({
         {labelWithRunningIndicator(
           category === "command" ? (
             <>
-              <span className="tc-tool-row__text" data-testid="tool-row-cmd-purpose">
+              <span
+                className={`tc-tool-row__text${loadingTextClass(isRunning(item))}`}
+                data-testid="tool-row-cmd-purpose"
+              >
                 {asString(item.summaryTitle) ?? commandPlaceholderVerb(item)}
               </span>
               {commandBinaries(fullCommandText(item)).length > 0 ? (
@@ -970,7 +978,9 @@ export function ToolRow({
             </>
           ) : (
             <>
-              <span className="tc-tool-row__text">{buildFlatLabel(item).replace(/ file$/, "")}</span>
+              <span className={`tc-tool-row__text${loadingTextClass(isRunning(item))}`}>
+                {buildFlatLabel(item).replace(/ file$/, "")}
+              </span>
               {item.display?.kind === "file" ? (
                 <FileChip onOpenFile={onOpenFile} path={item.display.file} />
               ) : null}

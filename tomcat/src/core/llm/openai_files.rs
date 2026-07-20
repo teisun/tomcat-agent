@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
+use super::files_api::{FilesApiAdapter, OpenAiFilesAdapter};
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::retry_delay::provider_retry_delay;
 use crate::infra::config::LlmFilesConfig;
@@ -70,7 +72,7 @@ impl FilePurpose {
 ///
 /// `reqwest::Client` clone 后共享同一连接池，满足「与 provider 同生命周期/同连接池」要求。
 #[derive(Debug, Clone)]
-pub struct OpenAiFilesProviderContext {
+pub struct FilesApiProviderContext {
     pub client: reqwest::Client,
     pub base_url: String,
     pub api_key: String,
@@ -100,7 +102,7 @@ pub struct OpenAiFilesClient {
 
 impl OpenAiFilesClient {
     pub fn from_provider_context(
-        ctx: OpenAiFilesProviderContext,
+        ctx: FilesApiProviderContext,
         files_cfg: &LlmFilesConfig,
     ) -> Self {
         Self {
@@ -559,7 +561,7 @@ pub struct CleanupSummary {
 
 #[derive(Debug)]
 pub struct OpenAiFilesRuntime {
-    client: OpenAiFilesClient,
+    adapter: Arc<dyn FilesApiAdapter>,
     pub cache: FileIdCache,
     session_files: DashMap<String, CleanupRecord>,
     delete_queue: DashMap<String, CleanupRecord>,
@@ -569,8 +571,12 @@ pub struct OpenAiFilesRuntime {
 
 impl OpenAiFilesRuntime {
     pub fn new(client: OpenAiFilesClient, registry_path: PathBuf) -> Self {
+        Self::new_with_adapter(Arc::new(OpenAiFilesAdapter::new(client)), registry_path)
+    }
+
+    pub fn new_with_adapter(adapter: Arc<dyn FilesApiAdapter>, registry_path: PathBuf) -> Self {
         let this = Self {
-            client,
+            adapter,
             cache: FileIdCache::default(),
             session_files: DashMap::new(),
             delete_queue: DashMap::new(),
@@ -579,10 +585,6 @@ impl OpenAiFilesRuntime {
         };
         this.load_registry_from_disk();
         this
-    }
-
-    pub fn client(&self) -> &OpenAiFilesClient {
-        &self.client
     }
 
     pub fn registry_path_for_session(sessions_dir: &Path, session_id: &str) -> PathBuf {
@@ -842,17 +844,17 @@ impl OpenAiFilesRuntime {
                 Ok(out)
             } else {
                 self.cache.by_hash.remove(&hash_key);
-                let uploaded = self.client.upload(purpose, filename, mime, &bytes).await?;
+                let uploaded = self.adapter.upload(purpose, filename, mime, &bytes).await?;
                 let expires_at = uploaded
                     .expires_at
                     .and_then(Self::epoch_to_system_time)
                     .or_else(|| {
-                        if self.client.expires_after_seconds() == 0 {
+                        if self.adapter.expires_after_seconds() == 0 {
                             None
                         } else {
                             Some(
                                 SystemTime::now()
-                                    + Duration::from_secs(self.client.expires_after_seconds()),
+                                    + Duration::from_secs(self.adapter.expires_after_seconds()),
                             )
                         }
                     });
@@ -884,17 +886,17 @@ impl OpenAiFilesRuntime {
                 Ok(uploaded)
             }
         } else {
-            let uploaded = self.client.upload(purpose, filename, mime, &bytes).await?;
+            let uploaded = self.adapter.upload(purpose, filename, mime, &bytes).await?;
             let expires_at = uploaded
                 .expires_at
                 .and_then(Self::epoch_to_system_time)
                 .or_else(|| {
-                    if self.client.expires_after_seconds() == 0 {
+                    if self.adapter.expires_after_seconds() == 0 {
                         None
                     } else {
                         Some(
                             SystemTime::now()
-                                + Duration::from_secs(self.client.expires_after_seconds()),
+                                + Duration::from_secs(self.adapter.expires_after_seconds()),
                         )
                     }
                 });
@@ -951,7 +953,7 @@ impl OpenAiFilesRuntime {
         let mut failed = 0usize;
         for (file_id, mut record) in merged {
             record.reason = reason.to_string();
-            match self.client.delete(&file_id).await {
+            match self.adapter.delete(&file_id).await {
                 Ok(()) => {
                     deleted += 1;
                     self.session_files.remove(&file_id);
@@ -983,12 +985,9 @@ pub fn build_runtime_for_provider(
     sessions_dir: &Path,
     session_id: &str,
 ) -> Option<OpenAiFilesRuntime> {
-    if !provider.supports_openai_files_api() {
-        return None;
-    }
-    let client = provider.openai_files_client(files_cfg)?;
+    let adapter = provider.files_adapter(files_cfg)?;
     let registry_path = OpenAiFilesRuntime::registry_path_for_session(sessions_dir, session_id);
-    Some(OpenAiFilesRuntime::new(client, registry_path))
+    Some(OpenAiFilesRuntime::new_with_adapter(adapter, registry_path))
 }
 
 fn system_time_to_epoch(ts: SystemTime) -> Option<i64> {

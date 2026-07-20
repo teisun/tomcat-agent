@@ -32,6 +32,7 @@ use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio_stream::{Stream, StreamExt};
@@ -42,6 +43,9 @@ use super::super::catalog::{infer_default_base_url, Capabilities, ModelEntry};
 use super::super::endpoint::build_path_aware_endpoint;
 use crate::core::llm::degrade_unsupported_multimodal;
 use crate::core::llm::http_client::build_http_client;
+use crate::core::llm::{
+    build_openai_compatible_files_adapter, FilesApiAdapter, FilesApiProviderContext,
+};
 use crate::core::llm::replay_policy::{plan, ProviderCompatProfile, ReplayAction};
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
@@ -50,7 +54,6 @@ use crate::infra::error::{
 };
 
 use super::super::retry_delay::provider_retry_delay;
-use crate::core::llm::openai_files::{OpenAiFilesClient, OpenAiFilesProviderContext};
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageRole, ChatRequest, ChatResponse, StreamEvent,
@@ -199,8 +202,8 @@ pub struct OpenAiResponsesProvider {
     stream_timeout_sec: u64,
     non_stream_stale_timeout_sec: u64,
     http_read_timeout_sec: u64,
-    /// Files client 懒加载实例（U10）：同一 provider 生命周期只构造一次。
-    files_client: std::sync::OnceLock<OpenAiFilesClient>,
+    /// Files adapter 懒加载实例：同一 provider 生命周期只构造一次。
+    files_adapter: std::sync::OnceLock<Arc<dyn FilesApiAdapter>>,
     files_expires_after_seconds: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request_body 不会写 reasoning。
     thinking_cfg: crate::infra::config::ThinkingConfig,
@@ -319,7 +322,7 @@ impl OpenAiResponsesProvider {
             stream_timeout_sec: runtime.stream_timeout_sec,
             non_stream_stale_timeout_sec: runtime.non_stream_stale_timeout_sec,
             http_read_timeout_sec: runtime.http_read_timeout_sec,
-            files_client: std::sync::OnceLock::new(),
+            files_adapter: std::sync::OnceLock::new(),
             files_expires_after_seconds: runtime.files.expires_after_seconds,
             thinking_cfg: runtime.thinking.clone(),
             configured_thinking_format,
@@ -767,23 +770,7 @@ impl LlmProvider for OpenAiResponsesProvider {
         Ok((total_chars / 3).max(1) as u32)
     }
 
-    fn supports_openai_files_api(&self) -> bool {
-        true
-    }
-
-    fn openai_files_context(&self) -> Option<OpenAiFilesProviderContext> {
-        Some(OpenAiFilesProviderContext {
-            client: self.client.clone(),
-            base_url: self.base_url.clone(),
-            api_key: self.api_key.clone(),
-            retry_count: self.retry_count,
-        })
-    }
-
-    fn openai_files_client(&self, files_cfg: &LlmFilesConfig) -> Option<OpenAiFilesClient> {
-        if !self.supports_openai_files_api() {
-            return None;
-        }
+    fn files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
         let expires = if files_cfg.expires_after_seconds == self.files_expires_after_seconds {
             self.files_expires_after_seconds
         } else {
@@ -792,9 +779,10 @@ impl LlmProvider for OpenAiResponsesProvider {
         let cfg = LlmFilesConfig {
             expires_after_seconds: expires,
         };
-        let client = self.files_client.get_or_init(|| {
-            OpenAiFilesClient::from_provider_context(
-                OpenAiFilesProviderContext {
+        let adapter = self.files_adapter.get_or_init(|| {
+            build_openai_compatible_files_adapter(
+                &self.route_provider,
+                FilesApiProviderContext {
                     client: self.client.clone(),
                     base_url: self.base_url.clone(),
                     api_key: self.api_key.clone(),
@@ -803,7 +791,7 @@ impl LlmProvider for OpenAiResponsesProvider {
                 &cfg,
             )
         });
-        Some(client.clone())
+        Some(adapter.clone())
     }
 }
 

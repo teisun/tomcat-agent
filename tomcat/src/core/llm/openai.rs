@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -20,7 +21,7 @@ use crate::core::llm::replay_policy::{
     apply_text_downgrade, plan_scoped, replay_requirement_for_profile, CaptureMode,
     ProviderCompatProfile, ReplayAction, ReplayDowngradeReport, ReplayWindow,
 };
-use crate::infra::config::LlmRuntimeConfig;
+use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::AppError;
 use crate::infra::error::{
     is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,
@@ -31,13 +32,18 @@ use super::super::auth::Credential;
 use super::super::catalog::{infer_default_base_url, ModelEntry};
 use super::super::endpoint::build_path_aware_endpoint;
 use super::super::retry_delay::provider_retry_delay;
+use crate::core::llm::files_api::{FilesApiAdapter, ImageRefSlot};
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ChatResponse,
-    ContinuityMetadata, ReasoningContinuation, ReasoningFormat, StreamEvent, ThinkingSource,
-    TokenUsage,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
+    ChatResponse, ContinuityMetadata, FileSource, ImageSource, ReasoningContinuation,
+    ReasoningFormat, StreamEvent, ThinkingSource, TokenUsage,
 };
-use crate::core::llm::{degrade_unsupported_multimodal, Capabilities};
+use crate::core::llm::multimodal::degrade_placeholder;
+use crate::core::llm::{
+    build_openai_compatible_files_adapter, degrade_unsupported_multimodal, Capabilities,
+    FilesApiProviderContext,
+};
 
 const PROVIDER_NAME: &str = "openai";
 
@@ -158,30 +164,101 @@ fn parts_to_completions_text(parts: &[ChatMessageContentPart]) -> String {
     text
 }
 
-/// Chat Completions 只走纯文本 `content: "..."`。
-///
-/// 这里先按纯文本模型能力把不支持的多模态附件降级成占位符文本，再把
-/// `InputText` + `InputReference`
-/// 按顺序合并成单个字符串，避免把 Responses 专用的 `input_*` part 形态误送给
-/// `/v1/chat/completions`。
-fn normalize_for_completions(messages: &[ChatMessage]) -> Cow<'_, [ChatMessage]> {
-    let degraded = degrade_unsupported_multimodal(messages, &Capabilities::default());
-    let needs_normalize = degraded
-        .iter()
-        .any(|msg| matches!(msg.content, Some(ChatMessageContent::Parts(_))));
-    if !needs_normalize {
-        return degraded;
-    }
-
-    let mut normalized = Vec::with_capacity(degraded.len());
-    for message in degraded.iter() {
-        let mut next = message.clone();
-        if let Some(ChatMessageContent::Parts(parts)) = &message.content {
-            next.content = Some(ChatMessageContent::Text(parts_to_completions_text(parts)));
+fn part_to_completions_content(
+    part: &ChatMessageContentPart,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> Value {
+    match part {
+        ChatMessageContentPart::InputText { text } => json!({
+            "type": "text",
+            "text": text,
+        }),
+        ChatMessageContentPart::InputReference { reference } => json!({
+            "type": "text",
+            "text": reference.to_prompt_text(),
+        }),
+        ChatMessageContentPart::InputImage { source, detail } => {
+            let mut image_url = serde_json::Map::new();
+            match source {
+                ImageSource::Inline(inline) => {
+                    image_url.insert(
+                        "url".to_string(),
+                        Value::String(format!("data:{};base64,{}", inline.mime_type, inline.data)),
+                    );
+                }
+                ImageSource::Uploaded(uploaded) => {
+                    let Some(adapter) = files_adapter else {
+                        return json!({
+                            "type": "text",
+                            "text": degrade_placeholder(part),
+                        });
+                    };
+                    let token = adapter.reference_token(&uploaded.file_id);
+                    match adapter.image_ref_slot() {
+                        ImageRefSlot::UrlField => {
+                            image_url.insert("url".to_string(), Value::String(token));
+                        }
+                        ImageRefSlot::FileIdField => {
+                            image_url.insert("file_id".to_string(), Value::String(token));
+                        }
+                    }
+                }
+            }
+            if let Some(detail) = detail.as_deref().filter(|value| !value.trim().is_empty()) {
+                image_url.insert("detail".to_string(), Value::String(detail.to_string()));
+            }
+            json!({
+                "type": "image_url",
+                "image_url": image_url,
+            })
         }
-        normalized.push(next);
+        ChatMessageContentPart::InputFile { source } => {
+            let mut file = serde_json::Map::new();
+            match source {
+                FileSource::Inline(inline) => {
+                    file.insert(
+                        "filename".to_string(),
+                        Value::String(inline.filename.clone()),
+                    );
+                    file.insert(
+                        "file_data".to_string(),
+                        Value::String(format!(
+                            "data:{};base64,{}",
+                            inline.mime_type, inline.data
+                        )),
+                    );
+                }
+                FileSource::Uploaded(uploaded) => {
+                    let Some(adapter) = files_adapter else {
+                        return json!({
+                            "type": "text",
+                            "text": degrade_placeholder(part),
+                        });
+                    };
+                    file.insert(
+                        "file_id".to_string(),
+                        Value::String(adapter.reference_token(&uploaded.file_id)),
+                    );
+                    if let Some(filename) =
+                        uploaded.filename.as_deref().filter(|value| !value.trim().is_empty())
+                    {
+                        file.insert("filename".to_string(), Value::String(filename.to_string()));
+                    }
+                }
+            }
+            json!({
+                "type": "file",
+                "file": file,
+            })
+        }
     }
-    Cow::Owned(normalized)
+}
+
+fn normalize_for_completions<'a>(
+    messages: &'a [ChatMessage],
+    capabilities: &Capabilities,
+) -> Cow<'a, [ChatMessage]> {
+    degrade_unsupported_multimodal(messages, capabilities)
 }
 
 /// 提取 chat-completions `reasoning_content` continuity blob（deepseek / mimo / 未来同类共用）。
@@ -203,8 +280,37 @@ fn chat_completions_reasoning_content(message: &ChatMessage) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
-fn inject_reasoning_content(message: ChatMessage, reasoning_content: &str) -> Value {
+fn transport_message_value(
+    message: ChatMessage,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> Value {
+    let content = message.content.clone();
+    let role = message.role.clone();
     let mut value = serde_json::to_value(message).unwrap_or_else(|_| json!({}));
+    if let Some(content) = content {
+        let content_value = match content {
+            ChatMessageContent::Text(text) => Value::String(text),
+            ChatMessageContent::Parts(parts) => {
+                if matches!(role, ChatMessageRole::User) {
+                    Value::Array(
+                        parts
+                            .iter()
+                            .map(|part| part_to_completions_content(part, files_adapter))
+                            .collect(),
+                    )
+                } else {
+                    Value::String(parts_to_completions_text(&parts))
+                }
+            }
+        };
+        if let Value::Object(ref mut obj) = value {
+            obj.insert("content".to_string(), content_value);
+        }
+    }
+    value
+}
+
+fn inject_reasoning_content(mut value: Value, reasoning_content: &str) -> Value {
     if let Value::Object(ref mut obj) = value {
         obj.insert(
             "reasoning_content".to_string(),
@@ -218,6 +324,7 @@ fn transport_messages(
     messages: &[ChatMessage],
     model: &str,
     continuity_enabled: bool,
+    files_adapter: Option<&dyn FilesApiAdapter>,
 ) -> Vec<Value> {
     let target = ProviderCompatProfile::chat_completions(model);
     let window = ReplayWindow::compute(messages);
@@ -240,8 +347,9 @@ fn transport_messages(
         let value = match action {
             ReplayAction::KeepOpaque => {
                 let message = original.without_completion_metadata();
+                let transport = transport_message_value(message, files_adapter);
                 if let Some(reasoning_content) = chat_completions_reasoning_content(original) {
-                    inject_reasoning_content(message, &reasoning_content)
+                    inject_reasoning_content(transport, &reasoning_content)
                 } else {
                     if continuity_enabled
                         && original.reasoning_continuation.is_some()
@@ -258,17 +366,16 @@ fn transport_messages(
                             "reasoning_content continuity marked KeepOpaque but payload missing; sending request without local hard intercept"
                         );
                     }
-                    serde_json::to_value(message).unwrap_or_else(|_| json!({}))
+                    transport
                 }
             }
             ReplayAction::ConvertToText(text) => {
-                serde_json::to_value(apply_text_downgrade(original, &text))
-                    .unwrap_or_else(|_| json!({}))
+                transport_message_value(apply_text_downgrade(original, &text), files_adapter)
             }
-            ReplayAction::StripOpaque => {
-                serde_json::to_value(original.without_completion_metadata())
-                    .unwrap_or_else(|_| json!({}))
-            }
+            ReplayAction::StripOpaque => transport_message_value(
+                original.without_completion_metadata(),
+                files_adapter,
+            ),
         };
         out.push(value);
     }
@@ -435,6 +542,7 @@ struct StreamOptionsBody {
 pub struct OpenAiProvider {
     client: reqwest::Client,
     base_url: String,
+    route_provider: String,
     /// 主 base 不通时自动用此 URL 重试；None 表示不降级。
     api_base_fallback: Option<String>,
     api_key: String,
@@ -447,11 +555,14 @@ pub struct OpenAiProvider {
     stream_timeout_sec: u64,
     non_stream_stale_timeout_sec: u64,
     http_read_timeout_sec: u64,
+    files_adapter: std::sync::OnceLock<Arc<dyn FilesApiAdapter>>,
+    files_expires_after_seconds: u64,
     /// T2-P0-006 P5：thinking 子配置；`enabled=false` 时 build_request 不会写任何 reasoning 字段。
     thinking_cfg: crate::infra::config::ThinkingConfig,
     /// 用户显式配置的 thinking format；`Auto` 时按当前 wire(`openai`) 决定。
     configured_thinking_format: crate::core::llm::thinking_policy::ThinkingFormat,
     continuity_enabled: bool,
+    capabilities: Capabilities,
 }
 
 fn apply_stream_idle_timeout<S>(
@@ -514,6 +625,7 @@ impl OpenAiProvider {
         Ok(Self {
             client,
             base_url,
+            route_provider: entry.provider.trim().to_string(),
             api_base_fallback,
             api_key: credential.value.clone(),
             catalog_model_id: entry.id.clone(),
@@ -523,9 +635,12 @@ impl OpenAiProvider {
             stream_timeout_sec: runtime.stream_timeout_sec,
             non_stream_stale_timeout_sec: runtime.non_stream_stale_timeout_sec,
             http_read_timeout_sec: runtime.http_read_timeout_sec,
+            files_adapter: std::sync::OnceLock::new(),
+            files_expires_after_seconds: runtime.files.expires_after_seconds,
             thinking_cfg: runtime.thinking.clone(),
             configured_thinking_format,
             continuity_enabled: runtime.reasoning_continuity.enabled,
+            capabilities: entry.capabilities.clone(),
         })
     }
 
@@ -568,6 +683,36 @@ impl OpenAiProvider {
         ("Authorization", format!("Bearer {}", self.api_key))
     }
 
+    fn cached_files_adapter(
+        &self,
+        files_cfg: &LlmFilesConfig,
+    ) -> Option<Arc<dyn FilesApiAdapter>> {
+        if !self.capabilities.files {
+            return None;
+        }
+        let expires = if files_cfg.expires_after_seconds == self.files_expires_after_seconds {
+            self.files_expires_after_seconds
+        } else {
+            files_cfg.expires_after_seconds
+        };
+        let cfg = LlmFilesConfig {
+            expires_after_seconds: expires,
+        };
+        let adapter = self.files_adapter.get_or_init(|| {
+            build_openai_compatible_files_adapter(
+                &self.route_provider,
+                FilesApiProviderContext {
+                    client: self.client.clone(),
+                    base_url: self.base_url.clone(),
+                    api_key: self.api_key.clone(),
+                    retry_count: self.retry_count,
+                },
+                &cfg,
+            )
+        });
+        Some(adapter.clone())
+    }
+
     async fn run_non_stream_with_stale<T, F>(&self, fut: F) -> Result<T, AppError>
     where
         F: Future<Output = Result<T, AppError>>,
@@ -599,9 +744,18 @@ impl OpenAiProvider {
             &thinking_cfg,
             thinking_format,
         );
+        let files_cfg = LlmFilesConfig {
+            expires_after_seconds: self.files_expires_after_seconds,
+        };
+        let files_adapter = self.cached_files_adapter(&files_cfg);
         let body = OpenAiRequestBody {
             model: model.clone(),
-            messages: transport_messages(messages, &model, self.continuity_enabled),
+            messages: transport_messages(
+                messages,
+                &model,
+                self.continuity_enabled,
+                files_adapter.as_deref(),
+            ),
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: false,
@@ -730,7 +884,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
-        let normalized_messages = normalize_for_completions(&request.messages);
+        let normalized_messages = normalize_for_completions(&request.messages, &self.capabilities);
 
         let _permit = if let Some(ref sem) = self.semaphore {
             Some(
@@ -798,7 +952,7 @@ impl LlmProvider for OpenAiProvider {
         request: ChatRequest,
     ) -> Result<Box<dyn Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>, AppError>
     {
-        let normalized_messages = normalize_for_completions(&request.messages);
+        let normalized_messages = normalize_for_completions(&request.messages, &self.capabilities);
 
         let _permit = if let Some(ref sem) = self.semaphore {
             Some(
@@ -817,12 +971,17 @@ impl LlmProvider for OpenAiProvider {
             &thinking_cfg,
             thinking_format,
         );
+        let files_cfg = LlmFilesConfig {
+            expires_after_seconds: self.files_expires_after_seconds,
+        };
+        let files_adapter = self.cached_files_adapter(&files_cfg);
         let body = OpenAiRequestBody {
             model: model.clone(),
             messages: transport_messages(
                 normalized_messages.as_ref(),
                 &model,
                 self.continuity_enabled,
+                files_adapter.as_deref(),
             ),
             temperature: request.temperature,
             max_tokens: request.max_tokens,
@@ -872,6 +1031,10 @@ impl LlmProvider for OpenAiProvider {
             })
             .sum();
         Ok((total_chars / 3).max(1) as u32)
+    }
+
+    fn files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
+        self.cached_files_adapter(files_cfg)
     }
 }
 

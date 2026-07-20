@@ -15,6 +15,8 @@ describe("ProgressRow", () => {
       />,
     );
 
+    expect(screen.getByTestId("progress-row-label").textContent).toBe("Thinking");
+    expect(screen.getByTestId("progress-row-label").className).toContain("tc-loading-shimmer");
     expect(screen.getByTestId("progress-row-dots").textContent).toBe("...");
   });
 

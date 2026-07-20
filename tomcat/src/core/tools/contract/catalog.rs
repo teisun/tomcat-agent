@@ -269,7 +269,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "search_files",
         label: "Search Files",
-        description: "Search authorized files by content regex or file-path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden. Use list_dir for a single directory level and read when you already know the path.\n\nUses system `rg` (content) / `fd` (files), falling back to an in-process Rust regex engine when they are missing (no lookaround/back-references; large/binary files skipped). Both honour .gitignore/.ignore.\n",
+        description: "Search authorized files by content regex or file-path glob. Use target=content to search inside files and target=files to find file paths; target=files only uses pattern/path/head_limit/offset/include_hidden. Use list_dir for a single directory level and read when you already know the path.\n",
         display_summary: Some("Search authorized files by content or file-path glob."),
         parameters: search_files_parameters,
         scope: PermissionScope::Read,

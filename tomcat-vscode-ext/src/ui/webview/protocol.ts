@@ -275,6 +275,24 @@ export type HostToWebviewFrame =
       messageId: string;
     };
 
+export const THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
+export type WebviewThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+const THINKING_LEVEL_SET = new Set<string>(THINKING_LEVELS);
+
+function isThinkingLevel(value: unknown): value is WebviewThinkingLevel {
+  return isString(value) && THINKING_LEVEL_SET.has(value);
+}
+
 export type WebviewIntent =
   | {
       messageId: string;
@@ -372,7 +390,7 @@ export type WebviewIntent =
       messageId: string;
       type: "setThinkingLevel";
       data: {
-        level: string;
+        level: WebviewThinkingLevel;
         modelId: string;
         sessionId?: string | null;
       };
@@ -529,7 +547,9 @@ export type WebviewIntent =
         planNoticeReplayed: boolean;
         planStateText: string | null;
         progressRow: boolean;
+        loadingShimmerCount: number;
         planTodos: number;
+        standaloneThinkingTitles: string[];
         todoWidgetExpanded: boolean;
         todoWidgetItemCount: number;
         todoWidgetTitle: string | null;
@@ -674,10 +694,7 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       return (
         isRecord(value.data) &&
         isString(value.data.modelId) &&
-        (value.data.level === "low" ||
-          value.data.level === "medium" ||
-          value.data.level === "high" ||
-          value.data.level === "xhigh")
+        isThinkingLevel(value.data.level)
       );
     case "setPlanMode":
       return (
@@ -793,7 +810,10 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         typeof value.data.planNoticeReplayed === "boolean" &&
         (value.data.planStateText === null || typeof value.data.planStateText === "string") &&
         typeof value.data.progressRow === "boolean" &&
+        typeof value.data.loadingShimmerCount === "number" &&
         typeof value.data.planTodos === "number" &&
+        Array.isArray(value.data.standaloneThinkingTitles) &&
+        value.data.standaloneThinkingTitles.every((title) => typeof title === "string") &&
         typeof value.data.todoWidgetExpanded === "boolean" &&
         typeof value.data.todoWidgetItemCount === "number" &&
         (value.data.todoWidgetTitle === null || typeof value.data.todoWidgetTitle === "string") &&

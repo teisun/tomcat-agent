@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+use crate::core::llm::files_api::FilesApiAdapter;
+use crate::core::llm::multimodal::degrade_placeholder;
 use crate::core::llm::replay_policy::{
     apply_text_downgrade, plan_scoped, replay_requirement_for_profile, ProviderCompatProfile,
     ReplayAction, ReplayWindow,
@@ -10,6 +12,7 @@ use crate::core::llm::types::{
     ChatResponse, ChatResponseChoice, ContinuityMetadata, FileSource, ImageSource,
     ReasoningContinuation, ReasoningFormat, StreamEvent, TokenUsage,
 };
+use crate::core::llm::Capabilities;
 use crate::infra::config::ThinkingConfig;
 
 pub(super) fn build_request_body(
@@ -19,9 +22,17 @@ pub(super) fn build_request_body(
     thinking_format: ThinkingFormat,
     continuity_enabled: bool,
     stream: bool,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
 ) -> Value {
     let target = ProviderCompatProfile::anthropic_messages(model);
-    let (system, messages) = build_messages(&request.messages, &target, continuity_enabled);
+    let (system, messages) = build_messages(
+        &request.messages,
+        &target,
+        continuity_enabled,
+        capabilities,
+        files_adapter,
+    );
     let tools = request
         .tools
         .as_ref()
@@ -249,6 +260,8 @@ fn build_messages(
     messages: &[ChatMessage],
     target: &ProviderCompatProfile,
     continuity_enabled: bool,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
 ) -> (Option<String>, Vec<Value>) {
     let mut system_chunks = Vec::new();
     let mut out = Vec::new();
@@ -275,7 +288,7 @@ fn build_messages(
                 }
             }
             ChatMessageRole::User => {
-                let content = user_content_blocks(&msg);
+                let content = user_content_blocks(&msg, capabilities, files_adapter);
                 if !content.is_empty() {
                     push_role_message(&mut out, "user", content);
                 }
@@ -437,14 +450,21 @@ fn push_role_message(out: &mut Vec<Value>, role: &str, content: Vec<Value>) {
     }));
 }
 
-fn user_content_blocks(message: &ChatMessage) -> Vec<Value> {
+fn user_content_blocks(
+    message: &ChatMessage,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> Vec<Value> {
     match &message.content {
         Some(ChatMessageContent::Text(text)) => vec![json!({
             "type": "text",
             "text": text,
         })],
         Some(ChatMessageContent::Parts(parts)) => {
-            parts.iter().map(content_part_to_block).collect::<Vec<_>>()
+            parts
+                .iter()
+                .map(|part| content_part_to_block(part, capabilities, files_adapter))
+                .collect::<Vec<_>>()
         }
         None => vec![json!({
             "type": "text",
@@ -453,7 +473,11 @@ fn user_content_blocks(message: &ChatMessage) -> Vec<Value> {
     }
 }
 
-fn content_part_to_block(part: &ChatMessageContentPart) -> Value {
+fn content_part_to_block(
+    part: &ChatMessageContentPart,
+    capabilities: &Capabilities,
+    files_adapter: Option<&dyn FilesApiAdapter>,
+) -> Value {
     match part {
         ChatMessageContentPart::InputText { text } => json!({
             "type": "text",
@@ -463,30 +487,90 @@ fn content_part_to_block(part: &ChatMessageContentPart) -> Value {
             "type": "text",
             "text": reference.to_prompt_text(),
         }),
-        ChatMessageContentPart::InputImage { source, .. } => match source {
-            ImageSource::Inline(source) => json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": source.mime_type,
-                    "data": source.data,
+        ChatMessageContentPart::InputImage { source, .. } => {
+            if !capabilities.vision {
+                return json!({
+                    "type": "text",
+                    "text": degrade_placeholder(part),
+                });
+            }
+            match source {
+                ImageSource::Inline(source) => json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": source.mime_type,
+                        "data": source.data,
+                    }
+                }),
+                ImageSource::Uploaded(source) => {
+                    if !capabilities.files {
+                        return json!({
+                            "type": "text",
+                            "text": degrade_placeholder(part),
+                        });
+                    }
+                    let Some(adapter) = files_adapter else {
+                        return json!({
+                            "type": "text",
+                            "text": degrade_placeholder(part),
+                        });
+                    };
+                    json!({
+                        "type": "image",
+                        "source": {
+                            "type": "file",
+                            "file_id": adapter.reference_token(&source.file_id),
+                        }
+                    })
                 }
-            }),
-            ImageSource::Uploaded(source) => json!({
-                "type": "text",
-                "text": format!("[uploaded image: {}]", source.file_id),
-            }),
-        },
-        ChatMessageContentPart::InputFile { source } => match source {
-            FileSource::Inline(source) => json!({
-                "type": "text",
-                "text": format!("[file attachment omitted: {} ({})]", source.filename, source.mime_type),
-            }),
-            FileSource::Uploaded(source) => json!({
-                "type": "text",
-                "text": format!("[uploaded file attachment omitted: {}]", source.file_id),
-            }),
-        },
+            }
+        }
+        ChatMessageContentPart::InputFile { source } => {
+            if !capabilities.files {
+                return json!({
+                    "type": "text",
+                    "text": degrade_placeholder(part),
+                });
+            }
+            match source {
+                FileSource::Inline(source) => {
+                    let mut block = json!({
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": source.mime_type,
+                            "data": source.data,
+                        }
+                    });
+                    if !source.filename.trim().is_empty() {
+                        block["title"] = Value::String(source.filename.clone());
+                    }
+                    block
+                }
+                FileSource::Uploaded(source) => {
+                    let Some(adapter) = files_adapter else {
+                        return json!({
+                            "type": "text",
+                            "text": degrade_placeholder(part),
+                        });
+                    };
+                    let mut block = json!({
+                        "type": "document",
+                        "source": {
+                            "type": "file",
+                            "file_id": adapter.reference_token(&source.file_id),
+                        }
+                    });
+                    if let Some(filename) =
+                        source.filename.as_deref().filter(|value| !value.trim().is_empty())
+                    {
+                        block["title"] = Value::String(filename.to_string());
+                    }
+                    block
+                }
+            }
+        }
     }
 }
 
@@ -501,21 +585,10 @@ fn flatten_message_text(message: &ChatMessage) -> String {
                     ChatMessageContentPart::InputReference { reference } => {
                         text.push_str(&reference.to_prompt_text());
                     }
-                    ChatMessageContentPart::InputImage { .. } => {}
-                    ChatMessageContentPart::InputFile { source } => match source {
-                        FileSource::Inline(source) => {
-                            text.push_str(&format!(
-                                "[file attachment omitted: {} ({})]",
-                                source.filename, source.mime_type
-                            ));
-                        }
-                        FileSource::Uploaded(source) => {
-                            text.push_str(&format!(
-                                "[uploaded file attachment omitted: {}]",
-                                source.file_id
-                            ));
-                        }
-                    },
+                    ChatMessageContentPart::InputImage { .. }
+                    | ChatMessageContentPart::InputFile { .. } => {
+                        text.push_str(&degrade_placeholder(part));
+                    }
                 }
             }
             text
@@ -538,13 +611,48 @@ fn normalize_finish_reason(reason: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use serde_json::json;
 
     use super::{build_request_body, response_to_chat_response};
+    use crate::core::llm::files_api::FilesApiAdapter;
+    use crate::core::llm::openai_files::{FilePurpose, OpenAiFileMeta};
     use crate::core::llm::replay_policy::ProviderCompatProfile;
     use crate::core::llm::thinking_policy::ThinkingFormat;
-    use crate::core::llm::types::{ChatMessage, ChatRequest, ReasoningFormat};
+    use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, ChatRequest, ReasoningFormat};
+    use crate::core::llm::Capabilities;
     use crate::infra::config::ThinkingConfig;
+    use crate::infra::error::AppError;
+
+    #[derive(Debug)]
+    struct StaticFilesAdapter {
+        prefix: &'static str,
+    }
+
+    #[async_trait]
+    impl FilesApiAdapter for StaticFilesAdapter {
+        async fn upload(
+            &self,
+            _purpose: FilePurpose,
+            _filename: &str,
+            _mime_type: &str,
+            _bytes: &[u8],
+        ) -> Result<OpenAiFileMeta, AppError> {
+            unreachable!("upload should not be called in wire tests");
+        }
+
+        async fn delete(&self, _file_id: &str) -> Result<(), AppError> {
+            unreachable!("delete should not be called in wire tests");
+        }
+
+        fn expires_after_seconds(&self) -> u64 {
+            3600
+        }
+
+        fn reference_token(&self, file_id: &str) -> String {
+            format!("{}{}", self.prefix, file_id)
+        }
+    }
 
     #[test]
     fn build_request_body_extracts_system_and_user_messages() {
@@ -569,6 +677,8 @@ mod tests {
             ThinkingFormat::AnthropicAdaptive,
             true,
             true,
+            &Capabilities::default(),
+            None,
         );
 
         assert_eq!(body["model"], "claude-opus-4-6");
@@ -582,6 +692,148 @@ mod tests {
             .as_f64()
             .expect("temperature serialized as number");
         assert!((temperature - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn build_request_body_serializes_inline_pdf_for_anthropic() {
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user_with_parts(vec![
+                ChatMessageContentPart::file_base64_data(
+                    "notes.pdf",
+                    "application/pdf",
+                    "cGRm",
+                )
+                .expect("valid inline pdf"),
+            ])],
+            model: "ignored".to_string(),
+            temperature: None,
+            max_tokens: None,
+            stream: Some(false),
+            model_override: None,
+            thinking_level: None,
+            tools: None,
+        };
+
+        let body = build_request_body(
+            &request,
+            "claude-opus-4-6",
+            &ThinkingConfig::default(),
+            ThinkingFormat::AnthropicAdaptive,
+            true,
+            false,
+            &Capabilities {
+                vision: true,
+                files: true,
+                ..Capabilities::default()
+            },
+            None,
+        );
+
+        assert_eq!(body["messages"][0]["content"][0]["type"], "document");
+        assert_eq!(body["messages"][0]["content"][0]["source"]["type"], "base64");
+        assert_eq!(
+            body["messages"][0]["content"][0]["source"]["media_type"],
+            "application/pdf"
+        );
+        assert_eq!(body["messages"][0]["content"][0]["title"], "notes.pdf");
+    }
+
+    #[test]
+    fn build_request_body_serializes_uploaded_image_and_pdf_file_ids() {
+        let adapter = StaticFilesAdapter { prefix: "anth-" };
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user_with_parts(vec![
+                ChatMessageContentPart::image_file_id("file-img").expect("valid image id"),
+                ChatMessageContentPart::file_file_id(
+                    "file-doc",
+                    Some("report.pdf".to_string()),
+                )
+                .expect("valid file id"),
+            ])],
+            model: "ignored".to_string(),
+            temperature: None,
+            max_tokens: None,
+            stream: Some(false),
+            model_override: None,
+            thinking_level: None,
+            tools: None,
+        };
+
+        let body = build_request_body(
+            &request,
+            "claude-opus-4-6",
+            &ThinkingConfig::default(),
+            ThinkingFormat::AnthropicAdaptive,
+            true,
+            false,
+            &Capabilities {
+                vision: true,
+                files: true,
+                ..Capabilities::default()
+            },
+            Some(&adapter),
+        );
+
+        assert_eq!(body["messages"][0]["content"][0]["type"], "image");
+        assert_eq!(body["messages"][0]["content"][0]["source"]["type"], "file");
+        assert_eq!(
+            body["messages"][0]["content"][0]["source"]["file_id"],
+            "anth-file-img"
+        );
+        assert_eq!(body["messages"][0]["content"][1]["type"], "document");
+        assert_eq!(body["messages"][0]["content"][1]["source"]["type"], "file");
+        assert_eq!(
+            body["messages"][0]["content"][1]["source"]["file_id"],
+            "anth-file-doc"
+        );
+        assert_eq!(body["messages"][0]["content"][1]["title"], "report.pdf");
+    }
+
+    #[test]
+    fn build_request_body_degrades_when_anthropic_files_or_vision_disabled() {
+        let request = ChatRequest {
+            messages: vec![ChatMessage::user_with_parts(vec![
+                ChatMessageContentPart::image_file_id("file-img").expect("valid image id"),
+                ChatMessageContentPart::file_file_id(
+                    "file-doc",
+                    Some("report.pdf".to_string()),
+                )
+                .expect("valid file id"),
+            ])],
+            model: "ignored".to_string(),
+            temperature: None,
+            max_tokens: None,
+            stream: Some(false),
+            model_override: None,
+            thinking_level: None,
+            tools: None,
+        };
+
+        let body = build_request_body(
+            &request,
+            "claude-opus-4-6",
+            &ThinkingConfig::default(),
+            ThinkingFormat::AnthropicAdaptive,
+            true,
+            false,
+            &Capabilities {
+                vision: false,
+                files: false,
+                ..Capabilities::default()
+            },
+            None,
+        );
+
+        assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            body["messages"][0]["content"][0]["text"],
+            "[图片已省略：当前模型不支持图片输入]"
+        );
+        assert_eq!(body["messages"][0]["content"][1]["type"], "text");
+        assert_eq!(
+            body["messages"][0]["content"][1]["text"],
+            "[文件已省略：当前模型不支持文件输入]"
+        );
     }
 
     #[test]

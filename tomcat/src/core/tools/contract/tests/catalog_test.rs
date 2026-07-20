@@ -35,9 +35,12 @@ fn success_rate_redline_keeps_critical_usage_in_descriptions() {
     assert!(edit.contains("ORIGINAL"));
     assert!(edit.contains("Stale"));
 
-    // search_files：系统二进制依赖 + Tier2 regex 限制。
+    // search_files：保留 target/usage 语义，不泄露底层实现细节。
     let search = desc_of("search_files");
-    assert!(search.contains("rg") && search.contains("fd"));
+    assert!(search.contains("target=content"));
+    assert!(search.contains("target=files"));
+    assert!(!search.contains("`rg`"));
+    assert!(!search.contains("`fd`"));
     assert!(search.contains("regex"));
 
     // update_plan：ops 三种 kind 枚举。
@@ -186,8 +189,8 @@ fn search_files_catalog_contract_matches_plan() {
         "首版 schema 不应暴露 multiline"
     );
     assert!(
-        entry.description.contains("rg") && entry.description.contains("fd"),
-        "description 应说明系统二进制依赖"
+        !entry.description.contains("`rg`") && !entry.description.contains("`fd`"),
+        "description 不应泄露 search_files 的系统实现细节"
     );
 }
 

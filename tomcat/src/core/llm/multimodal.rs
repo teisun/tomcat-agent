@@ -6,16 +6,25 @@ use super::{ChatMessage, ChatMessageContent, ChatMessageContentPart};
 pub(crate) const UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER: &str = "[图片已省略：当前模型不支持图片输入]";
 pub(crate) const UNSUPPORTED_FILE_INPUT_PLACEHOLDER: &str = "[文件已省略：当前模型不支持文件输入]";
 
+pub(crate) fn degrade_placeholder(part: &ChatMessageContentPart) -> String {
+    match part {
+        ChatMessageContentPart::InputImage { .. } => UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER.to_string(),
+        ChatMessageContentPart::InputFile { .. } => UNSUPPORTED_FILE_INPUT_PLACEHOLDER.to_string(),
+        ChatMessageContentPart::InputText { .. }
+        | ChatMessageContentPart::InputReference { .. } => String::new(),
+    }
+}
+
 fn unsupported_placeholder_for_part(
     part: &ChatMessageContentPart,
     capabilities: &Capabilities,
-) -> Option<&'static str> {
+) -> Option<String> {
     match part {
         ChatMessageContentPart::InputImage { .. } if !capabilities.vision => {
-            Some(UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER)
+            Some(degrade_placeholder(part))
         }
         ChatMessageContentPart::InputFile { .. } if !capabilities.files => {
-            Some(UNSUPPORTED_FILE_INPUT_PLACEHOLDER)
+            Some(degrade_placeholder(part))
         }
         _ => None,
     }

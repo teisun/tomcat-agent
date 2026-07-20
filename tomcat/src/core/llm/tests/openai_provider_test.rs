@@ -77,6 +77,48 @@ fn openai_auto_entry(api_key_env: &str, provider: &str, model_name: &str) -> Mod
     }
 }
 
+fn openai_multimodal_entry(api_key_env: &str) -> ModelEntry {
+    ModelEntry {
+        id: "gpt-4.1".to_string(),
+        model_name: Some("gpt-4.1".to_string()),
+        api: "openai".to_string(),
+        provider: "openai".to_string(),
+        api_key_env: Some(api_key_env.to_string()),
+        base_url: Some("https://api.openai.com".to_string()),
+        capabilities: Capabilities {
+            vision: true,
+            files: true,
+            tools: true,
+            reasoning: false,
+            web_search: false,
+        },
+        context_window: None,
+        supported_reasoning_levels: vec![],
+        thinking_format: Some("openai".to_string()),
+    }
+}
+
+fn moonshot_multimodal_entry(api_key_env: &str) -> ModelEntry {
+    ModelEntry {
+        id: "kimi-k3".to_string(),
+        model_name: Some("kimi-k3".to_string()),
+        api: "openai".to_string(),
+        provider: "moonshot".to_string(),
+        api_key_env: Some(api_key_env.to_string()),
+        base_url: Some("https://api.moonshot.cn".to_string()),
+        capabilities: Capabilities {
+            vision: true,
+            files: true,
+            tools: true,
+            reasoning: true,
+            web_search: false,
+        },
+        context_window: Some(1_000_000),
+        supported_reasoning_levels: vec!["low".to_string(), "high".to_string(), "max".to_string()],
+        thinking_format: Some("openai".to_string()),
+    }
+}
+
 #[test]
 fn openai_provider_new_uses_supplied_credential_without_env_lookup() {
     let entry = deepseek_entry("TOMCAT_TEST_NONEXISTENT_ENV_VAR_12345");
@@ -198,7 +240,7 @@ fn parts_with_image_degrade_to_placeholder_text() {
         ChatMessageContentPart::text("see this: "),
         part,
     ])];
-    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalize_for_completions(&msgs, &Capabilities::default());
     let normalized = normalized.as_ref();
     let expected = format!("see this: {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER}");
     assert!(matches!(
@@ -222,7 +264,7 @@ fn normalize_for_completions_degrades_mixed_image_and_file_history() {
         ]),
     ];
 
-    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalize_for_completions(&msgs, &Capabilities::default());
     let normalized = normalized.as_ref();
     let expected_image = format!("image {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER}");
     let expected_file = format!("file {UNSUPPORTED_FILE_INPUT_PLACEHOLDER}");
@@ -252,7 +294,7 @@ fn normalize_for_completions_flattens_references_into_text() {
         )),
         ChatMessageContentPart::text(" after"),
     ])];
-    let normalized = normalize_for_completions(&msgs);
+    let normalized = normalize_for_completions(&msgs, &Capabilities::default());
     let normalized = normalized.as_ref();
     assert_eq!(normalized.len(), 1);
     assert!(matches!(
@@ -261,6 +303,130 @@ fn normalize_for_completions_flattens_references_into_text() {
             if text
                 == "before <selection file=\"src/lib.rs\" lines=\"10-12\">\nfn hello() {}\n</selection> after"
     ));
+}
+
+#[test]
+fn transport_messages_renders_multimodal_user_content_for_standard_openai() {
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("look "),
+        ChatMessageContentPart::image_base64_data(
+            "image/png",
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        )
+        .expect("inline image"),
+        ChatMessageContentPart::text(" then "),
+        ChatMessageContentPart::file_base64_data("guide.pdf", "application/pdf", "UERG")
+            .expect("inline file"),
+    ])];
+
+    let wire = transport_messages(
+        normalize_for_completions(
+            &msgs,
+            &Capabilities {
+                vision: true,
+                files: true,
+                tools: true,
+                reasoning: false,
+                web_search: false,
+            },
+        )
+        .as_ref(),
+        "gpt-4.1",
+        false,
+        None,
+    );
+
+    let content = wire[0]["content"].as_array().expect("content array");
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "look ");
+    assert_eq!(content[1]["type"], "image_url");
+    let image_url = content[1]["image_url"]["url"]
+        .as_str()
+        .expect("image_url.url");
+    assert!(image_url.starts_with("data:image/png;base64,"));
+    assert_eq!(content[2]["type"], "text");
+    assert_eq!(content[2]["text"], " then ");
+    assert_eq!(content[3]["type"], "file");
+    let file_data = content[3]["file"]["file_data"]
+        .as_str()
+        .expect("file.file_data");
+    assert!(file_data.starts_with("data:application/pdf;base64,"));
+    assert!(content.iter().all(|part| {
+        part.get("type") != Some(&serde_json::json!("input_image"))
+            && part.get("type") != Some(&serde_json::json!("input_file"))
+    }));
+}
+
+#[test]
+fn transport_messages_uses_standard_file_id_slots_for_uploaded_parts() {
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "openai".to_string(),
+        env_name: "OPENAI_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider = OpenAiProvider::new(
+        &openai_multimodal_entry("OPENAI_API_KEY"),
+        &runtime,
+        &credential,
+    )
+    .expect("provider");
+    let files_adapter = provider
+        .cached_files_adapter(&runtime.files)
+        .expect("files adapter");
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+        ChatMessageContentPart::file_file_id("file-pdf", Some("guide.pdf".to_string())).unwrap(),
+    ])];
+
+    let wire = transport_messages(&msgs, "gpt-4.1", false, Some(files_adapter.as_ref()));
+    let content = wire[0]["content"].as_array().expect("content array");
+    assert_eq!(content[0]["image_url"]["file_id"], "file-image");
+    assert!(content[0]["image_url"].get("url").is_none());
+    assert_eq!(content[1]["file"]["file_id"], "file-pdf");
+}
+
+#[test]
+fn transport_messages_uses_ms_scheme_for_moonshot_uploaded_images() {
+    let runtime = LlmConfig::default().runtime();
+    let credential = Credential {
+        provider: "moonshot".to_string(),
+        env_name: "MOONSHOT_API_KEY".to_string(),
+        value: "stub-key".to_string(),
+    };
+    let provider = OpenAiProvider::new(
+        &moonshot_multimodal_entry("MOONSHOT_API_KEY"),
+        &runtime,
+        &credential,
+    )
+    .expect("moonshot provider");
+    let files_adapter = provider
+        .cached_files_adapter(&runtime.files)
+        .expect("moonshot files adapter");
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::image_file_id("img-123").unwrap(),
+    ])];
+
+    let wire = transport_messages(&msgs, "kimi-k3", false, Some(files_adapter.as_ref()));
+    let content = wire[0]["content"].as_array().expect("content array");
+    assert_eq!(content[0]["type"], "image_url");
+    assert_eq!(content[0]["image_url"]["url"], "ms://img-123");
+    assert!(content[0]["image_url"].get("file_id").is_none());
+}
+
+#[test]
+fn transport_messages_degrades_uploaded_parts_when_files_adapter_missing() {
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+        ChatMessageContentPart::file_file_id("file-pdf", Some("guide.pdf".to_string())).unwrap(),
+    ])];
+
+    let wire = transport_messages(&msgs, "gpt-4.1", false, None);
+    let content = wire[0]["content"].as_array().expect("content array");
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER);
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], UNSUPPORTED_FILE_INPUT_PLACEHOLDER);
 }
 
 /// 依赖 DEEPSEEK_API_KEY 与可用配额：有 key 时调用真实 chat 接口一次，打印请求与响应；无 key 时 panic。

@@ -417,7 +417,9 @@ async function waitForWebviewDomSnapshot<T>(
         planNoticeReplayed: lastSnapshot.planNoticeReplayed,
         planStateText: lastSnapshot.planStateText,
         progressRow: lastSnapshot.progressRow,
+        loadingShimmerCount: lastSnapshot.loadingShimmerCount,
         planTodos: lastSnapshot.planTodos,
+        standaloneThinkingTitles: lastSnapshot.standaloneThinkingTitles,
         todoWidgetVisible: lastSnapshot.todoWidgetVisible,
         todoWidgetExpanded: lastSnapshot.todoWidgetExpanded,
         todoWidgetItemCount: lastSnapshot.todoWidgetItemCount,
@@ -703,7 +705,7 @@ export async function assertWebviewAddModelsFlow(
   );
   assert.strictEqual(
     settingsSnapshot.state.serverVersion,
-    "0.1.15",
+    "0.1.16",
     "expected the settings panel state to carry the fake serve version",
   );
   assert.strictEqual(
@@ -1009,6 +1011,147 @@ export async function assertWebviewAddModelsFlow(
   await waitForEvent(api, {
     sessionId,
     textIncludes: "reasoning effort: xhigh",
+    type: "message_update",
+  });
+  await waitForEvent(api, {
+    sessionId,
+    type: "agent_idle",
+  });
+}
+
+export async function assertWebviewMaxReasoningAndLoadingGapFlow(
+  api: TomcatExtensionApi,
+): Promise<void> {
+  await api.__testing.focusWebview();
+  await api.__testing.waitForWebviewReady();
+  const sessionId = await createFreshWebviewSession(api, "webview-max-loading-gap-session");
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        modelId: "claude-4.6-sonnet",
+        sessionId,
+      },
+      messageId: "webview-set-claude-model",
+      type: "setModel",
+    }),
+  );
+  await waitForSessionState(
+    api,
+    (state) =>
+      state.sessionId === sessionId && state.model === "claude-4.6-sonnet" ? state : undefined,
+    20_000,
+  );
+
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "thinking-level-select",
+  });
+  const dropdown = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionId &&
+      snapshot.html.includes('data-testid="thinking-level-dropdown"') &&
+      snapshot.html.includes("Max")
+        ? snapshot
+        : undefined,
+    10_000,
+  );
+  assert.ok(
+    dropdown.html.includes("Max"),
+    `expected the reasoning menu to expose Max, got html=${dropdown.html.slice(0, 400)}`,
+  );
+  await api.__testing.sendWebviewDomAction({
+    index: 3,
+    kind: "clickTestId",
+    testId: "thinking-level-option",
+  });
+  await waitForSessionState(
+    api,
+    (state) =>
+      state.sessionId === sessionId &&
+      state.model === "claude-4.6-sonnet" &&
+      state.thinkingLevel === "max"
+        ? state
+        : undefined,
+    20_000,
+  );
+
+  api.__testing.clearObservedEvents();
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        text: "reasoning effort probe",
+      },
+      messageId: "webview-max-probe",
+      type: "prompt",
+    }),
+  );
+  await waitForEvent(api, {
+    sessionId,
+    textIncludes: "reasoning effort: max",
+    type: "message_update",
+  });
+  await waitForEvent(api, {
+    sessionId,
+    type: "agent_idle",
+  });
+
+  api.__testing.clearObservedEvents();
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: {
+        sessionId,
+        text: "loading gap showcase",
+      },
+      messageId: "webview-loading-gap",
+      type: "prompt",
+    }),
+  );
+
+  const progressSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.progressRow &&
+      candidate.loadingShimmerCount > 0 &&
+      candidate.html.includes('data-testid="stop-button"')
+        ? candidate
+        : undefined,
+    15_000,
+  );
+  assert.equal(progressSnapshot.progressRow, true, "expected a pre-stream inline progress row");
+  assert.ok(
+    progressSnapshot.loadingShimmerCount > 0,
+    `expected loading shimmer during the pre-stream gap, got ${progressSnapshot.loadingShimmerCount}`,
+  );
+
+  const thinkingSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      !candidate.progressRow &&
+      candidate.loadingShimmerCount > 0 &&
+      candidate.html.includes('data-testid="thinking-streaming-indicator"') &&
+      candidate.standaloneThinkingTitles.includes("Thinking") &&
+      !candidate.standaloneThinkingTitles.includes("Tomcat · Thinking")
+        ? candidate
+        : undefined,
+    15_000,
+  );
+  assert.ok(
+    thinkingSnapshot.standaloneThinkingTitles.includes("Thinking"),
+    `expected the standalone thinking header to read "Thinking", got ${JSON.stringify(thinkingSnapshot.standaloneThinkingTitles)}`,
+  );
+  assert.ok(
+    !thinkingSnapshot.standaloneThinkingTitles.includes("Tomcat · Thinking"),
+    `expected the product prefix to stay removed, got ${JSON.stringify(thinkingSnapshot.standaloneThinkingTitles)}`,
+  );
+
+  await waitForEvent(api, {
+    sessionId,
+    textIncludes: "loading gap complete",
     type: "message_update",
   });
   await waitForEvent(api, {

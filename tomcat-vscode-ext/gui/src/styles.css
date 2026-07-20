@@ -2167,24 +2167,31 @@ input:focus-visible {
 
 @keyframes tc-title-shimmer {
   0% {
-    background-position: 100% 0;
+    background-position: 130% 0;
   }
   100% {
-    background-position: -100% 0;
+    background-position: -130% 0;
   }
 }
 
+.tc-loading-shimmer,
 .tc-thinking__title--shimmer {
-  animation: tc-title-shimmer 2s linear infinite;
+  animation: tc-title-shimmer 1.6s linear infinite;
   background: linear-gradient(
     90deg,
     var(--vscode-descriptionForeground) 0%,
-    var(--vscode-foreground) 50%,
+    var(--vscode-descriptionForeground) 24%,
+    var(--vscode-foreground) 44%,
+    var(--vscode-textPreformatForeground, var(--vscode-foreground)) 50%,
+    var(--vscode-foreground) 56%,
+    var(--vscode-descriptionForeground) 76%,
     var(--vscode-descriptionForeground) 100%
   );
+  -webkit-background-clip: text;
   background-clip: text;
-  background-size: 200% 100%;
+  background-size: 240% 100%;
   color: transparent;
+  -webkit-text-fill-color: transparent;
 }
 
 .tc-thinking-box {
@@ -2782,29 +2789,8 @@ input:focus-visible {
   padding: 6px 0;
 }
 
-.tc-progress-row p {
-  margin: 0;
-}
-
-.tc-progress-row__spinner {
-  flex: 0 0 auto;
-}
-
-.tc-progress-row--shimmer .tc-progress-row__spinner {
-  animation: tc-tool-spin 1s linear infinite;
-}
-
-.tc-progress-row--shimmer p {
-  animation: tc-title-shimmer 2s linear infinite;
-  background: linear-gradient(
-    90deg,
-    var(--vscode-descriptionForeground) 0%,
-    var(--vscode-foreground) 50%,
-    var(--vscode-descriptionForeground) 100%
-  );
-  background-clip: text;
-  background-size: 200% 100%;
-  color: transparent;
+.tc-progress-row__label {
+  display: inline-block;
 }
 
 .tc-todo-widget {
@@ -2882,23 +2868,6 @@ input:focus-visible {
   font-size: 12px;
   gap: 8px;
   min-height: 22px;
-}
-
-.tc-todo-widget--working .tc-todo-widget__spinner {
-  animation: tc-tool-spin 1s linear infinite;
-}
-
-.tc-todo-widget--working .tc-todo-widget__title {
-  animation: tc-title-shimmer 2s linear infinite;
-  background: linear-gradient(
-    90deg,
-    var(--vscode-descriptionForeground) 0%,
-    var(--vscode-foreground) 50%,
-    var(--vscode-descriptionForeground) 100%
-  );
-  background-clip: text;
-  background-size: 200% 100%;
-  color: transparent;
 }
 
 .tc-todo-widget__list {
@@ -3377,7 +3346,7 @@ input:focus-visible {
 @keyframes tc-thinking-pulse {
   0%,
   100% {
-    opacity: 0.35;
+    opacity: 0.22;
   }
 
   50% {

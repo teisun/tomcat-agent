@@ -22,6 +22,7 @@ import {
   assertTranscriptUiFlow,
   assertTranscriptRichRenderingFlow,
   assertTranscriptSwitchBackOrder,
+  assertWebviewMaxReasoningAndLoadingGapFlow,
   getTomcatExtensionApi,
 } from "./support/hostE2eScenario";
 
@@ -39,6 +40,11 @@ suite("Tomcat host E2E", () => {
   test("adds a model through settings and uses it in the webview", async () => {
     const api = await getTomcatExtensionApi();
     await assertWebviewAddModelsFlow(api);
+  });
+
+  test("keeps max reasoning and pre-stream loading states working in the webview", async () => {
+    const api = await getTomcatExtensionApi();
+    await assertWebviewMaxReasoningAndLoadingGapFlow(api);
   });
 
   test("streams in the Tomcat webview", async () => {

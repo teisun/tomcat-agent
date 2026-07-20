@@ -564,7 +564,9 @@ export type WebviewIntent =
         planNoticeReplayed: boolean;
         planStateText: string | null;
         progressRow: boolean;
+        loadingShimmerCount: number;
         planTodos: number;
+        standaloneThinkingTitles: string[];
         todoWidgetExpanded: boolean;
         todoWidgetItemCount: number;
         todoWidgetTitle: string | null;

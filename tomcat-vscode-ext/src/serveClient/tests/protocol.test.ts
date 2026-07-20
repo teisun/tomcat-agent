@@ -8,13 +8,13 @@ describe("serve client protocol helpers", () => {
       parseInitializePayload({
         capabilities: ["prompt", "ask_question"],
         protocolVersion: 1,
-        serverVersion: "0.1.15",
+        serverVersion: "0.1.16",
         sessionId: "s1",
       }),
     ).toEqual({
       capabilities: ["prompt", "ask_question"],
       protocolVersion: 1,
-      serverVersion: "0.1.15",
+      serverVersion: "0.1.16",
       sessionId: "s1",
     });
   });

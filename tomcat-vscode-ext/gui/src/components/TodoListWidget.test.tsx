@@ -21,6 +21,7 @@ describe("TodoListWidget", () => {
     expect(screen.getByTestId("todo-widget-title").textContent).toBe(
       "Render the transcript UI (2/3)",
     );
+    expect(screen.getByTestId("todo-widget-title").className).toContain("tc-loading-shimmer");
 
     fireEvent.click(screen.getByTestId("todo-widget-toggle"));
 

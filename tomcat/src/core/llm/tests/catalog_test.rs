@@ -37,13 +37,17 @@ fn resolve_known_model() {
     assert_eq!(kimi.api, "openai");
     assert_eq!(kimi.provider, "moonshot");
     assert_eq!(kimi.base_url.as_deref(), Some("https://api.moonshot.cn"));
+    let kimi_k3 = catalog.lookup("kimi-k3").expect("builtin kimi-k3");
+    assert_eq!(kimi_k3.api, "openai");
+    assert_eq!(kimi_k3.provider, "moonshot");
+    assert_eq!(kimi_k3.base_url.as_deref(), Some("https://api.moonshot.cn"));
 }
 
 #[test]
 fn builtin_models_toml_parses() {
     let parsed =
         toml::from_str::<UserModelsFile>(builtin_seed_toml_text()).expect("parse embedded seed");
-    assert_eq!(parsed.models.len(), 13);
+    assert_eq!(parsed.models.len(), 14);
 }
 
 #[test]
@@ -67,6 +71,7 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
             "mimo-v2.5-pro",
             "glm-5.2",
             "kimi-k2.7-code",
+            "kimi-k3",
             "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-opus-4-6",
@@ -93,6 +98,23 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
     assert_eq!(kimi.provider, "moonshot");
     assert_eq!(kimi.context_window, Some(400_000));
     assert!(kimi.supported_reasoning_levels.is_empty());
+    assert!(kimi.capabilities.vision);
+    assert!(kimi.capabilities.files);
+
+    let kimi_k3 = entries
+        .iter()
+        .find(|entry| entry.id == "kimi-k3")
+        .expect("kimi-k3 preset");
+    assert_eq!(kimi_k3.base_url.as_deref(), Some("https://api.moonshot.cn"));
+    assert_eq!(kimi_k3.provider, "moonshot");
+    assert_eq!(kimi_k3.context_window, Some(1_000_000));
+    assert_eq!(
+        kimi_k3.supported_reasoning_levels,
+        vec!["low".to_string(), "high".to_string(), "max".to_string()]
+    );
+    assert_eq!(kimi_k3.thinking_format.as_deref(), Some("openai"));
+    assert!(kimi_k3.capabilities.vision);
+    assert!(kimi_k3.capabilities.files);
 
     let mimo = entries
         .iter()
@@ -130,12 +152,15 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
             "max".to_string(),
         ]
     );
+    assert!(claude.capabilities.files);
 
     let embedded = builtin_seed_toml_text();
     assert!(embedded.contains("id = \"utility-flash\""));
     assert!(embedded.contains("model_name = \"deepseek-v4-flash\""));
     assert!(embedded.contains("base_url = \"https://api.moonshot.cn\""));
+    assert!(embedded.contains("id = \"kimi-k3\""));
     assert!(embedded.contains("context_window = 1000000"));
+    assert!(embedded.contains("supported_reasoning_levels = [\"low\", \"high\", \"max\"]"));
     assert!(embedded.contains("supported_reasoning_levels = [\"high\", \"max\"]"));
     assert!(embedded.contains("thinking_format = \"anthropic-adaptive\""));
 }
@@ -157,6 +182,12 @@ fn builtin_seed_entries_keep_embedded_context_window_when_runtime_default_change
         .find(|entry| entry.id == "kimi-k2.7-code")
         .expect("kimi preset");
     assert_eq!(kimi.context_window, Some(400_000));
+
+    let kimi_k3 = entries
+        .iter()
+        .find(|entry| entry.id == "kimi-k3")
+        .expect("kimi-k3 preset");
+    assert_eq!(kimi_k3.context_window, Some(1_000_000));
 
     let mimo = entries
         .iter()

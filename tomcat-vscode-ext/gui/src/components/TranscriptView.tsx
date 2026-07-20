@@ -300,8 +300,10 @@ export function TranscriptView({
     busy && latestUserIndex >= 0
       ? renderedTimeline.slice(0, latestUserIndex + 1)
       : renderedTimeline;
-  const liveClusterTimeline =
-    busy && latestUserIndex >= 0 ? renderedTimeline.slice(latestUserIndex + 1) : [];
+  const showLiveCluster = busy && latestUserIndex >= 0;
+  const liveClusterTimeline = showLiveCluster
+    ? renderedTimeline.slice(latestUserIndex + 1)
+    : [];
 
   return (
     <section
@@ -310,7 +312,7 @@ export function TranscriptView({
       ref={transcriptRef}
     >
       {renderCluster(leadingTimeline, false)}
-      {liveClusterTimeline.length ? (
+      {showLiveCluster ? (
         <div className="tc-live-cluster" data-testid="live-cluster">
           {renderCluster(liveClusterTimeline, true)}
         </div>
