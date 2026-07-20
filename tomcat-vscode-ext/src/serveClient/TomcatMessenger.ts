@@ -363,7 +363,7 @@ export class TomcatMessenger {
   sendSetThinkingLevel(
     sessionId: string | null | undefined,
     model: string,
-    level: "high" | "low" | "medium" | "xhigh",
+    level: string,
     timeoutMs = this.timeoutMs(),
   ): Promise<ResponseFrame> {
     return this.request(

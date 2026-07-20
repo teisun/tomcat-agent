@@ -788,6 +788,18 @@ export async function activate(
     | undefined;
   let settingsPanel: SettingsPanel;
   let planPreviewProvider!: PlanPreviewEditorProvider;
+  const extensionPackage = context.extension.packageJSON as {
+    tomcat?: {
+      bundledCliVersion?: unknown;
+    };
+    version?: unknown;
+  };
+  const extensionVersion =
+    typeof extensionPackage.version === "string" ? extensionPackage.version : null;
+  const expectedCliVersion =
+    typeof extensionPackage.tomcat?.bundledCliVersion === "string"
+      ? extensionPackage.tomcat.bundledCliVersion
+      : null;
   const webviewProvider = new TomcatWebviewViewProvider({
     extensionUri: context.extensionUri,
     getDefaultCwd,
@@ -808,7 +820,9 @@ export async function activate(
   });
   settingsPanel = new SettingsPanel({
     ensureInitialized,
+    expectedCliVersion,
     extensionUri: context.extensionUri,
+    extensionVersion,
     messenger,
     onModelCatalogChanged: () => webviewProvider.refreshModelCatalog(),
   });

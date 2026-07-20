@@ -49,7 +49,9 @@ describe("settings panel html asset resolution", () => {
     });
     const panel = new SettingsPanel({
       ensureInitialized: async () => ({} as never),
+      expectedCliVersion: "0.1.15",
       extensionUri,
+      extensionVersion: "0.1.18",
       messenger: {} as never,
     });
 
@@ -76,7 +78,9 @@ describe("settings panel html asset resolution", () => {
     });
     const panel = new SettingsPanel({
       ensureInitialized: async () => ({} as never),
+      expectedCliVersion: "0.1.15",
       extensionUri,
+      extensionVersion: "0.1.18",
       messenger: {} as never,
     });
 
@@ -96,8 +100,11 @@ describe("settings panel model management flow", () => {
     ensureInitialized?: () => Promise<{
       capabilities: string[];
       protocolVersion: number;
+      serverVersion: string | null;
       sessionId: string | null;
     }>;
+    expectedCliVersion?: string | null;
+    extensionVersion?: string | null;
     messenger?: Partial<{
       sendListModels: () => Promise<unknown>;
       sendListProviderKeys: () => Promise<unknown>;
@@ -131,9 +138,12 @@ describe("settings panel model management flow", () => {
             "upsert_model",
           ],
           protocolVersion: 1,
+          serverVersion: "0.1.15",
           sessionId: null,
         })),
+      expectedCliVersion: overrides?.expectedCliVersion ?? "0.1.15",
       extensionUri: vscode.Uri.file("/tmp/tomcat-ext"),
+      extensionVersion: overrides?.extensionVersion ?? "0.1.18",
       messenger: messenger as never,
       onModelCatalogChanged: overrides?.onModelCatalogChanged,
     });
@@ -177,6 +187,62 @@ describe("settings panel model management flow", () => {
     expect(messenger.sendUpsertModel).toHaveBeenCalledTimes(1);
     expect(messenger.sendSetProviderKey).not.toHaveBeenCalled();
     expect(panel.__testingSnapshot().state.error).toBe("bad model");
+  });
+
+  it("surfaces non-fatal model warnings after save", async () => {
+    const { panel } = createPanel({
+      messenger: {
+        sendUpsertModel: vi.fn().mockResolvedValue({
+          payload: {
+            model: { id: "relay-openai" },
+            warnings: [
+              "API `openai-responses` expects reasoning effort, but thinking_format=`anthropic` will not send it.",
+            ],
+          },
+          success: true,
+        }),
+      },
+    });
+
+    await panel.__testingDispatchIntent({
+      data: {
+        model: {
+          api: "openai-responses",
+          apiKeyEnv: "RELAY_API_KEY",
+          capabilities: {
+            files: false,
+            reasoning: true,
+            tools: true,
+            vision: false,
+            webSearch: false,
+          },
+          id: "relay-openai",
+          provider: "relay",
+          thinkingFormat: "anthropic",
+        },
+      },
+      messageId: "upsert-with-warning",
+      type: "upsertModel",
+    } satisfies SettingsIntent);
+
+    expect(panel.__testingSnapshot().state.status).toBe("Model saved.");
+    expect(panel.__testingSnapshot().state.warnings).toEqual([
+      "API `openai-responses` expects reasoning effort, but thinking_format=`anthropic` will not send it.",
+    ]);
+  });
+
+  it("stores extension and serve version metadata in state snapshots", async () => {
+    const { panel } = createPanel();
+
+    await panel.__testingDispatchIntent({
+      data: { route: "models" },
+      messageId: "version-state",
+      type: "settings.ready",
+    } satisfies SettingsIntent);
+
+    expect(panel.__testingSnapshot().state.extensionVersion).toBe("0.1.18");
+    expect(panel.__testingSnapshot().state.expectedCliVersion).toBe("0.1.15");
+    expect(panel.__testingSnapshot().state.serverVersion).toBe("0.1.15");
   });
 
   it("keeps previous models and exposes list failures", async () => {

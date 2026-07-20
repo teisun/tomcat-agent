@@ -49,12 +49,12 @@ const API_OPTIONS = [
 ] as const;
 
 const THINKING_FORMAT_OPTIONS = [
-  { label: "Auto (follow the selected API)", value: "" },
   { label: "OpenAI effort", value: "openai" },
   { label: "DeepSeek thinking", value: "deepseek" },
   { label: "ZAI / GLM reasoning", value: "zai" },
   { label: "Doubao / Kimi / MiMo thinking", value: "doubao" },
   { label: "Anthropic thinking budget", value: "anthropic" },
+  { label: "Anthropic adaptive effort", value: "anthropic-adaptive" },
 ] as const;
 
 const CAPABILITY_OPTIONS = [
@@ -83,6 +83,28 @@ function createEmptyForm(): FormState {
     provider: "",
     thinkingFormat: "",
   };
+}
+
+function defaultThinkingFormatForApi(api: string): string {
+  switch (fieldText(api)) {
+    case "openai":
+    case "openai-responses":
+      return "openai";
+    case "anthropic":
+    case "anthropic-messages":
+      return "anthropic";
+    case "deepseek":
+      return "deepseek";
+    case "zai":
+      return "zai";
+    case "qwen":
+      return "qwen";
+    case "doubao":
+    case "moonshot":
+      return "doubao";
+    default:
+      return "openai";
+  }
 }
 
 function fieldText(value: string | null | undefined): string {
@@ -140,6 +162,9 @@ function normalizeModel(model: FormState): SettingsModelInput {
     id: fieldText(model.id),
     modelName: normalizeOptionalText(model.modelName),
     provider: fieldText(model.provider),
+    supportedReasoningLevels: Array.isArray(model.supportedReasoningLevels)
+      ? [...model.supportedReasoningLevels]
+      : null,
     thinkingFormat: normalizeOptionalText(model.thinkingFormat),
   };
 }
@@ -228,6 +253,7 @@ function modelToForm(model: SettingsModelView): FormState {
     id: model.id,
     modelName: model.modelName ?? "",
     provider: model.provider,
+    supportedReasoningLevels: model.supportedReasoningLevels ?? null,
     thinkingFormat: model.thinkingFormat ?? "",
   };
 }
@@ -242,6 +268,23 @@ function formatThinkingLabel(thinkingFormat: string | null | undefined): string 
     thinkingFormat ??
     ""
   );
+}
+
+function formatVersionLabel(version: string | null | undefined): string {
+  const trimmed = fieldText(version);
+  return trimmed ? `v${trimmed}` : "vunknown";
+}
+
+function buildServeVersionWarning(state: SettingsStateSnapshot): string | null {
+  const expected = fieldText(state.expectedCliVersion);
+  const server = fieldText(state.serverVersion);
+  if (!server) {
+    return "The connected `tomcat serve` did not report a version. You may be running an older CLI binary; rebuild or update it, then restart serve.";
+  }
+  if (expected && server !== expected) {
+    return `This extension expects tomcat CLI v${expected}, but the connected serve reports v${server}. Rebuild or update the CLI binary, then restart serve.`;
+  }
+  return null;
 }
 
 function modelKeyEnvName(model: SettingsModelView): string {
@@ -607,7 +650,9 @@ export function SettingsApp({
   const effectiveId = selectedModel ? selectedModel.id : fieldText(form.id) || derivedId;
   const effectiveThinkingFormat =
     fieldText(form.thinkingFormat) ||
-    (dialogKind === "official" ? selectedPreset?.thinkingFormat ?? "" : "");
+    (dialogKind === "official"
+      ? selectedPreset?.thinkingFormat ?? defaultThinkingFormatForApi(effectiveApi)
+      : defaultThinkingFormatForApi(effectiveApi));
   const effectiveModel: SettingsModelInput = normalizeModel({
     ...form,
     api: effectiveApi,
@@ -774,13 +819,26 @@ export function SettingsApp({
   }
 
   function handleApiChange(nextApi: string) {
-    setForm((current) => ({
-      ...current,
-      api:
-        dialogKind === "official" && selectedPreset && nextApi === selectedPreset.api
-          ? ""
-          : nextApi,
-    }));
+    setForm((current) => {
+      const currentApi =
+        dialogKind === "official"
+          ? fieldText(current.api) || selectedPreset?.api || ""
+          : fieldText(current.api) || "openai";
+      const currentDefaultThinkingFormat = defaultThinkingFormatForApi(currentApi);
+      const currentThinkingFormat = fieldText(current.thinkingFormat);
+      const nextThinkingFormat =
+        !currentThinkingFormat || currentThinkingFormat === currentDefaultThinkingFormat
+          ? defaultThinkingFormatForApi(nextApi)
+          : current.thinkingFormat;
+      return {
+        ...current,
+        api:
+          dialogKind === "official" && selectedPreset && nextApi === selectedPreset.api
+            ? ""
+            : nextApi,
+        thinkingFormat: nextThinkingFormat,
+      };
+    });
   }
 
   function handleKeySlotChange(nextEnvName: string) {
@@ -945,6 +1003,7 @@ export function SettingsApp({
                 ? `Add an API key or choose a configured slot such as ${effectiveApiKeyEnv}.`
                 : null;
   const saveDisabled = saveDisabledReason !== null;
+  const serveVersionWarning = buildServeVersionWarning(state);
 
   return (
     <div className="tc-settings-shell">
@@ -962,6 +1021,10 @@ export function SettingsApp({
         <button className="tc-settings-nav__item" disabled type="button">
           Tools
         </button>
+        <div className="tc-settings-shell__version" data-testid="settings-version-footer">
+          <div>Extension {formatVersionLabel(state.extensionVersion)}</div>
+          <div>Serve {formatVersionLabel(state.serverVersion)}</div>
+        </div>
       </aside>
       <main className="tc-settings-shell__content">
         <header className="tc-settings-shell__header">
@@ -983,7 +1046,15 @@ export function SettingsApp({
           </button>
         </header>
 
+        {serveVersionWarning ? (
+          <div className="tc-banner tc-banner--warning">{serveVersionWarning}</div>
+        ) : null}
         {state.error ? <div className="tc-banner tc-banner--warning">{state.error}</div> : null}
+        {state.warnings?.map((warning) => (
+          <div key={warning} className="tc-banner tc-banner--warning">
+            {warning}
+          </div>
+        ))}
         {state.status ? <div className="tc-banner">{state.status}</div> : null}
 
         {!state.capabilities.listModels ? (
@@ -1348,7 +1419,7 @@ export function SettingsApp({
                         </select>
                         <small className="tc-field__hint">
                           This decides how Tomcat talks to the endpoint and how
-                          Auto thinking is encoded.
+                          reasoning effort is encoded.
                         </small>
                       </label>
                       <label className="tc-field">
@@ -1567,8 +1638,8 @@ export function SettingsApp({
                             value={
                               fieldText(form.thinkingFormat) ||
                               (dialogKind === "official"
-                                ? selectedPreset?.thinkingFormat ?? ""
-                                : "")
+                                ? selectedPreset?.thinkingFormat ?? defaultThinkingFormatForApi(effectiveApi)
+                                : defaultThinkingFormatForApi(effectiveApi))
                             }
                           >
                             {THINKING_FORMAT_OPTIONS.map((entry) => (
@@ -1578,8 +1649,8 @@ export function SettingsApp({
                             ))}
                           </select>
                           <small className="tc-field__hint">
-                            In relay mode, Auto follows the selected API and never
-                            guesses from the model name.
+                            Defaults follow the selected API. Override only if
+                            your relay intentionally expects a different wire shape.
                           </small>
                         </label>
 

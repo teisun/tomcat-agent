@@ -71,12 +71,13 @@ pub(crate) fn run_model(sub: ModelSub, cfg: &AppConfig) -> Result<(), AppError> 
                         web_search,
                     },
                     context_window,
+                    supported_reasoning_levels: None,
                     thinking_format,
                 },
             )?;
             println!(
                 "已保存模型 {}（api={} provider={} key={}）。",
-                model.id, model.api, model.provider, model.api_key_env
+                model.model.id, model.model.api, model.model.provider, model.model.api_key_env
             );
         }
         ModelSub::Remove { id } => {

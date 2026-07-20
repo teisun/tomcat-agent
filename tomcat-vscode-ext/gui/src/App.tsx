@@ -29,6 +29,7 @@ import { useAutoScroll } from "./useAutoScroll";
 const EMPTY_STATE: WebviewStateSnapshot = {
   activeSessionId: null,
   availableModelCapabilities: {},
+  availableModelReasoningLevels: {},
   availableModels: [],
   modelAdminSupported: false,
   ready: false,
@@ -655,20 +656,6 @@ function buildContextLabel(contextRatio?: number | null): string {
   return `Ctx ${Math.round(contextRatio * 100)}%`;
 }
 
-function normalizeThinkingLevel(
-  thinkingLevel?: string | null,
-): "" | "high" | "low" | "medium" | "xhigh" {
-  switch (thinkingLevel) {
-    case "low":
-    case "medium":
-    case "high":
-    case "xhigh":
-      return thinkingLevel;
-    default:
-      return "";
-  }
-}
-
 function currentModeValue(planState?: string | null): "chat" | "plan" {
   return planState && planState !== "chat" ? "plan" : "chat";
 }
@@ -756,6 +743,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const activeModelCapabilities = activeSession?.model
     ? state.availableModelCapabilities?.[activeSession.model]
     : undefined;
+  const activeModelReasoningLevels = activeSession?.model
+    ? state.availableModelReasoningLevels?.[activeSession.model] ?? []
+    : [];
   const {
     activeStickyMessageId,
     bottomSpacerHeight,
@@ -1332,7 +1322,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         modelCapabilities={activeModelCapabilities}
         modeValue={currentModeValue(activeSession?.planState)}
         modelValue={activeSession?.model ?? ""}
-        thinkingLevelValue={normalizeThinkingLevel(activeSession?.thinkingLevel)}
+        supportedReasoningLevels={activeModelReasoningLevels}
+        thinkingLevelValue={activeSession?.thinkingLevel ?? ""}
         ref={composerRef}
         onContextSearchClose={handleContextSearchClose}
         onContextSearchOpen={handleContextSearchOpen}
@@ -1361,7 +1352,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             }
           : undefined}
         onThinkingLevelChange={(level) => {
-          if (!activeSession || !activeSession.model || !level) {
+          if (!activeSession || !activeSession.model) {
             return;
           }
           postIntent(vscodeApi, "setThinkingLevel", {

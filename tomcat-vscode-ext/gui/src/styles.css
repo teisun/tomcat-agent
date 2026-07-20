@@ -593,6 +593,15 @@ input:focus-visible {
   text-transform: uppercase;
 }
 
+.tc-settings-shell__version {
+  border-top: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.18));
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
 .tc-settings-nav__item {
   background: transparent;
   border: 1px solid transparent;

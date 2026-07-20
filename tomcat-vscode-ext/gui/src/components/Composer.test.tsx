@@ -29,6 +29,7 @@ function renderComposer({
   onThinkingLevelChange = vi.fn(),
   onSubmit = vi.fn(),
   planState = "planning",
+  supportedReasoningLevels = ["low", "medium", "high", "xhigh"],
   thinkingLevelValue = "high",
 }: {
   availableModels?: string[];
@@ -65,8 +66,9 @@ function renderComposer({
   onInterrupt?: () => void;
   onSubmit?: () => void;
   planState?: "chat" | "planning" | "executing";
-  thinkingLevelValue?: "" | "high" | "low" | "medium" | "xhigh";
-  onThinkingLevelChange?: (value: "" | "high" | "low" | "medium" | "xhigh") => void;
+  supportedReasoningLevels?: string[];
+  thinkingLevelValue?: string;
+  onThinkingLevelChange?: (value: string) => void;
 } = {}) {
   const ref = createRef<ComposerHandle>();
   const renderResult = render(
@@ -83,6 +85,7 @@ function renderComposer({
       modelCapabilities={modelCapabilities}
       modeValue={modeValue}
       modelValue={modelValue}
+      supportedReasoningLevels={supportedReasoningLevels}
       thinkingLevelValue={thinkingLevelValue}
       onContextSearchClose={onContextSearchClose}
       onContextSearchOpen={onContextSearchOpen}
@@ -256,6 +259,42 @@ describe("Composer", () => {
     );
 
     expect(onThinkingLevelChange).toHaveBeenCalledWith("xhigh");
+  });
+
+  it("renders only the supported reasoning tiers for deepseek/glm-style models", () => {
+    renderComposer({
+      supportedReasoningLevels: ["high", "max"],
+      thinkingLevelValue: "max",
+    });
+
+    expect(screen.getByText("Effort")).toBeTruthy();
+    expect(screen.getByTestId("thinking-level-select").textContent).toContain("Max");
+    fireEvent.click(screen.getByTestId("thinking-level-select"));
+    expect(
+      screen.getAllByTestId("thinking-level-option").map((node) => node.textContent),
+    ).toEqual(["High", "Max"]);
+  });
+
+  it("falls back to a Thinking On/Off toggle when the model exposes no effort tiers", () => {
+    const onThinkingLevelChange = vi.fn();
+    renderComposer({
+      onThinkingLevelChange,
+      supportedReasoningLevels: [],
+      thinkingLevelValue: "high",
+    });
+
+    expect(screen.getByText("Thinking")).toBeTruthy();
+    expect(screen.getByTestId("thinking-level-select").textContent).toContain("On");
+    fireEvent.click(screen.getByTestId("thinking-level-select"));
+    expect(
+      screen.getAllByTestId("thinking-level-option").map((node) => node.textContent),
+    ).toEqual(["On", "Off"]);
+    fireEvent.click(
+      screen
+        .getAllByTestId("thinking-level-option")
+        .find((node) => node.textContent === "Off") ?? screen.getAllByTestId("thinking-level-option")[1],
+    );
+    expect(onThinkingLevelChange).toHaveBeenCalledWith("off");
   });
 
   it("omits the plan notice when chat mode is active", () => {

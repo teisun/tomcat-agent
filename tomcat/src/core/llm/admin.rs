@@ -10,7 +10,7 @@ use crate::core::llm::auth::{
     env_name_for_provider, key_present_for_env, refresh_managed_credentials,
 };
 use crate::infra::config::{
-    get_work_dir, read_env_entries, write_default_model, write_env_entries,
+    get_work_dir, read_env_entries, write_default_model, write_env_entries, ThinkingConfig,
 };
 use crate::infra::platform::write_file_atomic;
 use crate::{AppConfig, AppError};
@@ -18,6 +18,10 @@ use crate::{AppConfig, AppError};
 use super::catalog::{
     load_user_models_file, render_user_models_file, Capabilities, ModelCatalog, ModelEntry,
     PartialCapabilities, UserModelEntry, UserModelsFile,
+};
+use super::thinking_policy::{
+    default_thinking_format_for_api, normalize_supported_reasoning_levels, resolve_request_fields,
+    safe_supported_reasoning_levels_for, ThinkingFormat,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -42,6 +46,8 @@ pub struct ModelView {
     pub thinking_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<String>,
     pub source: ModelSource,
     pub api_key_env: String,
     pub key_present: bool,
@@ -65,6 +71,14 @@ pub struct ModelEntryInput {
     pub context_window: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_reasoning_levels: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpsertModelResult {
+    pub model: ModelView,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -102,6 +116,7 @@ impl ModelView {
             capabilities: entry.capabilities.clone(),
             thinking_format: entry.thinking_format.clone(),
             context_window: entry.context_window,
+            supported_reasoning_levels: entry.supported_reasoning_levels.clone(),
             source: if catalog.is_builtin_seed(&entry.id) {
                 ModelSource::Builtin
             } else {
@@ -135,7 +150,19 @@ impl ModelEntryInput {
             validate_api_key_env_name(env_name)?;
         }
         let base_url = normalize_optional(self.base_url);
-        let thinking_format = normalize_optional(self.thinking_format);
+        let thinking_format = normalize_optional(self.thinking_format)
+            .or_else(|| Some(default_thinking_format_for_api(api.as_str()).to_string()));
+        let supported_reasoning_levels = match self.supported_reasoning_levels {
+            Some(levels) => {
+                let normalized = normalize_supported_reasoning_levels(&levels);
+                if normalized.is_empty() && !levels.is_empty() {
+                    safe_supported_reasoning_levels_for(api.as_str(), thinking_format.as_deref())
+                } else {
+                    normalized
+                }
+            }
+            None => safe_supported_reasoning_levels_for(api.as_str(), thinking_format.as_deref()),
+        };
         Ok(ModelEntry {
             id,
             model_name,
@@ -146,6 +173,7 @@ impl ModelEntryInput {
             capabilities: self.capabilities,
             context_window: self.context_window,
             thinking_format,
+            supported_reasoning_levels,
         })
     }
 }
@@ -196,8 +224,9 @@ pub fn resolve_provider_key_env_name(catalog: &ModelCatalog, raw: &str) -> Strin
     env_name_for_provider(candidate)
 }
 
-pub fn upsert_user_model(cfg: &AppConfig, input: ModelEntryInput) -> Result<ModelView, AppError> {
+pub fn upsert_user_model(cfg: &AppConfig, input: ModelEntryInput) -> Result<UpsertModelResult, AppError> {
     let entry = input.into_model_entry()?;
+    let warnings = collect_model_warnings(&entry);
     validate_mutable_model_entry(&entry)?;
     let path = ModelCatalog::default_user_path(cfg)?;
     with_file_lock(&models_lock_path(&path), || {
@@ -211,7 +240,10 @@ pub fn upsert_user_model(cfg: &AppConfig, input: ModelEntryInput) -> Result<Mode
             .cloned()
             .map(|resolved| ModelView::from_entry(&reloaded, resolved))
             .ok_or_else(|| AppError::Config(format!("模型 `{}` 写入后未能重新加载。", entry.id)))?;
-        Ok(view)
+        Ok(UpsertModelResult {
+            model: view,
+            warnings: warnings.clone(),
+        })
     })
 }
 
@@ -379,7 +411,28 @@ fn model_entry_to_user_model(entry: &ModelEntry) -> UserModelEntry {
         }),
         context_window: entry.context_window,
         thinking_format: entry.thinking_format.clone(),
+        supported_reasoning_levels: Some(entry.supported_reasoning_levels.clone()),
     }
+}
+
+fn collect_model_warnings(entry: &ModelEntry) -> Vec<String> {
+    if !entry.capabilities.reasoning {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    if matches!(entry.api.as_str(), "openai" | "openai-responses") {
+        let fmt = ThinkingFormat::parse_or_auto(entry.thinking_format.as_deref())
+            .resolve_for_api(entry.api.as_str());
+        let probe = resolve_request_fields(&ThinkingConfig::default(), fmt);
+        if probe.reasoning_effort.is_none() {
+            warnings.push(format!(
+                "API `{}` expects reasoning effort, but thinking_format=`{}` will not send it. Tomcat will omit reasoning depth for this model.",
+                entry.api,
+                fmt.as_str(),
+            ));
+        }
+    }
+    warnings
 }
 
 fn upsert_user_model_entry(file: &mut UserModelsFile, next: UserModelEntry) {

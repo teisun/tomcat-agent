@@ -62,6 +62,12 @@ function parseCapabilities(value: unknown): SettingsModelCapabilities {
   };
 }
 
+function parseStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
 function parseModelView(value: WireModelView): SettingsModelView {
   return {
     api: value.api,
@@ -74,6 +80,7 @@ function parseModelView(value: WireModelView): SettingsModelView {
     modelName: value.modelName ?? null,
     provider: value.provider,
     source: value.source === "user" ? "user" : "builtin",
+    supportedReasoningLevels: parseStringArray(value.supportedReasoningLevels),
     thinkingFormat: value.thinkingFormat ?? null,
   };
 }
@@ -111,13 +118,16 @@ function toWireModelEntryInput(model: SettingsModelInput): ModelEntryInput {
     id: model.id,
     modelName: model.modelName ?? null,
     provider: model.provider,
+    supportedReasoningLevels: model.supportedReasoningLevels ?? null,
     thinkingFormat: model.thinkingFormat ?? null,
   };
 }
 
 export interface SettingsPanelDeps {
   ensureInitialized(): Promise<InitializeResult>;
+  expectedCliVersion: string | null;
   extensionUri: vscode.Uri;
+  extensionVersion: string | null;
   messenger: TomcatMessenger;
   onModelCatalogChanged?(): Promise<void> | void;
 }
@@ -193,10 +203,14 @@ export class SettingsPanel implements vscode.Disposable {
       setProviderKey: false,
       upsertModel: false,
     },
+    expectedCliVersion: null,
+    extensionVersion: null,
     models: [],
     providerKeys: [],
     ready: false,
     route: "models",
+    serverVersion: null,
+    warnings: null,
   };
 
   constructor(private readonly deps: SettingsPanelDeps) {}
@@ -365,10 +379,13 @@ export class SettingsPanel implements vscode.Disposable {
         await this.refreshState(response.error ?? "Unable to save model.");
         return;
       }
+      const warnings = response.payload?.warnings ?? null;
       if (providerKey) {
         if (!capabilities.setProviderKey) {
           await this.refreshState(
             "Model saved, but this serve instance cannot store API keys yet.",
+            null,
+            warnings,
           );
           await this.deps.onModelCatalogChanged?.();
           return;
@@ -380,15 +397,17 @@ export class SettingsPanel implements vscode.Disposable {
         if (!keyResponse.success) {
           await this.refreshState(
             `Model saved, but API key was not stored: ${keyResponse.error ?? "Unknown error."}`,
+            null,
+            warnings,
           );
           await this.deps.onModelCatalogChanged?.();
           return;
         }
-        await this.refreshState(null, `Saved ${providerKey.envName}.`);
+        await this.refreshState(null, `Saved ${providerKey.envName}.`, warnings);
         await this.deps.onModelCatalogChanged?.();
         return;
       }
-      await this.refreshState(null, "Model saved.");
+      await this.refreshState(null, "Model saved.", warnings);
       await this.deps.onModelCatalogChanged?.();
     } catch (error) {
       await this.refreshState(String(error), null);
@@ -433,7 +452,11 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private async refreshState(error: string | null = null, status: string | null = null): Promise<void> {
+  private async refreshState(
+    error: string | null = null,
+    status: string | null = null,
+    warnings: string[] | null = null,
+  ): Promise<void> {
     const initializeResult = await this.deps.ensureInitialized();
     const capabilities = this.buildCapabilities(initializeResult);
     const providerKeysResult = capabilities.listProviderKeys
@@ -445,11 +468,15 @@ export class SettingsPanel implements vscode.Disposable {
     this.state = {
       capabilities,
       error: error ?? modelsResult.error ?? providerKeysResult.error,
+      expectedCliVersion: this.deps.expectedCliVersion,
+      extensionVersion: this.deps.extensionVersion,
       models: modelsResult.models,
       providerKeys: providerKeysResult.providerKeys,
       ready: true,
       route: this.route,
+      serverVersion: initializeResult.serverVersion,
       status,
+      warnings,
     };
     this.postState();
   }
@@ -467,10 +494,14 @@ export class SettingsPanel implements vscode.Disposable {
       ...this.state,
       capabilities,
       error: error ?? providerKeysResult.error,
+      expectedCliVersion: this.deps.expectedCliVersion,
+      extensionVersion: this.deps.extensionVersion,
       providerKeys: providerKeysResult.providerKeys,
       ready: true,
       route: this.route,
+      serverVersion: initializeResult.serverVersion,
       status,
+      warnings: null,
     };
     this.postState();
   }

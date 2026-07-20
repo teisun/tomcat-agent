@@ -32,6 +32,7 @@ fn deepseek_entry(api_key_env: &str) -> ModelEntry {
         base_url: Some("https://api.deepseek.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        supported_reasoning_levels: vec!["high".to_string(), "max".to_string()],
         thinking_format: Some("deepseek".to_string()),
     }
 }
@@ -46,6 +47,12 @@ fn openai_entry(api_key_env: &str) -> ModelEntry {
         base_url: Some("https://api.openai.com".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        supported_reasoning_levels: vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ],
         thinking_format: Some("openai".to_string()),
     }
 }
@@ -60,6 +67,12 @@ fn openai_auto_entry(api_key_env: &str, provider: &str, model_name: &str) -> Mod
         base_url: Some("https://gateway.example.test/v1".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        supported_reasoning_levels: vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ],
         thinking_format: None,
     }
 }
@@ -348,7 +361,7 @@ fn thinking_level_override_updates_deepseek_reasoning_effort() {
     let fields = resolve_request_fields(&cfg, provider.thinking_format_for_wire());
 
     assert_eq!(cfg.level, "xhigh");
-    assert_eq!(fields.reasoning_effort.as_deref(), Some("max"));
+    assert_eq!(fields.reasoning_effort.as_deref(), Some("xhigh"));
 }
 
 #[test]

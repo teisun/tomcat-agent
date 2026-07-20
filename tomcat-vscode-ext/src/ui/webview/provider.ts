@@ -135,16 +135,18 @@ function extractPlanPreviewRefreshArgs(
 export function parseModelCatalog(payload: unknown): {
   capabilities: Record<string, string[]>;
   ids: string[];
+  reasoningLevels: Record<string, string[]>;
 } {
   if (typeof payload !== "object" || payload === null) {
-    return { capabilities: {}, ids: [] };
+    return { capabilities: {}, ids: [], reasoningLevels: {} };
   }
   const models = (payload as { models?: unknown }).models;
   if (!Array.isArray(models)) {
-    return { capabilities: {}, ids: [] };
+    return { capabilities: {}, ids: [], reasoningLevels: {} };
   }
   const ids: string[] = [];
   const capabilities: Record<string, string[]> = {};
+  const reasoningLevels: Record<string, string[]> = {};
   for (const entry of models) {
     if (typeof entry !== "object" || entry === null || typeof (entry as { id?: unknown }).id !== "string") {
       continue;
@@ -155,8 +157,13 @@ export function parseModelCatalog(payload: unknown): {
     const id = (entry as { id: string }).id;
     ids.push(id);
     capabilities[id] = parseCapabilityNames((entry as { capabilities?: unknown }).capabilities);
+    reasoningLevels[id] = Array.isArray((entry as { supportedReasoningLevels?: unknown }).supportedReasoningLevels)
+      ? ((entry as { supportedReasoningLevels?: unknown }).supportedReasoningLevels as unknown[]).filter(
+          (level): level is string => typeof level === "string",
+        )
+      : [];
   }
-  return { capabilities, ids };
+  return { capabilities, ids, reasoningLevels };
 }
 
 function guessMimeType(filePath: string): string {
@@ -1485,20 +1492,24 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       hasAnyModelAdminCapability(initializeResult),
     );
     if (!hasServeCapability(initializeResult, SERVE_CAPABILITY_LIST_MODELS)) {
-      this.stateStore.setAvailableModels([], {});
+      this.stateStore.setAvailableModels([], {}, {});
       return;
     }
     const response = await this.deps.messenger.sendListModels().catch(() => null);
     if (!response) {
-      this.stateStore.setAvailableModels([], {});
+      this.stateStore.setAvailableModels([], {}, {});
       return;
     }
     if (!response.success) {
-      this.stateStore.setAvailableModels([], {});
+      this.stateStore.setAvailableModels([], {}, {});
       return;
     }
     const catalog = parseModelCatalog(response.payload);
-    this.stateStore.setAvailableModels(catalog.ids, catalog.capabilities);
+    this.stateStore.setAvailableModels(
+      catalog.ids,
+      catalog.capabilities,
+      catalog.reasoningLevels,
+    );
   }
 
   private async refreshSessions(): Promise<void> {

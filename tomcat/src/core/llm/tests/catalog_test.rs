@@ -80,6 +80,10 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
     assert_eq!(utility.request_model_name(), "deepseek-v4-flash");
     assert_eq!(utility.context_window, Some(400_000));
     assert!(!utility.capabilities.web_search);
+    assert_eq!(
+        utility.supported_reasoning_levels,
+        vec!["high".to_string(), "max".to_string()]
+    );
 
     let kimi = entries
         .iter()
@@ -88,18 +92,52 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
     assert_eq!(kimi.base_url.as_deref(), Some("https://api.moonshot.cn"));
     assert_eq!(kimi.provider, "moonshot");
     assert_eq!(kimi.context_window, Some(400_000));
+    assert!(kimi.supported_reasoning_levels.is_empty());
 
     let mimo = entries
         .iter()
         .find(|entry| entry.id == "mimo-v2.5-pro")
         .expect("mimo preset");
     assert_eq!(mimo.context_window, Some(1_000_000));
+    assert!(mimo.supported_reasoning_levels.is_empty());
+
+    let gpt = entries
+        .iter()
+        .find(|entry| entry.id == "gpt-5.6")
+        .expect("gpt-5.6 preset");
+    assert_eq!(
+        gpt.supported_reasoning_levels,
+        vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ]
+    );
+
+    let claude = entries
+        .iter()
+        .find(|entry| entry.id == "claude-opus-4-8")
+        .expect("claude-opus-4-8 preset");
+    assert_eq!(claude.thinking_format.as_deref(), Some("anthropic-adaptive"));
+    assert_eq!(
+        claude.supported_reasoning_levels,
+        vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+            "max".to_string(),
+        ]
+    );
 
     let embedded = builtin_seed_toml_text();
     assert!(embedded.contains("id = \"utility-flash\""));
     assert!(embedded.contains("model_name = \"deepseek-v4-flash\""));
     assert!(embedded.contains("base_url = \"https://api.moonshot.cn\""));
     assert!(embedded.contains("context_window = 1000000"));
+    assert!(embedded.contains("supported_reasoning_levels = [\"high\", \"max\"]"));
+    assert!(embedded.contains("thinking_format = \"anthropic-adaptive\""));
 }
 
 #[test]

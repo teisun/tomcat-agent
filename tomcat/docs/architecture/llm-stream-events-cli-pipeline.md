@@ -45,7 +45,8 @@
 | `Thinking` / `ThinkingDelta` | 思考/推理流增量 | `StreamEvent::Thinking { delta, source, signature }`（定稿命名） | 与正文分通道；可折叠；默认不落 transcript | 脑内草稿。 |
 | `FinishReason` | 流结束原因 | `StreamEvent::FinishReason { reason }` | 控制收口，不当正文 | 告诉循环何时停。 |
 | `ThinkingLevel` | 用户期望的推理强度档位 | 配置 `llm.thinking.level` + 模型能力元数据 | 映射为各厂商请求字段 | 「要多想一点」的旋钮。 |
-| `thinking_format` | 厂商参数形态分派键 | 配置 `llm.thinking.format` 或自动探测 | 决定发 `reasoning_effort` / `thinking` / `enable_thinking` 等 | 各家 API 长得不一样时的翻译表。 |
+| `supported_reasoning_levels` | 模型声明自己真正支持哪些档位 | `builtin_models.toml` / `models.toml` / serve `ModelView` | 决定聊天框下拉能选什么；请求前若用户选了不支持的档位，先 clamp | 模型自己的档位白名单。 |
+| `thinking_format` | 厂商参数形态分派键 | 配置 `llm.thinking.format`；保存模型时物化具体值，legacy 空值仍按 API 自动推断 | 决定发 `reasoning_effort` / `thinking` / `output_config.effort` 等 | 各家 API 长得不一样时的翻译表。 |
 | 渲染主通道 | UI 可观测事件 | `EventBus`：`message_update` / `tool_execution_*` | start/end 必须配平 | 终端/TUI/审计都能订阅。 |
 | `CliTurnRenderer` | 纯 CLI 排版器（本方案新增） | `src/api/chat/cli_turn_renderer.rs`（建议路径） | 只做 ANSI + 行缓冲，不做全屏 TUI | 把事件流变成「像报告那样」的文本块。 |
 
@@ -146,10 +147,13 @@
 **目标**：把报告第三章的「类型 A/B/C」收敛为 **Rust 内两张表**：
 
 1. **请求表（Outbound）**：`(provider, thinking_format, thinking_level) -> JSON 片段`  
-   - OpenAI Completions：`reasoning_effort`（OpenAI 系）  
-   - 豆包/Moonshot：`thinking: { type: "enabled" }`  
-   - Anthropic：`thinking: { type, budget_tokens }`（占位：本期只保留字段形状 + feature gate）  
-   - Qwen：`enable_thinking` / `chat_template_kwargs`（占位）
+   - OpenAI Completions：`reasoning_effort`（OpenAI 系；`low/medium/high/xhigh/max` 原样发，前提是已过模型支持集 clamp）  
+   - OpenAI Responses：`reasoning: { effort, summary: "auto" }`（`effort` 原样发；summary 请求与显示解耦）  
+   - DeepSeek / Z.AI：分别走 `reasoning_effort`（GLM）或 `reasoning_effort + thinking: { type: "enabled" }`（DeepSeek）；内置模型支持集均以真实 token 为准（`["high","max"]`）  
+   - 豆包 / Moonshot / Kimi / MiMo：只发 `thinking: { type: "enabled" }`，**没有 `reasoning_effort`**；因此 UI 退化为 `Thinking On/Off` 两态，而不是多档位  
+   - Anthropic classic：`thinking: { type: "enabled", budget_tokens }`（老 Messages extended thinking）
+   - Anthropic adaptive：`thinking: { type: "adaptive" } + output_config: { effort }`（Claude Opus 4.6/4.7/4.8 与新模型）
+   - Qwen：`enable_thinking` / `chat_template_kwargs`（仍占位）
 
 2. **响应表（Inbound）**：`(provider, stream_chunk_shape) -> Vec<StreamEvent>`  
    - Chat Completions：`delta.reasoning_content` / `delta.reasoning` / `delta.reasoning_text`（报告 §3.5：三路检测）。**该类 provider（deepseek/mimo/doubao 等）只有单一 reasoning 流，不存在 Responses 那种独立 summary/raw 双流，故统一发成 `source=summary`**——这是该类模型唯一对用户可见的思考面，使默认 `show="summary"` 档位即可显示（若退回 `raw` 会被渲染器过滤、导致 thinking UI 空白）。  
@@ -172,27 +176,30 @@ P1 StreamEvent::Thinking
 
 #### 4.2.2 ThinkingLevel 决策（实施小节）
 
-**定义（与 pi-mono 对齐）**：`ThinkingLevel = off | minimal | low | medium | high | xhigh`
+**定义（现行）**：`ThinkingLevel = off | minimal | low | medium | high | xhigh | max`
 
 **总规则**：
 
 1. `off`：**不发送**任何 thinking/reasoning 相关请求字段；解析端忽略 thinking 流。
-2. `minimal..xhigh`：必须同时满足：
-   - 模型能力位支持（来自模型 registry / 静态表；不支持则降级为 `off` 并在 stderr 打一条 **一次性** warn）
+2. `minimal..max`：必须同时满足：
+   - 模型能力位支持（现行实现以 `supported_reasoning_levels` 为真源；命中直用，不命中则 clamp 到最近低档）
    - `llm.thinking.enabled=true`
+3. `supported_reasoning_levels=[]` 代表该模型不暴露 effort 多档位，只保留纯 thinking 开关；UI 应显示 `Thinking On/Off`，其中 `Off` 仍然映射到 `ThinkingLevel::Off`。
 
 **映射策略（定稿）**：
 
-| ThinkingLevel | OpenAI `reasoning_effort`（Completions） | OpenAI Responses `reasoning`（若有该字段） | 豆包/Moonshot `thinking.type` | 说人话 |
-|---------------|----------------------------------------|-------------------------------------------|------------------------------|--------|
-| `off` | 省略 | 省略 | 省略 | 完全关思考。 |
-| `minimal` | `low` | `minimal`（若 API 支持；否则映射 `low`） | `enabled` + 低 `max_tokens` | 省钱的想一想。 |
-| `low` | `low` | `low` | `enabled` | 轻度。 |
-| `medium` | `medium` | `medium` | `enabled` | 默认推荐。 |
-| `high` | `high` | `high` | `enabled` | 深度推理。 |
-| `xhigh` | `xhigh`（仅当模型白名单支持，否则退回 `high`） | 同左 | `enabled` | 顶配，但要防不支持。 |
+| ThinkingLevel | OpenAI Completions / Responses | DeepSeek / Z.AI | 豆包 / Moonshot / Kimi / MiMo | Anthropic adaptive | 说人话 |
+|---------------|--------------------------------|-----------------|-------------------------------|--------------------|--------|
+| `off` | 省略 | 省略 | 省略 | 省略 | 完全关思考。 |
+| `minimal` | `minimal` | 先 clamp；内置 `deepseek/glm` 不会直接出现 | `enabled`（无 effort 档） | `minimal`（若模型支持；否则先 clamp） | 省钱的想一想。 |
+| `low` | `low` | 先 clamp | `enabled` | `low` | 轻度。 |
+| `medium` | `medium` | 先 clamp | `enabled` | `medium` | 默认推荐。 |
+| `high` | `high` | `high` | `enabled` | `high` | 深度推理。 |
+| `xhigh` | `xhigh`（**不再全局降成 `high`**） | 先 clamp；内置 `deepseek/glm` 会被夹到 `high` | `enabled` | `xhigh`（4.7/4.8 支持） | 顶配。 |
+| `max` | `max` | `max` | `enabled` | `max` | 无上限/最高档。 |
 
-> `thinking_format`（openai/openrouter/deepseek/zai/qwen/...）决定**具体 JSON 键名**，上表是「逻辑档位 → 厂商枚举值」；二者组合出最终请求体。
+> 现行规则不是“全局写死映射表”，而是 **`supported_reasoning_levels` 决定能选什么，`thinking_format` 决定怎么编码，真正发线前只做一次 clamp**。  
+> 例如：`gpt-5.x = ["low","medium","high","xhigh"]`，`deepseek/glm = ["high","max"]`，`mimo/kimi = []`，`claude-opus-4-8 = ["low","medium","high","xhigh","max"]`。
 
 #### 4.2.3 CLI 显示效果（报告 §2.2）实现规格
 
@@ -694,7 +701,7 @@ idle ──run──► streaming ──finish+tools──► dispatch_tools ─
 |----|------|------|------|--------|
 | `llm.thinking.enabled` | bool | `true` | 是否启用思考协议总开关 | 方案 B：开箱默认开。 |
 | `llm.thinking.level` | enum | `high` | `ThinkingLevel` | 默认深度推理档位。 |
-| `llm.thinking.format` | string? | auto | `thinking_format` | 告诉翻译表用哪套键。 |
+| `llm.thinking.format` | string? | auto(legacy) | `thinking_format` | legacy 空值仍按 API 自动推断；但模型保存时会物化成具体格式字符串（如 `openai` / `anthropic-adaptive`），避免「Auto 黑盒」。 |
 | `llm.thinking.max_tokens` | u32? | model default | 仅豆包 / Moonshot `thinking` 对象路径生效 | OpenAI/Responses 走 `reasoning.effort`。 |
 | `llm.thinking.show` | enum(`minimal/summary/full`) | `summary` | CLI thinking 显示档位；兼容旧 bool：`false -> summary`、`true -> full`。chat-completions 类模型单流恒为 `source=summary`，默认档即可见；`raw` 仅 Responses 有，须 `full` 才显示 | 默认显示摘要。 |
 | `llm.thinking.persist` | bool | `false` | 是否写入 transcript | 默认别存草稿。 |

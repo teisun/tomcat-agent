@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::infra::config::ThinkingConfig;
 
-/// 逻辑档位。与 pi-mono 对齐；`xhigh` 仅模型白名单支持时使用，否则降级为 `high`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// 逻辑档位。顺序即全序：`off < minimal < low < medium < high < xhigh < max`。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingLevel {
     Off,
@@ -27,6 +29,7 @@ pub enum ThinkingLevel {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 impl ThinkingLevel {
@@ -38,20 +41,41 @@ impl ThinkingLevel {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Some(Self::Off),
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" | "x-high" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
+            _ => None,
         }
     }
 
     /// 容错解析；未知字符串退化为 `Medium` 并返回 `false` 让 caller 决定是否报告。
     pub fn parse_or_medium(s: &str) -> (Self, bool) {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "off" => (Self::Off, true),
-            "minimal" => (Self::Minimal, true),
-            "low" => (Self::Low, true),
-            "medium" => (Self::Medium, true),
-            "high" => (Self::High, true),
-            "xhigh" | "x-high" => (Self::Xhigh, true),
-            _ => (Self::Medium, false),
+        Self::parse(s).map(|level| (level, true)).unwrap_or((Self::Medium, false))
+    }
+
+    pub fn clamp_to_supported(self, supported: &[Self]) -> Self {
+        if supported.is_empty() {
+            return self;
         }
+        if supported.contains(&self) {
+            return self;
+        }
+        supported
+            .iter()
+            .copied()
+            .filter(|candidate| *candidate <= self)
+            .max()
+            .unwrap_or_else(|| supported.iter().copied().min().unwrap_or(self))
     }
 }
 
@@ -75,9 +99,25 @@ pub enum ThinkingFormat {
     Doubao,
     /// Anthropic Messages：`thinking: {"type":"enabled","budget_tokens": ...}`。
     Anthropic,
+    /// 新版 Anthropic：`thinking: {"type":"adaptive"}` + `output_config.effort`。
+    AnthropicAdaptive,
 }
 
 impl ThinkingFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Openai => "openai",
+            Self::Openrouter => "openrouter",
+            Self::Deepseek => "deepseek",
+            Self::Zai => "zai",
+            Self::Qwen => "qwen",
+            Self::Doubao => "doubao",
+            Self::Anthropic => "anthropic",
+            Self::AnthropicAdaptive => "anthropic-adaptive",
+        }
+    }
+
     pub fn parse_or_auto(s: Option<&str>) -> Self {
         match s.map(|v| v.trim().to_ascii_lowercase()) {
             None => Self::Auto,
@@ -89,6 +129,7 @@ impl ThinkingFormat {
                 "qwen" => Self::Qwen,
                 "doubao" | "moonshot" => Self::Doubao,
                 "anthropic" => Self::Anthropic,
+                "anthropic-adaptive" => Self::AnthropicAdaptive,
                 _ => Self::Auto,
             },
         }
@@ -125,16 +166,20 @@ impl ThinkingFormat {
 /// - `openai` 与 `openai-responses` 共用「effort 档位」语义，但由各自 provider 负责编码成
 ///   顶层 `reasoning_effort` 或嵌套 `reasoning: { effort }`；
 /// - 显式 `thinking_format` 仍可覆盖这一路径，用于极少数 relay 方言。
-pub fn thinking_format_for_api(api: &str) -> ThinkingFormat {
+pub fn default_thinking_format_for_api(api: &str) -> &'static str {
     match api.trim() {
-        "openai" | "openai-responses" => ThinkingFormat::Openai,
-        "deepseek" => ThinkingFormat::Deepseek,
-        "zai" => ThinkingFormat::Zai,
-        "qwen" => ThinkingFormat::Qwen,
-        "doubao" | "moonshot" => ThinkingFormat::Doubao,
-        "anthropic" | "anthropic-messages" => ThinkingFormat::Anthropic,
-        _ => ThinkingFormat::Openai,
+        "openai" | "openai-responses" => "openai",
+        "deepseek" => "deepseek",
+        "zai" => "zai",
+        "qwen" => "qwen",
+        "doubao" | "moonshot" => "doubao",
+        "anthropic" | "anthropic-messages" => "anthropic",
+        _ => "openai",
     }
+}
+
+pub fn thinking_format_for_api(api: &str) -> ThinkingFormat {
+    ThinkingFormat::parse_or_auto(Some(default_thinking_format_for_api(api)))
 }
 
 /// 按 model 归一到 thinking 请求格式。
@@ -157,6 +202,11 @@ pub fn thinking_format_for_model(model: &str) -> ThinkingFormat {
         || lower.starts_with("mimo-")
     {
         ThinkingFormat::Doubao
+    } else if matches!(
+        lower.as_str(),
+        "claude-opus-4-6" | "claude-opus-4-7" | "claude-opus-4-8"
+    ) {
+        ThinkingFormat::AnthropicAdaptive
     } else if lower.starts_with("claude-") {
         ThinkingFormat::Anthropic
     } else {
@@ -176,16 +226,85 @@ pub struct ThinkingRequestFields {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnthropicThinkingRequest {
     pub thinking: Option<serde_json::Value>,
+    pub effort: Option<String>,
     pub max_tokens: u32,
+}
+
+pub fn normalize_supported_reasoning_levels(levels: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for level in levels {
+        let Some(level) = ThinkingLevel::parse(level) else {
+            continue;
+        };
+        let token = level.as_str().to_string();
+        if !normalized.iter().any(|existing| existing == &token) {
+            normalized.push(token);
+        }
+    }
+    normalized
+}
+
+pub fn safe_supported_reasoning_levels_for(
+    api: &str,
+    thinking_format: Option<&str>,
+) -> Vec<String> {
+    let fmt = ThinkingFormat::parse_or_auto(thinking_format).resolve_for_api(api);
+    let defaults: &[ThinkingLevel] = match fmt {
+        ThinkingFormat::Openai | ThinkingFormat::Openrouter => &[
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+        ],
+        ThinkingFormat::Deepseek | ThinkingFormat::Zai => {
+            &[ThinkingLevel::High, ThinkingLevel::Max]
+        }
+        ThinkingFormat::Doubao => &[],
+        ThinkingFormat::Anthropic | ThinkingFormat::AnthropicAdaptive => &[
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+            ThinkingLevel::Max,
+        ],
+        ThinkingFormat::Qwen | ThinkingFormat::Auto => &[
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+        ],
+    };
+    defaults
+        .iter()
+        .map(|level| level.as_str().to_string())
+        .collect()
+}
+
+pub fn clamp_reasoning_level(
+    level: ThinkingLevel,
+    supported_reasoning_levels: &[String],
+) -> ThinkingLevel {
+    let supported = normalize_supported_reasoning_levels(supported_reasoning_levels)
+        .into_iter()
+        .filter_map(|token| ThinkingLevel::parse(&token))
+        .collect::<Vec<_>>();
+    if supported.is_empty() {
+        return if level == ThinkingLevel::Off {
+            ThinkingLevel::Off
+        } else {
+            ThinkingLevel::High
+        };
+    }
+    level.clamp_to_supported(&supported)
 }
 
 /// 把 `ThinkingConfig` + provider 推断出的 `ThinkingFormat` 翻译为具体请求字段。
 ///
 /// 行为：
 /// - `enabled=false` 或 `level=off` → 全 None；
-/// - OpenAI 系：`reasoning_effort` 为 level 字符串；`xhigh` 不在白名单（外部决定）时 caller 应降级为 `high`；
+/// - OpenAI 系：`reasoning_effort` 为 level 原样字符串；是否降级由 caller 的 clamp 决定；
 /// - DeepSeek：按官方 thinking mode，同时写 `reasoning_effort + thinking={"type":"enabled"}`；
-///   其中 `minimal/low/medium/high` 统一映射为 `high`，`xhigh` 映射为 `max`；
+///   本函数不再折叠档位，caller 应保证传入 level 已经在模型支持集内；
 /// - 豆包/Moonshot：`thinking={"type":"enabled"}`，带 `max_tokens` 时附带；
 /// - Qwen：当前无显式请求字段；响应解析仍走 reasoning_content 三路兜底。
 pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> ThinkingRequestFields {
@@ -207,7 +326,7 @@ pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> Thin
         }
         ThinkingFormat::Deepseek => ThinkingRequestFields {
             reasoning_effort: Some(
-                deepseek_reasoning_effort(level)
+                openai_reasoning_effort(level)
                     .expect("ThinkingLevel::Off should have returned early")
                     .to_string(),
             ),
@@ -233,7 +352,9 @@ pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> Thin
             }
         }
         // Qwen：当前无显式请求字段；Anthropic 走 `resolve_anthropic_request`。
-        ThinkingFormat::Qwen | ThinkingFormat::Anthropic => ThinkingRequestFields::default(),
+        ThinkingFormat::Qwen
+        | ThinkingFormat::Anthropic
+        | ThinkingFormat::AnthropicAdaptive => ThinkingRequestFields::default(),
         // Auto 应该已经被 caller resolve 掉；保险起见兜底。
         ThinkingFormat::Auto => ThinkingRequestFields::default(),
     }
@@ -241,16 +362,11 @@ pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> Thin
 
 pub fn resolve_anthropic_request(
     cfg: &ThinkingConfig,
+    fmt: ThinkingFormat,
     request_max_tokens: Option<u32>,
 ) -> AnthropicThinkingRequest {
     let (level, _ok) = ThinkingLevel::parse_or_medium(&cfg.level);
-    let default_budget = match level {
-        ThinkingLevel::Off => 0,
-        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
-        ThinkingLevel::Medium => 2048,
-        ThinkingLevel::High => 4096,
-        ThinkingLevel::Xhigh => 8192,
-    };
+    let default_budget = anthropic_default_budget(level);
     let mut max_tokens = request_max_tokens.unwrap_or_else(|| {
         if cfg.enabled && default_budget > 0 {
             (default_budget + 1024).max(2048)
@@ -258,9 +374,26 @@ pub fn resolve_anthropic_request(
             2048
         }
     });
-    if !cfg.enabled || default_budget == 0 || max_tokens <= 512 {
+    if !cfg.enabled || default_budget == 0 {
         return AnthropicThinkingRequest {
             thinking: None,
+            effort: None,
+            max_tokens: max_tokens.max(256),
+        };
+    }
+    if matches!(fmt, ThinkingFormat::AnthropicAdaptive) {
+        return AnthropicThinkingRequest {
+            thinking: Some(serde_json::json!({
+                "type": "adaptive",
+            })),
+            effort: Some(level.as_str().to_string()),
+            max_tokens: max_tokens.max(256),
+        };
+    }
+    if max_tokens <= 512 {
+        return AnthropicThinkingRequest {
+            thinking: None,
+            effort: None,
             max_tokens: max_tokens.max(256),
         };
     }
@@ -276,6 +409,7 @@ pub fn resolve_anthropic_request(
             "type": "enabled",
             "budget_tokens": budget_tokens,
         })),
+        effort: None,
         max_tokens,
     }
 }
@@ -283,22 +417,23 @@ pub fn resolve_anthropic_request(
 fn openai_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
     match level {
         ThinkingLevel::Off => None,
-        ThinkingLevel::Minimal => Some("low"),
+        ThinkingLevel::Minimal => Some("minimal"),
         ThinkingLevel::Low => Some("low"),
         ThinkingLevel::Medium => Some("medium"),
         ThinkingLevel::High => Some("high"),
-        ThinkingLevel::Xhigh => Some("high"),
+        ThinkingLevel::Xhigh => Some("xhigh"),
+        ThinkingLevel::Max => Some("max"),
     }
 }
 
-fn deepseek_reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
+fn anthropic_default_budget(level: ThinkingLevel) -> u32 {
     match level {
-        ThinkingLevel::Off => None,
-        ThinkingLevel::Minimal
-        | ThinkingLevel::Low
-        | ThinkingLevel::Medium
-        | ThinkingLevel::High => Some("high"),
-        ThinkingLevel::Xhigh => Some("max"),
+        ThinkingLevel::Off => 0,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
+        ThinkingLevel::Medium => 2048,
+        ThinkingLevel::High => 4096,
+        ThinkingLevel::Xhigh => 8192,
+        ThinkingLevel::Max => 16384,
     }
 }
 
@@ -316,7 +451,10 @@ pub fn should_strip_on_resend(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> bool
     if !cfg.strip_on_resend {
         return false;
     }
-    !matches!(fmt, ThinkingFormat::Auto | ThinkingFormat::Anthropic)
+    !matches!(
+        fmt,
+        ThinkingFormat::Auto | ThinkingFormat::Anthropic | ThinkingFormat::AnthropicAdaptive
+    )
 }
 
 /// `persist=true` 时上层应把 Thinking 事件落 transcript；默认 false（仅展示不落盘）。

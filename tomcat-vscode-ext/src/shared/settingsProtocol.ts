@@ -21,6 +21,7 @@ export interface SettingsModelView {
   modelName?: string | null;
   provider: string;
   source: SettingsModelSource;
+  supportedReasoningLevels?: string[] | null;
   thinkingFormat?: string | null;
 }
 
@@ -33,6 +34,7 @@ export interface SettingsModelInput {
   id: string;
   modelName?: string | null;
   provider: string;
+  supportedReasoningLevels?: string[] | null;
   thinkingFormat?: string | null;
 }
 
@@ -59,11 +61,15 @@ export interface SettingsCapabilities {
 export interface SettingsStateSnapshot {
   capabilities: SettingsCapabilities;
   error?: string | null;
+  expectedCliVersion?: string | null;
+  extensionVersion?: string | null;
   models: SettingsModelView[];
   providerKeys: SettingsProviderKeyView[];
   ready: boolean;
   route: SettingsRoute;
+  serverVersion?: string | null;
   status?: string | null;
+  warnings?: string[] | null;
 }
 
 export type SettingsHostFrame = {
@@ -146,6 +152,10 @@ function isSettingsModelCapabilities(value: unknown): value is SettingsModelCapa
   );
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
 function isSettingsModelInput(value: unknown): value is SettingsModelInput {
   return (
     isRecord(value) &&
@@ -159,6 +169,9 @@ function isSettingsModelInput(value: unknown): value is SettingsModelInput {
     typeof value.id === "string" &&
     (value.modelName === undefined || value.modelName === null || typeof value.modelName === "string") &&
     typeof value.provider === "string" &&
+    (value.supportedReasoningLevels === undefined ||
+      value.supportedReasoningLevels === null ||
+      isStringArray(value.supportedReasoningLevels)) &&
     (value.thinkingFormat === undefined ||
       value.thinkingFormat === null ||
       typeof value.thinkingFormat === "string")

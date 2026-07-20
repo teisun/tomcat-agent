@@ -724,6 +724,12 @@ fn stream_test_provider(
         base_url: Some(base_url),
         capabilities: Capabilities::default(),
         context_window: None,
+        supported_reasoning_levels: vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
+        ],
         thinking_format: Some("openai".to_string()),
     };
     let mut runtime = LlmConfig::default().runtime();

@@ -153,6 +153,8 @@ pub struct ListModelsPayload {
 #[serde(rename_all = "camelCase")]
 pub struct UpsertModelResponse {
     pub model: ModelView,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

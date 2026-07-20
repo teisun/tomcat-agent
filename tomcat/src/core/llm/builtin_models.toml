@@ -6,6 +6,7 @@ provider = "openai"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com"
 thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
@@ -17,6 +18,7 @@ provider = "openai"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com"
 thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
@@ -28,6 +30,7 @@ provider = "openai"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com"
 thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
@@ -39,6 +42,7 @@ provider = "openai"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com"
 thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
 context_window = 400000
 capabilities = { vision = true, files = true, tools = true, reasoning = true, web_search = false }
 
@@ -50,6 +54,7 @@ provider = "deepseek"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 thinking_format = "deepseek"
+supported_reasoning_levels = ["high", "max"]
 context_window = 400000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
@@ -61,6 +66,7 @@ provider = "deepseek"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 thinking_format = "deepseek"
+supported_reasoning_levels = ["high", "max"]
 context_window = 400000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
@@ -72,6 +78,7 @@ provider = "deepseek"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com"
 thinking_format = "deepseek"
+supported_reasoning_levels = ["high", "max"]
 context_window = 400000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
@@ -83,6 +90,7 @@ provider = "mimo"
 api_key_env = "MIMO_API_KEY"
 base_url = "https://token-plan-cn.xiaomimimo.com"
 thinking_format = "doubao"
+supported_reasoning_levels = []
 context_window = 1000000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
@@ -94,6 +102,7 @@ provider = "zhipu"
 api_key_env = "ZHIPU_API_KEY"
 base_url = "https://open.bigmodel.cn/api/paas/v4"
 thinking_format = "zai"
+supported_reasoning_levels = ["high", "max"]
 context_window = 400000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
@@ -105,6 +114,7 @@ provider = "moonshot"
 api_key_env = "MOONSHOT_API_KEY"
 base_url = "https://api.moonshot.cn"
 thinking_format = "doubao"
+supported_reasoning_levels = []
 context_window = 400000
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
 
@@ -115,7 +125,8 @@ api = "anthropic-messages"
 provider = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
-thinking_format = "anthropic"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 400000
 capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
 
@@ -126,7 +137,8 @@ api = "anthropic-messages"
 provider = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
-thinking_format = "anthropic"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
 context_window = 400000
 capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }
 
@@ -137,6 +149,7 @@ api = "anthropic-messages"
 provider = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
-thinking_format = "anthropic"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "max"]
 context_window = 400000
 capabilities = { vision = true, files = false, tools = true, reasoning = true, web_search = false }

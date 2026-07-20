@@ -583,7 +583,8 @@ pub async fn run_chat_turn_with_message(
         .as_ref()
         .map(|c| c.model.clone())
         .unwrap_or_default();
-    let thinking_level = Some(ctx.global_services.model_thinking.get(&model));
+    let thinking_model_id = ctx.effective_model(entry.as_ref());
+    let thinking_level = Some(ctx.resolve_thinking_level(&thinking_model_id));
     let mut context_config = ctx.config.context.clone();
     context_config.compaction_model = compaction_call.model.clone();
 

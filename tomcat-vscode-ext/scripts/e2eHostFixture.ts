@@ -79,6 +79,7 @@ const BUILTIN_MODELS = [
     modelName: "fake-model",
     provider: "openai",
     source: "builtin",
+    supportedReasoningLevels: [],
     thinkingFormat: null,
   },
   {
@@ -90,6 +91,7 @@ const BUILTIN_MODELS = [
     modelName: "gpt-5.4",
     provider: "openai",
     source: "builtin",
+    supportedReasoningLevels: ["low", "medium", "high", "xhigh"],
     thinkingFormat: "openai",
   },
   {
@@ -101,7 +103,8 @@ const BUILTIN_MODELS = [
     modelName: "claude-4.6-sonnet",
     provider: "anthropic",
     source: "builtin",
-    thinkingFormat: "anthropic",
+    supportedReasoningLevels: ["low", "medium", "high", "max"],
+    thinkingFormat: "anthropic-adaptive",
   },
 ];
 const MODEL_OPTIONS = BUILTIN_MODELS.map((model) => model.id);
@@ -125,9 +128,10 @@ const transcriptProgressDelayMs = Math.max(
   0,
   Number(process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS || "1000"),
 );
+const serverVersion = "0.1.15";
 
 if (process.argv[2] === "--version") {
-  process.stdout.write("tomcat fake 0.1.8\\n");
+  process.stdout.write("tomcat fake " + serverVersion + "\\n");
   process.exit(0);
 }
 
@@ -160,15 +164,107 @@ function inferDefaultKeyEnv(provider) {
   return provider.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_") + "_API_KEY";
 }
 
+function normalizeThinkingFormat(api, thinkingFormat) {
+  if (typeof thinkingFormat === "string" && thinkingFormat.trim().length > 0) {
+    return thinkingFormat.trim().toLowerCase();
+  }
+  switch (String(api || "").trim()) {
+    case "deepseek":
+      return "deepseek";
+    case "zai":
+      return "zai";
+    case "qwen":
+      return "qwen";
+    case "doubao":
+    case "moonshot":
+      return "doubao";
+    case "anthropic":
+      return "anthropic";
+    case "anthropic-messages":
+      return "anthropic";
+    case "openai":
+    case "openai-responses":
+    default:
+      return "openai";
+  }
+}
+
+function normalizeReasoningLevel(value) {
+  const token = String(value || "").trim().toLowerCase();
+  if (token === "x-high") {
+    return "xhigh";
+  }
+  if (token === "none") {
+    return "off";
+  }
+  return token;
+}
+
+function inferSupportedReasoningLevels(api, thinkingFormat) {
+  switch (normalizeThinkingFormat(api, thinkingFormat)) {
+    case "deepseek":
+    case "zai":
+      return ["high", "max"];
+    case "doubao":
+      return [];
+    case "anthropic":
+    case "anthropic-adaptive":
+      return ["low", "medium", "high", "xhigh", "max"];
+    case "qwen":
+    case "openrouter":
+    case "openai":
+    default:
+      return ["low", "medium", "high", "xhigh"];
+  }
+}
+
+function normalizeSupportedReasoningLevels(levels, api, thinkingFormat) {
+  if (!Array.isArray(levels)) {
+    return inferSupportedReasoningLevels(api, thinkingFormat);
+  }
+  const normalized = [];
+  for (const value of levels) {
+    const token = normalizeReasoningLevel(value);
+    if (!token || normalized.includes(token)) {
+      continue;
+    }
+    normalized.push(token);
+  }
+  return normalized.length > 0 ? normalized : inferSupportedReasoningLevels(api, thinkingFormat);
+}
+
+function collectModelWarnings(api, thinkingFormat) {
+  const format = normalizeThinkingFormat(api, thinkingFormat);
+  const effortApis = new Set(["openai", "openai-responses"]);
+  const effortFormats = new Set(["openai", "openrouter", "deepseek", "zai"]);
+  if (!effortApis.has(String(api || "").trim()) || effortFormats.has(format)) {
+    return [];
+  }
+  return [
+    'Current API "' +
+      String(api || "").trim() +
+      '" will not send reasoning effort when thinking format is "' +
+      format +
+      '".',
+  ];
+}
+
 function normalizeModelEntry(entry, source) {
   const provider = typeof entry?.provider === "string" ? entry.provider : "openai";
+  const api = typeof entry?.api === "string" ? entry.api : "openai";
   const apiKeyEnv =
     typeof entry?.apiKeyEnv === "string" && entry.apiKeyEnv.trim().length > 0
       ? entry.apiKeyEnv.trim()
       : inferDefaultKeyEnv(provider);
   const providerKey = providerKeys.get(apiKeyEnv);
+  const thinkingFormat = normalizeThinkingFormat(api, entry?.thinkingFormat);
+  const supportedReasoningLevels = normalizeSupportedReasoningLevels(
+    entry?.supportedReasoningLevels,
+    api,
+    thinkingFormat,
+  );
   return {
-    api: typeof entry?.api === "string" ? entry.api : "openai",
+    api,
     apiKeyEnv,
     baseUrl: typeof entry?.baseUrl === "string" ? entry.baseUrl : null,
     capabilities: {
@@ -202,7 +298,8 @@ function normalizeModelEntry(entry, source) {
     modelName: typeof entry?.modelName === "string" ? entry.modelName : null,
     provider,
     source,
-    thinkingFormat: typeof entry?.thinkingFormat === "string" ? entry.thinkingFormat : null,
+    supportedReasoningLevels,
+    thinkingFormat,
   };
 }
 
@@ -244,6 +341,7 @@ function createSession() {
     planPath: null,
     planState: "chat",
     sessionKey: "fake-workspace",
+    thinkingByModel: {},
     title: null,
   }));
   if (!activeSessionId) {
@@ -327,6 +425,7 @@ function ensureSession(sessionId) {
       planPath: null,
       planState: "chat",
       sessionKey: "fake-workspace",
+      thinkingByModel: {},
       title: null,
     }));
   }
@@ -971,6 +1070,18 @@ function handlePrompt(frame) {
     return;
   }
 
+  if (text.includes("reasoning effort probe")) {
+    const thinkingLevel =
+      session.thinkingByModel && typeof session.thinkingByModel === "object"
+        ? session.thinkingByModel[session.model] || "off"
+        : "off";
+    emitMessageDelta(sessionId, "reasoning effort: " + thinkingLevel);
+    recordHistoryMessage(sessionId, "assistant", "reasoning effort: " + thinkingLevel);
+    emitContextMetrics(sessionId, 0.36);
+    finishTurn(sessionId, null);
+    return;
+  }
+
   if (text.includes("retry 403 showcase")) {
     const failureSummary = "API 错误 403 · aigateway.sunmi.com · Request-Id req-host-retry";
     const failureDetail = "API 错误 403: <html>forbidden</html>\\nHost: aigateway.sunmi.com\\nRequest-Id: req-host-retry";
@@ -1477,9 +1588,11 @@ function handleCommand(frame) {
               "set_provider_key",
               "list_provider_keys",
               "set_model",
+            "set_thinking_level",
               "set_plan_mode",
             ],
             protocolVersion: 1,
+            serverVersion,
             sessionId,
           },
           requestId: frame.requestId,
@@ -1550,6 +1663,10 @@ function handleCommand(frame) {
           sessionId,
           sessionKey: session.sessionKey,
           sessionTodos: session.sessionTodos ?? [],
+          thinkingLevel:
+            session.thinkingByModel && typeof session.thinkingByModel === "object"
+              ? session.thinkingByModel[session.model] || null
+              : null,
         },
         sessionId,
         success: true,
@@ -1653,10 +1770,12 @@ function handleCommand(frame) {
     case "upsert_model": {
       const normalized = normalizeModelEntry(frame.model, "user");
       userModels.set(normalized.id, normalized);
+      const warnings = collectModelWarnings(normalized.api, normalized.thinkingFormat);
       send({
         id: frame.id,
         payload: {
           model: normalized,
+          warnings,
         },
         success: true,
         type: "response",
@@ -1710,6 +1829,23 @@ function handleCommand(frame) {
       send({
         id: frame.id,
         payload: { model: session.model, sessionId },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      break;
+    }
+    case "set_thinking_level": {
+      const sessionId = frame.sessionId || activeSessionId || createSession();
+      const session = touchSession(ensureSession(sessionId));
+      const modelId =
+        typeof frame.model === "string" && frame.model.length > 0 ? frame.model : session.model;
+      const level = normalizeReasoningLevel(frame.level);
+      session.thinkingByModel = session.thinkingByModel || {};
+      session.thinkingByModel[modelId] = level || "off";
+      send({
+        id: frame.id,
+        payload: { model: modelId, sessionId, thinkingLevel: session.thinkingByModel[modelId] },
         sessionId,
         success: true,
         type: "response",

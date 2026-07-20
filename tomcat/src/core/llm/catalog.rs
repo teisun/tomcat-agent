@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use parking_lot::RwLock;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::thinking_policy::{normalize_supported_reasoning_levels, safe_supported_reasoning_levels_for};
 use crate::infra::config::{get_work_dir, AppConfig, ContextConfig};
 use crate::infra::error::AppError;
 
@@ -58,6 +62,8 @@ pub struct ModelEntry {
     pub context_window: Option<u32>,
     #[serde(default)]
     pub thinking_format: Option<String>,
+    #[serde(default)]
+    pub supported_reasoning_levels: Vec<String>,
 }
 
 impl ModelEntry {
@@ -78,6 +84,7 @@ pub struct ModelCatalog {
 #[derive(Debug, Clone)]
 pub struct SharedModelCatalog {
     inner: Arc<RwLock<Arc<ModelCatalog>>>,
+    generation: Arc<AtomicU64>,
 }
 
 impl ModelCatalog {
@@ -169,6 +176,7 @@ impl SharedModelCatalog {
     pub fn replace(&self, catalog: ModelCatalog) -> Arc<ModelCatalog> {
         let next = Arc::new(catalog);
         *self.inner.write() = next.clone();
+        self.generation.fetch_add(1, Ordering::Relaxed);
         next
     }
 
@@ -210,12 +218,17 @@ impl SharedModelCatalog {
         let snapshot = self.snapshot();
         f(snapshot.as_ref())
     }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
 }
 
 impl From<ModelCatalog> for SharedModelCatalog {
     fn from(value: ModelCatalog) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Arc::new(value))),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -224,6 +237,7 @@ impl From<Arc<ModelCatalog>> for SharedModelCatalog {
     fn from(value: Arc<ModelCatalog>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(value)),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -261,6 +275,9 @@ pub(crate) struct UserModelEntry {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) thinking_format: Option<String>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) supported_reasoning_levels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -338,6 +355,7 @@ fn merge_user_model(
         capabilities: Capabilities::default(),
         context_window: Some(context.context_window as u32),
         thinking_format: None,
+        supported_reasoning_levels: Vec::new(),
     });
     merged.id = raw.id.clone();
     if let Some(model_name) = raw.model_name {
@@ -375,6 +393,22 @@ fn merge_user_model(
     }
     if let Some(thinking_format) = raw.thinking_format {
         merged.thinking_format = Some(thinking_format);
+    }
+    if let Some(levels) = raw.supported_reasoning_levels {
+        let normalized = normalize_supported_reasoning_levels(&levels);
+        merged.supported_reasoning_levels = if normalized.is_empty() && !levels.is_empty() {
+            safe_supported_reasoning_levels_for(
+                merged.api.as_str(),
+                merged.thinking_format.as_deref(),
+            )
+        } else {
+            normalized
+        };
+    } else if merged.supported_reasoning_levels.is_empty() {
+        merged.supported_reasoning_levels = safe_supported_reasoning_levels_for(
+            merged.api.as_str(),
+            merged.thinking_format.as_deref(),
+        );
     }
     Ok(merged)
 }

@@ -31,6 +31,7 @@ use crate::{
     ThinkingLevel, Tool, ToolExecutor, ToolRegistry,
 };
 
+use crate::core::llm::thinking_policy::clamp_reasoning_level;
 use crate::core::llm::LlmScene;
 use crate::core::plan_runtime;
 
@@ -779,6 +780,16 @@ impl ChatContext {
             .to_string()
     }
 
+    pub(crate) fn resolve_thinking_level(&self, model_id: &str) -> ThinkingLevel {
+        self.global_services.model_catalog.with_catalog(|catalog| {
+            let requested = self.global_services.model_thinking.get(model_id);
+            catalog
+                .lookup_explicit(model_id)
+                .map(|entry| clamp_reasoning_level(requested, &entry.supported_reasoning_levels))
+                .unwrap_or(requested)
+        })
+    }
+
     pub(crate) fn resolve_call(
         &self,
         scene: LlmScene,
@@ -1462,9 +1473,9 @@ mod tests {
 
     use serial_test::serial;
 
-    use super::resolve_child_agent_compaction_runtime;
+    use super::{resolve_child_agent_compaction_runtime, ChatContext};
     use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
-    use crate::AppConfig;
+    use crate::{AppConfig, ThinkingLevel};
 
     #[test]
     #[serial(env_lock)]
@@ -1549,5 +1560,111 @@ mod tests {
             context_config.compaction_model, "gpt-5.4",
             "未解析成功时不应偷偷改写 compaction_model"
         );
+    }
+
+    #[test]
+    #[serial(env_lock)]
+    fn resolve_thinking_level_uses_catalog_id_key_when_model_name_differs() {
+        const ENV_KEY: &str = "TOMCAT_REASONING_LOOKUP_TEST_KEY";
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+        cfg.llm.default_model = "relay/gpt-sol".to_string();
+        cfg.context.compaction_model = "relay/gpt-sol".to_string();
+        std::fs::write(
+            dir.path().join("models.toml"),
+            format!(
+                r#"
+[[models]]
+id = "relay/gpt-sol"
+model_name = "gpt-sol"
+api = "openai-responses"
+provider = "relay"
+api_key_env = "{env}"
+base_url = "https://api.example.test"
+thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+                env = ENV_KEY,
+            ),
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var(ENV_KEY, "stub");
+        }
+
+        let ctx = ChatContext::from_config(cfg).expect("ctx");
+        ctx.global_services
+            .model_thinking
+            .set("relay/gpt-sol", ThinkingLevel::Xhigh)
+            .expect("persist relay override");
+
+        assert_eq!(
+            ctx.resolve_thinking_level("relay/gpt-sol"),
+            ThinkingLevel::Xhigh
+        );
+        assert_eq!(
+            ctx.resolve_thinking_level("gpt-sol"),
+            ThinkingLevel::High,
+            "wire model_name key miss should still fall back to the configured default level"
+        );
+
+        unsafe {
+            std::env::remove_var(ENV_KEY);
+        }
+    }
+
+    #[test]
+    #[serial(env_lock)]
+    fn resolve_thinking_level_preserves_empty_supported_levels_toggle_default() {
+        const ENV_KEY: &str = "TOMCAT_REASONING_TOGGLE_TEST_KEY";
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
+        cfg.llm.default_model = "relay/toggle-only".to_string();
+        cfg.context.compaction_model = "relay/toggle-only".to_string();
+        std::fs::write(
+            dir.path().join("models.toml"),
+            format!(
+                r#"
+[[models]]
+id = "relay/toggle-only"
+model_name = "toggle-only"
+api = "openai"
+provider = "relay"
+api_key_env = "{env}"
+base_url = "https://api.example.test"
+thinking_format = "doubao"
+supported_reasoning_levels = []
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+                env = ENV_KEY,
+            ),
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var(ENV_KEY, "stub");
+        }
+
+        let ctx = ChatContext::from_config(cfg).expect("ctx");
+        ctx.global_services
+            .model_thinking
+            .set("relay/toggle-only", ThinkingLevel::Low)
+            .expect("persist toggle override");
+
+        assert_eq!(
+            ctx.resolve_thinking_level("relay/toggle-only"),
+            ThinkingLevel::High,
+            "empty supported_reasoning_levels should keep the existing Thinking On/Off fallback"
+        );
+
+        unsafe {
+            std::env::remove_var(ENV_KEY);
+        }
     }
 }

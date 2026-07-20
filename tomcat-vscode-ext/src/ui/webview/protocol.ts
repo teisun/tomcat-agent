@@ -219,6 +219,7 @@ export interface WebviewSessionTab {
 export interface WebviewStateSnapshot {
   activeSessionId: string | null;
   availableModelCapabilities?: Record<string, string[]>;
+  availableModelReasoningLevels?: Record<string, string[]>;
   availableModels: string[];
   buildModel?: string;
   modelAdminSupported: boolean;
@@ -371,7 +372,7 @@ export type WebviewIntent =
       messageId: string;
       type: "setThinkingLevel";
       data: {
-        level: "high" | "low" | "medium" | "xhigh";
+        level: string;
         modelId: string;
         sessionId?: string | null;
       };

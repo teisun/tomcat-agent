@@ -30,6 +30,19 @@ fn set_and_reload_roundtrip_persists_override() {
 }
 
 #[test]
+fn set_and_reload_roundtrip_preserves_max_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("model-thinking.json");
+    let store = ModelThinkingStore::load(&path, ThinkingLevel::Medium).unwrap();
+
+    store.set("glm-5.2", ThinkingLevel::Max).unwrap();
+    assert_eq!(store.get("glm-5.2"), ThinkingLevel::Max);
+
+    let reloaded = ModelThinkingStore::load(&path, ThinkingLevel::Medium).unwrap();
+    assert_eq!(reloaded.get("glm-5.2"), ThinkingLevel::Max);
+}
+
+#[test]
 fn seed_file_loads_existing_model_levels() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("model-thinking.json");

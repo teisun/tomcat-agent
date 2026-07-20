@@ -96,6 +96,12 @@ async fn serve_initialize_control_request_sets_ready_state() {
             .and_then(serde_json::Value::as_i64),
         Some(1)
     );
+    assert_eq!(
+        payload
+            .get("serverVersion")
+            .and_then(serde_json::Value::as_str),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
     let capabilities = payload["capabilities"]
         .as_array()
         .expect("capabilities array");

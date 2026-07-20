@@ -16,8 +16,7 @@ use serde_json::json;
 use crate::api::chat::commands::{checkpoint_kind_label, restore_core, RestoreCoreReport};
 use crate::core::llm::{
     list_model_views, list_provider_keys, remove_user_model, set_provider_key, upsert_user_model,
-    ChatMessage, ChatMessageContentPart, ContextRefKind, ContextReference, ProviderKeyInput,
-    ThinkingLevel,
+    ChatMessage, ChatMessageContentPart, ContextRefKind, ContextReference, ProviderKeyInput, ThinkingLevel,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::transcript::{
@@ -101,13 +100,7 @@ fn encode_next_cursor(page: &TranscriptPage) -> Result<Option<String>, AppError>
 }
 
 fn parse_serve_thinking_level(level: &str) -> Option<ThinkingLevel> {
-    match level.trim().to_ascii_lowercase().as_str() {
-        "low" => Some(ThinkingLevel::Low),
-        "medium" => Some(ThinkingLevel::Medium),
-        "high" => Some(ThinkingLevel::High),
-        "xhigh" => Some(ThinkingLevel::Xhigh),
-        _ => None,
-    }
+    ThinkingLevel::parse(level)
 }
 
 pub(crate) async fn handle_command(
@@ -484,7 +477,7 @@ pub(crate) async fn handle_command(
             };
             let entry = slot.ctx.session_runtime.session.current_session_entry()?;
             let model = slot.ctx.effective_model(entry.as_ref());
-            let thinking_level = slot.ctx.global_services.model_thinking.get(&model);
+            let thinking_level = slot.ctx.resolve_thinking_level(&model);
             let plan_state = slot.ctx.session_runtime.plan_runtime.mode();
             let active_plan_id = plan_state
                 .active_plan_id()
@@ -764,7 +757,7 @@ pub(crate) async fn handle_command(
             )))?;
         }
         ServeCommand::UpsertModel { id, model } => {
-            let model = match upsert_user_model(&state.cfg, model) {
+            let result = match upsert_user_model(&state.cfg, model) {
                 Ok(model) => model,
                 Err(error) => {
                     send_error(
@@ -781,7 +774,11 @@ pub(crate) async fn handle_command(
                 id,
                 state.registry.active_session_id(),
                 Some(
-                    serde_json::to_value(UpsertModelResponse { model }).map_err(|error| {
+                    serde_json::to_value(UpsertModelResponse {
+                        model: result.model,
+                        warnings: result.warnings,
+                    })
+                    .map_err(|error| {
                         AppError::Config(format!("serialize upsert_model payload failed: {error}"))
                     })?,
                 ),

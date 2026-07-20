@@ -701,6 +701,25 @@ export async function assertWebviewAddModelsFlow(
     builtinModels.length > 0,
     "expected the settings panel to expose builtin models so official presets are available",
   );
+  assert.strictEqual(
+    settingsSnapshot.state.serverVersion,
+    "0.1.15",
+    "expected the settings panel state to carry the fake serve version",
+  );
+  assert.strictEqual(
+    settingsSnapshot.state.expectedCliVersion,
+    settingsSnapshot.state.serverVersion,
+    "expected the extension to consider the connected fake serve version current",
+  );
+  const settingsDom = await api.__testing.captureSettingsDom();
+  assert.ok(
+    settingsDom.html.includes(`Extension v${settingsSnapshot.state.extensionVersion}`),
+    "expected the settings footer to render the extension version",
+  );
+  assert.ok(
+    settingsDom.html.includes(`Serve v${settingsSnapshot.state.serverVersion}`),
+    "expected the settings footer to render the serve version",
+  );
 
   await assertSettingsKeyFieldsAligned(api);
 
@@ -769,18 +788,110 @@ export async function assertWebviewAddModelsFlow(
     }),
   );
 
+  const materializedModel = await waitForSettingsPanelState(
+    api,
+    (snapshot) => {
+      const model = snapshot.state.models.find((candidate) => candidate.id === modelId);
+      return model?.keyPresent &&
+          model.thinkingFormat === "openai" &&
+          model.supportedReasoningLevels?.includes("xhigh")
+        ? model
+        : undefined;
+    },
+    20_000,
+  );
+  assert.ok(
+    materializedModel.supportedReasoningLevels?.includes("xhigh"),
+    "expected the materialized relay model to expose xhigh in supportedReasoningLevels",
+  );
+
+  await api.__testing.sendSettingsIntent(
+    buildSettingsIntent({
+      data: {
+        model: {
+          api: "openai",
+          apiKeyEnv: keyEnv,
+          baseUrl: relayBaseUrl,
+          capabilities: {
+            files: false,
+            reasoning: true,
+            tools: true,
+            vision: false,
+            webSearch: false,
+          },
+          contextWindow: 16_384,
+          id: modelId,
+          modelName,
+          provider: relayProvider,
+          thinkingFormat: "anthropic",
+        },
+      },
+      messageId: "settings-upsert-model-warning",
+      type: "upsertModel",
+    }),
+  );
+
+  const warningState = await waitForSettingsPanelState(
+    api,
+    (snapshot) => {
+      const model = snapshot.state.models.find((candidate) => candidate.id === modelId);
+      return model?.thinkingFormat === "anthropic" &&
+          snapshot.state.warnings?.some((warning) => warning.includes("reasoning effort"))
+        ? snapshot
+        : undefined;
+    },
+    20_000,
+  );
+  assert.ok(
+    warningState.state.warnings?.some((warning) => warning.includes("reasoning effort")),
+    "expected mismatched anthropic thinking format to surface a reasoning effort warning",
+  );
+
+  await api.__testing.sendSettingsIntent(
+    buildSettingsIntent({
+      data: {
+        model: {
+          api: "openai",
+          apiKeyEnv: keyEnv,
+          baseUrl: relayBaseUrl,
+          capabilities: {
+            files: false,
+            reasoning: true,
+            tools: true,
+            vision: false,
+            webSearch: false,
+          },
+          contextWindow: 16_384,
+          id: modelId,
+          modelName,
+          provider: relayProvider,
+          thinkingFormat: null,
+        },
+      },
+      messageId: "settings-upsert-model-restored",
+      type: "upsertModel",
+    }),
+  );
+
   await waitForSettingsPanelState(
     api,
     (snapshot) => {
       const model = snapshot.state.models.find((candidate) => candidate.id === modelId);
-      return model?.keyPresent ? model : undefined;
+      return model?.thinkingFormat === "openai" &&
+          (!snapshot.state.warnings || snapshot.state.warnings.length === 0)
+        ? model
+        : undefined;
     },
     20_000,
   );
 
   await waitForWebviewState(
     api,
-    (state) => (state.availableModels.includes(modelId) ? state : undefined),
+    (state) =>
+      state.availableModels.includes(modelId) &&
+        state.availableModelReasoningLevels?.[modelId]?.includes("xhigh")
+        ? state
+        : undefined,
     20_000,
   );
 
@@ -847,12 +958,49 @@ export async function assertWebviewAddModelsFlow(
     10_000,
   );
 
+  await api.__testing.sendWebviewDomAction({
+    kind: "clickTestId",
+    testId: "thinking-level-select",
+  });
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.html.includes('data-testid="thinking-level-dropdown"') &&
+        snapshot.html.includes("Xhigh")
+        ? snapshot
+        : undefined,
+    10_000,
+  );
+  await api.__testing.sendWebviewDomAction({
+    index: 3,
+    kind: "clickTestId",
+    testId: "thinking-level-option",
+  });
+  await waitForSessionState(
+    api,
+    (state) =>
+      state.sessionId === sessionId &&
+        state.model === modelId &&
+        state.thinkingLevel === "xhigh"
+        ? state
+        : undefined,
+    20_000,
+  );
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.html.includes('data-testid="thinking-level-dropdown"')
+        ? undefined
+        : snapshot,
+    10_000,
+  );
+
   api.__testing.clearObservedEvents();
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: {
         sessionId,
-        text: "hello fake tomcat from added model",
+        text: "reasoning effort probe",
       },
       messageId: "webview-prompt-added-model",
       type: "prompt",
@@ -860,7 +1008,7 @@ export async function assertWebviewAddModelsFlow(
   );
   await waitForEvent(api, {
     sessionId,
-    textIncludes: "hello from fake tomcat",
+    textIncludes: "reasoning effort: xhigh",
     type: "message_update",
   });
   await waitForEvent(api, {

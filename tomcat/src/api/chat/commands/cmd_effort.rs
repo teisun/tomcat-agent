@@ -11,22 +11,16 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
             None => usage_error(level),
         },
         [_cmd] => ChatCommand::UsageError {
-            message: "用法错误：/effort 需要一个参数：low|medium|high|xhigh。".to_string(),
+            message: "用法错误：/effort 需要一个参数：off|minimal|low|medium|high|xhigh|max。".to_string(),
         },
         _ => ChatCommand::UsageError {
-            message: "用法错误：/effort 仅支持 low|medium|high|xhigh。".to_string(),
+            message: "用法错误：/effort 仅支持 off|minimal|low|medium|high|xhigh|max。".to_string(),
         },
     }
 }
 
 pub fn parse_effort_level(level: &str) -> Option<ThinkingLevel> {
-    match level.trim().to_ascii_lowercase().as_str() {
-        "low" => Some(ThinkingLevel::Low),
-        "medium" => Some(ThinkingLevel::Medium),
-        "high" => Some(ThinkingLevel::High),
-        "xhigh" => Some(ThinkingLevel::Xhigh),
-        _ => None,
-    }
+    ThinkingLevel::parse(level)
 }
 
 pub fn apply_level(
@@ -68,7 +62,7 @@ pub(crate) fn run(ctx: &ChatContext, level: ThinkingLevel) -> ChatCommandOutcome
 fn usage_error(level: &str) -> ChatCommand {
     ChatCommand::UsageError {
         message: format!(
-            "用法错误：/effort 仅支持 low|medium|high|xhigh，收到 `{}`。",
+            "用法错误：/effort 仅支持 off|minimal|low|medium|high|xhigh|max，收到 `{}`。",
             level
         ),
     }

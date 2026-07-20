@@ -1361,6 +1361,7 @@ export class WebviewStateStore {
     this.state = {
       activeSessionId: null,
       availableModelCapabilities: {},
+      availableModelReasoningLevels: {},
       availableModels: [],
       buildModel: "",
       modelAdminSupported: false,
@@ -1378,8 +1379,13 @@ export class WebviewStateStore {
     this.state.ready = ready;
   }
 
-  setAvailableModels(models: string[], capabilities: Record<string, string[]> = {}): void {
+  setAvailableModels(
+    models: string[],
+    capabilities: Record<string, string[]> = {},
+    reasoningLevels: Record<string, string[]> = {},
+  ): void {
     this.state.availableModelCapabilities = { ...capabilities };
+    this.state.availableModelReasoningLevels = { ...reasoningLevels };
     this.state.availableModels = [...models];
   }
 
@@ -1396,6 +1402,7 @@ export class WebviewStateStore {
     this.state = {
       activeSessionId: null,
       availableModelCapabilities: {},
+      availableModelReasoningLevels: {},
       availableModels: [],
       buildModel: "",
       modelAdminSupported: false,

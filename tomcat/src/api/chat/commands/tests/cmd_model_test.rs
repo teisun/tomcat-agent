@@ -61,6 +61,7 @@ fn format_model_list_line_uses_local_id_not_upstream_model_name() {
             web_search: false,
         },
         context_window: None,
+        supported_reasoning_levels: Vec::new(),
         thinking_format: Some("openai".to_string()),
     };
 

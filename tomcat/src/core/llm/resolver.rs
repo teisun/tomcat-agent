@@ -95,6 +95,7 @@ struct ProviderCacheKey {
     base_url: Option<String>,
     key_source: String,
     key_generation: u64,
+    catalog_generation: u64,
 }
 
 pub fn capability_requirements_for_messages(messages: &[ChatMessage]) -> CapabilityRequirements {
@@ -308,6 +309,7 @@ impl DefaultLlmResolver {
             base_url: self.effective_base_url(entry),
             key_source: credential.env_name.clone(),
             key_generation: credential_generation(&credential.env_name),
+            catalog_generation: self.catalog.generation(),
         }
     }
 

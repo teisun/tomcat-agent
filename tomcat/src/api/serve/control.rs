@@ -32,6 +32,7 @@ pub(crate) async fn handle_control_or_interrupt(
                     session_id.or_else(|| state.registry.active_session_id()),
                     serde_json::json!({
                         "protocolVersion": 1,
+                        "serverVersion": env!("CARGO_PKG_VERSION"),
                         "capabilities": [
                             "prompt",
                             "steer",

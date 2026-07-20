@@ -36,6 +36,7 @@ export interface ModelEntryInput {
   id: string;
   modelName?: null | string;
   provider: string;
+  supportedReasoningLevels?: null | string[];
   thinkingFormat?: null | string;
 }
 export type ModelSource = "builtin" | "user";
@@ -51,6 +52,7 @@ export interface ModelView {
   modelName?: null | string;
   provider: string;
   source: ModelSource;
+  supportedReasoningLevels?: string[];
   thinkingFormat?: null | string;
 }
 export interface NewSessionParams {
@@ -383,6 +385,7 @@ export interface SetProviderKeyResponse {
 }
 export interface UpsertModelResponse {
   model: ModelView;
+  warnings?: string[];
 }
 export type WireEvent = ({
   args: any;
@@ -558,5 +561,6 @@ export interface WireModelView {
   modelName?: null | string;
   provider: string;
   source: ModelSource;
+  supportedReasoningLevels?: string[];
   thinkingFormat?: null | string;
 }

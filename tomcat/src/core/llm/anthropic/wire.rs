@@ -4,7 +4,7 @@ use crate::core::llm::replay_policy::{
     apply_text_downgrade, plan_scoped, replay_requirement_for_profile, ProviderCompatProfile,
     ReplayAction, ReplayWindow,
 };
-use crate::core::llm::thinking_policy::resolve_anthropic_request;
+use crate::core::llm::thinking_policy::{resolve_anthropic_request, ThinkingFormat};
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
     ChatResponse, ChatResponseChoice, ContinuityMetadata, FileSource, ImageSource,
@@ -16,6 +16,7 @@ pub(super) fn build_request_body(
     request: &ChatRequest,
     model: &str,
     thinking_cfg: &ThinkingConfig,
+    thinking_format: ThinkingFormat,
     continuity_enabled: bool,
     stream: bool,
 ) -> Value {
@@ -26,7 +27,8 @@ pub(super) fn build_request_body(
         .as_ref()
         .map(|tools| convert_tools(tools))
         .filter(|tools| !tools.is_empty());
-    let thinking_request = resolve_anthropic_request(thinking_cfg, request.max_tokens);
+    let thinking_request =
+        resolve_anthropic_request(thinking_cfg, thinking_format, request.max_tokens);
 
     let mut body = serde_json::Map::new();
     body.insert("model".to_string(), Value::String(model.to_string()));
@@ -51,6 +53,14 @@ pub(super) fn build_request_body(
     }
     if let Some(thinking) = thinking_request.thinking {
         body.insert("thinking".to_string(), thinking);
+    }
+    if let Some(effort) = thinking_request.effort {
+        body.insert(
+            "output_config".to_string(),
+            serde_json::json!({
+                "effort": effort,
+            }),
+        );
     }
     Value::Object(body)
 }
@@ -532,6 +542,7 @@ mod tests {
 
     use super::{build_request_body, response_to_chat_response};
     use crate::core::llm::replay_policy::ProviderCompatProfile;
+    use crate::core::llm::thinking_policy::ThinkingFormat;
     use crate::core::llm::types::{ChatMessage, ChatRequest, ReasoningFormat};
     use crate::infra::config::ThinkingConfig;
 
@@ -555,6 +566,7 @@ mod tests {
             &request,
             "claude-opus-4-6",
             &ThinkingConfig::default(),
+            ThinkingFormat::AnthropicAdaptive,
             true,
             true,
         );
@@ -564,6 +576,8 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["messages"][0]["content"][0]["text"], "hello");
         assert_eq!(body["stream"], true);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
         let temperature = body["temperature"]
             .as_f64()
             .expect("temperature serialized as number");

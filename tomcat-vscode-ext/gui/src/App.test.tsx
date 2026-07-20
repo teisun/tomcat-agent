@@ -374,6 +374,10 @@ describe("Tomcat webview App", () => {
       content: {
         activeSessionId: "s1",
         availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        availableModelReasoningLevels: {
+          "claude-4.6-sonnet": ["low", "medium", "high", "max"],
+          "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        },
         ready: true,
         sessions: [
           {
@@ -1151,6 +1155,10 @@ describe("Tomcat webview App", () => {
       content: {
         activeSessionId: "s1",
         availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        availableModelReasoningLevels: {
+          "claude-4.6-sonnet": ["low", "medium", "high", "max"],
+          "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        },
         ready: true,
         sessions: [
           {
@@ -1277,7 +1285,8 @@ describe("Tomcat webview App", () => {
     fireEvent.click(
       screen
         .getAllByTestId("thinking-level-option")
-        .find((node) => node.textContent?.includes("Xhigh")) ?? screen.getAllByTestId("thinking-level-option")[0],
+        .find((node) => node.textContent?.includes("Xhigh")) ??
+        screen.getAllByTestId("thinking-level-option")[0],
     );
     fireEvent.click(screen.getByTestId("mode-select"));
     fireEvent.click(
@@ -1571,6 +1580,10 @@ describe("Tomcat webview App", () => {
       content: {
         activeSessionId: "s1",
         availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        availableModelReasoningLevels: {
+          "claude-4.6-sonnet": ["low", "medium", "high", "max"],
+          "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        },
         ready: true,
         sessions: [
           {
@@ -1608,6 +1621,10 @@ describe("Tomcat webview App", () => {
       content: {
         activeSessionId: "s1",
         availableModels: ["gpt-5.4", "claude-4.6-sonnet"],
+        availableModelReasoningLevels: {
+          "claude-4.6-sonnet": ["low", "medium", "high", "max"],
+          "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        },
         ready: true,
         sessions: [
           {

@@ -22,6 +22,7 @@ use crate::infra::error::{
 
 use super::super::auth::Credential;
 use super::super::catalog::{infer_default_base_url, ModelEntry};
+use super::super::thinking_policy::ThinkingFormat;
 
 mod stream;
 mod wire;
@@ -37,6 +38,7 @@ pub(super) struct AnthropicProvider {
     retry_count: u32,
     non_stream_stale_timeout_sec: u64,
     thinking_cfg: crate::infra::config::ThinkingConfig,
+    configured_thinking_format: ThinkingFormat,
     continuity_enabled: bool,
 }
 
@@ -52,6 +54,12 @@ impl AnthropicProvider {
             .clone()
             .or_else(|| infer_default_base_url(Some(entry.provider.as_str())))
             .ok_or_else(|| AppError::Config(format!("模型 `{}` 缺少 base_url。", entry.id)))?;
+        let configured_thinking_format = ThinkingFormat::parse_or_auto(
+            entry
+                .thinking_format
+                .as_deref()
+                .or(runtime.thinking.format.as_deref()),
+        );
         Ok(Self {
             client,
             base_url,
@@ -61,6 +69,7 @@ impl AnthropicProvider {
             retry_count: runtime.retry_count,
             non_stream_stale_timeout_sec: runtime.non_stream_stale_timeout_sec,
             thinking_cfg: runtime.thinking.clone(),
+            configured_thinking_format,
             continuity_enabled: runtime.reasoning_continuity.enabled,
         })
     }
@@ -90,6 +99,10 @@ impl AnthropicProvider {
 
     fn source_profile(&self, model: &str) -> ProviderCompatProfile {
         ProviderCompatProfile::anthropic_messages(model)
+    }
+
+    fn thinking_format_for_wire(&self) -> ThinkingFormat {
+        self.configured_thinking_format.resolve_for_api(PROVIDER_NAME)
     }
 
     async fn run_non_stream_with_stale<T, F>(&self, fut: F) -> Result<T, AppError>
@@ -127,10 +140,12 @@ impl AnthropicProvider {
     ) -> Result<reqwest::Response, AppError> {
         let model = self.effective_model(request);
         let thinking_cfg = self.thinking_cfg_for_request(request);
+        let thinking_format = self.thinking_format_for_wire();
         let body = wire::build_request_body(
             request,
             &model,
             &thinking_cfg,
+            thinking_format,
             self.continuity_enabled,
             stream,
         );

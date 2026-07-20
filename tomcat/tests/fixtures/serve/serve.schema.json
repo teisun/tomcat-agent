@@ -778,6 +778,15 @@
           "provider": {
             "type": "string"
           },
+          "supportedReasoningLevels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
           "thinkingFormat": {
             "type": [
               "string",
@@ -4125,6 +4134,13 @@
       "source": {
         "$ref": "#/definitions/ModelSource"
       },
+      "supportedReasoningLevels": {
+        "default": [],
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
       "thinkingFormat": {
         "type": [
           "string",
@@ -4313,6 +4329,13 @@
           "source": {
             "$ref": "#/definitions/ModelSource"
           },
+          "supportedReasoningLevels": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "thinkingFormat": {
             "type": [
               "string",
@@ -4333,6 +4356,12 @@
     "properties": {
       "model": {
         "$ref": "#/definitions/ModelView"
+      },
+      "warnings": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
       }
     },
     "definitions": {
@@ -4420,6 +4449,13 @@
           },
           "source": {
             "$ref": "#/definitions/ModelSource"
+          },
+          "supportedReasoningLevels": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "thinkingFormat": {
             "type": [

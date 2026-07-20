@@ -203,11 +203,13 @@ describe("model catalog parsing", () => {
             },
             id: "deepseek-v4-flash",
             keyPresent: true,
+            supportedReasoningLevels: ["high", "max"],
           },
           {
             capabilities: ["vision", "files"],
             id: "gpt-5.4",
             keyPresent: true,
+            supportedReasoningLevels: ["low", "medium", "high", "xhigh"],
           },
           {
             capabilities: null,
@@ -230,6 +232,11 @@ describe("model catalog parsing", () => {
         "text-only": [],
       },
       ids: ["deepseek-v4-flash", "gpt-5.4", "text-only"],
+      reasoningLevels: {
+        "deepseek-v4-flash": ["high", "max"],
+        "gpt-5.4": ["low", "medium", "high", "xhigh"],
+        "text-only": [],
+      },
     });
   });
 });

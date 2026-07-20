@@ -2418,6 +2418,7 @@ async fn serve_prompt_failed_turn_retry_keeps_previous_response_id_hint() {
     let mut cfg = serve_test_config(temp.path(), &server.base_url);
     cfg.llm.default_model = "gpt-5.4".to_string();
     cfg.context.compaction_model = "gpt-5.4".to_string();
+    cfg.llm.title_model = None;
     cfg.llm.reasoning_continuity.enabled = true;
     cfg.llm.openai_responses.use_previous_response_id = true;
     std::fs::write(
@@ -2934,6 +2935,60 @@ async fn serve_set_thinking_level_roundtrips_in_get_state() {
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn upsert_model_response_includes_non_fatal_warnings() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, _slot) = build_initialized_state_with_streams(vec![]).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::UpsertModel {
+            id: Some("upsert-warning".to_string()),
+            model: ModelEntryInput {
+                id: "relay-openai".to_string(),
+                model_name: Some("gpt-5.4".to_string()),
+                api: "openai-responses".to_string(),
+                provider: "relay".to_string(),
+                api_key_env: Some("SERVE_TEST_GATEWAY_API_KEY".to_string()),
+                base_url: Some("https://api.example.test/v1".to_string()),
+                capabilities: Capabilities {
+                    tools: true,
+                    reasoning: true,
+                    ..Capabilities::default()
+                },
+                context_window: Some(200_000),
+                supported_reasoning_levels: None,
+                thinking_format: Some("anthropic".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("upsert-warning")
+    })
+    .await;
+    let upsert = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("upsert-warning"))
+        .expect("upsert_model warning response");
+    assert_eq!(upsert["success"].as_bool(), Some(true));
+    assert_eq!(upsert["payload"]["model"]["id"].as_str(), Some("relay-openai"));
+    let warnings = upsert["payload"]["warnings"]
+        .as_array()
+        .expect("warnings array");
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .as_str()
+            .is_some_and(|msg| msg.contains("openai-responses") && msg.contains("anthropic")),
+        "unexpected warnings payload: {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_model_admin_roundtrip_updates_key_presence() {
     let _api_key = install_test_api_key();
     let (state, buffer, temp, _slot) = build_initialized_state_with_streams(vec![]).await;
@@ -2955,6 +3010,7 @@ async fn serve_model_admin_roundtrip_updates_key_presence() {
                     ..Capabilities::default()
                 },
                 context_window: Some(200_000),
+                supported_reasoning_levels: None,
                 thinking_format: Some("anthropic".to_string()),
             },
         },
@@ -3169,7 +3225,7 @@ async fn serve_get_state_tracks_per_model_thinking_level_after_switching_models(
             id: Some("effort-deepseek".to_string()),
             session_id: Some(slot.session_id.clone()),
             model: "deepseek-v4-pro".to_string(),
-            level: "xhigh".to_string(),
+            level: "max".to_string(),
         },
         ServeCommand::SetModel {
             id: Some("switch-deepseek".to_string()),
@@ -3210,7 +3266,7 @@ async fn serve_get_state_tracks_per_model_thinking_level_after_switching_models(
         deepseek["payload"]["model"].as_str(),
         Some("deepseek-v4-pro")
     );
-    assert_eq!(deepseek["payload"]["thinkingLevel"].as_str(), Some("xhigh"));
+    assert_eq!(deepseek["payload"]["thinkingLevel"].as_str(), Some("max"));
     assert_eq!(gpt["payload"]["model"].as_str(), Some("gpt-5.4"));
     assert_eq!(gpt["payload"]["thinkingLevel"].as_str(), Some("low"));
 }
@@ -3833,6 +3889,463 @@ async fn serve_prompt_passes_per_model_thinking_level_to_main_loop_request() {
         captured[0].thinking_level,
         Some(crate::core::llm::ThinkingLevel::Xhigh)
     );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_upsert_model_reloads_thinking_format_and_sends_xhigh_without_restart() {
+    let _api_key = install_test_api_key();
+    let server = RecordingHttpServer::start(vec![
+        ScriptedHttpResponse::sse(&[
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"before\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_before\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+        ]),
+        ScriptedHttpResponse::sse(&[
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m2\",\"content_index\":0,\"delta\":\"after\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_after\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+        ]),
+    ])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), &server.base_url);
+    cfg.llm.default_model = "gpt-5.4".to_string();
+    cfg.context.compaction_model = "gpt-5.4".to_string();
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "gpt-5.4"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "openai"
+api_key_env = "{env}"
+base_url = "{base_url}"
+thinking_format = "anthropic"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+capabilities = {{ vision = true, files = true, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+            base_url = server.base_url,
+        ),
+    )
+    .expect("write responses override");
+
+    let (state, buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("format-prompt-before".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "before".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let _after_first = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if count_event(&lines, "agent_end") >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::UpsertModel {
+            id: Some("upsert-format-openai".to_string()),
+            model: ModelEntryInput {
+                id: "gpt-5.4".to_string(),
+                model_name: Some("gpt-5.4".to_string()),
+                api: "openai-responses".to_string(),
+                provider: "openai".to_string(),
+                api_key_env: Some(TEST_API_KEY_ENV.to_string()),
+                base_url: Some(server.base_url.clone()),
+                capabilities: Capabilities {
+                    vision: true,
+                    files: true,
+                    tools: true,
+                    reasoning: true,
+                    web_search: false,
+                },
+                context_window: Some(400_000),
+                supported_reasoning_levels: Some(vec![
+                    "low".to_string(),
+                    "medium".to_string(),
+                    "high".to_string(),
+                    "xhigh".to_string(),
+                ]),
+                thinking_format: Some("openai".to_string()),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("set-xhigh-after-upsert".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "gpt-5.4".to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("format-prompt-after".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "after".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _after_second = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if count_event(&lines, "agent_end") >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+
+    let requests = server.requests();
+    let before_request = requests
+        .iter()
+        .find(|request| {
+            request.contains("\"stream\":true")
+                && request.contains("\"text\":\"before\"")
+                && !request.contains("\"text\":\"after\",\"type\":\"input_text\"")
+        })
+        .expect("expected a streamed request for the first prompt");
+    assert!(
+        !before_request.contains("\"effort\":\""),
+        "anthropic relay format on responses wire should omit reasoning effort: {}",
+        before_request
+    );
+    let after_request = requests
+        .iter()
+        .find(|request| {
+            request.contains("\"stream\":true")
+                && request.contains("\"text\":\"after\",\"type\":\"input_text\"")
+                && request.contains("\"effort\":\"xhigh\"")
+        })
+        .expect("expected a streamed request for the second prompt with xhigh effort");
+    assert!(
+        after_request.contains("\"effort\":\"xhigh\""),
+        "upserted openai format should hot-reload and send xhigh without restart: {}",
+        after_request
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_glm_max_emits_reasoning_effort_max() {
+    let _api_key = install_test_api_key();
+    let server = RecordingHttpServer::start(vec![ScriptedHttpResponse::sse(&[
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+        "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+    ])])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), &server.base_url);
+    cfg.llm.default_model = "glm-5.2".to_string();
+    cfg.context.compaction_model = "glm-5.2".to_string();
+    cfg.llm.title_model = None;
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "glm-5.2"
+model_name = "glm-5.2"
+api = "openai"
+provider = "zhipu"
+api_key_env = "{env}"
+base_url = "{base_url}"
+thinking_format = "zai"
+supported_reasoning_levels = ["high", "max"]
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+            base_url = server.base_url,
+        ),
+    )
+    .expect("write glm override");
+
+    let (state, buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("set-glm-max".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "glm-5.2".to_string(),
+            level: "max".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-glm-max".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "glm".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _lines = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if count_event(&lines, "agent_end") >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+
+    let requests = server.requests();
+    let glm_request = requests
+        .iter()
+        .find(|request| {
+            request.contains("\"stream\":true") && request.contains("\"reasoning_effort\":\"max\"")
+        })
+        .expect("expected a streamed glm request with max effort");
+    assert!(
+        glm_request.contains("\"reasoning_effort\":\"max\""),
+        "glm request should send max verbatim: {}",
+        glm_request
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_uses_catalog_id_for_reasoning_lookup_when_model_name_differs() {
+    let _api_key = install_test_api_key();
+    let server = RecordingHttpServer::start(vec![ScriptedHttpResponse::sse(&[
+        "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"ok\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_relay\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+    ])])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), &server.base_url);
+    cfg.llm.default_model = "relay/gpt-sol".to_string();
+    cfg.context.compaction_model = "relay/gpt-sol".to_string();
+    cfg.llm.title_model = None;
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "relay/gpt-sol"
+model_name = "gpt-sol"
+api = "openai-responses"
+provider = "relay"
+api_key_env = "{env}"
+base_url = "{base_url}"
+thinking_format = "openai"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh"]
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+            base_url = server.base_url,
+        ),
+    )
+    .expect("write relay override");
+
+    let (state, buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("set-relay-xhigh".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "relay/gpt-sol".to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetState {
+            id: Some("state-relay".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-relay".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "relay".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let state_lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("state-relay")
+    })
+    .await;
+    let state_response = state_lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-relay"))
+        .expect("relay get_state response");
+    assert_eq!(
+        state_response["payload"]["model"].as_str(),
+        Some("relay/gpt-sol")
+    );
+    assert_eq!(
+        state_response["payload"]["thinkingLevel"].as_str(),
+        Some("xhigh")
+    );
+
+    let _turn_lines = wait_for_line(&buffer, |line| {
+        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+    })
+    .await;
+
+    let requests = server.requests();
+    let relay_request = requests
+        .iter()
+        .find(|request| {
+            request.contains("\"stream\":true")
+                && request.contains("\"model\":\"gpt-sol\"")
+                && request.contains("\"effort\":\"xhigh\"")
+        })
+        .expect("expected a streamed relay request with xhigh effort");
+    assert!(
+        relay_request.contains("\"effort\":\"xhigh\""),
+        "relay request should send xhigh from the catalog id selection: {}",
+        relay_request
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_prompt_claude_adaptive_uses_output_config_effort() {
+    let _api_key = install_test_api_key();
+    let server = RecordingHttpServer::start(vec![ScriptedHttpResponse::sse(&[
+        "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":12}}}\n\n",
+        "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n",
+        "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n",
+        "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":12,\"output_tokens\":34}}\n\n",
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+    ])])
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = serve_test_config(temp.path(), &server.base_url);
+    cfg.llm.default_model = "claude-opus-4-8".to_string();
+    cfg.context.compaction_model = "claude-opus-4-8".to_string();
+    cfg.llm.title_model = None;
+    std::fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"
+[[models]]
+id = "claude-opus-4-8"
+model_name = "claude-opus-4-8"
+api = "anthropic-messages"
+provider = "anthropic"
+api_key_env = "{env}"
+base_url = "{base_url}"
+thinking_format = "anthropic-adaptive"
+supported_reasoning_levels = ["low", "medium", "high", "xhigh", "max"]
+capabilities = {{ vision = false, files = false, tools = true, reasoning = true, web_search = false }}
+"#,
+            env = TEST_API_KEY_ENV,
+            base_url = server.base_url,
+        ),
+    )
+    .expect("write claude override");
+
+    let (state, buffer, _temp, slot) =
+        crate::api::serve::test_support::build_initialized_state_with_config(temp, cfg).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetThinkingLevel {
+            id: Some("set-claude-xhigh".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: "claude-opus-4-8".to_string(),
+            level: "xhigh".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-claude-adaptive".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "claude".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let _lines = {
+        let mut lines = read_ndjson_lines(&buffer);
+        for _ in 0..50 {
+            lines = read_ndjson_lines(&buffer);
+            if count_event(&lines, "agent_end") >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        lines
+    };
+
+    let requests = server.requests();
+    let claude_request = requests
+        .iter()
+        .find(|request| {
+            request.contains("\"stream\":true")
+                && request.contains("\"output_config\":{\"effort\":\"xhigh\"}")
+        })
+        .expect("expected a streamed claude request with adaptive effort");
+    assert!(
+        claude_request.contains("\"thinking\":{\"type\":\"adaptive\"}"),
+        "claude adaptive request should enable adaptive thinking: {}",
+        claude_request
+    );
+    assert!(
+        claude_request.contains("\"output_config\":{\"effort\":\"xhigh\"}"),
+        "claude adaptive request should encode effort in output_config: {}",
+        claude_request
+    );
+
+    server.shutdown().await;
 }
 
 #[tokio::test]

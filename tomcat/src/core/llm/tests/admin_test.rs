@@ -15,6 +15,7 @@ use crate::core::llm::{
     LlmResolver, LlmScene, ModelCatalog, ModelEntryInput, ModelSource, ProviderKeyInput,
     SharedModelCatalog,
 };
+use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::infra::config::AppConfig;
 use crate::{resolve_sessions_dir, save_store, SessionEntry, SessionStore};
 
@@ -35,6 +36,7 @@ fn custom_claude_input() -> ModelEntryInput {
         base_url: Some("https://api.anthropic.com/v1".to_string()),
         capabilities: Capabilities::default(),
         context_window: None,
+        supported_reasoning_levels: None,
         thinking_format: Some("anthropic".to_string()),
     }
 }
@@ -58,14 +60,16 @@ fn upsert_list_and_remove_user_model_roundtrip() {
         base_url: Some("https://gateway.example.test/v1".to_string()),
         capabilities,
         context_window: Some(256_000),
-        thinking_format: Some("openai-responses".to_string()),
+        supported_reasoning_levels: None,
+        thinking_format: Some("openai".to_string()),
     };
 
     let view = upsert_user_model(&cfg, input).expect("upsert user model");
-    assert_eq!(view.source, ModelSource::User);
-    assert_eq!(view.api_key_env, "ADMIN_TEST_OPENAI_KEY");
-    assert!(!view.key_present);
-    assert_eq!(view.model_name.as_deref(), Some("gpt-5.4"));
+    assert_eq!(view.model.source, ModelSource::User);
+    assert_eq!(view.model.api_key_env, "ADMIN_TEST_OPENAI_KEY");
+    assert!(!view.model.key_present);
+    assert_eq!(view.model.model_name.as_deref(), Some("gpt-5.4"));
+    assert!(view.warnings.is_empty());
 
     let catalog = ModelCatalog::load(&cfg).expect("reload catalog");
     let views = list_model_views(&catalog);
@@ -173,17 +177,53 @@ fn upsert_user_model_accepts_id_with_slash() {
             ..Default::default()
         },
         context_window: None,
+        supported_reasoning_levels: None,
         thinking_format: None,
     };
 
     let view = upsert_user_model(&cfg, input).expect("slash id should be accepted");
-    assert_eq!(view.id, "chatanywhere/gpt-5.4");
+    assert_eq!(view.model.id, "chatanywhere/gpt-5.4");
 
     let catalog = ModelCatalog::load(&cfg).expect("reload catalog");
     let custom = catalog
         .lookup("chatanywhere/gpt-5.4")
         .expect("model with slash id should roundtrip");
     assert_eq!(custom.provider, "chatanywhere");
+}
+
+#[test]
+#[serial(env_lock)]
+fn upsert_user_model_collects_warning_for_openai_api_with_non_effort_format() {
+    clear_managed_credentials_for_test();
+    let (_work_dir, cfg) = temp_cfg();
+    let view = upsert_user_model(
+        &cfg,
+        ModelEntryInput {
+            id: "relay-openai".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            api: "openai-responses".to_string(),
+            provider: "relay".to_string(),
+            api_key_env: Some("RELAY_API_KEY".to_string()),
+            base_url: Some("https://gateway.example.test/v1".to_string()),
+            capabilities: Capabilities {
+                tools: true,
+                reasoning: true,
+                ..Default::default()
+            },
+            context_window: None,
+            supported_reasoning_levels: None,
+            thinking_format: Some("anthropic".to_string()),
+        },
+    )
+    .expect("upsert mismatched format");
+
+    assert_eq!(view.model.thinking_format.as_deref(), Some("anthropic"));
+    assert_eq!(view.warnings.len(), 1);
+    assert!(
+        view.warnings[0].contains("openai-responses") && view.warnings[0].contains("anthropic"),
+        "warning should explain the api/format mismatch, got: {:?}",
+        view.warnings
+    );
 }
 
 #[test]
@@ -465,6 +505,7 @@ fn upsert_user_model_rejects_unknown_api() {
             base_url: Some("https://example.test/v1".to_string()),
             capabilities: Capabilities::default(),
             context_window: None,
+            supported_reasoning_levels: None,
             thinking_format: None,
         },
     )
@@ -565,5 +606,79 @@ fn key_rotation_rebuilds_provider_for_same_resolver() {
     assert!(
         !Arc::ptr_eq(&first.provider_impl, &second.provider_impl),
         "provider cache should rebuild after key rotation"
+    );
+}
+
+#[test]
+#[serial(env_lock)]
+fn model_config_reload_rebuilds_provider_without_restart() {
+    clear_managed_credentials_for_test();
+    let (_work_dir, cfg) = temp_cfg();
+    let model_id = "relay-openai";
+    let api_key_env = "ADMIN_TEST_RELAY_API_KEY";
+    let base_url = "https://gateway.example.test/v1";
+    let capabilities = Capabilities {
+        tools: true,
+        reasoning: true,
+        ..Default::default()
+    };
+
+    upsert_user_model(
+        &cfg,
+        ModelEntryInput {
+            id: model_id.to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            api: "openai-responses".to_string(),
+            provider: "relay".to_string(),
+            api_key_env: Some(api_key_env.to_string()),
+            base_url: Some(base_url.to_string()),
+            capabilities: capabilities.clone(),
+            context_window: None,
+            supported_reasoning_levels: None,
+            thinking_format: Some("openai".to_string()),
+        },
+    )
+    .expect("seed relay model");
+    set_provider_key(
+        &cfg,
+        ProviderKeyInput {
+            env_name: api_key_env.to_string(),
+            value: "relay-secret".to_string(),
+        },
+    )
+    .expect("seed relay key");
+
+    let shared_catalog = SharedModelCatalog::load(&cfg).expect("shared catalog");
+    let resolver = DefaultLlmResolver::new(cfg.clone(), shared_catalog.clone());
+    let first = resolver
+        .resolve(LlmScene::Main, Some(model_id))
+        .expect("resolve openai wire");
+    assert_eq!(first.thinking_format, ThinkingFormat::Openai);
+
+    upsert_user_model(
+        &cfg,
+        ModelEntryInput {
+            id: model_id.to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            api: "openai-responses".to_string(),
+            provider: "relay".to_string(),
+            api_key_env: Some(api_key_env.to_string()),
+            base_url: Some(base_url.to_string()),
+            capabilities,
+            context_window: None,
+            supported_reasoning_levels: None,
+            thinking_format: Some("anthropic".to_string()),
+        },
+    )
+    .expect("rewrite relay model with new format");
+    shared_catalog.reload(&cfg).expect("reload shared catalog");
+
+    let second = resolver
+        .resolve(LlmScene::Main, Some(model_id))
+        .expect("resolve reconfigured wire");
+    assert_eq!(second.thinking_format, ThinkingFormat::Anthropic);
+    assert!(
+        !Arc::ptr_eq(&first.provider_impl, &second.provider_impl),
+        "provider cache should rebuild after model config reload"
     );
 }

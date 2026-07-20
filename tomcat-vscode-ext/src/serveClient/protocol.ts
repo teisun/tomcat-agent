@@ -19,6 +19,7 @@ export interface InitializePayload {
   protocolVersion: number;
   capabilities: string[];
   sessionId?: string | null;
+  serverVersion?: string | null;
 }
 
 export interface AskQuestionOption {
@@ -113,6 +114,12 @@ export function parseInitializePayload(payload: unknown): InitializePayload {
       payload.sessionId === undefined || payload.sessionId === null
         ? null
         : String(payload.sessionId),
+    serverVersion:
+      payload.serverVersion === undefined || payload.serverVersion === null
+        ? null
+        : typeof payload.serverVersion === "string"
+          ? payload.serverVersion
+          : null,
   };
 }
 

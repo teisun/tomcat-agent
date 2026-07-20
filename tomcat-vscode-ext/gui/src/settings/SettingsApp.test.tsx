@@ -497,7 +497,7 @@ describe("SettingsApp", () => {
           id: "chatanywhere/gpt-5.4",
           modelName: "gpt-5.4",
           provider: "chatanywhere",
-          thinkingFormat: null,
+          thinkingFormat: "openai",
         },
         providerKey: undefined,
       },
@@ -721,5 +721,73 @@ describe("SettingsApp", () => {
       },
       type: "upsertModel",
     });
+  });
+
+  it("renders warning banners pushed from the settings host", async () => {
+    mount();
+
+    await emitState(
+      readyState({
+        status: "Model saved.",
+        warnings: [
+          "API `openai-responses` expects reasoning effort, but thinking_format=`anthropic` will not send it.",
+        ],
+      }),
+    );
+
+    expect(
+      screen.getByText(
+        "API `openai-responses` expects reasoning effort, but thinking_format=`anthropic` will not send it.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText("Model saved.")).toBeTruthy();
+  });
+
+  it("shows extension and serve versions, and warns on missing or mismatched serve versions", async () => {
+    mount();
+
+    await emitState(
+      readyState({
+        expectedCliVersion: "0.1.15",
+        extensionVersion: "0.1.18",
+        serverVersion: "0.1.15",
+      }),
+    );
+
+    expect(screen.getByTestId("settings-version-footer").textContent).toContain(
+      "Extension v0.1.18",
+    );
+    expect(screen.getByTestId("settings-version-footer").textContent).toContain(
+      "Serve v0.1.15",
+    );
+    expect(screen.queryByText(/did not report a version/i)).toBeNull();
+    expect(screen.queryByText(/expects tomcat cli/i)).toBeNull();
+
+    await emitState(
+      readyState({
+        expectedCliVersion: "0.1.15",
+        extensionVersion: "0.1.18",
+        serverVersion: null,
+      }),
+    );
+
+    expect(screen.getByText(/did not report a version/i)).toBeTruthy();
+    expect(screen.getByTestId("settings-version-footer").textContent).toContain(
+      "Serve vunknown",
+    );
+
+    await emitState(
+      readyState({
+        expectedCliVersion: "0.1.15",
+        extensionVersion: "0.1.18",
+        serverVersion: "0.1.13",
+      }),
+    );
+
+    expect(
+      screen.getByText(
+        "This extension expects tomcat CLI v0.1.15, but the connected serve reports v0.1.13. Rebuild or update the CLI binary, then restart serve.",
+      ),
+    ).toBeTruthy();
   });
 });

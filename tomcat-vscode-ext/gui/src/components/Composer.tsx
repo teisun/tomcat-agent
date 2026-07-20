@@ -49,13 +49,6 @@ const MODE_OPTIONS = [
   { label: "Chat", value: "chat" },
   { label: "Plan", value: "plan" },
 ] as const;
-const THINKING_LEVEL_OPTIONS = [
-  { label: "Effort", value: "" },
-  { label: "Low", value: "low" },
-  { label: "Medium", value: "medium" },
-  { label: "High", value: "high" },
-  { label: "Xhigh", value: "xhigh" },
-] as const;
 
 function hasCapability(capabilities: string[], capability: "files" | "vision"): boolean {
   return capabilities.includes(capability);
@@ -122,8 +115,54 @@ function modeLabel(value: "chat" | "plan"): string {
   return MODE_OPTIONS.find((option) => option.value === value)?.label ?? "Chat";
 }
 
-function thinkingLevelLabel(value: "" | "high" | "low" | "medium" | "xhigh"): string {
-  return THINKING_LEVEL_OPTIONS.find((option) => option.value === value)?.label ?? "Effort";
+function titleCaseToken(value: string): string {
+  if (!value) {
+    return "";
+  }
+  return value[0].toUpperCase() + value.slice(1);
+}
+
+function thinkingLevelLabel(value: string): string {
+  switch (value.trim().toLowerCase()) {
+    case "":
+      return "Effort";
+    case "off":
+      return "Off";
+    case "xhigh":
+      return "Xhigh";
+    default:
+      return titleCaseToken(value.trim().toLowerCase());
+  }
+}
+
+function buildThinkingMenu(
+  supportedReasoningLevels: string[] | undefined,
+  currentValue: string,
+): {
+  buttonLabel: string;
+  fieldLabel: "Effort" | "Thinking";
+  options: Array<{ label: string; value: string }>;
+} {
+  const supported = Array.isArray(supportedReasoningLevels) ? supportedReasoningLevels : [];
+  if (supported.length === 0) {
+    const isOff = currentValue.trim().toLowerCase() === "off";
+    return {
+      buttonLabel: isOff ? "Off" : "On",
+      fieldLabel: "Thinking",
+      options: [
+        { label: "On", value: "high" },
+        { label: "Off", value: "off" },
+      ],
+    };
+  }
+  return {
+    buttonLabel: currentValue ? thinkingLevelLabel(currentValue) : thinkingLevelLabel(supported[0] ?? ""),
+    fieldLabel: "Effort",
+    options: supported.map((value) => ({
+      label: thinkingLevelLabel(value),
+      value,
+    })),
+  };
 }
 
 export interface ComposerDraft {
@@ -415,14 +454,15 @@ interface ComposerProps {
   onContextSearchClose(): void;
   onContextSearchOpen(): void;
   onContextSearchQueryChange(query: string): void;
-  thinkingLevelValue: "" | "high" | "low" | "medium" | "xhigh";
+  supportedReasoningLevels?: string[] | undefined;
+  thinkingLevelValue: string;
   onPickContext(): void;
   onDraftChange(draft: ComposerDraft): void;
   onModeChange(value: "chat" | "plan"): void;
   onModelChange(value: string): void;
   onOpenModelSettings?(): void;
   onResolveDrop(uris: string[]): void;
-  onThinkingLevelChange(value: "high" | "low" | "medium" | "xhigh" | ""): void;
+  onThinkingLevelChange(value: string): void;
   onInterrupt?(): void;
   onSubmit(): void;
   planState?: WebviewPlanState | null;
@@ -444,6 +484,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   onContextSearchClose,
   onContextSearchOpen,
   onContextSearchQueryChange,
+  supportedReasoningLevels,
   thinkingLevelValue,
   onPickContext,
   onDraftChange,
@@ -686,6 +727,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const canOpenModelMenu = canPrompt && (availableModels.length > 0 || Boolean(onOpenModelSettings));
   const canOpenModeMenu = canPrompt;
   const canOpenEffortMenu = canPrompt && Boolean(modelValue);
+  const thinkingMenu = useMemo(
+    () => buildThinkingMenu(supportedReasoningLevels, thinkingLevelValue),
+    [supportedReasoningLevels, thinkingLevelValue],
+  );
 
   const handleModelPick = (nextModel: string) => {
     onModelChange(nextModel);
@@ -701,9 +746,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setEffortMenuOpen(false);
   };
 
-  const handleThinkingLevelPick = (
-    nextLevel: "high" | "low" | "medium" | "xhigh" | "",
-  ) => {
+  const handleThinkingLevelPick = (nextLevel: string) => {
     onThinkingLevelChange(nextLevel);
     setModelMenuOpen(false);
     setModeMenuOpen(false);
@@ -1051,7 +1094,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             className="tc-field tc-field--compact tc-field--dropdown tc-field--effort"
             ref={effortMenuRef}
           >
-            <span>Effort</span>
+            <span>{thinkingMenu.fieldLabel}</span>
             <button
               aria-expanded={effortMenuOpen}
               aria-label="Tomcat reasoning effort"
@@ -1066,7 +1109,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               type="button"
             >
               <span className="tc-topbar__trigger-label">
-                {thinkingLevelLabel(thinkingLevelValue)}
+                {thinkingMenu.buttonLabel}
               </span>
               <span className="tc-topbar__caret" aria-hidden="true">
                 {effortMenuOpen ? "▴" : "▾"}
@@ -1077,14 +1120,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 className="tc-session-dropdown tc-composer-dropdown"
                 data-testid="thinking-level-dropdown"
               >
-                {THINKING_LEVEL_OPTIONS.map((option) => {
-                  const isActive = option.value === thinkingLevelValue;
+                {thinkingMenu.options.map((option) => {
+                  const isToggleMenu = thinkingMenu.fieldLabel === "Thinking";
+                  const isOff = thinkingLevelValue.trim().toLowerCase() === "off";
+                  const isActive = isToggleMenu
+                    ? option.value === "off"
+                      ? isOff
+                      : !isOff
+                    : option.value === thinkingLevelValue;
                   return (
                     <button
                       aria-current={isActive ? "true" : undefined}
                       className={`tc-session-item${isActive ? " tc-session-item--active" : ""}`}
                       data-testid="thinking-level-option"
-                      key={option.label}
+                      key={option.value}
                       onClick={() => handleThinkingLevelPick(option.value)}
                       type="button"
                     >

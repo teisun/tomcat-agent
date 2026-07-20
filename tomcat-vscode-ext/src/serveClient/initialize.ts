@@ -21,6 +21,7 @@ export interface InitializeResult {
   capabilities: string[];
   protocolVersion: number;
   sessionId: string | null;
+  serverVersion: string | null;
 }
 
 export function hasServeCapability(
@@ -67,5 +68,6 @@ export async function initializeServe(
     capabilities: payload.capabilities,
     protocolVersion: payload.protocolVersion,
     sessionId: payload.sessionId ?? frame.sessionId ?? null,
+    serverVersion: payload.serverVersion ?? null,
   };
 }
