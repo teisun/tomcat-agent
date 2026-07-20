@@ -19,10 +19,11 @@ describe("LoadingDots", () => {
     expect(dots.querySelectorAll(".tc-loading-dots__dot")).toHaveLength(3);
   }
 
-  it("cycles through one dot, two dots, three dots, blank, then repeats", () => {
+  it("cycles through one dot, two dots, three dots, then returns to one dot", () => {
     render(<LoadingDots testId="loading-dots" />);
 
     expectStage(1);
+    expect(screen.getByTestId("loading-dots").querySelectorAll(".tc-loading-shimmer")).toHaveLength(3);
 
     act(() => {
       vi.advanceTimersByTime(LOADING_DOTS_STEP_MS);
@@ -33,11 +34,6 @@ describe("LoadingDots", () => {
       vi.advanceTimersByTime(LOADING_DOTS_STEP_MS);
     });
     expectStage(3);
-
-    act(() => {
-      vi.advanceTimersByTime(LOADING_DOTS_STEP_MS);
-    });
-    expectStage(0);
 
     act(() => {
       vi.advanceTimersByTime(LOADING_DOTS_STEP_MS);

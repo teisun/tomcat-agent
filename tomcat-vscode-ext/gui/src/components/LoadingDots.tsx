@@ -4,7 +4,7 @@ export const LOADING_DOTS_STEP_MS = 500;
 
 function nextVisibleCount(current: number): number {
   if (current >= 3) {
-    return 0;
+    return 1;
   }
   return current + 1;
 }
@@ -37,7 +37,7 @@ export function LoadingDots({
     >
       {[0, 1, 2].map((index) => (
         <span
-          className="tc-loading-dots__dot"
+          className="tc-loading-dots__dot tc-loading-shimmer"
           data-visible={index < visibleCount ? "true" : "false"}
           key={index}
         >
