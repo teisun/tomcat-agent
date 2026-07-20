@@ -51,7 +51,7 @@ describe("settings panel html asset resolution", () => {
       ensureInitialized: async () => ({} as never),
       expectedCliVersion: "0.1.16",
       extensionUri,
-      extensionVersion: "0.1.19",
+      extensionVersion: "0.1.20",
       messenger: {} as never,
     });
 
@@ -80,7 +80,7 @@ describe("settings panel html asset resolution", () => {
       ensureInitialized: async () => ({} as never),
       expectedCliVersion: "0.1.16",
       extensionUri,
-      extensionVersion: "0.1.19",
+      extensionVersion: "0.1.20",
       messenger: {} as never,
     });
 
@@ -143,7 +143,7 @@ describe("settings panel model management flow", () => {
         })),
       expectedCliVersion: overrides?.expectedCliVersion ?? "0.1.16",
       extensionUri: vscode.Uri.file("/tmp/tomcat-ext"),
-      extensionVersion: overrides?.extensionVersion ?? "0.1.19",
+      extensionVersion: overrides?.extensionVersion ?? "0.1.20",
       messenger: messenger as never,
       onModelCatalogChanged: overrides?.onModelCatalogChanged,
     });
@@ -240,7 +240,7 @@ describe("settings panel model management flow", () => {
       type: "settings.ready",
     } satisfies SettingsIntent);
 
-    expect(panel.__testingSnapshot().state.extensionVersion).toBe("0.1.19");
+    expect(panel.__testingSnapshot().state.extensionVersion).toBe("0.1.20");
     expect(panel.__testingSnapshot().state.expectedCliVersion).toBe("0.1.16");
     expect(panel.__testingSnapshot().state.serverVersion).toBe("0.1.16");
   });

@@ -1115,7 +1115,8 @@ export async function assertWebviewMaxReasoningAndLoadingGapFlow(
     (candidate) =>
       candidate.activeSessionId === sessionId &&
       candidate.progressRow &&
-      candidate.loadingShimmerCount > 0 &&
+      candidate.html.includes('data-testid="progress-row-dots"') &&
+      !candidate.html.includes('data-testid="progress-row-label"') &&
       candidate.html.includes('data-testid="stop-button"')
         ? candidate
         : undefined,
@@ -1123,8 +1124,12 @@ export async function assertWebviewMaxReasoningAndLoadingGapFlow(
   );
   assert.equal(progressSnapshot.progressRow, true, "expected a pre-stream inline progress row");
   assert.ok(
-    progressSnapshot.loadingShimmerCount > 0,
-    `expected loading shimmer during the pre-stream gap, got ${progressSnapshot.loadingShimmerCount}`,
+    progressSnapshot.html.includes('data-testid="progress-row-dots"'),
+    "expected the pre-stream gap to render a dots-only progress row",
+  );
+  assert.ok(
+    !progressSnapshot.html.includes('data-testid="progress-row-label"'),
+    "expected the pre-stream gap to drop the visible Thinking label",
   );
   assert.ok(
     !progressSnapshot.html.includes("tc-codicon-spin") &&
@@ -1354,6 +1359,8 @@ export async function assertWebviewStreamingFlow(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
+      candidate.progressRow &&
+      candidate.html.includes('data-testid="progress-row-dots"') &&
       candidate.loadingShimmerCount === 0 &&
       candidate.groupFoldTitles.some((title) => title.includes("Read file README.md")) &&
       !candidate.html.includes("tc-codicon-spin") &&
@@ -1366,6 +1373,11 @@ export async function assertWebviewStreamingFlow(
     settledBeforeUpgrade.loadingShimmerCount,
     0,
     `expected the group shimmer to stop as soon as the tool completed, got ${settledBeforeUpgrade.loadingShimmerCount}`,
+  );
+  assert.equal(
+    settledBeforeUpgrade.progressRow,
+    true,
+    "expected the completed-tool gap to fall back to the shared progress row",
   );
 
   await api.__testing.injectServeEvent({
@@ -1382,6 +1394,7 @@ export async function assertWebviewStreamingFlow(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
+      candidate.progressRow &&
       candidate.groupFoldTitles.some((title) => title.includes("Used 1 tool")) &&
       candidate.loadingShimmerCount === 0
         ? candidate
@@ -1391,6 +1404,11 @@ export async function assertWebviewStreamingFlow(
   assert.ok(
     fallbackSummarySnapshot.groupFoldTitles.some((title) => title.includes("Used 1 tool")),
     `expected the grouped transcript header to show the fallback count title first, got ${JSON.stringify(fallbackSummarySnapshot.groupFoldTitles)}`,
+  );
+  assert.equal(
+    fallbackSummarySnapshot.progressRow,
+    true,
+    "expected the fallback-title gap to keep using the shared progress row",
   );
 
   await api.__testing.injectServeEvent({
@@ -1404,6 +1422,7 @@ export async function assertWebviewStreamingFlow(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
+      candidate.progressRow &&
       candidate.groupFoldTitles.some((title) => title.includes("Used 1 tool for checking the README")) &&
       candidate.loadingShimmerCount === 0
         ? candidate
@@ -1415,6 +1434,37 @@ export async function assertWebviewStreamingFlow(
       title.includes("Used 1 tool for checking the README")
     ),
     `expected turn.summary_updated to upgrade the folded transcript title, got ${JSON.stringify(upgradedSummarySnapshot.groupFoldTitles)}`,
+  );
+  assert.equal(
+    upgradedSummarySnapshot.progressRow,
+    true,
+    "expected summary upgrades to leave the shared progress row lifecycle untouched",
+  );
+
+  await api.__testing.injectServeEvent({
+    assistantMessageId: "streaming-context-group-1",
+    assistantMessageEvent: {
+      delta: "The README checks out.",
+      kind: "content_delta",
+    },
+    message: {},
+    sessionId,
+    type: "message_update",
+  });
+  const resumedOutputSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      !candidate.progressRow &&
+      candidate.messageTexts.some((text) => text.includes("The README checks out."))
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.equal(
+    resumedOutputSnapshot.progressRow,
+    false,
+    "expected the shared progress row to disappear once assistant output resumes",
   );
 
   await api.__testing.injectServeEvent({

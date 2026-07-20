@@ -553,7 +553,9 @@ describe("TranscriptView", () => {
     );
 
     expect(screen.getByTestId("live-cluster")).toBeTruthy();
-    expect(screen.getByTestId("progress-row-label").textContent).toBe("Thinking");
+    expect(screen.getByTestId("progress-row-dots").textContent).toBe("...");
+    expect(screen.queryByTestId("progress-row-label")).toBeNull();
+    expect(screen.queryByText("Thinking")).toBeNull();
 
     rerender(
       <TranscriptView
@@ -570,6 +572,123 @@ describe("TranscriptView", () => {
             id: "assistant-1",
             kind: "assistant",
             text: "first streamed token",
+            type: "message",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByTestId("progress-row")).toBeNull();
+  });
+
+  it("reuses the progress row after tools finish until the next live output arrives", () => {
+    const userMessage: WebviewTimelineItem = {
+      id: "user-1",
+      kind: "user",
+      text: "latest prompt",
+      type: "message",
+    };
+    const thinkingBlock: WebviewTimelineItem = {
+      assistantMessageId: "assistant-1",
+      id: "thinking-1",
+      summaryTitle: "Used 1 tool",
+      text: "checked the README before answering",
+      type: "thinking",
+    };
+    const runningTool: WebviewTimelineItem = {
+      args: { path: "README.md" },
+      assistantMessageId: "assistant-1",
+      id: "tool-1",
+      isError: false,
+      status: "running",
+      summary: "partial read",
+      toolCallId: "tool-call-1",
+      toolName: "read",
+      type: "tool",
+    };
+    const completedTool: WebviewTimelineItem = {
+      ...runningTool,
+      status: "complete",
+      summary: "# README",
+    };
+
+    const { rerender } = render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[userMessage, thinkingBlock, runningTool]}
+      />,
+    );
+
+    expect(screen.queryByTestId("progress-row")).toBeNull();
+
+    rerender(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[userMessage, thinkingBlock, completedTool]}
+      />,
+    );
+
+    expect(screen.getByTestId("progress-row-dots").textContent).toBe("...");
+    expect(screen.queryByText("Thinking")).toBeNull();
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe("Used 1 tool");
+    expect(screen.getByTestId("thinking-group-title").className).not.toContain(
+      "tc-thinking__title--shimmer",
+    );
+
+    rerender(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[
+          userMessage,
+          {
+            ...thinkingBlock,
+            summaryTitle: "Used 1 tool for checking the README",
+          },
+          completedTool,
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("progress-row-dots").textContent).toBe("...");
+    expect(screen.getByTestId("thinking-group-title").textContent).toBe(
+      "Used 1 tool for checking the README",
+    );
+
+    rerender(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[
+          userMessage,
+          {
+            ...thinkingBlock,
+            summaryTitle: "Used 1 tool for checking the README",
+          },
+          completedTool,
+          {
+            assistantMessageId: "assistant-1",
+            id: "assistant-1-message",
+            kind: "assistant",
+            text: "The README looks good.",
             type: "message",
           },
         ]}

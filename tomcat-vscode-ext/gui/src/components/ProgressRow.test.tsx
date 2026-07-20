@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { ProgressRow } from "../components/ProgressRow";
 
 describe("ProgressRow", () => {
-  it("renders a minimal dots placeholder while busy with no richer activity", () => {
+  it("renders only breathing dots while busy with no richer activity", () => {
     render(
       <ProgressRow
         busy
@@ -15,8 +15,9 @@ describe("ProgressRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("progress-row-label").textContent).toBe("Thinking");
-    expect(screen.getByTestId("progress-row-label").className).toContain("tc-loading-shimmer");
+    expect(screen.getByRole("status", { name: "Waiting for more output" })).toBeTruthy();
+    expect(screen.queryByTestId("progress-row-label")).toBeNull();
+    expect(screen.queryByText("Thinking")).toBeNull();
     expect(screen.getByTestId("progress-row-dots").textContent).toBe("...");
   });
 
@@ -40,6 +41,28 @@ describe("ProgressRow", () => {
         hasRunningTool
         hasStreamingText={false}
         hasTodos={false}
+      />,
+    );
+    expect(screen.queryByTestId("progress-row")).toBeNull();
+
+    rerender(
+      <ProgressRow
+        busy
+        hasActiveThinking={false}
+        hasRunningTool={false}
+        hasStreamingText
+        hasTodos={false}
+      />,
+    );
+    expect(screen.queryByTestId("progress-row")).toBeNull();
+
+    rerender(
+      <ProgressRow
+        busy
+        hasActiveThinking={false}
+        hasRunningTool={false}
+        hasStreamingText={false}
+        hasTodos
       />,
     );
     expect(screen.queryByTestId("progress-row")).toBeNull();

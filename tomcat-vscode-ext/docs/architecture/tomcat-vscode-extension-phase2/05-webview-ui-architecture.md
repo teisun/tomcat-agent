@@ -331,6 +331,7 @@ thinking 仍保持独立卡，而不是嵌入 assistant 气泡，原因有三：
 - leading/history cluster 的 `ThinkingGroup` 不会被新一轮的 busy 连坐成 shimmer；
 - 只有当前 live cluster 里最后一个 **pure thinking 残组**，或**仍有工具未完成**的 context group，才有资格拿到 `isStreaming=true`；
 - transcript 的分组头 / thinking 头**不再使用转圈 `codicon-loading`**：工具组固定 `codicon-search`，纯 thinking 固定 `codicon-lightbulb`，是否“正在干活”只靠标题 shimmer 表达；工具一旦全部完成，哪怕 session 还没 `agent_idle`，这组头也会立刻停 shimmer。
+- request 级空窗期（刚发出请求但还没出现首条 live 内容，或 tool 都完成了但下一段 LLM 输出还没回来）**不再绑回旧组头**，而是统一复用 cluster 尾部的 `ProgressRow`；这行现在只显示呼吸 `...`，不再显示可见 `Thinking` 文案。也就是说：组头只表达“这个块自己还在干活”，而 `ProgressRow` 只表达“整个请求还活着，但此刻没有任何块在工作”。
 
 ### 5.3 Transcript 工具行：标题恒显，结果体按类型折叠
 

@@ -749,13 +749,13 @@ describe("SettingsApp", () => {
     await emitState(
       readyState({
         expectedCliVersion: "0.1.16",
-        extensionVersion: "0.1.19",
+        extensionVersion: "0.1.20",
         serverVersion: "0.1.16",
       }),
     );
 
     expect(screen.getByTestId("settings-version-footer").textContent).toContain(
-      "Extension v0.1.19",
+      "Extension v0.1.20",
     );
     expect(screen.getByTestId("settings-version-footer").textContent).toContain(
       "Serve v0.1.16",
@@ -766,7 +766,7 @@ describe("SettingsApp", () => {
     await emitState(
       readyState({
         expectedCliVersion: "0.1.16",
-        extensionVersion: "0.1.19",
+        extensionVersion: "0.1.20",
         serverVersion: null,
       }),
     );
@@ -779,7 +779,7 @@ describe("SettingsApp", () => {
     await emitState(
       readyState({
         expectedCliVersion: "0.1.16",
-        extensionVersion: "0.1.19",
+        extensionVersion: "0.1.20",
         serverVersion: "0.1.13",
       }),
     );

@@ -2,7 +2,7 @@
   "name": "tomcat-vscode-ext",
   "displayName": "Tomcat",
   "description": "Tomcat Agent Box, an AI coding agent in your VS Code sidebar.",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "publisher": "tomcat",
   "license": "MIT",
   "repository": {

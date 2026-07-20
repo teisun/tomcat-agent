@@ -33,6 +33,21 @@ export type AssistantRenderEntry =
       type: "action-tool";
     };
 
+function lastLiveActivityType(
+  clusterTimeline: WebviewTimelineItem[],
+): "message" | "thinking" | "tool" | null {
+  for (let index = clusterTimeline.length - 1; index >= 0; index -= 1) {
+    const item = clusterTimeline[index];
+    if (item.type === "thinking" || item.type === "tool") {
+      return item.type;
+    }
+    if (item.type === "message" && item.kind === "assistant") {
+      return "message";
+    }
+  }
+  return null;
+}
+
 export function partitionAssistantResponseGroup(
   group: AssistantResponseGroup,
 ): AssistantRenderEntry[] {
@@ -140,6 +155,7 @@ export function TranscriptView({
     const clusterLastThinkingId = showProgress
       ? [...clusterTimeline].reverse().find((item) => item.type === "thinking")?.id ?? null
       : null;
+    const lastLiveActivity = showProgress ? lastLiveActivityType(clusterTimeline) : null;
 
     const renderTimelineItem = (item: WebviewTimelineItem) => {
       switch (item.type) {
@@ -269,13 +285,11 @@ export function TranscriptView({
       return renderTimelineItem(item as WebviewTimelineItem);
     };
 
-    const hasActiveThinking = clusterTimeline.some((item) => item.type === "thinking");
+    const hasActiveThinking = lastLiveActivity === "thinking";
     const hasRunningTool = clusterTimeline.some(
       (item) => item.type === "tool" && item.status !== "complete",
     );
-    const hasStreamingText = clusterTimeline.some(
-      (item) => item.type === "message" && item.kind === "assistant",
-    );
+    const hasStreamingText = lastLiveActivity === "message";
     const hasTodos = Boolean(
       selectActiveTodoSource({
         busy,
