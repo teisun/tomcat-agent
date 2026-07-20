@@ -579,6 +579,89 @@ describe("TranscriptView", () => {
     expect(screen.queryByTestId("progress-row")).toBeNull();
   });
 
+  it("only shimmers thinking groups that still have unfinished work in the live cluster", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        id: "user-1",
+        kind: "user",
+        text: "latest prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "assistant-complete",
+        id: "thinking-complete",
+        summaryTitle: "Reviewed 1 file",
+        text: "checked the current file",
+        type: "thinking",
+      },
+      {
+        args: { path: "/workspace/finished.ts" },
+        assistantMessageId: "assistant-complete",
+        id: "tool-complete",
+        isError: false,
+        status: "complete",
+        summary: "export const done = true;",
+        toolCallId: "tc-complete",
+        toolName: "read",
+        type: "tool",
+      },
+      {
+        assistantMessageId: "assistant-running",
+        id: "thinking-running",
+        summaryTitle: "Used 2 tools",
+        text: "now checking the remaining references",
+        type: "thinking",
+      },
+      {
+        args: { path: "/workspace/active.ts" },
+        assistantMessageId: "assistant-running",
+        id: "tool-running-1",
+        isError: false,
+        status: "running",
+        summary: "partial contents",
+        toolCallId: "tc-running-1",
+        toolName: "read",
+        type: "tool",
+      },
+      {
+        args: { query: "activeSymbol" },
+        assistantMessageId: "assistant-running",
+        id: "tool-running-2",
+        isError: false,
+        status: "complete",
+        summary: "Found 1 result.\nactive.ts:3",
+        toolCallId: "tc-running-2",
+        toolName: "search_workspace",
+        type: "tool",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    const titles = screen.getAllByTestId("thinking-group-title");
+    const statuses = screen.getAllByTestId("thinking-group-status");
+
+    expect(titles).toHaveLength(2);
+    expect(titles[0].className).not.toContain("tc-thinking__title--shimmer");
+    expect(titles[1].className).toContain("tc-thinking__title--shimmer");
+    expect(titles[1].textContent).toBe("Used 2 tools");
+
+    expect(statuses[0].className).toContain("codicon-search");
+    expect(statuses[1].className).toContain("codicon-search");
+    expect(statuses[0].className).not.toContain("codicon-loading");
+    expect(statuses[1].className).not.toContain("codicon-loading");
+  });
+
   it("does not shimmer a leading thinking group when the live cluster has no thinking yet", () => {
     const timeline: WebviewTimelineItem[] = [
       {
@@ -646,5 +729,6 @@ describe("TranscriptView", () => {
     expect(screen.getByTestId("thinking-group-status").className).not.toContain(
       "codicon-loading",
     );
+    expect(screen.getByTestId("thinking-group-status").className).toContain("codicon-search");
   });
 });

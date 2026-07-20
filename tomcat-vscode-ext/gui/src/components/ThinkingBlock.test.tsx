@@ -30,14 +30,17 @@ describe("ThinkingBlock", () => {
     expect(screen.getByTestId("thinking-summary").textContent).toContain(
       "Inspect transcript grouping before touching provider state.",
     );
-    expect(screen.getByTestId("thinking-status").className).toContain("codicon-loading");
+    expect(screen.getByTestId("thinking-status").className).toContain("codicon-lightbulb");
+    expect(screen.getByTestId("thinking-status").className).not.toContain("codicon-loading");
+    expect(screen.getByTestId("thinking-status").className).not.toContain("tc-codicon-spin");
 
     rerender(<ThinkingBlock item={item} />);
 
     expect(screen.getByTestId("thinking-summary").textContent).toContain(
       "Inspect transcript grouping before touching provider state.",
     );
-    expect(screen.getByTestId("thinking-status").className).toContain("codicon-check");
+    expect(screen.getByTestId("thinking-status").className).toContain("codicon-lightbulb");
+    expect(screen.getByTestId("thinking-status").className).not.toContain("codicon-check");
   });
 
   it("expands the body when toggled", () => {

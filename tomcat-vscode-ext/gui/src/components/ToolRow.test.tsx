@@ -557,6 +557,36 @@ describe("ToolRow", () => {
     expect(screen.queryByTestId("tool-row-body")).toBeNull();
   });
 
+  it("applies shimmer to running context rows and removes it after completion", () => {
+    const { rerender } = render(
+      <ToolRow
+        item={buildTool({
+          args: { query: "config" },
+          status: "running",
+          summary: "Found 1 result.\nconfig.ts:1",
+          toolName: "search_workspace",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { query: "config" },
+          status: "complete",
+          summary: "Found 1 result.\nconfig.ts:1",
+          toolName: "search_workspace",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeNull();
+  });
+
   it("maps additional built-in tools to readable labels and distinct icons", () => {
     const { rerender } = render(
       <ToolRow

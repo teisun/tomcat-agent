@@ -20,7 +20,7 @@ function groupHeaderTitle(
 ): { shimmer: boolean; text: string } {
   const summaryTitle = group.thinking?.summaryTitle ?? null;
   if (summaryTitle && (group.tools.length === 0 || !isDirtySummaryTitle(summaryTitle, group.tools))) {
-    return { shimmer: false, text: summaryTitle };
+    return { shimmer: isStreaming, text: summaryTitle };
   }
   if (group.tools.length > 0) {
     return { shimmer: isStreaming, text: buildToolCollectionTitle(group.tools) };
@@ -47,9 +47,8 @@ export function ThinkingGroup({
   }, [group.assistantMessageId, streaming]);
 
   const header = useMemo(() => groupHeaderTitle(group, isStreaming), [group, isStreaming]);
-  const statusIconClass = isStreaming
-    ? "tc-thinking-box__status codicon codicon-loading tc-codicon-spin"
-    : group.tools.length > 0
+  const statusIconClass =
+    group.tools.length > 0
       ? "tc-thinking-box__status codicon codicon-search"
       : "tc-thinking-box__status codicon codicon-lightbulb";
 

@@ -40,9 +40,7 @@ export function ThinkingBlock({
     ) : null;
   }
 
-  const statusIconClass = isStreaming
-    ? "tc-thinking__status codicon codicon-loading tc-codicon-spin"
-    : "tc-thinking__status codicon codicon-check";
+  const statusIconClass = "tc-thinking__status codicon codicon-lightbulb";
 
   return (
     <section

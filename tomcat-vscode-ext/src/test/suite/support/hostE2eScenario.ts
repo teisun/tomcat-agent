@@ -1126,6 +1126,11 @@ export async function assertWebviewMaxReasoningAndLoadingGapFlow(
     progressSnapshot.loadingShimmerCount > 0,
     `expected loading shimmer during the pre-stream gap, got ${progressSnapshot.loadingShimmerCount}`,
   );
+  assert.ok(
+    !progressSnapshot.html.includes("tc-codicon-spin") &&
+      !progressSnapshot.html.includes("codicon-loading"),
+    "expected the pre-stream gap to avoid loading spinner icons",
+  );
 
   const thinkingSnapshot = await waitForWebviewDomSnapshot(
     api,
@@ -1147,6 +1152,12 @@ export async function assertWebviewMaxReasoningAndLoadingGapFlow(
   assert.ok(
     !thinkingSnapshot.standaloneThinkingTitles.includes("Tomcat · Thinking"),
     `expected the product prefix to stay removed, got ${JSON.stringify(thinkingSnapshot.standaloneThinkingTitles)}`,
+  );
+  assert.ok(
+    thinkingSnapshot.html.includes("codicon-lightbulb") &&
+      !thinkingSnapshot.html.includes("tc-codicon-spin") &&
+      !thinkingSnapshot.html.includes("codicon-loading"),
+    "expected standalone thinking to use a static lightbulb instead of a spinner",
   );
 
   await waitForEvent(api, {
@@ -1287,6 +1298,134 @@ export async function assertWebviewStreamingFlow(
     !summarySnapshot.toolTitles.some((title) => title.includes("git status && echo done")),
     "expected the full command to stay out of the bash header",
   );
+
+  await api.__testing.injectServeEvent({
+    sessionId,
+    type: "agent_start",
+  });
+  await api.__testing.injectServeEvent({
+    assistantMessageId: "streaming-context-group-1",
+    assistantMessageEvent: {
+      delta: "Inspecting the README before wrapping up.",
+      kind: "thinking_delta",
+    },
+    message: {},
+    sessionId,
+    type: "message_update",
+  });
+  await api.__testing.injectServeEvent({
+    args: { path: "README.md" },
+    sessionId,
+    toolCallId: "streaming-context-tool-1",
+    toolName: "read",
+    type: "tool_execution_start",
+  });
+  const runningGroupSnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.loadingShimmerCount > 0 &&
+      candidate.groupFoldTitles.some((title) => title.includes("Reading file README.md")) &&
+      !candidate.html.includes("tc-codicon-spin") &&
+      !candidate.html.includes("codicon-loading")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    runningGroupSnapshot.loadingShimmerCount > 0,
+    `expected the live context group to shimmer while its tool is running, got ${runningGroupSnapshot.loadingShimmerCount}`,
+  );
+  assert.ok(
+    runningGroupSnapshot.groupFoldTitles.some((title) => title.includes("Reading file README.md")),
+    `expected the live context group title to reflect the running read, got ${JSON.stringify(runningGroupSnapshot.groupFoldTitles)}`,
+  );
+
+  await api.__testing.injectServeEvent({
+    display: { file: "README.md", kind: "file" },
+    isError: false,
+    result: "# readme\n",
+    sessionId,
+    toolCallId: "streaming-context-tool-1",
+    toolName: "read",
+    type: "tool_execution_end",
+  });
+  const settledBeforeUpgrade = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.loadingShimmerCount === 0 &&
+      candidate.groupFoldTitles.some((title) => title.includes("Read file README.md")) &&
+      !candidate.html.includes("tc-codicon-spin") &&
+      !candidate.html.includes("codicon-loading")
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.equal(
+    settledBeforeUpgrade.loadingShimmerCount,
+    0,
+    `expected the group shimmer to stop as soon as the tool completed, got ${settledBeforeUpgrade.loadingShimmerCount}`,
+  );
+
+  await api.__testing.injectServeEvent({
+    assistantMessageId: "streaming-context-group-1",
+    message: {},
+    sessionId,
+    summaryTitle: "Used 1 tool",
+    toolCallIds: ["streaming-context-tool-1"],
+    toolResults: [{}],
+    turnIndex: 1,
+    type: "turn_end",
+  });
+  const fallbackSummarySnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.groupFoldTitles.some((title) => title.includes("Used 1 tool")) &&
+      candidate.loadingShimmerCount === 0
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    fallbackSummarySnapshot.groupFoldTitles.some((title) => title.includes("Used 1 tool")),
+    `expected the grouped transcript header to show the fallback count title first, got ${JSON.stringify(fallbackSummarySnapshot.groupFoldTitles)}`,
+  );
+
+  await api.__testing.injectServeEvent({
+    sessionId,
+    summaryTitle: "Used 1 tool for checking the README",
+    toolCallIds: ["streaming-context-tool-1"],
+    turnIndex: 1,
+    type: "turn.summary_updated",
+  });
+  const upgradedSummarySnapshot = await waitForWebviewDomSnapshot(
+    api,
+    (candidate) =>
+      candidate.activeSessionId === sessionId &&
+      candidate.groupFoldTitles.some((title) => title.includes("Used 1 tool for checking the README")) &&
+      candidate.loadingShimmerCount === 0
+        ? candidate
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    upgradedSummarySnapshot.groupFoldTitles.some((title) =>
+      title.includes("Used 1 tool for checking the README")
+    ),
+    `expected turn.summary_updated to upgrade the folded transcript title, got ${JSON.stringify(upgradedSummarySnapshot.groupFoldTitles)}`,
+  );
+
+  await api.__testing.injectServeEvent({
+    messages: [],
+    sessionId,
+    type: "agent_end",
+  });
+  await api.__testing.injectServeEvent({
+    sessionId,
+    type: "agent_idle",
+  });
 }
 
 export async function assertWebviewInterruptFlow(
@@ -3132,6 +3271,7 @@ export async function assertTranscriptUiFlow(
     candidate.planCardCount >= 1 &&
     !candidate.progressRow &&
     !candidate.todoWidgetVisible &&
+    candidate.planFooterSameRow &&
     candidate.userPromptPill &&
     candidate.assistantNoCard &&
     candidate.sessionTitleUpdated &&
@@ -3150,6 +3290,7 @@ export async function assertTranscriptUiFlow(
         !candidate.progressRow &&
         candidate.todoWidgetVisible &&
         candidate.planCardCount > 0 &&
+        candidate.planFooterSameRow &&
         candidate.composerFooterPlanStatus === "Plan: planning"
           ? candidate
           : undefined,

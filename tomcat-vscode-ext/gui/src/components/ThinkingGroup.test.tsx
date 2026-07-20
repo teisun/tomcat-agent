@@ -58,6 +58,9 @@ describe("ThinkingGroup", () => {
     );
 
     expect(screen.getByTestId("thinking-group-title").textContent).toBe("Reviewed 3 files");
+    expect(screen.getByTestId("thinking-group-title").className).not.toContain(
+      "tc-thinking__title--shimmer",
+    );
     expect(screen.getByText("I'll review files.")).toBeTruthy();
   });
 
@@ -160,6 +163,40 @@ describe("ThinkingGroup", () => {
     );
   });
 
+  it("applies shimmer to a clean summary title only while the group is streaming", () => {
+    const group = buildGroup({
+      thinking: {
+        assistantMessageId: "assistant-1",
+        id: "think-1",
+        summaryTitle: "Used 4 tools for finding coffee shops in Shenzhen",
+        text: "Mixed batch of reads and edits.",
+        type: "thinking",
+      },
+    });
+    const { rerender } = render(
+      <ThinkingGroup
+        group={group}
+        isStreaming
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("thinking-group-title").className).toContain(
+      "tc-thinking__title--shimmer",
+    );
+
+    rerender(
+      <ThinkingGroup
+        group={group}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("thinking-group-title").className).not.toContain(
+      "tc-thinking__title--shimmer",
+    );
+  });
+
   it("replaces raw tool-argument summary titles with a clean tool label", () => {
     render(
       <ThinkingGroup
@@ -191,7 +228,7 @@ describe("ThinkingGroup", () => {
     expect(screen.getByTestId("thinking-group-title").textContent).toBe("Asked question");
   });
 
-  it("shows a loading status icon while streaming and a search icon for context groups when done", () => {
+  it("keeps a static search icon for tool groups, even while streaming", () => {
     const { rerender } = render(
       <ThinkingGroup
         group={buildGroup()}
@@ -201,7 +238,13 @@ describe("ThinkingGroup", () => {
     );
 
     expect(screen.getByTestId("thinking-group-status").className).toContain(
+      "codicon-search",
+    );
+    expect(screen.getByTestId("thinking-group-status").className).not.toContain(
       "codicon-loading",
+    );
+    expect(screen.getByTestId("thinking-group-status").className).not.toContain(
+      "tc-codicon-spin",
     );
 
     rerender(
@@ -236,6 +279,9 @@ describe("ThinkingGroup", () => {
 
     expect(screen.getByTestId("thinking-group-title").className).toContain(
       "tc-thinking__title--shimmer",
+    );
+    expect(screen.getByTestId("thinking-group-status").className).toContain(
+      "codicon-lightbulb",
     );
   });
 

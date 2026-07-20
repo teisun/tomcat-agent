@@ -39,10 +39,25 @@ pub async fn generate_turn_summary(
         return String::new();
     }
     let prompt = build_turn_summary_prompt(thinking_text, tools);
-    let title = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await
-    {
+    let title = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
         Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 10),
-        _ => fallback_turn_summary(tools),
+        Ok(Ok(_)) => fallback_turn_summary(tools),
+        Ok(Err(err)) => {
+            tracing::warn!(
+                model,
+                err = %err,
+                "turn summary utility generation failed; keeping fallback title"
+            );
+            fallback_turn_summary(tools)
+        }
+        Err(err) => {
+            tracing::warn!(
+                model,
+                err = %err,
+                "turn summary utility generation timed out; keeping fallback title"
+            );
+            fallback_turn_summary(tools)
+        }
     };
     if is_bare_tool_count(&title) {
         if let Some(clause) = generate_purpose_clause(thinking_text, tools, llm, model).await {
@@ -62,7 +77,23 @@ async fn generate_purpose_clause(
     let prompt = build_purpose_clause_prompt(thinking_text, tools);
     let raw = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
         Ok(Ok(text)) if !text.trim().is_empty() => text,
-        _ => return None,
+        Ok(Ok(_)) => return None,
+        Ok(Err(err)) => {
+            tracing::warn!(
+                model,
+                err = %err,
+                "purpose clause utility generation failed; keeping bare count title"
+            );
+            return None;
+        }
+        Err(err) => {
+            tracing::warn!(
+                model,
+                err = %err,
+                "purpose clause utility generation timed out; keeping bare count title"
+            );
+            return None;
+        }
     };
     let clause = sanitize_purpose_clause(raw);
     if clause.is_empty() {

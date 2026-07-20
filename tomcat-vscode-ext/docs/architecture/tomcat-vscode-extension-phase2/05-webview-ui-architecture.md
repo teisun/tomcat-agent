@@ -327,9 +327,10 @@ thinking 仍保持独立卡，而不是嵌入 assistant 气泡，原因有三：
 
 [`gui/src/components/TranscriptView.tsx`](../../../gui/src/components/TranscriptView.tsx) 不再对**整条 transcript**找“最后一个 thinking”，而是只在 `liveClusterTimeline`（最后一条 user 之后、且 `showProgress=true` 的那一组）内部找 `clusterLastThinkingId`。也就是说：
 
-- 旧轮 thinking 永远是过去态，不会因为全局 `busy=true` 又重新转圈；
+- 旧轮 thinking 永远是过去态，不会因为全局 `busy=true` 又重新进入“加载中”视觉；
 - leading/history cluster 的 `ThinkingGroup` 不会被新一轮的 busy 连坐成 shimmer；
-- 只有当前 live cluster 里最后一个 thinking 才有资格拿到 `isStreaming=true`。
+- 只有当前 live cluster 里最后一个 **pure thinking 残组**，或**仍有工具未完成**的 context group，才有资格拿到 `isStreaming=true`；
+- transcript 的分组头 / thinking 头**不再使用转圈 `codicon-loading`**：工具组固定 `codicon-search`，纯 thinking 固定 `codicon-lightbulb`，是否“正在干活”只靠标题 shimmer 表达；工具一旦全部完成，哪怕 session 还没 `agent_idle`，这组头也会立刻停 shimmer。
 
 ### 5.3 Transcript 工具行：标题恒显，结果体按类型折叠
 
@@ -420,6 +421,7 @@ agent_loop            tool_dispatcher                utility-flash        ext ho
 - **后端**：[`tool_dispatcher.rs`](../../../../tomcat/src/core/agent_loop/tool_dispatcher.rs) 发出 `ToolExecutionEnd` 后，对 `bash/shell/execute_command` 调 [`tool_summary_update::maybe_spawn_tool_summary_update`](../../../../tomcat/src/core/agent_loop/tool_summary_update.rs)（`tokio::spawn`，8s 超时，复用 `title_provider/title_model/emitter`）。短句由 [`generate_command_summary`](../../../../tomcat/src/core/summary/title_generator.rs)（祈使句 2–6 词）产出，失败回落 `Run <首个命令名>`。
 - **事件**：新增 `WIRE_TOOL_SUMMARY_UPDATED = "tool.summary_updated"`（[`infra/events/mod.rs`](../../../../tomcat/src/infra/events/mod.rs)）与 `ServeToolEvent::ToolSummaryUpdated { sessionId?, toolCallId, summaryTitle? }`（[`api/serve/types.rs`](../../../../tomcat/src/api/serve/types.rs)，并入 `ServeEvent` union）；`serve --print-schema` 已同步到 [`wire.d.ts`](../../../src/serveClient/wire.d.ts) 与 serve fixture。注意 **serve 侧还要把它列进 [`event_pump.rs`](../../../../tomcat/src/api/serve/event_pump.rs) 的 `EVENT_NAMES` 白名单**，否则后端虽然 emit 了 `tool.summary_updated`，插件/webview 仍收不到。
 - **宿主**：[`state.ts`](../../../src/ui/webview/state.ts) 新增 `case "tool.summary_updated"`：按 `toolCallId` 找到工具卡片写 `summaryTitle`（未命中则忽略）。与 `turn.summary_updated`（写 thinking 分组头）互不干扰。
+- **分组头补句**：`turn.summary_updated` 会按 `toolCallIds` 回写 thinking 分组头，因此 live 期先看到的裸计数（如 `Used N tools`）可以在 utility 标题回来后升级成 `Used N tools for <purpose>`；若 utility 超时/失败，则保留计数占位，不影响主回合收敛。
 - **已知限制（v1）**：per-tool 摘要**只在 live 生效、不回写 transcript**。历史重载时 bash 卡片回落到确定性占位（`Ran` + 命令名标签 + 正文 `$ 命令`），不会重放短句；持久化留作后续项。这与 turn summary 会回写 assistant message 的做法不同，是刻意的成本权衡（每条前台 bash 已多一次 utility 轻量调用）。
 
 ### 5.4 Composer：不换行、只压缩可压缩项

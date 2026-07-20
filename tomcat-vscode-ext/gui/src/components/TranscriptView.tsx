@@ -244,10 +244,14 @@ export function TranscriptView({
                   />
                 );
               }
+              const hasIncompleteTools = segment.group.tools.some(
+                (tool) => tool.status !== "complete",
+              );
               const isStreaming =
                 showProgress &&
-                (segment.group.thinking?.id === clusterLastThinkingId ||
-                  segment.group.tools.some((tool) => tool.status !== "complete"));
+                (hasIncompleteTools ||
+                  (segment.group.tools.length === 0 &&
+                    segment.group.thinking?.id === clusterLastThinkingId));
               return (
                 <ThinkingGroup
                   group={segment.group}

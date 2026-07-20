@@ -1922,7 +1922,7 @@ describe("Tomcat webview App", () => {
       expect(screen.queryByTestId("sticky-user-prompt")).toBeNull();
       expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
       expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
-      expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(1);
+      expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(0);
       expect(screen.getAllByTestId("thinking-streaming-indicator")).toHaveLength(1);
 
       baseContentHeight = 340;
@@ -1953,7 +1953,7 @@ describe("Tomcat webview App", () => {
       expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
       expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
       expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
-      expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(1);
+      expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(0);
       expect(screen.getAllByTestId("thinking-streaming-indicator")).toHaveLength(1);
     } finally {
       rectSpy.mockRestore();

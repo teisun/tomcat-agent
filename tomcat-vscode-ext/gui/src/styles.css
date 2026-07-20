@@ -2736,6 +2736,11 @@ input:focus-visible {
   color: var(--vscode-descriptionForeground);
 }
 
+.tc-tool-row__text.tc-loading-shimmer {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
 .tc-tool-row--answer .tc-tool-row__body {
   border-left: 0;
   margin-left: 0;
