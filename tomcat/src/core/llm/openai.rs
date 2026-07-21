@@ -164,6 +164,15 @@ fn parts_to_completions_text(parts: &[ChatMessageContentPart]) -> String {
     text
 }
 
+fn parts_need_multimodal_content(parts: &[ChatMessageContentPart]) -> bool {
+    parts.iter().any(|part| {
+        matches!(
+            part,
+            ChatMessageContentPart::InputImage { .. } | ChatMessageContentPart::InputFile { .. }
+        )
+    })
+}
+
 fn part_to_completions_content(
     part: &ChatMessageContentPart,
     files_adapter: Option<&dyn FilesApiAdapter>,
@@ -258,7 +267,29 @@ fn normalize_for_completions<'a>(
     messages: &'a [ChatMessage],
     capabilities: &Capabilities,
 ) -> Cow<'a, [ChatMessage]> {
-    degrade_unsupported_multimodal(messages, capabilities)
+    let degraded = degrade_unsupported_multimodal(messages, capabilities);
+    let needs_flatten = degraded.iter().any(|message| {
+        matches!(
+            message.content.as_ref(),
+            Some(ChatMessageContent::Parts(parts)) if !parts_need_multimodal_content(parts)
+        )
+    });
+    if !needs_flatten {
+        return degraded;
+    }
+
+    let mut normalized = degraded.into_owned();
+    for message in &mut normalized {
+        let Some(ChatMessageContent::Parts(parts)) = message.content.as_ref() else {
+            continue;
+        };
+        if parts_need_multimodal_content(parts) {
+            continue;
+        }
+        let text = parts_to_completions_text(parts);
+        message.content = Some(ChatMessageContent::Text(text));
+    }
+    Cow::Owned(normalized)
 }
 
 /// 提取 chat-completions `reasoning_content` continuity blob（deepseek / mimo / 未来同类共用）。

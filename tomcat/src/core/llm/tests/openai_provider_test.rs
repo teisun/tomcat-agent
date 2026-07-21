@@ -306,6 +306,79 @@ fn normalize_for_completions_flattens_references_into_text() {
 }
 
 #[test]
+fn normalize_for_completions_keeps_parts_when_supported_image_still_present() {
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("look "),
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+        ChatMessageContentPart::file_file_id("file-pdf", Some("guide.pdf".to_string())).unwrap(),
+    ])];
+    let normalized = normalize_for_completions(
+        &msgs,
+        &Capabilities {
+            vision: true,
+            files: false,
+            tools: true,
+            reasoning: false,
+            web_search: false,
+        },
+    );
+    let normalized = normalized.as_ref();
+    let parts = match &normalized[0].content {
+        Some(ChatMessageContent::Parts(parts)) => parts,
+        other => panic!("expected parts content, got {other:?}"),
+    };
+    assert_eq!(parts.len(), 3);
+    assert!(matches!(
+        &parts[0],
+        ChatMessageContentPart::InputText { text } if text == "look "
+    ));
+    assert!(matches!(
+        &parts[1],
+        ChatMessageContentPart::InputImage { .. }
+    ));
+    assert!(matches!(
+        &parts[2],
+        ChatMessageContentPart::InputText { text } if text == UNSUPPORTED_FILE_INPUT_PLACEHOLDER
+    ));
+}
+
+#[test]
+fn normalize_for_completions_leaves_text_messages_borrowed() {
+    let msgs = vec![ChatMessage::user("hello")];
+    let normalized = normalize_for_completions(&msgs, &Capabilities::default());
+    assert!(matches!(normalized, std::borrow::Cow::Borrowed(_)));
+    let normalized = normalized.as_ref();
+    assert!(matches!(
+        &normalized[0].content,
+        Some(ChatMessageContent::Text(text)) if text == "hello"
+    ));
+}
+
+#[test]
+fn transport_messages_uses_string_content_for_text_only_normalized_history() {
+    let msgs = vec![ChatMessage::user_with_parts(vec![
+        ChatMessageContentPart::text("before "),
+        ChatMessageContentPart::reference(ContextReference::selection(
+            "src/lib.rs",
+            "lib.rs:10-12",
+            Some(10),
+            Some(12),
+            Some("fn hello() {}".to_string()),
+        )),
+        ChatMessageContentPart::text(" after "),
+        ChatMessageContentPart::image_file_id("file-image").unwrap(),
+    ])];
+    let normalized = normalize_for_completions(&msgs, &Capabilities::default());
+    let expected = format!(
+        "before <selection file=\"src/lib.rs\" lines=\"10-12\">\nfn hello() {{}}\n</selection> after {UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER}"
+    );
+
+    let wire = transport_messages(normalized.as_ref(), "deepseek-v4-pro", false, None);
+    assert!(wire[0]["content"].is_string());
+    assert_eq!(wire[0]["content"].as_str(), Some(expected.as_str()));
+}
+
+#[test]
 fn transport_messages_renders_multimodal_user_content_for_standard_openai() {
     let msgs = vec![ChatMessage::user_with_parts(vec![
         ChatMessageContentPart::text("look "),
