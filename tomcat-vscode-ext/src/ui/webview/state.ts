@@ -1781,6 +1781,7 @@ export class WebviewStateStore {
         tool.isError = false;
         tool.args = parseToolArgs(frame.args) ?? tool.args;
         tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
+        tool.startedAt = Date.now();
         applyPlanReference(tool);
         delete tool.planActivity;
         return;

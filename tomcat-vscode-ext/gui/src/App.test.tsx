@@ -3129,4 +3129,149 @@ describe("Tomcat webview App", () => {
       type: "restoreCheckpoint",
     });
   });
+
+  it("replays background wait slices as in-place countdown rows across transcript snapshots", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = new Date("2026-07-21T07:00:00.000Z").getTime();
+      vi.setSystemTime(startedAt);
+      mount();
+
+      await emitTranscriptSessionState({
+        busy: true,
+        messageId: "countdown-start",
+        timeline: [
+          {
+            args: {
+              command: "sleep 12; echo TOKEN_MULTI_TIMEOUT",
+              run_in_background: true,
+            },
+            id: "tool-bash-background",
+            isError: false,
+            status: "complete",
+            summary:
+              "{\"taskId\":\"task-1\",\"logPath\":\"/tmp/task-1.log\",\"startedAtUnixMs\":1752000000000}",
+            toolCallId: "tc-bash-background",
+            toolName: "bash",
+            type: "tool",
+          },
+          {
+            args: { block: true, task_id: "task-1", timeout_ms: 10000 },
+            id: "tool-task-output-1",
+            isError: false,
+            startedAt,
+            status: "running",
+            toolCallId: "tc-task-output-1",
+            toolName: "task_output",
+            type: "tool",
+          },
+        ],
+      });
+
+      expect(screen.getByText("Waiting up to 10s for shell")).toBeTruthy();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(screen.getByText("Waiting up to 9s for shell")).toBeTruthy();
+
+      await emitTranscriptSessionState({
+        busy: true,
+        messageId: "countdown-second-slice",
+        timeline: [
+          {
+            args: {
+              command: "sleep 12; echo TOKEN_MULTI_TIMEOUT",
+              run_in_background: true,
+            },
+            id: "tool-bash-background",
+            isError: false,
+            status: "complete",
+            summary:
+              "{\"taskId\":\"task-1\",\"logPath\":\"/tmp/task-1.log\",\"startedAtUnixMs\":1752000000000}",
+            toolCallId: "tc-bash-background",
+            toolName: "bash",
+            type: "tool",
+          },
+          {
+            args: { block: true, task_id: "task-1", timeout_ms: 10000 },
+            id: "tool-task-output-1",
+            isError: false,
+            startedAt,
+            status: "complete",
+            summary: "{\"wakeReason\":\"timeout\"}",
+            toolCallId: "tc-task-output-1",
+            toolName: "task_output",
+            type: "tool",
+          },
+          {
+            args: { block: true, task_id: "task-1", timeout_ms: 5000 },
+            id: "tool-task-output-2",
+            isError: false,
+            startedAt: startedAt + 1000,
+            status: "running",
+            toolCallId: "tc-task-output-2",
+            toolName: "task_output",
+            type: "tool",
+          },
+        ],
+      });
+
+      expect(screen.getAllByText("Waited for shell")).toHaveLength(1);
+      expect(screen.getByText("Waiting up to 5s for shell")).toBeTruthy();
+
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(screen.getByText("Waiting up to 4s for shell")).toBeTruthy();
+
+      await emitTranscriptSessionState({
+        busy: false,
+        messageId: "countdown-finished",
+        timeline: [
+          {
+            args: {
+              command: "sleep 12; echo TOKEN_MULTI_TIMEOUT",
+              run_in_background: true,
+            },
+            id: "tool-bash-background",
+            isError: false,
+            status: "complete",
+            summary:
+              "{\"taskId\":\"task-1\",\"logPath\":\"/tmp/task-1.log\",\"startedAtUnixMs\":1752000000000}",
+            toolCallId: "tc-bash-background",
+            toolName: "bash",
+            type: "tool",
+          },
+          {
+            args: { block: true, task_id: "task-1", timeout_ms: 10000 },
+            id: "tool-task-output-1",
+            isError: false,
+            startedAt,
+            status: "complete",
+            summary: "{\"wakeReason\":\"timeout\"}",
+            toolCallId: "tc-task-output-1",
+            toolName: "task_output",
+            type: "tool",
+          },
+          {
+            args: { block: true, task_id: "task-1", timeout_ms: 5000 },
+            id: "tool-task-output-2",
+            isError: false,
+            startedAt: startedAt + 1000,
+            status: "complete",
+            summary: "{\"wakeReason\":\"finished\"}",
+            toolCallId: "tc-task-output-2",
+            toolName: "task_output",
+            type: "tool",
+          },
+        ],
+      });
+
+      expect(screen.queryByText(/Waiting up to .* for shell/)).toBeNull();
+      expect(screen.getAllByText("Waited for shell")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

@@ -26,11 +26,19 @@ function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function humanizeToolName(toolName: string): string {
   return toolName.replace(/_/g, " ");
 }
 
 export type ToolCategory = "answer" | "command" | "context" | "edit" | "other";
+
+const TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS = 5_000;
+const TASK_OUTPUT_BLOCK_MIN_TIMEOUT_MS = 5_000;
+const TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS = 600_000;
 
 const EDIT_TOOLS = new Set(["edit", "hashline_edit", "write"]);
 const COMMAND_TOOLS = new Set(["bash", "execute_command", "shell"]);
@@ -126,6 +134,27 @@ function createPlanCardFromTool(
 
 export function isRunning(item: WebviewToolCard): boolean {
   return (item.status === "running" || item.status === "streaming") && !item.isError;
+}
+
+export function formatCountdown(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
+  }
+  return `${totalSeconds}s`;
+}
+
+export function clampTaskOutputBudget(value: unknown): number {
+  if (value === 0) {
+    return 0;
+  }
+  const raw = asNumber(value) ?? TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS;
+  return Math.min(
+    TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS,
+    Math.max(TASK_OUTPUT_BLOCK_MIN_TIMEOUT_MS, raw),
+  );
 }
 
 function formatToolSummary(summary: string | undefined): string | undefined {
@@ -288,6 +317,12 @@ export function buildFlatLabel(item: WebviewToolCard): string {
       return running ? `Running ${command}` : `Ran ${command}`;
     }
     case "task_output": {
+      if (args.block === true && !item.isError && clampTaskOutputBudget(args.timeout_ms) > 0) {
+        if (item.status === "interrupted") {
+          return "Stopped waiting for shell";
+        }
+        return running ? "Waiting for shell" : "Waited for shell";
+      }
       const taskId = asString(args.task_id) ?? "task";
       return running ? `Reading output ${taskId}` : `Read output ${taskId}`;
     }
@@ -381,6 +416,33 @@ export function buildToolCollectionTitle(tools: WebviewToolCard[]): string {
 
 function loadingTextClass(active: boolean): string {
   return active ? " tc-loading-shimmer" : "";
+}
+
+function isBlockingTaskOutput(item: WebviewToolCard): boolean {
+  return item.toolName === "task_output" && item.args?.block === true && !item.isError;
+}
+
+function taskOutputCountdownLabel(
+  item: WebviewToolCard,
+  nowTick: number,
+): string | null {
+  if (!isBlockingTaskOutput(item)) {
+    return null;
+  }
+  const budget = clampTaskOutputBudget(item.args?.timeout_ms);
+  if (budget === 0) {
+    return null;
+  }
+  if (item.status === "interrupted") {
+    return "Stopped waiting for shell";
+  }
+  if (!isRunning(item)) {
+    return "Waited for shell";
+  }
+  const startedAt = asNumber(item.startedAt) ?? nowTick;
+  const elapsed = Math.max(0, nowTick - startedAt);
+  const remaining = Math.max(0, budget - elapsed);
+  return `Waiting up to ${formatCountdown(remaining)} for shell`;
 }
 
 export function hasMeaningfulContent(item: WebviewToolCard): boolean {
@@ -652,6 +714,7 @@ function renderFlatContent(
   item: WebviewToolCard,
   onOpenFile: (path: string) => void,
   onOpenPlanFile?: (path: string) => void,
+  nowTick?: number,
 ): ReactNode {
   const args = item.args ?? {};
   const filePath = filePathForTool(item);
@@ -706,6 +769,14 @@ function renderFlatContent(
     case "context":
     case "other":
       switch (item.toolName) {
+        case "task_output": {
+          const countdownLabel = nowTick === undefined ? null : taskOutputCountdownLabel(item, nowTick);
+          return (
+            <span className={textClassName} data-testid="tool-row-task-output-countdown">
+              {countdownLabel ?? buildFlatLabel(item)}
+            </span>
+          );
+        }
         case "create_plan":
         case "update_plan":
           return (
@@ -862,7 +933,12 @@ export function ToolRow({
   const canToggle = contentVisible && !alwaysVisibleBody;
   const shouldExpandByDefault = shouldShowBodyByDefault(item, contentVisible);
   const [collapsed, setCollapsed] = useState(!shouldExpandByDefault);
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [userInteracted, setUserInteracted] = useState(false);
+  const countdownActive =
+    isRunning(item) &&
+    isBlockingTaskOutput(item) &&
+    clampTaskOutputBudget(item.args?.timeout_ms) > 0;
 
   useEffect(() => {
     setCollapsed(!shouldExpandByDefault);
@@ -874,6 +950,19 @@ export function ToolRow({
       setCollapsed(!shouldExpandByDefault);
     }
   }, [shouldExpandByDefault, userInteracted]);
+
+  useEffect(() => {
+    setNowTick(Date.now());
+    if (!countdownActive) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      setNowTick(Date.now());
+    }, 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [countdownActive, item.id, item.startedAt]);
 
   const createPlanCard = useMemo(
     () =>
@@ -1031,7 +1120,7 @@ export function ToolRow({
           <>
             <div className="tc-tool-row__header">
               <span className="tc-tool-row__label" data-testid="tool-row-label">
-                {renderFlatContent(item, onOpenFile, onOpenPlanFile)}
+                {renderFlatContent(item, onOpenFile, onOpenPlanFile, nowTick)}
               </span>
               {canToggle ? (
                 <button

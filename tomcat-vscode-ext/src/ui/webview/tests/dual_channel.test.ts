@@ -801,6 +801,7 @@ describe("webview dual-channel state store", () => {
         assistantMessageId: "live-assistant-1",
         id: "tool-1",
         isError: false,
+        startedAt: expect.any(Number),
         status: "running",
         toolCallId: "tool-1",
         toolName: "edit",

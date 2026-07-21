@@ -288,7 +288,7 @@ fn tool_start_emits_gray_summary_on_stderr() {
     assert!(err.contains("\x1b[90m"), "应使用 gray ANSI: {:?}", err);
 }
 
-/// P1（bash background monitor）：真实终端 TTY 下倒计时走单行原地刷新，单位为秒。
+/// P1（bash background monitor）：真实终端 TTY 下倒计时走单行原地刷新，长等待片用 `9m59s` 样式。
 #[test]
 fn tool_update_emits_inline_countdown_line_on_tty_stderr() {
     let (r, w) = make_tty_renderer(ThinkingDisplay::Summary);
@@ -322,6 +322,29 @@ fn tool_update_emits_inline_countdown_line_on_tty_stderr() {
     );
     assert!(!err.contains('\n'), "TTY 倒计时不应每次追加换行: {:?}", err);
     assert!(err.contains("\x1b[90m"), "倒计时应使用 dim 灰: {:?}", err);
+}
+
+#[test]
+fn tool_update_uses_compact_minute_second_countdown_labels() {
+    let (r, w) = make_tty_renderer(ThinkingDisplay::Summary);
+    r.on_tool_update(&json!({
+        "toolCallId": "blk-2",
+        "toolName": "task_output",
+        "args": {"task_id": "t-2", "block": true, "timeout_ms": 600000},
+        "partialResult": {
+            "phase": "waiting_for_output",
+            "taskId": "t-2",
+            "since": 0,
+            "timeoutMs": 600000,
+            "remainingMs": 599000
+        },
+    }));
+    let err = w.stderr();
+    assert!(
+        err.contains("remaining=9m59s/10m00s"),
+        "长等待片应使用紧凑分秒格式: {:?}",
+        err
+    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   isWebviewIntent,
@@ -766,6 +766,52 @@ describe("history tool attribution", () => {
       .sessionViews.s1.timeline.find((item) => item.type === "tool");
     expect(tool?.type === "tool" ? tool.args : undefined).toEqual({ command: "cargo test" });
     expect(tool?.type === "tool" ? tool.assistantMessageId : undefined).toBeTruthy();
+    expect(tool?.type === "tool" ? tool.startedAt : undefined).toEqual(expect.any(Number));
+  });
+
+  it("stamps startedAt on live tool starts and ignores task_output partialResult countdown state", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_752_000_000_000);
+    try {
+      store.applyEvent({
+        args: { block: true, task_id: "task-1", timeout_ms: 600000 },
+        sessionId: "s1",
+        toolCallId: "tc-task-output",
+        toolName: "task_output",
+        type: "tool_execution_start",
+      });
+      store.applyEvent({
+        args: { block: true, task_id: "task-1", timeout_ms: 600000 },
+        partialResult: {
+          phase: "waiting_for_output",
+          remainingMs: 123456,
+          timeoutMs: 600000,
+        },
+        sessionId: "s1",
+        toolCallId: "tc-task-output",
+        toolName: "task_output",
+        type: "tool_execution_update",
+      } as never);
+
+      const tool = store
+        .snapshot()
+        .sessionViews.s1.timeline.find(
+          (item) => item.type === "tool" && item.toolCallId === "tc-task-output",
+        );
+      expect(tool).toMatchObject({
+        args: { block: true, task_id: "task-1", timeout_ms: 600000 },
+        startedAt: 1_752_000_000_000,
+        status: "streaming",
+        toolCallId: "tc-task-output",
+        toolName: "task_output",
+        type: "tool",
+      });
+      expect(tool && "remainingMs" in tool).toBe(false);
+      expect(tool && "timeoutMs" in tool).toBe(false);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("live multi-tool turn shares one assistantMessageId", () => {

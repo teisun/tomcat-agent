@@ -8,9 +8,21 @@ use crate::infra::events::{AgentEvent, ToolOutput};
 use super::super::ToolExecCtx;
 
 const TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS: u64 = 5_000;
-const TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS: u64 = 30_000;
+const TASK_OUTPUT_BLOCK_MIN_TIMEOUT_MS: u64 = 5_000;
+const TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS: u64 = 600_000;
 const TASK_OUTPUT_TICK_MS: u64 = 500;
 const TASK_OUTPUT_TIMEOUT_TAIL_MAX_BYTES: u64 = 4_096;
+
+fn clamp_block_timeout_ms(timeout_ms_raw: Option<u64>) -> u64 {
+    match timeout_ms_raw {
+        Some(0) => 0,
+        Some(v) => v.clamp(
+            TASK_OUTPUT_BLOCK_MIN_TIMEOUT_MS,
+            TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS,
+        ),
+        None => TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS,
+    }
+}
 
 pub(in super::super) async fn handle_task_output(
     ctx: &ToolExecCtx<'_>,
@@ -31,11 +43,7 @@ pub(in super::super) async fn handle_task_output(
     let block_param = args.get("block").and_then(|v| v.as_bool()).unwrap_or(false);
     let timeout_ms_raw = args.get("timeout_ms").and_then(|v| v.as_u64());
 
-    let timeout_ms = match timeout_ms_raw {
-        Some(0) => 0,
-        Some(v) => v.min(TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS),
-        None => TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS,
-    };
+    let timeout_ms = clamp_block_timeout_ms(timeout_ms_raw);
     let block = block_param && timeout_ms > 0;
 
     if !block {
@@ -366,6 +374,17 @@ mod tests {
         );
         assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
         assert!(delivered, "NewOutput + finished must claim Delivered");
+    }
+
+    #[test]
+    fn clamp_block_timeout_preserves_zero_and_bounds_wait_slices() {
+        assert_eq!(clamp_block_timeout_ms(None), 5_000);
+        assert_eq!(clamp_block_timeout_ms(Some(0)), 0);
+        assert_eq!(clamp_block_timeout_ms(Some(1)), 5_000);
+        assert_eq!(clamp_block_timeout_ms(Some(4_999)), 5_000);
+        assert_eq!(clamp_block_timeout_ms(Some(5_000)), 5_000);
+        assert_eq!(clamp_block_timeout_ms(Some(600_000)), 600_000);
+        assert_eq!(clamp_block_timeout_ms(Some(999_999_999)), 600_000);
     }
 
     #[tokio::test]

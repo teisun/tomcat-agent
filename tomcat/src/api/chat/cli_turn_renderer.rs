@@ -46,6 +46,17 @@ use crate::infra::event_bus::{EventContext, EventListenerId};
 use crate::infra::events::ToolDisplay;
 use crate::infra::{wire, EventBus};
 
+fn format_countdown_ms(ms: u64) -> String {
+    let total_secs = ms.saturating_add(999) / 1000;
+    let minutes = total_secs / 60;
+    let seconds = total_secs % 60;
+    if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{total_secs}s")
+    }
+}
+
 /// 上一次打印通道类型，决定是否需要补换行；`Tool` 始终 stderr，`Thinking` /
 /// `Content` 默认 stdout。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -457,15 +468,15 @@ impl CliTurnRenderer {
             .get("timeoutMs")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let remaining_secs = remaining.saturating_add(999) / 1000;
-        let timeout_secs = timeout.saturating_add(999) / 1000;
+        let remaining_label = format_countdown_ms(remaining);
+        let timeout_label = format_countdown_ms(timeout);
         let line = format!(
-            "\r\x1b[2K\x1b[90m[tool] {name} … {phase}  task={task} remaining={remaining}s/{timeout}s\x1b[0m",
+            "\r\x1b[2K\x1b[90m[tool] {name} … {phase}  task={task} remaining={remaining}/{timeout}\x1b[0m",
             name = tool_name,
             phase = phase,
             task = task_id,
-            remaining = remaining_secs,
-            timeout = timeout_secs,
+            remaining = remaining_label,
+            timeout = timeout_label,
         );
         let mut st = self.state.lock();
         self.writer.write_stderr(&line);

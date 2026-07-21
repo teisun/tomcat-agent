@@ -10,6 +10,9 @@ There are exactly three correct usage patterns — pick one:
 
 1. **The current todo strictly depends on the shell result** → poll with
    `task_output(task_id, since=..., block=true, timeout_ms=...)`.
+   A single blocking wait slice can now cover roughly 5 seconds to 10 minutes,
+   so prefer a longer slice when you truly need to wait instead of mindlessly
+   looping short polls.
    Read `content`, `finished`, `exit_code`, and `wakeReason` together:
    - `finished=true` → act on `exit_code` and the returned output.
    - `wakeReason="new_output"` → use the returned bytes to decide the next step.

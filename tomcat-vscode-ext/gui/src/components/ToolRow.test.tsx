@@ -1,8 +1,8 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WebviewToolCard } from "../types";
-import { commandBinaries, toolCategory, ToolRow } from "./ToolRow";
+import { clampTaskOutputBudget, commandBinaries, formatCountdown, toolCategory, ToolRow } from "./ToolRow";
 
 function buildTool(overrides: Partial<WebviewToolCard> = {}): WebviewToolCard {
   return {
@@ -18,6 +18,10 @@ function buildTool(overrides: Partial<WebviewToolCard> = {}): WebviewToolCard {
 }
 
 describe("ToolRow", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("read row renders FileChip and opens file on click", () => {
     const onOpenFile = vi.fn();
     render(
@@ -711,6 +715,120 @@ describe("ToolRow", () => {
     );
 
     expect(screen.getByTestId("tool-row-cmd-purpose").className).not.toContain("tc-loading-shimmer");
+  });
+
+  it("renders a task_output countdown row that ticks each second and flips to past tense", () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-07-21T07:00:00.000Z");
+    vi.setSystemTime(startedAt);
+    const { rerender } = render(
+      <ToolRow
+        item={buildTool({
+          args: { block: true, task_id: "task-1", timeout_ms: 10000 },
+          startedAt: startedAt.getTime(),
+          status: "running",
+          summary: undefined,
+          toolName: "task_output",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
+      "Waiting up to 10s for shell",
+    );
+    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
+      "Waiting up to 9s for shell",
+    );
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { block: true, task_id: "task-1", timeout_ms: 10000 },
+          startedAt: startedAt.getTime(),
+          status: "complete",
+          summary: "{\"wakeReason\":\"timeout\"}",
+          toolName: "task_output",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
+      "Waited for shell",
+    );
+    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeNull();
+  });
+
+  it("renders compact task_output countdown labels and falls back for non-blocking output reads", () => {
+    vi.useFakeTimers();
+    const now = new Date("2026-07-21T07:00:00.000Z");
+    vi.setSystemTime(now);
+    const { rerender } = render(
+      <ToolRow
+        item={buildTool({
+          args: { block: true, task_id: "task-2", timeout_ms: 600000 },
+          startedAt: now.getTime() - 1000,
+          status: "running",
+          summary: undefined,
+          toolName: "task_output",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
+      "Waiting up to 9m59s for shell",
+    );
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { block: false, task_id: "task-2", timeout_ms: 0 },
+          status: "complete",
+          summary: "{\"finished\":false}",
+          toolName: "task_output",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
+      "Read output task-2",
+    );
+  });
+
+  it("renders interrupted task_output rows in past-tense stop wording", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: { block: true, task_id: "task-3", timeout_ms: 5000 },
+          startedAt: Date.now(),
+          status: "interrupted",
+          summary: "[interrupted]",
+          toolName: "task_output",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
+      "Stopped waiting for shell",
+    );
+  });
+
+  it("formats countdown boundaries with shared helpers", () => {
+    expect(clampTaskOutputBudget(undefined)).toBe(5000);
+    expect(clampTaskOutputBudget(0)).toBe(0);
+    expect(clampTaskOutputBudget(1)).toBe(5000);
+    expect(clampTaskOutputBudget(600001)).toBe(600000);
+    expect(formatCountdown(599000)).toBe("9m59s");
+    expect(formatCountdown(45000)).toBe("45s");
   });
 
   it("accepts snake_case ask_question results from the transcript", () => {

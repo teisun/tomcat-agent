@@ -56,6 +56,9 @@ fn success_rate_redline_keeps_critical_usage_in_descriptions() {
 
     // bash：run_in_background 语义（后台任务全套用法在系统段）。
     assert!(desc_of("bash").contains("run_in_background"));
+    let task_output = desc_of("task_output");
+    assert!(task_output.contains("max 600000"));
+    assert!(task_output.contains("5000-600000ms"));
 }
 
 /// 聚合去重：跨工具规则只说一遍，且包含被测试依赖的关键锚点。
@@ -84,6 +87,21 @@ fn tool_guidelines_aggregate_dedup_and_contain_key_anchors() {
     );
     // 每条 guideline 以 `- ` 起头。
     assert!(g.lines().all(|l| l.starts_with("- ")));
+}
+
+#[test]
+fn task_output_schema_matches_long_wait_slice_contract() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "task_output")
+        .expect("task_output catalog entry");
+    let schema = (entry.parameters)();
+    let timeout = &schema["properties"]["timeout_ms"];
+    assert_eq!(timeout["minimum"].as_i64(), Some(0));
+    assert_eq!(timeout["maximum"].as_i64(), Some(600000));
+    let description = timeout["description"].as_str().unwrap_or("");
+    assert!(description.contains("5000-600000ms"));
+    assert!(description.contains("`0` == block=false"));
 }
 
 #[test]

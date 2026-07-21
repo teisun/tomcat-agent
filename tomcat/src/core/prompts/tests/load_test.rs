@@ -29,6 +29,7 @@ fn background_shell_prompt_mentions_finished_tag() {
     assert!(s.contains("<background-task-finished"));
     assert!(s.contains("task_output"));
     assert!(s.contains("wakeReason"));
+    assert!(s.contains("5 seconds to 10 minutes"));
     assert!(s.contains("Read `content`, `finished`, `exit_code`, and `wakeReason` together"));
     assert!(s.contains("Do not mindlessly loop forever"));
     assert!(

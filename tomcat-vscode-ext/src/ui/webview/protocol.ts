@@ -148,6 +148,7 @@ export interface WebviewToolCard {
   planActivity?: WebviewPlanActivity;
   planId?: string | null;
   planPath?: string | null;
+  startedAt?: number;
   status: WebviewToolStatus;
   summary?: string;
   /** utility-flash 异步生成的命令"目的"短句（bash 卡片标题）；live-only。 */

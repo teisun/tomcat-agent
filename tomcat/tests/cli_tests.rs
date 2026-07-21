@@ -2901,14 +2901,14 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
 /// [E2E-CLI-016D] `task_output(block=true)` wait-slice 真 LLM 黑盒回归
 ///
 /// 用户意图：模型必须在 `bash(run_in_background=true)` 之后**立即**进入
-/// `task_output(block=true, timeout_ms=300)` 循环，直到拿到 `wakeReason="new_output"`；
+/// `task_output(block=true, timeout_ms=5000)` 循环，直到拿到 `wakeReason="new_output"`；
 /// 不允许依赖 auto-feed，不允许 `task_output(block=false)`。
 ///
 /// 验证：
 /// - exit 0；
 /// - 非 TTY 抓取 stderr **不**含 `waiting_for_output` 倒计时动画；
 /// - transcript 中至少有 1 次 `task_output` tool call，且参数包含
-///   `block=true` 与 `timeout_ms=300`；
+///   `block=true` 与 `timeout_ms=5000`；
 /// - 后台任务真实产出 `blockwait_done.txt`；
 /// - stdout 最终包含约定完成词 `BLOCKWAIT_OK`。
 ///
@@ -2931,8 +2931,8 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
             "请严格执行，并只在最后回复一行 BLOCKWAIT_OK： ",
             "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
             "2. 该后台 bash 的 command 必须精确执行：sleep 2; echo TOKEN_WAITSLICE; printf BLOCKWAIT_DONE > \"{done_path}\"; sleep 30。 ",
-            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、timeout_ms=300、since 从 0 开始并按 next_offset 续传。 ",
-            "4. 如果 task_output 返回 wakeReason=timeout 且 finished=false，这不是失败；你必须继续再次调用 task_output(block=true, timeout_ms=300) 等下一次 wait slice。 ",
+            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、timeout_ms=5000、since 从 0 开始并按 next_offset 续传。 ",
+            "4. 如果 task_output 返回 wakeReason=timeout 且 finished=false，这不是失败；你必须继续再次调用 task_output(block=true, timeout_ms=5000) 等下一次 wait slice。 ",
             "5. 当 task_output 返回 wakeReason=new_output 且内容里出现 TOKEN_WAITSLICE 后，必须调用 task_stop 停掉这个后台任务，避免它继续睡眠。 ",
             "6. 禁止使用 task_output(block=false)，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash，禁止调用 task_list。 ",
             "7. 只有在看到 TOKEN_WAITSLICE 且已经 task_stop 之后，才允许读取并确认文件 \"{done_path}\" 存在且内容精确为 BLOCKWAIT_DONE。 ",
@@ -3004,8 +3004,8 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     for (_, args) in &task_output_calls {
         assert!(
             args.get("block").and_then(Value::as_bool) == Some(true)
-                && args.get("timeout_ms").and_then(Value::as_u64) == Some(300),
-            "task_output 调用参数应固定为 block=true + timeout_ms=300，实际 args={args}"
+                && args.get("timeout_ms").and_then(Value::as_u64) == Some(5000),
+            "task_output 调用参数应固定为 block=true + timeout_ms=5000，实际 args={args}"
         );
     }
     let tool_results = tool_results_from_transcript(&transcript);
@@ -3031,7 +3031,7 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 /// [E2E-CLI-016E] 真 LLM 多次 timeout slice 重试
 ///
 /// 用户意图：模型必须在同一个后台任务上经历**至少两次**
-/// `wakeReason="timeout" && finished=false`，继续重试 `task_output(block=true, timeout_ms=300)`，
+/// `wakeReason="timeout" && finished=false`，继续重试 `task_output(block=true, timeout_ms=5000)`，
 /// 最后再等到一次 `new_output` 并收尾。
 ///
 /// 验证：
@@ -3059,9 +3059,9 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
             "以下内容就是完整指令；不要要求我重复，不要反问，不要 ask_question。 ",
             "请严格执行，并只在最后回复一行 MULTI_TIMEOUT_OK： ",
             "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
-            "2. 该后台 bash 的 command 必须精确执行：sleep 8; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > \"{done_path}\"; sleep 30。 ",
-            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、timeout_ms=300、since 从 0 开始并按 next_offset 续传。 ",
-            "4. `wakeReason=timeout` 且 `finished=false` 在这道题里是正常现象，不是失败、不是要重来；你必须真实观察到至少两次这样的 timeout，并且每次 timeout 之后都继续在同一个 task_id 上再次调用 task_output(block=true, timeout_ms=300)，不要解释、不要总结、不要重启流程、不要新开任务。 ",
+            "2. 该后台 bash 的 command 必须精确执行：sleep 12; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > \"{done_path}\"; sleep 30。 ",
+            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、timeout_ms=5000、since 从 0 开始并按 next_offset 续传。 ",
+            "4. `wakeReason=timeout` 且 `finished=false` 在这道题里是正常现象，不是失败、不是要重来；你必须真实观察到至少两次这样的 timeout，并且每次 timeout 之后都继续在同一个 task_id 上再次调用 task_output(block=true, timeout_ms=5000)，不要解释、不要总结、不要重启流程、不要新开任务。 ",
             "5. 在至少两次 timeout 之后，继续沿用同一个 task_id 和最新 next_offset 等待，直到某次 task_output 返回 wakeReason=new_output 且内容里出现 TOKEN_MULTI_TIMEOUT。 ",
             "6. 一旦看到 TOKEN_MULTI_TIMEOUT，必须调用 task_stop 停掉该后台任务，避免它继续睡眠。 ",
             "7. 禁止使用 task_output(block=false)，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash，禁止调用 task_list。 ",
@@ -3131,8 +3131,8 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
             task_output_calls += 1;
             assert!(
                 args.get("block").and_then(Value::as_bool) == Some(true)
-                    && args.get("timeout_ms").and_then(Value::as_u64) == Some(300),
-                "task_output 调用参数应固定为 block=true + timeout_ms=300，实际 args={args}"
+                    && args.get("timeout_ms").and_then(Value::as_u64) == Some(5000),
+                "task_output 调用参数应固定为 block=true + timeout_ms=5000，实际 args={args}"
             );
         } else if name == "task_stop" {
             saw_task_stop = true;
@@ -3363,8 +3363,8 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
         "请严格执行，并只在最后回复一行 HUNG_TIMEOUT_BOUNDED_OK： ",
         "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
         "2. 该后台 bash 的 command 必须精确执行：printf HUNG_TIMEOUT_BOOT; sleep 60。 ",
-        "3. 拿到 task_id 后，必须立刻调用一次 task_output，参数必须满足：block=true、timeout_ms=300、since=0。 ",
-        "4. 当第一次 task_output 的返回内容里出现 HUNG_TIMEOUT_BOOT 后，必须基于返回的最新 next_offset，在同一个 task_id 上再调用一次 task_output(block=true, timeout_ms=300)。 ",
+        "3. 拿到 task_id 后，必须立刻调用一次 task_output，参数必须满足：block=true、timeout_ms=5000、since=0。 ",
+        "4. 当第一次 task_output 的返回内容里出现 HUNG_TIMEOUT_BOOT 后，必须基于返回的最新 next_offset，在同一个 task_id 上再调用一次 task_output(block=true, timeout_ms=5000)。 ",
         "5. 如果第二次 task_output 返回 wakeReason=timeout 且 finished=false，你必须阅读它返回的 content，并把它当作近期 tail 快照而不是失败。由于这里只有同一份 HUNG_TIMEOUT_BOOT、没有新的实质进展，你必须立刻停止继续轮询。 ",
         "6. 从这一步开始，禁止再次调用 task_output，禁止调用 task_stop、task_list，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash。 ",
         "7. 满足上述条件后，只回复一行 HUNG_TIMEOUT_BOUNDED_OK 并停止。"

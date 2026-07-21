@@ -1201,11 +1201,11 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
     let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
 
-    // 起一个长任务（5s 都不会结束 / 不会 print 任何东西）。
+    // 起一个长任务（>5s 都不会结束 / 不会 print 任何东西）。
     let start_tc = ToolCallInfo {
         id: "bg-tmo".into(),
         name: "bash".into(),
-        arguments: r#"{"command":"sleep 5","run_in_background":true}"#.into(),
+        arguments: r#"{"command":"sleep 8","run_in_background":true}"#.into(),
     };
     let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
     let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
@@ -1215,7 +1215,7 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
         id: "to-tmo".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":300}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":5000}}"#,
             task_id
         ),
     };
@@ -1266,7 +1266,7 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
         id: "bg-tail".into(),
         name: "bash".into(),
         arguments:
-            r#"{"command":"printf SNAPSHOT_FROM_TIMEOUT; sleep 5","run_in_background":true}"#.into(),
+            r#"{"command":"printf SNAPSHOT_FROM_TIMEOUT; sleep 8","run_in_background":true}"#.into(),
     };
     let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
     let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
@@ -1287,7 +1287,7 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
         id: "to-tail".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":250}}"#,
+            r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":5000}}"#,
             task_id, initial.next_offset
         ),
     };
@@ -1383,22 +1383,31 @@ async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
     let _ = registry.stop(&task_id).await;
 }
 
-/// `timeout_ms` 上限 cap：传 999_999 不会真的等 ~17 分钟，会被 cap 到 30_000。
-/// 这里我们用一个不会有任何输出/不会结束的长任务，传 timeout_ms=999_999，
-/// 然后 cancel_token 在 ~150ms 后 cancel；如果 cap 没生效，sleep_until 会等满
-/// 17 分钟而被 cancel；如果 cap 生效，我们仅断言不到 5s 内已经返回（cancel 命中）即可——
-/// 真正验证 cap 的方式是"返回里没有等满 17 分钟"，但 unit test 想要快速兜底，
-/// 用 cancel 路径足以覆盖：上限 cap 与 cancel 路径都是同一个 select 分支。
+/// `timeout_ms` 上限 cap：传超大值时，task_output 发出的实时 update 应显示 600_000 ms。
+/// 这里仍用 cancel 路径快速收尾，但真正断言的是第一帧 `partialResult.timeoutMs`。
 #[tokio::test]
 async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
     use crate::core::agent_loop::tool_exec::execute_tool_full;
     use crate::core::agent_loop::types::SubagentType;
     use crate::core::tools::primitive::BashTaskRegistry;
+    use crate::infra::event_bus::{EventContext, EventBus, ScopedEventEmitter};
+    use crate::infra::wire;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
     let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+    let captured_cb = Arc::clone(&captured);
+    let listener_id = bus.on(
+        wire::WIRE_TOOL_EXECUTION_UPDATE,
+        Box::new(move |ctx: EventContext| {
+            *captured_cb.lock().unwrap() = Some(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "sid-cap");
 
     let start_tc = ToolCallInfo {
         id: "bg-cap".into(),
@@ -1439,18 +1448,105 @@ async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
         None,
         &cancel,
         &out_tc,
-        None,
+        Some(&emitter),
         None,
     )
     .await;
     let elapsed = started.elapsed();
+    let timeout_ms = captured
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|payload| payload.get("partialResult"))
+        .and_then(|partial| partial.get("timeoutMs"))
+        .and_then(serde_json::Value::as_u64);
     assert!(
         elapsed < std::time::Duration::from_secs(5),
         "cancel 应当在 ~150ms 后命中，{:?}",
         elapsed
     );
+    assert_eq!(timeout_ms, Some(600_000), "超大 timeout_ms 应被 cap 到 10 分钟");
     assert!(outcome.is_error, "cancel 路径返回 is_error=true");
 
+    bus.off(listener_id);
+    let _ = registry.stop(&task_id).await;
+}
+
+/// `timeout_ms` 下限 floor：传 1 ms 时，task_output 发出的实时 update 应抬到 5_000 ms。
+#[tokio::test]
+async fn task_output_timeout_ms_floor_promotes_short_wait_slice() {
+    use crate::core::agent_loop::tool_exec::execute_tool_full;
+    use crate::core::agent_loop::types::SubagentType;
+    use crate::core::tools::primitive::BashTaskRegistry;
+    use crate::infra::event_bus::{EventContext, EventBus, ScopedEventEmitter};
+    use crate::infra::wire;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt: Option<Arc<BashTaskRegistry>> = Some(registry.clone());
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+    let captured_cb = Arc::clone(&captured);
+    let listener_id = bus.on(
+        wire::WIRE_TOOL_EXECUTION_UPDATE,
+        Box::new(move |ctx: EventContext| {
+            *captured_cb.lock().unwrap() = Some(ctx.payload.clone());
+            Ok(())
+        }),
+    );
+    let emitter = ScopedEventEmitter::new(Arc::clone(&bus), "sid-floor");
+
+    let start_tc = ToolCallInfo {
+        id: "bg-floor".into(),
+        name: "bash".into(),
+        arguments: r#"{"command":"sleep 60","run_in_background":true}"#.into(),
+    };
+    let (start_msg, _, _) = execute_tool(&primitive, &None, &registry_opt, None, &start_tc).await;
+    let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
+    let task_id = ticket["taskId"].as_str().unwrap().to_string();
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_signal = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        cancel_signal.cancel();
+    });
+
+    let out_tc = ToolCallInfo {
+        id: "to-floor".into(),
+        name: "task_output".into(),
+        arguments: format!(r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":1}}"#, task_id),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        None,
+        &cancel,
+        &out_tc,
+        Some(&emitter),
+        None,
+    )
+    .await;
+    let timeout_ms = captured
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|payload| payload.get("partialResult"))
+        .and_then(|partial| partial.get("timeoutMs"))
+        .and_then(serde_json::Value::as_u64);
+    assert_eq!(timeout_ms, Some(5_000), "短 wait slice 应被抬到 5 秒");
+    assert!(outcome.is_error, "cancel 路径返回 is_error=true");
+
+    bus.off(listener_id);
     let _ = registry.stop(&task_id).await;
 }
 
