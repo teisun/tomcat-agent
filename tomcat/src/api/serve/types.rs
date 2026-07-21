@@ -674,7 +674,7 @@ pub enum ServeTurnEvent {
     },
 }
 
-/// `tool.*` 自定义事件的 schema 入口（当前仅 `tool.summary_updated`）。
+/// `tool.*` 自定义事件的 schema 入口（`tool.summary_updated` / `background_task_finished`）。
 ///
 /// 单条工具卡片（bash）的标题在命令执行后由 utility 模型异步生成，通过该事件
 /// 按 `toolCallId` 热更新到前端；仅 live 生效，历史重载回落客户端占位。
@@ -689,6 +689,19 @@ pub enum ServeToolEvent {
         tool_call_id: String,
         #[serde(rename = "summaryTitle", skip_serializing_if = "Option::is_none")]
         summary_title: Option<String>,
+    },
+    #[serde(rename = "background_task_finished")]
+    BackgroundTaskFinished {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "taskId")]
+        task_id: String,
+        #[serde(rename = "exitCode")]
+        exit_code: i32,
+        #[serde(rename = "logPath", skip_serializing_if = "Option::is_none")]
+        log_path: Option<String>,
+        #[serde(rename = "command", skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
     },
 }
 

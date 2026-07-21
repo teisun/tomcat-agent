@@ -377,22 +377,12 @@ struct BashTask {
     pid: Option<u32>,
     /// P1：每 task 一份 `Notify`。pump 任务每 flush 一次后 `notify_waiters()`；
     /// wait 任务把 status 翻成 `Finished` / `Stopped` 时也 `notify_waiters()`。
-    /// 配合 [`BashTaskRegistry::wait_for_change`] 实现"按文件长度 vs since"判定，
+    /// 配合 [`BashTaskRegistry::wait_for_finish`] 实现"按文件长度 vs since"判定，
     /// 不依赖事件计数，避免 lost wakeup 与 read 与 wait 之间的字节丢失竞态。
     notify: Arc<Notify>,
     /// P1：lifecycle event 已经发出过的去重 guard（pump close + wait task return
     /// 都可能命中"翻终态"，但只允许 broadcast 一次）。
     lifecycle_emitted: parking_lot::Mutex<bool>,
-}
-
-/// P1：`task_output(block=true)` 的"为什么醒了"。dispatcher 用它决定写出
-/// `wake_reason` 字段、是否在 `completion_routes` 上 Delivered。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WakeReason {
-    /// 文件 size 已超过 since（有新字节可读），但任务可能仍 Running。
-    NewOutput,
-    /// 任务已 Finished / Stopped；调用方可同步取 `exit_code`。
-    Finished,
 }
 
 /// P1：registry 级 broadcast 事件。lifecycle subscriber（host/chat_loop 侧）
@@ -572,7 +562,7 @@ impl BashTaskRegistry {
         // 两条 pump 任务：stdout / stderr 边读边追加日志。
         // stderr 行前缀 "STDERR: " 让 task_output 拉到的内容仍可肉眼区分两路。
         // P1：每条 pump flush 后 `notify_waiters()`，唤醒所有挂在
-        // `wait_for_change` 上的等待者；按"文件长度 vs since"判定，避免 lost wakeup。
+        // `wait_for_finish` 上的等待者；按"文件长度 vs since"判定，避免 lost wakeup。
         spawn_pump(stdout, log_writer.clone(), "", task.notify.clone());
         spawn_pump(stderr, log_writer.clone(), "STDERR: ", task.notify.clone());
 
@@ -608,7 +598,7 @@ impl BashTaskRegistry {
                 info.status.clone()
             };
             // P1：先 emit lifecycle（受 lifecycle_emitted guard 保护），再
-            // notify_waiters；这样阻塞在 wait_for_change 的 dispatcher 醒来后能
+            // notify_waiters；这样阻塞在 wait_for_finish 的 dispatcher 醒来后能
             // 立刻看到终态，host lifecycle subscriber 也能拿到 broadcast。
             let already_emitted = {
                 let mut g = task_for_wait.lifecycle_emitted.lock();
@@ -679,12 +669,66 @@ impl BashTaskRegistry {
         })
     }
 
+    /// 取自 `since` 之后新增输出的有界尾巴。若自 `since` 起没有新字节，则
+    /// `content` 为空；若新增内容超过 `max_bytes`，只保留尾部并把
+    /// `start_offset` 前移到实际返回片段的起点。
+    pub async fn read_output_tail(
+        &self,
+        task_id: &str,
+        since: Option<u64>,
+        max_bytes: u64,
+    ) -> Result<BashTaskOutputChunk, AppError> {
+        let task = self
+            .tasks
+            .read()
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
+        let info_snap = task.info.read().clone();
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&info_snap.log_path)
+            .await
+            .map_err(AppError::Io)?;
+        let since = since.unwrap_or(0);
+        let len_before = file.metadata().await.map_err(AppError::Io)?.len();
+        let start = if len_before > since {
+            std::cmp::max(since, len_before.saturating_sub(max_bytes))
+        } else {
+            since
+        };
+        file.seek(std::io::SeekFrom::Start(start))
+            .await
+            .map_err(AppError::Io)?;
+        let mut buf = Vec::with_capacity(max_bytes as usize);
+        let mut limited = file.take(max_bytes);
+        limited.read_to_end(&mut buf).await.map_err(AppError::Io)?;
+        let next_offset = tokio::fs::metadata(&info_snap.log_path)
+            .await
+            .map_err(AppError::Io)?
+            .len()
+            .max(start + buf.len() as u64);
+        let (finished, exit_code) = match info_snap.status {
+            BashTaskStatus::Finished { exit_code } => (true, Some(exit_code)),
+            BashTaskStatus::Stopped => (true, Some(-1)),
+            BashTaskStatus::Running => (false, None),
+        };
+        Ok(BashTaskOutputChunk {
+            task_id: task_id.to_string(),
+            content: String::from_utf8_lossy(&buf).into_owned(),
+            start_offset: start,
+            next_offset,
+            finished,
+            exit_code,
+        })
+    }
+
     /// 主动停止：标记 status = Stopped → killpg(SIGKILL) 整组（Unix）；
     /// wait 任务后续 `child.wait()` 返回**不**回退覆盖（见 spawn 内 `if !matches!(...)`）。
     ///
     /// P1：stop 路径同样会 emit lifecycle 一次（由 `lifecycle_emitted` guard 兜底；
     /// stop 抢先 emit 后 wait 任务 return 时再尝试将被忽略），并 notify_waiters
-    /// 唤醒所有挂在 `wait_for_change` 上的等待者，让它们立即返回 `Finished`。
+    /// 唤醒所有挂在 `wait_for_finish` 上的等待者，让它们立即返回 `Finished`。
     pub async fn stop(&self, task_id: &str) -> Result<(), AppError> {
         let task = self
             .tasks
@@ -716,7 +760,7 @@ impl BashTaskRegistry {
         // 在 Child drop 时由 tokio 兜底——此处不再重复 kill 以免 race。
 
         // P1：emit lifecycle（被 lifecycle_emitted guard 收敛，wait 任务后续
-        // 命中相同 task 的翻转尝试会被忽略）+ 唤醒所有挂在 wait_for_change 的等待者。
+        // 命中相同 task 的翻转尝试会被忽略）+ 唤醒所有挂在 wait_for_finish 的等待者。
         let already_emitted = {
             let mut g = task.lifecycle_emitted.lock();
             if *g {
@@ -738,53 +782,34 @@ impl BashTaskRegistry {
         Ok(())
     }
 
-    /// P1：阻塞等待"文件长度超过 since"或"task 终态翻转"。
+    /// P1：阻塞等待任务终态翻转。
     ///
-    /// 实现按"先 `notified()` 拿 future → 再读当前文件总长度 / status 判定"
-    /// 的标准 race-free 顺序，避免 pump flush 与等待者注册之间的 lost wakeup。
-    /// 调用方负责自己处理"超时"（在外层 `tokio::select!` 套 `sleep_until`），
-    /// 这里只承诺"要么有新输出要么终态"两条返回路径之一。
-    ///
-    /// `since` 为 `None` 等价 `Some(0)`，即"从头判定"。
+    /// 实现按"先 `notified()` 拿 future → 再读当前 status 判定"的标准
+    /// race-free 顺序，避免 wait 任务 / stop 路径的 `notify_waiters()` 与等待者
+    /// 注册之间出现 lost wakeup。调用方负责自己处理"超时"（在外层
+    /// `tokio::select!` 套 `sleep_until`），这里只承诺"终态到了就返回"。
     ///
     /// `task_id` 不存在时返回 `AppError::Primitive`，与 `read_output` / `stop`
     /// 一致。
-    pub async fn wait_for_change(
-        &self,
-        task_id: &str,
-        since: Option<u64>,
-    ) -> Result<WakeReason, AppError> {
+    pub async fn wait_for_finish(&self, task_id: &str) -> Result<(), AppError> {
         let task = self
             .tasks
             .read()
             .get(task_id)
             .cloned()
             .ok_or_else(|| AppError::Primitive(format!("bash task not found: {}", task_id)))?;
-        let since = since.unwrap_or(0);
         loop {
             // 关键顺序：先注册 notified()（等待者句柄），再做条件判定。
-            // 反过来会与 pump 的 `notify_waiters()` 之间存在标准 lost-wakeup 窗口。
+            // 反过来会与 wait/stop 的 `notify_waiters()` 之间存在标准
+            // lost-wakeup 窗口。
             let notified = task.notify.notified();
             tokio::pin!(notified);
 
-            // 1) 终态优先于"是否已有新输出"。dispatcher 拿到 Finished 时，会用
-            //    后续 read_output 拉最终 chunk，所以这里直接返回 Finished 即可。
             let status_snap = task.info.read().status.clone();
             if !matches!(status_snap, BashTaskStatus::Running) {
-                return Ok(WakeReason::Finished);
+                return Ok(());
             }
 
-            // 2) 然后看"文件总长度是否已经超过 since"。注意：用文件元数据 size 比，
-            //    而不是事件计数；这样 read_output(since=X) 之后立刻 wait_for_change(since=Y=X+n)
-            //    即便没有新 notify 触发，size 直接判定也不会丢字节。
-            let log_path = task.info.read().log_path.clone();
-            if let Ok(meta) = tokio::fs::metadata(Path::new(&log_path)).await {
-                if meta.len() > since {
-                    return Ok(WakeReason::NewOutput);
-                }
-            }
-
-            // 3) 都不满足 → 让 await 句柄睡，等下一次 pump flush / 终态翻转。
             notified.await;
         }
     }
@@ -913,7 +938,7 @@ fn spawn_pump<R>(
                     let _ = f.write_all(&buf[..n]).await;
                     let _ = f.flush().await;
                     drop(f);
-                    // P1：每次 flush 后唤醒所有挂在 `wait_for_change` 上的等待者；
+                    // P1：每次 flush 后唤醒所有挂在 `wait_for_finish` 上的等待者；
                     // 配合"先 notified() 再读 size"的 race-free 顺序，保证不丢字节、不丢唤醒。
                     notify.notify_waiters();
                 }

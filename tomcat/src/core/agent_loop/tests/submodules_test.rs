@@ -1133,58 +1133,45 @@ async fn task_output_block_true_returns_finished_on_natural_exit() {
     assert!(!start_err);
     let ticket: serde_json::Value = serde_json::from_str(&start_msg).unwrap();
     let task_id = ticket["taskId"].as_str().unwrap().to_string();
-
-    // wait slice 循环：起点可能命中 wakeReason="new_output"（echo 立即被 pump
-    // 写出），需要按契约用 next_offset 继续等，直到 wakeReason="finished"。
-    let mut since: u64 = 0;
-    let mut got_finished = false;
-    for _ in 0..6 {
-        let out_tc = ToolCallInfo {
-            id: "to-blk-1".into(),
-            name: "task_output".into(),
-            arguments: format!(
-                r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":1500}}"#,
-                task_id, since
-            ),
-        };
-        let outcome = execute_tool_full(
-            &primitive,
-            &None,
-            &registry_opt,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            SubagentType::User,
-            None,
-            &tokio_util::sync::CancellationToken::new(),
-            &out_tc,
-            None,
-            None,
-        )
-        .await;
-        assert!(
-            !outcome.is_error,
-            "block=true 必须成功：{}",
-            outcome.model_text
-        );
-        let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
-        let wr = chunk["wakeReason"].as_str().unwrap_or("");
-        let finished = chunk["finished"].as_bool().unwrap_or(false);
-        if wr == "finished" || finished {
-            assert_eq!(
-                chunk["wakeReason"],
-                serde_json::Value::String("finished".into())
-            );
-            assert!(finished);
-            got_finished = true;
-            break;
-        }
-        since = chunk["nextOffset"].as_u64().unwrap_or(since);
-    }
-    assert!(got_finished, "应当在多次 wait slice 后命中 finished");
+    // `block=true` 现在会一直睡到任务结束或 timeout；这个任务很短，因此一次就应命中
+    // `wakeReason="finished"`。
+    let out_tc = ToolCallInfo {
+        id: "to-blk-1".into(),
+        name: "task_output".into(),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":1500}}"#,
+            task_id
+        ),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        None,
+        &tokio_util::sync::CancellationToken::new(),
+        &out_tc,
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        !outcome.is_error,
+        "block=true 必须成功：{}",
+        outcome.model_text
+    );
+    let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
+    assert_eq!(
+        chunk["wakeReason"],
+        serde_json::Value::String("finished".into())
+    );
+    assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
 }
 
 /// timeout 是非终态：`wakeReason="timeout" && finished=false`。若自 `since` 之后
@@ -1283,12 +1270,15 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
         initial.content
     );
 
+    // block=true 会睡满 timeout（任务 `sleep 8` 不会先结束）。这里用 since=0 让本次等待
+    // 窗口覆盖已产出的 token，因此 timeout 时应回一段有界尾巴（含 token）、finished=false，
+    // 而不是像 since=EOF 那样返回空 content。
     let out_tc = ToolCallInfo {
         id: "to-tail".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":5000}}"#,
-            task_id, initial.next_offset
+            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":5000}}"#,
+            task_id
         ),
     };
     let outcome = execute_tool_full(

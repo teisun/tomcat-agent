@@ -4,7 +4,7 @@ use tracing::warn;
 use crate::api::chat::ChatContext;
 use crate::core::tools::primitive::{BackgroundTaskLifecycleEvent, BashTaskStatus};
 
-pub(super) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
+pub(crate) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
     let registry = ctx.session_runtime.bash_task_registry.clone();
     let routes = ctx.session_runtime.completion_routes.clone();
     let queue = ctx.session_runtime.follow_up_queue.clone();

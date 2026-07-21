@@ -30,6 +30,7 @@ pub struct SessionSlot {
     pub terminal_emitted: AtomicBool,
     pub turn_state: Mutex<Option<SessionTurnState>>,
     pub run_task: Mutex<Option<JoinHandle<()>>>,
+    pub background_task_listener: Mutex<Option<JoinHandle<()>>>,
     pub listener_ids: Mutex<Vec<EventListenerId>>,
 }
 
@@ -50,6 +51,7 @@ impl SessionSlot {
             terminal_emitted: AtomicBool::new(false),
             turn_state: Mutex::new(Some(turn_state)),
             run_task: Mutex::new(None),
+            background_task_listener: Mutex::new(None),
             listener_ids: Mutex::new(Vec::new()),
         }
     }

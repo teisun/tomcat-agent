@@ -10,7 +10,7 @@ use crate::core::permission::{
 };
 use crate::core::tools::contract::confirmation::AllowAllConfirmation;
 use crate::core::tools::primitive::bash_task::BackgroundBashGuard;
-use crate::core::tools::primitive::{BashTaskRegistry, BashTaskStatus, WakeReason};
+use crate::core::tools::primitive::{BashTaskRegistry, BashTaskStatus};
 use crate::infra::audit::TracingAuditRecorder;
 
 fn make_guard(
@@ -173,11 +173,9 @@ async fn read_output_unknown_task_id_errors() {
 
 // ─── P1（bash background monitor）追加 ─────────────────────────────────────
 
-/// race-free wait_for_change：read_output(since=X) 拿到 next_offset=Y 之后
-/// 立刻 wait_for_change(since=Y)，期间 pump 仍在写字节，wait 必须能在新字节
-/// 到达后立即返回 NewOutput。**不丢字节**。
+/// `wait_for_finish` 不会因为持续新输出而提前返回；只有终态才会结束等待。
 #[tokio::test]
-async fn wait_for_change_returns_new_output_after_pump_flush() {
+async fn wait_for_finish_ignores_new_output_until_terminal() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = std::sync::Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
     let ticket = reg
@@ -189,58 +187,40 @@ async fn wait_for_change_returns_new_output_after_pump_flush() {
         .await
         .expect("spawn");
 
-    // 先等几行被写出来。
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    let chunk1 = reg.read_output(&ticket.task_id, None).await.expect("read1");
-    assert!(chunk1.next_offset > 0);
+    let pending = tokio::time::timeout(
+        std::time::Duration::from_millis(350),
+        reg.wait_for_finish(&ticket.task_id),
+    )
+    .await;
+    assert!(
+        pending.is_err(),
+        "持续新输出时 wait_for_finish 不应提前返回，实际 = {:?}",
+        pending
+    );
 
-    // 紧接着 wait_for_change(since = next_offset)，超时上限给 2s。
-    let reg2 = reg.clone();
-    let task_id = ticket.task_id.clone();
-    let since = chunk1.next_offset;
-    let waiter = tokio::spawn(async move { reg2.wait_for_change(&task_id, Some(since)).await });
-    let wake = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+    reg.stop(&ticket.task_id).await.expect("stop");
+    tokio::time::timeout(std::time::Duration::from_secs(2), reg.wait_for_finish(&ticket.task_id))
         .await
-        .expect("wait_for_change 没在 2s 内返回")
-        .expect("join")
-        .expect("wait_for_change err");
-    assert_eq!(wake, WakeReason::NewOutput);
-
-    let _ = reg.stop(&ticket.task_id).await;
+        .expect("wait_for_finish 应在 stop 后返回")
+        .expect("wait_for_finish err");
 }
 
-/// 任务自然结束 → wait_for_change 立即返回 Finished，不必再等 pump flush。
+/// 任务自然结束 → wait_for_finish 返回。
 #[tokio::test]
-async fn wait_for_change_returns_finished_on_natural_exit() {
+async fn wait_for_finish_returns_on_natural_exit() {
     let dir = tempfile::tempdir().expect("tempdir");
     let reg = std::sync::Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
     let ticket = reg
         .spawn("echo done; exit 0".to_string(), None, None)
         .await
         .expect("spawn");
-    let reg2 = reg.clone();
-    let task_id = ticket.task_id.clone();
-    let waiter = tokio::spawn(async move { reg2.wait_for_change(&task_id, Some(0)).await });
-    let wake = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+    tokio::time::timeout(std::time::Duration::from_secs(2), reg.wait_for_finish(&ticket.task_id))
         .await
         .expect("timeout")
-        .expect("join")
         .expect("err");
-    // NewOutput 与 Finished 都可接受（race 上 pump 可能先 flush "done\n"）；
-    // 二次 wait 必须能拿到 Finished。
-    if wake == WakeReason::NewOutput {
-        // 再等一次：现在 task 最终必须收敛到 Finished，再读状态断言，避免
-        // stdout flush 先于 wait 任务翻终态时的瞬时竞态。
-        let wake2 = reg
-            .wait_for_change(&ticket.task_id, Some(u64::MAX))
-            .await
-            .expect("wait2");
-        assert_eq!(wake2, WakeReason::Finished);
-        let info = reg.list();
-        assert!(matches!(info[0].status, BashTaskStatus::Finished { .. }));
-    } else {
-        assert_eq!(wake, WakeReason::Finished);
-    }
+    let info = reg.list();
+    assert!(matches!(info[0].status, BashTaskStatus::Finished { .. }));
 }
 
 /// subscribe_lifecycle：同一 task 的 finished 事件**只发一次**（验证

@@ -34,10 +34,10 @@ mod session_title;
 mod thinking_persist;
 mod workspace_state;
 
-use self::background::spawn_completion_subscriber;
 use self::cleanup::ensure_session;
 use self::persist::push_turn_message;
 use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
+pub(crate) use self::background::spawn_completion_subscriber;
 pub(crate) use self::rehydrate::{recover_context_state_after_failed_turn, render_error_message};
 use self::session_title::{maybe_emit_rule_session_title, maybe_spawn_semantic_session_title};
 use self::workspace_state::compute_workspace_state;

@@ -2,7 +2,14 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WebviewToolCard } from "../types";
-import { clampTaskOutputBudget, commandBinaries, formatCountdown, toolCategory, ToolRow } from "./ToolRow";
+import {
+  clampTaskOutputBudget,
+  commandBinaries,
+  formatCountdown,
+  isActionTool,
+  toolCategory,
+  ToolRow,
+} from "./ToolRow";
 
 function buildTool(overrides: Partial<WebviewToolCard> = {}): WebviewToolCard {
   return {
@@ -536,9 +543,57 @@ describe("ToolRow", () => {
     expect(toolCategory("edit")).toBe("edit");
     expect(toolCategory("bash")).toBe("command");
     expect(toolCategory("ask_question")).toBe("answer");
+    expect(toolCategory("task_output")).toBe("task");
+    expect(toolCategory("task_stop")).toBe("task");
+    expect(toolCategory("task_list")).toBe("task");
     expect(toolCategory("read")).toBe("context");
     expect(toolCategory("create_plan")).toBe("other");
     expect(toolCategory("unknown_tool")).toBe("other");
+  });
+
+  it("treats only blocking task_output waits as action tools", () => {
+    expect(
+      isActionTool(
+        buildTool({
+          args: { block: true, task_id: "task-1", timeout_ms: 10_000 },
+          status: "running",
+          toolName: "task_output",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isActionTool(
+        buildTool({
+          args: { block: false, task_id: "task-1", timeout_ms: 0 },
+          toolName: "task_output",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isActionTool(
+        buildTool({
+          args: { block: true, task_id: "task-1", timeout_ms: 10_000 },
+          status: "complete",
+          toolName: "task_output",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isActionTool(
+        buildTool({
+          args: { block: true, task_id: "task-1", timeout_ms: 0 },
+          toolName: "task_output",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isActionTool(
+        buildTool({
+          args: { task_id: "task-1" },
+          toolName: "task_stop",
+        }),
+      ),
+    ).toBe(false);
   });
 
   it("context rows keep the minimalist style and stay collapsed by default", () => {
@@ -717,6 +772,47 @@ describe("ToolRow", () => {
     expect(screen.getByTestId("tool-row-cmd-purpose").className).not.toContain("tc-loading-shimmer");
   });
 
+  it("keeps background bash cards in a running state until the task finishes", () => {
+    const { rerender } = render(
+      <ToolRow
+        item={buildTool({
+          args: { command: "sleep 12", run_in_background: true },
+          backgroundRunning: true,
+          backgroundTaskId: "task-1",
+          status: "complete",
+          summary: "{\"taskId\":\"task-1\"}",
+          summaryTitle: "Sleep in background",
+          toolName: "bash",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-cmd-purpose").textContent).toBe("Running in background");
+    expect(screen.getByTestId("tool-row-cmd-purpose").className).toContain("tc-loading-shimmer");
+    expect(screen.getByTestId("disclosure-card").className).toContain("tc-disclosure-card--running");
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          args: { command: "sleep 12", run_in_background: true },
+          backgroundExitCode: 23,
+          backgroundRunning: false,
+          backgroundTaskId: "task-1",
+          status: "complete",
+          summary: "{\"taskId\":\"task-1\"}",
+          summaryTitle: "Sleep in background",
+          toolName: "bash",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-cmd-purpose").textContent).toBe("Ran · exit 23");
+    expect(screen.getByTestId("tool-row-cmd-purpose").className).not.toContain("tc-loading-shimmer");
+    expect(screen.getByTestId("disclosure-card").className).toContain("tc-disclosure-card--success");
+  });
+
   it("renders a task_output countdown row that ticks each second and flips to past tense", () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-07-21T07:00:00.000Z");
@@ -734,6 +830,7 @@ describe("ToolRow", () => {
       />,
     );
 
+    expect(screen.getByTestId("tool-row").getAttribute("data-tool-category")).toBe("task");
     expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
       "Waiting up to 10s for shell",
     );
@@ -782,6 +879,7 @@ describe("ToolRow", () => {
       />,
     );
 
+    expect(screen.getByTestId("tool-row").getAttribute("data-tool-category")).toBe("task");
     expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
       "Waiting up to 9m59s for shell",
     );

@@ -138,6 +138,38 @@ describe("TranscriptView", () => {
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Read");
   });
 
+  it("folds a lone task-family tool into a thinking group instead of flattening it", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        args: { task_id: "task-1" },
+        assistantMessageId: "assistant-1",
+        id: "tool-stop",
+        isError: false,
+        status: "complete",
+        summary: "{\"stopped\":true}",
+        toolCallId: "tc-stop",
+        toolName: "task_stop",
+        type: "tool",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy={false}
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.getByTestId("thinking-group")).toBeTruthy();
+    expect(screen.getByTestId("thinking-group-title").textContent).toContain("Stopped task-1");
+    expect(screen.queryByTestId("tool-row")).toBeNull();
+  });
+
   it("keeps assistant rich rendering while showing thinking as plain text", () => {
     const timeline: WebviewTimelineItem[] = [
       {
@@ -581,6 +613,34 @@ describe("TranscriptView", () => {
     );
 
     expect(screen.queryByTestId("progress-row")).toBeNull();
+  });
+
+  it("keeps the progress row visible during quiet gaps even when todos exist", () => {
+    const userOnlyTimeline: WebviewTimelineItem[] = [
+      {
+        id: "user-1",
+        kind: "user",
+        text: "latest prompt",
+        type: "message",
+      },
+    ];
+    render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        planTodos={[{ content: "Wait for build", id: "todo-1", status: "in_progress" }]}
+        timeline={userOnlyTimeline}
+      />,
+    );
+
+    expect(screen.getByTestId("progress-row")).toBeTruthy();
+    expect(screen.getByTestId("progress-row-dots").querySelectorAll(".tc-loading-dots__dot")).toHaveLength(
+      3,
+    );
   });
 
   it("reuses the progress row after tools finish until the next live output arrives", () => {

@@ -187,6 +187,13 @@ export interface ServeTodoItem {
   status: string;
 }
 export type ServeToolEvent = {
+  command?: null | string;
+  exitCode: number;
+  logPath?: null | string;
+  sessionId?: null | string;
+  taskId: string;
+  type: "background_task_finished";
+} | {
   sessionId?: null | string;
   summaryTitle?: null | string;
   toolCallId: string;

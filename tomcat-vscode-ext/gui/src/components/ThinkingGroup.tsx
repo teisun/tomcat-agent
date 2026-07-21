@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import type { WebviewMessageBlock, WebviewToolCard } from "../types";
 import { MessageBubble } from "./MessageBubble";
@@ -28,23 +28,25 @@ function groupHeaderTitle(
   return { shimmer: isStreaming, text: "Thinking" };
 }
 
-export function ThinkingGroup({
-  group,
-  isStreaming = false,
-  onOpenFile,
-  onOpenDiff,
-}: {
+type ThinkingGroupProps = {
   group: AssistantResponseGroup;
   isStreaming?: boolean;
   onOpenFile(path: string, line?: number): void;
   onOpenDiff?(toolCallId: string): void;
-}) {
+};
+
+function ThinkingGroupComponent({
+  group,
+  isStreaming = false,
+  onOpenFile,
+  onOpenDiff,
+}: ThinkingGroupProps) {
   const streaming = isStreaming && group.tools.some((tool) => tool.status !== "complete");
-  const [collapsed, setCollapsed] = useState(!streaming);
+  const [collapsed, setCollapsed] = useState(true);
 
   useEffect(() => {
-    setCollapsed(!streaming);
-  }, [group.assistantMessageId, streaming]);
+    setCollapsed(true);
+  }, [group.assistantMessageId]);
 
   const header = useMemo(() => groupHeaderTitle(group, isStreaming), [group, isStreaming]);
   const statusIconClass =
@@ -106,3 +108,22 @@ export function ThinkingGroup({
     </section>
   );
 }
+
+function sameTools(left: WebviewToolCard[], right: WebviewToolCard[]): boolean {
+  return left.length === right.length && left.every((tool, index) => tool === right[index]);
+}
+
+function areThinkingGroupPropsEqual(prev: ThinkingGroupProps, next: ThinkingGroupProps): boolean {
+  return (
+    prev.group.assistantMessageId === next.group.assistantMessageId &&
+    prev.group.preamble === next.group.preamble &&
+    prev.group.thinking === next.group.thinking &&
+    sameTools(prev.group.tools, next.group.tools) &&
+    prev.isStreaming === next.isStreaming &&
+    prev.onOpenDiff === next.onOpenDiff &&
+    prev.onOpenFile === next.onOpenFile
+  );
+}
+
+export const ThinkingGroup = memo(ThinkingGroupComponent, areThinkingGroupPropsEqual);
+ThinkingGroup.displayName = "ThinkingGroup";

@@ -148,6 +148,9 @@ export interface WebviewPlanActivity {
 export interface WebviewToolCard {
   args?: Record<string, unknown>;
   assistantMessageId?: string;
+  backgroundExitCode?: number;
+  backgroundRunning?: boolean;
+  backgroundTaskId?: string;
   display?: WebviewToolDisplay;
   diff?: FileDiffLine[];
   diffStat?: WebviewToolDiffStat;

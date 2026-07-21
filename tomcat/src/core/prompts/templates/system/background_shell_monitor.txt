@@ -10,14 +10,19 @@ There are exactly three correct usage patterns — pick one:
 
 1. **The current todo strictly depends on the shell result** → poll with
    `task_output(task_id, since=..., block=true, timeout_ms=...)`.
-   A single blocking wait slice can now cover roughly 5 seconds to 10 minutes,
-   so prefer a longer slice when you truly need to wait instead of mindlessly
-   looping short polls.
+   A single blocking wait slice now sleeps until **the task finishes** or
+   **`timeout_ms` elapses**; mid-stream log output does **not** wake it early.
+   Blocking waits clamp into roughly 5 seconds to 10 minutes, so choose a slice
+   that matches the real wait you expect instead of mindlessly looping short polls.
    Read `content`, `finished`, `exit_code`, and `wakeReason` together:
-   - `finished=true` → act on `exit_code` and the returned output.
-   - `wakeReason="new_output"` → use the returned bytes to decide the next step.
-   - `wakeReason="timeout" && finished=false` → a progress check, **not** a failure;
-     inspect the returned output/tail first, only wait again if you truly must.
+   - `finished=true` (or `wakeReason="finished"`) → act on `exit_code` and the returned output.
+   - `wakeReason="timeout" && finished=false` → a progress check, **not** a failure.
+     Inspect `content` first:
+     - empty `content` → no new output arrived during that wait slice; the task may be quiet or hung.
+     - non-empty `content` → a bounded tail of the recent output since your `since` offset.
+   If you still need the final result after a timeout, call `task_output` again with
+   the returned `next_offset`. If you are waiting for a readiness marker rather than
+   task completion, use shorter timeout slices and inspect `content` after each timeout.
    Do not mindlessly loop forever: if repeated timeout slices show no meaningful
    progress, stop polling and do other work or report status.
 

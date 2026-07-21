@@ -24,6 +24,7 @@ import type {
   WebviewTimelineItem,
   WebviewStateSnapshot,
 } from "./types";
+import { reconcileStateSnapshot } from "./stateReconcile";
 import { useAutoScroll } from "./useAutoScroll";
 
 const EMPTY_STATE: WebviewStateSnapshot = {
@@ -874,9 +875,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         return;
       }
       if (frame.channel === "state") {
-        stateRef.current = frame.content;
-        setState(frame.content);
-        vscodeApi.setState?.(frame.content);
+        const nextState = reconcileStateSnapshot(stateRef.current, frame.content);
+        stateRef.current = nextState;
+        setState(nextState);
+        vscodeApi.setState?.(nextState);
         flushPendingInsertions();
         return;
       }
@@ -978,9 +980,12 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     };
   }, []);
 
-  const handleAnswerQuestion = (requestId: string, result: AskQuestionResult) => {
-    answerQuestion(vscodeApi, requestId, result);
-  };
+  const handleAnswerQuestion = useCallback(
+    (requestId: string, result: AskQuestionResult) => {
+      answerQuestion(vscodeApi, requestId, result);
+    },
+    [vscodeApi],
+  );
   const handleOpenFile = useCallback(
     (path: string, line?: number) => {
       postIntent(vscodeApi, "openFile", {
@@ -989,6 +994,42 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
       });
     },
     [vscodeApi],
+  );
+  const handleSetBuildModel = useCallback(
+    (modelId: string) => {
+      postIntent(vscodeApi, "setBuildModel", {
+        modelId,
+      });
+    },
+    [vscodeApi],
+  );
+  const handleOpenDiff = useCallback(
+    (toolCallId: string) => {
+      postIntent(vscodeApi, "openDiff", {
+        toolCallId,
+      });
+    },
+    [vscodeApi],
+  );
+  const handleOpenPlanFile = useCallback(
+    (path: string) => {
+      postIntent(vscodeApi, "openPlanFile", {
+        path,
+      });
+    },
+    [vscodeApi],
+  );
+  const handleRetryUserMessage = useCallback(
+    (messageId: string) => {
+      if (!activeSession?.sessionId || !canPrompt) {
+        return;
+      }
+      postIntent(vscodeApi, "retryUserMessage", {
+        messageId,
+        sessionId: activeSession.sessionId,
+      });
+    },
+    [activeSession?.sessionId, canPrompt, vscodeApi],
   );
 
   const handleContextSearchOpen = () => {
@@ -1033,32 +1074,38 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     });
   };
 
-  const handleBuildPlan = (planId: string | null, _path: string) => {
-    if (!activeSession) {
-      return;
-    }
-    postIntent(vscodeApi, "setPlanMode", {
-      action: "build",
-      planId,
-      sessionId: activeSession.sessionId,
-    });
-  };
+  const handleBuildPlan = useCallback(
+    (planId: string | null, _path: string) => {
+      if (!activeSession) {
+        return;
+      }
+      postIntent(vscodeApi, "setPlanMode", {
+        action: "build",
+        planId,
+        sessionId: activeSession.sessionId,
+      });
+    },
+    [activeSession, vscodeApi],
+  );
 
-  const handleOpenRestoreDialog = (checkpointId: string) => {
-    if (!activeSession?.sessionId) {
-      return;
-    }
-    const nextState = buildRestoreDialogState(
-      activeSession.timeline,
-      activeSession.checkpoints ?? [],
-      activeSession.sessionId,
-      checkpointId,
-    );
-    if (!nextState) {
-      return;
-    }
-    setPendingRestoreDialog(nextState);
-  };
+  const handleOpenRestoreDialog = useCallback(
+    (checkpointId: string) => {
+      if (!activeSession?.sessionId) {
+        return;
+      }
+      const nextState = buildRestoreDialogState(
+        activeSession.timeline,
+        activeSession.checkpoints ?? [],
+        activeSession.sessionId,
+        checkpointId,
+      );
+      if (!nextState) {
+        return;
+      }
+      setPendingRestoreDialog(nextState);
+    },
+    [activeSession],
+  );
 
   const handleCancelRestore = () => {
     setPendingRestoreDialog(null);
@@ -1218,32 +1265,12 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
                 busy={!!activeSession.busy}
                 bottomSpacerHeight={bottomSpacerHeight}
                 onAnswer={handleAnswerQuestion}
-                onSetBuildModel={(modelId) =>
-                  postIntent(vscodeApi, "setBuildModel", {
-                    modelId,
-                  })
-                }
+                onSetBuildModel={handleSetBuildModel}
                 checkpoints={activeSession.checkpoints ?? []}
-                onOpenDiff={(toolCallId) =>
-                  postIntent(vscodeApi, "openDiff", {
-                    toolCallId,
-                  })
-                }
+                onOpenDiff={handleOpenDiff}
                 onOpenFile={handleOpenFile}
-                onOpenPlanFile={(path) =>
-                  postIntent(vscodeApi, "openPlanFile", {
-                    path,
-                  })
-                }
-                onRetryUserMessage={(messageId) => {
-                  if (!activeSession?.sessionId || !canPrompt) {
-                    return;
-                  }
-                  postIntent(vscodeApi, "retryUserMessage", {
-                    messageId,
-                    sessionId: activeSession.sessionId,
-                  });
-                }}
+                onOpenPlanFile={handleOpenPlanFile}
+                onRetryUserMessage={handleRetryUserMessage}
                 canBuildPlan={canBuildPlan}
                 onBuildPlan={handleBuildPlan}
                 planId={activeSession.planId}

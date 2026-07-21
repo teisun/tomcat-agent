@@ -32,9 +32,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::chat::run_chat_turn_with_message;
-use crate::api::chat::{recover_context_state_after_failed_turn, ChatContext, ChatContextOverrides};
+use crate::api::chat::{
+    recover_context_state_after_failed_turn, spawn_completion_subscriber, ChatContext,
+    ChatContextOverrides,
+};
 use crate::core::agent_registry::AgentRegistry;
 use crate::core::llm::ChatMessage;
+use crate::core::tools::primitive::BashTaskStatus;
+use crate::infra::{wire, ScopedEventEmitter};
 use crate::{
     ensure_work_dir_structure, resolve_model_thinking_path, resolve_sessions_dir,
     session_key_for_agent, AppConfig, AppError, ModelThinkingStore, SessionManager, SessionMode,
@@ -245,6 +250,58 @@ pub(crate) fn register_slot_hooks(state: &ServeState, slot: &Arc<SessionSlot>) {
         slot.ctx.global_services.event_bus.clone(),
     );
     slot.listener_ids.lock().push(ask_listener);
+    if slot
+        .ctx
+        .session_runtime
+        .completion_subscriber_handle
+        .lock()
+        .is_none()
+    {
+        let handle = spawn_completion_subscriber(&slot.ctx);
+        *slot.ctx.session_runtime.completion_subscriber_handle.lock() = Some(handle);
+    }
+    if slot.background_task_listener.lock().is_none() {
+        *slot.background_task_listener.lock() = Some(spawn_background_task_listener(slot));
+    }
+}
+
+fn spawn_background_task_listener(slot: &Arc<SessionSlot>) -> tokio::task::JoinHandle<()> {
+    let registry = slot.ctx.session_runtime.bash_task_registry.clone();
+    let emitter = ScopedEventEmitter::new(
+        slot.ctx.global_services.event_bus.clone(),
+        slot.session_id.clone(),
+    );
+    let mut rx = registry.subscribe_lifecycle();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let exit_code = match event.final_status {
+                        BashTaskStatus::Finished { exit_code } => exit_code,
+                        BashTaskStatus::Stopped => -1,
+                        BashTaskStatus::Running => continue,
+                    };
+                    let payload = serde_json::json!({
+                        "type": wire::WIRE_BACKGROUND_TASK_FINISHED,
+                        "taskId": event.task_id,
+                        "exitCode": exit_code,
+                        "logPath": event.log_path,
+                        "command": event.command,
+                    });
+                    let _ = emitter.emit_payload(wire::WIRE_BACKGROUND_TASK_FINISHED, payload);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        target: "tomcat_chat_diag",
+                        phase = "serve_background_task_listener_lagged",
+                        skipped = skipped,
+                        "serve background task listener lagged; some lifecycle events skipped"
+                    );
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 struct TurnStateLease {
@@ -310,6 +367,10 @@ pub(crate) async fn cleanup_session_slot(
 ) -> Result<(), AppError> {
     slot.ctx.session_runtime.cancel_token.lock().cancel();
     slot.ctx.agent_registry.cascade_abort(&slot.session_id);
+    if let Some(handle) = slot.background_task_listener.lock().take() {
+        handle.abort();
+        let _ = handle.await;
+    }
 
     if let Some(plugin_manager) = slot.ctx.global_services.plugin_manager.clone() {
         match tokio::time::timeout(

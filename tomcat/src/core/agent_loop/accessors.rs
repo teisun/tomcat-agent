@@ -161,7 +161,7 @@ impl AgentLoop {
     /// P1：注入 `ChatContext` 持有的 session 级 `completion_routes` 路由表。
     ///
     /// `task_output(block=true)` 路径据此做 claim-on-entry，并在 wake 时按
-    /// `Finished / NewOutput / Timeout / Cancel` 四态维护 entry；详见
+    /// `Finished / Timeout / Cancel` 三态维护 entry（中途输出不再打断等待）；详见
     /// [`super::types::CompletionRoute`] 与 docs。
     pub fn with_completion_routes(mut self, routes: BackgroundCompletionRoutes) -> Self {
         self.completion_routes = Some(routes);

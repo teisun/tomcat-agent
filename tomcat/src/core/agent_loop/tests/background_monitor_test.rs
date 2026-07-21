@@ -58,7 +58,6 @@ impl LlmProvider for HungTaskBoundedProvider {
             requests.push(req.clone());
             requests.len() - 1
         };
-
         let events = match step {
             0 => single_tool_call_stream(
                 "call-bash",
@@ -78,17 +77,6 @@ impl LlmProvider for HungTaskBoundedProvider {
                 )
             }
             2 => {
-                let (task_id, next_offset) = extract_new_output_offset(&req)?;
-                single_tool_call_stream(
-                    "call-task-output-2",
-                    "task_output",
-                    &format!(
-                        r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":150}}"#,
-                        task_id, next_offset
-                    ),
-                )
-            }
-            3 => {
                 assert_timeout_snapshot_present(&req)?;
                 vec![
                     Ok(StreamEvent::ContentDelta {
@@ -101,10 +89,11 @@ impl LlmProvider for HungTaskBoundedProvider {
             }
             _ => {
                 return Err(AppError::Llm(format!(
-                    "hung task mock should stop after 4 requests, got step={step}"
+                    "hung task mock should stop after 3 requests, got step={step}"
                 )));
             }
         };
+
 
         Ok(Box::new(tokio_stream::iter(events)))
     }
@@ -172,40 +161,6 @@ fn assert_timeout_snapshot_present(req: &ChatRequest) -> Result<(), AppError> {
     ))
 }
 
-fn extract_new_output_offset(req: &ChatRequest) -> Result<(String, u64), AppError> {
-    let task_id = extract_background_task_id(req)?;
-    for message in req.messages.iter().rev() {
-        if message.role != ChatMessageRole::Tool {
-            continue;
-        }
-        let Some(content) = message.text_content() else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
-            continue;
-        };
-        if value.get("wakeReason").and_then(|v| v.as_str()) != Some("new_output") {
-            continue;
-        }
-        if !value
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .contains("HUNG_TIMEOUT_SNAPSHOT")
-        {
-            continue;
-        }
-        let next_offset = value
-            .get("nextOffset")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| AppError::Llm("expected nextOffset on new_output result".to_string()))?;
-        return Ok((task_id, next_offset));
-    }
-    Err(AppError::Llm(
-        "expected first task_output result to deliver initial new_output".to_string(),
-    ))
-}
-
 #[tokio::test]
 async fn run_hung_background_task_timeout_snapshot_keeps_turn_bounded() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -238,7 +193,7 @@ async fn run_hung_background_task_timeout_snapshot_keeps_turn_bounded() {
         "timeout snapshot 后应立即停止轮询，实际 final_text={:?}",
         result.final_text
     );
-    assert_eq!(llm.request_count(), 4, "应严格限制为 4 次 LLM 请求");
+    assert_eq!(llm.request_count(), 3, "应严格限制为 3 次 LLM 请求");
 
     if let Some(task_id) = llm.task_id() {
         let _ = registry.stop(&task_id).await;

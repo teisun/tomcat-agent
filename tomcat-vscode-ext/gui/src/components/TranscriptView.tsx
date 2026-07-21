@@ -1,6 +1,5 @@
 import { Fragment, type RefObject, useMemo } from "react";
 
-import { selectActiveTodoSource } from "../hooks/useActiveTodoProgress";
 import type {
   AskQuestionResult,
   WebviewCheckpoint,
@@ -16,7 +15,7 @@ import { MessageBubble } from "./MessageBubble";
 import { ProgressRow } from "./ProgressRow";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ThinkingGroup } from "./ThinkingGroup";
-import { isActionTool, ToolRow } from "./ToolRow";
+import { isActionTool, ToolRow, toolCategory } from "./ToolRow";
 import {
   groupTimelineByAssistantResponse,
   type AssistantResponseGroup,
@@ -250,7 +249,11 @@ export function TranscriptView({
               if (segment.group.tools.length === 0 && !hasThinkingText) {
                 return null;
               }
-              if (segment.group.tools.length === 1 && !hasThinkingText) {
+              if (
+                segment.group.tools.length === 1 &&
+                !hasThinkingText &&
+                toolCategory(segment.group.tools[0].toolName) !== "task"
+              ) {
                 return (
                   <ToolRow
                     item={segment.group.tools[0]}
@@ -290,14 +293,6 @@ export function TranscriptView({
       (item) => item.type === "tool" && item.status !== "complete",
     );
     const hasStreamingText = lastLiveActivity === "message";
-    const hasTodos = Boolean(
-      selectActiveTodoSource({
-        busy,
-        planState,
-        planTodos,
-        sessionTodos,
-      })?.length,
-    );
     return (
       <>
         {grouped.map(renderGroupedItem)}
@@ -307,7 +302,6 @@ export function TranscriptView({
             hasActiveThinking={hasActiveThinking}
             hasRunningTool={hasRunningTool}
             hasStreamingText={hasStreamingText}
-            hasTodos={hasTodos}
           />
         ) : null}
       </>

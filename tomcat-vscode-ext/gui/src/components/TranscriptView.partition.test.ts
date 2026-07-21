@@ -17,8 +17,11 @@ function buildGroup(overrides: Partial<AssistantResponseGroup> = {}): AssistantR
 function tool(
   id: string,
   toolName: string,
+  args?: Record<string, unknown>,
+  overrides: Partial<AssistantResponseGroup["tools"][number]> = {},
 ): AssistantResponseGroup["tools"][number] {
   return {
+    args,
     assistantMessageId: "assistant-1",
     id,
     isError: false,
@@ -27,6 +30,7 @@ function tool(
     toolCallId: `tc-${id}`,
     toolName,
     type: "tool",
+    ...overrides,
   };
 }
 
@@ -116,6 +120,43 @@ describe("partitionAssistantResponseGroup", () => {
     expect(entries[0]).toMatchObject({
       type: "action-tool",
       tool: { id: "plan-1", toolName: "create_plan" },
+    });
+  });
+
+  it("promotes blocking task_output rows but keeps non-blocking task tools grouped", () => {
+    const entries = partitionAssistantResponseGroup(
+      buildGroup({
+        tools: [
+          tool("task-blocking", "task_output", {
+            block: true,
+            task_id: "task-1",
+            timeout_ms: 10_000,
+          }, { status: "running" }),
+          tool("task-read", "task_output", {
+            block: false,
+            task_id: "task-1",
+            timeout_ms: 0,
+          }),
+          tool("task-stop", "task_stop", { task_id: "task-1" }),
+          tool("task-list", "task_list"),
+        ],
+      }),
+    );
+
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({
+      type: "action-tool",
+      tool: { id: "task-blocking", toolName: "task_output" },
+    });
+    expect(entries[1]).toMatchObject({
+      type: "context-group",
+      group: {
+        tools: [
+          { id: "task-read", toolName: "task_output" },
+          { id: "task-stop", toolName: "task_stop" },
+          { id: "task-list", toolName: "task_list" },
+        ],
+      },
     });
   });
 

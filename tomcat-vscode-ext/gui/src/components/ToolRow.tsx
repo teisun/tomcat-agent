@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type {
   AskQuestionResult,
@@ -34,7 +34,7 @@ function humanizeToolName(toolName: string): string {
   return toolName.replace(/_/g, " ");
 }
 
-export type ToolCategory = "answer" | "command" | "context" | "edit" | "other";
+export type ToolCategory = "answer" | "command" | "context" | "edit" | "other" | "task";
 
 const TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS = 5_000;
 const TASK_OUTPUT_BLOCK_MIN_TIMEOUT_MS = 5_000;
@@ -43,6 +43,7 @@ const TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS = 600_000;
 const EDIT_TOOLS = new Set(["edit", "hashline_edit", "write"]);
 const COMMAND_TOOLS = new Set(["bash", "execute_command", "shell"]);
 const ANSWER_TOOLS = new Set(["ask_question"]);
+const TASK_TOOLS = new Set(["task_output", "task_stop", "task_list"]);
 const CONTEXT_TOOLS = new Set([
   "grep",
   "list_dir",
@@ -136,6 +137,10 @@ export function isRunning(item: WebviewToolCard): boolean {
   return (item.status === "running" || item.status === "streaming") && !item.isError;
 }
 
+function isRunningForDisplay(item: WebviewToolCard): boolean {
+  return isRunning(item) || item.backgroundRunning === true;
+}
+
 export function formatCountdown(ms: number): string {
   const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -174,6 +179,9 @@ export function toolCategory(toolName: string): ToolCategory {
   if (ANSWER_TOOLS.has(toolName)) {
     return "answer";
   }
+  if (TASK_TOOLS.has(toolName)) {
+    return "task";
+  }
   if (CONTEXT_TOOLS.has(toolName)) {
     return "context";
   }
@@ -185,6 +193,9 @@ export function toolCategory(toolName: string): ToolCategory {
 
 export function isActionTool(item: WebviewToolCard): boolean {
   if (isPlanTool(item)) {
+    return true;
+  }
+  if (isRunning(item) && isBlockingTaskOutput(item)) {
     return true;
   }
   const category = toolCategory(item.toolName);
@@ -258,6 +269,12 @@ function toolIconClass(toolName: string): string {
     case "execute_command":
     case "shell":
       return "codicon-terminal";
+    case "task_output":
+      return "codicon-watch";
+    case "task_stop":
+      return "codicon-debug-stop";
+    case "task_list":
+      return "codicon-tools";
     case "web_fetch":
       return "codicon-globe";
     case "list_dir":
@@ -313,19 +330,15 @@ export function buildFlatLabel(item: WebviewToolCard): string {
       return running ? `Searching files for ${query}` : `Searched files for ${query}`;
     }
     case "bash": {
+      const backgroundLabel = backgroundCommandLabel(item);
+      if (backgroundLabel) {
+        return backgroundLabel;
+      }
       const command = firstLine(asString(args.command)) ?? "command";
       return running ? `Running ${command}` : `Ran ${command}`;
     }
-    case "task_output": {
-      if (args.block === true && !item.isError && clampTaskOutputBudget(args.timeout_ms) > 0) {
-        if (item.status === "interrupted") {
-          return "Stopped waiting for shell";
-        }
-        return running ? "Waiting for shell" : "Waited for shell";
-      }
-      const taskId = asString(args.task_id) ?? "task";
-      return running ? `Reading output ${taskId}` : `Read output ${taskId}`;
-    }
+    case "task_output":
+      return taskOutputStateLabel(item);
     case "task_stop": {
       const taskId = asString(args.task_id) ?? "task";
       return running ? `Stopping ${taskId}` : `Stopped ${taskId}`;
@@ -410,6 +423,9 @@ export function buildToolCollectionTitle(tools: WebviewToolCard[]): string {
   if (tools.every((tool) => toolCategory(tool.toolName) === "edit")) {
     return `Edited ${tools.length} files`;
   }
+  if (tools.every((tool) => toolCategory(tool.toolName) === "task")) {
+    return tools.length === 1 ? buildGroupTitleFromTool(tools[0]) : "Managed background tasks";
+  }
 
   return `Used ${tools.length} tools`;
 }
@@ -419,7 +435,24 @@ function loadingTextClass(active: boolean): string {
 }
 
 function isBlockingTaskOutput(item: WebviewToolCard): boolean {
-  return item.toolName === "task_output" && item.args?.block === true && !item.isError;
+  return (
+    item.toolName === "task_output" &&
+    item.args?.block === true &&
+    !item.isError &&
+    clampTaskOutputBudget(item.args?.timeout_ms) > 0
+  );
+}
+
+function taskOutputStateLabel(item: WebviewToolCard): string {
+  const running = isRunning(item);
+  if (isBlockingTaskOutput(item)) {
+    if (item.status === "interrupted") {
+      return "Stopped waiting for shell";
+    }
+    return running ? "Waiting for shell" : "Waited for shell";
+  }
+  const taskId = asString(item.args?.task_id) ?? "task";
+  return running ? `Reading output ${taskId}` : `Read output ${taskId}`;
 }
 
 function taskOutputCountdownLabel(
@@ -430,9 +463,6 @@ function taskOutputCountdownLabel(
     return null;
   }
   const budget = clampTaskOutputBudget(item.args?.timeout_ms);
-  if (budget === 0) {
-    return null;
-  }
   if (item.status === "interrupted") {
     return "Stopped waiting for shell";
   }
@@ -569,10 +599,34 @@ export function commandBinaries(command: string | undefined): string[] {
 
 /** bash 卡片头的占位动词（summaryTitle 未到时）：中断/运行中/已完成三态。 */
 function commandPlaceholderVerb(item: WebviewToolCard): string {
+  const backgroundLabel = backgroundCommandLabel(item);
+  if (backgroundLabel) {
+    return backgroundLabel;
+  }
   if (item.status === "interrupted") {
     return "Interrupted";
   }
   return isRunning(item) ? "Running" : "Ran";
+}
+
+function backgroundCommandLabel(item: WebviewToolCard): string | null {
+  const isBackgroundCommand =
+    (item.toolName === "bash" || item.toolName === "shell" || item.toolName === "execute_command") &&
+    (item.backgroundRunning === true || typeof item.backgroundTaskId === "string");
+  if (!isBackgroundCommand) {
+    return null;
+  }
+  if (item.backgroundRunning === true) {
+    return "Running in background";
+  }
+  if (typeof item.backgroundExitCode === "number" && item.backgroundExitCode !== 0) {
+    return `Ran · exit ${item.backgroundExitCode}`;
+  }
+  return "Ran";
+}
+
+function commandPurposeLabel(item: WebviewToolCard): string {
+  return backgroundCommandLabel(item) ?? asString(item.summaryTitle) ?? commandPlaceholderVerb(item);
 }
 
 function parseApprovalQuestions(args: Record<string, unknown> | undefined): WebviewApprovalQuestion[] | null {
@@ -721,7 +775,7 @@ function renderFlatContent(
   const planPath = planPathForTool(item);
   const category = toolCategory(item.toolName);
   const diffStat = item.diffStat;
-  const textClassName = `tc-tool-row__text${loadingTextClass(isRunning(item))}`;
+  const textClassName = `tc-tool-row__text${loadingTextClass(isRunningForDisplay(item))}`;
 
   switch (category) {
     case "edit":
@@ -756,7 +810,7 @@ function renderFlatContent(
       return (
         <span className="tc-tool-row__inline">
           <span className={textClassName} data-testid="tool-row-cmd-purpose">
-            {asString(item.summaryTitle) ?? commandPlaceholderVerb(item)}
+            {commandPurposeLabel(item)}
           </span>
           <code className="tc-tool-row__cmd" data-testid="tool-row-cmd">
             {commandText(item)}
@@ -766,17 +820,17 @@ function renderFlatContent(
     }
     case "answer":
       return <span className={textClassName}>{buildFlatLabel(item)}</span>;
+    case "task": {
+      const countdownLabel = nowTick === undefined ? null : taskOutputCountdownLabel(item, nowTick);
+      return (
+        <span className={textClassName} data-testid="tool-row-task-output-countdown">
+          {countdownLabel ?? buildFlatLabel(item)}
+        </span>
+      );
+    }
     case "context":
     case "other":
       switch (item.toolName) {
-        case "task_output": {
-          const countdownLabel = nowTick === undefined ? null : taskOutputCountdownLabel(item, nowTick);
-          return (
-            <span className={textClassName} data-testid="tool-row-task-output-countdown">
-              {countdownLabel ?? buildFlatLabel(item)}
-            </span>
-          );
-        }
         case "create_plan":
         case "update_plan":
           return (
@@ -898,21 +952,7 @@ function shouldShowBodyByDefault(
   return item.isError || item.status !== "complete";
 }
 
-export function ToolRow({
-  availableModels = [],
-  buildModel = "",
-  canBuildPlan = false,
-  currentPlanId = null,
-  currentPlanState = null,
-  item,
-  onBuildPlan,
-  onOpenFile,
-  onOpenDiff,
-  onOpenPlanFile,
-  onSetBuildModel,
-  planTodos = [],
-  variant = "standalone",
-}: {
+type ToolRowProps = {
   availableModels?: string[];
   buildModel?: string;
   canBuildPlan?: boolean;
@@ -926,7 +966,23 @@ export function ToolRow({
   onSetBuildModel?(modelId: string): void;
   planTodos?: WebviewTodo[];
   variant?: "grouped" | "standalone";
-}) {
+};
+
+function ToolRowComponent({
+  availableModels = [],
+  buildModel = "",
+  canBuildPlan = false,
+  currentPlanId = null,
+  currentPlanState = null,
+  item,
+  onBuildPlan,
+  onOpenFile,
+  onOpenDiff,
+  onOpenPlanFile,
+  onSetBuildModel,
+  planTodos = [],
+  variant = "standalone",
+}: ToolRowProps) {
   const category = toolCategory(item.toolName);
   const contentVisible = hasMeaningfulContent(item);
   const alwaysVisibleBody = category === "answer" && contentVisible;
@@ -1022,9 +1078,9 @@ export function ToolRow({
     (category === "edit" && item.display?.kind === "file" && (hasStructuredDiff || hasLargeDiffFallback));
   const disclosureStatusVariant: DisclosureStatusVariant = item.isError
     ? "error"
-    : item.status === "complete"
-      ? "success"
-      : "running";
+    : isRunningForDisplay(item)
+      ? "running"
+      : "success";
   const showOpenDiffButton =
     category === "edit" &&
     item.display?.kind === "file" &&
@@ -1038,10 +1094,10 @@ export function ToolRow({
         {category === "command" ? (
           <>
             <span
-              className={`tc-tool-row__text${loadingTextClass(isRunning(item))}`}
+              className={`tc-tool-row__text${loadingTextClass(isRunningForDisplay(item))}`}
               data-testid="tool-row-cmd-purpose"
             >
-              {asString(item.summaryTitle) ?? commandPlaceholderVerb(item)}
+              {commandPurposeLabel(item)}
             </span>
             {commandBinaries(fullCommandText(item)).length > 0 ? (
               <span className="tc-tool-row__cmd-tags" data-testid="tool-row-cmd-tags">
@@ -1051,7 +1107,7 @@ export function ToolRow({
           </>
         ) : (
           <>
-            <span className={`tc-tool-row__text${loadingTextClass(isRunning(item))}`}>
+            <span className={`tc-tool-row__text${loadingTextClass(isRunningForDisplay(item))}`}>
               {buildFlatLabel(item).replace(/ file$/, "")}
             </span>
             {item.display?.kind === "file" ? (
@@ -1149,3 +1205,24 @@ export function ToolRow({
     </div>
   );
 }
+
+function areToolRowPropsEqual(prev: ToolRowProps, next: ToolRowProps): boolean {
+  return (
+    prev.availableModels === next.availableModels &&
+    prev.buildModel === next.buildModel &&
+    prev.canBuildPlan === next.canBuildPlan &&
+    prev.currentPlanId === next.currentPlanId &&
+    prev.currentPlanState === next.currentPlanState &&
+    prev.item === next.item &&
+    prev.onBuildPlan === next.onBuildPlan &&
+    prev.onOpenDiff === next.onOpenDiff &&
+    prev.onOpenFile === next.onOpenFile &&
+    prev.onOpenPlanFile === next.onOpenPlanFile &&
+    prev.onSetBuildModel === next.onSetBuildModel &&
+    prev.planTodos === next.planTodos &&
+    prev.variant === next.variant
+  );
+}
+
+export const ToolRow = memo(ToolRowComponent, areToolRowPropsEqual);
+ToolRow.displayName = "ToolRow";

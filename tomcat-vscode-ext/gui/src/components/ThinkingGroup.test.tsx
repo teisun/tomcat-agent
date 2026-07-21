@@ -89,7 +89,7 @@ describe("ThinkingGroup", () => {
     expect(screen.getAllByTestId("tool-row")).toHaveLength(2);
   });
 
-  it("applies shimmer when streaming without summaryTitle", () => {
+  it("stays collapsed and applies shimmer when streaming without summaryTitle", () => {
     render(
       <ThinkingGroup
         group={buildGroup({
@@ -121,6 +121,8 @@ describe("ThinkingGroup", () => {
     expect(screen.getByTestId("thinking-group-title").className).toContain(
       "tc-thinking__title--shimmer",
     );
+    expect(screen.getByTestId("thinking-group-toggle").getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryAllByTestId("tool-row")).toHaveLength(0);
   });
 
   it("falls back to a clean tool-derived title when summaryTitle is missing", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 
 import { ReferenceChip } from "./ReferenceChip";
 import { ChatMarkdown } from "./markdown/ChatMarkdown";
@@ -13,15 +13,17 @@ const MESSAGE_LABELS: Record<WebviewMessageBlock["kind"], string> = {
 };
 const NOOP_OPEN_FILE = () => undefined;
 
-export function MessageBubble({
-  item,
-  onOpenFile,
-  onRetry,
-}: {
+type MessageBubbleProps = {
   item: WebviewMessageBlock;
   onOpenFile?: (path: string, line?: number) => void;
   onRetry?: (messageId: string) => void;
-}) {
+};
+
+function MessageBubbleComponent({
+  item,
+  onOpenFile,
+  onRetry,
+}: MessageBubbleProps) {
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const showHeader = item.kind !== "user" && item.kind !== "assistant";
@@ -153,3 +155,14 @@ export function MessageBubble({
     </article>
   );
 }
+
+function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: MessageBubbleProps): boolean {
+  return (
+    prev.item === next.item &&
+    prev.onOpenFile === next.onOpenFile &&
+    prev.onRetry === next.onRetry
+  );
+}
+
+export const MessageBubble = memo(MessageBubbleComponent, areMessageBubblePropsEqual);
+MessageBubble.displayName = "MessageBubble";

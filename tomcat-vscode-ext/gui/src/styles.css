@@ -2726,7 +2726,7 @@ input:focus-visible {
   );
 }
 
-.tc-tool-row--command .tc-tool-row__text {
+.tc-tool-row--command .tc-tool-row__text:not(.tc-loading-shimmer) {
   color: var(--vscode-descriptionForeground);
 }
 
@@ -2736,8 +2736,15 @@ input:focus-visible {
   color: var(--vscode-textLink-foreground, var(--vscode-foreground));
 }
 
-.tc-tool-row--context .tc-tool-row__text,
-.tc-tool-row--other .tc-tool-row__text {
+.tc-tool-row--context .tc-tool-row__text:not(.tc-loading-shimmer),
+.tc-tool-row--other .tc-tool-row__text:not(.tc-loading-shimmer),
+.tc-tool-row--task .tc-tool-row__text:not(.tc-loading-shimmer) {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-tool-row--task .tc-tool-row__leading-icon,
+.tc-tool-row--task .tc-thinking-icon,
+.tc-tool-row--task .tc-disclosure-card__leading-icon {
   color: var(--vscode-descriptionForeground);
 }
 

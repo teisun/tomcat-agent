@@ -507,6 +507,48 @@ function parseToolSummaryJson(resultText: string | undefined): Record<string, un
   }
 }
 
+function applyBackgroundTaskTicket(tool: WebviewToolCard, resultText?: string): void {
+  const runsInBackground =
+    tool.args?.run_in_background === true || tool.args?.runInBackground === true;
+  if (
+    !runsInBackground ||
+    (tool.toolName !== "bash" && tool.toolName !== "shell" && tool.toolName !== "execute_command")
+  ) {
+    delete tool.backgroundTaskId;
+    delete tool.backgroundRunning;
+    delete tool.backgroundExitCode;
+    return;
+  }
+  const parsed = parseToolSummaryJson(resultText);
+  const taskId = asNonEmptyString(parsed?.taskId) ?? asNonEmptyString(parsed?.task_id);
+  if (!taskId) {
+    return;
+  }
+  tool.backgroundTaskId = taskId;
+  tool.backgroundRunning = true;
+  delete tool.backgroundExitCode;
+}
+
+function applyBackgroundTaskFinished(
+  session: WebviewSessionSnapshot,
+  taskId: string,
+  exitCode: number | undefined,
+): void {
+  const tool = session.timeline.find(
+    (item): item is WebviewToolCard =>
+      item.type === "tool" && item.backgroundTaskId === taskId,
+  );
+  if (!tool) {
+    return;
+  }
+  tool.backgroundRunning = false;
+  if (typeof exitCode === "number" && Number.isFinite(exitCode)) {
+    tool.backgroundExitCode = exitCode;
+  } else {
+    delete tool.backgroundExitCode;
+  }
+}
+
 function countCompletedItems(items: unknown): { completed: number; total: number } | undefined {
   if (!Array.isArray(items)) {
     return undefined;
@@ -1826,6 +1868,7 @@ export class WebviewStateStore {
         tool.summary = toolResultWasInterrupted(frame.result) ? "Interrupted" : asText(frame.result);
         tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
         applyPlanReference(tool, tool.summary);
+        applyBackgroundTaskTicket(tool, tool.summary);
         if (!tool.isError && tool.status === "complete") {
           tool.planActivity = derivePlanActivity(tool.toolName, tool.summary, tool.args);
         } else {
@@ -1899,6 +1942,17 @@ export class WebviewStateStore {
           return;
         }
         applyToolSummaryTitle(session, toolCallId, summaryTitle);
+        return;
+      }
+      case "background_task_finished": {
+        const taskId =
+          "taskId" in frame && typeof frame.taskId === "string" ? frame.taskId : null;
+        if (!taskId) {
+          return;
+        }
+        const exitCode =
+          "exitCode" in frame && typeof frame.exitCode === "number" ? frame.exitCode : undefined;
+        applyBackgroundTaskFinished(session, taskId, exitCode);
         return;
       }
       default:

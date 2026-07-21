@@ -873,7 +873,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `bash background task output tail log`
 
-Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until new output, the task finishes, or `timeout_ms` elapses (default 5000, max 600000, actual blocking waits clamp into 5000-600000ms, `0` == block=false) and adds a `wakeReason` of `new_output` | `finished` | `timeout`. A `timeout` wakeReason is NOT a failure. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.
+Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until the task finishes or `timeout_ms` elapses (default 5000, max 600000, actual blocking waits clamp into 5000-600000ms, `0` == block=false). Mid-stream output does not interrupt the wait. Blocking waits add a `wakeReason` of `finished` | `timeout`; a `timeout` wakeReason is NOT a failure, so inspect `content` first (`content=""` means no new output arrived during that slice) and wait again only if you still need to. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.
 
 Parameters:
 
@@ -881,7 +881,7 @@ Parameters:
 {
   "properties": {
     "block": {
-      "description": "If true, wait until new output arrives, the task finishes, or `timeout_ms` elapses, and return a `wakeReason`. Default false.",
+      "description": "If true, wait until the task finishes or `timeout_ms` elapses, and return a `wakeReason` (`finished` or `timeout`). Mid-stream output does not interrupt the wait. Default false.",
       "type": "boolean"
     },
     "since": {
@@ -894,7 +894,7 @@ Parameters:
       "type": "string"
     },
     "timeout_ms": {
-      "description": "Wait slice in ms for block=true (default 5000, max 600000; actual blocking waits clamp into 5000-600000ms, `0` == block=false). A timeout is not a failure — inspect `content`/`finished` before waiting again.",
+      "description": "Wait slice in ms for block=true (default 5000, max 600000; actual blocking waits clamp into 5000-600000ms, `0` == block=false). The wait ends only on task finish or timeout. A timeout is not a failure — inspect `content` first (`content=""` means no new output arrived during that slice), then wait again only if needed.",
       "maximum": 600000,
       "minimum": 0,
       "type": "integer"

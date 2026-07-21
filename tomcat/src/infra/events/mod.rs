@@ -173,6 +173,8 @@ pub mod wire {
     pub const WIRE_TURN_SUMMARY_UPDATED: &str = "turn.summary_updated";
     /// 单条工具（bash）标题异步 utility 覆盖后推送。
     pub const WIRE_TOOL_SUMMARY_UPDATED: &str = "tool.summary_updated";
+    /// 后台 bash 任务真正结束后推送，供前端把 bash 卡片从 loading 翻成完成。
+    pub const WIRE_BACKGROUND_TASK_FINISHED: &str = "background_task_finished";
 
     // --- ExtensionEvent ---
     pub const WIRE_STARTUP: &str = "startup";

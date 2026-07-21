@@ -24,6 +24,9 @@ fn serve_dts_preserves_wire_event_session_id() {
     assert!(dts.contains("export type WireEvent = "));
     assert!(dts.contains("sessionId?: null | string;"));
     assert!(dts.contains("type: \"agent_idle\";"));
+    assert!(dts.contains("type: \"background_task_finished\";"));
+    assert!(dts.contains("taskId: string;"));
+    assert!(dts.contains("exitCode: number;"));
     assert!(dts.contains("type: \"message_update\";"));
     assert!(dts.contains("type: \"message_start\";"));
     assert!(dts.contains("type: \"message_end\";"));

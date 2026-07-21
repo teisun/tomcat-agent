@@ -321,6 +321,108 @@ describe("WebviewStateStore wire routing", () => {
     expect(tool?.type === "tool" ? tool.summaryTitle : undefined).toBeUndefined();
   });
 
+  it("records background bash task metadata on tool_execution_end", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      args: { command: "sleep 12", run_in_background: true },
+      sessionId: "s1",
+      toolCallId: "tc-bg",
+      toolName: "bash",
+      type: "tool_execution_start",
+    });
+    store.applyEvent({
+      isError: false,
+      result: JSON.stringify({
+        logPath: "/tmp/task.log",
+        next: "poll task_output",
+        startedAtUnixMs: 1_752_000_000_000,
+        taskId: "task-123",
+      }),
+      sessionId: "s1",
+      toolCallId: "tc-bg",
+      toolName: "bash",
+      type: "tool_execution_end",
+    });
+
+    const tool = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item) => item.type === "tool" && item.toolCallId === "tc-bg");
+    expect(tool).toMatchObject({
+      backgroundRunning: true,
+      backgroundTaskId: "task-123",
+      status: "complete",
+      toolCallId: "tc-bg",
+      toolName: "bash",
+      type: "tool",
+    });
+    expect(tool?.type === "tool" ? tool.backgroundExitCode : undefined).toBeUndefined();
+  });
+
+  it("flips background bash cards to finished by taskId and ignores unknown task ids", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      args: { command: "sleep 12", run_in_background: true },
+      sessionId: "s1",
+      toolCallId: "tc-bg",
+      toolName: "bash",
+      type: "tool_execution_start",
+    });
+    store.applyEvent({
+      isError: false,
+      result: JSON.stringify({
+        logPath: "/tmp/task.log",
+        next: "poll task_output",
+        startedAtUnixMs: 1_752_000_000_000,
+        taskId: "task-123",
+      }),
+      sessionId: "s1",
+      toolCallId: "tc-bg",
+      toolName: "bash",
+      type: "tool_execution_end",
+    });
+
+    store.applyEvent({
+      exitCode: 99,
+      sessionId: "s1",
+      taskId: "task-missing",
+      type: "background_task_finished",
+    });
+    let tool = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item) => item.type === "tool" && item.toolCallId === "tc-bg");
+    expect(tool).toMatchObject({
+      backgroundRunning: true,
+      backgroundTaskId: "task-123",
+      toolCallId: "tc-bg",
+      toolName: "bash",
+      type: "tool",
+    });
+    expect(tool?.type === "tool" ? tool.backgroundExitCode : undefined).toBeUndefined();
+
+    store.applyEvent({
+      exitCode: 23,
+      sessionId: "s1",
+      taskId: "task-123",
+      type: "background_task_finished",
+    });
+
+    tool = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item) => item.type === "tool" && item.toolCallId === "tc-bg");
+    expect(tool).toMatchObject({
+      backgroundExitCode: 23,
+      backgroundRunning: false,
+      backgroundTaskId: "task-123",
+      toolCallId: "tc-bg",
+      toolName: "bash",
+      type: "tool",
+    });
+  });
+
   it("updates session tab title on session.title_updated", () => {
     const store = new WebviewStateStore();
     store.syncSessionList(

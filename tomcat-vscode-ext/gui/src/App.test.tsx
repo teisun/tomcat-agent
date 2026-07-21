@@ -2358,86 +2358,92 @@ describe("Tomcat webview App", () => {
   });
 
   it("groups sessions by date with section headers", async () => {
-    mount();
-    const now = Date.now();
-    const day = 24 * 60 * 60 * 1000;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-21T12:00:00.000Z"));
+    try {
+      mount();
+      const now = Date.now();
+      const day = 24 * 60 * 60 * 1000;
 
-    await emitState({
-      channel: "state",
-      content: {
-        activeSessionId: "today-s",
-        availableModels: ["gpt-5.4"],
-        ready: true,
-        sessions: [
-          {
-            busy: false,
-            isCurrent: true,
-            ownedByThisFrontend: true,
-            sessionId: "today-s",
-            title: "today topic",
-            updatedAt: now - 60_000,
-          },
-          {
-            busy: false,
-            isCurrent: false,
-            ownedByThisFrontend: true,
-            sessionId: "yesterday-s",
-            title: "yesterday topic",
-            updatedAt: now - day - 60_000,
-          },
-          {
-            busy: false,
-            isCurrent: false,
-            ownedByThisFrontend: true,
-            sessionId: "last7-s",
-            title: "last7 topic",
-            updatedAt: now - 4 * day,
-          },
-          {
-            busy: false,
-            isCurrent: false,
-            ownedByThisFrontend: true,
-            sessionId: "last30-s",
-            title: "last30 topic",
-            updatedAt: now - 20 * day,
-          },
-          {
-            busy: false,
-            isCurrent: false,
-            ownedByThisFrontend: true,
-            sessionId: "older-s",
-            title: "older topic",
-            updatedAt: now - 400 * day,
-          },
-        ],
-        sessionViews: {
-          "today-s": {
-            busy: false,
-            contextRatio: null,
-            model: "gpt-5.4",
-            ownedByThisFrontend: true,
-            pendingAttachments: [],
-            planFile: null,
-            planId: null,
-            planState: "chat",
-            sessionId: "today-s",
-            thinkingLevel: "medium",
-            timeline: [],
+      await emitState({
+        channel: "state",
+        content: {
+          activeSessionId: "today-s",
+          availableModels: ["gpt-5.4"],
+          ready: true,
+          sessions: [
+            {
+              busy: false,
+              isCurrent: true,
+              ownedByThisFrontend: true,
+              sessionId: "today-s",
+              title: "today topic",
+              updatedAt: now - 60_000,
+            },
+            {
+              busy: false,
+              isCurrent: false,
+              ownedByThisFrontend: true,
+              sessionId: "yesterday-s",
+              title: "yesterday topic",
+              updatedAt: now - day - 60_000,
+            },
+            {
+              busy: false,
+              isCurrent: false,
+              ownedByThisFrontend: true,
+              sessionId: "last7-s",
+              title: "last7 topic",
+              updatedAt: now - 4 * day,
+            },
+            {
+              busy: false,
+              isCurrent: false,
+              ownedByThisFrontend: true,
+              sessionId: "last30-s",
+              title: "last30 topic",
+              updatedAt: now - 20 * day,
+            },
+            {
+              busy: false,
+              isCurrent: false,
+              ownedByThisFrontend: true,
+              sessionId: "older-s",
+              title: "older topic",
+              updatedAt: now - 400 * day,
+            },
+          ],
+          sessionViews: {
+            "today-s": {
+              busy: false,
+              contextRatio: null,
+              model: "gpt-5.4",
+              ownedByThisFrontend: true,
+              pendingAttachments: [],
+              planFile: null,
+              planId: null,
+              planState: "chat",
+              sessionId: "today-s",
+              thinkingLevel: "medium",
+              timeline: [],
+            },
           },
         },
-      },
-      messageId: "state-groups",
-    });
+        messageId: "state-groups",
+      });
 
-    fireEvent.click(screen.getByTestId("session-select"));
-    const headers = screen.getAllByTestId("session-group-header").map((h) => h.textContent);
-    expect(headers).toEqual([
-      "Today",
-      "Yesterday",
-      "Last 7 days",
-      "Last 30 days",
-      "Older",
-    ]);
+      fireEvent.click(screen.getByTestId("session-select"));
+      const headers = screen.getAllByTestId("session-group-header").map((h) => h.textContent);
+      expect(headers).toEqual([
+        "Today",
+        "Yesterday",
+        "Last 7 days",
+        "Last 30 days",
+        "Older",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("accepts insertReference events and sends reference-only prompts", async () => {
@@ -3130,7 +3136,7 @@ describe("Tomcat webview App", () => {
     });
   });
 
-  it("replays background wait slices as in-place countdown rows across transcript snapshots", async () => {
+  it("replays background wait slices and keeps the bash card loading until the background task finishes", async () => {
     vi.useFakeTimers();
     try {
       const startedAt = new Date("2026-07-21T07:00:00.000Z").getTime();
@@ -3146,6 +3152,8 @@ describe("Tomcat webview App", () => {
               command: "sleep 12; echo TOKEN_MULTI_TIMEOUT",
               run_in_background: true,
             },
+            backgroundRunning: true,
+            backgroundTaskId: "task-1",
             id: "tool-bash-background",
             isError: false,
             status: "complete",
@@ -3168,6 +3176,7 @@ describe("Tomcat webview App", () => {
         ],
       });
 
+      expect(screen.getByText("Running in background")).toBeTruthy();
       expect(screen.getByText("Waiting up to 10s for shell")).toBeTruthy();
 
       await act(async () => {
@@ -3184,6 +3193,8 @@ describe("Tomcat webview App", () => {
               command: "sleep 12; echo TOKEN_MULTI_TIMEOUT",
               run_in_background: true,
             },
+            backgroundRunning: true,
+            backgroundTaskId: "task-1",
             id: "tool-bash-background",
             isError: false,
             status: "complete",
@@ -3218,6 +3229,7 @@ describe("Tomcat webview App", () => {
       });
 
       expect(screen.getAllByText("Waited for shell")).toHaveLength(1);
+      expect(screen.getByText("Running in background")).toBeTruthy();
       expect(screen.getByText("Waiting up to 5s for shell")).toBeTruthy();
 
       await act(async () => {
@@ -3234,6 +3246,9 @@ describe("Tomcat webview App", () => {
               command: "sleep 12; echo TOKEN_MULTI_TIMEOUT",
               run_in_background: true,
             },
+            backgroundExitCode: 0,
+            backgroundRunning: false,
+            backgroundTaskId: "task-1",
             id: "tool-bash-background",
             isError: false,
             status: "complete",
@@ -3269,6 +3284,8 @@ describe("Tomcat webview App", () => {
       });
 
       expect(screen.queryByText(/Waiting up to .* for shell/)).toBeNull();
+      expect(screen.queryByText("Running in background")).toBeNull();
+      expect(screen.getByText("Ran")).toBeTruthy();
       expect(screen.getAllByText("Waited for shell")).toHaveLength(2);
     } finally {
       vi.useRealTimers();

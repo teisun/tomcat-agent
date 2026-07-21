@@ -300,14 +300,14 @@
 ##### 当前已落地与当前缺口
 
 - **已落地（**PR-I MVP 与 P1 后台监控补齐**）**：
-  - [`bash_task.rs`](../../../src/core/tools/primitive/bash_task.rs)：`spawn()` 起后台 child、pump stdout/stderr 到 `bash-<task_id>.log`、`wait()` 结束后翻 `Finished { exit_code }`；**P1 新增**：每 task 一份 `tokio::sync::Notify` + registry 级 `tokio::sync::broadcast::Sender<BackgroundTaskLifecycleEvent>`、`wait_for_change(task_id, since) -> WakeReason`（按"当前文件长度 vs since"判定，先 `notified()` 再读长度的标准 race-free 顺序）、`subscribe_lifecycle()`、`tail_log(task_id, max_bytes)`；`stop()` 与 wait 任务的终态翻转都受 `lifecycle_emitted` guard 保护，broadcast **每个 task 一生只发一次**。
-  - [`tool_exec.rs`](../../../src/core/agent_loop/tool_exec.rs)：`bash run_in_background`、`task_output`、`task_stop`、`task_list` 已全部接线；**P1 新增** `task_output(block=true, timeout_ms=...)` 特判分支：`tokio::select!` 在 `wait_for_change` / `sleep_until(deadline)` / `cancel.cancelled()` / countdown tick 之间多路复用，每 500ms 发一次 `ToolExecutionUpdate(partial_result.phase="waiting_for_output", remainingMs, timeoutMs, taskId, since)`；返回 JSON 在 `block=true` 路径**额外**写出 `wakeReason ∈ {"new_output","finished","timeout"}`；`block=false` 路径**不**写出该字段（向后兼容）。
+  - [`bash_task.rs`](../../../src/core/tools/primitive/bash_task.rs)：`spawn()` 起后台 child、pump stdout/stderr 到 `bash-<task_id>.log`、`wait()` 结束后翻 `Finished { exit_code }`；现已演进为：每 task 一份 `tokio::sync::Notify` + registry 级 `tokio::sync::broadcast::Sender<BackgroundTaskLifecycleEvent>`、`wait_for_finish(task_id)`（先 `notified()` 再判 status，只在终态返回）、`read_output_tail(task_id, since, max_bytes)`（timeout 时只回有界尾巴）、`subscribe_lifecycle()`、`tail_log(task_id, max_bytes)`；`stop()` 与 wait 任务的终态翻转都受 `lifecycle_emitted` guard 保护，broadcast **每个 task 一生只发一次**。
+  - [`tool_exec.rs`](../../../src/core/agent_loop/tool_exec.rs)：`bash run_in_background`、`task_output`、`task_stop`、`task_list` 已全部接线；`task_output(block=true, timeout_ms=...)` 现为真正的完成/超时等待：`tokio::select!` 只在 `wait_for_finish` / `sleep_until(deadline)` / `cancel.cancelled()` / countdown tick 之间多路复用，每 500ms 发一次 `ToolExecutionUpdate(partial_result.phase="waiting_for_output", remainingMs, timeoutMs, taskId, since)`；返回 JSON 在 `block=true` 路径**额外**写出 `wakeReason ∈ {"finished","timeout"}`，且 timeout 只回自 `since` 之后的**有界尾巴**；`block=false` 路径**不**写出该字段（向后兼容）。
   - [`accessors.rs`](../../../src/core/agent_loop/accessors.rs)：`follow_up(String)` 行为不变；**P1 新增** `with_shared_follow_up_queue(...)`、`with_completion_routes(...)`、`follow_up_message(ChatMessage)` 三个 builder/typed 入口。
 - [`api/chat/mod.rs`](../../../src/api/chat/mod.rs)：**P1 新增** `ChatContext.{follow_up_queue, completion_routes, delivered_completion, completion_subscriber_handle}`；`spawn_completion_subscriber()` 在 `chat_loop` 启动时 spawn，按 claim-on-entry 状态机决定是否推 synthetic；主循环改造：`run_chat_turn` 返回后若 `follow_up_queue` 非空且 auto-turn 预算（`AUTO_TURN_BUDGET=K=8`）未耗尽则**跳过 readline**直接以 `input=""` 触发下一轮 turn，否则回 readline。`run_chat_turn` 在装配完 messages 后 drain 一次 session 级 `follow_up_queue`，让后台完成事件能在**首轮 reasoning** 之前就被注入；`reasoning_loop` 在每个非 steered、且仍将继续发下一次 LLM 请求的 tool batch 边界，也会再 drain 一次共享 `follow_up_queue`，让后台完成事件不必等整轮收敛才被模型看到；若 agent 已空闲并阻塞在 `readline()`，则完成事件保留在 queue，待下一次用户交互返回主循环后再由 between-turns drain 自动喂回。
   - [`cli_turn_renderer.rs`](../../../src/api/chat/cli_turn_renderer.rs)：**P1 新增**监听 `WIRE_TOOL_EXECUTION_UPDATE`，把 `task_output(block=true)` 的倒计时渲染成一行 dim 灰行 `[tool] task_output … waiting_for_output  task=<id> remaining=<r>/<t>ms`。
-  - [`catalog.rs`](../../../src/core/tools/contract/catalog.rs)：**P1 新增** `task_output` 参数 `block: boolean`、`timeout_ms: integer (默认 5_000、上限 30_000、0 等价 block=false)`；description 教三种使用模式 + `<background-task-finished>` tag 识别契约。
+  - [`catalog.rs`](../../../src/core/tools/contract/catalog.rs)：`task_output` 参数含 `block: boolean`、`timeout_ms: integer (默认 5_000、上限 600_000、0 等价 block=false)`；description 已同步到“`block=true` 只等完成或 timeout，中途输出不打断；timeout 先看 `content`，需要再等才继续”。
   - [`system_prompt.rs`](../../../src/core/llm/system_prompt.rs)：**P1 新增** `BackgroundShellMonitorSection`（priority 30），把三种使用模式 + tag 识别 + 不鼓励的行为写进 system prompt。
-- **结论**：经过 P1 后，Tomcat 已经具备 Cursor `Shell + AwaitShell + terminal file` 同等量级的 wait/observe 体验（工具级 block=true wait slice + 完成自动回灌）；后续增量主要集中在"运行中新输出也提前唤醒 / 多任务 running 摘要"这类观测增强，详见 [`bash-background-monitor-p2_54f23d9c.plan.md`](../../../../../.cursor/plans/bash-background-monitor-p2_54f23d9c.plan.md)。
+- **结论**：经过这一轮语义收敛后，Tomcat 的 `block=true` 已更接近 Cursor 的“真等待”体验：工具级倒计时能完整跑到完成或 timeout，后台完成仍可自动回灌；后续增量主要集中在多任务 running 摘要等观测增强。
 
 ##### 参考实现补充对照（聚焦 completion auto-feed）
 
@@ -324,9 +324,9 @@
 > **状态（2026-05）**：P1 已**全部落地**。下面保留语义说明作为契约文档；具体代码锚点已在上面 "已落地" 块写明。
 
 - **P1（已交付 ✅）**：
-  - `task_output(block, timeout_ms)`：等待到"新输出 / 任务结束 / 超时"再返回；超时**非终态**，调用方可继续调 `task_output(block=true)` 再等。
-  - 返回 JSON 新增 `wakeReason ∈ {"new_output","finished","timeout"}`（仅 `block=true` 路径写出）。
-  - `timeout_ms` 默认 `5_000`、上限 `30_000`（超过即 cap）、`0` 等价 `block=false`。
+  - `task_output(block, timeout_ms)`：`block=true` 只会等到“任务结束 / 超时”再返回；中途新输出会先囤在日志里，不再提前打断等待。超时**非终态**，调用方可继续调 `task_output(block=true)` 再等。
+  - 返回 JSON 在 `block=true` 路径写出 `wakeReason ∈ {"finished","timeout"}`。
+  - `timeout_ms` 默认 `5_000`、上限 `600_000`（超过即 cap）、`0` 等价 `block=false`。
   - 后台 shell 自然结束（或 stop）时，runtime 在 `chat_loop` 里 spawn 的 lifecycle subscriber 守护 task 监听 `subscribe_lifecycle()`，按 [§ claim-on-entry 状态机](#claim-on-entry-状态机) 决定是否推 synthetic notification 到 session 级 `follow_up_queue`，由 between-turns drain、turn 入口 drain，或 reasoning loop 的 tool-batch 边界 drain 自动喂回 agent。
   - synthetic notification 格式：`<background-task-finished task_id="..." exit_code="..." log_path="..." command="...">tail of last ≤4 KiB</background-task-finished>`，类型为 `ChatMessage::user`。
   - CLI：`tool_execution_update` 渲染成 dim 灰行做倒计时；后台完成事件通过 `eprintln!` 一行 `[bg] task <id> finished (exit=<c>); queued for next turn.`，但**不会**打断正在阻塞的 `rustyline.readline()`；若此时 agent 已空闲在 prompt，事件会留在 queue，待下一次用户交互回到主循环后再被消费。
@@ -372,7 +372,7 @@ background completion -> queue synthetic follow-up
 - **Prompt 也要同步教模型**
   - `catalog.rs` 的 `task_output` description 已写清三种使用模式 + `<background-task-finished>` tag 识别；
   - `system_prompt.rs` 的 `BackgroundShellMonitorSection` 同步补一份全局指导；
-  - 监控长任务时，若 `wakeReason=timeout && finished=false`，应继续用 `task_output(block=true)` 等下一个 slice，**不要**误判成失败或终态。
+  - 监控长任务时，若 `wakeReason=timeout && finished=false`，先看 `content`：空串表示这段时间没新输出，非空则是自 `since` 之后的有界尾巴；只有在仍需要最终结果时才继续下一次 `task_output(block=true)`。
 
 ##### claim-on-entry 状态机
 
@@ -390,7 +390,6 @@ enum CompletionRoute {
     - 已 `Delivered` → 直接 `read_output(since)` 返回 `wakeReason=finished`，**不**进 wait（lifecycle 已抢先 case）；
     - 否则 `insert(task_id, ToolWillDeliver)`。
   - **wake (Finished)** → `insert(task_id, Delivered)`。
-  - **wake (NewOutput, finished=false)** → 保持 `ToolWillDeliver` 不变。
   - **wake (Timeout / Cancel, finished=false)** → `remove(task_id)` 让出 claim，让后续 lifecycle 兜底。
 - **lifecycle subscriber（独立 tokio task；`chat_loop` 启动时 spawn，drop 时 abort）**
   - 收到 `BackgroundTaskLifecycleEvent` finished：
@@ -399,21 +398,20 @@ enum CompletionRoute {
 
 **正确性**：所有写操作走同一把 `routes` 锁，串行化 dispatcher entry / dispatcher exit / lifecycle subscriber 三方；map 中**至多一个** `task_id` 条目；`Delivered` 是终态；shell 在任何时点完成都被恰好交付一次。
 
-##### race-free `wait_for_change` 协议
+##### race-free `wait_for_finish` 协议
 
-`BashTaskRegistry::wait_for_change(task_id, since) -> WakeReason`：
+`BashTaskRegistry::wait_for_finish(task_id)`：
 
 ```text
 loop {
     let notified = notify.notified();   // ① 先注册等待者
     tokio::pin!(notified);
-    if status != Running { return Finished; }  // ② 终态优先
-    if file_len(log) > since { return NewOutput; }  // ③ 文件长度判定（不依赖事件计数）
-    notified.await;                     // ④ 没新事就睡，等下一次 pump flush / 终态翻转
+    if status != Running { return; }    // ② 只看终态
+    notified.await;                     // ③ 新输出也会唤醒，但仍 Running 就继续睡
 }
 ```
 
-`pump` 每次 flush 后 `notify_waiters()`；wait 任务终态翻转后也 `notify_waiters()`。"先 notified() 再读 status / 长度" 的顺序是 race-free 必备：反过来会丢 wakeup，read_output(since=X) 后立即 wait_for_change(since=X) 之间到达的字节也不会丢。
+`pump` 每次 flush 后仍会 `notify_waiters()`；wait 任务终态翻转后也 `notify_waiters()`。关键点是：唤醒后**不再看文件长度**，只看状态是否已经终结，所以 `block=true` 的倒计时不会再被每行日志秒打断。
 
 ```text
 bash(run_in_background=true)
@@ -423,7 +421,8 @@ bash(run_in_background=true)
         └─▶ BashTaskRegistry 持续 pump / wait
                   │
                   ├─ LLM 调 task_output(block=true, timeout_ms)
-                  │    └─▶ 等到“新输出 / finished / timeout”后返回 chunk
+                  │    └─▶ 等到“finished / timeout”后返回 chunk
+                  │           timeout 时只回 since 之后的有界尾巴
                   │
                   └─ 任务自然结束
                         └─▶ BackgroundTaskFinished
@@ -647,7 +646,7 @@ LLM          tool_exec              bash::execute_bash_impl        gate / spawn
 |----------|------|----------|--------|--------|
 | — | `run_in_background=true` | BackgroundRunning | 立即返回 `task_id` + log path | 先拿票，再慢慢跑。 |
 | BackgroundRunning | `task_output(block=false)` | BackgroundRunning | 立即返回当前增量 | 现在已经有的轮询版。 |
-| BackgroundRunning | `task_output(block=true)` | BackgroundRunning | 等到新输出 / 结束 / 超时后再返回 | P1：更像 AwaitShell。 |
+| BackgroundRunning | `task_output(block=true)` | BackgroundRunning | 等到结束 / 超时后再返回 | P1：更像 AwaitShell。 |
 | BackgroundRunning | 进程自然退出 | Done | 写入 `exit_code`；P1 额外发 `BackgroundTaskFinished` + synthetic follow-up | 跑完后 agent 不用靠手工 poll 才知道。 |
 | BackgroundRunning | 运行中新输出 | BackgroundRunning | P2 可发 `BackgroundTaskOutputReady` / `BackgroundTasksUpdate` | 运行中也能被宿主提前叫醒。 |
 | BackgroundRunning | `task_stop` | Killed | `killpg` + wait 收口 | 主动掐掉。 |
@@ -707,7 +706,7 @@ LLM          tool_exec              bash::execute_bash_impl        gate / spawn
 | **T1** 超时杀进程 | `suite_test::bash_wallclock_timeout_kills_process` | ✅(2026-05-07) |
 | **T1** 输出截断落盘 | `suite_test::bash_output_truncation_keeps_head_tail`、`suite_test::bash_persists_full_output_when_truncated` | ✅(2026-05-07) |
 | **T2** 后台三件套 | `submodules_test::tool_exec_bash_background_full_lifecycle`、`tool_exec_bash_background_without_registry_returns_friendly_error`、`tool_exec_task_output_without_registry_returns_friendly_error`、`tool_exec_task_list_without_registry_returns_friendly_error` + `bash_task::tests::*`（registry CRUD） | ✅(2026-05-07) |
-| **P1** registry race-free wait | `bash_task_test::wait_for_change_returns_new_output_after_pump_flush`、`wait_for_change_returns_finished_on_natural_exit`、`subscribe_lifecycle_emits_once_per_task`、`tail_log_returns_suffix` | ✅(2026-05) |
+| **P1** registry race-free wait | `bash_task_test::wait_for_finish_ignores_new_output_until_terminal`、`wait_for_finish_returns_on_natural_exit`、`subscribe_lifecycle_emits_once_per_task`、`tail_log_returns_suffix` | ✅(2026-05) |
 | **P1** `task_output(block=true)` 契约 | `submodules_test::task_output_block_true_returns_finished_on_natural_exit`、`task_output_block_true_timeout_is_non_terminal_wait_slice`、`task_output_timeout_zero_is_equivalent_to_non_blocking`、`task_output_timeout_ms_cap_does_not_block_indefinitely` | ✅(2026-05) |
 | **P1** claim-on-entry 状态机 | `submodules_test::task_output_block_true_claims_completion_route_on_finished`、`task_output_block_true_releases_claim_on_timeout`、`task_output_block_true_skips_wait_when_lifecycle_already_delivered` | ✅(2026-05) |
 | **P1** CLI 倒计时 | `cli_turn_renderer::tests::tool_update_emits_dim_countdown_line_on_stderr` | ✅(2026-05) |

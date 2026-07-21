@@ -5,15 +5,13 @@ export function ProgressRow({
   hasActiveThinking,
   hasRunningTool,
   hasStreamingText,
-  hasTodos,
 }: {
   busy: boolean;
   hasActiveThinking: boolean;
   hasRunningTool: boolean;
   hasStreamingText: boolean;
-  hasTodos: boolean;
 }) {
-  if (!busy || hasActiveThinking || hasRunningTool || hasStreamingText || hasTodos) {
+  if (!busy || hasActiveThinking || hasRunningTool || hasStreamingText) {
     return null;
   }
 

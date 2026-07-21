@@ -137,6 +137,7 @@ export function useAutoScroll({
   const previousOldestItemKeyRef = useRef<string | null>(oldestItemKey);
   const previousScrollHeightRef = useRef(0);
   const previousClientHeightRef = useRef(0);
+  const lastFollowBottomAutoLayoutRef = useRef(0);
   const revealSettledRef = useRef(false);
   const skipAutoLayoutUntilRef = useRef(0);
   const userHasScrolledRef = useRef(false);
@@ -328,6 +329,7 @@ export function useAutoScroll({
     }
 
     if (!userHasScrolledRef.current) {
+      lastFollowBottomAutoLayoutRef.current = Date.now();
       scrollToBottom(false);
       syncUserHasScrolled(false);
     }
@@ -539,6 +541,14 @@ export function useAutoScroll({
         if (!shrinkRevealSpacer()) {
           updateStickyPromptState();
         }
+        return;
+      }
+      if (
+        modeRef.current === "followBottom" &&
+        !clientHeightChanged &&
+        Date.now() - lastFollowBottomAutoLayoutRef.current < 48
+      ) {
+        updateStickyPromptState();
         return;
       }
       updateAutoScrollLayout();

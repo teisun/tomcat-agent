@@ -11,7 +11,6 @@ describe("ProgressRow", () => {
         hasActiveThinking={false}
         hasRunningTool={false}
         hasStreamingText={false}
-        hasTodos={false}
       />,
     );
 
@@ -30,7 +29,6 @@ describe("ProgressRow", () => {
         hasActiveThinking
         hasRunningTool={false}
         hasStreamingText={false}
-        hasTodos={false}
       />,
     );
 
@@ -42,7 +40,6 @@ describe("ProgressRow", () => {
         hasActiveThinking={false}
         hasRunningTool
         hasStreamingText={false}
-        hasTodos={false}
       />,
     );
     expect(screen.queryByTestId("progress-row")).toBeNull();
@@ -53,18 +50,6 @@ describe("ProgressRow", () => {
         hasActiveThinking={false}
         hasRunningTool={false}
         hasStreamingText
-        hasTodos={false}
-      />,
-    );
-    expect(screen.queryByTestId("progress-row")).toBeNull();
-
-    rerender(
-      <ProgressRow
-        busy
-        hasActiveThinking={false}
-        hasRunningTool={false}
-        hasStreamingText={false}
-        hasTodos
       />,
     );
     expect(screen.queryByTestId("progress-row")).toBeNull();
@@ -77,7 +62,6 @@ describe("ProgressRow", () => {
         hasActiveThinking={false}
         hasRunningTool={false}
         hasStreamingText={false}
-        hasTodos={false}
       />,
     );
 

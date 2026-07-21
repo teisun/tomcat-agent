@@ -60,6 +60,7 @@ pub(super) const EVENT_NAMES: &[&str] = &[
     wire::WIRE_SESSION_TODOS,
     wire::WIRE_TURN_SUMMARY_UPDATED,
     wire::WIRE_TOOL_SUMMARY_UPDATED,
+    wire::WIRE_BACKGROUND_TASK_FINISHED,
 ];
 
 pub fn register_session_event_pump(
