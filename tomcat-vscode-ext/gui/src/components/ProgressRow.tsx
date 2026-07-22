@@ -2,22 +2,16 @@ import { LoadingDots } from "./LoadingDots";
 
 export function ProgressRow({
   busy,
-  hasActiveThinking,
-  hasRunningTool,
-  hasStreamingText,
 }: {
   busy: boolean;
-  hasActiveThinking: boolean;
-  hasRunningTool: boolean;
-  hasStreamingText: boolean;
 }) {
-  if (!busy || hasActiveThinking || hasRunningTool || hasStreamingText) {
+  if (!busy) {
     return null;
   }
 
   return (
     <div
-      aria-label="Waiting for more output"
+      aria-label="Still working"
       className="tc-progress-row"
       data-testid="progress-row"
       role="status"

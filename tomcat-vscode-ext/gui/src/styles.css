@@ -1337,6 +1337,7 @@ input:focus-visible {
 }
 
 .tc-transcript {
+  --tc-group-indent: 24px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -2257,6 +2258,81 @@ input:focus-visible {
   position: relative;
 }
 
+.tc-group-ticker {
+  --tc-ticker-line: 20px;
+  height: var(--tc-ticker-line);
+  overflow: hidden;
+  position: relative;
+  transition: height 160ms ease;
+}
+
+.tc-group-ticker::before {
+  background: var(--vscode-panel-border, rgba(127, 127, 127, 0.35));
+  bottom: 0;
+  content: "";
+  left: 8px;
+  mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 4px), transparent 100%);
+  position: absolute;
+  top: 0;
+  width: 1px;
+}
+
+.tc-group-ticker--entering {
+  height: 0;
+}
+
+.tc-group-ticker--collapsing {
+  height: 0;
+}
+
+.tc-group-ticker__strip {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  transition: transform 260ms ease;
+}
+
+.tc-group-ticker__strip--rolling {
+  transform: translateY(-50%);
+}
+
+.tc-group-ticker__line {
+  align-items: center;
+  color: var(--vscode-descriptionForeground);
+  display: flex;
+  font-size: 12px;
+  gap: 8px;
+  height: var(--tc-ticker-line);
+  line-height: var(--tc-ticker-line);
+  min-width: 0;
+  overflow: hidden;
+  padding-left: var(--tc-group-indent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tc-group-ticker__icon {
+  color: var(--vscode-descriptionForeground);
+  flex: 0 0 16px;
+  font-size: 16px;
+  line-height: 1;
+  text-align: center;
+}
+
+.tc-group-ticker__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tc-group-ticker,
+  .tc-group-ticker__strip {
+    transition: none;
+  }
+}
+
 .tc-thinking-box__body {
   color: var(--vscode-descriptionForeground);
   margin: 0;
@@ -2717,9 +2793,20 @@ input:focus-visible {
   color: var(--vscode-chat-linesAddedForeground, var(--vscode-charts-green, #3fb950));
 }
 
+.tc-group-ticker__icon.codicon-diff-modified {
+  color: var(--vscode-chat-linesAddedForeground, var(--vscode-charts-green, #3fb950));
+}
+
 .tc-tool-row--command .tc-tool-row__leading-icon,
 .tc-tool-row--command .tc-thinking-icon,
 .tc-tool-row--command .tc-disclosure-card__leading-icon {
+  color: var(
+    --vscode-terminalCommandDecoration-defaultBackground,
+    var(--vscode-focusBorder, rgba(0, 122, 204, 0.8))
+  );
+}
+
+.tc-group-ticker__icon.codicon-terminal {
   color: var(
     --vscode-terminalCommandDecoration-defaultBackground,
     var(--vscode-focusBorder, rgba(0, 122, 204, 0.8))
@@ -2733,6 +2820,10 @@ input:focus-visible {
 .tc-tool-row--answer .tc-tool-row__leading-icon,
 .tc-tool-row--answer .tc-thinking-icon,
 .tc-tool-row--answer .tc-disclosure-card__leading-icon {
+  color: var(--vscode-textLink-foreground, var(--vscode-foreground));
+}
+
+.tc-group-ticker__icon.codicon-question {
   color: var(--vscode-textLink-foreground, var(--vscode-foreground));
 }
 

@@ -82,4 +82,36 @@ describe("ThinkingBlock", () => {
     expect(body.querySelector("h2")).toBeNull();
     expect(body.querySelector("strong")).toBeNull();
   });
+
+  it("splits adjacent bold-only thinking headings into separate plain-text lines", () => {
+    render(
+      <ThinkingBlock
+        item={{
+          id: "thinking-4",
+          text: [
+            "**Identifying local code modifications****Comparing exports and test feasibility****Planning non-bash UI testing approach**",
+            "",
+            "Keep the raw text path simple.",
+          ].join("\n"),
+          type: "thinking",
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("thinking-summary").textContent).toBe(
+      "**Identifying local code modifications**",
+    );
+
+    fireEvent.click(screen.getByTestId("thinking-toggle"));
+    const body = screen.getByTestId("thinking-body");
+    expect(body.tagName).toBe("PRE");
+    expect(body.textContent).toContain(
+      [
+        "**Identifying local code modifications**",
+        "**Comparing exports and test feasibility**",
+        "**Planning non-bash UI testing approach**",
+      ].join("\n"),
+    );
+    expect(body.querySelector("strong")).toBeNull();
+  });
 });

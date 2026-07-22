@@ -32,16 +32,23 @@ export type AssistantRenderEntry =
       type: "action-tool";
     };
 
-function lastLiveActivityType(
+function assistantMessageIdForLiveItem(item: WebviewTimelineItem): string | null {
+  if (item.type === "tool" || item.type === "thinking") {
+    return item.assistantMessageId ?? null;
+  }
+  if (item.type === "message" && item.kind === "assistant") {
+    return item.assistantMessageId ?? null;
+  }
+  return null;
+}
+
+function lastLiveAssistantMessageId(
   clusterTimeline: WebviewTimelineItem[],
-): "message" | "thinking" | "tool" | null {
+): string | null {
   for (let index = clusterTimeline.length - 1; index >= 0; index -= 1) {
-    const item = clusterTimeline[index];
-    if (item.type === "thinking" || item.type === "tool") {
-      return item.type;
-    }
-    if (item.type === "message" && item.kind === "assistant") {
-      return "message";
+    const assistantMessageId = assistantMessageIdForLiveItem(clusterTimeline[index]);
+    if (assistantMessageId) {
+      return assistantMessageId;
     }
   }
   return null;
@@ -154,7 +161,9 @@ export function TranscriptView({
     const clusterLastThinkingId = showProgress
       ? [...clusterTimeline].reverse().find((item) => item.type === "thinking")?.id ?? null
       : null;
-    const lastLiveActivity = showProgress ? lastLiveActivityType(clusterTimeline) : null;
+    const activeAssistantMessageId = showProgress
+      ? lastLiveAssistantMessageId(clusterTimeline)
+      : null;
 
     const renderTimelineItem = (item: WebviewTimelineItem) => {
       switch (item.type) {
@@ -215,6 +224,16 @@ export function TranscriptView({
       if ("type" in item && item.type === "assistant-response-group") {
         const group = item as AssistantResponseGroup;
         const segments = partitionAssistantResponseGroup(group);
+        const isActiveGroup =
+          activeAssistantMessageId !== null &&
+          group.assistantMessageId === activeAssistantMessageId;
+        const lastContextGroupIndex = isActiveGroup
+          ? segments.reduce(
+              (lastIndex, segment, index) =>
+                segment.type === "context-group" ? index : lastIndex,
+              -1,
+            )
+          : -1;
         return (
           <Fragment key={`group-${group.assistantMessageId}`}>
             {group.preamble ? (
@@ -226,6 +245,7 @@ export function TranscriptView({
               />
             ) : null}
             {segments.map((segment, index) => {
+              const isActiveTailContextGroup = isActiveGroup && index === lastContextGroupIndex;
               if (segment.type === "action-tool") {
                 return (
                   <ToolRow
@@ -252,7 +272,8 @@ export function TranscriptView({
               if (
                 segment.group.tools.length === 1 &&
                 !hasThinkingText &&
-                toolCategory(segment.group.tools[0].toolName) !== "task"
+                toolCategory(segment.group.tools[0].toolName) !== "task" &&
+                !isActiveTailContextGroup
               ) {
                 return (
                   <ToolRow
@@ -274,6 +295,7 @@ export function TranscriptView({
               return (
                 <ThinkingGroup
                   group={segment.group}
+                  isLive={isActiveTailContextGroup}
                   isStreaming={isStreaming}
                   key={`group-context-${group.assistantMessageId}-${index}`}
                   onOpenDiff={onOpenDiff}
@@ -287,35 +309,23 @@ export function TranscriptView({
 
       return renderTimelineItem(item as WebviewTimelineItem);
     };
-
-    const hasActiveThinking = lastLiveActivity === "thinking";
-    const hasRunningTool = clusterTimeline.some(
-      (item) => item.type === "tool" && item.status !== "complete",
-    );
-    const hasStreamingText = lastLiveActivity === "message";
     return (
       <>
         {grouped.map(renderGroupedItem)}
-        {showProgress ? (
-          <ProgressRow
-            busy={busy}
-            hasActiveThinking={hasActiveThinking}
-            hasRunningTool={hasRunningTool}
-            hasStreamingText={hasStreamingText}
-          />
-        ) : null}
+        {showProgress ? <ProgressRow busy={showProgress} /> : null}
       </>
     );
   };
 
-  const leadingTimeline =
-    busy && latestUserIndex >= 0
-      ? renderedTimeline.slice(0, latestUserIndex + 1)
-      : renderedTimeline;
-  const showLiveCluster = busy && latestUserIndex >= 0;
-  const liveClusterTimeline = showLiveCluster
+  const splitTimeline =
+    latestUserIndex >= 0 && (busy || latestUserIndex + 1 < renderedTimeline.length);
+  const leadingTimeline = splitTimeline
+    ? renderedTimeline.slice(0, latestUserIndex + 1)
+    : renderedTimeline;
+  const liveClusterTimeline = splitTimeline
     ? renderedTimeline.slice(latestUserIndex + 1)
     : [];
+  const showLiveCluster = splitTimeline;
 
   return (
     <section
@@ -326,7 +336,7 @@ export function TranscriptView({
       {renderCluster(leadingTimeline, false)}
       {showLiveCluster ? (
         <div className="tc-live-cluster" data-testid="live-cluster">
-          {renderCluster(liveClusterTimeline, true)}
+          {renderCluster(liveClusterTimeline, busy)}
         </div>
       ) : null}
       <div

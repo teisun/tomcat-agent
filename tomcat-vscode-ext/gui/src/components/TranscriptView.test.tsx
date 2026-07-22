@@ -1,8 +1,12 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WebviewCheckpoint, WebviewTimelineItem } from "../types";
 import { TranscriptView } from "./TranscriptView";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("TranscriptView", () => {
   it("keeps a high-signal edit tool visible as a standalone row", () => {
@@ -136,6 +140,92 @@ describe("TranscriptView", () => {
     expect(screen.queryByTestId("thinking-group")).toBeNull();
     expect(screen.getByTestId("file-chip").textContent).toContain("README.md");
     expect(screen.getByTestId("tool-row-label").textContent).toContain("Read");
+  });
+
+  it("keeps a single live context tool grouped until the turn is no longer busy", () => {
+    const userMessage: WebviewTimelineItem = {
+      id: "user-1",
+      kind: "user",
+      text: "latest prompt",
+      type: "message",
+    };
+    const firstRunningTool: WebviewTimelineItem = {
+      args: { path: "/workspace/demo.ts" },
+      assistantMessageId: "assistant-1",
+      display: { file: "/workspace/demo.ts", kind: "file" },
+      id: "tool-1",
+      isError: false,
+      status: "running",
+      summary: "partial read",
+      toolCallId: "tool-call-1",
+      toolName: "read",
+      type: "tool",
+    };
+    const firstCompletedTool: WebviewTimelineItem = {
+      ...firstRunningTool,
+      status: "complete",
+      summary: "done",
+    };
+    const secondRunningTool: WebviewTimelineItem = {
+      args: { path: "/workspace/next.ts" },
+      assistantMessageId: "assistant-1",
+      display: { file: "/workspace/next.ts", kind: "file" },
+      id: "tool-2",
+      isError: false,
+      status: "running",
+      summary: "partial read",
+      toolCallId: "tool-call-2",
+      toolName: "read",
+      type: "tool",
+    };
+
+    const { rerender } = render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[userMessage, firstRunningTool]}
+      />,
+    );
+
+    const firstGroup = screen.getByTestId("thinking-group");
+    const firstProgressRow = screen.getByTestId("progress-row");
+    expect(screen.getByTestId("group-activity-ticker")).toBeTruthy();
+    expect(screen.queryByTestId("tool-row")).toBeNull();
+
+    rerender(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[userMessage, firstCompletedTool, secondRunningTool]}
+      />,
+    );
+
+    expect(screen.getByTestId("thinking-group")).toBe(firstGroup);
+    expect(screen.getByTestId("progress-row")).toBe(firstProgressRow);
+
+    rerender(
+      <TranscriptView
+        busy={false}
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[userMessage, firstCompletedTool]}
+      />,
+    );
+
+    expect(screen.queryByTestId("thinking-group")).toBeNull();
+    expect(screen.queryByTestId("progress-row")).toBeNull();
+    expect(screen.getByTestId("file-chip").textContent).toContain("demo.ts");
   });
 
   it("folds a lone task-family tool into a thinking group instead of flattening it", () => {
@@ -563,7 +653,7 @@ describe("TranscriptView", () => {
     expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
   });
 
-  it("shows a progress row during the pre-stream gap and hides it after the first live item", () => {
+  it("keeps the same progress row mounted after the first live item starts streaming", () => {
     const userOnlyTimeline: WebviewTimelineItem[] = [
       {
         id: "user-1",
@@ -585,6 +675,7 @@ describe("TranscriptView", () => {
     );
 
     expect(screen.getByTestId("live-cluster")).toBeTruthy();
+    const firstProgressRow = screen.getByTestId("progress-row");
     expect(screen.getByTestId("progress-row-dots").querySelectorAll(".tc-loading-dots__dot")).toHaveLength(
       3,
     );
@@ -612,7 +703,7 @@ describe("TranscriptView", () => {
       />,
     );
 
-    expect(screen.queryByTestId("progress-row")).toBeNull();
+    expect(screen.getByTestId("progress-row")).toBe(firstProgressRow);
   });
 
   it("keeps the progress row visible during quiet gaps even when todos exist", () => {
@@ -643,7 +734,7 @@ describe("TranscriptView", () => {
     );
   });
 
-  it("reuses the progress row after tools finish until the next live output arrives", () => {
+  it("keeps the progress row mounted for the full busy lifecycle", () => {
     const userMessage: WebviewTimelineItem = {
       id: "user-1",
       kind: "user",
@@ -673,8 +764,50 @@ describe("TranscriptView", () => {
       status: "complete",
       summary: "# README",
     };
+    const nextRunningTool: WebviewTimelineItem = {
+      args: { path: "CHANGELOG.md" },
+      assistantMessageId: "assistant-1",
+      id: "tool-2",
+      isError: false,
+      status: "running",
+      summary: "partial read",
+      toolCallId: "tool-call-2",
+      toolName: "read",
+      type: "tool",
+    };
 
     const { rerender } = render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[userMessage]}
+      />,
+    );
+
+    const liveCluster = screen.getByTestId("live-cluster");
+    const firstProgressRow = screen.getByTestId("progress-row");
+    expect(liveCluster.lastElementChild).toBe(firstProgressRow);
+
+    rerender(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[userMessage, thinkingBlock]}
+      />,
+    );
+
+    expect(screen.getByTestId("progress-row")).toBe(firstProgressRow);
+    expect(liveCluster.lastElementChild).toBe(firstProgressRow);
+
+    rerender(
       <TranscriptView
         busy
         canBuildPlan={false}
@@ -686,7 +819,9 @@ describe("TranscriptView", () => {
       />,
     );
 
-    expect(screen.queryByTestId("progress-row")).toBeNull();
+    expect(screen.getByTestId("progress-row")).toBe(firstProgressRow);
+    expect(firstProgressRow.className).toBe("tc-progress-row");
+    expect(liveCluster.lastElementChild).toBe(firstProgressRow);
 
     rerender(
       <TranscriptView
@@ -700,14 +835,8 @@ describe("TranscriptView", () => {
       />,
     );
 
-    expect(screen.getByTestId("progress-row-dots").querySelectorAll(".tc-loading-dots__dot")).toHaveLength(
-      3,
-    );
-    expect(screen.queryByText("Thinking")).toBeNull();
-    expect(screen.getByTestId("thinking-group-title").textContent).toBe("Used 1 tool");
-    expect(screen.getByTestId("thinking-group-title").className).not.toContain(
-      "tc-thinking__title--shimmer",
-    );
+    expect(screen.getByTestId("progress-row")).toBe(firstProgressRow);
+    expect(liveCluster.lastElementChild).toBe(firstProgressRow);
 
     rerender(
       <TranscriptView
@@ -719,21 +848,14 @@ describe("TranscriptView", () => {
         onOpenPlanFile={vi.fn()}
         timeline={[
           userMessage,
-          {
-            ...thinkingBlock,
-            summaryTitle: "Used 1 tool for checking the README",
-          },
           completedTool,
+          nextRunningTool,
         ]}
       />,
     );
 
-    expect(screen.getByTestId("progress-row-dots").querySelectorAll(".tc-loading-dots__dot")).toHaveLength(
-      3,
-    );
-    expect(screen.getByTestId("thinking-group-title").textContent).toBe(
-      "Used 1 tool for checking the README",
-    );
+    expect(screen.getByTestId("progress-row")).toBe(firstProgressRow);
+    expect(liveCluster.lastElementChild).toBe(firstProgressRow);
 
     rerender(
       <TranscriptView
@@ -745,16 +867,37 @@ describe("TranscriptView", () => {
         onOpenPlanFile={vi.fn()}
         timeline={[
           userMessage,
-          {
-            ...thinkingBlock,
-            summaryTitle: "Used 1 tool for checking the README",
-          },
           completedTool,
           {
             assistantMessageId: "assistant-1",
             id: "assistant-1-message",
             kind: "assistant",
-            text: "The README looks good.",
+            text: "The README and changelog look good.",
+            type: "message",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("progress-row")).toBe(firstProgressRow);
+    expect(liveCluster.lastElementChild).toBe(firstProgressRow);
+
+    rerender(
+      <TranscriptView
+        busy={false}
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[
+          userMessage,
+          completedTool,
+          {
+            assistantMessageId: "assistant-1",
+            id: "assistant-1-message",
+            kind: "assistant",
+            text: "The README and changelog look good.",
             type: "message",
           },
         ]}
@@ -845,6 +988,261 @@ describe("TranscriptView", () => {
     expect(statuses[1].className).toContain("codicon-search");
     expect(statuses[0].className).not.toContain("codicon-loading");
     expect(statuses[1].className).not.toContain("codicon-loading");
+  });
+
+  it("only shows a ticker for the last active grouped segment in the live cluster", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        id: "user-1",
+        kind: "user",
+        text: "latest prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "assistant-earlier",
+        id: "thinking-earlier",
+        summaryTitle: "Reviewed 1 file",
+        text: "checked the first file",
+        type: "thinking",
+      },
+      {
+        args: { path: "/workspace/earlier.ts" },
+        assistantMessageId: "assistant-earlier",
+        display: { file: "/workspace/earlier.ts", kind: "file" },
+        id: "tool-earlier",
+        isError: false,
+        status: "complete",
+        summary: "done",
+        toolCallId: "tc-earlier",
+        toolName: "read",
+        type: "tool",
+      },
+      {
+        assistantMessageId: "assistant-active",
+        id: "thinking-active",
+        summaryTitle: "Reviewed 1 file",
+        text: "checked the active file",
+        type: "thinking",
+      },
+      {
+        args: { path: "/workspace/active.ts" },
+        assistantMessageId: "assistant-active",
+        display: { file: "/workspace/active.ts", kind: "file" },
+        id: "tool-active",
+        isError: false,
+        status: "complete",
+        summary: "done",
+        toolCallId: "tc-active",
+        toolName: "read",
+        type: "tool",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    const tickers = screen.getAllByTestId("group-activity-ticker");
+    expect(tickers).toHaveLength(1);
+    expect(screen.getByText("Read file active.ts")).toBeTruthy();
+    expect(screen.queryByText("Read file earlier.ts")).toBeNull();
+  });
+
+  it("keeps the last grouped turn mounted long enough for the ticker to animate out", () => {
+    vi.useFakeTimers();
+    const timeline: WebviewTimelineItem[] = [
+      {
+        id: "user-1",
+        kind: "user",
+        text: "latest prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "assistant-1",
+        id: "thinking-1",
+        summaryTitle: "Reviewed 1 file",
+        text: "checked the file",
+        type: "thinking",
+      },
+      {
+        args: { path: "/workspace/file.ts" },
+        assistantMessageId: "assistant-1",
+        display: { file: "/workspace/file.ts", kind: "file" },
+        id: "tool-1",
+        isError: false,
+        status: "complete",
+        summary: "done",
+        toolCallId: "tc-1",
+        toolName: "read",
+        type: "tool",
+      },
+    ];
+    const { container, rerender } = render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.getByTestId("group-activity-ticker")).toBeTruthy();
+
+    rerender(
+      <TranscriptView
+        busy={false}
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.getByTestId("live-cluster")).toBeTruthy();
+
+    act(() => {
+      vi.advanceTimersByTime(450 + 260);
+    });
+    expect(container.querySelector(".tc-group-ticker--collapsing")).toBeTruthy();
+
+    act(() => {
+      vi.advanceTimersByTime(160);
+    });
+    expect(screen.queryByTestId("group-activity-ticker")).toBeNull();
+  });
+
+  it("keeps all grouped tickers hidden outside the live cluster", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        assistantMessageId: "assistant-1",
+        id: "thinking-1",
+        summaryTitle: "Reviewed 1 file",
+        text: "checked the file",
+        type: "thinking",
+      },
+      {
+        args: { path: "/workspace/file.ts" },
+        assistantMessageId: "assistant-1",
+        display: { file: "/workspace/file.ts", kind: "file" },
+        id: "tool-1",
+        isError: false,
+        status: "complete",
+        summary: "done",
+        toolCallId: "tc-1",
+        toolName: "read",
+        type: "tool",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy={false}
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.queryByTestId("group-activity-ticker")).toBeNull();
+  });
+
+  it("limits the active ticker to the last context segment when a live group is split", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        id: "user-1",
+        kind: "user",
+        text: "latest prompt",
+        type: "message",
+      },
+      {
+        assistantMessageId: "assistant-split",
+        id: "thinking-split",
+        summaryTitle: "Used 3 tools",
+        text: "inspect, edit, then inspect again",
+        type: "thinking",
+      },
+      {
+        args: { path: "/workspace/first.ts" },
+        assistantMessageId: "assistant-split",
+        display: { file: "/workspace/first.ts", kind: "file" },
+        id: "tool-first",
+        isError: false,
+        status: "complete",
+        summary: "done",
+        toolCallId: "tc-first",
+        toolName: "read",
+        type: "tool",
+      },
+      {
+        args: { path: "/workspace/first.ts" },
+        assistantMessageId: "assistant-split",
+        diffStat: { added: 1, removed: 0 },
+        display: { file: "/workspace/first.ts", kind: "file" },
+        id: "tool-edit",
+        isError: false,
+        status: "complete",
+        summary: "updated file",
+        toolCallId: "tc-edit",
+        toolName: "edit",
+        type: "tool",
+      },
+      {
+        args: { path: "/workspace/last.ts" },
+        assistantMessageId: "assistant-split",
+        display: { file: "/workspace/last.ts", kind: "file" },
+        id: "tool-last",
+        isError: false,
+        status: "complete",
+        summary: "done",
+        toolCallId: "tc-last",
+        toolName: "read",
+        type: "tool",
+      },
+      {
+        args: { path: "/workspace/final.ts" },
+        assistantMessageId: "assistant-split",
+        display: { file: "/workspace/final.ts", kind: "file" },
+        id: "tool-final",
+        isError: false,
+        status: "complete",
+        summary: "done",
+        toolCallId: "tc-final",
+        toolName: "read",
+        type: "tool",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.getAllByTestId("group-activity-ticker")).toHaveLength(1);
+    expect(screen.getByText("Read file final.ts")).toBeTruthy();
+    expect(screen.queryByText("Read file first.ts")).toBeNull();
   });
 
   it("does not shimmer a leading thinking group when the live cluster has no thinking yet", () => {

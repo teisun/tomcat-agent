@@ -2,6 +2,21 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { WebviewThinkingBlock } from "../types";
 
+function normalizeThinkingDisplayText(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!/^(?:\*\*.+?\*\*\s*){2,}$/.test(trimmed)) {
+        return line;
+      }
+
+      const segments = trimmed.match(/\*\*.+?\*\*/g);
+      return segments ? segments.join("\n") : line;
+    })
+    .join("\n");
+}
+
 function summarizeThinking(text: string): string | null {
   const firstMeaningfulLine = text
     .split("\n")
@@ -26,16 +41,17 @@ export function ThinkingBlock({
   variant?: "embedded" | "standalone";
 }) {
   const [collapsed, setCollapsed] = useState(true);
-  const summary = useMemo(() => summarizeThinking(item.text), [item.text]);
+  const displayText = useMemo(() => normalizeThinkingDisplayText(item.text), [item.text]);
+  const summary = useMemo(() => summarizeThinking(displayText), [displayText]);
 
   useEffect(() => {
     setCollapsed(true);
   }, [item.id]);
 
   if (variant === "embedded") {
-    return item.text ? (
+    return displayText ? (
       <pre className="tc-thinking-box__body" data-testid="thinking-group-body">
-        {item.text}
+        {displayText}
       </pre>
     ) : null;
   }
@@ -77,7 +93,7 @@ export function ThinkingBlock({
       </button>
       {collapsed ? null : (
         <pre className="tc-thinking__body" data-testid="thinking-body">
-          {item.text}
+          {displayText}
         </pre>
       )}
     </section>

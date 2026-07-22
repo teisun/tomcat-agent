@@ -1141,7 +1141,7 @@ export async function assertWebviewMaxReasoningAndLoadingGapFlow(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
-      !candidate.progressRow &&
+      candidate.progressRow &&
       candidate.loadingShimmerCount > 0 &&
       candidate.standaloneThinkingTitles.includes("Thinking") &&
       !candidate.standaloneThinkingTitles.includes("Tomcat · Thinking")
@@ -1328,8 +1328,9 @@ export async function assertWebviewStreamingFlow(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
-      candidate.loadingShimmerCount > 0 &&
-      candidate.groupFoldTitles.some((title) => title.includes("Reading file README.md")) &&
+      candidate.progressRow &&
+      candidate.html.includes("tc-thinking__title--shimmer") &&
+      candidate.groupFoldTitles.some((title) => title.includes("README.md")) &&
       !candidate.html.includes("tc-codicon-spin") &&
       !candidate.html.includes("codicon-loading")
         ? candidate
@@ -1337,12 +1338,16 @@ export async function assertWebviewStreamingFlow(
     20_000,
   );
   assert.ok(
-    runningGroupSnapshot.loadingShimmerCount > 0,
-    `expected the live context group to shimmer while its tool is running, got ${runningGroupSnapshot.loadingShimmerCount}`,
+    runningGroupSnapshot.progressRow,
+    "expected the shared progress row to stay mounted while the live context group is running",
   );
   assert.ok(
-    runningGroupSnapshot.groupFoldTitles.some((title) => title.includes("Reading file README.md")),
-    `expected the live context group title to reflect the running read, got ${JSON.stringify(runningGroupSnapshot.groupFoldTitles)}`,
+    runningGroupSnapshot.html.includes("tc-thinking__title--shimmer"),
+    "expected the live context group header to shimmer while its tool is running",
+  );
+  assert.ok(
+    runningGroupSnapshot.groupFoldTitles.some((title) => title.includes("README.md")),
+    `expected the live context group title to reflect the README read, got ${JSON.stringify(runningGroupSnapshot.groupFoldTitles)}`,
   );
 
   await api.__testing.injectServeEvent({
@@ -1360,7 +1365,7 @@ export async function assertWebviewStreamingFlow(
       candidate.activeSessionId === sessionId &&
       candidate.progressRow &&
       candidate.html.includes('data-testid="progress-row-dots"') &&
-      candidate.loadingShimmerCount === 0 &&
+      !candidate.html.includes("tc-thinking__title--shimmer") &&
       candidate.groupFoldTitles.some((title) => title.includes("Read file README.md")) &&
       !candidate.html.includes("tc-codicon-spin") &&
       !candidate.html.includes("codicon-loading")
@@ -1369,9 +1374,9 @@ export async function assertWebviewStreamingFlow(
     20_000,
   );
   assert.equal(
-    settledBeforeUpgrade.loadingShimmerCount,
-    0,
-    `expected the group shimmer to stop as soon as the tool completed, got ${settledBeforeUpgrade.loadingShimmerCount}`,
+    settledBeforeUpgrade.html.includes("tc-thinking__title--shimmer"),
+    false,
+    "expected the group header shimmer to stop as soon as the tool completed",
   );
   assert.equal(
     settledBeforeUpgrade.progressRow,
@@ -1395,7 +1400,7 @@ export async function assertWebviewStreamingFlow(
       candidate.activeSessionId === sessionId &&
       candidate.progressRow &&
       candidate.groupFoldTitles.some((title) => title.includes("Used 1 tool")) &&
-      candidate.loadingShimmerCount === 0
+      !candidate.html.includes("tc-thinking__title--shimmer")
         ? candidate
         : undefined,
     20_000,
@@ -1423,7 +1428,7 @@ export async function assertWebviewStreamingFlow(
       candidate.activeSessionId === sessionId &&
       candidate.progressRow &&
       candidate.groupFoldTitles.some((title) => title.includes("Used 1 tool for checking the README")) &&
-      candidate.loadingShimmerCount === 0
+      !candidate.html.includes("tc-thinking__title--shimmer")
         ? candidate
         : undefined,
     20_000,
@@ -1454,7 +1459,7 @@ export async function assertWebviewStreamingFlow(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
-      !candidate.progressRow &&
+      candidate.progressRow &&
       candidate.messageTexts.some((text) => text.includes("The README checks out."))
         ? candidate
         : undefined,
@@ -1462,8 +1467,8 @@ export async function assertWebviewStreamingFlow(
   );
   assert.equal(
     resumedOutputSnapshot.progressRow,
-    false,
-    "expected the shared progress row to disappear once assistant output resumes",
+    true,
+    "expected the shared progress row to stay mounted while assistant output is still streaming",
   );
 
   await api.__testing.injectServeEvent({
@@ -3336,7 +3341,7 @@ export async function assertTranscriptUiFlow(
     const busyTodo = await waitForWebviewDomSnapshot(
       api,
       (candidate) =>
-        !candidate.progressRow &&
+        candidate.progressRow &&
         candidate.todoWidgetVisible &&
         candidate.planCardCount > 0 &&
         candidate.planFooterSameRow &&
@@ -3367,8 +3372,8 @@ export async function assertTranscriptUiFlow(
     if (requireBusyProgress) {
       assert.equal(
         busyTodo.progressRow,
-        false,
-        "expected no inline progress row once the docked todo widget owns the busy state",
+        true,
+        "expected the inline progress row to stay visible while the docked todo widget owns the busy state",
       );
       await api.__testing.focusWebview();
       captureTranscriptVisual("progress");

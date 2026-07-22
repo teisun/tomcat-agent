@@ -192,6 +192,9 @@ export function useAutoScroll({
   const setScrollTop = (element: HTMLElement, top: number) => {
     const maxTop = Math.max(0, element.scrollHeight - element.clientHeight);
     const nextTop = Math.max(0, Math.min(top, maxTop));
+    if (Math.abs(element.scrollTop - nextTop) < 1) {
+      return;
+    }
     markProgrammaticScroll(nextTop);
     element.scrollTop = nextTop;
   };

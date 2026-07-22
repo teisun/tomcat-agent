@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useState } from "react";
 
 import type { WebviewMessageBlock, WebviewToolCard } from "../types";
+import { GroupActivityTicker } from "./GroupActivityTicker";
 import { MessageBubble } from "./MessageBubble";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { buildToolCollectionTitle, ToolRow } from "./ToolRow";
@@ -30,6 +31,7 @@ function groupHeaderTitle(
 
 type ThinkingGroupProps = {
   group: AssistantResponseGroup;
+  isLive?: boolean;
   isStreaming?: boolean;
   onOpenFile(path: string, line?: number): void;
   onOpenDiff?(toolCallId: string): void;
@@ -37,6 +39,7 @@ type ThinkingGroupProps = {
 
 function ThinkingGroupComponent({
   group,
+  isLive = false,
   isStreaming = false,
   onOpenFile,
   onOpenDiff,
@@ -90,6 +93,9 @@ function ThinkingGroupComponent({
           </span>
           <span className="tc-thinking-box__caret">{collapsed ? "▸" : "▾"}</span>
         </button>
+        {collapsed && tools.length > 0 ? (
+          <GroupActivityTicker isLive={isLive} tools={tools} />
+        ) : null}
         {collapsed ? null : (
           <>
             {thinking ? <ThinkingBlock item={thinking} onOpenFile={onOpenFile} variant="embedded" /> : null}
@@ -119,6 +125,7 @@ function areThinkingGroupPropsEqual(prev: ThinkingGroupProps, next: ThinkingGrou
     prev.group.preamble === next.group.preamble &&
     prev.group.thinking === next.group.thinking &&
     sameTools(prev.group.tools, next.group.tools) &&
+    prev.isLive === next.isLive &&
     prev.isStreaming === next.isStreaming &&
     prev.onOpenDiff === next.onOpenDiff &&
     prev.onOpenFile === next.onOpenFile

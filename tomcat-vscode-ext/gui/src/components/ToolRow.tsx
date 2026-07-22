@@ -246,7 +246,7 @@ function countResults(summary: string | undefined): number | null {
   return hits.length > 0 ? hits.length : null;
 }
 
-function toolIconClass(toolName: string): string {
+export function toolIconClass(toolName: string): string {
   switch (toolName) {
     case "write":
       return "codicon-new-file";

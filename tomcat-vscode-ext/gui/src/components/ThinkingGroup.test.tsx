@@ -72,21 +72,85 @@ describe("ThinkingGroup", () => {
       />,
     );
 
+    expect(screen.queryByTestId("group-activity-ticker")).toBeNull();
     expect(screen.queryAllByTestId("tool-row")).toHaveLength(0);
   });
 
-  it("renders thinking and tool rows when expanded", () => {
-    render(
+  it("shows a collapsed activity ticker for live groups with tools", () => {
+    const { container } = render(
       <ThinkingGroup
+        group={buildGroup({
+          tools: [
+            {
+              args: { path: "/workspace/demo.ts" },
+              assistantMessageId: "assistant-1",
+              display: { file: "/workspace/demo.ts", kind: "file" },
+              id: "tool-1",
+              isError: false,
+              status: "complete",
+              summary: "done",
+              toolCallId: "tc-1",
+              toolName: "read",
+              type: "tool",
+            },
+          ],
+        })}
+        isLive
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("group-activity-ticker")).toBeTruthy();
+    expect(screen.getByText("Read file demo.ts")).toBeTruthy();
+    expect(container.querySelector(".tc-group-ticker__line")).toBeTruthy();
+    expect(container.querySelector(".tc-group-ticker__icon")).toBeTruthy();
+  });
+
+  it("renders thinking and tool rows when expanded", () => {
+    const { container } = render(
+      <ThinkingGroup
+        isLive
         group={buildGroup()}
         onOpenFile={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByTestId("thinking-group-toggle"));
+    expect(screen.queryByTestId("group-activity-ticker")).toBeNull();
     expect(screen.getByTestId("thinking-group-body").tagName).toBe("PRE");
     expect(screen.getByTestId("thinking-group-body").textContent).toContain("Need to inspect");
     expect(screen.getAllByTestId("tool-row")).toHaveLength(2);
+    expect(container.querySelector(".tc-thinking-tool-wrapper")).toBeTruthy();
+    expect(container.querySelector(".tc-thinking-icon")).toBeTruthy();
+  });
+
+  it("reflows adjacent bold-only thinking headings inside expanded groups without enabling markdown", () => {
+    render(
+      <ThinkingGroup
+        group={buildGroup({
+          thinking: {
+            assistantMessageId: "assistant-1",
+            id: "think-1",
+            summaryTitle: "Reviewed 3 files",
+            text: "**Identifying local code modifications** **Comparing exports and test feasibility** **Planning non-bash UI testing approach**",
+            type: "thinking",
+          },
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("thinking-group-toggle"));
+    const body = screen.getByTestId("thinking-group-body");
+    expect(body.tagName).toBe("PRE");
+    expect(body.textContent).toContain(
+      [
+        "**Identifying local code modifications**",
+        "**Comparing exports and test feasibility**",
+        "**Planning non-bash UI testing approach**",
+      ].join("\n"),
+    );
+    expect(body.querySelector("strong")).toBeNull();
   });
 
   it("stays collapsed and applies shimmer when streaming without summaryTitle", () => {
