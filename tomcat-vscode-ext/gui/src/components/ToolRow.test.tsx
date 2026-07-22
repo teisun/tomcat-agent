@@ -156,6 +156,57 @@ describe("ToolRow", () => {
     expect(screen.getByTestId("tool-row-terminal").textContent).toContain("line 6");
   });
 
+  it("bash row rebuilds a complete command from command plus argv", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: {
+            args: [
+              "test",
+              "--lib",
+              "--manifest-path",
+              "tomcat/Cargo.toml",
+              "system_prompt_reflects_runtime_permission_skill_and_plugin_tool_changes",
+            ],
+            command: "cargo",
+          },
+          status: "complete",
+          summary: "test result: ok",
+          toolName: "bash",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("tool-row-cmd-tags").textContent).toBe("cargo");
+    const expected =
+      "$ cargo test --lib --manifest-path tomcat/Cargo.toml system_prompt_reflects_runtime_permission_skill_and_plugin_tool_changes";
+    expect(screen.getByTestId("terminal-output-preview").textContent).toContain(expected);
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain(expected);
+  });
+
+  it("bash row quotes argv values without losing argument boundaries", () => {
+    render(
+      <ToolRow
+        item={buildTool({
+          args: {
+            args: ["plain", "hello world", 'say "hi"', ""],
+            command: "printf",
+          },
+          status: "complete",
+          summary: "done",
+          toolName: "bash",
+        })}
+        onOpenFile={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("terminal-output-preview").textContent).toContain(
+      `$ printf plain 'hello world' 'say "hi"' ''`,
+    );
+  });
+
   it("bash header shows the utility purpose title and command-name tags", () => {
     render(
       <ToolRow

@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-07-22 21:34 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-07-22 23:10 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** Shell 命令展示层级修复：结构化 argv（`command` + `args[]`）在命令卡片终端正文漏拼导致只显示 `$ cargo`；现 `ToolRow.fullCommandText` 会重建完整命令并对含空格/引号/空串参数做 shell quoting，预览/展开/程序标签共用同一份完整命令。thinking 组头单 Shell 即时回退从 `Ran <完整原始命令>` 改为 `Ran shell command`，turn title utility prompt 明确要求描述目的、不复述 flags/路径/测试名；不增加 utility 返回值门槛或二次调用。扩展版本 `0.1.24 → 0.1.25`，本机纯插件包 `tomcat-vscode-ext-0.1.25.vsix`（不含内置 CLI）。验证：`cargo test --lib core::summary::tests::title_generator_test`（`18 passed`）、GUI `ToolRow`/`ThinkingGroup`（`48 passed`）、webview `state.test.ts`（`63 passed`）、`npm run lint` / `build:gui` / `package:vsix` 全绿。@2026-07-22
 - [✓] **[P0]** System prompt 去动态时间 + PLAN 修订契约收口：`workspace_context.txt` 去掉 `Current date and time: {now}`，`WorkspaceContextSection` 不再注入本地时钟，使相同 workspace/权限输入下 system prompt **字节级确定性**（便于缓存、对账与回归）；单测改为断言无时间文案/`{now}`，并补「同输入完全一致」与「权限/skill/plugin 变化会反映进 prompt」守卫；serve `new_session` 回归同步锁住。同时重写 `planner.txt`：修订既有计划时正文走 `read`+`edit`/`hashline_edit`，todos 走 `update_plan`，禁止再靠 `create_plan` 叠第二份计划或用 prose 伪计划。@2026-07-22
 - [✓] **[P0]** Code Review 收口整改已落地：完成态不再走对抗式 Verifier（`verify.rs`/dispatcher 保留 dormant）；Plan/Code Reviewer 彻底拆成独立 `SubagentType`、dispatcher、summary 与白名单守卫，仅共享 kind-无关 `<review>` 解析；`update_plan` 收口后跑 code review，non-pass 用强祈使指令引导 reopen/新增修复 todo（默认轮次 1，不自动建 todo）；serve `plan.code_review` 携带 `verdict/findings/changes_summary/rounds`；扩展时间线新增 `ReviewRow`（running shimmer → done 色标 + findings 可展开）。验证：相关 Rust focused/lib（排除无关 flaky net_fetch）与扩展 `npm run lint` + `npm run test:unit` 全绿；本机纯插件包 `tomcat-vscode-ext-0.1.24.vsix`。@2026-07-22
 - [✓] **[P0]** 折叠 `ThinkingGroup` 的 **Group Activity Ticker** 已落地：为了解决“第三轮默认折叠后看不见组内工具进度”，前端新增 [`GroupActivityTicker.tsx`](../../../tomcat-vscode-ext/gui/src/components/GroupActivityTicker.tsx)，在折叠组头下方复刻展开子行骨架（16px 图标列 + 24px 文案缩进 + 左侧连接竖线），并按队列逐个翻牌展示组内工具；当前项完成后以 **2 槽位 `translateY(-50%)`** 平滑滚到下一项，静默间隙则停留在最后一个已完成工具上并继续 shimmer。为避免“组内 streaming 在工具间隙误判结束”，`[TranscriptView.tsx](../../../tomcat-vscode-ext/gui/src/components/TranscriptView.tsx)` 现改为基于 live cluster 末尾 assistant 活动计算 `activeAssistantMessageId`，只给最后一个活跃 context-group 段传 `isLive=true`；`[ThinkingGroup.tsx](../../../tomcat-vscode-ext/gui/src/components/ThinkingGroup.tsx)` 在折叠态挂载 ticker，并把 `isLive` 纳入 memo 比较。另一个关键补丁是保留最后一个 post-user cluster 穿过 `busy=true → false` 的父级切换，这样 ticker 才能真的在 turn 结束时先滚空再平滑收拢，而不是被 `TranscriptView` 提前 remount 掉。验证：focused `npm --prefix gui run test -- src/components/GroupActivityTicker.test.tsx src/components/ThinkingGroup.test.tsx src/components/TranscriptView.test.tsx`（`40 passed`）、全量 `npm run test:unit:gui`（`42 files / 330 tests passed`）与 `npm run lint` 全绿；`E2E_SCENARIO_LIBRARY.md` 已补 `E2E-VSCEXT-010A` 锁住 ticker 翻牌、linger、收尾隐藏与无抖动验收口径。@2026-07-22
@@ -29,6 +30,7 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- 命令卡片完整命令展示统一消费 `command` + 可选 `args[]`；thinking turn 摘要单 Shell 即时回退改为固定 `Ran shell command`，utility prompt 禁止复述原始 shell 命令。扩展版本 `0.1.25`。
 - `SystemWorkspaceContext` 模板不再含 `Current date and time: {now}`；`WorkspaceContextSection::render` 仅注入四类工作目录路径，同输入下 system prompt 字节级稳定。PLAN 模式 `planner.txt` 修订契约：既有计划正文用 `edit`/`hashline_edit`，todos 用 `update_plan`，禁止再用 `create_plan` 叠第二份计划。
 - `SubagentType::Reviewer` 拆为 `PlanReviewer` / `CodeReviewer`；`PlanRuntime` 双字段 `attach_plan_reviewer` / `attach_code_reviewer`；`ServePlanEvent::PlanCodeReview` 增加 `verdict` / `findings` / `changes_summary` / `rounds`；webview 时间线新增 `WebviewReviewRow`，由 `sub_agent_start/end` + `plan.code_review` 驱动 running/done。收口路径不再返回 `verify` 字段（Verifier dormant）。
 - serve / webview 新增自定义事件 `background_task_finished{taskId,exitCode,logPath?,command?}`；`EVENT_NAMES` allowlist、`ServeToolEvent` schema、生成的 `wire.d.ts` 与扩展侧 `ServeEvent` 同步更新。`WebviewToolCard` 额外携带 `backgroundTaskId? / backgroundRunning? / backgroundExitCode?`，用于把“bash tool 调用已返回”与“后台真实任务仍在跑”这两条生命线拆开表达。
@@ -51,6 +53,7 @@
 | 无 | - | - |
 
 ### 集成说明
+- 最新补充（2026-07-22 23:10）：Shell 命令卡片补回 `args[]` 完整展示；thinking 单 Shell 组头即时回退改为 `Ran shell command`；扩展验收版本 `0.1.25`，纯插件包 `tomcat-vscode-ext-0.1.25.vsix`。
 - 最新补充（2026-07-22 21:34）：system prompt 去掉动态时间以保证同输入确定性；`planner.txt` 收口既有计划的 edit/`update_plan` 修订契约；相关 unit/registry 断言已同步。
 - 最新补充（2026-07-22 16:53）：Code Review 收口整改已合入本分支工作区并准备提交。Plan/Code Reviewer 全拆分、Verifier 收口 dormant、`plan.code_review` 富事件 + `ReviewRow` UI；验证：相关 Rust focused/lib 与扩展 `npm run lint` / `npm run test:unit` 全绿；纯插件 `tomcat-vscode-ext-0.1.24.vsix`。
 - 最新补充（2026-07-22 11:44）：折叠组 `GroupActivityTicker` + `ProgressRow` busy-turn 常显 + thinking `**...**` 最小换行整形已落地。验证：focused GUI `44 passed`、全量 `npm run test`（`42 files / 336 tests`）、`npm run lint`、targeted devhost E2E loading/streaming `2 passing`；验收包 `tomcat-vscode-ext-0.1.24.vsix`。

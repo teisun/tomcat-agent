@@ -316,6 +316,30 @@ describe("WebviewStateStore wire routing", () => {
     );
   });
 
+  it("preserves structured shell argv in live tool events", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const args = {
+      args: ["test", "--lib", "--manifest-path", "tomcat/Cargo.toml"],
+      command: "cargo",
+    };
+
+    store.applyEvent({
+      args,
+      sessionId: "s1",
+      toolCallId: "tc-cargo",
+      toolName: "bash",
+      type: "tool_execution_start",
+    });
+
+    const tool = store
+      .snapshot()
+      .sessionViews.s1.timeline.find(
+        (item) => item.type === "tool" && item.toolCallId === "tc-cargo",
+      );
+    expect(tool?.type === "tool" ? tool.args : undefined).toEqual(args);
+  });
+
   it("maps turn.summary_updated onto a live tool-only group", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
@@ -732,7 +756,13 @@ describe("history tool attribution", () => {
             thinking_text: "inspect",
             tool_calls: [
               {
-                function: { arguments: "{\"command\":\"ls\"}", name: "bash" },
+                function: {
+                  arguments: JSON.stringify({
+                    args: ["test", "--lib", "--manifest-path", "tomcat/Cargo.toml"],
+                    command: "cargo",
+                  }),
+                  name: "bash",
+                },
                 id: "tc-1",
               },
             ],
@@ -756,7 +786,10 @@ describe("history tool attribution", () => {
       .snapshot()
       .sessionViews.s1.timeline.find((item) => item.type === "tool");
     expect(tool?.type === "tool" ? tool.assistantMessageId : undefined).toBe("assistant-1");
-    expect(tool?.type === "tool" ? tool.args : undefined).toEqual({ command: "ls" });
+    expect(tool?.type === "tool" ? tool.args : undefined).toEqual({
+      args: ["test", "--lib", "--manifest-path", "tomcat/Cargo.toml"],
+      command: "cargo",
+    });
   });
 
   it("hydrates the same update_plan activity from history and live events", () => {

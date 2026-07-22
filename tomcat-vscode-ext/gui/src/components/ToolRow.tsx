@@ -334,7 +334,7 @@ export function buildFlatLabel(item: WebviewToolCard): string {
       if (backgroundLabel) {
         return backgroundLabel;
       }
-      const command = firstLine(asString(args.command)) ?? "command";
+      const command = commandText(item);
       return running ? `Running ${command}` : `Ran ${command}`;
     }
     case "task_output":
@@ -511,20 +511,32 @@ export function hasMeaningfulContent(item: WebviewToolCard): boolean {
   return false;
 }
 
-function commandText(item: WebviewToolCard): string {
-  const args = item.args ?? {};
-  return (
-    firstLine(asString(args.command)) ??
-    firstLine(asString(args.cmd)) ??
-    firstLine(asString(args.script)) ??
-    "command"
-  );
+function shellQuoteArg(value: string): string {
+  if (value === "") {
+    return "''";
+  }
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/gu, `'\\''`)}'`;
 }
 
 /** 完整命令串（多行/多段保留），用于终端正文 `$ …` 提示行。 */
 function fullCommandText(item: WebviewToolCard): string {
-  const args = item.args ?? {};
-  return asString(args.command) ?? asString(args.cmd) ?? asString(args.script) ?? "";
+  const toolArgs = item.args ?? {};
+  const command =
+    asString(toolArgs.command) ?? asString(toolArgs.cmd) ?? asString(toolArgs.script) ?? "";
+  const argv = Array.isArray(toolArgs.args)
+    ? toolArgs.args.filter((arg): arg is string => typeof arg === "string")
+    : [];
+  if (!command || argv.length === 0) {
+    return command;
+  }
+  return `${command} ${argv.map(shellQuoteArg).join(" ")}`;
+}
+
+function commandText(item: WebviewToolCard): string {
+  return firstLine(fullCommandText(item)) ?? "command";
 }
 
 /**

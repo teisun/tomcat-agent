@@ -39,7 +39,8 @@ pub async fn generate_turn_summary(
         return String::new();
     }
     let prompt = build_turn_summary_prompt(thinking_text, tools);
-    let title = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await {
+    let title = match tokio::time::timeout(UTILITY_TIMEOUT, call_utility(&prompt, llm, model)).await
+    {
         Ok(Ok(title)) if !title.trim().is_empty() => sanitize_title(title, 10),
         Ok(Ok(_)) => fallback_turn_summary(tools),
         Ok(Err(err)) => {
@@ -253,10 +254,7 @@ pub fn fallback_turn_summary(tools: &[ToolSnapshot]) -> String {
             "write" | "write_file" | "edit" | "edit_file" | "str_replace" => {
                 "Edited file".to_string()
             }
-            "bash" | "shell" | "execute_command" => {
-                let cmd = t.summary.strip_prefix("command=").unwrap_or(&t.summary);
-                format!("Ran {cmd}")
-            }
+            "bash" | "shell" | "execute_command" => "Ran shell command".to_string(),
             "ask_question" => "Asked question".to_string(),
             "create_plan" => "Drafted the plan".to_string(),
             "update_plan" => "Revised the plan".to_string(),
@@ -334,7 +332,10 @@ async fn call_utility(
     Ok(text)
 }
 
-pub(super) fn build_turn_summary_prompt(thinking_text: Option<&str>, tools: &[ToolSnapshot]) -> String {
+pub(super) fn build_turn_summary_prompt(
+    thinking_text: Option<&str>,
+    tools: &[ToolSnapshot],
+) -> String {
     let thinking = thinking_text.unwrap_or("").trim();
     let mut tools_block = String::new();
     for t in tools {
@@ -349,6 +350,7 @@ pub(super) fn build_turn_summary_prompt(thinking_text: Option<&str>, tools: &[To
          - If this turn only creates or updates a plan, use exactly \"Created plan for <purpose>\" \
            or \"Updated plan for <purpose>\" where <purpose> is a 2-6 word purpose phrase\n\
          - For multiple file reads use \"Reviewed N files\"\n\
+         - Describe the turn's purpose; do NOT repeat a raw shell command, flags, paths, or test names\n\
          - NEVER answer with only a bare tool count like \"Used 4 tools\"; always describe what was done. \
            If the tools are mixed and no single verb fits, use the form \"Used N tools for <short purpose>\".\n\
          - No quotes, no trailing punctuation\n\

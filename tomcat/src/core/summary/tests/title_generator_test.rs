@@ -160,7 +160,7 @@ async fn generate_turn_summary_timeout_falls_back_to_rules() {
     let title = generate_turn_summary(None, &tools, &SlowLlm, "utility-flash").await;
 
     info!(target: "test", phase = "assert");
-    assert_eq!(title, "Ran ls");
+    assert_eq!(title, "Ran shell command");
 }
 
 #[tokio::test]
@@ -213,6 +213,16 @@ fn fallback_turn_summary_multiple_reads_uses_file_count() {
 }
 
 #[test]
+fn fallback_turn_summary_hides_raw_shell_command() {
+    let tools = vec![ToolSnapshot {
+        tool_name: "bash".into(),
+        summary: "command=cargo test --lib --manifest-path tomcat/Cargo.toml long_test_name".into(),
+    }];
+
+    assert_eq!(fallback_turn_summary(&tools), "Ran shell command");
+}
+
+#[test]
 fn fallback_turn_summary_avoids_raw_json_for_ask_question() {
     let tools = vec![ToolSnapshot {
         tool_name: "ask_question".into(),
@@ -258,6 +268,10 @@ fn build_turn_summary_prompt_guides_plan_only_titles() {
     assert!(
         prompt.contains("Updated plan for <purpose>"),
         "prompt should mention the update_plan plan-only title rule: {prompt}"
+    );
+    assert!(
+        prompt.contains("do NOT repeat a raw shell command, flags, paths, or test names"),
+        "prompt should keep raw shell syntax out of the turn title: {prompt}"
     );
 }
 
