@@ -34,10 +34,25 @@ fn planner_reminder_forces_plan_requests_to_use_plan_tools() {
 }
 
 #[test]
-fn build_system_prompt_contains_current_time() {
+fn build_system_prompt_omits_dynamic_time() {
     let prompt = build_system_prompt("/tmp");
-    assert!(prompt.contains("Current date and time:"));
+    assert!(!prompt.contains("Current date and time:"));
+    assert!(!prompt.contains("{now}"));
     assert!(prompt.contains("Agent workspace directory"));
+}
+
+#[test]
+fn build_system_prompt_is_deterministic_for_identical_inputs() {
+    assert_eq!(
+        build_system_prompt("/tmp"),
+        build_system_prompt("/tmp"),
+        "static inputs must produce byte-identical system prompts"
+    );
+    assert_eq!(
+        build_system_prompt_with_state(fixture_context(), fixture_state()),
+        build_system_prompt_with_state(fixture_context(), fixture_state()),
+        "identical workspace state must produce byte-identical system prompts"
+    );
 }
 
 #[test]
@@ -134,14 +149,17 @@ fn new_sections_sit_in_priority_order() {
         .find("Finishing and verifying")
         .expect("verification");
     let ctx_pos = prompt
-        .find("Current date and time:")
+        .find("Agent workspace directory (agent_workspace_dir):")
         .expect("workspace ctx");
     // tool(20) < output(21) < parallel(22) < paged(25) < background(30) < verification(50) < workspace_ctx(200)
     assert!(
         tool_pos < output_pos,
         "output conventions 应在 tool_instructions 之后"
     );
-    assert!(output_pos < parallel_pos, "output conventions 应在 parallel 之前");
+    assert!(
+        output_pos < parallel_pos,
+        "output conventions 应在 parallel 之前"
+    );
     assert!(parallel_pos < paged_pos, "parallel 应在 paged 之前");
     assert!(paged_pos < bg_pos, "paged 应在 background 之前");
     assert!(bg_pos < verify_pos, "verification 应在 background 之后");
@@ -202,7 +220,61 @@ fn custom_section_appears_in_output() {
     assert!(output.contains("CUSTOM_CONTENT"));
 }
 
-// ── WorkspaceStateSection（plan §8 / PR-8） ──────────────────────────────────
+#[test]
+fn system_prompt_reflects_runtime_permission_skill_and_plugin_tool_changes() {
+    let baseline = build_system_prompt_with_state(fixture_context(), fixture_state());
+
+    let mut permission_state = fixture_state();
+    permission_state.read_write.push(WorkspaceRootDescriptor {
+        path: "/Users/yan/newly-authorized".into(),
+        label: "session_grant".into(),
+        alias: None,
+        description: Some("granted during the session".into()),
+    });
+    let permission_changed = build_system_prompt_with_state(fixture_context(), permission_state);
+    assert_ne!(baseline, permission_changed);
+    assert!(permission_changed.contains("/Users/yan/newly-authorized"));
+
+    let skills = fixture_skill_set();
+    let skills_baseline = build_system_prompt_with_state_and_skills(
+        fixture_context(),
+        fixture_state(),
+        Some(&skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    let mut changed_skills = fixture_skill_set();
+    changed_skills.by_name.insert(
+        "deploy".into(),
+        Skill {
+            name: "deploy".into(),
+            description: "Deploy the current release".into(),
+            file_path: PathBuf::from("/tmp/deploy/SKILL.md"),
+            base_dir: PathBuf::from("/tmp/deploy"),
+            source: SkillSource::Project,
+            allowed_tools: Some(vec!["bash".into()]),
+            disable_model_invocation: false,
+        },
+    );
+    let skills_changed = build_system_prompt_with_state_and_skills(
+        fixture_context(),
+        fixture_state(),
+        Some(&changed_skills),
+        Some(&SkillsConfig::default()),
+        400_000,
+    );
+    assert_ne!(skills_baseline, skills_changed);
+    assert!(skills_changed.contains("Deploy the current release"));
+
+    let mut plugin_context = fixture_context();
+    plugin_context.tool_lines = Some(format!(
+        "{}\n- plugin_echo: Echo text through the plugin runtime.",
+        crate::core::tools::contract::catalog::render_core_identity_tool_lines_with_policy(false)
+    ));
+    let plugin_changed = build_system_prompt_with_state(plugin_context, fixture_state());
+    assert_ne!(baseline, plugin_changed);
+    assert!(plugin_changed.contains("plugin_echo"));
+}
 
 fn fixture_state() -> WorkspaceState {
     WorkspaceState {
@@ -333,7 +405,7 @@ fn build_system_prompt_with_state_includes_workspace_state() {
     assert!(!prompt.contains("read_file"));
     assert!(prompt.contains("edit"));
     assert!(!prompt.contains("edit_file"));
-    assert!(prompt.contains("Current date and time"));
+    assert!(!prompt.contains("Current date and time"));
 }
 
 #[test]
@@ -343,7 +415,7 @@ fn workspace_state_priority_between_paged_reading_and_workspace_context() {
     let paged_pos = prompt.find("Tool result persisted").expect("paged section");
     let state_pos = prompt.find("Workspace State").expect("state section");
     let ctx_pos = prompt
-        .find("Current date and time:")
+        .find("Agent workspace directory (agent_workspace_dir):")
         .expect("workspace ctx");
     assert!(paged_pos < state_pos, "state 应在 paged 之后");
     assert!(state_pos < ctx_pos, "state 应在 workspace ctx 之前");

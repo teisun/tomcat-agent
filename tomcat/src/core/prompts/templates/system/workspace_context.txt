@@ -1,5 +1,3 @@
-Current date and time: {now}
-
 Agent workspace directory (agent_workspace_dir): {agent_workspace_dir}
 - This is the user's shell working directory when tomcat chat was launched.
 - Interpret "current directory", "this project", and relative paths as this directory.

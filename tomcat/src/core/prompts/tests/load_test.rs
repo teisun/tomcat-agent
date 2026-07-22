@@ -49,9 +49,11 @@ fn background_shell_prompt_mentions_finished_tag() {
 }
 
 #[test]
-fn workspace_context_template_contains_placeholders() {
+fn workspace_context_template_starts_with_workspace_and_has_no_time_placeholder() {
     let s = load(PromptKey::SystemWorkspaceContext);
-    assert!(s.contains("{now}"));
+    assert!(s.starts_with("Agent workspace directory (agent_workspace_dir):"));
+    assert!(!s.contains("{now}"));
+    assert!(!s.contains("Current date and time"));
     assert!(s.contains("{agent_workspace_dir}"));
     assert!(s.contains("{agent_trail_dir}"));
 }

@@ -2,7 +2,7 @@
 //!
 //! prompt 模板位于 `core/prompts/templates/`，通过 `include_str!` 编译后嵌入二进制，
 //! 不从外部文件读取。
-//! 动态部分（当前时间、三类工作目录）在每次调用时填充。
+//! 动态工作目录在每次调用时填充。
 //!
 //! ## 模块化
 //!
@@ -275,11 +275,9 @@ impl SystemPromptSection for WorkspaceContextSection {
         "workspace_context"
     }
     fn render(&self, context: &WorkspaceContext) -> String {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M %Z");
         render_prompt(
             PromptKey::SystemWorkspaceContext,
             &[
-                ("now", &now.to_string()),
                 ("agent_workspace_dir", &context.agent_workspace_dir),
                 ("agent_definition_dir", &context.agent_definition_dir),
                 ("agent_plans_dir", &context.agent_plans_dir),
@@ -332,7 +330,7 @@ pub struct PathRuleSummary {
 /// `WorkspaceStateSection`：按 plan §8.1 模板渲染。优先级 `150`——
 /// `priority` 升序排列，`CoreIdentity(10)` / `ToolInstructions(20)` /
 /// `PagedReading(30)` 在前，`WorkspaceContextSection(200)` 在后；
-/// `150` 让权限信息在 LLM 看到工具/读取规则之后、当前时间之前出现。
+/// `150` 让权限信息在 LLM 看到工具/读取规则之后、工作目录上下文之前出现。
 pub struct WorkspaceStateSection {
     state: WorkspaceState,
 }
