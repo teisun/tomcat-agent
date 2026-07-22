@@ -38,9 +38,11 @@
 //! `cancel`。
 
 pub mod catalog;
+pub mod code_reviewer;
 pub mod file_store;
 pub mod ops;
 pub mod panels;
+pub mod plan_reviewer;
 pub mod prod_reviewer;
 pub mod reminders;
 pub mod review;
@@ -66,7 +68,9 @@ pub use panels::{
     Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel, NoopTodosPanel, Question,
     QuestionOption, RefreshNotifier, TodosPanel, TodosPanelSnapshot, CUSTOM_OPTION_ID,
 };
-pub use review::{ReviewKind, ReviewSummary};
+pub use code_reviewer::CodeReviewSummary;
+pub use plan_reviewer::{PlanReviewSummary, REVIEWER_ALLOW_REVIEW_EDIT};
+pub use review::Finding;
 pub use state::PlanState;
 pub use verify::VerifySummary;
 
@@ -109,9 +113,10 @@ pub struct PlanRuntime {
     active_plan_path: Mutex<Option<PathBuf>>,
     /// `[plan] lock_timeout_ms`：write_plan / dispatch_reviewer 共享。默认 2000。
     lock_timeout_ms: u64,
-    /// 可选 reviewer 派发器。P4 时由 `ChatContext::from_config` 注入真实实现；
-    /// 测试可注入 mock；未注入时 `create_plan` 返回 `aborted=true` 占位摘要。
-    reviewer: Mutex<Option<Arc<dyn ReviewerDispatcher>>>,
+    /// 可选 plan reviewer 派发器。未注入时 `create_plan` 返回 `aborted=true` 占位摘要。
+    plan_reviewer: Mutex<Option<Arc<dyn PlanReviewerDispatcher>>>,
+    /// 可选 code reviewer 派发器。未注入时 `update_plan(all_completed)` 返回占位摘要。
+    code_reviewer: Mutex<Option<Arc<dyn CodeReviewerDispatcher>>>,
     /// 可选 verifier 派发器。PR-V1 由 `ChatContext::from_config` 注入真实实现；
     /// 测试可注入 mock；未注入时 `update_plan(all_completed)` 返回 `aborted` 占位摘要。
     verifier: Mutex<Option<Arc<dyn VerifierDispatcher>>>,
@@ -201,7 +206,8 @@ impl PlanRuntime {
             active_planning_plan_id: Mutex::new(None),
             active_plan_path: Mutex::new(None),
             lock_timeout_ms,
-            reviewer: Mutex::new(None),
+            plan_reviewer: Mutex::new(None),
+            code_reviewer: Mutex::new(None),
             verifier: Mutex::new(None),
             verify_gate_mode: RwLock::new("soft".into()),
             max_code_review_rounds: AtomicU32::new(1),
@@ -619,10 +625,14 @@ impl PlanRuntime {
 
     // ─── P4 reviewer 派发 API（plan-runtime.md §P4） ──────────────────────
 
-    /// 注入 reviewer 派发器（生产由 `ChatContext::from_config` 装配 reviewer 子 Agent 派发；
-    /// 测试可注入 [`review::MockReviewerDispatcher`] / 自定义实现）。
-    pub fn attach_reviewer(&self, dispatcher: Arc<dyn ReviewerDispatcher>) {
-        *self.reviewer.lock() = Some(dispatcher);
+    /// 注入 plan reviewer 派发器。
+    pub fn attach_plan_reviewer(&self, dispatcher: Arc<dyn PlanReviewerDispatcher>) {
+        *self.plan_reviewer.lock() = Some(dispatcher);
+    }
+
+    /// 注入 code reviewer 派发器。
+    pub fn attach_code_reviewer(&self, dispatcher: Arc<dyn CodeReviewerDispatcher>) {
+        *self.code_reviewer.lock() = Some(dispatcher);
     }
 
     /// 注入 verifier 派发器（生产由 `ChatContext::from_config` 装配 verifier 子 Agent 派发；
@@ -681,9 +691,9 @@ impl PlanRuntime {
         &self,
         plan_id: &str,
         allow_review_edit: bool,
-    ) -> review::ReviewSummary {
-        let Some(dispatcher) = self.reviewer.lock().clone() else {
-            return review::ReviewSummary::placeholder_pending();
+    ) -> plan_reviewer::PlanReviewSummary {
+        let Some(dispatcher) = self.plan_reviewer.lock().clone() else {
+            return plan_reviewer::PlanReviewSummary::placeholder_pending();
         };
         // 软上限：默认 1 轮；超出 → warning（这里以摘要 prefix 表示，
         // chat_loop 在装配 transcript 时会写 `plan.review.warning`）
@@ -707,20 +717,19 @@ impl PlanRuntime {
         // 这里再切到 `resolved_plan_path()`，与 code reviewer / verifier 对齐。
         let path = match file_store::plan_path_for_id(plan_id) {
             Ok(p) => p,
-            Err(e) => return review::ReviewSummary::aborted_with(format!("plan_id 非法: {e}")),
+            Err(e) => {
+                return plan_reviewer::PlanReviewSummary::aborted_with(format!("plan_id 非法: {e}"));
+            }
         };
         let plan_text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
-            Err(e) => return review::ReviewSummary::aborted_with(format!("read plan 失败: {e}")),
+            Err(e) => {
+                return plan_reviewer::PlanReviewSummary::aborted_with(format!("read plan 失败: {e}"));
+            }
         };
 
         let mut summary = dispatcher
-            .dispatch(
-                plan_id,
-                &plan_text,
-                review::ReviewKind::Plan,
-                allow_review_edit,
-            )
+            .dispatch(plan_id, &plan_text, allow_review_edit)
             .await;
         if rounds > 1 {
             summary.summary = format!("[round {rounds}] {}", summary.summary);
@@ -760,31 +769,28 @@ impl PlanRuntime {
 
     /// 同步派发 verifier 前的 code reviewer。调用方负责：
     /// 1. 先判断 / 递增 `code_review_rounds`
-    /// 2. 调用 `normalize_for_code_review_result()`
+    /// 2. 调用 `CodeReviewSummary::normalize_for_result()`
     /// 3. 再写 transcript，保证 transcript 与 `update_plan.code_review` 口径一致
-    pub async fn dispatch_code_reviewer(&self, plan_id: &str) -> review::ReviewSummary {
-        let Some(dispatcher) = self.reviewer.lock().clone() else {
-            return review::ReviewSummary::placeholder_pending_for(review::ReviewKind::Code);
+    pub async fn dispatch_code_reviewer(&self, plan_id: &str) -> code_reviewer::CodeReviewSummary {
+        let Some(dispatcher) = self.code_reviewer.lock().clone() else {
+            return code_reviewer::CodeReviewSummary::placeholder_pending();
         };
         let path = match self.resolved_plan_path(plan_id) {
             Ok(p) => p,
             Err(e) => {
-                return review::ReviewSummary::aborted_with_kind(review::ReviewKind::Code, e);
+                return code_reviewer::CodeReviewSummary::aborted_with(e);
             }
         };
         let plan_text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
-                return review::ReviewSummary::aborted_with_kind(
-                    review::ReviewKind::Code,
-                    format!("read plan 失败: {e}"),
-                );
+                return code_reviewer::CodeReviewSummary::aborted_with(format!(
+                    "read plan 失败: {e}"
+                ));
             }
         };
 
-        dispatcher
-            .dispatch(plan_id, &plan_text, review::ReviewKind::Code, false)
-            .await
+        dispatcher.dispatch(plan_id, &plan_text).await
     }
 
     /// 同步派发 verifier。语义与 reviewer 类似，但无 round 概念：
@@ -832,6 +838,7 @@ impl PlanRuntime {
     ///
     /// 调用方应先完成 `normalize_for_gate()`，再调用本方法，确保 transcript 与
     /// `update_plan` tool result 共享同一份 VerifySummary。
+    #[allow(dead_code)] // verifier 暂时下线，保留待重启。
     pub(crate) fn write_verify_transcript(&self, plan_id: &str, summary: &verify::VerifySummary) {
         let mut payload = summary.to_json();
         if let Some(obj) = payload.as_object_mut() {
@@ -850,7 +857,7 @@ impl PlanRuntime {
     pub(crate) fn write_code_review_transcript(
         &self,
         plan_id: &str,
-        summary: &review::ReviewSummary,
+        summary: &code_reviewer::CodeReviewSummary,
         rounds: u32,
     ) {
         let mut payload = summary.to_json();
@@ -1295,23 +1302,22 @@ pub struct BuildPlanOutcome {
     pub warnings: Vec<String>,
 }
 
-/// reviewer 子 Agent 派发器 trait（解耦真实 LLM + AgentRegistry）。
-///
-/// **契约**：
-/// - 调用方（`PlanRuntime::dispatch_reviewer`）保证：调度时 plan 文件 advisory lock 已 release（RV14）。
-/// - dispatch 内部应通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`]
-///   构造子 `AgentLoop`，并把 `SubagentSpawnContext.cancel_token` 直接透传给 `AgentLoop::new`。
-/// - 返回 `ReviewSummary`：成功 / aborted / parse_failed 都用同一形态承载。
-/// - **不**写父 transcript（reviewer 子 Agent 持独立 session_id；transcript 隔离 D11）。
+/// plan reviewer 子 Agent 派发器 trait。
 #[async_trait]
-pub trait ReviewerDispatcher: Send + Sync {
+pub trait PlanReviewerDispatcher: Send + Sync {
     async fn dispatch(
         &self,
         plan_id: &str,
         plan_text: &str,
-        kind: review::ReviewKind,
         allow_review_edit: bool,
-    ) -> review::ReviewSummary;
+    ) -> plan_reviewer::PlanReviewSummary;
+}
+
+/// code reviewer 子 Agent 派发器 trait。
+#[async_trait]
+pub trait CodeReviewerDispatcher: Send + Sync {
+    async fn dispatch(&self, plan_id: &str, plan_text: &str)
+        -> code_reviewer::CodeReviewSummary;
 }
 
 /// verifier 子 Agent 派发器 trait（解耦真实 LLM + AgentRegistry）。

@@ -24,6 +24,8 @@ fn serve_dts_preserves_wire_event_session_id() {
     assert!(dts.contains("export type WireEvent = "));
     assert!(dts.contains("sessionId?: null | string;"));
     assert!(dts.contains("type: \"agent_idle\";"));
+    assert!(dts.contains("type: \"sub_agent_start\";"));
+    assert!(dts.contains("subagentType: string;"));
     assert!(dts.contains("type: \"background_task_finished\";"));
     assert!(dts.contains("taskId: string;"));
     assert!(dts.contains("exitCode: number;"));
@@ -76,6 +78,16 @@ fn serve_dts_includes_context_reference_types() {
 }
 
 #[test]
+fn serve_dts_includes_plan_code_review_findings() {
+    let dts = serve_dts();
+    assert!(dts.contains("export interface ServeFinding {"));
+    assert!(dts.contains("type: \"plan.code_review\";"));
+    assert!(dts.contains("changesSummary?: null | string;"));
+    assert!(dts.contains("findings?: ServeFinding[] | null;"));
+    assert!(dts.contains("rounds?: null | number;"));
+}
+
+#[test]
 fn build_schema_bundle_includes_wire_event() {
     let value = serde_json::to_value(build_schema_bundle()).expect("serialize schema bundle");
     assert!(value.get("wire_event").is_some(), "wire_event root missing");
@@ -85,12 +97,13 @@ fn build_schema_bundle_includes_wire_event() {
 fn serve_emitted_event_validates_against_generated_schema() {
     let bundle = build_schema_bundle();
     let bundle_value = serde_json::to_value(&bundle).expect("serialize schema bundle");
-    let schema = bundle_value
+    let wire_schema = bundle_value
         .get("wire_event")
         .cloned()
         .expect("wire_event schema should exist");
-    let validator = jsonschema::validator_for(&schema).expect("compile wire event schema");
-    let samples = vec![
+    let wire_validator =
+        jsonschema::validator_for(&wire_schema).expect("compile wire event schema");
+    let wire_samples = vec![
         serde_json::to_value(WireEvent {
             session_id: Some("s1".to_string()),
             event: AgentEvent::MessageUpdate {
@@ -173,14 +186,53 @@ fn serve_emitted_event_validates_against_generated_schema() {
             event: AgentEvent::AgentIdle,
         })
         .expect("agent_idle sample"),
+        serde_json::to_value(WireEvent {
+            session_id: Some("s1".to_string()),
+            event: AgentEvent::SubAgentStart {
+                parent_session_id: "parent-1".to_string(),
+                child_session_id: "child-code-reviewer-1".to_string(),
+                subagent_type: "code_reviewer".to_string(),
+                spawn_depth: 1,
+            },
+        })
+        .expect("sub_agent_start sample"),
     ];
 
-    for sample in samples {
+    for sample in wire_samples {
         assert!(
-            validator.is_valid(&sample),
+            wire_validator.is_valid(&sample),
             "sample should validate against generated schema: {sample}"
         );
     }
+
+    let out_frame_schema = bundle_value
+        .get("out_frame")
+        .cloned()
+        .expect("out_frame schema should exist");
+    let out_frame_validator =
+        jsonschema::validator_for(&out_frame_schema).expect("compile out_frame schema");
+    let out_frame_sample = serde_json::to_value(OutFrame::Event(
+        serde_json::to_value(ServeEvent::Plan(ServePlanEvent::PlanCodeReview {
+            session_id: Some("s1".to_string()),
+            plan_id: Some("plan-1".to_string()),
+            summary: Some("review found one issue".to_string()),
+            aborted: Some(false),
+            verdict: Some("fail".to_string()),
+            changes_summary: Some("none".to_string()),
+            findings: Some(vec![ServeFinding {
+                severity: "concern".to_string(),
+                area: "logic".to_string(),
+                note: "missing guard".to_string(),
+            }]),
+            rounds: Some(1),
+        }))
+        .expect("serialize plan.code_review event"),
+    ))
+    .expect("out_frame plan.code_review sample");
+    assert!(
+        out_frame_validator.is_valid(&out_frame_sample),
+        "plan.code_review out_frame should validate: {out_frame_sample}"
+    );
 }
 
 #[test]

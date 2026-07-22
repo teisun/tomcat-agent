@@ -13,6 +13,7 @@ import { CheckpointMarker } from "./CheckpointMarker";
 import { injectCheckpointMarkers } from "./checkpointMarkers";
 import { MessageBubble } from "./MessageBubble";
 import { ProgressRow } from "./ProgressRow";
+import { ReviewRow } from "./ReviewRow";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ThinkingGroup } from "./ThinkingGroup";
 import { isActionTool, ToolRow, toolCategory } from "./ToolRow";
@@ -215,6 +216,8 @@ export function TranscriptView({
           );
         case "plan":
           return null;
+        case "review":
+          return <ReviewRow item={item} key={item.id} />;
         case "approval":
           return <ApprovalCard item={item} key={item.id} onAnswer={onAnswer} />;
       }

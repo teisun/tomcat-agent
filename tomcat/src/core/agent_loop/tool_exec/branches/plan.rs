@@ -13,9 +13,7 @@ pub(in super::super) async fn dispatch_plan_tool(
             "plan 工具 `{name}` 不可用：当前 AgentLoop 未注入 PlanRuntime（reviewer 子 Agent 或独立测试路径）"
         ));
     };
-    if name == "create_plan"
-        && ctx.subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer
-    {
+    if name == "create_plan" && ctx.subagent_type.is_reviewer() {
         return ToolExecOutcome::err(
             "reviewer 子 Agent 禁止调用 `create_plan`（防套娃；reviewer.md §5.2 / §5.5）",
         );

@@ -20,9 +20,7 @@ pub(in super::super) async fn handle_edit(
         check_mutation_stamp(state, path, "edit")?;
     }
 
-    if ctx.subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer
-        && ctx.review_kind != Some(crate::core::plan_runtime::review::ReviewKind::Code)
-    {
+    if ctx.subagent_type == crate::core::agent_loop::types::SubagentType::PlanReviewer {
         let normalized_path = crate::infra::platform::normalize_path(path)
             .map_err(|e| format!("reviewer edit 预检路径解析失败：{e}"))?;
         let old = std::fs::read_to_string(&normalized_path)

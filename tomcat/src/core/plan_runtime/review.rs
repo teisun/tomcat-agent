@@ -1,91 +1,14 @@
-//! # reviewer 子 Agent 同步派发（plan-runtime.md §P4 / tools/reviewer.md）
+//! `reviewer` 共享的 `<review>` 输出格式与纯解析 helper。
 //!
-//! reviewer 通过 [`crate::core::agent_registry::AgentRegistry::spawn_subagent_internal`] 派发；
-//! `kind=Plan` 保持现有 `allow_review_edit = true`（reviewer.md §5.2 / §5.5 拍板）——
-//! `allowed_tools` 为 `{read, search_files, list_dir, todos, update_plan, edit}`；
-//! `kind=Code` 则切到只读代码审查模式，`allowed_tools` 为
-//! `{read, search_files, list_dir, bash}`。两者都不含 `create_plan` / `write` /
-//! `dispatch_agent` / `checkpoint`。
-//!
-//! 子 Agent 必须最终消息体里 emit 一个 `<review>` block：
-//!
-//! ```text
-//! <review>
-//! findings:
-//!   - { severity: nit|suggestion|concern, area: "<short>", note: "<one-line>" }
-//!   - ...
-//! summary: <free-text review opinion>
-//! changes_summary: <none|none-but-noted|applied:<short>>
-//! applied_changes: <true|false>
-//! </review>
-//! ```
-//!
-//! 解析失败 / 超 `max_turns` / 父 cascade abort → `ReviewSummary { aborted: true, .. }`；
-//! `create_plan` 视为成功（plan 文件已落盘），仅在 ToolResult.review 中暴露 `aborted=true`。
+//! 这里**只**保留 kind 无关的格式层：finding / `<review>` 解析 / tool 白名单解析 /
+//! AgentLoop 产物提取，不再承载 Plan-vs-Code 的语义分叉。计划评审与代码评审的
+//! prompt、allowed tools、summary 语义、dispatcher 逻辑全部下沉到独立模块。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
 
-use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
-
-/// 生产路径 reviewer 改稿权固定开启（reviewer.md §5.2 / §5.5）；
-/// `false` 仅供 Mock 单测验证只读工具集 + 守卫。
-pub const REVIEWER_ALLOW_REVIEW_EDIT: bool = true;
-
-pub const PLAN_REVIEWER_ALLOWED_TOOLS: &[&str] = &[
-    "read",
-    "search_files",
-    "list_dir",
-    "todos",
-    "update_plan",
-    "edit",
-];
-
-pub const CODE_REVIEWER_ALLOWED_TOOLS: &[&str] = &["read", "search_files", "list_dir", "bash"];
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ReviewKind {
-    #[default]
-    Plan,
-    Code,
-}
-
-impl ReviewKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Plan => "plan",
-            Self::Code => "code",
-        }
-    }
-}
-
-pub fn reviewer_allowed_tools_for(kind: ReviewKind) -> &'static [&'static str] {
-    match kind {
-        ReviewKind::Plan => PLAN_REVIEWER_ALLOWED_TOOLS,
-        ReviewKind::Code => CODE_REVIEWER_ALLOWED_TOOLS,
-    }
-}
-
-pub fn reviewer_allowed_tools_with_policy(
-    kind: ReviewKind,
-    expose_skills: bool,
-) -> Vec<&'static str> {
-    let mut tools = reviewer_allowed_tools_for(kind).to_vec();
-    if expose_skills {
-        tools.push("load_skill");
-    }
-    tools
-}
-
-pub fn reviewer_system_prompt_text() -> &'static str {
-    load_prompt(PromptKey::ReviewerPlan)
-}
-
-pub fn code_review_system_prompt_text() -> &'static str {
-    load_prompt(PromptKey::ReviewerCode)
-}
+use crate::core::agent_loop::AgentRunResult;
+use crate::core::llm::ChatMessage;
 
 /// 单条 finding（reviewer.md §5.3）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,116 +18,21 @@ pub struct Finding {
     pub note: String,
 }
 
-/// reviewer 摘要（ToolResult.review 与 transcript.plan.review 共用）。
+/// `<review>` 块的中性解析结果。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReviewSummary {
-    /// review 类型：Plan（create_plan 后计划审稿）或 Code（verifier 前代码审查）。
-    #[serde(default)]
-    pub kind: ReviewKind,
-    /// 是否被中止（parse 失败 / max_turns / parent abort / spawn 失败）。
-    pub aborted: bool,
-    /// code reviewer 的描述性 verdict；Plan reviewer 永远为 None。
+pub struct ParsedReview {
     #[serde(default)]
     pub verdict: Option<String>,
-    /// 自由文本摘要；aborted=true 时含失败原因。
     pub summary: String,
-    /// 改动语义说明（`none` / `none-but-noted` / `applied:<short>`）。
     #[serde(default)]
     pub changes_summary: String,
-    /// 是否真有改动（reviewer 通过 update_plan / edit 改了文件）。
     pub applied_changes: bool,
-    /// 离散挑刺清单（reviewer.md §5.3）。
     #[serde(default)]
     pub findings: Vec<Finding>,
-    /// 本次子 AgentLoop 实际跑的 LLM reasoning 轮数（reasoning_loop turn_index 终值）。
-    /// 默认 0；占位 summary（未派发）保持 0 即可。
-    #[serde(default)]
-    pub reviewer_turns_used: u32,
-    /// 本次 dispatcher 配置的 max_turns 上限（与 AgentLoopConfig.max_tool_rounds 同档）。
-    #[serde(default)]
-    pub reviewer_turns_limit: u32,
-    /// 收口原因：`completed` / `max_turns` / `parse_error` / `parent_abort` / `spawn_error`。
-    #[serde(default)]
-    pub reviewer_stop_reason: String,
-    /// reviewer 子 Agent session_id（便于 transcript 关联）。
-    #[serde(default)]
-    pub child_session_id: String,
 }
 
-impl ReviewSummary {
-    /// 用于占位的"未派发"摘要（PlanRuntime 未注入 dispatcher 时回退）。
-    pub fn placeholder_pending() -> Self {
-        Self::placeholder_pending_for(ReviewKind::Plan)
-    }
-
-    pub fn placeholder_pending_for(kind: ReviewKind) -> Self {
-        Self {
-            kind,
-            aborted: true,
-            verdict: match kind {
-                ReviewKind::Plan => None,
-                ReviewKind::Code => Some("aborted".into()),
-            },
-            summary: "reviewer 子 Agent 将在 P4 接入；当前阶段返回 aborted 占位".into(),
-            changes_summary: "none".into(),
-            applied_changes: false,
-            findings: Vec::new(),
-            reviewer_turns_used: 0,
-            reviewer_turns_limit: 0,
-            reviewer_stop_reason: "not_dispatched".into(),
-            child_session_id: String::new(),
-        }
-    }
-
-    pub fn aborted_with(reason: impl Into<String>) -> Self {
-        Self::aborted_with_kind(ReviewKind::Plan, reason)
-    }
-
-    pub fn aborted_with_kind(kind: ReviewKind, reason: impl Into<String>) -> Self {
-        Self {
-            kind,
-            aborted: true,
-            verdict: match kind {
-                ReviewKind::Plan => None,
-                ReviewKind::Code => Some("aborted".into()),
-            },
-            summary: reason.into(),
-            changes_summary: "none".into(),
-            applied_changes: false,
-            findings: Vec::new(),
-            reviewer_turns_used: 0,
-            reviewer_turns_limit: 0,
-            reviewer_stop_reason: "aborted".into(),
-            child_session_id: String::new(),
-        }
-    }
-
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "kind": self.kind.as_str(),
-            "aborted": self.aborted,
-            "verdict": self.verdict,
-            "summary": self.summary,
-            "changes_summary": self.changes_summary,
-            "applied_changes": self.applied_changes,
-            "findings": self.findings,
-            "reviewer_turns_used": self.reviewer_turns_used,
-            "reviewer_turns_limit": self.reviewer_turns_limit,
-            "reviewer_stop_reason": self.reviewer_stop_reason,
-            "child_session_id": self.child_session_id,
-        })
-    }
-}
-
-/// 严格解析 `<review>...</review>` 块。失败返回 None；多块 → 取**最后一个**。
-///
-/// 解析约束：
-/// - `summary:` 必填，保留 reviewer 返回的完整文本
-/// - `changes_summary:` 必填，常见值 `none` / `none-but-noted` / `applied:<x>`
-/// - `applied_changes:` 必填，`true` / `false`（大小写不敏感）
-/// - `verdict:` 可选，若出现则必须是 `pass|fail|partial|aborted`
-/// - `findings:` 可选——失败不挡 summary 三必填字段
-pub fn parse_review_block(text: &str) -> Option<ReviewSummary> {
+/// 严格解析 `<review>...</review>` 块。失败返回 None；多块 → 取最后一个。
+pub fn parse_review_block(text: &str) -> Option<ParsedReview> {
     let last_block = find_last_review_block(text)?;
     let mut summary = None;
     let mut changes_summary = None;
@@ -236,7 +64,6 @@ pub fn parse_review_block(text: &str) -> Option<ReviewSummary> {
                 _ => return None,
             };
         } else if line == "findings:" || line.starts_with("findings:") {
-            // `findings:` 起始；列表项在后续行
             in_findings = true;
         } else if in_findings {
             if let Some(item) = parse_finding_line(line) {
@@ -244,71 +71,68 @@ pub fn parse_review_block(text: &str) -> Option<ReviewSummary> {
             }
         }
     }
-    let summary = summary?;
-    let changes_summary = changes_summary?;
-    let applied = applied?;
-    Some(ReviewSummary {
-        kind: ReviewKind::Plan,
-        aborted: false,
+
+    Some(ParsedReview {
         verdict,
-        summary,
-        changes_summary,
-        applied_changes: applied,
+        summary: summary?,
+        changes_summary: changes_summary?,
+        applied_changes: applied?,
         findings,
-        reviewer_turns_used: 0,
-        reviewer_turns_limit: 0,
-        reviewer_stop_reason: "completed".into(),
-        child_session_id: String::new(),
     })
 }
 
-pub fn normalize_for_code_review_result(summary: &mut ReviewSummary) -> Vec<String> {
-    let mut warnings = Vec::new();
-    summary.kind = ReviewKind::Code;
+/// 从 BUILTIN_TOOL_CATALOG 中筛出 `allowed` 名单内的工具，输出 OpenAI function 定义。
+pub fn resolve_internal_tools(allowed: &[&str]) -> Vec<Value> {
+    use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
+    BUILTIN_TOOL_CATALOG
+        .iter()
+        .filter(|entry| allowed.contains(&entry.name))
+        .map(|entry| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": entry.name,
+                    "description": entry.description,
+                    "parameters": (entry.parameters)(),
+                }
+            })
+        })
+        .collect()
+}
 
-    if summary.aborted {
-        if summary.verdict.as_deref() != Some("aborted") {
-            summary.verdict = Some("aborted".into());
-            warnings.push("code review 中止，verdict 已规范化为 aborted".into());
+/// reviewer 最终消息体——优先取 `final_text`（reasoning_loop 累计），fallback 到
+/// `new_messages` 中最后一条 Assistant 文本。
+pub fn extract_review_text(result: &AgentRunResult) -> String {
+    if !result.final_text.trim().is_empty() {
+        return result.final_text.clone();
+    }
+    use crate::core::llm::ChatMessageRole;
+    for msg in result.new_messages.iter().rev() {
+        if matches!(msg.role, ChatMessageRole::Assistant) {
+            if let Some(text) = msg.text_content() {
+                if !text.trim().is_empty() {
+                    return text.to_string();
+                }
+            }
         }
-        summary.applied_changes = false;
-        return warnings;
     }
+    String::new()
+}
 
-    match summary.verdict.clone() {
-        Some(verdict) if matches!(verdict.as_str(), "pass" | "fail" | "partial" | "aborted") => {}
-        Some(other) => {
-            summary.verdict = Some("aborted".into());
-            warnings.push(format!(
-                "code review verdict `{other}` 非法，已规范化为 aborted"
-            ));
-        }
-        None => {
-            summary.verdict = Some("partial".into());
-            warnings.push("code review 未返回 verdict，已规范化为 partial".into());
-        }
-    }
-
-    if summary.applied_changes {
-        summary.applied_changes = false;
-        warnings.push("code reviewer 不允许直接改动，applied_changes 已重置为 false".into());
-    }
-    if summary.changes_summary.trim().is_empty() {
-        summary.changes_summary = "none".into();
-        warnings.push("code review 未返回 changes_summary，已规范化为 none".into());
-    }
-
-    warnings
+pub fn count_assistant_turns(messages: &[ChatMessage]) -> u32 {
+    use crate::core::llm::ChatMessageRole;
+    messages
+        .iter()
+        .filter(|m| matches!(m.role, ChatMessageRole::Assistant))
+        .count() as u32
 }
 
 /// 解析 `- { severity: ..., area: "...", note: "..." }` 这种 YAML-flow 风格的行。
-/// 解析失败返回 None（单条失败不影响其它 finding）。
-fn parse_finding_line(line: &str) -> Option<Finding> {
+pub fn parse_finding_line(line: &str) -> Option<Finding> {
     let trimmed = line.trim_start_matches('-').trim();
     if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
         return None;
     }
-    // 用 serde_yaml 流模式不好维护依赖；这里手工提取 severity/area/note 三字段。
     let body = &trimmed[1..trimmed.len() - 1];
     let mut severity = None;
     let mut area = None;
@@ -334,8 +158,7 @@ fn parse_finding_line(line: &str) -> Option<Finding> {
     })
 }
 
-/// 顶层 `,` 切分（忽略引号内的逗号）。极简实现，足够覆盖 reviewer 输出格式。
-fn split_top_level_commas(s: &str) -> Vec<&str> {
+pub fn split_top_level_commas(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0;
     let bytes = s.as_bytes();
@@ -358,7 +181,7 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     out
 }
 
-fn find_last_review_block(text: &str) -> Option<&str> {
+pub fn find_last_review_block(text: &str) -> Option<&str> {
     let start_tag = "<review>";
     let end_tag = "</review>";
     let mut last_start = None;
@@ -371,113 +194,4 @@ fn find_last_review_block(text: &str) -> Option<&str> {
     let body_start = start + start_tag.len();
     let end_rel = text[body_start..].find(end_tag)?;
     Some(&text[body_start..body_start + end_rel])
-}
-
-/// 从 BUILTIN_TOOL_CATALOG 中筛出 `allowed` 名单内的工具，输出 OpenAI function 定义。
-///
-/// 用于 reviewer 子 AgentLoopConfig.tool_definitions——硬白名单收紧，确保
-/// `create_plan` / `bash` / `write` / `dispatch_agent` / `checkpoint` 永不出现。
-pub fn resolve_internal_tools(allowed: &[&str]) -> Vec<Value> {
-    use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
-    BUILTIN_TOOL_CATALOG
-        .iter()
-        .filter(|entry| allowed.contains(&entry.name))
-        .map(|entry| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": entry.name,
-                    "description": entry.description,
-                    "parameters": (entry.parameters)(),
-                }
-            })
-        })
-        .collect()
-}
-
-/// 构造 reviewer 子 Agent 的 initial user prompt（"review brief"）。
-/// 复用 reviewer.md §5.1 中"You receive a review brief in the initial user message"约束。
-pub fn build_review_prompt(
-    plan_id: &str,
-    plan_text: &str,
-    plan_path: &Path,
-    workspace_root: Option<&Path>,
-) -> String {
-    let plan_path = crate::infra::platform::format_home_path(plan_path);
-    let workspace_hint = workspace_root
-        .map(|path| {
-            format!(
-                "         - Project/workspace root (start repo inspection here first): `{}`\n\
-                 - Access note: this is the startup workspace snapshot; reads may still require runtime authorization (`workspace_roots` or a session grant) before they succeed.\n",
-                crate::infra::platform::format_home_path(path)
-            )
-        })
-        .unwrap_or_default();
-    render_prompt(
-        PromptKey::ReviewerPlanBrief,
-        &[
-            ("plan_id", plan_id),
-            ("plan_path", &plan_path),
-            ("workspace_hint", &workspace_hint),
-            ("plan_text", plan_text),
-        ],
-    )
-}
-
-pub fn build_code_review_prompt(
-    plan_id: &str,
-    plan_text: &str,
-    plan_path: &Path,
-    workspace_root: Option<&Path>,
-    diff_stat: &str,
-    changed_files: &[String],
-) -> String {
-    let plan_path = crate::infra::platform::format_home_path(plan_path);
-    let workspace_hint = workspace_root
-        .map(|path| {
-            format!(
-                "         - Project/workspace root (start repo inspection here first): `{}`\n\
-                 - Access note: reads and bash still follow runtime authorization / permission rules.\n",
-                crate::infra::platform::format_home_path(path)
-            )
-        })
-        .unwrap_or_default();
-    let diff_section = if diff_stat.trim().is_empty() {
-        "         Runtime git diff summary: unavailable (git diff injection failed or found no tracked changes).\n".to_string()
-    } else {
-        format!(
-            "         Runtime git diff summary (`git diff --stat HEAD`):\n\
-             ```text\n{diff_stat}\n```\n"
-        )
-    };
-    let changed_files_section = if changed_files.is_empty() {
-        "         Runtime changed files list: unavailable.\n".to_string()
-    } else {
-        let joined = changed_files
-            .iter()
-            .take(80)
-            .map(|path| format!("         - `{path}`"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let suffix = if changed_files.len() > 80 {
-            format!(
-                "\n         - ... {} more file(s) omitted",
-                changed_files.len() - 80
-            )
-        } else {
-            String::new()
-        };
-        format!("         Runtime changed files list:\n{joined}{suffix}\n")
-    };
-    render_prompt(
-        PromptKey::ReviewerCodeBrief,
-        &[
-            ("plan_id", plan_id),
-            ("plan_path", &plan_path),
-            ("workspace_hint", &workspace_hint),
-            ("diff_section", &diff_section),
-            ("changed_files_section", &changed_files_section),
-            ("plan_text", plan_text),
-        ],
-    )
 }

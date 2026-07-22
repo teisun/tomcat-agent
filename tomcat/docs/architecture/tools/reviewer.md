@@ -1,14 +1,90 @@
 # `reviewer`：审稿 subagent 派生契约（非 LLM 工具）
 
-> **重要**：`reviewer` **不是** LLM 工具，**也不进** catalog。它是一个**子 Agent**，当前已统一为 `ReviewKind::{Plan, Code}` 两种运行形态：`create_plan` 写完 `PlanFile` 后派发 `ReviewKind::Plan`，`update_plan` 命中 `all_completed` 后在 verifier 前派发 `ReviewKind::Code`（若 rounds 未耗尽）。两者都走**内部 Rust API**（`internal subagent dispatch`，对标 [codex `run_codex_thread_one_shot`](https://example/codex_delegate)）同步派发，与 LLM-facing 的 [`dispatch_agent`](../multi-agent.md) 工具互补。本文档定义 reviewer 的派生契约：派发入口、`allowed_tools`、system prompt 模板、输出契约、`allow_review_edit`（仅 Plan kind 使用）行为、并发 / abort 语义。
+> 当前权威口径（2026-07-22）  
+> 本文档旧版曾把 reviewer 描述成一个靠 `ReviewKind::{Plan, Code}` 区分形态的统一子 Agent，并且把 code review 写成 verifier 前置环节。该描述已经过时。现在请以本页顶部的“当前架构”小节和仓库代码为准；若下文旧段落与这里冲突，以这里为准。
 
 本文档是 **B 类**：`docs/architecture/tools/`，承接 [`plan-runtime.md`](../plan-runtime.md)、[`multi-agent.md`](../multi-agent.md) §14（基础设施）、[`create-plan.md`](./create-plan.md)（派发入口）。**实现以仓库代码为准**。
 
-末列 **「说人话」** 与 [`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) **§14.1** 对齐。
+## 当前架构
 
-**说人话**：reviewer 是一个内部子 Agent，模型看不到也不能调。`ReviewKind::Plan` 负责 `create_plan` 之后的计划审稿，结论落到 `plan.review` + `create_plan.review`，仍由用户决定何时 `/plan build`；`ReviewKind::Code` 负责 EXEC 收口时的只读代码审查，结论落到 `plan.code_review` + `update_plan.code_review`，`verdict=pass` 时同回合直连 verifier，非 `pass` 时把问题交回主 Agent 修。只有 Plan kind 会使用 `allow_review_edit`：它可通过 [`update_plan`](./update-plan.md) 调整 plan todos，或通过 `edit` 改 `PlanFile.body` 正文；**唯一硬边界是不能 raw 改 frontmatter**。Code kind 则**完全只读**：不能改 plan、不能改代码、不能改 todos，只能返回结构化结论。**任何 kind 下 reviewer 都不能调 `create_plan`**（防递归套娃 + 职责单一）。
+```text
+create_plan
+   |
+   +--> PlanReviewer (可按 runtime 授权改 plan 正文 / todos)
+   |       |
+   |       +--> transcript: plan.review
+   |       +--> tool result: create_plan.review
+   |
+update_plan(all todos completed)
+   |
+   +--> CodeReviewer (严格只读)
+           |
+           +--> transcript: plan.code_review
+           +--> tool result: update_plan.code_review
+           +--> verdict=pass      -> completed
+           +--> verdict=fail/partial -> stay executing, 强指令要求 reopen/add fix todo
+           +--> rounds exhausted  -> best-effort completed
+```
 
-> **实现提示**：下文若未显式写 `ReviewKind`，历史描述默认指 `ReviewKind::Plan`；以 §5 的差异表与仓库代码为当前口径。
+### 1. 第一性原理设计
+
+`PlanReviewer` 和 `CodeReviewer` 现在是 **两个完全独立的子 Agent 类型**，而不是一个 reviewer + `ReviewKind` 开关。
+
+- `SubagentType::PlanReviewer`
+- `SubagentType::CodeReviewer`
+- `PlanReviewerDispatcher`
+- `CodeReviewerDispatcher`
+- `PlanReviewSummary`
+- `CodeReviewSummary`
+
+共享层只保留 **真正与业务语义无关** 的代码：`review.rs` 只负责 `<review>` 结构解析、`Finding` 值类型、以及少量 transcript/helper 逻辑。换句话说，**共享的是格式，不是角色**。
+
+### 2. 两个角色分别负责什么
+
+| 角色 | 触发点 | 是否可写 | 工具白名单 | 输出 |
+|---|---|---|---|---|
+| `PlanReviewer` | `create_plan` 落盘后 | 可按 runtime 授权改 plan；不能 raw 改 frontmatter | `read/search_files/list_dir/todos/update_plan/edit`（可选 `load_skill`） | `PlanReviewSummary` + `plan.review` |
+| `CodeReviewer` | EXEC 收口时 | 严格只读 | `read/search_files/list_dir/bash`（可选 `load_skill`） | `CodeReviewSummary` + `plan.code_review` |
+
+**说人话**：计划审稿员负责“计划写得对不对、需不需要改 plan 本身”；代码审稿员负责“代码做完后有没有明显问题”。这是两种完全不同的责任，所以实现上也彻底拆开。
+
+### 3. EXEC 收口现在怎么走
+
+- 默认只跑 **1 轮** code review，也就是“审一次、修一次”。
+- `verdict = pass`：直接 completed，并切回 CHAT。
+- `verdict = fail | partial`：plan 保持 `executing`，runtime 不自动造 todo，而是明确要求主 Agent：
+  - `reopen` 一个已有 todo，或
+  - `add` 一个修复 todo。
+- 修完再次 `update_plan` 收口时，因为轮次默认已耗尽，所以 runtime **不再复审**，直接 best-effort completed。
+- `verdict = aborted`：按 reviewer 不可用处理，best-effort completed。
+
+### 4. verifier 当前状态
+
+verifier 代码、dispatcher、prompt、测试都还保留在仓库里，方便未来重新启用；但 **当前 `update_plan` 收口链路已经不再调用 verifier**。  
+换句话说：**代码保留，链路休眠**。
+
+### 5. UI 如何表现 code review
+
+UI 不再把 code review 只当一条普通 notice。
+
+- `sub_agent_start(subagentType=code_reviewer)`：创建一条独立 review row。
+- running 态：文案 `Reviewing code...`，文字 shimmer。
+- done 态：展示 verdict badge、finding 数量、summary，并可展开查看 findings 明细。
+- `plan_reviewer` 仍保持现有轻量表现，不额外占一条 review row。
+
+### 6. 阅读提醒
+
+下方长文档里仍保留了不少历史调研和旧决策背景，方便回溯为什么最初会设计成“统一 reviewer + verifier 串联”。  
+但凡你看到以下旧说法，都请视为**历史背景，不是当前实现**：
+
+- `ReviewKind::{Plan, Code}`
+- `SubagentType::Reviewer`
+- `ReviewSummary(kind=...)`
+- `code review 通过后直连 verifier`
+
+---
+
+## 历史背景（以下内容仅供回溯）
 
 ---
 

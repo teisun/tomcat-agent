@@ -555,6 +555,14 @@ pub enum ServePlanEvent {
         summary: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         aborted: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        verdict: Option<String>,
+        #[serde(rename = "changesSummary", skip_serializing_if = "Option::is_none")]
+        changes_summary: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        findings: Option<Vec<ServeFinding>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rounds: Option<u32>,
     },
     #[serde(rename = "plan.verify")]
     PlanVerify {
@@ -703,6 +711,13 @@ pub enum ServeToolEvent {
         #[serde(rename = "command", skip_serializing_if = "Option::is_none")]
         command: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ServeFinding {
+    pub severity: String,
+    pub area: String,
+    pub note: String,
 }
 
 /// plan / session todo 项的 wire schema 形状，与 `shared_todo_ops::items_json` 运行时输出一致。

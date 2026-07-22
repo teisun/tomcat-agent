@@ -96,7 +96,7 @@ fn jsonl_file_append_sink_serializes_concurrent_appends() {
     let sink = Arc::new(JsonlFileAppendSink::new(
         path.clone(),
         "child-2",
-        SubagentType::Reviewer,
+        SubagentType::PlanReviewer,
         "gpt-5",
         "parent-2",
     ));

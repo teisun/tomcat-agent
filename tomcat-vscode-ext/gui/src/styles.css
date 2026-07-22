@@ -2451,6 +2451,97 @@ input:focus-visible {
   min-width: 0;
 }
 
+.tc-review-row {
+  gap: 0;
+}
+
+.tc-review-row__header {
+  align-items: center;
+  display: flex;
+  min-width: 0;
+}
+
+.tc-review-row__badge {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  padding: 4px 8px;
+  text-transform: uppercase;
+}
+
+.tc-review-row__badge--pass {
+  background: color-mix(in srgb, var(--vscode-charts-green, #3fb950) 14%, transparent);
+  border-color: color-mix(in srgb, var(--vscode-charts-green, #3fb950) 38%, transparent);
+  color: var(--vscode-charts-green, #3fb950);
+}
+
+.tc-review-row__badge--fail {
+  background: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 14%, transparent);
+  border-color: color-mix(in srgb, var(--vscode-errorForeground, #f14c4c) 38%, transparent);
+  color: var(--vscode-errorForeground, #f14c4c);
+}
+
+.tc-review-row__badge--partial {
+  background: color-mix(in srgb, var(--vscode-charts-yellow, #d29922) 14%, transparent);
+  border-color: color-mix(in srgb, var(--vscode-charts-yellow, #d29922) 38%, transparent);
+  color: var(--vscode-charts-yellow, #d29922);
+}
+
+.tc-review-row__badge--aborted {
+  background: color-mix(in srgb, var(--vscode-descriptionForeground) 12%, transparent);
+  border-color: color-mix(in srgb, var(--vscode-descriptionForeground) 32%, transparent);
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-review-row__count,
+.tc-review-row__meta,
+.tc-review-row__summary {
+  color: var(--vscode-descriptionForeground);
+}
+
+.tc-review-row__summary,
+.tc-review-row__meta {
+  line-height: 1.45;
+  margin: 0;
+}
+
+.tc-review-row__details {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tc-review-row__findings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tc-review-row__finding {
+  background: color-mix(in srgb, var(--vscode-panel-border, rgba(127, 127, 127, 0.35)) 12%, transparent);
+  border: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.2));
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+}
+
+.tc-review-row__finding-meta {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
+.tc-review-row__finding-note {
+  line-height: 1.4;
+}
+
 .tc-tool-row__link {
   background: transparent;
   border: 0;

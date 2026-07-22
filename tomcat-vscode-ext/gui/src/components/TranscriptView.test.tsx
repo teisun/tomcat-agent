@@ -49,6 +49,39 @@ describe("TranscriptView", () => {
     expect(screen.queryByTestId("thinking-group")).toBeNull();
   });
 
+  it("renders code review rows directly instead of routing them through ToolRow", () => {
+    const timeline: WebviewTimelineItem[] = [
+      {
+        findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
+        id: "review:plan-1",
+        planId: "plan-1",
+        rounds: 1,
+        status: "done",
+        summary: "Fix the missing null guard before completing the plan.",
+        type: "review",
+        verdict: "partial",
+      },
+    ];
+
+    render(
+      <TranscriptView
+        busy={false}
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={timeline}
+      />,
+    );
+
+    expect(screen.getByTestId("review-row-verdict").textContent).toBe("PARTIAL");
+    expect(screen.getByTestId("review-row-preview").textContent).toContain(
+      "Fix the missing null guard",
+    );
+    expect(screen.queryByTestId("tool-row")).toBeNull();
+  });
+
   it("folds context tools into a thinking group while keeping action tools visible", () => {
     const timeline: WebviewTimelineItem[] = [
       {

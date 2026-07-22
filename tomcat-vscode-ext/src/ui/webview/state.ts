@@ -24,6 +24,8 @@ import type {
   WebviewMessageSegment,
   WebviewPendingAttachment,
   WebviewPlanFileRef,
+  WebviewReviewFinding,
+  WebviewReviewRow,
   WebviewSessionSnapshot,
   WebviewSessionTab,
   WebviewStateSnapshot,
@@ -157,6 +159,8 @@ function timelineEntityKey(item: WebviewTimelineItem): string {
       return `checkpoint:${item.checkpointId}`;
     case "plan":
       return `plan:${item.planId ?? item.path}`;
+    case "review":
+      return `review:${item.planId}`;
   }
 }
 
@@ -233,6 +237,87 @@ function planEventMessageId(
   detail: string | null | undefined,
 ): string {
   return `plan-event:${eventType}:${planId ?? "none"}:${detail && detail.length > 0 ? detail : "default"}`;
+}
+
+function activePlanId(session: WebviewSessionSnapshot): string | null {
+  return session.planId ?? session.planFile?.planId ?? null;
+}
+
+function parseReviewVerdict(value: unknown): WebviewReviewRow["verdict"] | undefined {
+  return value === "pass" || value === "fail" || value === "partial" || value === "aborted"
+    ? value
+    : undefined;
+}
+
+function parseReviewFindings(value: unknown): WebviewReviewFinding[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (!isRecord(entry)) {
+      return [];
+    }
+    const severity = typeof entry.severity === "string" ? entry.severity : "";
+    const area = typeof entry.area === "string" ? entry.area : "";
+    const note = typeof entry.note === "string" ? entry.note : "";
+    if (!note) {
+      return [];
+    }
+    return [{ severity, area, note } satisfies WebviewReviewFinding];
+  });
+}
+
+function upsertRunningCodeReviewRow(session: WebviewSessionSnapshot, planId: string): void {
+  upsertTimelineItem(session, {
+    id: `review:${planId}`,
+    planId,
+    status: "running",
+    type: "review",
+  } satisfies WebviewReviewRow);
+}
+
+function upsertDoneCodeReviewRow(
+  session: WebviewSessionSnapshot,
+  input: {
+    aborted?: unknown;
+    findings?: unknown;
+    planId: string;
+    rounds?: unknown;
+    summary?: unknown;
+    verdict?: unknown;
+  },
+): void {
+  const verdict =
+    parseReviewVerdict(input.verdict) ?? (input.aborted === true ? "aborted" : undefined);
+  upsertTimelineItem(session, {
+    findings: parseReviewFindings(input.findings),
+    id: `review:${input.planId}`,
+    planId: input.planId,
+    rounds: typeof input.rounds === "number" ? input.rounds : null,
+    status: "done",
+    summary: typeof input.summary === "string" ? input.summary : null,
+    type: "review",
+    verdict,
+  } satisfies WebviewReviewRow);
+}
+
+function settleRunningCodeReviewAsAborted(
+  session: WebviewSessionSnapshot,
+  planId: string,
+): void {
+  const existing = session.timeline.find(
+    (item): item is WebviewReviewRow => item.type === "review" && item.planId === planId,
+  );
+  if (!existing || existing.status !== "running") {
+    return;
+  }
+  upsertTimelineItem(session, {
+    ...existing,
+    status: "done",
+    summary:
+      existing.summary ?? "Code review ended before a structured verdict was emitted.",
+    verdict: "aborted",
+  });
 }
 
 function cloneTimelineItem<T extends WebviewTimelineItem>(item: T): T {
@@ -747,7 +832,6 @@ function applyHistoryPlanCustomEntry(
       return;
     }
     case "plan.review":
-    case "plan.code_review":
       if (typeof entry.summary === "string" && entry.summary.length > 0) {
         pushMessage(
           session,
@@ -755,6 +839,18 @@ function applyHistoryPlanCustomEntry(
           `Tomcat plan review: ${entry.summary}`,
           planEventMessageId(eventName, planId, entry.summary),
         );
+      }
+      return;
+    case "plan.code_review":
+      if (planId) {
+        upsertDoneCodeReviewRow(session, {
+          aborted: entry.aborted,
+          findings: entry.findings,
+          planId,
+          rounds: entry.rounds,
+          summary: entry.summary,
+          verdict: entry.verdict,
+        });
       }
       return;
     case "plan.verify":
@@ -1310,6 +1406,8 @@ function shouldRetainLiveTimelineItem(
       );
     case "approval":
       return !item.resolved;
+    case "review":
+      return item.status === "running";
     case "boundary":
     case "checkpoint":
     case "plan":
@@ -1780,9 +1878,23 @@ export class WebviewStateStore {
         }
         return;
       case "sub_agent_start":
+        if (frame.subagentType === "code_reviewer") {
+          const planId = activePlanId(session);
+          if (planId) {
+            upsertRunningCodeReviewRow(session, planId);
+            return;
+          }
+        }
         pushMessage(session, "notice", `Started ${frame.subagentType} sub-agent`);
         return;
       case "sub_agent_end":
+        if (frame.subagentType === "code_reviewer") {
+          const planId = activePlanId(session);
+          if (planId) {
+            settleRunningCodeReviewAsAborted(session, planId);
+            return;
+          }
+        }
         pushMessage(session, "notice", `Sub-agent ${frame.subagentType} ${frame.outcome}`);
         return;
       case "message_update": {
@@ -2092,7 +2204,6 @@ export class WebviewStateStore {
 
     switch (event.type) {
       case "plan.review":
-      case "plan.code_review":
         if (event.summary) {
           pushMessage(
             session,
@@ -2100,6 +2211,18 @@ export class WebviewStateStore {
             `Tomcat plan review: ${event.summary}`,
             planEventMessageId(event.type, event.planId, event.summary),
           );
+        }
+        return;
+      case "plan.code_review":
+        if (event.planId) {
+          upsertDoneCodeReviewRow(session, {
+            aborted: event.aborted,
+            findings: event.findings,
+            planId: event.planId,
+            rounds: event.rounds,
+            summary: event.summary,
+            verdict: event.verdict,
+          });
         }
         return;
       case "plan.verify":

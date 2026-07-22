@@ -7,11 +7,11 @@ pub(crate) use crate::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, validate_frontmatter_invariants, write_plan, PlanFile,
     PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
-pub(crate) use crate::core::plan_runtime::review::{ReviewKind, ReviewSummary};
 pub(crate) use crate::core::plan_runtime::todo_runtime::TodosRuntime;
 pub(crate) use crate::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
 pub(crate) use crate::core::plan_runtime::{
-    state::PlanState, PlanRuntime, PlanRuntimeError, ReviewerDispatcher, VerifierDispatcher,
+    state::PlanState, CodeReviewSummary, CodeReviewerDispatcher, PlanReviewSummary,
+    PlanReviewerDispatcher, PlanRuntime, PlanRuntimeError, VerifierDispatcher,
 };
 pub(crate) use crate::core::session::manager::{PlanEventKind, PlanEventRef};
 pub(crate) use crate::core::tools::plan_tool::{
@@ -87,14 +87,14 @@ pub fn mark_plan_executing(rt: &PlanRuntime, plan_id: &str, session_key: &str) {
     rt.set_executing_for_test(plan_id.to_string());
 }
 
-pub struct MockReviewerDispatcher {
-    summaries: parking_lot::Mutex<Vec<ReviewSummary>>,
+pub struct MockPlanReviewerDispatcher {
+    summaries: parking_lot::Mutex<Vec<PlanReviewSummary>>,
     pub call_count: AtomicUsize,
     pub delay: Option<Duration>,
 }
 
-impl MockReviewerDispatcher {
-    pub fn new(summaries: Vec<ReviewSummary>) -> Self {
+impl MockPlanReviewerDispatcher {
+    pub fn new(summaries: Vec<PlanReviewSummary>) -> Self {
         Self {
             summaries: parking_lot::Mutex::new(summaries),
             call_count: AtomicUsize::new(0),
@@ -104,31 +104,60 @@ impl MockReviewerDispatcher {
 }
 
 #[async_trait]
-impl ReviewerDispatcher for MockReviewerDispatcher {
+impl PlanReviewerDispatcher for MockPlanReviewerDispatcher {
     async fn dispatch(
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        kind: ReviewKind,
         _allow_review_edit: bool,
-    ) -> ReviewSummary {
+    ) -> PlanReviewSummary {
         self.call_count.fetch_add(1, Ordering::Relaxed);
         if let Some(d) = self.delay {
             tokio::time::sleep(d).await;
         }
         let mut q = self.summaries.lock();
         if q.is_empty() {
-            ReviewSummary::aborted_with_kind(kind, "mock 队列耗尽")
+            PlanReviewSummary::aborted_with("mock 队列耗尽")
         } else {
-            let mut summary = q.remove(0);
-            summary.kind = kind;
-            summary
+            q.remove(0)
         }
     }
 }
 
-pub fn ok_review() -> ReviewSummary {
-    ReviewSummary {
+pub struct MockCodeReviewerDispatcher {
+    summaries: parking_lot::Mutex<Vec<CodeReviewSummary>>,
+    pub call_count: AtomicUsize,
+    pub delay: Option<Duration>,
+}
+
+impl MockCodeReviewerDispatcher {
+    pub fn new(summaries: Vec<CodeReviewSummary>) -> Self {
+        Self {
+            summaries: parking_lot::Mutex::new(summaries),
+            call_count: AtomicUsize::new(0),
+            delay: None,
+        }
+    }
+}
+
+#[async_trait]
+impl CodeReviewerDispatcher for MockCodeReviewerDispatcher {
+    async fn dispatch(&self, _plan_id: &str, _plan_text: &str) -> CodeReviewSummary {
+        self.call_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(d) = self.delay {
+            tokio::time::sleep(d).await;
+        }
+        let mut q = self.summaries.lock();
+        if q.is_empty() {
+            CodeReviewSummary::aborted_with("mock 队列耗尽")
+        } else {
+            q.remove(0)
+        }
+    }
+}
+
+pub fn ok_review() -> PlanReviewSummary {
+    PlanReviewSummary {
         aborted: false,
         summary: "looks ok".into(),
         changes_summary: "none".into(),
@@ -137,34 +166,8 @@ pub fn ok_review() -> ReviewSummary {
     }
 }
 
-pub fn pass_code_review() -> ReviewSummary {
-    ReviewSummary {
-        kind: ReviewKind::Code,
-        aborted: false,
-        verdict: Some("pass".into()),
-        summary: "code review passed".into(),
-        changes_summary: "none".into(),
-        applied_changes: false,
-        ..Default::default()
-    }
-}
-
-pub fn fail_code_review() -> ReviewSummary {
-    ReviewSummary {
-        kind: ReviewKind::Code,
-        aborted: false,
-        verdict: Some("fail".into()),
-        summary: "code review found a concrete issue".into(),
-        changes_summary: "none".into(),
-        applied_changes: false,
-        ..Default::default()
-    }
-}
-
-pub fn aborted_code_review(summary: &str) -> ReviewSummary {
-    let mut review = ReviewSummary::aborted_with_kind(ReviewKind::Code, summary);
-    review.verdict = Some("aborted".into());
-    review
+pub fn aborted_code_review(summary: &str) -> CodeReviewSummary {
+    CodeReviewSummary::aborted_with(summary)
 }
 
 pub struct MockVerifierDispatcher {
@@ -222,32 +225,6 @@ pub fn fail_verify() -> VerifySummary {
         summary: "unit verification failed".into(),
         verifier_turns_limit: 64,
         verifier_stop_reason: "completed".into(),
-        ..Default::default()
-    }
-}
-
-pub fn partial_verify() -> VerifySummary {
-    VerifySummary {
-        checks: vec![VerifyCheck {
-            name: "unit test".into(),
-            command: String::new(),
-            result: "skip".into(),
-            output_excerpt: "sandbox blocked".into(),
-        }],
-        verdict: "partial".into(),
-        summary: "verification inconclusive".into(),
-        verifier_turns_limit: 64,
-        verifier_stop_reason: "completed".into(),
-        ..Default::default()
-    }
-}
-
-pub fn aborted_verify(stop_reason: &str, summary: &str) -> VerifySummary {
-    VerifySummary {
-        verdict: "aborted".into(),
-        summary: summary.into(),
-        verifier_turns_limit: 64,
-        verifier_stop_reason: stop_reason.into(),
         ..Default::default()
     }
 }

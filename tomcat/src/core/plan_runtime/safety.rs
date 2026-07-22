@@ -81,9 +81,9 @@ pub enum WritePathDenied {
 pub enum SubagentKind {
     /// 主 Agent / 用户 chat / dispatch_agent leaf
     Other,
-    /// reviewer subagent（`SubagentType::Reviewer`）
-    Reviewer,
-    /// code reviewer subagent（`ReviewKind::Code`）
+    /// plan reviewer subagent（`SubagentType::PlanReviewer`）
+    PlanReviewer,
+    /// code reviewer subagent（`SubagentType::CodeReviewer`）
     CodeReviewer,
 }
 
@@ -129,8 +129,8 @@ pub fn enforce_write_path_policy(
         return Err(WritePathDenied::CodeReviewerReadOnly);
     }
 
-    // Reviewer：只能写 plan 文件（且段位再由 edit guard 检查）。
-    if subagent == SubagentKind::Reviewer && !is_plan_file {
+    // Plan reviewer：只能写 plan 文件（且段位再由 edit guard 检查）。
+    if subagent == SubagentKind::PlanReviewer && !is_plan_file {
         return Err(WritePathDenied::ReviewerOnlyPlanFiles);
     }
 

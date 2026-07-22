@@ -24,6 +24,17 @@ fn executor_prompt_renders_plan_id() {
 }
 
 #[test]
+fn executor_prompt_describes_single_round_code_review_without_verifier_terms() {
+    let rendered = load(PromptKey::ExecutorReminderFmt);
+    assert!(rendered.contains("ONE review round"));
+    assert!(rendered.contains("review once, fix once"));
+    assert!(rendered.contains("reopen an existing todo"));
+    assert!(rendered.contains("add a fix todo"));
+    assert!(!rendered.contains("Verifier"));
+    assert!(!rendered.contains("adversarial"));
+}
+
+#[test]
 fn background_shell_prompt_mentions_finished_tag() {
     let s = load(PromptKey::SystemBackgroundShellMonitor);
     assert!(s.contains("<background-task-finished"));

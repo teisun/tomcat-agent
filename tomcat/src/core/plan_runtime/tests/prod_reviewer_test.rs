@@ -1,20 +1,28 @@
 use super::super::file_store::{
     write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
-use super::super::prod_reviewer::ProdReviewerDispatcher;
-use super::super::review::{
-    resolve_internal_tools, reviewer_allowed_tools_for, reviewer_allowed_tools_with_policy,
-    ReviewKind,
-};
-use super::super::{PlanRuntime, ReviewerDispatcher};
-use crate::core::plan_runtime::review::build_review_prompt;
+use super::super::code_reviewer::code_reviewer_allowed_tools_with_policy;
+use super::super::plan_reviewer::{build_review_prompt, plan_reviewer_allowed_tools_with_policy};
+use super::super::prod_reviewer::{ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher};
+use super::super::review::resolve_internal_tools;
+use super::super::{CodeReviewerDispatcher, PlanReviewerDispatcher, PlanRuntime};
 use crate::core::tools::contract::catalog::BUILTIN_TOOL_CATALOG;
 
 #[tokio::test]
-async fn prod_reviewer_stub_returns_aborted_with_origin() {
-    let d = ProdReviewerDispatcher::stub("test_origin");
-    let r = d.dispatch("demo", "noop", ReviewKind::Plan, true).await;
+async fn prod_plan_reviewer_stub_returns_aborted_with_origin() {
+    let d = ProdPlanReviewerDispatcher::stub("test_origin");
+    let r = d.dispatch("demo", "noop", true).await;
     assert!(r.aborted);
+    assert!(r.summary.contains("test_origin"));
+    assert!(!r.applied_changes);
+}
+
+#[tokio::test]
+async fn prod_code_reviewer_stub_returns_aborted_with_origin() {
+    let d = ProdCodeReviewerDispatcher::stub("test_origin");
+    let r = d.dispatch("demo", "noop").await;
+    assert!(r.aborted);
+    assert_eq!(r.verdict.as_deref(), Some("aborted"));
     assert!(r.summary.contains("test_origin"));
     assert!(!r.applied_changes);
 }
@@ -29,7 +37,7 @@ fn reviewer_not_in_catalog() {
 
 #[test]
 fn reviewer_default_allowed_tools_no_create_plan() {
-    let tools = resolve_internal_tools(reviewer_allowed_tools_for(ReviewKind::Plan));
+    let tools = resolve_internal_tools(&plan_reviewer_allowed_tools_with_policy(false));
     let names: std::collections::BTreeSet<String> = tools
         .iter()
         .map(|v| v["function"]["name"].as_str().unwrap().to_string())
@@ -46,7 +54,7 @@ fn reviewer_default_allowed_tools_no_create_plan() {
 
 #[test]
 fn code_reviewer_allowed_tools_include_bash_only_in_code_mode() {
-    let tools = resolve_internal_tools(reviewer_allowed_tools_for(ReviewKind::Code));
+    let tools = resolve_internal_tools(&code_reviewer_allowed_tools_with_policy(false));
     let names: std::collections::BTreeSet<String> = tools
         .iter()
         .map(|v| v["function"]["name"].as_str().unwrap().to_string())
@@ -59,12 +67,18 @@ fn code_reviewer_allowed_tools_include_bash_only_in_code_mode() {
 
 #[test]
 fn reviewer_can_expose_load_skill_when_config_enabled() {
-    let tools = resolve_internal_tools(&reviewer_allowed_tools_with_policy(ReviewKind::Plan, true));
-    let names: std::collections::BTreeSet<String> = tools
+    let plan_tools = resolve_internal_tools(&plan_reviewer_allowed_tools_with_policy(true));
+    let code_tools = resolve_internal_tools(&code_reviewer_allowed_tools_with_policy(true));
+    let plan_names: std::collections::BTreeSet<String> = plan_tools
         .iter()
         .map(|v| v["function"]["name"].as_str().unwrap().to_string())
         .collect();
-    assert!(names.contains("load_skill"));
+    let code_names: std::collections::BTreeSet<String> = code_tools
+        .iter()
+        .map(|v| v["function"]["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(plan_names.contains("load_skill"));
+    assert!(code_names.contains("load_skill"));
 }
 
 #[test]

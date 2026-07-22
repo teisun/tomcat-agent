@@ -123,7 +123,7 @@ pub fn derive_plan_id(goal: &str) -> String {
 ///   "review": { "aborted": true, "summary": "P4 接入" } }
 /// ```
 /// `create_plan` 同步执行（不派发 reviewer）；返回写盘成功后的核心信息。
-/// 当 PlanRuntime 注入了 `ReviewerDispatcher` 时，调用方应使用
+/// 当 PlanRuntime 注入了 `PlanReviewerDispatcher` 时，调用方应使用
 /// [`execute_with_reviewer`] 以获得真实的 review summary。
 pub fn execute(
     runtime: &PlanRuntime,
@@ -206,7 +206,7 @@ pub fn execute(
         "plan_id": plan_id,
         "path": crate::infra::platform::format_home_path(&path),
         "state": "planning",
-        "review": crate::core::plan_runtime::review::ReviewSummary::placeholder_pending().to_json(),
+        "review": crate::core::plan_runtime::plan_reviewer::PlanReviewSummary::placeholder_pending().to_json(),
     }))
 }
 

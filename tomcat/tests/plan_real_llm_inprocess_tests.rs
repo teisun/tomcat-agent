@@ -1,9 +1,9 @@
-//! E2E-PLAN-RL-002：进程内真 LLM 全路径测试（真 LlmProvider + real reviewer/verifier subagents）。
+//! E2E-PLAN-RL-002：进程内真 LLM 全路径测试（真 LlmProvider + real reviewer subagents）。
 //!
 //! 与 [`plan_e2e_with_mock_llm_tests.rs`](./plan_e2e_with_mock_llm_tests.rs) 互补：那个
 //! 测试把 "LLM 决策一次 tool_call" 用直接调 `tools::execute` 代替，本测试不做任何 mock，
 //! 真的让主 LLM 调 `create_plan` / `update_plan`、真的让 reviewer 子 Agent 跑一轮。
-//! 对 Plan 模式真 LLM 验收来说，这里是 full completion / artifact / review / verify /
+//! 对 Plan 模式真 LLM 验收来说，这里是 full completion / artifact / review /
 //! transcript 顺序的主验收锚点；CLI smoke 只保留 resume/build wiring。
 //!
 //! ## 门禁
@@ -22,10 +22,10 @@
 //! 2. 所有 `frontmatter.todos[].status == Completed`
 //! 3. workdir 中真实生成 `counter.py`，且 `python3 counter.py` 输出严格为 `0\n`
 //! 4. 内存 `PlanRuntime::mode()` 与磁盘同步
-//! 5. verifier 通过后 `update_plan` 会自动 `finalize_completed_to_chat()`；最终 mode = Chat
+//! 5. code review 通过后 `update_plan` 会自动 `finalize_completed_to_chat()`；最终 mode = Chat
 //! 6. transcript 至少有一条 `plan.review` 自定义事件
-//! 7. transcript 至少有一条 `plan.code_review` 自定义事件，且顺序早于 `plan.verify`
-//! 8. transcript 至少有一条 `plan.verify` 自定义事件
+//! 7. transcript 至少有一条 `plan.code_review` 自定义事件
+//! 8. transcript 不应再出现 `plan.verify` 自定义事件（链路已掐断）
 //!
 //! ## 软断言（不强求）
 //! - reviewer summary aborted=false（reviewer LLM 可能格式漂移）
@@ -59,7 +59,7 @@ use tomcat::{
 
 const COUNTER_PLAN_GOAL: &str = "inprocess e2e: write counter.py that prints 0";
 
-// 真 LLM 进程内全路径会串起 planning + reviewer/verifier + 执行轮次；
+// 真 LLM 进程内全路径会串起 planning + reviewer + 执行轮次；
 // 在 gpt-5.4 下 180s exec round 已被实测打满，因此把总时限与阶段时限
 // 上调到更符合当前上游时延的窗口，同时保留硬超时兜底。
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
@@ -786,7 +786,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
         );
         assert_counter_artifact(&workdir);
 
-        // 6) update_plan 已在 verifier 通过后自动 finalize_completed_to_chat → Chat
+        // 6) update_plan 已在 code review 通过后自动 finalize_completed_to_chat → Chat
         let finalized = ctx
             .session_runtime
             .plan_runtime
@@ -800,8 +800,8 @@ async fn inprocess_full_plan_path_with_real_llm() {
             PlanState::Chat
         ));
 
-        // 7) transcript 软断言：至少一条 plan.review + plan.code_review + plan.verify，
-        //    且 code_review 早于 verify。
+        // 7) transcript 软断言：至少一条 plan.review + plan.code_review，
+        //    且 verify 链路已被掐断，不应再出现 plan.verify。
         let transcript_path = ctx
             .session_runtime
             .session
@@ -824,12 +824,8 @@ async fn inprocess_full_plan_path_with_real_llm() {
             "transcript 应含至少一条 plan.code_review 自定义事件，实际未发现"
         );
         assert!(
-            plan_verify_idx.is_some(),
-            "transcript 应含至少一条 plan.verify 自定义事件，实际未发现"
-        );
-        assert!(
-            plan_code_review_idx.unwrap() < plan_verify_idx.unwrap(),
-            "plan.code_review 应早于 plan.verify 出现"
+            plan_verify_idx.is_none(),
+            "transcript 不应再含 plan.verify 自定义事件，实际仍发现旧 verifier 链路"
         );
     })
     .await;

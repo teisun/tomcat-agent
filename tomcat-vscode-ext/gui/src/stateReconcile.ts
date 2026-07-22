@@ -90,6 +90,8 @@ function timelineItemKey(item: WebviewTimelineItem): string {
       return `message:${item.id}`;
     case "plan":
       return `plan:${item.id}`;
+    case "review":
+      return `review:${item.id}`;
     case "thinking":
       return `thinking:${item.id}`;
     case "tool":

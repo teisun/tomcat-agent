@@ -54,15 +54,17 @@ pub enum LoopError {
 
 /// 子 Agent 类型枚举。**仅** internal dispatch 用，**不**进 OpenAI function schema。
 ///
-/// `User` 是父 Agent（顶层 chat_loop）的默认；`Reviewer` / `Verifier` 由
+/// `User` 是父 Agent（顶层 chat_loop）的默认；`PlanReviewer` / `CodeReviewer` / `Verifier` 由
 /// `PlanRuntime::dispatch_*` 通过 `AgentRegistry::spawn_subagent_internal` 设入。未来
 /// `dispatch_agent` 工具的通用子 Agent 类型在 Phase 3 全量阶段补充。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubagentType {
     /// 顶层 chat_loop 的 user-facing Agent；reviewer 不可使用此值。
     User,
-    /// reviewer 内联子 Agent。详见 `docs/architecture/tools/reviewer.md`。
-    Reviewer,
+    /// plan reviewer 内联子 Agent。详见 `docs/architecture/tools/reviewer.md`。
+    PlanReviewer,
+    /// code reviewer 内联子 Agent。详见 `docs/architecture/tools/reviewer.md`。
+    CodeReviewer,
     /// verifier 内联子 Agent。详见 `docs/architecture/plan-exec-code-verification.md`。
     Verifier,
 }
@@ -73,10 +75,15 @@ impl SubagentType {
         matches!(self, SubagentType::User)
     }
 
+    pub fn is_reviewer(self) -> bool {
+        matches!(self, SubagentType::PlanReviewer | SubagentType::CodeReviewer)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             SubagentType::User => "user",
-            SubagentType::Reviewer => "reviewer",
+            SubagentType::PlanReviewer => "plan_reviewer",
+            SubagentType::CodeReviewer => "code_reviewer",
             SubagentType::Verifier => "verifier",
         }
     }
@@ -125,12 +132,9 @@ pub struct AgentLoopConfig {
     /// 派生深度。顶层 chat_loop 为 0；`spawn_subagent_internal` 时设为 `parent.spawn_depth + 1`。
     /// `AgentRegistry::spawn_subagent_internal` 会校验 `spawn_depth + 1 <= MAX_SPAWN_DEPTH`（默认 2）。
     pub spawn_depth: u32,
-    /// 子 Agent 类型。顶层永远为 `User`；reviewer / verifier 子 Agent 分别为
-    /// `Reviewer` / `Verifier`。既参与 catalog 过滤，也参与 plan-only 工具防套娃。
+    /// 子 Agent 类型。顶层永远为 `User`；plan/code reviewer 与 verifier 子 Agent
+    /// 走各自的枚举位。既参与 catalog 过滤，也参与 plan-only 工具防套娃。
     pub subagent_type: SubagentType,
-    /// reviewer 的更细分运行形态：`Plan`（create_plan 后计划审稿）或 `Code`
-    ///（verifier 前代码审查）。仅 reviewer 子 Agent 需要；其它 Agent 为 `None`。
-    pub review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
     /// PlanRuntime 共享句柄（B1 / 2026-05）。透传给 `tool_exec` 用于：
     /// - 分发 `create_plan` / `update_plan` / `todos` / `ask_question` 工具
     /// - 读取当前 `PlanState` 做写路径策略 (`safety::enforce_write_path_policy`) 守卫
@@ -165,7 +169,6 @@ impl Default for AgentLoopConfig {
             parent_session_id: None,
             spawn_depth: 0,
             subagent_type: SubagentType::User,
-            review_kind: None,
             plan_runtime: None,
             skill_set: None,
         }

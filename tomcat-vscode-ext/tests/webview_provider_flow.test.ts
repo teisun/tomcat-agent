@@ -2376,6 +2376,66 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
+  it("projects the live code reviewer process into a single review row", async () => {
+    const { messenger, provider } = buildProvider({
+      sessionState: {
+        planId: "plan-1",
+        planPath: "/workspace/plans/plan-1.plan.md",
+        planState: "executing",
+      },
+    });
+
+    await provider.dispatchTestIntent({
+      messageId: "ready-review-1",
+      type: "ready",
+    });
+
+    messenger.emit({
+      sessionId: "session-1",
+      subagentType: "code_reviewer",
+      type: "sub_agent_start",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    let review = provider
+      .currentState()
+      .sessionViews["session-1"]?.timeline.find((item) => item.type === "review");
+    expect(review).toMatchObject({
+      id: "review:plan-1",
+      planId: "plan-1",
+      status: "running",
+      type: "review",
+    });
+
+    messenger.emit({
+      findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
+      planId: "plan-1",
+      rounds: 1,
+      sessionId: "session-1",
+      summary: "Fix the missing null guard before completing the plan.",
+      type: "plan.code_review",
+      verdict: "partial",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const reviews = provider
+      .currentState()
+      .sessionViews["session-1"]?.timeline.filter((item) => item.type === "review");
+    expect(reviews).toHaveLength(1);
+    review = reviews?.[0];
+    expect(review).toMatchObject({
+      findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
+      planId: "plan-1",
+      rounds: 1,
+      status: "done",
+      summary: "Fix the missing null guard before completing the plan.",
+      type: "review",
+      verdict: "partial",
+    });
+
+    provider.dispose();
+  });
+
   it("reconciles terminal plan events back to getState truth", async () => {
     const { messenger, provider, sessionState } = buildProvider({
       sessionState: {

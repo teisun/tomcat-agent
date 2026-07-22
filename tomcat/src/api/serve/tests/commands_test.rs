@@ -3374,7 +3374,7 @@ async fn serve_interrupt_rearms_root_token_before_next_turn_can_spawn_subagents(
         .agent_registry
         .spawn_subagent_internal(
             &slot.session_id,
-            crate::core::agent_loop::SubagentType::Reviewer,
+            crate::core::agent_loop::SubagentType::PlanReviewer,
             |ctx| async move {
                 crate::core::agent_registry::SubagentOutcome {
                     child_session_id: ctx.child_session_id,
@@ -3430,7 +3430,7 @@ async fn serve_interrupt_rearms_root_token_before_next_turn_can_spawn_subagents(
         .agent_registry
         .spawn_subagent_internal(
             &slot.session_id,
-            crate::core::agent_loop::SubagentType::Reviewer,
+            crate::core::agent_loop::SubagentType::PlanReviewer,
             |ctx| async move {
                 crate::core::agent_registry::SubagentOutcome {
                     child_session_id: ctx.child_session_id,

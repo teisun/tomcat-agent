@@ -709,7 +709,6 @@ pub async fn run_chat_turn_with_message(
         parent_session_id: None,
         spawn_depth: 0,
         subagent_type: crate::core::agent_loop::SubagentType::User,
-        review_kind: None,
         plan_runtime: Some(ctx.session_runtime.plan_runtime.clone()),
         skill_set: Some(ctx.scope_services.skill_set.clone()),
     };

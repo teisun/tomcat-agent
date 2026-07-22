@@ -190,6 +190,25 @@ export interface WebviewPlanFileCard extends WebviewPlanFileRef {
   type: "plan";
 }
 
+export type WebviewReviewVerdict = "aborted" | "fail" | "partial" | "pass";
+
+export interface WebviewReviewFinding {
+  area: string;
+  note: string;
+  severity: string;
+}
+
+export interface WebviewReviewRow {
+  findings?: WebviewReviewFinding[];
+  id: string;
+  planId: string;
+  rounds?: number | null;
+  status: "done" | "running";
+  summary?: string | null;
+  type: "review";
+  verdict?: WebviewReviewVerdict;
+}
+
 export interface WebviewApprovalOption {
   id: string;
   label: string;
@@ -290,6 +309,7 @@ export type WebviewTimelineItem =
   | WebviewCheckpointMarker
   | WebviewMessageBlock
   | WebviewPlanFileCard
+  | WebviewReviewRow
   | WebviewThinkingBlock
   | WebviewToolCard;
 

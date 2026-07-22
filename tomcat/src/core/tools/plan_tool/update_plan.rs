@@ -22,9 +22,7 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::{update_plan_locked, write_plan, PlanFileState, TodoStatus},
-    ops, review,
-    state::PlanState,
-    verify, PlanRuntime,
+    ops, state::PlanState, PlanRuntime,
 };
 
 use super::shared_todo_ops::{apply_shared_todo_ops, items_json};
@@ -150,51 +148,36 @@ pub async fn execute(
     let mut warnings = tx.warnings;
 
     let mut code_review_json = serde_json::Value::Null;
-    let mut verify_json = serde_json::Value::Null;
     let plan_state_after = if tx.derived_completed {
         if let Some(round) = runtime.try_begin_code_review_round(&target_plan_id) {
             let mut code_review_summary = runtime.dispatch_code_reviewer(&target_plan_id).await;
-            warnings.extend(review::normalize_for_code_review_result(
-                &mut code_review_summary,
-            ));
+            warnings.extend(code_review_summary.normalize_for_result());
             runtime.write_code_review_transcript(&target_plan_id, &code_review_summary, round);
             code_review_json = code_review_summary.to_json();
 
-            if code_review_summary.verdict.as_deref() == Some("pass") {
-                let (state_after, verify_payload) = run_verifier_after_code_review(
-                    runtime,
-                    &target_plan_id,
-                    &path,
-                    &mut plan,
-                    &mut warnings,
-                )
-                .await?;
-                verify_json = verify_payload;
-                state_after
-            } else if code_review_summary.aborted {
-                warnings.push(
-                    "code review 未能执行(aborted)，按 reviewer 不可用处理，转交 verifier".into(),
-                );
-                let (state_after, verify_payload) = run_verifier_after_code_review(
-                    runtime,
-                    &target_plan_id,
-                    &path,
-                    &mut plan,
-                    &mut warnings,
-                )
-                .await?;
-                verify_json = verify_payload;
-                state_after
-            } else {
-                warnings.push(format!(
-                    "code review verdict={}，plan 保持 executing，等待主 Agent 修复或重新 complete",
-                    code_review_summary.verdict.as_deref().unwrap_or("partial")
-                ));
-                PlanFileState::Executing
+            match code_review_summary.verdict.as_deref() {
+                Some("pass") => {
+                    finalize_plan_completed(runtime, &target_plan_id, &path, &mut plan)?;
+                    PlanFileState::Completed
+                }
+                Some("fail") | Some("partial") => {
+                    warnings.extend(non_pass_code_review_guidance(&code_review_summary));
+                    PlanFileState::Executing
+                }
+                Some("aborted") => {
+                    warnings.push("code review 中止(aborted)，本次按 best-effort 直接收口 completed".into());
+                    finalize_plan_completed(runtime, &target_plan_id, &path, &mut plan)?;
+                    PlanFileState::Completed
+                }
+                _ => {
+                    warnings.push("code review 未返回可识别 verdict，已按 partial 处理；plan 保持 executing".into());
+                    warnings.extend(non_pass_code_review_guidance(&code_review_summary));
+                    PlanFileState::Executing
+                }
             }
         } else {
             warnings.push(format!(
-                "code review rounds 已用尽（{}/{}），跳过 code review 直接 verifier",
+                "code review rounds 已用尽（{}/{}），本次不再复审，按 best-effort 直接收口 completed",
                 runtime.code_review_rounds(&target_plan_id),
                 runtime.max_code_review_rounds()
             ));
@@ -203,16 +186,8 @@ pub async fn execute(
                 "rounds_exhausted",
                 runtime.code_review_rounds(&target_plan_id),
             );
-            let (state_after, verify_payload) = run_verifier_after_code_review(
-                runtime,
-                &target_plan_id,
-                &path,
-                &mut plan,
-                &mut warnings,
-            )
-            .await?;
-            verify_json = verify_payload;
-            state_after
+            finalize_plan_completed(runtime, &target_plan_id, &path, &mut plan)?;
+            PlanFileState::Completed
         }
     } else {
         plan.frontmatter.state
@@ -269,34 +244,38 @@ pub async fn execute(
         "active_in_progress": active_in_progress,
         "items": items_json(&plan.frontmatter.todos),
         "code_review": code_review_json,
-        "verify": verify_json,
     }))
 }
 
-async fn run_verifier_after_code_review(
+fn finalize_plan_completed(
     runtime: &PlanRuntime,
     target_plan_id: &str,
     path: &std::path::Path,
     plan: &mut crate::core::plan_runtime::file_store::PlanFile,
-    warnings: &mut Vec<String>,
-) -> Result<(PlanFileState, serde_json::Value), ToolError> {
-    let mut verify_summary = runtime.dispatch_verifier(target_plan_id).await;
-    warnings.extend(verify::normalize_for_gate(&mut verify_summary));
-    runtime.write_verify_transcript(target_plan_id, &verify_summary);
-    let verify_json = verify_summary.to_json();
+) -> Result<(), ToolError> {
+    plan.frontmatter.state = PlanFileState::Completed;
+    write_plan(path, plan, runtime.lock_timeout_ms())?;
+    runtime.set_mode_completed_with_path(target_plan_id.to_string(), Some(path.to_path_buf()));
+    let _ = runtime.finalize_completed_to_chat();
+    Ok(())
+}
 
-    let allow_complete = !(runtime.verify_gate_is_strict() && verify_summary.verdict == "fail");
-    if allow_complete {
-        plan.frontmatter.state = PlanFileState::Completed;
-        write_plan(path, plan, runtime.lock_timeout_ms())?;
-        runtime.set_mode_completed_with_path(target_plan_id.to_string(), Some(path.to_path_buf()));
-        let _ = runtime.finalize_completed_to_chat();
-        Ok((PlanFileState::Completed, verify_json))
+fn non_pass_code_review_guidance(
+    summary: &crate::core::plan_runtime::code_reviewer::CodeReviewSummary,
+) -> Vec<String> {
+    let verdict = summary.verdict.as_deref().unwrap_or("partial");
+    let finding_hint = if summary.findings.is_empty() {
+        "当前 findings 为空，请根据 code_review.summary 归纳一个修复点。"
     } else {
-        warnings
-            .push("verifier verdict=fail 且 [plan].verify_gate=gate，plan 保持 executing".into());
-        Ok((PlanFileState::Executing, verify_json))
-    }
+        "请直接根据 code_review.findings 落修复。"
+    };
+    vec![
+        format!(
+            "code review verdict={verdict}，plan 保持 executing。{finding_hint} 用 update_plan 重新打开一个已有 todo（set_status=in_progress），或新增一个修复 todo；修复完成后再次调用 update_plan 收口。"
+        ),
+        "当前默认只跑 1 轮 code review：这次修复后再次收口将不再复审，而是直接 best-effort completed。"
+            .into(),
+    ]
 }
 
 fn resolve_target_plan_path(

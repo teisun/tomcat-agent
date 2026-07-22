@@ -29,13 +29,17 @@ use tomcat::core::plan_runtime::file_store::{
     TodoItem, TodoStatus,
 };
 use tomcat::core::plan_runtime::panels::{TodosPanel, TodosPanelSnapshot};
-use tomcat::core::plan_runtime::prod_reviewer::{ProdReviewerDeps, ProdReviewerDispatcher};
-use tomcat::core::plan_runtime::review::{ReviewKind, ReviewSummary};
+use tomcat::core::plan_runtime::prod_reviewer::{
+    ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher, ProdReviewerDeps,
+};
 use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::plan_runtime::verify::{
     ProdVerifierDeps, ProdVerifierDispatcher, VerifyCheck, VerifySummary,
 };
-use tomcat::core::plan_runtime::{PlanRuntime, ReviewerDispatcher, VerifierDispatcher};
+use tomcat::core::plan_runtime::{
+    CodeReviewSummary, CodeReviewerDispatcher, PlanReviewerDispatcher, PlanRuntime,
+    VerifierDispatcher,
+};
 use tomcat::core::skill::SkillSet;
 use tomcat::core::tools::pipeline::read_state::ReadFileState;
 use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
@@ -101,13 +105,13 @@ impl CheckpointStore for CheckpointSpy {
     }
 }
 
-struct QueueReviewer {
-    summaries: Mutex<Vec<ReviewSummary>>,
+struct QueueCodeReviewer {
+    summaries: Mutex<Vec<CodeReviewSummary>>,
     call_count: std::sync::atomic::AtomicUsize,
 }
 
-impl QueueReviewer {
-    fn new(summaries: Vec<ReviewSummary>) -> Self {
+impl QueueCodeReviewer {
+    fn new(summaries: Vec<CodeReviewSummary>) -> Self {
         Self {
             summaries: Mutex::new(summaries),
             call_count: std::sync::atomic::AtomicUsize::new(0),
@@ -116,24 +120,16 @@ impl QueueReviewer {
 }
 
 #[async_trait]
-impl ReviewerDispatcher for QueueReviewer {
-    async fn dispatch(
-        &self,
-        _plan_id: &str,
-        _plan_text: &str,
-        kind: ReviewKind,
-        _allow_review_edit: bool,
-    ) -> ReviewSummary {
+impl CodeReviewerDispatcher for QueueCodeReviewer {
+    async fn dispatch(&self, _plan_id: &str, _plan_text: &str) -> CodeReviewSummary {
         self.call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut summaries = self.summaries.lock();
-        let mut summary = if summaries.is_empty() {
-            ReviewSummary::aborted_with_kind(kind, "mock reviewer queue exhausted")
+        if summaries.is_empty() {
+            CodeReviewSummary::aborted_with("mock reviewer queue exhausted")
         } else {
             summaries.remove(0)
-        };
-        summary.kind = kind;
-        summary
+        }
     }
 }
 
@@ -372,9 +368,8 @@ fn transcript_message_count(path: &std::path::Path) -> usize {
         .count()
 }
 
-fn pass_code_review() -> ReviewSummary {
-    ReviewSummary {
-        kind: ReviewKind::Code,
+fn pass_code_review() -> CodeReviewSummary {
+    CodeReviewSummary {
         aborted: false,
         verdict: Some("pass".into()),
         summary: "implementation looks good".into(),
@@ -384,9 +379,8 @@ fn pass_code_review() -> ReviewSummary {
     }
 }
 
-fn fail_code_review() -> ReviewSummary {
-    ReviewSummary {
-        kind: ReviewKind::Code,
+fn fail_code_review() -> CodeReviewSummary {
+    CodeReviewSummary {
         aborted: false,
         verdict: Some("fail".into()),
         summary: "missed a concrete fix".into(),
@@ -396,9 +390,8 @@ fn fail_code_review() -> ReviewSummary {
     }
 }
 
-fn long_multibyte_code_review(summary: String) -> ReviewSummary {
-    ReviewSummary {
-        kind: ReviewKind::Code,
+fn long_multibyte_code_review(summary: String) -> CodeReviewSummary {
+    CodeReviewSummary {
         aborted: false,
         verdict: Some("pass".into()),
         summary,
@@ -789,14 +782,14 @@ async fn h5_reviewer_aborted_summary_used_when_dispatcher_returns_aborted() {
 }
 
 #[tokio::test]
-async fn h8_code_review_pass_runs_verifier_in_same_update_plan_turn() {
+async fn h8_code_review_pass_completes_without_verifier() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
     rt.set_max_code_review_rounds(1);
-    let reviewer = Arc::new(QueueReviewer::new(vec![pass_code_review()]));
+    let reviewer = Arc::new(QueueCodeReviewer::new(vec![pass_code_review()]));
     let verifier = Arc::new(QueueVerifier::new(vec![pass_verify()]));
-    rt.attach_reviewer(reviewer.clone());
+    rt.attach_code_reviewer(reviewer.clone());
     rt.attach_verifier(verifier.clone());
 
     rt.enter_planning().unwrap();
@@ -825,7 +818,7 @@ async fn h8_code_review_pass_runs_verifier_in_same_update_plan_turn() {
 
     let out = complete_all_plan_todos(&rt, &plan_id).await;
     assert_eq!(out["code_review"]["verdict"], "pass");
-    assert_eq!(out["verify"]["verdict"], "pass");
+    assert!(out.get("verify").is_none());
     assert_eq!(out["plan_state_after"], "completed");
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
     assert_eq!(
@@ -838,20 +831,20 @@ async fn h8_code_review_pass_runs_verifier_in_same_update_plan_turn() {
         verifier
             .call_count
             .load(std::sync::atomic::Ordering::Relaxed),
-        1
+        0
     );
     cleanup_home(&home);
 }
 
 #[tokio::test]
-async fn h9_code_review_non_pass_returns_to_main_then_second_completion_skips_review() {
+async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_completes() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
     rt.set_max_code_review_rounds(1);
-    let reviewer = Arc::new(QueueReviewer::new(vec![fail_code_review()]));
+    let reviewer = Arc::new(QueueCodeReviewer::new(vec![fail_code_review()]));
     let verifier = Arc::new(QueueVerifier::new(vec![pass_verify()]));
-    rt.attach_reviewer(reviewer.clone());
+    rt.attach_code_reviewer(reviewer.clone());
     rt.attach_verifier(verifier.clone());
 
     rt.enter_planning().unwrap();
@@ -880,7 +873,7 @@ async fn h9_code_review_non_pass_returns_to_main_then_second_completion_skips_re
 
     let first = complete_all_plan_todos(&rt, &plan_id).await;
     assert_eq!(first["code_review"]["verdict"], "fail");
-    assert_eq!(first["verify"], serde_json::Value::Null);
+    assert!(first.get("verify").is_none());
     assert_eq!(first["plan_state_after"], "executing");
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
     assert_eq!(
@@ -928,8 +921,14 @@ async fn h9_code_review_non_pass_returns_to_main_then_second_completion_skips_re
     .await
     .unwrap();
     assert_eq!(second["code_review"], serde_json::Value::Null);
-    assert_eq!(second["verify"]["verdict"], "pass");
+    assert!(second.get("verify").is_none());
     assert_eq!(second["plan_state_after"], "completed");
+    assert!(second["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .any(|w| w.contains("code review rounds 已用尽")));
     assert_eq!(
         reviewer
             .call_count
@@ -940,7 +939,7 @@ async fn h9_code_review_non_pass_returns_to_main_then_second_completion_skips_re
         verifier
             .call_count
             .load(std::sync::atomic::Ordering::Relaxed),
-        1
+        0
     );
     cleanup_home(&home);
 }
@@ -952,12 +951,12 @@ async fn h10_code_review_long_multibyte_summary_round_trips_without_truncation()
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
     rt.set_max_code_review_rounds(1);
     let long_summary = "修".repeat(250);
-    let reviewer = Arc::new(QueueReviewer::new(vec![long_multibyte_code_review(
+    let reviewer = Arc::new(QueueCodeReviewer::new(vec![long_multibyte_code_review(
         long_summary.clone(),
     )]));
     let verifier = Arc::new(QueueVerifier::new(vec![pass_verify()]));
-    rt.attach_reviewer(reviewer);
-    rt.attach_verifier(verifier);
+    rt.attach_code_reviewer(reviewer);
+    rt.attach_verifier(verifier.clone());
 
     rt.enter_planning().unwrap();
     let out = create_plan::execute(
@@ -985,8 +984,14 @@ async fn h10_code_review_long_multibyte_summary_round_trips_without_truncation()
 
     let out = complete_all_plan_todos(&rt, &plan_id).await;
     assert_eq!(out["code_review"]["summary"], long_summary);
-    assert_eq!(out["verify"]["verdict"], "pass");
+    assert!(out.get("verify").is_none());
     assert_eq!(out["plan_state_after"], "completed");
+    assert_eq!(
+        verifier
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 
     cleanup_home(&home);
 }
@@ -1115,8 +1120,30 @@ applied_changes: false
     let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
     let registry = AgentRegistry::new();
     let _root_guard = registry.register_root("parent-reviewer").unwrap();
-    let dispatcher = ProdReviewerDispatcher::new(
-        "test_reviewer",
+    let plan_dispatcher = ProdPlanReviewerDispatcher::new(
+        "test_plan_reviewer",
+        ProdReviewerDeps {
+            agent_registry: registry.clone(),
+            parent_session_id: "parent-reviewer".into(),
+            llm: llm.clone(),
+            compaction_provider: None,
+            primitive: primitive.clone(),
+            event_bus: event_bus.clone(),
+            agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+            checkpoint_store: Arc::new(NoopStore),
+            context_config: ContextConfig::default(),
+            read_file_state: Arc::new(ReadFileState::default()),
+            openai_files_runtime: None,
+            agent_workspace_dir: workspace.path().to_path_buf(),
+            skill_set: Arc::new(RwLock::new(SkillSet::default())),
+            skills_config: AppConfig::default().skills,
+            plan_runtime: Arc::downgrade(&rt),
+            model: "gpt-5.4-xhigh".into(),
+            max_turns: 8,
+        },
+    );
+    let code_dispatcher = ProdCodeReviewerDispatcher::new(
+        "test_code_reviewer",
         ProdReviewerDeps {
             agent_registry: registry.clone(),
             parent_session_id: "parent-reviewer".into(),
@@ -1138,15 +1165,14 @@ applied_changes: false
         },
     );
 
-    let plan_summary = dispatcher
-        .dispatch(plan_id, "## Goal\nship reviewer\n", ReviewKind::Plan, true)
+    let plan_summary = plan_dispatcher
+        .dispatch(plan_id, "## Goal\nship reviewer\n", true)
         .await;
-    let code_summary = dispatcher
-        .dispatch(plan_id, "## Goal\nship reviewer\n", ReviewKind::Code, false)
+    let code_summary = code_dispatcher
+        .dispatch(plan_id, "## Goal\nship reviewer\n")
         .await;
 
-    assert_eq!(plan_summary.kind, ReviewKind::Plan);
-    assert_eq!(code_summary.kind, ReviewKind::Code);
+    assert_eq!(code_summary.verdict.as_deref(), Some("pass"));
     assert!(!plan_summary.child_session_id.is_empty());
     assert!(!code_summary.child_session_id.is_empty());
     assert_ne!(plan_summary.child_session_id, code_summary.child_session_id);
@@ -1170,8 +1196,8 @@ applied_changes: false
         serde_json::from_str(&transcript_lines(&code_path).first().unwrap().clone()).unwrap();
     assert_eq!(plan_header.id, plan_summary.child_session_id);
     assert_eq!(code_header.id, code_summary.child_session_id);
-    assert!(transcript_lines(&plan_path)[1].contains("\"subagent_type\":\"reviewer\""));
-    assert!(transcript_lines(&code_path)[1].contains("\"subagent_type\":\"reviewer\""));
+    assert!(transcript_lines(&plan_path)[1].contains("\"subagent_type\":\"plan_reviewer\""));
+    assert!(transcript_lines(&code_path)[1].contains("\"subagent_type\":\"code_reviewer\""));
     assert!(transcript_message_count(&plan_path) >= 1);
     assert!(transcript_message_count(&code_path) >= 1);
 

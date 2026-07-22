@@ -1,5 +1,36 @@
 # Plan / Todo 执行完成后的代码验证（Verifier）技术方案
 
+> 当前权威口径（2026-07-22）  
+> 本文档大部分内容记录的是“code review + verifier 双阶段收口”的设计与调研背景。现在实现已经调整为：**保留 code review，暂时掐断 verifier 收口链路**。verifier 代码仍在仓库里，但 `update_plan` 完成链路不再调用它。若下文旧段落与本说明冲突，以本说明和仓库代码为准。
+
+## 当前状态
+
+```text
+all todos completed
+   |
+   +--> CodeReviewer (default rounds = 1)
+           |
+           +--> pass      -> completed
+           +--> fail/partial -> stay executing, 主 Agent reopen/add fix todo
+           +--> aborted   -> best-effort completed
+           +--> rounds exhausted on next close-out -> best-effort completed
+
+Verifier
+   |
+   +--> code kept for future re-enable
+   +--> not called by current completion flow
+```
+
+- **仍然存在的环节**
+  - 执行中每个 todo 的 mini verification 仍保留，避免主 Agent 完全不自检。
+  - EXEC 收口时的 `CodeReviewer` 仍保留，而且现在会把过程和结论明确写进 transcript / UI。
+- **已经下线的环节**
+  - `update_plan` 不再在 code review 后派发 verifier。
+  - `update_plan` tool result 不再返回 `verify` 字段。
+- **为什么这样改**
+  - 先把“代码审查闭环”和“UI 可见过程”做扎实。
+  - verifier 继续保留实现与测试资产，后续要恢复时不用重写。
+
 本文档是 **T2-P1-002 | plan-mode-enhance** 的横向调研 + 落地选型方案，承接 [`plan-runtime.md`](./plan-runtime.md)、[`tools/reviewer.md`](./tools/reviewer.md)、[`tools/read.md`](./tools/read.md) 与 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。**实现以仓库代码为准**；文中 **PENDING / PARTIAL** 验收项表示仍有缺口待补。
 
 §4.1 **「决策」**列（裁决结论）；其他表末列 **「说人话」** 与 ARCHITECTURE_SPEC **§14.1** 对齐。

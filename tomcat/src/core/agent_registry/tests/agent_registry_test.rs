@@ -61,7 +61,7 @@ async fn spawn_subagent_internal_is_only_child_construction_point() {
     let _g = reg.register_root_for_test("root").unwrap();
     assert_eq!(reg.active_count(), 1);
     let outcome = reg
-        .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+        .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
             SubagentOutcome {
                 child_session_id: ctx.child_session_id,
                 subagent_type: ctx.subagent_type,
@@ -86,7 +86,7 @@ async fn cascade_abort_propagates_to_descendants() {
     let reg_clone = Arc::clone(&reg);
     let join = tokio::spawn(async move {
         reg_clone
-            .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+            .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
                 ctx.cancel_token.cancelled().await;
                 SubagentOutcome {
                     child_session_id: ctx.child_session_id,
@@ -122,7 +122,7 @@ async fn max_spawn_depth_enforced() {
     let _g = reg.register_root_for_test("root").unwrap();
     // depth 0 → 1：允许
     let outcome = reg
-        .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+        .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
             // 在子内部再 spawn 一层 → depth 2 应拒
             SubagentOutcome {
                 child_session_id: ctx.child_session_id,
@@ -138,7 +138,7 @@ async fn max_spawn_depth_enforced() {
     // 直接尝试以子 session_id 作为父 spawn —— 但子已 unregister，故先重建一个 depth=1 的 handle
     let depth1_handle = Arc::new(AgentHandle {
         session_id: "deep-1".to_string(),
-        subagent_type: SubagentType::Reviewer,
+        subagent_type: SubagentType::PlanReviewer,
         spawn_depth: 1,
         parent_session_id: Some("root".into()),
         cancel_token: Mutex::new(CancellationToken::new()),
@@ -146,7 +146,7 @@ async fn max_spawn_depth_enforced() {
     });
     reg.register(depth1_handle).unwrap();
     let err = reg
-        .spawn_subagent_internal("deep-1", SubagentType::Reviewer, |ctx| async move {
+        .spawn_subagent_internal("deep-1", SubagentType::PlanReviewer, |ctx| async move {
             SubagentOutcome {
                 child_session_id: ctx.child_session_id,
                 subagent_type: ctx.subagent_type,
@@ -167,7 +167,7 @@ async fn max_concurrent_agents_enforced() {
     let _g2 = reg.register_root_for_test("b").unwrap();
     let _g3 = reg.register_root_for_test("c").unwrap();
     let err = reg
-        .spawn_subagent_internal("a", SubagentType::Reviewer, |ctx| async move {
+        .spawn_subagent_internal("a", SubagentType::PlanReviewer, |ctx| async move {
             SubagentOutcome {
                 child_session_id: ctx.child_session_id,
                 subagent_type: ctx.subagent_type,
@@ -193,7 +193,7 @@ async fn max_children_per_agent_enforced() {
         let release_clone = Arc::clone(&release);
         tokio::spawn(async move {
             reg_clone
-                .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+                .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
                     started_clone.fetch_add(1, Ordering::Relaxed);
                     release_clone.notified().await;
                     SubagentOutcome {
@@ -217,7 +217,7 @@ async fn max_children_per_agent_enforced() {
 
     // 第三次 spawn 应被 per-agent 限流拦下
     let err = reg
-        .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+        .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
             SubagentOutcome {
                 child_session_id: ctx.child_session_id,
                 subagent_type: ctx.subagent_type,
@@ -249,7 +249,7 @@ fn concurrent_preflight_and_register_respects_global_limit_atomically() {
         let barrier_clone = Arc::clone(&barrier);
         joins.push(std::thread::spawn(move || {
             barrier_clone.wait();
-            reg_clone.preflight_and_register("root", SubagentType::Reviewer)
+            reg_clone.preflight_and_register("root", SubagentType::PlanReviewer)
         }));
     }
 
@@ -294,7 +294,7 @@ fn concurrent_preflight_and_register_respects_children_limit_atomically() {
         let barrier_clone = Arc::clone(&barrier);
         joins.push(std::thread::spawn(move || {
             barrier_clone.wait();
-            reg_clone.preflight_and_register("root", SubagentType::Reviewer)
+            reg_clone.preflight_and_register("root", SubagentType::PlanReviewer)
         }));
     }
 
@@ -328,12 +328,12 @@ async fn subagent_panic_does_not_kill_parent() {
     let reg = fresh_registry();
     let _g = reg.register_root_for_test("root").unwrap();
     let err = reg
-        .spawn_subagent_internal("root", SubagentType::Reviewer, |_ctx| async move {
+        .spawn_subagent_internal("root", SubagentType::PlanReviewer, |_ctx| async move {
             panic!("intentional panic");
             #[allow(unreachable_code)]
             SubagentOutcome {
                 child_session_id: String::new(),
-                subagent_type: SubagentType::Reviewer,
+                subagent_type: SubagentType::PlanReviewer,
                 outcome_label: SubagentOutcomeLabel::Failed,
                 error_message: None,
             }
@@ -351,7 +351,7 @@ async fn subagent_panic_does_not_kill_parent() {
 
     // 还能继续 spawn
     let outcome = reg
-        .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+        .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
             SubagentOutcome {
                 child_session_id: ctx.child_session_id,
                 subagent_type: ctx.subagent_type,
@@ -382,7 +382,7 @@ async fn subagent_events_bind_payload_and_context_to_child_session() {
     }
 
     let outcome = reg
-        .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+        .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
             SubagentOutcome {
                 child_session_id: ctx.child_session_id,
                 subagent_type: ctx.subagent_type,
@@ -425,7 +425,7 @@ async fn parent_aborted_blocks_new_spawn() {
     let _g = reg.register_root_for_test("root").unwrap();
     reg.cascade_abort("root");
     let err = reg
-        .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+        .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
             SubagentOutcome {
                 child_session_id: ctx.child_session_id,
                 subagent_type: ctx.subagent_type,
@@ -457,7 +457,7 @@ async fn rearm_root_replaces_cancelled_token_and_allows_new_spawn() {
     );
 
     let outcome = reg
-        .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+        .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
             SubagentOutcome {
                 child_session_id: ctx.child_session_id,
                 subagent_type: ctx.subagent_type,
@@ -481,7 +481,7 @@ async fn parent_turn_token_cancel_propagates_to_spawned_child_tokens() {
     let reg_clone = Arc::clone(&reg);
     let join = tokio::spawn(async move {
         reg_clone
-            .spawn_subagent_internal("root", SubagentType::Reviewer, |ctx| async move {
+            .spawn_subagent_internal("root", SubagentType::PlanReviewer, |ctx| async move {
                 ctx.cancel_token.cancelled().await;
                 SubagentOutcome {
                     child_session_id: ctx.child_session_id,
@@ -514,7 +514,7 @@ async fn parent_turn_token_cancel_propagates_to_spawned_child_tokens() {
 async fn parent_not_found_returns_err() {
     let reg = fresh_registry();
     let err = reg
-        .spawn_subagent_internal("ghost", SubagentType::Reviewer, |ctx| async move {
+        .spawn_subagent_internal("ghost", SubagentType::PlanReviewer, |ctx| async move {
             SubagentOutcome {
                 child_session_id: ctx.child_session_id,
                 subagent_type: ctx.subagent_type,

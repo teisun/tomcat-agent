@@ -186,6 +186,99 @@ describe("WebviewStateStore wire routing", () => {
     });
   });
 
+  it("shows a running code review row and settles it with the structured verdict", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applySessionState({
+      busy: false,
+      model: "gpt-5.4",
+      planId: "plan-1",
+      planPath: "/workspace/plans/plan-1.plan.md",
+      planState: "executing",
+      sessionId: "s1",
+    });
+
+    store.applyEvent({
+      sessionId: "s1",
+      subagentType: "code_reviewer",
+      type: "sub_agent_start",
+    } as never);
+
+    let review = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item) => item.type === "review");
+    expect(review).toMatchObject({
+      id: "review:plan-1",
+      planId: "plan-1",
+      status: "running",
+      type: "review",
+    });
+
+    store.applyEvent({
+      findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
+      planId: "plan-1",
+      rounds: 1,
+      sessionId: "s1",
+      summary: "Fix the missing null guard before completing the plan.",
+      type: "plan.code_review",
+      verdict: "partial",
+    } as never);
+
+    const reviews = store
+      .snapshot()
+      .sessionViews.s1.timeline.filter((item) => item.type === "review");
+    expect(reviews).toHaveLength(1);
+    review = reviews[0];
+    expect(review).toMatchObject({
+      findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
+      planId: "plan-1",
+      rounds: 1,
+      status: "done",
+      summary: "Fix the missing null guard before completing the plan.",
+      type: "review",
+      verdict: "partial",
+    });
+  });
+
+  it("settles an unfinished code review row as aborted when the sub-agent ends early", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applySessionState({
+      busy: false,
+      model: "gpt-5.4",
+      planId: "plan-1",
+      planPath: "/workspace/plans/plan-1.plan.md",
+      planState: "executing",
+      sessionId: "s1",
+    });
+
+    store.applyEvent({
+      sessionId: "s1",
+      subagentType: "code_reviewer",
+      type: "sub_agent_start",
+    } as never);
+    store.applyEvent({
+      outcome: "completed",
+      sessionId: "s1",
+      subagentType: "code_reviewer",
+      type: "sub_agent_end",
+    } as never);
+
+    const review = store
+      .snapshot()
+      .sessionViews.s1.timeline.find((item) => item.type === "review");
+    expect(review).toMatchObject({
+      id: "review:plan-1",
+      planId: "plan-1",
+      status: "done",
+      type: "review",
+      verdict: "aborted",
+    });
+    expect(review?.type === "review" ? review.summary : null).toContain(
+      "ended before a structured verdict",
+    );
+  });
+
   it("maps turn_end summaryTitle onto the matching tool group", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
@@ -1525,6 +1618,17 @@ describe("custom history replay", () => {
           type: "custom",
         },
         {
+          aborted: false,
+          event: "plan.code_review",
+          findings: [{ area: "tests", note: "Add a regression test for the fix.", severity: "suggestion" }],
+          id: "code-review-1",
+          plan_id: "plan-1",
+          rounds: 1,
+          summary: "One follow-up test is still missing.",
+          type: "custom",
+          verdict: "partial",
+        },
+        {
           event: "plan.verify",
           id: "verify-1",
           plan_id: "plan-1",
@@ -1555,6 +1659,7 @@ describe("custom history replay", () => {
     const warnings = session.timeline.filter(
       (item) => item.type === "message" && item.kind === "warn",
     );
+    const reviewRow = session.timeline.find((item) => item.type === "review");
     expect(session.timeline.filter((item) => item.type === "plan")).toEqual([]);
     expect(session.planFile).toMatchObject({
       path: "/workspace/plan-a.plan.md",
@@ -1568,6 +1673,15 @@ describe("custom history replay", () => {
         expect.objectContaining({ text: "Tomcat plan verify: pass" }),
       ]),
     );
+    expect(reviewRow).toMatchObject({
+      findings: [{ area: "tests", note: "Add a regression test for the fix.", severity: "suggestion" }],
+      planId: "plan-1",
+      rounds: 1,
+      status: "done",
+      summary: "One follow-up test is still missing.",
+      type: "review",
+      verdict: "partial",
+    });
     expect(warnings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ text: "Tomcat plan warning: rounds_exhausted" }),

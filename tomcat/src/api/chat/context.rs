@@ -615,7 +615,29 @@ impl ChatContext {
             );
         let read_file_state =
             Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::default());
-        let prod_reviewer = plan_runtime::prod_reviewer::ProdReviewerDispatcher::new(
+        let prod_plan_reviewer = plan_runtime::prod_reviewer::ProdPlanReviewerDispatcher::new(
+            "chat_context",
+            plan_runtime::prod_reviewer::ProdReviewerDeps {
+                agent_registry: agent_registry.clone(),
+                parent_session_id: current_session_entry.session_id.clone(),
+                llm: llm.clone(),
+                compaction_provider: child_agent_compaction_provider.clone(),
+                primitive: primitive.clone(),
+                event_bus: event_bus.clone(),
+                agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+                checkpoint_store: checkpoint_store.clone(),
+                context_config: child_agent_context_config.clone(),
+                read_file_state: read_file_state.clone(),
+                openai_files_runtime: openai_files_runtime.clone(),
+                agent_workspace_dir: agent_workspace_dir.clone(),
+                skill_set: skill_set.clone(),
+                skills_config: config.skills.clone(),
+                plan_runtime: Arc::downgrade(&plan_runtime),
+                model: reviewer_model.clone(),
+                max_turns: reviewer_max_turns,
+            },
+        );
+        let prod_code_reviewer = plan_runtime::prod_reviewer::ProdCodeReviewerDispatcher::new(
             "chat_context",
             plan_runtime::prod_reviewer::ProdReviewerDeps {
                 agent_registry: agent_registry.clone(),
@@ -637,7 +659,8 @@ impl ChatContext {
                 max_turns: reviewer_max_turns,
             },
         );
-        plan_runtime.attach_reviewer(Arc::new(prod_reviewer));
+        plan_runtime.attach_plan_reviewer(Arc::new(prod_plan_reviewer));
+        plan_runtime.attach_code_reviewer(Arc::new(prod_code_reviewer));
         let prod_verifier = plan_runtime::verify::ProdVerifierDispatcher::new(
             "chat_context",
             plan_runtime::verify::ProdVerifierDeps {

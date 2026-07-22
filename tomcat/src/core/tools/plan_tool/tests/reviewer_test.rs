@@ -9,7 +9,7 @@ async fn create_plan_internally_dispatches_reviewer_with_real_summary() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+    rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         ok_review(),
     ])));
     rt.enter_planning().unwrap();
@@ -27,8 +27,8 @@ async fn create_plan_succeeds_even_when_reviewer_aborts() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
-        ReviewSummary::aborted_with("simulated parse error"),
+    rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
+        PlanReviewSummary::aborted_with("simulated parse error"),
     ])));
     rt.enter_planning().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
@@ -73,14 +73,13 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
 
     struct LockAcquiringMock;
     #[async_trait]
-    impl ReviewerDispatcher for LockAcquiringMock {
+    impl PlanReviewerDispatcher for LockAcquiringMock {
         async fn dispatch(
             &self,
             plan_id: &str,
             _plan_text: &str,
-            _kind: ReviewKind,
             _allow_review_edit: bool,
-        ) -> ReviewSummary {
+        ) -> PlanReviewSummary {
             use crate::core::plan_runtime::file_store::{plan_path_for_id, with_advisory_lock};
             let path = plan_path_for_id(plan_id).unwrap();
             let lock_path = path.with_file_name(format!(
@@ -91,19 +90,19 @@ async fn dispatch_reviewer_releases_plan_lock_before_spawn() {
                 Ok::<_, crate::core::plan_runtime::file_store::PlanError>(())
             });
             match r {
-                Ok(()) => ReviewSummary {
+                Ok(()) => PlanReviewSummary {
                     aborted: false,
                     summary: "lock acquired by reviewer (write_plan 已释放)".into(),
                     changes_summary: "none".into(),
                     applied_changes: false,
                     ..Default::default()
                 },
-                Err(e) => ReviewSummary::aborted_with(format!("LockBusy: {e}")),
+                Err(e) => PlanReviewSummary::aborted_with(format!("LockBusy: {e}")),
             }
         }
     }
 
-    rt.attach_reviewer(std::sync::Arc::new(LockAcquiringMock));
+    rt.attach_plan_reviewer(std::sync::Arc::new(LockAcquiringMock));
     rt.enter_planning().unwrap();
     let out = create_plan::execute_with_reviewer(&rt, good_args_with_todo(), false)
         .await
@@ -163,7 +162,7 @@ async fn reviewer_summary_lands_in_transcript_plan_review() {
         }));
     }
 
-    let summary = ReviewSummary {
+    let summary = PlanReviewSummary {
         aborted: false,
         summary: "ok".into(),
         changes_summary: "none".into(),
@@ -174,7 +173,7 @@ async fn reviewer_summary_lands_in_transcript_plan_review() {
         child_session_id: "child-1".into(),
         ..Default::default()
     };
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+    rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         summary,
     ])));
     rt.enter_planning().unwrap();
@@ -212,7 +211,7 @@ async fn reviewer_writes_warning_event_on_second_round() {
             Ok(())
         }));
     }
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+    rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         ok_review(),
         ok_review(),
     ])));
@@ -242,20 +241,19 @@ async fn reviewer_dispatch_invokes_mock_without_abort_param() {
         called: std::sync::Arc<AtomicBool>,
     }
     #[async_trait]
-    impl ReviewerDispatcher for CallTrackingMock {
+    impl PlanReviewerDispatcher for CallTrackingMock {
         async fn dispatch(
             &self,
             _plan_id: &str,
             _plan_text: &str,
-            _kind: ReviewKind,
             _allow_review_edit: bool,
-        ) -> ReviewSummary {
+        ) -> PlanReviewSummary {
             self.called.store(true, Ordering::Release);
             ok_review()
         }
     }
     let called = std::sync::Arc::new(AtomicBool::new(false));
-    rt.attach_reviewer(std::sync::Arc::new(CallTrackingMock {
+    rt.attach_plan_reviewer(std::sync::Arc::new(CallTrackingMock {
         called: std::sync::Arc::clone(&called),
     }));
     rt.enter_planning().unwrap();
@@ -272,7 +270,7 @@ async fn reviewer_round_count_warns_after_threshold() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
-    rt.attach_reviewer(std::sync::Arc::new(MockReviewerDispatcher::new(vec![
+    rt.attach_plan_reviewer(std::sync::Arc::new(MockPlanReviewerDispatcher::new(vec![
         ok_review(),
         ok_review(),
     ])));

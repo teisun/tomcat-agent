@@ -53,8 +53,9 @@ use tracing::warn;
 use super::config_backend::SharedConfigBackend;
 use super::types::{BackgroundCompletionRoutes, ToolCallInfo};
 use guard::{
-    is_reviewer_whitelisted_tool, is_verifier_whitelisted_tool,
-    reviewer_allowed_tools_description_with_policy, verifier_allowed_tools_description,
+    is_code_reviewer_whitelisted_tool, is_plan_reviewer_whitelisted_tool,
+    is_verifier_whitelisted_tool, reviewer_allowed_tools_description,
+    verifier_allowed_tools_description,
 };
 
 /// Agent Loop 直接触发的工具调用使用的固定 `plugin_id` 标签。
@@ -145,7 +146,6 @@ struct ToolExecCtx<'a> {
     plan_runtime: Option<&'a Arc<crate::core::plan_runtime::PlanRuntime>>,
     skill_set: Option<&'a Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
-    review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
     expose_skills_to_reviewer: bool,
     cancel: &'a tokio_util::sync::CancellationToken,
     event_emitter: Option<&'a ScopedEventEmitter>,
@@ -202,7 +202,6 @@ pub(super) async fn execute_tool_with_openai_files(
         None,
         None,
         crate::core::agent_loop::types::SubagentType::User,
-        None,
         &tokio_util::sync::CancellationToken::new(),
         tc,
         None,
@@ -231,7 +230,6 @@ pub(super) async fn execute_tool_full(
     plan_runtime: Option<&Arc<crate::core::plan_runtime::PlanRuntime>>,
     skill_set: Option<&Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
-    review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
     // P1（bash background monitor）：传 event_bus 给 task_output(block=true) 发倒计时
@@ -253,7 +251,6 @@ pub(super) async fn execute_tool_full(
         plan_runtime,
         skill_set,
         subagent_type,
-        review_kind,
         false,
         cancel,
         tc,
@@ -277,7 +274,6 @@ pub(super) async fn execute_tool_full_with_policy(
     plan_runtime: Option<&Arc<crate::core::plan_runtime::PlanRuntime>>,
     skill_set: Option<&Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>>,
     subagent_type: crate::core::agent_loop::types::SubagentType,
-    review_kind: Option<crate::core::plan_runtime::review::ReviewKind>,
     expose_skills_to_reviewer: bool,
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
@@ -298,7 +294,6 @@ pub(super) async fn execute_tool_full_with_policy(
         plan_runtime,
         skill_set,
         subagent_type,
-        review_kind,
         expose_skills_to_reviewer,
         cancel,
         event_emitter,
@@ -335,21 +330,24 @@ async fn execute_tool_tuple_full(
     // B3-guard：reviewer 子 Agent 不允许调 catalog 白名单外的任何工具（双保险——
     // catalog 已被 `resolve_internal_tools` 过滤过，这里再拦一道，防 dispatcher 直调或
     // catalog 漂移；与 reviewer.md §5.2 / §5.5 一致）。
-    if ctx.subagent_type == crate::core::agent_loop::types::SubagentType::Reviewer
-        && !is_reviewer_whitelisted_tool(
-            tc.name.as_str(),
-            ctx.review_kind,
-            ctx.expose_skills_to_reviewer,
-        )
-    {
+    if matches!(
+        ctx.subagent_type,
+        crate::core::agent_loop::types::SubagentType::PlanReviewer
+            | crate::core::agent_loop::types::SubagentType::CodeReviewer
+    ) && !match ctx.subagent_type {
+        crate::core::agent_loop::types::SubagentType::PlanReviewer => {
+            is_plan_reviewer_whitelisted_tool(tc.name.as_str(), ctx.expose_skills_to_reviewer)
+        }
+        crate::core::agent_loop::types::SubagentType::CodeReviewer => {
+            is_code_reviewer_whitelisted_tool(tc.name.as_str(), ctx.expose_skills_to_reviewer)
+        }
+        _ => true,
+    } {
         return (
             format!(
                 "reviewer 子 Agent 禁止调用工具 `{}`（仅允许 {}；create_plan 防套娃；write/dispatch_agent/checkpoint 永不可用）",
                 tc.name,
-                reviewer_allowed_tools_description_with_policy(
-                    ctx.review_kind,
-                    ctx.expose_skills_to_reviewer,
-                ),
+                reviewer_allowed_tools_description(ctx.subagent_type, ctx.expose_skills_to_reviewer),
             ),
             true,
             Vec::new(),
@@ -388,13 +386,12 @@ async fn execute_tool_tuple_full(
             let path_arg = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             if !path_arg.is_empty() {
                 let mode = rt.mode();
-                let subagent_kind = match (ctx.subagent_type, ctx.review_kind) {
-                    (
-                        crate::core::agent_loop::types::SubagentType::Reviewer,
-                        Some(crate::core::plan_runtime::review::ReviewKind::Code),
-                    ) => crate::core::plan_runtime::safety::SubagentKind::CodeReviewer,
-                    (crate::core::agent_loop::types::SubagentType::Reviewer, _) => {
-                        crate::core::plan_runtime::safety::SubagentKind::Reviewer
+                let subagent_kind = match ctx.subagent_type {
+                    crate::core::agent_loop::types::SubagentType::PlanReviewer => {
+                        crate::core::plan_runtime::safety::SubagentKind::PlanReviewer
+                    }
+                    crate::core::agent_loop::types::SubagentType::CodeReviewer => {
+                        crate::core::plan_runtime::safety::SubagentKind::CodeReviewer
                     }
                     _ => crate::core::plan_runtime::safety::SubagentKind::Other,
                 };

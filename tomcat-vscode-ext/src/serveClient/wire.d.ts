@@ -85,6 +85,11 @@ export type ServeContextRefKind = "selection" | "file";
 
 export type ServeEvent = ServePlanEvent | ServeSessionEvent | ServeToolEvent | ServeTurnEvent | WireEvent;
 
+export interface ServeFinding {
+  area: string;
+  note: string;
+  severity: string;
+}
 export interface ServeMessageParams {
   attachments?: ServeAttachment[];
   segments?: ServeContentSegment[];
@@ -92,10 +97,14 @@ export interface ServeMessageParams {
 }
 export type ServePlanEvent = {
   aborted?: boolean | null;
+  changesSummary?: null | string;
+  findings?: ServeFinding[] | null;
   planId?: null | string;
+  rounds?: null | number;
   sessionId?: null | string;
   summary?: null | string;
   type: "plan.code_review";
+  verdict?: null | string;
 } | {
   aborted?: boolean | null;
   planId?: null | string;

@@ -112,7 +112,7 @@ fn reviewer_subagent_must_target_plan_files() {
     let _g = home_lock().lock().unwrap();
     let _home = setup_home();
     let outside = std::path::PathBuf::from("/tmp/foo.txt");
-    let err = enforce_write_path_policy(&PlanState::Chat, SubagentKind::Reviewer, &outside)
+    let err = enforce_write_path_policy(&PlanState::Chat, SubagentKind::PlanReviewer, &outside)
         .expect_err("reviewer 不能写 plans/ 外路径");
     assert!(matches!(err, WritePathDenied::ReviewerOnlyPlanFiles));
 }
@@ -122,7 +122,7 @@ fn reviewer_subagent_allows_tilde_expanded_plan_file() {
     let _g = home_lock().lock().unwrap();
     let _home = setup_home();
     let target = std::path::PathBuf::from("~/.tomcat/plans/foo.plan.md");
-    enforce_write_path_policy(&PlanState::Chat, SubagentKind::Reviewer, &target)
+    enforce_write_path_policy(&PlanState::Chat, SubagentKind::PlanReviewer, &target)
         .expect("reviewer 应接受 ~ 展开的 plans 路径");
 }
 

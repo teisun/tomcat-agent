@@ -21,10 +21,12 @@ use tomcat::core::plan_runtime::panels::{
     Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel, Question, QuestionOption,
     CUSTOM_OPTION_ID,
 };
-use tomcat::core::plan_runtime::review::{ReviewKind, ReviewSummary};
 use tomcat::core::plan_runtime::state::PlanState;
 use tomcat::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
-use tomcat::core::plan_runtime::{PlanRuntime, ReviewerDispatcher, VerifierDispatcher};
+use tomcat::core::plan_runtime::{
+    CodeReviewSummary, CodeReviewerDispatcher, PlanReviewSummary, PlanReviewerDispatcher,
+    PlanRuntime, VerifierDispatcher,
+};
 use tomcat::core::tools::plan_tool::{ask_question, create_plan, todos, update_plan};
 use tomcat::normalize_path;
 
@@ -90,17 +92,30 @@ fn home_lock() -> &'static parking_lot::Mutex<()> {
     M.get_or_init(|| parking_lot::Mutex::new(()))
 }
 
-struct AcceptReviewer;
+struct AcceptPlanReviewer;
 #[async_trait::async_trait]
-impl ReviewerDispatcher for AcceptReviewer {
+impl PlanReviewerDispatcher for AcceptPlanReviewer {
     async fn dispatch(
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        _kind: ReviewKind,
         _allow_review_edit: bool,
-    ) -> ReviewSummary {
-        ReviewSummary {
+    ) -> PlanReviewSummary {
+        PlanReviewSummary {
+            aborted: false,
+            summary: "looks good".into(),
+            changes_summary: "none".into(),
+            applied_changes: false,
+            ..Default::default()
+        }
+    }
+}
+
+struct AcceptCodeReviewer;
+#[async_trait::async_trait]
+impl CodeReviewerDispatcher for AcceptCodeReviewer {
+    async fn dispatch(&self, _plan_id: &str, _plan_text: &str) -> CodeReviewSummary {
+        CodeReviewSummary {
             aborted: false,
             verdict: Some("pass".into()),
             summary: "looks good".into(),
@@ -132,7 +147,8 @@ impl VerifierDispatcher for AcceptVerifier {
 }
 
 fn attach_passing_completion_dispatchers(runtime: &PlanRuntime) {
-    runtime.attach_reviewer(Arc::new(AcceptReviewer));
+    runtime.attach_plan_reviewer(Arc::new(AcceptPlanReviewer));
+    runtime.attach_code_reviewer(Arc::new(AcceptCodeReviewer));
     runtime.attach_verifier(Arc::new(AcceptVerifier));
 }
 
@@ -452,7 +468,7 @@ async fn create_plan_dispatches_reviewer_summary_into_tool_result() {
     let _g = home_lock().lock();
     let home = isolated_home();
     let rt = PlanRuntime::new("ses-rv");
-    rt.attach_reviewer(Arc::new(AcceptReviewer));
+    rt.attach_plan_reviewer(Arc::new(AcceptPlanReviewer));
     rt.enter_planning().unwrap();
     let out = tokio::time::timeout(
         DEFAULT_TIMEOUT,
