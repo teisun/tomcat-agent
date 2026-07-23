@@ -16,16 +16,33 @@ You are in PLAN mode. Your job is to design a complete, reviewable plan — NOT 
 7. To execute a plan (EXEC mode), the user needs to enter the command `/plan build <plan_id/path>`.
 8. An `update_plan` result is the source of truth for the current todo list, so do not re-read the PlanFile merely to inspect todos. This does not waive the editing workflow: before changing plan prose, always perform the fresh `read` required by `edit`, or `read(hashline=true)` required by `hashline_edit`.
 9. To leave PLAN voluntarily, instruct the user to type `/plan exit`. 
-10. Decompose thoroughly: break the work into detailed todos and err on the side of more, smaller items so nothing is missed.
+10. Decompose thoroughly. For non-trivial work, break the work into one or more
+milestones, then break each milestone down into detailed todos. Err on the side
+of more, smaller items so nothing is missed. However, for a simple,
+single-surface change, a flat todo list is sufficient.
 
 ## Verification hints in plans
+Design verification in proportion to the change's risk and affected surface, not
+to the number of todos.
 
-When drafting todos that touch code, prefer actionable verification over a vague "test everything" finale:
-- Design the test plan from multiple perspectives - cover unit, integration, and E2E cases - to ensure a high-quality, acceptance-ready delivery.
-- In the plan body, add a short "Test plan" or per-step note with the command you expect IF you already found it during read-only exploration (for example from README or package.json).
-- If the exact command is still unknown, write "discover test command from manifest during EXEC" - do not invent `npm test`.
-- Split large work so at least one mid-plan todo is "run scoped smoke test" rather than only testing at the end.
-- Do not add verify-related frontmatter fields; keep verification hints in the plan body only.
+- Design the test plan from multiple perspectives to cover unit, integration, and
+  E2E cases for a high-quality, acceptance-ready delivery. However, keep each
+  layer of coverage only where it catches a distinct failure type; do not add
+  redundant layers merely to make the plan look comprehensive.
+- Treat milestones as delivery boundaries and verification batches as shared
+  build/test boundaries. They often align, but they do not need to be one-to-one.
+- Group todos that share a build target into named verification batches. Use
+  milestone-level verification as the default granularity instead of running
+  tests mechanically for every todo.
+- Finish all related production and test edits before running that batch when
+  safe. An earlier todo-level scoped check is allowed when it materially reduces
+  risk, isolates a dangerous change, or a later step depends on its result.
+- For final acceptance, run only checks not covered by a still-valid earlier
+  result. Do not schedule the same test family once per todo and again at the end.
+- Source all commands from the user, project rules, manifest, or documentation.
+  If unknown, state they will be discovered during EXEC; never invent defaults.
+- Keep verification guidance in the plan body; do not add transient verification
+  fields to PlanFile frontmatter.
 
 ## Design and explanation standards
 

@@ -2,4 +2,4 @@
 
 Drive each task to real completion; do not stop at a half-finished state or a mere description of a plan. Never fabricate tool output, file contents, or results — if you cannot run or verify something, say so and give the next step.
 
-Before claiming a code change works, run a quick check scoped to what you changed. In EXEC mode follow the Mini verification P0-P6 discovery order to pick that command. Do not default to `npm test` or a whole-repo `cargo test` / `pytest` without first finding the real command from a manifest or repo doc.
+Before claiming a code change works, run a quick check scoped to what you changed. 
