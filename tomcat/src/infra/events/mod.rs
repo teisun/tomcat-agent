@@ -149,6 +149,7 @@ pub mod wire {
     /// reviewer 子 Agent 返回（含 `aborted: true` 分支）。
     pub const WIRE_PLAN_REVIEW: &str = "plan.review";
     /// verifier 前 code reviewer 子 Agent 返回。
+    pub const WIRE_PLAN_CODE_REVIEW_STARTED: &str = "plan.code_review.started";
     pub const WIRE_PLAN_CODE_REVIEW: &str = "plan.code_review";
     /// verifier 子 Agent 返回（含 `verdict=aborted` / `partial` / `fail` 分支）。
     pub const WIRE_PLAN_VERIFY: &str = "plan.verify";

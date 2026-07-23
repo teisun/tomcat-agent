@@ -545,6 +545,21 @@ pub enum ServePlanEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         aborted: Option<bool>,
     },
+    #[serde(rename = "plan.code_review.started")]
+    PlanCodeReviewStarted {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        round: Option<u32>,
+        #[serde(rename = "reviewAttemptId", skip_serializing_if = "Option::is_none")]
+        review_attempt_id: Option<String>,
+        #[serde(rename = "toolCallId", skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
+    },
     #[serde(rename = "plan.code_review")]
     PlanCodeReview {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
@@ -563,6 +578,14 @@ pub enum ServePlanEvent {
         findings: Option<Vec<ServeFinding>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         rounds: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        round: Option<u32>,
+        #[serde(rename = "reviewAttemptId", skip_serializing_if = "Option::is_none")]
+        review_attempt_id: Option<String>,
+        #[serde(rename = "toolCallId", skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
+        child_session_id: Option<String>,
     },
     #[serde(rename = "plan.verify")]
     PlanVerify {

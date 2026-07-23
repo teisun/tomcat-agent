@@ -2711,6 +2711,14 @@ input:focus-visible {
   );
 }
 
+.tc-disclosure-card--warning .tc-disclosure-card__status {
+  background: var(--vscode-charts-yellow, #cca700);
+}
+
+.tc-disclosure-card--neutral .tc-disclosure-card__status {
+  background: var(--vscode-descriptionForeground, rgba(127, 127, 127, 0.8));
+}
+
 .tc-disclosure-card__header {
   align-items: flex-start;
   display: flex;

@@ -136,6 +136,7 @@ impl ToolExecOutcome {
 struct ToolExecCtx<'a> {
     primitive: &'a Arc<dyn PrimitiveExecutor>,
     session_id: &'a str,
+    tool_call_id: &'a str,
     config_backend: &'a Option<SharedConfigBackend>,
     bash_task_registry: &'a Option<Arc<BashTaskRegistry>>,
     read_file_state: Option<&'a Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
@@ -284,6 +285,7 @@ pub(super) async fn execute_tool_full_with_policy(
     let ctx = ToolExecCtx {
         primitive,
         session_id,
+        tool_call_id: &tc.id,
         config_backend,
         bash_task_registry,
         read_file_state,

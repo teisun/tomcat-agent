@@ -186,97 +186,61 @@ describe("WebviewStateStore wire routing", () => {
     });
   });
 
-  it("shows a running code review row and settles it with the structured verdict", () => {
+  it("shows a running code review row and settles the same attempt with the structured verdict", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
     store.applySessionState({
-      busy: false,
-      model: "gpt-5.4",
-      planId: "plan-1",
-      planPath: "/workspace/plans/plan-1.plan.md",
-      planState: "executing",
-      sessionId: "s1",
+      busy: true, model: "gpt-5.4", planId: "plan-1",
+      planPath: "/workspace/plans/plan-1.plan.md", planState: "executing", sessionId: "s1",
     });
 
     store.applyEvent({
-      sessionId: "s1",
-      subagentType: "code_reviewer",
-      type: "sub_agent_start",
+      args: { ops: [{ id: "todo-1", kind: "set_status", status: "completed" }] },
+      sessionId: "s1", toolCallId: "tc-update", toolName: "update_plan", type: "tool_execution_start",
     } as never);
-
-    let review = store
-      .snapshot()
-      .sessionViews.s1.timeline.find((item) => item.type === "review");
-    expect(review).toMatchObject({
-      id: "review:plan-1",
-      planId: "plan-1",
-      status: "running",
-      type: "review",
-    });
-
     store.applyEvent({
-      findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
-      planId: "plan-1",
-      rounds: 1,
-      sessionId: "s1",
-      summary: "Fix the missing null guard before completing the plan.",
-      type: "plan.code_review",
-      verdict: "partial",
+      planId: "plan-1", reviewAttemptId: "plan-1:1", round: 1, sessionId: "s1",
+      toolCallId: "tc-update", type: "plan.code_review.started",
     } as never);
 
-    const reviews = store
-      .snapshot()
-      .sessionViews.s1.timeline.filter((item) => item.type === "review");
+    let reviews = store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "review");
     expect(reviews).toHaveLength(1);
-    review = reviews[0];
-    expect(review).toMatchObject({
+    const runningTimeline = store.snapshot().sessionViews.s1.timeline;
+    expect(runningTimeline.findIndex((item) => item.type === "review")).toBe(
+      runningTimeline.findIndex((item) => item.type === "tool" && item.toolCallId === "tc-update") + 1,
+    );
+    expect(reviews[0]).toMatchObject({
+      anchorToolCallId: "tc-update", id: "review:plan-1:1", planId: "plan-1",
+      reviewAttemptId: "plan-1:1", round: 1, status: "running", type: "review",
+    });
+
+    store.applyEvent({
+      outcome: "completed", sessionId: "s1", subagentType: "code_reviewer", type: "sub_agent_end",
+    } as never);
+    expect(store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "review")[0]).toMatchObject({ status: "running" });
+
+    store.applyEvent({
       findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
-      planId: "plan-1",
-      rounds: 1,
-      status: "done",
-      summary: "Fix the missing null guard before completing the plan.",
-      type: "review",
-      verdict: "partial",
+      planId: "plan-1", reviewAttemptId: "plan-1:1", round: 1, rounds: 1, sessionId: "s1",
+      summary: "Fix the missing null guard before completing the plan.", toolCallId: "tc-update",
+      type: "plan.code_review", verdict: "partial",
+    } as never);
+
+    reviews = store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "review");
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({
+      id: "review:plan-1:1", reviewAttemptId: "plan-1:1", status: "done",
+      verdict: "partial", findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
     });
   });
 
-  it("settles an unfinished code review row as aborted when the sub-agent ends early", () => {
+  it("ignores generic code reviewer lifecycle events without a plan review attempt", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
-    store.applySessionState({
-      busy: false,
-      model: "gpt-5.4",
-      planId: "plan-1",
-      planPath: "/workspace/plans/plan-1.plan.md",
-      planState: "executing",
-      sessionId: "s1",
-    });
-
-    store.applyEvent({
-      sessionId: "s1",
-      subagentType: "code_reviewer",
-      type: "sub_agent_start",
-    } as never);
-    store.applyEvent({
-      outcome: "completed",
-      sessionId: "s1",
-      subagentType: "code_reviewer",
-      type: "sub_agent_end",
-    } as never);
-
-    const review = store
-      .snapshot()
-      .sessionViews.s1.timeline.find((item) => item.type === "review");
-    expect(review).toMatchObject({
-      id: "review:plan-1",
-      planId: "plan-1",
-      status: "done",
-      type: "review",
-      verdict: "aborted",
-    });
-    expect(review?.type === "review" ? review.summary : null).toContain(
-      "ended before a structured verdict",
-    );
+    store.applySessionState({ busy: true, model: "gpt-5.4", planId: "plan-1", planState: "executing", sessionId: "s1" });
+    store.applyEvent({ sessionId: "s1", subagentType: "code_reviewer", type: "sub_agent_start" } as never);
+    store.applyEvent({ outcome: "completed", sessionId: "s1", subagentType: "code_reviewer", type: "sub_agent_end" } as never);
+    expect(store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "review")).toEqual([]);
   });
 
   it("maps turn_end summaryTitle onto the matching tool group", () => {

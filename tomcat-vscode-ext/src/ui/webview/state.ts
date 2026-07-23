@@ -160,7 +160,7 @@ function timelineEntityKey(item: WebviewTimelineItem): string {
     case "plan":
       return `plan:${item.planId ?? item.path}`;
     case "review":
-      return `review:${item.planId}`;
+      return `review:${item.reviewAttemptId}`;
   }
 }
 
@@ -267,10 +267,31 @@ function parseReviewFindings(value: unknown): WebviewReviewFinding[] {
   });
 }
 
-function upsertRunningCodeReviewRow(session: WebviewSessionSnapshot, planId: string): void {
+function reviewAttemptId(planId: string, round: unknown, explicit: unknown): string {
+  if (typeof explicit === "string" && explicit.length > 0) {
+    return explicit;
+  }
+  return `${planId}:${typeof round === "number" ? round : 1}`;
+}
+
+function upsertRunningCodeReviewRow(
+  session: WebviewSessionSnapshot,
+  input: { planId: string; reviewAttemptId?: unknown; round?: unknown; toolCallId?: unknown },
+): void {
+  const attemptId = reviewAttemptId(input.planId, input.round, input.reviewAttemptId);
+  const existing = session.timeline.find(
+    (item): item is WebviewReviewRow =>
+      item.type === "review" && item.reviewAttemptId === attemptId,
+  );
+  if (existing?.status === "done") {
+    return;
+  }
   upsertTimelineItem(session, {
-    id: `review:${planId}`,
-    planId,
+    anchorToolCallId: typeof input.toolCallId === "string" ? input.toolCallId : null,
+    id: `review:${attemptId}`,
+    planId: input.planId,
+    reviewAttemptId: attemptId,
+    round: typeof input.round === "number" ? input.round : null,
     status: "running",
     type: "review",
   } satisfies WebviewReviewRow);
@@ -282,18 +303,26 @@ function upsertDoneCodeReviewRow(
     aborted?: unknown;
     findings?: unknown;
     planId: string;
+    reviewAttemptId?: unknown;
+    round?: unknown;
     rounds?: unknown;
+    toolCallId?: unknown;
     summary?: unknown;
     verdict?: unknown;
   },
 ): void {
   const verdict =
     parseReviewVerdict(input.verdict) ?? (input.aborted === true ? "aborted" : undefined);
+  const round = typeof input.round === "number" ? input.round : input.rounds;
+  const attemptId = reviewAttemptId(input.planId, round, input.reviewAttemptId);
   upsertTimelineItem(session, {
+    anchorToolCallId: typeof input.toolCallId === "string" ? input.toolCallId : null,
     findings: parseReviewFindings(input.findings),
-    id: `review:${input.planId}`,
+    id: `review:${attemptId}`,
     planId: input.planId,
-    rounds: typeof input.rounds === "number" ? input.rounds : null,
+    reviewAttemptId: attemptId,
+    round: typeof round === "number" ? round : null,
+    rounds: typeof round === "number" ? round : null,
     status: "done",
     summary: typeof input.summary === "string" ? input.summary : null,
     type: "review",
@@ -301,27 +330,26 @@ function upsertDoneCodeReviewRow(
   } satisfies WebviewReviewRow);
 }
 
-function settleRunningCodeReviewAsAborted(
-  session: WebviewSessionSnapshot,
-  planId: string,
-): void {
-  const existing = session.timeline.find(
-    (item): item is WebviewReviewRow => item.type === "review" && item.planId === planId,
-  );
-  if (!existing || existing.status !== "running") {
-    return;
-  }
-  upsertTimelineItem(session, {
-    ...existing,
-    status: "done",
-    summary:
-      existing.summary ?? "Code review ended before a structured verdict was emitted.",
-    verdict: "aborted",
-  });
-}
-
 function cloneTimelineItem<T extends WebviewTimelineItem>(item: T): T {
   return JSON.parse(JSON.stringify(item)) as T;
+}
+
+function reorderAnchoredReviewRows(session: WebviewSessionSnapshot): void {
+  const anchored = session.timeline.filter(
+    (item): item is WebviewReviewRow => item.type === "review" && Boolean(item.anchorToolCallId),
+  );
+  for (const review of anchored) {
+    const currentIndex = session.timeline.findIndex((item) => timelineEntityKey(item) === timelineEntityKey(review));
+    const anchorIndex = session.timeline.findIndex(
+      (item) => item.type === "tool" && item.toolCallId === review.anchorToolCallId,
+    );
+    if (currentIndex < 0 || anchorIndex < 0 || currentIndex === anchorIndex + 1) continue;
+    session.timeline.splice(currentIndex, 1);
+    const refreshedAnchorIndex = session.timeline.findIndex(
+      (item) => item.type === "tool" && item.toolCallId === review.anchorToolCallId,
+    );
+    session.timeline.splice(refreshedAnchorIndex + 1, 0, review);
+  }
 }
 
 function upsertTimelineItem(session: WebviewSessionSnapshot, item: WebviewTimelineItem): void {
@@ -329,9 +357,10 @@ function upsertTimelineItem(session: WebviewSessionSnapshot, item: WebviewTimeli
   const existingIndex = session.timeline.findIndex((entry) => timelineEntityKey(entry) === key);
   if (existingIndex >= 0) {
     session.timeline[existingIndex] = cloneTimelineItem(item);
-    return;
+  } else {
+    session.timeline.push(cloneTimelineItem(item));
   }
-  session.timeline.push(cloneTimelineItem(item));
+  reorderAnchoredReviewRows(session);
 }
 
 function pushTextSegment(segments: WebviewMessageSegment[], text: string): void {
@@ -841,13 +870,26 @@ function applyHistoryPlanCustomEntry(
         );
       }
       return;
+    case "plan.code_review.started":
+      if (planId) {
+        upsertRunningCodeReviewRow(session, {
+          planId,
+          reviewAttemptId: entry.review_attempt_id ?? entry.reviewAttemptId,
+          round: entry.round,
+          toolCallId: entry.tool_call_id ?? entry.toolCallId,
+        });
+      }
+      return;
     case "plan.code_review":
       if (planId) {
         upsertDoneCodeReviewRow(session, {
           aborted: entry.aborted,
           findings: entry.findings,
           planId,
+          reviewAttemptId: entry.review_attempt_id ?? entry.reviewAttemptId,
+          round: entry.round,
           rounds: entry.rounds,
+          toolCallId: entry.tool_call_id ?? entry.toolCallId,
           summary: entry.summary,
           verdict: entry.verdict,
         });
@@ -1878,24 +1920,14 @@ export class WebviewStateStore {
         }
         return;
       case "sub_agent_start":
-        if (frame.subagentType === "code_reviewer") {
-          const planId = activePlanId(session);
-          if (planId) {
-            upsertRunningCodeReviewRow(session, planId);
-            return;
-          }
+        if (frame.subagentType !== "code_reviewer") {
+          pushMessage(session, "notice", `Started ${frame.subagentType} sub-agent`);
         }
-        pushMessage(session, "notice", `Started ${frame.subagentType} sub-agent`);
         return;
       case "sub_agent_end":
-        if (frame.subagentType === "code_reviewer") {
-          const planId = activePlanId(session);
-          if (planId) {
-            settleRunningCodeReviewAsAborted(session, planId);
-            return;
-          }
+        if (frame.subagentType !== "code_reviewer") {
+          pushMessage(session, "notice", `Sub-agent ${frame.subagentType} ${frame.outcome}`);
         }
-        pushMessage(session, "notice", `Sub-agent ${frame.subagentType} ${frame.outcome}`);
         return;
       case "message_update": {
         const delta = getAssistantDelta(frame);
@@ -2213,13 +2245,26 @@ export class WebviewStateStore {
           );
         }
         return;
+      case "plan.code_review.started":
+        if (event.planId) {
+          upsertRunningCodeReviewRow(session, {
+            planId: event.planId,
+            reviewAttemptId: event.reviewAttemptId,
+            round: event.round,
+            toolCallId: event.toolCallId,
+          });
+        }
+        return;
       case "plan.code_review":
         if (event.planId) {
           upsertDoneCodeReviewRow(session, {
             aborted: event.aborted,
             findings: event.findings,
             planId: event.planId,
+            reviewAttemptId: event.reviewAttemptId,
+            round: event.round,
             rounds: event.rounds,
+            toolCallId: event.toolCallId,
             summary: event.summary,
             verdict: event.verdict,
           });

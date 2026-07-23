@@ -324,6 +324,50 @@ fn concurrent_preflight_and_register_respects_children_limit_atomically() {
 }
 
 #[tokio::test]
+async fn dropped_spawn_future_cancels_and_unregisters_child() {
+    let registry = fresh_registry();
+    let _root = registry.register_root_for_test("root-drop").unwrap();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let started_in_child = Arc::clone(&started);
+    let registry_for_spawn = Arc::clone(&registry);
+    let task = tokio::spawn(async move {
+        registry_for_spawn
+            .spawn_subagent_internal(
+                "root-drop",
+                SubagentType::CodeReviewer,
+                move |ctx| async move {
+                    started_in_child.notify_one();
+                    ctx.cancel_token.cancelled().await;
+                    SubagentOutcome {
+                        child_session_id: ctx.child_session_id,
+                        subagent_type: ctx.subagent_type,
+                        outcome_label: SubagentOutcomeLabel::Interrupted,
+                        error_message: None,
+                    }
+                },
+            )
+            .await
+    });
+    started.notified().await;
+    task.abort();
+    let _ = task.await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(
+        registry.active_count(),
+        1,
+        "only root must remain after dropped future"
+    );
+    assert!(registry
+        .handles
+        .read()
+        .get("root-drop")
+        .unwrap()
+        .children
+        .lock()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn subagent_panic_does_not_kill_parent() {
     let reg = fresh_registry();
     let _g = reg.register_root_for_test("root").unwrap();

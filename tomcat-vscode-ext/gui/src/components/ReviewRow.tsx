@@ -7,16 +7,11 @@ function verdictLabel(verdict: NonNullable<WebviewReviewRow["verdict"]>): string
 }
 
 function disclosureVariant(item: WebviewReviewRow): DisclosureStatusVariant {
-  if (item.status === "running") {
-    return "running";
-  }
-  if (item.verdict === "pass") {
-    return "success";
-  }
-  if (item.verdict === "fail") {
-    return "error";
-  }
-  return "running";
+  if (item.status === "running") return "running";
+  if (item.verdict === "pass") return "success";
+  if (item.verdict === "fail") return "error";
+  if (item.verdict === "partial") return "warning";
+  return "neutral";
 }
 
 export function ReviewRow({ item }: { item: WebviewReviewRow }) {
@@ -86,9 +81,9 @@ export function ReviewRow({ item }: { item: WebviewReviewRow }) {
         toggleTestId="review-row-toggle"
       >
         <div className="tc-review-row__details">
-          {item.rounds ? (
+          {item.round ?? item.rounds ? (
             <p className="tc-review-row__meta" data-testid="review-row-rounds">
-              Review round {item.rounds}
+              Review round {item.round ?? item.rounds}
             </p>
           ) : null}
           {item.summary ? (

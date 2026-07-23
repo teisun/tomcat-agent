@@ -184,9 +184,12 @@ export interface WebviewReviewFinding {
 }
 
 export interface WebviewReviewRow {
+  anchorToolCallId?: string | null;
   findings?: WebviewReviewFinding[];
   id: string;
   planId: string;
+  reviewAttemptId: string;
+  round?: number | null;
   rounds?: number | null;
   status: "done" | "running";
   summary?: string | null;
@@ -551,6 +554,13 @@ export type WebviewIntent =
           scrollTop: number;
         };
         timelineKinds: string[];
+        reviewRows: Array<{
+          anchorToolCallId: string | null;
+          id: string;
+          status: string;
+          top: number;
+          verdict: string | null;
+        }>;
         toolBodyMetrics: Array<{
           clientHeight: number;
           expanded: boolean;

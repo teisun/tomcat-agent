@@ -199,9 +199,12 @@ export interface WebviewReviewFinding {
 }
 
 export interface WebviewReviewRow {
+  anchorToolCallId?: string | null;
   findings?: WebviewReviewFinding[];
   id: string;
   planId: string;
+  reviewAttemptId: string;
+  round?: number | null;
   rounds?: number | null;
   status: "done" | "running";
   summary?: string | null;

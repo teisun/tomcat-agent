@@ -9,6 +9,8 @@ function buildReview(overrides: Partial<WebviewReviewRow> = {}): WebviewReviewRo
     findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
     id: "review:plan-1",
     planId: "plan-1",
+    reviewAttemptId: "plan-1:1",
+    round: 1,
     rounds: 1,
     status: "done",
     summary: "Fix the missing null guard before completing the plan.",

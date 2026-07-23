@@ -2391,9 +2391,12 @@ describe("webview provider integration", () => {
     });
 
     messenger.emit({
+      planId: "plan-1",
+      reviewAttemptId: "plan-1:1",
+      round: 1,
       sessionId: "session-1",
-      subagentType: "code_reviewer",
-      type: "sub_agent_start",
+      toolCallId: "tc-update",
+      type: "plan.code_review.started",
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -2401,8 +2404,10 @@ describe("webview provider integration", () => {
       .currentState()
       .sessionViews["session-1"]?.timeline.find((item) => item.type === "review");
     expect(review).toMatchObject({
-      id: "review:plan-1",
+      id: "review:plan-1:1",
       planId: "plan-1",
+      reviewAttemptId: "plan-1:1",
+      round: 1,
       status: "running",
       type: "review",
     });
@@ -2410,7 +2415,10 @@ describe("webview provider integration", () => {
     messenger.emit({
       findings: [{ area: "logic", note: "Missing null guard", severity: "concern" }],
       planId: "plan-1",
+      reviewAttemptId: "plan-1:1",
+      round: 1,
       rounds: 1,
+      toolCallId: "tc-update",
       sessionId: "session-1",
       summary: "Fix the missing null guard before completing the plan.",
       type: "plan.code_review",

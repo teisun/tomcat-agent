@@ -22,7 +22,9 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::{update_plan_locked, write_plan, PlanFileState, TodoStatus},
-    ops, state::PlanState, PlanRuntime,
+    ops,
+    state::PlanState,
+    PlanRuntime,
 };
 
 use super::shared_todo_ops::{apply_shared_todo_ops, items_json};
@@ -75,6 +77,14 @@ impl UpdatePlanArgs {
 pub async fn execute(
     runtime: &PlanRuntime,
     args: UpdatePlanArgs,
+) -> Result<serde_json::Value, ToolError> {
+    execute_for_tool(runtime, args, "legacy-update-plan").await
+}
+
+pub async fn execute_for_tool(
+    runtime: &PlanRuntime,
+    args: UpdatePlanArgs,
+    tool_call_id: &str,
 ) -> Result<serde_json::Value, ToolError> {
     let path = resolve_target_plan_path(runtime, args.plan_id, args.path)?;
     struct UpdateTxOutcome {
@@ -148,11 +158,28 @@ pub async fn execute(
     let mut warnings = tx.warnings;
 
     let mut code_review_json = serde_json::Value::Null;
+    if tx.derived_completed {
+        write_plan_progress_transcript(runtime, &target_plan_id, &path, &plan);
+    }
     let plan_state_after = if tx.derived_completed {
         if let Some(round) = runtime.try_begin_code_review_round(&target_plan_id) {
+            let review_attempt_id = format!("{target_plan_id}:{round}");
+            runtime.write_code_review_started_transcript(
+                &target_plan_id,
+                round,
+                &review_attempt_id,
+                tool_call_id,
+                None,
+            );
             let mut code_review_summary = runtime.dispatch_code_reviewer(&target_plan_id).await;
             warnings.extend(code_review_summary.normalize_for_result());
-            runtime.write_code_review_transcript(&target_plan_id, &code_review_summary, round);
+            runtime.write_code_review_transcript(
+                &target_plan_id,
+                &code_review_summary,
+                round,
+                &review_attempt_id,
+                tool_call_id,
+            );
             code_review_json = code_review_summary.to_json();
 
             match code_review_summary.verdict.as_deref() {
@@ -165,12 +192,17 @@ pub async fn execute(
                     PlanFileState::Executing
                 }
                 Some("aborted") => {
-                    warnings.push("code review 中止(aborted)，本次按 best-effort 直接收口 completed".into());
+                    warnings.push(
+                        "code review 中止(aborted)，本次按 best-effort 直接收口 completed".into(),
+                    );
                     finalize_plan_completed(runtime, &target_plan_id, &path, &mut plan)?;
                     PlanFileState::Completed
                 }
                 _ => {
-                    warnings.push("code review 未返回可识别 verdict，已按 partial 处理；plan 保持 executing".into());
+                    warnings.push(
+                        "code review 未返回可识别 verdict，已按 partial 处理；plan 保持 executing"
+                            .into(),
+                    );
                     warnings.extend(non_pass_code_review_guidance(&code_review_summary));
                     PlanFileState::Executing
                 }
@@ -216,8 +248,9 @@ pub async fn execute(
         path: crate::infra::platform::format_home_path(&path),
         state: plan_state_after.as_str().to_string(),
     };
-    if !(matches!(plan_state_before, PlanFileState::Completed)
-        && matches!(plan_state_after, PlanFileState::Pending))
+    if !tx.derived_completed
+        && !(matches!(plan_state_before, PlanFileState::Completed)
+            && matches!(plan_state_after, PlanFileState::Pending))
     {
         runtime.write_transcript_custom(serde_json::json!({
             "event": crate::infra::wire::WIRE_PLAN_UPDATE,
@@ -226,11 +259,13 @@ pub async fn execute(
             "state": event_payload.state,
         }));
     }
-    runtime.write_transcript_custom(serde_json::json!({
-        "event": crate::infra::wire::WIRE_PLAN_TODOS,
-        "plan_id": target_plan_id,
-        "todos": items_json(&plan.frontmatter.todos),
-    }));
+    if !tx.derived_completed {
+        runtime.write_transcript_custom(serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_TODOS,
+            "plan_id": target_plan_id,
+            "todos": items_json(&plan.frontmatter.todos),
+        }));
+    }
 
     Ok(serde_json::json!({
         "plan_id": target_plan_id,
@@ -245,6 +280,25 @@ pub async fn execute(
         "items": items_json(&plan.frontmatter.todos),
         "code_review": code_review_json,
     }))
+}
+
+fn write_plan_progress_transcript(
+    runtime: &PlanRuntime,
+    target_plan_id: &str,
+    path: &std::path::Path,
+    plan: &crate::core::plan_runtime::file_store::PlanFile,
+) {
+    runtime.write_transcript_custom(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_UPDATE,
+        "plan_id": target_plan_id,
+        "path": crate::infra::platform::format_home_path(path),
+        "state": PlanFileState::Executing.as_str(),
+    }));
+    runtime.write_transcript_custom(serde_json::json!({
+        "event": crate::infra::wire::WIRE_PLAN_TODOS,
+        "plan_id": target_plan_id,
+        "todos": items_json(&plan.frontmatter.todos),
+    }));
 }
 
 fn finalize_plan_completed(

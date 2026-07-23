@@ -19,11 +19,24 @@ update_plan(all todos completed)
    |
    +--> CodeReviewer (严格只读)
            |
-           +--> transcript: plan.code_review
+           +--> parent transcript: plan.code_review.started -> plan.code_review
+           +--> child audit: sub_agent_start -> sub_agent_end (不驱动产品 UI)
            +--> tool result: update_plan.code_review
            +--> verdict=pass      -> completed
            +--> verdict=fail/partial -> stay executing, 强指令要求 reopen/add fix todo
            +--> rounds exhausted  -> best-effort completed
+```
+
+### Code review 时间线契约
+
+`update_plan` 保持同步工具语义：最后一个 todo 写盘后，先广播 `plan.update` 和 `plan.todos`，再以父 session 写 `plan.code_review.started { planId, round, reviewAttemptId, toolCallId }`。review 完成后，同一 attempt 写 `plan.code_review` 结构化终态，随后工具才结束。`reviewAttemptId` 规范值为 `<planId>:<round>`，`toolCallId` 用于 live、history 与分页恢复时把独立 ReviewRow 锚定在触发它的 `update_plan` 后。通用 `sub_agent_start/end` 继续属于 child session 审计流，前端不得用它推断 running 或 aborted。
+
+```text
+plan.update + plan.todos
+  -> plan.code_review.started (parent, running)
+  -> sub_agent_start/end (child audit only)
+  -> plan.code_review (parent, pass/fail/partial/aborted)
+  -> tool_execution_end(update_plan)
 ```
 
 ### 1. 第一性原理设计

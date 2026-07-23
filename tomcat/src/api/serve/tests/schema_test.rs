@@ -81,6 +81,9 @@ fn serve_dts_includes_context_reference_types() {
 fn serve_dts_includes_plan_code_review_findings() {
     let dts = serve_dts();
     assert!(dts.contains("export interface ServeFinding {"));
+    assert!(dts.contains("type: \"plan.code_review.started\";"));
+    assert!(dts.contains("reviewAttemptId?: null | string;"));
+    assert!(dts.contains("toolCallId?: null | string;"));
     assert!(dts.contains("type: \"plan.code_review\";"));
     assert!(dts.contains("changesSummary?: null | string;"));
     assert!(dts.contains("findings?: ServeFinding[] | null;"));
@@ -225,6 +228,10 @@ fn serve_emitted_event_validates_against_generated_schema() {
                 note: "missing guard".to_string(),
             }]),
             rounds: Some(1),
+            round: Some(1),
+            review_attempt_id: Some("plan-1:1".to_string()),
+            tool_call_id: Some("tc-update".to_string()),
+            child_session_id: Some("code-reviewer-child".to_string()),
         }))
         .expect("serialize plan.code_review event"),
     ))

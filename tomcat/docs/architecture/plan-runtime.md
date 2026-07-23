@@ -1,5 +1,8 @@
 # PlanRuntime：`todos` 工具、PLAN 模式与 `/plan build` 的运行时编排
 
+> Review timeline invariant (2026-07): the parent session persists `plan.code_review.started` and `plan.code_review` with one `reviewAttemptId` plus the triggering `toolCallId`; child sub-agent lifecycle events remain audit-only.
+
+
 本文档是 **T2-P1-002 | plan-mode-enhance** 的总览级运行时编排方案，承接 [`checkpoint-resume.md`](./tools/checkpoint-resume.md) 提供的 `CheckpointStore`，并把 **PLAN 模式（Planner / AskQuestion / CreatePlan / UpdatePlan / Reviewer）** 与 **执行态（`update_plan` 推进 + `todos` scratchpad + TodosPanel）** 串成一个闭环。各 LLM 工具与 PLAN 模式内部细节见 `tools/` 子目录下的独立 spec：[`tools/planner.md`](./tools/planner.md)、[`tools/create-plan.md`](./tools/create-plan.md)、[`tools/update-plan.md`](./tools/update-plan.md)、[`tools/ask-question.md`](./tools/ask-question.md)、[`tools/todos.md`](./tools/todos.md)、[`tools/reviewer.md`](./tools/reviewer.md)。仓库当前实现已落地 `/plan`、`create_plan`、`update_plan`、`todos` 与 reviewer / verifier / transcript recover 主链；较早阶段的未实现描述以本文前置的 **v4-g 生效说明** 为准。
 
 本文按 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 主路径编排。

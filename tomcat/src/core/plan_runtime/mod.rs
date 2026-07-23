@@ -64,11 +64,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::session::manager::{PlanEventKind, PlanEventRef};
 
+pub use code_reviewer::CodeReviewSummary;
 pub use panels::{
     Answer, AskQuestionPanel, AskQuestionResult, MockAskQuestionPanel, NoopTodosPanel, Question,
     QuestionOption, RefreshNotifier, TodosPanel, TodosPanelSnapshot, CUSTOM_OPTION_ID,
 };
-pub use code_reviewer::CodeReviewSummary;
 pub use plan_reviewer::{PlanReviewSummary, REVIEWER_ALLOW_REVIEW_EDIT};
 pub use review::Finding;
 pub use state::PlanState;
@@ -718,13 +718,17 @@ impl PlanRuntime {
         let path = match file_store::plan_path_for_id(plan_id) {
             Ok(p) => p,
             Err(e) => {
-                return plan_reviewer::PlanReviewSummary::aborted_with(format!("plan_id 非法: {e}"));
+                return plan_reviewer::PlanReviewSummary::aborted_with(format!(
+                    "plan_id 非法: {e}"
+                ));
             }
         };
         let plan_text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) => {
-                return plan_reviewer::PlanReviewSummary::aborted_with(format!("read plan 失败: {e}"));
+                return plan_reviewer::PlanReviewSummary::aborted_with(format!(
+                    "read plan 失败: {e}"
+                ));
             }
         };
 
@@ -854,11 +858,37 @@ impl PlanRuntime {
         self.write_transcript_custom(payload);
     }
 
+    pub(crate) fn write_code_review_started_transcript(
+        &self,
+        plan_id: &str,
+        round: u32,
+        review_attempt_id: &str,
+        tool_call_id: &str,
+        child_session_id: Option<&str>,
+    ) {
+        let mut payload = serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW_STARTED,
+            "plan_id": plan_id,
+            "round": round,
+            "review_attempt_id": review_attempt_id,
+            "tool_call_id": tool_call_id,
+        });
+        if let (Some(obj), Some(child_session_id)) = (payload.as_object_mut(), child_session_id) {
+            obj.insert(
+                "child_session_id".to_string(),
+                serde_json::Value::String(child_session_id.to_string()),
+            );
+        }
+        self.write_transcript_custom(payload);
+    }
+
     pub(crate) fn write_code_review_transcript(
         &self,
         plan_id: &str,
         summary: &code_reviewer::CodeReviewSummary,
-        rounds: u32,
+        round: u32,
+        review_attempt_id: &str,
+        tool_call_id: &str,
     ) {
         let mut payload = summary.to_json();
         if let Some(obj) = payload.as_object_mut() {
@@ -872,8 +902,26 @@ impl PlanRuntime {
             );
             obj.insert(
                 "rounds".to_string(),
-                serde_json::Value::Number(serde_json::Number::from(rounds)),
+                serde_json::Value::Number(serde_json::Number::from(round)),
             );
+            obj.insert(
+                "round".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(round)),
+            );
+            obj.insert(
+                "review_attempt_id".to_string(),
+                serde_json::Value::String(review_attempt_id.to_string()),
+            );
+            obj.insert(
+                "tool_call_id".to_string(),
+                serde_json::Value::String(tool_call_id.to_string()),
+            );
+            if !summary.child_session_id.is_empty() {
+                obj.insert(
+                    "child_session_id".to_string(),
+                    serde_json::Value::String(summary.child_session_id.clone()),
+                );
+            }
         }
         self.write_transcript_custom(payload);
     }
@@ -1316,8 +1364,7 @@ pub trait PlanReviewerDispatcher: Send + Sync {
 /// code reviewer 子 Agent 派发器 trait。
 #[async_trait]
 pub trait CodeReviewerDispatcher: Send + Sync {
-    async fn dispatch(&self, plan_id: &str, plan_text: &str)
-        -> code_reviewer::CodeReviewSummary;
+    async fn dispatch(&self, plan_id: &str, plan_text: &str) -> code_reviewer::CodeReviewSummary;
 }
 
 /// verifier 子 Agent 派发器 trait（解耦真实 LLM + AgentRegistry）。

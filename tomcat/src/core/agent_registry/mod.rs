@@ -178,6 +178,26 @@ pub struct SubagentSpawnContext {
     pub cancel_token: CancellationToken,
 }
 
+struct SpawnCleanupGuard {
+    registry: Arc<AgentRegistry>,
+    child_session_id: String,
+}
+
+impl Drop for SpawnCleanupGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self
+            .registry
+            .handles
+            .read()
+            .get(&self.child_session_id)
+            .cloned()
+        {
+            handle.cancel();
+        }
+        self.registry.unregister(&self.child_session_id);
+    }
+}
+
 // ─── Registry ───────────────────────────────────────────────────────────────
 
 /// 进程内单例（按需注入，不是 OnceCell）；`ChatContext::from_config` 在装配阶段
@@ -336,6 +356,10 @@ impl AgentRegistry {
         let child_session_id = child_handle.session_id.clone();
         let cancel_token = child_handle.token();
         let spawn_depth = child_handle.spawn_depth;
+        let cleanup_guard = SpawnCleanupGuard {
+            registry: Arc::clone(self),
+            child_session_id: child_session_id.clone(),
+        };
 
         // emit SubAgentStart
         self.emit(
@@ -361,8 +385,8 @@ impl AgentRegistry {
         let join = tokio::spawn(async move { spawn(ctx).await });
         let outcome_result = join.await;
 
-        // 不论结果，都 unregister + emit End
-        self.unregister(&child_session_id);
+        // 不论结果，都 unregister + emit End；future 被 drop 时 guard 也会 cancel + unregister。
+        drop(cleanup_guard);
 
         match outcome_result {
             Ok(outcome) => {

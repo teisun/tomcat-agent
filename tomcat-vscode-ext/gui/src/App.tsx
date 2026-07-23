@@ -329,6 +329,16 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
     }
     return node.dataset.testid ?? "unknown";
   });
+  const reviewRows = [...document.querySelectorAll<HTMLElement>("[data-review-attempt-id]")].map((row) => {
+    const rect = row.getBoundingClientRect();
+    return {
+      anchorToolCallId: row.dataset.anchorToolCallId ?? null,
+      id: row.dataset.reviewAttemptId ?? "",
+      status: row.dataset.reviewStatus ?? "",
+      top: rect.top,
+      verdict: row.dataset.reviewVerdict ?? null,
+    };
+  });
   const toolBodyMetrics = [...document.querySelectorAll<HTMLElement>('[data-testid="tool-row"]')].map(
     (row) => {
       const title = row.querySelector('[data-testid="tool-row-label"]')?.textContent ?? "";
@@ -493,6 +503,7 @@ function buildDomSnapshot(state: WebviewStateSnapshot) {
       scrollTop: stream?.scrollTop ?? 0,
     },
     timelineKinds,
+    reviewRows,
     toolBodyMetrics,
     toolTitles: queryText('[data-testid="tool-row-label"]'),
     assistantResponseGroups: transcriptGroups.length,

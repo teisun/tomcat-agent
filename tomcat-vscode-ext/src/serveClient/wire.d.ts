@@ -98,11 +98,15 @@ export interface ServeMessageParams {
 export type ServePlanEvent = {
   aborted?: boolean | null;
   changesSummary?: null | string;
+  childSessionId?: null | string;
   findings?: ServeFinding[] | null;
   planId?: null | string;
+  reviewAttemptId?: null | string;
+  round?: null | number;
   rounds?: null | number;
   sessionId?: null | string;
   summary?: null | string;
+  toolCallId?: null | string;
   type: "plan.code_review";
   verdict?: null | string;
 } | {
@@ -117,6 +121,14 @@ export type ServePlanEvent = {
   sessionId?: null | string;
   type: "plan.verify";
   verdict?: null | string;
+} | {
+  childSessionId?: null | string;
+  planId?: null | string;
+  reviewAttemptId?: null | string;
+  round?: null | number;
+  sessionId?: null | string;
+  toolCallId?: null | string;
+  type: "plan.code_review.started";
 } | {
   path?: null | string;
   planId?: null | string;

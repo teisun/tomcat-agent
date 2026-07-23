@@ -4,6 +4,11 @@
 
 本文档定义 `update_plan` 的入参 / 出参、跨模式门控矩阵、自动派生触发点、跨 session 语义。
 
+## 2026-07 Code review 时间线补充
+
+最后一个 todo 完成时，`update_plan` 保持 running，并按 `plan.update + plan.todos -> plan.code_review.started -> plan.code_review -> tool_execution_end` 同步收口。started/result 都以父 session 发出，共享 `<planId>:<round>` attempt 身份和触发工具的 `toolCallId`；child-scoped `sub_agent_start/end` 只作审计，不驱动 ReviewRow。
+
+
 ## 2026-05 Active Binding 补充
 
 当前实现对 `update_plan` 的运行时契约已更新为：

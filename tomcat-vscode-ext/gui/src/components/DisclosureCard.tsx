@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 
-export type DisclosureStatusVariant = "error" | "running" | "success";
+export type DisclosureStatusVariant = "error" | "neutral" | "running" | "success" | "warning";
 
 export function DisclosureCard({
   bodyTestId,
