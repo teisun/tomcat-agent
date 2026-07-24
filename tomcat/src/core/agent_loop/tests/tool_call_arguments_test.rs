@@ -136,7 +136,7 @@ impl PrimitiveExecutor for CountingPrimitiveExecutor {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::BashResult, AppError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(AppError::Tool(

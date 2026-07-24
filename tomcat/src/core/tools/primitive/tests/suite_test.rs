@@ -789,160 +789,165 @@ async fn search_files_url_like_returns_non_permission_error() {
     );
 }
 
-/// T2-P0-016 PR-E.2 / bash.md §10 T1：墙钟超时 → kill 子进程 + 标记 timed_out。
-///
-/// 用 `with_bash_timeout_ms(50)` 把超时压到 50 ms，命令 `sleep 5` 触发 Elapsed 分支；
-/// 期望 `timed_out=true`、`exit_code=-1`、stderr 含 "timed out" 提示。
 #[tokio::test]
-async fn bash_wallclock_timeout_kills_process() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_timeout");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let path_str = dir.to_string_lossy().to_string();
-    let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
+async fn build_bash_task_registry_applies_wait_policy_and_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let bash_cfg = crate::infra::config::ToolsBashConfig {
+        foreground_wait_ms: 9_000,
+        ..Default::default()
+    };
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: dir.path().to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![r"\becho\b".to_string()],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let registry = build_bash_task_registry(
+        &bash_cfg,
+        dir.path().join("tool-results"),
+        gate,
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        make_gate(&dir),
-    )
-    .with_bash_timeout_ms(50);
+        crate::core::permission::BashAstChecker::default(),
+    );
+    assert_eq!(registry.foreground_wait_ms(), 9_000);
 
-    let started = std::time::Instant::now();
-    let res = exec
-        .execute_bash("sleep 5", Some(&path_str), "p1", None, None)
+    let err = registry
+        .spawn(
+            "echo should-be-blocked".to_string(),
+            None,
+            Some(dir.path().to_path_buf()),
+        )
         .await
-        .expect("bash impl 应返回 Ok（即便超时）");
-    let elapsed = started.elapsed();
-
-    assert!(res.timed_out, "墙钟超时应置 timed_out=true");
-    assert_eq!(res.exit_code, -1, "超时退出码约定 -1");
+        .expect_err("guard should deny forbidden bash");
+    assert!(err.to_string().contains("forbidden") || err.to_string().contains("拒绝"));
     assert!(
-        res.stderr.contains("timed out"),
-        "stderr 应携带 timed out 提示，实际: {:?}",
-        res.stderr
+        registry.list().is_empty(),
+        "deny should leave no tracked task"
     );
-    assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "墙钟超时 50ms + kill 后整体应远小于 sleep 时长，实际 elapsed={:?}",
-        elapsed
-    );
-    let _ = std::fs::remove_dir(&dir);
 }
 
-/// 前台 shell 先退出、后台 `cmd &` 仍攥着 stdout/stderr 时，同步 bash 不应永久卡死。
-/// 小 timeout 场景下，主 shell 退出后的善后 grace 还应被剩余预算 clamp，不能把 80ms 调用
-/// 反向拖成多秒；同时尽量保留前台已输出的内容。
+/// Without a shared registry, foreground wait expiry must stop the process tree locally rather
+/// than returning an unreachable background handle.
 #[tokio::test]
-async fn bash_backgrounded_pipe_holder_does_not_hang() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_bg_pipe_holder");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let path_str = dir.to_string_lossy().to_string();
-    let audit_entries: Arc<Mutex<Vec<PrimitiveAuditEntry>>> = Arc::new(Mutex::new(Vec::new()));
-    let audit = Arc::new(DenyAuditRecorder(audit_entries.clone()));
+async fn bash_foreground_wait_expiry_stops_without_shared_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path_str = dir.path().to_string_lossy().to_string();
+    let marker = dir.path().join("should-not-exist.txt");
     let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
-        Arc::new(AllowAllConfirmation),
-        audit,
-        make_gate(&dir),
-    )
-    .with_bash_timeout_ms(80);
-
-    let started = std::time::Instant::now();
-    let res = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        exec.execute_bash("sleep 30 & echo done", Some(&path_str), "p1", None, None),
-    )
-    .await
-    .expect("后台残留路径不应把测试挂死")
-    .expect("bash 应返回 Ok");
-    let elapsed = started.elapsed();
-
-    assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "应在测试级 timeout 前返回，实际 elapsed={:?}",
-        elapsed
-    );
-    assert!(
-        !res.timed_out,
-        "这里不是前台 wait 超时，而是 drain 检测到后台残留"
-    );
-    assert_eq!(res.exit_code, 0, "主 shell 已正常退出，应保留 exit_code=0");
-    assert!(
-        res.stdout.contains("done"),
-        "前台输出应被尽量保留，实际 stdout={:?}",
-        res.stdout
-    );
-    assert!(
-        res.stderr.contains("run_in_background=true"),
-        "stderr 应提示长任务改走后台机制，实际 stderr={:?}",
-        res.stderr
-    );
-
-    let entries = audit_entries.lock().unwrap();
-    let bash_entry = entries
-        .iter()
-        .rev()
-        .find(|entry| entry.operation == AuditPrimitiveOp::Bash)
-        .expect("应写 bash 审计");
-    let detail = bash_entry.detail.as_deref().unwrap_or("");
-    assert!(
-        detail.contains("lingering_children=true"),
-        "audit detail 应标记 lingering_children=true，实际 detail={}",
-        detail
-    );
-
-    let _ = std::fs::remove_dir(&dir);
-}
-
-/// 大 timeout 回归：默认/120s 级别预算下，主 shell 退出后的 lingering 检测也不应把同步
-/// bash 拖到完整 timeout_ms；应在 post-exit grace 内快速判残留并返回 warning。
-#[tokio::test]
-async fn bash_backgrounded_pipe_holder_returns_fast_under_large_timeout() {
-    let dir = std::env::temp_dir().join("tomcat_exec_bash_bg_pipe_holder_large_timeout");
-    std::fs::create_dir_all(&dir).unwrap();
-    let dir = dir.canonicalize().unwrap();
-    let path_str = dir.to_string_lossy().to_string();
-    let exec = DefaultPrimitiveExecutor::new(
-        temp_primitive_config(&dir),
+        temp_primitive_config(dir.path()),
         Arc::new(AllowAllConfirmation),
         Arc::new(TracingAuditRecorder),
-        make_gate(&dir),
+        make_gate(dir.path()),
     )
-    .with_bash_timeout_ms(120_000);
+    .with_bash_foreground_wait_ms(8_000);
+    let res = exec
+        .execute_bash(
+            &format!(
+                "printf before-stop; sleep 9; printf after-stop > {}",
+                marker.display()
+            ),
+            Some(&path_str),
+            "p1",
+            None,
+            Some(8_000),
+        )
+        .await
+        .expect("foreground wait expiry must return a bounded stopped result");
+    assert_eq!(
+        res.state,
+        crate::core::tools::primitive::BashExecutionState::Stopped
+    );
+    assert!(res.foreground_wait_expired);
+    assert!(res.task_id.is_none());
+    assert!(res.log_path.is_some());
+    assert!(
+        res.stdout.contains("before-stop"),
+        "stdout should keep drained prefix"
+    );
+    assert!(
+        !marker.exists(),
+        "stopped process must not reach post-sleep write"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert!(
+        !marker.exists(),
+        "post-return marker appearing would mean the timed-out process kept running"
+    );
+}
 
-    let started = std::time::Instant::now();
-    let res = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        exec.execute_bash("sleep 30 & echo done", Some(&path_str), "p1", None, None),
+/// A shared registry means the caller can follow up later, so expiry still promotes to
+/// background and returns a task handle.
+#[tokio::test]
+async fn bash_foreground_wait_expiry_promotes_with_shared_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path_str = dir.path().to_string_lossy().to_string();
+    let persist_dir = dir.path().join("tool-results");
+    let registry = build_bash_task_registry(
+        &crate::infra::config::ToolsBashConfig {
+            foreground_wait_ms: 8_000,
+            ..Default::default()
+        },
+        persist_dir.clone(),
+        make_gate(dir.path()),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        crate::core::permission::BashAstChecker::default(),
+    );
+    let exec = DefaultPrimitiveExecutor::new(
+        temp_primitive_config(dir.path()),
+        Arc::new(AllowAllConfirmation),
+        Arc::new(TracingAuditRecorder),
+        make_gate(dir.path()),
     )
-    .await
-    .expect("大 timeout 下也不应把测试挂死")
-    .expect("bash 应返回 Ok");
-    let elapsed = started.elapsed();
+    .with_bash_foreground_wait_ms(8_000)
+    .with_bash_persist_dir(persist_dir)
+    .with_bash_task_registry(registry.clone());
 
-    assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "大 timeout 场景也应在数秒内返回，而不是吃满 120s，实际 elapsed={:?}",
-        elapsed
+    let res = exec
+        .execute_bash(
+            "sleep 9; echo promoted-done",
+            Some(&path_str),
+            "p1",
+            None,
+            Some(8_000),
+        )
+        .await
+        .expect("shared registry path should promote to background");
+    assert_eq!(
+        res.state,
+        crate::core::tools::primitive::BashExecutionState::RunningInBackground
     );
+    assert!(res.foreground_wait_expired);
+    let task_id = res
+        .task_id
+        .clone()
+        .expect("background result must carry task_id");
     assert!(
-        !res.timed_out,
-        "这里不是前台 wait 超时，而是 post-exit grace 检测到后台残留"
-    );
-    assert_eq!(res.exit_code, 0, "主 shell 已正常退出，应保留 exit_code=0");
-    assert!(
-        res.stdout.contains("done"),
-        "前台输出应被尽量保留，实际 stdout={:?}",
-        res.stdout
-    );
-    assert!(
-        res.stderr.contains("run_in_background=true"),
-        "stderr 应提示长任务改走后台机制，实际 stderr={:?}",
-        res.stderr
+        res.log_path.is_some(),
+        "background result must carry log_path"
     );
 
-    let _ = std::fs::remove_dir(&dir);
+    registry
+        .wait_for_finish(&task_id)
+        .await
+        .expect("task finish");
+    let chunk = registry
+        .read_output(&task_id, Some(0))
+        .await
+        .expect("read output");
+    assert!(chunk.finished);
+    assert!(
+        chunk.content.contains("promoted-done"),
+        "final output should be durable"
+    );
 }
 
 /// T2-P0-016 PR-E.3 / bash.md §10 T1：超长 stdout 走 EndTruncatingAccumulator 头尾保留。

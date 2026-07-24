@@ -42,10 +42,11 @@ pub use package::{
     PACKAGE_MANIFEST_SCHEMA_V1, PACKAGE_REGISTRY_SCHEMA_V1,
 };
 pub use primitives::{
-    BashResult, DirEntry, EditFileResult, EditOperation, EditOperationType, PrimitiveExecutor,
-    PrimitiveOperation, ReadBinaryResult, ReadResult, ReadTextResult, SearchFileCount,
-    SearchFileMatch, SearchFilesArgs, SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery,
-    SearchFilesResultMode, SearchFilesStats, SearchFilesTarget, WriteFileResult,
+    BashExecutionState, BashNextAction, BashResult, DirEntry, EditFileResult, EditOperation,
+    EditOperationType, PrimitiveExecutor, PrimitiveOperation, ReadBinaryResult, ReadResult,
+    ReadTextResult, SearchFileCount, SearchFileMatch, SearchFilesArgs, SearchFilesOutput,
+    SearchFilesOutputMode, SearchFilesQuery, SearchFilesResultMode, SearchFilesStats,
+    SearchFilesTarget, WriteFileResult,
 };
 pub use session::context_metrics;
 pub use session::{

@@ -5,25 +5,27 @@
 pub mod bash_task;
 mod diff;
 mod executor;
+mod registry_builder;
 #[cfg(test)]
 mod tests;
 mod types;
 
 pub use bash_task::{
-    BackgroundTaskLifecycleEvent, BashTaskId, BashTaskInfo, BashTaskOutputChunk, BashTaskRegistry,
-    BashTaskStatus, BashTaskTicket,
+    BackgroundTaskLifecycleEvent, BashOutputStream, BashRuntimePreview, BashTaskId, BashTaskInfo,
+    BashTaskOutputChunk, BashTaskOutputEvent, BashTaskRegistry, BashTaskStatus, BashTaskTicket,
 };
 #[allow(unused_imports)]
 pub(crate) use executor::compute_line_hash;
 #[cfg(test)]
 pub(crate) use executor::simulate_failed_commit_with_backup_for_test;
 pub use executor::DefaultPrimitiveExecutor;
+pub(crate) use registry_builder::build_bash_task_registry;
 pub use types::{
-    BashResult, DiffTag, DirEntry, EditFileResult, EditOperation, EditOperationType, FileDiffLine,
-    HashlineOp, HashlineSegment, PrimitiveExecutor, PrimitiveOperation, ReadBinaryResult,
-    ReadResult, ReadTextResult, SearchFileCount, SearchFileMatch, SearchFilesArgs,
-    SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery, SearchFilesResultMode,
-    SearchFilesStats, SearchFilesTarget, WriteFileResult,
+    BashExecutionState, BashNextAction, BashResult, DiffTag, DirEntry, EditFileResult,
+    EditOperation, EditOperationType, FileDiffLine, HashlineOp, HashlineSegment, PrimitiveExecutor,
+    PrimitiveOperation, ReadBinaryResult, ReadResult, ReadTextResult, SearchFileCount,
+    SearchFileMatch, SearchFilesArgs, SearchFilesOutput, SearchFilesOutputMode, SearchFilesQuery,
+    SearchFilesResultMode, SearchFilesStats, SearchFilesTarget, WriteFileResult,
 };
 
 /// T2-P0-017 PR-D：`replace_all` 信号 sentinel。

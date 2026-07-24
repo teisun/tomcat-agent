@@ -846,15 +846,13 @@ Parameters:
       "description": "Optional working directory. Empty means unset. Use an absolute path or `~/...`; shell vars like `$HOME` are NOT expanded here. Defaults to the agent process cwd.",
       "type": "string"
     },
+    "foreground_wait_ms": {
+      "description": "How long this call waits in the foreground. Values clamp to 8000-16000ms; expiry keeps the same tracked process running. Ignored when run_in_background=true.",
+      "type": "integer"
+    },
     "run_in_background": {
       "description": "When true, spawn as a background task and return { task_id, log_path } immediately; pair with task_output/task_stop/task_list. Defaults to false.",
       "type": "boolean"
-    },
-    "timeout_ms": {
-      "description": "Optional wall-clock timeout in ms (default 120000, capped at 600000). On timeout the child is killed and `timed_out=true`. Ignored when run_in_background=true.",
-      "maximum": 600000,
-      "minimum": 1,
-      "type": "integer"
     }
   },
   "required": [
@@ -873,7 +871,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `bash background task output tail log`
 
-Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until the task finishes or `timeout_ms` elapses (default 5000, max 600000, actual blocking waits clamp into 5000-600000ms, `0` == block=false). Mid-stream output does not interrupt the wait. Blocking waits add a `wakeReason` of `finished` | `timeout`; a `timeout` wakeReason is NOT a failure, so inspect `content` first (`content=""` means no new output arrived during that slice) and wait again only if you still need to. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.
+Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until the task finishes or `wait_ms` elapses (default 5000; block=true clamps to 5000-600000ms; block=false ignores wait_ms). Mid-stream output does not interrupt the wait. Blocking waits add a `wakeReason` of `finished` | `wait_window_elapsed`; a `wait_window_elapsed` wakeReason is NOT a failure, so inspect `content` first (`content=""` means no new output arrived during that slice) and wait again only if you still need to. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.
 
 Parameters:
 
@@ -881,7 +879,7 @@ Parameters:
 {
   "properties": {
     "block": {
-      "description": "If true, wait until the task finishes or `timeout_ms` elapses, and return a `wakeReason` (`finished` or `timeout`). Mid-stream output does not interrupt the wait. Default false.",
+      "description": "If true, wait until the task finishes or `wait_ms` elapses, and return wakeReason `finished` or `wait_window_elapsed`. Mid-stream output does not interrupt the wait. Default false.",
       "type": "boolean"
     },
     "since": {
@@ -893,8 +891,8 @@ Parameters:
       "description": "The task_id returned by a previous `bash` call with run_in_background=true.",
       "type": "string"
     },
-    "timeout_ms": {
-      "description": "Wait slice in ms for block=true (default 5000, max 600000; actual blocking waits clamp into 5000-600000ms, `0` == block=false). The wait ends only on task finish or timeout. A timeout is not a failure — inspect `content` first (`content=""` means no new output arrived during that slice), then wait again only if needed.",
+    "wait_ms": {
+      "description": "Observation window for block=true (default 5000, clamped to 5000-600000ms). Ignored when block=false. It never stops the task.",
       "maximum": 600000,
       "minimum": 0,
       "type": "integer"

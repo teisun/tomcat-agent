@@ -9,13 +9,13 @@ use std::os::unix::fs::PermissionsExt;
 use fs2::FileExt;
 use serial_test::serial;
 
+use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::llm::{
     auth::clear_managed_credentials_for_test, list_model_views, list_provider_keys,
     remove_user_model, set_provider_key, upsert_user_model, Capabilities, DefaultLlmResolver,
     LlmResolver, LlmScene, ModelCatalog, ModelEntryInput, ModelSource, ProviderKeyInput,
     SharedModelCatalog,
 };
-use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::infra::config::AppConfig;
 use crate::{resolve_sessions_dir, save_store, SessionEntry, SessionStore};
 

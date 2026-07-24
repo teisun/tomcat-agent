@@ -20,8 +20,8 @@ use crate::core::llm::{
 };
 use crate::{
     init_context_state, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
-    CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore,
-    ListOptions, RestoreOptions,
+    CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
+    RestoreOptions,
 };
 
 struct CurrentDirGuard {
@@ -188,7 +188,9 @@ struct RecordingHttpServer {
 
 impl RecordingHttpServer {
     async fn start(initial_responses: Vec<ScriptedHttpResponse>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock server");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
         let addr = listener.local_addr().expect("local addr");
         let base_url = format!("http://{addr}");
         let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -2495,9 +2497,12 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
             .system_text
             .clone()
     };
-    let seeded_state =
-        init_context_state(&slot.ctx.session_runtime.session, &slot.ctx.config.context, &system_text)
-            .expect("rehydrate seeded context");
+    let seeded_state = init_context_state(
+        &slot.ctx.session_runtime.session,
+        &slot.ctx.config.context,
+        &system_text,
+    )
+    .expect("rehydrate seeded context");
     if let Some(turn_state) = slot.turn_state.lock().as_mut() {
         turn_state.context_state = seeded_state;
     }
@@ -2552,9 +2557,13 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = true,
         lines
     };
     assert!(
-        lines.iter().filter(|line| {
-            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
-        }).count() >= 2,
+        lines
+            .iter()
+            .filter(|line| {
+                line.get("type").and_then(serde_json::Value::as_str) == Some("agent_end")
+            })
+            .count()
+            >= 2,
         "expected failed turn + retry success terminal events: {lines:?}"
     );
 
@@ -2973,7 +2982,10 @@ async fn upsert_model_response_includes_non_fatal_warnings() {
         .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("upsert-warning"))
         .expect("upsert_model warning response");
     assert_eq!(upsert["success"].as_bool(), Some(true));
-    assert_eq!(upsert["payload"]["model"]["id"].as_str(), Some("relay-openai"));
+    assert_eq!(
+        upsert["payload"]["model"]["id"].as_str(),
+        Some("relay-openai")
+    );
     let warnings = upsert["payload"]["warnings"]
         .as_array()
         .expect("warnings array");

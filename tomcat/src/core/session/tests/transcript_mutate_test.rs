@@ -449,8 +449,14 @@ fn error_entry_roundtrips_as_type_error() {
     });
 
     let json = serde_json::to_value(&entry).unwrap();
-    assert_eq!(json.get("type").and_then(|value| value.as_str()), Some("error"));
-    assert_eq!(json.get("summary").and_then(|value| value.as_str()), Some("API 错误 403 · aigateway.sunmi.com · Request-Id req-123"));
+    assert_eq!(
+        json.get("type").and_then(|value| value.as_str()),
+        Some("error")
+    );
+    assert_eq!(
+        json.get("summary").and_then(|value| value.as_str()),
+        Some("API 错误 403 · aigateway.sunmi.com · Request-Id req-123")
+    );
 
     let roundtrip: TranscriptEntry = serde_json::from_value(json).unwrap();
     match roundtrip {

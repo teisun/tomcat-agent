@@ -95,7 +95,7 @@ impl crate::core::tools::primitive::PrimitiveExecutor for SkillReadPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::BashResult, AppError> {
         unreachable!()
     }

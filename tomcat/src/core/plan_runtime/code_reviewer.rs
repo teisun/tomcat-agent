@@ -158,7 +158,8 @@ impl CodeReviewSummary {
         }
 
         match self.verdict.clone() {
-            Some(verdict) if matches!(verdict.as_str(), "pass" | "fail" | "partial" | "aborted") => {}
+            Some(verdict)
+                if matches!(verdict.as_str(), "pass" | "fail" | "partial" | "aborted") => {}
             Some(other) => {
                 self.verdict = Some("aborted".into());
                 warnings.push(format!(

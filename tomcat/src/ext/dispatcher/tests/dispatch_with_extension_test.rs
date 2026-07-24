@@ -19,14 +19,16 @@ use super::super::helpers::{normalize_tool_parameters, parse_chat_request};
 use super::super::HostApiDispatcher;
 use super::mocks::{MockLlm, MockPrimitive, MockToolRegistry};
 use crate::core::llm::thinking_policy::ThinkingFormat;
+use crate::core::permission::{BashAstChecker, DefaultPermissionGate, GateConfig, SessionGrants};
 use crate::core::{
-    BashResult, Capabilities, ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, DirEntry,
-    EditFileResult, EditOperation, LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor,
-    PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent, WriteFileResult,
+    AllowAllConfirmation, BashResult, Capabilities, ChatMessage, ChatRequest, ChatResponse,
+    ChatResponseChoice, DefaultPrimitiveExecutor, DirEntry, EditFileResult, EditOperation,
+    LlmProvider, LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall,
+    SessionManager, StreamEvent, WriteFileResult,
 };
 use crate::ext::host_binding::HostRequest;
-use crate::infra::error::AppError;
 use crate::infra::DefaultEventBus;
+use crate::infra::{error::AppError, PrimitiveConfig, TracingAuditRecorder};
 
 #[derive(Clone)]
 struct RecordingLlm {
@@ -186,6 +188,59 @@ impl LlmProvider for CapturingLlm {
     }
 }
 
+fn make_real_bash_dispatcher(
+    root: &std::path::Path,
+    with_registry: bool,
+) -> (
+    HostApiDispatcher,
+    Option<Arc<crate::core::tools::primitive::BashTaskRegistry>>,
+) {
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: root.to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let confirmation = Arc::new(AllowAllConfirmation);
+    let audit = Arc::new(TracingAuditRecorder);
+    let persist_dir = root.join("tool-results");
+    let registry = with_registry.then(|| {
+        crate::core::tools::primitive::build_bash_task_registry(
+            &crate::infra::config::ToolsBashConfig {
+                foreground_wait_ms: 8_000,
+                ..Default::default()
+            },
+            persist_dir.clone(),
+            gate.clone(),
+            confirmation.clone(),
+            audit.clone(),
+            BashAstChecker::default(),
+        )
+    });
+
+    let mut exec =
+        DefaultPrimitiveExecutor::new(PrimitiveConfig::default(), confirmation, audit, gate)
+            .with_bash_foreground_wait_ms(8_000)
+            .with_bash_persist_dir(persist_dir);
+    if let Some(shared) = registry.clone() {
+        exec = exec.with_bash_task_registry(shared);
+    }
+
+    let bus = Arc::new(DefaultEventBus::new());
+    let mut dispatcher = HostApiDispatcher::new(bus).with_primitive(Arc::new(exec));
+    if let Some(shared) = registry.clone() {
+        dispatcher = dispatcher.with_bash_task_registry(shared);
+    }
+    (dispatcher, registry)
+}
+
 #[tokio::test]
 async fn dispatch_read_file_with_primitive_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());
@@ -249,6 +304,169 @@ async fn dispatch_execute_bash_with_primitive_returns_ok() {
 }
 
 #[tokio::test]
+async fn dispatch_execute_bash_without_registry_stops_on_wait_expiry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("ext-host-no-registry-leak.txt");
+    let (d, _) = make_real_bash_dispatcher(dir.path(), false);
+    let req = HostRequest {
+        module: "fs".to_string(),
+        method: "executeBash".to_string(),
+        params: serde_json::json!({
+            "command": format!(
+                "printf ext-host-bounded; sleep 9; printf leaked > {}",
+                marker.display()
+            ),
+            "cwd": dir.path().display().to_string(),
+            "foreground_wait_ms": 8_000
+        }),
+        call_id: None,
+    };
+
+    let res = d.dispatch_async("inst-no-registry", req).await.unwrap();
+    assert!(res.ok, "executeBash 应成功返回有界结果");
+    let data = res.data.expect("bash result");
+    assert_eq!(data["state"], serde_json::json!("stopped"));
+    assert_eq!(data["foregroundWaitExpired"], serde_json::json!(true));
+    assert!(
+        data.get("taskId").is_none(),
+        "无共享 registry 不应回 taskId"
+    );
+    assert!(
+        data["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ext-host-bounded"),
+        "应保留前台已产出输出: {data}"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert!(
+        !marker.exists(),
+        "marker 出现表示 ext host 无 registry 路径仍有 runaway 进程"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_execute_bash_with_registry_supports_task_output_and_task_stop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (d, registry) = make_real_bash_dispatcher(dir.path(), true);
+    assert!(
+        registry.is_some(),
+        "test fixture should inject shared registry"
+    );
+
+    let start_finish = HostRequest {
+        module: "fs".to_string(),
+        method: "executeBash".to_string(),
+        params: serde_json::json!({
+            "command": "sleep 9; echo ext-host-finished",
+            "cwd": dir.path().display().to_string(),
+            "foreground_wait_ms": 8_000
+        }),
+        call_id: None,
+    };
+    let start_finish_res = d
+        .dispatch_async("inst-bg-finish", start_finish)
+        .await
+        .unwrap();
+    assert!(start_finish_res.ok);
+    let finish_data = start_finish_res.data.expect("finish bash result");
+    assert_eq!(
+        finish_data["state"],
+        serde_json::json!("running_in_background")
+    );
+    let finish_task_id = finish_data["taskId"]
+        .as_str()
+        .expect("running_in_background result should include taskId")
+        .to_string();
+
+    let output_req = HostRequest {
+        module: "fs".to_string(),
+        method: "taskOutput".to_string(),
+        params: serde_json::json!({
+            "taskId": finish_task_id,
+            "block": true,
+            "waitMs": 60_000
+        }),
+        call_id: None,
+    };
+    let output_res = d
+        .dispatch_async("inst-bg-finish", output_req)
+        .await
+        .unwrap();
+    assert!(output_res.ok, "taskOutput(block) 应返回完成结果");
+    let output_data = output_res.data.expect("task output data");
+    assert_eq!(output_data["finished"], serde_json::json!(true));
+    assert_eq!(output_data["exitCode"], serde_json::json!(0));
+    assert_eq!(output_data["wakeReason"], serde_json::json!("finished"));
+    assert!(
+        output_data["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ext-host-finished"),
+        "taskOutput 应带回终态输出: {output_data}"
+    );
+
+    let start_stop = HostRequest {
+        module: "fs".to_string(),
+        method: "executeBash".to_string(),
+        params: serde_json::json!({
+            "command": "printf ext-host-stop; sleep 30",
+            "cwd": dir.path().display().to_string(),
+            "foreground_wait_ms": 8_000
+        }),
+        call_id: None,
+    };
+    let start_stop_res = d.dispatch_async("inst-bg-stop", start_stop).await.unwrap();
+    assert!(start_stop_res.ok);
+    let stop_task_id = start_stop_res
+        .data
+        .as_ref()
+        .and_then(|value| value["taskId"].as_str())
+        .expect("background stop case should include taskId")
+        .to_string();
+
+    let stop_req = HostRequest {
+        module: "fs".to_string(),
+        method: "taskStop".to_string(),
+        params: serde_json::json!({ "taskId": stop_task_id.clone() }),
+        call_id: None,
+    };
+    let stop_res = d.dispatch_async("inst-bg-stop", stop_req).await.unwrap();
+    assert!(stop_res.ok, "taskStop 应成功");
+    assert_eq!(
+        stop_res.data.expect("task stop data"),
+        serde_json::json!({ "taskId": stop_task_id, "stopped": true })
+    );
+
+    let stopped_output_req = HostRequest {
+        module: "fs".to_string(),
+        method: "taskOutput".to_string(),
+        params: serde_json::json!({
+            "taskId": stop_task_id,
+            "block": true,
+            "waitMs": 60_000
+        }),
+        call_id: None,
+    };
+    let stopped_output_res = d
+        .dispatch_async("inst-bg-stop", stopped_output_req)
+        .await
+        .unwrap();
+    assert!(stopped_output_res.ok);
+    let stopped_data = stopped_output_res.data.expect("stopped output data");
+    assert_eq!(stopped_data["finished"], serde_json::json!(true));
+    assert_eq!(stopped_data["exitCode"], serde_json::json!(-1));
+    assert!(
+        stopped_data["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ext-host-stop"),
+        "stopped task should still return drained prefix output: {stopped_data}"
+    );
+}
+
+#[tokio::test]
 async fn dispatch_execute_bash_with_argv_calls_primitive() {
     let ran = Arc::new(AtomicBool::new(false));
     let ran2 = Arc::clone(&ran);
@@ -299,7 +517,7 @@ async fn dispatch_execute_bash_with_argv_calls_primitive() {
             _cwd: Option<&str>,
             _id: &str,
             argv: Option<&[String]>,
-            _timeout_ms: Option<u64>,
+            _foreground_wait_ms: Option<u64>,
         ) -> Result<BashResult, AppError> {
             if cmd == "echo" {
                 if let Some(a) = argv {

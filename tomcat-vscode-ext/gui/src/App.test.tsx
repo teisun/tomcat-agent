@@ -193,9 +193,9 @@ function mockScrollableTranscript({
 }) {
   const stream = screen.getByTestId("stream-container");
   const transcript = screen.getByLabelText("active-session");
-  const userMessage = screen.getAllByTestId("message-block").find(
-    (node) => node.getAttribute("data-kind") === "user",
-  );
+  const userMessage = screen
+    .getAllByTestId("message-block")
+    .find((node) => node.getAttribute("data-kind") === "user");
 
   if (!userMessage) {
     throw new Error("Expected a user message in the transcript");
@@ -219,7 +219,17 @@ function mockScrollableTranscript({
   });
 
   (stream as HTMLElement).getBoundingClientRect = vi.fn(
-    () => ({ top: 0, bottom: 100, height: 100, left: 0, right: 0, width: 0, x: 0, y: 0 }) as DOMRect,
+    () =>
+      ({
+        top: 0,
+        bottom: 100,
+        height: 100,
+        left: 0,
+        right: 0,
+        width: 0,
+        x: 0,
+        y: 0,
+      }) as DOMRect,
   );
   (transcript as HTMLElement).getBoundingClientRect = vi.fn(
     () =>
@@ -282,7 +292,17 @@ function mockScrollableTranscriptUsers({
   });
 
   (stream as HTMLElement).getBoundingClientRect = vi.fn(
-    () => ({ top: 0, bottom: 100, height: 100, left: 0, right: 0, width: 0, x: 0, y: 0 }) as DOMRect,
+    () =>
+      ({
+        top: 0,
+        bottom: 100,
+        height: 100,
+        left: 0,
+        right: 0,
+        width: 0,
+        x: 0,
+        y: 0,
+      }) as DOMRect,
   );
   (transcript as HTMLElement).getBoundingClientRect = vi.fn(
     () =>
@@ -336,11 +356,13 @@ describe("Tomcat webview App", () => {
       messageId: "state-loading",
     });
 
-    expect(screen.getByTestId("loading-state").textContent).toContain("Connecting");
-    expect(screen.queryByText("No active Tomcat session")).toBeNull();
-    expect(screen.getByTestId("connection-chip").getAttribute("aria-label")).toContain(
+    expect(screen.getByTestId("loading-state").textContent).toContain(
       "Connecting",
     );
+    expect(screen.queryByText("No active Tomcat session")).toBeNull();
+    expect(
+      screen.getByTestId("connection-chip").getAttribute("aria-label"),
+    ).toContain("Connecting");
     expect(screen.getByTestId("connection-chip").className).toContain(
       "tc-conn-light--connecting",
     );
@@ -413,8 +435,16 @@ describe("Tomcat webview App", () => {
               },
             ],
             planTodos: [
-              { content: "Audit transcript rendering", id: "todo-1", status: "pending" },
-              { content: "Render update_plan rows", id: "todo-2", status: "pending" },
+              {
+                content: "Audit transcript rendering",
+                id: "todo-1",
+                status: "pending",
+              },
+              {
+                content: "Render update_plan rows",
+                id: "todo-2",
+                status: "pending",
+              },
             ],
             planFile: {
               path: "/workspace/login-refactor.plan.md",
@@ -449,8 +479,16 @@ describe("Tomcat webview App", () => {
                   goal: "Login refactor plan",
                   path: "/workspace/login-refactor.plan.md",
                   todos: [
-                    { content: "Audit transcript rendering", id: "todo-1", status: "pending" },
-                    { content: "Render update_plan rows", id: "todo-2", status: "pending" },
+                    {
+                      content: "Audit transcript rendering",
+                      id: "todo-1",
+                      status: "pending",
+                    },
+                    {
+                      content: "Render update_plan rows",
+                      id: "todo-2",
+                      status: "pending",
+                    },
                   ],
                 },
                 id: "plan-create-1",
@@ -466,7 +504,7 @@ describe("Tomcat webview App", () => {
                 planId: "plan-1",
                 status: "complete",
                 summary:
-                  "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login-refactor.plan.md\",\"state\":\"planning\"}",
+                  '{"plan_id":"plan-1","path":"/workspace/login-refactor.plan.md","state":"planning"}',
                 toolCallId: "tc-plan-create-1",
                 toolName: "create_plan",
                 type: "tool",
@@ -499,23 +537,39 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByText("hello")).toBeTruthy();
-    expect(screen.getByTestId("history-loader").textContent).toContain("Loading earlier");
-    expect(screen.getByTestId("boundary-block").textContent).toContain("Earlier history summary");
-    expect(screen.getByTestId("thinking-summary").textContent).toContain("thinking...");
+    expect(screen.getByTestId("history-loader").textContent).toContain(
+      "Loading earlier",
+    );
+    expect(screen.getByTestId("boundary-block").textContent).toContain(
+      "Earlier history summary",
+    );
+    expect(screen.getByTestId("thinking-summary").textContent).toContain(
+      "thinking...",
+    );
     expect(screen.queryByTestId("thinking-body")).toBeNull();
     fireEvent.click(screen.getByTestId("thinking-toggle"));
-    expect(screen.getByTestId("thinking-body").textContent).toContain("thinking...");
+    expect(screen.getByTestId("thinking-body").textContent).toContain(
+      "thinking...",
+    );
     expect(screen.getByText("Questions")).toBeTruthy();
     expect(screen.getByText("Proceed?")).toBeTruthy();
     expect(screen.getByTestId("file-chip").textContent).toContain("app.ts");
     expect(screen.queryByTestId("tool-row-open-diff")).toBeNull();
     fireEvent.click(screen.getByTestId("session-select"));
-    expect(screen.getByTestId("session-option").textContent).toContain("New session");
+    expect(screen.getByTestId("session-option").textContent).toContain(
+      "New session",
+    );
     expect(screen.queryByLabelText("Close active session")).toBeNull();
-    expect(screen.getByTestId("plan-card").textContent).toContain("login-refactor.plan.md");
+    expect(screen.getByTestId("plan-card").textContent).toContain(
+      "login-refactor.plan.md",
+    );
     expect(screen.getByTestId("build-plan").textContent).toContain("Build");
-    expect(screen.getByTestId("attachment-chip").textContent).toContain("README.md");
-    expect(screen.getByTestId("context-ratio").textContent).toContain("Ctx 42%");
+    expect(screen.getByTestId("attachment-chip").textContent).toContain(
+      "README.md",
+    );
+    expect(screen.getByTestId("context-ratio").textContent).toContain(
+      "Ctx 42%",
+    );
   });
 
   it("forwards a plan card build-model selection as a setBuildModel intent", async () => {
@@ -553,7 +607,13 @@ describe("Tomcat webview App", () => {
                 args: {
                   goal: "Login refactor plan",
                   path: "/workspace/login-refactor.plan.md",
-                  todos: [{ content: "Audit transcript rendering", id: "todo-1", status: "pending" }],
+                  todos: [
+                    {
+                      content: "Audit transcript rendering",
+                      id: "todo-1",
+                      status: "pending",
+                    },
+                  ],
                 },
                 id: "plan-create-1",
                 isError: false,
@@ -568,7 +628,7 @@ describe("Tomcat webview App", () => {
                 planId: "plan-1",
                 status: "complete",
                 summary:
-                  "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login-refactor.plan.md\",\"state\":\"planning\"}",
+                  '{"plan_id":"plan-1","path":"/workspace/login-refactor.plan.md","state":"planning"}',
                 toolCallId: "tc-plan-create-1",
                 toolName: "create_plan",
                 type: "tool",
@@ -642,7 +702,12 @@ describe("Tomcat webview App", () => {
             sessionId: "s1",
             timeline: [
               { id: "m-user", kind: "user", text: "hello", type: "message" },
-              { id: "m-assistant", kind: "assistant", text: "world", type: "message" },
+              {
+                id: "m-assistant",
+                kind: "assistant",
+                text: "world",
+                type: "message",
+              },
             ],
           },
         },
@@ -808,7 +873,13 @@ describe("Tomcat webview App", () => {
                 args: {
                   goal: "Restored plan",
                   path: "/workspace/restored.plan.md",
-                  todos: [{ content: "Resume execution", id: "todo-1", status: "pending" }],
+                  todos: [
+                    {
+                      content: "Resume execution",
+                      id: "todo-1",
+                      status: "pending",
+                    },
+                  ],
                 },
                 id: "plan-create-1",
                 isError: false,
@@ -823,7 +894,7 @@ describe("Tomcat webview App", () => {
                 planId: "plan-restored",
                 status: "complete",
                 summary:
-                  "{\"plan_id\":\"plan-restored\",\"path\":\"/workspace/restored.plan.md\",\"state\":\"planning\"}",
+                  '{"plan_id":"plan-restored","path":"/workspace/restored.plan.md","state":"planning"}',
                 toolCallId: "tc-plan-create-1",
                 toolName: "create_plan",
                 type: "tool",
@@ -835,7 +906,9 @@ describe("Tomcat webview App", () => {
       messageId: "state-restored-plan-build",
     });
 
-    expect((screen.getByTestId("build-plan") as HTMLButtonElement).disabled).toBe(false);
+    expect(
+      (screen.getByTestId("build-plan") as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 
   it("keeps top-pagination alive when older pages still do not advance the visible oldest item", async () => {
@@ -886,7 +959,14 @@ describe("Tomcat webview App", () => {
             planId: null,
             planState: "chat",
             sessionId: "s1",
-            timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
+            timeline: [
+              {
+                id: "visible-oldest",
+                kind: "assistant",
+                text: "chunk",
+                type: "message",
+              },
+            ],
           },
         },
       },
@@ -927,7 +1007,14 @@ describe("Tomcat webview App", () => {
             planId: null,
             planState: "chat",
             sessionId: "s1",
-            timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
+            timeline: [
+              {
+                id: "visible-oldest",
+                kind: "assistant",
+                text: "chunk",
+                type: "message",
+              },
+            ],
           },
         },
       },
@@ -961,7 +1048,14 @@ describe("Tomcat webview App", () => {
             planId: null,
             planState: "chat",
             sessionId: "s1",
-            timeline: [{ id: "visible-oldest", kind: "assistant", text: "chunk", type: "message" }],
+            timeline: [
+              {
+                id: "visible-oldest",
+                kind: "assistant",
+                text: "chunk",
+                type: "message",
+              },
+            ],
           },
         },
       },
@@ -1023,7 +1117,14 @@ describe("Tomcat webview App", () => {
               planId: null,
               planState: "chat",
               sessionId: "s1",
-              timeline: [{ id: `m-${index}`, kind: "assistant", text: "chunk", type: "message" }],
+              timeline: [
+                {
+                  id: `m-${index}`,
+                  kind: "assistant",
+                  text: "chunk",
+                  type: "message",
+                },
+              ],
             },
           },
         },
@@ -1057,7 +1158,14 @@ describe("Tomcat webview App", () => {
               planId: null,
               planState: "chat",
               sessionId: "s1",
-              timeline: [{ id: `m-${index}`, kind: "assistant", text: "chunk", type: "message" }],
+              timeline: [
+                {
+                  id: `m-${index}`,
+                  kind: "assistant",
+                  text: "chunk",
+                  type: "message",
+                },
+              ],
             },
           },
         },
@@ -1137,7 +1245,9 @@ describe("Tomcat webview App", () => {
             planId: null,
             planState: "chat",
             sessionId: "s1",
-            timeline: [{ id: "m1", kind: "assistant", text: "done", type: "message" }],
+            timeline: [
+              { id: "m1", kind: "assistant", text: "done", type: "message" },
+            ],
           },
         },
       },
@@ -1191,7 +1301,11 @@ describe("Tomcat webview App", () => {
               },
             ],
             planTodos: [
-              { content: "Audit transcript rendering", id: "todo-1", status: "pending" },
+              {
+                content: "Audit transcript rendering",
+                id: "todo-1",
+                status: "pending",
+              },
             ],
             planFile: {
               path: "/workspace/login-refactor.plan.md",
@@ -1206,7 +1320,13 @@ describe("Tomcat webview App", () => {
                 args: {
                   goal: "Login refactor plan",
                   path: "/workspace/login-refactor.plan.md",
-                  todos: [{ content: "Audit transcript rendering", id: "todo-1", status: "pending" }],
+                  todos: [
+                    {
+                      content: "Audit transcript rendering",
+                      id: "todo-1",
+                      status: "pending",
+                    },
+                  ],
                 },
                 id: "plan-create-1",
                 isError: false,
@@ -1221,7 +1341,7 @@ describe("Tomcat webview App", () => {
                 planId: "plan-1",
                 status: "complete",
                 summary:
-                  "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login-refactor.plan.md\",\"state\":\"planning\"}",
+                  '{"plan_id":"plan-1","path":"/workspace/login-refactor.plan.md","state":"planning"}',
                 toolCallId: "tc-plan-create-1",
                 toolName: "create_plan",
                 type: "tool",
@@ -1290,7 +1410,9 @@ describe("Tomcat webview App", () => {
     );
     fireEvent.click(screen.getByTestId("mode-select"));
     fireEvent.click(
-      screen.getAllByTestId("mode-option").find((node) => node.textContent?.includes("Chat")) ??
+      screen
+        .getAllByTestId("mode-option")
+        .find((node) => node.textContent?.includes("Chat")) ??
         screen.getAllByTestId("mode-option")[0],
     );
     fireEvent.click(screen.getByLabelText("添加文件/文件夹/图片"));
@@ -1335,12 +1457,13 @@ describe("Tomcat webview App", () => {
     expect(
       postMessage.mock.calls.some(
         ([message]) =>
-          message.type === "setPlanMode" &&
-          message.data?.action === "exit",
+          message.type === "setPlanMode" && message.data?.action === "exit",
       ),
     ).toBe(true);
     expect(
-      postMessage.mock.calls.some(([message]) => message.type === "pickContext"),
+      postMessage.mock.calls.some(
+        ([message]) => message.type === "pickContext",
+      ),
     ).toBe(true);
     expect(
       postMessage.mock.calls.some(
@@ -1506,7 +1629,8 @@ describe("Tomcat webview App", () => {
     const textbox = screen.getByTestId("composer-input");
     fireEvent.paste(textbox, {
       clipboardData: {
-        getData: (type: string) => (type === "text/plain" ? "submit via enter" : ""),
+        getData: (type: string) =>
+          type === "text/plain" ? "submit via enter" : "",
       },
     });
     fireEvent.keyDown(textbox, { key: "Enter" });
@@ -1514,7 +1638,8 @@ describe("Tomcat webview App", () => {
     expect(
       postMessage.mock.calls.some(
         ([message]) =>
-          message.type === "prompt" && message.data?.text === "submit via enter",
+          message.type === "prompt" &&
+          message.data?.text === "submit via enter",
       ),
     ).toBe(true);
   });
@@ -1558,9 +1683,9 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByTestId("new-session-button").textContent).toBe("+");
-    expect(screen.getByTestId("connection-chip").getAttribute("aria-label")).toContain(
-      "Connected",
-    );
+    expect(
+      screen.getByTestId("connection-chip").getAttribute("aria-label"),
+    ).toContain("Connected");
     expect(screen.getByTestId("connection-chip").className).toContain(
       "tc-conn-light--connected",
     );
@@ -1568,8 +1693,12 @@ describe("Tomcat webview App", () => {
     expect(screen.queryByRole("button", { name: /refresh/i })).toBeNull();
 
     const topbar = screen.getByLabelText("Session bar");
-    expect(topbar.firstElementChild).toBe(screen.getByTestId("connection-chip"));
-    expect(topbar.lastElementChild).toBe(screen.getByTestId("new-session-button"));
+    expect(topbar.firstElementChild).toBe(
+      screen.getByTestId("connection-chip"),
+    );
+    expect(topbar.lastElementChild).toBe(
+      screen.getByTestId("new-session-button"),
+    );
   });
 
   it("updates the thinking level select from session state", async () => {
@@ -1614,7 +1743,9 @@ describe("Tomcat webview App", () => {
       messageId: "state-thinking-gpt",
     });
 
-    expect(screen.getByTestId("thinking-level-select").textContent).toContain("High");
+    expect(screen.getByTestId("thinking-level-select").textContent).toContain(
+      "High",
+    );
 
     await emitState({
       channel: "state",
@@ -1655,7 +1786,9 @@ describe("Tomcat webview App", () => {
       messageId: "state-thinking-claude",
     });
 
-    expect(screen.getByTestId("thinking-level-select").textContent).toContain("Low");
+    expect(screen.getByTestId("thinking-level-select").textContent).toContain(
+      "Low",
+    );
   });
 
   it("shows a sticky prompt and live cluster for the active turn", async () => {
@@ -1718,9 +1851,12 @@ describe("Tomcat webview App", () => {
     });
 
     expect(screen.getByTestId("live-cluster")).toBeTruthy();
-    expect(screen.getByTestId("thinking-summary").textContent).toContain("先整理美国热点新闻");
+    expect(screen.getByTestId("thinking-summary").textContent).toContain(
+      "先整理美国热点新闻",
+    );
     expect(
-      document.querySelector('.tc-thinking [data-testid="thinking-body"]')?.textContent,
+      document.querySelector('.tc-thinking [data-testid="thinking-body"]')
+        ?.textContent,
     ).toBeFalsy();
 
     mockScrollableTranscript({
@@ -1736,9 +1872,10 @@ describe("Tomcat webview App", () => {
     );
 
     fireEvent.click(screen.getByTestId("thinking-toggle"));
-    expect(document.querySelector('.tc-thinking [data-testid="thinking-body"]')?.textContent).toContain(
-      "先整理美国热点新闻，再决定是否需要补 fetch。",
-    );
+    expect(
+      document.querySelector('.tc-thinking [data-testid="thinking-body"]')
+        ?.textContent,
+    ).toContain("先整理美国热点新闻，再决定是否需要补 fetch。");
   });
 
   it("hides the previous sticky prompt until the newly revealed user turn scrolls past the top edge", async () => {
@@ -1775,10 +1912,29 @@ describe("Tomcat webview App", () => {
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
-              { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
-              { id: "assistant-1", kind: "assistant", text: "第一轮回答", type: "message" },
-              { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
-              { id: "thinking-2", text: "正在回答第二轮问题", type: "thinking" },
+              {
+                id: "user-1",
+                kind: "user",
+                text: "第一轮问题",
+                type: "message",
+              },
+              {
+                id: "assistant-1",
+                kind: "assistant",
+                text: "第一轮回答",
+                type: "message",
+              },
+              {
+                id: "user-2",
+                kind: "user",
+                text: "第二轮问题",
+                type: "message",
+              },
+              {
+                id: "thinking-2",
+                text: "正在回答第二轮问题",
+                type: "thinking",
+              },
             ],
           },
         },
@@ -1801,7 +1957,9 @@ describe("Tomcat webview App", () => {
 
     metrics.scrollTop = 360;
     fireEvent.scroll(screen.getByTestId("stream-container"));
-    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
+      "第二轮问题",
+    );
   });
 
   it("settles the previous turn and auto-switches from reveal-to-top into the current sticky prompt", async () => {
@@ -1847,7 +2005,9 @@ describe("Tomcat webview App", () => {
     let baseContentHeight = 160;
     let scrollTop = 0;
     const currentSpacerHeight = () =>
-      Number.parseFloat(screen.getByTestId("transcript-spacer").style.height || "0");
+      Number.parseFloat(
+        screen.getByTestId("transcript-spacer").style.height || "0",
+      );
     const rect = (top: number, bottom: number): DOMRect =>
       ({
         top,
@@ -1870,9 +2030,16 @@ describe("Tomcat webview App", () => {
     });
     Object.defineProperty(stream, "scrollTop", {
       configurable: true,
-      get: () => Math.max(0, Math.min(scrollTop, baseContentHeight + currentSpacerHeight() - 100)),
+      get: () =>
+        Math.max(
+          0,
+          Math.min(scrollTop, baseContentHeight + currentSpacerHeight() - 100),
+        ),
       set: (value: number) => {
-        const maxTop = Math.max(0, baseContentHeight + currentSpacerHeight() - 100);
+        const maxTop = Math.max(
+          0,
+          baseContentHeight + currentSpacerHeight() - 100,
+        );
         scrollTop = Math.max(0, Math.min(value, maxTop));
       },
     });
@@ -1921,7 +2088,9 @@ describe("Tomcat webview App", () => {
       expect(screen.getByTestId("transcript-spacer").style.height).toBe("40px");
       expect(screen.queryByTestId("sticky-user-prompt")).toBeNull();
       expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
-      expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
+      expect(screen.getByTestId("tool-row-label").textContent).toContain(
+        "Edited",
+      );
       expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(0);
       expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
 
@@ -1950,9 +2119,13 @@ describe("Tomcat webview App", () => {
 
       expect((stream as HTMLElement).scrollTop).toBe(240);
       expect(screen.getByTestId("transcript-spacer").style.height).toBe("0px");
-      expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
+      expect(
+        screen.getByTestId("sticky-user-prompt-text").textContent,
+      ).toContain("第二轮问题");
       expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
-      expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
+      expect(screen.getByTestId("tool-row-label").textContent).toContain(
+        "Edited",
+      );
       expect(document.querySelectorAll(".tc-codicon-spin")).toHaveLength(0);
       expect(screen.queryByTestId("thinking-streaming-indicator")).toBeNull();
     } finally {
@@ -1994,12 +2167,41 @@ describe("Tomcat webview App", () => {
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
-              { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
-              { id: "assistant-1", kind: "assistant", text: "第一轮回答", type: "message" },
-              { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
-              { id: "assistant-2", kind: "assistant", text: "第二轮回答", type: "message" },
-              { id: "user-3", kind: "user", text: "第三轮问题", type: "message" },
-              { id: "thinking-3", text: "正在回答第三轮问题", type: "thinking" },
+              {
+                id: "user-1",
+                kind: "user",
+                text: "第一轮问题",
+                type: "message",
+              },
+              {
+                id: "assistant-1",
+                kind: "assistant",
+                text: "第一轮回答",
+                type: "message",
+              },
+              {
+                id: "user-2",
+                kind: "user",
+                text: "第二轮问题",
+                type: "message",
+              },
+              {
+                id: "assistant-2",
+                kind: "assistant",
+                text: "第二轮回答",
+                type: "message",
+              },
+              {
+                id: "user-3",
+                kind: "user",
+                text: "第三轮问题",
+                type: "message",
+              },
+              {
+                id: "thinking-3",
+                text: "正在回答第三轮问题",
+                type: "thinking",
+              },
             ],
           },
         },
@@ -2023,7 +2225,9 @@ describe("Tomcat webview App", () => {
 
     metrics.scrollTop = 460;
     fireEvent.scroll(screen.getByTestId("stream-container"));
-    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第三轮问题");
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
+      "第三轮问题",
+    );
   });
 
   it("switches the sticky prompt to the visible historical turn while scrolling upward", async () => {
@@ -2060,12 +2264,42 @@ describe("Tomcat webview App", () => {
             sessionId: "s1",
             thinkingLevel: "high",
             timeline: [
-              { id: "user-1", kind: "user", text: "第一轮问题", type: "message" },
-              { id: "assistant-1", kind: "assistant", text: "第一轮回答", type: "message" },
-              { id: "user-2", kind: "user", text: "第二轮问题", type: "message" },
-              { id: "assistant-2", kind: "assistant", text: "第二轮回答", type: "message" },
-              { id: "user-3", kind: "user", text: "第三轮问题", type: "message" },
-              { id: "assistant-3", kind: "assistant", text: "第三轮回答", type: "message" },
+              {
+                id: "user-1",
+                kind: "user",
+                text: "第一轮问题",
+                type: "message",
+              },
+              {
+                id: "assistant-1",
+                kind: "assistant",
+                text: "第一轮回答",
+                type: "message",
+              },
+              {
+                id: "user-2",
+                kind: "user",
+                text: "第二轮问题",
+                type: "message",
+              },
+              {
+                id: "assistant-2",
+                kind: "assistant",
+                text: "第二轮回答",
+                type: "message",
+              },
+              {
+                id: "user-3",
+                kind: "user",
+                text: "第三轮问题",
+                type: "message",
+              },
+              {
+                id: "assistant-3",
+                kind: "assistant",
+                text: "第三轮回答",
+                type: "message",
+              },
             ],
           },
         },
@@ -2085,11 +2319,15 @@ describe("Tomcat webview App", () => {
     });
 
     fireEvent.scroll(screen.getByTestId("stream-container"));
-    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第二轮问题");
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
+      "第二轮问题",
+    );
 
     metrics.scrollTop = 560;
     fireEvent.scroll(screen.getByTestId("stream-container"));
-    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain("第三轮问题");
+    expect(screen.getByTestId("sticky-user-prompt-text").textContent).toContain(
+      "第三轮问题",
+    );
 
     metrics.scrollTop = 0;
     fireEvent.scroll(screen.getByTestId("stream-container"));
@@ -2159,7 +2397,9 @@ describe("Tomcat webview App", () => {
 
     expect(screen.getByTestId("stop-button")).toBeTruthy();
     expect(screen.queryByTestId("send-button")).toBeNull();
-    expect(screen.getByTestId("session-select").textContent).toContain("running");
+    expect(screen.getByTestId("session-select").textContent).toContain(
+      "running",
+    );
 
     await emitState({
       channel: "state",
@@ -2198,7 +2438,9 @@ describe("Tomcat webview App", () => {
 
     expect(screen.getByTestId("send-button")).toBeTruthy();
     expect(screen.queryByTestId("stop-button")).toBeNull();
-    expect(screen.getByTestId("session-select").textContent).not.toContain("running");
+    expect(screen.getByTestId("session-select").textContent).not.toContain(
+      "running",
+    );
   });
 
   it("shows the session title instead of the raw sessionId in the dropdown", async () => {
@@ -2300,11 +2542,17 @@ describe("Tomcat webview App", () => {
       messageId: "state-empty-title",
     });
 
-    expect(screen.getByTestId("session-select").textContent).toContain("New session");
-    expect(screen.getByTestId("session-select").textContent).not.toContain("empty-session");
+    expect(screen.getByTestId("session-select").textContent).toContain(
+      "New session",
+    );
+    expect(screen.getByTestId("session-select").textContent).not.toContain(
+      "empty-session",
+    );
 
     fireEvent.click(screen.getByTestId("session-select"));
-    const options = screen.getAllByTestId("session-option").map((o) => o.textContent);
+    const options = screen
+      .getAllByTestId("session-option")
+      .map((o) => o.textContent);
     expect(options[0]).toContain("New session");
     expect(options[1]).toContain("New session");
     expect(options.every((o) => !o?.includes("whitespace-session"))).toBe(true);
@@ -2350,7 +2598,9 @@ describe("Tomcat webview App", () => {
 
     fireEvent.click(screen.getByTestId("session-select"));
     expect(screen.getAllByTestId("session-option").length).toBe(6);
-    expect(screen.getByTestId("session-more").textContent).toContain("Show 1 more");
+    expect(screen.getByTestId("session-more").textContent).toContain(
+      "Show 1 more",
+    );
 
     fireEvent.click(screen.getByTestId("session-more"));
     expect(screen.getAllByTestId("session-option").length).toBe(7);
@@ -2433,7 +2683,9 @@ describe("Tomcat webview App", () => {
       });
 
       fireEvent.click(screen.getByTestId("session-select"));
-      const headers = screen.getAllByTestId("session-group-header").map((h) => h.textContent);
+      const headers = screen
+        .getAllByTestId("session-group-header")
+        .map((h) => h.textContent);
       expect(headers).toEqual([
         "Today",
         "Yesterday",
@@ -2466,7 +2718,9 @@ describe("Tomcat webview App", () => {
       messageId: "event-insert-reference",
     });
 
-    expect(screen.getByTestId("composer-reference-chip").textContent).toContain("app.ts");
+    expect(screen.getByTestId("composer-reference-chip").textContent).toContain(
+      "app.ts",
+    );
 
     fireEvent.click(screen.getByTestId("send-button"));
 
@@ -2547,7 +2801,9 @@ describe("Tomcat webview App", () => {
 
     expect(textbox.textContent).toContain("send this");
 
-    const promptMessage = postMessage.mock.calls.find(([message]) => message.type === "prompt")?.[0];
+    const promptMessage = postMessage.mock.calls.find(
+      ([message]) => message.type === "prompt",
+    )?.[0];
     const userMessageId = promptMessage?.data?.userMessageId;
     expect(typeof userMessageId).toBe("string");
 
@@ -2646,7 +2902,9 @@ describe("Tomcat webview App", () => {
     });
     fireEvent.click(screen.getByTestId("send-button"));
 
-    const promptMessage = postMessage.mock.calls.find(([message]) => message.type === "prompt")?.[0];
+    const promptMessage = postMessage.mock.calls.find(
+      ([message]) => message.type === "prompt",
+    )?.[0];
     const userMessageId = promptMessage?.data?.userMessageId;
     expect(typeof userMessageId).toBe("string");
 
@@ -2697,7 +2955,9 @@ describe("Tomcat webview App", () => {
       messageId: "state-clear-failed-result",
     });
 
-    expect(screen.getByTestId("composer-input").textContent).toContain("keep me");
+    expect(screen.getByTestId("composer-input").textContent).toContain(
+      "keep me",
+    );
   });
 
   it("ignores malformed insertReference events without a concrete session id", async () => {
@@ -2739,7 +2999,9 @@ describe("Tomcat webview App", () => {
         });
       });
 
-      expect(screen.getByTestId("context-search-loading").textContent).toContain("搜索中");
+      expect(
+        screen.getByTestId("context-search-loading").textContent,
+      ).toContain("搜索中");
       expect(postMessage).not.toHaveBeenCalled();
 
       await act(async () => {
@@ -2847,7 +3109,9 @@ describe("Tomcat webview App", () => {
       });
 
       expect(
-        postMessage.mock.calls.filter(([message]) => message.type === "showWarningMessage"),
+        postMessage.mock.calls.filter(
+          ([message]) => message.type === "showWarningMessage",
+        ),
       ).toHaveLength(1);
       expect(screen.queryByTestId("context-search-dropdown")).toBeNull();
 
@@ -2879,7 +3143,9 @@ describe("Tomcat webview App", () => {
       });
 
       expect(
-        postMessage.mock.calls.filter(([message]) => message.type === "showWarningMessage"),
+        postMessage.mock.calls.filter(
+          ([message]) => message.type === "showWarningMessage",
+        ),
       ).toHaveLength(0);
     } finally {
       vi.useRealTimers();
@@ -2941,7 +3207,9 @@ describe("Tomcat webview App", () => {
       });
 
       expect(screen.getByTitle("src/app.ts")).toBeTruthy();
-      expect(screen.getByTestId("context-search-loading-inline").textContent).toContain("搜索中");
+      expect(
+        screen.getByTestId("context-search-loading-inline").textContent,
+      ).toContain("搜索中");
       expect(postMessage).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -2971,34 +3239,37 @@ describe("Tomcat webview App", () => {
 
   it("opens the checkpoint dialog first, then posts don't-revert and refills the composer after truncation", async () => {
     const { postMessage } = mount();
-    await emitCheckpointSessionState([
-      {
-        id: "assistant-1",
-        kind: "assistant",
-        text: "checkpoint reached",
-        type: "message",
-      },
-      {
-        id: "user-2",
-        kind: "user",
-        text: "follow-up prompt",
-        type: "message",
-      },
-      {
-        id: "assistant-2",
-        kind: "assistant",
-        text: "newer answer",
-        type: "message",
-      },
-    ], [
-      {
-        changedFiles: ["src/app.ts", "src/state.ts"],
-        createdAt: "2026-07-12T12:00:00Z",
-        id: "ck-1",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-      },
-    ]);
+    await emitCheckpointSessionState(
+      [
+        {
+          id: "assistant-1",
+          kind: "assistant",
+          text: "checkpoint reached",
+          type: "message",
+        },
+        {
+          id: "user-2",
+          kind: "user",
+          text: "follow-up prompt",
+          type: "message",
+        },
+        {
+          id: "assistant-2",
+          kind: "assistant",
+          text: "newer answer",
+          type: "message",
+        },
+      ],
+      [
+        {
+          changedFiles: ["src/app.ts", "src/state.ts"],
+          createdAt: "2026-07-12T12:00:00Z",
+          id: "ck-1",
+          kind: "turn_end",
+          messageAnchor: "assistant-1",
+        },
+      ],
+    );
 
     postMessage.mockClear();
     fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
@@ -3018,59 +3289,68 @@ describe("Tomcat webview App", () => {
       type: "restoreCheckpoint",
     });
 
-    await emitCheckpointSessionState([
-      {
-        id: "assistant-1",
-        kind: "assistant",
-        text: "checkpoint reached",
-        type: "message",
-      },
-    ], [
-      {
-        changedFiles: ["src/app.ts", "src/state.ts"],
-        createdAt: "2026-07-12T12:00:00Z",
-        id: "ck-1",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-      },
-    ]);
+    await emitCheckpointSessionState(
+      [
+        {
+          id: "assistant-1",
+          kind: "assistant",
+          text: "checkpoint reached",
+          type: "message",
+        },
+      ],
+      [
+        {
+          changedFiles: ["src/app.ts", "src/state.ts"],
+          createdAt: "2026-07-12T12:00:00Z",
+          id: "ck-1",
+          kind: "turn_end",
+          messageAnchor: "assistant-1",
+        },
+      ],
+    );
 
     expect(screen.queryByTestId("cp-confirm-dialog")).toBeNull();
-    expect(screen.getByTestId("composer-input").textContent).toContain("follow-up prompt");
+    expect(screen.getByTestId("composer-input").textContent).toContain(
+      "follow-up prompt",
+    );
   });
 
   it("does nothing when the checkpoint dialog is cancelled or dismissed with Escape", async () => {
     const { postMessage } = mount();
-    await emitCheckpointSessionState([
-      {
-        id: "assistant-1",
-        kind: "assistant",
-        text: "checkpoint reached",
-        type: "message",
-      },
-      {
-        id: "user-2",
-        kind: "user",
-        text: "follow-up prompt",
-        type: "message",
-      },
-      {
-        id: "assistant-2",
-        kind: "assistant",
-        text: "newer answer",
-        type: "message",
-      },
-    ], [
-      {
-        changedFiles: ["src/app.ts"],
-        createdAt: "2026-07-12T12:03:00Z",
-        id: "ck-cancel",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-      },
-    ]);
+    await emitCheckpointSessionState(
+      [
+        {
+          id: "assistant-1",
+          kind: "assistant",
+          text: "checkpoint reached",
+          type: "message",
+        },
+        {
+          id: "user-2",
+          kind: "user",
+          text: "follow-up prompt",
+          type: "message",
+        },
+        {
+          id: "assistant-2",
+          kind: "assistant",
+          text: "newer answer",
+          type: "message",
+        },
+      ],
+      [
+        {
+          changedFiles: ["src/app.ts"],
+          createdAt: "2026-07-12T12:03:00Z",
+          id: "ck-cancel",
+          kind: "turn_end",
+          messageAnchor: "assistant-1",
+        },
+      ],
+    );
 
-    const composerTextBefore = screen.getByTestId("composer-input").textContent ?? "";
+    const composerTextBefore =
+      screen.getByTestId("composer-input").textContent ?? "";
     postMessage.mockClear();
 
     fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
@@ -3082,7 +3362,9 @@ describe("Tomcat webview App", () => {
     expect(postMessage).not.toHaveBeenCalled();
     expect(screen.getByText("follow-up prompt")).toBeTruthy();
     expect(screen.getByText("newer answer")).toBeTruthy();
-    expect(screen.getByTestId("composer-input").textContent ?? "").toBe(composerTextBefore);
+    expect(screen.getByTestId("composer-input").textContent ?? "").toBe(
+      composerTextBefore,
+    );
 
     fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
     expect(screen.getByTestId("cp-confirm-dialog")).toBeTruthy();
@@ -3093,33 +3375,38 @@ describe("Tomcat webview App", () => {
     expect(postMessage).not.toHaveBeenCalled();
     expect(screen.getByText("follow-up prompt")).toBeTruthy();
     expect(screen.getByText("newer answer")).toBeTruthy();
-    expect(screen.getByTestId("composer-input").textContent ?? "").toBe(composerTextBefore);
+    expect(screen.getByTestId("composer-input").textContent ?? "").toBe(
+      composerTextBefore,
+    );
   });
 
   it("posts revertFiles=true when the Revert action is chosen", async () => {
     const { postMessage } = mount();
-    await emitCheckpointSessionState([
-      {
-        id: "assistant-1",
-        kind: "assistant",
-        text: "checkpoint reached",
-        type: "message",
-      },
-      {
-        id: "user-3",
-        kind: "user",
-        text: "revert me",
-        type: "message",
-      },
-    ], [
-      {
-        changedFiles: ["src/app.ts"],
-        createdAt: "2026-07-12T12:05:00Z",
-        id: "ck-2",
-        kind: "turn_end",
-        messageAnchor: "assistant-1",
-      },
-    ]);
+    await emitCheckpointSessionState(
+      [
+        {
+          id: "assistant-1",
+          kind: "assistant",
+          text: "checkpoint reached",
+          type: "message",
+        },
+        {
+          id: "user-3",
+          kind: "user",
+          text: "revert me",
+          type: "message",
+        },
+      ],
+      [
+        {
+          changedFiles: ["src/app.ts"],
+          createdAt: "2026-07-12T12:05:00Z",
+          id: "ck-2",
+          kind: "turn_end",
+          messageAnchor: "assistant-1",
+        },
+      ],
+    );
 
     postMessage.mockClear();
     fireEvent.click(screen.getByTestId("checkpoint-marker-button"));
@@ -3158,13 +3445,13 @@ describe("Tomcat webview App", () => {
             isError: false,
             status: "complete",
             summary:
-              "{\"taskId\":\"task-1\",\"logPath\":\"/tmp/task-1.log\",\"startedAtUnixMs\":1752000000000}",
+              '{"taskId":"task-1","logPath":"/tmp/task-1.log","startedAtUnixMs":1752000000000}',
             toolCallId: "tc-bash-background",
             toolName: "bash",
             type: "tool",
           },
           {
-            args: { block: true, task_id: "task-1", timeout_ms: 10000 },
+            args: { block: true, task_id: "task-1", wait_ms: 10000 },
             id: "tool-task-output-1",
             isError: false,
             startedAt,
@@ -3199,24 +3486,24 @@ describe("Tomcat webview App", () => {
             isError: false,
             status: "complete",
             summary:
-              "{\"taskId\":\"task-1\",\"logPath\":\"/tmp/task-1.log\",\"startedAtUnixMs\":1752000000000}",
+              '{"taskId":"task-1","logPath":"/tmp/task-1.log","startedAtUnixMs":1752000000000}',
             toolCallId: "tc-bash-background",
             toolName: "bash",
             type: "tool",
           },
           {
-            args: { block: true, task_id: "task-1", timeout_ms: 10000 },
+            args: { block: true, task_id: "task-1", wait_ms: 10000 },
             id: "tool-task-output-1",
             isError: false,
             startedAt,
             status: "complete",
-            summary: "{\"wakeReason\":\"timeout\"}",
+            summary: '{"wakeReason":"wait_window_elapsed"}',
             toolCallId: "tc-task-output-1",
             toolName: "task_output",
             type: "tool",
           },
           {
-            args: { block: true, task_id: "task-1", timeout_ms: 5000 },
+            args: { block: true, task_id: "task-1", wait_ms: 5000 },
             id: "tool-task-output-2",
             isError: false,
             startedAt: startedAt + 1000,
@@ -3253,29 +3540,29 @@ describe("Tomcat webview App", () => {
             isError: false,
             status: "complete",
             summary:
-              "{\"taskId\":\"task-1\",\"logPath\":\"/tmp/task-1.log\",\"startedAtUnixMs\":1752000000000}",
+              '{"taskId":"task-1","logPath":"/tmp/task-1.log","startedAtUnixMs":1752000000000}',
             toolCallId: "tc-bash-background",
             toolName: "bash",
             type: "tool",
           },
           {
-            args: { block: true, task_id: "task-1", timeout_ms: 10000 },
+            args: { block: true, task_id: "task-1", wait_ms: 10000 },
             id: "tool-task-output-1",
             isError: false,
             startedAt,
             status: "complete",
-            summary: "{\"wakeReason\":\"timeout\"}",
+            summary: '{"wakeReason":"wait_window_elapsed"}',
             toolCallId: "tc-task-output-1",
             toolName: "task_output",
             type: "tool",
           },
           {
-            args: { block: true, task_id: "task-1", timeout_ms: 5000 },
+            args: { block: true, task_id: "task-1", wait_ms: 5000 },
             id: "tool-task-output-2",
             isError: false,
             startedAt: startedAt + 1000,
             status: "complete",
-            summary: "{\"wakeReason\":\"finished\"}",
+            summary: "{}",
             toolCallId: "tc-task-output-2",
             toolName: "task_output",
             type: "tool",

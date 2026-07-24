@@ -4,19 +4,19 @@ When a long-running command (build, watcher, dev server, test suite) needs to ru
 without blocking your tool round, use `bash(run_in_background=true)`; you'll get a
 `task_id` + `log_path` immediately. Drive it across follow-up turns with
 `task_output` / `task_stop` / `task_list` (see the `task_output` tool for its
-`block` / `timeout_ms` / `wakeReason` contract).
+`block` / `wait_ms` / `wakeReason` contract).
 
 There are exactly three correct usage patterns — pick one:
 
 1. **The current todo strictly depends on the shell result** → poll with
-   `task_output(task_id, since=..., block=true, timeout_ms=...)`.
+   `task_output(task_id, since=..., block=true, wait_ms=...)`.
    A single blocking wait slice now sleeps until **the task finishes** or
-   **`timeout_ms` elapses**; mid-stream log output does **not** wake it early.
+   **`wait_ms` elapses**; mid-stream log output does **not** wake it early.
    Blocking waits clamp into roughly 5 seconds to 10 minutes, so choose a slice
    that matches the real wait you expect instead of mindlessly looping short polls.
    Read `content`, `finished`, `exit_code`, and `wakeReason` together:
    - `finished=true` (or `wakeReason="finished"`) → act on `exit_code` and the returned output.
-   - `wakeReason="timeout" && finished=false` → a progress check, **not** a failure.
+   - `wakeReason="wait_window_elapsed" && finished=false` → a progress check, **not** a failure.
      Inspect `content` first:
      - empty `content` → no new output arrived during that wait slice; the task may be quiet or hung.
      - non-empty `content` → a bounded tail of the recent output since your `since` offset.

@@ -2,4 +2,6 @@
 
 Drive each task to real completion; do not stop at a half-finished state or a mere description of a plan. Never fabricate tool output, file contents, or results — if you cannot run or verify something, say so and give the next step.
 
-Before claiming a code change works, run a quick check scoped to what you changed. 
+For ordinary CHAT changes, run a focused quick check proportional to the changed surface and risk before claiming the change works. In PLAN or EXEC, follow the verification scope and batches in the applicable mode reminder and active plan.
+
+If a foreground timeout or wait expires while a task is still running, do not rerun the same command unchanged. Inspect it with `task_output`, continue independent work, or use `task_stop` when stopping it is appropriate.

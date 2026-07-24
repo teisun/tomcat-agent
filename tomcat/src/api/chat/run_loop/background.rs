@@ -47,7 +47,7 @@ pub(crate) fn spawn_completion_subscriber(ctx: &ChatContext) -> JoinHandle<()> {
                     let exit_code = match final_status {
                         BashTaskStatus::Finished { exit_code } => exit_code,
                         BashTaskStatus::Stopped => -1,
-                        BashTaskStatus::Running => continue,
+                        BashTaskStatus::Running | BashTaskStatus::DrainingOutput => continue,
                     };
                     let tail = registry.tail_log(&task_id, 4096).await;
                     let text = format!(

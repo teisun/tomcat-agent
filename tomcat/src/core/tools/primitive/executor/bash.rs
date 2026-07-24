@@ -1,129 +1,25 @@
-//! # `bash` 工具实现（T2-P0-016 PR-E）
+//! Bash adapter for callers that use `PrimitiveExecutor` directly.
 //!
-//! ## 流程
-//! 1. cwd 路径预检（走 `gate_check_path`，复用 read scope）；
-//! 2. 拼装审计字符串 `audit_cmd`（命令 + 参数）；
-//! 3. 对命令中显式出现的路径 token 做预检（assignment RHS / `--flag=value` / 绝对或显式相对路径）；
-//! 4. `gate_check_bash`（whitelist / approval 三层）→ `(scope, grant)`；
-//! 5. **`spawn`** 子进程（Unix `sh -c` + 注入 wasmedge env，Windows `cmd /C`）或显式 argv；
-//! 6. **`tokio::time::timeout(timeout_ms, child.wait_with_output())` 等价**：
-//!    本实现用 **手工分离**——`Child::stdout/stderr.take()` → 并行 reader 任务读管道，
-//!    `tokio::time::timeout(_, child.wait())` 等退出，超时 `child.kill().await + child.wait()` 收口。
-//!    **禁止** `tokio::time::timeout(_, child.wait_with_output())` 反模式：`wait_with_output`
-//!    会消费 `Child`，超时分支拿不到句柄做 `kill`（bash.md §2.4.3 / §6.2 / §9.2）。
-//! 7. 收集 stdout / stderr / exit_code，写审计并返回。
-//!
-//! ## 与 PR-现状的差异（T2-P0-016 PR-E）
-//! - **MUST**：`Command::output()` → `spawn` + 并行 reader + `timeout(child.wait())`；
-//! - **MUST**：超时走 `child.kill().await` + `wait` 收口，`BashResult.exit_code = -1`；
-//! - **TBD（Phase-E.3）**：超长输出走 `EndTruncatingAccumulator` + `persisted_output_path`，
-//!   `BashResult` 结构扩 `timed_out / truncated / persisted_output_path`。当前 Phase-E.2
-//!   先用「头尾保留」简化截断（不写盘），保证 `BashResult` 字段不变。
+//! This path preserves the permission gate/audit preflight, then delegates process creation,
+//! output draining, foreground yield, and process-group stopping to `BashTaskRegistry`.
 
 use super::helpers::{grant_trigger_str, grant_type_str, permission_scope_str};
-use super::output_accum::accumulate_with_persist;
 use super::DefaultPrimitiveExecutor;
-use crate::core::tools::primitive::{BashResult, PrimitiveOperation};
+use crate::core::permission::{GrantTrace, PermissionScope};
+use crate::core::tools::primitive::{
+    BashExecutionState, BashNextAction, BashResult, BashTaskRegistry, PrimitiveOperation,
+};
 use crate::infra::audit::{AuditPrimitiveOp, PrimitiveAuditEntry};
 use crate::infra::error::AppError;
-use crate::infra::{
-    DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS, DEFAULT_TOOLS_BASH_TIMEOUT_MS, MAX_TOOLS_BASH_TIMEOUT_MS,
-};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::time::{timeout, timeout_at, Instant};
+use std::time::{Duration, Instant};
 
-/// 解析「最终生效超时」：调用方覆盖 → executor 注入 → 兜底默认；上限统一 clamp。
-///
-/// `tool_exec` 入口已 clamp 一次；这里再来一次防御，保证「直调 trait 方法」的路径
-/// （dispatcher / extension / 测试 mock）也走同一上限。
-fn resolve_timeout_ms(executor: &DefaultPrimitiveExecutor, override_ms: Option<u64>) -> u64 {
-    let configured = executor.bash_timeout_ms;
-    let raw = override_ms.unwrap_or(configured);
-    let raw = if raw == 0 {
-        DEFAULT_TOOLS_BASH_TIMEOUT_MS
-    } else {
-        raw
-    };
-    raw.min(MAX_TOOLS_BASH_TIMEOUT_MS)
-}
-
-/// 解析「最终输出字符上限」：直接使用 executor 注入值；当前 Phase-E.2 仅用于头尾保留
-/// 的简化截断，Phase-E.3 接入 `output_accum.rs` 后扩为「超限落盘 + persisted_output_path」。
-fn resolve_max_output_chars(executor: &DefaultPrimitiveExecutor) -> usize {
-    let v = executor.bash_max_output_chars;
-    if v == 0 {
-        DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS
-    } else {
-        v
-    }
-}
-
-fn normalize_launcher_argv(
-    command: &str,
-    argv: Option<Vec<String>>,
-) -> (String, Option<Vec<String>>) {
-    let Some(mut argv) = argv else {
-        return (command.to_string(), None);
-    };
-    let trimmed = command.trim();
-    let mut parts = trimmed.split_whitespace();
-    let Some(program) = parts.next() else {
-        return (command.to_string(), Some(argv));
-    };
-    if !matches!(
-        program,
-        "sh" | "bash" | "zsh" | "cmd" | "powershell" | "pwsh"
-    ) {
-        return (command.to_string(), Some(argv));
-    }
-    let launcher_args: Vec<String> = parts.map(str::to_string).collect();
-    if launcher_args.is_empty() {
-        return (command.to_string(), Some(argv));
-    }
-    let mut merged = launcher_args;
-    merged.append(&mut argv);
-    (program.to_string(), Some(merged))
-}
-
-fn resolve_preflight_path(raw: &str, cwd_path: &std::path::Path) -> PathBuf {
-    if raw == "~" {
-        return crate::infra::platform::home_dir().unwrap_or_else(|| PathBuf::from(raw));
-    }
-    if let Some(rest) = raw.strip_prefix("~/") {
-        return crate::infra::platform::home_dir()
-            .map(|home| home.join(rest))
-            .unwrap_or_else(|| PathBuf::from(raw));
-    }
-    if raw.starts_with("./") || raw.starts_with("../") {
-        let base = if cwd_path == std::path::Path::new(".") {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        } else {
-            cwd_path.to_path_buf()
-        };
-        return base.join(raw);
-    }
-    PathBuf::from(raw)
-}
-
-fn record_bash_failure(
-    executor: &DefaultPrimitiveExecutor,
-    audit_cmd: &str,
-    plugin_id: &str,
-    err: &AppError,
-) {
-    executor.audit.record_primitive(PrimitiveAuditEntry {
-        operation: AuditPrimitiveOp::Bash,
-        path_or_cmd: audit_cmd.to_string(),
-        plugin_id: plugin_id.to_string(),
-        user_approved: false,
-        success: false,
-        detail: Some(err.to_string()),
-        ..Default::default()
-    });
+fn resolve_foreground_wait_ms(executor: &DefaultPrimitiveExecutor, value: Option<u64>) -> u64 {
+    value.unwrap_or(executor.bash_foreground_wait_ms).clamp(
+        crate::infra::MIN_TOOLS_BASH_FOREGROUND_WAIT_MS,
+        crate::infra::MAX_TOOLS_BASH_FOREGROUND_WAIT_MS,
+    )
 }
 
 fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
@@ -150,227 +46,82 @@ fn validate_bash_cwd(path: &Path, raw_cwd: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-async fn resolve_bash_cwd(
+fn record_bash_failure(
+    executor: &DefaultPrimitiveExecutor,
+    audit_cmd: &str,
+    plugin_id: &str,
+    err: &AppError,
+) {
+    executor.audit.record_primitive(PrimitiveAuditEntry {
+        operation: AuditPrimitiveOp::Bash,
+        path_or_cmd: audit_cmd.to_string(),
+        plugin_id: plugin_id.to_string(),
+        user_approved: false,
+        success: false,
+        detail: Some(err.to_string()),
+        ..Default::default()
+    });
+}
+
+/// Resolve the working directory. An explicit cwd is gate-checked as a Read and validated for
+/// existence/type; an omitted cwd defaults to `.` and is **not** gate-checked (mirrors the
+/// shared [`BashTaskRegistry`] guard so the two entry points prompt identically). Any failure
+/// records a bash audit entry before propagating.
+async fn resolve_cwd(
     executor: &DefaultPrimitiveExecutor,
     cwd: Option<&str>,
     audit_cmd: &str,
     plugin_id: &str,
 ) -> Result<(PathBuf, Option<String>), AppError> {
-    let raw_cwd = cwd.and_then(|value| {
-        if value.trim().is_empty() {
-            None
-        } else {
-            Some(value.to_string())
-        }
-    });
-
-    let cwd_path = if let Some(raw_cwd_value) = raw_cwd.as_deref() {
-        let path = match executor
-            .gate_check_path(PrimitiveOperation::Read, raw_cwd_value, plugin_id)
-            .await
-        {
-            Ok((path, _, _)) => path,
-            Err(err) => {
-                record_bash_failure(executor, audit_cmd, plugin_id, &err);
-                return Err(err);
-            }
-        };
-        if let Err(err) = validate_bash_cwd(&path, raw_cwd_value) {
+    let raw_cwd = cwd.filter(|v| !v.trim().is_empty()).map(str::to_string);
+    let Some(raw) = raw_cwd.as_deref() else {
+        return Ok((PathBuf::from("."), None));
+    };
+    let path = match executor
+        .gate_check_path(PrimitiveOperation::Read, raw, plugin_id)
+        .await
+    {
+        Ok((path, _, _)) => path,
+        Err(err) => {
             record_bash_failure(executor, audit_cmd, plugin_id, &err);
             return Err(err);
         }
-        path
-    } else {
-        PathBuf::from(".")
     };
-
-    Ok((cwd_path, raw_cwd))
+    if let Err(err) = validate_bash_cwd(&path, raw) {
+        record_bash_failure(executor, audit_cmd, plugin_id, &err);
+        return Err(err);
+    }
+    Ok((path, raw_cwd))
 }
 
-/// 对命令串里**显式前缀路径 token**做 gate 预检（`/path`、`~/`、`./`、`../`、
-/// `--flag=/path`、`VAR=/path` 等）。
-///
-/// TODO: **不要**扩展为重定向目标 / 更多 shell 语法启发式（`fda4b9a` / 回滚
-/// `d8b5bf2 RedirectTarget`）：排列组合过多、易误伤且无法全覆盖；重定向写盘等
-/// 靠 `bash_ast` + `bash_forbidden` / `bash_approval` regex 兜底。
-async fn preflight_command_paths(
+/// AST guard + explicit-path preflight + bash policy gate. Returns the resolved `(scope, grant)`
+/// so the success audit can record the same `permission_scope` / `grant_type` / `grant_trigger`
+/// as the shared registry guard.
+async fn preflight(
     executor: &DefaultPrimitiveExecutor,
-    command: &str,
-    cwd_path: &std::path::Path,
+    audit_cmd: &str,
+    cwd: &Path,
     plugin_id: &str,
-) -> Result<(), AppError> {
-    for raw in crate::core::permission::bash_parser::extract_paths(command) {
-        let candidate = resolve_preflight_path(&raw, cwd_path);
-        let candidate_owned = candidate.to_string_lossy().into_owned();
-        let _ = executor
-            .gate_check_path(PrimitiveOperation::Bash, &candidate_owned, plugin_id)
+) -> Result<(PermissionScope, GrantTrace), AppError> {
+    executor
+        .bash_ast
+        .check(audit_cmd)
+        .map_err(|e| AppError::Primitive(e.to_string()))?;
+    for raw in crate::core::permission::bash_parser::extract_paths(audit_cmd) {
+        let candidate = if raw.starts_with("./") || raw.starts_with("../") {
+            cwd.join(&raw)
+        } else {
+            PathBuf::from(&raw)
+        };
+        executor
+            .gate_check_path(
+                PrimitiveOperation::Bash,
+                &candidate.to_string_lossy(),
+                plugin_id,
+            )
             .await?;
     }
-    Ok(())
-}
-
-/// `spawn_pipe_readers` 的返回类型别名（避开 `clippy::type_complexity`）。
-type PipeReader = tokio::task::JoinHandle<std::io::Result<()>>;
-
-/// 主 shell 已退出后，最多再给 reader 的自然收尾窗口。若迟迟拿不到 EOF，基本可判定为
-/// 后台子进程仍攥着 stdout/stderr；此时会 killpg 清理残留并尽快返回。该窗口还会被本次
-/// 调用剩余的 `timeout_ms` 预算再 clamp 一次，避免小超时请求被善后阶段反向拉长。
-const POST_EXIT_DRAIN_GRACE_MS: u64 = 2_000;
-
-/// kill 整个进程组之后，再给 reader 极短 grace 吃到 EOF；若仍未收尾，则 abort reader，
-/// 只回传已缓存的 partial，避免同步 bash 在“已决定放弃完整输出”后再次长时间阻塞。
-const PIPE_DRAIN_GRACE_MS: u64 = 250;
-
-struct PipeReaderState {
-    task: PipeReader,
-    captured: Arc<parking_lot::Mutex<Vec<u8>>>,
-}
-
-impl PipeReaderState {
-    fn snapshot(&self) -> Vec<u8> {
-        self.captured.lock().clone()
-    }
-
-    fn abort(&self) {
-        self.task.abort();
-    }
-
-    fn is_finished(&self) -> bool {
-        self.task.is_finished()
-    }
-}
-
-fn kill_process_group(process_group_id: Option<u32>) {
-    #[cfg(unix)]
-    {
-        if let Some(pid) = process_group_id {
-            // SAFETY: `killpg` 是 POSIX 信号 API；`pid` 来自同一调用里 spawn 出来的
-            // child pid（也是 pgid）。即便 leader 已退出，向同 pgid 发信号仍能清理
-            // 同组残留子进程；若进程组已不存在，ESRCH 也无副作用。
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = process_group_id;
-    }
-}
-
-/// 超时 / 残留清理：Unix 下优先对整组 `killpg`（含 sh 的孙子进程），Windows 退化为
-/// `Child::kill`（CreateProcess + JOB_OBJECT 路径目前不在 Phase-E 范围）。
-/// 调用前提：`Command::process_group(0)`，使 child pid == pgid，便于按进程组收口。
-async fn kill_process_tree(child: &mut Child, process_group_id: Option<u32>) {
-    #[cfg(unix)]
-    kill_process_group(process_group_id);
-    #[cfg(not(unix))]
-    {
-        let _ = process_group_id;
-        let _ = child.kill().await;
-    }
-    // 不论平台，wait 一次确保子进程被回收，避免僵尸 + 让 reader 端拿到 EOF。
-    let _ = child.wait().await;
-}
-
-/// 启动并行 reader：把 `Child::stdout / stderr` 边读边落入两条 `Vec<u8>`。
-///
-/// 不在 reader 里做截断 / 落盘——先收齐字节再交给上层逻辑（Phase-E.3 会替换为
-/// `EndTruncatingAccumulator`）。reader 任务内部不依赖 `Child`，仅持有 `take()` 出来
-/// 的管道 `ChildStdout` / `ChildStderr`，因此 `Child` 仍可被外层 `kill()` 杀掉
-/// （`wait_with_output` 反模式是 `Child` 与 reader 同寿命）。
-fn spawn_one_pipe_reader<R>(reader: Option<R>) -> PipeReaderState
-where
-    R: tokio::io::AsyncRead + Send + Unpin + 'static,
-{
-    let captured = Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let captured_for_task = captured.clone();
-    let task = tokio::spawn(async move {
-        if let Some(stream) = reader {
-            let mut reader = BufReader::new(stream);
-            let mut chunk = vec![0u8; 8192];
-            loop {
-                let n = reader.read(&mut chunk).await?;
-                if n == 0 {
-                    break;
-                }
-                captured_for_task.lock().extend_from_slice(&chunk[..n]);
-            }
-        }
-        Ok(())
-    });
-    PipeReaderState { task, captured }
-}
-
-fn spawn_pipe_readers(child: &mut Child) -> (PipeReaderState, PipeReaderState) {
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    (spawn_one_pipe_reader(stdout), spawn_one_pipe_reader(stderr))
-}
-
-async fn join_pipe_readers(
-    stdout: &mut PipeReaderState,
-    stderr: &mut PipeReaderState,
-) -> (Vec<u8>, Vec<u8>) {
-    let (stdout_res, stderr_res) = tokio::join!(&mut stdout.task, &mut stderr.task);
-    let _ = stdout_res.unwrap_or(Ok(()));
-    let _ = stderr_res.unwrap_or(Ok(()));
-    (stdout.snapshot(), stderr.snapshot())
-}
-
-fn post_exit_drain_grace(deadline: Instant) -> Duration {
-    deadline
-        .saturating_duration_since(Instant::now())
-        .min(Duration::from_millis(POST_EXIT_DRAIN_GRACE_MS))
-}
-
-async fn try_join_pipe_readers_for(
-    grace: Duration,
-    stdout: &mut PipeReaderState,
-    stderr: &mut PipeReaderState,
-) -> Option<(Vec<u8>, Vec<u8>)> {
-    if stdout.is_finished() && stderr.is_finished() {
-        return Some(join_pipe_readers(stdout, stderr).await);
-    }
-    if grace.is_zero() {
-        return None;
-    }
-    timeout(grace, join_pipe_readers(stdout, stderr)).await.ok()
-}
-
-async fn drain_pipe_readers_with_grace(
-    stdout: &mut PipeReaderState,
-    stderr: &mut PipeReaderState,
-    grace: Duration,
-) -> ((Vec<u8>, Vec<u8>), bool) {
-    if let Some(bytes) = try_join_pipe_readers_for(grace, stdout, stderr).await {
-        return (bytes, false);
-    }
-    stdout.abort();
-    stderr.abort();
-    ((stdout.snapshot(), stderr.snapshot()), true)
-}
-
-fn append_output_hint(target: &mut String, hint: &str) {
-    if target.is_empty() {
-        target.push_str(hint);
-    } else {
-        target.push('\n');
-        target.push_str(hint);
-    }
-}
-
-fn lingering_children_hint(reader_aborted: bool) -> String {
-    let mut hint = String::from(
-        "(background child processes kept stdout/stderr open after the main command exited; killed the process group",
-    );
-    if reader_aborted {
-        hint.push_str("; returned best-effort partial output");
-    } else {
-        hint.push_str(" so the foreground bash call could return");
-    }
-    hint.push_str(". If you intended a long-running command, use run_in_background=true)");
-    hint
+    executor.gate_check_bash(audit_cmd, plugin_id).await
 }
 
 pub(super) async fn execute_bash_impl(
@@ -379,250 +130,210 @@ pub(super) async fn execute_bash_impl(
     cwd: Option<&str>,
     plugin_id: &str,
     argv: Option<&[String]>,
-    timeout_ms_override: Option<u64>,
+    foreground_wait_ms: Option<u64>,
 ) -> Result<BashResult, AppError> {
-    // 空 argv 应等价于“未提供 args”，继续走 shell 模式；真 LLM 常会显式传 `args: []`。
-    let argv = argv
-        .filter(|args| !args.is_empty())
-        .map(|args| args.to_vec());
-    // 真 LLM 有时会把 `sh -c` / `bash -lc` 放进 command，再把脚本正文放进 args；
-    // 这里兼容这种 launcher 形态，避免 `Command::new("sh -c")` 直接 ENOENT。
-    let (command, argv) = normalize_launcher_argv(command, argv);
+    let started = Instant::now();
+    let argv = argv.filter(|a| !a.is_empty()).map(<[String]>::to_vec);
     let audit_cmd = match argv.as_deref() {
         None => command.to_string(),
-        Some(args) => {
-            let mut s = command.to_string();
-            for a in args {
-                s.push(' ');
-                s.push_str(a);
+        Some(args) => format!("{} {}", command, args.join(" ")),
+    };
+    let (cwd, raw_cwd) = resolve_cwd(executor, cwd, &audit_cmd, plugin_id).await?;
+    let (bash_scope, bash_grant) = match preflight(executor, &audit_cmd, &cwd, plugin_id).await {
+        Ok(scope_grant) => scope_grant,
+        Err(error) => {
+            record_bash_failure(executor, &audit_cmd, plugin_id, &error);
+            return Err(error);
+        }
+    };
+
+    let persist_dir = executor
+        .bash_persist_dir
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join("tomcat-bash-tool-results"));
+    let shared_registry = executor.bash_task_registry.clone();
+    let registry = shared_registry.clone().unwrap_or_else(|| {
+        Arc::new(
+            BashTaskRegistry::new(persist_dir)
+                .with_foreground_wait_ms(executor.bash_foreground_wait_ms),
+        )
+    });
+    let ticket = registry
+        .spawn_tracked_unchecked(command.to_string(), argv, Some(cwd.clone()), false)
+        .await
+        .map_err(|e| {
+            AppError::Primitive(format!(
+                "bash spawn failed (cwd={}, input={:?}): {}",
+                cwd.display(),
+                raw_cwd.as_deref().unwrap_or("<inherited>"),
+                e
+            ))
+        })?;
+    let wait_ms = resolve_foreground_wait_ms(executor, foreground_wait_ms);
+    let finished = tokio::select! {
+        result = registry.wait_for_finish(&ticket.task_id) => { result?; true }
+        _ = tokio::time::sleep(Duration::from_millis(wait_ms)) => false,
+    };
+
+    let result = if finished {
+        finalize_foreground_result(
+            executor,
+            &registry,
+            &ticket.task_id,
+            &ticket.log_path,
+            started,
+            false,
+        )
+        .await?
+    } else if shared_registry.is_some() {
+        if registry.promote_to_background(&ticket.task_id)? {
+            let chunk = registry
+                .tail_output_chunk(&ticket.task_id, 8 * 1024)
+                .await?;
+            BashResult {
+                state: BashExecutionState::RunningInBackground,
+                foreground_wait_expired: true,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                task_id: Some(ticket.task_id.clone()),
+                log_path: Some(ticket.log_path.clone()),
+                recent_output: chunk.content,
+                next_actions: vec![
+                    BashNextAction {
+                        when: "The result is needed now".into(),
+                        tool: Some("task_output".into()),
+                        arguments: Some(
+                            serde_json::json!({"task_id": ticket.task_id, "block": true, "wait_ms": 30000}),
+                        ),
+                        action: None,
+                    },
+                    BashNextAction {
+                        when: "The task is stuck or no longer useful".into(),
+                        tool: Some("task_stop".into()),
+                        arguments: Some(serde_json::json!({"task_id": ticket.task_id})),
+                        action: None,
+                    },
+                ],
+                ..Default::default()
             }
-            s
+        } else {
+            finalize_foreground_result(
+                executor,
+                &registry,
+                &ticket.task_id,
+                &ticket.log_path,
+                started,
+                true,
+            )
+            .await?
         }
-    };
-    let (cwd_path, raw_cwd) = resolve_bash_cwd(executor, cwd, &audit_cmd, plugin_id).await?;
-
-    // T2-P0-016 PR-L：AST 切段 + allow/deny 命中判定，**叠在** gate_check_bash 之前。
-    // 默认空 list 时 BashAstChecker 仅做切段、不做命中——与今日行为字节级等价；
-    // 命中 deny 立即 AppError + 审计 false / 不进入 gate。详见 bash-pr-l-scope §4。
-    if let Err(reject) = executor.bash_ast.check(&audit_cmd) {
-        let err = AppError::Primitive(reject.to_string());
-        record_bash_failure(executor, &audit_cmd, plugin_id, &err);
-        return Err(err);
-    }
-
-    if let Err(e) = preflight_command_paths(executor, &audit_cmd, &cwd_path, plugin_id).await {
-        record_bash_failure(executor, &audit_cmd, plugin_id, &e);
-        return Err(e);
-    }
-
-    // bash 决策来源（whitelist / approval）—— 走 gate 三层。
-    let (bash_scope, bash_grant) = match executor.gate_check_bash(&audit_cmd, plugin_id).await {
-        Ok((scope, grant)) => (scope, grant),
-        Err(e) => {
-            record_bash_failure(executor, &audit_cmd, plugin_id, &e);
-            return Err(e);
-        }
-    };
-
-    let timeout_ms = resolve_timeout_ms(executor, timeout_ms_override);
-    let max_output_chars = resolve_max_output_chars(executor);
-
-    // 构造命令并强制管道（默认 inherit 会把输出直接打到 agent 进程标准流）。
-    let mut cmd = match argv.as_deref() {
-        None => {
-            #[cfg(unix)]
-            let script = {
-                let env_path = executor
-                    .config
-                    .wasmedge_env_path
-                    .as_deref()
-                    .unwrap_or(r#"$HOME/.wasmedge/env"#);
-                format!(r#"[ -f "{0}" ] && . "{0}"; {1}"#, env_path, command)
-            };
-            #[cfg(windows)]
-            let script = command.to_string();
-            #[cfg(unix)]
-            let (shell, shell_arg) = ("sh", "-c");
-            #[cfg(windows)]
-            let (shell, shell_arg) = ("cmd", "/C");
-            let mut c = Command::new(shell);
-            c.arg(shell_arg).arg(&script);
-            c
-        }
-        Some(args) => {
-            let mut c = Command::new(&command);
-            c.args(args);
-            c
-        }
-    };
-    cmd.current_dir(&cwd_path)
-        .kill_on_drop(true)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null());
-    // 让嵌套启动的 `tomcat` CLI 感知自己正运行在活动 agent 会话内部，从而走护栏。
-    cmd.env("TOMCAT_AGENT_ACTIVE", "1");
-
-    // Unix：让子进程做新进程组的 leader（pgid = pid），超时分支 SIGKILL 整组。
-    // 否则 `sh -c '...; sleep N'` 派生出的孙子进程（sleep）只会被遗弃、继续撑住 stdout 管道
-    // 直到自然退出，导致 reader 卡死，整个 timeout 路径名存实亡。
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    // 5. spawn —— 必须 spawn 才能在超时分支拿到 Child::kill 的句柄
-    let mut child = cmd.spawn().map_err(|e| {
-        AppError::Primitive(format!(
-            "bash spawn failed (cwd={}, input={:?}): {}",
-            cwd_path.display(),
-            raw_cwd.as_deref().unwrap_or("<inherited>"),
-            e
-        ))
-    })?;
-    let process_group_id = child.id();
-
-    // 6. 并行 reader（与下面的 wait+timeout 解耦，便于超时分支独立 kill）
-    let (mut stdout_task, mut stderr_task) = spawn_pipe_readers(&mut child);
-
-    // 6'. `deadline` 先约束前台 `child.wait()`；一旦主 shell 已退出，reader 只再给一个
-    // 短 grace 等 EOF（且不超过剩余 timeout 预算）。否则 `cmd &` 这类后台残留会把同步
-    // bash 硬拖到完整 timeout_ms，用户体感仍像“卡住了”。
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let wait_fut = child.wait();
-    let timed_out;
-    let exit_code: i32 = match timeout_at(deadline, wait_fut).await {
-        Ok(Ok(status)) => {
-            timed_out = false;
-            status.code().unwrap_or(-1)
-        }
-        Ok(Err(e)) => {
-            // wait 自身错误：杀不杀都没意义（进程已不可达），但保险起见抢救一次。
-            let _ = child.kill().await;
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(AppError::Primitive(e.to_string()));
-        }
-        Err(_elapsed) => {
-            // Elapsed: 子进程仍在跑 → kill 整个进程组，再 wait 收口收尸。
-            // 单 PID kill 在 `sh -c '...; sleep N'` 场景只杀 sh，sleep 被遗弃、撑住管道。
-            timed_out = true;
-            kill_process_tree(&mut child, process_group_id).await;
-            -1
-        }
-    };
-
-    let mut lingering_children = false;
-    let reader_aborted;
-    // 取并行 reader 的结果。正常路径只给主 shell 退出后的短 grace；若 reader 仍不收尾，
-    // 说明有同进程组后台子进程在攥着管道写端（典型是 `cmd &`）。此时强制 killpg，
-    // 再给一小段 post-kill grace 收尾，必要时 abort reader 并回传已缓存的 partial。
-    let (stdout_bytes, stderr_bytes) = if timed_out {
-        let ((stdout, stderr), aborted) = drain_pipe_readers_with_grace(
-            &mut stdout_task,
-            &mut stderr_task,
-            Duration::from_millis(PIPE_DRAIN_GRACE_MS),
-        )
-        .await;
-        reader_aborted = aborted;
-        (stdout, stderr)
-    } else if let Some((stdout, stderr)) = try_join_pipe_readers_for(
-        post_exit_drain_grace(deadline),
-        &mut stdout_task,
-        &mut stderr_task,
-    )
-    .await
-    {
-        reader_aborted = false;
-        (stdout, stderr)
     } else {
-        lingering_children = true;
-        kill_process_group(process_group_id);
-        let ((stdout, stderr), aborted) = drain_pipe_readers_with_grace(
-            &mut stdout_task,
-            &mut stderr_task,
-            Duration::from_millis(PIPE_DRAIN_GRACE_MS),
+        finish_expired_foreground(
+            executor,
+            &registry,
+            &ticket.task_id,
+            &ticket.log_path,
+            started,
         )
-        .await;
-        reader_aborted = aborted;
-        (stdout, stderr)
+        .await?
     };
-
-    let raw_stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
-    let raw_stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-
-    // Phase-E.3：用 `output_accum::accumulate_with_persist` 替换 Phase-E.2 简易截断；
-    // 超限自动落盘 `bash_persist_dir/<prefix>-<unix_ms>-<rand6>.txt`，回填 `persisted_output_path`。
-    let persist_dir = executor.bash_persist_dir.as_deref();
-    let stdout_outcome =
-        accumulate_with_persist(&raw_stdout, max_output_chars, persist_dir, "bash-stdout");
-    let stderr_outcome =
-        accumulate_with_persist(&raw_stderr, max_output_chars, persist_dir, "bash-stderr");
-
-    let mut stdout = stdout_outcome.text;
-    let mut stderr = stderr_outcome.text;
-    let truncated = stdout_outcome.truncated || stderr_outcome.truncated;
-    // 优先返回 stdout 的落盘路径；如 stdout 未截断而 stderr 截断，则回填 stderr 路径。
-    let persisted_output_path = stdout_outcome
-        .persisted_path
-        .or(stderr_outcome.persisted_path)
-        .map(|p| p.display().to_string());
-
-    if timed_out {
-        let hint = format!(
-            "(timed out after {} ms; child killed; partial output above)",
-            timeout_ms
-        );
-        append_output_hint(&mut stderr, &hint);
-    }
-    if lingering_children {
-        let hint = lingering_children_hint(reader_aborted);
-        append_output_hint(&mut stderr, &hint);
-    }
-    if truncated {
-        let mut hint = format!(
-            "(output truncated; head/tail kept; original {}/{} chars)",
-            raw_stdout.chars().count(),
-            raw_stderr.chars().count()
-        );
-        if let Some(ref p) = persisted_output_path {
-            hint.push_str(&format!("; full output persisted to {}", p));
-        }
-        append_output_hint(&mut stdout, &hint);
-    }
-
     executor.audit.record_primitive(PrimitiveAuditEntry {
         operation: AuditPrimitiveOp::Bash,
         path_or_cmd: audit_cmd,
-        plugin_id: plugin_id.to_string(),
+        plugin_id: plugin_id.into(),
         user_approved: true,
-        success: !timed_out && exit_code == 0,
+        success: result.exit_code == 0 || result.foreground_wait_expired,
         detail: Some(format!(
-            "exit_code={} timed_out={} lingering_children={} reader_aborted={} truncated={} stdout_len={} stderr_len={} timeout_ms={} persisted={}",
-            exit_code,
-            timed_out,
-            lingering_children,
-            reader_aborted,
-            truncated,
-            stdout.len(),
-            stderr.len(),
-            timeout_ms,
-            persisted_output_path.as_deref().unwrap_or("-"),
+            "state={:?} foreground_wait_expired={} elapsed_ms={}",
+            result.state, result.foreground_wait_expired, result.elapsed_ms
         )),
         permission_scope: Some(permission_scope_str(bash_scope)),
         grant_type: Some(grant_type_str(bash_grant.grant_type)),
         grant_trigger: Some(grant_trigger_str(bash_grant.trigger)),
     });
+    Ok(result)
+}
+
+async fn finish_expired_foreground(
+    executor: &DefaultPrimitiveExecutor,
+    registry: &Arc<BashTaskRegistry>,
+    task_id: &str,
+    log_path: &str,
+    started: Instant,
+) -> Result<BashResult, AppError> {
+    let _ = registry.stop(task_id).await;
+    finalize_foreground_result(executor, registry, task_id, log_path, started, true).await
+}
+
+async fn finalize_foreground_result(
+    executor: &DefaultPrimitiveExecutor,
+    registry: &Arc<BashTaskRegistry>,
+    task_id: &str,
+    log_path: &str,
+    started: Instant,
+    foreground_wait_expired: bool,
+) -> Result<BashResult, AppError> {
+    registry.wait_for_finish(task_id).await?;
+    let chunk = registry.read_output(task_id, Some(0)).await?;
+    let final_state = match registry.get_info(task_id).map(|info| info.status) {
+        Some(crate::core::tools::primitive::BashTaskStatus::Stopped) => BashExecutionState::Stopped,
+        Some(crate::core::tools::primitive::BashTaskStatus::Finished { .. })
+        | Some(crate::core::tools::primitive::BashTaskStatus::Running)
+        | Some(crate::core::tools::primitive::BashTaskStatus::DrainingOutput)
+        | None => BashExecutionState::Finished,
+    };
+    registry.remove_foreground(task_id);
+    let (raw_stdout, raw_stderr) = split_log_streams(&chunk.content);
+    let stdout_outcome = super::output_accum::accumulate_with_persist(
+        &raw_stdout,
+        executor.bash_max_output_chars,
+        executor.bash_persist_dir.as_deref(),
+        "bash-stdout",
+    );
+    let stderr_outcome = super::output_accum::accumulate_with_persist(
+        &raw_stderr,
+        executor.bash_max_output_chars,
+        executor.bash_persist_dir.as_deref(),
+        "bash-stderr",
+    );
+    let truncated = stdout_outcome.truncated || stderr_outcome.truncated;
+    let persisted_output_path = stdout_outcome
+        .persisted_path
+        .or(stderr_outcome.persisted_path)
+        .map(|path| path.display().to_string());
     Ok(BashResult {
-        stdout,
-        stderr,
-        exit_code,
-        timed_out,
+        stdout: stdout_outcome.text,
+        stderr: stderr_outcome.text,
+        exit_code: chunk.exit_code.unwrap_or(-1),
+        state: final_state,
+        foreground_wait_expired,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        log_path: Some(log_path.to_string()),
         truncated,
         persisted_output_path,
+        ..Default::default()
     })
 }
 
-// Phase-E.3：截断 / 落盘相关纯逻辑单测已迁到 [`super::output_accum`] 模块。
-// 端到端 bash 单测（wallclock_timeout_kills_process / output_truncation_keeps_head_tail /
-// persists_full_output_when_truncated）放在 `primitive/tests/suite_test.rs`，与既有
-// `execute_bash_success` / `execute_bash_forbidden` 同栈，避免本文件重复装配
-// PermissionGate / Audit 等基础设施（详见 Phase-E.4 单测计划）。
+fn split_log_streams(log: &str) -> (String, String) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    for line in log.split_inclusive('\n') {
+        if let Some(value) = line.strip_prefix("STDERR: ") {
+            stderr.push(value);
+        } else {
+            stdout.push(line);
+        }
+    }
+    (stdout.concat(), stderr.concat())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn foreground_wait_clamps_to_contract() {
+        struct Values;
+        assert_eq!(crate::infra::MIN_TOOLS_BASH_FOREGROUND_WAIT_MS, 8_000);
+        assert_eq!(crate::infra::MAX_TOOLS_BASH_FOREGROUND_WAIT_MS, 16_000);
+        let _ = Values;
+    }
+}

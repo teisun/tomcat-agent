@@ -79,7 +79,9 @@ function asText(value: unknown): string | undefined {
   }
 }
 
-function parseAskQuestionRequest(frame: ControlRequestFrame): AskQuestionWireRequest | null {
+function parseAskQuestionRequest(
+  frame: ControlRequestFrame,
+): AskQuestionWireRequest | null {
   if (!isRecord(frame.payload)) {
     return null;
   }
@@ -118,7 +120,10 @@ function createEmptySession(sessionId: string): WebviewSessionSnapshot {
 function getAssistantDelta(
   event: ServeEvent,
 ): { delta: string; kind: string } | null {
-  if (event.type !== "message_update" || !isRecord(event.assistantMessageEvent)) {
+  if (
+    event.type !== "message_update" ||
+    !isRecord(event.assistantMessageEvent)
+  ) {
     return null;
   }
   const delta = event.assistantMessageEvent.delta;
@@ -177,10 +182,9 @@ function isCheckpointRestoreEntry(entry: unknown): boolean {
   return (
     isRecord(entry) &&
     entry.type === "custom" &&
-    (
-      entry.customType === "checkpoint.restore" ||
-      (isRecord(entry.extra) && entry.extra.customType === "checkpoint.restore")
-    )
+    (entry.customType === "checkpoint.restore" ||
+      (isRecord(entry.extra) &&
+        entry.extra.customType === "checkpoint.restore"))
   );
 }
 
@@ -243,8 +247,13 @@ function activePlanId(session: WebviewSessionSnapshot): string | null {
   return session.planId ?? session.planFile?.planId ?? null;
 }
 
-function parseReviewVerdict(value: unknown): WebviewReviewRow["verdict"] | undefined {
-  return value === "pass" || value === "fail" || value === "partial" || value === "aborted"
+function parseReviewVerdict(
+  value: unknown,
+): WebviewReviewRow["verdict"] | undefined {
+  return value === "pass" ||
+    value === "fail" ||
+    value === "partial" ||
+    value === "aborted"
     ? value
     : undefined;
 }
@@ -267,7 +276,11 @@ function parseReviewFindings(value: unknown): WebviewReviewFinding[] {
   });
 }
 
-function reviewAttemptId(planId: string, round: unknown, explicit: unknown): string {
+function reviewAttemptId(
+  planId: string,
+  round: unknown,
+  explicit: unknown,
+): string {
   if (typeof explicit === "string" && explicit.length > 0) {
     return explicit;
   }
@@ -276,9 +289,18 @@ function reviewAttemptId(planId: string, round: unknown, explicit: unknown): str
 
 function upsertRunningCodeReviewRow(
   session: WebviewSessionSnapshot,
-  input: { planId: string; reviewAttemptId?: unknown; round?: unknown; toolCallId?: unknown },
+  input: {
+    planId: string;
+    reviewAttemptId?: unknown;
+    round?: unknown;
+    toolCallId?: unknown;
+  },
 ): void {
-  const attemptId = reviewAttemptId(input.planId, input.round, input.reviewAttemptId);
+  const attemptId = reviewAttemptId(
+    input.planId,
+    input.round,
+    input.reviewAttemptId,
+  );
   const existing = session.timeline.find(
     (item): item is WebviewReviewRow =>
       item.type === "review" && item.reviewAttemptId === attemptId,
@@ -287,7 +309,8 @@ function upsertRunningCodeReviewRow(
     return;
   }
   upsertTimelineItem(session, {
-    anchorToolCallId: typeof input.toolCallId === "string" ? input.toolCallId : null,
+    anchorToolCallId:
+      typeof input.toolCallId === "string" ? input.toolCallId : null,
     id: `review:${attemptId}`,
     planId: input.planId,
     reviewAttemptId: attemptId,
@@ -312,11 +335,13 @@ function upsertDoneCodeReviewRow(
   },
 ): void {
   const verdict =
-    parseReviewVerdict(input.verdict) ?? (input.aborted === true ? "aborted" : undefined);
+    parseReviewVerdict(input.verdict) ??
+    (input.aborted === true ? "aborted" : undefined);
   const round = typeof input.round === "number" ? input.round : input.rounds;
   const attemptId = reviewAttemptId(input.planId, round, input.reviewAttemptId);
   upsertTimelineItem(session, {
-    anchorToolCallId: typeof input.toolCallId === "string" ? input.toolCallId : null,
+    anchorToolCallId:
+      typeof input.toolCallId === "string" ? input.toolCallId : null,
     findings: parseReviewFindings(input.findings),
     id: `review:${attemptId}`,
     planId: input.planId,
@@ -336,25 +361,36 @@ function cloneTimelineItem<T extends WebviewTimelineItem>(item: T): T {
 
 function reorderAnchoredReviewRows(session: WebviewSessionSnapshot): void {
   const anchored = session.timeline.filter(
-    (item): item is WebviewReviewRow => item.type === "review" && Boolean(item.anchorToolCallId),
+    (item): item is WebviewReviewRow =>
+      item.type === "review" && Boolean(item.anchorToolCallId),
   );
   for (const review of anchored) {
-    const currentIndex = session.timeline.findIndex((item) => timelineEntityKey(item) === timelineEntityKey(review));
-    const anchorIndex = session.timeline.findIndex(
-      (item) => item.type === "tool" && item.toolCallId === review.anchorToolCallId,
+    const currentIndex = session.timeline.findIndex(
+      (item) => timelineEntityKey(item) === timelineEntityKey(review),
     );
-    if (currentIndex < 0 || anchorIndex < 0 || currentIndex === anchorIndex + 1) continue;
+    const anchorIndex = session.timeline.findIndex(
+      (item) =>
+        item.type === "tool" && item.toolCallId === review.anchorToolCallId,
+    );
+    if (currentIndex < 0 || anchorIndex < 0 || currentIndex === anchorIndex + 1)
+      continue;
     session.timeline.splice(currentIndex, 1);
     const refreshedAnchorIndex = session.timeline.findIndex(
-      (item) => item.type === "tool" && item.toolCallId === review.anchorToolCallId,
+      (item) =>
+        item.type === "tool" && item.toolCallId === review.anchorToolCallId,
     );
     session.timeline.splice(refreshedAnchorIndex + 1, 0, review);
   }
 }
 
-function upsertTimelineItem(session: WebviewSessionSnapshot, item: WebviewTimelineItem): void {
+function upsertTimelineItem(
+  session: WebviewSessionSnapshot,
+  item: WebviewTimelineItem,
+): void {
   const key = timelineEntityKey(item);
-  const existingIndex = session.timeline.findIndex((entry) => timelineEntityKey(entry) === key);
+  const existingIndex = session.timeline.findIndex(
+    (entry) => timelineEntityKey(entry) === key,
+  );
   if (existingIndex >= 0) {
     session.timeline[existingIndex] = cloneTimelineItem(item);
   } else {
@@ -363,7 +399,10 @@ function upsertTimelineItem(session: WebviewSessionSnapshot, item: WebviewTimeli
   reorderAnchoredReviewRows(session);
 }
 
-function pushTextSegment(segments: WebviewMessageSegment[], text: string): void {
+function pushTextSegment(
+  segments: WebviewMessageSegment[],
+  text: string,
+): void {
   if (!text) {
     return;
   }
@@ -378,7 +417,9 @@ function pushTextSegment(segments: WebviewMessageSegment[], text: string): void 
   });
 }
 
-function contentToMessageSegments(content: unknown): WebviewMessageSegment[] | undefined {
+function contentToMessageSegments(
+  content: unknown,
+): WebviewMessageSegment[] | undefined {
   if (typeof content === "string") {
     return content ? [{ text: content, type: "text" }] : undefined;
   }
@@ -408,8 +449,10 @@ function contentToMessageSegments(content: unknown): WebviewMessageSegment[] | u
             segments.push({
               kind: entry.ref_kind,
               label: entry.label,
-              lineEnd: typeof entry.line_end === "number" ? entry.line_end : null,
-              lineStart: typeof entry.line_start === "number" ? entry.line_start : null,
+              lineEnd:
+                typeof entry.line_end === "number" ? entry.line_end : null,
+              lineStart:
+                typeof entry.line_start === "number" ? entry.line_start : null,
               path: entry.path,
               text: typeof entry.text === "string" ? entry.text : null,
               type: "reference",
@@ -444,8 +487,10 @@ function contentToMessageSegments(content: unknown): WebviewMessageSegment[] | u
         {
           kind: content.ref_kind,
           label: content.label,
-          lineEnd: typeof content.line_end === "number" ? content.line_end : null,
-          lineStart: typeof content.line_start === "number" ? content.line_start : null,
+          lineEnd:
+            typeof content.line_end === "number" ? content.line_end : null,
+          lineStart:
+            typeof content.line_start === "number" ? content.line_start : null,
           path: content.path,
           text: typeof content.text === "string" ? content.text : null,
           type: "reference",
@@ -463,15 +508,22 @@ function extractMessageText(content: unknown): string | undefined {
   const segments = contentToMessageSegments(content);
   if (segments?.length) {
     const text = segments
-      .map((segment) => (segment.type === "text" ? segment.text : segment.label))
+      .map((segment) =>
+        segment.type === "text" ? segment.text : segment.label,
+      )
       .join("");
     return text || undefined;
   }
   return asText(content);
 }
 
-function extractThinkingText(message: Record<string, unknown>): string | undefined {
-  if (typeof message.thinking_text === "string" && message.thinking_text.trim()) {
+function extractThinkingText(
+  message: Record<string, unknown>,
+): string | undefined {
+  if (
+    typeof message.thinking_text === "string" &&
+    message.thinking_text.trim()
+  ) {
     return message.thinking_text;
   }
   if (
@@ -484,15 +536,24 @@ function extractThinkingText(message: Record<string, unknown>): string | undefin
   return undefined;
 }
 
-function extractSummaryTitle(message: Record<string, unknown>): string | undefined {
-  if (typeof message.summary_title === "string" && message.summary_title.trim()) {
+function extractSummaryTitle(
+  message: Record<string, unknown>,
+): string | undefined {
+  if (
+    typeof message.summary_title === "string" &&
+    message.summary_title.trim()
+  ) {
     return message.summary_title.trim();
   }
   return undefined;
 }
 
-function extractToolCallId(message: Record<string, unknown>): string | undefined {
-  return typeof message.tool_call_id === "string" ? message.tool_call_id : undefined;
+function extractToolCallId(
+  message: Record<string, unknown>,
+): string | undefined {
+  return typeof message.tool_call_id === "string"
+    ? message.tool_call_id
+    : undefined;
 }
 
 function buildHistoryToolNameLookup(entries: unknown[]): Map<string, string> {
@@ -522,7 +583,9 @@ function buildHistoryToolNameLookup(entries: unknown[]): Map<string, string> {
   return lookup;
 }
 
-export function buildToolCallToAssistantMap(entries: unknown[]): Map<string, string> {
+export function buildToolCallToAssistantMap(
+  entries: unknown[],
+): Map<string, string> {
   const lookup = new Map<string, string>();
   for (const entry of entries) {
     if (
@@ -548,7 +611,9 @@ export function buildToolCallToAssistantMap(entries: unknown[]): Map<string, str
   return lookup;
 }
 
-function buildHistoryToolArgsLookup(entries: unknown[]): Map<string, Record<string, unknown>> {
+function buildHistoryToolArgsLookup(
+  entries: unknown[],
+): Map<string, Record<string, unknown>> {
   const lookup = new Map<string, Record<string, unknown>>();
   for (const entry of entries) {
     if (
@@ -602,14 +667,20 @@ function parseToolArgs(value: unknown): Record<string, unknown> | undefined {
 }
 
 function asNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : undefined;
 }
 
 function asFiniteNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
-function parseToolSummaryJson(resultText: string | undefined): Record<string, unknown> | undefined {
+function parseToolSummaryJson(
+  resultText: string | undefined,
+): Record<string, unknown> | undefined {
   if (!resultText) {
     return undefined;
   }
@@ -621,26 +692,124 @@ function parseToolSummaryJson(resultText: string | undefined): Record<string, un
   }
 }
 
-function applyBackgroundTaskTicket(tool: WebviewToolCard, resultText?: string): void {
+function applyBackgroundTaskTicket(
+  tool: WebviewToolCard,
+  resultText?: string,
+): void {
+  const parsed = parseToolSummaryJson(resultText);
+  const resultRunsInBackground = parsed?.state === "running_in_background";
   const runsInBackground =
-    tool.args?.run_in_background === true || tool.args?.runInBackground === true;
+    tool.args?.run_in_background === true ||
+    tool.args?.runInBackground === true ||
+    resultRunsInBackground;
   if (
     !runsInBackground ||
-    (tool.toolName !== "bash" && tool.toolName !== "shell" && tool.toolName !== "execute_command")
+    (tool.toolName !== "bash" &&
+      tool.toolName !== "shell" &&
+      tool.toolName !== "execute_command")
   ) {
     delete tool.backgroundTaskId;
     delete tool.backgroundRunning;
     delete tool.backgroundExitCode;
     return;
   }
-  const parsed = parseToolSummaryJson(resultText);
-  const taskId = asNonEmptyString(parsed?.taskId) ?? asNonEmptyString(parsed?.task_id);
+  const taskId =
+    asNonEmptyString(parsed?.taskId) ?? asNonEmptyString(parsed?.task_id);
   if (!taskId) {
     return;
   }
   tool.backgroundTaskId = taskId;
   tool.backgroundRunning = true;
+  tool.logPath =
+    asNonEmptyString(parsed?.logPath) ??
+    asNonEmptyString(parsed?.log_path) ??
+    tool.logPath;
   delete tool.backgroundExitCode;
+}
+
+const LIVE_OUTPUT_MAX_LINES = 500;
+const LIVE_OUTPUT_MAX_CHARS = 30_000;
+
+function safeUnicodeSuffix(value: string, maxCodeUnits: number): string {
+  if (value.length <= maxCodeUnits) return value;
+  let start = value.length - maxCodeUnits;
+  const current = value.charCodeAt(start);
+  const previous = value.charCodeAt(start - 1);
+  if (
+    current >= 0xdc00 &&
+    current <= 0xdfff &&
+    previous >= 0xd800 &&
+    previous <= 0xdbff
+  ) {
+    start += 1;
+  }
+  return value.slice(start);
+}
+
+function trimLiveOutput(value: string): { output: string; truncated: boolean } {
+  let output = value.replace(/\r\n/g, "\n");
+  let truncated = output.length > LIVE_OUTPUT_MAX_CHARS;
+  if (truncated) {
+    output = safeUnicodeSuffix(output, LIVE_OUTPUT_MAX_CHARS);
+  }
+  const lines = output.split("\n");
+  if (lines.length > LIVE_OUTPUT_MAX_LINES) {
+    output = lines.slice(-LIVE_OUTPUT_MAX_LINES).join("\n");
+    truncated = true;
+  }
+  return { output, truncated };
+}
+
+function applyLiveToolOutput(
+  tool: WebviewToolCard,
+  partialResult: unknown,
+): void {
+  if (
+    (tool.toolName !== "bash" &&
+      tool.toolName !== "shell" &&
+      tool.toolName !== "execute_command") ||
+    !isRecord(partialResult) ||
+    (partialResult.kind !== undefined && partialResult.kind !== "live_output")
+  )
+    return;
+  const output =
+    typeof partialResult.output === "string" ? partialResult.output : undefined;
+  const startOffset = asFiniteNumber(partialResult.startOffset);
+  const nextOffset = asFiniteNumber(partialResult.nextOffset);
+  const sequence = asFiniteNumber(partialResult.sequence);
+  if (
+    output === undefined ||
+    startOffset === undefined ||
+    nextOffset === undefined ||
+    sequence === undefined ||
+    !Number.isInteger(startOffset) ||
+    !Number.isInteger(nextOffset) ||
+    !Number.isInteger(sequence) ||
+    startOffset < 0 ||
+    nextOffset < startOffset ||
+    sequence < 0
+  )
+    return;
+  if (
+    tool.liveOutputSequence !== undefined &&
+    sequence <= tool.liveOutputSequence
+  )
+    return;
+
+  const contiguous =
+    tool.liveOutputOffset === undefined
+      ? startOffset === 0
+      : startOffset === tool.liveOutputOffset;
+  const combined = contiguous ? `${tool.liveOutput ?? ""}${output}` : output;
+  const trimmed = trimLiveOutput(combined);
+  tool.liveOutput = trimmed.output;
+  tool.liveOutputOffset = nextOffset;
+  tool.liveOutputSequence = sequence;
+  tool.liveOutputTruncated =
+    trimmed.truncated || partialResult.truncated === true || !contiguous;
+  tool.logPath = asNonEmptyString(partialResult.logPath) ?? tool.logPath;
+  tool.backgroundTaskId =
+    asNonEmptyString(partialResult.taskId) ?? tool.backgroundTaskId;
 }
 
 function applyBackgroundTaskFinished(
@@ -663,7 +832,9 @@ function applyBackgroundTaskFinished(
   }
 }
 
-function countCompletedItems(items: unknown): { completed: number; total: number } | undefined {
+function countCompletedItems(
+  items: unknown,
+): { completed: number; total: number } | undefined {
   if (!Array.isArray(items)) {
     return undefined;
   }
@@ -681,7 +852,9 @@ function countCompletedItems(items: unknown): { completed: number; total: number
   return { completed, total };
 }
 
-function countTodosFromArgs(todos: unknown): { completed: number; total: number } | undefined {
+function countTodosFromArgs(
+  todos: unknown,
+): { completed: number; total: number } | undefined {
   if (!Array.isArray(todos)) {
     return undefined;
   }
@@ -705,7 +878,10 @@ function countCheckedOps(args: Record<string, unknown> | undefined): number {
     }
     const kind = asNonEmptyString(op.kind);
     const status = asNonEmptyString(op.status);
-    if ((kind === "set_status" || kind === "upsert") && status === "completed") {
+    if (
+      (kind === "set_status" || kind === "upsert") &&
+      status === "completed"
+    ) {
       return count + 1;
     }
     return count;
@@ -912,12 +1088,12 @@ function applyHistoryPlanCustomEntry(
           typeof entry.reason === "string" && entry.reason.length > 0
             ? entry.reason
             : "review needs attention";
-      pushMessage(
-        session,
-        "warn",
-        `Tomcat plan warning: ${reason}`,
-        planEventMessageId(eventName, planId, reason),
-      );
+        pushMessage(
+          session,
+          "warn",
+          `Tomcat plan warning: ${reason}`,
+          planEventMessageId(eventName, planId, reason),
+        );
       }
       return;
     default:
@@ -941,8 +1117,12 @@ function applyHistoryEntry(
       return;
     }
     session.timeline.push({
-      coveredCount: typeof entry.coveredCount === "number" ? entry.coveredCount : null,
-      id: typeof entry.id === "string" ? entry.id : `boundary-${session.timeline.length + 1}`,
+      coveredCount:
+        typeof entry.coveredCount === "number" ? entry.coveredCount : null,
+      id:
+        typeof entry.id === "string"
+          ? entry.id
+          : `boundary-${session.timeline.length + 1}`,
       summary: typeof entry.summary === "string" ? entry.summary : null,
       type: "boundary",
     } satisfies WebviewBoundaryBlock);
@@ -958,7 +1138,10 @@ function applyHistoryEntry(
           : "Unknown error";
     session.timeline.push({
       detailText: typeof entry.detail === "string" ? entry.detail : null,
-      id: typeof entry.id === "string" ? entry.id : `history-error-${session.timeline.length + 1}`,
+      id:
+        typeof entry.id === "string"
+          ? entry.id
+          : `history-error-${session.timeline.length + 1}`,
       kind: "error",
       text: summary,
       type: "message",
@@ -967,10 +1150,13 @@ function applyHistoryEntry(
   }
 
   if (entry.type === "message" && isRecord(entry.message)) {
-    const role = typeof entry.message.role === "string" ? entry.message.role : null;
+    const role =
+      typeof entry.message.role === "string" ? entry.message.role : null;
     const text = extractMessageText(entry.message.content);
     const id =
-      typeof entry.id === "string" ? entry.id : `history-message-${(text ?? role ?? "unknown").length}`;
+      typeof entry.id === "string"
+        ? entry.id
+        : `history-message-${(text ?? role ?? "unknown").length}`;
     if (role === "user") {
       if (!text) {
         return;
@@ -987,7 +1173,8 @@ function applyHistoryEntry(
     }
     if (role === "assistant") {
       const hasToolCalls =
-        Array.isArray(entry.message.tool_calls) && entry.message.tool_calls.length > 0;
+        Array.isArray(entry.message.tool_calls) &&
+        entry.message.tool_calls.length > 0;
       const thinkingText = extractThinkingText(entry.message);
       const summaryTitle = extractSummaryTitle(entry.message) ?? null;
       const assistantMessageId = id;
@@ -1038,9 +1225,16 @@ function applyHistoryEntry(
     }
   }
 
-  if (entry.type === "thinking_trace" && typeof entry.text === "string" && entry.text.trim()) {
+  if (
+    entry.type === "thinking_trace" &&
+    typeof entry.text === "string" &&
+    entry.text.trim()
+  ) {
     session.timeline.push({
-      id: typeof entry.id === "string" ? entry.id : `thinking-${entry.text.length}`,
+      id:
+        typeof entry.id === "string"
+          ? entry.id
+          : `thinking-${entry.text.length}`,
       text: entry.text,
       type: "thinking",
     } satisfies WebviewThinkingBlock);
@@ -1090,7 +1284,10 @@ function mergeHistoryEntries(older: unknown[], newer: unknown[]): unknown[] {
   return merged;
 }
 
-function mergeLatestHistoryEntries(existing: unknown[], latest: unknown[]): unknown[] {
+function mergeLatestHistoryEntries(
+  existing: unknown[],
+  latest: unknown[],
+): unknown[] {
   const latestByKey = new Map<string, unknown>();
   for (const entry of latest) {
     latestByKey.set(historyEntryKey(entry), entry);
@@ -1171,7 +1368,8 @@ function findTimelineItem<T extends WebviewTimelineItem["type"]>(
   type: T,
 ): Extract<WebviewTimelineItem, { type: T }> | undefined {
   return session.timeline.find(
-    (item): item is Extract<WebviewTimelineItem, { type: T }> => item.id === id && item.type === type,
+    (item): item is Extract<WebviewTimelineItem, { type: T }> =>
+      item.id === id && item.type === type,
   );
 }
 
@@ -1180,17 +1378,22 @@ function findTimelineIndex<T extends WebviewTimelineItem["type"]>(
   id: string,
   type: T,
 ): number {
-  return session.timeline.findIndex((item) => item.id === id && item.type === type);
+  return session.timeline.findIndex(
+    (item) => item.id === id && item.type === type,
+  );
 }
 
 function findThinkingByAssistantMessageId(
   session: WebviewSessionSnapshot,
   assistantMessageId: string,
 ): WebviewThinkingBlock | undefined {
-  return [...session.timeline].reverse().find(
-    (item): item is WebviewThinkingBlock =>
-      item.type === "thinking" && item.assistantMessageId === assistantMessageId,
-  );
+  return [...session.timeline]
+    .reverse()
+    .find(
+      (item): item is WebviewThinkingBlock =>
+        item.type === "thinking" &&
+        item.assistantMessageId === assistantMessageId,
+    );
 }
 
 function ensureThinkingBlockForAssistantMessage(
@@ -1205,7 +1408,10 @@ function ensureThinkingBlockForAssistantMessage(
     return current;
   }
 
-  const existing = findThinkingByAssistantMessageId(session, assistantMessageId);
+  const existing = findThinkingByAssistantMessageId(
+    session,
+    assistantMessageId,
+  );
   if (existing) {
     runtime.activeThinkingId = existing.id;
     return existing;
@@ -1218,7 +1424,11 @@ function ensureThinkingBlockForAssistantMessage(
     text: "",
     type: "thinking",
   };
-  const assistantIndex = findTimelineIndex(session, assistantMessageId, "message");
+  const assistantIndex = findTimelineIndex(
+    session,
+    assistantMessageId,
+    "message",
+  );
   if (assistantIndex >= 0) {
     session.timeline.splice(assistantIndex, 0, created);
   } else {
@@ -1235,7 +1445,9 @@ function findAssistantGroupIdForToolCallIds(
   for (const toolCallId of toolCallIds) {
     const tool = session.timeline.find(
       (item): item is WebviewToolCard =>
-        item.type === "tool" && item.toolCallId === toolCallId && !!item.assistantMessageId,
+        item.type === "tool" &&
+        item.toolCallId === toolCallId &&
+        !!item.assistantMessageId,
     );
     if (tool?.assistantMessageId) {
       return tool.assistantMessageId;
@@ -1255,7 +1467,8 @@ function applySummaryTitleToGroup(
 ): void {
   const assistantMessageId =
     findAssistantGroupIdForToolCallIds(session, options.toolCallIds ?? []) ??
-    (typeof options.assistantMessageId === "string" && options.assistantMessageId.length > 0
+    (typeof options.assistantMessageId === "string" &&
+    options.assistantMessageId.length > 0
       ? options.assistantMessageId
       : undefined) ??
     runtime.activeAssistantId ??
@@ -1264,8 +1477,7 @@ function applySummaryTitleToGroup(
       .find(
         (item): item is WebviewThinkingBlock =>
           item.type === "thinking" && !!item.assistantMessageId,
-      )
-      ?.assistantMessageId;
+      )?.assistantMessageId;
   if (!assistantMessageId) {
     return;
   }
@@ -1283,7 +1495,8 @@ function upsertTool(
   toolName: string,
 ): WebviewToolCard {
   const existing = session.timeline.find(
-    (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
+    (item): item is WebviewToolCard =>
+      item.type === "tool" && item.toolCallId === toolCallId,
   );
   if (existing) {
     return existing;
@@ -1307,7 +1520,8 @@ function applyToolSummaryTitle(
   summaryTitle: string,
 ): void {
   const tool = session.timeline.find(
-    (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
+    (item): item is WebviewToolCard =>
+      item.type === "tool" && item.toolCallId === toolCallId,
   );
   if (tool) {
     tool.summaryTitle = summaryTitle;
@@ -1457,7 +1671,10 @@ function shouldRetainLiveTimelineItem(
   }
 }
 
-function effectiveBusy(busy: boolean, interrupted: boolean | null | undefined): boolean {
+function effectiveBusy(
+  busy: boolean,
+  interrupted: boolean | null | undefined,
+): boolean {
   return busy && interrupted !== true;
 }
 
@@ -1517,14 +1734,16 @@ function appendStreamingMessage(
     return created;
   }
 
-  const current = ensureThinkingBlockForAssistantMessage(session, runtime, assistantMessageId);
+  const current = ensureThinkingBlockForAssistantMessage(
+    session,
+    runtime,
+    assistantMessageId,
+  );
   current.text += text;
   return current;
 }
 
-function mapSessionToTab(
-  session: SessionSummary,
-): WebviewSessionTab {
+function mapSessionToTab(session: SessionSummary): WebviewSessionTab {
   return {
     busy: effectiveBusy(session.busy, session.interrupted),
     isCurrent: session.isCurrent,
@@ -1602,7 +1821,9 @@ export class WebviewStateStore {
   }
 
   syncSessionList(payload: SessionListPayload): void {
-    this.state.sessions = payload.sessions.map((session) => mapSessionToTab(session));
+    this.state.sessions = payload.sessions.map((session) =>
+      mapSessionToTab(session),
+    );
     if (!this.state.activeSessionId && payload.activeSessionId) {
       this.setActiveSession(payload.activeSessionId);
     }
@@ -1650,11 +1871,17 @@ export class WebviewStateStore {
     this.syncTabOwnedByFrontend(payload.sessionId);
   }
 
-  setPendingAttachments(sessionId: string, attachments: WebviewPendingAttachment[]): void {
+  setPendingAttachments(
+    sessionId: string,
+    attachments: WebviewPendingAttachment[],
+  ): void {
     this.ensureSession(sessionId).pendingAttachments = [...attachments];
   }
 
-  setCheckpoints(sessionId: string, checkpoints: SessionCheckpointPayload[]): void {
+  setCheckpoints(
+    sessionId: string,
+    checkpoints: SessionCheckpointPayload[],
+  ): void {
     const session = this.ensureSession(sessionId);
     session.checkpoints = checkpoints.map((checkpoint) => ({
       changedFiles: [...checkpoint.changedFiles],
@@ -1688,7 +1915,8 @@ export class WebviewStateStore {
       Array.isArray(history.messages) ? history.messages : [],
     );
     runtime.oldestHistoryCursor = history.nextCursor ?? null;
-    runtime.hasMoreHistory = history.hasMore === true && typeof history.nextCursor === "string";
+    runtime.hasMoreHistory =
+      history.hasMore === true && typeof history.nextCursor === "string";
     runtime.historyLoading = false;
     this.rebuildHistoryTimeline(sessionId);
   }
@@ -1699,9 +1927,13 @@ export class WebviewStateStore {
 
   prependOlderHistory(sessionId: string, history: SessionHistoryPayload): void {
     const runtime = this.ensureRuntime(sessionId);
-    runtime.historyEntries = mergeHistoryEntries(history.messages, runtime.historyEntries);
+    runtime.historyEntries = mergeHistoryEntries(
+      history.messages,
+      runtime.historyEntries,
+    );
     runtime.oldestHistoryCursor = history.nextCursor ?? null;
-    runtime.hasMoreHistory = history.hasMore === true && typeof history.nextCursor === "string";
+    runtime.hasMoreHistory =
+      history.hasMore === true && typeof history.nextCursor === "string";
     runtime.historyLoading = false;
     this.rebuildHistoryTimeline(sessionId);
   }
@@ -1726,7 +1958,13 @@ export class WebviewStateStore {
     if (!text) {
       return;
     }
-    pushMessage(this.ensureSession(sessionId), kind, text, options.preferredId, options);
+    pushMessage(
+      this.ensureSession(sessionId),
+      kind,
+      text,
+      options.preferredId,
+      options,
+    );
   }
 
   appendLocalUserMessage(
@@ -1758,7 +1996,9 @@ export class WebviewStateStore {
     const runtime = this.ensureRuntime(sessionId);
     const message = session.timeline.find(
       (item): item is WebviewMessageBlock =>
-        item.type === "message" && item.kind === "user" && item.id === messageId,
+        item.type === "message" &&
+        item.kind === "user" &&
+        item.id === messageId,
     );
     if (!message) {
       return;
@@ -1774,7 +2014,9 @@ export class WebviewStateStore {
     const runtime = this.ensureRuntime(sessionId);
     const message = session.timeline.find(
       (item): item is WebviewMessageBlock =>
-        item.type === "message" && item.kind === "user" && item.id === messageId,
+        item.type === "message" &&
+        item.kind === "user" &&
+        item.id === messageId,
     );
     if (!message) {
       return;
@@ -1791,7 +2033,9 @@ export class WebviewStateStore {
     runtime.localUserMessageIds.delete(messageId);
     const message = session.timeline.find(
       (item): item is WebviewMessageBlock =>
-        item.type === "message" && item.kind === "user" && item.id === messageId,
+        item.type === "message" &&
+        item.kind === "user" &&
+        item.id === messageId,
     );
     if (!message) {
       return;
@@ -1835,7 +2079,10 @@ export class WebviewStateStore {
         return;
       case "message_start": {
         clearStreaming(runtime);
-        if ("assistantMessageId" in frame && typeof frame.assistantMessageId === "string") {
+        if (
+          "assistantMessageId" in frame &&
+          typeof frame.assistantMessageId === "string"
+        ) {
           runtime.activeAssistantId = frame.assistantMessageId;
           runtime.streamingAssistantId = frame.assistantMessageId;
         }
@@ -1858,13 +2105,15 @@ export class WebviewStateStore {
         if (summaryTitle) {
           applySummaryTitleToGroup(session, runtime, summaryTitle, {
             assistantMessageId:
-              "assistantMessageId" in frame && typeof frame.assistantMessageId === "string"
+              "assistantMessageId" in frame &&
+              typeof frame.assistantMessageId === "string"
                 ? frame.assistantMessageId
                 : undefined,
             toolCallIds:
               "toolCallIds" in frame && Array.isArray(frame.toolCallIds)
                 ? frame.toolCallIds.filter(
-                    (toolCallId): toolCallId is string => typeof toolCallId === "string",
+                    (toolCallId): toolCallId is string =>
+                      typeof toolCallId === "string",
                   )
                 : [],
           });
@@ -1909,24 +2158,44 @@ export class WebviewStateStore {
         session.contextRatio = frame.contextUtilizationRatio;
         return;
       case "compaction_error":
-        pushMessage(session, "notice", `Context compaction failed: ${frame.error}`);
+        pushMessage(
+          session,
+          "notice",
+          `Context compaction failed: ${frame.error}`,
+        );
         return;
       case "auto_retry_start":
-        pushMessage(session, "notice", `Retrying after error: ${frame.errorMessage}`);
+        pushMessage(
+          session,
+          "notice",
+          `Retrying after error: ${frame.errorMessage}`,
+        );
         return;
       case "auto_retry_end":
         if (!frame.success) {
-          pushMessage(session, "notice", `Retry finished without success: ${frame.finalError ?? "unknown error"}`);
+          pushMessage(
+            session,
+            "notice",
+            `Retry finished without success: ${frame.finalError ?? "unknown error"}`,
+          );
         }
         return;
       case "sub_agent_start":
         if (frame.subagentType !== "code_reviewer") {
-          pushMessage(session, "notice", `Started ${frame.subagentType} sub-agent`);
+          pushMessage(
+            session,
+            "notice",
+            `Started ${frame.subagentType} sub-agent`,
+          );
         }
         return;
       case "sub_agent_end":
         if (frame.subagentType !== "code_reviewer") {
-          pushMessage(session, "notice", `Sub-agent ${frame.subagentType} ${frame.outcome}`);
+          pushMessage(
+            session,
+            "notice",
+            `Sub-agent ${frame.subagentType} ${frame.outcome}`,
+          );
         }
         return;
       case "message_update": {
@@ -1935,7 +2204,8 @@ export class WebviewStateStore {
           return;
         }
         const assistantMessageId =
-          "assistantMessageId" in frame && typeof frame.assistantMessageId === "string"
+          "assistantMessageId" in frame &&
+          typeof frame.assistantMessageId === "string"
             ? frame.assistantMessageId
             : null;
         if (!assistantMessageId) {
@@ -1950,12 +2220,24 @@ export class WebviewStateStore {
         }
         if (delta.kind === "content_delta") {
           runtime.activeAssistantId = assistantMessageId;
-          appendStreamingMessage(session, runtime, "assistant", assistantMessageId, delta.delta);
+          appendStreamingMessage(
+            session,
+            runtime,
+            "assistant",
+            assistantMessageId,
+            delta.delta,
+          );
           return;
         }
         if (delta.kind === "thinking_delta") {
           runtime.activeAssistantId = assistantMessageId;
-          appendStreamingMessage(session, runtime, "thinking", assistantMessageId, delta.delta);
+          appendStreamingMessage(
+            session,
+            runtime,
+            "thinking",
+            assistantMessageId,
+            delta.delta,
+          );
         }
         return;
       }
@@ -1977,9 +2259,14 @@ export class WebviewStateStore {
         clearThinkingStreaming(runtime);
         const activeAssistantId = runtime.activeAssistantId ?? undefined;
         const tool = upsertTool(session, frame.toolCallId, frame.toolName);
-        tool.status = "streaming";
+        if (!(tool.backgroundRunning && tool.status === "complete")) {
+          tool.status = "streaming";
+        }
         if ("args" in frame) {
           tool.args = parseToolArgs(frame.args) ?? tool.args;
+        }
+        if (frame.type === "tool_execution_update") {
+          applyLiveToolOutput(tool, frame.partialResult);
         }
         tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
         applyPlanReference(tool);
@@ -2002,19 +2289,30 @@ export class WebviewStateStore {
         } else {
           delete tool.diffStat;
         }
-        if (frame.display?.kind === "file" && Array.isArray(frame.display.diff)) {
+        if (
+          frame.display?.kind === "file" &&
+          Array.isArray(frame.display.diff)
+        ) {
           tool.diff = frame.display.diff;
         } else {
           delete tool.diff;
         }
         tool.isError = frame.isError;
-        tool.status = toolResultWasInterrupted(frame.result) ? "interrupted" : "complete";
-        tool.summary = toolResultWasInterrupted(frame.result) ? "Interrupted" : asText(frame.result);
+        tool.status = toolResultWasInterrupted(frame.result)
+          ? "interrupted"
+          : "complete";
+        tool.summary = toolResultWasInterrupted(frame.result)
+          ? "Interrupted"
+          : asText(frame.result);
         tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
         applyPlanReference(tool, tool.summary);
         applyBackgroundTaskTicket(tool, tool.summary);
         if (!tool.isError && tool.status === "complete") {
-          tool.planActivity = derivePlanActivity(tool.toolName, tool.summary, tool.args);
+          tool.planActivity = derivePlanActivity(
+            tool.toolName,
+            tool.summary,
+            tool.args,
+          );
         } else {
           delete tool.planActivity;
         }
@@ -2035,11 +2333,15 @@ export class WebviewStateStore {
         return;
       }
       case "session.todos":
-        session.sessionTodos = parseTodos("todos" in frame ? frame.todos : undefined);
+        session.sessionTodos = parseTodos(
+          "todos" in frame ? frame.todos : undefined,
+        );
         return;
       case "session.title_updated": {
         const title =
-          "title" in frame && typeof frame.title === "string" ? frame.title : null;
+          "title" in frame && typeof frame.title === "string"
+            ? frame.title
+            : null;
         if (!title) {
           return;
         }
@@ -2061,13 +2363,15 @@ export class WebviewStateStore {
         }
         applySummaryTitleToGroup(session, runtime, summaryTitle, {
           assistantMessageId:
-            "assistantMessageId" in frame && typeof frame.assistantMessageId === "string"
+            "assistantMessageId" in frame &&
+            typeof frame.assistantMessageId === "string"
               ? frame.assistantMessageId
               : undefined,
           toolCallIds:
             "toolCallIds" in frame && Array.isArray(frame.toolCallIds)
               ? frame.toolCallIds.filter(
-                  (toolCallId): toolCallId is string => typeof toolCallId === "string",
+                  (toolCallId): toolCallId is string =>
+                    typeof toolCallId === "string",
                 )
               : [],
         });
@@ -2090,12 +2394,16 @@ export class WebviewStateStore {
       }
       case "background_task_finished": {
         const taskId =
-          "taskId" in frame && typeof frame.taskId === "string" ? frame.taskId : null;
+          "taskId" in frame && typeof frame.taskId === "string"
+            ? frame.taskId
+            : null;
         if (!taskId) {
           return;
         }
         const exitCode =
-          "exitCode" in frame && typeof frame.exitCode === "number" ? frame.exitCode : undefined;
+          "exitCode" in frame && typeof frame.exitCode === "number"
+            ? frame.exitCode
+            : undefined;
         applyBackgroundTaskFinished(session, taskId, exitCode);
         return;
       }
@@ -2115,7 +2423,9 @@ export class WebviewStateStore {
     if (!request) {
       return;
     }
-    const session = this.ensureSession(frame.sessionId ?? this.state.activeSessionId ?? "unknown");
+    const session = this.ensureSession(
+      frame.sessionId ?? this.state.activeSessionId ?? "unknown",
+    );
     upsertApproval(session, request, frame.sessionId);
   }
 
@@ -2158,8 +2468,14 @@ export class WebviewStateStore {
         historyToolArgs,
       );
     }
-    const existingKeys = new Set(historySession.timeline.map((item) => timelineEntityKey(item)));
-    const optimisticTailKeys = collectOptimisticTailKeys(session, runtime, existingKeys);
+    const existingKeys = new Set(
+      historySession.timeline.map((item) => timelineEntityKey(item)),
+    );
+    const optimisticTailKeys = collectOptimisticTailKeys(
+      session,
+      runtime,
+      existingKeys,
+    );
     const assistantGroupIds = liveAssistantGroupIds(runtime);
     const nextLocalUserMessageIds = new Set<string>();
     for (const item of session.timeline) {
@@ -2187,10 +2503,15 @@ export class WebviewStateStore {
     session.timeline = historySession.timeline;
     if (!session.planFile && historySession.planFile) {
       session.planFile = historySession.planFile;
-    } else if (session.planFile && historySession.planFile && session.planFile.path === historySession.planFile.path) {
+    } else if (
+      session.planFile &&
+      historySession.planFile &&
+      session.planFile.path === historySession.planFile.path
+    ) {
       session.planFile = {
         ...session.planFile,
-        planId: session.planFile.planId ?? historySession.planFile.planId ?? null,
+        planId:
+          session.planFile.planId ?? historySession.planFile.planId ?? null,
         state: session.planFile.state ?? historySession.planFile.state ?? null,
       };
     }
@@ -2222,10 +2543,23 @@ export class WebviewStateStore {
     if (event.planId) {
       session.planId = event.planId;
     }
-    if ("path" in event && typeof event.path === "string" && event.path.length > 0) {
+    if (
+      "path" in event &&
+      typeof event.path === "string" &&
+      event.path.length > 0
+    ) {
       const nextState = state ?? session.planState ?? null;
-      syncPlanRef(session, event.path, nextState, event.planId ?? session.planId ?? null);
-      stampRunningCreatePlan(session, event.path, event.planId ?? session.planId ?? null);
+      syncPlanRef(
+        session,
+        event.path,
+        nextState,
+        event.planId ?? session.planId ?? null,
+      );
+      stampRunningCreatePlan(
+        session,
+        event.path,
+        event.planId ?? session.planId ?? null,
+      );
     } else if (session.planFile) {
       session.planFile = {
         ...session.planFile,
@@ -2284,12 +2618,12 @@ export class WebviewStateStore {
       case "plan.code_review.warning":
         {
           const reason = event.reason ?? "review needs attention";
-        pushMessage(
-          session,
-          "warn",
-          `Tomcat plan warning: ${reason}`,
-          planEventMessageId(event.type, event.planId, reason),
-        );
+          pushMessage(
+            session,
+            "warn",
+            `Tomcat plan warning: ${reason}`,
+            planEventMessageId(event.type, event.planId, reason),
+          );
         }
         return;
       default:
@@ -2298,7 +2632,9 @@ export class WebviewStateStore {
   }
 
   private syncTabOwnedByFrontend(sessionId: string): void {
-    const existing = this.state.sessions.find((session) => session.sessionId === sessionId);
+    const existing = this.state.sessions.find(
+      (session) => session.sessionId === sessionId,
+    );
     if (existing) {
       existing.ownedByThisFrontend = true;
       return;
@@ -2314,7 +2650,9 @@ export class WebviewStateStore {
   }
 
   private syncTabBusy(sessionId: string, busy: boolean): void {
-    const existing = this.state.sessions.find((session) => session.sessionId === sessionId);
+    const existing = this.state.sessions.find(
+      (session) => session.sessionId === sessionId,
+    );
     if (existing) {
       existing.busy = busy;
       return;

@@ -33,13 +33,13 @@ use super::super::catalog::{infer_default_base_url, ModelEntry};
 use super::super::endpoint::build_path_aware_endpoint;
 use super::super::retry_delay::provider_retry_delay;
 use crate::core::llm::files_api::{FilesApiAdapter, ImageRefSlot};
+use crate::core::llm::multimodal::degrade_placeholder;
 use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::types::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatMessageRole, ChatRequest,
     ChatResponse, ContinuityMetadata, FileSource, ImageSource, ReasoningContinuation,
     ReasoningFormat, StreamEvent, ThinkingSource, TokenUsage,
 };
-use crate::core::llm::multimodal::degrade_placeholder;
 use crate::core::llm::{
     build_openai_compatible_files_adapter, degrade_unsupported_multimodal, Capabilities,
     FilesApiProviderContext,
@@ -231,10 +231,7 @@ fn part_to_completions_content(
                     );
                     file.insert(
                         "file_data".to_string(),
-                        Value::String(format!(
-                            "data:{};base64,{}",
-                            inline.mime_type, inline.data
-                        )),
+                        Value::String(format!("data:{};base64,{}", inline.mime_type, inline.data)),
                     );
                 }
                 FileSource::Uploaded(uploaded) => {
@@ -248,8 +245,10 @@ fn part_to_completions_content(
                         "file_id".to_string(),
                         Value::String(adapter.reference_token(&uploaded.file_id)),
                     );
-                    if let Some(filename) =
-                        uploaded.filename.as_deref().filter(|value| !value.trim().is_empty())
+                    if let Some(filename) = uploaded
+                        .filename
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
                     {
                         file.insert("filename".to_string(), Value::String(filename.to_string()));
                     }
@@ -403,10 +402,9 @@ fn transport_messages(
             ReplayAction::ConvertToText(text) => {
                 transport_message_value(apply_text_downgrade(original, &text), files_adapter)
             }
-            ReplayAction::StripOpaque => transport_message_value(
-                original.without_completion_metadata(),
-                files_adapter,
-            ),
+            ReplayAction::StripOpaque => {
+                transport_message_value(original.without_completion_metadata(), files_adapter)
+            }
         };
         out.push(value);
     }
@@ -714,10 +712,7 @@ impl OpenAiProvider {
         ("Authorization", format!("Bearer {}", self.api_key))
     }
 
-    fn cached_files_adapter(
-        &self,
-        files_cfg: &LlmFilesConfig,
-    ) -> Option<Arc<dyn FilesApiAdapter>> {
+    fn cached_files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
         if !self.capabilities.files {
             return None;
         }

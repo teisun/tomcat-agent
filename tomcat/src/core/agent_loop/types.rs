@@ -76,7 +76,10 @@ impl SubagentType {
     }
 
     pub fn is_reviewer(self) -> bool {
-        matches!(self, SubagentType::PlanReviewer | SubagentType::CodeReviewer)
+        matches!(
+            self,
+            SubagentType::PlanReviewer | SubagentType::CodeReviewer
+        )
     }
 
     pub fn as_str(self) -> &'static str {

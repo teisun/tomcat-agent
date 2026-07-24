@@ -36,8 +36,8 @@ pub use admin::{
 pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
 pub use catalog::{Capabilities, ModelCatalog, ModelEntry, SharedModelCatalog};
 pub use files_api::{
-    build_openai_compatible_files_adapter, AnthropicFilesAdapter, FilesApiAdapter,
-    ImageRefSlot, MoonshotFilesAdapter, OpenAiFilesAdapter, ANTHROPIC_FILES_BETA,
+    build_openai_compatible_files_adapter, AnthropicFilesAdapter, FilesApiAdapter, ImageRefSlot,
+    MoonshotFilesAdapter, OpenAiFilesAdapter, ANTHROPIC_FILES_BETA,
 };
 pub(crate) use multimodal::degrade_unsupported_multimodal;
 pub use openai_files::FilesApiProviderContext;

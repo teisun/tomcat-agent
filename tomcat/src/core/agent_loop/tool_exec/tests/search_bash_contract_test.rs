@@ -34,7 +34,7 @@ fn make_executor(definition: &Path) -> Arc<dyn PrimitiveExecutor> {
 
 fn make_executor_with_bash_timeout(
     definition: &Path,
-    timeout_ms: u64,
+    foreground_wait_ms: u64,
 ) -> Arc<dyn PrimitiveExecutor> {
     Arc::new(
         DefaultPrimitiveExecutor::new(
@@ -43,7 +43,7 @@ fn make_executor_with_bash_timeout(
             Arc::new(TracingAuditRecorder),
             make_gate(definition),
         )
-        .with_bash_timeout_ms(timeout_ms),
+        .with_bash_foreground_wait_ms(foreground_wait_ms),
     )
 }
 
@@ -119,44 +119,45 @@ async fn bash_contract_surfaces_cwd_context_in_user_visible_error() {
 }
 
 #[tokio::test]
-async fn bash_contract_returns_warning_for_background_pipe_holder_without_hanging() {
+async fn bash_contract_stops_pipe_holder_without_hanging_when_no_registry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().canonicalize().unwrap();
-    // 留出足够窗口让前台 `echo done` 稳定落到输出里，再验证后台子进程持有管道时
-    // 依旧会被 timeout 收敛为带 warning 的成功回执，而不是挂死整个 tool call。
+    let marker = root.join("pipe-holder-leak.txt");
+    // 后台 child 持有 stdout/stderr 写端；若前台等待到期后不 kill 整个进程组，
+    // 这条子进程会继续活到 9s 并写 marker，形成 runaway。
     let primitive = make_executor_with_bash_timeout(&root, 300);
     let tc = ToolCallInfo {
         id: "tc-bash-bg-pipe-holder".to_string(),
         name: "bash".to_string(),
         arguments: serde_json::json!({
-            "command": "sleep 30 & echo done",
+            "command": format!("sleep 9 && printf leaked > {} & echo done", marker.display()),
             "cwd": root.display().to_string(),
-            "timeout_ms": 300
+            "foreground_wait_ms": 300
         })
         .to_string(),
     };
 
     let (text, is_error, _) = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
+        std::time::Duration::from_secs(20),
         execute_tool(&primitive, &None, &None, None, &tc),
     )
     .await
-    .expect("tool-exec 不应因后台残留而挂死");
+    .expect("前台等待窗口到期即返回，绝不能挂死到后台 child 自然退出");
 
     assert!(
         !is_error,
-        "后台残留清理属于带 warning 的成功回执，不应变成 tool error: {}",
+        "到期就地收口仍是成功回执，不应变成 tool error: {}",
         text
     );
     assert!(text.contains("done"), "应保留前台 stdout，实际: {}", text);
     assert!(
-        text.contains("run_in_background=true"),
-        "用户可见文本应提示长任务改走后台机制，实际: {}",
+        text.contains("stopped in this context"),
+        "应明示该上下文已停止命令，实际: {}",
         text
     );
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     assert!(
-        text.contains("(exit code: 0)"),
-        "应保留既有 bash 展示格式，实际: {}",
-        text
+        !marker.exists(),
+        "marker 出现表示等待到期后的后台 child 仍在继续跑"
     );
 }

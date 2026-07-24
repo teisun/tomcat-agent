@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-07-23 08:34 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-07-24 16:08 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0]** Bash 执行与验证耗时整改已落地：`tools.bash.timeout_ms`（到期杀进程）改为 `foreground_wait_ms`（默认 16s，硬夹 8–16s）的**前台观察窗**；到期后有 shared registry 的路径（主 loop / Verifier / CodeReviewer / ext host）`promote_to_background` 转同一 tracked task，模型用 `task_output`/`task_stop` 收口，不再半途杀编译。抽出 `build_bash_task_registry` 统一装配 wait 策略与 background guard；裸 primitive / 隔离单测无 registry 时到期有界停进程组，杜绝 ephemeral registry 泄漏 runaway。ext host 本期补齐 `taskOutput`/`taskStop` HostCall（block wait 夹到宿主 async 超时内），插件 `exec` 可跟前后台。GUI 命令卡支持 liveOutput 增量与前后台同卡转换。版本：CLI `0.1.17`、扩展 `0.1.26`（`bundledCliVersion=0.1.17`）；本机产物 `tomcat-cli-v0.1.17-x86_64-apple-darwin.tar.gz` 与纯插件 `tomcat-vscode-ext-0.1.26.vsix`。验证：相关 Rust lib/E2E（含 Verifier 长命令 `task_output`）与扩展设定/协议版本断言已同步。@2026-07-24
 - [✓] **[P0]** Code Review 时间线 attempt 契约整改：新增父 session scoped `plan.code_review.started`，与 `plan.code_review` 共享 `reviewAttemptId=<planId>:<round>` 和触发 `update_plan` 的 `toolCallId`；最后 todo 完成后先广播 `plan.update`/`plan.todos`，再显示独立 `ReviewRow: Reviewing code...` shimmer，结构化 result 到达后同一 row 原地落定。通用 child `sub_agent_start/end` 只作审计，不再造成 ABORTED 闪烁。Webview 以 attempt 去重并按 toolCallId 锚定 live/history/分页顺序，DOM snapshot 暴露 review identity/status/verdict/top/anchor。`AgentRegistry` 对 drop 的 spawn future 增加 cancel+unregister 清理，避免并发额度泄漏。验证：Rust code-review focused 4 passed、serve schema 11 passed、AgentRegistry（含 drop 竞态）17 passed、extension core 219 passed、GUI 342 passed、wire check 与 lint 全绿；本机纯插件包 `tomcat-vscode-ext-0.1.25.vsix`（不含内置 CLI）已重打供体验安装。@2026-07-23
 - [✓] **[P0]** Shell 命令展示层级修复：结构化 argv（`command` + `args[]`）在命令卡片终端正文漏拼导致只显示 `$ cargo`；现 `ToolRow.fullCommandText` 会重建完整命令并对含空格/引号/空串参数做 shell quoting，预览/展开/程序标签共用同一份完整命令。thinking 组头单 Shell 即时回退从 `Ran <完整原始命令>` 改为 `Ran shell command`，turn title utility prompt 明确要求描述目的、不复述 flags/路径/测试名；不增加 utility 返回值门槛或二次调用。扩展版本 `0.1.24 → 0.1.25`，本机纯插件包 `tomcat-vscode-ext-0.1.25.vsix`（不含内置 CLI）。验证：`cargo test --lib core::summary::tests::title_generator_test`（`18 passed`）、GUI `ToolRow`/`ThinkingGroup`（`48 passed`）、webview `state.test.ts`（`63 passed`）、`npm run lint` / `build:gui` / `package:vsix` 全绿。@2026-07-22
 - [✓] **[P0]** System prompt 去动态时间 + PLAN 修订契约收口：`workspace_context.txt` 去掉 `Current date and time: {now}`，`WorkspaceContextSection` 不再注入本地时钟，使相同 workspace/权限输入下 system prompt **字节级确定性**（便于缓存、对账与回归）；单测改为断言无时间文案/`{now}`，并补「同输入完全一致」与「权限/skill/plugin 变化会反映进 prompt」守卫；serve `new_session` 回归同步锁住。同时重写 `planner.txt`：修订既有计划时正文走 `read`+`edit`/`hashline_edit`，todos 走 `update_plan`，禁止再靠 `create_plan` 叠第二份计划或用 prose 伪计划。@2026-07-22
@@ -31,6 +32,7 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- `[tools.bash].timeout_ms` 移除，改为 `foreground_wait_ms`（默认 16000，合法 8000–16000）；到期语义从“杀进程”改为“有 registry 则转 tracked 后台 / 无 registry 则有界停止”。新增 `build_bash_task_registry`；主 loop、Verifier、CodeReviewer、ext host 注入 shared registry。HostCall 新增 `taskOutput` / `taskStop`；插件 SDK `exec` 可带 `foreground_wait_ms`，回执可含后台 `task_id`/`log_path`/`next_actions`。CLI `0.1.17` / 扩展 `0.1.26`（`bundledCliVersion=0.1.17`）。
 - 命令卡片完整命令展示统一消费 `command` + 可选 `args[]`；thinking turn 摘要单 Shell 即时回退改为固定 `Ran shell command`，utility prompt 禁止复述原始 shell 命令。扩展版本 `0.1.25`。
 - `SystemWorkspaceContext` 模板不再含 `Current date and time: {now}`；`WorkspaceContextSection::render` 仅注入四类工作目录路径，同输入下 system prompt 字节级稳定。PLAN 模式 `planner.txt` 修订契约：既有计划正文用 `edit`/`hashline_edit`，todos 用 `update_plan`，禁止再用 `create_plan` 叠第二份计划。
 - `SubagentType::Reviewer` 拆为 `PlanReviewer` / `CodeReviewer`；`PlanRuntime` 双字段 `attach_plan_reviewer` / `attach_code_reviewer`；新增 `ServePlanEvent::PlanCodeReviewStarted`，`PlanCodeReview` 补齐 `round` / `reviewAttemptId` / `toolCallId` / `childSessionId`；webview `WebviewReviewRow` 以 `reviewAttemptId` 为 entity key、`anchorToolCallId` 锚定 `update_plan`，由父 session `plan.code_review.started` + `plan.code_review` 驱动同一 attempt 的 running/done；通用 child lifecycle 只作审计。收口路径不再返回 `verify` 字段（Verifier dormant）。
@@ -54,6 +56,7 @@
 | 无 | - | - |
 
 ### 集成说明
+- 最新补充（2026-07-24 16:08）：Bash timeout→background 与子代理/ext host tracked execution 已落地；版本 CLI `0.1.17` / 扩展 `0.1.26`；本机 CLI tar.gz 与纯插件 VSIX 已打包（制品不入库）。
 - 最新补充（2026-07-22 23:10）：Shell 命令卡片补回 `args[]` 完整展示；thinking 单 Shell 组头即时回退改为 `Ran shell command`；扩展验收版本 `0.1.25`，纯插件包 `tomcat-vscode-ext-0.1.25.vsix`。
 - 最新补充（2026-07-22 21:34）：system prompt 去掉动态时间以保证同输入确定性；`planner.txt` 收口既有计划的 edit/`update_plan` 修订契约；相关 unit/registry 断言已同步。
 - 最新补充（2026-07-22 16:53）：Code Review 收口整改已合入本分支工作区并准备提交。Plan/Code Reviewer 全拆分、Verifier 收口 dormant、`plan.code_review` 富事件 + `ReviewRow` UI；验证：相关 Rust focused/lib 与扩展 `npm run lint` / `npm run test:unit` 全绿；纯插件 `tomcat-vscode-ext-0.1.24.vsix`。

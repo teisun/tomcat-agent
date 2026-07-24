@@ -11,7 +11,8 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
             None => usage_error(level),
         },
         [_cmd] => ChatCommand::UsageError {
-            message: "用法错误：/effort 需要一个参数：off|minimal|low|medium|high|xhigh|max。".to_string(),
+            message: "用法错误：/effort 需要一个参数：off|minimal|low|medium|high|xhigh|max。"
+                .to_string(),
         },
         _ => ChatCommand::UsageError {
             message: "用法错误：/effort 仅支持 off|minimal|low|medium|high|xhigh|max。".to_string(),

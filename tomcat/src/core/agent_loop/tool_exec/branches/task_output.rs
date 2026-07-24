@@ -7,20 +7,17 @@ use crate::infra::events::{AgentEvent, ToolOutput};
 
 use super::super::ToolExecCtx;
 
-const TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS: u64 = 5_000;
-const TASK_OUTPUT_BLOCK_MIN_TIMEOUT_MS: u64 = 5_000;
-const TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS: u64 = 600_000;
+const TASK_OUTPUT_BLOCK_DEFAULT_WAIT_MS: u64 = 5_000;
+const TASK_OUTPUT_BLOCK_MIN_WAIT_MS: u64 = 5_000;
+const TASK_OUTPUT_BLOCK_MAX_WAIT_MS: u64 = 600_000;
 const TASK_OUTPUT_TICK_MS: u64 = 500;
-const TASK_OUTPUT_TIMEOUT_TAIL_MAX_BYTES: u64 = 4_096;
+const TASK_OUTPUT_WAIT_TAIL_MAX_BYTES: u64 = 4_096;
 
-fn clamp_block_timeout_ms(timeout_ms_raw: Option<u64>) -> u64 {
-    match timeout_ms_raw {
-        Some(0) => 0,
-        Some(v) => v.clamp(
-            TASK_OUTPUT_BLOCK_MIN_TIMEOUT_MS,
-            TASK_OUTPUT_BLOCK_MAX_TIMEOUT_MS,
-        ),
-        None => TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS,
+fn clamp_block_wait_ms(wait_ms_raw: Option<u64>) -> u64 {
+    match wait_ms_raw {
+        Some(0) => TASK_OUTPUT_BLOCK_MIN_WAIT_MS,
+        Some(v) => v.clamp(TASK_OUTPUT_BLOCK_MIN_WAIT_MS, TASK_OUTPUT_BLOCK_MAX_WAIT_MS),
+        None => TASK_OUTPUT_BLOCK_DEFAULT_WAIT_MS,
     }
 }
 
@@ -29,6 +26,9 @@ pub(in super::super) async fn handle_task_output(
     tc: &ToolCallInfo,
     args: &serde_json::Value,
 ) -> Result<String, String> {
+    if args.get("timeout_ms").is_some() {
+        return Err("task_output: legacy timeout_ms is unsupported; use wait_ms".to_string());
+    }
     let Some(registry) = ctx.bash_task_registry.as_ref() else {
         return Err(super::background_unavailable::bash_background_unavailable(
             "task_output",
@@ -41,10 +41,10 @@ pub(in super::super) async fn handle_task_output(
         .ok_or_else(|| "task_output 缺少 task_id".to_string())?;
     let since = args.get("since").and_then(|v| v.as_u64());
     let block_param = args.get("block").and_then(|v| v.as_bool()).unwrap_or(false);
-    let timeout_ms_raw = args.get("timeout_ms").and_then(|v| v.as_u64());
+    let wait_ms_raw = args.get("wait_ms").and_then(|v| v.as_u64());
 
-    let timeout_ms = clamp_block_timeout_ms(timeout_ms_raw);
-    let block = block_param && timeout_ms > 0;
+    let wait_ms = clamp_block_wait_ms(wait_ms_raw);
+    let block = block_param;
 
     if !block {
         return registry
@@ -58,7 +58,7 @@ pub(in super::super) async fn handle_task_output(
         registry,
         task_id,
         since,
-        timeout_ms,
+        wait_ms,
         ctx.cancel,
         tc,
         ctx.event_emitter,
@@ -72,7 +72,7 @@ async fn handle_task_output_blocking(
     registry: &Arc<BashTaskRegistry>,
     task_id: &str,
     since: Option<u64>,
-    timeout_ms: u64,
+    wait_ms: u64,
     cancel: &tokio_util::sync::CancellationToken,
     tc: &ToolCallInfo,
     event_emitter: Option<&ScopedEventEmitter>,
@@ -102,7 +102,7 @@ async fn handle_task_output_blocking(
     }
 
     let started = Instant::now();
-    let deadline = TokioInstant::now() + Duration::from_millis(timeout_ms);
+    let deadline = TokioInstant::now() + Duration::from_millis(wait_ms);
 
     let mut ticker = tokio::time::interval(Duration::from_millis(TASK_OUTPUT_TICK_MS));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -112,8 +112,8 @@ async fn handle_task_output_blocking(
         tc,
         task_id,
         since_value,
-        timeout_ms,
-        timeout_ms.saturating_sub(elapsed_ms(started)),
+        wait_ms,
+        wait_ms.saturating_sub(elapsed_ms(started)),
         "waiting_for_output",
         None,
     );
@@ -139,16 +139,16 @@ async fn handle_task_output_blocking(
                 }
             }
             _ = sleep_until(deadline) => {
-                break BlockingWakeKind::Timeout;
+                break BlockingWakeKind::WaitWindowElapsed;
             }
             _ = ticker.tick() => {
-                let remaining = timeout_ms.saturating_sub(elapsed_ms(started));
+                let remaining = wait_ms.saturating_sub(elapsed_ms(started));
                 emit_task_output_update(
                         event_emitter,
                     tc,
                     task_id,
                     since_value,
-                    timeout_ms,
+                    wait_ms,
                     remaining,
                     "waiting_for_output",
                     None,
@@ -165,7 +165,7 @@ async fn handle_task_output_blocking(
             BlockingWakeKind::Finished => {
                 g.insert(task_id.to_string(), CompletionRoute::Delivered);
             }
-            BlockingWakeKind::Timeout => {
+            BlockingWakeKind::WaitWindowElapsed => {
                 if delivered {
                     g.insert(task_id.to_string(), CompletionRoute::Delivered);
                 } else {
@@ -181,7 +181,7 @@ async fn handle_task_output_blocking(
 #[derive(Debug, Clone, Copy)]
 enum BlockingWakeKind {
     Finished,
-    Timeout,
+    WaitWindowElapsed,
 }
 
 async fn finish_blocking_with(
@@ -195,9 +195,9 @@ async fn finish_blocking_with(
             .read_output(task_id, Some(since_value))
             .await
             .map_err(|e| e.to_string())?,
-        BlockingWakeKind::Timeout => {
+        BlockingWakeKind::WaitWindowElapsed => {
             let snapshot = registry
-                .read_output_tail(task_id, Some(since_value), TASK_OUTPUT_TIMEOUT_TAIL_MAX_BYTES)
+                .read_output_tail(task_id, Some(since_value), TASK_OUTPUT_WAIT_TAIL_MAX_BYTES)
                 .await
                 .map_err(|e| e.to_string())?;
             if snapshot.finished {
@@ -212,11 +212,11 @@ async fn finish_blocking_with(
     };
     let wake_reason = match wake {
         BlockingWakeKind::Finished => "finished",
-        BlockingWakeKind::Timeout => {
+        BlockingWakeKind::WaitWindowElapsed => {
             if chunk.finished {
                 "finished"
             } else {
-                "timeout"
+                "wait_window_elapsed"
             }
         }
     };
@@ -228,7 +228,7 @@ async fn finish_blocking_with(
         );
     }
     let delivered = matches!(wake, BlockingWakeKind::Finished)
-        || matches!(wake, BlockingWakeKind::Timeout) && chunk.finished;
+        || matches!(wake, BlockingWakeKind::WaitWindowElapsed) && chunk.finished;
     Ok((value.to_string(), delivered))
 }
 
@@ -243,7 +243,7 @@ fn emit_task_output_update(
     tc: &ToolCallInfo,
     task_id: &str,
     since: u64,
-    timeout_ms: u64,
+    wait_ms: u64,
     remaining_ms: u64,
     phase: &str,
     wake_reason: Option<&str>,
@@ -268,8 +268,8 @@ fn emit_task_output_update(
         serde_json::Value::Number(serde_json::Number::from(since)),
     );
     partial.insert(
-        "timeoutMs".to_string(),
-        serde_json::Value::Number(serde_json::Number::from(timeout_ms)),
+        "waitMs".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(wait_ms)),
     );
     partial.insert(
         "remainingMs".to_string(),
@@ -363,13 +363,13 @@ mod tests {
 
     #[test]
     fn clamp_block_timeout_preserves_zero_and_bounds_wait_slices() {
-        assert_eq!(clamp_block_timeout_ms(None), 5_000);
-        assert_eq!(clamp_block_timeout_ms(Some(0)), 0);
-        assert_eq!(clamp_block_timeout_ms(Some(1)), 5_000);
-        assert_eq!(clamp_block_timeout_ms(Some(4_999)), 5_000);
-        assert_eq!(clamp_block_timeout_ms(Some(5_000)), 5_000);
-        assert_eq!(clamp_block_timeout_ms(Some(600_000)), 600_000);
-        assert_eq!(clamp_block_timeout_ms(Some(999_999_999)), 600_000);
+        assert_eq!(clamp_block_wait_ms(None), 5_000);
+        assert_eq!(clamp_block_wait_ms(Some(0)), 5_000);
+        assert_eq!(clamp_block_wait_ms(Some(1)), 5_000);
+        assert_eq!(clamp_block_wait_ms(Some(4_999)), 5_000);
+        assert_eq!(clamp_block_wait_ms(Some(5_000)), 5_000);
+        assert_eq!(clamp_block_wait_ms(Some(600_000)), 600_000);
+        assert_eq!(clamp_block_wait_ms(Some(999_999_999)), 600_000);
     }
 
     #[tokio::test]
@@ -394,7 +394,7 @@ mod tests {
             &registry,
             &ticket.task_id,
             first.next_offset,
-            BlockingWakeKind::Timeout,
+            BlockingWakeKind::WaitWindowElapsed,
         )
         .await
         .expect("finish_blocking_with");
@@ -402,7 +402,7 @@ mod tests {
 
         assert_eq!(
             chunk["wakeReason"],
-            serde_json::Value::String("timeout".into())
+            serde_json::Value::String("wait_window_elapsed".into())
         );
         assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
         assert_eq!(chunk["content"], serde_json::Value::String(String::new()));
@@ -422,10 +422,14 @@ mod tests {
             .expect("spawn");
 
         let _ = wait_until_finished(&registry, &ticket.task_id).await;
-        let (text, delivered) =
-            finish_blocking_with(&registry, &ticket.task_id, 0, BlockingWakeKind::Timeout)
-                .await
-                .expect("finish_blocking_with");
+        let (text, delivered) = finish_blocking_with(
+            &registry,
+            &ticket.task_id,
+            0,
+            BlockingWakeKind::WaitWindowElapsed,
+        )
+        .await
+        .expect("finish_blocking_with");
         let chunk: serde_json::Value = serde_json::from_str(&text).expect("valid json");
 
         assert_eq!(
@@ -452,22 +456,26 @@ mod tests {
             .expect("spawn");
 
         let _ = wait_until_has_output(&registry, &ticket.task_id, 0).await;
-        let (text, delivered) =
-            finish_blocking_with(&registry, &ticket.task_id, 0, BlockingWakeKind::Timeout)
-                .await
-                .expect("finish_blocking_with");
+        let (text, delivered) = finish_blocking_with(
+            &registry,
+            &ticket.task_id,
+            0,
+            BlockingWakeKind::WaitWindowElapsed,
+        )
+        .await
+        .expect("finish_blocking_with");
         let chunk: serde_json::Value = serde_json::from_str(&text).expect("valid json");
 
         assert_eq!(
             chunk["wakeReason"],
-            serde_json::Value::String("timeout".into())
+            serde_json::Value::String("wait_window_elapsed".into())
         );
         let content = chunk["content"].as_str().unwrap_or_default();
         assert!(
-            content.len() <= TASK_OUTPUT_TIMEOUT_TAIL_MAX_BYTES as usize,
+            content.len() <= TASK_OUTPUT_WAIT_TAIL_MAX_BYTES as usize,
             "timeout tail 长度 {} 不应超过上限 {}",
             content.len(),
-            TASK_OUTPUT_TIMEOUT_TAIL_MAX_BYTES
+            TASK_OUTPUT_WAIT_TAIL_MAX_BYTES
         );
         let start_offset = chunk["startOffset"].as_u64().unwrap_or(0);
         let next_offset = chunk["nextOffset"].as_u64().unwrap_or(0);
@@ -498,8 +506,7 @@ mod tests {
         let tc = ToolCallInfo {
             id: "call-task".to_string(),
             name: "task_output".to_string(),
-            arguments: r#"{"task_id":"task-1","since":0,"block":true,"timeout_ms":150}"#
-                .to_string(),
+            arguments: r#"{"task_id":"task-1","since":0,"block":true,"wait_ms":150}"#.to_string(),
         };
 
         emit_task_output_update(

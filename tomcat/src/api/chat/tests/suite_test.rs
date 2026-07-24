@@ -1092,20 +1092,24 @@ fn failed_turn_recovery_is_idempotent_for_the_same_failed_tail() {
     let mut state =
         init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
     let error = crate::AppError::Llm("gateway 403".to_string());
-    assert!(crate::api::chat::run_loop::recover_context_state_after_failed_turn(
-        &ctx,
-        &ctx.config.context,
-        "sys",
-        &error,
-        &mut state,
-    ));
-    assert!(crate::api::chat::run_loop::recover_context_state_after_failed_turn(
-        &ctx,
-        &ctx.config.context,
-        "sys",
-        &error,
-        &mut state,
-    ));
+    assert!(
+        crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+            &ctx,
+            &ctx.config.context,
+            "sys",
+            &error,
+            &mut state,
+        )
+    );
+    assert!(
+        crate::api::chat::run_loop::recover_context_state_after_failed_turn(
+            &ctx,
+            &ctx.config.context,
+            "sys",
+            &error,
+            &mut state,
+        )
+    );
 
     let texts: Vec<String> = state
         .messages
@@ -1119,7 +1123,10 @@ fn failed_turn_recovery_is_idempotent_for_the_same_failed_tail() {
         .iter()
         .filter(|entry| matches!(entry, crate::core::TranscriptEntry::Error(_)))
         .count();
-    assert_eq!(error_count, 1, "同一 failed tail 重复恢复不应重复追加 Error");
+    assert_eq!(
+        error_count, 1,
+        "同一 failed tail 重复恢复不应重复追加 Error"
+    );
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };
@@ -1296,7 +1303,10 @@ fn failed_turn_recovery_summarizes_real_sunmi_gateway_403_html() {
         &err,
         &mut state,
     );
-    assert!(changed, "真实 403 失败轮应触发上下文恢复并落一条 Error 记录");
+    assert!(
+        changed,
+        "真实 403 失败轮应触发上下文恢复并落一条 Error 记录"
+    );
 
     let error_entry = crate::core::session::read_entries_tail(&transcript_path, 8)
         .unwrap()
@@ -1315,7 +1325,9 @@ fn failed_turn_recovery_summarizes_real_sunmi_gateway_403_html() {
         error_entry.summary,
         "API 错误 403 · aigateway.sunmi.com · Request-Id 6a59715c_PS-CZX-01wky52_16724-27663"
     );
-    assert!(error_entry.detail.contains("Node information: PS-CZX-01wky52"));
+    assert!(error_entry
+        .detail
+        .contains("Node information: PS-CZX-01wky52"));
     assert!(error_entry
         .detail
         .contains("URL: https://aigateway.sunmi.com/v1/responses"));

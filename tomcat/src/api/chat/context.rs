@@ -38,6 +38,24 @@ use crate::core::plan_runtime;
 use super::session_runtime::{GlobalServices, ScopeContainer, ScopeServices, SessionRuntime};
 use super::{panels, permission};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BashProductionPolicy {
+    foreground_wait_ms: u64,
+    max_output_chars: usize,
+    persist_dir: std::path::PathBuf,
+}
+
+fn resolve_bash_production_policy(
+    config: &AppConfig,
+    agent_trail_dir: &std::path::Path,
+) -> BashProductionPolicy {
+    BashProductionPolicy {
+        foreground_wait_ms: config.tools.bash.foreground_wait_ms,
+        max_output_chars: config.tools.bash.max_output_chars,
+        persist_dir: agent_trail_dir.join("tool-results"),
+    }
+}
+
 pub struct ChatContext {
     pub global_services: GlobalServices,
     pub scope_services: ScopeServices,
@@ -219,6 +237,7 @@ fn scope_runtime_for(
     llm: Arc<dyn LlmProvider>,
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
+    bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
     session: Arc<SessionManager>,
     overrides: &ChatContextOverrides,
 ) -> Result<Arc<ScopeContainer>, AppError> {
@@ -254,6 +273,7 @@ fn scope_runtime_for(
         llm,
         llm_resolver,
         primitive,
+        bash_task_registry,
         session,
     };
     let (tool_registry, function_registry, plugin_manager, plugin_function_invoker, dispatcher) =
@@ -415,6 +435,15 @@ impl ChatContext {
 
         let _ = workspace_roots;
         let bash_ast = crate::core::permission::BashAstChecker::new(false, vec![], vec![]);
+        let bash_policy = resolve_bash_production_policy(&config, &agent_trail_dir);
+        let bash_task_registry = crate::core::tools::primitive::build_bash_task_registry(
+            &config.tools.bash,
+            bash_policy.persist_dir.clone(),
+            gate.clone(),
+            confirmation.clone(),
+            audit.clone(),
+            bash_ast.clone(),
+        );
         let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(
             DefaultPrimitiveExecutor::new(
                 config.primitive.clone(),
@@ -423,6 +452,10 @@ impl ChatContext {
                 gate.clone(),
             )
             .with_bash_ast(bash_ast.clone())
+            .with_bash_foreground_wait_ms(bash_policy.foreground_wait_ms)
+            .with_bash_max_output_chars(bash_policy.max_output_chars)
+            .with_bash_persist_dir(bash_policy.persist_dir.clone())
+            .with_bash_task_registry(bash_task_registry.clone())
             .with_write_normalize_crlf(config.tools.write.normalize_crlf),
         );
 
@@ -452,6 +485,7 @@ impl ChatContext {
             llm.clone(),
             llm_resolver.clone(),
             primitive.clone(),
+            bash_task_registry.clone(),
             session_arc.clone(),
             &overrides,
         )?;
@@ -537,20 +571,6 @@ impl ChatContext {
         let last_interrupt_at = Arc::new(Mutex::new(None));
         let hard_exit_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        let bash_task_registry = Arc::new(
-            crate::core::tools::primitive::BashTaskRegistry::new(
-                agent_trail_dir.join("tool-results"),
-            )
-            .with_background_guard(
-                crate::core::tools::primitive::bash_task::BackgroundBashGuard::new(
-                    "__agent__",
-                    gate.clone(),
-                    confirmation.clone(),
-                    audit.clone(),
-                    bash_ast,
-                ),
-            ),
-        );
         let follow_up_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
             Arc::new(Mutex::new(Vec::new()));
         let steering_queue: Arc<Mutex<Vec<crate::core::llm::ChatMessage>>> =
@@ -632,6 +652,11 @@ impl ChatContext {
                 agent_workspace_dir: agent_workspace_dir.clone(),
                 skill_set: skill_set.clone(),
                 skills_config: config.skills.clone(),
+                bash_config: config.tools.bash.clone(),
+                gate: gate.clone(),
+                confirmation: confirmation.clone(),
+                audit: audit.clone(),
+                bash_ast: bash_ast.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
                 model: reviewer_model.clone(),
                 max_turns: reviewer_max_turns,
@@ -654,6 +679,11 @@ impl ChatContext {
                 agent_workspace_dir: agent_workspace_dir.clone(),
                 skill_set: skill_set.clone(),
                 skills_config: config.skills.clone(),
+                bash_config: config.tools.bash.clone(),
+                gate: gate.clone(),
+                confirmation: confirmation.clone(),
+                audit: audit.clone(),
+                bash_ast: bash_ast.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
                 model: reviewer_model,
                 max_turns: reviewer_max_turns,
@@ -679,6 +709,11 @@ impl ChatContext {
                 agent_workspace_dir: agent_workspace_dir.clone(),
                 skill_set: skill_set.clone(),
                 skills_config: config.skills.clone(),
+                bash_config: config.tools.bash.clone(),
+                gate: gate.clone(),
+                confirmation: confirmation.clone(),
+                audit: audit.clone(),
+                bash_ast: bash_ast.clone(),
                 plan_runtime: Arc::downgrade(&plan_runtime),
                 model: config.llm.default_model.clone(),
             },
@@ -1124,6 +1159,7 @@ struct PluginRuntimeDeps {
     llm: Arc<dyn LlmProvider>,
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
+    bash_task_registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
     session: Arc<SessionManager>,
 }
 
@@ -1235,6 +1271,7 @@ fn build_plugin_runtime(
         llm,
         llm_resolver,
         primitive,
+        bash_task_registry,
         session,
     } = deps;
     if plugin_runtime_disabled_via_env() {
@@ -1250,6 +1287,7 @@ fn build_plugin_runtime(
                 .with_llm(llm)
                 .with_llm_resolver(llm_resolver)
                 .with_primitive(primitive)
+                .with_bash_task_registry(bash_task_registry.clone())
                 .with_audit(audit),
         );
         return Ok((tool_registry, function_registry, None, None, dispatcher));
@@ -1318,6 +1356,7 @@ fn build_plugin_runtime(
             .with_llm(llm)
             .with_llm_resolver(llm_resolver)
             .with_primitive(primitive)
+            .with_bash_task_registry(bash_task_registry)
             .with_plugin_manager(Arc::downgrade(&plugin_manager))
             .with_fetch_http_client(fetch_client)
             .with_fetch_max_body_bytes(config.tools.web_fetch.max_http_content_bytes)
@@ -1496,10 +1535,29 @@ mod tests {
 
     use serial_test::serial;
 
-    use super::{resolve_child_agent_compaction_runtime, ChatContext};
+    use super::{
+        resolve_bash_production_policy, resolve_child_agent_compaction_runtime, ChatContext,
+    };
     use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
     use crate::{AppConfig, ThinkingLevel};
 
+    #[test]
+    fn bash_production_policy_resolves_non_default_wait_output_and_path() {
+        let mut cfg = AppConfig::default();
+        cfg.tools.bash.foreground_wait_ms = 9_000;
+        cfg.tools.bash.max_output_chars = 42_000;
+        let trail = std::path::Path::new("/tmp/tomcat-policy-test/agent-trail");
+
+        let policy = resolve_bash_production_policy(&cfg, trail);
+
+        assert_eq!(policy.foreground_wait_ms, 9_000);
+        assert_eq!(policy.max_output_chars, 42_000);
+        assert_eq!(policy.persist_dir, trail.join("tool-results"));
+        let registry =
+            crate::core::tools::primitive::BashTaskRegistry::new(policy.persist_dir.clone())
+                .with_foreground_wait_ms(policy.foreground_wait_ms);
+        assert_eq!(registry.foreground_wait_ms(), 9_000);
+    }
     #[test]
     #[serial(env_lock)]
     fn child_agent_compaction_runtime_preserves_resolved_model_provider_pair() {

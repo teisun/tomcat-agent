@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import type { AssistantResponseGroup } from "./sessionList/groupTimelineByAssistantResponse";
 import { partitionAssistantResponseGroup } from "./TranscriptView";
 
-function buildGroup(overrides: Partial<AssistantResponseGroup> = {}): AssistantResponseGroup {
+function buildGroup(
+  overrides: Partial<AssistantResponseGroup> = {},
+): AssistantResponseGroup {
   return {
     assistantMessageId: "assistant-1",
     preamble: undefined,
@@ -58,7 +60,10 @@ describe("partitionAssistantResponseGroup", () => {
       }),
     );
 
-    expect(entries.map((entry) => entry.type)).toEqual(["action-tool", "action-tool"]);
+    expect(entries.map((entry) => entry.type)).toEqual([
+      "action-tool",
+      "action-tool",
+    ]);
   });
 
   it("flushes alternating context and action tools in time order", () => {
@@ -95,7 +100,10 @@ describe("partitionAssistantResponseGroup", () => {
       }),
     );
 
-    expect(entries.map((entry) => entry.type)).toEqual(["context-group", "action-tool"]);
+    expect(entries.map((entry) => entry.type)).toEqual([
+      "context-group",
+      "action-tool",
+    ]);
   });
 
   it("promotes a plan workflow tool to an action segment so ToolRow can own the UX", () => {
@@ -127,15 +135,20 @@ describe("partitionAssistantResponseGroup", () => {
     const entries = partitionAssistantResponseGroup(
       buildGroup({
         tools: [
-          tool("task-blocking", "task_output", {
-            block: true,
-            task_id: "task-1",
-            timeout_ms: 10_000,
-          }, { status: "running" }),
+          tool(
+            "task-blocking",
+            "task_output",
+            {
+              block: true,
+              task_id: "task-1",
+              wait_ms: 10_000,
+            },
+            { status: "running" },
+          ),
           tool("task-read", "task_output", {
             block: false,
             task_id: "task-1",
-            timeout_ms: 0,
+            wait_ms: 0,
           }),
           tool("task-stop", "task_stop", { task_id: "task-1" }),
           tool("task-list", "task_list"),

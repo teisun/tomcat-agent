@@ -295,12 +295,12 @@ fn tool_update_emits_inline_countdown_line_on_tty_stderr() {
     r.on_tool_update(&json!({
         "toolCallId": "blk-1",
         "toolName": "task_output",
-        "args": {"task_id": "t-1", "block": true, "timeout_ms": 3000},
+        "args": {"task_id": "t-1", "block": true, "wait_ms": 3000},
         "partialResult": {
             "phase": "waiting_for_output",
             "taskId": "t-1",
             "since": 0,
-            "timeoutMs": 3000,
+            "waitMs": 3000,
             "remainingMs": 1500
         },
     }));
@@ -330,12 +330,12 @@ fn tool_update_uses_compact_minute_second_countdown_labels() {
     r.on_tool_update(&json!({
         "toolCallId": "blk-2",
         "toolName": "task_output",
-        "args": {"task_id": "t-2", "block": true, "timeout_ms": 600000},
+        "args": {"task_id": "t-2", "block": true, "wait_ms": 600000},
         "partialResult": {
             "phase": "waiting_for_output",
             "taskId": "t-2",
             "since": 0,
-            "timeoutMs": 600000,
+            "waitMs": 600000,
             "remainingMs": 599000
         },
     }));
@@ -353,12 +353,12 @@ fn tool_update_is_suppressed_on_non_tty_stderr() {
     r.on_tool_update(&json!({
         "toolCallId": "blk-1",
         "toolName": "task_output",
-        "args": {"task_id": "t-1", "block": true, "timeout_ms": 3000},
+        "args": {"task_id": "t-1", "block": true, "wait_ms": 3000},
         "partialResult": {
             "phase": "waiting_for_output",
             "taskId": "t-1",
             "since": 0,
-            "timeoutMs": 3000,
+            "waitMs": 3000,
             "remainingMs": 1500
         },
     }));

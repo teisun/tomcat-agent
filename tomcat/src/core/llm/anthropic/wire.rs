@@ -15,6 +15,7 @@ use crate::core::llm::types::{
 use crate::core::llm::Capabilities;
 use crate::infra::config::ThinkingConfig;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_request_body(
     request: &ChatRequest,
     model: &str,
@@ -460,12 +461,10 @@ fn user_content_blocks(
             "type": "text",
             "text": text,
         })],
-        Some(ChatMessageContent::Parts(parts)) => {
-            parts
-                .iter()
-                .map(|part| content_part_to_block(part, capabilities, files_adapter))
-                .collect::<Vec<_>>()
-        }
+        Some(ChatMessageContent::Parts(parts)) => parts
+            .iter()
+            .map(|part| content_part_to_block(part, capabilities, files_adapter))
+            .collect::<Vec<_>>(),
         None => vec![json!({
             "type": "text",
             "text": "",
@@ -562,8 +561,10 @@ fn content_part_to_block(
                             "file_id": adapter.reference_token(&source.file_id),
                         }
                     });
-                    if let Some(filename) =
-                        source.filename.as_deref().filter(|value| !value.trim().is_empty())
+                    if let Some(filename) = source
+                        .filename
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
                     {
                         block["title"] = Value::String(filename.to_string());
                     }
@@ -619,7 +620,9 @@ mod tests {
     use crate::core::llm::openai_files::{FilePurpose, OpenAiFileMeta};
     use crate::core::llm::replay_policy::ProviderCompatProfile;
     use crate::core::llm::thinking_policy::ThinkingFormat;
-    use crate::core::llm::types::{ChatMessage, ChatMessageContentPart, ChatRequest, ReasoningFormat};
+    use crate::core::llm::types::{
+        ChatMessage, ChatMessageContentPart, ChatRequest, ReasoningFormat,
+    };
     use crate::core::llm::Capabilities;
     use crate::infra::config::ThinkingConfig;
     use crate::infra::error::AppError;
@@ -698,12 +701,8 @@ mod tests {
     fn build_request_body_serializes_inline_pdf_for_anthropic() {
         let request = ChatRequest {
             messages: vec![ChatMessage::user_with_parts(vec![
-                ChatMessageContentPart::file_base64_data(
-                    "notes.pdf",
-                    "application/pdf",
-                    "cGRm",
-                )
-                .expect("valid inline pdf"),
+                ChatMessageContentPart::file_base64_data("notes.pdf", "application/pdf", "cGRm")
+                    .expect("valid inline pdf"),
             ])],
             model: "ignored".to_string(),
             temperature: None,
@@ -730,7 +729,10 @@ mod tests {
         );
 
         assert_eq!(body["messages"][0]["content"][0]["type"], "document");
-        assert_eq!(body["messages"][0]["content"][0]["source"]["type"], "base64");
+        assert_eq!(
+            body["messages"][0]["content"][0]["source"]["type"],
+            "base64"
+        );
         assert_eq!(
             body["messages"][0]["content"][0]["source"]["media_type"],
             "application/pdf"
@@ -744,11 +746,8 @@ mod tests {
         let request = ChatRequest {
             messages: vec![ChatMessage::user_with_parts(vec![
                 ChatMessageContentPart::image_file_id("file-img").expect("valid image id"),
-                ChatMessageContentPart::file_file_id(
-                    "file-doc",
-                    Some("report.pdf".to_string()),
-                )
-                .expect("valid file id"),
+                ChatMessageContentPart::file_file_id("file-doc", Some("report.pdf".to_string()))
+                    .expect("valid file id"),
             ])],
             model: "ignored".to_string(),
             temperature: None,
@@ -794,11 +793,8 @@ mod tests {
         let request = ChatRequest {
             messages: vec![ChatMessage::user_with_parts(vec![
                 ChatMessageContentPart::image_file_id("file-img").expect("valid image id"),
-                ChatMessageContentPart::file_file_id(
-                    "file-doc",
-                    Some("report.pdf".to_string()),
-                )
-                .expect("valid file id"),
+                ChatMessageContentPart::file_file_id("file-doc", Some("report.pdf".to_string()))
+                    .expect("valid file id"),
             ])],
             model: "ignored".to_string(),
             temperature: None,

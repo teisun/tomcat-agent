@@ -177,11 +177,30 @@
       return hostCallAsync('fs', 'executeBash', {
         command: command,
         args: args,
-        cwd: options && options.cwd
+        cwd: options && options.cwd,
+        foreground_wait_ms: options && options.foregroundWaitMs
       }).then(function (r) {
         if (!r.ok) throw new Error(r.error || 'exec failed');
         return r.data; // { stdout, stderr, exitCode }
       });
+    },
+
+    taskOutput: function (taskId, options) {
+      return hostCallAsync('fs', 'taskOutput', {
+        taskId: taskId,
+        since: options && options.since,
+        block: options && options.block,
+        waitMs: options && options.waitMs
+      }).then(function (r) {
+        if (!r.ok) throw new Error(r.error || 'taskOutput failed');
+        return r.data;
+      });
+    },
+
+    taskStop: function (taskId) {
+      var r = hostCall('fs', 'taskStop', { taskId: taskId });
+      if (!r.ok) return Promise.reject(new Error(r.error || 'taskStop failed'));
+      return Promise.resolve(r.data);
     },
 
     // File ops use Promise.resolve-wrapping of sync call (files are fast; no

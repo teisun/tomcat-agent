@@ -17,6 +17,8 @@
 
 #![allow(clippy::field_reassign_with_default)]
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,6 +26,7 @@ use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 
 use tomcat::core::agent_registry::AgentRegistry;
+use tomcat::core::permission::{BashAstChecker, DefaultPermissionGate, GateConfig, SessionGrants};
 use tomcat::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
     TodoItem, TodoStatus,
@@ -49,10 +52,11 @@ use tomcat::core::{
     CheckpointRestoreReport, CheckpointStore, ListOptions, RestoreOptions, RetentionPolicy,
 };
 use tomcat::{
-    AppConfig, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse, ContextConfig,
-    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, LlmProvider, NoopStore,
-    PrimitiveExecutor, PrimitiveOperation, ReadResult, SearchFilesArgs, SearchFilesOutput,
-    SessionHeader, StreamEvent, TranscriptEntry, WriteFileResult,
+    AllowAllConfirmation, AppConfig, AppError, BashResult, ChatMessage, ChatRequest, ChatResponse,
+    ContextConfig, DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, LlmProvider,
+    NoopStore, PrimitiveExecutor, PrimitiveOperation, ReadResult, SearchFilesArgs,
+    SearchFilesOutput, SessionHeader, StreamEvent, TracingAuditRecorder, TranscriptEntry,
+    WriteFileResult,
 };
 
 // ─── 共享 fixture 与 spy ───────────────────────────────────────────────────
@@ -253,7 +257,7 @@ impl PrimitiveExecutor for UnusedPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms_override: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("mock bash ok: {command}"),
@@ -317,6 +321,17 @@ fn scripted_tool_call_stream(
     ]
 }
 
+fn last_task_id_from_messages(messages: &[ChatMessage]) -> Option<String> {
+    messages.iter().rev().find_map(|msg| {
+        let text = msg.text_content()?;
+        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+        value
+            .get("taskId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    })
+}
+
 fn write_test_plan(plan_id: &str, body: &str) {
     let path = plan_path_for_id(plan_id).unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -343,6 +358,24 @@ fn write_test_plan(plan_id: &str, body: &str) {
         1000,
     )
     .unwrap();
+}
+
+fn subagent_permission_gate(
+    root: &std::path::Path,
+) -> Arc<dyn tomcat::core::permission::PermissionGate> {
+    DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: root.to_path_buf(),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc()
 }
 
 fn subagent_transcript_path(agent_trail_dir: &std::path::Path, child_session_id: &str) -> PathBuf {
@@ -1007,6 +1040,7 @@ async fn h11_prod_verifier_persists_child_transcript_and_keeps_child_id_aligned(
     let agent_trail_dir = home.join(".tomcat").join("agents").join("main");
     std::fs::create_dir_all(&agent_trail_dir).unwrap();
     let workspace = tempfile::tempdir().unwrap();
+    let gate = subagent_permission_gate(workspace.path());
     let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::new(vec![
         scripted_tool_call_stream(
             "bash",
@@ -1050,6 +1084,11 @@ summary: verifier child completed
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
+            bash_config: AppConfig::default().tools.bash,
+            gate,
+            confirmation: Arc::new(AllowAllConfirmation),
+            audit: Arc::new(TracingAuditRecorder),
+            bash_ast: BashAstChecker::default(),
             plan_runtime: Arc::downgrade(&rt),
             model: "gpt-5.4-xhigh".into(),
         },
@@ -1089,6 +1128,186 @@ summary: verifier child completed
 }
 
 #[tokio::test]
+async fn h11b_prod_verifier_long_fake_cargo_runs_once_and_finishes_via_task_output() {
+    struct VerifierTrackedLlm {
+        fake_bin: PathBuf,
+        turn: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for VerifierTrackedLlm {
+        fn provider_name(&self) -> &str {
+            "mock"
+        }
+
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+            Err(AppError::Llm("mock chat not used".to_string()))
+        }
+
+        async fn chat_stream(
+            &self,
+            req: ChatRequest,
+        ) -> Result<
+            Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+            AppError,
+        > {
+            let step = {
+                let mut turn = self.turn.lock();
+                let current = *turn;
+                *turn += 1;
+                current
+            };
+            let events = match step {
+                0 => scripted_tool_call_stream(
+                    "bash",
+                    "call_fake_cargo",
+                    &serde_json::json!({
+                        "command": format!("PATH=\"{}:$PATH\" cargo test", self.fake_bin.display()),
+                        "foreground_wait_ms": 8_000
+                    })
+                    .to_string(),
+                ),
+                1 => {
+                    let task_id = last_task_id_from_messages(&req.messages)
+                        .expect("first verifier turn should return taskId");
+                    scripted_tool_call_stream(
+                        "task_output",
+                        "call_fake_cargo_output",
+                        &serde_json::json!({
+                            "task_id": task_id,
+                            "block": true,
+                            "wait_ms": 5_000
+                        })
+                        .to_string(),
+                    )
+                }
+                2 => scripted_text_stream(
+                    r#"<verify>
+checks:
+  - name: fake cargo verifier
+    command: cargo test
+    result: pass
+    output_excerpt: "fake-cargo-finished"
+verdict: pass
+summary: verifier observed long fake cargo to completion
+</verify>"#,
+                ),
+                _ => {
+                    return Err(AppError::Llm(format!(
+                        "VerifierTrackedLlm received unexpected turn {}",
+                        step
+                    )));
+                }
+            };
+            Ok(Box::new(tokio_stream::iter(events)))
+        }
+
+        fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+            Ok(0)
+        }
+    }
+
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let (rt, _panel, _ckpt) = build_runtime_with_spies();
+    let plan_id = "verifier_long_fake_cargo_plan";
+    write_test_plan(plan_id, "## Goal\nship verifier long cargo\n");
+
+    let agent_trail_dir = home.join(".tomcat").join("agents").join("main");
+    std::fs::create_dir_all(&agent_trail_dir).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let gate = subagent_permission_gate(workspace.path());
+    let fake_bin = workspace.path().join("fake-bin");
+    std::fs::create_dir_all(&fake_bin).unwrap();
+    let count_file = workspace.path().join("fake-cargo-count.txt");
+    let fake_cargo = fake_bin.join("cargo");
+    std::fs::write(
+        &fake_cargo,
+        format!(
+            "#!/bin/sh\nprintf x >> \"{}\"\nprintf fake-cargo-start\nsleep 9\nprintf fake-cargo-finished\n",
+            count_file.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&fake_cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let llm: Arc<dyn LlmProvider> = Arc::new(VerifierTrackedLlm {
+        fake_bin: fake_bin.clone(),
+        turn: Mutex::new(0),
+    });
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let registry = AgentRegistry::new();
+    let _root_guard = registry.register_root("parent-verifier-long").unwrap();
+    let web_fetch_runtime = Arc::new(
+        WebFetchRuntime::new(&AppConfig::default(), agent_trail_dir.join("tool-results")).unwrap(),
+    );
+    let dispatcher = ProdVerifierDispatcher::new(
+        "test_verifier_long",
+        ProdVerifierDeps {
+            agent_registry: registry.clone(),
+            parent_session_id: "parent-verifier-long".into(),
+            llm,
+            compaction_provider: None,
+            primitive,
+            event_bus,
+            agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
+            checkpoint_store: Arc::new(NoopStore),
+            context_config: ContextConfig::default(),
+            read_file_state: Arc::new(ReadFileState::default()),
+            openai_files_runtime: None,
+            web_fetch_runtime,
+            agent_workspace_dir: workspace.path().to_path_buf(),
+            skill_set: Arc::new(RwLock::new(SkillSet::default())),
+            skills_config: AppConfig::default().skills,
+            bash_config: AppConfig::default().tools.bash,
+            gate,
+            confirmation: Arc::new(AllowAllConfirmation),
+            audit: Arc::new(TracingAuditRecorder),
+            bash_ast: BashAstChecker::default(),
+            plan_runtime: Arc::downgrade(&rt),
+            model: "gpt-5.4-xhigh".into(),
+        },
+    );
+
+    let summary = dispatcher
+        .dispatch(plan_id, "## Goal\nship verifier long cargo\n")
+        .await;
+    assert_eq!(summary.verdict, "pass");
+
+    let count_text = std::fs::read_to_string(&count_file).expect("fake cargo count file");
+    assert_eq!(
+        count_text.chars().count(),
+        1,
+        "long fake cargo should run exactly once"
+    );
+
+    let transcript_path = subagent_transcript_path(&agent_trail_dir, &summary.child_session_id);
+    let lines = transcript_lines(&transcript_path);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("running_in_background")),
+        "verifier transcript should record foreground-wait expiry background handoff"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("fake-cargo-finished")),
+        "verifier transcript should include final task_output content"
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("currently unsupported in this subagent")),
+        "verifier should no longer fall back to the old unsupported background-bash path"
+    );
+
+    cleanup_home(&home);
+}
+
+#[tokio::test]
 async fn h12_prod_reviewer_persists_plan_and_code_review_child_transcripts() {
     let _g = home_lock().lock().unwrap();
     let home = setup_home();
@@ -1099,6 +1318,7 @@ async fn h12_prod_reviewer_persists_plan_and_code_review_child_transcripts() {
     let agent_trail_dir = home.join(".tomcat").join("agents").join("main");
     std::fs::create_dir_all(&agent_trail_dir).unwrap();
     let workspace = tempfile::tempdir().unwrap();
+    let gate = subagent_permission_gate(workspace.path());
     let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedLlm::new(vec![
         scripted_text_stream(
             r#"<review>
@@ -1106,6 +1326,11 @@ summary: plan review complete
 changes_summary: none
 applied_changes: false
 </review>"#,
+        ),
+        scripted_tool_call_stream(
+            "bash",
+            "call_code_bg_1",
+            r#"{"command":"printf code-review-bg","run_in_background":true}"#,
         ),
         scripted_text_stream(
             r#"<review>
@@ -1137,6 +1362,11 @@ applied_changes: false
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
+            bash_config: AppConfig::default().tools.bash.clone(),
+            gate: gate.clone(),
+            confirmation: Arc::new(AllowAllConfirmation),
+            audit: Arc::new(TracingAuditRecorder),
+            bash_ast: BashAstChecker::default(),
             plan_runtime: Arc::downgrade(&rt),
             model: "gpt-5.4-xhigh".into(),
             max_turns: 8,
@@ -1159,6 +1389,11 @@ applied_changes: false
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
+            bash_config: AppConfig::default().tools.bash,
+            gate,
+            confirmation: Arc::new(AllowAllConfirmation),
+            audit: Arc::new(TracingAuditRecorder),
+            bash_ast: BashAstChecker::default(),
             plan_runtime: Arc::downgrade(&rt),
             model: "gpt-5.4-xhigh".into(),
             max_turns: 8,
@@ -1200,6 +1435,12 @@ applied_changes: false
     assert!(transcript_lines(&code_path)[1].contains("\"subagent_type\":\"code_reviewer\""));
     assert!(transcript_message_count(&plan_path) >= 1);
     assert!(transcript_message_count(&code_path) >= 1);
+    assert!(
+        transcript_lines(&code_path)
+            .iter()
+            .any(|line| line.contains("\"taskId\"") || line.contains("running_in_background")),
+        "code reviewer transcript should capture tracked background bash ticket"
+    );
 
     cleanup_home(&home);
 }

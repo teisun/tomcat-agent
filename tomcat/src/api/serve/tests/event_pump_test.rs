@@ -252,9 +252,16 @@ async fn serve_background_task_finish_routes_event_and_queues_follow_up_for_same
     );
 
     let queue = slot.ctx.session_runtime.follow_up_queue.lock();
-    assert_eq!(queue.len(), 1, "background completion should queue exactly one follow-up");
+    assert_eq!(
+        queue.len(),
+        1,
+        "background completion should queue exactly one follow-up"
+    );
     let Some(ChatMessageContent::Text(text)) = &queue[0].content else {
-        panic!("expected background completion follow-up text, got {:?}", queue[0].content);
+        panic!(
+            "expected background completion follow-up text, got {:?}",
+            queue[0].content
+        );
     };
     assert!(
         text.contains("<background-task-finished"),

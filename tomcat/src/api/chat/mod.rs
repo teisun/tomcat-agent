@@ -19,10 +19,10 @@ pub mod permission;
 pub mod preflight;
 
 pub use context::{ChatContext, ChatContextOverrides, CliConfirmation};
-pub(crate) use run_loop::{build_system_text, sync_context_state_system_prompt_len};
-pub(crate) use run_loop::{recover_context_state_after_failed_turn, render_error_message};
 pub(crate) use run_loop::spawn_completion_subscriber;
+pub(crate) use run_loop::{build_system_text, sync_context_state_system_prompt_len};
 pub use run_loop::{chat_loop, run_chat_turn, run_chat_turn_with_message};
+pub(crate) use run_loop::{recover_context_state_after_failed_turn, render_error_message};
 pub use session_runtime::{GlobalServices, ScopeServices, SessionRuntime, SessionRuntimeRegistry};
 
 #[cfg(test)]

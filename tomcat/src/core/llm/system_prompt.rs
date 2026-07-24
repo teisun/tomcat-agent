@@ -196,7 +196,7 @@ impl SystemPromptSection for PagedReadingSection {
 }
 
 /// P1（bash background monitor）：教模型如何使用 `bash run_in_background` +
-/// `task_output(block=true|false, timeout_ms=...)` 三种模式，以及如何识别
+/// `task_output(block=true|false, wait_ms=...)` 三种模式，以及如何识别
 /// `<background-task-finished>` 系统注入的 user message。
 struct BackgroundShellMonitorSection;
 

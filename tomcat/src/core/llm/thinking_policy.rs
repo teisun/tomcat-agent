@@ -17,9 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::infra::config::ThinkingConfig;
 
 /// 逻辑档位。顺序即全序：`off < minimal < low < medium < high < xhigh < max`。
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingLevel {
     Off,
@@ -60,7 +58,9 @@ impl ThinkingLevel {
 
     /// 容错解析；未知字符串退化为 `Medium` 并返回 `false` 让 caller 决定是否报告。
     pub fn parse_or_medium(s: &str) -> (Self, bool) {
-        Self::parse(s).map(|level| (level, true)).unwrap_or((Self::Medium, false))
+        Self::parse(s)
+            .map(|level| (level, true))
+            .unwrap_or((Self::Medium, false))
     }
 
     pub fn clamp_to_supported(self, supported: &[Self]) -> Self {
@@ -352,9 +352,9 @@ pub fn resolve_request_fields(cfg: &ThinkingConfig, fmt: ThinkingFormat) -> Thin
             }
         }
         // Qwen：当前无显式请求字段；Anthropic 走 `resolve_anthropic_request`。
-        ThinkingFormat::Qwen
-        | ThinkingFormat::Anthropic
-        | ThinkingFormat::AnthropicAdaptive => ThinkingRequestFields::default(),
+        ThinkingFormat::Qwen | ThinkingFormat::Anthropic | ThinkingFormat::AnthropicAdaptive => {
+            ThinkingRequestFields::default()
+        }
         // Auto 应该已经被 caller resolve 掉；保险起见兜底。
         ThinkingFormat::Auto => ThinkingRequestFields::default(),
     }

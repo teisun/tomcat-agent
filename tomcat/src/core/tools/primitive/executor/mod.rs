@@ -156,9 +156,9 @@ pub struct DefaultPrimitiveExecutor {
     /// config 注入，测试可关掉验证「字节透传」语义）。详见
     /// `docs/architecture/tools/write.md` §3.3 / §8。
     pub(super) write_normalize_crlf: bool,
-    /// T2-P0-016 PR-E.2：bash 工具墙钟超时（毫秒）；默认 [`crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS`]。
-    /// 由 [`Self::with_bash_timeout_ms`] 覆盖（生产由 `[tools.bash] timeout_ms` config 注入）。
-    pub(super) bash_timeout_ms: u64,
+    /// T2-P0-016 PR-E.2：bash 工具前台等待窗口（毫秒）；默认 [`crate::infra::DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS`]。
+    /// 由 [`Self::with_bash_foreground_wait_ms`] 覆盖（生产由 `[tools.bash] foreground_wait_ms` config 注入）。
+    pub(super) bash_foreground_wait_ms: u64,
     /// T2-P0-016 PR-E.2：bash 工具单流字符上限（stdout / stderr 各算一份）；默认
     /// [`crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS`]。Phase-E.3 起接入
     /// `output_accum.rs`，超限走头尾保留 + 落盘 `bash_persist_dir`。
@@ -168,6 +168,10 @@ pub struct DefaultPrimitiveExecutor {
     /// [`crate::infra::resolve_agent_trail_dir`] + `/tool-results`。测试可设 `tempfile::tempdir()`
     /// 验证「超限落盘」路径，或保持 `None` 验证「仅截断」路径。
     pub(super) bash_persist_dir: Option<std::path::PathBuf>,
+    /// 可选共享 bash 任务台账。生产 ext-host 路径注入 session registry 后，前台等待到期
+    /// 可转后台并返回 `task_id`；未注入时仅允许一次性前台调用，并在等待窗口到期时
+    /// 就地收口，避免无主后台泄漏。
+    pub(super) bash_task_registry: Option<Arc<crate::core::tools::primitive::BashTaskRegistry>>,
     /// T2-P0-016 PR-L（bash T3）：AST allowlist 检查器，**叠在** `gate_check_bash`
     /// 之前生效（详见 [bash-pr-l-scope.md §1 / §4](../../../../docs/architecture/tools/bash-pr-l-scope.md)）。
     /// 默认 **`enabled=false`**（`BashAstChecker::new(false, …)`）：不切段、不跑
@@ -190,9 +194,10 @@ impl DefaultPrimitiveExecutor {
             gate,
             read_max_bytes: MAX_READ_BYTES,
             write_normalize_crlf: crate::infra::DEFAULT_TOOLS_WRITE_NORMALIZE_CRLF,
-            bash_timeout_ms: crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS,
+            bash_foreground_wait_ms: crate::infra::DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS,
             bash_max_output_chars: crate::infra::DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS,
             bash_persist_dir: None,
+            bash_task_registry: None,
             bash_ast: crate::core::permission::BashAstChecker::new(false, vec![], vec![]),
         }
     }
@@ -204,16 +209,19 @@ impl DefaultPrimitiveExecutor {
         self
     }
 
-    /// T2-P0-016 PR-E.2：覆盖 bash 工具默认墙钟超时。
+    /// T2-P0-016 PR-E.2：覆盖 bash 工具默认前台等待窗口。
     ///
-    /// **生产路径**：由 `[tools.bash] timeout_ms` config 在 `api/chat` 装配
+    /// **生产路径**：由 `[tools.bash] foreground_wait_ms` config 在 `api/chat` 装配
     /// `DefaultPrimitiveExecutor` 时调用（与 [`Self::with_read_max_bytes`] 同形）。
-    /// **测试路径**：可设小到 50 ms 模拟 wall-clock kill 行为。
-    pub fn with_bash_timeout_ms(mut self, ms: u64) -> Self {
-        self.bash_timeout_ms = if ms == 0 {
-            crate::infra::DEFAULT_TOOLS_BASH_TIMEOUT_MS
+    /// **测试路径**：可设小到 50 ms 验证前台等待 clamp。
+    pub fn with_bash_foreground_wait_ms(mut self, ms: u64) -> Self {
+        self.bash_foreground_wait_ms = if ms == 0 {
+            crate::infra::DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS
         } else {
-            ms.min(crate::infra::MAX_TOOLS_BASH_TIMEOUT_MS)
+            ms.clamp(
+                crate::infra::MIN_TOOLS_BASH_FOREGROUND_WAIT_MS,
+                crate::infra::MAX_TOOLS_BASH_FOREGROUND_WAIT_MS,
+            )
         };
         self
     }
@@ -234,6 +242,16 @@ impl DefaultPrimitiveExecutor {
     /// `None` 表示「不落盘，仅截断」（测试默认 + 极小心智的 mock）。
     pub fn with_bash_persist_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.bash_persist_dir = Some(dir);
+        self
+    }
+
+    /// 注入共享 bash 任务台账。适用于能后续 `task_output` / `task_stop` 跟进的调用方
+    /// （如 ext host）；未注入时等待到期只能就地收口。
+    pub fn with_bash_task_registry(
+        mut self,
+        registry: Arc<crate::core::tools::primitive::BashTaskRegistry>,
+    ) -> Self {
+        self.bash_task_registry = Some(registry);
         self
     }
 
@@ -356,9 +374,9 @@ impl PrimitiveExecutor for DefaultPrimitiveExecutor {
         cwd: Option<&str>,
         plugin_id: &str,
         argv: Option<&[String]>,
-        timeout_ms: Option<u64>,
+        foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
-        bash::execute_bash_impl(self, command, cwd, plugin_id, argv, timeout_ms).await
+        bash::execute_bash_impl(self, command, cwd, plugin_id, argv, foreground_wait_ms).await
     }
 
     async fn require_user_confirmation(

@@ -185,11 +185,29 @@ interface TomcatPluginAPI {
   emit(eventName: string, payload?: TomcatJsonValue): unknown;
   once(eventName: string, handler: (data: TomcatJsonValue, ctx: TomcatPluginContext) => void): number;
 
-  exec(command: string, args?: string[], options?: { cwd?: string }): Promise<{
+  exec(command: string, args?: string[], options?: { cwd?: string; foregroundWaitMs?: number }): Promise<{
     stdout?: string;
     stderr?: string;
     exitCode?: number;
+    state?: 'finished' | 'running_in_background' | 'stopped';
+    foregroundWaitExpired?: boolean;
+    taskId?: string;
+    logPath?: string;
+    recentOutput?: string;
   }>;
+  taskOutput(
+    taskId: string,
+    options?: { since?: number; block?: boolean; waitMs?: number }
+  ): Promise<{
+    taskId: string;
+    content: string;
+    startOffset: number;
+    nextOffset: number;
+    finished: boolean;
+    exitCode?: number;
+    wakeReason?: 'finished' | 'wait_window_elapsed';
+  }>;
+  taskStop(taskId: string): Promise<{ taskId: string; stopped: boolean }>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string, options?: { overwrite?: boolean }): Promise<unknown>;
   editFile(path: string, edits: TomcatJsonValue): Promise<unknown>;

@@ -2,7 +2,12 @@
 
 本规范从项目代码审查（2026-03-09）中提炼，收录常见的 Clippy 警告模式及其修复方式。每条规则附带 lint 名称、原理说明、Before/After 对照代码。
 
-**门禁要求**：`cargo clippy --all-targets` 必须零警告。新代码提交前须通过此检查。
+**两层静态检查策略**：
+
+- 日常 EXEC / 功能分支迭代：只检查受影响 crate 与 target，例如 `cargo clippy -p tomcat --lib -- -D warnings`；若改到 binary 或特定 integration target，再把对应 target 精确加入。这样反馈直接归因于本次改动。
+- 正式验收与 CI：保留 `cargo clippy --all-targets -- -D warnings`，必须零警告，不降低门禁。
+
+若仓库 baseline 本身不干净，日常检查应记录与本次 diff 无关的既有告警，并继续修复本次引入的问题；不要在没有新证据时机械重复同一轮全量 Clippy。
 
 ---
 
@@ -211,6 +216,7 @@ pub fn init_logging(cfg: &LogConfig, log_dir: Option<&Path>) -> Result<(), AppEr
 
 ## 验收标准
 
-- `cargo clippy --all-targets` 零警告
+- 日常 EXEC 对受影响 crate/target 执行 scoped Clippy，并确保本次改动不新增警告
+- 正式验收 / CI 执行 `cargo clippy --all-targets -- -D warnings` 且零警告
 - 新代码遵循上述 8 条惯用法规则
 - Code Review 时可引用本文档规则编号（如 "违反 I-3"）进行标注

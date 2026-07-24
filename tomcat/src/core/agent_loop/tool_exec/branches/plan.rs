@@ -30,7 +30,7 @@ pub(in super::super) async fn dispatch_plan_tool(
         }
         "update_plan" => {
             match serde_json::from_value::<plan_tools::update_plan::UpdatePlanArgs>(args.clone()) {
-                Ok(a) => plan_tools::update_plan::execute_for_tool(rt, a, &ctx.tool_call_id).await,
+                Ok(a) => plan_tools::update_plan::execute_for_tool(rt, a, ctx.tool_call_id).await,
                 Err(e) => Err(plan_tools::ToolError::BadArgs(e.to_string())),
             }
         }

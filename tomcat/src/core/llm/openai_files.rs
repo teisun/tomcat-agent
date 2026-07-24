@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -101,10 +101,7 @@ pub struct OpenAiFilesClient {
 }
 
 impl OpenAiFilesClient {
-    pub fn from_provider_context(
-        ctx: FilesApiProviderContext,
-        files_cfg: &LlmFilesConfig,
-    ) -> Self {
+    pub fn from_provider_context(ctx: FilesApiProviderContext, files_cfg: &LlmFilesConfig) -> Self {
         Self {
             client: ctx.client,
             base_url: ctx.base_url.trim_end_matches('/').to_string(),

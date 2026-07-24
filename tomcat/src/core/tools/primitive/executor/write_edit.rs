@@ -148,7 +148,9 @@ pub(super) async fn write_file_impl(
     // 只是回执里不带 diff 摘要。
     let original: Option<String> = if overwrite && pre_existed {
         let path_for_read = path_buf.clone();
-        tokio::task::spawn_blocking(move || crate::infra::platform::read_file_utf8(&path_for_read).ok())
+        tokio::task::spawn_blocking(move || {
+            crate::infra::platform::read_file_utf8(&path_for_read).ok()
+        })
         .await
         .map_err(|e| AppError::Primitive(format!("write pre-read join error: {e}")))?
     } else {

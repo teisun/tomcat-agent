@@ -57,7 +57,7 @@ fn success_rate_redline_keeps_critical_usage_in_descriptions() {
     // bash：run_in_background 语义（后台任务全套用法在系统段）。
     assert!(desc_of("bash").contains("run_in_background"));
     let task_output = desc_of("task_output");
-    assert!(task_output.contains("max 600000"));
+    assert!(task_output.contains("600000"));
     assert!(task_output.contains("5000-600000ms"));
 }
 
@@ -96,12 +96,16 @@ fn task_output_schema_matches_long_wait_slice_contract() {
         .find(|entry| entry.name == "task_output")
         .expect("task_output catalog entry");
     let schema = (entry.parameters)();
-    let timeout = &schema["properties"]["timeout_ms"];
+    let timeout = &schema["properties"]["wait_ms"];
     assert_eq!(timeout["minimum"].as_i64(), Some(0));
     assert_eq!(timeout["maximum"].as_i64(), Some(600000));
+    assert!(
+        schema["properties"].get("timeout_ms").is_none(),
+        "legacy task_output timeout_ms must not be accepted"
+    );
     let description = timeout["description"].as_str().unwrap_or("");
     assert!(description.contains("5000-600000ms"));
-    assert!(description.contains("`0` == block=false"));
+    assert!(description.contains("Ignored when block=false"));
 }
 
 #[test]
@@ -320,4 +324,15 @@ fn assert_schema_has_parameter_descriptions(tool_name: &str, schema: &Value) {
             name
         );
     }
+}
+
+#[test]
+fn bash_schema_rejects_legacy_timeout_name() {
+    let entry = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "bash")
+        .unwrap();
+    let schema = (entry.parameters)();
+    assert!(schema["properties"].get("foreground_wait_ms").is_some());
+    assert!(schema["properties"].get("timeout_ms").is_none());
 }

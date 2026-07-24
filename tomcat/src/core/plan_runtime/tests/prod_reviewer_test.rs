@@ -1,7 +1,7 @@
+use super::super::code_reviewer::code_reviewer_allowed_tools_with_policy;
 use super::super::file_store::{
     write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
-use super::super::code_reviewer::code_reviewer_allowed_tools_with_policy;
 use super::super::plan_reviewer::{build_review_prompt, plan_reviewer_allowed_tools_with_policy};
 use super::super::prod_reviewer::{ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher};
 use super::super::review::resolve_internal_tools;

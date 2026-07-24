@@ -15,7 +15,10 @@ export type WebviewMessageSegment =
       type: "reference";
     };
 
-export type WebviewReference = Extract<WebviewMessageSegment, { type: "reference" }>;
+export type WebviewReference = Extract<
+  WebviewMessageSegment,
+  { type: "reference" }
+>;
 
 export interface ContextSearchMatch {
   description?: string | null;
@@ -122,11 +125,10 @@ export interface WebviewToolDisplayText {
 }
 
 export type WebviewToolDisplay =
-  | WebviewToolDisplayFile
-  | WebviewToolDisplayPlan
-  | WebviewToolDisplayText;
+  WebviewToolDisplayFile | WebviewToolDisplayPlan | WebviewToolDisplayText;
 
-export type WebviewToolStatus = "complete" | "interrupted" | "running" | "streaming";
+export type WebviewToolStatus =
+  "complete" | "interrupted" | "running" | "streaming";
 
 export interface WebviewToolDiffStat {
   added: number;
@@ -151,6 +153,11 @@ export interface WebviewToolCard {
   backgroundExitCode?: number;
   backgroundRunning?: boolean;
   backgroundTaskId?: string;
+  liveOutput?: string;
+  liveOutputOffset?: number;
+  liveOutputSequence?: number;
+  liveOutputTruncated?: boolean;
+  logPath?: string;
   display?: WebviewToolDisplay;
   diff?: FileDiffLine[];
   diffStat?: WebviewToolDiffStat;
@@ -170,11 +177,7 @@ export interface WebviewToolCard {
 }
 
 export type WebviewPlanState =
-  | "chat"
-  | "planning"
-  | "executing"
-  | "pending"
-  | "completed";
+  "chat" | "planning" | "executing" | "pending" | "completed";
 
 export interface WebviewPlanFileRef {
   path: string;

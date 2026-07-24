@@ -13,13 +13,20 @@ import { DiffView } from "./DiffView";
 import { DisclosureCard, type DisclosureStatusVariant } from "./DisclosureCard";
 import { FileChip } from "./FileChip";
 import { PlanFileCard } from "./PlanFileCard";
-import { tailTerminalOutput, TerminalOutput } from "./TerminalOutput";
+import {
+  limitTerminalOutput,
+  tailTerminalOutput,
+  TerminalOutput,
+} from "./TerminalOutput";
 
 function firstLine(value: string | undefined): string | undefined {
   if (!value) {
     return undefined;
   }
-  return value.split("\n").find((line) => line.trim())?.trim();
+  return value
+    .split("\n")
+    .find((line) => line.trim())
+    ?.trim();
 }
 
 function asString(value: unknown): string | undefined {
@@ -27,14 +34,17 @@ function asString(value: unknown): string | undefined {
 }
 
 function asNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }
 
 function humanizeToolName(toolName: string): string {
   return toolName.replace(/_/g, " ");
 }
 
-export type ToolCategory = "answer" | "command" | "context" | "edit" | "other" | "task";
+export type ToolCategory =
+  "answer" | "command" | "context" | "edit" | "other" | "task";
 
 const TASK_OUTPUT_BLOCK_DEFAULT_TIMEOUT_MS = 5_000;
 const TASK_OUTPUT_BLOCK_MIN_TIMEOUT_MS = 5_000;
@@ -55,7 +65,13 @@ const CONTEXT_TOOLS = new Set([
   "web_fetch",
   "web_search",
 ]);
-const OTHER_TOOLS = new Set(["config_get", "config_set", "create_plan", "todos", "update_plan"]);
+const OTHER_TOOLS = new Set([
+  "config_get",
+  "config_set",
+  "create_plan",
+  "todos",
+  "update_plan",
+]);
 
 function basename(filePath: string): string {
   const normalized = filePath.replace(/\\/g, "/");
@@ -64,7 +80,9 @@ function basename(filePath: string): string {
 
 function filePathForTool(item: WebviewToolCard): string | undefined {
   const args = item.args ?? {};
-  return item.display?.kind === "file" ? item.display.file : asString(args.path);
+  return item.display?.kind === "file"
+    ? item.display.file
+    : asString(args.path);
 }
 
 function isPlanTool(item: WebviewToolCard): boolean {
@@ -75,7 +93,9 @@ function planPathForTool(item: WebviewToolCard): string | undefined {
   return item.planPath ?? asString(item.args?.path);
 }
 
-function createPlanTodosFromArgs(args: Record<string, unknown> | undefined): WebviewTodo[] | undefined {
+function createPlanTodosFromArgs(
+  args: Record<string, unknown> | undefined,
+): WebviewTodo[] | undefined {
   const todos = args?.todos;
   if (!Array.isArray(todos)) {
     return undefined;
@@ -120,21 +140,28 @@ function createPlanCardFromTool(
   }
   const isActivePlan = !!item.planId && item.planId === options.currentPlanId;
   const argTodos = createPlanTodosFromArgs(item.args);
-  const ambientTodos = options.planTodos && options.planTodos.length > 0 ? options.planTodos : undefined;
+  const ambientTodos =
+    options.planTodos && options.planTodos.length > 0
+      ? options.planTodos
+      : undefined;
   return {
     id: item.id,
     overview: item.planActivity?.overview ?? undefined,
     path,
     planId: item.planId ?? null,
-    state: isActivePlan ? options.currentPlanState ?? item.planActivity?.stateAfter ?? null : item.planActivity?.stateAfter ?? null,
+    state: isActivePlan
+      ? (options.currentPlanState ?? item.planActivity?.stateAfter ?? null)
+      : (item.planActivity?.stateAfter ?? null),
     title: item.planActivity?.title ?? asString(item.args?.goal) ?? undefined,
-    todos: isActivePlan ? ambientTodos ?? argTodos : argTodos,
+    todos: isActivePlan ? (ambientTodos ?? argTodos) : argTodos,
     type: "plan",
   };
 }
 
 export function isRunning(item: WebviewToolCard): boolean {
-  return (item.status === "running" || item.status === "streaming") && !item.isError;
+  return (
+    (item.status === "running" || item.status === "streaming") && !item.isError
+  );
 }
 
 function isRunningForDisplay(item: WebviewToolCard): boolean {
@@ -211,8 +238,11 @@ function buildPlanUpdateLabel(item: WebviewToolCard): string {
     return "Updated plan";
   }
   const hasProgress =
-    typeof activity.completed === "number" && typeof activity.total === "number";
-  const progressSuffix = hasProgress ? ` · ${activity.completed}/${activity.total}` : "";
+    typeof activity.completed === "number" &&
+    typeof activity.total === "number";
+  const progressSuffix = hasProgress
+    ? ` · ${activity.completed}/${activity.total}`
+    : "";
   if (
     activity.stateBefore &&
     activity.stateAfter &&
@@ -226,7 +256,9 @@ function buildPlanUpdateLabel(item: WebviewToolCard): string {
       : `Checked ${activity.checked}`;
   }
   if ((activity.applied ?? 0) > 0) {
-    return hasProgress ? `Updated plan · ${activity.completed}/${activity.total}` : "Updated plan";
+    return hasProgress
+      ? `Updated plan · ${activity.completed}/${activity.total}`
+      : "Updated plan";
   }
   return "Updated plan";
 }
@@ -299,7 +331,9 @@ export function buildFlatLabel(item: WebviewToolCard): string {
   if (item.status === "interrupted") {
     switch (category) {
       case "edit":
-        return item.toolName === "write" ? "Interrupted write" : "Interrupted edit";
+        return item.toolName === "write"
+          ? "Interrupted write"
+          : "Interrupted edit";
       case "command":
         return "Interrupted command";
       case "answer":
@@ -326,8 +360,14 @@ export function buildFlatLabel(item: WebviewToolCard): string {
       return running ? `Searching ${query}` : `Searched ${query}`;
     }
     case "search_files": {
-      const query = asString(args.pattern) ?? asString(args.query) ?? asString(args.path) ?? "files";
-      return running ? `Searching files for ${query}` : `Searched files for ${query}`;
+      const query =
+        asString(args.pattern) ??
+        asString(args.query) ??
+        asString(args.path) ??
+        "files";
+      return running
+        ? `Searching files for ${query}`
+        : `Searched files for ${query}`;
     }
     case "bash": {
       const backgroundLabel = backgroundCommandLabel(item);
@@ -356,7 +396,9 @@ export function buildFlatLabel(item: WebviewToolCard): string {
     case "search_workspace": {
       const query = asString(args.query) ?? asString(args.pattern);
       if (query) {
-        return running ? `Searching workspace for ${query}` : `Searched workspace for ${query}`;
+        return running
+          ? `Searching workspace for ${query}`
+          : `Searched workspace for ${query}`;
       }
       return running ? "Searching workspace" : "Searched workspace";
     }
@@ -411,20 +453,28 @@ export function buildToolCollectionTitle(tools: WebviewToolCard[]): string {
     return buildGroupTitleFromTool(tools[0]);
   }
 
-  if (tools.every((tool) => tool.toolName === "read" || tool.toolName === "read_file")) {
+  if (
+    tools.every(
+      (tool) => tool.toolName === "read" || tool.toolName === "read_file",
+    )
+  ) {
     return `Reviewed ${tools.length} files`;
   }
   if (tools.every((tool) => toolCategory(tool.toolName) === "context")) {
     return `Searched ${tools.length} sources`;
   }
   if (tools.every((tool) => toolCategory(tool.toolName) === "command")) {
-    return tools.length === 1 ? buildGroupTitleFromTool(tools[0]) : `Executed ${tools.length} commands`;
+    return tools.length === 1
+      ? buildGroupTitleFromTool(tools[0])
+      : `Executed ${tools.length} commands`;
   }
   if (tools.every((tool) => toolCategory(tool.toolName) === "edit")) {
     return `Edited ${tools.length} files`;
   }
   if (tools.every((tool) => toolCategory(tool.toolName) === "task")) {
-    return tools.length === 1 ? buildGroupTitleFromTool(tools[0]) : "Managed background tasks";
+    return tools.length === 1
+      ? buildGroupTitleFromTool(tools[0])
+      : "Managed background tasks";
   }
 
   return `Used ${tools.length} tools`;
@@ -439,7 +489,7 @@ function isBlockingTaskOutput(item: WebviewToolCard): boolean {
     item.toolName === "task_output" &&
     item.args?.block === true &&
     !item.isError &&
-    clampTaskOutputBudget(item.args?.timeout_ms) > 0
+    clampTaskOutputBudget(item.args?.wait_ms) > 0
   );
 }
 
@@ -462,7 +512,7 @@ function taskOutputCountdownLabel(
   if (!isBlockingTaskOutput(item)) {
     return null;
   }
-  const budget = clampTaskOutputBudget(item.args?.timeout_ms);
+  const budget = clampTaskOutputBudget(item.args?.wait_ms);
   if (item.status === "interrupted") {
     return "Stopped waiting for shell";
   }
@@ -480,6 +530,9 @@ export function hasMeaningfulContent(item: WebviewToolCard): boolean {
     return false;
   }
   const summary = formatToolSummary(item.summary);
+  if (item.liveOutput?.trim()) {
+    return true;
+  }
   if (
     toolCategory(item.toolName) === "edit" &&
     item.status === "complete" &&
@@ -525,7 +578,10 @@ function shellQuoteArg(value: string): string {
 function fullCommandText(item: WebviewToolCard): string {
   const toolArgs = item.args ?? {};
   const command =
-    asString(toolArgs.command) ?? asString(toolArgs.cmd) ?? asString(toolArgs.script) ?? "";
+    asString(toolArgs.command) ??
+    asString(toolArgs.cmd) ??
+    asString(toolArgs.script) ??
+    "";
   const argv = Array.isArray(toolArgs.args)
     ? toolArgs.args.filter((arg): arg is string => typeof arg === "string")
     : [];
@@ -623,25 +679,37 @@ function commandPlaceholderVerb(item: WebviewToolCard): string {
 
 function backgroundCommandLabel(item: WebviewToolCard): string | null {
   const isBackgroundCommand =
-    (item.toolName === "bash" || item.toolName === "shell" || item.toolName === "execute_command") &&
-    (item.backgroundRunning === true || typeof item.backgroundTaskId === "string");
+    (item.toolName === "bash" ||
+      item.toolName === "shell" ||
+      item.toolName === "execute_command") &&
+    (item.backgroundRunning === true ||
+      typeof item.backgroundTaskId === "string");
   if (!isBackgroundCommand) {
     return null;
   }
   if (item.backgroundRunning === true) {
     return "Running in background";
   }
-  if (typeof item.backgroundExitCode === "number" && item.backgroundExitCode !== 0) {
+  if (
+    typeof item.backgroundExitCode === "number" &&
+    item.backgroundExitCode !== 0
+  ) {
     return `Ran · exit ${item.backgroundExitCode}`;
   }
   return "Ran";
 }
 
 function commandPurposeLabel(item: WebviewToolCard): string {
-  return backgroundCommandLabel(item) ?? asString(item.summaryTitle) ?? commandPlaceholderVerb(item);
+  return (
+    backgroundCommandLabel(item) ??
+    asString(item.summaryTitle) ??
+    commandPlaceholderVerb(item)
+  );
 }
 
-function parseApprovalQuestions(args: Record<string, unknown> | undefined): WebviewApprovalQuestion[] | null {
+function parseApprovalQuestions(
+  args: Record<string, unknown> | undefined,
+): WebviewApprovalQuestion[] | null {
   const questions = args?.questions;
   if (!Array.isArray(questions)) {
     return null;
@@ -664,7 +732,9 @@ function parseApprovalQuestions(args: Record<string, unknown> | undefined): Webv
   return parsed.length === questions.length ? parsed : null;
 }
 
-function parseAskQuestionResult(summary: string | undefined): AskQuestionResult | null {
+function parseAskQuestionResult(
+  summary: string | undefined,
+): AskQuestionResult | null {
   if (!summary) {
     return null;
   }
@@ -673,7 +743,11 @@ function parseAskQuestionResult(summary: string | undefined): AskQuestionResult 
       answers?: unknown[];
       cancelled?: unknown;
     };
-    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.answers)) {
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      !Array.isArray(parsed.answers)
+    ) {
       return null;
     }
     if (typeof parsed.cancelled !== "boolean") {
@@ -704,7 +778,8 @@ function parseAskQuestionResult(summary: string | undefined): AskQuestionResult 
       const customText =
         typeof answer.customText === "string" || answer.customText === null
           ? answer.customText
-          : typeof answer.custom_text === "string" || answer.custom_text === null
+          : typeof answer.custom_text === "string" ||
+              answer.custom_text === null
             ? answer.custom_text
             : undefined;
       const skipped =
@@ -729,7 +804,10 @@ function parseAskQuestionResult(summary: string | undefined): AskQuestionResult 
       return null;
     }
     return {
-      answers: answers.filter((entry): entry is AskQuestionResult["answers"][number] => entry !== null),
+      answers: answers.filter(
+        (entry): entry is AskQuestionResult["answers"][number] =>
+          entry !== null,
+      ),
       cancelled: parsed.cancelled,
     };
   } catch {
@@ -767,7 +845,11 @@ function renderPlanActionLink(
 function renderPlainBody(item: WebviewToolCard): ReactNode {
   return (
     <>
-      {item.summary ? <pre data-testid="tool-row-result">{formatToolSummary(item.summary)}</pre> : null}
+      {item.summary ? (
+        <pre data-testid="tool-row-result">
+          {formatToolSummary(item.summary)}
+        </pre>
+      ) : null}
       {item.display?.kind === "plan" ? <pre>{item.display.plan}</pre> : null}
       {item.display?.kind === "text" && item.display.text !== item.summary ? (
         <pre>{item.display.text}</pre>
@@ -794,10 +876,15 @@ function renderFlatContent(
       if (filePath) {
         return (
           <span className="tc-tool-row__inline">
-            <span className={textClassName}>{buildFlatLabel(item).replace(/ file$/, "")}</span>
+            <span className={textClassName}>
+              {buildFlatLabel(item).replace(/ file$/, "")}
+            </span>
             <FileChip onOpenFile={onOpenFile} path={filePath} />
             {diffStat ? (
-              <span className="tc-tool-row__diff-badges" data-testid="tool-row-diff-badges">
+              <span
+                className="tc-tool-row__diff-badges"
+                data-testid="tool-row-diff-badges"
+              >
                 <span
                   className="tc-tool-row__diff-badge tc-tool-row__diff-badge--added"
                   data-testid="tool-row-diff-added"
@@ -833,9 +920,13 @@ function renderFlatContent(
     case "answer":
       return <span className={textClassName}>{buildFlatLabel(item)}</span>;
     case "task": {
-      const countdownLabel = nowTick === undefined ? null : taskOutputCountdownLabel(item, nowTick);
+      const countdownLabel =
+        nowTick === undefined ? null : taskOutputCountdownLabel(item, nowTick);
       return (
-        <span className={textClassName} data-testid="tool-row-task-output-countdown">
+        <span
+          className={textClassName}
+          data-testid="tool-row-task-output-countdown"
+        >
           {countdownLabel ?? buildFlatLabel(item)}
         </span>
       );
@@ -848,13 +939,17 @@ function renderFlatContent(
           return (
             <span className="tc-tool-row__inline">
               <span className={textClassName}>{buildFlatLabel(item)}</span>
-              {isRunning(item) || item.isError ? null : renderPlanActionLink(planPath, onOpenPlanFile)}
+              {isRunning(item) || item.isError
+                ? null
+                : renderPlanActionLink(planPath, onOpenPlanFile)}
             </span>
           );
         case "grep": {
           const resultsCount = countResults(item.summary);
           const suffix =
-            !isRunning(item) && resultsCount ? ` · ${resultsCount} results` : "";
+            !isRunning(item) && resultsCount
+              ? ` · ${resultsCount} results`
+              : "";
           const glob = asString(args.glob) ?? asString(args.path);
           if (glob) {
             return (
@@ -867,14 +962,20 @@ function renderFlatContent(
               </span>
             );
           }
-          return <span className={textClassName}>{`${buildFlatLabel(item)}${suffix}`}</span>;
+          return (
+            <span
+              className={textClassName}
+            >{`${buildFlatLabel(item)}${suffix}`}</span>
+          );
         }
         case "read":
         case "read_file":
           if (filePath) {
             return (
               <span className="tc-tool-row__inline">
-                <span className={textClassName}>{buildFlatLabel(item).replace(/ file$/, "")}</span>
+                <span className={textClassName}>
+                  {buildFlatLabel(item).replace(/ file$/, "")}
+                </span>
                 <FileChip onOpenFile={onOpenFile} path={filePath} />
               </span>
             );
@@ -934,7 +1035,10 @@ function renderDiffBadges(item: WebviewToolCard): ReactNode {
     return null;
   }
   return (
-    <span className="tc-tool-row__diff-badges" data-testid="tool-row-diff-badges">
+    <span
+      className="tc-tool-row__diff-badges"
+      data-testid="tool-row-diff-badges"
+    >
       <span
         className="tc-tool-row__diff-badge tc-tool-row__diff-badge--added"
         data-testid="tool-row-diff-added"
@@ -958,8 +1062,12 @@ function shouldShowBodyByDefault(
   if (!contentVisible) {
     return false;
   }
-  if (toolCategory(item.toolName) === "answer") {
+  const category = toolCategory(item.toolName);
+  if (category === "answer") {
     return true;
+  }
+  if (category === "command") {
+    return item.isError;
   }
   return item.isError || item.status !== "complete";
 }
@@ -996,7 +1104,13 @@ function ToolRowComponent({
   variant = "standalone",
 }: ToolRowProps) {
   const category = toolCategory(item.toolName);
-  const contentVisible = hasMeaningfulContent(item);
+  const terminalText =
+    item.status === "complete" && !item.backgroundRunning
+      ? item.summary
+      : (item.liveOutput ?? item.summary);
+  const boundedTerminalText = limitTerminalOutput(terminalText);
+  const contentVisible =
+    hasMeaningfulContent(item) || Boolean(boundedTerminalText);
   const alwaysVisibleBody = category === "answer" && contentVisible;
   const canToggle = contentVisible && !alwaysVisibleBody;
   const shouldExpandByDefault = shouldShowBodyByDefault(item, contentVisible);
@@ -1006,12 +1120,12 @@ function ToolRowComponent({
   const countdownActive =
     isRunning(item) &&
     isBlockingTaskOutput(item) &&
-    clampTaskOutputBudget(item.args?.timeout_ms) > 0;
+    clampTaskOutputBudget(item.args?.wait_ms) > 0;
 
   useEffect(() => {
     setCollapsed(!shouldExpandByDefault);
     setUserInteracted(false);
-  }, [item.id, shouldExpandByDefault]);
+  }, [item.id]);
 
   useEffect(() => {
     if (!userInteracted) {
@@ -1041,7 +1155,10 @@ function ToolRowComponent({
       }),
     [currentPlanId, currentPlanState, item, planTodos],
   );
-  const iconClass = useMemo(() => toolIconClass(item.toolName), [item.toolName]);
+  const iconClass = useMemo(
+    () => toolIconClass(item.toolName),
+    [item.toolName],
+  );
   if (createPlanCard) {
     return (
       <PlanFileCard
@@ -1084,10 +1201,14 @@ function ToolRowComponent({
     category === "edit" &&
     item.display?.kind === "file" &&
     !hasStructuredDiff &&
-    Boolean(item.diffStat && (item.diffStat.added > 0 || item.diffStat.removed > 0));
+    Boolean(
+      item.diffStat && (item.diffStat.added > 0 || item.diffStat.removed > 0),
+    );
   const usesDisclosureCard =
     (category === "command" && contentVisible) ||
-    (category === "edit" && item.display?.kind === "file" && (hasStructuredDiff || hasLargeDiffFallback));
+    (category === "edit" &&
+      item.display?.kind === "file" &&
+      (hasStructuredDiff || hasLargeDiffFallback));
   const disclosureStatusVariant: DisclosureStatusVariant = item.isError
     ? "error"
     : isRunningForDisplay(item)
@@ -1112,14 +1233,19 @@ function ToolRowComponent({
               {commandPurposeLabel(item)}
             </span>
             {commandBinaries(fullCommandText(item)).length > 0 ? (
-              <span className="tc-tool-row__cmd-tags" data-testid="tool-row-cmd-tags">
+              <span
+                className="tc-tool-row__cmd-tags"
+                data-testid="tool-row-cmd-tags"
+              >
                 {commandBinaries(fullCommandText(item)).join(", ")}
               </span>
             ) : null}
           </>
         ) : (
           <>
-            <span className={`tc-tool-row__text${loadingTextClass(isRunningForDisplay(item))}`}>
+            <span
+              className={`tc-tool-row__text${loadingTextClass(isRunningForDisplay(item))}`}
+            >
               {buildFlatLabel(item).replace(/ file$/, "")}
             </span>
             {item.display?.kind === "file" ? (
@@ -1168,7 +1294,7 @@ function ToolRowComponent({
                 <TerminalOutput
                   command={fullCommandText(item)}
                   preview
-                  text={tailTerminalOutput(item.summary, 5)}
+                  text={tailTerminalOutput(boundedTerminalText, 5)}
                 />
               ) : (
                 <DiffView diff={item.diff} previewRows={5} />
@@ -1179,7 +1305,26 @@ function ToolRowComponent({
             toggleTestId="tool-row-toggle"
           >
             {category === "command" ? (
-              <TerminalOutput command={fullCommandText(item)} text={item.summary} />
+              <>
+                <TerminalOutput
+                  command={fullCommandText(item)}
+                  text={boundedTerminalText}
+                />
+                {item.logPath ? (
+                  <button
+                    className="tc-tool-row__action-link"
+                    data-testid="tool-row-full-log"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onOpenFile(item.logPath!);
+                    }}
+                    type="button"
+                  >
+                    Full log
+                  </button>
+                ) : null}
+              </>
             ) : (
               <DiffView diff={item.diff} />
             )}
@@ -1193,7 +1338,9 @@ function ToolRowComponent({
               {canToggle ? (
                 <button
                   aria-expanded={!collapsed}
-                  aria-label={collapsed ? "Expand tool result" : "Collapse tool result"}
+                  aria-label={
+                    collapsed ? "Expand tool result" : "Collapse tool result"
+                  }
                   className="tc-tool-row__toggle"
                   data-testid="tool-row-toggle"
                   onClick={() => {
@@ -1202,7 +1349,9 @@ function ToolRowComponent({
                   }}
                   type="button"
                 >
-                  <span className="tc-tool-row__caret">{collapsed ? "▸" : "▾"}</span>
+                  <span className="tc-tool-row__caret">
+                    {collapsed ? "▸" : "▾"}
+                  </span>
                 </button>
               ) : null}
             </div>

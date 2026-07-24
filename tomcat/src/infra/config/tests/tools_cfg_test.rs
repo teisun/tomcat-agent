@@ -9,6 +9,7 @@
 //! - `serde_json` round-trip 不丢字段。
 
 use super::super::*;
+use serial_test::serial;
 use std::io::Write;
 
 #[test]
@@ -253,4 +254,85 @@ use_llm_processing = true
     assert!(cfg.tools.web_fetch.use_llm_processing);
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
+}
+
+// ── Case 5：[tools.bash] foreground observation policy ───────────────────────
+
+#[test]
+fn tools_bash_defaults_match_contract() {
+    let cfg = AppConfig::default();
+    assert_eq!(
+        cfg.tools.bash.foreground_wait_ms,
+        DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS
+    );
+    assert_eq!(
+        cfg.tools.bash.max_output_chars,
+        DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS
+    );
+}
+
+#[test]
+fn tools_bash_toml_override_loads_non_default_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[tools.bash]\nforeground_wait_ms = 9000\nmax_output_chars = 42000\n",
+    )
+    .unwrap();
+
+    let cfg = load_config(Some(&path)).unwrap();
+    assert_eq!(cfg.tools.bash.foreground_wait_ms, 9_000);
+    assert_eq!(cfg.tools.bash.max_output_chars, 42_000);
+}
+
+#[test]
+#[serial(env_lock)]
+fn tools_bash_env_override_uses_nested_config_mapping() {
+    const KEY: &str = "TOMCAT__TOOLS__BASH__FOREGROUND_WAIT_MS";
+    let previous = std::env::var(KEY).ok();
+    // SAFETY: serial(env_lock) excludes concurrent environment mutation in this test suite.
+    unsafe { std::env::set_var(KEY, "9000") };
+
+    let loaded = load_config(None);
+
+    // SAFETY: restore the exact pre-test process environment while still holding env_lock.
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var(KEY, value),
+            None => std::env::remove_var(KEY),
+        }
+    }
+    assert_eq!(loaded.unwrap().tools.bash.foreground_wait_ms, 9_000);
+}
+
+#[test]
+fn tools_bash_rejects_legacy_timeout_field_with_replacement_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[tools.bash]\ntimeout_ms = 120000\n").unwrap();
+
+    let message = load_config(Some(&path)).unwrap_err().to_string();
+    assert!(message.contains("timeout_ms"), "{message}");
+    assert!(message.contains("foreground_wait_ms"), "{message}");
+}
+
+#[test]
+fn tools_bash_rejects_foreground_wait_outside_8_to_16_seconds() {
+    for invalid in [7_999, 16_001] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            format!("[tools.bash]\nforeground_wait_ms = {invalid}\n"),
+        )
+        .unwrap();
+
+        let message = load_config(Some(&path)).unwrap_err().to_string();
+        assert!(
+            message.contains("tools.bash.foreground_wait_ms"),
+            "{message}"
+        );
+        assert!(message.contains("[8000, 16000]"), "{message}");
+    }
 }

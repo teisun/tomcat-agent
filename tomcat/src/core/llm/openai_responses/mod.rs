@@ -43,10 +43,10 @@ use super::super::catalog::{infer_default_base_url, Capabilities, ModelEntry};
 use super::super::endpoint::build_path_aware_endpoint;
 use crate::core::llm::degrade_unsupported_multimodal;
 use crate::core::llm::http_client::build_http_client;
+use crate::core::llm::replay_policy::{plan, ProviderCompatProfile, ReplayAction};
 use crate::core::llm::{
     build_openai_compatible_files_adapter, FilesApiAdapter, FilesApiProviderContext,
 };
-use crate::core::llm::replay_policy::{plan, ProviderCompatProfile, ReplayAction};
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
     is_retryable_llm_error, llm_connect_or_network, llm_error, llm_error_with_source,

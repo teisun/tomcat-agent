@@ -209,7 +209,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "task_output",
         label: "Bash Task Output",
-        description: "Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until the task finishes or `timeout_ms` elapses (default 5000, max 600000, actual blocking waits clamp into 5000-600000ms, `0` == block=false). Mid-stream output does not interrupt the wait. Blocking waits add a `wakeReason` of `finished` | `timeout`; a `timeout` wakeReason is NOT a failure, so inspect `content` first (`content=\"\"` means no new output arrived during that slice) and wait again only if you still need to. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.\n",
+        description: "Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until the task finishes or `wait_ms` elapses (default 5000; block=true clamps to 5000-600000ms; block=false ignores wait_ms). Mid-stream output does not interrupt the wait. Blocking waits add a `wakeReason` of `finished` | `wait_window_elapsed`; a `wait_window_elapsed` wakeReason is NOT a failure, so inspect `content` first (`content=\"\"` means no new output arrived during that slice) and wait again only if you still need to. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.\n",
         display_summary: Some("Tail incremental output from a background bash task."),
         parameters: task_output_parameters,
         scope: PermissionScope::Bash,
@@ -742,11 +742,9 @@ fn bash_parameters() -> Value {
                 "items": { "type": "string" },
                 "description": "Optional argv elements appended to `command`; when present the command runs argv-style (no shell) — safer for paths with spaces or quotes."
             },
-            "timeout_ms": {
+            "foreground_wait_ms": {
                 "type": "integer",
-                "minimum": 1,
-                "maximum": 600000,
-                "description": "Optional wall-clock timeout in ms (default 120000, capped at 600000). On timeout the child is killed and `timed_out=true`. Ignored when run_in_background=true."
+                "description": "How long this call waits in the foreground. Values clamp to 8000-16000ms; expiry keeps the same tracked process running. Ignored when run_in_background=true."
             },
             "run_in_background": {
                 "type": "boolean",
@@ -771,13 +769,13 @@ fn task_output_parameters() -> Value {
             },
             "block": {
                 "type": "boolean",
-                "description": "If true, wait until the task finishes or `timeout_ms` elapses, and return a `wakeReason` (`finished` or `timeout`). Mid-stream output does not interrupt the wait. Default false."
+                "description": "If true, wait until the task finishes or `wait_ms` elapses, and return wakeReason `finished` or `wait_window_elapsed`. Mid-stream output does not interrupt the wait. Default false."
             },
-            "timeout_ms": {
+            "wait_ms": {
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 600000,
-                "description": "Wait slice in ms for block=true (default 5000, max 600000; actual blocking waits clamp into 5000-600000ms, `0` == block=false). The wait ends only on task finish or timeout. A timeout is not a failure — inspect `content` first (`content=\"\"` means no new output arrived during that slice), then wait again only if needed."
+                "description": "Observation window for block=true (default 5000, clamped to 5000-600000ms). Ignored when block=false. It never stops the task."
             }
         }),
         &["task_id"],

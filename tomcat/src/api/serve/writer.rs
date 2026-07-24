@@ -2,7 +2,7 @@
 //!
 //! 所有命令响应、控制帧和事件下行都必须先进入这里，再由单写者任务序列化成 NDJSON。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -65,14 +65,15 @@ pub fn spawn_writer(writer: BoxWriter, config: WriterConfig) -> WriterHandle {
     WriterHandle { shared }
 }
 
-struct BufferedFrame {
-    frame: OutFrame,
+pub(crate) struct BufferedFrame {
+    pub(crate) frame: OutFrame,
     queued_at: Instant,
 }
 
-struct SessionBuffer {
-    frames: VecDeque<BufferedFrame>,
+pub(crate) struct SessionBuffer {
+    pub(crate) frames: VecDeque<BufferedFrame>,
     warned_slow_consumer: bool,
+    dropped_shell_previews: HashSet<String>,
 }
 
 impl SessionBuffer {
@@ -80,6 +81,7 @@ impl SessionBuffer {
         Self {
             frames: VecDeque::new(),
             warned_slow_consumer: false,
+            dropped_shell_previews: HashSet::new(),
         }
     }
 }
@@ -156,7 +158,7 @@ async fn writer_task(mut writer: BoxWriter, shared: Arc<WriterShared>) -> Result
     }
 }
 
-fn enqueue_frame(
+pub(crate) fn enqueue_frame(
     frame: OutFrame,
     buffers: &mut HashMap<String, SessionBuffer>,
     session_order: &mut VecDeque<String>,
@@ -175,6 +177,13 @@ fn enqueue_frame(
         .entry(session_id.clone())
         .or_insert_with(SessionBuffer::new);
     let was_empty = buffer.frames.is_empty();
+    if let Some(key) = shell_preview_key(&frame) {
+        enqueue_shell_preview(buffer, frame, key, config.max_buffered_frames.max(1));
+        if was_empty && !buffer.frames.is_empty() {
+            session_order.push_back(session_id);
+        }
+        return;
+    }
     if try_coalesce_tail(buffer, &frame, config.delta_coalesce_ms) {
         if was_empty {
             session_order.push_back(session_id);
@@ -209,6 +218,79 @@ fn enqueue_frame(
     if was_empty && !buffer.frames.is_empty() {
         session_order.push_back(session_id);
     }
+}
+
+pub(crate) fn shell_preview_key(frame: &OutFrame) -> Option<String> {
+    let OutFrame::Event(value) = frame else {
+        return None;
+    };
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("tool_execution_update")
+        || value.get("toolName").and_then(serde_json::Value::as_str) != Some("bash")
+    {
+        return None;
+    }
+    let partial = value.get("partialResult")?;
+    partial.get("output")?.as_str()?;
+    partial.get("taskId")?.as_str()?;
+    value
+        .get("toolCallId")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn mark_shell_preview_truncated(frame: &mut OutFrame) {
+    let OutFrame::Event(value) = frame else {
+        return;
+    };
+    if let Some(partial) = value
+        .get_mut("partialResult")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        partial.insert("truncated".to_string(), serde_json::Value::Bool(true));
+    }
+}
+
+fn enqueue_shell_preview(
+    buffer: &mut SessionBuffer,
+    mut frame: OutFrame,
+    key: String,
+    limit: usize,
+) {
+    if buffer.dropped_shell_previews.remove(&key) {
+        mark_shell_preview_truncated(&mut frame);
+    }
+    if let Some(existing) = buffer
+        .frames
+        .iter_mut()
+        .rev()
+        .find(|queued| shell_preview_key(&queued.frame).as_deref() == Some(key.as_str()))
+    {
+        mark_shell_preview_truncated(&mut frame);
+        existing.frame = frame;
+        existing.queued_at = Instant::now();
+        return;
+    }
+    if buffer.frames.len() >= limit {
+        if let Some(index) = buffer
+            .frames
+            .iter()
+            .position(|queued| shell_preview_key(&queued.frame).is_some())
+        {
+            if let Some(dropped) = buffer.frames.remove(index) {
+                if let Some(dropped_key) = shell_preview_key(&dropped.frame) {
+                    buffer.dropped_shell_previews.insert(dropped_key);
+                }
+            }
+            mark_shell_preview_truncated(&mut frame);
+        } else {
+            buffer.dropped_shell_previews.insert(key);
+            return;
+        }
+    }
+    buffer.frames.push_back(BufferedFrame {
+        frame,
+        queued_at: Instant::now(),
+    });
 }
 
 fn try_coalesce_tail(buffer: &mut SessionBuffer, next: &OutFrame, window_ms: u32) -> bool {

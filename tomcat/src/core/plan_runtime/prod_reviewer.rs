@@ -9,8 +9,8 @@ use async_trait::async_trait;
 
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome, SubagentType};
 use crate::core::agent_registry::{AgentRegistry, SubagentOutcome, SubagentOutcomeLabel};
-use crate::core::llm::system_prompt::render_available_skills_prompt;
 use crate::core::llm::openai_files::OpenAiFilesRuntime;
+use crate::core::llm::system_prompt::render_available_skills_prompt;
 use crate::core::llm::{ChatMessage, LlmProvider};
 use crate::core::plan_runtime::code_reviewer::{
     build_code_review_prompt, code_review_system_prompt_text,
@@ -58,6 +58,11 @@ pub struct ProdReviewerDeps {
     pub agent_workspace_dir: std::path::PathBuf,
     pub skill_set: Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>,
     pub skills_config: crate::infra::config::SkillsConfig,
+    pub bash_config: crate::infra::config::ToolsBashConfig,
+    pub gate: Arc<dyn crate::core::permission::PermissionGate>,
+    pub confirmation: Arc<dyn crate::core::tools::contract::confirmation::UserConfirmationProvider>,
+    pub audit: Arc<dyn crate::infra::AuditRecorder>,
+    pub bash_ast: crate::core::permission::BashAstChecker,
     /// Weak 引用避免与 `PlanRuntime` 内部 dispatcher 字段形成 cycle。
     pub plan_runtime: Weak<PlanRuntime>,
     pub model: String,
@@ -126,11 +131,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
         let tool_defs =
             resolve_internal_tools(&plan_reviewer_allowed_tools_with_policy(expose_skills));
         let skill_prompt = if expose_skills {
-            render_available_skills_prompt(
-                &skill_set,
-                context_budget_chars,
-                &deps.skills_config,
-            )
+            render_available_skills_prompt(&skill_set, context_budget_chars, &deps.skills_config)
         } else {
             None
         };
@@ -199,6 +200,8 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                     };
                     let mut agent_loop =
                         AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone());
+                    // PlanReviewer tool whitelist does not include `bash`, so it does not need
+                    // a dedicated BashTaskRegistry.
                     let initial_messages = vec![
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),
@@ -242,8 +245,10 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                 )),
             },
             Err(e) => {
-                let mut s =
-                    PlanReviewSummary::aborted_with(format!("[{}] reviewer spawn 失败：{e}", self.origin));
+                let mut s = PlanReviewSummary::aborted_with(format!(
+                    "[{}] reviewer spawn 失败：{e}",
+                    self.origin
+                ));
                 s.reviewer_turns_limit = turns_limit;
                 s.reviewer_stop_reason = "spawn_error".into();
                 s
@@ -286,7 +291,8 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             Err(err) => return CodeReviewSummary::aborted_with(err),
         };
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
-        let (diff_stat, changed_files) = collect_git_diff_context(deps.agent_workspace_dir.as_path());
+        let (diff_stat, changed_files) =
+            collect_git_diff_context(deps.agent_workspace_dir.as_path());
         let initial_user_message = build_code_review_prompt(
             plan_id,
             plan_text,
@@ -310,16 +316,17 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         let openai_files_runtime = deps.openai_files_runtime.clone();
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
+        let bash_config = deps.bash_config.clone();
+        let gate = Arc::clone(&deps.gate);
+        let confirmation = Arc::clone(&deps.confirmation);
+        let audit = Arc::clone(&deps.audit);
+        let bash_ast = deps.bash_ast.clone();
         let expose_skills =
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs =
             resolve_internal_tools(&code_reviewer_allowed_tools_with_policy(expose_skills));
         let skill_prompt = if expose_skills {
-            render_available_skills_prompt(
-                &skill_set,
-                context_budget_chars,
-                &deps.skills_config,
-            )
+            render_available_skills_prompt(&skill_set, context_budget_chars, &deps.skills_config)
         } else {
             None
         };
@@ -340,6 +347,18 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                     let child_session_id = spawn_ctx.child_session_id.clone();
                     let cancel_token = spawn_ctx.cancel_token.clone();
                     let transcript_root = agent_trail_dir.clone();
+                    let bash_task_registry =
+                        crate::core::tools::primitive::build_bash_task_registry(
+                            &bash_config,
+                            std::path::PathBuf::from(&transcript_root)
+                                .join("tool-results")
+                                .join(format!("subagent-{}", spawn_ctx.subagent_type.as_str()))
+                                .join(&child_session_id),
+                            gate.clone(),
+                            confirmation.clone(),
+                            audit.clone(),
+                            bash_ast.clone(),
+                        );
                     let transcript_sink =
                         crate::core::session::subagent_transcript::open_subagent_transcript(
                             &transcript_root,
@@ -387,7 +406,8 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         },
                     };
                     let mut agent_loop =
-                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone());
+                        AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone())
+                            .with_bash_task_registry(bash_task_registry);
                     let initial_messages = vec![
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),

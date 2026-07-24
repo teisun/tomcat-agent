@@ -568,7 +568,11 @@ fn serve_prompt_with_moonshot_uploaded_image_uses_ms_scheme() {
     );
 
     let requests = non_title_requests(&server);
-    assert_eq!(requests.len(), 1, "expected one moonshot completions request");
+    assert_eq!(
+        requests.len(),
+        1,
+        "expected one moonshot completions request"
+    );
     let body = extract_json_body(&requests[0]);
     let messages = body["messages"].as_array().expect("messages array");
     let user = messages
@@ -580,7 +584,10 @@ fn serve_prompt_with_moonshot_uploaded_image_uses_ms_scheme() {
         .unwrap_or_else(|| panic!("content array, got body={body:?}"));
     assert_eq!(content[0]["type"].as_str(), Some("text"));
     assert_eq!(content[1]["type"].as_str(), Some("image_url"));
-    assert_eq!(content[1]["image_url"]["url"].as_str(), Some("ms://file-vision"));
+    assert_eq!(
+        content[1]["image_url"]["url"].as_str(),
+        Some("ms://file-vision")
+    );
     assert!(content[1]["image_url"].get("file_id").is_none());
 }
 

@@ -224,7 +224,10 @@ pub fn resolve_provider_key_env_name(catalog: &ModelCatalog, raw: &str) -> Strin
     env_name_for_provider(candidate)
 }
 
-pub fn upsert_user_model(cfg: &AppConfig, input: ModelEntryInput) -> Result<UpsertModelResult, AppError> {
+pub fn upsert_user_model(
+    cfg: &AppConfig,
+    input: ModelEntryInput,
+) -> Result<UpsertModelResult, AppError> {
     let entry = input.into_model_entry()?;
     let warnings = collect_model_warnings(&entry);
     validate_mutable_model_entry(&entry)?;

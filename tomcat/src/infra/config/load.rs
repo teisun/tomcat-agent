@@ -47,6 +47,7 @@ fn load_config_impl(
         if p.exists() {
             if reject_legacy_keys {
                 reject_legacy_whitelist_keys(p)?;
+                reject_legacy_bash_timeout_key(p)?;
             }
             builder = builder.add_source(::config::File::from(p));
         }
@@ -62,6 +63,7 @@ fn load_config_impl(
     let merged: AppConfig = layered
         .try_deserialize()
         .map_err(|e| AppError::Config(e.to_string()))?;
+    validate_config(&merged)?;
     Ok(merged)
 }
 
@@ -74,6 +76,24 @@ fn load_config_impl(
 /// - `TOMCAT__PRIMITIVE__PATH_RULES*`
 /// - `TOMCAT__PRIMITIVE__BASH_FORBIDDEN*`
 /// - `TOMCAT__PRIMITIVE__BASH_APPROVAL_REQUIRED*`
+fn reject_legacy_bash_timeout_key(path: &Path) -> Result<(), AppError> {
+    let content = std::fs::read_to_string(path).map_err(AppError::Io)?;
+    let value: toml::Value =
+        toml::from_str(&content).map_err(|error| AppError::Config(error.to_string()))?;
+    if value
+        .get("tools")
+        .and_then(|tools| tools.get("bash"))
+        .and_then(|bash| bash.get("timeout_ms"))
+        .is_some()
+    {
+        return Err(AppError::Config(
+            "tools.bash.timeout_ms 已移除；请改用 tools.bash.foreground_wait_ms（8000..=16000，等待到期不会终止进程）"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn sanitize_sensitive_env(config_path: Option<&std::path::Path>) {
     if config_path.is_none_or(|p| !p.exists()) {
         return;
@@ -394,6 +414,24 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
 /// # Errors
 /// * [`AppError::Config`] - `audit_log_retention_days` 为 0、`log.level` 非法、`llm.proxy` 格式非法（非 `http://`/`https://` 开头），或 `llm.files.expires_after_seconds` 越界（非 0 且不在 [3600, 2592000]）时返回。
 pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
+    if !(super::types::MIN_TOOLS_BASH_FOREGROUND_WAIT_MS
+        ..=super::types::MAX_TOOLS_BASH_FOREGROUND_WAIT_MS)
+        .contains(&cfg.tools.bash.foreground_wait_ms)
+    {
+        return Err(AppError::Config(format!(
+            "tools.bash.foreground_wait_ms 非法: {}（允许 [8000, 16000]）",
+            cfg.tools.bash.foreground_wait_ms
+        )));
+    }
+    if !(1..=super::types::MAX_TOOLS_BASH_MAX_OUTPUT_CHARS)
+        .contains(&cfg.tools.bash.max_output_chars)
+    {
+        return Err(AppError::Config(format!(
+            "tools.bash.max_output_chars 非法: {}（允许 [1, {}]）",
+            cfg.tools.bash.max_output_chars,
+            super::types::MAX_TOOLS_BASH_MAX_OUTPUT_CHARS
+        )));
+    }
     if cfg.security.audit_log_retention_days == 0 {
         return Err(AppError::Config(
             "audit_log_retention_days 必须大于 0".to_string(),

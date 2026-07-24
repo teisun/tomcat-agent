@@ -1,3 +1,4 @@
+use crate::core::tools::primitive::BashTaskRegistry;
 use crate::core::{LlmProvider, LlmResolver, PrimitiveExecutor, SessionManager, ToolRegistry};
 use crate::ext::host_binding::HostResponse;
 use crate::ext::vm_actor::EventEnvelope;
@@ -36,6 +37,7 @@ pub struct HostApiDispatcher {
     pub(super) llm: Option<Arc<dyn LlmProvider>>,
     pub(super) llm_resolver: Option<Arc<dyn LlmResolver>>,
     pub(super) session: Option<Arc<SessionManager>>,
+    pub(super) bash_task_registry: Option<Arc<BashTaskRegistry>>,
     pub(super) session_registry: Arc<DashMap<String, Weak<SessionManager>>>,
     pub(super) audit: Option<Arc<dyn AuditRecorder>>,
     pub(super) async_results: Arc<DashMap<String, AsyncCallStatus>>,
@@ -97,6 +99,7 @@ impl HostApiDispatcher {
             llm: None,
             llm_resolver: None,
             session: None,
+            bash_task_registry: None,
             session_registry: Arc::new(DashMap::new()),
             audit: None,
             async_results: Arc::new(DashMap::new()),
@@ -227,6 +230,11 @@ impl HostApiDispatcher {
     /// 注入 SessionManager（会话 API）。
     pub fn with_session(mut self, s: Arc<SessionManager>) -> Self {
         self.session = Some(s);
+        self
+    }
+
+    pub fn with_bash_task_registry(mut self, registry: Arc<BashTaskRegistry>) -> Self {
+        self.bash_task_registry = Some(registry);
         self
     }
 

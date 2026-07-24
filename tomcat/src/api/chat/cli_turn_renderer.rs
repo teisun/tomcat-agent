@@ -465,7 +465,8 @@ impl CliTurnRenderer {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let timeout = partial
-            .get("timeoutMs")
+            .get("waitMs")
+            .or_else(|| partial.get("timeoutMs"))
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         let remaining_label = format_countdown_ms(remaining);

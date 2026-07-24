@@ -381,6 +381,8 @@ impl HostApiDispatcher {
             ("fs" | "primitive", "writeFile") => self.do_write_file(instance_id, &params).await,
             ("fs" | "primitive", "editFile") => self.do_edit_file(instance_id, &params).await,
             ("fs" | "primitive", "executeBash") => self.do_execute_bash(instance_id, &params).await,
+            ("fs" | "primitive", "taskOutput") => self.do_task_output(instance_id, &params).await,
+            ("fs" | "primitive", "taskStop") => self.do_task_stop(instance_id, &params).await,
             ("net", "fetch") => self.do_fetch(instance_id, &params).await,
             ("llm", "createChatCompletion") => self.do_chat(instance_id, &params).await,
             ("llm", "createChatCompletionStream") => {

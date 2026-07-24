@@ -1,6 +1,5 @@
 pub(super) mod background_unavailable;
 pub(super) mod bash;
-pub(super) mod bash_background;
 pub(super) mod config;
 pub(super) mod edit;
 pub(super) mod hashline_edit;
@@ -17,7 +16,6 @@ pub(super) mod web_search;
 pub(super) mod write;
 
 pub(super) use bash::handle_bash;
-pub(super) use bash_background::handle_bash_background;
 pub(super) use config::{handle_config_get, handle_config_set};
 pub(super) use edit::handle_edit;
 pub(super) use hashline_edit::handle_hashline_edit;

@@ -86,7 +86,7 @@ impl PrimitiveExecutor for DisplayPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms_override: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()
     }

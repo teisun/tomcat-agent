@@ -376,7 +376,7 @@ impl PrimitiveExecutor for DeterministicMockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{command}"),
@@ -2687,13 +2687,13 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
 // - `016D`：`task_output(block=true)` 单次 wait-slice。模型必须走阻塞等待路径，
 //   transcript 要出现真实 `task_output` / `task_stop`；非 TTY 抓取 stderr 不应再堆
 //   `waiting_for_output` 动画。
-// - `016E`：真实多次 timeout slice 重试。模型必须至少经历两次
-//   `wakeReason="timeout" && finished=false`，然后在后续 timeout 结果里读到新 tail 再收尾。
+// - `016E`：真实多次 wait-window 重试。模型必须至少经历两次
+//   `wakeReason="wait_window_elapsed" && finished=false`，然后在后续 wait-window 结果里读到新 tail 再收尾。
 // - `016F`：midturn batch boundary auto-feed。模型先起后台 bash，再跑一个耗时 foreground
 //   bash；只有在 foreground batch 结束后的**下一次请求**里看到
 //   `<background-task-finished ...>` 才允许继续，否则必须输出失败哨兵词。
-// - `016G`：永不结束任务 + timeout tail snapshot。模型先在第一次 timeout 里读到首个 tail，
-//   再在 EOF 处命中一次 timeout 快照，随后必须停止继续 poll。
+// - `016G`：永不结束任务 + wait-window tail snapshot。模型先在第一次 wait-window 里读到首个 tail，
+//   再在 EOF 处命中一次 wait-window 快照，随后必须停止继续 poll。
 //
 // 这组 helper 只做四件事：
 // 1. 起临时 HOME + `tomcat init`
@@ -2901,19 +2901,19 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
 /// [E2E-CLI-016D] `task_output(block=true)` wait-slice 真 LLM 黑盒回归
 ///
 /// 用户意图：模型必须在 `bash(run_in_background=true)` 之后**立即**进入
-/// `task_output(block=true, timeout_ms=5000)` 等待路径；首个 timeout 里应拿到目标 token，
+/// `task_output(block=true, wait_ms=5000)` 等待路径；首个 wait-window 里应拿到目标 token，
 /// 不允许依赖 auto-feed，不允许 `task_output(block=false)`。
 ///
 /// 验证：
 /// - exit 0；
 /// - 非 TTY 抓取 stderr **不**含 `waiting_for_output` 倒计时动画；
 /// - transcript 中至少有 1 次 `task_output` tool call，且参数包含
-///   `block=true` 与 `timeout_ms=5000`；
+///   `block=true` 与 `wait_ms=5000`；
 /// - 后台任务真实产出 `blockwait_done.txt`；
 /// - stdout 最终包含约定完成词 `BLOCKWAIT_OK`。
 ///
 /// 意义：P1 第二条真门禁——真正覆盖 `block=true` 等待路径、
-/// transcript 中的真实 tool_call，以及 timeout 结果携带 tail 后的收尾。
+/// transcript 中的真实 tool_call，以及 wait-window 结果携带 tail 后的收尾。
 #[test]
 #[serial(env_lock)]
 fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
@@ -2931,9 +2931,9 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
             "请严格执行，并只在最后回复一行 BLOCKWAIT_OK： ",
             "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
             "2. 该后台 bash 的 command 必须精确执行：sleep 2; echo TOKEN_WAITSLICE; printf BLOCKWAIT_DONE > \"{done_path}\"; sleep 30。 ",
-            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、timeout_ms=5000、since 从 0 开始并按 next_offset 续传。 ",
-            "4. 如果 task_output 返回 wakeReason=timeout 且 finished=false，这不是失败；你必须继续再次调用 task_output(block=true, timeout_ms=5000) 等下一次 wait slice。 ",
-            "5. 当 task_output 返回 wakeReason=timeout 且内容里出现 TOKEN_WAITSLICE 后，必须调用 task_stop 停掉这个后台任务，避免它继续睡眠。 ",
+            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、wait_ms=5000、since 从 0 开始并按 next_offset 续传。 ",
+            "4. 如果 task_output 返回 wakeReason=wait_window_elapsed 且 finished=false，这不是失败；你必须继续再次调用 task_output(block=true, wait_ms=5000) 等下一次 wait slice。 ",
+            "5. 当 task_output 返回 wakeReason=wait_window_elapsed 且内容里出现 TOKEN_WAITSLICE 后，必须调用 task_stop 停掉这个后台任务，避免它继续睡眠。 ",
             "6. 禁止使用 task_output(block=false)，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash，禁止调用 task_list。 ",
             "7. 只有在看到 TOKEN_WAITSLICE 且已经 task_stop 之后，才允许读取并确认文件 \"{done_path}\" 存在且内容精确为 BLOCKWAIT_DONE。 ",
             "8. 全部确认后，只回复一行 BLOCKWAIT_OK 并停止。"
@@ -3004,14 +3004,14 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     for (_, args) in &task_output_calls {
         assert!(
             args.get("block").and_then(Value::as_bool) == Some(true)
-                && args.get("timeout_ms").and_then(Value::as_u64) == Some(5000),
-            "task_output 调用参数应固定为 block=true + timeout_ms=5000，实际 args={args}"
+                && args.get("wait_ms").and_then(Value::as_u64) == Some(5000),
+            "task_output 调用参数应固定为 block=true + wait_ms=5000，实际 args={args}"
         );
     }
     let tool_results = tool_results_from_transcript(&transcript);
     assert!(
         tool_results.iter().any(|result| {
-            result.get("wakeReason").and_then(Value::as_str) == Some("timeout")
+            result.get("wakeReason").and_then(Value::as_str) == Some("wait_window_elapsed")
                 && result
                     .get("content")
                     .and_then(Value::as_str)
@@ -3028,17 +3028,17 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     );
 }
 
-/// [E2E-CLI-016E] 真 LLM 多次 timeout slice 重试
+/// [E2E-CLI-016E] 真 LLM 多次 wait-window 重试
 ///
 /// 用户意图：模型必须在同一个后台任务上经历**至少两次**
-/// `wakeReason="timeout" && finished=false`，继续重试 `task_output(block=true, timeout_ms=5000)`，
-/// 最后在一次 timeout 结果里读到新 tail 并收尾。
+/// `wakeReason="wait_window_elapsed" && finished=false`，继续重试 `task_output(block=true, wait_ms=5000)`，
+/// 最后在一次 wait-window 结果里读到新 tail 并收尾。
 ///
 /// 验证：
 /// - exit 0；
 /// - 非 TTY 抓取 stderr **不**含 `waiting_for_output`；
 /// - transcript 中 `task_output` tool call 至少 3 次；
-/// - transcript 中 `role=tool` 的结果里，`wakeReason="timeout"` 至少 2 次；
+/// - transcript 中 `role=tool` 的结果里，`wakeReason="wait_window_elapsed"` 至少 2 次；
 /// - transcript 中最终出现 `TOKEN_MULTI_TIMEOUT` 与 `task_stop`；
 /// - 真实产物 `multi_timeout_done.txt` 存在且内容正确；
 /// - stdout 最终包含 `MULTI_TIMEOUT_OK`。
@@ -3060,12 +3060,12 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
             "请严格执行，并只在最后回复一行 MULTI_TIMEOUT_OK： ",
             "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
             "2. 该后台 bash 的 command 必须精确执行：sleep 12; echo TOKEN_MULTI_TIMEOUT; printf MULTI_TIMEOUT_DONE > \"{done_path}\"; sleep 30。 ",
-            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、timeout_ms=5000、since 从 0 开始并按 next_offset 续传。 ",
-            "4. `wakeReason=timeout` 且 `finished=false` 在这道题里是正常现象，不是失败、不是要重来；你必须真实观察到至少两次这样的 timeout，并且每次 timeout 之后都继续在同一个 task_id 上再次调用 task_output(block=true, timeout_ms=5000)，不要解释、不要总结、不要重启流程、不要新开任务。 ",
-            "5. 在至少两次 timeout 之后，继续沿用同一个 task_id 和最新 next_offset 等待，直到某次 task_output 返回 wakeReason=timeout 且内容里出现 TOKEN_MULTI_TIMEOUT。 ",
+            "3. 拿到 task_id 后，必须立刻开始调用 task_output，且参数必须满足：block=true、wait_ms=5000、since 从 0 开始并按 next_offset 续传。 ",
+            "4. `wakeReason=wait_window_elapsed` 且 `finished=false` 在这道题里是正常现象，不是失败、不是要重来；你必须真实观察到至少两次这样的 wait-window，并且每次 wait-window 之后都继续在同一个 task_id 上再次调用 task_output(block=true, wait_ms=5000)，不要解释、不要总结、不要重启流程、不要新开任务。 ",
+            "5. 在至少两次 wait-window 之后，继续沿用同一个 task_id 和最新 next_offset 等待，直到某次 task_output 返回 wakeReason=wait_window_elapsed 且内容里出现 TOKEN_MULTI_TIMEOUT。 ",
             "6. 一旦看到 TOKEN_MULTI_TIMEOUT，必须调用 task_stop 停掉该后台任务，避免它继续睡眠。 ",
             "7. 禁止使用 task_output(block=false)，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash，禁止调用 task_list。 ",
-            "8. 只有在已经看到至少两次 timeout、随后看到 TOKEN_MULTI_TIMEOUT、并且已经 task_stop 之后，才允许读取并确认文件 \"{done_path}\" 存在且内容精确为 MULTI_TIMEOUT_DONE。 ",
+            "8. 只有在已经看到至少两次 wait-window、随后看到 TOKEN_MULTI_TIMEOUT、并且已经 task_stop 之后，才允许读取并确认文件 \"{done_path}\" 存在且内容精确为 MULTI_TIMEOUT_DONE。 ",
             "9. 全部确认后，只回复一行 MULTI_TIMEOUT_OK 并停止。"
         ),
         done_path = done_path.display(),
@@ -3123,51 +3123,51 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     let tool_results = tool_results_from_transcript(&transcript);
 
     let mut task_output_calls = 0usize;
-    let mut timeout_results = 0usize;
-    let mut saw_timeout_token = false;
+    let mut wait_window_elapsed_results = 0usize;
+    let mut saw_wait_window_token = false;
     let mut saw_task_stop = false;
     for (name, args) in &tool_calls {
         if name == "task_output" {
             task_output_calls += 1;
             assert!(
                 args.get("block").and_then(Value::as_bool) == Some(true)
-                    && args.get("timeout_ms").and_then(Value::as_u64) == Some(5000),
-                "task_output 调用参数应固定为 block=true + timeout_ms=5000，实际 args={args}"
+                    && args.get("wait_ms").and_then(Value::as_u64) == Some(5000),
+                "task_output 调用参数应固定为 block=true + wait_ms=5000，实际 args={args}"
             );
         } else if name == "task_stop" {
             saw_task_stop = true;
         }
     }
     for result in &tool_results {
-        if result.get("wakeReason").and_then(Value::as_str) == Some("timeout") {
-            timeout_results += 1;
+        if result.get("wakeReason").and_then(Value::as_str) == Some("wait_window_elapsed") {
+            wait_window_elapsed_results += 1;
         }
-        if result.get("wakeReason").and_then(Value::as_str) == Some("timeout")
+        if result.get("wakeReason").and_then(Value::as_str) == Some("wait_window_elapsed")
             && result
                 .get("content")
                 .and_then(Value::as_str)
                 .map(|content| content.contains("TOKEN_MULTI_TIMEOUT"))
                 .unwrap_or(false)
         {
-            saw_timeout_token = true;
+            saw_wait_window_token = true;
         }
     }
 
     assert!(
         task_output_calls >= 3,
-        "transcript 中 task_output 次数应至少为 3（至少两次 timeout + 一次带 token 的 timeout），实际 {}；transcript: {}",
+        "transcript 中 task_output 次数应至少为 3（至少两次 wait-window + 一次带 token 的 wait-window），实际 {}；transcript: {}",
         task_output_calls,
         trunc(&transcript, 1800)
     );
     assert!(
-        timeout_results >= 2,
-        "transcript 中 timeout slice 次数应至少为 2，实际 {}；transcript: {}",
-        timeout_results,
+        wait_window_elapsed_results >= 2,
+        "transcript 中 wait-window 次数应至少为 2，实际 {}；transcript: {}",
+        wait_window_elapsed_results,
         trunc(&transcript, 1800)
     );
     assert!(
-        saw_timeout_token,
-        "transcript 中应看到包含 TOKEN_MULTI_TIMEOUT 的 timeout 结果；actual: {}",
+        saw_wait_window_token,
+        "transcript 中应看到包含 TOKEN_MULTI_TIMEOUT 的 wait-window 结果；actual: {}",
         trunc(&transcript, 1800)
     );
     assert!(
@@ -3337,8 +3337,8 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
 /// [E2E-CLI-016G] 永不结束后台 bash + timeout 快照后停止轮询
 ///
 /// 用户意图：模型先启动一个会长时间挂起的后台 bash，先用一次 `task_output(block=true)`
-/// 在第一次 timeout 里读到首个 tail，再用第二次 `task_output(block=true)` 在 EOF 处命中
-/// `wakeReason="timeout"`。拿到 timeout 返回的 tail 快照后，必须立即停止轮询，
+/// 在第一次 wait-window 里读到首个 tail，再用第二次 `task_output(block=true)` 在 EOF 处命中
+/// `wakeReason="wait_window_elapsed"`。拿到 wait-window 返回的 tail 快照后，必须立即停止轮询，
 /// 不允许继续 `task_output` busy loop。
 ///
 /// 验证：
@@ -3346,7 +3346,7 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
 /// - stdout 含 `HUNG_TIMEOUT_BOUNDED_OK`；
 /// - 非 TTY 抓取 stderr 不含 `waiting_for_output`；
 /// - transcript 中 `task_output` 调用次数有上界（<= 3）且至少 2 次；
-/// - transcript 中存在 `wakeReason="timeout"` 且内容含 `HUNG_TIMEOUT_BOOT` 的工具结果；
+/// - transcript 中存在 `wakeReason="wait_window_elapsed"` 且内容含 `HUNG_TIMEOUT_BOOT` 的工具结果；
 /// - transcript 的 `role=user` 消息不含 `waiting_for_output`；
 /// - transcript 中不出现 `task_stop` / `task_list`。
 #[test]
@@ -3363,15 +3363,15 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
         "请严格执行，并只在最后回复一行 HUNG_TIMEOUT_BOUNDED_OK： ",
         "1. 启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
         "2. 该后台 bash 的 command 必须精确执行：printf HUNG_TIMEOUT_BOOT; sleep 60。 ",
-        "3. 拿到 task_id 后，必须立刻调用一次 task_output，参数必须满足：block=true、timeout_ms=5000、since=0。 ",
-        "4. 当第一次 task_output 返回 wakeReason=timeout 且内容里出现 HUNG_TIMEOUT_BOOT 后，必须基于返回的最新 next_offset，在同一个 task_id 上再调用一次 task_output(block=true, timeout_ms=5000)。 ",
-        "5. 如果第二次 task_output 返回 wakeReason=timeout 且 finished=false，你必须阅读它返回的 content，并把它当作近期 tail 快照而不是失败。由于这里只有同一份 HUNG_TIMEOUT_BOOT、没有新的实质进展，你必须立刻停止继续轮询。 ",
+        "3. 拿到 task_id 后，必须立刻调用一次 task_output，参数必须满足：block=true、wait_ms=5000、since=0。 ",
+        "4. 当第一次 task_output 返回 wakeReason=wait_window_elapsed 且内容里出现 HUNG_TIMEOUT_BOOT 后，必须基于返回的最新 next_offset，在同一个 task_id 上再调用一次 task_output(block=true, wait_ms=5000)。 ",
+        "5. 如果第二次 task_output 返回 wakeReason=wait_window_elapsed 且 finished=false，你必须阅读它返回的 content，并把它当作近期 tail 快照而不是失败。由于这里只有同一份 HUNG_TIMEOUT_BOOT、没有新的实质进展，你必须立刻停止继续轮询。 ",
         "6. 从这一步开始，禁止再次调用 task_output，禁止调用 task_stop、task_list，禁止依赖 <background-task-finished ...> 自动回灌，禁止启动新的 bash。 ",
         "7. 满足上述条件后，只回复一行 HUNG_TIMEOUT_BOUNDED_OK 并停止。"
     )
     .to_string();
 
-    info!("Act: tomcat chat 触发 timeout tail snapshot bounded case，timeout 90s");
+    info!("Act: tomcat chat 触发 wait-window tail snapshot bounded case，timeout 90s");
     let run = run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(90));
     let stdout = run.stdout;
     let stderr = run.stderr;
@@ -3408,7 +3408,7 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
 
     let transcript = load_background_bash_p1_real_llm_transcript(&fx);
     let mut task_output_calls = 0usize;
-    let mut saw_timeout_snapshot = false;
+    let mut saw_wait_window_snapshot = false;
     let mut saw_waiting_for_output_user = false;
     let mut saw_task_stop = false;
     let mut saw_task_list = false;
@@ -3442,11 +3442,11 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
                 .get("content")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if content.contains("\"wakeReason\":\"timeout\"")
+            if content.contains("\"wakeReason\":\"wait_window_elapsed\"")
                 && content.contains("HUNG_TIMEOUT_BOOT")
                 && content.contains("\"finished\":false")
             {
-                saw_timeout_snapshot = true;
+                saw_wait_window_snapshot = true;
             }
         } else if role == "user" {
             let content = message
@@ -3466,8 +3466,8 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
         trunc(&transcript, 2200)
     );
     assert!(
-        saw_timeout_snapshot,
-        "transcript 中应看到带 HUNG_TIMEOUT_BOOT 的 timeout 快照；actual: {}",
+        saw_wait_window_snapshot,
+        "transcript 中应看到带 HUNG_TIMEOUT_BOOT 的 wait-window 快照；actual: {}",
         trunc(&transcript, 2200)
     );
     assert!(
@@ -5575,9 +5575,10 @@ async fn test_cli_chat_path_retries_gateway_503_and_recovers_same_turn() {
 #[tokio::test]
 async fn test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_next_turn() {
     common::setup_logging();
-    let _span =
-        info_span!("test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_next_turn")
-            .entered();
+    let _span = info_span!(
+        "test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_next_turn"
+    )
+    .entered();
 
     const ENV_KEY: &str = "TOMCAT_CLI_GATEWAY_503_EXHAUST_KEY";
     let (_work_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);

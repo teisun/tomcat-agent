@@ -34,3 +34,23 @@ fn executor_reminder_format_uses_system_reminder_tags() {
     );
     assert!(s.contains(plan_id), "EXECUTOR reminder 必须包含 plan_id");
 }
+
+#[test]
+fn runtime_reminders_batch_detailed_todos_without_repeating_final_acceptance() {
+    let planner: &str = *reminders::PLANNER_REMINDER;
+    let executor = reminders::render_executor_reminder("batch-contract");
+
+    assert!(planner.contains("not\nto the number of todos"));
+    assert!(planner.contains("verification batches as shared\n  build/test boundaries"));
+    assert!(planner.contains("share a build target"));
+    assert!(planner.contains("milestone-level verification"));
+    assert!(planner.contains(
+        "final acceptance, run only checks not covered by a still-valid earlier\n  result"
+    ));
+    assert!(
+        planner.contains("Do not schedule the same test family once per todo and again at the end")
+    );
+    assert!(
+        executor.contains("Follow the building plan's verification scope, timing, and batching")
+    );
+}

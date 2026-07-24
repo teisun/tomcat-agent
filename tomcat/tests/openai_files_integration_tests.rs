@@ -149,7 +149,10 @@ async fn chat_text_with_parts(
     let resp = tokio::time::timeout(Duration::from_secs(timeout_secs), provider.chat(req))
         .await
         .map_err(|_| format!("provider.chat timeout {timeout_secs}s"))??;
-    assert!(!resp.choices.is_empty(), "provider.chat 应返回至少一个 choice");
+    assert!(
+        !resp.choices.is_empty(),
+        "provider.chat 应返回至少一个 choice"
+    );
     Ok(resp.choices[0]
         .message
         .text_content()
@@ -271,8 +274,10 @@ async fn openai_file_id_reference_roundtrip_real_api() -> Result<(), Box<dyn std
         provider.as_ref(),
         &fixture.config.llm.default_model,
         vec![
-        ChatMessageContentPart::text("Read the attached file and answer with one short sentence."),
-        ChatMessageContentPart::file_file_id(uploaded.id.clone(), Some(filename.clone()))?,
+            ChatMessageContentPart::text(
+                "Read the attached file and answer with one short sentence.",
+            ),
+            ChatMessageContentPart::file_file_id(uploaded.id.clone(), Some(filename.clone()))?,
         ],
         96,
         120,
@@ -440,7 +445,10 @@ async fn fcodex_files_upload_smoke_real_api() -> Result<(), Box<dyn std::error::
     )
     .await
     .map_err(|_| "fcodex upload smoke timeout 120s")??;
-    assert!(!uploaded.id.is_empty(), "fcodex smoke upload 应返回 file_id");
+    assert!(
+        !uploaded.id.is_empty(),
+        "fcodex smoke upload 应返回 file_id"
+    );
     adapter.delete(&uploaded.id).await?;
     Ok(())
 }
@@ -448,8 +456,8 @@ async fn fcodex_files_upload_smoke_real_api() -> Result<(), Box<dyn std::error::
 #[tokio::test]
 #[ignore = "live fcodex file_id roundtrip; requires PI_LIVE_OPENAI_FILES=1"]
 #[serial]
-async fn fcodex_file_id_roundtrip_text_image_pdf_real_api(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn fcodex_file_id_roundtrip_text_image_pdf_real_api() -> Result<(), Box<dyn std::error::Error>>
+{
     common::setup_logging();
     if !require_live_openai_files_opt_in("fcodex_file_id_roundtrip_text_image_pdf_real_api") {
         return Ok(());
@@ -476,7 +484,9 @@ async fn fcodex_file_id_roundtrip_text_image_pdf_real_api(
         provider.as_ref(),
         &fixture.config.llm.default_model,
         vec![
-            ChatMessageContentPart::text("Read the attached text file and repeat the token exactly."),
+            ChatMessageContentPart::text(
+                "Read the attached text file and repeat the token exactly.",
+            ),
             ChatMessageContentPart::file_file_id(
                 text_upload.id.clone(),
                 Some(text_filename.clone()),
@@ -495,14 +505,21 @@ async fn fcodex_file_id_roundtrip_text_image_pdf_real_api(
     let image_filename = format!("{prefix}-fcodex-image.png");
     let image_bytes = std::fs::read(sample_image_path())?;
     let image_upload = adapter
-        .upload(FilePurpose::Vision, &image_filename, "image/png", &image_bytes)
+        .upload(
+            FilePurpose::Vision,
+            &image_filename,
+            "image/png",
+            &image_bytes,
+        )
         .await?;
     guard.track(image_upload.id.clone());
     let image_reply = chat_text_with_parts(
         provider.as_ref(),
         &fixture.config.llm.default_model,
         vec![
-            ChatMessageContentPart::text("Describe what you see in this image in one short sentence."),
+            ChatMessageContentPart::text(
+                "Describe what you see in this image in one short sentence.",
+            ),
             ChatMessageContentPart::image_file_id(image_upload.id.clone())?,
         ],
         96,
@@ -543,7 +560,10 @@ async fn fcodex_file_id_roundtrip_text_image_pdf_real_api(
         &fixture.config.llm.default_model,
         vec![
             ChatMessageContentPart::text("Summarize the attached PDF in one short sentence."),
-            ChatMessageContentPart::file_file_id(pdf_upload.id.clone(), Some(pdf_filename.clone()))?,
+            ChatMessageContentPart::file_file_id(
+                pdf_upload.id.clone(),
+                Some(pdf_filename.clone()),
+            )?,
         ],
         96,
         120,
@@ -585,7 +605,9 @@ async fn kimi_k3_inline_and_uploaded_image_real_api() -> Result<(), Box<dyn std:
         provider.as_ref(),
         &fixture.config.llm.default_model,
         vec![
-            ChatMessageContentPart::text("Describe what you see in this image in one short sentence."),
+            ChatMessageContentPart::text(
+                "Describe what you see in this image in one short sentence.",
+            ),
             ChatMessageContentPart::image_b64("image/png", &image_path)?,
         ],
         96,
@@ -624,7 +646,9 @@ async fn kimi_k3_inline_and_uploaded_image_real_api() -> Result<(), Box<dyn std:
         provider.as_ref(),
         &fixture.config.llm.default_model,
         vec![
-            ChatMessageContentPart::text("Describe what you see in this uploaded image in one short sentence."),
+            ChatMessageContentPart::text(
+                "Describe what you see in this uploaded image in one short sentence.",
+            ),
             ChatMessageContentPart::image_file_id(uploaded.id.clone())?,
         ],
         96,
@@ -657,7 +681,9 @@ async fn anthropic_inline_image_real_api() -> Result<(), Box<dyn std::error::Err
         provider.as_ref(),
         &fixture.config.llm.default_model,
         vec![
-            ChatMessageContentPart::text("Describe what you see in this image in one short sentence."),
+            ChatMessageContentPart::text(
+                "Describe what you see in this image in one short sentence.",
+            ),
             ChatMessageContentPart::image_base64_data("image/png", SAMPLE_IMAGE_B64.trim())?,
         ],
         96,

@@ -364,6 +364,16 @@
 
 > **reviewer 子 Agent**：两条用例都默认走 [`prod_reviewer.rs`](../../../../src/api/chat/plan_runtime/prod_reviewer.rs) 真派发，主 LLM 每次 `create_plan` 都会消耗一段子 LLM token。transcript 中的 `plan.review` 事件包含 `reviewer_turns_used` / `reviewer_turns_limit` / `reviewer_stop_reason`，便于事后分析。
 
+## 验证耗时整改（分层自动场景）
+
+> 本组不调用真实 LLM，也不把机器负载敏感的固定墙钟作为稳定指标。验收以命令/tool call 次数、同一 `task_id`、无 kill、无原样重跑及提示词证据优先级为准；真实终端/Webview 的流式观感另行人工补验。
+
+| 编号 | 验收 | 用例名（所在文件） | 用户意图 | 操作序列 | 必须断言 |
+| ---- | ---- | ------------------ | -------- | -------- | -------- |
+| E2E-PROMPT-030 | 分层自动 | `long_command_wait_expiry_keeps_same_task_without_unchanged_rerun_contract`（`src/core/prompts/tests/load_test.rs`）；`run_hung_background_task_wait_window_snapshot_keeps_turn_bounded`（`src/core/agent_loop/tests/background_monitor_test.rs`） | 长命令等待窗口到期后继续观察原进程，而不是把等待到期当失败 | scripted mock LLM：`bash(run_in_background=true)` ×1 → 从工具结果提取 `task_id` → `task_output` ×1 → 收尾 | AgentLoop 恰好 3 次 LLM 请求；命令只启动一次；后续使用同一 `task_id`；工具结果为 `finished=false` 的等待窗口快照；Agent 行为序列不含 `task_stop`、timeout kill 或原样重跑。稳定性不依赖固定墙钟 |
+| E2E-PROMPT-031 | 自动（prompt contract） | `planner_and_executor_share_one_scoped_verification_batch_per_target_contract`（`src/core/prompts/tests/load_test.rs`） | 多个细 todo 共用同一 Cargo target 时只规划并执行一个 scoped 验证批次 | 加载 Planner / Executor 模板并核对共享边界、去重与 P0 计划证据 | Planner 要求同 build target 合并命名批次且禁止 todo 级与最终重复同一 test family；Executor 遵循计划的 scope/timing/batching 并优先项目 focused command；不引入 Runtime 测试缓存 |
+| E2E-PROMPT-032 | 自动（prompt contract） | `dynamic_time_regression_uses_plan_project_evidence_and_bounded_verification_contract`；`workspace_context_template_starts_with_workspace_and_has_no_time_placeholder`（`src/core/prompts/tests/load_test.rs`）；`build_system_prompt_omits_dynamic_time`（`src/core/llm/tests/system_prompt_test.rs`） | 修改动态时间提示时，验证命令来自计划/项目证据，且不会因等待到期 kill 或原样重跑 | 构造/加载系统、Workspace、Executor 提示词，不调用真实 LLM | 动态 `{now}` / `Current date and time` 不回归；命令证据按 active plan/user → project rules → manifest；`cargo test` 只作为“禁止默认全仓执行”的有界反例出现一次；等待到期契约要求继续原 task、禁止 unchanged rerun。真实模型是否遵循需人工/在线补验 |
+
 ---
 
 ## 边界与健壮性场景（跨 Story）（7 条）

@@ -279,7 +279,7 @@ fn spawn_background_task_listener(slot: &Arc<SessionSlot>) -> tokio::task::JoinH
                     let exit_code = match event.final_status {
                         BashTaskStatus::Finished { exit_code } => exit_code,
                         BashTaskStatus::Stopped => -1,
-                        BashTaskStatus::Running => continue,
+                        BashTaskStatus::Running | BashTaskStatus::DrainingOutput => continue,
                     };
                     let payload = serde_json::json!({
                         "type": wire::WIRE_BACKGROUND_TASK_FINISHED,
@@ -367,7 +367,8 @@ pub(crate) async fn cleanup_session_slot(
 ) -> Result<(), AppError> {
     slot.ctx.session_runtime.cancel_token.lock().cancel();
     slot.ctx.agent_registry.cascade_abort(&slot.session_id);
-    if let Some(handle) = slot.background_task_listener.lock().take() {
+    let background_task_listener = { slot.background_task_listener.lock().take() };
+    if let Some(handle) = background_task_listener {
         handle.abort();
         let _ = handle.await;
     }

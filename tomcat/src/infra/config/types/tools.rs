@@ -87,52 +87,38 @@ impl Default for ToolsWriteConfig {
     }
 }
 
-/// `[tools.bash]` 子表（T2-P0-016 PR-E / `bash.md` §8）。
+/// `[tools.bash]` 子表：前台观察窗口与输出资源上限。
 ///
-/// 与 `read` / `write` 同口径，仅放「磁盘资源 / 安全相关」全局开关，**不**放可由 LLM
-/// 直接通过 schema 字段控制的开关。
-///
-/// - `timeout_ms`：默认墙钟超时（毫秒），由 [`crate::core::tools::primitive::executor::bash`]
-///   传给 `tokio::time::timeout(..., child.wait())`。配置默认 [`DEFAULT_TOOLS_BASH_TIMEOUT_MS`]
-///   = 120_000（2 分钟，对齐 bash.md §2.4.3 / §6.2）；模型可在 schema `timeout_ms` 字段
-///   显式上调，但 [`crate::core::agent_loop::tool_exec`] 会以
-///   [`MAX_TOOLS_BASH_TIMEOUT_MS`] = 600_000（10 分钟）封顶。
-/// - `max_output_chars`：单次 bash 调用 stdout / stderr **合并后字符数**上限（与
-///   bash.md §8 / cc-fork-01 `BASH_MAX_OUTPUT_DEFAULT=30_000` 同档）。超限走
-///   `EndTruncatingAccumulator` 风格头尾保留 + 整段落盘
-///   `~/.tomcat/agents/<id>/tool-results/...`，调用回执带 `truncated=true` /
-///   `persisted_output_path`（详见 bash.md §2.4.3）。
+/// - `foreground_wait_ms`：一次 `bash` 调用在前台观察 tracked process 的时间，合法范围
+///   为 [`MIN_TOOLS_BASH_FOREGROUND_WAIT_MS`]..=[`MAX_TOOLS_BASH_FOREGROUND_WAIT_MS`]，
+///   默认 16 秒。等待窗口到期后进程继续作为 tracked background task 运行，不会被终止；
+/// - `max_output_chars`：stdout / stderr 各自的内存字符上限。超限采用头尾保留，
+///   完整输出持久化到 agent trail 的 `tool-results` 目录。
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolsBashConfig {
-    #[serde(default = "default_tools_bash_timeout_ms")]
-    pub timeout_ms: u64,
+    #[serde(default = "default_tools_bash_foreground_wait_ms")]
+    pub foreground_wait_ms: u64,
     #[serde(default = "default_tools_bash_max_output_chars")]
     pub max_output_chars: usize,
 }
 
-/// 默认 bash 墙钟超时：120_000 ms（2 分钟）。bash.md §2.4.3 / §6.2 / §9.2 钉死。
-pub const DEFAULT_TOOLS_BASH_TIMEOUT_MS: u64 = 120_000;
-
-/// bash 墙钟超时上限：600_000 ms（10 分钟）。schema `timeout_ms` 大于此值会被 `tool_exec`
-/// 在解析阶段 clamp（避免把任何模型可见上限漂移到 catalog schema 之外）。
-///
-/// **Phase-E.1**：仅声明；**Phase-E.2** 在 [`crate::core::agent_loop::tool_exec`] 与
-/// [`crate::core::tools::primitive::executor::bash`] 中作为 clamp 使用。
-#[allow(dead_code)]
-pub const MAX_TOOLS_BASH_TIMEOUT_MS: u64 = 600_000;
+/// 默认前台观察 16 秒；所有入口统一限制在 8–16 秒。
+pub const DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS: u64 = 16_000;
+/// 前台观察窗口下界：8 秒。
+pub const MIN_TOOLS_BASH_FOREGROUND_WAIT_MS: u64 = 8_000;
+/// 前台观察窗口上界：16 秒。
+pub const MAX_TOOLS_BASH_FOREGROUND_WAIT_MS: u64 = 16_000;
 
 /// 默认 bash 输出字符上限：30_000（cc-fork-01 `BASH_MAX_OUTPUT_DEFAULT` 同档）。
 pub const DEFAULT_TOOLS_BASH_MAX_OUTPUT_CHARS: usize = 30_000;
 
 /// bash 输出字符上限的硬上限：150_000（cc-fork-01 `BASH_MAX_OUTPUT_UPPER_LIMIT` 同档），
-/// 用于 [`ToolsBashConfig`] 反序列化后的越界保护（可在 [`crate::infra::config::load`] 校验）。
-///
-/// **Phase-E.1**：仅声明；**Phase-E.3** 由 `output_accum` 在合并流时作为硬上限引用。
-#[allow(dead_code)]
+/// 由配置校验拒绝越界值，执行层仍保留硬上限防御。
 pub const MAX_TOOLS_BASH_MAX_OUTPUT_CHARS: usize = 150_000;
 
-fn default_tools_bash_timeout_ms() -> u64 {
-    DEFAULT_TOOLS_BASH_TIMEOUT_MS
+fn default_tools_bash_foreground_wait_ms() -> u64 {
+    DEFAULT_TOOLS_BASH_FOREGROUND_WAIT_MS
 }
 
 fn default_tools_bash_max_output_chars() -> usize {
@@ -142,7 +128,7 @@ fn default_tools_bash_max_output_chars() -> usize {
 impl Default for ToolsBashConfig {
     fn default() -> Self {
         Self {
-            timeout_ms: default_tools_bash_timeout_ms(),
+            foreground_wait_ms: default_tools_bash_foreground_wait_ms(),
             max_output_chars: default_tools_bash_max_output_chars(),
         }
     }

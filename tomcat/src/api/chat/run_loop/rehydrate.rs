@@ -7,9 +7,7 @@ use crate::api::chat::ChatContext;
 use crate::core::compaction::preheat::Preheat;
 use crate::core::session::manager::init_context_state;
 use crate::core::session::ErrorEntry;
-use crate::infra::error::{
-    llm_http_status, llm_source_chain, llm_stage, llm_summary, AppError,
-};
+use crate::infra::error::{llm_http_status, llm_source_chain, llm_stage, llm_summary, AppError};
 
 const MAX_ERROR_DETAIL_CHARS: usize = 8 * 1024;
 
@@ -200,7 +198,12 @@ pub(crate) fn render_error_message(error: &AppError) -> String {
 }
 
 fn build_error_entry(ctx: &ChatContext, error: &AppError) -> ErrorEntry {
-    let session_entry = ctx.session_runtime.session.current_session_entry().ok().flatten();
+    let session_entry = ctx
+        .session_runtime
+        .session
+        .current_session_entry()
+        .ok()
+        .flatten();
     let model = Some(ctx.effective_model(session_entry.as_ref()));
     let catalog_entry = model.as_deref().and_then(|model_id| {
         ctx.global_services
@@ -339,8 +342,8 @@ pub(crate) fn recover_context_state_after_failed_turn(
     };
 
     let structured_error = build_error_entry(ctx, error);
-    let should_append_error = superseded_trailing_users > 0
-        || !latest_transcript_error_matches(ctx, &structured_error);
+    let should_append_error =
+        superseded_trailing_users > 0 || !latest_transcript_error_matches(ctx, &structured_error);
     if should_append_error {
         if let Err(append_error) = ctx
             .session_runtime

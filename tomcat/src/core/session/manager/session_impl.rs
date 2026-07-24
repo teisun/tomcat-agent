@@ -15,13 +15,12 @@ use crate::core::session::store::{
     load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY,
 };
 use crate::core::session::transcript::{
-    append_entry, append_entry_with_sync, get_branch,
-    get_children, get_entry, get_leaf_entry, mark_message_entries_after_anchor_superseded,
-    mark_trailing_user_messages_superseded, read_entries_tail, read_entries_tail_before,
-    read_header, rewrite_message_summary_titles_by_id, write_header, BranchSummaryEntry,
-    CustomEntry, ErrorEntry, LabelEntry, MessageEntry, MessageSummaryTitleRewrite,
-    ModelChangeEntry, SessionHeader, SessionInfoEntry, SyncLevel, ThinkingLevelChangeEntry,
-    ThinkingTraceEntry, TranscriptEntry, TranscriptPage,
+    append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
+    mark_message_entries_after_anchor_superseded, mark_trailing_user_messages_superseded,
+    read_entries_tail, read_entries_tail_before, read_header, rewrite_message_summary_titles_by_id,
+    write_header, BranchSummaryEntry, CustomEntry, ErrorEntry, LabelEntry, MessageEntry,
+    MessageSummaryTitleRewrite, ModelChangeEntry, SessionHeader, SessionInfoEntry, SyncLevel,
+    ThinkingLevelChangeEntry, ThinkingTraceEntry, TranscriptEntry, TranscriptPage,
 };
 use crate::infra::error::AppError;
 use crate::infra::platform::normalize_path;
@@ -801,7 +800,9 @@ impl SessionManager {
         let path = self
             .current_transcript_path()?
             .ok_or_else(|| AppError::Config("无当前会话".to_string()))?;
-        self.with_transcript_lock(&path, || append_entry(&path, &TranscriptEntry::Error(error)))
+        self.with_transcript_lock(&path, || {
+            append_entry(&path, &TranscriptEntry::Error(error))
+        })
     }
 
     /// 按 `message.id` 重写指定 session transcript 中 assistant message 的 `summary_title`。

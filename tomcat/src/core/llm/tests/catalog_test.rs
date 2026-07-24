@@ -141,7 +141,10 @@ fn builtin_seed_entries_match_expected_presets_and_embedded_toml() {
         .iter()
         .find(|entry| entry.id == "claude-opus-4-8")
         .expect("claude-opus-4-8 preset");
-    assert_eq!(claude.thinking_format.as_deref(), Some("anthropic-adaptive"));
+    assert_eq!(
+        claude.thinking_format.as_deref(),
+        Some("anthropic-adaptive")
+    );
     assert_eq!(
         claude.supported_reasoning_levels,
         vec![

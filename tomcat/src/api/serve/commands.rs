@@ -16,7 +16,8 @@ use serde_json::json;
 use crate::api::chat::commands::{checkpoint_kind_label, restore_core, RestoreCoreReport};
 use crate::core::llm::{
     list_model_views, list_provider_keys, remove_user_model, set_provider_key, upsert_user_model,
-    ChatMessage, ChatMessageContentPart, ContextRefKind, ContextReference, ProviderKeyInput, ThinkingLevel,
+    ChatMessage, ChatMessageContentPart, ContextRefKind, ContextReference, ProviderKeyInput,
+    ThinkingLevel,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::transcript::{

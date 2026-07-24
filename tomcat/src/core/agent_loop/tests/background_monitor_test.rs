@@ -71,13 +71,13 @@ impl LlmProvider for HungTaskBoundedProvider {
                     "call-task-output-1",
                     "task_output",
                     &format!(
-                        r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":150}}"#,
+                        r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":150}}"#,
                         task_id
                     ),
                 )
             }
             2 => {
-                assert_timeout_snapshot_present(&req)?;
+                assert_wait_window_snapshot_present(&req)?;
                 vec![
                     Ok(StreamEvent::ContentDelta {
                         delta: "HUNG_WAIT_STOPPED_OK".to_string(),
@@ -93,7 +93,6 @@ impl LlmProvider for HungTaskBoundedProvider {
                 )));
             }
         };
-
 
         Ok(Box::new(tokio_stream::iter(events)))
     }
@@ -141,7 +140,7 @@ fn extract_background_task_id(req: &ChatRequest) -> Result<String, AppError> {
     ))
 }
 
-fn assert_timeout_snapshot_present(req: &ChatRequest) -> Result<(), AppError> {
+fn assert_wait_window_snapshot_present(req: &ChatRequest) -> Result<(), AppError> {
     for message in req.messages.iter().rev() {
         if message.role != ChatMessageRole::Tool {
             continue;
@@ -149,7 +148,7 @@ fn assert_timeout_snapshot_present(req: &ChatRequest) -> Result<(), AppError> {
         let Some(content) = message.text_content() else {
             continue;
         };
-        if content.contains("\"wakeReason\":\"timeout\"")
+        if content.contains("\"wakeReason\":\"wait_window_elapsed\"")
             && content.contains("HUNG_TIMEOUT_SNAPSHOT")
             && content.contains("\"finished\":false")
         {
@@ -157,12 +156,12 @@ fn assert_timeout_snapshot_present(req: &ChatRequest) -> Result<(), AppError> {
         }
     }
     Err(AppError::Llm(
-        "expected timeout tool result containing recent output snapshot".to_string(),
+        "expected wait-window tool result containing recent output snapshot".to_string(),
     ))
 }
 
 #[tokio::test]
-async fn run_hung_background_task_timeout_snapshot_keeps_turn_bounded() {
+async fn run_hung_background_task_wait_window_snapshot_keeps_turn_bounded() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
     let llm = Arc::new(HungTaskBoundedProvider::new());
@@ -183,14 +182,14 @@ async fn run_hung_background_task_timeout_snapshot_keeps_turn_bounded() {
 
     let result = loop_
         .run(vec![ChatMessage::user(
-            "start one hung background task and stop polling after the first timeout snapshot",
+            "start one hung background task and stop polling after the first wait-window snapshot",
         )])
         .await
         .unwrap();
 
     assert!(
         result.final_text.contains("HUNG_WAIT_STOPPED_OK"),
-        "timeout snapshot 后应立即停止轮询，实际 final_text={:?}",
+        "wait-window snapshot 后应立即停止轮询，实际 final_text={:?}",
         result.final_text
     );
     assert_eq!(llm.request_count(), 3, "应严格限制为 3 次 LLM 请求");

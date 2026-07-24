@@ -9,7 +9,9 @@ use parking_lot::RwLock;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::thinking_policy::{normalize_supported_reasoning_levels, safe_supported_reasoning_levels_for};
+use super::thinking_policy::{
+    normalize_supported_reasoning_levels, safe_supported_reasoning_levels_for,
+};
 use crate::infra::config::{get_work_dir, AppConfig, ContextConfig};
 use crate::infra::error::AppError;
 

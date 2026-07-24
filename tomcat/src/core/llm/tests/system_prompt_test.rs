@@ -26,11 +26,12 @@ fn build_system_prompt_contains_tools_and_workspace() {
 }
 
 #[test]
-fn planner_reminder_forces_plan_requests_to_use_plan_tools() {
+fn planner_reminder_persists_plans_with_the_tool_for_each_changed_part() {
     let prompt = crate::core::prompts::load(crate::core::prompts::PromptKey::PlannerReminder);
-    assert!(prompt.contains("MUST use `create_plan` or `update_plan`"));
+    assert!(prompt.contains("New plan: use `create_plan`"));
+    assert!(prompt.contains("Existing plan body or `## Goal`: call `read`, then use `edit`"));
+    assert!(prompt.contains("Existing `frontmatter.todos`: use `update_plan`"));
     assert!(prompt.contains("Do NOT emit a plan/proposal as prose"));
-    assert!(prompt.contains("设计方案"));
 }
 
 #[test]
@@ -110,8 +111,10 @@ fn build_system_prompt_contains_parallel_and_verification_sections() {
         prompt.contains("Finishing and verifying"),
         "system prompt 应包含收尾/验证段"
     );
-    // 收尾段引用 EXEC Mini 验证，不复制全文。
-    assert!(prompt.contains("Mini verification P0-P6"));
+    assert!(prompt.contains("For ordinary CHAT changes"));
+    assert!(prompt.contains("In PLAN or EXEC"));
+    assert!(prompt.contains("task_output"));
+    assert!(!prompt.contains("Mini verification"));
 }
 
 #[test]

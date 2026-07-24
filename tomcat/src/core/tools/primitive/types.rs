@@ -74,6 +74,27 @@ pub struct EditFileResult {
     pub diff: Option<Vec<FileDiffLine>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BashExecutionState {
+    #[default]
+    Finished,
+    RunningInBackground,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashNextAction {
+    pub when: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BashResult {
@@ -81,20 +102,22 @@ pub struct BashResult {
     pub stderr: String,
     #[serde(rename = "code")]
     pub exit_code: i32,
-    /// T2-P0-016 PR-E.3：墙钟超时被 kill 时为 `true`；正常退出 / 立即结束为 `false`。
-    /// 若主 shell 已退出、但 reader drain 阶段检测到 `cmd &` 残留后台子进程撑住管道，
-    /// 当前实现会在 `stderr` / 审计里追加 warning 并清理同进程组，但**不会**把这条字段
-    /// 置为 `true`（与真正的前台 wall-clock timeout 语义区分）。
-    /// 历史 mock / 第三方 PrimitiveExecutor 反序列化兼容：缺省 `false`。
     #[serde(default)]
-    pub timed_out: bool,
-    /// T2-P0-016 PR-E.3：原始 stdout / stderr 字符数超过 `[tools.bash].max_output_chars`
-    /// 上限被 [`crate::core::tools::primitive::executor::output_accum`] 头尾截断时为 `true`。
+    pub state: BashExecutionState,
+    #[serde(default)]
+    pub foreground_wait_expired: bool,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_path: Option<String>,
+    #[serde(default)]
+    pub recent_output: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<BashNextAction>,
     #[serde(default)]
     pub truncated: bool,
-    /// T2-P0-016 PR-E.3：当 `truncated=true` 且配置了 `bash_persist_dir` 时，指向
-    /// `~/.tomcat/agents/<id>/tool-results/<prefix>-<unix_ms>-<rand6>.txt`（合并后的完整原文）。
-    /// LLM 收到回执后可用 `read` 工具按需取回完整原文。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persisted_output_path: Option<String>,
 }
@@ -503,23 +526,16 @@ pub trait PrimitiveExecutor: Send + Sync + 'static {
     /// 执行 bash/进程。
     /// - `argv` 为 `None`：`command` 视为完整 shell 命令（经 `sh -c` / `cmd /C`）。
     /// - `argv` 为 `Some`：`command` 为可执行文件名，`argv` 为其参数列表（不经 shell，与 pi-mono `exec(cmd, args)` 对齐）。
-    /// - `timeout_ms`（T2-P0-016 PR-E）：墙钟超时（毫秒）；`None` 时使用
-    ///   `[tools.bash].timeout_ms`（默认 120_000）。`tool_exec` 入口已按
-    ///   [`crate::infra::config::MAX_TOOLS_BASH_TIMEOUT_MS`] = 600_000 clamp，
-    ///   trait 实现侧再做一次防御性 clamp。`DefaultPrimitiveExecutor` 用
-    ///   `tokio::time::timeout(..., child.wait())` 包裹前台等待，并用同一 deadline 继续约束
-    ///   stdout/stderr reader drain；若主 shell 已退、但 `cmd &` 残留后台子进程继续持有
-    ///   管道写端，会清理同进程组并返回 warning，而不是永久阻塞在 `read_to_end` 上。
-    ///   这样既避免 `wait_with_output` 反模式（bash.md §2.4.3 / §6.2 / §9.2），也避免
-    ///   同步 bash 被“shell 语义后台”卡死。
-    ///   旧 mock / 第三方 PrimitiveExecutor 实现可忽略此参数（默认行为不变）。
+    /// - `foreground_wait_ms` controls only how long this call observes the tracked command.
+    ///   Expiry returns the same task as `RunningInBackground`; it never terminates the process.
+    ///   Explicit cancellation or `task_stop` are the only process-tree stop paths.
     async fn execute_bash(
         &self,
         command: &str,
         cwd: Option<&str>,
         plugin_id: &str,
         argv: Option<&[String]>,
-        timeout_ms: Option<u64>,
+        foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError>;
     async fn require_user_confirmation(
         &self,

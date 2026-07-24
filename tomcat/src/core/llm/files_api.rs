@@ -91,7 +91,9 @@ impl FilesApiAdapter for OpenAiFilesAdapter {
         mime_type: &str,
         bytes: &[u8],
     ) -> Result<OpenAiFileMeta, AppError> {
-        self.client.upload(purpose, filename, mime_type, bytes).await
+        self.client
+            .upload(purpose, filename, mime_type, bytes)
+            .await
     }
 
     async fn delete(&self, file_id: &str) -> Result<(), AppError> {
@@ -293,7 +295,10 @@ pub struct AnthropicFilesAdapter {
 }
 
 impl AnthropicFilesAdapter {
-    pub fn from_provider_context(ctx: FilesApiProviderContext, _files_cfg: &LlmFilesConfig) -> Self {
+    pub fn from_provider_context(
+        ctx: FilesApiProviderContext,
+        _files_cfg: &LlmFilesConfig,
+    ) -> Self {
         Self {
             client: ctx.client,
             base_url: ctx.base_url.trim_end_matches('/').to_string(),
@@ -413,9 +418,8 @@ impl FilesApiAdapter for AnthropicFilesAdapter {
                 Err(err) => return Err(err),
             }
         }
-        Err(last_err.unwrap_or_else(|| {
-            AppError::Llm("Anthropic Files upload 重试耗尽".to_string())
-        }))
+        Err(last_err
+            .unwrap_or_else(|| AppError::Llm("Anthropic Files upload 重试耗尽".to_string())))
     }
 
     async fn delete(&self, file_id: &str) -> Result<(), AppError> {
@@ -431,9 +435,8 @@ impl FilesApiAdapter for AnthropicFilesAdapter {
                 Err(err) => return Err(err),
             }
         }
-        Err(last_err.unwrap_or_else(|| {
-            AppError::Llm("Anthropic Files delete 重试耗尽".to_string())
-        }))
+        Err(last_err
+            .unwrap_or_else(|| AppError::Llm("Anthropic Files delete 重试耗尽".to_string())))
     }
 
     fn expires_after_seconds(&self) -> u64 {
@@ -495,11 +498,7 @@ fn map_body_read_error(provider_name: &str, op: &str, err: reqwest::Error) -> Ap
     )
 }
 
-fn map_parse_error(
-    provider_name: &str,
-    op: &str,
-    err: impl Into<anyhow::Error>,
-) -> AppError {
+fn map_parse_error(provider_name: &str, op: &str, err: impl Into<anyhow::Error>) -> AppError {
     llm_error_with_source(
         provider_name,
         LlmErrorStage::Parse,
@@ -522,20 +521,29 @@ fn classify_http_error(
         return llm_http_status_error_with_summary(
             provider_name,
             status.as_u16(),
-            format!("{provider_name} {op} 失败：API Key 无效（HTTP {}）。", status.as_u16()),
+            format!(
+                "{provider_name} {op} 失败：API Key 无效（HTTP {}）。",
+                status.as_u16()
+            ),
         );
     }
     if status == reqwest::StatusCode::PAYLOAD_TOO_LARGE || lower.contains("file_too_large") {
         return llm_http_status_error_with_summary(
             provider_name,
             status.as_u16(),
-            format!("{provider_name} {op} 失败：文件超过上游上限（HTTP {}）。", status.as_u16()),
+            format!(
+                "{provider_name} {op} 失败：文件超过上游上限（HTTP {}）。",
+                status.as_u16()
+            ),
         );
     }
     llm_http_status_error_with_summary(
         provider_name,
         status.as_u16(),
-        format!("{provider_name} {op} 失败（HTTP {}）：{body}", status.as_u16()),
+        format!(
+            "{provider_name} {op} 失败（HTTP {}）：{body}",
+            status.as_u16()
+        ),
     )
 }
 

@@ -180,7 +180,7 @@ impl PrimitiveExecutor for MockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{}", command),
@@ -249,7 +249,7 @@ impl PrimitiveExecutor for ErrorOnFirstBashPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         let n = self.call_count.fetch_add(1, Ordering::SeqCst);
         if n == 0 {
@@ -322,7 +322,7 @@ impl PrimitiveExecutor for SlowMockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
         Ok(BashResult {
@@ -342,13 +342,16 @@ impl PrimitiveExecutor for SlowMockPrimitive {
     }
 }
 
-/// `read_file` 人工延迟，确保后台 bash 能在前台工具批次执行期间自然完成。
+/// `read_file` 人工延迟，确保后台 bash 能在前台工具批次执行期间**完整走完**完成链路：
+/// 后台命令 `sleep 1`（~1000ms）退出后，还要经过 output drain → preview barrier ACK →
+/// lifecycle 广播 → 测试订阅者入队，这条链路比进程退出本身多出数百毫秒。取 2500ms 给足
+/// 余量，让 follow-up 稳定地在前台批次结束前入队、随后被同一回合 drain 进第 3 次请求。
 struct MidturnDelayPrimitive;
 
 #[async_trait]
 impl PrimitiveExecutor for MidturnDelayPrimitive {
     async fn read_file(&self, path: &str, _plugin_id: &str) -> Result<String, AppError> {
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
         Ok(format!("content:{}", path))
     }
     async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
@@ -391,7 +394,7 @@ impl PrimitiveExecutor for MidturnDelayPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: format!("out:{}", command),
@@ -571,7 +574,7 @@ fn spawn_test_completion_subscriber(ctx: &ChatContext) -> tokio::task::JoinHandl
                     let exit_code = match final_status {
                         BashTaskStatus::Finished { exit_code } => exit_code,
                         BashTaskStatus::Stopped => -1,
-                        BashTaskStatus::Running => continue,
+                        BashTaskStatus::Running | BashTaskStatus::DrainingOutput => continue,
                     };
                     let tail = registry.tail_log(&task_id, 4096).await;
                     let text = format!(

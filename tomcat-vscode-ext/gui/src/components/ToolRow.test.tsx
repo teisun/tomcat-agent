@@ -66,20 +66,28 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Edited");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Edited",
+    );
     expect(screen.getByTestId("tool-row-diff-added").textContent).toBe("+4");
     expect(screen.getByTestId("tool-row-diff-removed").textContent).toBe("-2");
     expect(screen.getByTestId("tool-row-open-diff")).toBeTruthy();
-    expect(screen.getByTestId("tool-row-open-diff").textContent).toContain("View diff");
+    expect(screen.getByTestId("tool-row-open-diff").textContent).toContain(
+      "View diff",
+    );
     expect(screen.getByTestId("tool-row-open-diff").className).not.toContain(
       "tc-tool-row__action-link--plan",
     );
     expect(
-      screen.getByTestId("tool-row-open-diff").querySelector(".tc-tool-row__action-link-chevron"),
+      screen
+        .getByTestId("tool-row-open-diff")
+        .querySelector(".tc-tool-row__action-link-chevron"),
     ).toBeNull();
     expect(container.querySelector(".tc-tool-row__leading-icon")).toBeNull();
     expect(screen.getByTestId("disclosure-card-leading-icon")).toBeTruthy();
-    expect(screen.getByTestId("diff-view-preview").closest(".tc-disclosure-card")).toBeTruthy();
+    expect(
+      screen.getByTestId("diff-view-preview").closest(".tc-disclosure-card"),
+    ).toBeTruthy();
     fireEvent.click(screen.getByTestId("tool-row-open-diff"));
     expect(onOpenDiff).toHaveBeenCalledWith("tc-1");
     expect(screen.queryByRole("button", { name: /apply/i })).toBeNull();
@@ -145,15 +153,22 @@ describe("ToolRow", () => {
     expect(container.querySelector(".tc-tool-row__leading-icon")).toBeNull();
     expect(screen.getByTestId("disclosure-card-leading-icon")).toBeTruthy();
     expect(screen.queryByTestId("tool-row-terminal")).toBeNull();
-    const preview = screen.getByTestId("terminal-output-preview").textContent ?? "";
+    const preview =
+      screen.getByTestId("terminal-output-preview").textContent ?? "";
     expect(preview).toContain("$ cargo test");
     expect(preview).not.toContain("line 1");
     expect(preview).toContain("line 2");
     expect(preview).toContain("line 6");
     fireEvent.click(screen.getByTestId("tool-row-toggle"));
-    expect(screen.getByTestId("tool-row-terminal").textContent).toContain("$ cargo test");
-    expect(screen.getByTestId("tool-row-terminal").textContent).toContain("line 1");
-    expect(screen.getByTestId("tool-row-terminal").textContent).toContain("line 6");
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain(
+      "$ cargo test",
+    );
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain(
+      "line 1",
+    );
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain(
+      "line 6",
+    );
   });
 
   it("bash row rebuilds a complete command from command plus argv", () => {
@@ -181,9 +196,13 @@ describe("ToolRow", () => {
     expect(screen.getByTestId("tool-row-cmd-tags").textContent).toBe("cargo");
     const expected =
       "$ cargo test --lib --manifest-path tomcat/Cargo.toml system_prompt_reflects_runtime_permission_skill_and_plugin_tool_changes";
-    expect(screen.getByTestId("terminal-output-preview").textContent).toContain(expected);
+    expect(screen.getByTestId("terminal-output-preview").textContent).toContain(
+      expected,
+    );
     fireEvent.click(screen.getByTestId("tool-row-toggle"));
-    expect(screen.getByTestId("tool-row-terminal").textContent).toContain(expected);
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain(
+      expected,
+    );
   });
 
   it("bash row quotes argv values without losing argument boundaries", () => {
@@ -225,7 +244,9 @@ describe("ToolRow", () => {
       "Gather git status and recent commit",
     );
     // Deduped command-name tags parsed client-side from the full command.
-    expect(screen.getByTestId("tool-row-cmd-tags").textContent).toBe("git, echo");
+    expect(screen.getByTestId("tool-row-cmd-tags").textContent).toBe(
+      "git, echo",
+    );
     // Full command surfaces as a `$ …` prompt line in the terminal body.
     fireEvent.click(screen.getByTestId("tool-row-toggle"));
     expect(screen.getByTestId("tool-row-terminal").textContent).toContain(
@@ -265,7 +286,9 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-terminal").textContent).toContain("command failed");
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain(
+      "command failed",
+    );
   });
 
   it("web_search row expands hits list", () => {
@@ -281,7 +304,9 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").textContent).toContain('Searched "rust async"');
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      'Searched "rust async"',
+    );
     fireEvent.click(screen.getByTestId("tool-row-toggle"));
     expect(screen.getByText("Rust async book")).toBeTruthy();
   });
@@ -294,7 +319,9 @@ describe("ToolRow", () => {
             questions: [
               {
                 id: "style",
-                options: [{ id: "run-gun", label: "Run-and-gun", recommended: true }],
+                options: [
+                  { id: "run-gun", label: "Run-and-gun", recommended: true },
+                ],
                 prompt: "Which style?",
               },
             ],
@@ -317,7 +344,9 @@ describe("ToolRow", () => {
 
     expect(screen.queryByTestId("tool-row-toggle")).toBeNull();
     expect(screen.getByTestId("answer-card").textContent).toContain("Answers");
-    expect(screen.getByTestId("answer-option-style").textContent).toContain("Run-and-gun");
+    expect(screen.getByTestId("answer-option-style").textContent).toContain(
+      "Run-and-gun",
+    );
   });
 
   it("renders a completed create_plan as a pinned plan card", () => {
@@ -335,8 +364,16 @@ describe("ToolRow", () => {
             goal: "Login refactor plan",
             path: "/workspace/login-refactor.plan.md",
             todos: [
-              { content: "Audit the transcript path", id: "todo-1", status: "completed" },
-              { content: "Render update_plan events", id: "todo-2", status: "in_progress" },
+              {
+                content: "Audit the transcript path",
+                id: "todo-1",
+                status: "completed",
+              },
+              {
+                content: "Render update_plan events",
+                id: "todo-2",
+                status: "in_progress",
+              },
             ],
           },
           planActivity: {
@@ -348,29 +385,49 @@ describe("ToolRow", () => {
           },
           planId: "plan-1",
           planPath: "/workspace/login-refactor.plan.md",
-          summary: "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login-refactor.plan.md\",\"state\":\"planning\"}",
+          summary:
+            '{"plan_id":"plan-1","path":"/workspace/login-refactor.plan.md","state":"planning"}',
           toolName: "create_plan",
         })}
         onBuildPlan={onBuildPlan}
         onOpenFile={vi.fn()}
         onOpenPlanFile={onOpenPlanFile}
         planTodos={[
-          { content: "Audit the transcript path", id: "todo-1", status: "completed" },
-          { content: "Render update_plan events", id: "todo-2", status: "in_progress" },
+          {
+            content: "Audit the transcript path",
+            id: "todo-1",
+            status: "completed",
+          },
+          {
+            content: "Render update_plan events",
+            id: "todo-2",
+            status: "in_progress",
+          },
         ]}
       />,
     );
 
-    expect(screen.getByTestId("plan-card-title").textContent).toBe("Login refactor plan");
-    expect(screen.getByTestId("plan-card-file-name").textContent).toBe("login-refactor.plan.md");
+    expect(screen.getByTestId("plan-card-title").textContent).toBe(
+      "Login refactor plan",
+    );
+    expect(screen.getByTestId("plan-card-file-name").textContent).toBe(
+      "login-refactor.plan.md",
+    );
     expect(screen.getByTestId("plan-todos-count").textContent).toBe("2 todos");
-    expect((screen.getByTestId("build-plan") as HTMLButtonElement).disabled).toBe(false);
+    expect(
+      (screen.getByTestId("build-plan") as HTMLButtonElement).disabled,
+    ).toBe(false);
 
     fireEvent.click(screen.getByTestId("view-plan"));
-    expect(onOpenPlanFile).toHaveBeenCalledWith("/workspace/login-refactor.plan.md");
+    expect(onOpenPlanFile).toHaveBeenCalledWith(
+      "/workspace/login-refactor.plan.md",
+    );
 
     fireEvent.click(screen.getByTestId("build-plan"));
-    expect(onBuildPlan).toHaveBeenCalledWith("plan-1", "/workspace/login-refactor.plan.md");
+    expect(onBuildPlan).toHaveBeenCalledWith(
+      "plan-1",
+      "/workspace/login-refactor.plan.md",
+    );
   });
 
   it("renders a running create_plan as the legacy pending plan card", () => {
@@ -384,8 +441,16 @@ describe("ToolRow", () => {
             draft: "Keep one create card and many update rows.",
             goal: "Login refactor plan",
             todos: [
-              { content: "Audit the transcript path", id: "todo-1", status: "completed" },
-              { content: "Render update_plan events", id: "todo-2", status: "pending" },
+              {
+                content: "Audit the transcript path",
+                id: "todo-1",
+                status: "completed",
+              },
+              {
+                content: "Render update_plan events",
+                id: "todo-2",
+                status: "pending",
+              },
             ],
           },
           planId: "plan-1",
@@ -399,9 +464,13 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("plan-card-title").textContent).toBe("Login refactor plan");
+    expect(screen.getByTestId("plan-card-title").textContent).toBe(
+      "Login refactor plan",
+    );
     expect(screen.getByTestId("plan-todos-count").textContent).toBe("2 todos");
-    expect((screen.getByTestId("view-plan-pending") as HTMLButtonElement).disabled).toBe(true);
+    expect(
+      (screen.getByTestId("view-plan-pending") as HTMLButtonElement).disabled,
+    ).toBe(true);
     expect(screen.getAllByTestId("plan-card")).toHaveLength(1);
     expect(screen.queryByTestId("tool-row-label")).toBeNull();
 
@@ -415,8 +484,16 @@ describe("ToolRow", () => {
             draft: "Keep one create card and many update rows.",
             goal: "Login refactor plan",
             todos: [
-              { content: "Audit the transcript path", id: "todo-1", status: "completed" },
-              { content: "Render update_plan events", id: "todo-2", status: "pending" },
+              {
+                content: "Audit the transcript path",
+                id: "todo-1",
+                status: "completed",
+              },
+              {
+                content: "Render update_plan events",
+                id: "todo-2",
+                status: "pending",
+              },
             ],
           },
           planActivity: {
@@ -430,7 +507,7 @@ describe("ToolRow", () => {
           planPath: "/workspace/login-refactor.plan.md",
           status: "complete",
           summary:
-            "{\"plan_id\":\"plan-1\",\"path\":\"/workspace/login-refactor.plan.md\",\"state\":\"planning\"}",
+            '{"plan_id":"plan-1","path":"/workspace/login-refactor.plan.md","state":"planning"}',
           toolName: "create_plan",
         })}
         onBuildPlan={vi.fn()}
@@ -466,7 +543,7 @@ describe("ToolRow", () => {
           },
           planId: "plan-1",
           planPath: "/workspace/login-refactor.plan.md",
-          summary: "{\"applied\":2}",
+          summary: '{"applied":2}',
           toolName: "update_plan",
         })}
         onOpenFile={vi.fn()}
@@ -474,23 +551,36 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Checked 2 · 4/9");
-    expect(screen.getByTestId("view-plan").className).toContain("tc-tool-row__action-link--plan");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Checked 2 · 4/9",
+    );
+    expect(screen.getByTestId("view-plan").className).toContain(
+      "tc-tool-row__action-link--plan",
+    );
     expect(
-      screen.getByTestId("view-plan").querySelector(".tc-tool-row__action-link-text")?.textContent,
+      screen
+        .getByTestId("view-plan")
+        .querySelector(".tc-tool-row__action-link-text")?.textContent,
     ).toBe("View Plan");
     expect(
-      screen.getByTestId("view-plan").querySelector(".tc-tool-row__action-link-chevron")?.className,
+      screen
+        .getByTestId("view-plan")
+        .querySelector(".tc-tool-row__action-link-chevron")?.className,
     ).toContain("codicon-chevron-right");
     fireEvent.click(screen.getByTestId("view-plan"));
-    expect(onOpenPlanFile).toHaveBeenCalledWith("/workspace/login-refactor.plan.md");
+    expect(onOpenPlanFile).toHaveBeenCalledWith(
+      "/workspace/login-refactor.plan.md",
+    );
   });
 
   it("renders update_plan state transitions without inventing missing data", () => {
     render(
       <ToolRow
         item={buildTool({
-          args: { path: "/workspace/login-refactor.plan.md", plan_id: "plan-1" },
+          args: {
+            path: "/workspace/login-refactor.plan.md",
+            plan_id: "plan-1",
+          },
           planActivity: {
             completed: 8,
             kind: "update",
@@ -516,7 +606,10 @@ describe("ToolRow", () => {
     const { rerender } = render(
       <ToolRow
         item={buildTool({
-          args: { path: "/workspace/login-refactor.plan.md", plan_id: "plan-1" },
+          args: {
+            path: "/workspace/login-refactor.plan.md",
+            plan_id: "plan-1",
+          },
           planActivity: {
             applied: 3,
             checked: 0,
@@ -533,12 +626,17 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Updated plan · 6/9");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Updated plan · 6/9",
+    );
 
     rerender(
       <ToolRow
         item={buildTool({
-          args: { path: "/workspace/login-refactor.plan.md", plan_id: "plan-1" },
+          args: {
+            path: "/workspace/login-refactor.plan.md",
+            plan_id: "plan-1",
+          },
           planId: "plan-1",
           planPath: "/workspace/login-refactor.plan.md",
           toolName: "update_plan",
@@ -548,15 +646,22 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Updated plan");
-    expect(screen.getByTestId("tool-row-label").textContent).not.toContain("/9");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Updated plan",
+    );
+    expect(screen.getByTestId("tool-row-label").textContent).not.toContain(
+      "/9",
+    );
   });
 
   it("keeps running update_plan rows lightweight and hides View Plan until complete", () => {
     render(
       <ToolRow
         item={buildTool({
-          args: { path: "/workspace/login-refactor.plan.md", plan_id: "plan-1" },
+          args: {
+            path: "/workspace/login-refactor.plan.md",
+            plan_id: "plan-1",
+          },
           planId: "plan-1",
           planPath: "/workspace/login-refactor.plan.md",
           status: "streaming",
@@ -568,8 +673,12 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Updating plan");
-    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Updating plan",
+    );
+    expect(
+      screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer"),
+    ).toBeTruthy();
     expect(screen.queryByTestId("view-plan")).toBeNull();
     expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
   });
@@ -586,8 +695,12 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("update_plan failed");
-    expect(screen.getByTestId("tool-row-body").textContent).toContain("Unable to update plan");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "update_plan failed",
+    );
+    expect(screen.getByTestId("tool-row-body").textContent).toContain(
+      "Unable to update plan",
+    );
   });
 
   it("toolCategory maps built-ins into the new buckets", () => {
@@ -606,7 +719,7 @@ describe("ToolRow", () => {
     expect(
       isActionTool(
         buildTool({
-          args: { block: true, task_id: "task-1", timeout_ms: 10_000 },
+          args: { block: true, task_id: "task-1", wait_ms: 10_000 },
           status: "running",
           toolName: "task_output",
         }),
@@ -615,7 +728,7 @@ describe("ToolRow", () => {
     expect(
       isActionTool(
         buildTool({
-          args: { block: false, task_id: "task-1", timeout_ms: 0 },
+          args: { block: false, task_id: "task-1", wait_ms: 0 },
           toolName: "task_output",
         }),
       ),
@@ -623,7 +736,7 @@ describe("ToolRow", () => {
     expect(
       isActionTool(
         buildTool({
-          args: { block: true, task_id: "task-1", timeout_ms: 10_000 },
+          args: { block: true, task_id: "task-1", wait_ms: 10_000 },
           status: "complete",
           toolName: "task_output",
         }),
@@ -632,7 +745,7 @@ describe("ToolRow", () => {
     expect(
       isActionTool(
         buildTool({
-          args: { block: true, task_id: "task-1", timeout_ms: 0 },
+          args: { block: true, task_id: "task-1", wait_ms: 0 },
           toolName: "task_output",
         }),
       ),
@@ -660,7 +773,9 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row").getAttribute("data-tool-category")).toBe("context");
+    expect(
+      screen.getByTestId("tool-row").getAttribute("data-tool-category"),
+    ).toBe("context");
     expect(screen.getByTestId("tool-row-label").textContent).toContain(
       "Searched workspace for config",
     );
@@ -680,7 +795,9 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
+    expect(
+      screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer"),
+    ).toBeTruthy();
 
     rerender(
       <ToolRow
@@ -694,7 +811,9 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeNull();
+    expect(
+      screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer"),
+    ).toBeNull();
   });
 
   it("maps additional built-in tools to readable labels and distinct icons", () => {
@@ -708,7 +827,9 @@ describe("ToolRow", () => {
         onOpenFile={vi.fn()}
       />,
     );
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Loaded skill sdk");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Loaded skill sdk",
+    );
     expect(document.querySelector(".codicon-book")).toBeTruthy();
 
     rerender(
@@ -735,7 +856,9 @@ describe("ToolRow", () => {
         onOpenFile={vi.fn()}
       />,
     );
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Listed /workspace/src");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Listed /workspace/src",
+    );
     expect(document.querySelector(".codicon-folder")).toBeTruthy();
 
     rerender(
@@ -748,7 +871,9 @@ describe("ToolRow", () => {
         onOpenFile={vi.fn()}
       />,
     );
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Updated config log.level");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Updated config log.level",
+    );
     expect(document.querySelector(".codicon-gear")).toBeTruthy();
   });
 
@@ -767,7 +892,9 @@ describe("ToolRow", () => {
 
     expect(screen.queryByTestId("tool-row-toggle")).toBeNull();
     expect(screen.queryByTestId("tool-row-body")).toBeNull();
-    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
+    expect(
+      screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer"),
+    ).toBeTruthy();
     expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
   });
 
@@ -785,7 +912,9 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-cmd-purpose").className).toContain("tc-loading-shimmer");
+    expect(screen.getByTestId("tool-row-cmd-purpose").className).toContain(
+      "tc-loading-shimmer",
+    );
 
     rerender(
       <ToolRow
@@ -805,7 +934,9 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
+    expect(
+      screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer"),
+    ).toBeTruthy();
 
     rerender(
       <ToolRow
@@ -820,7 +951,9 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-cmd-purpose").className).not.toContain("tc-loading-shimmer");
+    expect(screen.getByTestId("tool-row-cmd-purpose").className).not.toContain(
+      "tc-loading-shimmer",
+    );
   });
 
   it("keeps background bash cards in a running state until the task finishes", () => {
@@ -831,7 +964,7 @@ describe("ToolRow", () => {
           backgroundRunning: true,
           backgroundTaskId: "task-1",
           status: "complete",
-          summary: "{\"taskId\":\"task-1\"}",
+          summary: '{"taskId":"task-1"}',
           summaryTitle: "Sleep in background",
           toolName: "bash",
         })}
@@ -839,9 +972,15 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-cmd-purpose").textContent).toBe("Running in background");
-    expect(screen.getByTestId("tool-row-cmd-purpose").className).toContain("tc-loading-shimmer");
-    expect(screen.getByTestId("disclosure-card").className).toContain("tc-disclosure-card--running");
+    expect(screen.getByTestId("tool-row-cmd-purpose").textContent).toBe(
+      "Running in background",
+    );
+    expect(screen.getByTestId("tool-row-cmd-purpose").className).toContain(
+      "tc-loading-shimmer",
+    );
+    expect(screen.getByTestId("disclosure-card").className).toContain(
+      "tc-disclosure-card--running",
+    );
 
     rerender(
       <ToolRow
@@ -851,7 +990,7 @@ describe("ToolRow", () => {
           backgroundRunning: false,
           backgroundTaskId: "task-1",
           status: "complete",
-          summary: "{\"taskId\":\"task-1\"}",
+          summary: '{"taskId":"task-1"}',
           summaryTitle: "Sleep in background",
           toolName: "bash",
         })}
@@ -859,9 +998,15 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-cmd-purpose").textContent).toBe("Ran · exit 23");
-    expect(screen.getByTestId("tool-row-cmd-purpose").className).not.toContain("tc-loading-shimmer");
-    expect(screen.getByTestId("disclosure-card").className).toContain("tc-disclosure-card--success");
+    expect(screen.getByTestId("tool-row-cmd-purpose").textContent).toBe(
+      "Ran · exit 23",
+    );
+    expect(screen.getByTestId("tool-row-cmd-purpose").className).not.toContain(
+      "tc-loading-shimmer",
+    );
+    expect(screen.getByTestId("disclosure-card").className).toContain(
+      "tc-disclosure-card--success",
+    );
   });
 
   it("renders a task_output countdown row that ticks each second and flips to past tense", () => {
@@ -871,7 +1016,7 @@ describe("ToolRow", () => {
     const { rerender } = render(
       <ToolRow
         item={buildTool({
-          args: { block: true, task_id: "task-1", timeout_ms: 10000 },
+          args: { block: true, task_id: "task-1", wait_ms: 10000 },
           startedAt: startedAt.getTime(),
           status: "running",
           summary: undefined,
@@ -881,36 +1026,42 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row").getAttribute("data-tool-category")).toBe("task");
-    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
-      "Waiting up to 10s for shell",
-    );
-    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeTruthy();
+    expect(
+      screen.getByTestId("tool-row").getAttribute("data-tool-category"),
+    ).toBe("task");
+    expect(
+      screen.getByTestId("tool-row-task-output-countdown").textContent,
+    ).toBe("Waiting up to 10s for shell");
+    expect(
+      screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer"),
+    ).toBeTruthy();
 
     act(() => {
       vi.advanceTimersByTime(1000);
     });
-    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
-      "Waiting up to 9s for shell",
-    );
+    expect(
+      screen.getByTestId("tool-row-task-output-countdown").textContent,
+    ).toBe("Waiting up to 9s for shell");
 
     rerender(
       <ToolRow
         item={buildTool({
-          args: { block: true, task_id: "task-1", timeout_ms: 10000 },
+          args: { block: true, task_id: "task-1", wait_ms: 10000 },
           startedAt: startedAt.getTime(),
           status: "complete",
-          summary: "{\"wakeReason\":\"timeout\"}",
+          summary: '{"wakeReason":"wait_window_elapsed"}',
           toolName: "task_output",
         })}
         onOpenFile={vi.fn()}
       />,
     );
 
-    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
-      "Waited for shell",
-    );
-    expect(screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer")).toBeNull();
+    expect(
+      screen.getByTestId("tool-row-task-output-countdown").textContent,
+    ).toBe("Waited for shell");
+    expect(
+      screen.getByTestId("tool-row-label").querySelector(".tc-loading-shimmer"),
+    ).toBeNull();
   });
 
   it("renders compact task_output countdown labels and falls back for non-blocking output reads", () => {
@@ -920,7 +1071,7 @@ describe("ToolRow", () => {
     const { rerender } = render(
       <ToolRow
         item={buildTool({
-          args: { block: true, task_id: "task-2", timeout_ms: 600000 },
+          args: { block: true, task_id: "task-2", wait_ms: 600000 },
           startedAt: now.getTime() - 1000,
           status: "running",
           summary: undefined,
@@ -930,33 +1081,35 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row").getAttribute("data-tool-category")).toBe("task");
-    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
-      "Waiting up to 9m59s for shell",
-    );
+    expect(
+      screen.getByTestId("tool-row").getAttribute("data-tool-category"),
+    ).toBe("task");
+    expect(
+      screen.getByTestId("tool-row-task-output-countdown").textContent,
+    ).toBe("Waiting up to 9m59s for shell");
 
     rerender(
       <ToolRow
         item={buildTool({
-          args: { block: false, task_id: "task-2", timeout_ms: 0 },
+          args: { block: false, task_id: "task-2", wait_ms: 0 },
           status: "complete",
-          summary: "{\"finished\":false}",
+          summary: '{"finished":false}',
           toolName: "task_output",
         })}
         onOpenFile={vi.fn()}
       />,
     );
 
-    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
-      "Read output task-2",
-    );
+    expect(
+      screen.getByTestId("tool-row-task-output-countdown").textContent,
+    ).toBe("Read output task-2");
   });
 
   it("renders interrupted task_output rows in past-tense stop wording", () => {
     render(
       <ToolRow
         item={buildTool({
-          args: { block: true, task_id: "task-3", timeout_ms: 5000 },
+          args: { block: true, task_id: "task-3", wait_ms: 5000 },
           startedAt: Date.now(),
           status: "interrupted",
           summary: "[interrupted]",
@@ -966,9 +1119,9 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("tool-row-task-output-countdown").textContent).toBe(
-      "Stopped waiting for shell",
-    );
+    expect(
+      screen.getByTestId("tool-row-task-output-countdown").textContent,
+    ).toBe("Stopped waiting for shell");
   });
 
   it("formats countdown boundaries with shared helpers", () => {
@@ -1009,21 +1162,36 @@ describe("ToolRow", () => {
       />,
     );
 
-    expect(screen.getByTestId("answer-card-question").textContent).toContain("Deploy where?");
-    expect(screen.getByTestId("answer-option-deploy_target").textContent).toContain("Staging");
+    expect(screen.getByTestId("answer-card-question").textContent).toContain(
+      "Deploy where?",
+    );
+    expect(
+      screen.getByTestId("answer-option-deploy_target").textContent,
+    ).toContain("Staging");
   });
 
   it("commandBinaries parses, dedupes and caps command-name tags", () => {
     expect(commandBinaries("git status")).toEqual(["git"]);
-    expect(commandBinaries("git status && echo '---' && git log")).toEqual(["git", "echo"]);
-    expect(commandBinaries("cat a | grep foo | sort")).toEqual(["cat", "grep", "sort"]);
+    expect(commandBinaries("git status && echo '---' && git log")).toEqual([
+      "git",
+      "echo",
+    ]);
+    expect(commandBinaries("cat a | grep foo | sort")).toEqual([
+      "cat",
+      "grep",
+      "sort",
+    ]);
     expect(commandBinaries("FOO=bar sudo ./deploy.sh")).toEqual(["deploy.sh"]);
     expect(commandBinaries("/usr/local/bin/node script.js")).toEqual(["node"]);
     expect(commandBinaries("a; b; c; d; e")).toEqual(["a", "b", "c"]);
     expect(
-      commandBinaries("cd /tmp\n# generate icon\ncat <<'SVG' > icon.svg\n<svg>\n</svg>\nSVG\nsvgcleaner icon.svg"),
+      commandBinaries(
+        "cd /tmp\n# generate icon\ncat <<'SVG' > icon.svg\n<svg>\n</svg>\nSVG\nsvgcleaner icon.svg",
+      ),
     ).toEqual(["cd", "cat", "svgcleaner"]);
-    expect(commandBinaries("git status && # comment only\n<svg>\n> out.txt")).toEqual(["git"]);
+    expect(
+      commandBinaries("git status && # comment only\n<svg>\n> out.txt"),
+    ).toEqual(["git"]);
     expect(commandBinaries("")).toEqual([]);
     expect(commandBinaries(undefined)).toEqual([]);
   });
@@ -1042,7 +1210,71 @@ describe("ToolRow", () => {
     );
 
     expect(screen.queryByTestId("tool-row-running-indicator")).toBeNull();
-    expect(screen.getByTestId("tool-row-label").textContent).toContain("Interrupted edit");
-    expect(screen.getByTestId("tool-row-body").textContent).toContain("Interrupted");
+    expect(screen.getByTestId("tool-row-label").textContent).toContain(
+      "Interrupted edit",
+    );
+    expect(screen.getByTestId("tool-row-body").textContent).toContain(
+      "Interrupted",
+    );
+  });
+
+  it("shows bounded live shell output, five-line preview, full log, and final summary", () => {
+    const onOpenFile = vi.fn();
+    const liveOutput = Array.from(
+      { length: 510 },
+      (_, index) => `line-${index}`,
+    ).join("\n");
+    const { rerender } = render(
+      <ToolRow
+        item={buildTool({
+          status: "streaming",
+          toolName: "bash",
+          args: { command: "build" },
+          liveOutput: `${liveOutput}\nstdout: compiling\nstderr: warning`,
+          logPath: "/tmp/full.log",
+          summary: undefined,
+        })}
+        onOpenFile={onOpenFile}
+      />,
+    );
+    const preview = screen.getByTestId("terminal-output-preview");
+    expect(preview.textContent).toContain("line-509");
+    expect(preview.textContent).toContain("stderr: warning");
+    expect(preview.textContent).not.toContain("line-504");
+    fireEvent.click(screen.getByTestId("tool-row-toggle"));
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain(
+      "line-509",
+    );
+    expect(screen.getByTestId("tool-row-terminal").textContent).not.toContain(
+      "line-0",
+    );
+    fireEvent.click(screen.getByTestId("tool-row-full-log"));
+    expect(onOpenFile).toHaveBeenCalledWith("/tmp/full.log");
+    expect(
+      screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded"),
+    ).toBe("true");
+
+    rerender(
+      <ToolRow
+        item={buildTool({
+          status: "complete",
+          toolName: "bash",
+          args: { command: "build" },
+          liveOutput,
+          logPath: "/tmp/full.log",
+          summary: "final authoritative summary",
+        })}
+        onOpenFile={onOpenFile}
+      />,
+    );
+    expect(
+      screen.getByTestId("tool-row-toggle").getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(screen.getByTestId("tool-row-terminal").textContent).toContain(
+      "final authoritative summary",
+    );
+    expect(screen.getByTestId("tool-row-terminal").textContent).not.toContain(
+      "stderr: warning",
+    );
   });
 });

@@ -239,6 +239,11 @@ pub struct ProdVerifierDeps {
     pub agent_workspace_dir: std::path::PathBuf,
     pub skill_set: Arc<parking_lot::RwLock<crate::core::skill::SkillSet>>,
     pub skills_config: crate::infra::config::SkillsConfig,
+    pub bash_config: crate::infra::config::ToolsBashConfig,
+    pub gate: Arc<dyn crate::core::permission::PermissionGate>,
+    pub confirmation: Arc<dyn crate::core::tools::contract::confirmation::UserConfirmationProvider>,
+    pub audit: Arc<dyn crate::infra::AuditRecorder>,
+    pub bash_ast: crate::core::permission::BashAstChecker,
     pub plan_runtime: Weak<PlanRuntime>,
     pub model: String,
 }
@@ -295,6 +300,11 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let web_fetch_runtime = Arc::clone(&deps.web_fetch_runtime);
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
+        let bash_config = deps.bash_config.clone();
+        let gate = Arc::clone(&deps.gate);
+        let confirmation = Arc::clone(&deps.confirmation);
+        let audit = Arc::clone(&deps.audit);
+        let bash_ast = deps.bash_ast.clone();
         let expose_skills =
             plan_runtime.expose_skills_to_reviewer() && !skill_set.visible_skills().is_empty();
         let tool_defs = resolve_internal_tools(&verifier_allowed_tools_with_policy(expose_skills));
@@ -333,6 +343,18 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                     let child_session_id = spawn_ctx.child_session_id.clone();
                     let cancel_token = spawn_ctx.cancel_token.clone();
                     let transcript_root = agent_trail_dir.clone();
+                    let bash_task_registry =
+                        crate::core::tools::primitive::build_bash_task_registry(
+                            &bash_config,
+                            std::path::PathBuf::from(&transcript_root)
+                                .join("tool-results")
+                                .join(format!("subagent-{}", spawn_ctx.subagent_type.as_str()))
+                                .join(&child_session_id),
+                            gate.clone(),
+                            confirmation.clone(),
+                            audit.clone(),
+                            bash_ast.clone(),
+                        );
                     let transcript_sink =
                         crate::core::session::subagent_transcript::open_subagent_transcript(
                             &transcript_root,
@@ -372,7 +394,8 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                     };
                     let mut agent_loop =
                         AgentLoop::new(llm, primitive, event_bus, cfg, cancel_token.clone())
-                            .with_web_fetch_runtime(web_fetch_runtime);
+                            .with_web_fetch_runtime(web_fetch_runtime)
+                            .with_bash_task_registry(bash_task_registry);
                     let initial_messages = vec![
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),

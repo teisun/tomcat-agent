@@ -80,7 +80,10 @@ fn format_resolve_auto_by_wire_api() {
         ThinkingFormat::Deepseek
     );
     assert_eq!(thinking_format_for_api("doubao"), ThinkingFormat::Doubao);
-    assert_eq!(default_thinking_format_for_api("openai-responses"), "openai");
+    assert_eq!(
+        default_thinking_format_for_api("openai-responses"),
+        "openai"
+    );
     assert_eq!(
         default_thinking_format_for_api("anthropic-messages"),
         "anthropic"
@@ -245,7 +248,8 @@ fn anthropic_request_caps_budget_against_requested_max_tokens() {
     assert_eq!(r.max_tokens, 1024);
     assert_eq!(r.thinking.as_ref().unwrap()["budget_tokens"], 768);
 
-    let off = resolve_anthropic_request(&cfg_with(true, "off"), ThinkingFormat::Anthropic, Some(400));
+    let off =
+        resolve_anthropic_request(&cfg_with(true, "off"), ThinkingFormat::Anthropic, Some(400));
     assert!(off.thinking.is_none());
     assert_eq!(off.max_tokens, 400);
 }

@@ -64,7 +64,7 @@ impl PrimitiveExecutor for MockPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<BashResult, AppError> {
         Ok(BashResult {
             stdout: "ok".to_string(),

@@ -14,8 +14,8 @@ use crate::core::llm::provider::LlmProvider;
 use crate::core::llm::replay_policy::ProviderCompatProfile;
 use crate::core::llm::retry_delay::provider_retry_delay;
 use crate::core::llm::types::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ChatResponse,
-    FileSource, ImageSource, StreamEvent,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, ChatRequest, ChatResponse, FileSource,
+    ImageSource, StreamEvent,
 };
 use crate::infra::config::{LlmFilesConfig, LlmRuntimeConfig};
 use crate::infra::error::{
@@ -112,7 +112,8 @@ impl AnthropicProvider {
     }
 
     fn thinking_format_for_wire(&self) -> ThinkingFormat {
-        self.configured_thinking_format.resolve_for_api(PROVIDER_NAME)
+        self.configured_thinking_format
+            .resolve_for_api(PROVIDER_NAME)
     }
 
     async fn run_non_stream_with_stale<T, F>(&self, fut: F) -> Result<T, AppError>
@@ -137,10 +138,7 @@ impl AnthropicProvider {
         }
     }
 
-    fn cached_files_adapter(
-        &self,
-        files_cfg: &LlmFilesConfig,
-    ) -> Option<Arc<dyn FilesApiAdapter>> {
+    fn cached_files_adapter(&self, files_cfg: &LlmFilesConfig) -> Option<Arc<dyn FilesApiAdapter>> {
         if !self.capabilities.files {
             return None;
         }

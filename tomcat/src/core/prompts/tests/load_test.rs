@@ -6,10 +6,11 @@ fn planner_prompt_mentions_create_plan_and_ask_question() {
     assert!(s.contains("create_plan"));
     assert!(s.contains("ask_question"));
     assert!(s.contains("PLAN mode"));
-    assert!(s.contains("plan or proposal/solution"));
-    assert!(s.contains("MUST use `create_plan` or `update_plan`"));
+    assert!(s.contains("requested plan/proposal creation or revision"));
+    assert!(s.contains("New plan: use `create_plan`"));
+    assert!(s.contains("Existing plan body or `## Goal`: call `read`, then use `edit`"));
+    assert!(s.contains("Existing `frontmatter.todos`: use `update_plan`"));
     assert!(s.contains("Do NOT emit a plan/proposal as prose"));
-    assert!(s.contains("技术方案"));
 }
 
 #[test]
@@ -111,12 +112,20 @@ fn parallel_tools_template_guides_batching() {
 }
 
 #[test]
-fn verification_template_references_mini_verification_and_forbids_default_test() {
+fn verification_template_is_language_neutral_and_delegates_mode_scope() {
     let s = load(PromptKey::SystemVerification);
-    assert!(s.contains("fabricate"));
-    assert!(s.contains("Mini verification"));
-    assert!(s.contains("P0-P6"));
-    assert!(s.contains("npm test"));
+    assert!(s.contains("real completion"));
+    assert!(s.contains("Never fabricate"));
+    assert!(s.contains("ordinary CHAT changes"));
+    assert!(s.contains("focused quick check proportional"));
+    assert!(s.contains("In PLAN or EXEC"));
+    assert!(s.contains("mode reminder and active plan"));
+    assert!(s.contains("do not rerun the same command unchanged"));
+    assert!(s.contains("`task_output`"));
+    assert!(s.contains("`task_stop`"));
+    assert!(!s.contains("Mini verification"));
+    assert!(!s.contains("Cargo.toml"));
+    assert!(!s.contains("`cargo test`"));
 }
 
 #[test]
@@ -124,9 +133,15 @@ fn planner_prompt_prefers_thorough_decomposition_and_multi_perspective_tests() {
     let s = load(PromptKey::PlannerReminder);
     // engineering-standards #10：宁多勿少，取代原"避免过度拆解"。
     assert!(!s.contains("Avoid over-decomposition"));
-    assert!(s.contains("err on the side of more"));
-    // engineering-standards #9：多视角测试。
-    assert!(s.contains("unit, integration, and E2E"));
+    assert!(s.contains("Err on the side"));
+    assert!(s.contains("of more, smaller items"));
+    // engineering-standards #9：按独特风险分层的多视角测试。
+    assert!(s.contains("unit, integration, and\n  E2E"));
+    assert!(s.contains("only where it catches a distinct failure type"));
+    assert!(s.contains("verification batches as shared\n  build/test boundaries"));
+    assert!(s.contains("share a build target"));
+    assert!(s.contains("milestone-level verification"));
+    assert!(s.contains("user, project rules, manifest, or documentation"));
     // engineering-standards #6-8 在 planner 的重申锚点。
     assert!(s.contains("first principles"));
     assert!(s.contains("ASCII diagram"));
@@ -160,4 +175,89 @@ fn standards_6_7_8_are_byte_identical_in_core_identity_planner_and_reviewers() {
             "{label} 应逐字出现在 reviewer_code"
         );
     }
+}
+
+#[test]
+fn executor_prompt_uses_p0_p5_evidence_without_ecosystem_specific_defaults() {
+    let s = load(PromptKey::ExecutorReminderFmt);
+    for phase in ["P0:", "P1:", "P2:", "P3:", "P4:", "P5:"] {
+        assert!(s.contains(phase), "executor should contain {phase}");
+    }
+    assert!(!s.contains("P6:"));
+    assert!(s.contains("active plan or user request"));
+    assert!(s.contains("nearest manifest"));
+    assert!(s.contains("README, CONTRIBUTING, CI workflows"));
+    assert!(s.contains("existing tests near the changed code"));
+    assert!(s.contains("Never default to"));
+    assert!(s.contains("whole-workspace `npm test`, `cargo test`, or `pytest`"));
+
+    // Cargo.toml is one manifest example and cargo test appears only in the
+    // cross-ecosystem prohibition; neither is a Rust-specific injected policy.
+    assert!(s.contains("package.json, Cargo.toml, pyproject.toml"));
+    assert!(!s.contains("Rust project"));
+    assert!(!s.contains("Cargo workspace must"));
+    assert!(!s.contains("run `cargo test` for Rust"));
+}
+
+#[test]
+fn long_command_wait_expiry_keeps_same_task_without_unchanged_rerun_contract() {
+    let verification = load(PromptKey::SystemVerification);
+    let monitor = load(PromptKey::SystemBackgroundShellMonitor);
+
+    assert!(verification.contains("foreground timeout or wait expires"));
+    assert!(verification.contains("do not rerun the same command unchanged"));
+    assert!(verification.contains("Inspect it with `task_output`"));
+    assert!(monitor.contains("`task_id` + `log_path` immediately"));
+    assert!(monitor.contains("task_output(task_id, since=..., block=true, wait_ms=...)"));
+    assert!(monitor.contains("a progress check, **not** a failure"));
+    assert!(monitor.contains("returned `next_offset`"));
+    assert!(
+        monitor.contains("use `task_stop` when stopping it is appropriate")
+            || verification.contains("use `task_stop` when stopping it is appropriate")
+    );
+}
+
+#[test]
+fn planner_and_executor_share_one_scoped_verification_batch_per_target_contract() {
+    let planner = load(PromptKey::PlannerReminder);
+    let executor = load(PromptKey::ExecutorReminderFmt);
+
+    assert!(planner.contains("verification batches as shared\n  build/test boundaries"));
+    assert!(
+        planner.contains("Group todos that share a build target into named verification batches")
+    );
+    assert!(planner.contains("milestone-level verification as the default granularity"));
+    assert!(
+        planner.contains("Do not schedule the same test family once per todo and again at the end")
+    );
+    assert!(
+        executor.contains("Follow the building plan's verification scope, timing, and batching")
+    );
+    assert!(executor
+        .contains("P0: commands and verification batches in the active plan or user request"));
+    assert!(executor.contains("Prefer the project's own focused command and command order"));
+}
+
+#[test]
+fn dynamic_time_regression_uses_plan_project_evidence_and_bounded_verification_contract() {
+    let workspace = load(PromptKey::SystemWorkspaceContext);
+    let verification = load(PromptKey::SystemVerification);
+    let executor = load(PromptKey::ExecutorReminderFmt);
+
+    assert!(!workspace.contains("{now}"));
+    assert!(!workspace.contains("Current date and time"));
+    assert!(executor
+        .contains("P0: commands and verification batches in the active plan or user request"));
+    assert!(executor.contains("P1: injected project rules"));
+    assert!(executor.contains("P2: the nearest manifest"));
+    assert!(executor.contains("Never default to"));
+    assert!(verification.contains("do not rerun the same command unchanged"));
+
+    let cargo_test_mentions = executor.matches("cargo test").count()
+        + verification.matches("cargo test").count()
+        + workspace.matches("cargo test").count();
+    assert_eq!(
+        cargo_test_mentions, 1,
+        "Cargo test should appear only in the bounded anti-default example"
+    );
 }

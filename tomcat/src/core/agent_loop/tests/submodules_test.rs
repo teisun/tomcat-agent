@@ -87,7 +87,7 @@ impl PrimitiveExecutor for SkillFilePrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()
     }
@@ -148,7 +148,7 @@ impl PrimitiveExecutor for RecordingSkillPrimitive {
         _cwd: Option<&str>,
         _plugin_id: &str,
         _argv: Option<&[String]>,
-        _timeout_ms: Option<u64>,
+        _foreground_wait_ms: Option<u64>,
     ) -> Result<crate::core::tools::primitive::BashResult, AppError> {
         unreachable!()
     }
@@ -968,20 +968,57 @@ async fn tool_exec_task_list_without_registry_returns_friendly_error() {
 }
 
 #[tokio::test]
-async fn tool_exec_verifier_background_bash_without_registry_mentions_subagent() {
+async fn tool_exec_verifier_bash_uses_tracked_registry_when_available() {
     use crate::core::agent_loop::tool_exec::execute_tool_full;
     use crate::core::agent_loop::types::SubagentType;
+    use crate::core::tools::primitive::BashTaskRegistry;
 
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = Arc::new(BashTaskRegistry::new(dir.path().join("tool-results")));
+    let registry_opt = Some(registry.clone());
     let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(MockPrimitiveExecutor);
+    let foreground_tc = ToolCallInfo {
+        id: "fgv1".to_string(),
+        name: "bash".to_string(),
+        arguments: r#"{"command":"printf verifier-front-ok"}"#.to_string(),
+    };
+    let foreground = execute_tool_full(
+        &primitive,
+        &None,
+        &registry_opt,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::Verifier,
+        &tokio_util::sync::CancellationToken::new(),
+        &foreground_tc,
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        !foreground.is_error,
+        "verifier 前台 bash 应可用: {}",
+        foreground.model_text
+    );
+    assert!(
+        foreground.model_text.contains("verifier-front-ok"),
+        "前台执行应返回实际输出: {}",
+        foreground.model_text
+    );
+
     let tc = ToolCallInfo {
         id: "bgv1".to_string(),
         name: "bash".to_string(),
-        arguments: r#"{"command":"sleep 1","run_in_background":true}"#.to_string(),
+        arguments: r#"{"command":"i=0; while [ $i -lt 8 ]; do echo verifier-bg-$i; i=$((i+1)); sleep 0.05; done","run_in_background":true}"#.to_string(),
     };
     let outcome = execute_tool_full(
         &primitive,
         &None,
-        &None,
+        &registry_opt,
         None,
         None,
         None,
@@ -995,23 +1032,38 @@ async fn tool_exec_verifier_background_bash_without_registry_mentions_subagent()
         None,
     )
     .await;
-    assert!(outcome.is_error);
     assert!(
-        outcome
-            .model_text
-            .contains("currently unsupported in this subagent"),
-        "verifier 子 Agent 文案应说明当前子 Agent 不支持 background bash：{}",
+        !outcome.is_error,
+        "verifier 后台 bash 应进入 tracked 路径: {}",
         outcome.model_text
     );
+    let ticket: serde_json::Value =
+        serde_json::from_str(&outcome.model_text).expect("ticket 应为合法 JSON");
+    let task_id = ticket["taskId"]
+        .as_str()
+        .expect("ticket 应含 taskId")
+        .to_string();
     assert!(
-        outcome.model_text.contains("foreground `bash`"),
-        "verifier 子 Agent 文案应提示改用前台 bash：{}",
+        !task_id.is_empty(),
+        "tracked verifier bash 应返回 taskId: {}",
         outcome.model_text
     );
+
+    let out_tc = ToolCallInfo {
+        id: "to-v1".to_string(),
+        name: "task_output".to_string(),
+        arguments: format!(r#"{{"task_id":"{}","block":true,"wait_ms":5000}}"#, task_id),
+    };
+    let (out_msg, out_err, _) = execute_tool(&primitive, &None, &registry_opt, None, &out_tc).await;
+    assert!(!out_err, "verifier task_output 必须可用: {}", out_msg);
+    let chunk: serde_json::Value = serde_json::from_str(&out_msg).expect("chunk json");
     assert!(
-        !outcome.model_text.contains("BashTaskRegistry"),
-        "verifier 子 Agent 文案不应泄漏内部 registry 术语：{}",
-        outcome.model_text
+        chunk["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("verifier-bg-"),
+        "task_output 应拿到后台输出: {}",
+        out_msg
     );
 }
 
@@ -1130,7 +1182,7 @@ async fn task_output_block_true_returns_finished_on_natural_exit() {
         id: "to-blk-1".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":1500}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":1500}}"#,
             task_id
         ),
     };
@@ -1164,7 +1216,7 @@ async fn task_output_block_true_returns_finished_on_natural_exit() {
     assert_eq!(chunk["finished"], serde_json::Value::Bool(true));
 }
 
-/// timeout 是非终态：`wakeReason="timeout" && finished=false`。若自 `since` 之后
+/// timeout 是非终态：`wakeReason="wait_window_elapsed" && finished=false`。若自 `since` 之后
 /// 仍无新输出，则允许 `next_offset == since`；若此前已有输出，则返回最近 tail 快照
 /// 供模型判断是否继续等待。
 #[tokio::test]
@@ -1192,7 +1244,7 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
         id: "to-tmo".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":5000}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":5000}}"#,
             task_id
         ),
     };
@@ -1217,7 +1269,7 @@ async fn task_output_block_true_timeout_is_non_terminal_wait_slice() {
     let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
     assert_eq!(
         chunk["wakeReason"],
-        serde_json::Value::String("timeout".into())
+        serde_json::Value::String("wait_window_elapsed".into())
     );
     assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
     assert_eq!(chunk["nextOffset"].as_u64(), Some(0));
@@ -1266,7 +1318,7 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
         id: "to-tail".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":5000}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":5000}}"#,
             task_id
         ),
     };
@@ -1291,7 +1343,7 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
     let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
     assert_eq!(
         chunk["wakeReason"],
-        serde_json::Value::String("timeout".into())
+        serde_json::Value::String("wait_window_elapsed".into())
     );
     assert_eq!(chunk["finished"], serde_json::Value::Bool(false));
     let content = chunk["content"].as_str().unwrap_or_default();
@@ -1304,7 +1356,7 @@ async fn task_output_block_true_timeout_returns_tail_snapshot_when_task_is_still
     let _ = registry.stop(&task_id).await;
 }
 
-/// `timeout_ms=0` 等价 `block=false`：返回不带 wakeReason 字段。
+/// `wait_ms=0` 等价 `block=false`：返回不带 wakeReason 字段。
 #[tokio::test]
 async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
     use crate::core::agent_loop::tool_exec::execute_tool_full;
@@ -1329,7 +1381,7 @@ async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
         id: "to-z".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":0}}"#,
+            r#"{{"task_id":"{}","since":0,"block":false,"wait_ms":0}}"#,
             task_id
         ),
     };
@@ -1360,14 +1412,14 @@ async fn task_output_timeout_zero_is_equivalent_to_non_blocking() {
     let _ = registry.stop(&task_id).await;
 }
 
-/// `timeout_ms` 上限 cap：传超大值时，task_output 发出的实时 update 应显示 600_000 ms。
-/// 这里仍用 cancel 路径快速收尾，但真正断言的是第一帧 `partialResult.timeoutMs`。
+/// `wait_ms` 上限 cap：传超大值时，task_output 发出的实时 update 应显示 600_000 ms。
+/// 这里仍用 cancel 路径快速收尾，但真正断言的是第一帧 `partialResult.waitMs`。
 #[tokio::test]
-async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
+async fn task_output_wait_ms_cap_does_not_block_indefinitely() {
     use crate::core::agent_loop::tool_exec::execute_tool_full;
     use crate::core::agent_loop::types::SubagentType;
     use crate::core::tools::primitive::BashTaskRegistry;
-    use crate::infra::event_bus::{EventContext, EventBus, ScopedEventEmitter};
+    use crate::infra::event_bus::{EventBus, EventContext, ScopedEventEmitter};
     use crate::infra::wire;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1406,7 +1458,7 @@ async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
         id: "to-cap".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":999999999}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":999999999}}"#,
             task_id
         ),
     };
@@ -1429,32 +1481,32 @@ async fn task_output_timeout_ms_cap_does_not_block_indefinitely() {
     )
     .await;
     let elapsed = started.elapsed();
-    let timeout_ms = captured
+    let wait_ms = captured
         .lock()
         .unwrap()
         .as_ref()
         .and_then(|payload| payload.get("partialResult"))
-        .and_then(|partial| partial.get("timeoutMs"))
+        .and_then(|partial| partial.get("waitMs"))
         .and_then(serde_json::Value::as_u64);
     assert!(
         elapsed < std::time::Duration::from_secs(5),
         "cancel 应当在 ~150ms 后命中，{:?}",
         elapsed
     );
-    assert_eq!(timeout_ms, Some(600_000), "超大 timeout_ms 应被 cap 到 10 分钟");
+    assert_eq!(wait_ms, Some(600_000), "超大 wait_ms 应被 cap 到 10 分钟");
     assert!(outcome.is_error, "cancel 路径返回 is_error=true");
 
     bus.off(listener_id);
     let _ = registry.stop(&task_id).await;
 }
 
-/// `timeout_ms` 下限 floor：传 1 ms 时，task_output 发出的实时 update 应抬到 5_000 ms。
+/// `wait_ms` 下限 floor：传 1 ms 时，task_output 发出的实时 update 应抬到 5_000 ms。
 #[tokio::test]
-async fn task_output_timeout_ms_floor_promotes_short_wait_slice() {
+async fn task_output_wait_ms_floor_promotes_short_wait_slice() {
     use crate::core::agent_loop::tool_exec::execute_tool_full;
     use crate::core::agent_loop::types::SubagentType;
     use crate::core::tools::primitive::BashTaskRegistry;
-    use crate::infra::event_bus::{EventContext, EventBus, ScopedEventEmitter};
+    use crate::infra::event_bus::{EventBus, EventContext, ScopedEventEmitter};
     use crate::infra::wire;
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1492,7 +1544,10 @@ async fn task_output_timeout_ms_floor_promotes_short_wait_slice() {
     let out_tc = ToolCallInfo {
         id: "to-floor".into(),
         name: "task_output".into(),
-        arguments: format!(r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":1}}"#, task_id),
+        arguments: format!(
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":1}}"#,
+            task_id
+        ),
     };
     let outcome = execute_tool_full(
         &primitive,
@@ -1511,14 +1566,14 @@ async fn task_output_timeout_ms_floor_promotes_short_wait_slice() {
         None,
     )
     .await;
-    let timeout_ms = captured
+    let wait_ms = captured
         .lock()
         .unwrap()
         .as_ref()
         .and_then(|payload| payload.get("partialResult"))
-        .and_then(|partial| partial.get("timeoutMs"))
+        .and_then(|partial| partial.get("waitMs"))
         .and_then(serde_json::Value::as_u64);
-    assert_eq!(timeout_ms, Some(5_000), "短 wait slice 应被抬到 5 秒");
+    assert_eq!(wait_ms, Some(5_000), "短 wait slice 应被抬到 5 秒");
     assert!(outcome.is_error, "cancel 路径返回 is_error=true");
 
     bus.off(listener_id);
@@ -1559,7 +1614,7 @@ async fn task_output_block_true_claims_completion_route_on_finished() {
             id: "to-cr".into(),
             name: "task_output".into(),
             arguments: format!(
-                r#"{{"task_id":"{}","since":{},"block":true,"timeout_ms":3000}}"#,
+                r#"{{"task_id":"{}","since":{},"block":true,"wait_ms":3000}}"#,
                 task_id, since
             ),
         };
@@ -1633,7 +1688,7 @@ async fn task_output_block_true_releases_claim_on_timeout() {
         id: "to-rel".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":250}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":250}}"#,
             task_id
         ),
     };
@@ -1657,7 +1712,7 @@ async fn task_output_block_true_releases_claim_on_timeout() {
     let chunk: serde_json::Value = serde_json::from_str(&outcome.model_text).unwrap();
     assert_eq!(
         chunk["wakeReason"],
-        serde_json::Value::String("timeout".into())
+        serde_json::Value::String("wait_window_elapsed".into())
     );
     // routes 不应留 entry：让 lifecycle 后续兜底。
     assert!(routes.lock().get(&task_id).is_none());
@@ -1702,11 +1757,11 @@ async fn task_output_block_true_skips_wait_when_lifecycle_already_delivered() {
         id: "to-snk".into(),
         name: "task_output".into(),
         arguments: format!(
-            r#"{{"task_id":"{}","since":0,"block":true,"timeout_ms":100}}"#,
+            r#"{{"task_id":"{}","since":0,"block":true,"wait_ms":100}}"#,
             task_id
         ),
     };
-    // 即便 timeout_ms 只有 100ms，dispatcher 应在 entry 立即返回（不进 wait）。
+    // 即便 wait_ms 只有 100ms，dispatcher 应在 entry 立即返回（不进 wait）。
     let started = std::time::Instant::now();
     let outcome = execute_tool_full(
         &primitive,

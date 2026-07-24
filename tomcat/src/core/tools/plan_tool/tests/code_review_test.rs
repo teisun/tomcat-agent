@@ -149,7 +149,8 @@ async fn aborted_code_review_best_effort_completes_without_verifier() {
 }
 
 #[tokio::test]
-async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_completes_without_second_review() {
+async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_completes_without_second_review(
+) {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
@@ -213,7 +214,10 @@ async fn code_review_non_pass_returns_to_main_and_rounds_exhaustion_completes_wi
         .as_array()
         .unwrap()
         .iter()
-        .all(|item| !item["id"].as_str().unwrap_or_default().starts_with("cr_fix_")));
+        .all(|item| !item["id"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("cr_fix_")));
     assert_eq!(
         reviewer
             .call_count

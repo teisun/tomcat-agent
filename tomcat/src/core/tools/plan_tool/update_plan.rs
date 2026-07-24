@@ -248,8 +248,8 @@ pub async fn execute_for_tool(
         path: crate::infra::platform::format_home_path(&path),
         state: plan_state_after.as_str().to_string(),
     };
-    if !tx.derived_completed
-        && !(matches!(plan_state_before, PlanFileState::Completed)
+    if !(tx.derived_completed
+        || matches!(plan_state_before, PlanFileState::Completed)
             && matches!(plan_state_after, PlanFileState::Pending))
     {
         runtime.write_transcript_custom(serde_json::json!({

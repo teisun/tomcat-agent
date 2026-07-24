@@ -3,11 +3,18 @@ import type {
   AskQuestionWireRequest,
   ControlRequestFrame,
 } from "../../serveClient/protocol";
-import type { ServeAttachment, ServeContentSegment, ServeEvent } from "../../serveClient/wire";
+import type {
+  ServeAttachment,
+  ServeContentSegment,
+  ServeEvent,
+} from "../../serveClient/wire";
 import type { ParticipantPlanState } from "../../shared/planState";
 
 export type WebviewMessageSegment = ServeContentSegment;
-export type WebviewReference = Extract<ServeContentSegment, { type: "reference" }>;
+export type WebviewReference = Extract<
+  ServeContentSegment,
+  { type: "reference" }
+>;
 
 export interface ContextSearchMatch {
   description?: string | null;
@@ -114,15 +121,25 @@ export interface WebviewToolDisplayText {
 }
 
 export type WebviewToolDisplay =
-  | WebviewToolDisplayFile
-  | WebviewToolDisplayPlan
-  | WebviewToolDisplayText;
+  WebviewToolDisplayFile | WebviewToolDisplayPlan | WebviewToolDisplayText;
 
-export type WebviewToolStatus = "complete" | "interrupted" | "running" | "streaming";
+export type WebviewToolStatus =
+  "complete" | "interrupted" | "running" | "streaming";
 
 export interface WebviewToolDiffStat {
   added: number;
   removed: number;
+}
+
+export interface WebviewLiveToolOutputPayload {
+  kind?: "live_output";
+  logPath?: string;
+  nextOffset: number;
+  output: string;
+  sequence: number;
+  startOffset: number;
+  taskId?: string;
+  truncated?: boolean;
 }
 
 export interface WebviewPlanActivity {
@@ -143,6 +160,11 @@ export interface WebviewToolCard {
   backgroundExitCode?: number;
   backgroundRunning?: boolean;
   backgroundTaskId?: string;
+  liveOutput?: string;
+  liveOutputOffset?: number;
+  liveOutputSequence?: number;
+  liveOutputTruncated?: boolean;
+  logPath?: string;
   display?: WebviewToolDisplay;
   diff?: FileDiffLine[];
   diffStat?: WebviewToolDiffStat;
@@ -623,13 +645,19 @@ function isWebviewReferenceShape(value: unknown): value is WebviewReference {
     (value.kind === "selection" || value.kind === "file") &&
     isString(value.label) &&
     isString(value.path) &&
-    (value.lineStart === undefined || value.lineStart === null || typeof value.lineStart === "number") &&
-    (value.lineEnd === undefined || value.lineEnd === null || typeof value.lineEnd === "number") &&
+    (value.lineStart === undefined ||
+      value.lineStart === null ||
+      typeof value.lineStart === "number") &&
+    (value.lineEnd === undefined ||
+      value.lineEnd === null ||
+      typeof value.lineEnd === "number") &&
     (value.text === undefined || value.text === null || isString(value.text))
   );
 }
 
-function isContextSearchMatchShape(value: unknown): value is ContextSearchMatch {
+function isContextSearchMatchShape(
+  value: unknown,
+): value is ContextSearchMatch {
   return (
     isRecord(value) &&
     isWebviewReferenceShape(value.reference) &&
@@ -639,7 +667,9 @@ function isContextSearchMatchShape(value: unknown): value is ContextSearchMatch 
   );
 }
 
-export function sanitizeContextSearchMatches(value: unknown): ContextSearchMatch[] {
+export function sanitizeContextSearchMatches(
+  value: unknown,
+): ContextSearchMatch[] {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -663,19 +693,24 @@ export function coerceContextSearchResultEvent(
     query: value.query,
     requestId: value.requestId,
     sessionId:
-      value.sessionId === undefined || value.sessionId === null || isString(value.sessionId)
+      value.sessionId === undefined ||
+      value.sessionId === null ||
+      isString(value.sessionId)
         ? value.sessionId
         : undefined,
     truncated: value.truncated,
     type: "contextSearchResult",
     workspaceAvailable:
-      value.workspaceAvailable === undefined || typeof value.workspaceAvailable === "boolean"
+      value.workspaceAvailable === undefined ||
+      typeof value.workspaceAvailable === "boolean"
         ? value.workspaceAvailable
         : undefined,
   };
 }
 
-function isWebviewMessageSegmentShape(value: unknown): value is WebviewMessageSegment {
+function isWebviewMessageSegmentShape(
+  value: unknown,
+): value is WebviewMessageSegment {
   if (!isRecord(value) || !isString(value.type)) {
     return false;
   }
@@ -688,7 +723,9 @@ function isWebviewMessageSegmentShape(value: unknown): value is WebviewMessageSe
   return false;
 }
 
-export function isHostToWebviewFrame(value: unknown): value is HostToWebviewFrame {
+export function isHostToWebviewFrame(
+  value: unknown,
+): value is HostToWebviewFrame {
   return (
     isRecord(value) &&
     isString(value.messageId) &&
@@ -713,7 +750,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
       return (
         isRecord(value.data) &&
         isString(value.data.text) &&
-        (value.data.userMessageId === undefined || isString(value.data.userMessageId)) &&
+        (value.data.userMessageId === undefined ||
+          isString(value.data.userMessageId)) &&
         (value.data.segments === undefined ||
           (Array.isArray(value.data.segments) &&
             value.data.segments.every(isWebviewMessageSegmentShape)))
@@ -818,14 +856,17 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
           typeof value.data.planCardTopWithinStream === "number") &&
         (value.data.latestUserTopWithinStream === null ||
           typeof value.data.latestUserTopWithinStream === "number") &&
-        (value.data.overflowAnchor === null || typeof value.data.overflowAnchor === "string") &&
-        (value.data.stickyPromptText === null || typeof value.data.stickyPromptText === "string") &&
+        (value.data.overflowAnchor === null ||
+          typeof value.data.overflowAnchor === "string") &&
+        (value.data.stickyPromptText === null ||
+          typeof value.data.stickyPromptText === "string") &&
         typeof value.data.expandedThinkingCount === "number" &&
         typeof value.data.composerRowCount === "number" &&
         Array.isArray(value.data.expandedToolTitles) &&
         Array.isArray(value.data.timelineKinds) &&
         isRecord(value.data.composerControlMetrics) &&
-        (value.data.ctxLabel === null || typeof value.data.ctxLabel === "string") &&
+        (value.data.ctxLabel === null ||
+          typeof value.data.ctxLabel === "string") &&
         isRecord(value.data.streamMetrics) &&
         typeof value.data.streamMetrics.scrollTop === "number" &&
         typeof value.data.streamMetrics.scrollHeight === "number" &&
@@ -842,15 +883,19 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         (value.data.planCardTodoCountText === null ||
           typeof value.data.planCardTodoCountText === "string") &&
         typeof value.data.planNoticeReplayed === "boolean" &&
-        (value.data.planStateText === null || typeof value.data.planStateText === "string") &&
+        (value.data.planStateText === null ||
+          typeof value.data.planStateText === "string") &&
         typeof value.data.progressRow === "boolean" &&
         typeof value.data.loadingShimmerCount === "number" &&
         typeof value.data.planTodos === "number" &&
         Array.isArray(value.data.standaloneThinkingTitles) &&
-        value.data.standaloneThinkingTitles.every((title) => typeof title === "string") &&
+        value.data.standaloneThinkingTitles.every(
+          (title) => typeof title === "string",
+        ) &&
         typeof value.data.todoWidgetExpanded === "boolean" &&
         typeof value.data.todoWidgetItemCount === "number" &&
-        (value.data.todoWidgetTitle === null || typeof value.data.todoWidgetTitle === "string") &&
+        (value.data.todoWidgetTitle === null ||
+          typeof value.data.todoWidgetTitle === "string") &&
         typeof value.data.todoWidgetVisible === "boolean" &&
         typeof value.data.toolRowFlat === "boolean" &&
         typeof value.data.toolRowExpandable === "boolean" &&
@@ -882,10 +927,7 @@ export class PendingMessageTracker<T> {
     }
   >();
 
-  create(
-    messageId: string,
-    timeoutMs: number,
-  ): Promise<T> {
+  create(messageId: string, timeoutMs: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(messageId);
