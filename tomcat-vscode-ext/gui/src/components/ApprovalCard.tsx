@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 
 import {
   CUSTOM_OPTION_ID,
@@ -36,7 +36,7 @@ function createInitialDrafts(item: WebviewApprovalCard): Record<string, Question
   );
 }
 
-export function ApprovalCard({
+function ApprovalCardComponent({
   item,
   onAnswer,
 }: {
@@ -219,3 +219,12 @@ export function ApprovalCard({
     </section>
   );
 }
+
+function areApprovalCardPropsEqual(
+  previous: Readonly<Parameters<typeof ApprovalCardComponent>[0]>,
+  next: Readonly<Parameters<typeof ApprovalCardComponent>[0]>,
+): boolean {
+  return previous.item === next.item && previous.onAnswer === next.onAnswer;
+}
+
+export const ApprovalCard = memo(ApprovalCardComponent, areApprovalCardPropsEqual);

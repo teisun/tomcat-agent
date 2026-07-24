@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 import { PlanBuildModelSelect } from "./PlanBuildModelSelect";
 import type { WebviewPlanFileCard, WebviewTodo } from "../types";
 import { LoadingDots } from "./LoadingDots";
@@ -39,7 +41,7 @@ function todoCountLabel(count: number): string {
   return `${count} ${count === 1 ? "todo" : "todos"}`;
 }
 
-export function PlanFileCard({
+function PlanFileCardComponent({
   availableModels = [],
   buildModel = "",
   canBuild,
@@ -141,3 +143,22 @@ export function PlanFileCard({
     </section>
   );
 }
+
+function arePlanFileCardPropsEqual(
+  previous: Readonly<Parameters<typeof PlanFileCardComponent>[0]>,
+  next: Readonly<Parameters<typeof PlanFileCardComponent>[0]>,
+): boolean {
+  return (
+    previous.availableModels === next.availableModels &&
+    previous.buildModel === next.buildModel &&
+    previous.canBuild === next.canBuild &&
+    previous.creating === next.creating &&
+    previous.item === next.item &&
+    previous.onBuild === next.onBuild &&
+    previous.onOpenPlanFile === next.onOpenPlanFile &&
+    previous.onSetBuildModel === next.onSetBuildModel &&
+    previous.planTodos === next.planTodos
+  );
+}
+
+export const PlanFileCard = memo(PlanFileCardComponent, arePlanFileCardPropsEqual);

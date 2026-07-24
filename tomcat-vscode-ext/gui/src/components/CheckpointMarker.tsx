@@ -1,6 +1,8 @@
+import { memo } from "react";
+
 import type { WebviewCheckpointMarker } from "../types";
 
-export function CheckpointMarker({
+function CheckpointMarkerComponent({
   item,
   onRestore,
 }: {
@@ -33,3 +35,15 @@ export function CheckpointMarker({
     </div>
   );
 }
+
+function areCheckpointMarkerPropsEqual(
+  previous: Readonly<Parameters<typeof CheckpointMarkerComponent>[0]>,
+  next: Readonly<Parameters<typeof CheckpointMarkerComponent>[0]>,
+): boolean {
+  return previous.item === next.item && previous.onRestore === next.onRestore;
+}
+
+export const CheckpointMarker = memo(
+  CheckpointMarkerComponent,
+  areCheckpointMarkerPropsEqual,
+);

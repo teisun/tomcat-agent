@@ -1,3 +1,5 @@
+import { memo } from "react";
+
 import { DisclosureCard, type DisclosureStatusVariant } from "./DisclosureCard";
 
 import type { WebviewReviewRow } from "../types";
@@ -14,7 +16,7 @@ function disclosureVariant(item: WebviewReviewRow): DisclosureStatusVariant {
   return "neutral";
 }
 
-export function ReviewRow({ item }: { item: WebviewReviewRow }) {
+function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
   const shellClassName = "tc-tool-row-shell tc-tool-row-shell--standalone";
   const leadingIcon = (
     <span aria-hidden="true" className="tc-tool-row__leading-icon codicon codicon-shield" />
@@ -116,3 +118,8 @@ export function ReviewRow({ item }: { item: WebviewReviewRow }) {
     </div>
   );
 }
+
+export const ReviewRow = memo(
+  ReviewRowComponent,
+  (previous, next) => previous.item === next.item,
+);

@@ -44,7 +44,11 @@ import { parsePlanDocument } from "../planPreview/planDocument";
 import { ContextSearchService } from "./contextSearch";
 import { buildFileReference } from "./contextReferences";
 import { TomcatSessionPool } from "./sessionPool";
-import { WebviewStateStore } from "./state";
+import {
+  type StateBroadcasterFlushPlan,
+  StateBroadcaster,
+} from "./stateBroadcaster";
+import { type SessionRenderMutation, WebviewStateStore } from "./state";
 
 const HISTORY_PAGE_ENTRIES = 80;
 
@@ -259,6 +263,20 @@ function shouldReconcileSessionState(event: ServeEvent): boolean {
   );
 }
 
+function shouldForceServeEventFlush(event: ServeEvent): boolean {
+  return (
+    event.type === "message_end" ||
+    event.type === "tool_execution_end" ||
+    event.type === "turn_end" ||
+    event.type === "agent_end" ||
+    event.type === "agent_idle" ||
+    event.type === "agent_interrupted" ||
+    event.type === "plan.complete" ||
+    event.type === "plan.exit" ||
+    event.type === "plan.pending"
+  );
+}
+
 type PlanMetadataCacheEntry = {
   mtimeMs: number;
   overview?: string;
@@ -346,7 +364,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private serveEventQueue: Promise<void> = Promise.resolve();
   private readonly sessionPool: TomcatSessionPool;
   private readonly stateStore: WebviewStateStore;
+  private readonly stateBroadcaster: StateBroadcaster;
   private readonly eventSubscription: { dispose(): void };
+  private readonly sessionPatchFramesEnabled =
+    process.env.TOMCAT_DISABLE_SESSION_PATCHES !== "1";
   /** Plan paths already auto-opened after review, so repeats don't reopen. */
   private readonly autoOpenedPlanPaths = new Set<string>();
   /** `plan.create` gives us the path; `plan.review` is the actual open trigger. */
@@ -363,6 +384,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   constructor(private readonly deps: TomcatWebviewProviderDeps) {
     this.sessionPool = new TomcatSessionPool(deps.sessionRouter);
     this.stateStore = new WebviewStateStore();
+    this.stateBroadcaster = new StateBroadcaster({
+      delayMs: 16,
+      flush: (plan) => this.flushStateBroadcastPlan(plan),
+    });
     this.eventSubscription = deps.messenger.onEvent((event) => {
       this.serveEventQueue = this.serveEventQueue
         .then(() => this.handleServeEvent(event))
@@ -379,6 +404,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     this.messageSubscription?.dispose();
     this.visibilitySubscription?.dispose();
     this.eventSubscription.dispose();
+    this.stateBroadcaster.dispose();
     this.domSnapshots.rejectAll(new Error("Tomcat webview disposed"));
     for (const waiter of [...this.readyWaiters]) {
       clearTimeout(waiter.timeout);
@@ -406,7 +432,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     });
     this.visibilitySubscription = view.onDidChangeVisibility(() => {
       if (view.visible) {
-        void this.postState();
+        void this.broadcastFullState({ force: true });
       }
     });
   }
@@ -513,10 +539,14 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     return this.stateStore.snapshot();
   }
 
+  private peekState(): Readonly<WebviewStateSnapshot> {
+    return this.stateStore.view();
+  }
+
   private findToolCard(
     toolCallId: string,
   ): { sessionId: string; tool: WebviewToolCard } | undefined {
-    for (const [sessionId, session] of Object.entries(this.currentState().sessionViews)) {
+    for (const [sessionId, session] of Object.entries(this.peekState().sessionViews)) {
       const tool = session.timeline.find(
         (item): item is WebviewToolCard => item.type === "tool" && item.toolCallId === toolCallId,
       );
@@ -535,7 +565,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private pendingAttachmentsForSession(sessionId: string): WebviewPendingAttachment[] {
-    return this.currentState().sessionViews[sessionId]?.pendingAttachments ?? [];
+    return this.peekState().sessionViews[sessionId]?.pendingAttachments ?? [];
   }
 
   private async showOpenDialog(
@@ -579,7 +609,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       return;
     }
 
-    const existing = this.currentState().sessionViews[sessionId]?.pendingAttachments ?? [];
+    const existing = this.peekState().sessionViews[sessionId]?.pendingAttachments ?? [];
     const nextAttachments = [...existing];
     for (const entry of resolved) {
       if (entry.kind === "reference") {
@@ -599,7 +629,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     sessionId: string,
     messageId: string,
   ): { segments?: WebviewMessageSegment[]; submitKind: UserSubmitKind; text: string } | null {
-    const session = this.currentState().sessionViews[sessionId];
+    const session = this.peekState().sessionViews[sessionId];
     const message = session?.timeline.find(
       (item): item is WebviewMessageBlock =>
         item.type === "message" && item.kind === "user" && item.id === messageId,
@@ -735,7 +765,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private lookupApprovalSessionId(requestId: string): string | null {
-    for (const session of Object.values(this.currentState().sessionViews)) {
+    for (const session of Object.values(this.peekState().sessionViews)) {
       const approval = session.timeline.find(
         (item): item is WebviewApprovalCard =>
           item.type === "approval" && item.request.requestId === requestId,
@@ -790,6 +820,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       case "listCheckpoints":
         await this.refreshCheckpoints(intent.data.sessionId);
         await this.postState();
+        return;
+      case "resyncSessionView":
+        await this.postSessionView(intent.data.sessionId);
         return;
       case "loadOlderHistory":
         await this.loadOlderHistory(intent.data.sessionId);
@@ -905,7 +938,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         return;
       }
       case "removeAttachment": {
-        const sessionId = intent.data.sessionId ?? this.currentState().activeSessionId;
+        const sessionId = intent.data.sessionId ?? this.peekState().activeSessionId;
         if (!sessionId) {
           return;
         }
@@ -915,7 +948,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       }
       case "interrupt": {
         const sessionId = await this.ensureWebviewSessionWithoutHistory(
-          intent.data?.sessionId ?? this.currentState().activeSessionId,
+          intent.data?.sessionId ?? this.peekState().activeSessionId,
         );
         if (!sessionId) {
           await this.postState();
@@ -1099,7 +1132,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             );
           } else {
             await this.deps.ide.showFile(displayPath);
-            const sessionId = toolInfo?.sessionId ?? this.currentState().activeSessionId;
+            const sessionId = toolInfo?.sessionId ?? this.peekState().activeSessionId;
             if (sessionId) {
               this.stateStore.appendMessage(
                 sessionId,
@@ -1110,7 +1143,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
             }
           }
         } catch (error) {
-          const sessionId = this.currentState().activeSessionId;
+          const sessionId = this.peekState().activeSessionId;
           if (sessionId) {
             this.stateStore.appendMessage(
               sessionId,
@@ -1129,7 +1162,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
           try {
             await this.deps.ide.showFile(intent.data.path);
           } catch {
-            const sessionId = this.currentState().activeSessionId;
+            const sessionId = this.peekState().activeSessionId;
             if (sessionId) {
               this.stateStore.appendMessage(
                 sessionId,
@@ -1146,7 +1179,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         if (!pending) {
           const sessionId =
             this.lookupApprovalSessionId(intent.data.requestId)
-            ?? this.currentState().activeSessionId;
+            ?? this.peekState().activeSessionId;
           if (sessionId) {
             this.stateStore.appendMessage(
               sessionId,
@@ -1201,7 +1234,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     ) {
       this.sessionsAwaitingErrorHistoryRefresh.add(event.sessionId);
     }
-    this.stateStore.applyEvent(event);
+    const mutation = this.stateStore.applyEvent(event);
     await this.maybeAutoOpenPlanPreview(event);
     const previewRefresh = extractPlanPreviewRefreshArgs(event);
     if (previewRefresh && this.deps.refreshPlanPreview) {
@@ -1211,20 +1244,33 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         console.warn("Tomcat webview failed to refresh the plan preview", error);
       });
     }
+    let requiresSessionView = false;
     if (event.sessionId) {
       if (shouldReconcileSessionState(event)) {
         await this.refreshSessionState(event.sessionId, { trustBusy: false });
+        requiresSessionView = true;
       }
       if (event.type === "turn_end") {
         await this.refreshCheckpoints(event.sessionId);
+        requiresSessionView = true;
       }
       if (event.type === "agent_idle" && this.sessionsAwaitingErrorHistoryRefresh.has(event.sessionId)) {
         this.sessionsAwaitingErrorHistoryRefresh.delete(event.sessionId);
         await this.refreshSessionHistory(event.sessionId);
+        requiresSessionView = true;
       }
     }
     await this.postEvent(event);
-    await this.postState();
+    const force = shouldForceServeEventFlush(event);
+    if (!event.sessionId) {
+      await this.broadcastFullState({ force });
+      return;
+    }
+    if (requiresSessionView) {
+      await this.broadcastSession(event.sessionId, { force });
+      return;
+    }
+    await this.broadcastMutation(mutation, { force });
   }
 
   /**
@@ -1281,10 +1327,11 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private currentStateToSessionList() {
+    const state = this.peekState();
     return {
-      activeSessionId: this.currentState().activeSessionId,
+      activeSessionId: state.activeSessionId,
       scope: "disk" as const,
-      sessions: this.currentState().sessions.map((session) => ({
+      sessions: state.sessions.map((session) => ({
         busy: session.busy,
         isCurrent: session.isCurrent,
         sessionId: session.sessionId,
@@ -1295,7 +1342,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async ensureWebviewSession(sessionId: string | null): Promise<string | null> {
-    const target = sessionId ?? this.currentState().activeSessionId;
+    const target = sessionId ?? this.peekState().activeSessionId;
     if (!target) {
       const created = await this.sessionPool.createSession(this.deps.getDefaultCwd());
       await this.selectSession(created);
@@ -1308,7 +1355,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   private async ensureWebviewSessionWithoutHistory(
     sessionId: string | null,
   ): Promise<string | null> {
-    const target = sessionId ?? this.currentState().activeSessionId;
+    const target = sessionId ?? this.peekState().activeSessionId;
     if (!target) {
       const created = await this.sessionPool.createSession(this.deps.getDefaultCwd());
       this.stateStore.setActiveSession(created);
@@ -1330,6 +1377,75 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     });
   }
 
+  private async flushStateBroadcastPlan(
+    plan: StateBroadcasterFlushPlan,
+  ): Promise<void> {
+    if (!this.view || !this.isReady) {
+      return;
+    }
+    if (plan.fullState) {
+      await this.postStateFrame();
+      return;
+    }
+    for (const sessionId of plan.sessionIds) {
+      await this.postSessionView(sessionId);
+    }
+    for (const patch of plan.sessionPatches) {
+      if (!this.sessionPatchFramesEnabled) {
+        await this.postSessionView(patch.sessionId);
+        continue;
+      }
+      await this.postSessionPatch(
+        patch.sessionId,
+        patch.seq,
+        patch.ops,
+      );
+    }
+  }
+
+  private async broadcastFullState(
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    this.stateBroadcaster.markFullState();
+    if (options.force) {
+      await this.stateBroadcaster.forceFlush();
+    }
+  }
+
+  private async broadcastSession(
+    sessionId: string | null | undefined,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    if (!sessionId) {
+      if (options.force) {
+        await this.stateBroadcaster.forceFlush();
+      }
+      return;
+    }
+    this.stateBroadcaster.markSession(sessionId);
+    if (options.force) {
+      await this.stateBroadcaster.forceFlush();
+    }
+  }
+
+  private async broadcastMutation(
+    mutation: SessionRenderMutation,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    if (mutation.kind === "patch") {
+      if (this.sessionPatchFramesEnabled) {
+        this.stateBroadcaster.appendPatch(mutation.sessionId, mutation.ops);
+      } else {
+        this.stateBroadcaster.markSession(mutation.sessionId);
+      }
+    } else if (mutation.kind === "session") {
+      this.stateBroadcaster.markSession(mutation.sessionId);
+    }
+    if (options.force) {
+      await this.stateBroadcaster.forceFlush();
+    }
+  }
+
   private async postMessage(frame: HostToWebviewFrame): Promise<void> {
     if (!this.view) {
       return;
@@ -1338,6 +1454,10 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
   }
 
   private async postState(): Promise<void> {
+    await this.postStateFrame();
+  }
+
+  private async postStateFrame(): Promise<void> {
     if (!this.view || !this.isReady) {
       return;
     }
@@ -1349,6 +1469,45 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     });
   }
 
+  private async postSessionView(sessionId: string): Promise<void> {
+    if (!this.view || !this.isReady) {
+      return;
+    }
+    const view = this.stateStore.snapshotSession(sessionId);
+    if (!view) {
+      return;
+    }
+    const tab = this.stateStore.snapshotSessionTab(sessionId);
+    await this.postMessage({
+      channel: "sessionView",
+      content: {
+        sessionId,
+        tab,
+        view: await this.enrichPlanSession(view),
+      },
+      messageId: createHostFrameMessageId("session-view"),
+    });
+  }
+
+  private async postSessionPatch(
+    sessionId: string,
+    seq: number,
+    ops: StateBroadcasterFlushPlan["sessionPatches"][number]["ops"],
+  ): Promise<void> {
+    if (!this.view || !this.isReady || ops.length === 0) {
+      return;
+    }
+    await this.postMessage({
+      channel: "sessionPatch",
+      content: {
+        ops,
+        seq,
+        sessionId,
+      },
+      messageId: createHostFrameMessageId("session-patch"),
+    });
+  }
+
   async postInsertReference(sessionId: string, reference: WebviewReference): Promise<void> {
     await this.postEvent({
       reference,
@@ -1357,54 +1516,57 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     });
   }
 
-  private async enrichPlanCards(snapshot: WebviewStateSnapshot): Promise<WebviewStateSnapshot> {
-    const sessions = Object.values(snapshot.sessionViews);
+  private async enrichPlanSession(
+    session: WebviewStateSnapshot["sessionViews"][string],
+  ): Promise<WebviewStateSnapshot["sessionViews"][string]> {
+    const planCards = session.timeline.filter(
+      (item): item is WebviewPlanFileCard => item.type === "plan",
+    );
+    const createPlanTools = session.timeline.filter(
+      (item): item is WebviewToolCard =>
+        item.type === "tool" &&
+        item.toolName === "create_plan" &&
+        item.planActivity?.kind === "create" &&
+        typeof item.planPath === "string" &&
+        item.planPath.length > 0,
+    );
     await Promise.all(
-      sessions.map(async (session) => {
-        const planCards = session.timeline.filter(
-          (item): item is WebviewPlanFileCard => item.type === "plan",
-        );
-        const createPlanTools = session.timeline.filter(
-          (item): item is WebviewToolCard =>
-            item.type === "tool" &&
-            item.toolName === "create_plan" &&
-            item.planActivity?.kind === "create" &&
-            typeof item.planPath === "string" &&
-            item.planPath.length > 0,
-        );
-        await Promise.all(
-          [...planCards, ...createPlanTools].map(async (item) => {
-            const planPath = item.type === "plan" ? item.path : item.planPath;
-            if (!planPath) {
-              return;
-            }
-            const metadata = await readPlanMetadata(planPath, this.planMetadataCache);
-            if (item.type === "plan") {
-              if (metadata.title) {
-                item.title = metadata.title;
-              } else {
-                delete item.title;
-              }
-              if (metadata.overview) {
-                item.overview = metadata.overview;
-              } else {
-                delete item.overview;
-              }
-              return;
-            }
-            const planActivity = item.planActivity;
-            if (!planActivity) {
-              return;
-            }
-            item.planActivity = {
-              ...planActivity,
-              overview: metadata.overview ?? null,
-              title: metadata.title ?? planActivity.title ?? null,
-            };
-          }),
-        );
+      [...planCards, ...createPlanTools].map(async (item) => {
+        const planPath = item.type === "plan" ? item.path : item.planPath;
+        if (!planPath) {
+          return;
+        }
+        const metadata = await readPlanMetadata(planPath, this.planMetadataCache);
+        if (item.type === "plan") {
+          if (metadata.title) {
+            item.title = metadata.title;
+          } else {
+            delete item.title;
+          }
+          if (metadata.overview) {
+            item.overview = metadata.overview;
+          } else {
+            delete item.overview;
+          }
+          return;
+        }
+        const planActivity = item.planActivity;
+        if (!planActivity) {
+          return;
+        }
+        item.planActivity = {
+          ...planActivity,
+          overview: metadata.overview ?? null,
+          title: metadata.title ?? planActivity.title ?? null,
+        };
       }),
     );
+    return session;
+  }
+
+  private async enrichPlanCards(snapshot: WebviewStateSnapshot): Promise<WebviewStateSnapshot> {
+    const sessions = Object.values(snapshot.sessionViews);
+    await Promise.all(sessions.map((session) => this.enrichPlanSession(session)));
     return snapshot;
   }
 
@@ -1574,7 +1736,7 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (typeof this.deps.sessionRouter.getMessages !== "function") {
       return;
     }
-    const session = this.currentState().sessionViews[sessionId];
+    const session = this.peekState().sessionViews[sessionId];
     if (!session?.hasMoreHistory || session.historyLoading !== false) {
       return;
     }

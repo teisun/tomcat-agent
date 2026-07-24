@@ -1,6 +1,8 @@
+import { memo } from "react";
+
 import type { WebviewBoundaryBlock } from "../types";
 
-export function BoundaryBlock({ item }: { item: WebviewBoundaryBlock }) {
+function BoundaryBlockComponent({ item }: { item: WebviewBoundaryBlock }) {
   const title = item.coveredCount
     ? `Earlier history summary (${item.coveredCount} entries)`
     : "Earlier history summary";
@@ -14,3 +16,8 @@ export function BoundaryBlock({ item }: { item: WebviewBoundaryBlock }) {
     </details>
   );
 }
+
+export const BoundaryBlock = memo(
+  BoundaryBlockComponent,
+  (previous, next) => previous.item === next.item,
+);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import type { WebviewThinkingBlock } from "../types";
 
@@ -30,7 +30,7 @@ function summarizeThinking(text: string): string | null {
     : firstMeaningfulLine;
 }
 
-export function ThinkingBlock({
+function ThinkingBlockComponent({
   isStreaming = false,
   item,
   variant = "standalone",
@@ -99,3 +99,16 @@ export function ThinkingBlock({
     </section>
   );
 }
+
+function areThinkingBlockPropsEqual(
+  previous: Readonly<Parameters<typeof ThinkingBlockComponent>[0]>,
+  next: Readonly<Parameters<typeof ThinkingBlockComponent>[0]>,
+): boolean {
+  return (
+    previous.isStreaming === next.isStreaming &&
+    previous.item === next.item &&
+    previous.variant === next.variant
+  );
+}
+
+export const ThinkingBlock = memo(ThinkingBlockComponent, areThinkingBlockPropsEqual);

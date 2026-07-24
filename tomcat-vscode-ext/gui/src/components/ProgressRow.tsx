@@ -1,6 +1,8 @@
+import { memo } from "react";
+
 import { LoadingDots } from "./LoadingDots";
 
-export function ProgressRow({
+function ProgressRowComponent({
   busy,
 }: {
   busy: boolean;
@@ -20,3 +22,8 @@ export function ProgressRow({
     </div>
   );
 }
+
+export const ProgressRow = memo(
+  ProgressRowComponent,
+  (previous, next) => previous.busy === next.busy,
+);

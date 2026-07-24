@@ -99,7 +99,14 @@ function timelineItemKey(item: WebviewTimelineItem): string {
   }
 }
 
-function reconcileSession(
+function reconcileSessionTab(
+  previous: WebviewSessionTab | undefined,
+  next: WebviewSessionTab,
+): WebviewSessionTab {
+  return previous !== undefined && deepEqual(previous, next) ? previous : next;
+}
+
+export function reconcileSessionSnapshot(
   previous: WebviewSessionSnapshot | undefined,
   next: WebviewSessionSnapshot,
 ): WebviewSessionSnapshot {
@@ -169,7 +176,7 @@ export function reconcileStateSnapshot(
     Object.keys(previous.sessionViews).length !== Object.keys(next.sessionViews).length;
   const sessionViews: Record<string, WebviewSessionSnapshot> = {};
   for (const [sessionId, snapshot] of Object.entries(next.sessionViews)) {
-    const reconciled = reconcileSession(previous.sessionViews[sessionId], snapshot);
+    const reconciled = reconcileSessionSnapshot(previous.sessionViews[sessionId], snapshot);
     sessionViews[sessionId] = reconciled;
     if (previous.sessionViews[sessionId] !== reconciled) {
       sessionViewsChanged = true;
@@ -202,6 +209,71 @@ export function reconcileStateSnapshot(
     availableModelCapabilities,
     availableModelReasoningLevels,
     availableModels,
+    sessions,
+    sessionViews,
+  };
+}
+
+export function mergeSessionViewSnapshot(
+  previous: WebviewStateSnapshot | null | undefined,
+  input: {
+    sessionId: string;
+    tab?: WebviewSessionTab | null;
+    view: WebviewSessionSnapshot;
+  },
+): WebviewStateSnapshot {
+  if (!previous) {
+    return {
+      activeSessionId: null,
+      availableModelCapabilities: {},
+      availableModelReasoningLevels: {},
+      availableModels: [],
+      modelAdminSupported: false,
+      ready: false,
+      sessionViews: {
+        [input.sessionId]: input.view,
+      },
+      sessions: input.tab ? [input.tab] : [],
+    };
+  }
+
+  const nextView = reconcileSessionSnapshot(
+    previous.sessionViews[input.sessionId],
+    input.view,
+  );
+  const previousView = previous.sessionViews[input.sessionId];
+  const sessionViews =
+    previousView === nextView
+      ? previous.sessionViews
+      : {
+          ...previous.sessionViews,
+          [input.sessionId]: nextView,
+        };
+
+  let sessions = previous.sessions;
+  if (input.tab) {
+    const currentIndex = previous.sessions.findIndex(
+      (entry) => entry.sessionId === input.sessionId,
+    );
+    const currentTab =
+      currentIndex >= 0 ? previous.sessions[currentIndex] : undefined;
+    const nextTab = reconcileSessionTab(currentTab, input.tab);
+    if (currentIndex >= 0) {
+      if (nextTab !== currentTab) {
+        sessions = [...previous.sessions];
+        sessions[currentIndex] = nextTab;
+      }
+    } else {
+      sessions = [...previous.sessions, nextTab];
+    }
+  }
+
+  if (sessionViews === previous.sessionViews && sessions === previous.sessions) {
+    return previous;
+  }
+
+  return {
+    ...previous,
     sessions,
     sessionViews,
   };

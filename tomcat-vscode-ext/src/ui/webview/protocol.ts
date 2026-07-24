@@ -286,6 +286,23 @@ export type WebviewTimelineItem =
   | WebviewThinkingBlock
   | WebviewToolCard;
 
+export type WebviewSessionPatchOp =
+  | {
+      id: string;
+      text: string;
+      type: "appendText";
+    }
+  | {
+      afterId?: string | null;
+      beforeId?: string | null;
+      item: WebviewTimelineItem;
+      type: "upsert";
+    }
+  | {
+      id: string;
+      type: "remove";
+    };
+
 export type HostEventFrameContent =
   | ControlRequestFrame
   | ServeEvent
@@ -316,6 +333,24 @@ export type HostToWebviewFrame =
       channel: "event";
       content: HostEventFrameContent;
       done?: boolean;
+      messageId: string;
+    }
+  | {
+      channel: "sessionPatch";
+      content: {
+        ops: WebviewSessionPatchOp[];
+        seq: number;
+        sessionId: string;
+      };
+      messageId: string;
+    }
+  | {
+      channel: "sessionView";
+      content: {
+        sessionId: string;
+        tab?: WebviewSessionTab | null;
+        view: WebviewSessionSnapshot;
+      };
       messageId: string;
     }
   | {
@@ -409,6 +444,13 @@ export type WebviewIntent =
       type: "retryUserMessage";
       data: {
         messageId: string;
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "resyncSessionView";
+      data: {
         sessionId: string;
       };
     }
@@ -730,7 +772,9 @@ export function isHostToWebviewFrame(
     isRecord(value) &&
     isString(value.messageId) &&
     ((value.channel === "state" && isRecord(value.content)) ||
-      (value.channel === "event" && isRecord(value.content)))
+      (value.channel === "event" && isRecord(value.content)) ||
+      (value.channel === "sessionView" && isRecord(value.content)) ||
+      (value.channel === "sessionPatch" && isRecord(value.content)))
   );
 }
 
@@ -778,10 +822,11 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
     case "newSession":
       return value.data === undefined || isRecord(value.data);
     case "retryUserMessage":
+    case "resyncSessionView":
       return (
         isRecord(value.data) &&
-        isString(value.data.messageId) &&
         isString(value.data.sessionId)
+        && (value.type !== "retryUserMessage" || isString(value.data.messageId))
       );
     case "loadOlderHistory":
       return isRecord(value.data) && isString(value.data.sessionId);

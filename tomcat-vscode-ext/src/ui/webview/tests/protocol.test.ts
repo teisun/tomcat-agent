@@ -29,6 +29,35 @@ describe("webview protocol helpers", () => {
         messageId: "event-1",
       }),
     ).toBe(true);
+    expect(
+      isHostToWebviewFrame({
+        channel: "sessionView",
+        content: {
+          sessionId: "s1",
+          view: {
+            busy: false,
+            ownedByThisFrontend: true,
+            pendingAttachments: [],
+            planTodos: [],
+            sessionId: "s1",
+            sessionTodos: [],
+            timeline: [],
+          },
+        },
+        messageId: "session-view-1",
+      }),
+    ).toBe(true);
+    expect(
+      isHostToWebviewFrame({
+        channel: "sessionPatch",
+        content: {
+          ops: [{ id: "m1", text: "hello", type: "appendText" }],
+          seq: 1,
+          sessionId: "s1",
+        },
+        messageId: "session-patch-1",
+      }),
+    ).toBe(true);
 
     expect(
       isWebviewIntent({
@@ -100,6 +129,15 @@ describe("webview protocol helpers", () => {
         },
         messageId: "open-diff-1",
         type: "openDiff",
+      }),
+    ).toBe(true);
+    expect(
+      isWebviewIntent({
+        data: {
+          sessionId: "s1",
+        },
+        messageId: "resync-session-1",
+        type: "resyncSessionView",
       }),
     ).toBe(true);
   });

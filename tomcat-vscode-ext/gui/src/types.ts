@@ -319,6 +319,23 @@ export type WebviewTimelineItem =
   | WebviewThinkingBlock
   | WebviewToolCard;
 
+export type WebviewSessionPatchOp =
+  | {
+      id: string;
+      text: string;
+      type: "appendText";
+    }
+  | {
+      afterId?: string | null;
+      beforeId?: string | null;
+      item: WebviewTimelineItem;
+      type: "upsert";
+    }
+  | {
+      id: string;
+      type: "remove";
+    };
+
 export type HostToWebviewFrame =
   | {
       channel: "event";
@@ -345,6 +362,24 @@ export type HostToWebviewFrame =
             type: "__test.dom_action";
           }
         | Record<string, unknown>;
+      messageId: string;
+    }
+  | {
+      channel: "sessionPatch";
+      content: {
+        ops: WebviewSessionPatchOp[];
+        seq: number;
+        sessionId: string;
+      };
+      messageId: string;
+    }
+  | {
+      channel: "sessionView";
+      content: {
+        sessionId: string;
+        tab?: WebviewSessionTab | null;
+        view: WebviewSessionSnapshot;
+      };
       messageId: string;
     }
   | {
@@ -416,6 +451,13 @@ export type WebviewIntent =
       type: "retryUserMessage";
       data: {
         messageId: string;
+        sessionId: string;
+      };
+    }
+  | {
+      messageId: string;
+      type: "resyncSessionView";
+      data: {
         sessionId: string;
       };
     }

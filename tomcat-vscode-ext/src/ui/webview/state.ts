@@ -26,6 +26,7 @@ import type {
   WebviewPlanFileRef,
   WebviewReviewFinding,
   WebviewReviewRow,
+  WebviewSessionPatchOp,
   WebviewSessionSnapshot,
   WebviewSessionTab,
   WebviewStateSnapshot,
@@ -36,6 +37,12 @@ import type {
 
 function cloneSnapshot(snapshot: WebviewStateSnapshot): WebviewStateSnapshot {
   return JSON.parse(JSON.stringify(snapshot)) as WebviewStateSnapshot;
+}
+
+function cloneSessionSnapshot(
+  session: WebviewSessionSnapshot,
+): WebviewSessionSnapshot {
+  return JSON.parse(JSON.stringify(session)) as WebviewSessionSnapshot;
 }
 
 type SessionRuntimeState = {
@@ -60,6 +67,43 @@ type AppendMessageOptions = {
   segments?: WebviewMessageSegment[];
   submitKind?: UserSubmitKind;
 };
+
+export type SessionRenderMutation =
+  | {
+      kind: "none";
+    }
+  | {
+      kind: "patch";
+      ops: WebviewSessionPatchOp[];
+      sessionId: string;
+    }
+  | {
+      kind: "session";
+      sessionId: string;
+    };
+
+const NO_SESSION_RENDER_MUTATION: SessionRenderMutation = { kind: "none" };
+
+function sessionRenderMutation(sessionId: string): SessionRenderMutation {
+  return {
+    kind: "session",
+    sessionId,
+  };
+}
+
+function patchRenderMutation(
+  sessionId: string,
+  ops: WebviewSessionPatchOp[],
+): SessionRenderMutation {
+  if (ops.length === 0) {
+    return NO_SESSION_RENDER_MUTATION;
+  }
+  return {
+    kind: "patch",
+    ops,
+    sessionId,
+  };
+}
 
 function isPlanEvent(event: ServeEvent): event is ServePlanEvent {
   return event.type.startsWith("plan.");
@@ -357,6 +401,46 @@ function upsertDoneCodeReviewRow(
 
 function cloneTimelineItem<T extends WebviewTimelineItem>(item: T): T {
   return JSON.parse(JSON.stringify(item)) as T;
+}
+
+function timelineNeighbors(
+  session: WebviewSessionSnapshot,
+  itemId: string,
+): { afterId?: string | null; beforeId?: string | null } {
+  const index = session.timeline.findIndex((item) => item.id === itemId);
+  if (index < 0) {
+    return {};
+  }
+  return {
+    afterId: index > 0 ? session.timeline[index - 1]?.id ?? null : null,
+    beforeId:
+      index >= 0 && index < session.timeline.length - 1
+        ? session.timeline[index + 1]?.id ?? null
+        : null,
+  };
+}
+
+function buildUpsertPatchOpForItem(
+  session: WebviewSessionSnapshot,
+  item: WebviewTimelineItem | undefined,
+): Extract<WebviewSessionPatchOp, { type: "upsert" }> | null {
+  if (!item) {
+    return null;
+  }
+  const neighbors = timelineNeighbors(session, item.id);
+  return {
+    ...neighbors,
+    item: cloneTimelineItem(item),
+    type: "upsert",
+  };
+}
+
+function buildUpsertPatchOpById(
+  session: WebviewSessionSnapshot,
+  itemId: string,
+): Extract<WebviewSessionPatchOp, { type: "upsert" }> | null {
+  const item = session.timeline.find((entry) => entry.id === itemId);
+  return buildUpsertPatchOpForItem(session, item);
 }
 
 function reorderAnchoredReviewRows(session: WebviewSessionSnapshot): void {
@@ -816,13 +900,13 @@ function applyBackgroundTaskFinished(
   session: WebviewSessionSnapshot,
   taskId: string,
   exitCode: number | undefined,
-): void {
+): WebviewToolCard | undefined {
   const tool = session.timeline.find(
     (item): item is WebviewToolCard =>
       item.type === "tool" && item.backgroundTaskId === taskId,
   );
   if (!tool) {
-    return;
+    return undefined;
   }
   tool.backgroundRunning = false;
   if (typeof exitCode === "number" && Number.isFinite(exitCode)) {
@@ -830,6 +914,7 @@ function applyBackgroundTaskFinished(
   } else {
     delete tool.backgroundExitCode;
   }
+  return tool;
 }
 
 function countCompletedItems(
@@ -1464,7 +1549,7 @@ function applySummaryTitleToGroup(
     assistantMessageId?: string | null;
     toolCallIds?: string[];
   },
-): void {
+): WebviewThinkingBlock | undefined {
   const assistantMessageId =
     findAssistantGroupIdForToolCallIds(session, options.toolCallIds ?? []) ??
     (typeof options.assistantMessageId === "string" &&
@@ -1479,7 +1564,7 @@ function applySummaryTitleToGroup(
           item.type === "thinking" && !!item.assistantMessageId,
       )?.assistantMessageId;
   if (!assistantMessageId) {
-    return;
+    return undefined;
   }
   const thinking = ensureThinkingBlockForAssistantMessage(
     session,
@@ -1487,6 +1572,7 @@ function applySummaryTitleToGroup(
     assistantMessageId,
   );
   thinking.summaryTitle = summaryTitle;
+  return thinking;
 }
 
 function upsertTool(
@@ -1518,7 +1604,7 @@ function applyToolSummaryTitle(
   session: WebviewSessionSnapshot,
   toolCallId: string,
   summaryTitle: string,
-): void {
+): WebviewToolCard | undefined {
   const tool = session.timeline.find(
     (item): item is WebviewToolCard =>
       item.type === "tool" && item.toolCallId === toolCallId,
@@ -1526,6 +1612,7 @@ function applyToolSummaryTitle(
   if (tool) {
     tool.summaryTitle = summaryTitle;
   }
+  return tool;
 }
 
 function upsertApproval(
@@ -1721,17 +1808,26 @@ function appendStreamingMessage(
   kind: "assistant" | "thinking",
   assistantMessageId: string,
   text: string,
-): WebviewMessageBlock | WebviewThinkingBlock {
+): {
+  created: boolean;
+  item: WebviewMessageBlock | WebviewThinkingBlock;
+} {
   if (kind === "assistant") {
     const current = findTimelineItem(session, assistantMessageId, "message");
     if (current && current.kind === "assistant") {
       current.text += text;
-      return current;
+      return {
+        created: false,
+        item: current,
+      };
     }
     const created = pushMessage(session, "assistant", text, assistantMessageId);
     created.assistantMessageId = assistantMessageId;
     runtime.activeAssistantId = assistantMessageId;
-    return created;
+    return {
+      created: true,
+      item: created,
+    };
   }
 
   const current = ensureThinkingBlockForAssistantMessage(
@@ -1740,7 +1836,10 @@ function appendStreamingMessage(
     assistantMessageId,
   );
   current.text += text;
-  return current;
+  return {
+    created: current.text === text,
+    item: current,
+  };
 }
 
 function mapSessionToTab(session: SessionSummary): WebviewSessionTab {
@@ -1772,8 +1871,28 @@ export class WebviewStateStore {
     };
   }
 
+  view(): Readonly<WebviewStateSnapshot> {
+    return this.state;
+  }
+
   snapshot(): WebviewStateSnapshot {
     return cloneSnapshot(this.state);
+  }
+
+  snapshotSession(sessionId: string): WebviewSessionSnapshot | null {
+    const session = this.state.sessionViews[sessionId];
+    if (!session) {
+      return null;
+    }
+    return cloneSessionSnapshot(session);
+  }
+
+  snapshotSessionTab(sessionId: string): WebviewSessionTab | null {
+    const tab = this.state.sessions.find((entry) => entry.sessionId === sessionId);
+    if (!tab) {
+      return null;
+    }
+    return { ...tab };
   }
 
   setReady(ready: boolean): void {
@@ -2055,18 +2174,17 @@ export class WebviewStateStore {
     }
   }
 
-  applyEvent(frame: HostEventFrameContent): void {
+  applyEvent(frame: HostEventFrameContent): SessionRenderMutation {
     if (
       frame.type === "__test.capture_dom" ||
       frame.type === "__test.dom_action" ||
       frame.type === "contextSearchResult" ||
       frame.type === "insertReference"
     ) {
-      return;
+      return NO_SESSION_RENDER_MUTATION;
     }
     if ("subtype" in frame && frame.type === "control_request") {
-      this.applyControlRequest(frame);
-      return;
+      return this.applyControlRequest(frame);
     }
 
     const session = this.ensureSession(
@@ -2076,7 +2194,7 @@ export class WebviewStateStore {
     switch (frame.type) {
       case "turn_start":
         clearStreaming(runtime);
-        return;
+        return NO_SESSION_RENDER_MUTATION;
       case "message_start": {
         clearStreaming(runtime);
         if (
@@ -2086,7 +2204,7 @@ export class WebviewStateStore {
           runtime.activeAssistantId = frame.assistantMessageId;
           runtime.streamingAssistantId = frame.assistantMessageId;
         }
-        return;
+        return NO_SESSION_RENDER_MUTATION;
       }
       case "message_end":
         if (
@@ -2096,7 +2214,7 @@ export class WebviewStateStore {
         ) {
           clearStreaming(runtime);
         }
-        return;
+        return NO_SESSION_RENDER_MUTATION;
       case "turn_end": {
         const summaryTitle =
           "summaryTitle" in frame && typeof frame.summaryTitle === "string"
@@ -2119,58 +2237,58 @@ export class WebviewStateStore {
           });
         }
         clearActiveAssistant(runtime);
-        return;
+        return sessionRenderMutation(session.sessionId);
       }
       case "agent_start":
         session.busy = true;
         this.syncTabBusy(session.sessionId, true);
         clearActiveAssistant(runtime);
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "agent_end":
         clearActiveAssistant(runtime);
         if (frame.error && frame.error !== "interrupted") {
           pushMessage(session, "error", frame.error);
         }
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "agent_interrupted":
         clearActiveAssistant(runtime);
         markRunningToolsInterrupted(session);
         if (!messageExistsAtTail(session, "warn", "Tomcat turn interrupted")) {
           pushMessage(session, "warn", "Tomcat turn interrupted");
         }
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "agent_idle":
         session.busy = false;
         this.syncTabBusy(session.sessionId, false);
         settleRunningTools(session);
         clearActiveAssistant(runtime);
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "llm_notice":
         pushMessage(session, "notice", frame.message);
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "llm_error":
         pushMessage(session, "error", `${frame.reason}: ${frame.errorMessage}`);
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "extension_error":
         pushMessage(session, "error", `${frame.event}: ${frame.error}`);
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "context_metrics_update":
         session.contextRatio = frame.contextUtilizationRatio;
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "compaction_error":
         pushMessage(
           session,
           "notice",
           `Context compaction failed: ${frame.error}`,
         );
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "auto_retry_start":
         pushMessage(
           session,
           "notice",
           `Retrying after error: ${frame.errorMessage}`,
         );
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "auto_retry_end":
         if (!frame.success) {
           pushMessage(
@@ -2179,7 +2297,7 @@ export class WebviewStateStore {
             `Retry finished without success: ${frame.finalError ?? "unknown error"}`,
           );
         }
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "sub_agent_start":
         if (frame.subagentType !== "code_reviewer") {
           pushMessage(
@@ -2188,7 +2306,7 @@ export class WebviewStateStore {
             `Started ${frame.subagentType} sub-agent`,
           );
         }
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "sub_agent_end":
         if (frame.subagentType !== "code_reviewer") {
           pushMessage(
@@ -2197,11 +2315,11 @@ export class WebviewStateStore {
             `Sub-agent ${frame.subagentType} ${frame.outcome}`,
           );
         }
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "message_update": {
         const delta = getAssistantDelta(frame);
         if (!delta) {
-          return;
+          return NO_SESSION_RENDER_MUTATION;
         }
         const assistantMessageId =
           "assistantMessageId" in frame &&
@@ -2209,37 +2327,64 @@ export class WebviewStateStore {
             ? frame.assistantMessageId
             : null;
         if (!assistantMessageId) {
-          return;
+          return NO_SESSION_RENDER_MUTATION;
         }
         if (!runtime.streamingAssistantId && !runtime.activeAssistantId) {
           runtime.activeAssistantId = assistantMessageId;
           runtime.streamingAssistantId = assistantMessageId;
         }
         if (runtime.streamingAssistantId !== assistantMessageId) {
-          return;
+          return NO_SESSION_RENDER_MUTATION;
         }
         if (delta.kind === "content_delta") {
           runtime.activeAssistantId = assistantMessageId;
-          appendStreamingMessage(
+          const next = appendStreamingMessage(
             session,
             runtime,
             "assistant",
             assistantMessageId,
             delta.delta,
           );
-          return;
+          if (next.created) {
+            const op = buildUpsertPatchOpForItem(session, next.item);
+            return patchRenderMutation(
+              session.sessionId,
+              op ? [op] : [],
+            );
+          }
+          return patchRenderMutation(session.sessionId, [
+            {
+              id: next.item.id,
+              text: delta.delta,
+              type: "appendText",
+            },
+          ]);
         }
         if (delta.kind === "thinking_delta") {
           runtime.activeAssistantId = assistantMessageId;
-          appendStreamingMessage(
+          const next = appendStreamingMessage(
             session,
             runtime,
             "thinking",
             assistantMessageId,
             delta.delta,
           );
+          if (next.created) {
+            const op = buildUpsertPatchOpForItem(session, next.item);
+            return patchRenderMutation(
+              session.sessionId,
+              op ? [op] : [],
+            );
+          }
+          return patchRenderMutation(session.sessionId, [
+            {
+              id: next.item.id,
+              text: delta.delta,
+              type: "appendText",
+            },
+          ]);
         }
-        return;
+        return NO_SESSION_RENDER_MUTATION;
       }
       case "tool_execution_start": {
         clearThinkingStreaming(runtime);
@@ -2252,7 +2397,8 @@ export class WebviewStateStore {
         tool.startedAt = Date.now();
         applyPlanReference(tool);
         delete tool.planActivity;
-        return;
+        const op = buildUpsertPatchOpForItem(session, tool);
+        return patchRenderMutation(session.sessionId, op ? [op] : []);
       }
       case "tool_call_streaming":
       case "tool_execution_update": {
@@ -2270,7 +2416,8 @@ export class WebviewStateStore {
         }
         tool.assistantMessageId = activeAssistantId ?? tool.assistantMessageId;
         applyPlanReference(tool);
-        return;
+        const op = buildUpsertPatchOpForItem(session, tool);
+        return patchRenderMutation(session.sessionId, op ? [op] : []);
       }
       case "tool_execution_end": {
         clearThinkingStreaming(runtime);
@@ -2316,7 +2463,8 @@ export class WebviewStateStore {
         } else {
           delete tool.planActivity;
         }
-        return;
+        const op = buildUpsertPatchOpForItem(session, tool);
+        return patchRenderMutation(session.sessionId, op ? [op] : []);
       }
       case "plan.todos": {
         const todos = parseTodos("todos" in frame ? frame.todos : undefined);
@@ -2330,28 +2478,34 @@ export class WebviewStateStore {
             };
           }
         }
-        return;
+        return sessionRenderMutation(session.sessionId);
       }
       case "session.todos":
         session.sessionTodos = parseTodos(
           "todos" in frame ? frame.todos : undefined,
         );
-        return;
+        return sessionRenderMutation(session.sessionId);
       case "session.title_updated": {
         const title =
           "title" in frame && typeof frame.title === "string"
             ? frame.title
             : null;
         if (!title) {
-          return;
+          return NO_SESSION_RENDER_MUTATION;
         }
         const tab = this.state.sessions.find(
           (entry) => entry.sessionId === session.sessionId,
         );
-        if (tab) {
-          tab.title = title;
+        if (!tab) {
+          this.syncTabOwnedByFrontend(session.sessionId);
         }
-        return;
+        const nextTab = this.state.sessions.find(
+          (entry) => entry.sessionId === session.sessionId,
+        );
+        if (nextTab) {
+          nextTab.title = title;
+        }
+        return sessionRenderMutation(session.sessionId);
       }
       case "turn.summary_updated": {
         const summaryTitle =
@@ -2359,9 +2513,9 @@ export class WebviewStateStore {
             ? frame.summaryTitle
             : null;
         if (!summaryTitle) {
-          return;
+          return NO_SESSION_RENDER_MUTATION;
         }
-        applySummaryTitleToGroup(session, runtime, summaryTitle, {
+        const thinking = applySummaryTitleToGroup(session, runtime, summaryTitle, {
           assistantMessageId:
             "assistantMessageId" in frame &&
             typeof frame.assistantMessageId === "string"
@@ -2375,7 +2529,8 @@ export class WebviewStateStore {
                 )
               : [],
         });
-        return;
+        const op = buildUpsertPatchOpForItem(session, thinking);
+        return patchRenderMutation(session.sessionId, op ? [op] : []);
       }
       case "tool.summary_updated": {
         const toolCallId =
@@ -2387,10 +2542,11 @@ export class WebviewStateStore {
             ? frame.summaryTitle
             : null;
         if (!toolCallId || !summaryTitle) {
-          return;
+          return NO_SESSION_RENDER_MUTATION;
         }
-        applyToolSummaryTitle(session, toolCallId, summaryTitle);
-        return;
+        const tool = applyToolSummaryTitle(session, toolCallId, summaryTitle);
+        const op = buildUpsertPatchOpForItem(session, tool);
+        return patchRenderMutation(session.sessionId, op ? [op] : []);
       }
       case "background_task_finished": {
         const taskId =
@@ -2398,35 +2554,38 @@ export class WebviewStateStore {
             ? frame.taskId
             : null;
         if (!taskId) {
-          return;
+          return NO_SESSION_RENDER_MUTATION;
         }
         const exitCode =
           "exitCode" in frame && typeof frame.exitCode === "number"
             ? frame.exitCode
             : undefined;
-        applyBackgroundTaskFinished(session, taskId, exitCode);
-        return;
+        const tool = applyBackgroundTaskFinished(session, taskId, exitCode);
+        const op = buildUpsertPatchOpForItem(session, tool);
+        return patchRenderMutation(session.sessionId, op ? [op] : []);
       }
       default:
         if (isPlanEvent(frame)) {
           this.applyPlanEvent(session, frame);
+          return sessionRenderMutation(session.sessionId);
         }
-        return;
+        return NO_SESSION_RENDER_MUTATION;
     }
   }
 
-  private applyControlRequest(frame: ControlRequestFrame): void {
+  private applyControlRequest(frame: ControlRequestFrame): SessionRenderMutation {
     if (frame.subtype !== "ask_question") {
-      return;
+      return NO_SESSION_RENDER_MUTATION;
     }
     const request = parseAskQuestionRequest(frame);
     if (!request) {
-      return;
+      return NO_SESSION_RENDER_MUTATION;
     }
     const session = this.ensureSession(
       frame.sessionId ?? this.state.activeSessionId ?? "unknown",
     );
     upsertApproval(session, request, frame.sessionId);
+    return sessionRenderMutation(session.sessionId);
   }
 
   private ensureSession(sessionId: string): WebviewSessionSnapshot {

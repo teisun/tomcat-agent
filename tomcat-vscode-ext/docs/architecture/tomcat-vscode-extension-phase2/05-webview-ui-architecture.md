@@ -17,12 +17,15 @@
 
 ```text
 VSCode WebviewViewProvider
-  ├─ provider.ts        宿主生命周期 / intent 路由 / postState / postEvent
+  ├─ provider.ts        宿主生命周期 / intent 路由 / 三层发送(state/sessionView/sessionPatch)
   ├─ protocol.ts        host<->webview typed frame / intent 校验
   ├─ state.ts           SessionSnapshot + Timeline 合并器（历史 + 实时）
+  ├─ stateBroadcaster.ts 攒发调度器（dirty/session/patch 择帧）
   └─ gui/
       ├─ main.tsx       acquireVsCodeApi/no-op fallback + React root
-      ├─ App.tsx        页面壳 / state 接收 / intent 发送 / 自动滚动接线
+      ├─ App.tsx        页面壳 / 三层收帧 / intent 发送 / 自动滚动接线
+      ├─ stateReconcile.ts 全量/单会话引用复用
+      ├─ statePatch.ts  timeline 补丁应用器
       ├─ useAutoScroll.ts
       ├─ components/
       └─ styles.css
@@ -90,45 +93,74 @@ main.tsx
 
 ## 3. 宿主到 React 的数据流
 
-> 专业：宿主不把 React 当“主动拉数”的客户端，而是把它当“被动订阅状态”的 view。宿主 `provider.ts` 在初始化、切会话、事件到达时推送 `state`/`event` 两类帧；GUI 不直接碰 `TomcatMessenger`。
+> 专业：宿主仍然是唯一真相源，GUI 依然是被动订阅者；但发送模型已经从“每次都整份 `state`”升级成“三层发送模型 + 攒发调度器”。Rust 核心继续只发增量 `ServeEvent`，**不需要改**；真正决定“这次过桥发多少”的是扩展宿主 `provider.ts + stateBroadcaster.ts`。
 >
-> 说人话：前端不自己连 `tomcat serve`，一切都经由扩展宿主中转。
+> 说人话：现在不是每来一个 token 就把整本 transcript 重新寄给前端了。宿主会先问一句: “这次只是尾巴多了几个字吗？那我只寄那几个字。” 只有需要的时候，才退回寄整段会话，最坏再退回寄整份状态。
 
 数据流：
 
 ```text
-tomcat serve/stdout event
-    │
-    ▼
+Rust tomcat serve
+  └─ 继续发增量 ServeEvent（不发整份 timeline）
+            │
+            ▼
 provider.ts.handleServeEvent()
-    ├─ stateStore.applyEvent(event)
-    ├─ postEvent(event)      // 增量透传
-    └─ postState()           // 全量快照刷新
-             │
-             ▼
-      App.tsx window.message listener
-             │
-             ▼
-       React render timeline / composer / plan strip
+  ├─ stateStore.applyEvent(event)          // 先把宿主内存态改成最新
+  ├─ postEvent(event)                      // event 通道继续保留给搜索/测试/调试
+  └─ stateBroadcaster 选一条最省的路
+       ├─ state        = 全量兜底（首次 ready / 切会话 / 结构变化）
+       ├─ sessionView  = 只重寄一个会话（busy/checkpoints/history/计划态）
+       └─ sessionPatch = 只寄 timeline 热路径补丁（appendText/upsert/remove）
+            │
+            ▼
+App.tsx window.message listener
+  ├─ state        -> reconcileStateSnapshot()
+  ├─ sessionView  -> mergeSessionViewSnapshot()
+  ├─ sessionPatch -> applySessionPatchFrame()
+  └─ seq 跳号 / webview 重载 / target 缺失 -> resyncSessionView
+            │
+            ▼
+React render timeline / composer / plan strip
 ```
+
+这一层现在有三个关键事实：
+
+1. **Rust 后端已经是增量的**
+   - 它发的是 `message_update / tool_execution_* / plan.*` 这类事件。
+   - 它不是性能债源头，本轮不改 Rust 的 streaming 协议。
+
+2. **性能债在扩展宿主**
+   - 旧模型里，`provider.ts` 每来一个 delta 都会 `snapshot()` 整份 state，再 `postMessage(state)`。
+   - 新模型里，`StateBroadcaster` 会把多个热更新合并到一帧内，再决定是发 `sessionPatch`、`sessionView`，还是 `state`。
+
+3. **前端现在会“分层接收”**
+   - `state` 还是最终权威兜底。
+   - `sessionView` 只改一个会话，不拖累别的后台会话。
+   - `sessionPatch` 只改被触碰的 timeline 条目；如果 `seq` 不连续、item 缺失或类型不匹配，GUI 立刻停用该会话补丁并发 `resyncSessionView` 自愈。
 
 宿主侧关键职责：
 
 1. [`src/ui/webview/provider.ts`](../../../src/ui/webview/provider.ts)
-   - `bootstrap()`：拉模型列表、项目级 session pool、默认 session，再调用 `refreshSessionState()` + `refreshSessionHistory()` + `postState()`。
-   - `handleWebviewMessage()`：把 GUI intent 路由到 `newSession / switchSession / prompt / setModel / setPlanMode / openFile / pickAttachment` 等宿主动作。
-   - `handleServeEvent()`：每来一条 `ServeEvent`，先更新 `stateStore`，再同时发 `event` 增量帧和 `state` 快照帧；mutation 类工具的 `diffStat` 与结构化 `diff` 都直接来自核心事件里的 `display.added/removed/diff`。
-   - `postState()` / `postEvent()`：前者发送 `WebviewStateSnapshot`，后者发送 `HostEventFrameContent`。
+   - `bootstrap()`：拉模型列表、session pool、默认 session，再发一份全量 `state` 作为冷启动基线。
+   - `handleWebviewMessage()`：把 GUI intent 路由到 `newSession / switchSession / prompt / setModel / setPlanMode / openFile / pickAttachment / resyncSessionView` 等宿主动作。
+   - `handleServeEvent()`：每来一条 `ServeEvent`，先更新 `stateStore`，再把这次改动交给 `StateBroadcaster` 择帧；mutation 类工具的 `diffStat` 与结构化 `diff` 仍直接来自核心事件里的 `display.added/removed/diff`。
+   - `postStateFrame()` / `postSessionView()` / `postSessionPatch()` / `postEvent()`：对应三层状态帧与辅助事件帧。
 
-2. [`src/ui/webview/protocol.ts`](../../../src/ui/webview/protocol.ts)
+2. [`src/ui/webview/stateBroadcaster.ts`](../../../src/ui/webview/stateBroadcaster.ts)
+   - 维护 `fullState / dirty session / session patch` 三类待发送队列。
+   - 约一帧（16ms）内合并多次热更新。
+   - 同一会话里，`sessionView` 会覆盖未发出的 patch，`state` 会覆盖全部待发送内容。
+
+3. [`src/ui/webview/protocol.ts`](../../../src/ui/webview/protocol.ts)
    - 定义 `HostToWebviewFrame` 与 `WebviewIntent`。
-   - 提供 `isWebviewIntent()` 做宿主入站校验。
-   - 维持 GUI 与宿主共享的 `WebviewTimelineItem`、`WebviewToolStatus` 等类型。
+   - 新增 `sessionView`、`sessionPatch` 与 `resyncSessionView`。
+   - 维持 GUI 与宿主共享的 `WebviewTimelineItem`、`WebviewSessionPatchOp`、`WebviewToolStatus` 等类型。
 
-3. [`gui/src/App.tsx`](../../../gui/src/App.tsx)
-   - 收 `channel: "state"`：整份覆盖到 React `state`。
-   - 收 `channel: "event"`：当前只消费 `__test.capture_dom` 这类测试事件；正常渲染依赖宿主同步后的 `state` 快照。
-   - 发 intent：统一走 `postIntent()`，保持消息 ID 生成和 frame 形态一致。
+4. [`gui/src/App.tsx`](../../../gui/src/App.tsx)
+   - 收 `channel: "state"`：整份 `reconcileStateSnapshot()`。
+   - 收 `channel: "sessionView"`：只合并一个会话，顺手更新对应 session tab。
+   - 收 `channel: "sessionPatch"`：按 `seq` 校验后做最小补丁应用；失败就发 `resyncSessionView`。
+   - 收 `channel: "event"`：继续消费 `insertReference`、`contextSearchResult` 与测试事件；正常渲染主路径仍以状态帧为准。
 
 ### 3.1 文件改动数据流：一份核心 diff，双路消费
 
@@ -468,6 +500,7 @@ agent_loop            tool_dispatcher                utility-flash        ext ho
 |------|--------|
 | [`gui/src/useAutoScroll.test.tsx`](../../../gui/src/useAutoScroll.test.tsx) | 贴底跟随、上滑暂停、session 切换与 user message 重置 |
 | [`gui/src/App.test.tsx`](../../../gui/src/App.test.tsx) | composer/DOM snapshot 埋点接线、跳底箭头按钮、上一轮进行态收尾，以及“reveal 到顶 → 超一屏切回当前 sticky”整链路 |
+| [`gui/src/App.sessionFrames.test.tsx`](../../../gui/src/App.sessionFrames.test.tsx) | `sessionPatch` 真正落到 transcript、`seq` 跳号触发 `resyncSessionView`、resync 后继续收补丁 |
 | [`gui/src/components/DisclosureCard.test.tsx`](../../../gui/src/components/DisclosureCard.test.tsx) | 折叠/展开外壳、preview/body 切换 |
 | [`gui/src/components/DiffView.test.tsx`](../../../gui/src/components/DiffView.test.tsx) | 行号列、加删底色、长 context 折叠、大文件 fallback |
 | [`gui/src/components/ToolRow.test.tsx`](../../../gui/src/components/ToolRow.test.tsx) | edit diff 徽章 + View diff 按钮、command disclosure、answer/context 渲染语义、read 图标去重 |
@@ -476,8 +509,10 @@ agent_loop            tool_dispatcher                utility-flash        ext ho
 | [`gui/src/components/markdown/ChatMarkdown.test.tsx`](../../../gui/src/components/markdown/ChatMarkdown.test.tsx) | assistant 正文 markdown 富渲染：标题/普通段落、代码卡片（bare / 路径头）、inline path、copy、普通 `<a>`、sanitize、未闭合围栏；**流式过程中代码块同步出现 `code.hljs`、mermaid 仍异步；追加尾块只重算新块（按块 memo）** |
 | [`gui/src/components/markdown/markdownRuntime.test.ts`](../../../gui/src/components/markdown/markdownRuntime.test.ts) / [`gui/src/components/markdown/richRenderRuntime.test.ts`](../../../gui/src/components/markdown/richRenderRuntime.test.ts) | `splitTopLevelBlocks()` 过滤 `space` token / 未闭合围栏尾块、`highlightToHtml()` 在模块加载期完成语言注册、别名与未知语言回退 |
 | [`gui/src/components/ThinkingGroup.test.tsx`](../../../gui/src/components/ThinkingGroup.test.tsx) | thinking-only 残组不复用 `summaryTitle` |
+| [`gui/src/stateReconcile.test.ts`](../../../gui/src/stateReconcile.test.ts) / [`gui/src/statePatch.test.ts`](../../../gui/src/statePatch.test.ts) | 全量 `state` / 单会话 `sessionView` / 热路径 `sessionPatch` 三条 UI 合并路径的引用复用与失败回退 |
 | [`src/ui/webview/tests/dual_channel.test.ts`](../../../src/ui/webview/tests/dual_channel.test.ts) | thinking 在 assistant 前、历史 `role:tool` → 工具卡、历史/实时去重 |
 | [`src/ui/webview/tests/provider.test.ts`](../../../src/ui/webview/tests/provider.test.ts) | mutation 工具结束后从 `display.added/removed/diff` 注入 `diffStat/tool.diff`、errored tool 收敛为 `complete+error`，以及 `openDiff -> ide.openReconstructedDiff` 路由 |
+| [`src/ui/webview/tests/stateBroadcaster.test.ts`](../../../src/ui/webview/tests/stateBroadcaster.test.ts) / [`src/ui/webview/tests/provider_broadcast.test.ts`](../../../src/ui/webview/tests/provider_broadcast.test.ts) | 攒发调度器的合并/覆盖/seq 递增，以及 provider 在 streaming 下真正发 `sessionPatch`、在 turn 边界强刷 `sessionView` |
 | [`src/ui/webview/tests/state.test.ts`](../../../src/ui/webview/tests/state.test.ts) | `agent_idle` 收敛残留 `running/streaming` 工具卡，并保留 `summary/isError` |
 | [`src/ide/tests/diff_apply_edit.test.ts`](../../../src/ide/tests/diff_apply_edit.test.ts) | `openReconstructedDiff()` 复用原生虚拟文档 diff 链路 |
 | [`src/ui/planPreview/tests/planDocument.test.ts`](../../../src/ui/planPreview/tests/planDocument.test.ts) | `.plan.md` 解析：四态 todos、缺 frontmatter、`name`/`goal` 回退、`bodyMarkdown` 剥离 `## Todos Board`、CRLF；**`bodyLineMap` 源码行映射（frontmatter 偏移 / 无 frontmatter / board 剪除后非线性 / CRLF）** |
@@ -489,6 +524,7 @@ agent_loop            tool_dispatcher                utility-flash        ext ho
 
 实际 UI 验收（本次体验优化）：
 
+0. 性能桥接基线：在 `tomcat-vscode-ext/` 下运行 `npm run bench:webview-bridge -- --json`，拿到 full-state / sessionView / sessionPatch 三条路径的 payload、merge、memo 行渲染数字；
 1. 用 `vite dev` 单独跑 GUI；
 2. 浏览器侧注入 mock `state` 帧；
 3. 验证：

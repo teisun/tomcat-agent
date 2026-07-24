@@ -24,7 +24,8 @@ import type {
   WebviewTimelineItem,
   WebviewStateSnapshot,
 } from "./types";
-import { reconcileStateSnapshot } from "./stateReconcile";
+import { reconcileStateSnapshot, mergeSessionViewSnapshot } from "./stateReconcile";
+import { applySessionPatchFrame } from "./statePatch";
 import { useAutoScroll } from "./useAutoScroll";
 
 const EMPTY_STATE: WebviewStateSnapshot = {
@@ -715,6 +716,8 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const contextSearchRequestSeqRef = useRef(0);
   const latestContextSearchRequestIdRef = useRef<string | null>(null);
   const contextSearchWarningShownRef = useRef(false);
+  const expectedPatchSeqBySessionRef = useRef<Record<string, number>>({});
+  const sessionPatchResyncPendingRef = useRef<Set<string>>(new Set());
   const streamRef = useRef<HTMLElement | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
 
@@ -880,17 +883,60 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   }, [state]);
 
   useEffect(() => {
+    const requestSessionResync = (sessionId: string) => {
+      if (sessionPatchResyncPendingRef.current.has(sessionId)) {
+        return;
+      }
+      sessionPatchResyncPendingRef.current.add(sessionId);
+      delete expectedPatchSeqBySessionRef.current[sessionId];
+      postIntent(vscodeApi, "resyncSessionView", { sessionId });
+    };
+
     const handleMessage = (event: MessageEvent<HostToWebviewFrame>) => {
       const frame = event.data;
       if (!frame || typeof frame !== "object") {
         return;
       }
       if (frame.channel === "state") {
+        expectedPatchSeqBySessionRef.current = {};
+        sessionPatchResyncPendingRef.current.clear();
         const nextState = reconcileStateSnapshot(stateRef.current, frame.content);
         stateRef.current = nextState;
         setState(nextState);
         vscodeApi.setState?.(nextState);
         flushPendingInsertions();
+        return;
+      }
+      if (frame.channel === "sessionView") {
+        delete expectedPatchSeqBySessionRef.current[frame.content.sessionId];
+        sessionPatchResyncPendingRef.current.delete(frame.content.sessionId);
+        const nextState = mergeSessionViewSnapshot(stateRef.current, frame.content);
+        stateRef.current = nextState;
+        setState(nextState);
+        vscodeApi.setState?.(nextState);
+        flushPendingInsertions();
+        return;
+      }
+      if (frame.channel === "sessionPatch") {
+        if (sessionPatchResyncPendingRef.current.has(frame.content.sessionId)) {
+          return;
+        }
+        const expectedSeq =
+          expectedPatchSeqBySessionRef.current[frame.content.sessionId];
+        if (expectedSeq !== undefined && expectedSeq !== frame.content.seq) {
+          requestSessionResync(frame.content.sessionId);
+          return;
+        }
+        const patched = applySessionPatchFrame(stateRef.current, frame.content);
+        if (!patched.ok) {
+          requestSessionResync(frame.content.sessionId);
+          return;
+        }
+        expectedPatchSeqBySessionRef.current[frame.content.sessionId] =
+          frame.content.seq + 1;
+        stateRef.current = patched.state;
+        setState(patched.state);
+        vscodeApi.setState?.(patched.state);
         return;
       }
       if (
