@@ -71,6 +71,27 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const workbenchCapture = require(path.resolve(repoRoot, "out/test/suite/support/workbenchFindDriver.js")) as {
+  captureWorkbenchArtifacts(target: string): Promise<void>;
+  WorkbenchFindDriver: { connectFromEnvironment(): Promise<{
+    waitForVisibleText(text: string): Promise<void>;
+    clickVisibleButton(label: string): Promise<void>;
+    close(): void;
+  }> };
+};
+
+async function captureStartupCheckpoint(name: string, visibleText?: string): Promise<void> {
+  if (process.env.TOMCAT_E2E_SCREENSHOT !== "1") return;
+  const root = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR;
+  assert.ok(root, "this test launch must own an evidence directory");
+  if (visibleText) {
+    const driver = await workbenchCapture.WorkbenchFindDriver.connectFromEnvironment();
+    try { await driver.waitForVisibleText(visibleText); } finally { driver.close(); }
+  }
+  await sleep(250);
+  await workbenchCapture.captureWorkbenchArtifacts(path.join(root, `${name}.png`));
+}
+
 async function maybeTriggerOnboardingBootstrap(): Promise<void> {
   if (process.env.TOMCAT_EXPECT_PROMPT_TRIGGER !== "restart") {
     return;
@@ -173,6 +194,7 @@ suite("Installed Tomcat extension", () => {
         `expected onboarding prompt to include serve stderr: ${expectedDetail}`,
       );
     }
+    await captureStartupCheckpoint("onboarding-prompt", expectedSubstring);
   });
 
   test("recovers from a setup-required startup when the test fixture auto-runs init", async function () {
@@ -184,12 +206,18 @@ suite("Installed Tomcat extension", () => {
     const api = await hostE2e.getTomcatExtensionApi() as ResolvedSourceApi;
     await maybeTriggerOnboardingBootstrap();
     await waitForPrompt(api, "Tomcat could not start after several attempts.", 20_000);
+    await captureStartupCheckpoint("setup-required-before-recovery", "Tomcat could not start after several attempts.");
+    if (process.env.TOMCAT_EXPECT_VISIBLE_SETUP === "1") {
+      const driver = await workbenchCapture.WorkbenchFindDriver.connectFromEnvironment();
+      try { await driver.clickVisibleButton("Start Setup"); } finally { driver.close(); }
+    }
 
     const deadline = Date.now() + 20_000;
     let lastError: unknown;
     while (Date.now() < deadline) {
       try {
         await hostE2e.assertWebviewStreamingFlow(api as unknown);
+        await captureStartupCheckpoint("setup-recovered-stream");
         return;
       } catch (error) {
         lastError = error;
@@ -220,6 +248,7 @@ suite("Installed Tomcat extension", () => {
         .some((entry) => entry.message.includes("Tomcat could not start after several attempts.")),
       "a transient startup failure must recover silently instead of suggesting setup",
     );
+    await captureStartupCheckpoint("transient-startup-recovered");
   });
 
   test("connects when serve takes longer than the former handshake budget", async function () {
@@ -241,6 +270,7 @@ suite("Installed Tomcat extension", () => {
         .some((entry) => entry.message.includes("Tomcat could not start after several attempts.")),
       "a slow but healthy handshake must not be treated as a startup crash",
     );
+    await captureStartupCheckpoint("slow-handshake-ready");
   });
 
   test("switches an executing plan back to chat in the webview", async () => {

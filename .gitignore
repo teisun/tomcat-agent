@@ -38,6 +38,7 @@ build/
 node_modules/
 test-stuff/
 .tomcat/shots/
+tomcat-vscode-ext/.build-artifacts.json
 tomcat/assets/cache/
 
 ### Env (API keys, do not commit) ###

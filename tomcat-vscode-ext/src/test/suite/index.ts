@@ -4,6 +4,7 @@ import Mocha from "mocha";
 
 export async function run(): Promise<void> {
   const mocha = new Mocha({
+    failZero: true,
     ui: "tdd",
     color: true,
     timeout: 60000,

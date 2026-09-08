@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 提交前检查：全量测试 + 覆盖率，并输出合规 commit message 模板（宪法 / commit-guard）
+# 提交前检查：同一离线门禁 + 库覆盖率；联网测试须单独显式运行。
 set -e
 cd "$(dirname "$0")/.."
 
-echo "=== 1. 全量测试（-j 1 与各目标内 --test-threads=1 串行）==="
-cargo test -j 1 --all -- --test-threads=1
+echo "=== 1. 离线门禁（与 scripts/test-groups.sh / nextest 分类一致）==="
+./scripts/run-integration-tests.sh gate-fast
 echo ""
 
 echo "=== 2. 覆盖率（tomcat lib）==="

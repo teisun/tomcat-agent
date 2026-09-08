@@ -7,6 +7,7 @@ import {
   sseDelta,
   sseDone,
   sseFinish,
+  buildAndInterruptPlan,
   warmTomcatBinaryForSuite,
   writePlanFile,
 } from "./serveTestUtils";
@@ -14,73 +15,48 @@ import {
 warmTomcatBinaryForSuite();
 
 describe("real tomcat serve state integration", () => {
-  it("reflects planState, planId, and sessionKey through get_state", async () => {
+  it("returns workspaceMode, agentMode and activePlan without changing session identity", async () => {
     const server = await spawnScriptedOpenAiStreamServer([
-      {
-        parts: [sseDelta("state build"), sseFinish("stop"), sseDone()],
-      },
+      { parts: [sseDelta("state build"), { ...sseFinish("stop"), delayMs: 1000 }, sseDone()] },
     ]);
-    const runtime = await createRealServeMessenger(server.baseUrl);
-
+    let runtime: Awaited<ReturnType<typeof createRealServeMessenger>> | undefined;
     try {
-      const init = await initializeServe(runtime.messenger);
-      const initialState = await runtime.messenger.request({
+      runtime = await createRealServeMessenger(server.baseUrl);
+      const { messenger } = runtime;
+      const init = await initializeServe(messenger);
+      const getState = () => messenger.request({ sessionId: init.sessionId, type: "get_state" });
+      const initial = await getState();
+      expect(initial).toMatchObject({ success: true, payload: {
+        workspaceMode: "code", model: "gpt-5.4", agentMode: "chat", activePlan: null,
         sessionId: init.sessionId,
-        type: "get_state",
-      });
+      } });
+      expect(initial.payload?.sessionKey).toEqual(expect.any(String));
+      const identity = { sessionId: init.sessionId, sessionKey: initial.payload?.sessionKey };
 
-      expect(initialState.success).toBe(true);
-      expect(initialState.payload).toMatchObject({
-        mode: "code",
-        model: "gpt-5.4",
-        planId: null,
-        planState: "chat",
-        sessionId: init.sessionId,
-      });
-      expect(typeof initialState.payload?.sessionKey).toBe("string");
+      expect(await messenger.sendSetPlanMode({ action: "enter", sessionId: init.sessionId }))
+        .toMatchObject({ success: true });
+      expect(await getState()).toMatchObject({ success: true, payload: {
+        ...identity, workspaceMode: "code", agentMode: "plan", activePlan: null,
+      } });
 
-      await runtime.messenger.sendSetPlanMode({
-        action: "enter",
-        sessionId: init.sessionId,
-      });
-      const planningState = await runtime.messenger.request({
-        sessionId: init.sessionId,
-        type: "get_state",
-      });
-      expect(planningState.payload).toMatchObject({
-        planId: null,
-        planState: "planning",
-        sessionId: init.sessionId,
-        sessionKey: initialState.payload?.sessionKey,
-      });
-
-      const planPath = await writePlanFile(
-        runtime.fixture.homePath,
-        "stage-a-state-plan",
-        "planning",
-      );
-      await runtime.messenger.sendSetPlanMode({
-        action: "build",
-        planId: planPath,
-        sessionId: init.sessionId,
-      });
-      const executingState = await runtime.messenger.request({
-        sessionId: init.sessionId,
-        type: "get_state",
-      });
-
-      expect(executingState.payload).toMatchObject({
-        planId: "stage-a-state-plan",
-        planState: "executing",
-        sessionId: init.sessionId,
-        sessionKey: initialState.payload?.sessionKey,
-      });
-      expect(String(executingState.payload?.planPath)).toContain(
-        "stage-a-state-plan.plan.md",
-      );
+      const planPath = await writePlanFile(runtime.fixture.homePath, "stage-a-state-plan", "planning");
+      const { build: built, events, runningState: executing } = await buildAndInterruptPlan(messenger, init.sessionId, planPath);
+      expect(built).toMatchObject({ success: true, payload: {
+        ...identity, agentMode: "chat", activePlan: { id: "stage-a-state-plan", state: "executing" },
+      } });
+      expect(executing).toMatchObject({ success: true, payload: {
+        ...identity, workspaceMode: "code", agentMode: "chat", activePlan: {
+          id: "stage-a-state-plan", state: "executing", path: expect.stringContaining("stage-a-state-plan.plan.md"),
+        },
+      } });
+      expect(events.at(-1)?.type).toBe("agent_idle");
+      // Interrupt returns the active plan to pending without replacing identity.
+      expect(await getState()).toMatchObject({ success: true, payload: {
+        ...identity, workspaceMode: "code", agentMode: "chat",
+        activePlan: { id: "stage-a-state-plan", state: "pending" },
+      } });
     } finally {
-      await runtime.cleanup();
-      await server.close();
+      try { await runtime?.cleanup(); } finally { await server.close(); }
     }
   }, 30_000);
 });

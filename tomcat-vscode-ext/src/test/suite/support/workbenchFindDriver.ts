@@ -1,4 +1,5 @@
 import { fetch, WebSocket } from "undici";
+import * as fs from "node:fs/promises";
 
 const CDP_PORT_ENV = "TOMCAT_E2E_CDP_PORT";
 
@@ -10,6 +11,8 @@ type CdpTarget = {
 };
 
 type CdpReply = {
+  method?: string;
+  params?: unknown;
   error?: { code: number; message: string };
   id?: number;
   result?: unknown;
@@ -23,6 +26,7 @@ type FindWidgetState = {
 };
 
 class CdpClient {
+  readonly events: CdpReply[] = [];
   private nextId = 1;
   private readonly pending = new Map<
     number,
@@ -41,6 +45,7 @@ class CdpClient {
         return;
       }
       if (reply.id === undefined) {
+        this.events.push(reply);
         return;
       }
       const waiter = this.pending.get(reply.id);
@@ -65,7 +70,10 @@ class CdpClient {
   static async connect(url: string): Promise<CdpClient> {
     const socket = new WebSocket(url);
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error("Timed out opening CDP websocket")), 10_000);
+      const timeout = setTimeout(() => {
+        socket.close();
+        reject(new Error("Timed out opening CDP websocket"));
+      }, 10_000);
       socket.addEventListener("open", () => {
         clearTimeout(timeout);
         resolve();
@@ -83,8 +91,16 @@ class CdpClient {
     const result = new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { reject, resolve });
     });
-    this.socket.send(JSON.stringify({ id, method, params }));
-    return result;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      this.socket.send(JSON.stringify({ id, method, params }));
+      return await Promise.race([result, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`CDP ${method} timed out`)), 10_000);
+      })]);
+    } finally {
+      clearTimeout(timer);
+      this.pending.delete(id);
+    }
   }
 
   close(): void {
@@ -111,7 +127,7 @@ async function waitFor<T>(
 }
 
 async function discoverWorkbenchTarget(port: number): Promise<CdpTarget> {
-  const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+  const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(10_000) });
   if (!response.ok) {
     throw new Error(`CDP target discovery failed: HTTP ${response.status}`);
   }
@@ -183,6 +199,52 @@ function findWidgetExpression(): string {
       value: String(input.value || ""),
     };
   })()`;
+}
+
+/** Capture the test process's renderer, never whichever macOS window is frontmost. */
+export async function captureWorkbenchArtifacts(targetPath: string): Promise<void> {
+  const port = Number(process.env[CDP_PORT_ENV]);
+  if (!Number.isInteger(port) || port <= 0) throw new Error(`${CDP_PORT_ENV} is required for visual evidence`);
+  const workbench = await discoverWorkbenchTarget(port);
+  const main = await CdpClient.connect(workbench.webSocketDebuggerUrl!);
+  const structures: unknown[] = [];
+  const reports: unknown[] = [];
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) throw new Error(`CDP target discovery failed: ${response.status}`);
+    const targets = await response.json() as CdpTarget[];
+    for (const target of [workbench, ...targets.filter((t) => t.type === "iframe" && t.webSocketDebuggerUrl)]) {
+      const client = target === workbench ? main : await CdpClient.connect(target.webSocketDebuggerUrl!);
+      try {
+        // Runtime.enable and Log.enable replay the renderer's buffered console/log
+        // records. This is a capture-time report, not a claim of full-run tracing.
+        await client.send("Runtime.enable");
+        await client.send("Log.enable");
+        if (target.type === "iframe") {
+          type FrameTree = { frame: { id: string; url: string }; childFrames?: FrameTree[] };
+          const { frameTree } = await client.send("Page.getFrameTree") as { frameTree: FrameTree };
+          const frames = (node: FrameTree): FrameTree[] => [node, ...(node.childFrames ?? []).flatMap(frames)];
+          // VS Code puts the actual app in a same-process inner frame; the outer
+          // webview's AX tree alone contains only its wrapper and is insufficient.
+          for (const frame of frames(frameTree)) {
+            const tree = await client.send("Accessibility.getFullAXTree", { frameId: frame.frame.id });
+            structures.push({ title: target.title, url: target.url, frameUrl: frame.frame.url, tree });
+          }
+        } else {
+          const tree = await client.send("Accessibility.getFullAXTree");
+          structures.push({ title: target.title, url: target.url, tree });
+        }
+        reports.push({ title: target.title, url: target.url, events: client.events.filter((event) =>
+          /^(Runtime\.(consoleAPICalled|exceptionThrown)|Log\.entryAdded)$/.test(event.method ?? "")) });
+      } finally { if (client !== main) client.close(); }
+    }
+    const shot = await main.send("Page.captureScreenshot", { format: "png", fromSurface: true }) as { data?: string };
+    if (!shot.data) throw new Error("CDP did not return a PNG");
+    await fs.writeFile(targetPath, shot.data, "base64");
+    const stem = targetPath.replace(/\.png$/, "");
+    await fs.writeFile(`${stem}.aria.txt`, JSON.stringify(structures, null, 2));
+    await fs.writeFile(`${stem}.console.json`, JSON.stringify({ scope: "capture-time buffered renderer records", targets: reports }, null, 2));
+  } finally { main.close(); }
 }
 
 export class WorkbenchFindDriver {
@@ -274,6 +336,32 @@ export class WorkbenchFindDriver {
       () => this.readFindWidget(),
       (state) => !state.open,
       "Escape did not close VS Code's native Find Widget",
+    );
+  }
+
+  async waitForVisibleText(text: string): Promise<void> {
+    await waitFor(
+      () => this.evaluate<boolean>(`document.body.innerText.includes(${JSON.stringify(text)})`),
+      (found) => found,
+      `Test window did not display ${text}`,
+    );
+  }
+
+  async clickVisibleButton(label: string): Promise<void> {
+    await waitFor(
+      () => this.evaluate<boolean>(`(() => {
+        const matches = [...document.querySelectorAll('button, [role="button"], a.monaco-button')].filter(element => {
+          const rect = element.getBoundingClientRect();
+          return element.textContent.trim() === ${JSON.stringify(label)} && rect.width > 0 && rect.height > 0
+            && getComputedStyle(element).visibility !== 'hidden';
+        });
+        const button = matches.at(-1);
+        if (!button) return false;
+        button.click();
+        return true;
+      })()`),
+      (clicked) => clicked,
+      `Test window did not expose button ${label}`,
     );
   }
 

@@ -21,6 +21,7 @@ export type DiffTag = "add" | "del" | "ctx" | "gap";
 export interface FileDiffLine {
   newLine?: null | number;
   oldLine?: null | number;
+  skippedLines?: null | number;
   tag: DiffTag;
   text: string;
 }

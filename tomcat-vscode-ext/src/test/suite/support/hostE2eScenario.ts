@@ -1,5 +1,4 @@
 import * as assert from "node:assert/strict";
-import { execFileSync, execSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
@@ -18,7 +17,7 @@ import type {
   WebviewIntent,
 } from "../../../extension";
 import type { SettingsIntent } from "../../../shared/settingsProtocol";
-import { WorkbenchFindDriver } from "./workbenchFindDriver";
+import { captureWorkbenchArtifacts, WorkbenchFindDriver } from "./workbenchFindDriver";
 
 let dummyLanguageModelRegistration: vscode.Disposable | undefined;
 type LanguageModelRegistry = {
@@ -69,18 +68,6 @@ async function waitFor(
   }
   throw new Error(errorMessage);
 }
-
-type MacWindowInfo = {
-  bounds: {
-    height: number;
-    width: number;
-    x: number;
-    y: number;
-  };
-  ownerName: string;
-  windowName: string;
-  windowNumber: number;
-};
 
 type CaptureRegion = "editor" | "sidebar" | "window";
 
@@ -168,8 +155,18 @@ async function waitForWebviewState<T>(
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  const lastState = api.__testing.getWebviewState();
+  const sessions = Object.entries(lastState.sessionViews).map(([sessionId, session]) => ({
+    sessionId,
+    busy: session.busy,
+    approvals: session.timeline.filter((item) => item.type === "approval"),
+  }));
   throw new Error(
-    "Timed out waiting for webview state to match the expected condition",
+    `Timed out waiting for webview state to match the expected condition; last=${JSON.stringify({
+      activeSessionId: lastState.activeSessionId,
+      connectionStatus: lastState.connectionStatus,
+      sessions,
+    })}`,
   );
 }
 
@@ -908,7 +905,7 @@ export async function assertWebviewAddModelsFlow(
     };
     await openAddModelForm();
     await pause(400);
-    captureTranscriptVisual("settings-alignment", "window", "Tomcat Settings");
+    await captureTranscriptVisual("settings-alignment", "window", "Tomcat Settings");
     await api.__testing.sendSettingsDomAction({
       kind: "clickTestId",
       testId: "settings-close-model-form",
@@ -1096,7 +1093,7 @@ export async function assertWebviewAddModelsFlow(
     10_000,
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "model-dropdown-open",
       "window",
       "Extension Development Host",
@@ -1183,7 +1180,7 @@ export async function assertWebviewAddModelsFlow(
     "expected the Edit popover to show the second Context tier",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "model-config-open",
       "window",
       "Extension Development Host",
@@ -2396,7 +2393,7 @@ export async function assertWebviewDiffFlow(
     // Anchor to the always-present dev-host window title (the diff editor is the
     // active full-width editor here); a diff-tab-specific title does not reliably
     // resolve to window bounds and would skip the capture.
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "diff-double-pane",
       "window",
       "Extension Development Host",
@@ -2765,7 +2762,7 @@ export async function assertWebviewRetryRecoveryFlow(
     await api.__testing.focusWebview();
     await api.__testing.waitForWebviewReady();
     await pause(700);
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "same-session-retry-card",
       "window",
       "Extension Development Host",
@@ -2810,7 +2807,7 @@ export async function assertWebviewRetryRecoveryFlow(
     await api.__testing.focusWebview();
     await api.__testing.waitForWebviewReady();
     await pause(700);
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "same-session-retry-success",
       "window",
       "Extension Development Host",
@@ -2847,7 +2844,7 @@ export async function assertWebviewRetryRecoveryFlow(
       testId: "stream-container",
     });
     await pause(700);
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "transcript-current-attempt",
       "window",
       "Extension Development Host",
@@ -2878,13 +2875,18 @@ export async function assertWebviewRecoveryRejectionFlow(
   await api.__testing.waitForEvent({
     sessionId,
     timeoutMs: 20_000,
-    type: "agent_end",
+    type: "agent_idle",
   });
+  // Exercise the restored durable error card, not the transient live error row
+  // that is still being replaced by the agent_idle history refresh.
+  await api.__testing.reloadWebview();
+  await api.__testing.waitForWebviewReady();
   await waitForWebviewDomSnapshot(
     api,
     (candidate) =>
       candidate.activeSessionId === sessionId &&
-      candidate.messageTexts.some((text) => text.includes(failureSummary))
+      candidate.messageTexts.some((text) => text.includes(failureSummary)) &&
+      candidate.html.includes('data-testid="recover-error-turn"')
         ? candidate
         : undefined,
     20_000,
@@ -2960,7 +2962,7 @@ export async function assertWebviewResumeCardFlow(
     await api.__testing.focusWebview();
     await api.__testing.waitForWebviewReady();
     await pause(700);
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "same-session-resume-card",
       "window",
       "Extension Development Host",
@@ -3046,7 +3048,7 @@ export async function assertWebviewCompactControlFlow(
     await api.__testing.focusWebview();
     await api.__testing.waitForWebviewReady();
     await pause(700);
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "compact-control-position-and-icon",
       "window",
       "Extension Development Host",
@@ -3343,7 +3345,7 @@ export async function assertWebviewSessionSwitchRestoreFlow(
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
-    captureTranscriptVisual("switch-restore");
+    await captureTranscriptVisual("switch-restore");
   }
 }
 
@@ -3586,7 +3588,7 @@ export async function assertTranscriptSwitchBackOrder(
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
-    captureTranscriptVisual("switch-order");
+    await captureTranscriptVisual("switch-order");
   }
 }
 
@@ -3656,7 +3658,7 @@ export async function assertWebviewReloadReplayFlow(
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
-    captureTranscriptVisual("reload-replay");
+    await captureTranscriptVisual("reload-replay");
   }
 }
 
@@ -3814,7 +3816,7 @@ export async function assertWebviewSelectionReferenceFlow(
   );
   await pause(1_100);
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "selection-reference-codelens",
       "editor",
       "selection-context.ts",
@@ -3846,7 +3848,7 @@ export async function assertWebviewSelectionReferenceFlow(
     "expected the composer chip label to include the selected file and lines",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "selection-reference-composer",
       "sidebar",
       "selection-context.ts",
@@ -3925,7 +3927,7 @@ export async function assertWebviewSelectionReferenceFlow(
     "expected the restored transcript bubble to render the selection reference label",
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-    captureTranscriptVisual(
+    await captureTranscriptVisual(
       "selection-reference-history",
       "sidebar",
       "selection-context.ts",
@@ -4601,68 +4603,7 @@ function transcriptVisualArtifactPath(filename: string): string {
   return path.join(dir, filename);
 }
 
-function locateMacosWindowScriptPath(): string {
-  return path.resolve(__dirname, "../../../../scripts/find-macos-window.swift");
-}
-
-function resolveCaptureRect(
-  bounds: MacWindowInfo["bounds"],
-  region: CaptureRegion,
-): { height: number; width: number; x: number; y: number } {
-  if (region === "window") {
-    return bounds;
-  }
-
-  const topInset =
-    region === "editor"
-    ? Math.min(52, Math.max(18, Math.round(bounds.height * 0.03)))
-    : Math.min(86, Math.max(62, Math.round(bounds.height * 0.09)));
-  const bottomInset = 28;
-  const usableHeight = Math.max(240, bounds.height - topInset - bottomInset);
-
-  if (region === "sidebar") {
-    const width = Math.min(440, Math.max(360, Math.round(bounds.width * 0.36)));
-    return {
-      height: usableHeight,
-      width,
-      x: bounds.x + bounds.width - width - 16,
-      y: bounds.y + topInset,
-    };
-  }
-
-  const width = Math.min(760, Math.max(560, Math.round(bounds.width * 0.48)));
-  return {
-    height: Math.min(700, usableHeight),
-    width,
-    x: bounds.x + Math.max(80, Math.round(bounds.width * 0.28)),
-    y: bounds.y + topInset,
-  };
-}
-
-function tryResolveVsCodeWindow(appName: string): MacWindowInfo | null {
-  return tryResolveVsCodeWindowWithTitle(appName);
-}
-
-function tryResolveVsCodeWindowWithTitle(
-  appName: string,
-  titleHint?: string,
-): MacWindowInfo | null {
-  try {
-    const args = [locateMacosWindowScriptPath(), appName];
-    if (titleHint && titleHint.trim().length > 0) {
-      args.push("--title", titleHint);
-    }
-    const raw = execFileSync("swift", args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    return raw ? (JSON.parse(raw) as MacWindowInfo) : null;
-  } catch {
-    return null;
-  }
-}
-
-function captureTranscriptVisual(
+async function captureTranscriptVisual(
   name:
     | "collapsed"
     | "compact-control-position-and-icon"
@@ -4693,53 +4634,13 @@ function captureTranscriptVisual(
     | "plan-find-nav"
     | "plan-find-cross-node"
     | "plan-find-no-results",
-  region: CaptureRegion = "window",
-  titleHint?: string,
-): void {
-  try {
-    const appName = vscode.env.appName || "Visual Studio Code";
-    // Foregrounding is a convenience only. On a busy Dev Host, macOS can time
-    // out while activating an already-running application; the title-qualified
-    // window lookup below remains sufficient to select the correct window.
-    try {
-      execFileSync("open", ["-a", appName], {
-        stdio: "ignore",
-        timeout: 2_000,
-      });
-    } catch {
-      /* Continue with deterministic title-based window resolution. */
-    }
-    execSync("sleep 0.35");
-    const targetPath = transcriptVisualArtifactPath(
-      `tomcat-vsix-visual-${name}.png`,
-    );
-    const windowInfo =
-      tryResolveVsCodeWindowWithTitle(appName, titleHint) ??
-      tryResolveVsCodeWindow(appName);
-    if (windowInfo) {
-      const rect = resolveCaptureRect(windowInfo.bounds, region);
-      execFileSync(
-        "screencapture",
-        [
-          "-x",
-          "-R",
-          `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)},${Math.round(rect.height)}`,
-          targetPath,
-        ],
-        { stdio: "ignore" },
-      );
-      return;
-    }
-    execFileSync("screencapture", ["-x", targetPath], {
-      stdio: "ignore",
-    });
-  } catch (error) {
-    if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`Visual capture requested but failed: ${detail}`);
-    }
-    /* Visual capture is optional unless the dedicated acceptance flag is set. */
-  }
+  _region: CaptureRegion = "window",
+  _titleHint?: string,
+): Promise<void> {
+  // Port belongs to this test launch. Full-frame capture avoids guessing window
+  // bounds or accidentally recording the user's foreground editor.
+  const targetPath = transcriptVisualArtifactPath(`tomcat-vsix-visual-${name}.png`);
+  await captureWorkbenchArtifacts(targetPath);
 }
 
 async function capturePlanFindVisual(
@@ -4846,7 +4747,7 @@ export async function assertTranscriptUiFlow(
         "expected the inline progress row to stay visible while the docked todo widget owns the busy state",
       );
       await api.__testing.focusWebview();
-      captureTranscriptVisual("progress");
+      await captureTranscriptVisual("progress");
     }
     await api.__testing.sendWebviewDomAction({
       kind: "clickTestId",
@@ -4873,7 +4774,7 @@ export async function assertTranscriptUiFlow(
     );
     if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
       await api.__testing.focusWebview();
-      captureTranscriptVisual("todo-expanded");
+      await captureTranscriptVisual("todo-expanded");
     }
   } catch (error) {
     if (requireBusyProgress) {
@@ -4969,7 +4870,7 @@ export async function assertTranscriptUiFlow(
   );
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
-    captureTranscriptVisual("collapsed");
+    await captureTranscriptVisual("collapsed");
   }
   assert.ok(
     collapsed.groupFoldTitles.some((title) =>
@@ -5277,7 +5178,7 @@ export async function assertTranscriptRichRenderingFlow(
 
   if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
     await api.__testing.focusWebview();
-    captureTranscriptVisual("rich-render");
+    await captureTranscriptVisual("rich-render");
   }
 }
 

@@ -110,6 +110,15 @@ function createDisposable(callback: () => void): DisposableLike {
   };
 }
 
+type OwnedChild = {
+  child: ChildProcessWithoutNullStreams;
+  closed: Promise<void>;
+  exited: boolean;
+  stopping: boolean;
+  killTimer?: NodeJS.Timeout;
+  termTimer?: NodeJS.Timeout;
+};
+
 export class TomcatMessenger {
   private readonly controlHandlers = new Map<string, ControlRequestHandler>();
   private readonly activeControlRequests = new Map<string, AbortController>();
@@ -123,6 +132,9 @@ export class TomcatMessenger {
   private readonly pendingResponses = new Map<string, PendingResponse>();
   private readonly stderrListeners = new Set<(chunk: string) => void>();
   private child?: ChildProcessWithoutNullStreams;
+  // A child can exit/restart before its pipes close. Keep ownership until close.
+  private readonly ownedChildren = new Set<OwnedChild>();
+  private disposalPromise?: Promise<void>;
   private childAbort?: AbortController;
   private childGeneration = 0;
   private disposed = false;
@@ -164,6 +176,7 @@ export class TomcatMessenger {
     );
 
     this.child = child;
+    this.observeChildClose(child);
     const abortController = new AbortController();
     const generation = ++this.childGeneration;
     this.childAbort = abortController;
@@ -246,18 +259,107 @@ export class TomcatMessenger {
   }
 
   dispose(): void {
+    this.disposeWithGrace(0);
+  }
+
+  private disposeWithGrace(graceMs: number): void {
     if (this.disposed) {
       return;
     }
 
     this.disposed = true;
-    this.shutdown("TomcatMessenger disposed");
+    this.shutdown("TomcatMessenger disposed", graceMs);
+    for (const owned of this.ownedChildren) this.terminateChild(owned, 500, graceMs);
     this.controlHandlers.clear();
     this.controlRequestListeners.clear();
     this.eventListeners.clear();
     this.exitListeners.clear();
     this.frameErrorListeners.clear();
     this.stderrListeners.clear();
+  }
+
+  /**
+   * Disables new work immediately, allows a short EOF grace period, then waits
+   * for every owned generation's process AND stdio close. The budget includes escalation.
+   * Repeated calls share the first call's promise/budget. Timeout is a failure,
+   * not permission for a fixture to delete a directory a child may still use.
+   */
+  disposeAsync({ timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<void> {
+    if (this.disposalPromise) return this.disposalPromise;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) {
+      return Promise.reject(new RangeError("disposeAsync timeoutMs must be a positive timer duration"));
+    }
+    // Give EOF a short opportunity to settle checkpoint/title writes before a
+    // signal interrupts the process. Synchronous dispose retains its old timing.
+    this.disposeWithGrace(Math.min(500, timeoutMs / 4));
+    const pending = [...this.ownedChildren];
+    for (const owned of pending) this.terminateChild(owned, Math.min(1_000, timeoutMs / 2));
+    let timer: NodeJS.Timeout;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const remaining = [...this.ownedChildren];
+        const detail = remaining.map(({ child }) =>
+          `pid=${child.pid ?? "unknown"} exit=${child.exitCode} signal=${child.signalCode}`).join("; ");
+        // Release our pipes as a last resort, but still report the missed deadline.
+        for (const owned of remaining) {
+          this.signalChild(owned, "SIGKILL");
+          owned.child.stdin.destroy();
+          owned.child.stdout.destroy();
+          owned.child.stderr.destroy();
+        }
+        reject(new Error(`timed out closing tomcat serve after ${timeoutMs}ms: ${detail}`));
+      }, timeoutMs);
+    });
+    this.disposalPromise = Promise.race([
+      Promise.all(pending.map((owned) => owned.closed)).then(() => undefined),
+      deadline,
+    ]).finally(() => clearTimeout(timer));
+    return this.disposalPromise;
+  }
+
+  private observeChildClose(child: ChildProcessWithoutNullStreams): void {
+    let resolveClosed!: () => void;
+    const owned: OwnedChild = {
+      child,
+      closed: new Promise<void>((resolve) => { resolveClosed = resolve; }),
+      exited: false,
+      stopping: false,
+    };
+    this.ownedChildren.add(owned);
+    child.once("exit", () => { owned.exited = true; });
+    child.once("close", () => {
+      clearTimeout(owned.killTimer);
+      clearTimeout(owned.termTimer);
+      this.ownedChildren.delete(owned);
+      resolveClosed();
+    });
+  }
+
+  private signalChild(owned: OwnedChild, signal: NodeJS.Signals): void {
+    if (owned.exited || !this.ownedChildren.has(owned)) return;
+    try { owned.child.kill(signal); } catch (error) {
+      this.log("warn", `failed to signal tomcat ${signal}: ${toError(error).message}`);
+    }
+  }
+
+  private terminateChild(owned: OwnedChild, graceMs = 500, eofGraceMs = 0): void {
+    if (!this.ownedChildren.has(owned)) return;
+    if (!owned.stopping) {
+      owned.stopping = true;
+      try {
+        if (!owned.child.stdin.destroyed) owned.child.stdin.end();
+      } catch (error) {
+        this.log("warn", `failed to close tomcat stdin: ${toError(error).message}`);
+      }
+      if (eofGraceMs > 0) {
+        owned.termTimer = setTimeout(() => this.signalChild(owned, "SIGTERM"), eofGraceMs).unref();
+      } else {
+        this.signalChild(owned, "SIGTERM");
+      }
+    }
+    if (!this.ownedChildren.has(owned) || owned.exited) return;
+    clearTimeout(owned.killTimer);
+    owned.killTimer = setTimeout(() => this.signalChild(owned, "SIGKILL"), graceMs).unref();
   }
 
   send(command: ServeCommand): void {
@@ -643,7 +745,7 @@ export class TomcatMessenger {
     child.stdin.write(line, "utf8");
   }
 
-  private shutdown(reason: string): void {
+  private shutdown(reason: string, eofGraceMs = 0): void {
     this.rejectPending(new Error(reason));
 
     const child = this.child;
@@ -661,20 +763,10 @@ export class TomcatMessenger {
       return;
     }
 
-    child.stdout.removeAllListeners();
-    child.stderr.removeAllListeners();
-    child.removeAllListeners();
-
-    try {
-      if (!child.stdin.destroyed) {
-        child.stdin.end();
-      }
-    } catch (error) {
-      this.log("warn", `failed to close tomcat stdin: ${toError(error).message}`);
-    }
-
-    if (!child.killed) {
-      child.kill();
+    // Keep close/error observers and continue draining old-generation output.
+    // Existing identity/generation checks prevent stale data reaching the UI.
+    for (const owned of this.ownedChildren) {
+      if (owned.child === child) this.terminateChild(owned, 1_000, eofGraceMs);
     }
   }
 
@@ -867,6 +959,12 @@ export class TomcatMessenger {
     this.stdoutBuffer = "";
 
     this.rejectPending(error);
+
+    if (event.error) {
+      for (const owned of this.ownedChildren) {
+        if (owned.child === child) this.terminateChild(owned);
+      }
+    }
 
     const payload: TomcatMessengerExit = {
       code: event.code,

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { runTests } from "@vscode/test-electron";
+import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 
 import {
   createHostE2eFixture,
@@ -75,10 +76,6 @@ async function main(): Promise<void> {
       extensionTestsEnv[name] = value;
     }
   }
-  // Coding-agent shells may run Electron as Node; never leak that mode into VS Code.
-  delete extensionTestsEnv.ELECTRON_RUN_AS_NODE;
-  const electronRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
-  delete process.env.ELECTRON_RUN_AS_NODE;
   const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "tdev-"));
   const cdpPort = await reserveLoopbackPort();
 
@@ -90,7 +87,7 @@ async function main(): Promise<void> {
     await seedChatUserSettings(userDataDir);
 
     await fs.access(extensionTestsPath);
-    await runTests({
+    await runVsCodeGuiTests(runTests, {
       extensionDevelopmentPath,
       extensionTestsEnv: {
         ...extensionTestsEnv,
@@ -105,11 +102,6 @@ async function main(): Promise<void> {
       vscodeExecutablePath: resolveVsCodeExecutable(),
     });
   } finally {
-    if (electronRunAsNode === undefined) {
-      delete process.env.ELECTRON_RUN_AS_NODE;
-    } else {
-      process.env.ELECTRON_RUN_AS_NODE = electronRunAsNode;
-    }
     await fixture.cleanup();
     await fs.rm(userDataDir, { force: true, recursive: true });
   }

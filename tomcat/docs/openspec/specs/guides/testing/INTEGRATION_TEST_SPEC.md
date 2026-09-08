@@ -141,13 +141,16 @@ my_project/
 
 1. **默认 4 并发车道**：仓库通过 `.config/nextest.toml` 将 `profile.default.test-threads` 固定为 `4`，不再按 `num-cpus` 满开。凡已证实不共享进程级全局状态或真实 `~/.tomcat` 盘目录的 binary，全部放这里，包括原先的 `cli_tests`、`checkpoint_cli_e2e`、`resume_hydration_cli_e2e`、`quickjs_e2e_tests`、`hostcall_tests`、`long_lived_vm_tests`、`primitives_tools_tests`、`tool_catalog_doc`、`serve_*` 等。
 2. **serial 兜底组**：`test-groups.serial.max-threads = 1`，默认空。只有 3x 连跑证明确实互踩、OOM 或明显抖动时，才把个别 binary 临时回退到这里。
-3. **real-llm 显式层**：`.config/nextest.toml` 的 `profile.real-llm` 负责收口 `TOMCAT_INTEGRATION_REAL_LLM_TESTS` 以及 `cli_tests` 里 `*_real_llm_cli` 慢用例；其 `test-groups.real-llm.max-threads = 2` 只为规避 provider API 限流，不是正确性要求。
+3. **real-llm 显式层**：`.config/nextest.toml` 的 `profile.real-llm` 收口 `TOMCAT_INTEGRATION_REAL_LLM_TESTS`、`TOMCAT_INTEGRATION_REAL_LLM_CLI_TESTS` 及 `TOMCAT_INTEGRATION_REAL_LLM_CASES`；其 `test-groups.real-llm.max-threads = 2` 只为规避 provider API 限流，不是正确性要求。
+4. **本地服务特性与手动项**：`TOMCAT_INTEGRATION_FEATURE_TESTS` 随默认门禁启用 `test-streamable-http-server`，覆盖本机 HTTP/OAuth 测试服务；`TOMCAT_INTEGRATION_MANUAL_TESTS` / `MANUAL_CASES` 明确列出需专用环境的用例，不把它们伪称离线或 real-llm 已通过。`integration_gate_config_tests` 对照 Cargo targets 检查分类遗漏。
 
 **隔离原则**：
 
 *   `nextest` 是“一用例一进程”，因此 `set_var` / `cwd` 这类进程内状态不再天然要求整组 `-j1 --test-threads=1`。
 *   真 LLM / CLI E2E 里凡会落盘到 `~/.tomcat` 的路径，都必须在测试入口先切到**临时 HOME**，让 `~/.tomcat/*` 落到私有 tempdir；默认门禁不再依赖真实家目录。
-*   默认过滤（`profile.default.default-filter`）会排除显式 real-llm binary 与 `cli_tests` 里的 `*_real_llm_cli` 慢用例；它们只能通过 `integration-real-llm` / `profile real-llm` 进入门禁。
+*   默认过滤排除上述真实模型/外网 binary 和 case，以及明确列出的手动项。离线集成可使用固定本地服务，但其通过不能代替真实供应商链路验证。
+*   `run-integration-tests.sh` 只使用当前 shell 已导出的凭据（`TOMCAT_TEST_EXPORTED_ENV_ONLY=1`），不让 Rust helper 偷偷从 dotenv 补到与预检不同的 key。默认 OpenAI target 为 `gpt-5.4_litellm-sunmi`，由 `TOMCAT_E2E_OPENAI_TARGET` 覆盖；直连 GPT 使用 `OPENAI_API_KEY`，其他 target 使用 `LITELLM_SUNMI_API_KEY`，另需 `DEEPSEEK_API_KEY` 和 `MIMO_API_KEY`。缺凭据退出 2 并说明“未运行”，不是成功跳过。
+*   真 CLI 测试请从正常独立测试 shell 启动；harness 不清除继承的 `TOMCAT_AGENT_ACTIVE`。guard 开关行为由显式开/关单测覆盖。
 
 ### 7.3 CI 检查项
 在流水线（如 GitHub Actions）中，集成测试应包含：

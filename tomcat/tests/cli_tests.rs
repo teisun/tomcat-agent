@@ -159,51 +159,6 @@ fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_onl
     fs::write(skill_dir.join("SKILL.md"), content).expect("write skill");
 }
 
-fn spawn_quick_openai_stream_server(reply: &'static str) -> (String, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
-    use std::time::{Duration, Instant};
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock llm server");
-    let addr = listener.local_addr().expect("local addr");
-    listener
-        .set_nonblocking(true)
-        .expect("set mock llm server nonblocking");
-    let handle = std::thread::spawn(move || {
-        let mut served = 0usize;
-        let mut last_activity = Instant::now();
-        loop {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    served += 1;
-                    last_activity = Instant::now();
-                    let mut buf = [0u8; 8192];
-                    let _ = stream.read(&mut buf);
-                    let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
-                    let first = format!(
-                        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{reply}\"}}}}]}}\n\n"
-                    );
-                    let finish = "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n";
-                    stream.write_all(headers.as_bytes()).expect("write headers");
-                    stream.write_all(first.as_bytes()).expect("write delta");
-                    stream.write_all(finish.as_bytes()).expect("write finish");
-                    stream.flush().expect("flush");
-                    if served >= 4 {
-                        break;
-                    }
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    if served > 0 && last_activity.elapsed() > Duration::from_secs(1) {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(err) => panic!("accept: {err}"),
-            }
-        }
-    });
-    (format!("http://{addr}"), handle)
-}
-
 struct DeterministicMockLlm {
     chat_responses: Mutex<VecDeque<Result<ChatResponse, AppError>>>,
     streams: Mutex<VecDeque<Vec<Result<StreamEvent, AppError>>>>,
@@ -2729,9 +2684,7 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
     std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("workspace-temp")
-        .join(scratch_leaf);
+    let scratch = dir.path().join(scratch_leaf);
     std::fs::create_dir_all(&scratch).unwrap();
     let scratch = scratch.canonicalize().expect("workspace-temp scratch path");
     let scratch_str = scratch.to_str().expect("utf8 scratch path");
@@ -2739,11 +2692,18 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
     info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
     cmd()
         .args(["init"])
+        .current_dir(&scratch)
+        .timeout(std::time::Duration::from_secs(20))
         .env("HOME", dir.path())
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
     let api_key = real_llm_api_key("setup_background_bash_p1_real_llm_fixture");
+    let mut cfg = tomcat::load_config_toml_file(&config_path).expect("private live fixture config");
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+    common::apply_deepseek_app_config(&mut cfg);
+    fs::write(&config_path, toml::to_string_pretty(&cfg).unwrap()).unwrap();
+    fs::write(work_dir.join("mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
 
     info!("Arrange: tomcat workspace add {}", scratch_str);
     cmd()
@@ -2772,10 +2732,11 @@ fn run_background_bash_p1_real_llm_chat(
     let mut c = cmd();
     c.arg("code")
         .current_dir(&fx.scratch)
+        .env("HOME", fx._home.path())
+        .env("USERPROFILE", fx._home.path())
         .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
-        .env("TOMCAT__CONFIG_PATH", fx.config_path.to_str().unwrap())
         .env("RUST_LOG", "tomcat=info")
-        .write_stdin(prompt)
+        .write_stdin(format!("{prompt}\n"))
         .timeout(timeout);
     configure_deepseek_real_llm(&mut c, &fx.api_key);
     let assert = c.assert();
@@ -2812,7 +2773,7 @@ fn load_background_bash_p1_real_llm_transcript(fx: &BackgroundBashP1RealLlmFixtu
 /// 验证：
 /// - exit 0；
 /// - stderr 出现 `[bg] task ... queued for next turn`（证明 lifecycle subscriber →
-///   follow_up_queue → between-turns drain 路径真的跑了）；
+///   follow_up_queue 入队；消费可发生在同一轮或轮次之间，单凭此日志不能区分）；
 /// - 后台任务真实产出 `bg_done.txt`，独立工作真实产出 `marker.txt`；
 /// - stdout 最终包含约定完成词 `AUTOFEED_OK`。
 ///
@@ -4858,7 +4819,15 @@ fn test_user_chat_skill_list_reload_use() {
     let workspace = tempfile::tempdir().unwrap();
     let work_dir = home.path().join("work");
     fs::create_dir_all(&work_dir).unwrap();
-    let (base_url, server_handle) = spawn_quick_openai_stream_server("SKILL_CLI_OK");
+    let server = common::serve::spawn_scripted_openai_stream_server_with_auto_title(vec![
+        common::serve::response(vec![
+            common::serve::sse_delta("SKILL_CLI_OK"),
+            common::serve::sse_finish("stop"),
+            common::serve::sse_done(),
+        ]),
+    ]);
+    let base_url = &server.base_url;
+    fs::write(work_dir.join("mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
 
     info!("Arrange: init temp HOME + workspace skills");
     cmd()
@@ -4953,7 +4922,8 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         "transcript should preserve /skill use intent, actual: {}",
         trunc(&transcript, 800)
     );
-    server_handle.join().expect("mock llm server should exit");
+    // RAII closes the local service even if an assertion above fails.
+    drop(server);
 }
 
 /// [E2E-CLI-068] 用户执行 tomcat skill list|reload

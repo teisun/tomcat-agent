@@ -107,7 +107,7 @@ function normalizeSession(session) {
     busy: false,
     cwd: typeof session?.cwd === "string" ? session.cwd : process.cwd(),
     history,
-    mode: typeof session?.mode === "string" ? session.mode : "code",
+    mode: session?.mode === "user" ? "user" : "project",
     model:
       typeof session?.model === "string" && MODEL_OPTIONS.includes(session.model)
         ? session.model
@@ -1162,6 +1162,7 @@ function handleCommand(frame) {
               "switch_session",
               "list_sessions",
               "get_state",
+              "list_checkpoints",
               "close_session",
               "interrupt",
               "list_models",
@@ -1258,15 +1259,26 @@ function handleCommand(frame) {
         id: frame.id,
         payload: {
           activePlan,
-          agentMode: activePlan ? "plan" : "chat",
+          agentMode: activePlan?.state === "planning" ? "plan" : "chat",
           busy: session.busy,
           cwd: session.cwd,
-          mode: session.mode,
+          workspaceMode: session.mode,
           model: session.model,
           sessionId,
           sessionKey: session.sessionKey,
           thinkingLevel: currentThinkingLevel(session),
         },
+        sessionId,
+        success: true,
+        type: "response",
+      });
+      return;
+    }
+    case "list_checkpoints": {
+      const sessionId = frame.sessionId || activeSessionId || createSession();
+      send({
+        id: frame.id,
+        payload: { checkpoints: [], sessionId },
         sessionId,
         success: true,
         type: "response",

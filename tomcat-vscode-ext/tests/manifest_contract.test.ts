@@ -57,7 +57,7 @@ describe("extension manifest contract", () => {
     const manifest = await readManifest();
 
     expect(manifest.scripts?.["test:unit:core"]).toBe("vitest run --maxWorkers 4 src");
-    expect(manifest.scripts?.["test:integration"]).toBe("vitest run --maxWorkers 1 tests");
+    expect(manifest.scripts?.["test:integration"]).toBe("vitest run --config vitest.integration.config.ts --maxWorkers 1");
     expect(manifest.scripts?.["gate:fast"]).toBe("npm run lint && npm run test:unit");
     expect(manifest.scripts?.["gate:full"]).toBe("tsx scripts/run-vscode-full-gate.ts");
   });

@@ -151,6 +151,24 @@ If Tomcat exits during a conversation:
 `TOMCAT__ASK_QUESTION__TIMEOUT_MS` were removed. Old values are ignored with a
 migration warning and never create a question deadline.
 
+## Running development checks
+
+Run commands below from `tomcat-vscode-ext` in an independent test shell. Tests keep private HOME/workspace directories and use fixed local model replies; they do not turn off Tomcat's nested-Agent protection. An Agent-hosted shell carrying `TOMCAT_AGENT_ACTIVE=1` is not a normal CLI test environment.
+
+```sh
+npm run test:integration -- tests/serve_set_plan_mode.test.ts
+npm run test:integration -- tests/serve_set_plan_mode.test.ts tests/serve_get_state_planstate.test.ts
+# No positional paths means every tests/**/*.test.ts; an unmatched path fails.
+# Standalone packaging smoke prepares its own build.
+npm run test:integration -- tests/package_vsix_smoke.test.ts
+npm run check:wire
+npm run gate:full
+```
+
+`package:vsix` and standalone package smoke tests build by default. The smoke setup runs its build asynchronously with bounded process-group cleanup; `gate:full` owns one build and reuses it for sequential packaging. `--skip-build` validates a content-hash record and rejects missing, stale, or corrupt artifacts. Do not run builds/packages that share `out`/`gui/dist` concurrently.
+
+GUI entry points clean known Electron window-mode variables only for the launch and restore them afterward. They retain unique launch logs under the printed artifact directory. Screenshots must show the **test window**, not the user's desktop; keep the matching accessibility and console records. A successful install is not visual acceptance. See [the remediation evidence ledger](../tomcat/docs/reports/acceptance-remediation.md) for this run's successes, failures, and unfinished checks.
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.

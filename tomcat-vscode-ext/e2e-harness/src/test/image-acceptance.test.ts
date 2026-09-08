@@ -181,86 +181,12 @@ async function withRootWidth<T>(
   }
 }
 
-/**
- * Bounds of the test VS Code window, as `x,y,w,h` for `screencapture -R`.
- *
- * Whole-screen shots pick up whatever else is on the reviewer's desktop, which buries the
- * thing under review and puts unrelated windows into an artifact. Returns null when the
- * window cannot be located so the caller can fail the acceptance run rather than silently
- * producing an unverifiable screenshot.
- */
-function testWindowRegion(): string | null {
-  try {
-    // VS Code's native process is named "Visual Studio Code" (or an Insiders/
-    // derivative name), not "Electron". Query CoreGraphics by the app name that
-    // the extension host reports, so capture follows the actual VS Code window
-    // without requiring Accessibility permission for System Events.
-    const scriptPath = path.join(repoRoot, "scripts", "find-macos-window.swift");
-    const output = execFileSync(
-      "swift",
-      [scriptPath, vscode.env.appName || "Visual Studio Code"],
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      },
-    ).trim();
-    const windowInfo = output
-      ? (JSON.parse(output) as {
-          bounds?: { height?: number; width?: number; x?: number; y?: number };
-        })
-      : null;
-    const bounds = windowInfo?.bounds;
-    if (
-      !bounds ||
-      ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
-    ) {
-      return null;
-    }
-    return `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
-  } catch {
-    return null;
-  }
-}
-
-// CoreGraphics can transiently omit an otherwise visible VS Code window while
-// Electron changes focus. The acceptance run never moves or resizes its window,
-// so reuse an earlier verified rectangle rather than falling back to an
-// unrelated full-screen capture. The very first capture still requires a fresh
-// successful lookup.
-let lastKnownTestWindowRegion: string | null = null;
-
 async function captureScreenshot(name: string): Promise<string> {
   const targetPath = path.join(requireEnv("TOMCAT_ACCEPT_SCREENSHOTS_DIR"), name);
   await pause(500);
-  let freshRegion = testWindowRegion();
-  if (!freshRegion) {
-    // @vscode/test-electron can launch Code behind the IDE that started this
-    // test. An off-screen/background window is intentionally absent from
-    // CGWindowList's on-screen query, so activate the exact app first and then
-    // retry once before treating visual acceptance as impossible.
-    const appName = vscode.env.appName || "Visual Studio Code";
-    try {
-      execFileSync("open", ["-a", appName], { stdio: "ignore" });
-      await pause(350);
-      freshRegion = testWindowRegion();
-    } catch {
-      // The assertion below names the capture and app that failed. It is much
-      // more useful than producing a full-desktop artifact for the wrong app.
-    }
-  }
-  if (freshRegion) {
-    lastKnownTestWindowRegion = freshRegion;
-  }
-  const region = freshRegion ?? lastKnownTestWindowRegion;
-  assert.ok(
-    region,
-    `could not locate the ${vscode.env.appName || "Visual Studio Code"} window for ${name}`,
-  );
-  execFileSync(
-    "screencapture",
-    ["-x", "-R", region, targetPath],
-    { stdio: "inherit" },
-  );
+  await (require(path.resolve(repoRoot, "out/test/suite/support/workbenchFindDriver.js")) as {
+    captureWorkbenchArtifacts(target: string): Promise<void>;
+  }).captureWorkbenchArtifacts(targetPath);
   return targetPath;
 }
 

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
+import { assertBuildArtifacts } from "./buildArtifacts";
 
 type PackageManifest = {
   name: string;
@@ -54,18 +55,6 @@ const DIRECTORY_ASSETS = [
   "media",
 ] as const;
 
-type ModifiedFile = {
-  mtimeMs: number;
-  relativePath: string;
-};
-
-const BUILD_FRESHNESS_PAIRS = [
-  { artifactDirectory: "out", sourceDirectory: "src" },
-  { artifactDirectory: "gui/dist", sourceDirectory: "gui/src" },
-] as const;
-
-const FRESHNESS_IGNORED_DIRECTORIES = new Set(["dist", "node_modules", "out"]);
-
 function run(command: string, args: string[], cwd: string, capture = false): string {
   const result = execFileSync(command, args, {
     cwd,
@@ -75,63 +64,7 @@ function run(command: string, args: string[], cwd: string, capture = false): str
   return capture ? result : "";
 }
 
-function newestModifiedFile(root: string, relativeDirectory: string): ModifiedFile | undefined {
-  const directory = path.join(root, relativeDirectory);
-  if (!fs.existsSync(directory)) {
-    return undefined;
-  }
-
-  let newest: ModifiedFile | undefined;
-  const visit = (relativePath: string): void => {
-    const absolutePath = path.join(directory, relativePath);
-    for (const entry of fs.readdirSync(absolutePath, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        if (!FRESHNESS_IGNORED_DIRECTORIES.has(entry.name)) {
-          visit(path.join(relativePath, entry.name));
-        }
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-
-      const filePath = path.join(absolutePath, entry.name);
-      const stat = fs.statSync(filePath);
-      if (!newest || stat.mtimeMs > newest.mtimeMs) {
-        newest = {
-          mtimeMs: stat.mtimeMs,
-          relativePath: path.join(relativeDirectory, relativePath, entry.name),
-        };
-      }
-    }
-  };
-
-  visit("");
-  return newest;
-}
-
-/**
- * Prevents `--skip-build` from silently packaging source changes that have not
- * reached `out/` or `gui/dist/`. The normal package path always rebuilds.
- */
-export function assertPrebuiltArtifactsFresh(extensionRoot: string): void {
-  for (const { artifactDirectory, sourceDirectory } of BUILD_FRESHNESS_PAIRS) {
-    const artifact = newestModifiedFile(extensionRoot, artifactDirectory);
-    const source = newestModifiedFile(extensionRoot, sourceDirectory);
-    if (!artifact) {
-      throw new Error(
-        `Cannot package with --skip-build: missing build artifact in ${artifactDirectory}. ` +
-          "Remove --skip-build to rebuild first.",
-      );
-    }
-    if (source && source.mtimeMs > artifact.mtimeMs) {
-      throw new Error(
-        `Cannot package with --skip-build: source ${source.relativePath} is newer than ` +
-          `artifact ${artifact.relativePath}. Remove --skip-build to rebuild first.`,
-      );
-    }
-  }
-}
+export const assertPrebuiltArtifactsFresh = assertBuildArtifacts;
 
 function resolveLocalBin(extensionRoot: string, name: string): string {
   return path.join(
@@ -326,7 +259,7 @@ export function assertPublishableFiles(
   fileList: readonly string[],
   options: Pick<PackageVsixOptions, "bundleBinaryPath" | "target"> = {},
 ): void {
-  const requiredFiles = [...REQUIRED_FILES];
+  const requiredFiles: string[] = [...REQUIRED_FILES];
   if (options.bundleBinaryPath) {
     requiredFiles.push(bundledExecutableRelativePath(options.target));
   }

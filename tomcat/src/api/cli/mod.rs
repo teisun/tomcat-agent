@@ -495,7 +495,13 @@ fn nested_invocation_mutates_state(cmd: &Commands) -> bool {
 }
 
 fn guard_nested_invocation(cmd: Option<&Commands>) -> Result<(), AppError> {
-    if !nested_agent_invocation_active() {
+    guard_nested_invocation_for(nested_agent_invocation_active(), cmd)
+}
+
+// Keep policy independent of process-global environment so tests can supply
+// both inputs without changing the active agent's safety flag.
+fn guard_nested_invocation_for(active: bool, cmd: Option<&Commands>) -> Result<(), AppError> {
+    if !active {
         return Ok(());
     }
     let Some(cmd) = cmd else {

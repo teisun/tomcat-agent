@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 
 import { runTests } from "@vscode/test-electron";
+import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 
 import {
   createHostE2eFixture,
@@ -27,6 +28,7 @@ function currentVsCodeTarget(): string {
 }
 
 type InstalledScenarioOptions = {
+  artifactsDir: string;
   additionalSettings?: Record<string, unknown>;
   extensionRoot: string;
   harnessRoot: string;
@@ -72,9 +74,9 @@ async function runInstalledScenario(options: InstalledScenarioOptions): Promise<
     );
 
     await fs.access(options.harnessTestsPath);
-    await runTests({
+    await runVsCodeGuiTests(runTests, {
       extensionDevelopmentPath: options.harnessRoot,
-      extensionTestsEnv: options.testEnv,
+      extensionTestsEnv: { ...options.testEnv, TOMCAT_E2E_SCREENSHOT: "1", TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: options.artifactsDir },
       extensionTestsPath: options.harnessTestsPath,
       launchArgs: [
         options.workspacePath,
@@ -105,8 +107,10 @@ async function main(): Promise<void> {
   );
   // Artifacts live OUTSIDE installRoot so the finally cleanup retains them for
   // post-run inspection (Read cropped screenshots). Override via env if needed.
-  const artifactsDir = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR
+  const artifactsParent = process.env.TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR
     ?? path.join(os.tmpdir(), "tomcat-vsix-verify-artifacts");
+  await fs.mkdir(artifactsParent, { recursive: true });
+  const artifactsDir = await fs.mkdtemp(path.join(artifactsParent, "run-"));
   const bundledFixture = await createHostE2eFixture();
   const setupRequiredFixture = await createHostE2eFixture({ requireInit: true });
   const transientFailureFixture = await createHostE2eFixture({
@@ -133,8 +137,6 @@ async function main(): Promise<void> {
     ...slowHandshakeBundledEnv
   } = slowHandshakeFixture.env;
 
-  await fs.mkdir(artifactsDir, { recursive: true });
-  await clearVisualArtifacts(artifactsDir);
 
   const bundledVerifyEnv: NodeJS.ProcessEnv = {
     ...process.env,
@@ -147,7 +149,7 @@ async function main(): Promise<void> {
       ?? [
         "restores plan cards and Ctx after switching sessions",
         "replays plan history after a webview reload",
-        "keeps cross-owner plan state in sync in the webview",
+        "switches an executing plan back to chat in the webview",
         "renders the transcript UI groups, tool rows, file chips, and progress",
       ].join("|"),
     TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS:
@@ -164,7 +166,9 @@ async function main(): Promise<void> {
     TOMCAT_EXPECT_PROMPT_SEVERITY: "warning",
     TOMCAT_EXPECT_PROMPT_SUBSTRING: "Tomcat CLI was not found automatically.",
     TOMCAT_VSCODE_TEST_DEFAULT_CWD: pureExtWorkspacePath,
-    TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
+    TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "0",
+    TOMCAT_VSCODE_TEST_WARNING_ACTION: "",
+    TOMCAT_VSCODE_TEST_INFO_ACTION: "",
   };
   const setupRecoveryEnv: NodeJS.ProcessEnv = {
     ...process.env,
@@ -182,8 +186,10 @@ async function main(): Promise<void> {
     TOMCAT_EXPECT_RESOLVED_SOURCE: "bundled",
     TOMCAT_EXPECT_SETUP_RECOVERY: "1",
     TOMCAT_EXPECT_PROMPT_TRIGGER: "restart",
-    TOMCAT_VSCODE_TEST_WARNING_ACTION: "Start Setup",
-    TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "1",
+    TOMCAT_EXPECT_VISIBLE_SETUP: "1",
+    TOMCAT_VSCODE_TEST_WARNING_ACTION: "",
+    TOMCAT_VSCODE_TEST_INFO_ACTION: "",
+    TOMCAT_VSCODE_TEST_SUPPRESS_EXIT_PROMPT: "0",
   };
   const transientRecoveryEnv: NodeJS.ProcessEnv = {
     ...process.env,
@@ -213,6 +219,7 @@ async function main(): Promise<void> {
     });
 
     await runInstalledScenario({
+      artifactsDir,
       extensionRoot,
       harnessRoot,
       harnessTestsPath: bundledHarnessTestsPath,
@@ -225,6 +232,7 @@ async function main(): Promise<void> {
       additionalSettings: {
         "tomcat.path": path.join(pureExtWorkspacePath, "definitely-missing-tomcat"),
       },
+      artifactsDir,
       extensionRoot,
       harnessRoot,
       harnessTestsPath: promptOnlyHarnessTestsPath,
@@ -234,6 +242,7 @@ async function main(): Promise<void> {
     });
 
     await runInstalledScenario({
+      artifactsDir,
       extensionRoot,
       harnessRoot,
       harnessTestsPath: setupRecoveryHarnessTestsPath,
@@ -243,6 +252,7 @@ async function main(): Promise<void> {
     });
 
     await runInstalledScenario({
+      artifactsDir,
       extensionRoot,
       harnessRoot,
       harnessTestsPath: transientRecoveryHarnessTestsPath,
@@ -252,6 +262,7 @@ async function main(): Promise<void> {
     });
 
     await runInstalledScenario({
+      artifactsDir,
       extensionRoot,
       harnessRoot,
       harnessTestsPath: slowHandshakeHarnessTestsPath,
@@ -281,23 +292,16 @@ async function cropScreenshots(extensionRoot: string, artifactsDir: string): Pro
     return;
   }
   try {
-    execFileSync(
-      "python3",
-      [cropper, "--artifacts-dir", artifactsDir],
-      { stdio: "inherit" },
-    );
+    const runs = await fs.readdir(artifactsDir, { withFileTypes: true });
+    for (const run of runs.filter((entry) => entry.isDirectory() && entry.name.startsWith("gui-"))) {
+      const runDir = path.join(artifactsDir, run.name);
+      const images = await fs.readdir(runDir);
+      if (!images.some((name) => name.startsWith("tomcat-vsix-visual-") && name.endsWith(".png"))) continue;
+      execFileSync("python3", [cropper, "--artifacts-dir", runDir], { stdio: "inherit" });
+    }
   } catch (error) {
     console.warn(`crop-screenshot.py failed (screenshots may still be readable as full-frame): ${String(error)}`);
   }
-}
-
-async function clearVisualArtifacts(artifactsDir: string): Promise<void> {
-  const entries = await fs.readdir(artifactsDir, { withFileTypes: true });
-  await Promise.all(
-    entries
-      .filter((entry) => entry.isFile() && /^tomcat-vsix-visual-.*\.png$/u.test(entry.name))
-      .map((entry) => fs.rm(path.join(artifactsDir, entry.name), { force: true })),
-  );
 }
 
 main().catch((error) => {

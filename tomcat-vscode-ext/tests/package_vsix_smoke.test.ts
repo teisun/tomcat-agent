@@ -2,7 +2,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
+import { BUILD_RECORD, recordBuildArtifacts, REQUIRED_OUTPUTS } from "../scripts/buildArtifacts";
 
 import { crc32 } from "node:zlib";
 
@@ -15,7 +17,7 @@ import {
   bundledExecutableRelativePath,
   listPublishableFiles,
   packageVsix,
-  packageVsixOrReuse,
+  PREBUILT_VSIX_ENV,
   preparePublishDirectory,
 } from "../scripts/package-vsix";
 import { extractVsixLikeCursor } from "../scripts/vsix-extractable";
@@ -84,6 +86,30 @@ function makeStoredZip(fileName: string, content: Buffer): Buffer {
 }
 
 describe("VSIX packaging", () => {
+  beforeAll(async () => {
+    const root = path.resolve(__dirname, "..");
+    if (!process.env[PREBUILT_VSIX_ENV]) {
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn("npm", ["run", "build"], { cwd: root, stdio: "inherit", detached: process.platform !== "win32" });
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          if (process.platform !== "win32" && child.pid) {
+            try { process.kill(-child.pid, "SIGKILL"); } catch { /* already exited */ }
+          }
+          child.kill("SIGKILL");
+        }, 180_000);
+        child.once("error", (error) => { clearTimeout(timer); reject(error); });
+        child.once("close", (code) => {
+          clearTimeout(timer);
+          if (code === 0 && !timedOut) resolve();
+          else reject(new Error(`package test build failed: code=${code}, timedOut=${timedOut}`));
+        });
+      });
+    }
+    assertPrebuiltArtifactsFresh(root);
+  }, 200_000);
+
   it(
     "packages non-interactively and excludes source-only directories",
     async () => {
@@ -93,7 +119,7 @@ describe("VSIX packaging", () => {
       let publishRoot: string | undefined;
 
       try {
-        const packaged = packageVsixOrReuse({ extensionRoot, outPath: vsixPath });
+        const packaged = packageVsix({ extensionRoot, outPath: vsixPath, skipBuild: true });
         publishRoot = preparePublishDirectory(extensionRoot);
         const fileList = listPublishableFiles(publishRoot, extensionRoot);
         assertPublishableFiles(fileList);
@@ -152,6 +178,7 @@ describe("VSIX packaging", () => {
         extensionRoot,
         outPath: vsixPath,
         target: "linux-x64",
+        skipBuild: true,
       });
       const stat = await fs.stat(packaged);
       expect(stat.isFile()).toBe(true);
@@ -184,38 +211,31 @@ describe("VSIX packaging", () => {
     ]);
   });
 
-  it("rejects skip-build packaging when source is newer than its artifact", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-vsix-freshness-"));
-    const sourcePath = path.join(root, "gui", "src", "App.tsx");
-    const artifactPath = path.join(root, "gui", "dist", "index.js");
-    const coreSourcePath = path.join(root, "src", "extension.ts");
-    const coreArtifactPath = path.join(root, "out", "extension.js");
-
-    try {
-      await fs.mkdir(path.dirname(sourcePath), { recursive: true });
-      await fs.mkdir(path.dirname(artifactPath), { recursive: true });
-      await fs.mkdir(path.dirname(coreSourcePath), { recursive: true });
-      await fs.mkdir(path.dirname(coreArtifactPath), { recursive: true });
-      await Promise.all([
-        fs.writeFile(sourcePath, "export {};\n"),
-        fs.writeFile(artifactPath, "export {};\n"),
-        fs.writeFile(coreSourcePath, "export {};\n"),
-        fs.writeFile(coreArtifactPath, "export {};\n"),
-      ]);
-
-      const now = Date.now();
-      await fs.utimes(artifactPath, now / 1000 - 10, now / 1000 - 10);
-      await fs.utimes(coreArtifactPath, now / 1000, now / 1000);
-      await fs.utimes(coreSourcePath, now / 1000 - 10, now / 1000 - 10);
-      await fs.utimes(sourcePath, now / 1000, now / 1000);
-
-      expect(() => assertPrebuiltArtifactsFresh(root)).toThrow(
-        "source gui/src/App.tsx is newer than artifact gui/dist/index.js",
-      );
-    } finally {
-      await fs.rm(root, { force: true, recursive: true });
-    }
-  });
+  it.each(["missing-record", "bad-record", "source", "config", "missing-output", "corrupt-output"])(
+    "rejects skip-build reuse with %s", async (fault) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-vsix-freshness-"));
+      try {
+        for (const file of [...REQUIRED_OUTPUTS, "src/extension.ts", "gui/src/App.tsx", "tsconfig.json", "out/nested/helper.js"]) {
+          await fs.mkdir(path.dirname(path.join(root, file)), { recursive: true });
+          await fs.writeFile(path.join(root, file), "export {};\n");
+        }
+        recordBuildArtifacts(root);
+        expect(() => assertPrebuiltArtifactsFresh(root)).not.toThrow();
+        if (fault === "missing-record") await fs.rm(path.join(root, BUILD_RECORD));
+        if (fault === "bad-record") await fs.writeFile(path.join(root, BUILD_RECORD), "broken");
+        if (fault === "source") await fs.writeFile(path.join(root, "gui/src/App.tsx"), "changed source");
+        if (fault === "config") await fs.writeFile(path.join(root, "tsconfig.json"), "changed config");
+        if (fault === "missing-output") await fs.rm(path.join(root, "out/nested/helper.js"));
+        if (fault === "corrupt-output") {
+          const file = path.join(root, "out/extension.js");
+          const stat = await fs.stat(file);
+          await fs.writeFile(file, "corrupt output");
+          await fs.utimes(file, stat.atime, stat.mtime); // timestamps cannot hide corruption
+        }
+        expect(() => assertPrebuiltArtifactsFresh(root)).toThrow(/build/);
+      } finally { await fs.rm(root, { force: true, recursive: true }); }
+    },
+  );
 
   it("rejects a VSIX that Cursor's unzipper cannot extract", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "tomcat-vsix-integrity-"));

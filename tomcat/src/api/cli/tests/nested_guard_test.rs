@@ -1,39 +1,9 @@
-use std::ffi::OsString;
 use std::path::PathBuf;
 
 use serial_test::serial;
 
 use super::super::*;
 use crate::infra::error::AppError;
-
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<OsString>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: impl Into<OsString>) -> Self {
-        let prev = std::env::var_os(key);
-        // SAFETY: test-scoped env mutation is serialized via `serial(env_lock)`.
-        unsafe { std::env::set_var(key, value.into()) };
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match self.prev.take() {
-            Some(prev) => {
-                // SAFETY: restore original env during test teardown.
-                unsafe { std::env::set_var(self.key, prev) };
-            }
-            None => {
-                // SAFETY: clear test-only env during teardown.
-                unsafe { std::env::remove_var(self.key) };
-            }
-        }
-    }
-}
 
 fn blocked_commands() -> Vec<Commands> {
     vec![
@@ -228,7 +198,7 @@ fn allowed_commands() -> Vec<Commands> {
 }
 
 fn assert_blocked(cmd: Commands) {
-    match guard_nested_invocation(Some(&cmd)) {
+    match guard_nested_invocation_for(true, Some(&cmd)) {
         Err(AppError::Config(message)) => {
             assert!(
                 message.contains(
@@ -246,7 +216,7 @@ fn assert_blocked(cmd: Commands) {
 }
 
 fn assert_allowed(cmd: Commands) {
-    let result = guard_nested_invocation(Some(&cmd));
+    let result = guard_nested_invocation_for(true, Some(&cmd));
     assert!(
         result.is_ok(),
         "command should stay allowed under nested guard, got: {:?}",
@@ -255,27 +225,21 @@ fn assert_allowed(cmd: Commands) {
 }
 
 #[test]
-#[serial(env_lock)]
-fn nested_guard_blocks_mutating_commands_when_agent_env_is_set() {
-    let _guard = EnvGuard::set("TOMCAT_AGENT_ACTIVE", "1");
+fn nested_guard_blocks_mutating_commands_when_active() {
     for cmd in blocked_commands() {
         assert_blocked(cmd);
     }
 }
 
 #[test]
-#[serial(env_lock)]
-fn nested_guard_allows_readonly_commands_when_agent_env_is_set() {
-    let _guard = EnvGuard::set("TOMCAT_AGENT_ACTIVE", "1");
+fn nested_guard_allows_readonly_commands_when_active() {
     for cmd in allowed_commands() {
         assert_allowed(cmd);
     }
 }
 
 #[test]
-#[serial(env_lock)]
-fn nested_guard_allows_serve_print_schema_when_agent_env_is_set() {
-    let _guard = EnvGuard::set("TOMCAT_AGENT_ACTIVE", "1");
+fn nested_guard_allows_serve_print_schema_when_active() {
     assert_allowed(Commands::Serve {
         stdio: false,
         ws: false,
@@ -284,25 +248,33 @@ fn nested_guard_allows_serve_print_schema_when_agent_env_is_set() {
 }
 
 #[test]
-#[serial(env_lock)]
-fn nested_guard_keeps_existing_behavior_when_env_is_absent() {
-    let blocked_representatives = vec![
-        Commands::Session {
-            sub: SessionSub::New { scope: None },
-        },
-        Commands::Config {
-            sub: ConfigSub::Set {
-                key: "log.level".to_string(),
-                value: "debug".to_string(),
-            },
-        },
-        Commands::Code { resume: false },
-    ];
-    for cmd in blocked_representatives {
+fn nested_guard_keeps_existing_behavior_when_inactive() {
+    for cmd in blocked_commands().into_iter().chain(allowed_commands()) {
         assert!(
-            guard_nested_invocation(Some(&cmd)).is_ok(),
-            "env-absent path must remain a no-op for {:?}",
-            cmd
+            guard_nested_invocation_for(false, Some(&cmd)).is_ok(),
+            "inactive path: {cmd:?}"
         );
     }
+}
+
+#[test]
+fn nested_guard_keeps_no_explicit_command_behavior() {
+    for active in [false, true] {
+        assert!(guard_nested_invocation_for(active, None).is_ok());
+    }
+}
+
+#[test]
+#[serial(env_lock)]
+fn nested_guard_environment_adapter_uses_the_real_flag_without_mutating_it() {
+    let original = std::env::var_os(TOMCAT_AGENT_ACTIVE_ENV);
+    let expected_active = original.as_deref() == Some(std::ffi::OsStr::new("1"));
+    assert_eq!(nested_agent_invocation_active(), expected_active);
+    for cmd in blocked_commands().into_iter().chain(allowed_commands()) {
+        let expected = guard_nested_invocation_for(expected_active, Some(&cmd));
+        let actual = guard_nested_invocation(Some(&cmd));
+        assert_eq!(actual.is_ok(), expected.is_ok(), "adapter path: {cmd:?}");
+    }
+    assert!(guard_nested_invocation(None).is_ok());
+    assert_eq!(std::env::var_os(TOMCAT_AGENT_ACTIVE_ENV), original);
 }

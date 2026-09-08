@@ -21,24 +21,33 @@ use tomcat::{
 };
 use tracing::{info, info_span};
 
+#[cfg(unix)]
+use child_harness::BackgroundProcessGuard;
 use child_harness::CheckpointChild;
 use mock_protocol::{classify_mock_request, MockRequestClass};
 
-#[allow(deprecated)]
+fn isolated_cli_command() -> StdCommand {
+    let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("TOMCAT__") {
+            command.env_remove(key);
+        }
+    }
+    command
+}
+
 fn cmd() -> Command {
-    let mut c = Command::cargo_bin("tomcat").expect("binary tomcat should exist");
-    c.env_remove("TOMCAT__LLM__DEFAULT_MODEL");
+    let mut c = Command::from_std(isolated_cli_command());
+    c.timeout(Duration::from_secs(30));
     c
 }
 
 fn git_available() -> bool {
-    std::process::Command::new("git")
+    Command::new("git")
         .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .timeout(Duration::from_secs(5))
+        .ok()
+        .is_ok()
 }
 
 struct Fixture {
@@ -56,22 +65,28 @@ fn setup_fixture() -> Fixture {
     let workdir = home.path().join("workspace");
     fs::create_dir_all(&workdir).unwrap();
 
+    eprintln!("[checkpoint] phase=init start home={}", home_path.display());
     cmd()
         .args(["init"])
+        .timeout(Duration::from_secs(20))
+        .current_dir(&workdir)
         .env("HOME", &home_path)
         .env("SHELL", "/bin/zsh")
         .assert()
         .success();
 
+    eprintln!("[checkpoint] phase=init complete");
     let config_path = home_path.join(".tomcat").join("tomcat.config.toml");
     let mut cfg = load_config_toml_file(&config_path).expect("config should load");
+    cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
+    // Checkpoint tests are offline; never bootstrap the default live MCP server.
+    fs::write(home_path.join(".tomcat/mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
     common::apply_deepseek_app_config(&mut cfg);
     fs::write(
         &config_path,
         toml::to_string_pretty(&cfg).expect("serialize deepseek test config"),
     )
     .expect("persist deepseek test config");
-    cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
     let sessions_dir = resolve_sessions_dir(&cfg).unwrap();
     fs::create_dir_all(&sessions_dir).unwrap();
     let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &workdir);
@@ -678,7 +693,11 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         CheckpointKind::TurnEnd,
         Some(assistant_id),
     );
+    eprintln!("[checkpoint] phase=turn-end-record complete id={turn_end_ckpt}");
 
+    eprintln!(
+        "[checkpoint] phase=restore-turn-end start id={turn_end_ckpt}; EOF follows restore input"
+    );
     fs::write(fx.workdir.join("note.txt"), "broken-after-turn-end").unwrap();
     cmd()
         .current_dir(&fx.workdir)
@@ -691,9 +710,11 @@ fn test_pre_rollback_only_before_turn_end_restore() {
             common::DEEPSEEK_TEST_API_KEY_ENV,
         )
         .write_stdin(format!("/restore {turn_end_ckpt}\n"))
+        .timeout(Duration::from_secs(20))
         .assert()
         .success();
 
+    eprintln!("[checkpoint] phase=restore-turn-end exited; phase=list-turn-end start");
     let after_turn_end = fx
         .store
         .list(&fx.session_id, Default::default())
@@ -722,6 +743,9 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         },
         None,
     );
+    eprintln!(
+        "[checkpoint] phase=restore-manual start id={manual_ckpt}; EOF follows restore input"
+    );
     fs::write(fx.workdir.join("note.txt"), "manual-bad").unwrap();
     cmd()
         .current_dir(&fx.workdir)
@@ -734,9 +758,11 @@ fn test_pre_rollback_only_before_turn_end_restore() {
             common::DEEPSEEK_TEST_API_KEY_ENV,
         )
         .write_stdin(format!("/restore {manual_ckpt}\n"))
+        .timeout(Duration::from_secs(20))
         .assert()
         .success();
 
+    eprintln!("[checkpoint] phase=restore-manual exited; phase=list-manual start");
     let after_manual = fx
         .store
         .list(&fx.session_id, Default::default())
@@ -868,7 +894,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .current_transcript_path()
         .unwrap()
         .expect("transcript path");
-    let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"));
+    let mut command = isolated_cli_command();
     command
         .current_dir(&fx.workdir)
         .arg("code")
@@ -950,6 +976,9 @@ fn test_hangup_during_tool_run_allows_same_process_followup() {
     let _span = info_span!("test_hangup_during_tool_run_allows_same_process_followup").entered();
     let fx = setup_fixture();
     let background_pid_path = fx.workdir.join("checkpoint-background.pid");
+    // Declared before the CLI: unwind stops the producer first, then its separate
+    // background process group, and only afterward removes the fixture directory.
+    let _background = BackgroundProcessGuard::new(background_pid_path.clone());
     let (base_url, stage, handle) =
         spawn_tool_then_text_openai_stream_server(background_pid_path.clone());
 
@@ -975,7 +1004,7 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .current_transcript_path()
         .unwrap()
         .expect("transcript path");
-    let mut command = StdCommand::new(assert_cmd::cargo::cargo_bin!("tomcat"));
+    let mut command = isolated_cli_command();
     command
         .current_dir(&fx.workdir)
         .arg("code")

@@ -141,9 +141,9 @@ async function captureScreenshot(name: string): Promise<string> {
   const screenshotsDir = requireEnv("TOMCAT_ACCEPT_SCREENSHOTS_DIR");
   const targetPath = path.join(screenshotsDir, name);
   await pause(300);
-  execFileSync("screencapture", ["-x", targetPath], {
-    stdio: "inherit",
-  });
+  await (require(path.resolve(repoRoot, "out/test/suite/support/workbenchFindDriver.js")) as {
+    captureWorkbenchArtifacts(target: string): Promise<void>;
+  }).captureWorkbenchArtifacts(targetPath);
   return targetPath;
 }
 
@@ -289,13 +289,9 @@ function metricWidth(snapshot: DomSnapshot, key: string): number {
 }
 
 function hasThinkingBeforeAssistant(snapshot: DomSnapshot): boolean {
-  const lastThinkingIndex = snapshot.timelineKinds.lastIndexOf("thinking-block");
-  if (lastThinkingIndex === -1) {
-    return false;
-  }
-  return snapshot.timelineKinds
-    .slice(lastThinkingIndex + 1)
-    .includes("message:assistant");
+  const thinkingIndex = snapshot.html.lastIndexOf('data-testid="thinking-block"');
+  const replyIndex = snapshot.html.lastIndexOf("Manual acceptance reply for prompt: manual acceptance prompt");
+  return thinkingIndex >= 0 && replyIndex > thinkingIndex;
 }
 
 suite("Tomcat manual acceptance", () => {
@@ -315,11 +311,20 @@ suite("Tomcat manual acceptance", () => {
       JSON.stringify(api.__testing.getWebviewState()),
     );
 
+    // Context tools now live in a collapsed thinking group. Open the actual
+    // group before checking its hydrated tool row rather than waiting for the
+    // old, always-visible tool card.
+    await waitForDom(api, (snapshot) =>
+      snapshot.messageTexts.some((text) => /Historic prompt 6/i.test(text)) &&
+      snapshot.html.includes('data-testid="thinking-group-toggle"') ? snapshot : undefined,
+      20_000,
+    );
+    await sendDomAction(api, { kind: "clickTestId", testId: "thinking-group-toggle", index: 0 });
     const hydrated = await waitForDom(
       api,
       (snapshot) =>
         snapshot.messageTexts.some((text) => /Historic prompt 6/i.test(text)) &&
-        snapshot.toolTitles.some((title) => /search_files/i.test(title))
+        snapshot.toolTitles.some((title) => /Searched files/i.test(title))
           ? snapshot
           : undefined,
       20_000,
@@ -349,6 +354,12 @@ suite("Tomcat manual acceptance", () => {
       5_000,
     );
     screenshots.push(await captureScreenshot("02-autoscroll-following.png"));
+    await sendDomAction(api, { kind: "clickTestId", testId: "thinking-toggle", index: -1 });
+    const thinkingExpanded = await waitForDom(api, (snapshot) =>
+      snapshot.expandedThinkingCount > 0 && hasThinkingBeforeAssistant(snapshot) ? snapshot : undefined,
+      5_000,
+    );
+    screenshots.push(await captureScreenshot("06-thinking-expanded.png"));
 
     await sendDomAction(api, {
       edge: "top",
@@ -397,42 +408,33 @@ suite("Tomcat manual acceptance", () => {
       timeoutMs: 20_000,
       type: "agent_end",
     });
+    // Successful context rows remain inside the collapsed live thinking group.
+    await sendDomAction(api, { kind: "clickTestId", testId: "thinking-group-toggle", index: -1 });
     const completed = await waitForDom(
       api,
       (snapshot) =>
-        snapshot.toolTitles.some((title) => /search_workspace/i.test(title)) &&
-        snapshot.toolTitles.some((title) => /validate_layout/i.test(title))
+        snapshot.toolTitles.some((title) => /Searched workspace/i.test(title)) &&
+        snapshot.toolTitles.some((title) => /validate[_ ]layout/i.test(title))
           ? snapshot
           : undefined,
       10_000,
     );
     screenshots.push(await captureScreenshot("05-tool-default-states.png"));
 
-    await sendDomAction(api, {
-      index: -1,
-      kind: "clickTestId",
-      testId: "thinking-toggle",
-    });
-    const thinkingExpanded = await waitForDom(
-      api,
-      (snapshot) => (snapshot.expandedThinkingCount > 0 ? snapshot : undefined),
-      5_000,
-    );
-    screenshots.push(await captureScreenshot("06-thinking-expanded.png"));
 
     const liveSearchIndex = completed.toolTitles.findIndex((title) =>
-      /search_workspace/i.test(title),
+      /Searched workspace/i.test(title),
     );
     assert.ok(liveSearchIndex >= 0, "expected the live complete tool card to exist");
     await sendDomAction(api, {
       index: liveSearchIndex,
       kind: "clickTestId",
-      testId: "tool-toggle",
+      testId: "tool-row-toggle",
     });
     const toolExpanded = await waitForDom(
       api,
       (snapshot) =>
-        snapshot.expandedToolTitles.some((title) => /search_workspace/i.test(title))
+        snapshot.expandedToolTitles.some((title) => /Searched workspace/i.test(title))
           ? snapshot
           : undefined,
       5_000,
@@ -785,10 +787,10 @@ suite("Tomcat manual acceptance", () => {
       );
 
     const toolScrollMetric = toolExpanded.toolBodyMetrics.find((entry) =>
-      /search_workspace/i.test(entry.title),
+      /Searched workspace/i.test(entry.title),
     );
     const errorToolMetric = completed.toolBodyMetrics.find((entry) =>
-      /validate_layout/i.test(entry.title),
+      /validate[_ ]layout/i.test(entry.title),
     );
 
     const report = {
@@ -824,7 +826,7 @@ suite("Tomcat manual acceptance", () => {
         hydration: {
           passed:
             hydrated.messageTexts.some((text) => /Historic prompt 6/i.test(text)) &&
-            hydrated.toolTitles.some((title) => /search_files/i.test(title)),
+            hydrated.toolTitles.some((title) => /Searched files/i.test(title)),
         },
         effort: {
           passed:
@@ -838,7 +840,7 @@ suite("Tomcat manual acceptance", () => {
               "xhigh",
         },
         thinking: {
-          passed: thinkingExpanded.expandedThinkingCount > 0 && hasThinkingBeforeAssistant(completed),
+          passed: thinkingExpanded.expandedThinkingCount > 0 && hasThinkingBeforeAssistant(thinkingExpanded),
         },
         modelSwitch: {
           passed:
@@ -869,8 +871,8 @@ suite("Tomcat manual acceptance", () => {
         },
         toolcards: {
           passed:
-            !completed.expandedToolTitles.some((title) => /search_workspace/i.test(title)) &&
-            completed.expandedToolTitles.some((title) => /validate_layout/i.test(title)) &&
+            !completed.expandedToolTitles.some((title) => /Searched workspace/i.test(title)) &&
+            completed.expandedToolTitles.some((title) => /validate[_ ]layout/i.test(title)) &&
             !!toolScrollMetric &&
             toolScrollMetric.scrollHeight > toolScrollMetric.clientHeight &&
             !!errorToolMetric &&

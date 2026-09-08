@@ -54,6 +54,11 @@ pub fn setup_serve_fixture(base_url: &str) -> ServeFixture {
         toml::to_string_pretty(&cfg).expect("serialize serve config"),
     )
     .expect("persist serve config");
+    fs::write(
+        home_path.join(".tomcat").join("mcp.json"),
+        r#"{"mcpServers":{}}"#,
+    )
+    .expect("isolate offline serve fixture from managed MCP processes");
 
     fs::write(
         home_path.join(".tomcat").join("models.toml"),
@@ -255,9 +260,16 @@ pub fn spawn_serve_child(fx: &ServeFixture) -> ServeChild {
 
     thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
-        let mut buf = String::new();
-        let _ = reader.read_to_string(&mut buf);
-        *stderr_buf_thread.lock().expect("stderr lock") = buf;
+        let mut chunk = [0u8; 4096];
+        while let Ok(count) = reader.read(&mut chunk) {
+            if count == 0 {
+                break;
+            }
+            stderr_buf_thread
+                .lock()
+                .expect("stderr lock")
+                .push_str(&String::from_utf8_lossy(&chunk[..count]));
+        }
     });
 
     ServeChild {

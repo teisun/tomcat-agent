@@ -127,6 +127,20 @@ describe("manual acceptance fake serve attachment leases", () => {
     };
     expect(initializePayload.protocolVersion).toBe(2);
     expect(initializePayload.capabilities).toContain("retain_attachment_leases");
+    expect(initializePayload.capabilities).toContain("list_checkpoints");
+    const checkpoints = await fake.request("checkpoints", {
+      id: "checkpoints",
+      sessionId: initializePayload.sessionId,
+      type: "list_checkpoints",
+    });
+    expect(checkpoints).toMatchObject({
+      success: true,
+      payload: { checkpoints: [], sessionId: initializePayload.sessionId },
+    });
+    const state = await fake.request("state", {
+      id: "state", sessionId: initializePayload.sessionId, type: "get_state",
+    });
+    expect(state.payload).toMatchObject({ agentMode: "chat", workspaceMode: "project" });
 
     const ingested = await fake.request("ingest", {
       attachment: {

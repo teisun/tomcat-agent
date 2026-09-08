@@ -8,6 +8,8 @@ import * as vscode from "vscode";
 
 import type { InitializeResult } from "../src/serveClient/initialize";
 import type {
+  ActivePlanPayload,
+  SessionStatePayload,
   RestoreCheckpointPayload,
   SessionCheckpointListPayload,
   SessionHistoryPayload,
@@ -44,9 +46,9 @@ type MutableSessionState = {
   interrupted: boolean;
   model: string;
   modelThinking: Record<string, string | null>;
-  planId: string | null;
-  planPath: string | null;
-  planState: string;
+  activePlan: ActivePlanPayload | null;
+  agentMode: "chat" | "plan";
+  workspaceMode: string;
   thinkingLevel: string | null;
 };
 
@@ -55,7 +57,7 @@ type BuildProviderOptions = {
     sessionId?: string,
     params?: { cursor?: string | null; limit?: number },
   ) => Promise<SessionHistoryPayload>;
-  getStateImpl?: (sessionId?: string) => Promise<Record<string, unknown>>;
+  getStateImpl?: (sessionId?: string) => Promise<SessionStatePayload>;
   historyMessages?: unknown[];
   historyResponses?: Record<string, SessionHistoryPayload>;
   ideOverrides?: Partial<IdeHost>;
@@ -73,6 +75,10 @@ type BuildProviderOptions = {
   ) => Promise<RestoreCheckpointPayload>;
   sessionState?: Partial<MutableSessionState>;
 };
+
+function planFixture(state: ActivePlanPayload["state"] = "planning"): ActivePlanPayload {
+  return { id: "plan-1", path: "/workspace/plans/plan-1.plan.md", state };
+}
 
 class FakeMessenger {
   readonly requestCalls: Array<Record<string, unknown>> = [];
@@ -209,42 +215,36 @@ class FakeMessenger {
     this.setPlanModeCalls.push(command);
     const sessionId = String(command.sessionId ?? "session-1");
     if (command.action === "enter") {
-      this.sessionState.planId = "plan-1";
-      this.sessionState.planPath = "/workspace/plans/plan-1.plan.md";
-      this.sessionState.planState = "planning";
-      this.emit({
-        path: this.sessionState.planPath,
-        planId: this.sessionState.planId,
-        sessionId,
-        state: this.sessionState.planState,
-        type: "plan.create",
-      });
+      if (this.sessionState.agentMode === "plan") {
+        return { success: false, error: "plan_already_in_mode", type: "response" };
+      }
+      this.sessionState.agentMode = "plan";
     } else if (command.action === "build") {
-      this.sessionState.planId = this.sessionState.planId ?? "plan-1";
-      this.sessionState.planPath = this.sessionState.planPath ?? "/workspace/plans/plan-1.plan.md";
-      this.sessionState.planState = "executing";
+      // This fake models the existing test plan on disk, not enter creating one.
+      if (!command.planId && !this.sessionState.activePlan) {
+        return { success: false, error: "plan_build_blocked", type: "response" };
+      }
+      this.sessionState.activePlan = { ...(this.sessionState.activePlan ?? planFixture()), state: "executing" };
+      this.sessionState.agentMode = "chat";
       this.emit({
-        path: this.sessionState.planPath,
-        planId: this.sessionState.planId,
+        path: this.sessionState.activePlan.path,
+        planId: this.sessionState.activePlan.id,
         sessionId,
-        state: this.sessionState.planState,
+        state: this.sessionState.activePlan.state,
         type: "plan.build",
       });
     } else {
-      this.sessionState.planState = "chat";
-      this.emit({
-        path: this.sessionState.planPath,
-        planId: this.sessionState.planId,
-        sessionId,
-        state: "completed",
-        type: "plan.complete",
-      });
-      this.sessionState.planId = null;
+      if (this.sessionState.agentMode !== "plan") {
+        return { success: false, error: "plan_state_conflict", type: "response" };
+      }
+      this.sessionState.agentMode = "chat";
     }
+    this.emit({ agentMode: this.sessionState.agentMode, sessionId, type: "session.agent_mode.changed" });
     return {
       payload: {
-        planId: this.sessionState.planId,
-        planState: this.sessionState.planState,
+        activePlan: this.sessionState.activePlan,
+        agentMode: this.sessionState.agentMode,
+        sessionId,
       },
       success: true,
       type: "response",
@@ -291,9 +291,9 @@ function buildProvider(options: BuildProviderOptions = {}) {
       "claude-4.6-sonnet": "low",
       "gpt-5.4": "high",
     },
-    planId: null,
-    planPath: null,
-    planState: "chat",
+    activePlan: null,
+    agentMode: "chat",
+    workspaceMode: "code",
     thinkingLevel: "high",
     ...options.sessionState,
   };
@@ -354,9 +354,9 @@ function buildProvider(options: BuildProviderOptions = {}) {
         contextRatio: sessionState.contextRatio,
         interrupted: sessionState.interrupted,
         model: sessionState.model,
-        planId: sessionState.planId,
-        planPath: sessionState.planPath,
-        planState: sessionState.planState,
+        activePlan: sessionState.activePlan,
+        agentMode: sessionState.agentMode,
+        workspaceMode: sessionState.workspaceMode,
         sessionId: sessionId ?? "session-1",
         thinkingLevel: sessionState.thinkingLevel,
       };
@@ -1191,7 +1191,7 @@ describe("webview provider integration", () => {
     expect(retriedUserMessages[0]).not.toHaveProperty("retryable");
   });
 
-  it("shows only the fresh Retry chapter after copy-forward recovery", async () => {
+  it("retains the abandoned chapter alongside the fresh Retry chapter", async () => {
     const historyMessages: unknown[] = [
       {
         id: "user-1",
@@ -1264,15 +1264,20 @@ describe("webview provider integration", () => {
     ) ?? [];
     expect(users).toEqual([
       expect.objectContaining({
+        abandoned: true,
+        attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
+        id: "user-1",
+      }),
+      expect.objectContaining({
         attachments: [expect.objectContaining({ blobSha: PNG_SHA })],
         id: "user-2",
       }),
     ]);
-    expect(
-      provider.currentState().sessionViews["session-1"]?.timeline.find(
-        (item) => item.type === "message" && item.id === "error-1",
-      ),
-    ).toBeUndefined();
+    const recoveredError = provider.currentState().sessionViews["session-1"]?.timeline.find(
+      (item) => item.type === "message" && item.id === "error-1",
+    );
+    expect(recoveredError).toMatchObject({ kind: "error" });
+    expect(recoveredError).not.toHaveProperty("recoveryAction");
     expect(
       provider.currentState().sessionViews["session-1"]?.timeline.find(
         (item) => item.type === "message" && item.id === "assistant-2",
@@ -1339,13 +1344,16 @@ describe("webview provider integration", () => {
       type: "recoverErrorTurn",
     });
 
+    expect(provider.currentState().sessionViews["session-1"]?.timeline.filter(
+      (item) => item.type === "message" && item.kind === "user",
+    )).toEqual([expect.objectContaining({ id: "user-1", text: "inspect the project" })]);
     expect(resumeCalls).toEqual(["session-1"]);
     expect(retryCalls).toEqual([]);
-    expect(
-      provider.currentState().sessionViews["session-1"]?.timeline.find(
-        (item) => item.type === "message" && item.id === "error-1",
-      ),
-    ).toBeUndefined();
+    const recoveredError = provider.currentState().sessionViews["session-1"]?.timeline.find(
+      (item) => item.type === "message" && item.id === "error-1",
+    );
+    expect(recoveredError).toMatchObject({ kind: "error" });
+    expect(recoveredError).not.toHaveProperty("recoveryAction");
     expect(
       provider.currentState().sessionViews["session-1"]?.timeline.find(
         (item) => item.type === "message" && item.id === "assistant-2",
@@ -1511,9 +1519,8 @@ describe("webview provider integration", () => {
         busy: false,
         contextRatio: 0.42,
         model: "gpt-5.4",
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -1533,13 +1540,12 @@ describe("webview provider integration", () => {
 
     expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
       contextRatio: 0.42,
-      planFile: {
+      activePlan: {
         path: "/workspace/plans/plan-1.plan.md",
         planId: "plan-1",
         state: "executing",
       },
-      planId: "plan-1",
-      planState: "executing",
+      agentMode: "chat",
     });
     expect(provider.currentState().sessionViews["session-1"]?.timeline).toEqual([]);
     expect(
@@ -1675,9 +1681,8 @@ describe("webview provider integration", () => {
         contextRatio: null,
         interrupted: false,
         model: "gpt-5.4",
-        planId: null,
-        planPath: null,
-        planState: "chat",
+        activePlan: null,
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -1764,9 +1769,8 @@ describe("webview provider integration", () => {
         },
       },
       sessionState: {
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
       },
     });
 
@@ -1782,8 +1786,8 @@ describe("webview provider integration", () => {
 
     const session = provider.currentState().sessionViews["session-1"];
     expect(session).toMatchObject({
-      planId: "plan-1",
-      planState: "executing",
+      activePlan: { planId: "plan-1", state: "executing" },
+      agentMode: "chat",
     });
     expect(session?.timeline).toEqual(
       expect.arrayContaining([
@@ -1903,9 +1907,8 @@ describe("webview provider integration", () => {
         contextRatio: null,
         interrupted: false,
         model: "gpt-5.4",
-        planId: null,
-        planPath: null,
-        planState: "chat",
+        activePlan: null,
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -2045,9 +2048,8 @@ describe("webview provider integration", () => {
         contextRatio: null,
         interrupted: false,
         model: "gpt-5.4",
-        planId: null,
-        planPath: null,
-        planState: "chat",
+        activePlan: null,
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -2250,9 +2252,8 @@ describe("webview provider integration", () => {
         contextRatio: null,
         interrupted: false,
         model: "gpt-5.4",
-        planId: null,
-        planPath: null,
-        planState: "chat",
+        activePlan: null,
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -2323,9 +2324,8 @@ describe("webview provider integration", () => {
         contextRatio: null,
         interrupted: false,
         model: "gpt-5.4",
-        planId: null,
-        planPath: null,
-        planState: "chat",
+        activePlan: null,
+        agentMode: "chat",
         sessionId: sessionId ?? "session-1",
         thinkingLevel: "high",
       }),
@@ -2412,13 +2412,8 @@ describe("webview provider integration", () => {
       type: "setPlanMode",
     });
     expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
-      planFile: {
-        path: "/workspace/plans/plan-1.plan.md",
-        planId: "plan-1",
-        state: "planning",
-      },
-      planId: "plan-1",
-      planState: "planning",
+      activePlan: null,
+      agentMode: "plan",
     });
 
     await provider.dispatchTestIntent({
@@ -2431,14 +2426,20 @@ describe("webview provider integration", () => {
       type: "setPlanMode",
     });
     expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
-      planFile: {
+      activePlan: {
         path: "/workspace/plans/plan-1.plan.md",
         planId: "plan-1",
         state: "executing",
       },
-      planState: "executing",
+      agentMode: "chat",
     });
 
+    // Enter/exit changes the mode without completing the already built plan.
+    await provider.dispatchTestIntent({
+      data: { action: "enter", sessionId: "session-1" },
+      messageId: "plan-enter-again",
+      type: "setPlanMode",
+    });
     await provider.dispatchTestIntent({
       data: {
         action: "exit",
@@ -2448,10 +2449,13 @@ describe("webview provider integration", () => {
       messageId: "plan-exit-1",
       type: "setPlanMode",
     });
-    expect(provider.currentState().sessionViews["session-1"]?.planState).toBe("chat");
+    expect(provider.currentState().sessionViews["session-1"]).toMatchObject({
+      agentMode: "chat", activePlan: { planId: "plan-1", state: "executing" },
+    });
     expect(messenger.setPlanModeCalls.map((call) => call.action)).toEqual([
       "enter",
       "build",
+      "enter",
       "exit",
     ]);
 
@@ -2500,7 +2504,7 @@ describe("webview provider integration", () => {
 
     expect(messenger.setPlanModeCalls).toEqual([]);
     expect(provider.currentState().sessionViews["session-1"]?.model).toBe("gpt-5.4");
-    expect(provider.currentState().sessionViews["session-1"]?.planState).not.toBe("executing");
+    expect(provider.currentState().sessionViews["session-1"]?.activePlan?.state).not.toBe("executing");
 
     provider.dispose();
   });
@@ -2528,7 +2532,7 @@ describe("webview provider integration", () => {
   });
 
   it("routes plan.todos events onto the active plan state", async () => {
-    const { messenger, provider } = buildProvider();
+    const { messenger, provider } = buildProvider({ sessionState: { activePlan: planFixture() } });
 
     await provider.dispatchTestIntent({
       messageId: "ready-plan-todos",
@@ -2556,7 +2560,7 @@ describe("webview provider integration", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const session = provider.currentState().sessionViews["session-1"];
-    expect(session.planFile).toMatchObject({
+    expect(session.activePlan).toMatchObject({
       path: "/workspace/plans/plan-1.plan.md",
       planId: "plan-1",
       state: "planning",
@@ -2650,7 +2654,7 @@ describe("webview provider integration", () => {
     });
 
     expect(historyCalls).toHaveLength(1);
-    expect(provider.currentState().sessionViews["session-1"]?.planState).toBe("planning");
+    expect(provider.currentState().sessionViews["session-1"]?.agentMode).toBe("plan");
 
     provider.dispose();
   });
@@ -2659,9 +2663,8 @@ describe("webview provider integration", () => {
     const { provider } = buildProvider({
       sessionState: {
         contextRatio: 0.42,
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
       },
     });
 
@@ -2673,13 +2676,12 @@ describe("webview provider integration", () => {
     const session = provider.currentState().sessionViews["session-1"];
     expect(session).toMatchObject({
       contextRatio: 0.42,
-      planFile: {
+      activePlan: {
         path: "/workspace/plans/plan-1.plan.md",
         planId: "plan-1",
         state: "executing",
       },
-      planId: "plan-1",
-      planState: "executing",
+      agentMode: "chat",
     });
     expect(session?.timeline.filter((item) => item.type === "plan")).toEqual([]);
 
@@ -2713,9 +2715,8 @@ describe("webview provider integration", () => {
         },
       ],
       sessionState: {
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
       },
     });
 
@@ -2728,7 +2729,7 @@ describe("webview provider integration", () => {
     const notices = session?.timeline.filter(
       (item) => item.type === "message" && item.kind === "notice",
     );
-    expect(session?.planFile).toMatchObject({
+    expect(session?.activePlan).toMatchObject({
       path: "/workspace/plans/plan-1.plan.md",
       planId: "plan-1",
       state: "executing",
@@ -2753,8 +2754,9 @@ describe("webview provider integration", () => {
     });
 
     messenger.emit({
+      agentMode: "plan",
       sessionId: "session-1",
-      type: "plan.enter",
+      type: "session.agent_mode.changed",
     });
     messenger.emit({
       path: "/workspace/plans/plan-1.plan.md",
@@ -2781,12 +2783,8 @@ describe("webview provider integration", () => {
 
     const session = provider.currentState().sessionViews["session-1"];
     expect(session).toMatchObject({
-      planFile: {
-        path: "/workspace/plans/plan-1.plan.md",
-        state: "chat",
-      },
-      planId: null,
-      planState: "chat",
+      activePlan: null,
+      agentMode: "chat",
     });
     expect(session?.timeline.filter((item) => item.type === "plan")).toEqual([]);
 
@@ -2796,9 +2794,8 @@ describe("webview provider integration", () => {
   it("projects the live code reviewer process into a single review row", async () => {
     const { messenger, provider } = buildProvider({
       sessionState: {
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
       },
     });
 
@@ -2864,9 +2861,8 @@ describe("webview provider integration", () => {
   it("reconciles terminal plan events back to getState truth", async () => {
     const { messenger, provider, sessionState } = buildProvider({
       sessionState: {
-        planId: "plan-1",
-        planPath: "/workspace/plans/plan-1.plan.md",
-        planState: "executing",
+        activePlan: planFixture("executing"),
+        agentMode: "chat",
       },
     });
 
@@ -2875,9 +2871,8 @@ describe("webview provider integration", () => {
       type: "ready",
     });
 
-    sessionState.planId = null;
-    sessionState.planPath = null;
-    sessionState.planState = "chat";
+    sessionState.activePlan = null;
+    sessionState.agentMode = "chat";
     messenger.emit({
       path: "/workspace/plans/plan-1.plan.md",
       planId: "plan-1",
@@ -2889,12 +2884,8 @@ describe("webview provider integration", () => {
 
     const session = provider.currentState().sessionViews["session-1"];
     expect(session).toMatchObject({
-      planFile: {
-        path: "/workspace/plans/plan-1.plan.md",
-        state: "chat",
-      },
-      planId: null,
-      planState: "chat",
+      activePlan: null,
+      agentMode: "chat",
     });
 
     provider.dispose();

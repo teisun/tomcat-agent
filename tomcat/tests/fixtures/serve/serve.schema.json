@@ -2821,6 +2821,15 @@
             "format": "uint32",
             "minimum": 0.0
           },
+          "skippedLines": {
+            "description": "Number of unchanged source lines omitted by a `gap` row.\n\n`text` remains a human-readable fallback for historical transcripts, but consumers must use this structured field when it is present.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
           "tag": {
             "$ref": "#/definitions/DiffTag"
           },
@@ -3193,6 +3202,15 @@
             "minimum": 0.0
           },
           "oldLine": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "skippedLines": {
+            "description": "Number of unchanged source lines omitted by a `gap` row.\n\n`text` remains a human-readable fallback for historical transcripts, but consumers must use this structured field when it is present.",
             "type": [
               "integer",
               "null"

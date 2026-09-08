@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { runTests } from "@vscode/test-electron";
+import { runVsCodeGuiTests } from "./vscodeLaunchEnv";
 
 import {
   resolveVsCodeCli,
@@ -43,35 +44,6 @@ async function seedAcceptanceSettings(
   );
 }
 
-async function runInCleanElectronEnvironment(
-  callback: () => Promise<void>,
-): Promise<void> {
-  const contaminatedKeys = [
-    "ELECTRON_RUN_AS_NODE",
-    "VSCODE_CRASH_REPORTER_PROCESS_TYPE",
-    "VSCODE_ESM_ENTRYPOINT",
-    "VSCODE_HANDLES_UNCAUGHT_ERRORS",
-    "VSCODE_IPC_HOOK",
-  ] as const;
-  const previous = new Map<string, string | undefined>();
-  for (const key of contaminatedKeys) {
-    previous.set(key, process.env[key]);
-    delete process.env[key];
-  }
-  try {
-    await callback();
-  } finally {
-    for (const key of contaminatedKeys) {
-      const value = previous.get(key);
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
-  }
-}
-
 function artifactDirectory(extensionRoot: string): string {
   const requested = process.env.TOMCAT_IMAGE_ACCEPT_ARTIFACTS_DIR?.trim();
   if (requested) {
@@ -91,7 +63,9 @@ async function main(): Promise<void> {
     "image-acceptance.index.js",
   );
   const installRoot = await fs.mkdtemp(path.join(os.tmpdir(), "tia-"));
-  const artifactsRoot = artifactDirectory(extensionRoot);
+  const artifactsParent = artifactDirectory(extensionRoot);
+  await fs.mkdir(artifactsParent, { recursive: true });
+  const artifactsRoot = await fs.mkdtemp(path.join(artifactsParent, "run-"));
   const extensionsDir = path.join(installRoot, "extensions");
   const fakeServeStateDir = path.join(installRoot, "fake-serve-state");
   const userDataDir = path.join(installRoot, "user-data");
@@ -147,12 +121,13 @@ async function main(): Promise<void> {
     );
 
     await fs.access(harnessTestsPath);
-    await runInCleanElectronEnvironment(async () => {
-      await runTests({
+    {
+      await runVsCodeGuiTests(runTests, {
         extensionDevelopmentPath: harnessRoot,
         extensionTestsEnv: {
           ...process.env,
           TOMCAT_ACCEPT_REPORT_PATH: reportPath,
+          TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: artifactsRoot,
           TOMCAT_ACCEPT_SCREENSHOTS_DIR: screenshotsDir,
           TOMCAT_FAKE_SERVE_STATE_DIR: fakeServeStateDir,
           TOMCAT_VSCODE_TEST_DEFAULT_CWD: workspaceDir,
@@ -167,7 +142,7 @@ async function main(): Promise<void> {
         reuseMachineInstall: true,
         vscodeExecutablePath: resolveVsCodeExecutable(),
       });
-    });
+    }
 
     console.log(`Image acceptance artifacts: ${artifactsRoot}`);
     console.log(await fs.readFile(reportPath, "utf8"));

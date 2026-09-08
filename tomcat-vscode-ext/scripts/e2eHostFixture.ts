@@ -1476,7 +1476,8 @@ function handlePrompt(frame) {
     return;
   }
   if (text.includes("answer card showcase")) {
-    const requestId = \`ask-answer-\${sessionId}\`;
+    // Every tool invocation owns a distinct durable id, even in the same session.
+    const requestId = \`ask-answer-\${sessionId}-\${crypto.randomUUID()}\`;
     const toolCallId = \`tool-ask-\${requestId}\`;
     const request = {
       questions: [
@@ -1493,6 +1494,14 @@ function handlePrompt(frame) {
       responseEvent: \`plan.ask_question.response.\${requestId}\`,
       toolCallId,
     };
+    const pendingTool = {
+      args: { questions: request.questions },
+      result: "[pending]",
+      toolCallId,
+      toolName: "ask_question",
+    };
+    recordHistoryAssistantWithTools(sessionId, "", [pendingTool], "Asked question");
+    recordHistoryToolResult(sessionId, pendingTool);
     pendingApproval = { kind: "answer-card", request, requestId, sessionId };
     persistPendingApproval();
     send({
@@ -2160,7 +2169,13 @@ function handleControlResponse(frame) {
       toolCallId: pending.request.toolCallId,
       toolName: "ask_question",
     };
+    for (const entry of ensureSession(sessionId).history) {
+      if (entry.message && entry.message.tool_call_id === tool.toolCallId && entry.message.content === "[pending]") {
+        entry.message.superseded = true;
+      }
+    }
     emitCompletedTool(sessionId, tool);
+    clearPendingAssistantMessageId(sessionId);
     emitMessageDelta(sessionId, "Recorded your answer.");
     emitTurnEnd(sessionId, {
       message: {},
@@ -2168,8 +2183,8 @@ function handleControlResponse(frame) {
       toolResults: [],
       turnIndex: 1,
     });
-    recordHistoryAssistantWithTools(sessionId, "Recorded your answer.", [tool], "Asked question");
     recordHistoryToolResult(sessionId, tool);
+    recordHistoryMessage(sessionId, "assistant", "Recorded your answer.");
     emitContextMetrics(sessionId, 0.49);
     finishTurn(sessionId, null);
     return;

@@ -1,6 +1,8 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import * as http from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
+import type { Socket } from "node:net";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -45,7 +47,7 @@ export function sseDelta(content: string): ScriptedPart {
 
 export function sseFinish(reason: string): ScriptedPart {
   return {
-    body: `data: {"choices":[{"finish_reason":"${reason}"}}]}\n\n`,
+    body: `data: ${JSON.stringify({ choices: [{ finish_reason: reason }] })}\n\n`,
   };
 }
 
@@ -104,7 +106,12 @@ export function responsesCompleted(status = "completed"): ScriptedPart {
 export async function ensureTomcatBinary(): Promise<string> {
   buildPromise ??= execFileAsync(resolveCargoCommand(), ["build", "--quiet", "--bin", "tomcat"], {
     cwd: tomcatRoot,
-  }).then(() => undefined);
+    timeout: 120_000,
+    killSignal: "SIGKILL",
+  }).then(() => undefined).catch((error) => {
+    buildPromise = undefined;
+    throw error;
+  });
   await buildPromise;
   if (!(await stat(tomcatBinary).then(() => true).catch(() => false))) {
     throw new Error(`tomcat binary not found after build: ${tomcatBinary}`);
@@ -118,66 +125,74 @@ export function warmTomcatBinaryForSuite(timeoutMs = 120_000): void {
   }, timeoutMs);
 }
 
+export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...inherited };
+  // Remove user config/model/credential overrides, never the active-agent guard.
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("TOMCAT__") || /_API_KEY$/i.test(key)) env[key] = undefined;
+  }
+  return {
+    ...env,
+    HOME: homePath,
+    USERPROFILE: homePath,
+    SHELL: "/bin/zsh",
+    TOMCAT__STORAGE__WORK_DIR: path.join(homePath, ".tomcat"),
+    TOMCAT__CONTEXT__COMPACTION_MODEL: "gpt-5.4",
+    TOMCAT__LLM__DEFAULT_MODEL: "gpt-5.4",
+    OPENAI_API_KEY: "dummy-key",
+    ALL_PROXY: "", HTTPS_PROXY: "", HTTP_PROXY: "",
+    all_proxy: "", https_proxy: "", http_proxy: "",
+    NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost",
+  };
+}
+
+type FixtureSetup = {
+  binary?: string;
+  initialize?: (binary: string, env: NodeJS.ProcessEnv, cwd: string) => Promise<void>;
+};
+
 export async function setupServeFixture(
   baseUrl: string,
   api: LlmApi = "openai",
+  setup: FixtureSetup = {},
 ): Promise<{
   cleanup(): Promise<void>;
   env: NodeJS.ProcessEnv;
   homePath: string;
   workspacePath: string;
 }> {
-  const binary = await ensureTomcatBinary();
+  const binary = setup.binary ?? await ensureTomcatBinary();
   const homePath = await mkdtemp(path.join(os.tmpdir(), "tomcat-vscode-ext-"));
   const workspacePath = path.join(homePath, "workspace");
-  await mkdir(workspacePath, { recursive: true });
-
-  await execFileAsync(binary, ["init"], {
-    env: {
-      ...process.env,
-      HOME: homePath,
-      SHELL: "/bin/zsh",
-    },
-  });
-
-  const modelsPath = path.join(homePath, ".tomcat", "models.toml");
-  await writeFile(
-    modelsPath,
-    `[[models]]
+  const env = serveFixtureEnvironment(homePath);
+  const cleanup = () => rm(homePath, { force: true, recursive: true });
+  try {
+    await mkdir(workspacePath, { recursive: true });
+    if (setup.initialize) {
+      await setup.initialize(binary, env, workspacePath);
+    } else {
+      await execFileAsync(binary, ["init"], {
+        cwd: workspacePath, env, timeout: 15_000, killSignal: "SIGKILL",
+      });
+    }
+    const modelsPath = path.join(homePath, ".tomcat", "models.toml");
+    // This suite does not exercise connectors. Init installs a live Playwright
+    // default; explicitly replace it inside this fixture before starting serve.
+    await writeFile(path.join(homePath, ".tomcat", "mcp.json"), '{"mcpServers":{}}\n', "utf8");
+    await writeFile(modelsPath, `[[models]]
 id = "gpt-5.4"
 api = "${api}"
 provider = "openai"
 base_url = "${baseUrl}"
 capabilities = { vision = false, files = false, tools = true, reasoning = true, web_search = false }
-`,
-    "utf8",
-  );
-
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    ALL_PROXY: "",
-    HOME: homePath,
-    HTTPS_PROXY: "",
-    HTTP_PROXY: "",
-    NO_PROXY: "127.0.0.1,localhost",
-    OPENAI_API_KEY: "dummy-key",
-    SHELL: "/bin/zsh",
-    TOMCAT__CONTEXT__COMPACTION_MODEL: "gpt-5.4",
-    TOMCAT__LLM__DEFAULT_MODEL: "gpt-5.4",
-    all_proxy: "",
-    https_proxy: "",
-    http_proxy: "",
-    no_proxy: "127.0.0.1,localhost",
-  };
-
-  return {
-    async cleanup() {
-      await rm(homePath, { force: true, recursive: true });
-    },
-    env,
-    homePath,
-    workspacePath,
-  };
+`, "utf8");
+    return { cleanup, env, homePath, workspacePath };
+  } catch (error) {
+    try { await cleanup(); } catch (cleanupError) {
+      console.warn("serve fixture cleanup failed after setup error", cleanupError);
+    }
+    throw error;
+  }
 }
 
 export async function spawnScriptedOpenAiStreamServer(responses: ScriptedResponse[]): Promise<{
@@ -188,8 +203,24 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
 }> {
   const captured: string[] = [];
   let responseIndex = 0;
+  const abort = new AbortController();
+  const sockets = new Set<Socket>();
+  const inFlight = new Set<Promise<void>>();
+  let closePromise: Promise<void> | undefined;
 
-  const server = http.createServer(async (request, response) => {
+  const server = http.createServer((request, response) => {
+    const task = respond(request, response).catch((error: unknown) => {
+      response.destroy(error instanceof Error ? error : new Error(String(error)));
+    });
+    inFlight.add(task);
+    void task.then(() => inFlight.delete(task));
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+
+  async function respond(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     const chunks: Buffer[] = [];
     for await (const chunk of request) {
       chunks.push(Buffer.from(chunk));
@@ -225,12 +256,12 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
 
     for (const part of scripted.parts) {
       if (part.delayMs && part.delayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, part.delayMs));
+        await delay(part.delayMs, undefined, { signal: abort.signal });
       }
       response.write(part.body);
     }
     response.end();
-  });
+  }
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -253,16 +284,24 @@ export async function spawnScriptedOpenAiStreamServer(responses: ScriptedRespons
     capturedNonTitleRequests() {
       return captured.filter((request) => !isSessionTitleRequest(request));
     },
-    async close() {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
-      });
+    close() {
+      if (closePromise) return closePromise;
+      abort.abort();
+      closePromise = (async () => {
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            new Promise<void>((resolve, reject) => {
+              server.close((error) => error ? reject(error) : resolve());
+              for (const socket of sockets) socket.destroy();
+            }).then(() => Promise.all([...inFlight])),
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => reject(new Error("scripted server cleanup timed out")), 3_000);
+            }),
+          ]);
+        } finally { clearTimeout(timer); }
+      })();
+      return closePromise;
     },
   };
 }
@@ -343,16 +382,24 @@ export async function createRealServeMessenger(
   messenger: TomcatMessenger;
 }> {
   const fixture = await setupServeFixture(baseUrl, api);
-  const messenger = new TomcatMessenger({
-    cwd: fixture.workspacePath,
-    env: fixture.env,
-    executable: await ensureTomcatBinary(),
-    requestTimeoutMs: 10000,
-  });
+  let messenger: TomcatMessenger;
+  try {
+    messenger = new TomcatMessenger({
+      cwd: fixture.workspacePath,
+      env: fixture.env,
+      executable: await ensureTomcatBinary(),
+      requestTimeoutMs: 10000,
+    });
+  } catch (error) {
+    try { await fixture.cleanup(); } catch (cleanupError) {
+      console.warn("serve fixture cleanup failed after construction error", cleanupError);
+    }
+    throw error;
+  }
 
   return {
     async cleanup() {
-      messenger.dispose();
+      await messenger.disposeAsync();
       await fixture.cleanup();
     },
     fixture,
@@ -391,6 +438,26 @@ export async function waitForEvent(
       }
     });
   });
+}
+
+// State/event tests exercise build acknowledgement, not the execution/Acceptance
+// loop. Wait for real streamed text, then use the public interrupt command before
+// the scripted reply finishes. All waits join immediately, so failures stay owned.
+export async function buildAndInterruptPlan(
+  messenger: TomcatMessenger, sessionId: string, planPath: string,
+) {
+  const events = waitForEvent(messenger, (event) => event.type === "agent_idle" && event.sessionId === sessionId);
+  const interrupted = waitForEvent(messenger, (event) => event.type === "message_update" && event.sessionId === sessionId)
+    .then(async () => {
+      const runningState = await messenger.request({ type: "get_state", sessionId });
+      const response = await messenger.request({ type: "interrupt", sessionId });
+      return { runningState, response };
+    });
+  const [build, captured, interrupt] = await Promise.all([
+    messenger.sendSetPlanMode({ action: "build", planId: planPath, sessionId }), events, interrupted,
+  ]);
+  if (!interrupt.response.success) throw new Error(`fixture interrupt failed: ${JSON.stringify(interrupt.response)}`);
+  return { build, events: captured, runningState: interrupt.runningState };
 }
 
 export async function readRequestJson(rawRequest: string): Promise<unknown> {

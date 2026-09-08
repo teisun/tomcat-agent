@@ -4,6 +4,9 @@
 
 TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   audit_tests
+  connector_mcp_tests
+  nested_cli_guard_tests
+  prompt_size_budget
   event_tests
   agent_loop_tests
   bash_assignment_deny
@@ -44,6 +47,33 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   serve_stdio_e2e
 )
 
+# Local HTTP/OAuth fake, compiled only with the test-server feature.
+TOMCAT_INTEGRATION_FEATURE_TESTS=(
+  connector_http_tests
+)
+
+# Deliberately manual: performance/browser bootstrap or additional paid providers.
+TOMCAT_INTEGRATION_MANUAL_TESTS=(
+  resume_hydration_perf
+  verify_skill_browser_scripts
+  model_presets_live_smoke_tests
+  prompt_cache_real_llm_tests
+  ui_acceptance_real_llm_e2e
+  openai_files_integration_tests
+)
+
+# Network-only cases inside otherwise offline binaries; run explicitly with the
+# documented PI_LIVE_* opt-ins/provider keys, never in the default gate.
+TOMCAT_INTEGRATION_MANUAL_CASES=(
+  web_search_tool_tests::live_tavily_search_smoke
+  web_search_tool_tests::real_tavily_plugin_web_search
+  web_search_tool_tests::real_brave_plugin_web_search
+  web_search_tool_tests::real_serper_plugin_web_search
+  web_search_tool_tests::real_mimo_web_search
+  web_fetch_tool_tests::live_example_fetch_smoke
+  skill_tool_tests::live_skill_load_roundtrip_with_real_llm
+)
+
 TOMCAT_INTEGRATION_SERIAL_TESTS=(
 )
 
@@ -59,8 +89,8 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
 # `./scripts/run-integration-tests.sh integration-real-llm` 显式触发。
 TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
   current_tail_guard_real_llm_tests
-  openai_files_integration_tests
   openai_responses_integration_tests
+
   plan_real_llm_inprocess_tests
   plan_real_llm_cli_e2e
   reasoning_continuity_real_llm_tests
@@ -72,6 +102,21 @@ TOMCAT_INTEGRATION_REAL_LLM_CLI_TESTS=(
   test_user_background_bash_multiple_timeout_slices_real_llm_cli
   test_user_background_bash_midturn_followup_real_llm_cli
   test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli
+  test_chat_with_valid_config_and_api_key_starts_and_produces_output
+  test_user_asks_pi_a_question
+  test_user_asks_pi_technical_question
+  test_user_asks_pi_to_run_bash_command
+  test_user_sees_read_failure_reason_in_tool_line
+  test_user_asks_pi_to_write_hello_world_bash
+  test_user_chats_with_llm_gets_streaming_response
+  test_user_receives_nonempty_llm_response
+  test_user_chat_resumes_last_session
+  test_user_chat_non_interactive_with_prompt_flag
+)
+
+TOMCAT_INTEGRATION_REAL_LLM_CASES=(
+  llm_tests::test_llm_provider_chat_real_request_returns_ok
+  llm_tests::test_llm_provider_chat_stream_real_request_yields_events
 )
 
 # OpenAI Responses wire 真链路子组：只收口到最终走 `api=openai-responses` 的验收入口。
@@ -83,6 +128,6 @@ TOMCAT_INTEGRATION_REAL_LLM_CLI_TESTS=(
 TOMCAT_INTEGRATION_OPENAI_RESPONSES_WIRE_COMMANDS=(
   "cargo test -j 1 --test openai_responses_integration_tests -- --nocapture --test-threads=1"
   "cargo test -j 1 --test reasoning_continuity_real_llm_tests openai_responses_roundtrip_replays_reasoning_items -- --nocapture --test-threads=1"
-  "cargo test -j 1 --test openai_files_integration_tests -- --ignored --nocapture --test-threads=1"
+  "cargo test -j 1 --test openai_files_integration_tests openai_ -- --ignored --nocapture --test-threads=1"
 )
 

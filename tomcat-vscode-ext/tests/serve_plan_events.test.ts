@@ -8,7 +8,7 @@ import {
   sseDelta,
   sseDone,
   sseFinish,
-  waitForEvent,
+  buildAndInterruptPlan,
   warmTomcatBinaryForSuite,
   writePlanFile,
 } from "./serveTestUtils";
@@ -19,7 +19,7 @@ describe("real tomcat serve plan event forwarding", () => {
   it("forwards plan events through the stdio event pump", async () => {
     const server = await spawnScriptedOpenAiStreamServer([
       {
-        parts: [sseDelta("event build"), sseFinish("stop"), sseDone()],
+        parts: [sseDelta("event build"), { ...sseFinish("stop"), delayMs: 1000 }, sseDone()],
       },
     ]);
     const runtime = await createRealServeMessenger(server.baseUrl);
@@ -31,26 +31,10 @@ describe("real tomcat serve plan event forwarding", () => {
         "stage-a-plan-event",
         "planning",
       );
-      const planBuild = waitForEvent(
-        runtime.messenger,
-        (event) =>
-          event.type === "plan.build" &&
-          event.sessionId === init.sessionId,
-      );
-      const agentEnd = waitForEvent(
-        runtime.messenger,
-        (event) =>
-          event.type === "agent_end" &&
-          event.sessionId === init.sessionId,
-      );
-
-      await runtime.messenger.sendSetPlanMode({
-        action: "build",
-        planId: planPath,
-        sessionId: init.sessionId,
-      });
-      const events = await planBuild;
-      await agentEnd;
+      const { build, events } = await buildAndInterruptPlan(runtime.messenger, init.sessionId, planPath);
+      expect(build.success).toBe(true);
+      expect(events.find((event) => event.type === "agent_end")).toBeDefined();
+      expect(events.at(-1)?.type).toBe("agent_idle");
       const buildEvent = events.find(
         (event): event is Extract<ServeEvent, { type: "plan.build" }> =>
           event.type === "plan.build" && event.sessionId === init.sessionId,

@@ -67,6 +67,13 @@ pub const ANTHROPIC_TEST_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// 1. `tomcat/.env`（`CARGO_MANIFEST_DIR`，与 `src/core/llm/tests/mocks.rs::load_dotenv` 一致）
 /// 2. `dotenvy::dotenv()`：从当前工作目录向上查找 `.env`（`cargo test` 在 crate 根执行时通常同上）
 pub fn load_openai_test_env() {
+    if std::env::var("TOMCAT_TEST_EXPORTED_ENV_ONLY")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return;
+    }
     let manifest_env = Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
     let _ = dotenvy::from_path(&manifest_env);
     let _ = dotenvy::dotenv();
@@ -83,7 +90,10 @@ pub fn deepseek_test_model() -> String {
 }
 
 pub fn e2e_openai_model() -> String {
-    std::env::var(OPENAI_TEST_MODEL_ENV).unwrap_or_else(|_| OPENAI_TEST_DEFAULT_MODEL.to_string())
+    std::env::var(OPENAI_TEST_MODEL_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OPENAI_TEST_DEFAULT_MODEL.to_string())
 }
 
 pub fn mimo_test_model() -> String {
@@ -155,7 +165,7 @@ pub fn apply_deepseek_app_config(cfg: &mut tomcat::AppConfig) {
 
 pub fn apply_openai_app_config(cfg: &mut AppConfig) {
     cfg.llm.default_model = e2e_openai_model();
-    cfg.context.compaction_model = "gpt-5.4".to_string();
+    cfg.context.compaction_model = cfg.llm.default_model.clone();
     maybe_write_test_models(cfg);
 }
 

@@ -114,6 +114,82 @@ fn temp_home_guard_keeps_multiple_workdirs_isolated_under_same_temp_home() {
 }
 
 #[test]
+fn every_integration_binary_has_one_explicit_classification() {
+    let groups = read_test_groups();
+    let mut classified = BTreeSet::new();
+    for group in ["PARALLEL", "SERIAL", "FEATURE", "REAL_LLM", "MANUAL"] {
+        for binary in parse_shell_array(&groups, &format!("TOMCAT_INTEGRATION_{group}_TESTS")) {
+            assert!(
+                classified.insert(binary.clone()),
+                "duplicate classification: {binary}"
+            );
+        }
+    }
+    let actual: BTreeSet<String> = std::fs::read_dir(repo_root().join("tests"))
+        .unwrap()
+        .map(Result::unwrap)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .map(|path| path.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        classified, actual,
+        "new test binaries must be classified, including manual/feature targets"
+    );
+    let config = read_nextest_config();
+    let offline = profile_default_filter(&config);
+    for binary in parse_shell_array(&groups, "TOMCAT_INTEGRATION_MANUAL_TESTS") {
+        assert!(
+            offline.contains(&format!("binary({binary})")),
+            "manual target in default: {binary}"
+        );
+    }
+    for case in parse_shell_array(&groups, "TOMCAT_INTEGRATION_MANUAL_CASES") {
+        let (binary, name) = case.split_once("::").unwrap();
+        let source =
+            std::fs::read_to_string(repo_root().join(format!("tests/{binary}.rs"))).unwrap();
+        assert!(
+            source.contains(&format!("fn {name}(")),
+            "missing manual case: {case}"
+        );
+        assert!(
+            offline.contains(name),
+            "manual case absent from offline exclusion: {case}"
+        );
+    }
+    let runner =
+        std::fs::read_to_string(repo_root().join("scripts/run-integration-tests.sh")).unwrap();
+    assert!(runner.contains("${TOMCAT_INTEGRATION_FEATURE_TESTS[@]}"));
+    assert!(runner.contains("--features test-streamable-http-server"));
+}
+
+#[test]
+fn missing_live_credentials_is_not_a_successful_skip() {
+    for target in ["", "gpt-5.4", "gpt-5.4_litellm-sunmi"] {
+        let output = std::process::Command::new("bash")
+            .arg(repo_root().join("scripts/run-integration-tests.sh"))
+            .arg("integration-openai-responses-wire")
+            .env("TOMCAT_E2E_OPENAI_TARGET", target)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("LITELLM_SUNMI_API_KEY")
+            .output()
+            .expect("run preflight without credentials");
+        assert_eq!(output.status.code(), Some(2));
+        let log = String::from_utf8_lossy(&output.stdout);
+        let effective = if target.is_empty() {
+            common::OPENAI_TEST_DEFAULT_MODEL
+        } else {
+            target
+        };
+        assert!(
+            log.contains(common::openai_test_api_key_env_for_model(effective)),
+            "{log}"
+        );
+        assert!(log.contains("未运行"), "{log}");
+    }
+}
+
+#[test]
 fn promoted_parallel_and_nextest_real_llm_filters_stay_in_sync() {
     let groups = read_test_groups();
     let parallel = parse_shell_array(&groups, "TOMCAT_INTEGRATION_PARALLEL_TESTS");
@@ -151,12 +227,22 @@ fn promoted_parallel_and_nextest_real_llm_filters_stay_in_sync() {
         "serial 兜底组默认应为空，实际：{serial:?}"
     );
     assert!(
-        !real_llm_cli.is_empty()
-            && real_llm_cli
-                .iter()
-                .all(|test_name| test_name.ends_with("_real_llm_cli")),
-        "real-llm CLI 测试清单应显式维护且全部以 _real_llm_cli 结尾，实际：{real_llm_cli:?}"
+        !real_llm_cli.is_empty(),
+        "live CLI inventory must not be empty"
     );
+    let cli_source = std::fs::read_to_string(repo_root().join("tests/cli_tests.rs")).unwrap();
+    for name in &real_llm_cli {
+        assert!(
+            cli_source.contains(&format!("fn {name}(")),
+            "unknown live CLI case: {name}"
+        );
+        if !name.ends_with("_real_llm_cli") {
+            assert!(
+                default_filter.contains(name) && real_llm_filter.contains(name),
+                "live CLI case absent from one filter: {name}"
+            );
+        }
+    }
 
     for binary in &real_llm {
         let needle = format!("binary({binary})");

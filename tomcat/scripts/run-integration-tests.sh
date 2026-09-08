@@ -33,6 +33,9 @@ export VISUAL=true
 export GIT_EDITOR=true
 export PAGER=cat
 export GIT_PAGER=cat
+# Script preflight and Rust helpers must use the same exported credential set.
+# Direct cargo tests may still opt into their documented dotenv discovery.
+export TOMCAT_TEST_EXPORTED_ENV_ONLY=1
 
 NEXTTEST_INSTALL_HINT="cargo install cargo-nextest --locked"
 
@@ -65,7 +68,7 @@ build_test_args() {
 }
 
 openai_responses_target() {
-  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-gpt-5.4}"
+  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-gpt-5.4_litellm-sunmi}"
 }
 
 openai_responses_key_env() {
@@ -76,7 +79,7 @@ openai_responses_key_env() {
     printf '%s' "OPENAI_API_KEY"
     ;;
     *)
-    printf '%s' "${TOMCAT_E2E_OPENAI_KEY_ENV:-OPENAI_GATEWAY_API_KEY}"
+    printf '%s' "LITELLM_SUNMI_API_KEY"
     ;;
   esac
 }
@@ -131,11 +134,11 @@ run_integration_parallel() {
   local args=()
   while IFS= read -r arg; do
     args+=("$arg")
-  done < <(build_test_args "${TOMCAT_INTEGRATION_PARALLEL_TESTS[@]}")
+  done < <(build_test_args "${TOMCAT_INTEGRATION_PARALLEL_TESTS[@]}" "${TOMCAT_INTEGRATION_FEATURE_TESTS[@]}")
 
   ensure_nextest
   log_phase "开始 integration-parallel（默认 integration 门禁，nextest 4 并发）"
-  cargo nextest run --no-fail-fast "${args[@]}"
+  cargo nextest run --features test-streamable-http-server --no-fail-fast "${args[@]}"
   local status=$?
   log_phase "结束 integration-parallel"
   return $status
@@ -154,7 +157,7 @@ run_integration_serial() {
 
   ensure_nextest
   log_phase "开始 integration-serial（nextest serial 兜底组）"
-  cargo nextest run --no-fail-fast "${args[@]}"
+  cargo nextest run --features test-streamable-http-server --no-fail-fast "${args[@]}"
   local status=$?
   log_phase "结束 integration-serial"
   return $status
@@ -178,12 +181,12 @@ run_integration_real_llm() {
     fi
   done < <(missing_required_envs_for_real_llm)
   if [ "${#missing[@]}" -ne 0 ]; then
-    echo "跳过 integration-real-llm：未设置 ${missing[*]}（当前 OpenAI target=$(openai_responses_target)）" >&2
-    return 0
+    echo "未运行 integration-real-llm：未设置 ${missing[*]}（当前 OpenAI target=$(openai_responses_target)）；不计通过" >&2
+    return 2
   fi
   ensure_nextest
   log_phase "开始 integration-real-llm（真 LLM 显式层；nextest real-llm profile，max-threads=2；需 ${openai_key_env} + DEEPSEEK_API_KEY + MIMO_API_KEY）"
-  cargo nextest run --profile real-llm --no-fail-fast
+  PI_LIVE_OPENAI_RESPONSES=1 cargo nextest run --profile real-llm --no-fail-fast
   local status=$?
   log_phase "结束 integration-real-llm"
   return $status
@@ -213,10 +216,11 @@ run_integration_openai_responses_wire() {
   local openai_key_env
   openai_key_env="$(openai_responses_key_env)"
   if [ -z "${!openai_key_env}" ]; then
-    log_phase "跳过 integration-openai-responses-wire：当前 OpenAI target=$(openai_responses_target) 未设置 ${openai_key_env}"
-    return 0
+    log_phase "未运行 integration-openai-responses-wire：当前 OpenAI target=$(openai_responses_target) 未设置 ${openai_key_env}；不计通过"
+    return 2
   fi
 
+  export PI_LIVE_OPENAI_RESPONSES=1 PI_LIVE_OPENAI_FILES=1
   log_phase "开始 integration-openai-responses-wire（仅 OpenAI Responses wire 真链路组）"
   local fail=0
   local cmd
