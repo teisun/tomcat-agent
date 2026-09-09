@@ -1470,6 +1470,14 @@ async fn run_responses_marathon_probe_with_config(
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map_or(Duration::from_secs(8), Duration::from_millis);
 
+    // 诊断开关：TOMCAT_E2E_CACHE_PROBE_KEY=off 时不发 `prompt_cache_key`。用于判定纯透传网关
+    // 是否忠实转发该路由键——GPT-5.6 有 key 才启用「可靠匹配」，剥掉 key 会退化成 best-effort
+    // 隐式缓存。默认 on（发 key）。
+    let cache_key_enabled = std::env::var("TOMCAT_E2E_CACHE_PROBE_KEY")
+        .ok()
+        .map(|value| !value.trim().eq_ignore_ascii_case("off"))
+        .unwrap_or(true);
+
     for round in 1..=rounds {
         if round > 1 && !inter_round_delay.is_zero() {
             tokio::time::sleep(inter_round_delay).await;
@@ -1483,8 +1491,17 @@ async fn run_responses_marathon_probe_with_config(
 
         let mut turn_request = request(request_messages, &cfg.llm.default_model, &cache_key);
         turn_request.stream = Some(true);
+        // GPT-5 Terra relay endpoints reject sampling/output parameters. The cache probe
+        // measures prefix reuse, so it must not add transport options that production
+        // requests for this model family omit.
+        turn_request.temperature = None;
+        turn_request.max_tokens = None;
+        turn_request.resolved_output_limit = None;
         turn_request.thinking_level = Some(ThinkingLevel::High);
         turn_request.tools = Some(vec![cache_probe_tool.clone()]);
+        if !cache_key_enabled {
+            turn_request.cache_key = None;
+        }
         let captured = capture_stream_turn(provider.as_ref(), turn_request).await?;
         let usage = &captured.usage;
         let cache_read = usage.cache_read_tokens.unwrap_or_default();
@@ -1492,11 +1509,12 @@ async fn run_responses_marathon_probe_with_config(
             .last()
             .map(|prev: &MarathonRound| cache_read as f64 / prev.prompt_tokens.max(1) as f64);
         eprintln!(
-            "phase=\"responses_cache_phase0\" mode={} tail_placement={} tail_mode={} model={} round={} prompt_tokens={} \
+            "phase=\"responses_cache_phase0\" mode={} tail_placement={} tail_mode={} cache_key={} model={} round={} prompt_tokens={} \
              cache_read_tokens={} cache_write_tokens={} reuse_of_previous={}",
             mode.label(),
             tail_placement.label(),
             tail_mode.label(),
+            if cache_key_enabled { "on" } else { "off" },
             wire_model,
             round,
             usage.prompt_tokens,
@@ -1652,8 +1670,18 @@ async fn models_toml_model_growing_prefix_cache_marathon() -> Result<(), Box<dyn
         .sum();
     let full = reuse.iter().filter(|ratio| **ratio >= 0.95).count();
     let zero = reuse.iter().filter(|ratio| **ratio == 0.0).count();
+    let cache_key_state = std::env::var("TOMCAT_E2E_CACHE_PROBE_KEY")
+        .ok()
+        .map(|value| {
+            if value.trim().eq_ignore_ascii_case("off") {
+                "off"
+            } else {
+                "on"
+            }
+        })
+        .unwrap_or("on");
     eprintln!(
-        "phase=\"responses_cache_marathon_summary\" model={model_id} tail_placement={} tail_mode={} rounds={} \
+        "phase=\"responses_cache_marathon_summary\" model={model_id} tail_placement={} tail_mode={} cache_key={cache_key_state} rounds={} \
          overall_hit={:.0}% growth_rounds={} full_reuse={full} zero={zero} stale_or_partial={} \
          reuse_of_previous={:?}",
         tail_placement.label(),
@@ -1666,6 +1694,184 @@ async fn models_toml_model_growing_prefix_cache_marathon() -> Result<(), Box<dyn
             .iter()
             .map(|ratio| format!("{:.0}%", ratio * 100.0))
             .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+/// 逐轮交替 A/B：同一段只增不改的历史、同一时刻背靠背发两种 wire（tail 并进 `instructions`
+/// vs tail 作为 `input` 末项），把「时间 / 负载 / 渠道」变量摁死，只留 tail 放置这一个变量。
+/// 每轮交换先后顺序，抵消「前一发请求为后一发预热」的偏差。用于判定某网关是否**结构性**地
+/// 区别对待两种 wire，而非不同时段各跑一遍得到的负载假象。
+///
+/// 历史用**确定性**合成推进（synthetic assistant tool_call + 固定大 tool result），因此两种
+/// wire 每轮看到的 durable history 逐字节相同、跨轮只追加，不依赖模型输出的随机性。
+///
+/// ```text
+/// TOMCAT_E2E_CACHE_PROBE_MODEL=idatatlas/gpt-5.6-terra \
+/// TOMCAT_E2E_CACHE_PROBE_ROUNDS=12 \
+/// TOMCAT_E2E_CACHE_PROBE_DELAY_MS=8000 \
+/// cargo test --test prompt_cache_real_llm_tests interleaved_tail_placement_ab_probe -- --ignored --nocapture
+/// ```
+///
+/// 判读：若 `instr_overall_hit` ≈ `input_overall_hit`，说明形状不是原因（差距来自时段 / 路由）；
+/// 若某形状**系统性**更低，才说明网关确实区别对待 `instructions` 与 `input`。只打印、不断言阈值。
+#[tokio::test]
+#[ignore = "manual: interleaved instructions-tail vs input-tail A/B on one gateway (TOMCAT_E2E_CACHE_PROBE_MODEL)"]
+#[serial]
+async fn interleaved_tail_placement_ab_probe() -> Result<(), Box<dyn std::error::Error>> {
+    common::setup_logging();
+    common::load_openai_test_env();
+    let Some(model_id) = std::env::var(common::CACHE_PROBE_MODEL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(format!(
+            "set {} to a model id from ~/.tomcat/models.toml (e.g. idatatlas/gpt-5.6-terra)",
+            common::CACHE_PROBE_MODEL_ENV
+        )
+        .into());
+    };
+    let rounds = std::env::var("TOMCAT_E2E_CACHE_PROBE_ROUNDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(12);
+    let inter_round_delay = std::env::var("TOMCAT_E2E_CACHE_PROBE_DELAY_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(Duration::from_secs(8), Duration::from_millis);
+
+    let models_toml = common::real_models_toml_path();
+    let runtime_env = common::real_runtime_env_path();
+    let _home = common::TempHomeGuard::new();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(
+        common::dot_tomcat_e2e_workdir(&format!("prompt_cache_ab_{}", model_id.replace('/', "_")))
+            .display()
+            .to_string(),
+    );
+    let wire_model =
+        common::apply_models_toml_entry_app_config(&mut cfg, &models_toml, &runtime_env, &model_id)?;
+    let provider = common::resolve_main_provider(&cfg);
+    let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let cache_key = format!("prompt-cache-ab:{wire_model}:{probe_id}");
+    let cache_probe_tool = serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "cache_probe",
+            "description": "Record one deterministic cache-marathon step.",
+            "parameters": {
+                "type": "object",
+                "properties": {"round": {"type": "integer"}},
+                "required": ["round"]
+            }
+        }
+    });
+    let tail_text = "runtime-only cache tail; stable across all rounds";
+
+    let mut history = vec![
+        ChatMessage::system(stable_prefix()),
+        ChatMessage::user("Start the cache marathon by calling cache_probe for round 1."),
+    ];
+
+    // Both wires share this builder; only where `tail_text` lands differs. Terra relays reject
+    // sampling/output parameters, so they stay `None` to match production requests.
+    let make_request = |placement: MarathonTailPlacement, history: &[ChatMessage]| -> ChatRequest {
+        let mut messages = history.to_vec();
+        let mut tail = ChatMessage::user(tail_text);
+        if placement == MarathonTailPlacement::EphemeralTail {
+            tail.kind = MessageKind::EphemeralTail;
+        }
+        messages.push(tail);
+        let mut req = request(messages, &cfg.llm.default_model, &cache_key);
+        req.stream = Some(true);
+        req.temperature = None;
+        req.max_tokens = None;
+        req.resolved_output_limit = None;
+        req.thinking_level = Some(ThinkingLevel::High);
+        req.tools = Some(vec![cache_probe_tool.clone()]);
+        req
+    };
+
+    // Each row is (cache_read_tokens, prompt_tokens) for that wire.
+    let mut instr_rows: Vec<(u32, u32)> = Vec::with_capacity(rounds);
+    let mut input_rows: Vec<(u32, u32)> = Vec::with_capacity(rounds);
+
+    for round in 1..=rounds {
+        if round > 1 && !inter_round_delay.is_zero() {
+            tokio::time::sleep(inter_round_delay).await;
+        }
+        // Alternate which shape is sent first so warming the shared prefix cannot systematically
+        // favor one wire across the run.
+        let instr_first = round % 2 == 1;
+        let (instr_turn, input_turn) = if instr_first {
+            let a = capture_stream_turn(
+                provider.as_ref(),
+                make_request(MarathonTailPlacement::EphemeralTail, &history),
+            )
+            .await?;
+            let b = capture_stream_turn(
+                provider.as_ref(),
+                make_request(MarathonTailPlacement::LastUserItem, &history),
+            )
+            .await?;
+            (a, b)
+        } else {
+            let b = capture_stream_turn(
+                provider.as_ref(),
+                make_request(MarathonTailPlacement::LastUserItem, &history),
+            )
+            .await?;
+            let a = capture_stream_turn(
+                provider.as_ref(),
+                make_request(MarathonTailPlacement::EphemeralTail, &history),
+            )
+            .await?;
+            (a, b)
+        };
+        let instr_read = instr_turn.usage.cache_read_tokens.unwrap_or_default();
+        let input_read = input_turn.usage.cache_read_tokens.unwrap_or_default();
+        eprintln!(
+            "phase=\"ab_tail_placement\" model={model_id} round={round} order={} \
+             instr_prompt={} instr_cache_read={} input_prompt={} input_cache_read={}",
+            if instr_first { "instr_first" } else { "input_first" },
+            instr_turn.usage.prompt_tokens,
+            instr_read,
+            input_turn.usage.prompt_tokens,
+            input_read,
+        );
+        instr_rows.push((instr_read, instr_turn.usage.prompt_tokens));
+        input_rows.push((input_read, input_turn.usage.prompt_tokens));
+
+        // Advance the shared history deterministically; identical for both wires next round.
+        let call_id = format!("ab-call-{round}");
+        history.push(ChatMessage::assistant_with_tool_calls(
+            None,
+            vec![serde_json::json!({
+                "id": call_id,
+                "type": "function",
+                "function": {"name": "cache_probe", "arguments": format!("{{\"round\":{round}}}")},
+            })],
+        ));
+        let payload = format!(
+            "cache_probe result round={round}\n{}",
+            "large deterministic diagnostic output\n".repeat(220)
+        );
+        history.push(ChatMessage::tool(&call_id, &payload));
+    }
+
+    let overall_hit = |rows: &[(u32, u32)]| -> f64 {
+        let cached: u64 = rows.iter().map(|(read, _)| u64::from(*read)).sum();
+        let prompt: u64 = rows.iter().map(|(_, prompt)| u64::from(*prompt)).sum();
+        100.0 * cached as f64 / prompt.max(1) as f64
+    };
+    eprintln!(
+        "phase=\"ab_tail_placement_summary\" model={model_id} rounds={rounds} \
+         instr_overall_hit={:.0}% input_overall_hit={:.0}% instr_reads={:?} input_reads={:?}",
+        overall_hit(&instr_rows),
+        overall_hit(&input_rows),
+        instr_rows.iter().map(|(read, _)| *read).collect::<Vec<_>>(),
+        input_rows.iter().map(|(read, _)| *read).collect::<Vec<_>>(),
     );
     Ok(())
 }

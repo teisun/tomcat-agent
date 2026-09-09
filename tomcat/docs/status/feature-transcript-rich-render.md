@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-09 15:38 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-09 22:01 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P1] 缓存探针可对照 `prompt_cache_key` 与两种 wire**：`prompt_cache_real_llm_tests` 的增长前缀马拉松不再向 Terra 中转站发送 `temperature` / `max_tokens`（与生产请求同形）；新增 `TOMCAT_E2E_CACHE_PROBE_KEY=on|off` 诊断开关，以及 `interleaved_tail_placement_ab_probe`（同一时刻背靠背对比 tail 并进 `instructions` vs 放 `input` 末项）。实测 idatatlas 上 ON≈OFF（73%≈72%）且掉坑轮精确落到 4608（仅常热 system prefix），说明该网关未把客户端 `prompt_cache_key` 用于 GPT-5.6 可靠匹配；命中抖动不是 Tomcat 拼上下文形状问题。Cov% 未跑，仍为 —。@2026-09-09
 - [✓] **[P0] Build 审计整改与双网关真实验收完成**：`TodoItem.evidence` 仅持久化至 frontmatter / `update_plan` 返回值，不再干扰 Markdown Todos Board；删除可重算的 `tool_results_compacted` transcript marker，将 current-tail guard 合并为 `reasoning_loop` 顶部的单点请求前检查，覆盖新 turn、follow-up、retry 与 resume 首请求。L0 在摘要 boundary 后改为处理最近一个含工具结果的 turn，避免新 user 消息遮蔽前一回合的超大结果。OpenAI Responses 增加 `chat_collect`，使强制 SSE 的中转站仍可向摘要调用方提供完整响应。真实 idatatlas / fcodex `gpt-5.6-terra` 分别验证预热、摘要应用、重启 guard、build E2E、evidence 和缓存；`cargo test -p tomcat --lib` 2804 passed，CLI `0.1.47 → 0.1.48`、扩展 `0.1.61 → 0.1.62`、bundled CLI 同步。Cov% 未跑，仍为 —。@2026-09-09
 - [✓] **[P0] 验收测试与运行脚本整改完成**：Plan / Retry / Resume 测试对齐现有状态和历史保留行为；测试使用独立目录、模型配置和模拟服务，等待 CLI 进程及管道关闭后才清理资源。nested guard 只抽取判断便于测试，不放松原安全规则。VS Code 五种启动入口统一隔离 Electron 环境；截图直接取自测试窗口，不再误拍用户窗口。测试筛选拒绝零匹配，Rust 离线 / 真实联网 / 手动场景分类补齐；VSIX 共享构建并以内容哈希拒绝过期产物。@2026-09-08
 - [✓] **[P0] 整改必验批次完成并保留失败历史**：Rust lib 2779 通过 / 1 ignored、完整默认集成 377 通过 / 25 skipped；扩展 core / GUI / 集成分别 409 / 572 / 143 通过，安装版 19 通过、VSIX 五场景 10 通过，devhost 33 通过 / 4 pending、manual 2 通过、image 1 通过。跳过项不计通过，启动专属场景另在 verify 窗口执行。格式、Clippy、类型检查、wire、release 构建及版本检查通过；失败命令与后续修复分开记录，不宣称原失败的整条命令退出 0。checkpoint 独立复现未重现历史卡点，相关完整测试通过；真实模型后台通知单项通过不代表所有联网测试都已运行。详情见 [验收整改记录](../reports/acceptance-remediation.md)。@2026-09-08
@@ -192,6 +193,7 @@
 | 其余真实联网 / 手动测试未全部运行 | 本轮必验离线集与明确列出的真实窗口已通过；其他依赖真实模型行为、外部凭据或人工操作的测试不计入通过数，历史失败保留在整改记录与 Git 历史 | 按文档显式启用对应测试组后分别验证 |
 
 ### 集成说明
+- 最新补充（2026-09-09 22:01）：缓存马拉松去掉 Terra 拒绝的采样参数，并加上 `TOMCAT_E2E_CACHE_PROBE_KEY` 与交替 wire A/B。不推送、不发版；CLI `0.1.48` / 扩展 `0.1.62` 不变。Cov% 未测，保持 —。
 - 当前提交（2026-09-08 16:08）：验收整改计划于 15:51 完成，本次依用户新指令提交整改源码、测试、说明和状态文件；不推送、不发版。代码与验收结束时的 58 路径快照一致（排除账本的 SHA-256 为 `fabe312fca556e9e8ec2adca5b4d3781012039a207f58cf633098034963920f6`），提交前仅补状态/提交说明，不重复已通过的完整测试。CLI `0.1.47` / 扩展 `0.1.61` / bundled CLI `0.1.47` 不变；Cov% 未测，保持 —。完整命令、真实任务 ID、失败与补跑结果见 [验收整改记录](../reports/acceptance-remediation.md)。
 - 最新补充（2026-09-03 22:09）：依赖去重与 `[profile.fast]` 合入。`Cargo.lock` 573→541；CLI `0.1.44` / 扩展 `0.1.58` / bundled CLI `0.1.44`。验证：fmt、clippy `-D warnings`、`cargo check --all-targets`、`release-version check`、`git diff --check` 全绿。Cov% 未跑，仍为 —。
 - 最新补充（2026-08-30 20:10）：CLI `0.1.39` / 扩展 `0.1.51` / bundled CLI `0.1.39`；`package:vsix` 增加 yauzl 解压门禁。验证：`release-version check`、VSIX 解压单测、完整打包流程；本机纯插件 `tomcat-vscode-ext-0.1.51.vsix` SHA-256 `eda843bed4bf95700de25c1ef0f7168a11e310000ed27b15080537210ab2864e`。Cov% 未跑，仍为 —。
