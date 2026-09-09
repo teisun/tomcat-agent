@@ -36,6 +36,7 @@ fn refresh_notifier_fanouts_registered_panels() {
             id: "t1".into(),
             content: "ship".into(),
             status: TodoStatus::InProgress,
+            evidence: Vec::new(),
             kind: Default::default(),
         }],
     );

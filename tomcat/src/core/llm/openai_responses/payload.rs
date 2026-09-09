@@ -213,9 +213,10 @@ pub(super) fn infer_terminal_metadata(
 ///
 /// 规则（与 plan §5 Phase B 表 + pi_agent_rust 同名实现一致）：
 /// - 序列首条 `role=System` 文本 → 顶层 `instructions`，**不**进 input；
-/// - `EphemeralTail` → 追加到顶层 `instructions`，**不**进 input。运行时状态是 system
-///   reminder；若作为每轮末尾的 user item 注入，上一请求的该 item 会在下一请求中被新 assistant /
-///   tool history 插到前面，从而破坏 Responses 的字节前缀缓存；
+/// - `EphemeralTail` → 追加到顶层 `instructions`，**不**进 input。这样它不会在下轮被新
+///   assistant / tool history 插进 durable history 的中间；但它位于缓存前缀，内容变化仍会
+///   改变整个 `instructions` 前缀并使 provider cache miss。缓存效果必须由 usage 指标验证，
+///   不能由这个布局推断；
 /// - 后续 `role=System` → 退化到 `input` 中的 `message` 项（Responses 通常允许，但少数 Codex
 ///   端点会拒绝；本期不做特殊处理）；
 /// - `User` → `{ type: "message", role: "user", content: [input_text] }`；

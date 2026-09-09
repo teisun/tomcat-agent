@@ -397,7 +397,7 @@ async fn call_utility(
         cache_key: cache_key.map(str::to_owned),
         ..Default::default()
     };
-    let resp = llm.chat(req).await?;
+    let resp = llm.chat_collect(req).await?;
     let text = resp
         .choices
         .first()

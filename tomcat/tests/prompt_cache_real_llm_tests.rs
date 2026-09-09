@@ -1308,14 +1308,130 @@ impl FcodexResponsesProbeMode {
     }
 }
 
+/// 一轮马拉松的实测：本轮 prompt 与其中命中缓存的部分。
+#[derive(Debug, Clone, Copy)]
+struct MarathonRound {
+    prompt_tokens: u32,
+    cache_read_tokens: u32,
+}
+
+/// 逐轮「复用率」= 本轮命中 / 上一轮 prompt。前缀只增不改时，理想值 ≈ 100%（差额只是上一轮的
+/// runtime tail）；0 表示网关没把上一轮请求缓存下来或路由到了另一台上游；介于两者之间且远低于
+/// 上一轮长度，说明命中的是更早某轮留下的旧前缀（多上游、不粘连的指纹）。
+fn marathon_reuse_ratios(rounds: &[MarathonRound]) -> Vec<f64> {
+    rounds
+        .windows(2)
+        .map(|pair| {
+            let prev = pair[0].prompt_tokens.max(1) as f64;
+            pair[1].cache_read_tokens as f64 / prev
+        })
+        .collect()
+}
+
 async fn run_fcodex_responses_marathon_probe(
     model_id: &str,
     mode: FcodexResponsesProbeMode,
     stable_prefix_multiplier: usize,
 ) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
     let (_home, cfg) = fcodex_responses_config_for_model(model_id, mode.use_previous_response_id());
-    let provider = common::resolve_main_provider(&cfg);
     let wire_model = model_id.strip_prefix("fcodex/").unwrap_or(model_id);
+    let rounds = run_responses_marathon_probe_with_config(
+        &cfg,
+        model_id,
+        wire_model,
+        mode,
+        stable_prefix_multiplier,
+        6,
+        MarathonTailPlacement::EphemeralTail,
+        MarathonTailMode::Stable,
+    )
+    .await?;
+    Ok(rounds.iter().map(|round| round.cache_read_tokens).collect())
+}
+
+/// runtime tail 放在请求的哪个位置。
+///
+/// tomcat 生产路径是 `EphemeralTail`：`payload::build_responses_input` 会把它并进顶层
+/// `instructions`（位于整个 prompt 最前面）。`LastUserItem` 让同一段文字作为普通 user 消息留在
+/// `input` 末尾，用来对照两种放法对前缀缓存的影响。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarathonTailPlacement {
+    EphemeralTail,
+    LastUserItem,
+}
+
+impl MarathonTailPlacement {
+    fn from_env() -> Self {
+        match std::env::var("TOMCAT_E2E_CACHE_PROBE_TAIL")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("input") | Some("last_user_item") => Self::LastUserItem,
+            _ => Self::EphemeralTail,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::EphemeralTail => "ephemeral_tail_in_instructions",
+            Self::LastUserItem => "tail_as_last_user_item",
+        }
+    }
+}
+
+/// Tail 内容是否变化与其 wire 位置是两个独立变量。默认保持稳定，先量出网关对
+/// 正常可缓存前缀的表现；只有显式选择 changing 才用它复现 tail 失稳的影响。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarathonTailMode {
+    Stable,
+    Changing,
+}
+
+impl MarathonTailMode {
+    fn from_env() -> Self {
+        match std::env::var("TOMCAT_E2E_CACHE_PROBE_TAIL_MODE")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("changing") => Self::Changing,
+            _ => Self::Stable,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Changing => "changing",
+        }
+    }
+
+    fn text_for_round(self, round: usize) -> String {
+        match self {
+            Self::Stable => "runtime-only cache tail; stable across all rounds".into(),
+            Self::Changing => {
+                format!("runtime-only cache tail; deliberately different on round {round}")
+            }
+        }
+    }
+}
+
+/// 网关无关的「前缀逐轮增长」缓存马拉松：每轮让模型调一次 `cache_probe`，把 assistant +
+/// 大块 tool result 追加进历史，再发下一轮；记录每轮 prompt 与 cache_read。
+/// `cfg` 由调用方决定指向哪个网关 / 模型（fcodex 固定配置或 `~/.tomcat/models.toml` 任意条目）。
+#[allow(clippy::too_many_arguments)]
+async fn run_responses_marathon_probe_with_config(
+    cfg: &AppConfig,
+    model_id: &str,
+    wire_model: &str,
+    mode: FcodexResponsesProbeMode,
+    stable_prefix_multiplier: usize,
+    rounds: usize,
+    tail_placement: MarathonTailPlacement,
+    tail_mode: MarathonTailMode,
+) -> Result<Vec<MarathonRound>, Box<dyn std::error::Error>> {
+    let provider = common::resolve_main_provider(cfg);
     let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let cache_key = format!(
         "prompt-cache-phase0:{}:{}:prefix-x{}:{probe_id}",
@@ -1344,14 +1460,25 @@ async fn run_fcodex_responses_marathon_probe(
         )),
         ChatMessage::user("Start the cache marathon by calling cache_probe for round 1."),
     ];
-    let mut cache_reads = Vec::with_capacity(6);
+    let mut rounds_seen = Vec::with_capacity(rounds);
 
-    for round in 1..=6 {
+    // 上游把一次请求写进 prompt cache 需要几秒；轮间隔太短会把「还没写完」误判成「没命中」。
+    // 生产里两轮之间至少隔一次工具执行（本 transcript 实测 13–60s），这里默认 8s，可用
+    // TOMCAT_E2E_CACHE_PROBE_DELAY_MS 覆盖（0 = 背靠背）。
+    let inter_round_delay = std::env::var("TOMCAT_E2E_CACHE_PROBE_DELAY_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(Duration::from_secs(8), Duration::from_millis);
+
+    for round in 1..=rounds {
+        if round > 1 && !inter_round_delay.is_zero() {
+            tokio::time::sleep(inter_round_delay).await;
+        }
         let mut request_messages = messages.clone();
-        let mut tail = ChatMessage::user(format!(
-            "runtime-only cache tail; this is deliberately different on round {round}"
-        ));
-        tail.kind = MessageKind::EphemeralTail;
+        let mut tail = ChatMessage::user(tail_mode.text_for_round(round));
+        if tail_placement == MarathonTailPlacement::EphemeralTail {
+            tail.kind = MessageKind::EphemeralTail;
+        }
         request_messages.push(tail);
 
         let mut turn_request = request(request_messages, &cfg.llm.default_model, &cache_key);
@@ -1361,23 +1488,32 @@ async fn run_fcodex_responses_marathon_probe(
         let captured = capture_stream_turn(provider.as_ref(), turn_request).await?;
         let usage = &captured.usage;
         let cache_read = usage.cache_read_tokens.unwrap_or_default();
+        let reuse_of_previous = rounds_seen
+            .last()
+            .map(|prev: &MarathonRound| cache_read as f64 / prev.prompt_tokens.max(1) as f64);
         eprintln!(
-            "phase=\"responses_cache_phase0\" mode={} model={} round={} prompt_tokens={} \
-             cache_read_tokens={} cache_write_tokens={}",
+            "phase=\"responses_cache_phase0\" mode={} tail_placement={} tail_mode={} model={} round={} prompt_tokens={} \
+             cache_read_tokens={} cache_write_tokens={} reuse_of_previous={}",
             mode.label(),
+            tail_placement.label(),
+            tail_mode.label(),
             wire_model,
             round,
             usage.prompt_tokens,
             cache_read,
-            usage.cache_write_tokens.unwrap_or_default()
+            usage.cache_write_tokens.unwrap_or_default(),
+            reuse_of_previous.map_or("-".to_string(), |ratio| format!("{:.0}%", ratio * 100.0))
         );
-        cache_reads.push(cache_read);
+        rounds_seen.push(MarathonRound {
+            prompt_tokens: usage.prompt_tokens,
+            cache_read_tokens: cache_read,
+        });
 
         let assistant = captured.assistant;
         let tool_call_ids = assistant
             .tool_calls
             .as_deref()
-            .ok_or_else(|| format!("{model_id} did not call cache_probe on round {round}"))?
+            .unwrap_or_default()
             .iter()
             .filter_map(|call| {
                 (call["function"]["name"].as_str() == Some("cache_probe"))
@@ -1386,9 +1522,9 @@ async fn run_fcodex_responses_marathon_probe(
                     .map(str::to_owned)
             })
             .collect::<Vec<_>>();
-        if tool_call_ids.len() != 1 {
+        if tool_call_ids.len() > 1 {
             return Err(format!(
-                "{model_id} must call cache_probe exactly once on round {round}; got {:?}",
+                "{model_id} must call cache_probe at most once on round {round}; got {:?}",
                 assistant.tool_calls
             )
             .into());
@@ -1409,14 +1545,211 @@ async fn run_fcodex_responses_marathon_probe(
         }
 
         messages.push(assistant);
-        let tool_result = format!(
+        let round_payload = format!(
             "cache_probe result round={round}\n{}",
             "large deterministic diagnostic output\n".repeat(220)
         );
-        messages.push(ChatMessage::tool(&tool_call_ids[0], &tool_result));
+        match tool_call_ids.first() {
+            Some(tool_call_id) => messages.push(ChatMessage::tool(tool_call_id, &round_payload)),
+            None => {
+                // 有些模型偶尔用文字代替调用；被测量的是「前缀只增不改」，所以照样把这一轮
+                // 追加进历史（以 user 消息承载同样大小的负载）并催促下一轮，不让马拉松中断。
+                eprintln!(
+                    "phase=\"responses_cache_phase0\" mode={} model={} round={round} \
+                     note=\"no cache_probe call; appended as user payload\"",
+                    mode.label(),
+                    wire_model
+                );
+                messages.push(ChatMessage::user(format!(
+                    "{round_payload}\nYou answered in prose; call cache_probe for round {}.",
+                    round + 1
+                )));
+            }
+        }
     }
 
-    Ok(cache_reads)
+    Ok(rounds_seen)
+}
+
+/// 对 `~/.tomcat/models.toml` 里任意一条模型（同网关、同配置）跑「前缀逐轮增长」缓存马拉松，
+/// 用于复核某个网关的 prompt cache 是否对「像 Agent 一样一轮轮追加」的请求稳定命中。
+///
+/// ```text
+/// TOMCAT_E2E_CACHE_PROBE_MODEL=idatatlas/gpt-5.6-terra \
+/// TOMCAT_E2E_CACHE_PROBE_ROUNDS=12 \
+/// TOMCAT_E2E_CACHE_PROBE_TAIL=input             # 可选：把 runtime tail 放到 input 末尾而非 instructions
+/// TOMCAT_E2E_CACHE_PROBE_TAIL_MODE=changing     # 可选：默认 stable；显式复现会变化的 tail
+/// cargo test --test prompt_cache_real_llm_tests models_toml_model_growing_prefix_cache_marathon -- --ignored --nocapture
+/// ```
+///
+/// 判读：`reuse_of_previous` 每轮 ≈ 95–100% 是健康网关；出现 0% 或「远低于上一轮长度的部分命中」
+/// 说明网关后面有多个上游缓存且请求不粘连；若两种 tail 放法下同一网关表现差异巨大，说明是
+/// tomcat 自己的请求形状在破坏前缀（2026-09-08 的复核见
+/// `~/.cursor/plans/build_过程审计与整改_2c2c3bd2.plan.md` §3.1.3）。本用例只打印、不断言阈值：
+/// 它是诊断工具，不是回归门禁。
+#[tokio::test]
+#[ignore = "manual: growing-prefix cache marathon for any ~/.tomcat/models.toml model id (TOMCAT_E2E_CACHE_PROBE_MODEL)"]
+#[serial]
+async fn models_toml_model_growing_prefix_cache_marathon() -> Result<(), Box<dyn std::error::Error>>
+{
+    common::setup_logging();
+    common::load_openai_test_env();
+    let Some(model_id) = std::env::var(common::CACHE_PROBE_MODEL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(format!(
+            "set {} to a model id from ~/.tomcat/models.toml (e.g. idatatlas/gpt-5.6-terra)",
+            common::CACHE_PROBE_MODEL_ENV
+        )
+        .into());
+    };
+    let rounds = std::env::var("TOMCAT_E2E_CACHE_PROBE_ROUNDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(12);
+
+    // 真实 HOME 下的文件路径必须在 TempHomeGuard 切 HOME 之前解析。
+    let models_toml = common::real_models_toml_path();
+    let runtime_env = common::real_runtime_env_path();
+    let _home = common::TempHomeGuard::new();
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(
+        common::dot_tomcat_e2e_workdir(&format!(
+            "prompt_cache_probe_{}",
+            model_id.replace('/', "_")
+        ))
+        .display()
+        .to_string(),
+    );
+    let wire_model = common::apply_models_toml_entry_app_config(
+        &mut cfg,
+        &models_toml,
+        &runtime_env,
+        &model_id,
+    )?;
+    cfg.llm.reasoning_continuity.enabled = true;
+    let tail_placement = MarathonTailPlacement::from_env();
+    let tail_mode = MarathonTailMode::from_env();
+
+    let observed = run_responses_marathon_probe_with_config(
+        &cfg,
+        &model_id,
+        &wire_model,
+        FcodexResponsesProbeMode::Baseline,
+        1,
+        rounds,
+        tail_placement,
+        tail_mode,
+    )
+    .await?;
+    let reuse = marathon_reuse_ratios(&observed);
+    let total_prompt: u64 = observed.iter().map(|r| u64::from(r.prompt_tokens)).sum();
+    let total_cached: u64 = observed
+        .iter()
+        .map(|r| u64::from(r.cache_read_tokens))
+        .sum();
+    let full = reuse.iter().filter(|ratio| **ratio >= 0.95).count();
+    let zero = reuse.iter().filter(|ratio| **ratio == 0.0).count();
+    eprintln!(
+        "phase=\"responses_cache_marathon_summary\" model={model_id} tail_placement={} tail_mode={} rounds={} \
+         overall_hit={:.0}% growth_rounds={} full_reuse={full} zero={zero} stale_or_partial={} \
+         reuse_of_previous={:?}",
+        tail_placement.label(),
+        tail_mode.label(),
+        observed.len(),
+        100.0 * total_cached as f64 / total_prompt.max(1) as f64,
+        reuse.len(),
+        reuse.len() - full - zero,
+        reuse
+            .iter()
+            .map(|ratio| format!("{:.0}%", ratio * 100.0))
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+/// 对两个 gpt-5.6-terra 中转站运行相同的增长前缀探针。缓存属于网关实现，故此用例
+/// 只验证 usage 通路和至少一次命中；逐轮复用率保留在日志中供人工诊断。
+#[tokio::test]
+#[ignore = "manual: growing-prefix cache marathon on both gpt-5.6-terra relay gateways"]
+#[serial]
+async fn terra_dual_gateway_growing_prefix_cache_marathon() -> Result<(), Box<dyn std::error::Error>>
+{
+    common::setup_logging();
+    common::load_openai_test_env();
+    let models_toml = common::real_models_toml_path();
+    let runtime_env = common::real_runtime_env_path();
+    let rounds = std::env::var("TOMCAT_E2E_CACHE_PROBE_ROUNDS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(8);
+    let _home = common::TempHomeGuard::new();
+
+    for model_id in ["idatatlas/gpt-5.6-terra", "fcodex/gpt-5.6-terra"] {
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(
+            common::dot_tomcat_e2e_workdir(&format!(
+                "prompt_cache_probe_{}",
+                model_id.replace('/', "_")
+            ))
+            .display()
+            .to_string(),
+        );
+        let wire_model = common::apply_models_toml_entry_app_config(
+            &mut cfg,
+            &models_toml,
+            &runtime_env,
+            model_id,
+        )?;
+        cfg.llm.reasoning_continuity.enabled = true;
+
+        let observed = run_responses_marathon_probe_with_config(
+            &cfg,
+            model_id,
+            &wire_model,
+            FcodexResponsesProbeMode::Baseline,
+            1,
+            rounds,
+            MarathonTailPlacement::EphemeralTail,
+            MarathonTailMode::Stable,
+        )
+        .await?;
+        let total_prompt: u64 = observed
+            .iter()
+            .map(|round| u64::from(round.prompt_tokens))
+            .sum();
+        let total_cached: u64 = observed
+            .iter()
+            .map(|round| u64::from(round.cache_read_tokens))
+            .sum();
+        let reuse = marathon_reuse_ratios(&observed);
+        eprintln!(
+            "phase=\"terra_dual_gateway_cache_marathon\" model={model_id} rounds={} \
+             overall_hit={:.0}% reuse_of_previous={:?}",
+            observed.len(),
+            100.0 * total_cached as f64 / total_prompt.max(1) as f64,
+            reuse
+                .iter()
+                .map(|ratio| format!("{:.0}%", ratio * 100.0))
+                .collect::<Vec<_>>(),
+        );
+
+        if total_prompt == 0 {
+            eprintln!(
+                "phase=\"terra_dual_gateway_cache_marathon\" model={model_id} \
+                 result=\"skip-cache-assertion\" reason=\"gateway returned no usage\""
+            );
+            continue;
+        }
+        assert!(
+            observed.iter().any(|round| round.cache_read_tokens > 0),
+            "{model_id} returned usage but no cache_read_tokens; inspect the diagnostic above"
+        );
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]

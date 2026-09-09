@@ -373,6 +373,8 @@ fn inject_reasoning_content(mut value: Value, reasoning_content: &str) -> Value 
 /// every Agent loop iteration, so it cannot remain in the durable
 /// `messages[]` history. Use an existing *leading* system message when
 /// possible; otherwise insert a synthetic one before all durable messages.
+/// This preserves history order only: when the tail changes it also changes
+/// the leading cache prefix, so cache-read usage is the source of truth.
 fn promote_runtime_tail_to_system(messages: &mut Vec<Value>, runtime_tail: &str) {
     if runtime_tail.is_empty() {
         return;

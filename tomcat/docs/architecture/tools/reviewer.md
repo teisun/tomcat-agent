@@ -1,5 +1,23 @@
 # `reviewer`：审稿 subagent 派生契约（非 LLM 工具）
 
+## 2026-09 预算耗尽后的 acceptance 交接
+
+Code review 轮次仍是有限预算。预算尚有余额时，代码编辑会使 review 与 acceptance 都失效；
+预算已耗尽后，Acceptance 中的编辑不再伪造一次“新 review”：
+
+```text
+edit after exhausted review
+  ├─ no accepted green build → keep review pass + residual findings
+  │                            emit plan.code_review.unreviewed_edit
+  │                            require fresh Acceptance evidence
+  └─ accepted green build    → invalidate Acceptance only
+```
+
+`unreviewed_edit` 明确记录这是一段未获得额外 review 的变更，供 transcript 和后续验收判断；
+residual findings 继续可见。若 review 预算与 completion-cycle 预算都允许，常规 stale 分支照旧
+派发下一轮 review。该策略的推翻条件是数据表明预算耗尽分支的严重缺陷率不可接受，届时调整预算
+或恢复 review，而不是悄悄把 review 状态改成已覆盖。
+
 > 当前权威口径（2026-09-03）
 > 本文档旧版曾把 reviewer 描述成一个靠 `ReviewKind::{Plan, Code}` 区分形态的统一子 Agent，并且把 code review 写成 verifier 前置环节。该描述已经过时。现在请以本页顶部的“当前架构”小节和仓库代码为准；若下文旧段落与这里冲突，以这里为准。
 

@@ -2465,6 +2465,42 @@ async fn responses_chat_stream_retries_503_before_first_delta_and_succeeds() {
 }
 
 #[tokio::test]
+async fn responses_chat_collect_buffers_a_required_stream_transport() {
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body: responses_sse_body(&[
+            r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"Buffered"}"#,
+            r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":" summary"}"#,
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14}}}"#,
+        ]),
+        delay_ms: 0,
+        declared_content_length: None,
+    }])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+
+    let response = provider
+        .chat_collect(responses_stream_test_request())
+        .await
+        .expect("stream-only Responses gateway must still produce a buffered response");
+
+    assert_eq!(
+        response.choices[0].message.text_content(),
+        Some("Buffered summary")
+    );
+    assert_eq!(
+        response.usage.as_ref().map(|usage| usage.prompt_tokens),
+        Some(11)
+    );
+    assert!(
+        server.request_texts()[0].contains(r#""stream":true"#),
+        "chat_collect must use the streaming wire transport"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn responses_chat_stream_retry_exhaustion_returns_structured_503() {
     let server = MockHttpServer::start(vec![
         ScriptedHttpResponse::json(

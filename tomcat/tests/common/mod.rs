@@ -441,6 +441,111 @@ fn write_model_override(cfg: &AppConfig, spec: ModelOverrideSpec<'_>) {
     std::fs::write(path, format!("{}\n", lines.join("\n"))).expect("write model override");
 }
 
+/// 手动缓存探针要测的 `~/.tomcat/models.toml` model id（例：`idatatlas/gpt-5.6-terra`）。
+pub const CACHE_PROBE_MODEL_ENV: &str = "TOMCAT_E2E_CACHE_PROBE_MODEL";
+/// 覆盖真实 models.toml 路径（默认 `$HOME/.tomcat/models.toml`）。
+pub const MODELS_TOML_PATH_ENV: &str = "TOMCAT_E2E_MODELS_TOML";
+
+/// 真实 `~/.tomcat/models.toml` 路径。**必须在 `TempHomeGuard::new()` 之前调用**：guard 会把 HOME 切到 tempdir。
+pub fn real_models_toml_path() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os(MODELS_TOML_PATH_ENV) {
+        return std::path::PathBuf::from(path);
+    }
+    real_home().join(".tomcat").join("models.toml")
+}
+
+/// 真实运行时凭证文件 `~/.tomcat/assets/.env`（`tomcat init` 生成）。同样必须在切 HOME 之前调用。
+pub fn real_runtime_env_path() -> std::path::PathBuf {
+    real_home().join(".tomcat").join("assets").join(".env")
+}
+
+fn real_home() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+}
+
+/// 把真实 models.toml 里 `id == model_id` 的那条 `[[models]]` **原样**搬进测试 work_dir 的 models.toml，
+/// 让测试用与用户线上完全相同的 api / provider / base_url / 能力配置访问同一网关；并把该条目
+/// `api_key_env` 指向的凭证从 `runtime_env` 注入进程环境（进程里已有则不覆盖）。
+///
+/// 返回 wire model name（`model_name`，缺省为 id 去掉 `provider/` 前缀），供日志标注。
+pub fn apply_models_toml_entry_app_config(
+    cfg: &mut AppConfig,
+    models_toml: &Path,
+    runtime_env: &Path,
+    model_id: &str,
+) -> Result<String, String> {
+    let text = std::fs::read_to_string(models_toml)
+        .map_err(|err| format!("read {}: {err}", models_toml.display()))?;
+    let doc: toml::Value =
+        toml::from_str(&text).map_err(|err| format!("parse {}: {err}", models_toml.display()))?;
+    let entry = doc
+        .get("models")
+        .and_then(toml::Value::as_array)
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|m| m.get("id").and_then(toml::Value::as_str) == Some(model_id))
+        })
+        .cloned()
+        .ok_or_else(|| format!("model `{model_id}` not found in {}", models_toml.display()))?;
+
+    let api_key_env = entry
+        .get("api_key_env")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| format!("model `{model_id}` has no api_key_env"))?
+        .to_string();
+    if std::env::var(&api_key_env)
+        .ok()
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        // 与运行时 `infra::config::read_env_entries` 同源（dotenvy），这里只读不写。
+        let value = dotenvy::from_path_iter(runtime_env)
+            .map_err(|err| format!("read {}: {err}", runtime_env.display()))?
+            .filter_map(Result::ok)
+            .find_map(|(key, value)| (key == api_key_env).then_some(value));
+        match value.as_deref().map(str::trim) {
+            Some(value) if !value.is_empty() => std::env::set_var(&api_key_env, value),
+            _ => {
+                return Err(format!(
+                    "`{api_key_env}` is neither exported nor present in {}",
+                    runtime_env.display()
+                ))
+            }
+        }
+    }
+
+    let wire_model = entry
+        .get("model_name")
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            model_id
+                .rsplit_once('/')
+                .map_or(model_id, |(_, name)| name)
+                .to_string()
+        });
+
+    let mut root = toml::map::Map::new();
+    root.insert("models".to_string(), toml::Value::Array(vec![entry]));
+    let rendered = toml::to_string(&toml::Value::Table(root))
+        .map_err(|err| format!("serialize models.toml entry: {err}"))?;
+    let work_dir = cfg
+        .storage
+        .work_dir
+        .as_deref()
+        .map(Path::new)
+        .ok_or("cfg.storage.work_dir must be set before applying a models.toml entry")?;
+    std::fs::create_dir_all(work_dir).map_err(|err| format!("create work_dir: {err}"))?;
+    std::fs::write(work_dir.join("models.toml"), rendered)
+        .map_err(|err| format!("write test models.toml: {err}"))?;
+
+    cfg.llm.default_model = model_id.to_string();
+    cfg.context.compaction_model = model_id.to_string();
+    Ok(wire_model)
+}
+
 /// 初始化日志，供各集成测试在入口调用；使用 test_writer 以便 cargo test 捕获输出。
 pub fn setup_logging() {
     INIT.call_once(|| {

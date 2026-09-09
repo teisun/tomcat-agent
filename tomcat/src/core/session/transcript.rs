@@ -166,6 +166,9 @@ pub enum TranscriptEntry {
     /// **不**参与 hydrate 重放（避免污染 assistant 正文与上行 messages）。
     ThinkingTrace(ThinkingTraceEntry),
     BranchSummary(BranchSummaryEntry),
+    /// Legacy append-only marker. It remains deserializable for transcript compatibility, but
+    /// hydrate ignores it: placeholder compaction is now a runtime-only request view.
+    ToolResultsCompacted(ToolResultsCompactedEntry),
     Label(LabelEntry),
     SessionInfo(SessionInfoEntry),
     Custom(CustomEntry),
@@ -286,6 +289,17 @@ pub struct BranchSummaryEntry {
     /// 不重建假摘要 ChatMessage（详见 `session::manager::context::fold_entries_to_messages`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempts: Option<u32>,
+}
+
+/// Legacy `type=tool_results_compacted` record. New code does not write it and hydrate ignores
+/// it; retaining the type lets existing JSONL transcripts deserialize without migration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultsCompactedEntry {
+    pub id: Option<String>,
+    pub parent_id: Option<String>,
+    pub timestamp: String,
+    pub message_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1239,6 +1253,7 @@ pub(crate) fn entry_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::ThinkingLevelChange(e) => e.id.as_deref(),
         TranscriptEntry::ThinkingTrace(e) => e.id.as_deref(),
         TranscriptEntry::BranchSummary(e) => e.id.as_deref(),
+        TranscriptEntry::ToolResultsCompacted(e) => e.id.as_deref(),
         TranscriptEntry::Label(e) => e.id.as_deref(),
         TranscriptEntry::SessionInfo(e) => e.id.as_deref(),
         TranscriptEntry::Custom(e) => e.id.as_deref(),
@@ -1298,6 +1313,7 @@ fn entry_parent_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::ThinkingLevelChange(e) => e.parent_id.as_deref(),
         TranscriptEntry::ThinkingTrace(e) => e.parent_id.as_deref(),
         TranscriptEntry::BranchSummary(e) => e.parent_id.as_deref(),
+        TranscriptEntry::ToolResultsCompacted(e) => e.parent_id.as_deref(),
         TranscriptEntry::Label(e) => e.parent_id.as_deref(),
         TranscriptEntry::SessionInfo(e) => e.parent_id.as_deref(),
         TranscriptEntry::Custom(e) => e.parent_id.as_deref(),

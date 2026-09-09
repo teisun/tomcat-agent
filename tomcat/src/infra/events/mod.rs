@@ -183,6 +183,8 @@ pub mod wire {
     pub const WIRE_PLAN_RESTORE: &str = "plan.restore";
     /// code review 轮次预算用尽但仍有未清 finding，交还用户。
     pub const WIRE_PLAN_CODE_REVIEW_EXHAUSTED: &str = "plan.code_review.exhausted";
+    /// code review 已按预算放行后又检测到代码改动；不重开 gate，但必须留下未复审改动的审计痕迹。
+    pub const WIRE_PLAN_CODE_REVIEW_UNREVIEWED_EDIT: &str = "plan.code_review.unreviewed_edit";
     /// session 标题异步 LLM 覆盖后推送。
     pub const WIRE_SESSION_TITLE_UPDATED: &str = "session.title_updated";
     /// `todos` 工具写入 session scratchpad 后推送。
@@ -575,6 +577,19 @@ pub enum AgentEvent {
         compaction_tokens_freed: usize,
         #[serde(rename = "totalToolResultBytesPersisted")]
         total_tool_result_bytes_persisted: usize,
+        #[serde(rename = "promptTokensTotal")]
+        prompt_tokens_total: u64,
+        #[serde(rename = "cacheReadTokensTotal")]
+        cache_read_tokens_total: u64,
+        /// `None` means the provider has not reported cache-read usage yet.
+        #[serde(rename = "cacheHitRatio", skip_serializing_if = "Option::is_none")]
+        cache_hit_ratio: Option<f64>,
+        #[serde(rename = "consecutiveMissMax")]
+        consecutive_miss_max: u32,
+        #[serde(rename = "tailChangedCount")]
+        tail_changed_count: u32,
+        #[serde(rename = "tailChangeMissTokens")]
+        tail_change_miss_tokens: u64,
         #[serde(rename = "preheatInProgress")]
         preheat_in_progress: bool,
         #[serde(rename = "preheatResultPending")]

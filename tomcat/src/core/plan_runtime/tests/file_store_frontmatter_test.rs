@@ -100,6 +100,7 @@ fn plan_file_rejects_more_than_three_in_progress_on_write() {
             id: id.into(),
             content: format!("另一个 in_progress: {id}"),
             status: TodoStatus::InProgress,
+            evidence: Vec::new(),
             kind: Default::default(),
         });
     }
@@ -121,6 +122,7 @@ fn plan_file_rejects_duplicate_todo_ids_on_write() {
         id: "t1".into(),
         content: "dup".into(),
         status: TodoStatus::Pending,
+        evidence: Vec::new(),
         kind: Default::default(),
     });
     let plan = PlanFile {

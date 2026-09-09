@@ -2254,6 +2254,12 @@ fn emit_estimated_context_metrics_snapshot(slot: &Arc<super::registry::SessionSl
             total_tool_result_bytes_persisted: context_state
                 .session_obs
                 .tool_result_chars_persisted,
+            prompt_tokens_total: context_state.session_obs.prompt_tokens_total,
+            cache_read_tokens_total: context_state.session_obs.cache_read_tokens_total,
+            cache_hit_ratio: context_state.session_obs.cache_hit_ratio(),
+            consecutive_miss_max: context_state.session_obs.consecutive_cache_miss_max,
+            tail_changed_count: context_state.session_obs.tail_changed_count,
+            tail_change_miss_tokens: context_state.session_obs.tail_change_miss_tokens,
             preheat_in_progress,
             preheat_result_pending,
         }

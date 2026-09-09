@@ -407,6 +407,7 @@ fn write_test_plan(plan_id: &str, body: &str) {
                     id: "t1".into(),
                     content: "step 1".into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: Default::default(),
                 }],
                 green_build_pass: false,

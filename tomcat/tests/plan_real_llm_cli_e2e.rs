@@ -513,6 +513,7 @@ fn seed_counter_planning_plan(fx: &CliFixture, goal: &str) -> common::CreatedPla
                         fx.workdir.display()
                     ),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: Default::default(),
                 },
                 TodoItem {
@@ -522,18 +523,21 @@ fn seed_counter_planning_plan(fx: &CliFixture, goal: &str) -> common::CreatedPla
                         fx.workdir.display()
                     ),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: Default::default(),
                 },
                 TodoItem {
                     id: GATE_CODE_REVIEW_TODO_ID.into(),
                     content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: TodoKind::GateCodeReview,
                 },
                 TodoItem {
                     id: GATE_ACCEPTANCE_TODO_ID.into(),
                     content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: TodoKind::GateAcceptance,
                 },
             ],

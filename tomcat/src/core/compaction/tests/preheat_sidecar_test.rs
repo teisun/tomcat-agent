@@ -8,7 +8,7 @@ use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, StreamEvent,
 };
 use crate::core::session::transcript::{
-    append_entry, write_header, MessageEntry, SessionHeader, TranscriptEntry,
+    append_entry, read_entries_tail, write_header, MessageEntry, SessionHeader, TranscriptEntry,
 };
 use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 use crate::infra::config::ContextConfig;
@@ -116,4 +116,57 @@ async fn preheat_summary_materializes_and_points_to_sidecar() {
     assert!(std::fs::read_to_string(sidecar_path)
         .unwrap()
         .contains("pre-boundary Normal user input"));
+}
+
+#[tokio::test]
+async fn deferred_preheat_leaves_transcript_unchanged_until_the_guard_applies_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("deferred-preheat.jsonl");
+    write_header(
+        &transcript,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "deferred-preheat".to_string(),
+            timestamp: "2026-09-09T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+
+    let mut user = ChatMessage::user("input");
+    user.msg_id = Some("u1".to_string());
+    let mut assistant = ChatMessage::assistant("output");
+    assistant.msg_id = Some("a1".to_string());
+    let mut preheat = Preheat::new();
+    assert!(preheat.try_start_deferred(
+        0.95,
+        &[user, assistant],
+        &transcript,
+        None,
+        Arc::new(SummaryProvider),
+        None,
+        &ContextConfig::default(),
+        Arc::new(ScopedEventEmitter::new(
+            Arc::new(DefaultEventBus::new()),
+            "deferred-preheat",
+        )),
+        None,
+    ));
+
+    let result = match preheat.await_result(Duration::from_secs(5)).await {
+        PreheatOutcome::Completed(result) => result,
+        _ => panic!("deferred preheat must produce a summary"),
+    };
+    assert!(
+        result.transcript_compaction_entry_id.is_none(),
+        "only the foreground guard may materialize a deferred preheat boundary"
+    );
+    assert!(
+        read_entries_tail(&transcript, 16)
+            .unwrap()
+            .iter()
+            .all(|entry| !matches!(entry, TranscriptEntry::BranchSummary(_))),
+        "background preheat must not race later tool-result appends by rewriting the transcript"
+    );
 }

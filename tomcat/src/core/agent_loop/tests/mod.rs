@@ -26,6 +26,7 @@ mod classify_test;
 mod compaction_provider_accessor_test;
 mod completion_guard_test;
 mod current_tail_guard_behavior_test;
+mod current_tail_guard_real_llm_runtime_test;
 mod current_tail_guard_runtime_test;
 mod current_tail_guard_test;
 mod current_tail_provider_routing_test;

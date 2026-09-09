@@ -27,6 +27,8 @@ const CONTROL_OPEN: &str = "<control_state>";
 const CONTROL_CLOSE: &str = "</control_state>";
 const VERBATIM_OPEN: &str = "<verbatim_user_messages>";
 const VERBATIM_CLOSE: &str = "</verbatim_user_messages>";
+const RECENT_FILES_OPEN: &str = "<recent_files>";
+const RECENT_FILES_CLOSE: &str = "</recent_files>";
 
 /// 逐字保留的最近用户消息条数。
 const VERBATIM_MESSAGE_LIMIT: usize = 10;
@@ -128,6 +130,51 @@ pub fn render_with_sidecar(
     out
 }
 
+/// Add a post-collapse file index without re-attaching file contents. The next agent can inspect
+/// exactly the relevant paths, while the compacted summary stays small and has no stale payload.
+pub fn prepend_recent_files(
+    summary: &str,
+    read_files: &[String],
+    modified_files: &[String],
+) -> String {
+    let summary = strip_tag(summary, RECENT_FILES_OPEN, RECENT_FILES_CLOSE);
+    if read_files.is_empty() && modified_files.is_empty() {
+        return summary;
+    }
+
+    let mut block = String::from(RECENT_FILES_OPEN);
+    block.push('\n');
+    if !read_files.is_empty() {
+        block.push_str("Recently read files (last 20 unique paths):\n");
+        for path in read_files {
+            block.push_str("- ");
+            block.push_str(path);
+            block.push('\n');
+        }
+    }
+    if !modified_files.is_empty() {
+        block.push_str("Modified files:\n");
+        for path in modified_files {
+            block.push_str("- ");
+            block.push_str(path);
+            block.push('\n');
+        }
+    }
+    block.push_str(
+        "Before relying on this index, run `git status --short` and inspect the current uncommitted diff for the relevant paths.\n",
+    );
+    block.push_str(RECENT_FILES_CLOSE);
+    if let Some(verbatim_end) = summary.find(VERBATIM_CLOSE) {
+        let insert_at = verbatim_end + VERBATIM_CLOSE.len();
+        return format!(
+            "{}\n\n{block}{}",
+            &summary[..insert_at],
+            &summary[insert_at..]
+        );
+    }
+    format!("{block}\n\n{}", summary.trim_start())
+}
+
 /// 从最新往回收，直到撞上字符预算。返回 (按时间顺序保留的消息, 丢弃条数)。
 fn fit_to_budget(user_messages: &[String]) -> (Vec<String>, usize) {
     let mut kept: Vec<String> = Vec::new();
@@ -162,16 +209,23 @@ pub fn strip(summary: &str) -> String {
     for (open, close) in [
         (CONTROL_OPEN, CONTROL_CLOSE),
         (VERBATIM_OPEN, VERBATIM_CLOSE),
+        (RECENT_FILES_OPEN, RECENT_FILES_CLOSE),
     ] {
-        while let Some(start) = out.find(open) {
-            let Some(rel_end) = out[start..].find(close) else {
-                out.truncate(start);
-                break;
-            };
-            out.replace_range(start..start + rel_end + close.len(), "");
-        }
+        out = strip_tag(&out, open, close);
     }
     out.trim().to_string()
+}
+
+fn strip_tag(summary: &str, open: &str, close: &str) -> String {
+    let mut out = summary.to_string();
+    while let Some(start) = out.find(open) {
+        let Some(rel_end) = out[start..].find(close) else {
+            out.truncate(start);
+            break;
+        };
+        out.replace_range(start..start + rel_end + close.len(), "");
+    }
+    out
 }
 
 /// 机器区块在前、模型文本在后。重复调用结果不变（幂等）。

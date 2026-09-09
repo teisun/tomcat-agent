@@ -141,7 +141,9 @@ pub struct Layer0CleanupOutcome {
 }
 
 /// Layer 0 步骤 A：超大 tool result 落盘 + preview 占位符。
-/// 仅扫描最后一个 UserTurn 内的 tool 消息，单条 >= `layer0_single_result_max_chars` 时落盘。
+/// 扫描最新一个包含 tool 消息的 UserTurn，单条 >= `layer0_single_result_max_chars` 时落盘。
+/// 请求前刚追加的 user 消息还没有工具结果；跳过它，才能在 loop 顶部应用 boundary 时仍清理
+/// 前一已完成 tool round 的大结果。
 pub fn layer0_persist_large_results(
     state: &mut ContextState,
     config: &ContextConfig,
@@ -152,17 +154,33 @@ pub fn layer0_persist_large_results(
     let mut persist_chars_freed = 0usize;
     let single_max = config.layer0_single_result_max_chars;
 
-    // Find the start of the last turn (last user/compaction boundary).
-    let last_turn_start = state
+    // Find the most recent logical turn that actually contains a tool result. A new user
+    // message may already be in the outgoing request when a preheated boundary is applied,
+    // but it cannot have tool output yet.
+    let turn_starts: Vec<usize> = state
         .messages
         .iter()
         .enumerate()
-        .rev()
-        .find(|(_, m)| m.starts_logical_turn())
-        .map(|(i, _)| i)
-        .unwrap_or(state.messages.len());
+        .filter(|(_, message)| message.starts_logical_turn())
+        .map(|(index, _)| index)
+        .collect();
+    let mut next_turn_start = state.messages.len();
+    let mut latest_tool_turn = None;
+    for &turn_start in turn_starts.iter().rev() {
+        if state.messages[turn_start..next_turn_start]
+            .iter()
+            .any(|message| message.role == ChatMessageRole::Tool)
+        {
+            latest_tool_turn = Some((turn_start, next_turn_start));
+            break;
+        }
+        next_turn_start = turn_start;
+    }
+    let Some((last_turn_start, last_turn_end)) = latest_tool_turn else {
+        return (results, persist_chars_freed);
+    };
 
-    for msg in state.messages[last_turn_start..].iter_mut() {
+    for msg in state.messages[last_turn_start..last_turn_end].iter_mut() {
         if msg.role != ChatMessageRole::Tool {
             continue;
         }

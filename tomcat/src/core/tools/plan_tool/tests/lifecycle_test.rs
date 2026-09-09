@@ -93,6 +93,7 @@ fn concurrent_write_plan_serialized_by_lock() {
                 id: format!("t{i}-a"),
                 content: format!("a-{i}"),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
                 kind: Default::default(),
             }];
             write_plan(&p1, &plan, 2000).unwrap();
@@ -105,6 +106,7 @@ fn concurrent_write_plan_serialized_by_lock() {
                 id: format!("t{i}-b"),
                 content: format!("b-{i}"),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
                 kind: Default::default(),
             }];
             write_plan(&p2, &plan, 2000).unwrap();
@@ -381,6 +383,7 @@ fn control_snapshot_chooses_plan_todos_then_scratchpad_then_none() {
         id: "scratch".into(),
         content: "must not leak over a readable empty plan".into(),
         status: TodoStatus::Pending,
+        evidence: Vec::new(),
         kind: Default::default(),
     }]);
     assert!(matches!(
@@ -394,6 +397,7 @@ fn control_snapshot_chooses_plan_todos_then_scratchpad_then_none() {
         id: "scratch".into(),
         content: "keep investigating".into(),
         status: TodoStatus::InProgress,
+        evidence: Vec::new(),
         kind: Default::default(),
     }]);
     assert!(matches!(

@@ -1,6 +1,10 @@
 //! Context management data structures (TASK-17 / TASK-20 / TASK-21 §5.7).
 
-use std::path::PathBuf;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::PathBuf,
+};
 
 use tracing::{info, warn};
 
@@ -75,6 +79,74 @@ pub struct SessionContextObservation {
     pub compaction_tokens_freed: usize,
     /// L0 落盘原始 Unicode 字符数（与 `SessionEntry.tool_result_chars_persisted`；事件字段仍名 bytes）。
     pub tool_result_chars_persisted: usize,
+    /// 所有 provider Usage 样本的 prompt token 累计；可用于定位「命中率高但总输入仍过大」。
+    pub prompt_tokens_total: u64,
+    /// provider 明确报告的 cache read token 累计（缺失的 usage 不伪装成 miss）。
+    pub cache_read_tokens_total: u64,
+    /// 仅计入 provider 报告了 cache read 指标的 prompt token，用作命中率分母。
+    pub cache_observed_prompt_tokens_total: u64,
+    /// cache 指标可用的 Usage 样本数；0 表示该 provider 未提供可判读的数据。
+    pub cache_observed_request_count: u32,
+    /// 连续零 cache-read 的最长长度（未报告 cache 字段不改变这个序列）。
+    pub consecutive_cache_miss: u32,
+    pub consecutive_cache_miss_max: u32,
+    /// 有 Usage 的请求中，runtime tail 相对上一请求发生变化的次数。
+    pub tail_changed_count: u32,
+    /// tail 变化请求的 prompt token 总量。它是待排查样本规模，不能反推因果损失。
+    pub tail_change_miss_tokens: u64,
+    /// 不刷盘的请求本地状态：tail 是否变动，供其后的 Usage 样本归因。
+    pub(crate) ephemeral_tail_observed: bool,
+    pub(crate) last_ephemeral_tail_hash: Option<u64>,
+    pub(crate) last_request_tail_changed: bool,
+}
+
+impl SessionContextObservation {
+    /// Record the exact ephemeral-tail shape used by the next provider request.
+    /// Hashing keeps the changing text out of diagnostics and session state.
+    pub fn observe_ephemeral_tail(&mut self, tail: Option<&str>) {
+        let tail_hash = tail.map(|text| {
+            let mut hasher = DefaultHasher::new();
+            text.hash(&mut hasher);
+            hasher.finish()
+        });
+        self.last_request_tail_changed =
+            self.ephemeral_tail_observed && self.last_ephemeral_tail_hash != tail_hash;
+        self.ephemeral_tail_observed = true;
+        self.last_ephemeral_tail_hash = tail_hash;
+    }
+
+    /// Add one provider Usage sample. An absent `cache_read_tokens` means unavailable, not zero.
+    pub fn observe_provider_usage(&mut self, prompt_tokens: u32, cache_read_tokens: Option<u32>) {
+        self.prompt_tokens_total += u64::from(prompt_tokens);
+        if self.last_request_tail_changed {
+            self.tail_changed_count = self.tail_changed_count.saturating_add(1);
+            self.tail_change_miss_tokens += u64::from(prompt_tokens);
+        }
+        let Some(cache_read_tokens) = cache_read_tokens else {
+            return;
+        };
+        self.cache_observed_request_count = self.cache_observed_request_count.saturating_add(1);
+        self.cache_observed_prompt_tokens_total += u64::from(prompt_tokens);
+        self.cache_read_tokens_total += u64::from(cache_read_tokens);
+        if cache_read_tokens == 0 {
+            self.consecutive_cache_miss = self.consecutive_cache_miss.saturating_add(1);
+            self.consecutive_cache_miss_max = self
+                .consecutive_cache_miss_max
+                .max(self.consecutive_cache_miss);
+        } else {
+            self.consecutive_cache_miss = 0;
+        }
+    }
+
+    pub fn cache_hit_ratio(&self) -> Option<f64> {
+        (self.cache_observed_prompt_tokens_total > 0).then(|| {
+            self.cache_read_tokens_total as f64 / self.cache_observed_prompt_tokens_total as f64
+        })
+    }
+
+    pub fn last_request_tail_changed(&self) -> bool {
+        self.last_request_tail_changed
+    }
 }
 
 /// 瞬时上下文指标：仅内存，**不**写入 `sessions.json`。

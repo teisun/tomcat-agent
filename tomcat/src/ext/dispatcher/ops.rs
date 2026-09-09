@@ -247,7 +247,7 @@ impl HostApiDispatcher {
         let call = self.resolve_chat_call(&req)?;
         req.model = call.model.clone();
         call.apply_resolved_output_limit(&mut req);
-        let resp = call.provider_impl.chat(req).await?;
+        let resp = call.provider_impl.chat_collect(req).await?;
         Ok(HostResponse::ok(
             serde_json::to_value(resp).map_err(AppError::Serialize)?,
         ))

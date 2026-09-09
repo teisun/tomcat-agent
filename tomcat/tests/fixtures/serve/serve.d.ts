@@ -102,6 +102,16 @@ export interface ServeAttachment {
 }
 export type ServeAttachmentKind = "image" | "file";
 
+export interface ServeCacheObservation {
+  cacheHitRatio?: null | number;
+  cacheObservedPromptTokensTotal: number;
+  cacheObservedRequestCount: number;
+  cacheReadTokensTotal: number;
+  consecutiveMissMax: number;
+  promptTokensTotal: number;
+  tailChangeMissTokens: number;
+  tailChangedCount: number;
+}
 export type ServeContentSegment = {
   kind: ServeContextRefKind;
   label: string;
@@ -160,6 +170,21 @@ export type ServePlanEvent = {
   sessionId?: null | string;
   type: "session.agent_mode.changed";
 } | {
+  cacheObservation?: ServeCacheObservation | null;
+  path?: null | string;
+  planId?: null | string;
+  sessionId?: null | string;
+  state?: null | string;
+  type: "plan.complete";
+} | {
+  changedCodeFiles?: null | string[];
+  maxCodeReviewRounds?: null | number;
+  newestEditMtimeMs?: null | number;
+  planId?: null | string;
+  rounds?: null | number;
+  sessionId?: null | string;
+  type: "plan.code_review.unreviewed_edit";
+} | {
   childSessionId?: null | string;
   planId?: null | string;
   reviewAttemptId?: null | string;
@@ -195,12 +220,6 @@ export type ServePlanEvent = {
   sessionId?: null | string;
   state?: null | string;
   type: "plan.build";
-} | {
-  path?: null | string;
-  planId?: null | string;
-  sessionId?: null | string;
-  state?: null | string;
-  type: "plan.complete";
 } | {
   path?: null | string;
   planId?: null | string;
@@ -264,6 +283,7 @@ export type ServeSessionMode = "code" | "claw";
 
 export interface ServeTodoItem {
   content: string;
+  evidence?: string[];
   id: string;
   status: string;
 }
@@ -654,6 +674,22 @@ export type WireEvent = ({
   source: string;
   type: "compaction_error";
 } | {
+  cacheHitRatio?: null | number;
+  cacheReadTokensTotal: number;
+  compactionCount: number;
+  compactionTokensFreed: number;
+  consecutiveMissMax: number;
+  contextUtilizationRatio: number;
+  inputTokensUsed: number;
+  preheatInProgress: boolean;
+  preheatResultPending: boolean;
+  promptTokensTotal: number;
+  providerUsageMeasured: boolean;
+  tailChangeMissTokens: number;
+  tailChangedCount: number;
+  totalToolResultBytesPersisted: number;
+  type: "context_metrics_update";
+} | {
   childSessionId: string;
   errorMessage?: null | string;
   outcome: string;
@@ -666,16 +702,6 @@ export type WireEvent = ({
   spawnDepth: number;
   subagentType: string;
   type: "sub_agent_start";
-} | {
-  compactionCount: number;
-  compactionTokensFreed: number;
-  contextUtilizationRatio: number;
-  inputTokensUsed: number;
-  preheatInProgress: boolean;
-  preheatResultPending: boolean;
-  providerUsageMeasured: boolean;
-  totalToolResultBytesPersisted: number;
-  type: "context_metrics_update";
 } | {
   coveredCount: number;
   elapsedMs: number;

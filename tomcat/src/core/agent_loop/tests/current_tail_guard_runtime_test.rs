@@ -23,7 +23,9 @@ use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{
     estimate_msg_chars, ApiUsage, ContextState, PlanEventKind, PlanEventRef,
 };
-use crate::core::session::transcript::{append_entry, MessageEntry, TranscriptEntry};
+use crate::core::session::transcript::{
+    append_entry, read_entries_tail, MessageEntry, ToolResultsCompactedEntry, TranscriptEntry,
+};
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::DefaultEventBus;
@@ -69,7 +71,7 @@ impl LlmProvider for ChatOnlyMockLlm {
 }
 
 #[tokio::test]
-async fn mid_turn_guard_reduced_tail_survives_reload() {
+async fn mid_turn_guard_reduced_tail_is_recomputed_after_reload() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = SessionManager::new(dir.path().to_path_buf());
     let key = mgr.current_session_key();
@@ -150,6 +152,26 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
         .await
         .unwrap();
 
+    let persisted_entries = read_entries_tail(&transcript, 32).unwrap();
+    assert!(
+        persisted_entries.iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Message(message)
+                    if message.id.as_deref() == Some("tr2")
+                        && message.message["content"]
+                            .as_str()
+                            .is_some_and(|content| content == "y".repeat(8_000))
+            )
+        }),
+        "placeholder compaction must retain the original JSONL result"
+    );
+    assert!(
+        !persisted_entries
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::ToolResultsCompacted(_))),
+        "placeholder compaction must not persist runtime-only markers"
+    );
     let reloaded = init_context_state(&mgr, &config, "sys").unwrap();
     let texts: Vec<_> = reloaded
         .messages
@@ -159,10 +181,111 @@ async fn mid_turn_guard_reduced_tail_survives_reload() {
     assert!(texts
         .iter()
         .any(|text| text.starts_with("[Tool result persisted:")));
-    assert!(texts.contains(&TOOL_RESULT_PLACEHOLDER));
     assert!(
-        !texts.iter().any(|text| text == &"x".repeat(12_000)),
-        "reload should keep the rewritten preview instead of reviving the original tail"
+        texts.iter().any(|text| text == &"y".repeat(8_000)),
+        "reload should restore raw results that were only placeholdered in memory"
+    );
+    assert!(
+        !texts.contains(&TOOL_RESULT_PLACEHOLDER),
+        "without a persisted marker, reload must not preserve runtime placeholders"
+    );
+}
+
+#[test]
+fn legacy_tool_results_compacted_marker_is_ignored_on_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+    let transcript = mgr.current_transcript_path().unwrap().unwrap();
+
+    let mut user = ChatMessage::user("read the file");
+    user.msg_id = Some("u1".to_string());
+    let mut assistant = assistant_with_tool_calls(&[("tc1", "read")]);
+    assistant.msg_id = Some("a1".to_string());
+    let tool = tool_message("tr1", "tc1", &"raw result".repeat(2_000));
+    append_transcript_message(&transcript, &user);
+    append_transcript_message(&transcript, &assistant);
+    append_transcript_message(&transcript, &tool);
+    append_entry(
+        &transcript,
+        &TranscriptEntry::ToolResultsCompacted(ToolResultsCompactedEntry {
+            id: Some("legacy-marker".to_string()),
+            parent_id: None,
+            timestamp: "2026-05-30T16:00:01Z".to_string(),
+            message_ids: vec!["tr1".to_string()],
+        }),
+    )
+    .unwrap();
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "sys").unwrap();
+    let texts: Vec<_> = state
+        .messages
+        .iter()
+        .filter_map(|message| message.text_content())
+        .collect();
+    assert!(
+        texts.iter().any(|text| *text == "raw result".repeat(2_000)),
+        "legacy markers are accepted for transcript compatibility but ignored by hydrate"
+    );
+    assert!(!texts.contains(&TOOL_RESULT_PLACEHOLDER));
+}
+
+#[tokio::test]
+async fn resume_without_marker_reduces_before_first_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key();
+    mgr.create_session(key, None).unwrap();
+    let transcript = mgr.current_transcript_path().unwrap().unwrap();
+
+    let mut user = ChatMessage::user("continue the oversized resumed turn");
+    user.msg_id = Some("u1".to_string());
+    let mut assistant = assistant_with_tool_calls(&[("tc1", "write")]);
+    assistant.msg_id = Some("a1".to_string());
+    let tool = tool_message("tr1", "tc1", &"raw resumed output\n".repeat(1_000));
+    append_transcript_message(&transcript, &user);
+    append_transcript_message(&transcript, &assistant);
+    append_transcript_message(&transcript, &tool);
+
+    let config = ContextConfig {
+        current_tail_compactable_min_chars: 1,
+        ..Default::default()
+    };
+    let mut state = init_context_state(&mgr, &config, "sys").unwrap();
+    state.context_budget_chars = 4_000;
+    state.context_budget_tokens = 1_000;
+    let mut messages = vec![ChatMessage::system("sys")];
+    messages.extend(state.messages.clone());
+    let mut agent = AgentLoop::new(
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "collapsed resumed context".to_string(),
+            }),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "resume-no-marker".to_string(),
+            agent_trail_dir: dir.path().to_string_lossy().to_string(),
+            context_config: config,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.start_idx = 1;
+    agent.context_tail_start = 1;
+    agent.set_context_state(Some(state));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    assert!(
+        !agent.context_state.as_ref().unwrap().is_over_budget(),
+        "the raw transcript must be reduced before its first resumed request"
     );
 }
 
@@ -178,12 +301,14 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
                 id: "t1".to_string(),
                 content: "step pending".to_string(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
                 kind: Default::default(),
             },
             TodoItem {
                 id: "t2".to_string(),
                 content: "step active".to_string(),
                 status: TodoStatus::InProgress,
+                evidence: Vec::new(),
                 kind: Default::default(),
             },
         ],
@@ -283,12 +408,14 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
                 id: "t1".to_string(),
                 content: "first pending".to_string(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
                 kind: Default::default(),
             },
             TodoItem {
                 id: "t2".to_string(),
                 content: "second pending".to_string(),
                 status: TodoStatus::Pending,
+                evidence: Vec::new(),
                 kind: Default::default(),
             },
         ],

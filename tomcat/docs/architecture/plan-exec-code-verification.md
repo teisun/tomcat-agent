@@ -1,5 +1,26 @@
 # Plan / Todo 执行完成后的代码验证
 
+## 2026-09 预算耗尽后的编辑与 Todo 证据
+
+```text
+代码修改发生在 Acceptance 期间
+  ├─ review rounds 尚有余额             → review 与 acceptance 都重新变 stale
+  ├─ review 已耗尽、green build 尚未通过 → 保持 review 放行和 residual findings
+  │                                        → 刷新 review pass 时间、记录 unreviewed_edit
+  │                                        → 只要求新的 Acceptance 绿构建证据
+  └─ review 已耗尽、旧绿构建已通过       → 只使 acceptance stale
+```
+
+这不是跳过验证：预算耗尽后再次打开 review 只会再次耗尽，不能增加审查信息；Acceptance
+仍须用最新代码之后启动且零退出的后台任务证明全部改动。`plan.code_review.unreviewed_edit`
+是审计事件，残余 P0/P1 finding 不会被清除。若后续发现预算耗尽后的修改常引入本可由 review
+发现的问题，应降低 review 预算耗尽放行的范围或提高预算，而不是把旧 finding 静默删除。
+
+PlanFile 的每个 work todo 另有 `evidence: string[]`。EXEC 中 `content` 是已批准的工作描述，
+已有 work todo 不可由 upsert 改写；完成时用 `set_status.evidence` 记录命令、输出或交付路径。
+未带 evidence 为兼容性保留，但返回 warning；evidence 持久化在 frontmatter 并随 `update_plan`
+返回，面板的 Todos Board 不渲染它。
+
 > 状态：已实现（以当前工作树为准）；本文是 EXEC 代码变更收口的权威技术设计。
 > 范围：`PlanRuntime`、`update_plan`、code reviewer、内置 `verify` skill、后台 bash 任务账本。
 > 规范：[ARCHITECTURE_SPEC.md](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。相邻设计：[plan-runtime.md](plan-runtime.md)、[tools/reviewer.md](tools/reviewer.md)、[delivery-accuracy-and-completeness.md](delivery-accuracy-and-completeness.md)。

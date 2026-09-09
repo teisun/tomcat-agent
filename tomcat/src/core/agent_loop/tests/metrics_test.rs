@@ -165,7 +165,7 @@ async fn context_metrics_update_payload_contains_valid_values() {
         Ok(StreamEvent::Usage {
             prompt_tokens: 2_000,
             completion_tokens: 20,
-            cache_read_tokens: None,
+            cache_read_tokens: Some(1_500),
             cache_write_tokens: None,
             total_tokens: Some(2_020),
             reasoning_tokens: None,
@@ -229,6 +229,8 @@ async fn context_metrics_update_payload_contains_valid_values() {
     assert!(p["compactionCount"].is_u64());
     assert!(p["compactionTokensFreed"].is_u64());
     assert!(p["totalToolResultBytesPersisted"].is_u64());
+    assert!(p["promptTokensTotal"].is_u64());
+    assert!(p["cacheReadTokensTotal"].is_u64());
     assert_eq!(p["preheatInProgress"].as_bool(), Some(false));
     assert_eq!(p["preheatResultPending"].as_bool(), Some(false));
     assert_eq!(
@@ -246,6 +248,10 @@ async fn context_metrics_update_payload_contains_valid_values() {
         "only the event emitted directly from StreamEvent::Usage is provider-measured; \
          the trailing timing-⑤ snapshot is an estimate"
     );
+    let provider_measured = &captured[1];
+    assert_eq!(provider_measured["promptTokensTotal"], 2_000);
+    assert_eq!(provider_measured["cacheReadTokensTotal"], 1_500);
+    assert_eq!(provider_measured["cacheHitRatio"], 0.75);
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ fn rewrite_todos_board_replaces_between_markers() {
         id: "t1".into(),
         content: "step".into(),
         status: TodoStatus::InProgress,
+        evidence: Vec::new(),
         kind: Default::default(),
     }];
     rewrite_todos_board(&mut body, &todos);
@@ -68,6 +69,142 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
     assert!(out.get("path").is_some());
     assert!(out.get("panel_snapshot_id").is_some());
     assert_eq!(out["active_in_progress"], "t1");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn work_todo_content_is_frozen_while_executing() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let err = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::Upsert {
+                id: "t1".into(),
+                content: Some("silently broaden the approved task".into()),
+                status: None,
+            }],
+        },
+    )
+    .await
+    .expect_err("executing work content must be immutable");
+
+    assert!(
+        err.to_string().contains("content 已冻结") && err.to_string().contains("evidence"),
+        "unexpected error: {err}"
+    );
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn set_status_completed_accepts_evidence_and_persists_to_frontmatter() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    let evidence = vec!["cargo test -p tomcat --lib update_plan_test passed".to_string()];
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: Some(evidence.clone().into()),
+                status: TodoStatus::Completed,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out["items"][0]["evidence"], serde_json::json!(evidence));
+    let plan = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert_eq!(plan.frontmatter.todos[0].evidence, evidence);
+    assert!(!plan.body.contains("  - evidence:"));
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn planning_state_still_allows_content_rewrite() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::Upsert {
+                id: "t1".into(),
+                content: Some("refined planning description".into()),
+                status: None,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out["items"][0]["content"], "refined planning description");
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn completed_work_todo_without_evidence_produces_warning() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::Completed,
+            }],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(out["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("未记录 evidence"))));
     cleanup_home(&home);
 }
 
@@ -201,18 +338,21 @@ async fn update_plan_plan_id_prefers_active_external_path() {
                     id: "t1".into(),
                     content: "step 1".into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: Default::default(),
                 },
                 TodoItem {
                     id: GATE_CODE_REVIEW_TODO_ID.into(),
                     content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: TodoKind::GateCodeReview,
                 },
                 TodoItem {
                     id: GATE_ACCEPTANCE_TODO_ID.into(),
                     content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: TodoKind::GateAcceptance,
                 },
             ],

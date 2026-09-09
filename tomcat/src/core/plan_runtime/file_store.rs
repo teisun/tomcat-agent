@@ -170,6 +170,9 @@ pub struct TodoItem {
     pub id: String,
     pub content: String,
     pub status: TodoStatus,
+    /// Immutable work description stays in `content`; execution proof accumulates here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
     /// 旧计划 / session scratchpad 没有该字段时默认普通工作项。
     #[serde(default)]
     pub kind: TodoKind,

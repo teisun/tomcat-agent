@@ -45,7 +45,7 @@ pub use transcript::{
     rewrite_message_summary_titles_by_id, rewrite_message_text_entries_by_id,
     set_branch_summary_entry_is_boundary_true, write_header, BranchSummaryEntry, ErrorEntry,
     MessageEntry, MessageSummaryTitleRewrite, MessageTextRewrite, SessionHeader,
-    ThinkingTraceEntry, TranscriptEntry,
+    ThinkingTraceEntry, ToolResultsCompactedEntry, TranscriptEntry,
 };
 
 #[cfg(test)]

@@ -1,5 +1,29 @@
 # `update_plan` 工具：PlanFile frontmatter 增量编辑
 
+## 2026-09 Todo 内容冻结与 evidence
+
+`update_plan` 的 `set_status completed` 接受可选 `evidence: string[]`；它追加去重后持久化到
+todo 的 frontmatter 项，并在 `update_plan` 返回的 `items[]` 中提供。Todos Board 只显示 todo
+的状态和内容，不渲染 evidence；会话级 `todos` 虽复用 op 引擎，但 schema 不暴露该字段。
+
+```json
+{
+  "ops": [{
+    "kind": "set_status",
+    "id": "run-tests",
+    "status": "completed",
+    "evidence": ["cargo test -p tomcat --lib: passed"]
+  }]
+}
+```
+
+EXEC 中，已有 `kind: work` todo 的 `upsert.content` 必须逐字不变。`content` 是批准的交付范围；
+进度、测试结果和例外写进 evidence。planning/pending 的内容重写仍然允许。兼容旧调用时，
+completed work todo 缺 evidence 只产生 warning，绝不把 warning 当作验收凭据。
+
+> 兼容说明：历史 `set_status.content` 仍会被读取但忽略。`evidence` 是 `update_plan` schema 的
+> completion-only 字段；随其它状态提交会返回 BadArgs。
+
 > **位置**：B 类 `docs/architecture/tools/`。本工具与 [`todos`](./todos.md) **代码复用、提示词分裂**，与 [`create_plan`](./create-plan.md) 互补：`create_plan` 整盘重写、仅 PLAN 模式可见；`update_plan` **增量编辑**、**任何模式可见**。运行时编排见 [`plan-runtime.md`](../plan-runtime.md) §5.3。
 
 本文档定义 `update_plan` 的入参 / 出参、跨模式门控矩阵、自动派生触发点、跨 session 语义。
@@ -189,7 +213,8 @@ completed 计划 reopen:  completed → pending   （会话保持 Chat）
             },
             "id":           { "type": "string" },
             "content":      { "type": "string", "description": "For upsert: todo content. Required when creating a brand-new todo." },
-            "status":       { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"] }
+            "status":       { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"] },
+            "evidence":     { "type": "array", "items": { "type": "string" }, "description": "For set_status: concrete progress or verification notes." }
           },
           "required": ["kind", "id"]
         }
@@ -219,7 +244,8 @@ completed 计划 reopen:  completed → pending   （会话保持 Chat）
         "properties": {
           "id":           { "type": "string" },
           "content":      { "type": "string" },
-          "status":       { "type": "string", "enum": ["pending","in_progress","completed","cancelled"] }
+          "status":       { "type": "string", "enum": ["pending","in_progress","completed","cancelled"] },
+          "evidence":     { "type": "array", "items": { "type": "string" } }
         },
         "required": ["id", "content", "status"]
       }

@@ -2454,17 +2454,35 @@
       {
         "type": "object",
         "required": [
+          "cacheReadTokensTotal",
           "compactionCount",
           "compactionTokensFreed",
+          "consecutiveMissMax",
           "contextUtilizationRatio",
           "inputTokensUsed",
           "preheatInProgress",
           "preheatResultPending",
+          "promptTokensTotal",
           "providerUsageMeasured",
+          "tailChangeMissTokens",
+          "tailChangedCount",
           "totalToolResultBytesPersisted",
           "type"
         ],
         "properties": {
+          "cacheHitRatio": {
+            "description": "`None` means the provider has not reported cache-read usage yet.",
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "cacheReadTokensTotal": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
           "compactionCount": {
             "type": "integer",
             "format": "uint32",
@@ -2473,6 +2491,11 @@
           "compactionTokensFreed": {
             "type": "integer",
             "format": "uint",
+            "minimum": 0.0
+          },
+          "consecutiveMissMax": {
+            "type": "integer",
+            "format": "uint32",
             "minimum": 0.0
           },
           "contextUtilizationRatio": {
@@ -2490,9 +2513,24 @@
           "preheatResultPending": {
             "type": "boolean"
           },
+          "promptTokensTotal": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
           "providerUsageMeasured": {
             "description": "`true` only after the provider has returned usage for this loaded context. `false` means the ratio is the pre-request chars/4 fallback estimate.",
             "type": "boolean"
+          },
+          "tailChangeMissTokens": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "tailChangedCount": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
           },
           "totalToolResultBytesPersisted": {
             "type": "integer",
@@ -3264,6 +3302,63 @@
           }
         }
       },
+      "ServeCacheObservation": {
+        "description": "Cache metrics collected during the active build. A missing `cacheHitRatio` means the provider did not report cache-read usage, not that every request missed.",
+        "type": "object",
+        "required": [
+          "cacheObservedPromptTokensTotal",
+          "cacheObservedRequestCount",
+          "cacheReadTokensTotal",
+          "consecutiveMissMax",
+          "promptTokensTotal",
+          "tailChangeMissTokens",
+          "tailChangedCount"
+        ],
+        "properties": {
+          "cacheHitRatio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "cacheObservedPromptTokensTotal": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "cacheObservedRequestCount": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "cacheReadTokensTotal": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "consecutiveMissMax": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "promptTokensTotal": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "tailChangeMissTokens": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "tailChangedCount": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        }
+      },
       "ServeEvent": {
         "anyOf": [
           {
@@ -3970,11 +4065,81 @@
             }
           },
           {
+            "description": "预算耗尽后的代码改动没有再次派发 reviewer；仅作为审计事件保留。",
             "type": "object",
             "required": [
               "type"
             ],
             "properties": {
+              "changedCodeFiles": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "string"
+                }
+              },
+              "maxCodeReviewRounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "newestEditMtimeMs": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint128",
+                "minimum": 0.0
+              },
+              "planId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "rounds": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "plan.code_review.unreviewed_edit"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "cacheObservation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/definitions/ServeCacheObservation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "path": {
                 "type": [
                   "string",
@@ -4153,6 +4318,12 @@
         "properties": {
           "content": {
             "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "id": {
             "type": "string"
@@ -5137,17 +5308,35 @@
           {
             "type": "object",
             "required": [
+              "cacheReadTokensTotal",
               "compactionCount",
               "compactionTokensFreed",
+              "consecutiveMissMax",
               "contextUtilizationRatio",
               "inputTokensUsed",
               "preheatInProgress",
               "preheatResultPending",
+              "promptTokensTotal",
               "providerUsageMeasured",
+              "tailChangeMissTokens",
+              "tailChangedCount",
               "totalToolResultBytesPersisted",
               "type"
             ],
             "properties": {
+              "cacheHitRatio": {
+                "description": "`None` means the provider has not reported cache-read usage yet.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "cacheReadTokensTotal": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
               "compactionCount": {
                 "type": "integer",
                 "format": "uint32",
@@ -5156,6 +5345,11 @@
               "compactionTokensFreed": {
                 "type": "integer",
                 "format": "uint",
+                "minimum": 0.0
+              },
+              "consecutiveMissMax": {
+                "type": "integer",
+                "format": "uint32",
                 "minimum": 0.0
               },
               "contextUtilizationRatio": {
@@ -5173,9 +5367,24 @@
               "preheatResultPending": {
                 "type": "boolean"
               },
+              "promptTokensTotal": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
               "providerUsageMeasured": {
                 "description": "`true` only after the provider has returned usage for this loaded context. `false` means the ratio is the pre-request chars/4 fallback estimate.",
                 "type": "boolean"
+              },
+              "tailChangeMissTokens": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0.0
+              },
+              "tailChangedCount": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
               },
               "totalToolResultBytesPersisted": {
                 "type": "integer",

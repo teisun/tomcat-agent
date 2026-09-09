@@ -92,6 +92,35 @@ fn run_layer0_cleanup_no_tool_results_is_noop() {
 }
 
 #[test]
+fn layer0_persists_previous_tool_turn_when_fresh_user_turn_has_no_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let large = "x".repeat(60_000);
+    let mut state = make_state(0, 100_000, 25_000);
+    state.messages = vec![
+        user_msg_with_id("completed-turn", "inspect source"),
+        tool_msg_with_id("completed-tool", "read-source", &large),
+        assistant_msg("inspection complete"),
+        user_msg_with_id("fresh-turn", "now answer the user"),
+    ];
+    state.estimate_context_chars = state.messages.iter().map(estimate_msg_chars).sum();
+
+    let outcome = run_layer0_cleanup(
+        &mut state,
+        &ContextConfig::default(),
+        dir.path(),
+        "sess_a2b",
+    );
+
+    assert_eq!(outcome.persisted.len(), 1);
+    assert!(
+        state.messages[1]
+            .text_content()
+            .is_some_and(|text| text.starts_with("[Tool result persisted:")),
+        "a fresh request must not hide the most recent completed tool result from Layer 0"
+    );
+}
+
+#[test]
 fn run_layer0_cleanup_mixed_sizes() {
     let dir = tempfile::tempdir().unwrap();
     let big = "x".repeat(60_000);

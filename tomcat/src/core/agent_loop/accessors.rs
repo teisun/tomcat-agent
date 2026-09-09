@@ -428,6 +428,12 @@ impl AgentLoop {
                 total_tool_result_bytes_persisted: ctx_state
                     .session_obs
                     .tool_result_chars_persisted,
+                prompt_tokens_total: ctx_state.session_obs.prompt_tokens_total,
+                cache_read_tokens_total: ctx_state.session_obs.cache_read_tokens_total,
+                cache_hit_ratio: ctx_state.session_obs.cache_hit_ratio(),
+                consecutive_miss_max: ctx_state.session_obs.consecutive_cache_miss_max,
+                tail_changed_count: ctx_state.session_obs.tail_changed_count,
+                tail_change_miss_tokens: ctx_state.session_obs.tail_change_miss_tokens,
                 preheat_in_progress: ctx_state.live.preheat_in_progress,
                 preheat_result_pending: ctx_state.live.preheat_result_pending,
             });

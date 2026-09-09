@@ -29,7 +29,7 @@ use crate::core::plan_runtime::{
     PlanRuntime,
 };
 
-use super::shared_todo_ops::{apply_shared_todo_ops, items_json};
+use super::shared_todo_ops::{apply_shared_todo_ops, items_json, StatusUpdateMetadata};
 use super::ToolError;
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +139,13 @@ pub async fn execute_for_tool(
         let plan_state_before = plan.frontmatter.state;
         enforce_cross_session_policy(runtime, &plan.frontmatter, plan_state_before)?;
         enforce_state_matrix(plan_state_before, &args.ops)?;
+        enforce_executing_work_content_is_frozen(
+            plan_state_before,
+            &plan.frontmatter.todos,
+            &args.ops,
+        )?;
+        let completion_evidence_warnings =
+            completion_evidence_warnings(&plan.frontmatter.todos, &args.ops);
 
         let (gate_start, mut warnings) = apply_plan_todo_ops(
             &mut plan.frontmatter.todos,
@@ -146,6 +153,7 @@ pub async fn execute_for_tool(
             args.replace,
             plan.frontmatter.code_review_pass,
         )?;
+        warnings.extend(completion_evidence_warnings);
 
         // A reopened completed plan must become writable before the runtime can guide it through
         // a fresh close-out cycle. New plans always own their two gates, so this is derived from
@@ -181,6 +189,7 @@ pub async fn execute_for_tool(
     let mut code_review_json = serde_json::Value::Null;
     let mut review_for_next_step = None;
     let mut diff_context = crate::core::plan_runtime::code_reviewer::CodeDiffContext::default();
+    let mut unreviewed_edit_event = None;
 
     for (finding, reason) in prepared_disputes {
         let reference = finding.reference.clone();
@@ -190,8 +199,9 @@ pub async fn execute_for_tool(
         ));
     }
 
-    // Editing code after a review pass makes both visible gates stale, not only the boolean
-    // frontmatter flags. This keeps the persistent todo state and compute_next_step in lockstep.
+    // Before the code-review budget is exhausted, code edits make both gates stale. Afterwards,
+    // acceptance owns the remaining verification: reopening review only produces another
+    // fail-open exhaustion event and prevents a fresh acceptance proof from being submitted.
     if code_gate_state_needs_freshness_check(&plan.frontmatter) {
         if let Some(workspace_root) = runtime.workspace_root() {
             diff_context = crate::core::plan_runtime::code_reviewer::collect_code_diff_context(
@@ -202,7 +212,23 @@ pub async fn execute_for_tool(
                 if code_review_is_stale(&plan.frontmatter, mtime) {
                     let had_previous_full_gate =
                         plan.frontmatter.code_review_pass && plan.frontmatter.green_build_pass;
-                    if had_previous_full_gate
+                    let review_budget_exhausted =
+                        runtime.code_review_budget_exhausted(&target_plan_id);
+                    if review_budget_exhausted && !plan.frontmatter.green_build_pass {
+                        // This is the normal acceptance-in-progress case. `pass_at_ms` records
+                        // the same budget fail-open decision that the old reopen→exhausted round
+                        // would have recorded, so this edit is not reconsidered on every later
+                        // update_plan call. Keep residual findings: they remain relevant until
+                        // the plan is completed.
+                        plan.frontmatter.code_review_pass_at_ms = Some(now_unix_ms());
+                        warnings.push(format!(
+                            "code review 预算已用尽（{}/{}）；本次代码改动不再复审，继续用 Acceptance 的新鲜绿构建证据收口",
+                            runtime.code_review_rounds(&target_plan_id),
+                            runtime.max_code_review_rounds(),
+                        ));
+                        unreviewed_edit_event =
+                            Some((diff_context.changed_code_files.clone(), mtime));
+                    } else if had_previous_full_gate
                         && plan.frontmatter.completion_gate_cycles
                             >= runtime.max_completion_gate_cycles()
                     {
@@ -212,6 +238,10 @@ pub async fn execute_for_tool(
                         ));
                         runtime_complete_all_gates(&mut plan.frontmatter.todos);
                         plan.frontmatter.state = PlanFileState::Completed;
+                    } else if review_budget_exhausted && plan.frontmatter.green_build_pass {
+                        invalidate_acceptance_gate_only(&mut plan.frontmatter);
+                        plan.frontmatter.completion_gate_cycles =
+                            plan.frontmatter.completion_gate_cycles.saturating_add(1);
                     } else {
                         invalidate_code_gates(&mut plan.frontmatter);
                         if had_previous_full_gate {
@@ -225,6 +255,15 @@ pub async fn execute_for_tool(
                 }
             }
         }
+    }
+
+    if let Some((changed_code_files, newest_edit_mtime_ms)) = unreviewed_edit_event {
+        runtime.write_code_review_unreviewed_edit_transcript(
+            &target_plan_id,
+            runtime.code_review_rounds(&target_plan_id),
+            &changed_code_files,
+            newest_edit_mtime_ms,
+        );
     }
 
     if matches!(tx.gate_start, Some(GateStart::Review)) {
@@ -557,18 +596,18 @@ fn apply_plan_todo_ops(
     let mut requested_gate_start = None;
     let mut work_ops = Vec::with_capacity(ops_list.len());
     for op in ops_list {
-        let (id, content, status, is_remove) = match op {
+        let (id, has_metadata, status, is_remove) = match op {
             UpdateOp::Upsert {
                 id,
                 content,
                 status,
-            } => (id.as_str(), content.as_ref(), *status, false),
+            } => (id.as_str(), content.is_some(), *status, false),
             UpdateOp::SetStatus {
                 id,
                 content,
                 status,
-            } => (id.as_str(), content.as_ref(), Some(*status), false),
-            UpdateOp::Remove { id, content, .. } => (id.as_str(), content.as_ref(), None, true),
+            } => (id.as_str(), content.is_some(), Some(*status), false),
+            UpdateOp::Remove { id, content, .. } => (id.as_str(), content.is_some(), None, true),
         };
         let Some(gate_kind) = runtime_gate_kind_for_id(id) else {
             work_ops.push(op.clone());
@@ -581,7 +620,7 @@ fn apply_plan_todo_ops(
                     .into(),
             ));
         }
-        if is_remove || content.is_some() || status != Some(TodoStatus::InProgress) {
+        if is_remove || has_metadata || status != Some(TodoStatus::InProgress) {
             return Err(ToolError::BadArgs(format!(
                 "{} is runtime-managed: it may only be set to in_progress",
                 match gate_kind {
@@ -626,7 +665,8 @@ fn apply_plan_todo_ops(
                 }
                 if required_gate(todos, TodoKind::GateCodeReview)?.status != TodoStatus::Pending {
                     return Err(ToolError::BadArgs(
-                        "`[gate] review` is not pending and cannot be started again".into(),
+                        "`[gate] review` is not pending and cannot be started again; if its configured review budget has already been exhausted, continue with `[gate] Acceptance` instead"
+                            .into(),
                     ));
                 }
                 runtime_set_gate_status(todos, TodoKind::GateCodeReview, TodoStatus::InProgress);
@@ -806,12 +846,19 @@ fn finalize_plan_completed(
     plan.frontmatter.state = PlanFileState::Completed;
     write_plan(path, plan, runtime.lock_timeout_ms())?;
     runtime.refresh_active_plan_after_write(path.to_path_buf(), plan);
-    runtime.write_transcript_custom(serde_json::json!({
+    let mut completion_event = serde_json::json!({
         "event": crate::infra::wire::WIRE_PLAN_COMPLETE,
         "plan_id": target_plan_id,
         "path": crate::infra::platform::format_home_path(path),
         "state": PlanFileState::Completed.as_str(),
-    }));
+    });
+    if let (Some(event), Some(cache_observation)) = (
+        completion_event.as_object_mut(),
+        runtime.plan_cache_observation_json(target_plan_id),
+    ) {
+        event.insert("cacheObservation".into(), cache_observation);
+    }
+    runtime.write_transcript_custom(completion_event);
     Ok(())
 }
 
@@ -835,6 +882,20 @@ fn invalidate_code_gates(
         TodoKind::GateCodeReview,
         TodoStatus::Pending,
     );
+    runtime_set_gate_status(
+        &mut frontmatter.todos,
+        TodoKind::GateAcceptance,
+        TodoStatus::Pending,
+    );
+}
+
+/// A fresh verification proof is needed, but the completed review decision remains authoritative.
+/// This is used only after the review budget was already exhausted.
+fn invalidate_acceptance_gate_only(
+    frontmatter: &mut crate::core::plan_runtime::file_store::PlanFileFrontmatter,
+) {
+    frontmatter.green_build_pass = false;
+    frontmatter.green_build_evidence.clear();
     runtime_set_gate_status(
         &mut frontmatter.todos,
         TodoKind::GateAcceptance,
@@ -1096,6 +1157,66 @@ fn enforce_cross_session_policy(
         )));
     }
     Ok(())
+}
+
+/// `content` is the approved work description. During execution it must remain stable, otherwise
+/// a todo can appear complete even though the original work was silently rewritten. Progress,
+/// verification, and noteworthy trade-offs belong in `evidence`.
+fn enforce_executing_work_content_is_frozen(
+    plan_state: PlanFileState,
+    todos: &[TodoItem],
+    ops_list: &[UpdateOp],
+) -> Result<(), ToolError> {
+    if !matches!(plan_state, PlanFileState::Executing) {
+        return Ok(());
+    }
+    for op in ops_list {
+        let UpdateOp::Upsert {
+            id,
+            content: Some(content),
+            ..
+        } = op
+        else {
+            continue;
+        };
+        let Some(existing) = todos.iter().find(|todo| todo.id == *id) else {
+            continue;
+        };
+        if existing.kind == TodoKind::Work && existing.content != *content {
+            return Err(ToolError::BadArgs(format!(
+                "执行中的 work todo `{id}` 的 content 已冻结；请保持原工作描述，并用 set_status 的 `evidence` 记录进展或验证结果"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Completion without proof remains valid for compatibility, but is conspicuous to the executor
+/// and reviewer. Gates never accept model-provided evidence and are excluded above.
+fn completion_evidence_warnings(todos: &[TodoItem], ops_list: &[UpdateOp]) -> Vec<String> {
+    ops_list
+        .iter()
+        .filter_map(|op| match op {
+            UpdateOp::SetStatus {
+                id,
+                status: TodoStatus::Completed,
+                content,
+                ..
+            } if content
+                .as_ref()
+                .and_then(StatusUpdateMetadata::evidence)
+                .map_or(true, |evidence| evidence.is_empty())
+                && todos
+                    .iter()
+                    .any(|todo| todo.id == *id && todo.kind == TodoKind::Work) =>
+            {
+                Some(format!(
+                    "work todo `{id}` 已完成但未记录 evidence；请在下一次 update_plan 的 set_status 中补充实际验证或交付说明"
+                ))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// G2 state 矩阵闸门——参考 [update-plan.md] §6.2。

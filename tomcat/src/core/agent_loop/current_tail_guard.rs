@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use tracing::{info, warn};
 
-use crate::core::compaction::apply::{check_after_reply, BoundaryEnv};
+use crate::core::compaction::apply::{check_after_reply, run_layer0_after_boundary, BoundaryEnv};
 use crate::core::compaction::preheat::{generate_summary_with_output_limit, SummaryRequestOptions};
 use crate::core::compaction::{
     compact_tool_results, is_persisted_tool_result_text, persist_tool_result_text,
@@ -29,6 +29,10 @@ use crate::infra::error::AppError;
 use super::types::AgentLoop;
 
 const COMPACTABLE_TOOLS: &[&str] = &["read", "search_files", "bash", "task_output"];
+/// Build-mode folds the prefix captured at the 50% waterline, retaining the later half as the
+/// agent's working set. This is deliberately not a user configuration knob: its value is a
+/// policy trade-off, and cache/compaction observations decide whether it should become 0.25.
+const MIDTURN_FOLD_KEEP_RATIO: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum GuardRoute {
@@ -143,6 +147,7 @@ async fn maybe_reduce_before_next_llm_inner(
         );
     }
     if matches!(decision.route, GuardRoute::Fits) {
+        start_midturn_preheat_if_needed(agent, messages)?;
         log_aggregate_precheck_decision(&decision);
         return Ok(Some(decision));
     }
@@ -275,6 +280,12 @@ fn reduce_before_next_llm(
     messages: &mut Vec<ChatMessage>,
 ) -> Result<ReductionResult, AppError> {
     let mut result = ReductionResult::default();
+    if apply_midturn_preheat(agent, messages)? {
+        result.mutated = true;
+        if !context_is_over_budget(agent) {
+            return Ok(result);
+        }
+    }
     let boundary_env = BoundaryEnv {
         config: &agent.config.context_config,
         work_dir: Path::new(&agent.config.agent_trail_dir),
@@ -340,6 +351,218 @@ fn reduce_before_next_llm(
     Ok(result)
 }
 
+/// A build's tool loop has no normal turn boundary, so its preheat must start from the guard's
+/// Fits path rather than `turn_finalize`. The snapshot ends at the current tool round; later
+/// tool calls stay raw when this preheated prefix is applied.
+fn start_midturn_preheat_if_needed(
+    agent: &mut AgentLoop,
+    messages: &mut [ChatMessage],
+) -> Result<(), AppError> {
+    let Some(ctx_state) = agent.context_state.as_ref() else {
+        return Ok(());
+    };
+    let usage_ratio = ctx_state.usage_ratio();
+    if usage_ratio < MIDTURN_FOLD_KEEP_RATIO || !ctx_state.preheat.is_idle() {
+        return Ok(());
+    }
+
+    let first_non_system = messages
+        .iter()
+        .position(|message| message.role != ChatMessageRole::System)
+        .unwrap_or(messages.len());
+    if first_non_system == messages.len() {
+        return Ok(());
+    }
+    ensure_working_message_ids(agent, &mut messages[first_non_system..])?;
+    let snapshot = messages[first_non_system..].to_vec();
+    let transcript_path = ctx_state.transcript_path.clone();
+    let compaction_provider = agent.compaction_provider();
+    let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
+    let control_snapshot = agent
+        .config
+        .plan_runtime
+        .as_ref()
+        .map(|runtime| runtime.control_snapshot(Some(agent.wire_model())));
+    let emitter = std::sync::Arc::new(agent.emitter.clone());
+    let covered_count = snapshot.len();
+
+    let started = agent.context_state.as_mut().is_some_and(|ctx_state| {
+        ctx_state.preheat.try_start_deferred(
+            usage_ratio,
+            &snapshot,
+            &transcript_path,
+            cache_key,
+            compaction_provider,
+            agent.config.compaction_output_limit,
+            &agent.config.context_config,
+            emitter,
+            control_snapshot,
+        )
+    });
+    if started {
+        agent.emit_event(crate::infra::events::AgentEvent::AutoCompactionStart {
+            covered_count,
+            ratio_before: usage_ratio,
+        });
+    }
+    Ok(())
+}
+
+/// Apply a ready build-mode preheat to exactly its recorded `covered_end_id`, leaving all tool
+/// calls made after the waterline in the live tail. Its boundary is written synchronously here,
+/// after overlapping tool-round appends have completed. A missing boundary is stale, so the
+/// regular Reduce/Collapse fallbacks handle the current context.
+fn apply_midturn_preheat(
+    agent: &mut AgentLoop,
+    messages: &mut Vec<ChatMessage>,
+) -> Result<bool, AppError> {
+    let Some(result) = (match agent.context_state.as_mut() {
+        Some(ctx_state) if ctx_state.preheat.is_finished() => match ctx_state.preheat.poll_result()
+        {
+            crate::core::compaction::preheat::PreheatOutcome::Completed(result) => Some(result),
+            _ => None,
+        },
+        _ => None,
+    }) else {
+        return Ok(false);
+    };
+
+    let start = messages
+        .iter()
+        .position(|message| message.msg_id.as_deref() == Some(&result.covered_start_id));
+    let end = messages
+        .iter()
+        .position(|message| message.msg_id.as_deref() == Some(&result.covered_end_id));
+    let (Some(start), Some(end)) = (start, end) else {
+        remove_stale_midturn_preheat_entry(agent, &result);
+        return Ok(false);
+    };
+    if start > end
+        || messages[start..=end]
+            .iter()
+            .any(|message| message.role == ChatMessageRole::System)
+    {
+        remove_stale_midturn_preheat_entry(agent, &result);
+        return Ok(false);
+    }
+
+    let entry_id = result
+        .transcript_compaction_entry_id
+        .clone()
+        .unwrap_or_else(|| compound_turn_id(&result.covered_start_id, &result.covered_end_id));
+    if !persist_midturn_preheat_boundary(agent, &result, &entry_id) {
+        return Ok(false);
+    }
+    let summary = apply_collapse_summary(
+        &messages[start..=end],
+        &result.summary_text,
+        &result.covered_start_id,
+        &result.covered_end_id,
+        &entry_id,
+    )?;
+    let tokens_before = agent
+        .context_state
+        .as_ref()
+        .map(ContextState::estimated_token_count)
+        .unwrap_or_default();
+    messages.splice(start..=end, std::iter::once(summary));
+    let state_start = usize::from(
+        messages
+            .first()
+            .is_some_and(|message| message.role == ChatMessageRole::System),
+    );
+    let context_messages = messages[state_start..].to_vec();
+    let new_chars: usize = messages[state_start..].iter().map(estimate_msg_chars).sum();
+    if let Some(ctx_state) = agent.context_state.as_mut() {
+        ctx_state.messages = context_messages;
+        ctx_state.estimate_context_chars = new_chars;
+        ctx_state.invalidate_api_usage();
+        ctx_state.session_obs.compaction_count =
+            ctx_state.session_obs.compaction_count.saturating_add(1);
+        ctx_state.session_obs.compaction_tokens_freed +=
+            tokens_before.saturating_sub(ctx_state.estimated_token_count());
+    }
+    // The applied prefix and the live suffix now form one persisted context. Rebuild from this
+    // authoritative state after Layer 0, leaving the next appended assistant/tool pair as the
+    // new current tail rather than duplicating the suffix.
+    agent.start_idx = messages.len();
+    agent.context_tail_start = messages.len();
+    let boundary_env = BoundaryEnv {
+        config: &agent.config.context_config,
+        work_dir: Path::new(&agent.config.agent_trail_dir),
+        session_id: &agent.config.session_id,
+        read_file_state: agent.config.read_file_state.as_ref(),
+    };
+    if let Some(ctx_state) = agent.context_state.as_mut() {
+        run_layer0_after_boundary(ctx_state, &agent.emitter, &boundary_env);
+    }
+    rebuild_messages_from_context(agent, messages);
+    Ok(true)
+}
+
+/// Materialize a deferred preheat at its watermark only when that watermark has been confirmed
+/// against the live context. Doing this in the guard (rather than its background task) keeps all
+/// transcript mutations on the foreground tool-loop path.
+fn persist_midturn_preheat_boundary(
+    agent: &AgentLoop,
+    result: &CompactionResult,
+    entry_id: &str,
+) -> bool {
+    let Some(ctx_state) = agent.context_state.as_ref() else {
+        return false;
+    };
+    if ctx_state.transcript_path.as_os_str().is_empty() {
+        return true;
+    }
+
+    let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+        id: Some(entry_id.to_string()),
+        parent_id: None,
+        timestamp: Utc::now().to_rfc3339(),
+        summary: Some(result.summary_text.clone()),
+        covered_start_id: Some(result.covered_start_id.clone()),
+        covered_end_id: Some(result.covered_end_id.clone()),
+        covered_count: Some(result.covered_count),
+        is_boundary: Some(true),
+        preheat_compaction_id: Some(entry_id.to_string()),
+        estimated_covered_tokens_before: result.estimated_covered_tokens_before,
+        estimated_summary_tokens: result.estimated_summary_tokens,
+        estimated_tokens_saved: result.estimated_tokens_saved,
+        error: None,
+        attempts: None,
+    });
+    match insert_entry_after_message_id(&ctx_state.transcript_path, &result.covered_end_id, &entry)
+    {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(
+                error = %error,
+                covered_end_id = %result.covered_end_id,
+                "deferred mid-turn preheat boundary insert failed; keeping raw context"
+            );
+            false
+        }
+    }
+}
+
+fn remove_stale_midturn_preheat_entry(agent: &AgentLoop, result: &CompactionResult) {
+    let Some(ctx_state) = agent.context_state.as_ref() else {
+        return;
+    };
+    let Some(entry_id) = result.transcript_compaction_entry_id.as_deref() else {
+        return;
+    };
+    if ctx_state.transcript_path.as_os_str().is_empty() {
+        return;
+    }
+    if let Err(error) = crate::core::session::transcript::remove_branch_summary_entry_by_id(
+        &ctx_state.transcript_path,
+        entry_id,
+    ) {
+        warn!(error = %error, "stale mid-turn preheat transcript removal failed");
+    }
+}
+
 fn reduce_current_tail_messages(
     agent: &mut AgentLoop,
     messages: &mut [ChatMessage],
@@ -350,6 +573,8 @@ fn reduce_current_tail_messages(
     let tail_start = agent.start_idx.min(messages.len());
     let config = &agent.config.context_config;
     let work_dir = Path::new(&agent.config.agent_trail_dir);
+    // Step 0 changes a tool result into a durable file reference, so it still needs a targeted
+    // rewrite. Placeholder waves only change what the current LLM request sees.
     let mut transcript_rewrites = Vec::new();
     let mut result = TailReductionResult::default();
     let mut step0_reduced = false;
@@ -407,7 +632,6 @@ fn reduce_current_tail_messages(
             ctx_state,
             messages,
             candidates_after_step0,
-            &mut transcript_rewrites,
             &mut result.freed_chars,
             &mut evicted_tool_call_ids,
         );
@@ -436,7 +660,6 @@ fn reduce_current_tail_messages(
             ctx_state,
             messages,
             candidates,
-            &mut transcript_rewrites,
             &mut result.freed_chars,
             &mut evicted_tool_call_ids,
         );
@@ -706,6 +929,7 @@ async fn build_collapse_summary_artifacts(
         .collect();
     let (covered_start_id, covered_end_id) = collapse_bounds(&working)
         .ok_or_else(|| AppError::Config("collapse 缺少 message 锚点".to_string()))?;
+    let (recent_read_files, modified_files) = collect_recent_files(&working);
     // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
     // 这里不再自己拼一份 keepalive —— 两份机器区块只会互相矛盾。
     let control = request
@@ -724,6 +948,11 @@ async fn build_collapse_summary_artifacts(
         },
     )
     .await?;
+    let summary_text = crate::core::compaction::machine_block::prepend_recent_files(
+        &summary_text,
+        &recent_read_files,
+        &modified_files,
+    );
     let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);
     let covered_count = working
         .iter()
@@ -760,6 +989,67 @@ async fn build_collapse_summary_artifacts(
         covered_end_id,
         entry_id,
     })
+}
+
+/// Collect a small, durable file index from calls covered by a collapse. This deliberately
+/// re-attaches paths only: their current contents must be read again instead of trusting stale
+/// text from the collapsed context.
+fn collect_recent_files(messages: &[ChatMessage]) -> (Vec<String>, Vec<String>) {
+    let mut reads = Vec::new();
+    let mut modified = Vec::new();
+
+    for message in messages {
+        for tool_call in message.tool_calls.iter().flatten() {
+            let tool_name = tool_call
+                .pointer("/function/name")
+                .or_else(|| tool_call.get("name"))
+                .and_then(serde_json::Value::as_str);
+            let Some(path) = tool_call_path(tool_call) else {
+                continue;
+            };
+            match tool_name {
+                Some("read") => reads.push(path),
+                Some("edit" | "write") => modified.push(path),
+                _ => {}
+            }
+        }
+    }
+
+    let reads = dedupe_keep_last(reads);
+    let first_kept_read = reads.len().saturating_sub(20);
+    (
+        reads[first_kept_read..].to_vec(),
+        dedupe_keep_last(modified),
+    )
+}
+
+fn tool_call_path(tool_call: &serde_json::Value) -> Option<String> {
+    let arguments = tool_call
+        .pointer("/function/arguments")
+        .or_else(|| tool_call.get("arguments"))?;
+    let arguments = match arguments {
+        serde_json::Value::String(raw) => serde_json::from_str(raw).ok()?,
+        value => value.clone(),
+    };
+    arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+}
+
+/// Preserve chronological order while keeping the most recent occurrence of each path.
+fn dedupe_keep_last(paths: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::with_capacity(paths.len());
+    for path in paths.into_iter().rev() {
+        if seen.insert(path.clone()) {
+            deduped.push(path);
+        }
+    }
+    deduped.reverse();
+    deduped
 }
 
 fn maybe_write_collapse_entry(
@@ -845,7 +1135,6 @@ fn apply_placeholder_wave(
     ctx_state: &mut ContextState,
     messages: &mut [ChatMessage],
     candidates: Vec<TailCandidate>,
-    transcript_rewrites: &mut Vec<MessageTextRewrite>,
     freed_chars: &mut usize,
     evicted_tool_call_ids: &mut Vec<String>,
 ) {
@@ -853,10 +1142,6 @@ fn apply_placeholder_wave(
     let chars_before = *freed_chars;
     let mut rewritten_messages = Vec::new();
     for candidate in candidates.into_iter().take(wave) {
-        let message_identity = candidate
-            .message_id
-            .clone()
-            .unwrap_or_else(|| format!("wire_index:{}", candidate.msg_idx));
         if let Some(id) = messages[candidate.msg_idx].tool_call_id.clone() {
             evicted_tool_call_ids.push(id);
         }
@@ -867,19 +1152,17 @@ fn apply_placeholder_wave(
         *text = TOOL_RESULT_PLACEHOLDER.to_string();
         *freed_chars += old_len.saturating_sub(text.len());
         ctx_state.rewrite_local_tail_chars(old_len, text.len());
-        rewritten_messages.push(message_identity);
-        if let Some(message_id) = candidate.message_id {
-            transcript_rewrites.push(MessageTextRewrite {
-                message_id,
-                new_content: text.clone(),
-            });
-        }
+        rewritten_messages.push(
+            candidate
+                .message_id
+                .unwrap_or_else(|| "<unpersisted>".to_string()),
+        );
     }
     let chars_freed = (*freed_chars).saturating_sub(chars_before);
     if chars_freed > 0 {
         info!(
             target: "tomcat_chat_diag",
-            phase = "history_rewritten",
+            phase = "tool_results_marked_compacted",
             operation = "apply_placeholder_wave",
             chars_freed,
             rewritten_messages = ?rewritten_messages,

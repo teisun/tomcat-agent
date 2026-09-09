@@ -45,11 +45,36 @@ fn update_plan_from_json_accepts_set_status_with_extra_content_field() {
 }
 
 #[test]
+fn update_plan_from_json_maps_status_evidence() {
+    let args = update_plan::UpdatePlanArgs::from_json(&serde_json::json!({
+        "ops": [{
+            "kind": "set_status",
+            "id": "t1",
+            "status": "completed",
+            "evidence": ["cargo test passed"]
+        }]
+    }))
+    .expect("set_status evidence should satisfy the tool schema");
+
+    match &args.ops[0] {
+        update_plan::UpdateOp::SetStatus {
+            content: Some(metadata),
+            ..
+        } => assert_eq!(
+            metadata.evidence().unwrap(),
+            ["cargo test passed".to_string()]
+        ),
+        other => panic!("unexpected evidence representation: {other:?}"),
+    }
+}
+
+#[test]
 fn shared_todo_ops_replace_requires_upsert_only() {
     let mut todos = vec![TodoItem {
         id: "t1".into(),
         content: "old".into(),
         status: TodoStatus::Pending,
+        evidence: Vec::new(),
         kind: Default::default(),
     }];
     let err = shared_todo_ops::apply_shared_todo_ops(
@@ -91,4 +116,73 @@ fn shared_todo_ops_upsert_can_insert_and_update() {
     assert_eq!(todos.len(), 1);
     assert_eq!(todos[0].content, "updated");
     assert_eq!(todos[0].status, TodoStatus::Completed);
+}
+
+#[test]
+fn set_status_completed_persists_evidence() {
+    let mut todos = Vec::new();
+    shared_todo_ops::apply_shared_todo_ops(
+        &mut todos,
+        &[shared_todo_ops::SharedTodoOpArg::Upsert {
+            id: "t1".into(),
+            content: Some("implement the change".into()),
+            status: None,
+        }],
+        false,
+    )
+    .unwrap();
+
+    shared_todo_ops::apply_shared_todo_ops(
+        &mut todos,
+        &[shared_todo_ops::SharedTodoOpArg::SetStatus {
+            id: "t1".into(),
+            content: Some(vec!["cargo test -p tomcat --lib passed".into()].into()),
+            status: TodoStatus::Completed,
+        }],
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(todos[0].status, TodoStatus::Completed);
+    assert_eq!(todos[0].evidence, vec!["cargo test -p tomcat --lib passed"]);
+}
+
+#[test]
+fn status_evidence_is_completion_only_and_does_not_replace_prior_evidence() {
+    let mut todos = vec![TodoItem {
+        id: "t1".into(),
+        content: "implement the change".into(),
+        status: TodoStatus::Pending,
+        evidence: vec!["file:src/lib.rs".into()],
+        kind: Default::default(),
+    }];
+
+    let err = shared_todo_ops::apply_shared_todo_ops(
+        &mut todos,
+        &[shared_todo_ops::SharedTodoOpArg::SetStatus {
+            id: "t1".into(),
+            content: Some(vec!["task:123".into()].into()),
+            status: TodoStatus::InProgress,
+        }],
+        false,
+    )
+    .expect_err("evidence is only a completion record");
+    assert!(matches!(err, ToolError::BadArgs(_)));
+    assert_eq!(todos[0].status, TodoStatus::Pending);
+
+    shared_todo_ops::apply_shared_todo_ops(
+        &mut todos,
+        &[shared_todo_ops::SharedTodoOpArg::SetStatus {
+            id: "t1".into(),
+            content: Some(vec!["task:123".into(), "file:src/lib.rs".into()].into()),
+            status: TodoStatus::Completed,
+        }],
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        todos[0].evidence,
+        vec!["file:src/lib.rs", "task:123"],
+        "completion evidence is append-only and deduplicated"
+    );
 }

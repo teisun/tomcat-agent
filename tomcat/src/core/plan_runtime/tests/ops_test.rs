@@ -6,6 +6,7 @@ fn td(id: &str, status: TodoStatus) -> TodoItem {
         id: id.into(),
         content: id.into(),
         status,
+        evidence: Vec::new(),
         kind: Default::default(),
     }
 }

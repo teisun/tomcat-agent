@@ -204,6 +204,51 @@ async fn mid_turn_guard_fits_is_noop() {
 }
 
 #[tokio::test]
+async fn over_budget_without_preheat_still_collapses() {
+    let mut agent = make_agent(ContextConfig {
+        current_tail_compactable_min_chars: 1,
+        ..Default::default()
+    });
+    let system = ChatMessage::system("sys");
+    let user = ChatMessage::user("apply a write");
+    let assistant = assistant_with_tool_calls(&[("tc1", "write")]);
+    let tool = ChatMessage::tool("tc1", &"x".repeat(8_000));
+    let mut messages = vec![system, user, assistant, tool];
+    let total_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+
+    agent.start_idx = 1;
+    agent.context_tail_start = 1;
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: total_chars,
+        context_budget_chars: 4_000,
+        context_budget_tokens: 1_000,
+        last_api_usage: None,
+        post_usage_appended_chars: total_chars,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    let decision = current_tail_guard::maybe_reduce_before_next_llm_capture_decision(
+        &mut agent,
+        &mut messages,
+    )
+    .await
+    .unwrap()
+    .expect("guard should emit a decision");
+
+    assert_eq!(decision.route, GuardRoute::Collapse);
+    assert_eq!(decision.route_reason, GuardRouteReason::NotEnoughReducible);
+    assert!(decision.after_collapse.is_some());
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+}
+
+#[tokio::test]
 async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
     let mut agent = make_agent(ContextConfig {
         keep_recent_turns: 1,

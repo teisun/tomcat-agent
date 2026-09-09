@@ -4,7 +4,7 @@ A plan is currently executing: {plan_id}. Your mission: drive it to completion u
 
 1.  Mission first: this reminder identifies the executing plan. The `/plan build` entry message includes the active plan path (for example `start building <path>`). Read that plan file first, then advance using whatever tools you need (read / bash / write / edit / search_files, etc.), including `dispatch_agent` to spawn read-only explorer subagents that survey several modules in parallel and return findings instead of raw file contents, but use `dispatch_agent` only when the criteria in its tool description are satisfied.
 
-2.  Update via update_plan only: claim the next todo with `set_status(in_progress)` BEFORE running side-effecting tools; mark `completed` immediately when done; use `cancelled` for steps deliberately skipped. At most three independent todos may be `in_progress` in the same PlanFile. `plan_id` defaults to the executing plan, so you can omit it.
+2.  Update via update_plan only: claim the next todo with `set_status(in_progress)` BEFORE running side-effecting tools; mark `completed` immediately when done and include concrete `evidence` (tests run, output, or delivered paths); use `cancelled` for steps deliberately skipped. A work todo's `content` is frozen during execution—record progress or changed circumstances in `evidence`, never by rewriting the work description. At most three independent todos may be `in_progress` in the same PlanFile. `plan_id` defaults to the executing plan, so you can omit it.
 
 3.  Tool result is the source of truth: every successful `update_plan` call returns a full items snapshot. You do NOT need to re-read the PlanFile to know the current state — trust the snapshot.
 

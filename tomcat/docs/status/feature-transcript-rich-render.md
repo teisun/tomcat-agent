@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-08 16:08 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-09 15:38 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0] Build 审计整改与双网关真实验收完成**：`TodoItem.evidence` 仅持久化至 frontmatter / `update_plan` 返回值，不再干扰 Markdown Todos Board；删除可重算的 `tool_results_compacted` transcript marker，将 current-tail guard 合并为 `reasoning_loop` 顶部的单点请求前检查，覆盖新 turn、follow-up、retry 与 resume 首请求。L0 在摘要 boundary 后改为处理最近一个含工具结果的 turn，避免新 user 消息遮蔽前一回合的超大结果。OpenAI Responses 增加 `chat_collect`，使强制 SSE 的中转站仍可向摘要调用方提供完整响应。真实 idatatlas / fcodex `gpt-5.6-terra` 分别验证预热、摘要应用、重启 guard、build E2E、evidence 和缓存；`cargo test -p tomcat --lib` 2804 passed，CLI `0.1.47 → 0.1.48`、扩展 `0.1.61 → 0.1.62`、bundled CLI 同步。Cov% 未跑，仍为 —。@2026-09-09
 - [✓] **[P0] 验收测试与运行脚本整改完成**：Plan / Retry / Resume 测试对齐现有状态和历史保留行为；测试使用独立目录、模型配置和模拟服务，等待 CLI 进程及管道关闭后才清理资源。nested guard 只抽取判断便于测试，不放松原安全规则。VS Code 五种启动入口统一隔离 Electron 环境；截图直接取自测试窗口，不再误拍用户窗口。测试筛选拒绝零匹配，Rust 离线 / 真实联网 / 手动场景分类补齐；VSIX 共享构建并以内容哈希拒绝过期产物。@2026-09-08
 - [✓] **[P0] 整改必验批次完成并保留失败历史**：Rust lib 2779 通过 / 1 ignored、完整默认集成 377 通过 / 25 skipped；扩展 core / GUI / 集成分别 409 / 572 / 143 通过，安装版 19 通过、VSIX 五场景 10 通过，devhost 33 通过 / 4 pending、manual 2 通过、image 1 通过。跳过项不计通过，启动专属场景另在 verify 窗口执行。格式、Clippy、类型检查、wire、release 构建及版本检查通过；失败命令与后续修复分开记录，不宣称原失败的整条命令退出 0。checkpoint 独立复现未重现历史卡点，相关完整测试通过；真实模型后台通知单项通过不代表所有联网测试都已运行。详情见 [验收整改记录](../reports/acceptance-remediation.md)。@2026-09-08
 - [✓] **[P0] 连接器设置改为默认全局并暴露真实配置文件**：`McpConfigSource::Global` 对外标签从 `User` 改为 `Global`；新增连接器默认写入 `~/.tomcat/mcp.json`，设置页可打开该文件或工作区 `.tomcat/mcp.json`。全局连接器由用户自己维护，普通改配置保持信任，只有显式 Deny 才继续拦截；内置 Playwright 默认带 `trusted: true`。`list_connectors` 回传 `configPath` / `configPathRaw`，设置宿主新增 `openConnectorConfig`。验证：serve `control_test` 路径字段、trust 单测（全局编辑仍可信 / Deny 跨编辑仍封锁）、GUI 连接器页与协议归一化单测。CLI `0.1.46 → 0.1.47`、扩展 `0.1.60 → 0.1.61`、bundled CLI 同步；Cov% 未跑，仍为 —。@2026-09-08
@@ -89,6 +90,8 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- `LlmProvider::chat_collect(ChatRequest) -> ChatResponse`：新增“完整响应”抽象；普通 provider 直接复用非流式 `chat`，强制 SSE 的 OpenAI Responses 中转站在 adapter 内缓冲流，不把传输限制泄漏给 compaction / title / dispatcher 调用方。
+- 发布版本：CLI `0.1.48`、扩展 `0.1.62`、`bundledCliVersion=0.1.48`。
 - `TomcatMessenger.disposeAsync({ timeoutMs? })`：新增可等待关闭的扩展内部方法，默认 5 秒，超时明确失败；原同步 `dispose()` 调用方式及关闭时序保持兼容。Plan / Acceptance 状态机、用户配置和正式 serve 协议不变，schema fixture 仅补齐已有 `FileDiffLine.skippedLines`。
 - 测试与构建：`test:integration` 使用独立 Vitest 配置并尊重文件筛选；Mocha 四入口开启 `failZero`。`packageVsix(skipBuild: true)` 及验收入口复用构建前验证 `.build-artifacts.json` 的输入/输出内容哈希；该本地产物记录不入库。
 - 发布版本：CLI `0.1.47`、扩展 `0.1.61`、`bundledCliVersion=0.1.47`。

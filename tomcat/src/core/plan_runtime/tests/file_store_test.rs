@@ -16,11 +16,13 @@ fn todo_kind_round_trips_and_missing_kind_defaults_to_work() {
     }))
     .unwrap();
     assert_eq!(legacy.kind, TodoKind::Work);
+    assert!(legacy.evidence.is_empty());
 
     let gate = TodoItem {
         id: "gate-review".into(),
         content: "[gate] review".into(),
         status: TodoStatus::Pending,
+        evidence: Vec::new(),
         kind: TodoKind::GateCodeReview,
     };
     assert_eq!(
@@ -185,6 +187,7 @@ fn update_plan_locked_preserves_incremental_updates_under_concurrency() {
                     id: format!("a-{i}"),
                     content: format!("a-{i}"),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: Default::default(),
                 });
                 Ok::<_, std::convert::Infallible>(())
@@ -199,6 +202,7 @@ fn update_plan_locked_preserves_incremental_updates_under_concurrency() {
                     id: format!("b-{i}"),
                     content: format!("b-{i}"),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: Default::default(),
                 });
                 Ok::<_, std::convert::Infallible>(())

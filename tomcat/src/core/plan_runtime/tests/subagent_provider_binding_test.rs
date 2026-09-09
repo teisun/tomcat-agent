@@ -105,6 +105,7 @@ fn write_planning_plan(plan_id: &str, body: &str) -> PathBuf {
                     id: "t1".into(),
                     content: "step 1".into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: Default::default(),
                 }],
                 green_build_pass: false,

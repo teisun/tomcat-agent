@@ -271,6 +271,7 @@ fn persist_context_observability_writes_sessions_json() {
             compaction_count: 7,
             compaction_tokens_freed: 12345,
             tool_result_chars_persisted: 999,
+            ..Default::default()
         },
         live: super::super::types::ContextLiveMetrics {
             context_utilization_ratio: 0.42,
@@ -326,6 +327,7 @@ fn persist_context_observability_stays_on_pinned_session_after_external_repoint(
             compaction_count: 7,
             compaction_tokens_freed: 12345,
             tool_result_chars_persisted: 999,
+            ..Default::default()
         },
         live: super::super::types::ContextLiveMetrics {
             context_utilization_ratio: 0.42,
@@ -352,4 +354,72 @@ fn persist_context_observability_stays_on_pinned_session_after_external_repoint(
     assert_eq!(hijacked_entry.context_utilization_ratio, None);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn session_obs_counts_tail_changes_and_miss_tokens() {
+    let mut obs = super::super::types::SessionContextObservation::default();
+
+    obs.observe_ephemeral_tail(Some("tail A"));
+    obs.observe_provider_usage(100, Some(90));
+    obs.observe_ephemeral_tail(Some("tail A"));
+    obs.observe_provider_usage(200, Some(0));
+    obs.observe_ephemeral_tail(Some("tail B"));
+    obs.observe_provider_usage(300, Some(0));
+
+    assert_eq!(obs.tail_changed_count, 1);
+    assert_eq!(obs.tail_change_miss_tokens, 300);
+    assert_eq!(obs.consecutive_cache_miss_max, 2);
+    assert_eq!(obs.prompt_tokens_total, 600);
+    assert_eq!(obs.cache_read_tokens_total, 90);
+    assert_eq!(obs.cache_observed_request_count, 3);
+    assert_eq!(obs.cache_hit_ratio(), Some(0.15));
+}
+
+#[test]
+fn session_obs_keeps_missing_cache_usage_out_of_hit_rate() {
+    let mut obs = super::super::types::SessionContextObservation::default();
+    obs.observe_ephemeral_tail(None);
+    obs.observe_provider_usage(100, None);
+
+    assert_eq!(obs.prompt_tokens_total, 100);
+    assert_eq!(obs.cache_read_tokens_total, 0);
+    assert_eq!(obs.cache_observed_request_count, 0);
+    assert_eq!(obs.cache_hit_ratio(), None);
+    assert_eq!(obs.consecutive_cache_miss_max, 0);
+}
+
+/// Replay the audited build's cardinalities: 343 provider usage records, 146 cold reads, and
+/// the observed 24-request cold streak. Values are normalized to 10k-token requests so this
+/// regression tests the accumulator, not a local absolute-token baseline.
+#[test]
+fn cache_hit_ratio_accumulates_from_provider_usage() {
+    let mut obs = super::super::types::SessionContextObservation::default();
+    let mut samples = Vec::with_capacity(343);
+    samples.extend(std::iter::repeat(Some(0)).take(24));
+    for _ in 0..122 {
+        samples.push(Some(7_142));
+        samples.push(Some(0));
+    }
+    samples.extend(std::iter::repeat(Some(7_142)).take(75));
+    assert_eq!(samples.len(), 343);
+
+    for cache_read_tokens in samples {
+        obs.observe_provider_usage(10_000, cache_read_tokens);
+    }
+
+    assert_eq!(obs.cache_observed_request_count, 343);
+    assert_eq!(obs.consecutive_cache_miss_max, 24);
+    assert_eq!(
+        obs.cache_read_tokens_total,
+        197 * 7_142,
+        "197 of the 343 audited usage samples reported non-zero cache reads"
+    );
+    let hit_rate = obs
+        .cache_hit_ratio()
+        .expect("all replay samples report cache usage");
+    assert!(
+        (hit_rate - 0.41).abs() < 0.005,
+        "audited build's normalized replay should retain its approximately 41% hit ratio, got {hit_rate:.3}"
+    );
 }

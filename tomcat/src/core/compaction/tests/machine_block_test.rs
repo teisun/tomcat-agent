@@ -31,6 +31,7 @@ fn todo(id: &str, content: &str, status: TodoStatus) -> TodoItem {
         id: id.to_string(),
         content: content.to_string(),
         status,
+        evidence: Vec::new(),
         kind: Default::default(),
     }
 }
@@ -83,6 +84,24 @@ fn strip_removes_machine_blocks_before_feeding_back_to_the_model() {
     assert!(!stripped.contains("<control_state>"));
     assert!(!stripped.contains("<verbatim_user_messages>"));
     assert_eq!(stripped, "## Goal\nx");
+}
+
+#[test]
+fn recent_file_index_is_machine_owned_and_stripped_before_recompaction() {
+    let summary = prepend(
+        &render(Some(&snapshot()), &["original request".to_string()]),
+        "## Goal\ncontinue",
+    );
+    let indexed = prepend_recent_files(
+        &summary,
+        &["src/read.rs".to_string()],
+        &["src/edited.rs".to_string()],
+    );
+    assert!(indexed.starts_with("<control_state>"));
+    assert!(indexed.contains("<recent_files>"));
+    assert!(indexed.contains("src/read.rs"));
+    assert!(indexed.contains("src/edited.rs"));
+    assert!(!strip(&indexed).contains("<recent_files>"));
 }
 
 #[test]

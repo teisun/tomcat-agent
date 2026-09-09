@@ -224,7 +224,8 @@ async fn failed_review_returns_implement_focused_instead_of_immediately_restarti
 }
 
 #[tokio::test]
-async fn code_edit_after_review_pass_reopens_both_gates_and_returns_start_review() {
+async fn code_edit_during_acceptance_after_review_budget_keeps_review_and_requires_fresh_acceptance(
+) {
     let _guard = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let workspace = git_workspace_with_uncommitted_code();
@@ -264,10 +265,10 @@ async fn code_edit_after_review_pass_reopens_both_gates_and_returns_start_review
         .await
         .unwrap();
 
-    assert_eq!(reopened["next_step"]["phase"], "start_review");
-    assert!(!reopened["code_review_pass"].as_bool().unwrap());
+    assert_eq!(reopened["next_step"]["phase"], "run_acceptance");
+    assert!(reopened["code_review_pass"].as_bool().unwrap());
     assert!(!reopened["green_build_pass"].as_bool().unwrap());
-    assert_eq!(reopened["items"][2]["status"], "pending");
+    assert_eq!(reopened["items"][2]["status"], "completed");
     assert_eq!(reopened["items"][3]["status"], "pending");
     let _ = std::fs::remove_dir_all(workspace);
     cleanup_home(&home);

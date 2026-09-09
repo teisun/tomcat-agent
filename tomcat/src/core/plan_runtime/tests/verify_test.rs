@@ -339,6 +339,7 @@ fn verify_prompt_uses_active_external_plan_path() {
                     id: "t1".into(),
                     content: "ship".into(),
                     status: TodoStatus::Pending,
+                    evidence: Vec::new(),
                     kind: Default::default(),
                 }],
                 green_build_pass: false,

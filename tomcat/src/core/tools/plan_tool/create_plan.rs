@@ -170,6 +170,7 @@ pub fn execute(
             id: t.id.clone(),
             content: t.content.clone(),
             status: t.status,
+            evidence: Vec::new(),
             kind: TodoKind::Work,
         })
         .collect();
@@ -184,12 +185,14 @@ pub fn execute(
         id: GATE_CODE_REVIEW_TODO_ID.into(),
         content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
         status: TodoStatus::Pending,
+        evidence: Vec::new(),
         kind: TodoKind::GateCodeReview,
     });
     todos.push(TodoItem {
         id: GATE_ACCEPTANCE_TODO_ID.into(),
         content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
         status: TodoStatus::Pending,
+        evidence: Vec::new(),
         kind: TodoKind::GateAcceptance,
     });
 

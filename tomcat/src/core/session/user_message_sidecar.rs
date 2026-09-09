@@ -111,7 +111,8 @@ pub(crate) async fn ensure_user_message_sidecar_current(transcript_path: &Path) 
 #[serde(rename_all = "camelCase")]
 struct TranscriptFingerprint {
     transcript_size: u64,
-    transcript_mtime_ms: u128,
+    /// JSON integers are limited to `u64`; Unix milliseconds are safely within that range.
+    transcript_mtime_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_entry_id: Option<String>,
 }
@@ -148,12 +149,19 @@ struct SidecarMessage<'a> {
 
 fn transcript_fingerprint(transcript_path: &Path) -> Result<TranscriptFingerprint, AppError> {
     let metadata = fs::metadata(transcript_path).map_err(AppError::Io)?;
-    let modified = metadata
-        .modified()
-        .map_err(AppError::Io)?
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| AppError::Config(format!("transcript mtime 早于 Unix epoch: {error}")))?
-        .as_millis();
+    let modified = u64::try_from(
+        metadata
+            .modified()
+            .map_err(AppError::Io)?
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| {
+                AppError::Config(format!("transcript mtime 早于 Unix epoch: {error}"))
+            })?
+            .as_millis(),
+    )
+    .map_err(|error| {
+        AppError::Config(format!("transcript mtime milliseconds exceed u64: {error}"))
+    })?;
     let last_entry_id = read_entries_tail(transcript_path, 1)?
         .last()
         .and_then(transcript_entry_id)
@@ -174,6 +182,7 @@ fn transcript_entry_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::ThinkingLevelChange(entry) => entry.id.as_deref(),
         TranscriptEntry::ThinkingTrace(entry) => entry.id.as_deref(),
         TranscriptEntry::BranchSummary(entry) => entry.id.as_deref(),
+        TranscriptEntry::ToolResultsCompacted(entry) => entry.id.as_deref(),
         TranscriptEntry::Label(entry) => entry.id.as_deref(),
         TranscriptEntry::SessionInfo(entry) => entry.id.as_deref(),
         TranscriptEntry::Custom(entry) => entry.id.as_deref(),

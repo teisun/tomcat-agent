@@ -42,12 +42,11 @@ fn summarization_prompt_contains_first_reason_directive() {
 
 #[test]
 fn summarization_prompt_contains_all_section_headings() {
-    // 章节锚点（§5.3 报告唯一来源）：Goal / Constraints & Preferences / Progress（含 Done / In Progress / Blocked）
-    // / Errors Encountered / Key Decisions / Next Steps / Critical Context。
+    // 章节锚点：Goal / Progress（含 Done / In Progress / Blocked）/ Errors Encountered /
+    // Key Decisions / Next Steps / Critical Context。
     // "Recent User Messages" 已移除 —— 用户原话改由 machine_block 在模型产出后逐字拼接。
     let required_headings = [
         "## Goal",
-        "## Constraints & Preferences",
         "## Progress",
         "### Done",
         "### In Progress",
@@ -61,6 +60,19 @@ fn summarization_prompt_contains_all_section_headings() {
         assert!(
             SUMMARIZATION_PROMPT.contains(h),
             "BASE prompt 缺失章节标题：{h}（来源 docs/reports/compaction-prompt-cc-vs-pi.md §5.3）",
+        );
+    }
+}
+
+#[test]
+fn summary_prompts_have_no_model_authored_constraints_section() {
+    for (name, prompt) in [
+        ("BASE", SUMMARIZATION_PROMPT),
+        ("UPDATE", UPDATE_SUMMARIZATION_PROMPT),
+    ] {
+        assert!(
+            !prompt.contains("Constraints & Preferences"),
+            "{name} prompt must not ask the model to restate user constraints"
         );
     }
 }
@@ -143,7 +155,7 @@ fn update_summarization_prompt_has_rules_block_and_format_reference() {
     }
     assert!(
         UPDATE_SUMMARIZATION_PROMPT.contains(
-            "Use the EXACT same format as the original summary (Goal / Constraints & Preferences / Progress / Errors Encountered / Key Decisions / Next Steps / Critical Context)."
+            "Use the EXACT same format as the original summary (Goal / Progress / Errors Encountered / Key Decisions / Next Steps / Critical Context)."
         ),
         "UPDATE prompt 必须显式列出各节格式回链，避免增量更新走形",
     );

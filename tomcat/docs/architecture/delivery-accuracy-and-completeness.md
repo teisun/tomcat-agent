@@ -1,5 +1,27 @@
 # 交付准确率与完整性：当前完成门禁
 
+## 2026-09 交付描述与执行证据分离
+
+`TodoItem.content` 回答“原先承诺做什么”；`TodoItem.evidence[]` 回答“实际如何验证或交付”。
+两者不能在 EXEC 中互相替代：
+
+```text
+approved work content ──冻结──▶ 完成门禁 / review 范围可追溯
+                                  │
+status transition ──evidence─────┘
+  ├─ tests and observed output
+  ├─ delivered file / endpoint
+  └─ explicit limitation or handoff
+```
+
+因此已有 work todo 的 upsert content 改动会被拒，并指向 `set_status.evidence`；planning/pending
+仍允许改稿。完成而没有 evidence 仅发 warning（保证旧调用可恢复），不伪造验证通过。
+
+review 预算耗尽时，代码再改不重新打开没有预算的 review gate：若仍在 Acceptance，只刷新
+review 通过时间、保留 residual findings 并记录 `plan.code_review.unreviewed_edit`，要求新的
+绿构建覆盖该次编辑；若已有绿构建，则只使 acceptance 失效。推翻条件是审计显示此分支造成
+可避免的严重漏检，届时收紧预算放行策略而非丢弃审计事件。
+
 > 状态：已实现（以当前工作树为准）。
 > 适用：代码变更计划的 EXEC 收口。字段、调用协议与完整决策以 [plan-exec-code-verification.md](plan-exec-code-verification.md) 为权威来源。
 > 规范：[ARCHITECTURE_SPEC.md](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。相邻方案：[tools/reviewer.md](tools/reviewer.md)、[plan-runtime.md](plan-runtime.md)、[permission-system.md](permission-system.md)。

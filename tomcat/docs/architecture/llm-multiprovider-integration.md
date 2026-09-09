@@ -103,8 +103,10 @@ Anthropic…                                                           Completio
          ├─ OpenAiProvider ─────────► POST …/v1/chat/completions
          └─ OpenAiResponsesProvider ─► POST …/v1/responses
          │
-         ├─ stream: true  → SSE / NDJSON → StreamEvent::…
-         └─ stream: false → JSON → ChatResponse
+         ├─ chat_stream → SSE / NDJSON → StreamEvent::…
+         └─ chat / chat_collect → ChatResponse
+                              ├─ 普通 wire：JSON
+                              └─ 必须流式的 Responses 中转站：缓冲 SSE / NDJSON
 ```
 
 ### 2.4 配置：Provider 类型 vs 模型字符串 vs 场景键
@@ -145,6 +147,8 @@ DeepSeek 与 **Xiaomi MiMo（`mimo-v2.5-pro`，Token Plan）** 都是「复用 `
 调用方（Agent Loop、Compaction、测试）**只依赖 trait**，不依赖 `OpenAiProvider` 具体类型：
 
 - **`chat(ChatRequest) -> ChatResponse`**：非流式。
+- **`chat_collect(ChatRequest) -> ChatResponse`**：完整响应语义；默认复用 `chat`，但
+  Responses 中转站可在 adapter 内缓冲其强制要求的流式传输。
 - **`chat_stream(ChatRequest) -> Stream<StreamEvent>`**：流式；SSE 解析在实现内完成。
 - **`count_tokens`**：预算 / 观测用（实现精度依模型而定）。
 
@@ -160,13 +164,15 @@ DeepSeek 与 **Xiaomi MiMo（`mimo-v2.5-pro`，Token Plan）** 都是「复用 `
 |------|----------|
 | 换 API 要不要组 **两套** `ChatRequest` 字段？ | **通常不要。** Agent 仍按现有习惯组 **一份** `ChatRequest`（`model`、`messages`、`tools`、`stream` 等）。 |
 | `provider` / 注册表 id 干什么用？ | 只决定 **`Arc<dyn LlmProvider>` 用哪一个实现**：例如 **`openai`** → Completions 适配器；**`openai-responses`** → Responses 适配器。**差别在 Provider 内部**：同一坨 **`messages`**，前者序列化成 **`messages[]`** POST，后者 **翻译成 `input` + `instructions`（及工具形状）** 再 POST。 |
-| 调用方要不要知道当前是 Completions 还是 Responses？ | **不需要。** 协议差异 **封装在 `XxxProvider::chat` / `chat_stream`** 里。 |
+| 调用方要不要知道当前是 Completions 还是 Responses？ | **不需要。** 协议差异 **封装在 `XxxProvider::chat` / `chat_collect` / `chat_stream`** 里。 |
 | 何时才要在 `ChatRequest` 上 **加新字段**？ | 仅当引入 **现有 `ChatMessageContentPart` 无法表达** 的新能力时才扩类型。图片 / PDF / `file_id` / inline base64 现在都能由现有 part 表达；差异留在 provider 内部 wire，而不是再裂出多套 `ChatRequest`。 |
 
 ### 3.3 流式与非流式
 
 - **stream: true**：字节级 SSE → **`StreamEvent`**（content delta、tool_calls 分片、usage 等，以代码为准）。
-- **stream: false**：单次 JSON **`ChatResponse`**。
+- **完整响应调用**：`chat` 通常使用单次 JSON；`chat_collect` 的返回值同样是
+  **`ChatResponse`**，但 Responses adapter 可以缓冲 SSE/NDJSON，兼容禁止 `stream:false`
+  的中转站。调用方无需分支。
 
 ### 3.4 配置-driven 的客户端参数
 
@@ -229,7 +235,8 @@ User input
 usage_ratio / policy 触发 preheat
     → 上层解析 compaction_provider + compaction_model
     → generate_summary(snapshot, compaction_provider, compaction_model)
-    → chat(ChatRequest { model: compaction_model, tools: None, stream: false })
+    → chat_collect(ChatRequest { model: compaction_model, tools: None, stream: false })
+       （逻辑上收集完整摘要；Responses adapter 必要时缓冲其流式 wire）
     → 摘要文本 → transcript / compaction 状态机（与主对话模型独立）
 ```
 

@@ -20,6 +20,15 @@ pub trait LlmProvider: Send + Sync + 'static {
     /// 非流式对话，返回完整响应。
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, AppError>;
 
+    /// 返回完整响应；provider 可选择以流式传输承载并在适配器内聚合。
+    ///
+    /// 默认复用 [`Self::chat`]。部分 OpenAI-compatible 中转站拒绝非流式请求，
+    /// 因而它们应覆写此方法：保持调用方仍拿到完整 [`ChatResponse`]，不把传输
+    /// 细节泄露给摘要、标题等后台文本任务。
+    async fn chat_collect(&self, request: ChatRequest) -> Result<ChatResponse, AppError> {
+        self.chat(request).await
+    }
+
     /// 流式对话，返回 StreamEvent 流；流式中断/超时时产生错误并释放资源。
     async fn chat_stream(
         &self,

@@ -1825,6 +1825,237 @@ async fn persisted_fresh_review_skips_rerun_after_runtime_recreation() {
     cleanup_home(&home);
 }
 
+/// Once review reached its configured budget, acceptance owns verification of later edits.
+/// Do not reopen a review which can only fail open again; leave an auditable event instead.
+#[tokio::test]
+async fn edit_during_acceptance_after_exhausted_review_keeps_gates_and_accepts_fresh_evidence() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let workspace = git_workspace_with_code("tomcat_exhausted_acceptance_edit_");
+    let registry = std::sync::Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
+        workspace.path().join(".task-logs"),
+    ));
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
+    rt.attach_bash_task_registry(registry.clone());
+    let captured: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let sink = std::sync::Arc::clone(&captured);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+    rt.attach_code_reviewer(std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![
+        CodeReviewSummary {
+            aborted: false,
+            verdict: Some("fail".into()),
+            summary: "review found a defect".into(),
+            findings: vec![Finding::new(
+                "P1".into(),
+                "logic".into(),
+                "missing regression coverage".into(),
+            )
+            .with_reference("F01")],
+            ..Default::default()
+        },
+    ])));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+
+    update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
+        .await
+        .expect("first review returns the finding");
+    update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: "t1".into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .expect("reopen work todo to consume the review budget");
+    let exhausted = update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
+        .await
+        .expect("review budget should fail open");
+    assert_eq!(exhausted["code_review_pass"], true);
+
+    let review_again = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: GATE_CODE_REVIEW_TODO_ID.into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .expect_err("a completed exhausted review gate must not be reopened");
+    assert!(
+        review_again.to_string().contains("[gate] Acceptance"),
+        "the correction must point the agent at acceptance: {review_again}"
+    );
+
+    update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: GATE_ACCEPTANCE_TODO_ID.into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .expect("start acceptance after exhausted review");
+
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { println!(\"fixed during acceptance\"); }\n",
+    )
+    .unwrap();
+    let proof = registry
+        .spawn("true".into(), Some(workspace.path().to_path_buf()))
+        .await
+        .unwrap();
+    registry.wait_for_finish(&proof.task_id).await.unwrap();
+    rt.record_plan_cache_usage(1_000, Some(410), false);
+
+    let completed = update_plan::execute(
+        &rt,
+        submit_green_evidence_args(&plan_id, "true", proof.task_id.as_str()),
+    )
+    .await
+    .expect("fresh acceptance evidence must be accepted without reopening review");
+    assert_eq!(completed["plan_state_after"], "completed");
+    assert_eq!(completed["code_review_pass"], true);
+    assert_eq!(completed["green_build_pass"], true);
+    let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert_eq!(persisted.frontmatter.state, PlanFileState::Completed);
+    assert_eq!(
+        persisted.frontmatter.code_review_residual_findings,
+        vec!["F01 [P1] logic: missing regression coverage"]
+    );
+
+    let events = captured.lock();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "plan.code_review.exhausted")
+            .count(),
+        1
+    );
+    let unreviewed_edit = events
+        .iter()
+        .find(|event| event["event"] == "plan.code_review.unreviewed_edit")
+        .expect("must retain an auditable unreviewed edit event");
+    assert_eq!(unreviewed_edit["rounds"], 1);
+    assert_eq!(
+        unreviewed_edit["changed_code_files"],
+        serde_json::json!(["src/main.rs"])
+    );
+    let complete = events
+        .iter()
+        .find(|event| event["event"] == "plan.complete")
+        .expect("completion event should include the build cache observation");
+    assert_eq!(complete["cacheObservation"]["cacheHitRatio"], 0.41);
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn stale_green_evidence_after_exhausted_review_reopens_only_acceptance() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let workspace = git_workspace_with_code("tomcat_exhausted_stale_green_");
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+    assert_eq!(
+        rt.try_begin_code_review_round(&plan_id),
+        Some(1),
+        "seed an already-consumed review budget"
+    );
+
+    let path = plan_path_for_id(&plan_id).unwrap();
+    let mut plan = read_plan(&path).unwrap();
+    for todo in &mut plan.frontmatter.todos {
+        if matches!(
+            todo.kind,
+            TodoKind::GateCodeReview | TodoKind::GateAcceptance
+        ) {
+            todo.status = TodoStatus::Completed;
+        }
+    }
+    seed_previous_full_gate(&mut plan, 0);
+    plan.frontmatter.code_review_residual_findings =
+        vec!["F01 [P1] tests: pending acceptance".into()];
+    write_plan(&path, &plan, 2000).unwrap();
+    rt.refresh_active_plan_after_write(path, &plan);
+
+    let out = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            ops: Vec::new(),
+        },
+    )
+    .await
+    .expect("stale green evidence must reopen only acceptance");
+
+    assert_eq!(out["code_review_pass"], true);
+    assert_eq!(out["green_build_pass"], false);
+    assert_eq!(out["next_step"]["phase"], "run_acceptance");
+    let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert_eq!(persisted.frontmatter.completion_gate_cycles, 1);
+    assert_eq!(
+        persisted.frontmatter.code_review_residual_findings,
+        vec!["F01 [P1] tests: pending acceptance"]
+    );
+    assert!(persisted
+        .frontmatter
+        .todos
+        .iter()
+        .any(|todo| todo.kind == TodoKind::GateCodeReview && todo.status == TodoStatus::Completed));
+    assert!(persisted
+        .frontmatter
+        .todos
+        .iter()
+        .any(|todo| todo.kind == TodoKind::GateAcceptance && todo.status == TodoStatus::Pending));
+    cleanup_home(&home);
+}
+
 #[tokio::test]
 async fn code_edit_invalidates_full_gate_and_requires_review_and_fresh_evidence() {
     let _g = home_lock().lock().unwrap();

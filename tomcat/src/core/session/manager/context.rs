@@ -310,6 +310,7 @@ fn entry_timestamp(entry: &TranscriptEntry) -> &str {
         TranscriptEntry::ThinkingLevelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingTrace(e) => &e.timestamp,
         TranscriptEntry::BranchSummary(e) => &e.timestamp,
+        TranscriptEntry::ToolResultsCompacted(e) => &e.timestamp,
         TranscriptEntry::Label(e) => &e.timestamp,
         TranscriptEntry::SessionInfo(e) => &e.timestamp,
         TranscriptEntry::Custom(e) => &e.timestamp,
@@ -775,6 +776,7 @@ pub fn init_context_state(
         compaction_count: cc,
         compaction_tokens_freed: ctf,
         tool_result_chars_persisted: trcp,
+        ..Default::default()
     };
 
     let path = match session.current_transcript_path()? {

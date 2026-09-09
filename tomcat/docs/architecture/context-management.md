@@ -4,6 +4,45 @@
 
 # 上下文管理技术方案
 
+## 2026-09 Build 马拉松压缩整改
+
+Build 是单个用户请求内连续工具调用的马拉松，不能等待普通 assistant 文本回复才开始准备摘要。
+
+```text
+每次请求前（同一 guard 位于 reasoning_loop loop 顶）
+  < 50%       → 继续
+  50%..100%   → Fits：后台预热当前前缀，记住 covered_end_id
+  > 100%      → 预热已就绪：折叠 covered_end_id 以前的前缀，保留之后原始尾巴
+             → 未就绪：Step 0 落盘引用 → 运行期工具结果占位符 → 同步全量 Collapse
+```
+
+第 2 轮以后，上一条 tool round 结束到下一轮 loop 顶之间不改 `messages`，所以仍是「工具结果已入账、下一次请求尚未构造」的同一个称重点；额外覆盖了每个 loop 的首请求（新 user turn、重试、follow-up、resume）。
+
+`MIDTURN_FOLD_KEEP_RATIO = 0.5` 是刻意固定的工作集策略：摘要后上下文在约 50% 到满额之间摆动，优先保留刚读取的文件和最近工具结果。若观测表明预热常因边界 stale 失效，则只保留 L0–L3 兜底；若 cache 正常但摘要成本成为主要成本，可把保留比降为 0.25。
+
+当前轮的 Step 0 会将单条 ≥10K 字符的结果写入 sidecar，并将消息替换为可重新读取的路径指针；
+placeholder wave 仅替换当前进程内的消息，不写 JSONL。hydrate 因此恢复 wave 的原文，再由下一次
+请求前的 guard 重新称重和收束。历史 `tool_results_compacted` 记录仍可读取但被忽略，不再覆盖
+消息正文。同步 Collapse 从已覆盖消息的 `read`（最近 20 个去重路径）、`edit`、`write` 参数生成
+`<recent_files>`，只给路径而不回挂陈旧正文，并提示先查 `git status --short` 和当前 diff。
+
+请求级 ephemeral tail 的物理位置由 provider wire 决定：
+
+```text
+Anthropic Messages  : system suffix，cache breakpoint 留在最新持久 tool/user 消息
+OpenAI Chat         : leading system message
+OpenAI Responses    : top-level instructions
+```
+
+tail 变化会有意冷写一次；稳定后必须继续追加可缓存前缀。运行时累计
+`prompt_tokens`、`cache_read_tokens`、连续 miss、tail 变化次数及其 miss tokens，并将
+cache hit ratio 写入 context metrics 与 `plan.complete`。若同一稳定 prefix 的哈希不变但仍连续 miss，应交由网关排查，而不是继续改写本地 prompt。
+
+Responses tail 进 `instructions` 的依据是 `f2523cc3`，三条 wire 的推广是 `095a36d3`：
+稳定 tail 的 DeepSeek 实测优于输入末尾布局，但变化的那一轮会冷写。Build 的无人值守 tail
+通常不变，因此维持现状；仅当单一 provider 的 tail 变化率超过 10%，或这些冷写占总 prompt
+token 超过 5%，才按 provider profile 评估回退，不作全局位置切换。
+
 ## 2026-08 模型额度与运行时尾巴整改
 
 `context_window` 和 `max_output_tokens` 是模型能力，不再由全局上下文配置冒充。模型目录解析出
@@ -1329,10 +1368,6 @@ Use this EXACT format:
 ## Goal
 [What is the user trying to accomplish? Can be multiple items.]
 
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "(none)" if none were mentioned]
-
 ## Progress
 ### Done
 - [x] [Completed tasks/changes]
@@ -1390,9 +1425,6 @@ Use this EXACT format (same as the original summary):
 ## Goal
 [Updated goal]
 
-## Constraints & Preferences
-- [Updated constraints]
-
 ## Progress
 ### Done
 - [x] [Completed tasks]
@@ -1424,32 +1456,30 @@ Use this EXACT format (same as the original summary):
 
 ### 7.5 Compaction v2 修订（T2-P0-002）
 
-> 本小节为 **T2-P0-002**（compaction prompt 与 context v2）的最小落档；§7.1 / §7.3 的中间形态已被本次升级取代，**单一事实来源**为 [`src/core/compaction/preheat.rs`](../../../src/core/compaction/preheat.rs) 中两个 `pub(super) const` 字面量，配套对照见 [报告 §5.3 / §5.4](../reports/compaction-prompt-cc-vs-pi.md)。
+> 本小节为 **T2-P0-002**（compaction prompt 与 context v2）的最小落档；§7.1 / §7.3 的中间形态已被本次升级取代，**单一事实来源**为 [`src/core/compaction/preheat.rs`](../../src/core/compaction/preheat.rs) 中两个 `pub(super) const` 字面量。
 
-#### 7.5.1 模板升级为 9 节
+#### 7.5.1 结构化模板
 
-`SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT` 由 7 节扩展为 9 节，新增 `Errors Encountered`、`Recent User Messages`（最近 10 条用户原话），并要求 `Next Steps` 给出 **verbatim 引用**（精确 file path / 函数名 / 错误信息）。两个模板首行均为 `Respond with text only. Do not call any tools.`，指令区追加 `First reason internally, then output the final summary.`（隐式诱导内部推理，不开 Two-pass 第二轮 LLM）。
+`SUMMARIZATION_PROMPT` / `UPDATE_SUMMARIZATION_PROMPT` 要求 `Goal`、`Progress`（Done / In Progress / Blocked）、`Errors Encountered`、`Key Decisions`、`Next Steps`、`Critical Context`，并要求 `Next Steps` 给出 **verbatim 引用**（精确 file path / 函数名 / 错误信息）。`Constraints & Preferences` 和 `Recent User Messages` 不由模型转述：计划路径和用户原话由运行时机器区块逐字提供。两个模板首行均为 `Respond with text only. Do not call any tools.`，指令区追加 `First reason internally, then output the final summary.`（隐式诱导内部推理，不开 Two-pass 第二轮 LLM）。
 
 模板章节顺序与必要约束：
 
 ```
 ## Goal
-## Constraints & Preferences
 ## Progress    （Done [带 file: 锚点] / In Progress / Blocked）
 ## Errors Encountered
 ## Key Decisions
-## Recent User Messages    （最近 10 条用户原话，逐字保留）
 ## Next Steps    （含 verbatim 引用）
 ## Critical Context
 ```
 
 行为契约：
 - `<8K tokens` 的输出预算与既有保持一致；§7.2 模型选择不变。
-- 测试锁点见 [`src/core/compaction/tests/prompt_snapshot.rs`](../../../src/core/compaction/tests/prompt_snapshot.rs)（13 用例：9 节标题、text-only 首行、internal-reason 指令、最近 10 条口径、verbatim 要求、文件锚点提示、`{existing_summary}` 占位符等）。
+- 测试锁点见 [`src/core/compaction/tests/prompt_snapshot_test.rs`](../../src/core/compaction/tests/prompt_snapshot_test.rs)（章节标题、text-only 首行、internal-reason 指令、无模型转述的约束/用户原话、verbatim 要求、文件锚点提示、`{existing_summary}` 占位符等）。
 
 #### 7.5.2 Compaction 请求显式 `tools: None`
 
-`Compactor::generate_summary` 构造 `ChatRequest` 时**显式**写 `tools: None`，与模板首行的 text-only 声明形成**双保险**——即使后续模型对 prompt 指令不敏感，因请求体不携带 tool schema，模型亦无能力发起工具调用。`stream: Some(false)`（摘要不流式）。该约束与 §10.1 中 reasoning loop 的工具调用契约**互不污染**：摘要 LLM 调用走独立的 `ChatRequest`，不复用主对话的请求构造。
+`Compactor::generate_summary` 构造 `ChatRequest` 时**显式**写 `tools: None`，与模板首行的 text-only 声明形成**双保险**——即使后续模型对 prompt 指令不敏感，因请求体不携带 tool schema，模型亦无能力发起工具调用。它经 `LlmProvider::chat_collect` 取得完整摘要：普通 provider 使用非流式 JSON；拒绝 `stream:false` 的 Responses 中转站则在 adapter 内缓冲 SSE/NDJSON，语义仍是一份完整的 `ChatResponse`，不向摘要状态机泄露传输差异。该约束与 §10.1 中 reasoning loop 的工具调用契约**互不污染**：摘要 LLM 调用走独立的 `ChatRequest`，不复用主对话的请求构造。
 
 #### 7.5.3 失败路径：指数退避 + transcript 留痕
 

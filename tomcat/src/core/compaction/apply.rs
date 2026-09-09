@@ -206,7 +206,7 @@ pub(crate) fn apply_and_emit_boundary(
 ///
 /// 这段逻辑只能从 `apply_and_emit_boundary` 的成功分支进入，保证时机②、时机⑤和
 /// current-tail guard 三条路径的语义完全一致。
-fn run_layer0_after_boundary(
+pub(crate) fn run_layer0_after_boundary(
     state: &mut ContextState,
     emitter: &ScopedEventEmitter,
     env: &BoundaryEnv<'_>,

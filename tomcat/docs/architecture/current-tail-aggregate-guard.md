@@ -1,16 +1,56 @@
 # Current-Tail Aggregate Guard：阶段二预防型上下文减负方案
 
+## 2026-09 Build 路径修订（当前实现优先）
+
+本文后文 R4/R5 的“rewrite / 全量 collapse”是旧实现描述，以下为当前事实：
+
+```text
+Fits at ≥50%  → async preheat snapshots a prefix and records covered_end_id in memory
+Over budget   → foreground guard persists then folds that prefix, leaving the newer tail raw
+not ready     → Step 0 persisted reference → runtime-only placeholder waves → full Collapse
+```
+
+Step 0 对单条 ≥10K 字符的 tool result 将原文写入 sidecar，再以可重新读取的路径指针替换正文；
+这是唯一会改写该 tool result transcript 行的 guard 减负步骤。placeholder wave 仅修改当前进程内的
+请求视图，不写 JSONL；进程重启时 hydrate 恢复原文，并由下一次请求前 guard 重新称重和收束。旧的
+`tool_results_compacted` 行仍可反序列化但会被 hydrate 忽略，保证历史 transcript 可读。
+
+full Collapse 另附 `<recent_files>`（read 的最后 20 个唯一路径，全部 edit/write 路径），只提示
+重新读当前文件和检查 git diff。mid-turn 预热不在后台写 JSONL，避免与后续工具结果追加竞争；若原始
+覆盖边界找不到或前台落盘失败，就保留原始上下文并走现有兜底；若该 stale 比例持续偏高，取消这个
+mid-turn 预热优化而保留 L0–L3。
+
 本文档用于说明阶段二 `current-tail aggregate guard` 的**现行实现**与交付边界，对齐 [`context-management.md`](./context-management.md)、[`agent-loop.md`](./agent-loop.md)、[`plan-runtime.md`](./plan-runtime.md) 之间的 mid-turn current-tail guard 主链。仓库当前已落地 `current_tail_guard.rs`、mid-turn history apply/recompact orchestration、single-branch-summary collapse + keepalive、steering 正规注入与对应测试矩阵；本文保留行为边界、协议与交付口径，避免再回到“开发前目标态”的旧描述。
 
 本文按 [`ARCHITECTURE_SPEC.md`](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md) 主路径编排。上位与相邻方案：[`context-management.md`](./context-management.md)、[`agent-loop.md`](./agent-loop.md)、[`plan-runtime.md`](./plan-runtime.md)、[`tools/read.md`](./tools/read.md)。
 
 **时间点钉死**：
 
-- **「每次工具循环结束、发下一次 LLM 前」**：专指 `reasoning_loop` 的一次 tool round 完成后，`tool_dispatcher` 已把本轮 assistant/tool 消息 push 到局部 `messages`，并已调用 `ctx_state.on_message_appended(...)` 记账，但下一次 `llm.chat_stream(...)` 还**没有**开始构造 `ChatRequest` 的那个时刻。
+- **「每次请求前」**：同一条 `maybe_reduce_before_next_llm` 合并在 `reasoning_loop` 的 loop 顶部。首个请求直接在此过磅；第 2 轮及以后，上一条 tool round 已由 `tool_dispatcher` 将 assistant/tool 消息 push 到局部 `messages` 并调用 `ctx_state.on_message_appended(...)` 记账，而轮末到下一轮 loop 顶之间不再改写 `messages`，故仍等价于「每次工具循环结束、发下一次 LLM 前」。
 - **不是** 下一个 user turn 进入时的外层 `check_before_request`。
 - **也不是** reasoning loop 最终 assistant 回复后、user turn 全部结束的时刻。
 
 **说人话**：这篇文档讲的是“车已经在当前轮里装了很多货，下一脚油门准备再发 LLM 之前，先称重、减负、必要时中途打 checkpoint”，不是传统的“下一轮用户再来时压老历史”。
+
+### 阈值与兜底决策
+
+```text
+L0（成功应用 branch_summary 后的收尾）  单条 >= 50K  → sidecar 指针
+current-tail guard（已超预算的紧急减负） 单条 >= 10K  → Step 0 sidecar 指针
+                                              其余候选 → 最旧的一半 placeholder wave
+```
+
+- 50K 是回合边界 housekeeping：只搬走真正巨大的历史结果。10K 是已超预算时的紧急
+  减负：把 10K–50K 也变成可读取的指针，避免它们直接降级为不可恢复的 placeholder。
+- placeholder wave 只在 D1 预热没有及时产出可应用摘要、且 Step 0 仍不足以回到预算时
+  才是保命兜底；它保留最新至少两条候选，以避免抹掉刚发生的工作线索。
+- Step 0 为使 transcript 中的消息变成 sidecar 指针，需要按 `msg_id` 做一次目标文本回写；
+  它只对新出现且 ≥10K 的结果触发，而非每一波 placeholder 都触发，因此接受这项有界
+  写放大。
+- 通过 `session_obs.tool_result_chars_persisted` 和 `tool_results_marked_compacted` 诊断
+  观测效果。若 D1 上线后多数超预算 build 仍走 placeholder wave，评估把预热水位从
+  50% 提前，或统一改为更低门槛的可恢复 sidecar；若 Step 0 对几十 MB transcript
+  高频造成单次 >100ms 写入，再评估改为追加式持久化。
 
 ---
 
@@ -99,10 +139,10 @@
 
 | 目标 | 观察指标（落地后可核对） | 说人话 |
 | --- | --- | --- |
-| **G1 提前发现 current-tail 超重** | 每次 tool round 结束后，在下一次 `llm.chat_stream(...)` 之前都会运行 precheck；many-medium-reads 场景在发请求前进入分流，而不是先撞 API | 车还没开出去，就先知道超没超载。 |
+| **G1 提前发现 current-tail 超重** | 每次 `llm.chat_stream(...)` 前都运行同一 precheck；第 2 轮起仍在每次 tool round 结束后处理新堆积，首请求（含 resume）也主动收束，不先撞 API | 车还没开出去，就先知道超没超载。 |
 | **G2 总量优先，不看单条阈值** | A 的主判据是 `overflow_tokens = max(0, working_set_tokens - context_budget_tokens)`；单条 10K/128KB 不再决定是否触发阶段二 | 单箱合规不代表整车合规。 |
 | **G3 reduction 只改 `COMPACTABLE_TOOLS`** | 首版仅 `read`、`search_files`、`bash`、`task_output` 进入 reduction；按“旧的一半 -> 再旧的一半”波次直接置 placeholder | 能砍的砍，先砍旧半区。 |
-| **G4 reduction 与 C 路径都有明确持久化语义** | reduction 通过 transcript helper best-effort 回写；C 路径复用既有 `branch_summary` + `apply_boundary`；写盘成功时 reload 仍能得到同样的 reduced tail / 单条摘要 | 不要求为了 reload 一致性牺牲当前轮减负，但也不放弃持久化路径。 |
+| **G4 reduction 与 C 路径都有明确持久化语义** | Step 0 的 sidecar 指针 best-effort 回写 transcript；placeholder wave 仅为本进程请求减负，reload 恢复原文；C 路径复用既有 `branch_summary` + `apply_boundary` | 只把昂贵、不可重算的摘要与可重读的指针持久化；便宜的占位符在运行时重算。 |
 | **G5 split 不丢执行态** | split 后 `PlanRuntime` 仍能恢复到正确 `mode`，且下一步 `current_step` / `pending_work` 可继续推进 | 压完 token 以后还能接着干活。 |
 | **G6 配置漂移收口** | `keep_recent_turns` 真正驱动 `truncation.rs` 保护区；`compaction_turns` 不再出现在 config type / allowlist / catalog / 测试里 | 配置写了就真生效，死配置直接删掉。 |
 | **G7 阶段边界不混淆** | 阶段二不消费 `finish_reason`，也不做 same-turn recovery；实现链路固定为 `precheck -> reduction -> split -> keepalive -> next prompt` | 先把发车前整理货物做满，再谈车已经抛锚后的补救。 |
@@ -129,10 +169,10 @@
 
 | 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
 | --- | --- | --- | --- | --- | --- | --- |
-| **R1 触发时机** | guard 应该在什么时候称重 | **采用** `reasoning_loop` 内的 mid-turn precheck：每次 tool round 结束、下一次 `llm.chat_stream(...)` 前执行。 | 本仓：`../../src/core/agent_loop/reasoning_loop.rs`、`../../src/core/agent_loop/tool_dispatcher.rs`；外部：`openclaw + src/agents/embedded-agent-runner/run/preemptive-compaction.ts` | 设计：把 precheck 钉在 tool round 与下一次 LLM 之间；理由：只有这个点同时看得到本轮新增消息、又能拦住过载请求。 | 仅复用外层 `check_before_request` / 仅在最终 assistant 回复后再压缩；拒因：它们看不到当前轮 tool 堆积，发现问题太晚。 | 真正该过磅的点，是这拨工具跑完、下一脚油门还没踩下去的时候。 |
+| **R1 触发时机** | guard 应该在什么时候称重 | **采用** `reasoning_loop` 内 loop 顶部的单点 precheck：每次 `llm.chat_stream(...)` 前执行。 | 本仓：`../../src/core/agent_loop/reasoning_loop.rs`、`../../src/core/agent_loop/tool_dispatcher.rs`；外部：`openclaw + src/agents/embedded-agent-runner/run/preemptive-compaction.ts` | 第 2 轮起，轮末与下一轮 loop 顶之间不改 `messages`，因此与原「每次工具循环结束、下一次请求前」等价；同时补上首请求（含 resume）。 | 仅复用外层 `check_before_request` / 仅在最终 assistant 回复后再压缩；拒因：它们看不到当前轮 tool 堆积，发现问题太晚。 | 每次踩油门前都先过磅；工具刚装完货时仍会在下一脚油门前被称到。 |
 | **R2 预算口径** | A 的红线怎么定义 | **采用** `context_budget_tokens = context_window - max_output_tokens`；**拒绝**再扣一次 output reserve。 | 本仓：`../../src/core/session/manager/types.rs`、[`context-management.md`](./context-management.md)；外部：`openclaw + preemptive-compaction.ts`（预算/overflow 思路） | 设计：直接使用 `ContextState.context_budget_tokens`；理由：Tomcat 已在配置层扣过输出位，再扣一次会双重保守。 | 沿用旧草案名 `promptBudgetBeforeReserve` 或额外手动 reserve；拒因：概念不清且会把 guard 做得过早、过紧。 | 红线已经画好了，别自己又往里缩一圈。 |
 | **R3 reduction 范围与策略** | B 应该动哪些消息、按什么顺序动 | **采用** 先复用现有 `apply_boundary` 吃掉已完成的历史摘要，再对 apply 后历史消息整体再压一遍，最后才对 `current tail` 的 `COMPACTABLE_TOOLS` 做“旧的一半 -> 再旧的一半”波次 placeholder。 | 本仓：`../../src/core/compaction/apply.rs`、`../../src/core/compaction/truncation.rs`、`../../src/core/agent_loop/tool_dispatcher.rs`、`../../src/core/session/manager/types.rs`；外部：`openclaw + tool-result-truncation.ts`、`cc-fork-01 + COMPACTABLE_TOOLS`（计划调研） | 设计：先把仓里已经准备好的历史减负吃干净，再重新压一轮历史，最后才动当前轮；理由：这样更贴合“先榨干历史空间，再对现场动刀”的收益顺序。 | 一上来只扫 current tail / 只压老历史 / preview + placeholder 两段策略；拒因：要么白白放过现成历史收益，要么会 no-op，或引入没必要的状态机复杂度。 | 先把已经备好的老货和历史整一遍，再去动眼前这轮的箱子。 |
-| **R4 reduction 持久化语义** | B 改完消息后如何跨 reload 维持 | **采用** `session/transcript` 模块提供的 message rewrite helper：按 `msg_id` 尝试回写对应 `tool_result` message；**不以写盘成功作为内存减负前提**。 | 本仓：`../../src/core/session/transcript.rs`、`../../src/core/session/manager/context.rs`、`../../src/api/chat/commands/cmd_restore.rs` | 设计：guard 只调用 helper，不直接操心 JSONL 改写细节；helper 成功时 reload 更接近运行时真相，失败时只降级为“当前轮减负有效、reload 可能回退”。 | 只改局部 `messages` / append-only reduction ledger / 以写盘成功 gate 当前轮减负；拒因：前者 reload 会复活原文，后两者都把阶段二主目标让位给持久化复杂度。 | 先把眼前这轮车减下来；能顺手把 transcript 同步掉最好，但别倒过来拿写盘卡主流程。 |
+| **R4 reduction 持久化语义** | B 改完消息后如何跨 reload 维持 | **采用** Step 0 的 sidecar 指针通过 transcript helper best-effort 回写；placeholder wave 不持久化，reload 恢复原文并在请求前重算；C 复用 `branch_summary + apply_boundary`。 | 本仓：`../../src/core/agent_loop/current_tail_guard.rs`、`../../src/core/session/transcript.rs`、`../../src/core/session/manager/context.rs` | 模型生成的摘要昂贵、sidecar 指针可重读，二者值得持久化；占位符波是本地 O(n) 派生视图，持久化它会引入 marker 协议和 hydrate 二次扫描。 | append-only placeholder marker / 以写盘成功 gate 当前轮减负；拒因：前者存储可重算状态、使 reload 复杂，后者让当前轮安全依赖 I/O。 | 贵的才落盘；便宜的视图下次再算。 |
 | **R5 C 路径形态** | B 不够时，如何兜底 | **采用** 单条 `branch_summary + keepalive snapshot`：复用既有 `BranchSummaryEntry` + `apply_boundary`，把 apply 后的整份 working messages 全量折成一条摘要。 | 本仓：`../../src/core/compaction/preheat.rs`、`../../src/core/compaction/apply.rs`、`../../src/core/session/manager/context.rs`、`../../src/core/plan_runtime/mod.rs` | 设计：不再发明 `current_tail.split_turn` 事件，不再保留 suffix verbatim；理由：既然 B 已经把历史和 current tail 都尽力压过，剩下唯一稳定路径就是整份工作集一把折成一条 branch_summary。 | 自定义 `current_tail.split_turn` 事件 / 落普通 user message / 再引入 cut-point 选择；拒因：实现复杂度高，且与现有 `branch_summary + apply_boundary` 成熟路径重复造轮子。 | 真压不下来，就别切前缀后缀了，直接复用现有 branch_summary 语义整份折起来。 |
 | **R6 执行态保活** | C 后 plan/runtime 状态靠谁保 | **采用** 本地 deterministic keepalive footer，数据来自 `PlanRuntime + plan file + latest_plan_event`。 | 本仓：`../../src/core/plan_runtime/mod.rs`、`../../src/core/session/manager/context.rs`；外部：`hermes-agent` resume continuity（计划调研） | 设计：LLM 只总结语义进展，本地代码单独拼出 keepalive；理由：`mode`、`active_plan_path`、当前 step / pending work 属于运行态真相，不能让模型自由发挥。 | 只依赖 LLM summary 自己“记住现在做到哪”；拒因：长 plan 下最容易把真正的执行态压没。 | 不能只让模型写摘要，得把“现在到底在执行什么”明确写死。 |
 | **R7 配置漂移修正** | 阶段二要不要顺手清理 `keep_recent_turns` / `compaction_turns` | **采用** 同批收口：`keep_recent_turns` 接线到 `truncation.rs`，默认改为 `5`；删除 `compaction_turns`。 | 本仓：`../../src/infra/config/types/context.rs`、`../../src/core/compaction/truncation.rs`、`../../src/core/tools/config_tool/allowlist.rs`、`../../src/core/tools/contract/catalog.rs`；外部：无并列外部正例（纯本仓漂移修正） | 设计：在同一批 current-tail/context 修改里修正配置真相；理由：避免继续保留“配置存在但 runtime 不读”的双份事实。 | 维持现状、等以后再修；拒因：阶段二正好要改这片代码，再拖只会继续误导配置读者与工具目录。 | 既然都在动这片上下文治理代码，就把没生效的旋钮一起修掉。 |
@@ -206,9 +246,9 @@ overflow_tokens = max(0, working - budget)
   - 不在 placeholder 文本里重复抄 `path` / `query` / `offset` / `limit` / `task_id` / `since`；
   - 上一条 assistant tool_call 已保留这些 args，模型若真要重读/重新拉日志，可顺着 tool_call 自己再调工具。
 - **持久化规则**：
-  - 每条被改写的 tool message，先更新局部 `messages` 与计数；
-  - 随后调用 `session/transcript` 模块提供的 helper，按 `msg_id` best-effort 回写 transcript 对应 `MessageEntry.message.content`；
-  - helper 失败只记 `warn` / metrics，不回滚本轮减负；是否进入 C 只看**当前重称结果**。
+  - Step 0 先把 ≥10K 字符 tool result 写入 sidecar，局部消息改为可重新读取的路径指针；有 `msg_id` 时，再 best-effort 回写对应 transcript `MessageEntry.message.content`。
+  - placeholder wave 只更新局部 `messages` 与计数，绝不写 transcript，也不追加 marker；重启 hydrate 将恢复其原文，由下一次请求前 guard 重新称重。
+  - sidecar 指针的 helper 失败只记 `warn` / metrics，不回滚本轮减负；是否进入 C 只看**当前重称结果**。
 - **计数回写**：
   - 若 B 只动了 tail，占位后更新 `messages` / `estimate_context_chars` / `post_usage_appended_chars`；
   - 若 B 动到了 apply 后历史消息，则直接 `ctx_state.invalidate_api_usage()`，后续称重暂时退回 chars fallback；
@@ -330,38 +370,25 @@ apply_boundary
 }
 ```
 
-### 5.2 reduction transcript helper 契约（非 transcript 事件）
+### 5.2 Step 0 指针与 placeholder wave 的持久化边界
 
-reduction 不再追加 `CustomEntry`；它通过 `session/transcript` 模块提供的 helper 尝试回写对应 `tool_result` message。内部 helper 建议接收如下结构：
+`reduce_current_tail_messages(...)` 有两种不同的减负动作，不能把它们都当成 transcript
+协议：
 
-| 字段 | JSON 类型 | 必填 | 默认值 | 适用场景 | 说明 | 说人话 |
-| --- | --- | --- | --- | --- | --- | --- |
-| `messageId` | `string` | 是 | 无 | rewrite helper | 被改写的 tool message `msg_id` | 说明要改哪条工具结果。 |
-| `toolName` | `string` | 是 | 无 | rewrite helper / audit | `read` / `search_files` / `bash` / `task_output` | 哪种工具的结果。 |
-| `waveIndex` | `integer` | 是 | `1` | rewrite helper / metrics | 第几轮二分波次 | 第几刀。 |
-| `placeholderText` | `string` | 是 | `TOOL_RESULT_PLACEHOLDER` | rewrite helper | 要写回 transcript 的文本；局部 `messages` 同步使用同一文本 | 直接换成哪句占位符。 |
-| `originalChars` | `integer` | 是 | 无 | audit / metrics | 原始字符数 | 原来多重。 |
-| `rewrittenChars` | `integer` | 是 | 无 | audit / metrics | 改写后字符数 | 现在多重。 |
+```text
+Step 0（单条 >= 10K）   原文 → sidecar 文件；消息 → [Tool result persisted: <path>]
+                         有 msg_id 时 best-effort 回写该 MessageEntry，原文仍可 read 回来
 
-示例：
-
-```json
-{
-  "messageId": "msg_tool_42",
-  "toolName": "search_files",
-  "waveIndex": 1,
-  "placeholderText": "[Previous tool result replaced to save context space]",
-  "originalChars": 14820,
-  "rewrittenChars": 47
-}
+placeholder wave（其余候选） 原文 → TOOL_RESULT_PLACEHOLDER，仅改内存消息与估算计数
+                         不写 JSONL、不追加 marker；重启时 hydrate 恢复原文，guard 再决定是否减负
 ```
 
-helper 规则：
+选择的原则是「贵的才持久化」：模型生成的 `branch_summary` 和可重新读取的 sidecar 指针值得
+落盘；placeholder 只是本地 O(n) 派生视图，保存它会增加 marker 协议和 hydrate 二次扫描。
+历史 `ToolResultsCompactedEntry` 仍可反序列化，但读取时忽略，兼容旧 transcript 而不延续旧语义。
 
-1. `current_tail_guard` 先提交局部 `messages` 与计数回写；
-2. helper 按 `messageId` 找到目标 `TranscriptEntry::Message`；
-3. helper 保留 `id` / `parent_id` / `timestamp` / `tool_call_id` 等字段不变，仅更新 `message.content`；
-4. helper 失败只返回诊断结果，不回滚已生效的当前轮减负。
+Step 0 的回写失败只记诊断，当前请求内的指针替换仍生效；placeholder wave 更不依赖写盘。
+两者是否继续减负或升级到 Collapse，均只由当前重称结果决定。
 
 ### 5.3 单条 `branch_summary + keepalive snapshot` collapse（复用既有 `BranchSummaryEntry`）
 
@@ -696,7 +723,7 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 | 情况 | 归一化结果 | 具体动作 | 说人话 |
 | --- | --- | --- | --- |
 | `working_set_tokens >= 0.90 * budget && overflow == 0` | 诊断黄灯 | `tracing` 结构化日志；不改控制流 | 快到线了，先亮黄灯提醒。 |
-| reduction transcript helper 失败 | 非致命持久化降级 | 保留本次内存减负结果；记 `warn` / metrics；不回滚、不立即转 C | 单据一时没改成，不影响先把这轮车减下来。 |
+| Step 0 transcript helper 失败 | 非致命持久化降级 | 保留本次内存指针替换；记 `warn` / metrics；不回滚、不立即转 C | 单据一时没改成，不影响先把这轮车减下来。 |
 | B 已完成 apply + 历史再压 + tail reduction 仍超预算 | 正常升级分流 | 停止继续做局部减负，转 `collapse` | 历史和尾巴都压过了，还不够，就整份折成一条摘要。 |
 | C summary 生成失败 | 致命 guard 失败 | 返回错误给上层 attempt；不发送过载请求 | 单条摘要打不出来，这趟就别硬发。 |
 | `branch_summary` transcript 插入失败 | 非致命持久化降级 | 仅 `warn`；局部 `messages` 仍提交 C 结果 | transcript 里没插成功，不影响当前轮继续。 |
@@ -721,14 +748,19 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_behavior_test.rs::mid_turn_guard_runs_first_tail_wave_before_recheck` | DONE | tail reduction 的首个称重点落在 `Step 0 + 第一波` 之后。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_behavior_test.rs::mid_turn_guard_collapses_when_two_candidates_remain` | DONE | 剩余候选 `<= 2` 时停手转 collapse。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_behavior_test.rs::collapse_handles_missing_msg_ids_without_sink` | DONE | 缺 `msg_id` 也能补锚点并继续 collapse。 |
-| 单元 | `src/core/agent_loop/tests/current_tail_guard_test.rs::mid_turn_guard_rewrites_tail_and_transcript` | DONE | current tail 改写与 transcript best-effort 回写都生效。 |
+| 单元 | `src/core/agent_loop/tests/current_tail_guard_test.rs::mid_turn_guard_rewrites_tail_and_transcript` | DONE | Step 0 指针回写生效；placeholder wave 不写 marker。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_test.rs::collapse_to_branch_summary_keeps_planning_snapshot` | DONE | planning keepalive 在 collapse 后保留。 |
-| 单元 | `src/core/agent_loop/tests/current_tail_guard_runtime_test.rs::mid_turn_guard_reduced_tail_survives_reload` | DONE | reduced tail reload 后不会复活原文。 |
+| 单元 | `src/core/agent_loop/tests/current_tail_guard_runtime_test.rs::mid_turn_guard_reduced_tail_is_recomputed_after_reload` | DONE | placeholder wave 的原文 reload 后恢复，再由 guard 重算。 |
+| 单元 | `src/core/agent_loop/tests/current_tail_guard_runtime_test.rs::legacy_tool_results_compacted_marker_is_ignored_on_reload` | DONE | 历史 marker 可读但不再改变 hydrate 结果。 |
+| 单元 | `src/core/agent_loop/tests/current_tail_guard_behavior_test.rs::over_budget_without_preheat_still_collapses` | DONE | 无预热且本地可回收空间不足时直接走 Collapse。 |
+| 单元 | `src/core/agent_loop/tests/run_basic_test.rs::guard_runs_before_first_request_of_a_turn` | DONE | 每轮首次主请求先过 guard，不先触发一次 API overflow。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_runtime_test.rs::collapse_to_branch_summary_keeps_executing_snapshot` | DONE | executing keepalive 从 plan file 读取当前步骤。 |
 | 单元 | `src/core/agent_loop/tests/current_tail_guard_runtime_test.rs::collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_exists` | DONE | pending keepalive 会回退到第一个 pending。 |
 | 单元 | `src/core/agent_loop/tests/steering_followup_test.rs::inject_steering_messages_records_context_and_persists_msg_id` | DONE | steering 注入统一走记账 + append/persist + push。 |
 | 单元 | `src/core/session/manager/tests/context_state_test.rs::rewrite_local_tail_chars_updates_estimate_and_post_usage` | DONE | 改短了消息，称重底账也一起变。 |
 | 集成 | `tests/context_management_tests.rs::test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm` | DONE | 真正的 `AgentLoop::run()` 链路上，先减负再发下一次 LLM。 |
+| 集成(real-LLM) | `src/core/agent_loop/tests/current_tail_guard_real_llm_runtime_test.rs::real_terra_preheat_apply_and_resume_first_request_guard` | MANUAL | 真实 terra 摘要经历预热、完整 round 边界 splice 与 resume 首请求减负。 |
+| 集成(real-LLM) | `tests/current_tail_guard_real_llm_e2e.rs::real_terra_agent_loop_applies_preheat_during_build_task` | MANUAL | 真读盘/写盘 build 回合验证预热、Collapse `<recent_files>`、重载配对和 D4 usage。 |
 | 集成(real-LLM) | `tests/current_tail_guard_real_llm_tests.rs::real_llm_collapse_summary_includes_programmatic_keepalive` | DONE | A：真实摘要 + 程序 keepalive 拼接的最终文本与 entry/message 形状都锁死。 |
 | 集成(real-LLM) | `tests/current_tail_guard_real_llm_tests.rs::real_llm_reads_keepalive_and_calls_update_plan` | DONE | B：直接喂 `branch_summary + keepalive` 后，真实模型会继续调用 `update_plan`。 |
 | 集成(real-LLM) | `tests/current_tail_guard_real_llm_tests.rs::real_llm_after_reload_reads_keepalive_and_calls_update_plan` | DONE | C：reload transcript + 恢复 `PlanRuntime` 后，真实模型仍能续跑。 |
@@ -742,7 +774,7 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 | G1 | `test_reasoning_loop_mid_turn_precheck_rewrites_before_second_llm` | DONE | 发车前就要拦住。 |
 | G2 | `build_precheck_decision_covers_fit_reduce_and_collapse_routes` + `mid_turn_guard_fits_is_noop` | DONE | 看整车，不看单箱。 |
 | G3 | `mid_turn_guard_stops_after_history_compaction_without_touching_tail` + `mid_turn_guard_runs_first_tail_wave_before_recheck` + `mid_turn_guard_collapses_when_two_candidates_remain` + `mid_turn_guard_rewrites_tail_and_transcript` | DONE | 历史和 tail 的顺序、停点与刀法都锁死。 |
-| G4 | `mid_turn_guard_reduced_tail_survives_reload` + `mid_turn_guard_rewrites_tail_and_transcript` | DONE | helper 写盘成功时，关掉再开也还是同一份减负结果。 |
+| G4 | `mid_turn_guard_reduced_tail_is_recomputed_after_reload` + `legacy_tool_results_compacted_marker_is_ignored_on_reload` + `mid_turn_guard_rewrites_tail_and_transcript` | DONE | 指针会持久化，wave 原文会恢复，旧 marker 不再改变重载语义。 |
 | G5 | `collapse_to_branch_summary_keeps_planning_snapshot` + `collapse_to_branch_summary_keeps_executing_snapshot` + `collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_exists` + real-LLM A/B/C | DONE | deterministic snapshot 与真实续跑两条线都证明“压完 token 不能把 plan 压没”。 |
 | G6 | `inject_steering_messages_records_context_and_persists_msg_id` + `collapse_handles_missing_msg_ids_without_sink` | DONE | `msg_id` 边界和 steering 正规通道都锁死。 |
 | G7 | 本文 + `agent-loop.md` / `plan-runtime.md` 同步 | DONE | 阶段边界、消息生命周期与 keepalive 口径都讲同一种话。 |
@@ -754,7 +786,7 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 | 风险 | 影响 | 应对（具体动作） | 说人话 |
 | --- | --- | --- | --- |
 | **B 改完消息但不回写计数** | precheck 连续误判超重，guard 形同失效 | tail-only reduction 时统一做 `messages` / `estimate_context_chars` / `post_usage_appended_chars` 三处 delta；动到历史时直接 `invalidate_api_usage()`；补专门单测 | 文本瘦了，体重秤也得一起变。 |
-| **内存减负与 transcript 发散** | 当前轮已减下来，但 reload 后可能暂时看回原文 | reduction 始终先改内存与计数；同时通过 helper best-effort 回写 transcript，并打指标观察失败率；C 仍保持 `branch_summary + apply_boundary` 成功后才提交 collapse 结果 | 先保当前轮不超重，再尽量把账补齐。 |
+| **内存减负与 transcript 发散** | placeholder wave 当前轮减下来，reload 会看回原文 | Step 0 指针与 C 摘要持久化；wave 明确只做运行期视图，reload 后顶部 guard 重新收束；C 仍保持 `branch_summary + apply_boundary` 成功后才提交 collapse 结果 | 先保当前轮不超重；便宜的视图下次再算。 |
 | **B apply/历史再压后仍沿用旧 usage 底账** | 预算系统性偏大，后续 guard 误判 | 只要 B 动到 apply 后历史消息，立即 `ctx_state.invalidate_api_usage()`；C 也同样 invalidate | 只要动了老消息，就别继续拿旧秤砣算重量。 |
 | **`COMPACTABLE_TOOLS` 选太宽** | 破坏推理语义或让模型过度依赖重跑旧工具 | 首版固定 `read` / `search_files` / `bash` / `task_output`；其它工具默认不纳入；是否把 `list_dir` 等加入单独评估 | 白名单先小一点，别一上来什么都往里塞。 |
 | **单条 branch_summary collapse 丢执行态** | 压完 token 后 plan 续不下去 | `summaryText` 必须拼接 keepalive snapshot；数据来源固定为 `PlanRuntime + plan file + latest_plan_event`；补专门集成测 | 摘要可以瘦，但执行态不能丢。 |
@@ -772,8 +804,8 @@ reload 时 branch_summary 覆盖区间过期（id 对不上）
 | --- | --- | --- |
 | ~~继续沿用 `promptBudgetBeforeReserve` 一类旧预算命名~~ | → **否**：正式方案统一使用 `context_budget_tokens` | 名字和口径都得统一，别再让预算概念左右互搏。 |
 | ~~只靠单条阈值或只压老历史就能解决 current-tail 爆窗~~ | → **否**：阶段二必须引入 mid-turn aggregate precheck | 当前轮越跑越胖时，压老历史常常不顶用。 |
-| ~~B 只改内存 `messages`，完全不尝试持久化~~ | → **否**：仍应调用 transcript helper 尝试回写；但**不以成功作为当前轮减负前提** | 先减负，再尽量补账，顺序别反。 |
-| ~~B 走 append-only reduction ledger~~ | → **否**：实现复杂度过高，本期直接 rewrite transcript message 行 | 当前仓已有安全 rewrite 路径，就别再多造一套账本。 |
+| ~~所有 B reduction 都回写 transcript~~ | → **否**：仅 Step 0 的可重读 sidecar 指针 best-effort 回写；placeholder wave 是运行期视图 | 贵的指针留单据，便宜的占位符不造账。 |
+| ~~B 走 append-only reduction ledger / marker~~ | → **否**：不持久化 placeholder，hydrate 不再二次扫描；旧 marker 仅兼容读取并忽略 | 不要为可重算状态再造一套协议。 |
 | ~~C 新增 `current_tail.split_turn` 事件并保留 suffix verbatim~~ | → **否**：复用现有 `branch_summary + apply_boundary`，直接整份 working messages collapse | 现成成熟路径能做的，就别再为 split 新造一套。 |
 | ~~阶段二顺手把 `finish_reason` recovery 一起做掉~~ | → **否**：阶段三独立处理 | 预防型和反应型要拆开做。 |
 

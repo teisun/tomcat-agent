@@ -136,6 +136,32 @@ fn green_build_evidence_schema_requires_recorded_command_and_task() {
     );
 }
 
+#[test]
+fn todo_set_status_schema_accepts_evidence() {
+    let update_plan = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "update_plan")
+        .expect("update_plan catalog entry");
+    let update_plan_schema = (update_plan.parameters)();
+    let set_status = &update_plan_schema["properties"]["ops"]["items"]["oneOf"][1];
+    assert_eq!(set_status["properties"]["evidence"]["type"], "array");
+    assert_eq!(
+        set_status["properties"]["evidence"]["items"]["type"],
+        "string"
+    );
+
+    let todos = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "todos")
+        .expect("todos catalog entry");
+    let todos_schema = (todos.parameters)();
+    let todos_set_status = &todos_schema["properties"]["ops"]["items"]["oneOf"][1];
+    assert!(
+        todos_set_status["properties"].get("evidence").is_none(),
+        "plan completion evidence must not leak into the session-local todos contract"
+    );
+}
+
 /// 聚合去重：跨工具规则只说一遍，且包含被测试依赖的关键锚点。
 #[test]
 fn tool_guidelines_aggregate_dedup_and_contain_key_anchors() {

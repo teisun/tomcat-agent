@@ -52,6 +52,7 @@ fn plan_build_warns_but_continues_with_active_session_todos() {
         id: "live".into(),
         content: "x".into(),
         status: TodoStatus::Pending,
+        evidence: Vec::new(),
         kind: Default::default(),
     }]);
     let outcome = rt

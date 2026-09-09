@@ -191,6 +191,9 @@ pub struct PlanRuntime {
     reviewer_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
     /// 计数 verifier 前 code reviewer 实际派发轮次。
     code_review_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
+    /// 执行中 plan 的 provider 缓存观测；用于在 `plan.complete` 留下本次 build 的实测比率。
+    plan_cache_observations:
+        parking_lot::Mutex<std::collections::HashMap<String, PlanCacheObservation>>,
     /// 上一次 code reviewer 派发的 wall-clock 时间，用 mtime 划定下一轮增量范围。
     last_code_review_dispatch_ms: parking_lot::Mutex<std::collections::HashMap<String, u128>>,
     /// 上一轮 code review 留下的未清 finding。下一轮 reviewer 逐条按语义核销已修项；
@@ -243,6 +246,63 @@ pub struct PlanRuntime {
 pub type TranscriptAppender =
     Arc<dyn Fn(serde_json::Value) -> Result<(), crate::infra::error::AppError> + Send + Sync>;
 pub type TranscriptEventNotifier = Arc<dyn Fn(serde_json::Value) + Send + Sync>;
+
+/// Provider-reported cache observations collected only while one plan is executing.
+///
+/// This mirrors the session-level counters held by `ContextState`, but is deliberately
+/// keyed by plan so `plan.complete` can emit the build's totals without reaching into the
+/// mutable agent loop.
+#[derive(Debug, Clone, Default)]
+struct PlanCacheObservation {
+    prompt_tokens_total: u64,
+    cache_read_tokens_total: u64,
+    cache_observed_prompt_tokens_total: u64,
+    cache_observed_request_count: u32,
+    consecutive_cache_miss: u32,
+    consecutive_cache_miss_max: u32,
+    tail_changed_count: u32,
+    tail_change_miss_tokens: u64,
+}
+
+impl PlanCacheObservation {
+    fn observe(&mut self, prompt_tokens: u32, cache_read_tokens: Option<u32>, tail_changed: bool) {
+        self.prompt_tokens_total += u64::from(prompt_tokens);
+        if tail_changed {
+            self.tail_changed_count = self.tail_changed_count.saturating_add(1);
+            self.tail_change_miss_tokens += u64::from(prompt_tokens);
+        }
+        let Some(cache_read_tokens) = cache_read_tokens else {
+            return;
+        };
+        self.cache_observed_request_count = self.cache_observed_request_count.saturating_add(1);
+        self.cache_observed_prompt_tokens_total += u64::from(prompt_tokens);
+        self.cache_read_tokens_total += u64::from(cache_read_tokens);
+        if cache_read_tokens == 0 {
+            self.consecutive_cache_miss = self.consecutive_cache_miss.saturating_add(1);
+            self.consecutive_cache_miss_max = self
+                .consecutive_cache_miss_max
+                .max(self.consecutive_cache_miss);
+        } else {
+            self.consecutive_cache_miss = 0;
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        let cache_hit_ratio = (self.cache_observed_prompt_tokens_total > 0).then(|| {
+            self.cache_read_tokens_total as f64 / self.cache_observed_prompt_tokens_total as f64
+        });
+        serde_json::json!({
+            "promptTokensTotal": self.prompt_tokens_total,
+            "cacheReadTokensTotal": self.cache_read_tokens_total,
+            "cacheObservedPromptTokensTotal": self.cache_observed_prompt_tokens_total,
+            "cacheObservedRequestCount": self.cache_observed_request_count,
+            "cacheHitRatio": cache_hit_ratio,
+            "consecutiveMissMax": self.consecutive_cache_miss_max,
+            "tailChangedCount": self.tail_changed_count,
+            "tailChangeMissTokens": self.tail_change_miss_tokens,
+        })
+    }
+}
 
 impl PlanRuntime {
     /// 构造一个绑定到 session_key 的 PlanRuntime。
@@ -297,6 +357,7 @@ impl PlanRuntime {
             max_completion_gate_cycles: AtomicU32::new(3),
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             code_review_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            plan_cache_observations: parking_lot::Mutex::new(std::collections::HashMap::new()),
             last_code_review_dispatch_ms: parking_lot::Mutex::new(std::collections::HashMap::new()),
             unresolved_findings: parking_lot::Mutex::new(std::collections::HashMap::new()),
             disputed_findings: parking_lot::Mutex::new(std::collections::HashMap::new()),
@@ -1123,6 +1184,55 @@ impl PlanRuntime {
         }));
     }
 
+    /// 代码评审预算已用尽后，验收期间又修改了代码。
+    ///
+    /// 预算决定不再重开 reviewer；此事件保留那批未复审代码的可审计痕迹，避免把
+    /// 「没有新的 review」伪装成「没有新的改动」。
+    pub(crate) fn write_code_review_unreviewed_edit_transcript(
+        &self,
+        plan_id: &str,
+        rounds: u32,
+        changed_code_files: &[String],
+        newest_edit_mtime_ms: u128,
+    ) {
+        self.write_transcript_custom(serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW_UNREVIEWED_EDIT,
+            "plan_id": plan_id,
+            "rounds": rounds,
+            "max_code_review_rounds": self.max_code_review_rounds(),
+            "changed_code_files": changed_code_files,
+            "newest_edit_mtime_ms": newest_edit_mtime_ms,
+        }));
+    }
+
+    /// Record provider usage for the active build only. Calls made in normal chat or planning
+    /// mode are deliberately excluded, so plan completion reports are not polluted by earlier
+    /// conversation cache traffic.
+    pub(crate) fn record_plan_cache_usage(
+        &self,
+        prompt_tokens: u32,
+        cache_read_tokens: Option<u32>,
+        tail_changed: bool,
+    ) {
+        let Some(plan_id) = self.executing_plan_id() else {
+            return;
+        };
+        self.plan_cache_observations
+            .lock()
+            .entry(plan_id)
+            .or_default()
+            .observe(prompt_tokens, cache_read_tokens, tail_changed);
+    }
+
+    /// Returns a JSON-ready snapshot so `plan.complete` can be an auditable build outcome even
+    /// though it is emitted from the plan tool rather than the agent loop.
+    pub(crate) fn plan_cache_observation_json(&self, plan_id: &str) -> Option<serde_json::Value> {
+        self.plan_cache_observations
+            .lock()
+            .get(plan_id)
+            .map(PlanCacheObservation::to_json)
+    }
+
     /// 用于单测 / 集成测：清除指定 plan_id 的 reviewer round 计数。
     pub fn reset_reviewer_rounds(&self, plan_id: &str) {
         self.reviewer_rounds.lock().remove(plan_id);
@@ -1485,6 +1595,7 @@ impl PlanRuntime {
         // 一次 build 就是一次交付尝试，code review 轮数预算按次发放而不是按计划终身发放。
         // 少了这一步，同一进程里二次 build 同一个计划会因为计数器没清而直接跳过 review。
         self.reset_code_review_rounds(&plan_id);
+        self.plan_cache_observations.lock().remove(&plan_id);
 
         // E6：`[plan].auto_checkpoint_on_build`（默认 false）→ 写 `Manual{label="plan_build:..."}`。
         // record 失败仅 warning（盘异常不阻 EXEC 推进，D 防御）。

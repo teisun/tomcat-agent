@@ -13,12 +13,14 @@ fn todo_file_roundtrips_markdown_with_status_checkboxes() {
         id: "t1".into(),
         content: "first".into(),
         status: TodoStatus::InProgress,
+        evidence: Vec::new(),
         kind: Default::default(),
     });
     f.items.push(TodoItem {
         id: "t2".into(),
         content: "second".into(),
         status: TodoStatus::Completed,
+        evidence: Vec::new(),
         kind: Default::default(),
     });
     let runtime = TodosRuntime::new(dir.path().to_path_buf(), "ses-a");
@@ -63,6 +65,7 @@ fn todos_runtime_isolates_multiple_sessions_without_purge() {
         id: "a1".into(),
         content: "from a".into(),
         status: TodoStatus::Pending,
+        evidence: Vec::new(),
         kind: Default::default(),
     });
     let mut file_b = TodoFile::new("td_b", None);
@@ -70,6 +73,7 @@ fn todos_runtime_isolates_multiple_sessions_without_purge() {
         id: "b1".into(),
         content: "from b".into(),
         status: TodoStatus::Completed,
+        evidence: Vec::new(),
         kind: Default::default(),
     });
 

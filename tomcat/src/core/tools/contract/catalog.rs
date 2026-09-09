@@ -453,7 +453,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "update_plan",
         label: "Update Plan",
-        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. Up to three independent todos may be `in_progress`. When all todos reach `completed` in EXEC, the runtime runs applicable completion gates before allowing state=completed. Only frontmatter.todos is mutated; plan body markdown is left untouched.\n",
+        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. In EXEC, an existing work todo's `content` is frozen; record progress and verification in `set_status.evidence` instead. Up to three independent todos may be `in_progress`. When all todos reach `completed` in EXEC, the runtime runs applicable completion gates before allowing state=completed. Only frontmatter.todos is mutated; plan body markdown is left untouched.\n",
         display_summary: Some("Apply todo-only incremental ops to the active plan (CHAT/PLAN/EXEC)."),
         parameters: update_plan_parameters,
         scope: PermissionScope::Write,
@@ -679,7 +679,26 @@ fn todo_status_property(description: &str) -> Value {
     })
 }
 
-fn shared_todo_op_item_schema(status_description: &str) -> Value {
+fn shared_todo_op_item_schema(status_description: &str, include_evidence: bool) -> Value {
+    let mut set_status_properties = serde_json::json!({
+        "kind": {
+            "type": "string",
+            "const": "set_status",
+            "description": "Operation kind."
+        },
+        "id": {
+            "type": "string",
+            "description": "Target todo id (kebab-case)."
+        },
+        "status": todo_status_property(status_description),
+    });
+    if include_evidence {
+        set_status_properties["evidence"] = serde_json::json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Completion evidence. Only valid with status=`completed`; include concrete verification such as task:<id>, file:<path>, or a command outcome."
+        });
+    }
     serde_json::json!({
         "oneOf": [
             {
@@ -707,18 +726,7 @@ fn shared_todo_op_item_schema(status_description: &str) -> Value {
             {
                 "type": "object",
                 "description": "`set_status` only changes status for an existing todo.",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "const": "set_status",
-                        "description": "Operation kind."
-                    },
-                    "id": {
-                        "type": "string",
-                        "description": "Target todo id (kebab-case)."
-                    },
-                    "status": todo_status_property(status_description)
-                },
+                "properties": set_status_properties,
                 "required": ["kind", "id", "status"],
                 "additionalProperties": false
             },
@@ -1276,7 +1284,8 @@ fn update_plan_parameters() -> Value {
                 "type": "array",
                 "description": "Ordered todo mutations applied atomically. Omit or pass [] only when submitting dispute_findings or green-build evidence.",
                 "items": shared_todo_op_item_schema(
-                    "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing."
+                    "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing.",
+                    true,
                 )
             },
             "dispute_findings": {
@@ -1337,7 +1346,8 @@ fn todos_parameters() -> Value {
                 "description": "Ordered list of mutations applied in order.",
                 "minItems": 1,
                 "items": shared_todo_op_item_schema(
-                    "For `upsert` (optional) and `set_status` (required)."
+                    "For `upsert` (optional) and `set_status` (required).",
+                    false,
                 )
             }
         },

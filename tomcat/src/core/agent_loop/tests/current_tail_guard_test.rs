@@ -15,7 +15,7 @@ use crate::core::llm::{
 use crate::core::plan_runtime::file_store::{PlanFileState, TodoItem, TodoStatus};
 use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{
-    estimate_msg_chars, ApiUsage, ContextState, PlanEventKind, PlanEventRef,
+    estimate_msg_chars, ApiUsage, CompactionResult, ContextState, PlanEventKind, PlanEventRef,
 };
 use crate::core::session::transcript::{
     append_entry, read_entries_tail, write_header, MessageEntry, SessionHeader, TranscriptEntry,
@@ -190,9 +190,19 @@ async fn mid_turn_guard_rewrites_tail_and_transcript() {
     assert!(transcript_tool_texts
         .iter()
         .any(|text| text.starts_with("[Tool result persisted:")));
-    assert!(transcript_tool_texts
-        .iter()
-        .any(|text| text == TOOL_RESULT_PLACEHOLDER));
+    assert!(
+        !transcript_tool_texts
+            .iter()
+            .any(|text| text == TOOL_RESULT_PLACEHOLDER),
+        "placeholder waves must leave original JSONL message bodies intact"
+    );
+    assert!(
+        !read_entries_tail(&transcript, 20)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(entry, TranscriptEntry::ToolResultsCompacted(_))),
+        "placeholder waves must remain runtime-only and never append a marker"
+    );
 }
 
 #[tokio::test]
@@ -209,12 +219,14 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
             id: "t1".to_string(),
             content: "step pending".to_string(),
             status: TodoStatus::Pending,
+            evidence: Vec::new(),
             kind: Default::default(),
         },
         TodoItem {
             id: "t2".to_string(),
             content: "step active".to_string(),
             status: TodoStatus::InProgress,
+            evidence: Vec::new(),
             kind: Default::default(),
         },
     ]);
@@ -222,7 +234,32 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     let system = ChatMessage::system("sys");
     let mut user = ChatMessage::user("u".repeat(4_000));
     user.msg_id = Some("u1".to_string());
-    let mut assistant = ChatMessage::assistant("a".repeat(4_000));
+    let mut tool_calls = (1..=25)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("read-{index}"),
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "arguments": format!(r#"{{"path":"src/read-{index}.rs"}}"#),
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    tool_calls.extend([
+        serde_json::json!({
+            "id": "edit-1",
+            "type": "function",
+            "function": {"name": "edit", "arguments": r#"{"path":"src/edited.rs"}"#},
+        }),
+        serde_json::json!({
+            "id": "write-1",
+            "type": "function",
+            "function": {"name": "write", "arguments": r#"{"path":"src/written.rs"}"#},
+        }),
+    ]);
+    let mut assistant =
+        ChatMessage::assistant_with_tool_calls(Some(&"a".repeat(4_000)), tool_calls);
     assistant.msg_id = Some("a1".to_string());
     append_transcript_message(&transcript, &user);
     append_transcript_message(&transcript, &assistant);
@@ -280,6 +317,16 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     assert!(text.starts_with("<control_state>"));
     assert!(text.contains("mode: plan"));
     assert!(text.contains("<verbatim_user_messages>"));
+    assert!(text.contains("<recent_files>"));
+    assert!(
+        !text.contains("src/read-5.rs"),
+        "only the latest 20 unique read paths should be retained"
+    );
+    assert!(text.contains("src/read-6.rs"));
+    assert!(text.contains("src/read-25.rs"));
+    assert!(text.contains("src/edited.rs"));
+    assert!(text.contains("src/written.rs"));
+    assert!(text.contains("git status --short"));
     let sidecar_path = user_message_sidecar_path(&transcript);
     assert!(
         sidecar_path.is_file(),
@@ -320,6 +367,219 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
         }
         other => panic!("expected collapse branch summary, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn preheat_starts_at_tool_round_when_ratio_reaches_half() {
+    let mut user = ChatMessage::user("u".repeat(100));
+    user.msg_id = Some("u1".to_string());
+    let mut messages = vec![ChatMessage::system("sys"), user];
+    let config = AgentLoopConfig {
+        session_id: "sess-midturn-preheat".to_string(),
+        ..Default::default()
+    };
+    let mut agent = AgentLoop::new(
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "summary".to_string(),
+            }),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        config,
+        CancellationToken::new(),
+    );
+    agent.start_idx = 1;
+    agent.context_tail_start = 1;
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: 100,
+        context_budget_chars: 120,
+        context_budget_tokens: 30,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    let preheat = &agent.context_state.as_ref().unwrap().preheat;
+    assert!(
+        preheat.is_running() || preheat.is_finished(),
+        "the guard's Fits path must start a preheat once the build reaches 50%"
+    );
+    agent.context_state.as_mut().unwrap().preheat.abort();
+}
+
+#[tokio::test]
+async fn over_budget_with_ready_preheat_folds_front_half_and_keeps_tail() {
+    let mut first = ChatMessage::user("a".repeat(400));
+    first.msg_id = Some("u1".to_string());
+    let mut covered_end = ChatMessage::assistant("b".repeat(400));
+    covered_end.msg_id = Some("a1".to_string());
+    let mut tail = tool_message("t1", "call-1", "tail must remain raw");
+    tail.timestamp = Some("2026-09-08T00:00:00Z".to_string());
+    let mut messages = vec![ChatMessage::system("sys"), first, covered_end, tail];
+    let mut preheat = Preheat::new();
+    preheat.restore_completed(CompactionResult {
+        summary_text: "preheated prefix summary".to_string(),
+        covered_start_id: "u1".to_string(),
+        covered_end_id: "a1".to_string(),
+        covered_count: 2,
+        transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: Some(200),
+        estimated_summary_tokens: Some(8),
+        estimated_tokens_saved: Some(192),
+        preheat_elapsed_ms: 1,
+    });
+    let config = AgentLoopConfig {
+        session_id: "sess-ready-midturn-preheat".to_string(),
+        ..Default::default()
+    };
+    let mut agent = AgentLoop::new(
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "unused".to_string(),
+            }),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        config,
+        CancellationToken::new(),
+    );
+    agent.start_idx = 1;
+    agent.context_tail_start = 1;
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: 900,
+        context_budget_chars: 400,
+        context_budget_tokens: 100,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat,
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    assert_eq!(messages.len(), 3, "system + prefix summary + raw tail");
+    assert_eq!(
+        messages[1].kind,
+        crate::core::llm::MessageKind::CompactionSummary
+    );
+    assert_eq!(messages[2].text_content(), Some("tail must remain raw"));
+    assert_eq!(agent.start_idx, 3);
+}
+
+#[tokio::test]
+async fn midturn_summary_boundary_lands_on_round_boundary() {
+    let mut user = ChatMessage::user("u".repeat(400));
+    user.msg_id = Some("u1".to_string());
+    let mut first_assistant = ChatMessage::assistant_with_tool_calls(
+        Some("first tool round"),
+        vec![serde_json::json!({
+            "id": "tc1",
+            "type": "function",
+            "function": {"name": "read", "arguments": r#"{"path":"one.txt"}"#},
+        })],
+    );
+    first_assistant.msg_id = Some("a1".to_string());
+    let first_tool = tool_message("t1", "tc1", &"one\n".repeat(100));
+    let mut second_assistant = ChatMessage::assistant_with_tool_calls(
+        Some("second tool round"),
+        vec![serde_json::json!({
+            "id": "tc2",
+            "type": "function",
+            "function": {"name": "read", "arguments": r#"{"path":"two.txt"}"#},
+        })],
+    );
+    second_assistant.msg_id = Some("a2".to_string());
+    let second_tool = tool_message("t2", "tc2", &"two\n".repeat(25));
+    let mut messages = vec![
+        ChatMessage::system("sys"),
+        user,
+        first_assistant,
+        first_tool,
+        second_assistant,
+        second_tool,
+    ];
+    let mut preheat = Preheat::new();
+    preheat.restore_completed(CompactionResult {
+        summary_text: "preheated first round".to_string(),
+        covered_start_id: "u1".to_string(),
+        covered_end_id: "t1".to_string(),
+        covered_count: 3,
+        transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
+    });
+    let chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut agent = AgentLoop::new(
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "unused".to_string(),
+            }),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "midturn-boundary".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.start_idx = 1;
+    agent.context_tail_start = 1;
+    agent.set_context_state(Some(ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: chars + 800,
+        context_budget_chars: 1_200,
+        context_budget_tokens: 300,
+        last_api_usage: None,
+        post_usage_appended_chars: chars,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat,
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        messages[1].kind,
+        crate::core::llm::MessageKind::CompactionSummary
+    );
+    assert_eq!(
+        messages[2].role,
+        crate::core::llm::ChatMessageRole::Assistant,
+        "the first raw message after a preheat summary must begin the next complete tool round"
+    );
+    assert!(
+        !crate::core::session::has_dangling_tool_calls_in_messages(&messages),
+        "the summary splice must preserve paired assistant/tool messages"
+    );
 }
 
 fn tool_message(id: &str, tool_call_id: &str, text: &str) -> ChatMessage {

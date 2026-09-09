@@ -4,18 +4,19 @@
 //! 已把"具体动作"全部委托给同级子模块，本文件只关心**何时调用谁**：
 //!
 //! 1. **取消预检**：`cancel_token.is_cancelled()` → `make_aborted`（早返回）
-//! 2. **TurnStart 发射**（带 unix_ts_ms 时间戳）
-//! 3. **首轮 metrics**：`turn_index == 1` 时 `emit_context_metrics()` + 诊断 info!
-//! 4. **Stream 消费**：`stream_handler::run_chat_stream`（同步发 Message{Start,Update,End}）
-//! 5. **Stream 中断善后**：把 partial `content_buf` 落到 messages，再 `make_aborted`
-//! 6. **text-only 收束**：`tool_calls.is_empty()` → `turn_finalize::finalize_turn_after_text` →
+//! 2. **请求前 guard**：每次请求前 `maybe_reduce_before_next_llm`，必要时减负或折叠
+//! 3. **TurnStart 发射**（带 unix_ts_ms 时间戳）
+//! 4. **首轮 metrics**：`turn_index == 1` 时 `emit_context_metrics()` + 诊断 info!
+//! 5. **Stream 消费**：`stream_handler::run_chat_stream`（同步发 Message{Start,Update,End}）
+//! 6. **Stream 中断善后**：把 partial `content_buf` 落到 messages，再 `make_aborted`
+//! 7. **text-only 收束**：`tool_calls.is_empty()` → `turn_finalize::finalize_turn_after_text` →
 //!    立即 `Ok(final_text)`（不再发 TurnEnd，因为 finalize 内已发）
-//! 7. **tool_calls 调度**：`tool_dispatcher::run_tool_calls`（统一 push assistant +
+//! 8. **tool_calls 调度**：`tool_dispatcher::run_tool_calls`（统一 push assistant +
 //!    block 检查 + 事件配对 + cancel 抢占）
-//! 8. **TurnEnd 发射**（携带 dispatch.tool_results）
-//! 9. **Steering**：`dispatch.steered == true` 立即 `continue`，跳过 follow-up / max_tool_rounds
-//! 10. **FollowUp**：非 steered 且后续仍要继续请求时，先 drain `follow_up_queue`
-//! 11. **轮次上限**：`turn_index >= max_tool_rounds` 时 `emit_context_metrics` + `Ok`
+//! 9. **TurnEnd 发射**（携带 dispatch.tool_results）
+//! 10. **Steering**：`dispatch.steered == true` 立即 `continue`，跳过 follow-up / max_tool_rounds
+//! 11. **FollowUp**：非 steered 且后续仍要继续请求时，先 drain `follow_up_queue`
+//! 12. **轮次上限**：`turn_index >= max_tool_rounds` 时 `emit_context_metrics` + `Ok`
 //!
 //! ## 为什么是自由函数而非 `impl AgentLoop`
 //!
@@ -94,6 +95,9 @@ pub(super) async fn run_reasoning_loop(
         if agent.cancel_token.is_cancelled() {
             return Err(agent.make_aborted(messages, final_text));
         }
+        current_tail_guard::maybe_reduce_before_next_llm(agent, messages)
+            .await
+            .map_err(LoopError::Fatal)?;
         if crate::core::session::has_dangling_tool_calls_in_messages(messages) {
             return Err(LoopError::Fatal(crate::infra::error::AppError::invariant(
                 "llm_request",
@@ -123,6 +127,14 @@ pub(super) async fn run_reasoning_loop(
         });
 
         let request_messages = with_ephemeral_tail(messages, agent);
+        let ephemeral_tail = request_messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.kind, MessageKind::EphemeralTail))
+            .and_then(ChatMessage::text_content);
+        if let Some(ctx_state) = agent.context_state.as_mut() {
+            ctx_state.session_obs.observe_ephemeral_tail(ephemeral_tail);
+        }
         let mut req = ChatRequest {
             messages: request_messages,
             model: agent.wire_model().to_string(),
@@ -427,9 +439,6 @@ pub(super) async fn run_reasoning_loop(
         });
 
         if dispatch.steered {
-            current_tail_guard::maybe_reduce_before_next_llm(agent, messages)
-                .await
-                .map_err(LoopError::Fatal)?;
             continue;
         }
 
@@ -440,9 +449,5 @@ pub(super) async fn run_reasoning_loop(
         }
 
         inject_follow_up_messages(agent, messages).map_err(LoopError::Fatal)?;
-
-        current_tail_guard::maybe_reduce_before_next_llm(agent, messages)
-            .await
-            .map_err(LoopError::Fatal)?;
     }
 }

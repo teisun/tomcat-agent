@@ -103,6 +103,11 @@ fn valid_fingerprint_reuses_existing_sidecar_then_new_user_rebuilds_it() {
     );
 
     let path = ensure_user_message_sidecar(&transcript).unwrap();
+    assert_eq!(
+        read_sidecar_fingerprint(&path).unwrap(),
+        Some(transcript_fingerprint(&transcript).unwrap()),
+        "a just-written sidecar header must deserialize and match the transcript"
+    );
     let before = fs::read(&path).unwrap();
     ensure_user_message_sidecar(&transcript).unwrap();
     assert_eq!(

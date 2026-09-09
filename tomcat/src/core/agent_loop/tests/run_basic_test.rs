@@ -22,7 +22,9 @@ use crate::core::llm::{
 };
 use crate::core::plan_runtime::file_store::PlanFileState;
 use crate::core::plan_runtime::PlanRuntime;
-use crate::core::session::manager::{estimate_msg_chars, ContextState, MessageAppendSink};
+use crate::core::session::manager::{
+    estimate_msg_chars, ApiUsage, ContextState, MessageAppendSink,
+};
 use crate::infra::error::{llm_error, llm_http_status_error, AppError, LlmError, LlmErrorStage};
 use crate::infra::event_bus::EventBus;
 use crate::infra::{wire, DefaultEventBus, EventContext};
@@ -692,7 +694,13 @@ async fn run_second_overflow_collapses_and_strictly_shrinks_main_requests() {
         },
         CancellationToken::new(),
     );
-    loop_.set_context_state(Some(overbudget_context_state(initial_messages.clone())));
+    let mut stale_estimate = overbudget_context_state(initial_messages.clone());
+    stale_estimate.last_api_usage = Some(ApiUsage {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+    });
+    stale_estimate.post_usage_appended_chars = 0;
+    loop_.set_context_state(Some(stale_estimate));
 
     let outcome = loop_.run(initial_messages).await;
 
@@ -733,6 +741,59 @@ async fn run_second_overflow_collapses_and_strictly_shrinks_main_requests() {
             [message] if message.kind == MessageKind::CompactionSummary
         ),
         "second overflow must replace retained history with a compaction summary"
+    );
+}
+
+#[tokio::test]
+async fn guard_runs_before_first_request_of_a_turn() {
+    let initial_messages = vec![
+        large_user_turn("oldest"),
+        large_user_turn("middle"),
+        large_user_turn("latest"),
+    ];
+    let (provider, requests) =
+        RecordingStreamLlmProvider::new(vec![ok_text_stream("guarded before first request")]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "first-request-guard".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    let mut context_state = overbudget_context_state(initial_messages.clone());
+    context_state.context_budget_chars = 4_000;
+    context_state.context_budget_tokens = 1_000;
+    loop_.set_context_state(Some(context_state));
+
+    let outcome = loop_.run(initial_messages).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "the first request should be sent after proactive compaction: {outcome:?}"
+    );
+    let recorded = requests.0.lock().unwrap().clone();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "the guard must prevent an overflow round-trip"
+    );
+    assert!(
+        recorded[0]
+            .messages
+            .iter()
+            .any(|message| message.kind == MessageKind::CompactionSummary),
+        "the first provider request should receive proactively collapsed context"
+    );
+    assert!(
+        recorded[0].messages.iter().all(|message| {
+            !message
+                .text_content()
+                .is_some_and(|text| text.starts_with("oldest:"))
+        }),
+        "the first provider request must not resend the oversized raw prefix"
     );
 }
 

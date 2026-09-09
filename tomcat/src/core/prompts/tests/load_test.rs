@@ -22,6 +22,8 @@ fn executor_prompt_renders_plan_id() {
     assert!(rendered.contains("plan_demo_aaaa1111"));
     assert!(rendered.contains("update_plan"));
     assert!(rendered.contains("off-limits"));
+    assert!(rendered.contains("content` is frozen"));
+    assert!(rendered.contains("evidence"));
 }
 
 #[test]
@@ -206,6 +208,7 @@ fn every_tool_named_in_a_template_exists_in_the_catalog() {
         "concern",
         "content",
         "cwd",
+        "evidence",
         "exit_code",
         "fail",
         "false",

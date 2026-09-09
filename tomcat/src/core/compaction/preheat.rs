@@ -99,7 +99,7 @@ pub(crate) struct SummaryRequestOptions<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt templates (T2-P0-002 Phase B — 9 节模板，唯一来源：
+// Prompt templates (T2-P0-002 Phase B — 8 节模板，唯一来源：
 //   - docs/reports/compaction-prompt-cc-vs-pi.md §5.3 (BASE)
 //   - docs/reports/compaction-prompt-cc-vs-pi.md §5.4 (UPDATE)
 //
@@ -125,10 +125,6 @@ Use this EXACT format:
 
 ## Goal
 [What is the user trying to accomplish? Can be multiple items.]
-
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "(none)" if none were mentioned]
 
 ## Progress
 ### Done
@@ -175,11 +171,19 @@ RULES:
 - When the old summary is already large, compress older details to stay within budget
 - PRESERVE exact file paths, function names, and error messages
 
-Use the EXACT same format as the original summary (Goal / Constraints & Preferences / Progress / Errors Encountered / Key Decisions / Next Steps / Critical Context)."#;
+Use the EXACT same format as the original summary (Goal / Progress / Errors Encountered / Key Decisions / Next Steps / Critical Context)."#;
 
 // ---------------------------------------------------------------------------
 // PreheatState (internal — not pub)
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum PreheatPersistence {
+    /// Normal turn-boundary preheat can safely materialize its provisional entry in background.
+    Eager,
+    /// Build-mode preheat overlaps foreground transcript appends; persist only on application.
+    Deferred,
+}
 
 enum PreheatState {
     Idle,
@@ -353,6 +357,66 @@ impl Preheat {
         emitter: Arc<ScopedEventEmitter>,
         control: Option<ControlSnapshot>,
     ) -> bool {
+        self.try_start_with_persistence(
+            usage_ratio,
+            messages,
+            transcript_path,
+            cache_key,
+            llm,
+            resolved_output_limit,
+            config,
+            emitter,
+            control,
+            PreheatPersistence::Eager,
+        )
+    }
+
+    /// Starts a preheat whose successful boundary is persisted only when the caller applies it.
+    ///
+    /// Build-mode preheat overlaps subsequent tool rounds.  Deferring the full transcript rewrite
+    /// prevents its background task from racing those foreground appends.  The transcript path is
+    /// still supplied to summary generation so the user-message sidecar remains available.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_start_deferred(
+        &mut self,
+        usage_ratio: f64,
+        messages: &[ChatMessage],
+        transcript_path: &std::path::Path,
+        cache_key: Option<String>,
+        llm: Arc<dyn LlmProvider>,
+        resolved_output_limit: Option<u32>,
+        config: &ContextConfig,
+        emitter: Arc<ScopedEventEmitter>,
+        control: Option<ControlSnapshot>,
+    ) -> bool {
+        self.try_start_with_persistence(
+            usage_ratio,
+            messages,
+            transcript_path,
+            cache_key,
+            llm,
+            resolved_output_limit,
+            config,
+            emitter,
+            control,
+            PreheatPersistence::Deferred,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_start_with_persistence(
+        &mut self,
+        usage_ratio: f64,
+        messages: &[ChatMessage],
+        transcript_path: &std::path::Path,
+        cache_key: Option<String>,
+        llm: Arc<dyn LlmProvider>,
+        resolved_output_limit: Option<u32>,
+        config: &ContextConfig,
+        emitter: Arc<ScopedEventEmitter>,
+        control: Option<ControlSnapshot>,
+        persistence: PreheatPersistence,
+    ) -> bool {
         if !self.is_idle() {
             return false;
         }
@@ -425,21 +489,25 @@ impl Preheat {
                                 attempts: None,
                             });
 
-                        let (transcript_compaction_entry_id, append_ok) = if transcript_path
-                            .as_os_str()
-                            .is_empty()
-                        {
-                            (Some(batch_compaction_id.clone()), true)
-                        } else {
-                            match insert_entry_after_message_id(
-                                &transcript_path,
-                                &covered_end_id,
-                                &branch_summary_entry,
-                            ) {
-                                Ok(()) => (Some(batch_compaction_id.clone()), true),
-                                Err(e) => {
-                                    warn!("preheat insert_entry_after_message_id failed: {}", e);
-                                    (None, false)
+                        let (transcript_compaction_entry_id, append_ok) = match persistence {
+                            PreheatPersistence::Deferred => (None, true),
+                            PreheatPersistence::Eager if transcript_path.as_os_str().is_empty() => {
+                                (Some(batch_compaction_id.clone()), true)
+                            }
+                            PreheatPersistence::Eager => {
+                                match insert_entry_after_message_id(
+                                    &transcript_path,
+                                    &covered_end_id,
+                                    &branch_summary_entry,
+                                ) {
+                                    Ok(()) => (Some(batch_compaction_id.clone()), true),
+                                    Err(e) => {
+                                        warn!(
+                                            "preheat insert_entry_after_message_id failed: {}",
+                                            e
+                                        );
+                                        (None, false)
+                                    }
                                 }
                             }
                         };
@@ -512,7 +580,9 @@ impl Preheat {
                 error: Some(last_error.clone()),
                 attempts: Some(MAX_PREHEAT_RETRIES),
             });
-            if !transcript_path.as_os_str().is_empty() {
+            if matches!(persistence, PreheatPersistence::Eager)
+                && !transcript_path.as_os_str().is_empty()
+            {
                 if let Err(e) =
                     insert_entry_after_message_id(&transcript_path, &covered_end_id, &failure_entry)
                 {
@@ -737,7 +807,7 @@ pub(crate) async fn generate_summary_with_output_limit(
         ..Default::default()
     };
 
-    let resp = llm.chat(req).await?;
+    let resp = llm.chat_collect(req).await?;
     let mut text = resp
         .choices
         .first()

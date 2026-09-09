@@ -406,8 +406,21 @@ pub(super) async fn run_chat_stream(
                     cache_read_tokens,
                     cache_write_tokens,
                 );
-                if let Some(ref mut ctx_state) = agent.context_state {
+                let tail_changed = if let Some(ref mut ctx_state) = agent.context_state {
                     ctx_state.update_api_usage(prompt_tokens, completion_tokens);
+                    ctx_state
+                        .session_obs
+                        .observe_provider_usage(prompt_tokens, cache_read_tokens);
+                    ctx_state.session_obs.last_request_tail_changed()
+                } else {
+                    false
+                };
+                if let Some(plan_runtime) = agent.config.plan_runtime.as_ref() {
+                    plan_runtime.record_plan_cache_usage(
+                        prompt_tokens,
+                        cache_read_tokens,
+                        tail_changed,
+                    );
                 }
                 // A tool-using turn may remain active for many more LLM/tool
                 // rounds. Publish the provider-backed measurement here rather
