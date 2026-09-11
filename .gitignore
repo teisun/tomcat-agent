@@ -37,7 +37,7 @@ build/
 /.cursor/rules/
 node_modules/
 test-stuff/
-.tomcat/shots/
+.agents/shots/
 tomcat-vscode-ext/.build-artifacts.json
 tomcat/assets/cache/
 

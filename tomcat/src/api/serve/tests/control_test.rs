@@ -7,7 +7,7 @@ use std::time::Duration;
 use serial_test::serial;
 
 fn write_session_plugin_fixture(workspace: &std::path::Path, plugin_id: &str) {
-    let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
+    let plugin_dir = workspace.join(".agents").join("plugins").join(plugin_id);
     fs::create_dir_all(&plugin_dir).expect("create plugin fixture dir");
     let manifest = serde_json::json!({
         "id": plugin_id,
@@ -158,6 +158,7 @@ async fn serve_connector_commands_keep_list_light_and_tools_on_demand() {
     let _api_key = EnvGuard::set(CONNECTOR_TEST_API_KEY_ENV, "test-key");
     let temp = tempfile::tempdir().expect("temporary directory");
     let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.workspace.project_resource_dir = ".workspace-data".to_string();
     cfg.connector.enabled = true;
     fs::write(
         temp.path().join("models.toml"),
@@ -175,6 +176,32 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     )
     .expect("write isolated connector test model");
     let (state, buffer, _temp, _slot) = build_initialized_state_with_config(temp, cfg).await;
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListConnectors {
+            id: Some("list-empty-connectors".to_string()),
+        },
+    )
+    .await
+    .expect("list empty connectors");
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-empty-connectors")
+    })
+    .await;
+    let empty_listed = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("list-empty-connectors")
+        })
+        .expect("empty list response");
+    assert_eq!(empty_listed["payload"]["connectors"], serde_json::json!([]));
+    assert!(
+        empty_listed["payload"]["configPaths"]["workspace"]["raw"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(".workspace-data/mcp.json")),
+        "an empty connector list must still provide the actual workspace config path",
+    );
+
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/mcp/fake_stdio_server.mjs");
 
@@ -221,15 +248,21 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
     assert_eq!(summary["name"], "fake");
     assert_eq!(summary["source"], "Workspace");
     assert!(
+        listed["payload"]["configPaths"]["workspace"]["raw"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(".workspace-data/mcp.json")),
+        "the connector response must expose the configured workspace MCP path",
+    );
+    assert!(
         summary["configPathRaw"]
             .as_str()
-            .is_some_and(|path| path.ends_with(".tomcat/mcp.json")),
+            .is_some_and(|path| path.ends_with(".workspace-data/mcp.json")),
         "connector summaries must expose the real configuration path to the host",
     );
     assert!(
         summary["configPath"]
             .as_str()
-            .is_some_and(|path| path.ends_with(".tomcat/mcp.json")),
+            .is_some_and(|path| path.ends_with(".workspace-data/mcp.json")),
         "connector summaries must identify the configuration file",
     );
     assert_eq!(summary["state"], "connected");

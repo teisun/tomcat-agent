@@ -53,13 +53,13 @@ function state(): SettingsStateSnapshot {
   };
 }
 
-function renderView() {
+function renderView(snapshot: SettingsStateSnapshot = state()) {
   const postMessage = vi.fn();
   const vscodeApi: VsCodeApiLike = {
     postMessage,
     setState: vi.fn(),
   };
-  const rendered = render(<ConnectorsSettingsView state={state()} vscodeApi={vscodeApi} />);
+  const rendered = render(<ConnectorsSettingsView state={snapshot} vscodeApi={vscodeApi} />);
   return { container: rendered.container, postMessage };
 }
 
@@ -98,8 +98,13 @@ describe("ConnectorsSettingsView", () => {
     );
   });
 
-  it("defaults each new connector to the Global configuration file", () => {
-    const { postMessage } = renderView();
+  it("uses the backend-provided Global configuration file by default", () => {
+    const snapshot = state();
+    snapshot.connectorConfigPaths = {
+      global: { display: "~/.tomcat/mcp.json", raw: "/tmp/home/.tomcat/mcp.json" },
+      workspace: { display: ".workspace-data/mcp.json", raw: "/tmp/project/.workspace-data/mcp.json" },
+    };
+    const { postMessage } = renderView(snapshot);
 
     fireEvent.click(screen.getByRole("button", { name: /add connector/i }));
 
@@ -113,4 +118,26 @@ describe("ConnectorsSettingsView", () => {
         type: "openConnectorConfig",
       }),
     );
-  });});
+  });
+
+  it("uses the exact workspace configuration path for a connector added from an empty list", () => {
+    const snapshot = state();
+    snapshot.connectors = [];
+    snapshot.connectorConfigPaths = {
+      global: { display: "~/.tomcat/mcp.json", raw: "/tmp/home/.tomcat/mcp.json" },
+      workspace: { display: ".workspace-data/mcp.json", raw: "/tmp/project/.workspace-data/mcp.json" },
+    };
+    const { postMessage } = renderView(snapshot);
+
+    fireEvent.click(screen.getByRole("button", { name: /add connector/i }));
+    fireEvent.click(screen.getByRole("radio", { name: "Workspace" }));
+    fireEvent.click(screen.getByRole("button", { name: ".workspace-data/mcp.json" }));
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { scope: "workspace" },
+        type: "openConnectorConfig",
+      }),
+    );
+  });
+});

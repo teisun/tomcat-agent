@@ -1717,14 +1717,14 @@ async fn shot_command_satisfies_green_build_gate() {
 
     let scripts_dir = workspace
         .path()
-        .join(".tomcat")
+        .join(".agents")
         .join("skills")
         .join("verify")
         .join("scripts");
     std::fs::create_dir_all(&scripts_dir).unwrap();
     let shot_script = scripts_dir.join("shot.mjs");
     std::fs::write(&shot_script, "process.exit(0);\n").unwrap();
-    let output_dir = workspace.path().join(".tomcat").join("shots");
+    let output_dir = workspace.path().join(".agents").join("shots");
     let command = format!(
         "node {} http://127.0.0.1:3000 --out {}",
         shot_script.display(),

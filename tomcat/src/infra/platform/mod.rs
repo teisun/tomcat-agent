@@ -2,6 +2,7 @@
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 use super::error::AppError;
 
@@ -84,11 +85,16 @@ pub fn write_file_atomic(path: &Path, content: &[u8]) -> Result<(), AppError> {
         .parent()
         .ok_or_else(|| AppError::Config("路径无父目录".to_string()))?;
     std::fs::create_dir_all(parent).map_err(AppError::Io)?;
-    let tmp = parent.join(format!(
-        ".{}",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    std::fs::write(&tmp, content).map_err(AppError::Io)?;
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp)
+        .map_err(AppError::Io)?;
+    file.write_all(content).map_err(AppError::Io)?;
+    file.sync_all().map_err(AppError::Io)?;
+    drop(file);
     std::fs::rename(&tmp, path).map_err(AppError::Io)?;
     Ok(())
 }
@@ -103,14 +109,17 @@ pub fn write_file_atomic_with(
         .parent()
         .ok_or_else(|| AppError::Config("路径无父目录".to_string()))?;
     std::fs::create_dir_all(parent).map_err(AppError::Io)?;
-    let tmp = parent.join(format!(
-        ".{}",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    let file = std::fs::File::create(&tmp).map_err(AppError::Io)?;
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp)
+        .map_err(AppError::Io)?;
     let mut writer = BufWriter::new(file);
     write(&mut writer)?;
     writer.flush().map_err(AppError::Io)?;
+    writer.get_ref().sync_all().map_err(AppError::Io)?;
     drop(writer);
     std::fs::rename(&tmp, path).map_err(AppError::Io)?;
     Ok(())

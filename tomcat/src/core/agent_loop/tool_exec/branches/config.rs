@@ -40,3 +40,17 @@ pub(in super::super) async fn handle_config_set(
         })
         .map_err(|e| e.to_string())
 }
+
+pub(in super::super) async fn handle_package_install(
+    ctx: &ToolExecCtx<'_>,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let Some(backend) = ctx.config_backend.as_ref() else {
+        return Err("package_install 未启用：当前会话没有安装后端".to_string());
+    };
+    backend
+        .package_install(args.clone())
+        .await
+        .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()))
+        .map_err(|error| error.to_string())
+}

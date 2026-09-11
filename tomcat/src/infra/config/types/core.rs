@@ -207,14 +207,32 @@ impl Default for PluginConfig {
 ///
 /// `entries` 是 v2 富格式（每项含 path / alias / description），与 `workspace_roots`（仅路径）
 /// 同时支持；解析时合并去重。新代码请优先使用 `entries`。
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WorkspaceConfig {
+    /// 项目内 skills/plugins/packages/MCP 等资源的相对目录；默认 `.agents`。
+    /// 该值只决定项目资源位置，不改变全局 `~/.tomcat` 或 workspace 授权根。
+    #[serde(default = "default_project_resource_dir")]
+    pub project_resource_dir: String,
     /// v1 兼容：每项为路径字符串（通常为绝对路径）；空串在解析时忽略。
     #[serde(default)]
     pub workspace_roots: Vec<String>,
     /// v2 富格式：每项含 path / alias / description（与 `workspace_roots` 合并）。
     #[serde(default)]
     pub entries: Vec<WorkspaceEntry>,
+}
+
+fn default_project_resource_dir() -> String {
+    ".agents".to_string()
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            project_resource_dir: default_project_resource_dir(),
+            workspace_roots: Vec::new(),
+            entries: Vec::new(),
+        }
+    }
 }
 
 /// 富格式工作区条目（[`WorkspaceConfig::entries`] 元素）。

@@ -36,6 +36,8 @@ import type {
 import { isSettingsIntent as isSettingsIntentMessage } from "../../shared/settingsProtocol";
 import { resolveWebviewEntryAssets } from "../guiAssets";
 import type {
+  ConnectorConfigPath,
+  ConnectorConfigPaths,
   ConnectorInput,
   ConnectorToolFilter,
   ConnectorToolView,
@@ -143,11 +145,31 @@ function parseProviderKeysPayload(
   return payload?.keys?.map(parseProviderKeyView) ?? [];
 }
 
-function parseConnectorsPayload(payload: unknown): ConnectorView[] {
-  if (!isRecord(payload) || !Array.isArray(payload.connectors)) return [];
-  return payload.connectors
-    .map(normalizeConnectorView)
-    .filter((connector): connector is ConnectorView => connector !== null);
+function parseConnectorConfigPath(value: unknown): ConnectorConfigPath | undefined {
+  if (!isRecord(value) || typeof value.display !== "string" || typeof value.raw !== "string") {
+    return undefined;
+  }
+  return { display: value.display, raw: value.raw };
+}
+
+function parseConnectorConfigPaths(payload: unknown): ConnectorConfigPaths | undefined {
+  if (!isRecord(payload) || !isRecord(payload.configPaths)) return undefined;
+  const global = parseConnectorConfigPath(payload.configPaths.global);
+  const workspace = parseConnectorConfigPath(payload.configPaths.workspace);
+  return global && workspace ? { global, workspace } : undefined;
+}
+
+function parseConnectorsPayload(payload: unknown): {
+  connectors: ConnectorView[];
+  configPaths?: ConnectorConfigPaths;
+} {
+  if (!isRecord(payload) || !Array.isArray(payload.connectors)) return { connectors: [] };
+  return {
+    connectors: payload.connectors
+      .map(normalizeConnectorView)
+      .filter((connector): connector is ConnectorView => connector !== null),
+    configPaths: parseConnectorConfigPaths(payload),
+  };
 }
 
 function parseConnectorToolsPayload(payload: unknown): ConnectorToolView[] {
@@ -518,19 +540,16 @@ export class SettingsPanel implements vscode.Disposable {
     const connector = name
       ? this.state.connectors?.find((entry) => entry.name === name)
       : undefined;
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const rawConfigPath = connector?.configPathRaw;
+    const scopedConfigPath = scope === "user"
+      ? this.state.connectorConfigPaths?.global
+      : scope === "workspace"
+        ? this.state.connectorConfigPaths?.workspace
+        : undefined;
+    const rawConfigPath = connector?.configPathRaw ?? scopedConfigPath?.raw;
     const configPath =
       rawConfigPath && rawConfigPath.startsWith("~")
         ? path.join(os.homedir(), rawConfigPath.slice(2))
-        : rawConfigPath ??
-          (connector?.source === "Global" || scope === "user"
-            ? path.join(os.homedir(), ".tomcat", "mcp.json")
-            : connector?.source === "Workspace" || scope === "workspace"
-              ? workspaceRoot
-                ? path.join(workspaceRoot, ".tomcat", "mcp.json")
-                : undefined
-              : undefined);
+        : rawConfigPath;
     if (!configPath) {
       await this.refreshState("The connector configuration file is not available to open.");
       return;
@@ -742,8 +761,15 @@ export class SettingsPanel implements vscode.Disposable {
       ? await this.fetchModels(this.state.models)
       : { error: null, models: [] };
     const connectorsResult = this.route === "connectors" && capabilities.connectorCapabilities?.list
-      ? await this.fetchConnectors(this.state.connectors ?? [])
-      : { error: null, connectors: this.state.connectors ?? [] };
+      ? await this.fetchConnectors(
+        this.state.connectors ?? [],
+        this.state.connectorConfigPaths,
+      )
+      : {
+        error: null,
+        connectors: this.state.connectors ?? [],
+        configPaths: this.state.connectorConfigPaths,
+      };
     this.state = {
       capabilities,
       error: error ?? modelsResult.error ?? providerKeysResult.error ?? connectorsResult.error,
@@ -752,6 +778,7 @@ export class SettingsPanel implements vscode.Disposable {
       models: modelsResult.models,
       providerKeys: providerKeysResult.providerKeys,
       connectors: connectorsResult.connectors,
+      connectorConfigPaths: connectorsResult.configPaths,
       ready: true,
       route: this.route,
       serverVersion: initializeResult.serverVersion,
@@ -811,14 +838,25 @@ export class SettingsPanel implements vscode.Disposable {
 
   private async fetchConnectors(
     fallback: ConnectorView[],
-  ): Promise<{ error: string | null; connectors: ConnectorView[] }> {
+    fallbackConfigPaths?: ConnectorConfigPaths,
+  ): Promise<{
+    error: string | null;
+    connectors: ConnectorView[];
+    configPaths?: ConnectorConfigPaths;
+  }> {
     try {
       const response = await this.deps.messenger.sendListConnectors();
-      return response.success
-        ? { error: null, connectors: parseConnectorsPayload(response.payload) }
-        : { error: response.error ?? "Unable to load connectors.", connectors: fallback };
+      if (response.success) {
+        const parsed = parseConnectorsPayload(response.payload);
+        return { error: null, ...parsed };
+      }
+      return {
+        error: response.error ?? "Unable to load connectors.",
+        connectors: fallback,
+        configPaths: fallbackConfigPaths,
+      };
     } catch (error) {
-      return { error: String(error), connectors: fallback };
+      return { error: String(error), connectors: fallback, configPaths: fallbackConfigPaths };
     }
   }
 

@@ -73,7 +73,7 @@ fn discover_three_tier_first_wins() {
     write_plugin(
         &project_dir
             .path()
-            .join(".tomcat")
+            .join(".agents")
             .join("plugins")
             .join("demo"),
         "demo",
@@ -130,7 +130,7 @@ fn discover_host_root_helper_remains_managed_only() {
     write_plugin(
         &project_dir
             .path()
-            .join(".tomcat")
+            .join(".agents")
             .join("plugins")
             .join("project-function-plugin"),
         "project-function-plugin",
@@ -149,6 +149,38 @@ fn discover_host_root_helper_remains_managed_only() {
 }
 
 #[test]
+fn discover_uses_custom_project_resource_directory() {
+    let work_dir = tempfile::tempdir().expect("create work dir");
+    let project_dir = tempfile::tempdir().expect("create project dir");
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
+    cfg.workspace.project_resource_dir = ".team-agents".to_string();
+
+    write_plugin(
+        &project_dir
+            .path()
+            .join(".team-agents")
+            .join("plugins")
+            .join("project-plugin"),
+        "project-plugin",
+        "custom project directory",
+    );
+    write_plugin(
+        &project_dir
+            .path()
+            .join(".agents")
+            .join("plugins")
+            .join("ignored-default-plugin"),
+        "ignored-default-plugin",
+        "must not scan default after customization",
+    );
+
+    let catalog = PluginCatalog::discover(&cfg, project_dir.path()).expect("discover catalog");
+    assert!(catalog.get("project-plugin").is_some());
+    assert!(catalog.get("ignored-default-plugin").is_none());
+}
+
+#[test]
 fn discover_respects_registry_enabled_flags_when_registry_exists() {
     let work_dir = tempfile::tempdir().expect("create work dir");
     let project_dir = tempfile::tempdir().expect("create project dir");
@@ -157,7 +189,7 @@ fn discover_respects_registry_enabled_flags_when_registry_exists() {
     cfg.storage.work_dir = Some(work_dir.path().to_string_lossy().into_owned());
     cfg.agent.id = "agent-a".to_string();
 
-    let plugin_root = project_dir.path().join(".tomcat").join("plugins");
+    let plugin_root = project_dir.path().join(".agents").join("plugins");
     write_plugin(
         &plugin_root.join("enabled-plugin"),
         "enabled-plugin",

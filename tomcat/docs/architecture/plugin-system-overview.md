@@ -1,6 +1,8 @@
 # 插件系统总览
 
 本文为 [Architecture](../openspec/specs/Architecture.md) 中「4. 插件系统（统一入口）」的当前入口页。**当前实现口径只认进程内 `rquickjs` 运行时**；旧版 WasmEdge 时代文档已经退出主阅读路径，但其中真正有价值的导图、决策和“说人话”解释，已经重新收口到现行文档集。
+> **项目资源根当前规则（2026-09）**：项目 plugin/skill/package 数据位于 `workspace.project_resource_dir`，默认 `<project>/.agents`；本文及关联旧图中的项目 `.tomcat` 路径不再是有效写入约定。
+
 
 ## 摘要
 

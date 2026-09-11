@@ -20,7 +20,7 @@ pub(super) mod write;
 
 pub(super) use bash::handle_bash;
 pub(super) use code::handle_tool_run_code;
-pub(super) use config::{handle_config_get, handle_config_set};
+pub(super) use config::{handle_config_get, handle_config_set, handle_package_install};
 pub(super) use connector::{handle_tool_call, handle_tool_describe, handle_tool_search};
 pub(super) use dispatch_agent::handle_dispatch_agent;
 pub(super) use edit::handle_edit;

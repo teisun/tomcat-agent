@@ -24,6 +24,50 @@ fn validate_config_rejects_invalid_session_default_mode() {
 }
 
 #[test]
+fn project_resource_dir_allows_only_project_relative_non_legacy_paths() {
+    let project = tempfile::tempdir().unwrap();
+    let cfg = AppConfig::default();
+    assert_eq!(
+        resolve_project_resource_dir(&cfg, project.path()).unwrap(),
+        project.path().join(".agents")
+    );
+
+    let mut nested = AppConfig::default();
+    nested.workspace.project_resource_dir = "tools/agents".to_string();
+    assert_eq!(
+        resolve_project_resource_dir(&nested, project.path()).unwrap(),
+        project.path().join("tools/agents")
+    );
+
+    for invalid in [
+        "",
+        " ",
+        ".",
+        "..",
+        "./agents",
+        "tools/./agents",
+        "../agents",
+        "/tmp/agents",
+        "~/agents",
+        ".tomcat",
+        ".tomcat/skills",
+        ".tomcat\\skills",
+        "tools/.tomcat",
+    ] {
+        let mut cfg = AppConfig::default();
+        cfg.workspace.project_resource_dir = invalid.to_string();
+        assert!(
+            validate_config(&cfg).is_err(),
+            "{invalid:?} must be rejected"
+        );
+        assert!(
+            resolve_project_resource_dir(&cfg, project.path()).is_err(),
+            "resolver must not bypass validation for {invalid:?}"
+        );
+    }
+}
+
+#[test]
 fn validate_config_accepts_custom_web_search_plugin_backend() {
     let mut cfg = AppConfig::default();
     cfg.tools.web_search.backend = "mimo".to_string();

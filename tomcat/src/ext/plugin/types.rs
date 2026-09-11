@@ -1,7 +1,7 @@
 use crate::infra::error::AppError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use crate::ext::PluginVmInstance;
 use crate::infra::event_bus::EventListenerId;
@@ -151,6 +151,17 @@ pub fn parse_manifest(json: &str) -> Result<PluginManifest, AppError> {
 fn validate_manifest(m: &PluginManifest) -> Result<(), AppError> {
     if m.id.is_empty() {
         return Err(AppError::Plugin("manifest.id is required".to_string()));
+    }
+    let id_path = Path::new(&m.id);
+    if m.id.trim().is_empty()
+        || m.id.contains('\\')
+        || id_path.is_absolute()
+        || !matches!(id_path.components().next(), Some(Component::Normal(component)) if component == std::ffi::OsStr::new(&m.id))
+        || id_path.components().nth(1).is_some()
+    {
+        return Err(AppError::Plugin(
+            "manifest.id must be one safe directory name".to_string(),
+        ));
     }
     if m.name.is_empty() {
         return Err(AppError::Plugin("manifest.name is required".to_string()));

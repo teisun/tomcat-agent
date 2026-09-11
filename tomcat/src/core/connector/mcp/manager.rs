@@ -197,7 +197,9 @@ impl McpManager {
             .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {server_name}")))?;
         let removed = match server.source {
             McpConfigSource::Global => remove_global_server(cfg, server_name)?,
-            McpConfigSource::Project => remove_project_server(&self.workspace_root, server_name)?,
+            McpConfigSource::Project => {
+                remove_project_server(cfg, &self.workspace_root, server_name)?
+            }
         };
         if removed {
             self.connections.write().remove(server_name);
@@ -219,7 +221,7 @@ impl McpManager {
         match server.source {
             McpConfigSource::Global => set_global_tool_filter(cfg, server_name, filter)?,
             McpConfigSource::Project => {
-                set_project_tool_filter(&self.workspace_root, server_name, filter)?
+                set_project_tool_filter(cfg, &self.workspace_root, server_name, filter)?
             }
         }
         Ok(())
@@ -979,7 +981,7 @@ mod tests {
     fn manager_with_untrusted_project_server() -> (tempfile::TempDir, Arc<McpManager>) {
         let temp = tempfile::tempdir().expect("temporary directory");
         let workspace = temp.path().join("workspace");
-        let config_path = workspace.join(".tomcat/mcp.json");
+        let config_path = workspace.join(".agents/mcp.json");
         std::fs::create_dir_all(config_path.parent().expect("project config parent"))
             .expect("project config directory");
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

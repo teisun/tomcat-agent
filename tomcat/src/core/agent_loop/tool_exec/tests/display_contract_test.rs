@@ -153,6 +153,13 @@ impl ConfigBackend for DisplayConfigBackend {
             "message": "已设置 llm.default_model = gpt-5.4"
         }))
     }
+
+    async fn package_install(
+        &self,
+        _args: serde_json::Value,
+    ) -> Result<serde_json::Value, AppError> {
+        unreachable!()
+    }
 }
 
 #[tokio::test]

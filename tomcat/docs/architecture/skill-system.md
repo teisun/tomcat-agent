@@ -3,6 +3,8 @@
 本文是 **tomcat Skill 系统** 的技术方案（OpenSpec **架构子系统类**：`docs/architecture/`，与 `plan-runtime.md` / `plugin-system-overview.md` 同级）。Skill 系统跨 `core/skill`（新模块）、`core/llm/system_prompt`、`core/tools/contract/catalog`、`core/agent_loop/tool_exec`、`infra/config` 五处一级落点，触发 `[ARCHITECTURE_SPEC.md](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)` §1 第 1/2/3 条「跨 ≥2 子目录 + 新增工具/事件契约 + 新生命周期」，故单开一份架构文档。
 
 > **安装入口补充（T2-P1-017 PackageManager）**：skill 仍然只通过三层磁盘根被发现，但现在除了手工把 `SKILL.md` 放进目录外，也支持走统一安装入口：shell 用 `tomcat install <source>` / `tomcat uninstall <package>` / `tomcat packages`，会话内用 `/install <source> [current-project|agent|global]`。`current-project` 只是 UI 标签，内部仍映射到 `scope`。code/claw 当前会话里的 `/install` 成功后会自动 `reload_skill_set()`，让新装的 skill 立即进入当前 `SkillSet`；这一步只刷新发现结果，不赋予 skill 额外权限。
+> **当前实现（2026-09）**：项目层不再硬编码 `.tomcat`。它由 `workspace.project_resource_dir` 决定，默认是 `.agents`，例如 `<project>/.agents/skills`。值必须是项目内的单个安全目录名；旧 `.tomcat` 资源目录不会被新代码写入。内置 `skill-creator` 与 `plugin-creator` 是 Managed（全局托管）技能，源文件在 `tomcat/assets/skills/`，不写项目目录。
+
 
 ---
 

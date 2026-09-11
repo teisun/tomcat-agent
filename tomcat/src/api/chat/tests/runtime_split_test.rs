@@ -486,7 +486,7 @@ fn write_project_function_plugin(
     script: &str,
 ) {
     write_function_plugin_dir(
-        &workspace.join(".tomcat").join("plugins").join(plugin_id),
+        &workspace.join(".agents").join("plugins").join(plugin_id),
         plugin_id,
         functions,
         script,
@@ -580,7 +580,7 @@ fn write_plugin_fixture_with_permissions_and_events(
     events: &[&str],
     script: &str,
 ) {
-    let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
+    let plugin_dir = workspace.join(".agents").join("plugins").join(plugin_id);
     fs::create_dir_all(&plugin_dir).expect("create plugin fixture dir");
     let tool_defs = tools
         .iter()
@@ -1772,7 +1772,7 @@ async fn function_override_scope_wins_over_agent_and_global() {
     assert_eq!(targets[0].plugin_id, "project-function");
     assert!(
         targets[0].plugin_root.ends_with(
-            Path::new(".tomcat")
+            Path::new(".agents")
                 .join("plugins")
                 .join("project-function")
         ),
@@ -1951,7 +1951,7 @@ async fn function_override_lower_layer_reemerges_after_higher_layer_removed() {
     );
     let project_plugin_dir = workspace
         .path()
-        .join(".tomcat")
+        .join(".agents")
         .join("plugins")
         .join("project-function");
     write_project_function_plugin(

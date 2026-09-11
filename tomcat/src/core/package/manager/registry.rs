@@ -30,24 +30,25 @@ pub(super) struct RegistrySnapshot {
 }
 
 impl RegistrySnapshot {
-    pub(super) fn capture_package(path: &Path) -> Self {
+    pub(super) fn capture_package(path: &Path) -> Result<Self, AppError> {
         Self::capture(path)
     }
 
-    pub(super) fn capture_plugin(path: &Path) -> Self {
+    pub(super) fn capture_plugin(path: &Path) -> Result<Self, AppError> {
         Self::capture(path)
     }
 
-    fn capture(path: &Path) -> Self {
+    fn capture(path: &Path) -> Result<Self, AppError> {
         match fs::read_to_string(path) {
-            Ok(raw_json) => Self {
+            Ok(raw_json) => Ok(Self {
                 existed: true,
                 raw_json,
-            },
-            Err(_) => Self {
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
                 existed: false,
                 raw_json: String::new(),
-            },
+            }),
+            Err(error) => Err(AppError::Io(error)),
         }
     }
 
@@ -86,10 +87,11 @@ fn load_registry<T>(path: &Path) -> Result<T, AppError>
 where
     T: serde::de::DeserializeOwned + Default,
 {
-    if !path.exists() {
-        return Ok(T::default());
-    }
-    let raw = fs::read_to_string(path).map_err(AppError::Io)?;
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(error) => return Err(AppError::Io(error)),
+    };
     serde_json::from_str(&raw)
         .map_err(|error| AppError::Config(format!("registry 损坏: {} ({error})", path.display())))
 }

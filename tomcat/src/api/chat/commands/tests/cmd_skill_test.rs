@@ -110,7 +110,7 @@ impl crate::core::tools::primitive::PrimitiveExecutor for SkillReadPrimitive {
 }
 
 fn write_skill(workspace: &Path, name: &str, description: &str, user_only: bool) {
-    let skill_dir = workspace.join(".tomcat").join("skills").join(name);
+    let skill_dir = workspace.join(".agents").join("skills").join(name);
     std::fs::create_dir_all(&skill_dir).unwrap();
     let mut content = format!("---\nname: {name}\ndescription: {description}\n");
     if user_only {

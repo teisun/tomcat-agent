@@ -41,6 +41,8 @@ describe what would be tested.
    tests when UI code changed. Do not invent project tests or claim visual checks
    that do not exist.
 
+Before choosing an output directory, read `workspace.project_resource_dir` from the active Tomcat configuration. It defaults to `.agents`. Pass the resolved project directory explicitly to `--out` so a custom setting such as `.workspace-data` stores screenshots under `.workspace-data/shots`; never rely on the script default for a custom configuration.
+
 4. Start every acceptance command with `bash(run_in_background=true)`. If the next
    step does not strictly depend on its result, do other independent work and wait
    for `<background-task-finished>`. If it does, call `task_output(block=true)` with
@@ -92,7 +94,7 @@ browser runtime errors.
 
    ```text
    node <work_dir>/skills/verify/scripts/shot.mjs <url> \
-     --out <workspace>/.tomcat/shots --name <screen> --viewport 1440x900
+     --out <workspace>/<project_resource_dir>/shots --name <screen> --viewport 1440x900
    ```
 
    This writes `<screen>.png` (visual truth), `<screen>.aria.txt` (structure), and

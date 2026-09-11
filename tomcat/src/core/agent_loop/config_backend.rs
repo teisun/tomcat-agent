@@ -33,6 +33,10 @@ pub trait ConfigBackend: Send + Sync + 'static {
     /// 写入（或追加）一个配置项；返回结构化 JSON（至少含 `applied` / `message`），
     /// 由工具直接序列化给 LLM；CLI 展示提示由 `tool_exec` 额外补充。
     async fn config_set(&self, key: &str, value: &str) -> Result<serde_json::Value, AppError>;
+
+    /// Install a local Tomcat package, skill, or plugin after an operation-specific confirmation.
+    async fn package_install(&self, args: serde_json::Value)
+        -> Result<serde_json::Value, AppError>;
 }
 
 /// 类型别名：方便 `AgentLoop` / `tool_exec` 处使用。

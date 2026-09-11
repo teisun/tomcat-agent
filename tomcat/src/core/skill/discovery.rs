@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::infra::config::{get_work_dir, resolve_agent_trail_dir};
+use crate::infra::config::{get_work_dir, resolve_agent_trail_dir, resolve_project_resource_dir};
 use crate::infra::error::AppError;
 use crate::AppConfig;
 
@@ -19,7 +19,7 @@ pub fn skill_roots(
     Ok(vec![
         (
             SkillSource::Project,
-            agent_workspace_dir.join(".tomcat").join("skills"),
+            resolve_project_resource_dir(cfg, agent_workspace_dir)?.join("skills"),
         ),
         (
             SkillSource::Agent,
@@ -199,10 +199,27 @@ fn inspect_skill_file(
 
 fn read_frontmatter_prefix(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| format!("打开 skill 文件失败: {e}"))?;
-    let mut buf = vec![0_u8; FRONTMATTER_READ_LIMIT_BYTES];
-    let read = file
-        .read(&mut buf)
-        .map_err(|e| format!("读取 skill frontmatter 失败: {e}"))?;
-    buf.truncate(read);
-    String::from_utf8(buf).map_err(|e| format!("skill 文件不是 UTF-8 文本: {e}"))
+    let mut buf = Vec::with_capacity(FRONTMATTER_READ_LIMIT_BYTES);
+    let mut chunk = [0_u8; 1024];
+    while buf.len() < FRONTMATTER_READ_LIMIT_BYTES {
+        let remaining = FRONTMATTER_READ_LIMIT_BYTES - buf.len();
+        let chunk_len = chunk.len();
+        let read = file
+            .read(&mut chunk[..remaining.min(chunk_len)])
+            .map_err(|e| format!("读取 skill frontmatter 失败: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..read]);
+    }
+    match String::from_utf8(buf) {
+        Ok(prefix) => Ok(prefix),
+        Err(error) if error.utf8_error().error_len().is_none() => {
+            let valid_up_to = error.utf8_error().valid_up_to();
+            let bytes = error.into_bytes();
+            String::from_utf8(bytes[..valid_up_to].to_vec())
+                .map_err(|error| format!("skill 文件不是 UTF-8 文本: {error}"))
+        }
+        Err(error) => Err(format!("skill 文件不是 UTF-8 文本: {error}")),
+    }
 }

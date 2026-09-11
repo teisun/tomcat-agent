@@ -149,7 +149,7 @@ fn create_session_via_cli(work_dir: &Path) -> String {
 }
 
 fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_only: bool) {
-    let skill_dir = workspace.join(".tomcat").join("skills").join(name);
+    let skill_dir = workspace.join(".agents").join("skills").join(name);
     fs::create_dir_all(&skill_dir).expect("create skill dir");
     let mut content = format!("---\nname: {name}\ndescription: {description}\n");
     if user_only {
@@ -673,7 +673,7 @@ fn write_project_function_plugin(
     script: &str,
 ) {
     write_function_plugin_dir(
-        &workspace.join(".tomcat").join("plugins").join(plugin_id),
+        &workspace.join(".agents").join("plugins").join(plugin_id),
         plugin_id,
         functions,
         script,
@@ -3942,9 +3942,9 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
             .and(predicate::str::contains("skill:e2e-scope-skill")),
     );
 
-    let scope_tomcat = scope_root.join(".tomcat");
+    let scope_agents = scope_root.join(".agents");
     assert!(
-        scope_tomcat
+        scope_agents
             .join("plugins")
             .join("e2e-scope-plugin")
             .join("plugin.json")
@@ -3952,7 +3952,7 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
         "scope plugin 应已落盘"
     );
     assert!(
-        scope_tomcat
+        scope_agents
             .join("skills")
             .join("e2e-scope-skill")
             .join("SKILL.md")
@@ -3961,7 +3961,7 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
     );
 
     let package_registry =
-        read_package_registry(&scope_tomcat.join("packages").join("registry.json"));
+        read_package_registry(&scope_agents.join("packages").join("registry.json"));
     assert_eq!(
         package_registry.schema,
         tomcat::core::PACKAGE_REGISTRY_SCHEMA_V1
@@ -3990,7 +3990,7 @@ fn test_user_installs_scope_package_and_lists_layered_packages() {
         "skills/e2e-scope-skill"
     );
 
-    let plugin_registry = read_plugin_registry(&scope_tomcat.join("plugins").join("registry.json"));
+    let plugin_registry = read_plugin_registry(&scope_agents.join("plugins").join("registry.json"));
     assert!(
         plugin_registry
             .plugins
@@ -4331,9 +4331,9 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
             .and(predicate::str::contains("e2e-uninstall-package")),
     );
 
-    let scope_tomcat = scope_root.join(".tomcat");
+    let scope_agents = scope_root.join(".agents");
     assert!(
-        !scope_tomcat
+        !scope_agents
             .join("plugins")
             .join("e2e-uninstall-plugin")
             .join("plugin.json")
@@ -4341,7 +4341,7 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
         "scope plugin 目录应被清理"
     );
     assert!(
-        !scope_tomcat
+        !scope_agents
             .join("skills")
             .join("e2e-uninstall-skill")
             .join("SKILL.md")
@@ -4350,13 +4350,13 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
     );
 
     let package_registry =
-        read_package_registry(&scope_tomcat.join("packages").join("registry.json"));
+        read_package_registry(&scope_agents.join("packages").join("registry.json"));
     assert!(
         package_registry.packages.is_empty(),
         "scope package registry 卸载后应为空"
     );
 
-    let plugin_registry = read_plugin_registry(&scope_tomcat.join("plugins").join("registry.json"));
+    let plugin_registry = read_plugin_registry(&scope_agents.join("plugins").join("registry.json"));
     assert!(
         plugin_registry.plugins.is_empty(),
         "scope plugin registry 卸载后应为空"

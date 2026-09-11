@@ -31,6 +31,15 @@ pub(super) fn install_resource(
         .parent()
         .ok_or_else(|| AppError::Config("目标目录无父目录".to_string()))?;
     fs::create_dir_all(parent).map_err(AppError::Io)?;
+    reject_symlink_path(parent, "目标父目录")?;
+    reject_symlink_path(&resource.destination_dir, "目标目录")?;
+    if parent.starts_with(&resource.source_dir) {
+        return Err(AppError::Config(format!(
+            "安装源目录不能与目标暂存目录重叠: {} -> {}",
+            resource.source_dir.display(),
+            resource.destination_dir.display()
+        )));
+    }
 
     let stage_dir = hidden_sibling_path(parent, &resource.id, "staging");
     copy_dir_recursive(&resource.source_dir, &stage_dir).inspect_err(|_| {
@@ -65,6 +74,18 @@ pub(super) fn install_resource(
         backup_dir,
         stage_dir,
     })
+}
+
+fn reject_symlink_path(path: &Path, label: &str) -> Result<(), AppError> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::Permission(format!(
+                "package {label} 不能是符号链接: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn prepare_force_remove_path(

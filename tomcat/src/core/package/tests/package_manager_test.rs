@@ -104,6 +104,28 @@ fn detect_bare_plugin_and_bare_skill() {
 }
 
 #[test]
+fn detect_package_rejects_resource_reference_outside_package_root() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source_parent = tempfile::tempdir().unwrap();
+    let package_root = source_parent.path().join("package");
+    let outside_plugin = source_parent.path().join("outside-plugin");
+    std::fs::create_dir_all(&package_root).unwrap();
+    write_plugin(&outside_plugin, "outside-plugin", "0.1.0", "outside_tool");
+    write_package_manifest(&package_root, &["../outside-plugin"], &[]);
+
+    let error = manager
+        .detect_source(&package_root)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("package 根目录内"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn detect_package_manifest_requires_package_json_tomcat_block() {
     let work_dir = tempfile::tempdir().unwrap();
     let cfg = test_config(work_dir.path());
@@ -244,7 +266,7 @@ fn prepare_install_rejects_same_layer_conflict_without_force() {
     let manager = PackageManager::new(&cfg);
 
     write_plugin(
-        &workspace.path().join(".tomcat/plugins/conflict-plugin"),
+        &workspace.path().join(".agents/plugins/conflict-plugin"),
         "conflict-plugin",
         "0.1.0",
         "tool_a",
@@ -272,7 +294,7 @@ fn prepare_install_reports_cross_layer_shadow_warning() {
     let manager = PackageManager::new(&cfg);
 
     write_skill(
-        &workspace.path().join(".tomcat/skills/commit"),
+        &workspace.path().join(".agents/skills/commit"),
         "commit",
         "already here",
     );
@@ -365,7 +387,7 @@ fn install_scope_package_writes_layer_registries() {
 }
 
 #[test]
-fn install_failure_rolls_back_copied_dirs() {
+fn invalid_registry_parent_fails_before_copying_resources() {
     let work_dir = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let cfg = test_config(work_dir.path());
@@ -379,27 +401,27 @@ fn install_failure_rolls_back_copied_dirs() {
     std::fs::create_dir_all(&scope_paths.layer_root).unwrap();
     std::fs::write(&scope_paths.packages_dir, "block registry writes here").unwrap();
 
-    let prepared = manager
+    let error = manager
         .prepare_install(
             source.path(),
             PackageVisibility::Scope,
             Some(workspace.path()),
             false,
         )
-        .unwrap();
-    let error = manager.install(prepared).unwrap_err().to_string();
+        .unwrap_err()
+        .to_string();
 
     assert!(
-        !error.contains("dirty_state"),
-        "unexpected dirty rollback: {error}"
+        error.contains("Not a directory") || error.contains("不是目录"),
+        "unexpected registry preflight failure: {error}"
     );
     assert!(
         !scope_paths.plugins_dir.join("broken-plugin").exists(),
-        "copied plugin dir should be removed after rollback"
+        "invalid registry parent must fail before copying a plugin directory"
     );
     assert!(
         !scope_paths.package_registry_path.exists(),
-        "package registry should be restored to non-existent state"
+        "no registry file should be created below a non-directory parent"
     );
 }
 

@@ -96,11 +96,11 @@ fn disabled_list_filters_skill() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
     let work_dir = dir.path().join("work");
-    std::fs::create_dir_all(project.join(".tomcat").join("skills").join("commit")).unwrap();
+    std::fs::create_dir_all(project.join(".agents").join("skills").join("commit")).unwrap();
     std::fs::create_dir_all(&work_dir).unwrap();
     std::fs::write(
         project
-            .join(".tomcat")
+            .join(".agents")
             .join("skills")
             .join("commit")
             .join("SKILL.md"),

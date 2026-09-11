@@ -1,4 +1,5 @@
 import type {
+  ConnectorConfigPaths,
   ConnectorInput,
   ConnectorToolFilter,
   ConnectorToolView,
@@ -91,6 +92,7 @@ export interface SettingsStateSnapshot {
   models: SettingsModelView[];
   providerKeys: SettingsProviderKeyView[];
   connectors?: ConnectorView[];
+  connectorConfigPaths?: ConnectorConfigPaths;
   connectorCapabilities?: SettingsConnectorCapabilities;
   connectorTools?: ConnectorToolView[];
   selectedConnector?: string | null;

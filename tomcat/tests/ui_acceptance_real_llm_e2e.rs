@@ -131,7 +131,7 @@ fn headed_e2e_screenshot_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("tomcat crate must be inside the repository")
-        .join(".tomcat/shots")
+        .join(".agents/shots")
 }
 
 fn real_llm_target() -> RealLlmTarget {
@@ -426,7 +426,7 @@ fn wait_for_playwright_ready(child: &mut ServeChild) {
 fn any_shot_exists(fixture: &ServeFixture) -> bool {
     [
         fixture.home_path.join(".tomcat/shots"),
-        fixture.workspace.join(".tomcat/shots"),
+        fixture.workspace.join(".agents/shots"),
     ]
     .iter()
     .filter_map(|directory| std::fs::read_dir(directory).ok())

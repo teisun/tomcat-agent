@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::infra::config::{get_work_dir, resolve_agent_trail_dir};
+use crate::infra::config::{get_work_dir, resolve_agent_trail_dir, resolve_project_resource_dir};
 use crate::infra::error::AppError;
 use crate::AppConfig;
 
@@ -42,7 +42,7 @@ pub fn resolve_layer_paths(
                 AppError::Config("scope 安装/查询必须提供 scope_root".to_string())
             })?;
             let canonical_root = canonical_scope_root(scope_root)?;
-            let layer_root = canonical_root.join(".tomcat");
+            let layer_root = resolve_project_resource_dir(cfg, &canonical_root)?;
             Ok(build_layer_paths(
                 visibility,
                 layer_root,

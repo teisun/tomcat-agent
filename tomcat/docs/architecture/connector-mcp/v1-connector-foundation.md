@@ -3,6 +3,8 @@
 > 适用范围：给 Tomcat 增加通用连接器模块。连接器类型规划为 MCP / CLI / A2A；本期已实现 MCP 的 stdio 与 Streamable HTTP 传输，HTTP OAuth/PKCE 由标准 metadata discovery、loopback callback 与安全 token store 驱动。CLI/A2A 仍只保留扩展边界。
 > 上位规范：[`ARCHITECTURE_SPEC.md`](../../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)（本文 `## 1`–`## 10` 对应规范 §1–§10）。相邻方案：[`plugin-system-overview.md`](../plugin-system-overview.md)（动态工具注册的现成范式）、[`skill-system.md`](../skill-system.md)（内置资产物化范式）、[`tools/read.md`](../tools/read.md)（图片回流的单一事实源）。
 > 单一事实源：连接器抽象（`Connector` trait / `ConnectorType {Mcp, Cli, A2a}` / `ConnectorRegistry`）在 `core/connector/mod.rs`；**MCP 连接器**的运行时事实源在 `core/connector/mcp/manager.rs::McpManager`；工具暴露给模型经 `core/llm/system_prompt.rs::ToolSurface`；图片回流由 `core/agent_loop/tool_dispatcher.rs::extract_tool_result_media` 使用 `ChatMessageContentPart` 与 `openai_files` 共享原语完成。`core/connector/` 已在当前工作树落地；CLI/A2A 只保留枚举值，尚未创建实现目录。
+> **项目 MCP 当前规则（2026-09）**：workspace MCP 配置通过 `workspace.project_resource_dir` 解析，默认 `<project>/.agents/mcp.json`。旧图里写死的项目 `.tomcat/mcp.json` 不能被前端或后端猜测、创建或打开。
+
 
 **一句话定位**：连接器模块 = 把外部能力暴露的工具安全地接入 Tomcat。当前 MCP 支持 stdio 与 Streamable HTTP；HTTP 连接器可使用无认证、Bearer/custom headers 或标准 OAuth/PKCE。MCP 目录仍由 `McpManager` 维护并通过 v2 渐进式披露提供。
 

@@ -17,7 +17,13 @@ fn skill_roots_follow_project_agent_managed_order() {
 
     let roots = skill_roots(&cfg, &project).unwrap();
     assert_eq!(roots[0].0, SkillSource::Project);
-    assert_eq!(roots[0].1, project.join(".tomcat").join("skills"));
+    assert_eq!(roots[0].1, project.join(".agents").join("skills"));
+    cfg.workspace.project_resource_dir = ".team-agents".to_string();
+    let custom_roots = skill_roots(&cfg, &project).unwrap();
+    assert_eq!(
+        custom_roots[0].1,
+        project.join(".team-agents").join("skills")
+    );
     assert_eq!(roots[1].0, SkillSource::Agent);
     assert!(roots[1]
         .1
@@ -37,7 +43,7 @@ fn discover_prefers_higher_priority_same_name() {
 
     write_skill(
         &project
-            .join(".tomcat")
+            .join(".agents")
             .join("skills")
             .join("commit")
             .join("SKILL.md"),
@@ -118,7 +124,7 @@ fn discover_preserves_allowed_tools_metadata() {
 
     write_raw(
         &project
-            .join(".tomcat")
+            .join(".agents")
             .join("skills")
             .join("commit")
             .join("SKILL.md"),
@@ -139,6 +145,31 @@ fn discover_preserves_allowed_tools_metadata() {
 }
 
 #[test]
+fn discover_accepts_a_valid_header_when_the_bounded_read_ends_mid_utf8_body_character() {
+    let temp = temp_dir("utf8_prefix");
+    let project = temp.join("project");
+    let work_dir = temp.join("work");
+    let cfg = base_config(&work_dir);
+    let header = "---\nname: unicode\ndescription: safe bounded header\n---\n";
+    let body_bytes_before_unicode = 4 * 1024 - 1 - header.len();
+    let content = format!("{header}{}界", "x".repeat(body_bytes_before_unicode));
+    write_raw(
+        &work_dir.join("skills").join("unicode").join("SKILL.md"),
+        &content,
+    );
+
+    let set = discover(&cfg, &project);
+    assert!(
+        set.by_name.contains_key("unicode"),
+        "{:#?}",
+        set.diagnostics
+    );
+    assert!(set.diagnostics.is_empty(), "{:#?}", set.diagnostics);
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
 fn discover_ignores_loose_markdown_files_in_project_root() {
     let temp = temp_dir("ignore_loose_markdown");
     let project = temp.join("project");
@@ -146,13 +177,13 @@ fn discover_ignores_loose_markdown_files_in_project_root() {
     let cfg = base_config(&work_dir);
 
     write_skill(
-        &project.join(".tomcat").join("skills").join("commit.md"),
+        &project.join(".agents").join("skills").join("commit.md"),
         "commit",
         "loose markdown should be ignored",
     );
     write_skill(
         &project
-            .join(".tomcat")
+            .join(".agents")
             .join("skills")
             .join("lint")
             .join("SKILL.md"),

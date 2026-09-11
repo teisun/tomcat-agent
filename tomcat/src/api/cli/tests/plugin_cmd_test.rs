@@ -277,7 +277,7 @@ fn plugin_disable_targets_highest_priority_registry_layer() {
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
 
-    let scope_registry_path = workspace.path().join(".tomcat/plugins/registry.json");
+    let scope_registry_path = workspace.path().join(".agents/plugins/registry.json");
     let global_registry_path = crate::resolve_plugins_dir(&cfg)
         .unwrap()
         .join("registry.json");
@@ -288,7 +288,7 @@ fn plugin_disable_targets_highest_priority_registry_layer() {
                 id: "dup-plugin".to_string(),
                 path: workspace
                     .path()
-                    .join(".tomcat/plugins/dup-plugin")
+                    .join(".agents/plugins/dup-plugin")
                     .display()
                     .to_string(),
                 enabled: true,
@@ -332,7 +332,7 @@ fn plugin_list_renders_visible_and_shadowed_layered_entries() {
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
 
-    let scope_registry_path = workspace.path().join(".tomcat/plugins/registry.json");
+    let scope_registry_path = workspace.path().join(".agents/plugins/registry.json");
     let global_registry_path = crate::resolve_plugins_dir(&cfg)
         .unwrap()
         .join("registry.json");
@@ -343,7 +343,7 @@ fn plugin_list_renders_visible_and_shadowed_layered_entries() {
                 id: "dup-plugin".to_string(),
                 path: workspace
                     .path()
-                    .join(".tomcat/plugins/dup-plugin")
+                    .join(".agents/plugins/dup-plugin")
                     .display()
                     .to_string(),
                 enabled: true,
@@ -381,7 +381,7 @@ fn plugin_unload_removes_scope_entry_before_global_entry() {
     let cfg = test_config(dir.path());
     crate::ensure_work_dir_structure(&cfg).unwrap();
 
-    let scope_registry_path = workspace.path().join(".tomcat/plugins/registry.json");
+    let scope_registry_path = workspace.path().join(".agents/plugins/registry.json");
     let global_registry_path = crate::resolve_plugins_dir(&cfg)
         .unwrap()
         .join("registry.json");
@@ -392,7 +392,7 @@ fn plugin_unload_removes_scope_entry_before_global_entry() {
                 id: "dup-plugin".to_string(),
                 path: workspace
                     .path()
-                    .join(".tomcat/plugins/dup-plugin")
+                    .join(".agents/plugins/dup-plugin")
                     .display()
                     .to_string(),
                 enabled: true,

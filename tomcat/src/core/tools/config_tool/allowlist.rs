@@ -5,6 +5,7 @@ const CONFIG_READ_ALLOWLIST: &[&str] = &[
     "workspace",
     "workspace.workspace_roots",
     "workspace.entries",
+    "workspace.project_resource_dir",
     "agent.id",
     "agent.workspace",
     "agent.agent_dir",
@@ -40,6 +41,7 @@ const CONFIG_HARDCODED_READ_DENY: &[&str] = &[
 const CONFIG_WRITE_ALLOWLIST: &[&str] = &[
     "workspace.workspace_roots",
     "workspace.entries",
+    "workspace.project_resource_dir",
     "primitive.path_rules",
     "primitive.bash_approval_required",
     "primitive.bash_forbidden",

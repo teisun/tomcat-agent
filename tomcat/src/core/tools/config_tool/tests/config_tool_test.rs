@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use super::{
-    config_get_impl, config_set_impl, is_array_field, is_readable, is_writable, ConfigToolContext,
+    config_get_impl, config_set_impl, is_array_field, is_readable, is_writable, ChatConfigBackend,
+    ConfigToolContext,
 };
+use crate::core::agent_loop::ConfigBackend;
 use crate::core::permission::{
     DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, PermissionDecision, SessionGrants,
 };
@@ -20,6 +22,7 @@ fn read_allowlist_covers_documented_keys() {
     for k in [
         "workspace",
         "workspace.workspace_roots",
+        "workspace.project_resource_dir",
         "primitive.path_rules",
         "agent.id",
         "log.level",
@@ -49,6 +52,7 @@ fn read_hardcoded_deny_overrides_allowlist() {
 fn write_allowlist_subset() {
     for k in [
         "workspace.workspace_roots",
+        "workspace.project_resource_dir",
         "primitive.path_rules",
         "primitive.bash_forbidden",
         "log.level",
@@ -112,6 +116,8 @@ async fn config_get_returns_value_for_allowlisted_key() {
     let cfg = load_config(Some(&p)).unwrap();
     let v = config_get_impl("llm.default_model", &cfg).unwrap();
     assert_eq!(v.as_str(), Some("gpt-5.4"));
+    let resource_dir = config_get_impl("workspace.project_resource_dir", &cfg).unwrap();
+    assert_eq!(resource_dir.as_str(), Some(".agents"));
 }
 
 #[tokio::test]
@@ -126,6 +132,38 @@ async fn config_get_returns_preflight_ui_value_for_allowlisted_key() {
     let cfg = load_config(Some(&p)).unwrap();
     let v = config_get_impl("preflight.show_git_ui", &cfg).unwrap();
     assert_eq!(v.as_bool(), Some(true));
+}
+
+#[tokio::test]
+async fn config_set_updates_and_validates_project_resource_dir() {
+    let dir = TempDir::new().unwrap();
+    let path = empty_config(&dir);
+    let ctx = ConfigToolContext::new(path.clone(), Arc::new(AllowAllConfirmation));
+
+    let updated = config_set_impl("workspace.project_resource_dir", ".team-agents", &ctx)
+        .await
+        .unwrap();
+    assert!(updated.applied);
+    assert_eq!(
+        load_config(Some(&path))
+            .unwrap()
+            .workspace
+            .project_resource_dir,
+        ".team-agents"
+    );
+
+    let err = config_set_impl("workspace.project_resource_dir", ".tomcat", &ctx)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AppError::Config(_)));
+    assert_eq!(
+        load_config(Some(&path))
+            .unwrap()
+            .workspace
+            .project_resource_dir,
+        ".team-agents",
+        "invalid write must not replace the last valid resource directory"
+    );
 }
 
 #[tokio::test]
@@ -356,4 +394,100 @@ async fn config_set_bash_forbidden_does_not_persist_env_merged_values() {
     let cfg = load_config_toml_file(&p).unwrap();
     assert_eq!(cfg.log.level, "warn");
     assert_eq!(cfg.primitive.bash_forbidden, vec!["^rm -rf /$".to_string()]);
+}
+
+#[tokio::test]
+async fn package_install_confirms_then_installs_an_agent_skill() {
+    let dir = TempDir::new().unwrap();
+    let config_path = empty_config(&dir);
+    let source = dir.path().join("source-skill");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: release-notes\ndescription: write release notes\n---\n# Release notes\n",
+    )
+    .unwrap();
+    let backend = ChatConfigBackend {
+        ctx: ConfigToolContext::new(config_path, Arc::new(AllowAllConfirmation)),
+    };
+
+    let result = backend
+        .package_install(serde_json::json!({"source": source, "scope": "agent"}))
+        .await
+        .unwrap();
+
+    assert_eq!(result["installed"], true);
+    assert_eq!(result["resources"][0]["kind"], "skill");
+    assert_eq!(result["inventory_dirty"], true);
+    assert!(dir
+        .path()
+        .join("agents/main/skills/release-notes/SKILL.md")
+        .is_file());
+}
+
+#[tokio::test]
+async fn package_install_denial_has_no_side_effects() {
+    let dir = TempDir::new().unwrap();
+    let config_path = empty_config(&dir);
+    let source = dir.path().join("source-skill");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: cancelled-skill\ndescription: must not install\n---\n# Cancelled\n",
+    )
+    .unwrap();
+    let backend = ChatConfigBackend {
+        ctx: ConfigToolContext::new(config_path, Arc::new(DenyAllConfirmation)),
+    };
+
+    let error = backend
+        .package_install(serde_json::json!({"source": source, "scope": "agent"}))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, AppError::Permission(_)));
+    assert!(!dir
+        .path()
+        .join("agents/main/skills/cancelled-skill")
+        .exists());
+}
+
+#[tokio::test]
+async fn package_install_honors_a_denied_source_child_path_rule_before_confirmation() {
+    let dir = TempDir::new().unwrap();
+    let config_path = empty_config(&dir);
+    let source = dir.path().join("blocked-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: blocked-skill\ndescription: must stay blocked\n---\n# Blocked\n",
+    )
+    .unwrap();
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: dir.path().join("definition"),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![PathRule::new(
+                source.join("SKILL.md").to_string_lossy().to_string(),
+                PathRuleMode::Deny,
+            )],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let backend = ChatConfigBackend {
+        ctx: ConfigToolContext::new(config_path, Arc::new(AllowAllConfirmation)).with_gate(gate),
+    };
+
+    let error = backend
+        .package_install(serde_json::json!({"source": source, "scope": "agent"}))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, AppError::Permission(_)));
+    assert!(!dir.path().join("agents/main/skills/blocked-skill").exists());
 }

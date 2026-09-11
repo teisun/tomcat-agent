@@ -251,7 +251,7 @@ return response;
     async fn code_vm_cannot_bypass_untrusted_project_connector() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let workspace = temp.path().join("workspace");
-        let config_path = workspace.join(".tomcat/mcp.json");
+        let config_path = workspace.join(".agents/mcp.json");
         std::fs::create_dir_all(config_path.parent().expect("project config directory"))
             .expect("project config directory");
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

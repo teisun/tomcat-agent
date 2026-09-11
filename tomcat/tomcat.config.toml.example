@@ -49,6 +49,9 @@ id = "main"
 
 [workspace]
 workspace_roots = []
+# 项目资源目录；仅允许项目内相对路径，默认 `.agents`。
+# 可改为 `.team-agents` 或 `tools/agents`；改后重启 Tomcat 生效。
+project_resource_dir = ".agents"
 
 [plugin]
 auto_load = []

@@ -123,6 +123,22 @@ fn parse_manifest_valid() {
 }
 
 #[test]
+fn parse_manifest_rejects_path_like_id() {
+    for id in [
+        "../outside",
+        "nested/plugin",
+        "/absolute",
+        "..",
+        "plugin\\\\nested",
+    ] {
+        let json = format!(
+            r#"{{"id":"{id}","name":"test","version":"0.1.0","description":"d","author":"a","main":"index.js","requiredPermissions":[],"requiredApiVersion":"1.0","tags":[]}}"#
+        );
+        assert!(parse_manifest(&json).is_err(), "{id:?} must be rejected");
+    }
+}
+
+#[test]
 fn parse_manifest_net_fetch_requires_allowed_hosts() {
     let json = r#"{
         "id": "test-plugin",

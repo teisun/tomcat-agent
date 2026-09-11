@@ -230,7 +230,7 @@ fn cli_tool_call_stream(id: &str, name: &str, args: &str) -> Vec<Result<StreamEv
 }
 
 fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_only: bool) {
-    let skill_dir = workspace.join(".tomcat").join("skills").join(name);
+    let skill_dir = workspace.join(".agents").join("skills").join(name);
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
     let mut content = format!("---\nname: {name}\ndescription: {description}\n");
     if user_only {
@@ -241,7 +241,7 @@ fn write_skill_fixture(workspace: &Path, name: &str, description: &str, user_onl
 }
 
 fn write_live_skill_fixture(workspace: &Path, name: &str, description: &str, secret_token: &str) {
-    let skill_dir = workspace.join(".tomcat").join("skills").join(name);
+    let skill_dir = workspace.join(".agents").join("skills").join(name);
     std::fs::create_dir_all(&skill_dir).expect("create live skill dir");
     let content = format!(
         "---\nname: {name}\ndescription: {description}\n---\n# Live Commit Skill\nsecret-token: {secret_token}\n1. Run git status.\n"

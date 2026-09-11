@@ -420,6 +420,21 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
         requires_user_interaction: false,
     },
     BuiltinToolCatalogEntry {
+        name: "package_install",
+        label: "Package Install",
+        description: "Install a local Tomcat package, skill, or plugin after confirmation. Pass a local source path and scope (`scope`, `agent`, or `global`); the current workspace is used for scope installs. The operation validates the package before writing and returns installed resources plus `inventory_dirty` for the next session refresh.\n",
+        display_summary: Some("Install a local package after confirmation."),
+        parameters: package_install_parameters,
+        scope: PermissionScope::Write,
+        category: Some(ToolCategory::Config),
+        read_only: false,
+        destructive: true,
+        search_hint: Some("package install skill plugin source scope global agent"),
+        prompt_guidelines: &[],
+        plan_only: false,
+        requires_user_interaction: false,
+    },
+    BuiltinToolCatalogEntry {
         name: "dispatch_agent",
         label: "Dispatch Agent",
         description: "Delegate high-latency, read-only codebase investigation to one or more explorer subagents running in parallel. Direct `search_files` / `read` calls are the default. Do NOT dispatch for a simple task, project rules or AGENTS/README files, a known file or symbol, confirmation of one implementation, a question that can be answered in one or two batches of direct-tool calls, self-review or final audit of your own Plan, or work already covered by the automatic Plan/Code Reviewer. Use this tool only when all are true: (1) the task crosses multiple unknown subsystems, (2) the questions can be investigated independently in parallel, and (3) returning the necessary raw reads would materially bloat the parent context. Before dispatching, put every currently known independent question into one `tasks` array. After reports return, prefer direct tools to fill evidence gaps. Dispatch again only if the reports reveal a new blocker that direct tools cannot answer. Pass `tasks`: 1-6 entries of `{ id, prompt }`, where `prompt` is self-contained because the subagent sees none of this conversation, and `id` matches answers to questions. Each subagent may only read (`read` / `search_files` / `list_dir` / read-only `bash`) and returns concise findings with `path:line` references plus a conclusion, never raw file contents. Only its final report enters the parent context.\n",
@@ -1216,6 +1231,17 @@ fn config_set_parameters() -> Value {
             "value": { "type": "string", "description": "Scalar replacement value, or one JSON element string for append-only array fields such as workspace roots and path rules." }
         }),
         &["key", "value"],
+    )
+}
+
+fn package_install_parameters() -> Value {
+    object_schema(
+        serde_json::json!({
+            "source": { "type": "string", "description": "Local directory or package.json/plugin.json/SKILL.md to install." },
+            "scope": { "type": "string", "enum": ["scope", "agent", "global"], "description": "Installation scope. Defaults to scope (the current workspace)." },
+            "force": { "type": "boolean", "description": "Replace a same-layer package or resource after confirmation. Defaults to false." }
+        }),
+        &["source"],
     )
 }
 

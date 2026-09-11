@@ -146,7 +146,7 @@ async fn pending_confirm_project_server_is_absent_until_confirmed() {
     let workspace = temp.path().join("workspace");
     let _api_key = EnvGuard::set(API_KEY_ENV, "test-key");
     write_mcp_config(
-        &workspace.join(".tomcat").join("mcp.json"),
+        &workspace.join(".agents").join("mcp.json"),
         fake_mcp_config("project-fake"),
     );
     let ctx = connector_context(&temp, workspace, API_KEY_ENV);

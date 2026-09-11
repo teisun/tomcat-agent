@@ -274,13 +274,25 @@ fn catalog_scope_and_category_contracts_hold() {
         }
     }
 
-    for name in ["config_get", "config_set"] {
+    for name in ["config_get", "config_set", "package_install"] {
         let entry = BUILTIN_TOOL_CATALOG
             .iter()
             .find(|entry| entry.name == name)
             .expect("config catalog entry");
         assert_eq!(entry.category, Some(ToolCategory::Config));
     }
+    let package_install = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "package_install")
+        .expect("package_install catalog entry");
+    assert_eq!(package_install.scope, PermissionScope::Write);
+    assert!(package_install.destructive);
+    let schema = (package_install.parameters)();
+    assert_eq!(schema["required"], serde_json::json!(["source"]));
+    assert_eq!(
+        schema["properties"]["scope"]["enum"],
+        serde_json::json!(["scope", "agent", "global"])
+    );
 }
 
 #[test]

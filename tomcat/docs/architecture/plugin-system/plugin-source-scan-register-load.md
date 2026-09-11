@@ -1,6 +1,8 @@
 # 插件发现、作用域与加载
 
 本文为 [Architecture](../../openspec/specs/Architecture.md) 中「4. 插件系统（统一入口）」的专题页，补充 [`../plugin-system-overview.md`](../plugin-system-overview.md) 的磁盘发现、scope 视图、激活时机与 layered registry 规则。
+> **项目资源根当前规则（2026-09）**：scope 的项目数据由 `workspace.project_resource_dir` 决定，默认 `<project>/.agents`；任何项目 `.tomcat` 路径仅表示旧布局，不能用于扫描或安装。
+
 
 ## 这份文档回答什么
 

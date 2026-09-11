@@ -1,6 +1,8 @@
 # 工作目录与数据布局
 
 本文为 [Architecture](../openspec/specs/Architecture.md) 中「8. 工作目录与数据布局」的详细设计，总览见主文档。参考 [openclaw 多 agent 目录约定]
+> **项目资源根当前规则（2026-09）**：项目层由 `workspace.project_resource_dir` 决定，默认 `<project>/.agents`。本文后续出现的项目 `.tomcat` 路径属于旧布局示意，不可作为写入目标。
+
 
 ## 1. 默认工作根目录（work_dir）
 

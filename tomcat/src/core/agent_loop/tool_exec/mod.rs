@@ -532,6 +532,7 @@ async fn execute_tool_tuple_full(
         "web_search" => branches::handle_web_search(ctx, &args).await,
         "config_get" => branches::handle_config_get(ctx, &args).await,
         "config_set" => branches::handle_config_set(ctx, &args, display_out).await,
+        "package_install" => branches::handle_package_install(ctx, &args).await,
         "dispatch_agent" => branches::handle_dispatch_agent(ctx, &args).await,
         other => Err(format!("未知工具: {}", other)),
     };

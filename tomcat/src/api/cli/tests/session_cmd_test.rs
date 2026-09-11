@@ -92,7 +92,7 @@ impl Drop for CurrentDirGuard {
 }
 
 fn write_session_plugin_fixture(workspace: &Path, plugin_id: &str, activation: &str) {
-    let plugin_dir = workspace.join(".tomcat").join("plugins").join(plugin_id);
+    let plugin_dir = workspace.join(".agents").join("plugins").join(plugin_id);
     fs::create_dir_all(&plugin_dir).expect("create plugin fixture dir");
     let manifest = json!({
         "id": plugin_id,

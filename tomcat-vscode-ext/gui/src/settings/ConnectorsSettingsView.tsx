@@ -47,11 +47,18 @@ function statusClass(connector: ConnectorView): string {
   return `tc-connector-status tc-connector-status--${connector.state}`;
 }
 
-function configurationPath(connector: ConnectorView): string {
-  if (connector.configPath) {
-    return connector.configPath;
-  }
-  return connector.source === "Global" ? "~/.tomcat/mcp.json" : ".tomcat/mcp.json";
+function configurationPath(connector: ConnectorView): string | null {
+  return connector.configPath ?? null;
+}
+
+function configurationPathForScope(
+  state: SettingsStateSnapshot,
+  scope: "user" | "workspace",
+): string | null {
+  const configured = scope === "user"
+    ? state.connectorConfigPaths?.global
+    : state.connectorConfigPaths?.workspace;
+  return configured?.display ?? null;
 }
 
 function authenticationLabel(connector: ConnectorView): string {
@@ -312,7 +319,7 @@ export function ConnectorsSettingsView({
               <div><dt>Scope</dt><dd>{selected.source}</dd></div>
               <div>
                 <dt>Config file</dt>
-                <dd><button className="tc-connector-config-link" onClick={() => send(vscodeApi, "openConnectorConfig", { name: selected.name })} type="button"><code>{configurationPath(selected)}</code></button></dd>
+                <dd>{configurationPath(selected) ? <button className="tc-connector-config-link" onClick={() => send(vscodeApi, "openConnectorConfig", { name: selected.name })} type="button"><code>{configurationPath(selected)}</code></button> : <span className="tc-muted">Configuration file unavailable</span>}</dd>
               </div>
               <div><dt>Connection</dt><dd><code>{selected.transport}</code></dd></div>
               {selected.transport === "http" ? (
@@ -367,7 +374,7 @@ export function ConnectorsSettingsView({
             <div className="tc-connector-form-row"><span>Name</span><input aria-label="Name" value={name} onChange={(event) => setName(event.target.value)} /></div>
             <div className="tc-connector-form-row"><span>Type</span><div className="tc-connector-radio-row"><label><input checked type="radio" onChange={() => {}} /> MCP</label><label className="tc-muted"><input disabled type="radio" /> CLI (soon)</label><label className="tc-muted"><input disabled type="radio" /> A2A (soon)</label></div></div>
             <div className="tc-connector-form-row"><span>Scope</span><div className="tc-connector-radio-row"><label><input checked={scope === "user"} name="scope" onChange={() => setScope("user")} type="radio" /> Global</label><label><input checked={scope === "workspace"} name="scope" onChange={() => setScope("workspace")} type="radio" /> Workspace</label></div></div>
-            <div className="tc-connector-form-row"><span>Config file</span><button className="tc-connector-config-link" onClick={() => send(vscodeApi, "openConnectorConfig", { scope })} type="button"><code>{scope === "user" ? "~/.tomcat/mcp.json" : ".tomcat/mcp.json"}</code></button></div>
+            <div className="tc-connector-form-row"><span>Config file</span>{configurationPathForScope(state, scope) ? <button className="tc-connector-config-link" onClick={() => send(vscodeApi, "openConnectorConfig", { scope })} type="button"><code>{configurationPathForScope(state, scope)}</code></button> : <span className="tc-muted">Configuration file unavailable</span>}</div>
             <div className="tc-connector-form-row"><span>Connection</span><div className="tc-connector-radio-row"><label><input checked={transport === "stdio"} name="transport" onChange={() => setTransport("stdio")} type="radio" /> stdio</label><label><input checked={transport === "http"} name="transport" onChange={() => setTransport("http")} type="radio" /> HTTP</label></div></div>
             {transport === "http" && authMode === "oauth" ? <div className="tc-connector-form-row"><span>OAuth client ID</span><div><input aria-label="OAuth client ID" placeholder="Optional" value={clientId} onChange={(event) => setClientId(event.target.value)} /><small>Dynamic registration is used when empty.</small></div></div> : null}
             {transport === "http" ? <><div className="tc-connector-form-row"><span>Remote URL</span><input aria-label="URL" placeholder="https://example.com/mcp" value={url} onChange={(event) => setUrl(event.target.value)} /></div><div className="tc-connector-form-row"><span>Authentication</span><select aria-label="Authentication" value={authMode} onChange={(event) => setAuthMode(event.target.value as "oauth" | "bearer" | "none")}><option value="oauth">OAuth 2.0</option><option value="bearer">Bearer token</option><option value="none">None</option></select></div>{authMode === "bearer" ? <div className="tc-connector-form-row"><span>Bearer token</span><input aria-label="Bearer token" type="password" placeholder="Stored locally" value={bearerToken} onChange={(event) => setBearerToken(event.target.value)} /></div> : null}<div className="tc-connector-form-row"><span>Custom headers</span><div><textarea aria-label="Custom headers" rows={3} placeholder="Header: value" value={customHeaders} onChange={(event) => setCustomHeaders(event.target.value)} /><small>One header per line.</small></div></div><p className="tc-connector-form-help">Add saves the configuration and starts OAuth authorization.</p></> : <><div className="tc-connector-form-row"><span>Local command</span><input aria-label="Command" placeholder="npx" value={command} onChange={(event) => setCommand(event.target.value)} /></div><div className="tc-connector-form-row"><span>Arguments</span><input aria-label="Args" placeholder="-y @playwright/mcp" value={args} onChange={(event) => setArgs(event.target.value)} /></div><div className="tc-connector-form-row"><span>Environment</span><div><textarea aria-label="Environment" rows={3} placeholder="KEY=value" value={envText} onChange={(event) => setEnvText(event.target.value)} /><small>One variable per line.</small></div></div></>}

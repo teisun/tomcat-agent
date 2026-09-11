@@ -11,6 +11,16 @@ export type ConnectorState =
   | "failed";
 export type ConnectorSource = "Global" | "Workspace" | "Unknown";
 
+export interface ConnectorConfigPath {
+  display: string;
+  raw: string;
+}
+
+export interface ConnectorConfigPaths {
+  global: ConnectorConfigPath;
+  workspace: ConnectorConfigPath;
+}
+
 export interface ConnectorView {
   name: string;
   type: ConnectorType;
@@ -95,13 +105,7 @@ export function normalizeConnectorView(value: unknown): ConnectorView | null {
     resourceCount: typeof raw.resourceCount === "number" ? raw.resourceCount : 0,
     url: typeof raw.url === "string" ? raw.url : null,
     command: typeof raw.command === "string" ? raw.command : null,
-    configPath: typeof raw.configPath === "string"
-      ? raw.configPath
-      : source === "Global"
-        ? "~/.tomcat/mcp.json"
-        : source === "Workspace"
-          ? ".tomcat/mcp.json"
-          : null,
+    configPath: typeof raw.configPath === "string" ? raw.configPath : null,
     configPathRaw: typeof raw.configPathRaw === "string" ? raw.configPathRaw : null,
     error: typeof raw.error === "string" ? raw.error : null,
     toolFilter: isRecord(raw.toolFilter) ? {

@@ -1,7 +1,7 @@
 //! 配置加载、校验与路径解析函数。
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use super::super::brand::{DEFAULT_WORK_DIR, ENV_PREFIX};
 use super::super::error::AppError;
@@ -279,6 +279,64 @@ fn push_builtin_workspace_root(
         out.push(canon);
     }
     Ok(())
+}
+
+/// 将项目资源目录配置校验为项目内相对路径。
+///
+/// 该配置只描述项目目录下的一棵资源树，因此拒绝空值、当前/父目录、绝对路径、
+/// home 缩写和旧 `.tomcat` 子树。函数不检查或创建 `project_dir`，调用方可在
+/// 发现、预检或安装阶段按自己的错误边界处理项目是否存在。
+pub fn resolve_project_resource_dir(
+    cfg: &AppConfig,
+    project_dir: &Path,
+) -> Result<PathBuf, AppError> {
+    let relative = validated_project_resource_dir(&cfg.workspace.project_resource_dir)?;
+    Ok(project_dir.join(relative))
+}
+
+fn validated_project_resource_dir(value: &str) -> Result<PathBuf, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Config(
+            "workspace.project_resource_dir 不能为空".to_string(),
+        ));
+    }
+
+    let path = Path::new(trimmed);
+
+    if trimmed
+        .split(['/', '\\'])
+        .any(|segment| matches!(segment, "." | ".." | "~" | ".tomcat"))
+    {
+        return Err(AppError::Config(format!(
+            "workspace.project_resource_dir 必须是项目内相对目录，且不能使用 ~、.、.. 或 .tomcat: {value}"
+        )));
+    }
+    for component in path.components() {
+        match component {
+            Component::Normal(name) if name == ".tomcat" => {
+                return Err(AppError::Config(
+                    "workspace.project_resource_dir 不能使用旧 .tomcat 子树".to_string(),
+                ));
+            }
+            Component::Normal(name) if name == "~" => {
+                return Err(AppError::Config(
+                    "workspace.project_resource_dir 不支持 ~ 路径".to_string(),
+                ));
+            }
+            Component::Normal(_) => {}
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(AppError::Config(format!(
+                    "workspace.project_resource_dir 必须是项目内相对目录: {value}"
+                )));
+            }
+        }
+    }
+
+    Ok(path.to_path_buf())
 }
 
 /// 解析工作根目录：若配置了 `storage.work_dir` 则规范化后返回，否则默认 `~/.tomcat/`。
@@ -631,6 +689,7 @@ pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
             "tools.web_fetch.cache_capacity_bytes 必须大于 0".to_string(),
         ));
     }
+    validated_project_resource_dir(&cfg.workspace.project_resource_dir)?;
     resolve_workspace_roots_paths(cfg).map(|_| ())?;
     Ok(())
 }

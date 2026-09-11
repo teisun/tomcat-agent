@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
 use serde::Deserialize;
 
 use crate::core::skill::parse as parse_skill_frontmatter;
 use crate::ext::parse_manifest as parse_plugin_manifest;
+use crate::infra::config::with_config_lock;
 use crate::infra::{read_file_utf8, AppError};
 use crate::AppConfig;
 
@@ -16,7 +17,7 @@ use super::model::{
     PackageSkillRecord, PackageSourceKind, PackageVisibility, PluginRegistryEntry, PreparedInstall,
     PreparedInstallResource, UninstallOutcome, PACKAGE_MANIFEST_SCHEMA_V1,
 };
-use super::paths::{resolve_layer_paths, resolve_runtime_layer_paths};
+use super::paths::{resolve_layer_paths, resolve_runtime_layer_paths, LayerPaths};
 
 mod install_fs;
 mod registry;
@@ -122,10 +123,7 @@ impl<'a> PackageManager<'a> {
             collect_cross_layer_warnings(self.cfg, scope_root, visibility, &detected)?;
         let mut resources = Vec::with_capacity(detected.resources.len());
         for resource in ordered_detected_resources(&detected.resources) {
-            let destination_dir = match resource.kind {
-                PackageResourceKind::Plugin => layer_paths.plugins_dir.join(&resource.id),
-                PackageResourceKind::Skill => layer_paths.skills_dir.join(&resource.id),
-            };
+            let destination_dir = resource_target_dir(&layer_paths, resource.kind, &resource.id)?;
             if destination_dir.exists() && !force {
                 return Err(AppError::Config(format!(
                     "同层 {} 已存在，需加 --force: {}",
@@ -161,10 +159,15 @@ impl<'a> PackageManager<'a> {
     }
 
     pub fn install(&self, prepared: PreparedInstall) -> Result<InstallOutcome, AppError> {
+        let lock_path = prepared.layer_paths.package_registry_path.clone();
+        with_config_lock(&lock_path, || self.install_locked(prepared))
+    }
+
+    fn install_locked(&self, prepared: PreparedInstall) -> Result<InstallOutcome, AppError> {
         let package_snapshot =
-            RegistrySnapshot::capture_package(&prepared.layer_paths.package_registry_path);
+            RegistrySnapshot::capture_package(&prepared.layer_paths.package_registry_path)?;
         let plugin_snapshot =
-            RegistrySnapshot::capture_plugin(&prepared.layer_paths.plugin_registry_path);
+            RegistrySnapshot::capture_plugin(&prepared.layer_paths.plugin_registry_path)?;
         let mut mutations = Vec::new();
 
         let install_result = (|| -> Result<InstallOutcome, AppError> {
@@ -214,9 +217,11 @@ impl<'a> PackageManager<'a> {
                     .iter()
                     .filter(|plugin| !plugin_ids.contains(&plugin.id))
                 {
-                    if let Some(mutation) = prepare_force_remove_path(
-                        &prepared.layer_paths.plugins_dir.join(&plugin.id),
-                    )? {
+                    if let Some(mutation) = prepare_force_remove_path(&resource_target_dir(
+                        &prepared.layer_paths,
+                        PackageResourceKind::Plugin,
+                        &plugin.id,
+                    )?)? {
                         mutations.push(mutation);
                     }
                 }
@@ -225,9 +230,11 @@ impl<'a> PackageManager<'a> {
                     .iter()
                     .filter(|skill| !skill_ids.contains(&skill.name))
                 {
-                    if let Some(mutation) = prepare_force_remove_path(
-                        &prepared.layer_paths.skills_dir.join(&skill.name),
-                    )? {
+                    if let Some(mutation) = prepare_force_remove_path(&resource_target_dir(
+                        &prepared.layer_paths,
+                        PackageResourceKind::Skill,
+                        &skill.name,
+                    )?)? {
                         mutations.push(mutation);
                     }
                 }
@@ -341,13 +348,13 @@ impl<'a> PackageManager<'a> {
 
         let mut removed_paths = Vec::new();
         for plugin in &record.plugins {
-            let path = layer_paths.plugins_dir.join(&plugin.id);
+            let path = resource_target_dir(&layer_paths, PackageResourceKind::Plugin, &plugin.id)?;
             if remove_path_if_exists(&path)? {
                 removed_paths.push(path);
             }
         }
         for skill in &record.skills {
-            let path = layer_paths.skills_dir.join(&skill.name);
+            let path = resource_target_dir(&layer_paths, PackageResourceKind::Skill, &skill.name)?;
             if remove_path_if_exists(&path)? {
                 removed_paths.push(path);
             }
@@ -591,7 +598,8 @@ fn resolve_package_resources(
     let mut resources = Vec::with_capacity(manifest.plugins.len() + manifest.skills.len());
     let mut seen = HashSet::new();
     for plugin in &manifest.plugins {
-        let (plugin_root, plugin_manifest) = resolve_plugin_source(&root.join(plugin))?;
+        let plugin_path = resolve_package_resource_path(root, plugin, "plugin")?;
+        let (plugin_root, plugin_manifest) = resolve_plugin_source(&plugin_path)?;
         let id = plugin_manifest.id.clone();
         if !seen.insert((PackageResourceKind::Plugin.as_str().to_string(), id.clone())) {
             return Err(AppError::Config(format!("package 内 plugin 重复: {id}")));
@@ -604,7 +612,8 @@ fn resolve_package_resources(
         });
     }
     for skill in &manifest.skills {
-        let (skill_root, skill_name, _description) = resolve_skill_source(&root.join(skill))?;
+        let skill_path = resolve_package_resource_path(root, skill, "skill")?;
+        let (skill_root, skill_name, _description) = resolve_skill_source(&skill_path)?;
         if !seen.insert((
             PackageResourceKind::Skill.as_str().to_string(),
             skill_name.clone(),
@@ -744,10 +753,7 @@ fn collect_cross_layer_warnings(
             if layer.visibility == target_visibility {
                 continue;
             }
-            let resource_path = match resource.kind {
-                PackageResourceKind::Plugin => layer.plugins_dir.join(&resource.id),
-                PackageResourceKind::Skill => layer.skills_dir.join(&resource.id),
-            };
+            let resource_path = resource_target_dir(layer, resource.kind, &resource.id)?;
             if !resource_path.exists() {
                 continue;
             }
@@ -784,6 +790,102 @@ fn ordered_detected_resources(
         PackageResourceKind::Plugin => 1_u8,
     });
     ordered.into_iter()
+}
+
+/// Produce a managed resource directory only from a single safe resource identifier.
+///
+/// Package records are persisted input: validate them again at every destructive IO
+/// boundary so a hand-edited or old registry cannot turn `join` into traversal.
+fn resource_target_dir(
+    layer: &LayerPaths,
+    kind: PackageResourceKind,
+    id: &str,
+) -> Result<PathBuf, AppError> {
+    validate_resource_id(id, kind.as_str())?;
+    if let Ok(metadata) = fs::symlink_metadata(&layer.layer_root) {
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::Permission(format!(
+                "package 层根目录不能是符号链接: {}",
+                layer.layer_root.display()
+            )));
+        }
+    }
+    let root = match kind {
+        PackageResourceKind::Plugin => &layer.plugins_dir,
+        PackageResourceKind::Skill => &layer.skills_dir,
+    };
+    if let Ok(metadata) = fs::symlink_metadata(root) {
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::Permission(format!(
+                "package {} 目标根目录不能是符号链接: {}",
+                kind.as_str(),
+                root.display()
+            )));
+        }
+    }
+    Ok(root.join(id))
+}
+
+fn validate_resource_id(id: &str, label: &str) -> Result<(), AppError> {
+    let path = Path::new(id);
+    if id.trim().is_empty()
+        || id.contains('\\')
+        || path.is_absolute()
+        || !matches!(path.components().next(), Some(Component::Normal(component)) if component == std::ffi::OsStr::new(id))
+        || path.components().nth(1).is_some()
+    {
+        return Err(AppError::Config(format!(
+            "package {label} ID 必须是单个安全目录名: {id:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Resolve an explicit package entry without allowing it to escape or pass through
+/// a symlink. This happens before parsing manifests and before any destination IO.
+fn resolve_package_resource_path(
+    root: &Path,
+    reference: &str,
+    label: &str,
+) -> Result<PathBuf, AppError> {
+    let relative = Path::new(reference);
+    if reference.trim().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(AppError::Config(format!(
+            "package {label} 引用必须是 package 根目录内相对路径: {reference:?}"
+        )));
+    }
+    let mut candidate = root.to_path_buf();
+    for component in relative.components() {
+        if let Component::Normal(segment) = component {
+            candidate.push(segment);
+            if fs::symlink_metadata(&candidate)
+                .map_err(AppError::Io)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(AppError::Permission(format!(
+                    "package {label} 引用不能穿过符号链接: {}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+    let resolved = canonicalize_existing_path(&candidate)?;
+    if !resolved.starts_with(root) {
+        return Err(AppError::Permission(format!(
+            "package {label} 引用不得越出 package 根目录: {}",
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
 }
 
 fn canonicalize_existing_path(path: &Path) -> Result<PathBuf, AppError> {

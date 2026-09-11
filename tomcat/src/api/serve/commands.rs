@@ -1323,6 +1323,31 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
+            let global_config_path = match global_mcp_path(&state.cfg) {
+                Ok(path) => path,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let project_config_path =
+                match project_mcp_path(&state.cfg, connector.mcp_manager().workspace_root()) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        send_error(
+                            &state,
+                            id,
+                            state.registry.active_session_id(),
+                            render_error_message(&error),
+                        )?;
+                        return Ok(());
+                    }
+                };
             let servers = connector
                 .mcp_manager()
                 .statuses()
@@ -1330,11 +1355,8 @@ pub(crate) async fn handle_command(
                 .map(|status| {
                     let configured = connector.mcp_manager().configured_server(&status.name);
                     let config_path = match status.source {
-                        McpConfigSource::Global => global_mcp_path(&state.cfg)
-                            .unwrap_or_else(|_| std::path::PathBuf::from("~/.tomcat/mcp.json")),
-                        McpConfigSource::Project => {
-                            project_mcp_path(connector.mcp_manager().workspace_root())
-                        }
+                        McpConfigSource::Global => global_config_path.clone(),
+                        McpConfigSource::Project => project_config_path.clone(),
                     };
                     let config_path_display = crate::infra::platform::format_home_path(&config_path);
                     json!({
@@ -1367,10 +1389,20 @@ pub(crate) async fn handle_command(
                         }),
                     })
                 })                .collect::<Vec<_>>();
+            let config_paths = json!({
+                "global": {
+                    "display": crate::infra::platform::format_home_path(&global_config_path),
+                    "raw": global_config_path.to_string_lossy().to_string(),
+                },
+                "workspace": {
+                    "display": crate::infra::platform::format_home_path(&project_config_path),
+                    "raw": project_config_path.to_string_lossy().to_string(),
+                },
+            });
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(json!({ "connectors": servers })),
+                Some(json!({ "connectors": servers, "configPaths": config_paths })),
             )))?;
         }
         ServeCommand::ListConnectorTools { id, name } => {
@@ -1493,7 +1525,7 @@ pub(crate) async fn handle_command(
                         .unwrap_or_default()
                 });
             let result = if use_workspace {
-                upsert_project_server(&workspace_root, name.clone(), config)
+                upsert_project_server(&state.cfg, &workspace_root, name.clone(), config)
             } else {
                 upsert_global_server(&state.cfg, name.clone(), config)
             };

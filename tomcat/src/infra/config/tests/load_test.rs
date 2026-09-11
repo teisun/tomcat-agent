@@ -86,6 +86,31 @@ fn load_config_accepts_preflight_section() {
 }
 
 #[test]
+#[serial(env_lock)]
+fn load_config_defaults_and_env_overrides_project_resource_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[workspace]\nproject_resource_dir = \".team-agents\"\n",
+    )
+    .unwrap();
+
+    let configured = load_config(Some(&path)).unwrap();
+    assert_eq!(configured.workspace.project_resource_dir, ".team-agents");
+
+    unsafe { std::env::set_var("TOMCAT__WORKSPACE__PROJECT_RESOURCE_DIR", "tools/agents") };
+    let overridden = load_config(Some(&path)).unwrap();
+    unsafe { std::env::remove_var("TOMCAT__WORKSPACE__PROJECT_RESOURCE_DIR") };
+    assert_eq!(overridden.workspace.project_resource_dir, "tools/agents");
+
+    assert_eq!(
+        AppConfig::default().workspace.project_resource_dir,
+        ".agents"
+    );
+}
+
+#[test]
 fn load_config_rejects_legacy_whitelist_keys() {
     let dir = std::env::temp_dir().join("tomcat_legacy_whitelist_config_test");
     std::fs::create_dir_all(&dir).unwrap();

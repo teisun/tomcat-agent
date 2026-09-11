@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::infra::config::get_work_dir;
+use crate::infra::config::{get_work_dir, resolve_project_resource_dir};
 use crate::infra::error::AppError;
 use crate::AppConfig;
 
@@ -226,8 +226,8 @@ pub fn global_mcp_path(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     Ok(get_work_dir(cfg)?.join("mcp.json"))
 }
 
-pub fn project_mcp_path(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".tomcat").join("mcp.json")
+pub fn project_mcp_path(cfg: &AppConfig, workspace_root: &Path) -> Result<PathBuf, AppError> {
+    Ok(resolve_project_resource_dir(cfg, workspace_root)?.join("mcp.json"))
 }
 
 pub fn load_servers(
@@ -249,7 +249,7 @@ pub fn load_servers(
         })
         .collect::<BTreeMap<_, _>>();
 
-    for (name, config) in read_mcp_file(&project_mcp_path(workspace_root))?.mcp_servers {
+    for (name, config) in read_mcp_file(&project_mcp_path(cfg, workspace_root)?)?.mcp_servers {
         merged.insert(
             name,
             ConfiguredMcpServer {
@@ -307,19 +307,24 @@ pub fn remove_global_server(cfg: &AppConfig, name: &str) -> Result<bool, AppErro
 }
 
 pub fn upsert_project_server(
+    cfg: &AppConfig,
     workspace_root: &Path,
     name: String,
     server: McpServerConfig,
 ) -> Result<(), AppError> {
     server.validate(&name)?;
-    let path = project_mcp_path(workspace_root);
+    let path = project_mcp_path(cfg, workspace_root)?;
     let mut file = read_mcp_file(&path)?;
     file.mcp_servers.insert(name, server);
     write_mcp_file(&path, &file)
 }
 
-pub fn remove_project_server(workspace_root: &Path, name: &str) -> Result<bool, AppError> {
-    let path = project_mcp_path(workspace_root);
+pub fn remove_project_server(
+    cfg: &AppConfig,
+    workspace_root: &Path,
+    name: &str,
+) -> Result<bool, AppError> {
+    let path = project_mcp_path(cfg, workspace_root)?;
     let mut file = read_mcp_file(&path)?;
     let removed = file.mcp_servers.remove(name).is_some();
     if removed {
@@ -329,11 +334,12 @@ pub fn remove_project_server(workspace_root: &Path, name: &str) -> Result<bool, 
 }
 
 pub fn set_project_tool_filter(
+    cfg: &AppConfig,
     workspace_root: &Path,
     name: &str,
     tool_filter: ToolFilter,
 ) -> Result<(), AppError> {
-    let path = project_mcp_path(workspace_root);
+    let path = project_mcp_path(cfg, workspace_root)?;
     let mut file = read_mcp_file(&path)?;
     let server = file
         .mcp_servers
@@ -425,12 +431,36 @@ mod tests {
     }
 
     #[test]
+    fn project_mcp_path_uses_configured_resource_directory_and_rejects_invalid_values() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let workspace = temp.path().join("workspace");
+        let mut cfg = AppConfig::default();
+
+        assert_eq!(
+            project_mcp_path(&cfg, &workspace).expect("default project config path"),
+            workspace.join(".agents").join("mcp.json")
+        );
+
+        cfg.workspace.project_resource_dir = ".workspace-data".to_string();
+        assert_eq!(
+            project_mcp_path(&cfg, &workspace).expect("custom project config path"),
+            workspace.join(".workspace-data").join("mcp.json")
+        );
+
+        cfg.workspace.project_resource_dir = "../outside".to_string();
+        assert!(project_mcp_path(&cfg, &workspace).is_err());
+    }
+
+    #[test]
     fn project_server_overrides_global_server_with_same_name() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(workspace.join(".tomcat")).expect("project config directory");
         let mut cfg = AppConfig::default();
+        cfg.workspace.project_resource_dir = ".workspace-data".to_string();
         cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let project = project_mcp_path(&cfg, &workspace).expect("project config path");
+        std::fs::create_dir_all(project.parent().expect("project config directory"))
+            .expect("project config directory");
         let global = get_work_dir(&cfg).expect("work dir").join("mcp.json");
         std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
         std::fs::write(
@@ -439,7 +469,7 @@ mod tests {
         )
         .expect("write global config");
         std::fs::write(
-            project_mcp_path(&workspace),
+            project_mcp_path(&cfg, &workspace).expect("project config path"),
             r#"{"mcpServers":{"same":{"command":"project","args":[]}}}"#,
         )
         .expect("write project config");
@@ -448,6 +478,10 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].config.command, "project");
         assert_eq!(servers[0].source, McpConfigSource::Project);
+        assert!(
+            !workspace.join(".agents").join("mcp.json").exists(),
+            "loading the custom path must not fall back to the default project path"
+        );
     }
 
     #[test]

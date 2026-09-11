@@ -17,7 +17,7 @@ fn resolve_visibility_roots_global_agent_scope() {
     std::fs::create_dir_all(&nested).unwrap();
     let non_canonical_scope_root = nested.join("..");
 
-    let cfg = test_config(work_dir.path());
+    let mut cfg = test_config(work_dir.path());
     let global =
         resolve_layer_paths(&cfg, PackageVisibility::Global, Some(workspace.path())).unwrap();
     let canonical_work_dir = work_dir.path().canonicalize().unwrap();
@@ -45,11 +45,29 @@ fn resolve_visibility_roots_global_agent_scope() {
     .unwrap();
     let canonical_scope = workspace.path().canonicalize().unwrap();
     assert_eq!(scope.scope_root.as_deref(), Some(canonical_scope.as_path()));
-    assert_eq!(scope.layer_root, canonical_scope.join(".tomcat"));
-    assert_eq!(scope.plugins_dir, canonical_scope.join(".tomcat/plugins"));
+    assert_eq!(scope.layer_root, canonical_scope.join(".agents"));
+    assert_eq!(scope.plugins_dir, canonical_scope.join(".agents/plugins"));
     assert_eq!(
         scope.package_registry_path,
-        canonical_scope.join(".tomcat/packages/registry.json")
+        canonical_scope.join(".agents/packages/registry.json")
+    );
+
+    cfg.workspace.project_resource_dir = ".team-agents".to_string();
+    let custom_scope =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    assert_eq!(
+        custom_scope.layer_root,
+        canonical_scope.join(".team-agents")
+    );
+    assert_eq!(
+        custom_scope.plugin_registry_path,
+        canonical_scope.join(".team-agents/plugins/registry.json")
+    );
+
+    cfg.workspace.project_resource_dir = "../outside".to_string();
+    assert!(
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).is_err(),
+        "an invalid project resource directory must stop package path resolution"
     );
 }
 

@@ -103,6 +103,7 @@ describe("settings panel model management flow", () => {
     extensionVersion?: string | null;
     messenger?: Partial<{
       sendListModels: () => Promise<unknown>;
+      sendListConnectors: () => Promise<unknown>;
       sendListProviderKeys: () => Promise<unknown>;
       sendSetProviderKey: (envName: string, value: string) => Promise<unknown>;
       sendUpsertModel: (model: unknown) => Promise<unknown>;
@@ -112,6 +113,10 @@ describe("settings panel model management flow", () => {
     const messenger = {
       sendListModels: vi.fn().mockResolvedValue({
         payload: { models: [] },
+        success: true,
+      }),
+      sendListConnectors: vi.fn().mockResolvedValue({
+        payload: { connectors: [] },
         success: true,
       }),
       sendListProviderKeys: vi.fn().mockResolvedValue({
@@ -146,6 +151,42 @@ describe("settings panel model management flow", () => {
     });
     return { messenger, panel };
   }
+
+  it("retains the serve-provided configuration paths even when no connectors exist", async () => {
+    const { messenger, panel } = createPanel({
+      ensureInitialized: async () => ({
+        attachmentRoot: null,
+        capabilities: ["list_connectors"],
+        protocolVersion: 1,
+        serverVersion: "0.1.20",
+        sessionId: null,
+      }),
+      messenger: {
+        sendListConnectors: vi.fn().mockResolvedValue({
+          payload: {
+            configPaths: {
+              global: { display: "~/.tomcat/mcp.json", raw: "/tmp/home/.tomcat/mcp.json" },
+              workspace: { display: ".workspace-data/mcp.json", raw: "/tmp/project/.workspace-data/mcp.json" },
+            },
+            connectors: [],
+          },
+          success: true,
+        }),
+      },
+    });
+
+    await panel.__testingDispatchIntent({
+      data: { route: "connectors" },
+      messageId: "connector-config-paths",
+      type: "settings.ready",
+    } satisfies SettingsIntent);
+
+    expect(messenger.sendListConnectors).toHaveBeenCalledTimes(1);
+    expect(panel.__testingSnapshot().state.connectorConfigPaths).toEqual({
+      global: { display: "~/.tomcat/mcp.json", raw: "/tmp/home/.tomcat/mcp.json" },
+      workspace: { display: ".workspace-data/mcp.json", raw: "/tmp/project/.workspace-data/mcp.json" },
+    });
+  });
 
   it("does not persist provider keys when model save fails", async () => {
     const { messenger, panel } = createPanel({

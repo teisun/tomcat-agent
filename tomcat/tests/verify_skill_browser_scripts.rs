@@ -91,6 +91,17 @@ fn respond(mut stream: TcpStream) {
 }
 
 #[test]
+fn verify_assets_default_to_agents_shots_and_document_custom_configuration() {
+    let skill = include_str!("../assets/skills/verify/SKILL.md");
+    let shot = include_str!("../assets/skills/verify/scripts/shot.mjs");
+
+    assert!(skill.contains("workspace.project_resource_dir"));
+    assert!(skill.contains("<workspace>/<project_resource_dir>/shots"));
+    assert!(shot.contains("path.resolve(\".agents\", \"shots\")"));
+    assert!(!shot.contains("path.resolve(\".tomcat\", \"shots\")"));
+}
+
+#[test]
 #[ignore = "requires Node, network/browser bootstrap, and a local Chromium-compatible browser"]
 #[serial]
 fn bootstrap_then_shot_writes_three_artifacts_and_rejects_console_errors() {
@@ -103,6 +114,12 @@ fn bootstrap_then_shot_writes_three_artifacts_and_rejects_console_errors() {
         .expect("skill directory")
         .join("scripts");
     let browser_path = temp.path().join("playwright");
+    assert!(
+        std::fs::read_to_string(skill_path.join("SKILL.md"))
+            .expect("read materialized verify skill")
+            .contains("workspace.project_resource_dir"),
+        "verify guidance must require the configured project resource directory"
+    );
 
     let bootstrap = Command::new("node")
         .arg("bootstrap.mjs")
@@ -117,7 +134,7 @@ fn bootstrap_then_shot_writes_three_artifacts_and_rejects_console_errors() {
     );
 
     let server = FixtureServer::start();
-    let default_output_dir = temp.path().join(".tomcat").join("shots");
+    let default_output_dir = temp.path().join(".agents").join("shots");
     let healthy_url = format!("{}/healthy.html", server.base_url);
     let healthy = Command::new("node")
         .args([

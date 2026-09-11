@@ -39,7 +39,7 @@ function parseArguments(argv) {
     viewport: DEFAULT_VIEWPORT,
     wait: "networkidle",
     timeoutMs: DEFAULT_TIMEOUT_MS,
-    out: path.resolve(".tomcat", "shots"),
+    out: path.resolve(".agents", "shots"),
   };
   const [url, ...rest] = argv;
   if (!url) {

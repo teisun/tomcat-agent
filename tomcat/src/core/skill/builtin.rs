@@ -13,6 +13,10 @@ use crate::AppConfig;
 static VERIFY_SKILL_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/skills/verify");
 static CONNECTORS_SKILL_ASSETS: Dir<'_> =
     include_dir!("$CARGO_MANIFEST_DIR/assets/skills/connectors");
+static SKILL_CREATOR_ASSETS: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/assets/skills/skill-creator");
+static PLUGIN_CREATOR_ASSETS: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/assets/skills/plugin-creator");
 
 pub fn materialize_builtin_skills(cfg: &AppConfig) -> Result<PathBuf, AppError> {
     let managed_skills_root = get_work_dir(cfg)?.join("skills");
@@ -21,6 +25,14 @@ pub fn materialize_builtin_skills(cfg: &AppConfig) -> Result<PathBuf, AppError> 
     materialize_dir(
         &CONNECTORS_SKILL_ASSETS,
         &managed_skills_root.join("connectors"),
+    )?;
+    materialize_dir(
+        &SKILL_CREATOR_ASSETS,
+        &managed_skills_root.join("skill-creator"),
+    )?;
+    materialize_dir(
+        &PLUGIN_CREATOR_ASSETS,
+        &managed_skills_root.join("plugin-creator"),
     )?;
     Ok(verify_root.join("SKILL.md"))
 }
@@ -54,7 +66,10 @@ fn materialize_file(path: &Path, contents: &[u8]) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_builtin_skills, CONNECTORS_SKILL_ASSETS, VERIFY_SKILL_ASSETS};
+    use super::{
+        materialize_builtin_skills, CONNECTORS_SKILL_ASSETS, PLUGIN_CREATOR_ASSETS,
+        SKILL_CREATOR_ASSETS, VERIFY_SKILL_ASSETS,
+    };
     use crate::core::skill::{discover, load_skill_payload, skill_roots, SkillSource};
     use crate::core::tools::primitive::PrimitiveExecutor;
     use crate::infra::error::AppError;
@@ -146,6 +161,30 @@ mod tests {
         assert!(connectors.contains("tool_search"));
         assert!(connectors.contains("tool_describe"));
         assert!(connectors.contains("tool_call"));
+        let skill_creator = std::str::from_utf8(
+            SKILL_CREATOR_ASSETS
+                .get_file("SKILL.md")
+                .expect("embedded skill-creator SKILL.md")
+                .contents(),
+        )
+        .expect("embedded skill-creator SKILL.md is UTF-8");
+        assert!(skill_creator.contains("name: skill-creator"));
+        assert!(skill_creator.contains("package_install"));
+        assert!(SKILL_CREATOR_ASSETS
+            .get_file("scripts/quick_validate.py")
+            .is_some());
+        let plugin_creator = std::str::from_utf8(
+            PLUGIN_CREATOR_ASSETS
+                .get_file("SKILL.md")
+                .expect("embedded plugin-creator SKILL.md")
+                .contents(),
+        )
+        .expect("embedded plugin-creator SKILL.md is UTF-8");
+        assert!(plugin_creator.contains("name: plugin-creator"));
+        assert!(plugin_creator.contains("package_install"));
+        assert!(PLUGIN_CREATOR_ASSETS
+            .get_file("scripts/init_plugin.mjs")
+            .is_some());
     }
 
     #[test]
