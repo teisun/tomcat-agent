@@ -263,6 +263,7 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     assistant.msg_id = Some("a1".to_string());
     append_transcript_message(&transcript, &user);
     append_transcript_message(&transcript, &assistant);
+    let transcript_prefix_before_collapse = std::fs::read_to_string(&transcript).unwrap();
 
     let mut messages = vec![system, user, assistant];
     let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
@@ -356,6 +357,12 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
 
     let entries = read_entries_tail(&transcript, 10).unwrap();
     let last = entries.last().unwrap();
+    assert!(
+        std::fs::read_to_string(&transcript)
+            .unwrap()
+            .starts_with(&transcript_prefix_before_collapse),
+        "collapse must preserve every existing transcript byte and append its boundary at the tail"
+    );
     match last {
         TranscriptEntry::BranchSummary(entry) => {
             assert_eq!(entry.is_boundary, Some(true));

@@ -310,7 +310,7 @@ async fn preheat_retries_with_exponential_backoff() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn preheat_exhausted_writes_failure_entry_to_transcript() {
+async fn preheat_exhausted_keeps_its_unfulfilled_marker_and_emits_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("failure_trail.jsonl");
     write_header(
@@ -325,9 +325,7 @@ async fn preheat_exhausted_writes_failure_entry_to_transcript() {
     )
     .unwrap();
 
-    // 写一条 type=message + id=msg_end 作为 covered_end_id 锚点，
-    // insert_entry_after_message_id 才能在该锚点之后插入失败留痕；
-    // 否则按 §5.7.4 退化为 append_entry，仍能落盘但用例语义弱化。
+    // The marker is appended at start, while `msg_end` is still the transcript tail.
     let anchor_msg = TranscriptEntry::Message(MessageEntry {
         id: Some("msg_end".to_string()),
         parent_id: None,
@@ -367,38 +365,24 @@ async fn preheat_exhausted_writes_failure_entry_to_transcript() {
     assert!(matches!(outcome, PreheatOutcome::Exhausted));
 
     let entries = read_entries_tail(&path, 16).unwrap();
-    let failure_entry = entries
+    let marker = entries
         .iter()
         .rev()
         .find_map(|e| match e {
-            TranscriptEntry::BranchSummary(b) if b.summary.is_none() => Some(b.clone()),
+            TranscriptEntry::BranchSummary(b) if b.is_boundary == Some(true) => Some(b.clone()),
             _ => None,
         })
-        .expect("3 次失败后 transcript 应出现 summary == None 的 BranchSummary 失败留痕");
+        .expect("preheat start must leave its empty marker even if all retries fail");
 
     assert_eq!(
-        failure_entry.attempts,
-        Some(3),
-        "attempts 必须等于 MAX_PREHEAT_RETRIES = 3（与计划 §6.D 接口约束一致）",
-    );
-    assert!(
-        failure_entry
-            .error
-            .as_deref()
-            .map(|s| s.contains("simulated provider failure"))
-            .unwrap_or(false),
-        "error 必须保留最末次 LLM 错误描述，实际 {:?}",
-        failure_entry.error,
+        marker.summary,
+        None,
+        "failure diagnostics are emitted as CompactionError; the transcript marker stays unfulfilled"
     );
     assert_eq!(
-        failure_entry.is_boundary,
-        Some(false),
-        "失败行同样标 is_boundary=false，避免 reload 时清空 prefix",
-    );
-    assert_eq!(
-        failure_entry.covered_end_id.as_deref(),
+        marker.covered_end_id.as_deref(),
         Some("msg_end"),
-        "失败行需要保留 covered 范围，便于运行期定位故障窗口",
+        "marker keeps the covered range for later diagnostics",
     );
 }
 

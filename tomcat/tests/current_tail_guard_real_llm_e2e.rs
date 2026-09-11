@@ -336,15 +336,30 @@ async fn real_terra_agent_loop_applies_preheat_during_build_task() {
         .expect("created transcript path");
     let entries = tomcat::core::session::transcript::read_entries_tail(&transcript, 64)
         .expect("read transcript");
+    let preheat_marker_ids: HashSet<&str> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            tomcat::TranscriptEntry::BranchSummary(summary)
+                if summary.is_boundary == Some(true) && summary.summary.is_none() =>
+            {
+                summary.id.as_deref()
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !preheat_marker_ids.is_empty(),
+        "preheat must append an unfulfilled branch_summary marker at its cut"
+    );
     assert!(
         entries.iter().any(|entry| {
             matches!(
                 entry,
-                tomcat::TranscriptEntry::BranchSummary(summary)
-                    if summary.is_boundary == Some(true)
+                tomcat::TranscriptEntry::BranchSummaryText(body)
+                    if preheat_marker_ids.contains(body.for_id.as_str())
             )
         }),
-        "the ready preheat must be applied as a persisted branch_summary"
+        "applying the ready preheat must append a body linked to its marker"
     );
     assert!(
         entries.iter().any(|entry| {

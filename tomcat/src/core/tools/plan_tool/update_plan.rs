@@ -1205,7 +1205,7 @@ fn completion_evidence_warnings(todos: &[TodoItem], ops_list: &[UpdateOp]) -> Ve
             } if content
                 .as_ref()
                 .and_then(StatusUpdateMetadata::evidence)
-                .map_or(true, |evidence| evidence.is_empty())
+                .is_none_or(|evidence| evidence.is_empty())
                 && todos
                     .iter()
                     .any(|todo| todo.id == *id && todo.kind == TodoKind::Work) =>

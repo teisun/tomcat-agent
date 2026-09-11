@@ -1278,14 +1278,19 @@ function emitContextMetrics(sessionId, ratio = 0.42) {
   const session = touchSession(ensureSession(sessionId));
   session.contextRatio = ratio;
   send({
+    cacheReadTokensTotal: 0,
     compactionCount: 0,
     compactionTokensFreed: 0,
+    consecutiveMissMax: 0,
     contextUtilizationRatio: ratio,
     inputTokensUsed: 256,
     preheatInProgress: false,
     preheatResultPending: false,
+    promptTokensTotal: 256,
     providerUsageMeasured: true,
     sessionId,
+    tailChangeMissTokens: 0,
+    tailChangedCount: 0,
     totalToolResultBytesPersisted: 0,
     type: "context_metrics_update",
   });
@@ -1297,14 +1302,19 @@ function emitEstimatedContextMetrics(sessionId, ratio) {
     session.contextRatio = ratio;
   }
   send({
+    cacheReadTokensTotal: 0,
     compactionCount: 0,
     compactionTokensFreed: 0,
+    consecutiveMissMax: 0,
     contextUtilizationRatio: ratio,
     inputTokensUsed: 256,
     preheatInProgress: false,
     preheatResultPending: false,
+    promptTokensTotal: 256,
     providerUsageMeasured: false,
     sessionId,
+    tailChangeMissTokens: 0,
+    tailChangedCount: 0,
     totalToolResultBytesPersisted: 0,
     type: "context_metrics_update",
   });

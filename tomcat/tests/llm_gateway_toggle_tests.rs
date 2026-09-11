@@ -115,7 +115,6 @@ fn openai_target_env_override_switches_back_to_builtin_openai() {
     }
 }
 
-#[test]
 #[serial(env_lock)]
 fn openai_target_env_override_treats_55_and_56_as_builtin_openai() {
     for model_id in ["gpt-5.5", "gpt-5.6"] {

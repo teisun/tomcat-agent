@@ -920,6 +920,13 @@ export type WebviewIntent =
         editDiffBadgeCount: number;
         commandBlockCount: number;
       };
+    }
+  | {
+      messageId: string;
+      type: "__test.dom_fallback_snapshot";
+      data: {
+        html: string;
+      };
     };
 
 export interface VsCodeApiLike {

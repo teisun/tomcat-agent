@@ -63,9 +63,15 @@ async fn ask_question_emits_transcript_event_on_answer() {
         }],
     }]);
 
-    let out = ask_question::execute(&rt, &panel, &good_args(), AskQuestionTermination::default())
-        .await
-        .unwrap();
+    let out = ask_question::execute_for_tool(
+        &rt,
+        &panel,
+        &good_args(),
+        AskQuestionTermination::default(),
+        Some("ask-call-1"),
+    )
+    .await
+    .unwrap();
     assert_eq!(out["cancelled"], false);
 
     let guard = captured.lock();
@@ -77,6 +83,7 @@ async fn ask_question_emits_transcript_event_on_answer() {
     assert_eq!(guard[0]["mode"], "plan");
     assert_eq!(guard[0]["questions"][0]["id"], "q1");
     assert_eq!(guard[0]["result"]["answers"][0]["question_id"], "q1");
+    assert_eq!(guard[0]["tool_call_id"], "ask-call-1");
 }
 
 #[tokio::test]

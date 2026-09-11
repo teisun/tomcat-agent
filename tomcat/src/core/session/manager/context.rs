@@ -1,5 +1,6 @@
 //! init_context_state helpers and context assembly functions.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -7,6 +8,7 @@ use base64::Engine as _;
 use chrono::{NaiveDate, Utc};
 
 use crate::core::llm::{ChatMessage, ChatMessageContentPart, MessageKind};
+use crate::core::session::preheat_cache::read_preheat_cache;
 use crate::core::session::resume_index::{
     load_or_rebuild_resume_index, rebuild_resume_index, ResumeAnchor, ResumeIndex,
     ResumeIndexIoStats, ResumeIndexSource,
@@ -105,9 +107,10 @@ fn legacy_read_cap() -> usize {
 }
 
 fn boundary_exists(entries: &[TranscriptEntry]) -> bool {
-    entries.iter().any(
-        |entry| matches!(entry, TranscriptEntry::BranchSummary(ce) if ce.is_boundary == Some(true)),
-    )
+    let bodies = branch_summary_texts(entries);
+    entries
+        .iter()
+        .any(|entry| is_completed_boundary(entry, &bodies))
 }
 
 fn choose_recent_turn_anchor(index: &ResumeIndex) -> Option<ResumeAnchor> {
@@ -310,6 +313,7 @@ fn entry_timestamp(entry: &TranscriptEntry) -> &str {
         TranscriptEntry::ThinkingLevelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingTrace(e) => &e.timestamp,
         TranscriptEntry::BranchSummary(e) => &e.timestamp,
+        TranscriptEntry::BranchSummaryText(e) => &e.timestamp,
         TranscriptEntry::ToolResultsCompacted(e) => &e.timestamp,
         TranscriptEntry::Label(e) => &e.timestamp,
         TranscriptEntry::SessionInfo(e) => &e.timestamp,
@@ -345,9 +349,10 @@ pub(super) fn compute_fold_start(
     today: NaiveDate,
     min_turns: usize,
 ) -> usize {
-    let boundary = entries.iter().rposition(
-        |e| matches!(e, TranscriptEntry::BranchSummary(ce) if ce.is_boundary == Some(true)),
-    );
+    let bodies = branch_summary_texts(entries);
+    let boundary = entries
+        .iter()
+        .rposition(|entry| is_completed_boundary(entry, &bodies));
     let effective_start = boundary.unwrap_or(0);
 
     let today_start = entries[effective_start..]
@@ -401,6 +406,51 @@ fn branch_summary_pending_from_entry(ce: &BranchSummaryEntry) -> Option<Compacti
         estimated_summary_tokens: ce.estimated_summary_tokens,
         estimated_tokens_saved: ce.estimated_tokens_saved,
         preheat_elapsed_ms: 0,
+    })
+}
+
+/// Bodies are persisted as tail-appended `branch_summary_text` rows, while their marker remains
+/// at the original compaction cut. Build this lookup before positional folding so a marker is a
+/// boundary only after its body is durably present.
+fn branch_summary_texts(entries: &[TranscriptEntry]) -> HashMap<&str, &str> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::BranchSummaryText(body) => {
+                Some((body.for_id.as_str(), body.summary.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_completed_boundary(entry: &TranscriptEntry, bodies: &HashMap<&str, &str>) -> bool {
+    let TranscriptEntry::BranchSummary(summary) = entry else {
+        return false;
+    };
+    summary.is_boundary == Some(true)
+        && (summary.summary.is_some()
+            || summary
+                .id
+                .as_deref()
+                .is_some_and(|id| bodies.contains_key(id)))
+}
+
+fn has_unfulfilled_preheat_marker(entries: &[TranscriptEntry], marker_id: &str) -> bool {
+    entries.iter().any(|entry| {
+        matches!(
+            entry,
+            TranscriptEntry::BranchSummary(marker)
+                if marker.id.as_deref() == Some(marker_id)
+                    && marker.is_boundary == Some(true)
+                    && marker.summary.is_none()
+        )
+    })
+}
+
+fn has_summary_body(entries: &[TranscriptEntry], marker_id: &str) -> bool {
+    entries.iter().any(|entry| {
+        matches!(entry, TranscriptEntry::BranchSummaryText(body) if body.for_id == marker_id)
     })
 }
 
@@ -580,13 +630,14 @@ fn extract_resume_control(entries: &[TranscriptEntry]) -> ResumeControlState {
     control
 }
 
-fn fold_entries_to_messages(
+pub(super) fn fold_entries_to_messages(
     entries: &[TranscriptEntry],
     system_text_len: usize,
 ) -> FoldEntriesOutcome {
     let mut messages: Vec<ChatMessage> = Vec::new();
     let mut total_chars = system_text_len;
     let mut pending_preheat: Option<CompactionResult> = None;
+    let bodies = branch_summary_texts(entries);
 
     for entry in entries {
         match entry {
@@ -599,25 +650,37 @@ fn fold_entries_to_messages(
                     continue;
                 }
 
-                if ce.is_boundary == Some(true) {
+                let summary_text = if ce.is_boundary == Some(true) {
+                    ce.summary
+                        .as_deref()
+                        .or_else(|| ce.id.as_deref().and_then(|id| bodies.get(id).copied()))
+                } else {
+                    // Only a new `is_boundary=true` marker can have a tail body. Legacy
+                    // is_boundary=None rows retain their historic inline-only behavior.
+                    ce.summary.as_deref()
+                };
+                let is_completed_boundary = ce.is_boundary == Some(true) && summary_text.is_some();
+                if is_completed_boundary {
                     pending_preheat = None;
                 }
 
-                // is_boundary=true → discard prefix (boundary switch)
-                // is_boundary=None → legacy entry, don't clear (backward compat)
-                if ce.is_boundary == Some(true) {
+                // A completed is_boundary=true record discards the prefix. A marker without its
+                // tail body is deliberately a no-op: treating it as a boundary would lose the
+                // original history after a failed or interrupted preheat.
+                if is_completed_boundary {
                     messages.clear();
                     total_chars = system_text_len;
                 }
 
-                if let Some(ref summary) = ce.summary {
-                    let mut summary_msg = ChatMessage::compaction_summary(summary.as_str());
-                    summary_msg.msg_id = ce.id.clone().or_else(|| Some(generate_entry_id()));
+                if let Some(summary) = summary_text {
+                    let entry_id = ce.id.clone().unwrap_or_else(generate_entry_id);
+                    let mut summary_msg = ChatMessage::compaction_summary(summary, entry_id);
                     summary_msg.timestamp = Some(ce.timestamp.clone());
                     total_chars += estimate_msg_chars(&summary_msg);
                     messages.push(summary_msg);
                 }
             }
+            TranscriptEntry::BranchSummaryText(_) => {}
             TranscriptEntry::Message(me) => {
                 if let Some(msg) = chat_message_from_entry(me) {
                     total_chars += estimate_msg_chars(&msg);
@@ -835,6 +898,24 @@ pub fn init_context_state(
         let end = p.covered_end_id.as_str();
         if selected.iter().any(|m| m.msg_id.as_deref() == Some(end)) {
             preheat.restore_completed(p);
+        }
+    }
+    if preheat.is_idle() {
+        if let Some(cached) = read_preheat_cache(&path) {
+            // The cache is an optional recovery optimization. Its record normally always has a
+            // marker id, but a malformed/future record must never prevent the session itself
+            // from loading.
+            if let Some(marker_id) = cached.transcript_compaction_entry_id.as_deref() {
+                let covered_end_is_live = selected.iter().any(|message| {
+                    message.msg_id.as_deref() == Some(cached.covered_end_id.as_str())
+                });
+                if has_unfulfilled_preheat_marker(&entries, marker_id)
+                    && !has_summary_body(&entries, marker_id)
+                    && covered_end_is_live
+                {
+                    preheat.restore_completed(cached);
+                }
+            }
         }
     }
 

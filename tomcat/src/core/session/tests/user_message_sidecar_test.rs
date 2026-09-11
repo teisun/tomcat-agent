@@ -92,6 +92,44 @@ fn rebuild_keeps_only_active_normal_user_messages_with_original_json() {
 }
 
 #[test]
+fn recent_user_message_texts_reads_the_sidecar_tail_and_keeps_multipart_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("recent.jsonl");
+    write_header(&transcript, &header()).unwrap();
+    append_message(
+        &transcript,
+        "u1",
+        serde_json::json!({"role":"user","content":"first"}),
+    );
+    append_message(
+        &transcript,
+        "u2",
+        serde_json::json!({
+            "role":"user",
+            "kind":"normal",
+            "content":[
+                {"type":"input_text","text":"second "},
+                {"type":"input_reference","path":"src/lib.rs","label":"lib.rs"},
+                {"type":"input_text","text":"message"}
+            ]
+        }),
+    );
+    append_message(
+        &transcript,
+        "u3",
+        serde_json::json!({"role":"user","content":"third"}),
+    );
+    ensure_user_message_sidecar(&transcript).unwrap();
+
+    let path = user_message_sidecar_path(&transcript);
+    assert_eq!(
+        recent_user_message_texts(&path, 2).unwrap(),
+        ["second message", "third"],
+        "the tail reader must ignore the header, retain authored multipart text, and return chronological order"
+    );
+}
+
+#[test]
 fn valid_fingerprint_reuses_existing_sidecar_then_new_user_rebuilds_it() {
     let dir = tempfile::tempdir().unwrap();
     let transcript = dir.path().join("cache.jsonl");

@@ -29,6 +29,23 @@ describe("webview protocol helpers", () => {
     ).toBe(false);
   });
 
+  it("accepts the HTML-only fallback snapshot after App unmounts", () => {
+    expect(
+      isWebviewIntent({
+        data: { html: '<main data-testid="webview-error-fallback"></main>' },
+        messageId: "webview-error-fallback-snapshot-1",
+        type: "__test.dom_fallback_snapshot",
+      }),
+    ).toBe(true);
+    expect(
+      isWebviewIntent({
+        data: {},
+        messageId: "webview-error-fallback-snapshot-invalid",
+        type: "__test.dom_fallback_snapshot",
+      }),
+    ).toBe(false);
+  });
+
   it("accepts valid host and webview frames", () => {
     expect(
       isHostToWebviewFrame({

@@ -126,7 +126,15 @@ describe("webview dual-channel state store", () => {
       sessionId: "s1",
       type: "message_update",
     });
+    const cacheObs = {
+      cacheReadTokensTotal: 0,
+      consecutiveMissMax: 0,
+      promptTokensTotal: 0,
+      tailChangeMissTokens: 0,
+      tailChangedCount: 0,
+    };
     store.applyEvent({
+      ...cacheObs,
       compactionCount: 0,
       compactionTokensFreed: 0,
       contextUtilizationRatio: 0.1,
@@ -140,6 +148,7 @@ describe("webview dual-channel state store", () => {
     expect(store.snapshot().sessionViews.s1.contextRatio).toBeNull();
 
     store.applyEvent({
+      ...cacheObs,
       compactionCount: 0,
       compactionTokensFreed: 0,
       contextUtilizationRatio: 0.5,
@@ -152,6 +161,7 @@ describe("webview dual-channel state store", () => {
     });
     expect(store.snapshot().sessionViews.s1.contextRatio).toBe(0.5);
     store.applyEvent({
+      ...cacheObs,
       compactionCount: 1,
       compactionTokensFreed: 256,
       contextUtilizationRatio: 0.4,

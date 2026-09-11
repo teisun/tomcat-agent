@@ -2306,6 +2306,12 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       this.domSnapshots.resolve(message.messageId, message.data);
       return;
     }
+    if (message.type === "__test.dom_fallback_snapshot") {
+      // Only installed error-boundary E2E uses this shape. Its contract asks
+      // for fallback HTML, while the normal snapshot retains its full metrics.
+      this.domSnapshots.resolve(message.messageId, message.data as DomSnapshot);
+      return;
+    }
     await this.handleIntent(message);
   }
 

@@ -88,15 +88,14 @@ fn strip_removes_machine_blocks_before_feeding_back_to_the_model() {
 
 #[test]
 fn recent_file_index_is_machine_owned_and_stripped_before_recompaction() {
-    let summary = prepend(
-        &render(Some(&snapshot()), &["original request".to_string()]),
-        "## Goal\ncontinue",
-    );
-    let indexed = prepend_recent_files(
-        &summary,
+    let blocks = render_with_sidecar_and_recent_files(
+        Some(&snapshot()),
+        &["original request".to_string()],
+        None,
         &["src/read.rs".to_string()],
         &["src/edited.rs".to_string()],
     );
+    let indexed = prepend(&blocks, "## Goal\ncontinue");
     assert!(indexed.starts_with("<control_state>"));
     assert!(indexed.contains("<recent_files>"));
     assert!(indexed.contains("src/read.rs"));

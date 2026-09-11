@@ -7,11 +7,9 @@ use tracing::{info, warn};
 
 use crate::core::compaction::preheat::PreheatOutcome;
 use crate::core::compaction::run_layer0_cleanup;
-use crate::core::session::manager::{
-    compound_turn_id, estimated_tokens_from_chars, CompactionResult, ContextState,
-};
+use crate::core::session::manager::{estimated_tokens_from_chars, CompactionResult, ContextState};
 use crate::core::session::transcript::{
-    remove_branch_summary_entry_by_id, set_branch_summary_entry_is_boundary_true,
+    append_entry, read_entries_tail, BranchSummaryTextEntry, TranscriptEntry,
 };
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::infra::config::ContextConfig;
@@ -150,11 +148,47 @@ pub(crate) fn apply_and_emit_boundary(
     let covered_count = result.covered_count;
     let saved = result.estimated_tokens_saved.unwrap_or(0);
 
+    if !state
+        .messages
+        .iter()
+        .any(|message| message.msg_id.as_deref() == Some(result.covered_end_id.as_str()))
+    {
+        let error = AppError::ApplyBoundaryStale {
+            covered_end_id: result.covered_end_id.clone(),
+        };
+        warn!(
+            %error,
+            "apply_boundary stale: keeping the unfulfilled compaction marker as a harmless no-op"
+        );
+        state.preheat.discard_cached_completed();
+        let _ = emitter.emit(AgentEvent::CompactionError {
+            exhausted_after_retries: false,
+            attempts: 0,
+            error: error.to_string(),
+            source: "apply".to_string(),
+            ratio: Some(state.usage_ratio()),
+        });
+        return false;
+    }
+
+    if let Err(error) = append_completed_summary_text(state, &result) {
+        warn!(
+            %error,
+            "could not persist completed compaction summary; retaining raw context for retry"
+        );
+        let _ = emitter.emit(AgentEvent::CompactionError {
+            exhausted_after_retries: false,
+            attempts: 0,
+            error: error.to_string(),
+            source: "apply".to_string(),
+            ratio: Some(state.usage_ratio()),
+        });
+        state.preheat.restore_pending_result(result);
+        return false;
+    }
+
     match state.apply_boundary(result.clone()) {
         Ok(()) => {
-            // Only record boundary switch after it has successfully applied.
-            write_boundary_transcript(state, &result);
-
             state.session_obs.compaction_tokens_freed += saved;
             state.session_obs.compaction_count =
                 state.session_obs.compaction_count.saturating_add(1);
@@ -174,9 +208,8 @@ pub(crate) fn apply_and_emit_boundary(
         Err(e @ AppError::ApplyBoundaryStale { .. }) => {
             warn!(
                 error = %e,
-                "apply_boundary stale: covered_end not in user_turns_list; removing branch_summary line, not restoring pending"
+                "apply_boundary became stale after its precondition; preserving the marker and body for reload"
             );
-            remove_stale_branch_summary_line(state, &result);
             state.preheat.discard_cached_completed();
             let _ = emitter.emit(AgentEvent::CompactionError {
                 exhausted_after_retries: false,
@@ -196,7 +229,6 @@ pub(crate) fn apply_and_emit_boundary(
                 source: "apply".to_string(),
                 ratio: Some(state.usage_ratio()),
             });
-            state.preheat.restore_pending_result(result);
             false
         }
     }
@@ -232,44 +264,42 @@ pub(crate) fn run_layer0_after_boundary(
     });
 }
 
-fn transcript_entry_id_for_stale_remove(result: &CompactionResult) -> String {
-    result
+fn append_completed_summary_text(
+    state: &ContextState,
+    result: &CompactionResult,
+) -> Result<(), AppError> {
+    if state.transcript_path.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let marker_id = result
         .transcript_compaction_entry_id
-        .clone()
-        .unwrap_or_else(|| compound_turn_id(&result.covered_start_id, &result.covered_end_id))
-}
-
-fn remove_stale_branch_summary_line(state: &ContextState, result: &CompactionResult) {
-    if state.transcript_path.as_os_str().is_empty() {
-        warn!("remove_stale_branch_summary_line: transcript path empty; skip");
-        return;
+        .as_deref()
+        .ok_or_else(|| {
+            AppError::internal(
+                "completed preheat is missing its transcript marker id; refusing to leak summary as a message",
+            )
+        })?;
+    // This O(1) tail check is sufficient while applying a result writes its body before any
+    // later transcript append: polling consumes the result and moves Preheat to Idle, and
+    // hydrate restores cache only when no body exists. If a future path can append between body
+    // persistence and application, replace this with a for_id scan over the relevant transcript
+    // slice before adding that path.
+    if read_entries_tail(&state.transcript_path, 1)?
+        .last()
+        .is_some_and(|entry| {
+            matches!(entry, TranscriptEntry::BranchSummaryText(body) if body.for_id == marker_id)
+        })
+    {
+        return Ok(());
     }
-    let id = transcript_entry_id_for_stale_remove(result);
-    if let Err(e) = remove_branch_summary_entry_by_id(&state.transcript_path, &id) {
-        warn!(
-            entry_id = %id,
-            "remove_stale_branch_summary_line: failed (transcript may diverge until reload): {}",
-            e
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// write_boundary_transcript
-// ---------------------------------------------------------------------------
-
-fn write_boundary_transcript(state: &ContextState, result: &CompactionResult) {
-    if state.transcript_path.as_os_str().is_empty() {
-        return;
-    }
-    let Some(id) = result.transcript_compaction_entry_id.as_deref() else {
-        warn!("write_boundary_transcript: missing transcript_compaction_entry_id; skip transcript update");
-        return;
-    };
-    if let Err(e) = set_branch_summary_entry_is_boundary_true(&state.transcript_path, id) {
-        warn!(
-            "write_boundary_transcript: failed to set isBoundary for {}: {}",
-            id, e
-        );
-    }
+    append_entry(
+        &state.transcript_path,
+        &TranscriptEntry::BranchSummaryText(BranchSummaryTextEntry {
+            id: Some(format!("{marker_id}:text")),
+            parent_id: Some(marker_id.to_string()),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            for_id: marker_id.to_string(),
+            summary: result.summary_text.clone(),
+        }),
+    )
 }

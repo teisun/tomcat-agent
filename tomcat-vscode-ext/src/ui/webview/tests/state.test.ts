@@ -2339,6 +2339,37 @@ describe("custom history replay", () => {
     );
   });
 
+  it("upserts a replayed plan verification notice after history hydration", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [{
+        event: "plan.verify",
+        id: "verify-1",
+        plan_id: "plan-1",
+        type: "custom",
+        verdict: "pass",
+      }],
+      sessionId: "s1",
+    });
+
+    store.applyEvent({
+      planId: "plan-1",
+      sessionId: "s1",
+      type: "plan.verify",
+      verdict: "pass",
+    });
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.filter(
+        (item) =>
+          item.type === "message" &&
+          item.kind === "notice" &&
+          item.text === "Tomcat plan verify: pass",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("uses a legacy ask_question custom entry only when the standard tool result is missing", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
@@ -2615,6 +2646,66 @@ describe("custom history replay", () => {
       resolved: false,
     });
     expect(new Set(timeline.map((item) => item.id)).size).toBe(timeline.length);
+  });
+
+  it("does not retain an answered ask_question card after its history rolls out", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    const questions = [{
+      id: "q1",
+      options: [{ id: "yes", label: "Yes", recommended: true }],
+      prompt: "Proceed?",
+    }];
+
+    store.applyEvent({
+      args: { questions },
+      sessionId: "s1",
+      toolCallId: "ask-call-answered",
+      toolName: "ask_question",
+      type: "tool_execution_start",
+    });
+    store.applyEvent({
+      payload: {
+        questions,
+        requestId: "request-answered",
+        responseEvent: "plan.ask_question.response.request-answered",
+        sessionId: "s1",
+        toolCallId: "ask-call-answered",
+      },
+      requestId: "request-answered",
+      sessionId: "s1",
+      subtype: "ask_question",
+      type: "control_request",
+    });
+    store.resolveApproval("request-answered", {
+      answers: [{
+        optionIds: ["yes"],
+        pickedRecommended: true,
+        questionId: "q1",
+      }],
+      cancelled: false,
+      outcome: "answered",
+    });
+    expect(
+      store.snapshot().sessionViews.s1.timeline.some(
+        (item) => item.type === "tool" && item.toolCallId === "ask-call-answered",
+      ),
+    ).toBe(true);
+
+    const internalStore = store as unknown as {
+      ensureRuntime(sessionId: string): { historyEntries: unknown[] };
+      rebuildHistoryTimeline(sessionId: string): void;
+    };
+    internalStore.ensureRuntime("s1").historyEntries = [];
+    internalStore.rebuildHistoryTimeline("s1");
+    internalStore.rebuildHistoryTimeline("s1");
+    internalStore.rebuildHistoryTimeline("s1");
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.some(
+        (item) => item.type === "tool" && item.toolCallId === "ask-call-answered",
+      ),
+    ).toBe(false);
   });
 
   it("keeps a live ask_question approval answerable after interruption", () => {
@@ -3000,6 +3091,111 @@ describe("custom history replay", () => {
         type: "boundary",
       },
     ]);
+  });
+
+  it("joins a tail summary body back to its marker and leaves a dangling marker invisible", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.hydrateHistory("s1", {
+      messages: [
+        {
+          coveredCount: 8,
+          id: "summary-ready",
+          isBoundary: true,
+          type: "branch_summary",
+        },
+        {
+          forId: "summary-ready",
+          id: "summary-ready:text",
+          summary: "Earlier turns were summarized.",
+          type: "branch_summary_text",
+        },
+        {
+          id: "summary-pending",
+          isBoundary: true,
+          type: "branch_summary",
+        },
+      ],
+      sessionId: "s1",
+    });
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "boundary"),
+    ).toEqual([
+      {
+        coveredCount: 8,
+        id: "summary-ready",
+        summary: "Earlier turns were summarized.",
+        type: "boundary",
+      },
+    ]);
+  });
+
+  it("does not render a body until its older marker page is loaded, then renders it once", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      hasMore: true,
+      messages: [
+        {
+          forId: "summary-older",
+          id: "summary-older:text",
+          summary: "Recovered summary",
+          type: "branch_summary_text",
+        },
+      ],
+      nextCursor: "before-marker",
+      sessionId: "s1",
+    });
+    expect(
+      store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "boundary"),
+    ).toEqual([]);
+
+    store.prependOlderHistory("s1", {
+      hasMore: false,
+      messages: [{
+        coveredCount: 3,
+        id: "summary-older",
+        isBoundary: true,
+        type: "branch_summary",
+      }],
+      nextCursor: null,
+      sessionId: "s1",
+    });
+
+    expect(
+      store.snapshot().sessionViews.s1.timeline.filter((item) => item.type === "boundary"),
+    ).toEqual([{
+      coveredCount: 3,
+      id: "summary-older",
+      summary: "Recovered summary",
+      type: "boundary",
+    }]);
+  });
+
+  it("renders legacy persisted compaction summaries as boundary cards, not user bubbles", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.hydrateHistory("s1", {
+      messages: [{
+        id: "legacy-summary",
+        message: {
+          content: "## Goal\nkeep working",
+          kind: "compaction_summary",
+          role: "user",
+        },
+        type: "message",
+      }],
+      sessionId: "s1",
+    });
+
+    expect(store.snapshot().sessionViews.s1.timeline).toEqual([{
+      coveredCount: null,
+      id: "legacy-summary",
+      summary: "## Goal\nkeep working",
+      type: "boundary",
+    }]);
   });
 });
 

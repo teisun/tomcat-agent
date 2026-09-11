@@ -258,6 +258,7 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
     let fixture = openai_responses_continuity_config();
     let config = &fixture.config;
     let call = common::resolve_main_call(config);
+    let expected_provider = call.provider.clone();
     let provider = call.provider_impl;
     let model = call.model;
     let prompt =
@@ -296,7 +297,10 @@ async fn openai_responses_roundtrip_replays_reasoning_items(
             );
             continue;
         };
-        assert_eq!(reasoning_continuation.source_provider, "openai");
+        assert_eq!(
+            reasoning_continuation.source_provider, expected_provider,
+            "continuation 必须如实记录产生 opaque reasoning items 的已解析 provider"
+        );
         assert_eq!(reasoning_continuation.source_api, "responses");
         assert!(
             reasoning_continuation

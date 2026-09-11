@@ -396,12 +396,12 @@ fn session_obs_keeps_missing_cache_usage_out_of_hit_rate() {
 fn cache_hit_ratio_accumulates_from_provider_usage() {
     let mut obs = super::super::types::SessionContextObservation::default();
     let mut samples = Vec::with_capacity(343);
-    samples.extend(std::iter::repeat(Some(0)).take(24));
+    samples.extend(std::iter::repeat_n(Some(0), 24));
     for _ in 0..122 {
         samples.push(Some(7_142));
         samples.push(Some(0));
     }
-    samples.extend(std::iter::repeat(Some(7_142)).take(75));
+    samples.extend(std::iter::repeat_n(Some(7_142), 75));
     assert_eq!(samples.len(), 343);
 
     for cache_read_tokens in samples {

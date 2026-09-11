@@ -499,7 +499,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `plan update todos upsert set_status remove replace`
 
-Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. Up to three independent todos may be `in_progress`. When all todos reach `completed` in EXEC, the runtime runs applicable completion gates before allowing state=completed. Only frontmatter.todos is mutated; plan body markdown is left untouched.
+Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. In EXEC, an existing work todo's `content` is frozen; record progress and verification in `set_status.evidence` instead. Up to three independent todos may be `in_progress`. When all todos reach `completed` in EXEC, the runtime runs applicable completion gates before allowing state=completed. Only frontmatter.todos is mutated; plan body markdown is left untouched.
 
 Parameters:
 
@@ -607,6 +607,13 @@ Parameters:
             "additionalProperties": false,
             "description": "`set_status` only changes status for an existing todo.",
             "properties": {
+              "evidence": {
+                "description": "Completion evidence. Only valid with status=`completed`; include concrete verification such as task:<id>, file:<path>, or a command outcome.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "id": {
                 "description": "Target todo id (kebab-case).",
                 "type": "string"

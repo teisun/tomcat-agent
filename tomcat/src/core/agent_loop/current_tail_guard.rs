@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use tracing::{info, warn};
 
-use crate::core::compaction::apply::{check_after_reply, run_layer0_after_boundary, BoundaryEnv};
+use crate::core::compaction::apply::{check_after_reply, BoundaryEnv};
 use crate::core::compaction::preheat::{generate_summary_with_output_limit, SummaryRequestOptions};
 use crate::core::compaction::{
     compact_tool_results, is_persisted_tool_result_text, persist_tool_result_text,
@@ -19,8 +19,8 @@ use crate::core::session::manager::{
     generate_entry_id, CompactionResult, ContextState,
 };
 use crate::core::session::transcript::{
-    insert_entry_after_message_id, rewrite_message_text_entries_by_id, BranchSummaryEntry,
-    MessageTextRewrite, TranscriptEntry,
+    append_entry, entry_id, insert_entry_after_message_id, read_entries_tail,
+    rewrite_message_text_entries_by_id, BranchSummaryEntry, MessageTextRewrite, TranscriptEntry,
 };
 use crate::core::session::user_message_sidecar::ensure_user_message_sidecar_current;
 
@@ -387,7 +387,7 @@ fn start_midturn_preheat_if_needed(
     let covered_count = snapshot.len();
 
     let started = agent.context_state.as_mut().is_some_and(|ctx_state| {
-        ctx_state.preheat.try_start_deferred(
+        ctx_state.preheat.try_start(
             usage_ratio,
             &snapshot,
             &transcript_path,
@@ -409,9 +409,9 @@ fn start_midturn_preheat_if_needed(
 }
 
 /// Apply a ready build-mode preheat to exactly its recorded `covered_end_id`, leaving all tool
-/// calls made after the waterline in the live tail. Its boundary is written synchronously here,
-/// after overlapping tool-round appends have completed. A missing boundary is stale, so the
-/// regular Reduce/Collapse fallbacks handle the current context.
+/// calls made after the waterline in the live tail. The shared apply path writes the completed
+/// body as an append-only row; a missing boundary is stale, so the regular Reduce/Collapse
+/// fallbacks handle the current context.
 fn apply_midturn_preheat(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
@@ -427,140 +427,43 @@ fn apply_midturn_preheat(
         return Ok(false);
     };
 
-    let start = messages
-        .iter()
-        .position(|message| message.msg_id.as_deref() == Some(&result.covered_start_id));
-    let end = messages
-        .iter()
-        .position(|message| message.msg_id.as_deref() == Some(&result.covered_end_id));
-    let (Some(start), Some(end)) = (start, end) else {
-        remove_stale_midturn_preheat_entry(agent, &result);
-        return Ok(false);
-    };
-    if start > end
-        || messages[start..=end]
-            .iter()
-            .any(|message| message.role == ChatMessageRole::System)
-    {
-        remove_stale_midturn_preheat_entry(agent, &result);
-        return Ok(false);
-    }
-
-    let entry_id = result
-        .transcript_compaction_entry_id
-        .clone()
-        .unwrap_or_else(|| compound_turn_id(&result.covered_start_id, &result.covered_end_id));
-    if !persist_midturn_preheat_boundary(agent, &result, &entry_id) {
-        return Ok(false);
-    }
-    let summary = apply_collapse_summary(
-        &messages[start..=end],
-        &result.summary_text,
-        &result.covered_start_id,
-        &result.covered_end_id,
-        &entry_id,
-    )?;
-    let tokens_before = agent
-        .context_state
-        .as_ref()
-        .map(ContextState::estimated_token_count)
-        .unwrap_or_default();
-    messages.splice(start..=end, std::iter::once(summary));
-    let state_start = usize::from(
-        messages
-            .first()
-            .is_some_and(|message| message.role == ChatMessageRole::System),
-    );
-    let context_messages = messages[state_start..].to_vec();
-    let new_chars: usize = messages[state_start..].iter().map(estimate_msg_chars).sum();
-    if let Some(ctx_state) = agent.context_state.as_mut() {
-        ctx_state.messages = context_messages;
-        ctx_state.estimate_context_chars = new_chars;
-        ctx_state.invalidate_api_usage();
-        ctx_state.session_obs.compaction_count =
-            ctx_state.session_obs.compaction_count.saturating_add(1);
-        ctx_state.session_obs.compaction_tokens_freed +=
-            tokens_before.saturating_sub(ctx_state.estimated_token_count());
-    }
-    // The applied prefix and the live suffix now form one persisted context. Rebuild from this
-    // authoritative state after Layer 0, leaving the next appended assistant/tool pair as the
-    // new current tail rather than duplicating the suffix.
-    agent.start_idx = messages.len();
-    agent.context_tail_start = messages.len();
     let boundary_env = BoundaryEnv {
         config: &agent.config.context_config,
         work_dir: Path::new(&agent.config.agent_trail_dir),
         session_id: &agent.config.session_id,
         read_file_state: agent.config.read_file_state.as_ref(),
     };
-    if let Some(ctx_state) = agent.context_state.as_mut() {
-        run_layer0_after_boundary(ctx_state, &agent.emitter, &boundary_env);
+    // Build-mode keeps the current tool-round working set in `messages`; ContextState can still
+    // lag behind it while the loop is between tool calls. Synchronize it before handing off to
+    // the same boundary application primitive used by normal turn boundaries, so the covered
+    // prefix is replaced while the later tool round remains in the raw tail.
+    let state_start = usize::from(
+        messages
+            .first()
+            .is_some_and(|message| message.role == ChatMessageRole::System),
+    );
+    let applied = agent.context_state.as_mut().is_some_and(|ctx_state| {
+        ctx_state.messages = messages[state_start..].to_vec();
+        ctx_state.estimate_context_chars = ctx_state.messages.iter().map(estimate_msg_chars).sum();
+        ctx_state.invalidate_api_usage();
+        crate::core::compaction::apply::apply_and_emit_boundary(
+            ctx_state,
+            result,
+            ctx_state.usage_ratio(),
+            false,
+            &agent.emitter,
+            &boundary_env,
+        )
+    });
+    if !applied {
+        return Ok(false);
     }
+    // The applied prefix and the live suffix now form one persisted context. Rebuild from this
+    // authoritative state, leaving the next assistant/tool pair as the new current tail.
+    agent.start_idx = messages.len();
+    agent.context_tail_start = messages.len();
     rebuild_messages_from_context(agent, messages);
     Ok(true)
-}
-
-/// Materialize a deferred preheat at its watermark only when that watermark has been confirmed
-/// against the live context. Doing this in the guard (rather than its background task) keeps all
-/// transcript mutations on the foreground tool-loop path.
-fn persist_midturn_preheat_boundary(
-    agent: &AgentLoop,
-    result: &CompactionResult,
-    entry_id: &str,
-) -> bool {
-    let Some(ctx_state) = agent.context_state.as_ref() else {
-        return false;
-    };
-    if ctx_state.transcript_path.as_os_str().is_empty() {
-        return true;
-    }
-
-    let entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
-        id: Some(entry_id.to_string()),
-        parent_id: None,
-        timestamp: Utc::now().to_rfc3339(),
-        summary: Some(result.summary_text.clone()),
-        covered_start_id: Some(result.covered_start_id.clone()),
-        covered_end_id: Some(result.covered_end_id.clone()),
-        covered_count: Some(result.covered_count),
-        is_boundary: Some(true),
-        preheat_compaction_id: Some(entry_id.to_string()),
-        estimated_covered_tokens_before: result.estimated_covered_tokens_before,
-        estimated_summary_tokens: result.estimated_summary_tokens,
-        estimated_tokens_saved: result.estimated_tokens_saved,
-        error: None,
-        attempts: None,
-    });
-    match insert_entry_after_message_id(&ctx_state.transcript_path, &result.covered_end_id, &entry)
-    {
-        Ok(()) => true,
-        Err(error) => {
-            warn!(
-                error = %error,
-                covered_end_id = %result.covered_end_id,
-                "deferred mid-turn preheat boundary insert failed; keeping raw context"
-            );
-            false
-        }
-    }
-}
-
-fn remove_stale_midturn_preheat_entry(agent: &AgentLoop, result: &CompactionResult) {
-    let Some(ctx_state) = agent.context_state.as_ref() else {
-        return;
-    };
-    let Some(entry_id) = result.transcript_compaction_entry_id.as_deref() else {
-        return;
-    };
-    if ctx_state.transcript_path.as_os_str().is_empty() {
-        return;
-    }
-    if let Err(error) = crate::core::session::transcript::remove_branch_summary_entry_by_id(
-        &ctx_state.transcript_path,
-        entry_id,
-    ) {
-        warn!(error = %error, "stale mid-turn preheat transcript removal failed");
-    }
 }
 
 fn reduce_current_tail_messages(
@@ -929,9 +832,8 @@ async fn build_collapse_summary_artifacts(
         .collect();
     let (covered_start_id, covered_end_id) = collapse_bounds(&working)
         .ok_or_else(|| AppError::Config("collapse 缺少 message 锚点".to_string()))?;
-    let (recent_read_files, modified_files) = collect_recent_files(&working);
     // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
-    // 这里不再自己拼一份 keepalive —— 两份机器区块只会互相矛盾。
+    // recent-files 也在同一个入口生成，避免不同 compaction 路径漏掉其中一块。
     let control = request
         .plan_runtime
         .map(|rt| rt.control_snapshot(request.session_model));
@@ -948,11 +850,6 @@ async fn build_collapse_summary_artifacts(
         },
     )
     .await?;
-    let summary_text = crate::core::compaction::machine_block::prepend_recent_files(
-        &summary_text,
-        &recent_read_files,
-        &modified_files,
-    );
     let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);
     let covered_count = working
         .iter()
@@ -991,67 +888,6 @@ async fn build_collapse_summary_artifacts(
     })
 }
 
-/// Collect a small, durable file index from calls covered by a collapse. This deliberately
-/// re-attaches paths only: their current contents must be read again instead of trusting stale
-/// text from the collapsed context.
-fn collect_recent_files(messages: &[ChatMessage]) -> (Vec<String>, Vec<String>) {
-    let mut reads = Vec::new();
-    let mut modified = Vec::new();
-
-    for message in messages {
-        for tool_call in message.tool_calls.iter().flatten() {
-            let tool_name = tool_call
-                .pointer("/function/name")
-                .or_else(|| tool_call.get("name"))
-                .and_then(serde_json::Value::as_str);
-            let Some(path) = tool_call_path(tool_call) else {
-                continue;
-            };
-            match tool_name {
-                Some("read") => reads.push(path),
-                Some("edit" | "write") => modified.push(path),
-                _ => {}
-            }
-        }
-    }
-
-    let reads = dedupe_keep_last(reads);
-    let first_kept_read = reads.len().saturating_sub(20);
-    (
-        reads[first_kept_read..].to_vec(),
-        dedupe_keep_last(modified),
-    )
-}
-
-fn tool_call_path(tool_call: &serde_json::Value) -> Option<String> {
-    let arguments = tool_call
-        .pointer("/function/arguments")
-        .or_else(|| tool_call.get("arguments"))?;
-    let arguments = match arguments {
-        serde_json::Value::String(raw) => serde_json::from_str(raw).ok()?,
-        value => value.clone(),
-    };
-    arguments
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(str::to_owned)
-}
-
-/// Preserve chronological order while keeping the most recent occurrence of each path.
-fn dedupe_keep_last(paths: Vec<String>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    let mut deduped = Vec::with_capacity(paths.len());
-    for path in paths.into_iter().rev() {
-        if seen.insert(path.clone()) {
-            deduped.push(path);
-        }
-    }
-    deduped.reverse();
-    deduped
-}
-
 fn maybe_write_collapse_entry(
     path: &Path,
     anchor_id: &str,
@@ -1060,7 +896,18 @@ fn maybe_write_collapse_entry(
     if path.as_os_str().is_empty() {
         return Ok(());
     }
-    insert_entry_after_message_id(path, anchor_id, entry)
+    // Collapse normally covers through the current durable tail, so its boundary can be appended
+    // in O(1), like /compact and Scheme E preheat. Retain anchor insertion only for an extreme
+    // interleaving where another transcript entry arrived while the summary LLM call was running.
+    let tail_is_anchor = read_entries_tail(path, 1)?
+        .last()
+        .and_then(entry_id)
+        .is_some_and(|id| id == anchor_id);
+    if tail_is_anchor {
+        append_entry(path, entry)
+    } else {
+        insert_entry_after_message_id(path, anchor_id, entry)
+    }
 }
 
 fn apply_collapse_summary(

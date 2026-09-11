@@ -8,11 +8,7 @@ use crate::core::llm::ChatMessage;
 #[test]
 fn messages_to_text_format_all_roles() {
     let msgs = vec![
-        {
-            let mut m = ChatMessage::compaction_summary("之前的摘要");
-            m.msg_id = Some("s0".to_string());
-            m
-        },
+        ChatMessage::compaction_summary("之前的摘要", "s0"),
         ChatMessage::user("你好"),
         ChatMessage::assistant("你好啊"),
         ChatMessage::tool("tc1", "ok"),

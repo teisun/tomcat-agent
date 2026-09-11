@@ -6,6 +6,7 @@ pub mod context_metrics;
 pub(crate) mod housekeeping_ledger;
 pub(crate) mod manager;
 mod model_thinking;
+pub(crate) mod preheat_cache;
 pub(crate) mod resume_index;
 pub mod scope;
 pub(crate) mod store;
@@ -41,10 +42,9 @@ pub use transcript::{
     append_entry, append_line, insert_entry_after_message_id,
     mark_message_entries_after_anchor_superseded,
     mark_tool_result_entries_by_tool_call_id_superseded, mark_trailing_user_messages_superseded,
-    read_entries_tail, read_header, remove_branch_summary_entry_by_id,
-    rewrite_message_summary_titles_by_id, rewrite_message_text_entries_by_id,
-    set_branch_summary_entry_is_boundary_true, write_header, BranchSummaryEntry, ErrorEntry,
-    MessageEntry, MessageSummaryTitleRewrite, MessageTextRewrite, SessionHeader,
+    read_entries_tail, read_header, rewrite_message_summary_titles_by_id,
+    rewrite_message_text_entries_by_id, write_header, BranchSummaryEntry, BranchSummaryTextEntry,
+    ErrorEntry, MessageEntry, MessageSummaryTitleRewrite, MessageTextRewrite, SessionHeader,
     ThinkingTraceEntry, ToolResultsCompactedEntry, TranscriptEntry,
 };
 

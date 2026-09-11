@@ -153,7 +153,7 @@ async function main(): Promise<void> {
         "renders the transcript UI groups, tool rows, file chips, and progress",
       ].join("|"),
     TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS:
-      process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS ?? "1500",
+      process.env.TOMCAT_E2E_TRANSCRIPT_PROGRESS_DELAY_MS ?? "4000",
     TOMCAT_EXPECT_RESOLVED_SOURCE: "bundled",
     TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: artifactsDir,
   };

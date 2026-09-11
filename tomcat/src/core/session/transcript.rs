@@ -76,10 +76,7 @@
 //! │  append_entry(&entry)         ► 序列化 + append                         │
 //! │  insert_entry_after_message_id ► 为某 message 之后原地插入              │
 //! │                                  （compaction 把 BranchSummary 落到这）│
-//! │  set_branch_summary_entry_is_boundary_true                              │
-//! │                                ► 仅改 BranchSummary 的 isBoundary 标志  │
-//! │  remove_branch_summary_entry_by_id                                      │
-//! │                                ► 失败摘要回滚（compaction error 路径）  │
+//! │  BranchSummaryText             ► 摘要正文追加后挂回 earlier marker       │
 //! │  write_header                 ► 重写第 1 行（cwd 变更等罕见场景）        │
 //! └────────────────────────────────────────────────────────────────────────┘
 //! ```
@@ -87,7 +84,7 @@
 //! ## 设计要点
 //!
 //! - **Append-only 优先**：90% 写入是 `append_line` / `append_entry`，避免锁全文件。
-//! - **insert / set / remove 走 atomic rewrite**：先读全文件（流式）→ 改→ 写
+//! - **insert 走 atomic rewrite**：先读全文件（流式）→ 改→ 写
 //!   临时 → rename，由 [`crate::infra::platform::write_file_atomic`] 兜底原子性。
 //! - **EntryBase + serde flatten**：所有变体共享 `id / parentId / timestamp`，新增
 //!   类型只需在 `TranscriptEntry` enum 加一个变体。
@@ -166,6 +163,9 @@ pub enum TranscriptEntry {
     /// **不**参与 hydrate 重放（避免污染 assistant 正文与上行 messages）。
     ThinkingTrace(ThinkingTraceEntry),
     BranchSummary(BranchSummaryEntry),
+    /// Completed text for an earlier `branch_summary` marker. The marker stays at the
+    /// compaction cut while this append-only payload may arrive after live tail entries.
+    BranchSummaryText(BranchSummaryTextEntry),
     /// Legacy append-only marker. It remains deserializable for transcript compatibility, but
     /// hydrate ignores it: placeholder compaction is now a runtime-only request view.
     ToolResultsCompacted(ToolResultsCompactedEntry),
@@ -289,6 +289,22 @@ pub struct BranchSummaryEntry {
     /// 不重建假摘要 ChatMessage（详见 `session::manager::context::fold_entries_to_messages`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempts: Option<u32>,
+}
+
+/// JSONL `type: branch_summary_text`: completed summary text for an earlier marker.
+///
+/// A preheat marker is appended while its covered end is still the transcript tail. Once the
+/// asynchronous LLM result is applied, this entry is tail-appended and linked back to the marker
+/// by `for_id`. Keeping the two writes append-only preserves physical transcript order without
+/// an expensive mid-file rewrite.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSummaryTextEntry {
+    pub id: Option<String>,
+    pub parent_id: Option<String>,
+    pub timestamp: String,
+    pub for_id: String,
+    pub summary: String,
 }
 
 /// Legacy `type=tool_results_compacted` record. New code does not write it and hydrate ignores
@@ -1133,109 +1149,6 @@ pub fn rewrite_message_summary_titles_by_id(
     Ok(changed)
 }
 
-/// 按 `branch_summary` 行的 `id` 将 `isBoundary` 改为 `true`（重写整文件：仅替换匹配行；其余行保留原始字节）。
-///
-/// 使用临时文件 + `rename` 原子替换目标路径，避免写入中途崩溃导致 transcript 损坏。
-pub fn set_branch_summary_entry_is_boundary_true(
-    path: &Path,
-    entry_id: &str,
-) -> Result<(), AppError> {
-    let f = std::fs::File::open(path).map_err(AppError::Io)?;
-    let reader = BufReader::new(f);
-    let lines: Vec<String> = reader
-        .lines()
-        .map(|r| r.map_err(AppError::Io))
-        .collect::<Result<Vec<_>, _>>()?;
-    if lines.is_empty() {
-        return Err(AppError::Config("transcript 文件为空".to_string()));
-    }
-
-    let mut found = false;
-    let mut out: Vec<String> = Vec::with_capacity(lines.len());
-    out.push(lines[0].clone());
-
-    for line in lines.into_iter().skip(1) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            out.push(line);
-            continue;
-        }
-        let replaced = match serde_json::from_str::<TranscriptEntry>(trimmed) {
-            Ok(TranscriptEntry::BranchSummary(mut ce)) => {
-                if ce.id.as_deref() == Some(entry_id) {
-                    ce.is_boundary = Some(true);
-                    found = true;
-                    Some(serde_json::to_string(&TranscriptEntry::BranchSummary(ce))?)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        if let Some(json) = replaced {
-            out.push(json);
-        } else {
-            out.push(line);
-        }
-    }
-
-    if !found {
-        return Err(AppError::Config(format!(
-            "transcript: branch_summary entry id {entry_id:?} not found"
-        )));
-    }
-
-    write_jsonl_lines_atomically(path, &out)?;
-    let _ = rebuild_resume_index_from_lines(path, &out)?;
-    Ok(())
-}
-
-/// 按 `branch_summary` 行的 `id` **删除所有匹配行**（重写整文件：省略匹配行；其余行保留原始字节）。
-///
-/// 与 [`set_branch_summary_entry_is_boundary_true`] 相同：临时文件 + `rename` 原子替换。
-pub fn remove_branch_summary_entry_by_id(path: &Path, entry_id: &str) -> Result<(), AppError> {
-    let f = std::fs::File::open(path).map_err(AppError::Io)?;
-    let reader = BufReader::new(f);
-    let lines: Vec<String> = reader
-        .lines()
-        .map(|r| r.map_err(AppError::Io))
-        .collect::<Result<Vec<_>, _>>()?;
-    if lines.is_empty() {
-        return Err(AppError::Config("transcript 文件为空".to_string()));
-    }
-
-    let mut removed = 0usize;
-    let mut out: Vec<String> = Vec::with_capacity(lines.len());
-    out.push(lines[0].clone());
-
-    for line in lines.into_iter().skip(1) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            out.push(line);
-            continue;
-        }
-        let omit = match serde_json::from_str::<TranscriptEntry>(trimmed) {
-            Ok(TranscriptEntry::BranchSummary(ref ce)) => ce.id.as_deref() == Some(entry_id),
-            _ => false,
-        };
-        if omit {
-            removed += 1;
-        } else {
-            out.push(line);
-        }
-    }
-
-    if removed == 0 {
-        return Err(AppError::Config(format!(
-            "transcript: branch_summary entry id {entry_id:?} not found for removal"
-        )));
-    }
-
-    write_jsonl_lines_atomically(path, &out)?;
-    let _ = rebuild_resume_index_from_lines(path, &out)?;
-    Ok(())
-}
-
 /// 追加 SessionHeader 作为首行（仅当文件不存在或为空时调用）。
 pub fn write_header(path: &Path, header: &SessionHeader) -> Result<(), AppError> {
     std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(AppError::Io)?;
@@ -1253,6 +1166,7 @@ pub(crate) fn entry_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::ThinkingLevelChange(e) => e.id.as_deref(),
         TranscriptEntry::ThinkingTrace(e) => e.id.as_deref(),
         TranscriptEntry::BranchSummary(e) => e.id.as_deref(),
+        TranscriptEntry::BranchSummaryText(e) => e.id.as_deref(),
         TranscriptEntry::ToolResultsCompacted(e) => e.id.as_deref(),
         TranscriptEntry::Label(e) => e.id.as_deref(),
         TranscriptEntry::SessionInfo(e) => e.id.as_deref(),
@@ -1313,6 +1227,7 @@ fn entry_parent_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::ThinkingLevelChange(e) => e.parent_id.as_deref(),
         TranscriptEntry::ThinkingTrace(e) => e.parent_id.as_deref(),
         TranscriptEntry::BranchSummary(e) => e.parent_id.as_deref(),
+        TranscriptEntry::BranchSummaryText(e) => e.parent_id.as_deref(),
         TranscriptEntry::ToolResultsCompacted(e) => e.parent_id.as_deref(),
         TranscriptEntry::Label(e) => e.parent_id.as_deref(),
         TranscriptEntry::SessionInfo(e) => e.parent_id.as_deref(),

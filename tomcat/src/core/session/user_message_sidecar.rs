@@ -5,7 +5,7 @@
 //! `superseded` 状态。
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -28,6 +28,7 @@ const SIDECAR_TYPE: &str = "tomcat_user_messages";
 const SIDECAR_MESSAGE_TYPE: &str = "message";
 const SIDECAR_SCHEMA_VERSION: u32 = 2;
 const STABLE_REBUILD_ATTEMPTS: usize = 2;
+const REVERSE_CHUNK_BYTES: usize = 64 * 1024;
 /// `write_file_atomic_with` 使用固定临时文件名；同一进程中同一路径并发重建会争抢该文件。
 /// 侧车每个路径一把锁，锁等待发生在 `spawn_blocking` 线程而不影响 Tokio worker。
 static REBUILD_LOCKS: OnceLock<DashMap<PathBuf, Arc<Mutex<()>>>> = OnceLock::new();
@@ -182,6 +183,7 @@ fn transcript_entry_id(entry: &TranscriptEntry) -> Option<&str> {
         TranscriptEntry::ThinkingLevelChange(entry) => entry.id.as_deref(),
         TranscriptEntry::ThinkingTrace(entry) => entry.id.as_deref(),
         TranscriptEntry::BranchSummary(entry) => entry.id.as_deref(),
+        TranscriptEntry::BranchSummaryText(entry) => entry.id.as_deref(),
         TranscriptEntry::ToolResultsCompacted(entry) => entry.id.as_deref(),
         TranscriptEntry::Label(entry) => entry.id.as_deref(),
         TranscriptEntry::SessionInfo(entry) => entry.id.as_deref(),
@@ -289,6 +291,114 @@ struct SidecarMessageRecord {
     entry_type: String,
     timestamp: String,
     message: Value,
+}
+
+#[derive(Deserialize)]
+struct RecentSidecarMessage {
+    #[serde(rename = "type")]
+    entry_type: String,
+    message: Option<Value>,
+}
+
+/// Reads the newest `limit` user-authored text records from the sidecar without loading its
+/// complete history. The returned messages are in chronological order.
+///
+/// The caller first runs [`ensure_user_message_sidecar_current`] so this reader can treat a
+/// missing or malformed row as a degraded optional enhancement rather than a second source of
+/// truth. It nevertheless skips malformed rows defensively: a bad sidecar must never prevent
+/// compaction from producing a summary.
+pub(crate) fn recent_user_message_texts(
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<String>, AppError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut file = fs::File::open(path).map_err(AppError::Io)?;
+    let mut pos = file.metadata().map_err(AppError::Io)?.len();
+    let mut carry = Vec::new();
+    let mut newest_first = Vec::with_capacity(limit);
+
+    while pos > 0 && newest_first.len() < limit {
+        let read_len = REVERSE_CHUNK_BYTES.min(pos as usize);
+        pos -= read_len as u64;
+        file.seek(SeekFrom::Start(pos)).map_err(AppError::Io)?;
+        let mut chunk = vec![0; read_len];
+        file.read_exact(&mut chunk).map_err(AppError::Io)?;
+        if !carry.is_empty() {
+            chunk.extend_from_slice(&carry);
+            carry.clear();
+        }
+
+        let mut end = chunk.len();
+        for index in (0..chunk.len()).rev() {
+            if chunk[index] != b'\n' {
+                continue;
+            }
+            let line = &chunk[index + 1..end];
+            end = index;
+            collect_recent_sidecar_text(line, path, &mut newest_first);
+            if newest_first.len() == limit {
+                break;
+            }
+        }
+        carry = chunk[..end].to_vec();
+    }
+
+    if !carry.is_empty() && newest_first.len() < limit {
+        collect_recent_sidecar_text(&carry, path, &mut newest_first);
+    }
+
+    newest_first.reverse();
+    Ok(newest_first)
+}
+
+fn collect_recent_sidecar_text(line: &[u8], path: &Path, output: &mut Vec<String>) {
+    if line.is_empty() {
+        return;
+    }
+    match serde_json::from_slice::<RecentSidecarMessage>(line) {
+        Ok(record) if record.entry_type == SIDECAR_MESSAGE_TYPE => {
+            let Some(message) = record.message else {
+                return;
+            };
+            match first_user_text_from_sidecar_value(&message) {
+                Some(text) if !text.trim().is_empty() => output.push(text),
+                _ => {}
+            }
+        }
+        Ok(_) => {}
+        Err(error) => warn!(
+            sidecar = %path.display(),
+            error = %error,
+            "skipping malformed user-message sidecar row while reading recent input"
+        ),
+    }
+}
+
+/// Mirrors `ChatMessage::first_text` while deliberately tolerating unfamiliar non-text parts.
+/// The sidecar stores the original message JSON, including attachments and historical reference
+/// shapes that may not deserialize into today's `ChatMessageContentPart` enum. A bad attachment
+/// must not make the user's adjacent `input_text` disappear from the compaction prompt.
+fn first_user_text_from_sidecar_value(message: &Value) -> Option<String> {
+    match message.get("content") {
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Array(parts)) => {
+            let mut text = String::new();
+            let mut saw_input_text = false;
+            for part in parts {
+                if part.get("type").and_then(Value::as_str) == Some("input_text") {
+                    if let Some(chunk) = part.get("text").and_then(Value::as_str) {
+                        saw_input_text = true;
+                        text.push_str(chunk);
+                    }
+                }
+            }
+            saw_input_text.then_some(text)
+        }
+        _ => None,
+    }
 }
 
 fn validate_sidecar_records(

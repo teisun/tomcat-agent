@@ -103,6 +103,15 @@ async fn preheat_summary_materializes_and_points_to_sidecar() {
         emitter,
         None,
     ));
+    let marker_entries = read_entries_tail(&transcript, 16).unwrap();
+    assert!(
+        matches!(
+            marker_entries.last(),
+            Some(TranscriptEntry::BranchSummary(marker))
+                if marker.is_boundary == Some(true) && marker.summary.is_none()
+        ),
+        "starting preheat must append a no-body marker while covered_end is still the transcript tail"
+    );
 
     let result = match preheat.await_result(Duration::from_secs(5)).await {
         PreheatOutcome::Completed(result) => result,
@@ -119,15 +128,15 @@ async fn preheat_summary_materializes_and_points_to_sidecar() {
 }
 
 #[tokio::test]
-async fn deferred_preheat_leaves_transcript_unchanged_until_the_guard_applies_it() {
+async fn preheat_background_computation_does_not_mutate_the_marker_transcript() {
     let dir = tempfile::tempdir().unwrap();
-    let transcript = dir.path().join("deferred-preheat.jsonl");
+    let transcript = dir.path().join("marker-preheat.jsonl");
     write_header(
         &transcript,
         &SessionHeader {
             r#type: "session".to_string(),
             version: Some(3),
-            id: "deferred-preheat".to_string(),
+            id: "marker-preheat".to_string(),
             timestamp: "2026-09-09T00:00:00.000Z".to_string(),
             cwd: None,
         },
@@ -138,8 +147,23 @@ async fn deferred_preheat_leaves_transcript_unchanged_until_the_guard_applies_it
     user.msg_id = Some("u1".to_string());
     let mut assistant = ChatMessage::assistant("output");
     assistant.msg_id = Some("a1".to_string());
+    for message in [&user, &assistant] {
+        append_entry(
+            &transcript,
+            &TranscriptEntry::Message(MessageEntry {
+                id: message.msg_id.clone(),
+                parent_id: None,
+                timestamp: "2026-09-09T00:00:01.000Z".to_string(),
+                message: serde_json::json!({
+                    "role": if message.role == crate::core::llm::ChatMessageRole::User { "user" } else { "assistant" },
+                    "content": message.text_content().unwrap(),
+                }),
+            }),
+        )
+        .unwrap();
+    }
     let mut preheat = Preheat::new();
-    assert!(preheat.try_start_deferred(
+    assert!(preheat.try_start(
         0.95,
         &[user, assistant],
         &transcript,
@@ -153,20 +177,19 @@ async fn deferred_preheat_leaves_transcript_unchanged_until_the_guard_applies_it
         )),
         None,
     ));
+    let after_marker = std::fs::read(&transcript).unwrap();
 
     let result = match preheat.await_result(Duration::from_secs(5)).await {
         PreheatOutcome::Completed(result) => result,
         _ => panic!("deferred preheat must produce a summary"),
     };
     assert!(
-        result.transcript_compaction_entry_id.is_none(),
-        "only the foreground guard may materialize a deferred preheat boundary"
+        result.transcript_compaction_entry_id.is_some(),
+        "the foreground marker id must travel with the completed result"
     );
-    assert!(
-        read_entries_tail(&transcript, 16)
-            .unwrap()
-            .iter()
-            .all(|entry| !matches!(entry, TranscriptEntry::BranchSummary(_))),
-        "background preheat must not race later tool-result appends by rewriting the transcript"
+    assert_eq!(
+        std::fs::read(&transcript).unwrap(),
+        after_marker,
+        "background preheat may cache the result separately but must not mutate the transcript"
     );
 }

@@ -626,7 +626,86 @@ fn preheat_discard_cached_completed_only_clears_cached() {
 }
 
 #[test]
-fn check_after_reply_stale_apply_removes_branch_summary_and_keeps_preheat_idle() {
+fn applying_the_same_preheat_result_twice_writes_one_linked_summary_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("apply.jsonl");
+    write_header(
+        &path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(4),
+            id: "sid".to_string(),
+            timestamp: "2026-09-10T00:00:00.000Z".to_string(),
+            cwd: None,
+        },
+    )
+    .unwrap();
+    let result = l0_test_result();
+    let marker_id = result.transcript_compaction_entry_id.clone().unwrap();
+    append_entry(
+        &path,
+        &TranscriptEntry::BranchSummary(BranchSummaryEntry {
+            id: Some(marker_id.clone()),
+            parent_id: None,
+            timestamp: "2026-09-10T00:00:01.000Z".to_string(),
+            summary: None,
+            covered_start_id: Some(result.covered_start_id.clone()),
+            covered_end_id: Some(result.covered_end_id.clone()),
+            covered_count: Some(result.covered_count),
+            is_boundary: Some(true),
+            preheat_compaction_id: Some(marker_id.clone()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
+        }),
+    )
+    .unwrap();
+
+    let mut state = l0_test_state();
+    state.transcript_path = path.clone();
+    let config = l0_test_config();
+    let read_file_state = ReadFileState::default();
+    let env = boundary_env(&config, dir.path(), &read_file_state);
+    let emitter =
+        crate::infra::ScopedEventEmitter::new(Arc::new(DefaultEventBus::new()), "s-apply-test");
+
+    assert!(apply_and_emit_boundary(
+        &mut state,
+        result.clone(),
+        0.85,
+        false,
+        &emitter,
+        &env,
+    ));
+    // Model the retry/restart boundary where memory still contains the raw covered range, but
+    // the durable body was already appended. The tail guard must make the second apply idempotent.
+    let mut retry_state = l0_test_state();
+    retry_state.transcript_path = path.clone();
+    assert!(
+        apply_and_emit_boundary(&mut retry_state, result, 0.85, false, &emitter, &env),
+        "a retry with raw memory should reuse the existing durable body"
+    );
+
+    let entries = crate::core::session::transcript::read_entries_tail(&path, 8).unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| {
+                matches!(entry, TranscriptEntry::BranchSummaryText(body) if body.for_id == marker_id)
+            })
+            .count(),
+        1,
+        "the same marker must never receive two body rows"
+    );
+    assert!(entries
+        .iter()
+        .all(|entry| !matches!(entry, TranscriptEntry::Message(_))));
+}
+
+#[test]
+fn check_after_reply_stale_apply_keeps_history_and_preheat_idle() {
     use crate::infra::event_bus::DefaultEventBus;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stale_apply.jsonl");
@@ -693,8 +772,8 @@ fn check_after_reply_stale_apply_removes_branch_summary_and_keeps_preheat_idle()
     let raw = std::fs::read_to_string(&path).unwrap();
     assert_eq!(
         raw.lines().count(),
-        1,
-        "branch_summary line should be removed; only header remains"
+        2,
+        "a stale marker is harmless during reload and must not trigger a costly transcript rewrite"
     );
     read_header(&path).unwrap();
 }

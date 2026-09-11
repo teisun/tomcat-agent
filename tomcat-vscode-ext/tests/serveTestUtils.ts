@@ -319,10 +319,20 @@ function isSessionTitleRequest(rawRequest: string): boolean {
     return false;
   }
 
-  if (!isRecord(value) || value.stream !== false) {
+  if (!isRecord(value)) {
     return false;
   }
-  return body.includes("Generate a short chat title from the user's first message.\\n");
+  return containsSessionTitlePrompt(value);
+}
+
+function containsSessionTitlePrompt(value: unknown): boolean {
+  if (typeof value === "string") {
+    return value.includes("Generate a short chat title from the user's first message.");
+  }
+  if (Array.isArray(value)) {
+    return value.some(containsSessionTitlePrompt);
+  }
+  return isRecord(value) && Object.values(value).some(containsSessionTitlePrompt);
 }
 
 function sessionTitleResponseJson(rawRequest: string, title: string): string {

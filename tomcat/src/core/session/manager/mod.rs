@@ -47,8 +47,12 @@ pub trait MessageAppendSink: Send + Sync {
 const BRANCH_MAX_ENTRIES: usize = 2000;
 
 #[cfg(test)]
-use crate::core::session::transcript::{BranchSummaryEntry, MessageEntry, TranscriptEntry};
+use crate::core::session::transcript::{
+    BranchSummaryEntry, BranchSummaryTextEntry, MessageEntry, TranscriptEntry,
+};
 #[cfg(test)]
 use crate::infra::config::ContextConfig;
 #[cfg(test)]
-use context::{compute_fold_start, filter_turns_by_day, is_user_message, parse_date};
+use context::{
+    compute_fold_start, filter_turns_by_day, fold_entries_to_messages, is_user_message, parse_date,
+};

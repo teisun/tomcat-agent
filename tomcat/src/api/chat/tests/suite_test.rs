@@ -166,8 +166,8 @@ fn compose_planned_turn_messages_preserves_auto_turn_follow_up_order() {
 
 #[test]
 fn rebuild_turn_messages_uses_context_state_and_keeps_current_input_at_tail() {
-    let mut summary = crate::ChatMessage::compaction_summary("summary replaces old history");
-    summary.msg_id = Some("summary-id".to_string());
+    let summary =
+        crate::ChatMessage::compaction_summary("summary replaces old history", "summary-id");
     let mut placeholder = crate::ChatMessage::tool(
         "old-tool-call",
         "[Previous tool result replaced to save context space]",

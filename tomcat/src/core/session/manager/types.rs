@@ -441,8 +441,11 @@ impl ContextState {
             .collect::<Vec<_>>();
         let summary_chars = result.summary_text.len();
 
-        let mut summary_msg = ChatMessage::compaction_summary(&result.summary_text);
-        summary_msg.msg_id = result.transcript_compaction_entry_id.clone();
+        let summary_entry_id = result
+            .transcript_compaction_entry_id
+            .clone()
+            .unwrap_or_else(|| compound_turn_id(&result.covered_start_id, &result.covered_end_id));
+        let summary_msg = ChatMessage::compaction_summary(&result.summary_text, summary_entry_id);
 
         self.messages.splice(..=end_idx, [summary_msg]);
         self.estimate_context_chars =

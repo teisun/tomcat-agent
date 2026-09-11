@@ -984,6 +984,15 @@ export type WebviewIntent =
         editDiffBadgeCount: number;
         commandBlockCount: number;
       };
+    }
+  | {
+      // `App` is unmounted after ErrorBoundary catches. The fallback can only
+      // truthfully return the rendered document, not App-owned UI metrics.
+      messageId: string;
+      type: "__test.dom_fallback_snapshot";
+      data: {
+        html: string;
+      };
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1360,6 +1369,8 @@ export function isWebviewIntent(value: unknown): value is WebviewIntent {
         typeof value.data.editDiffBadgeCount === "number" &&
         typeof value.data.commandBlockCount === "number"
       );
+    case "__test.dom_fallback_snapshot":
+      return isRecord(value.data) && isString(value.data.html);
     default:
       return false;
   }

@@ -13,7 +13,7 @@ fn verbatim_accepts_only_normal_user_messages() {
     let steering = ChatMessage::steering("排除 Steering");
     let mut nudge = ChatMessage::user("排除 Nudge");
     nudge.kind = MessageKind::Nudge;
-    let summary = ChatMessage::compaction_summary("排除 summary");
+    let summary = ChatMessage::compaction_summary("排除 summary", "summary-1");
 
     assert_eq!(
         collect_verbatim_user_messages(&[normal, signal, plan_build, steering, nudge, summary]),

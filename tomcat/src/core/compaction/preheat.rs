@@ -59,8 +59,9 @@
 //!
 //! ## 副作用
 //!
-//! 摘要生成成功后调用方在 `apply.rs` 中通过 [`crate::core::session::transcript::insert_entry_after_message_id`]
-//! 把 `BranchSummaryEntry` 写回 JSONL，并发射 `AgentEvent::AutoCompactionEnd`。
+//! 预热启动时前台在 transcript 尾部追加一个 `BranchSummaryEntry` 切口标记；摘要完成后
+//! 调用方在 `apply.rs` 追加其 `BranchSummaryTextEntry` 正文，并发射
+//! `AgentEvent::AutoCompactionEnd`。
 //! 重试与失败路径分别发 `AutoCompactionStart` / `CompactionError`。
 
 use std::path::Path;
@@ -76,10 +77,13 @@ use crate::core::plan_runtime::ControlSnapshot;
 use crate::core::session::manager::{
     compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, CompactionResult,
 };
+use crate::core::session::preheat_cache::write_preheat_cache;
 use crate::core::session::transcript::{
-    insert_entry_after_message_id, BranchSummaryEntry, TranscriptEntry,
+    append_entry, entry_id, read_entries_tail, BranchSummaryEntry, TranscriptEntry,
 };
-use crate::core::session::user_message_sidecar::ensure_user_message_sidecar_current;
+use crate::core::session::user_message_sidecar::{
+    ensure_user_message_sidecar_current, recent_user_message_texts,
+};
 
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
@@ -176,14 +180,6 @@ Use the EXACT same format as the original summary (Goal / Progress / Errors Enco
 // ---------------------------------------------------------------------------
 // PreheatState (internal — not pub)
 // ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-enum PreheatPersistence {
-    /// Normal turn-boundary preheat can safely materialize its provisional entry in background.
-    Eager,
-    /// Build-mode preheat overlaps foreground transcript appends; persist only on application.
-    Deferred,
-}
 
 enum PreheatState {
     Idle,
@@ -339,8 +335,9 @@ impl Preheat {
 
     /// Idle → Running。条件：ratio >= 0.50、有 messages、且当前为 **Idle**。
     /// `CachedCompleted` / `Running` / `ExhaustedPending` 时均不启动，避免已有未消费摘要时又开新预热。
-    /// spawn 内 generate_summary 最多 3 次 retry；
-    /// 成功且 `insert_entry_after_message_id` 成功（或无 transcript 路径）时 emit AutoCompactionEnd；耗尽 emit CompactionError(exhausted)。
+    /// The foreground appends its cut marker before spawn. The spawned task only computes the
+    /// summary (and optional crash cache), so it can never race foreground transcript appends.
+    /// It retries generation at most three times and emits AutoCompactionEnd on success.
     /// 返回 true = 已启动。
     ///
     /// 接受独立参数而非 `&ContextState`，避免与 `ctx.preheat` 的 `&mut self` 冲突。
@@ -356,66 +353,6 @@ impl Preheat {
         config: &ContextConfig,
         emitter: Arc<ScopedEventEmitter>,
         control: Option<ControlSnapshot>,
-    ) -> bool {
-        self.try_start_with_persistence(
-            usage_ratio,
-            messages,
-            transcript_path,
-            cache_key,
-            llm,
-            resolved_output_limit,
-            config,
-            emitter,
-            control,
-            PreheatPersistence::Eager,
-        )
-    }
-
-    /// Starts a preheat whose successful boundary is persisted only when the caller applies it.
-    ///
-    /// Build-mode preheat overlaps subsequent tool rounds.  Deferring the full transcript rewrite
-    /// prevents its background task from racing those foreground appends.  The transcript path is
-    /// still supplied to summary generation so the user-message sidecar remains available.
-    #[allow(clippy::too_many_arguments)]
-    pub fn try_start_deferred(
-        &mut self,
-        usage_ratio: f64,
-        messages: &[ChatMessage],
-        transcript_path: &std::path::Path,
-        cache_key: Option<String>,
-        llm: Arc<dyn LlmProvider>,
-        resolved_output_limit: Option<u32>,
-        config: &ContextConfig,
-        emitter: Arc<ScopedEventEmitter>,
-        control: Option<ControlSnapshot>,
-    ) -> bool {
-        self.try_start_with_persistence(
-            usage_ratio,
-            messages,
-            transcript_path,
-            cache_key,
-            llm,
-            resolved_output_limit,
-            config,
-            emitter,
-            control,
-            PreheatPersistence::Deferred,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn try_start_with_persistence(
-        &mut self,
-        usage_ratio: f64,
-        messages: &[ChatMessage],
-        transcript_path: &std::path::Path,
-        cache_key: Option<String>,
-        llm: Arc<dyn LlmProvider>,
-        resolved_output_limit: Option<u32>,
-        config: &ContextConfig,
-        emitter: Arc<ScopedEventEmitter>,
-        control: Option<ControlSnapshot>,
-        persistence: PreheatPersistence,
     ) -> bool {
         if !self.is_idle() {
             return false;
@@ -435,8 +372,64 @@ impl Preheat {
         };
         let batch_compaction_id = compound_turn_id(&covered_start_id, &covered_end_id);
         let covered_count = snapshot.len();
+
+        // This is the only moment where appending a boundary marker also puts it exactly at the
+        // semantic cut: the snapshot's covered end is still the transcript tail. Never defer
+        // this write into the background task, where intervening tool rows would make it a costly
+        // mid-file insertion.
+        if !transcript_path.as_os_str().is_empty() {
+            let covered_end_is_tail = match read_entries_tail(transcript_path, 1) {
+                Ok(entries) => entries
+                    .last()
+                    .and_then(entry_id)
+                    .is_some_and(|id| id == covered_end_id),
+                Err(error) => {
+                    warn!(
+                        transcript = %transcript_path.display(),
+                        %error,
+                        "could not verify preheat marker placement"
+                    );
+                    false
+                }
+            };
+            if !covered_end_is_tail {
+                warn!(
+                    transcript = %transcript_path.display(),
+                    covered_end_id,
+                    "preheat snapshot is no longer the transcript tail; not creating a misplaced marker"
+                );
+                return false;
+            }
+            let marker = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+                id: Some(batch_compaction_id.clone()),
+                parent_id: None,
+                timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                summary: None,
+                covered_start_id: Some(covered_start_id.clone()),
+                covered_end_id: Some(covered_end_id.clone()),
+                covered_count: Some(covered_count),
+                is_boundary: Some(true),
+                preheat_compaction_id: Some(batch_compaction_id.clone()),
+                estimated_covered_tokens_before: None,
+                estimated_summary_tokens: None,
+                estimated_tokens_saved: None,
+                error: None,
+                attempts: None,
+            });
+            if let Err(error) = append_entry(transcript_path, &marker) {
+                warn!(
+                    transcript = %transcript_path.display(),
+                    %error,
+                    "preheat marker append failed; not starting an unpersistable preheat"
+                );
+                return false;
+            }
+        }
+
         let transcript_path = transcript_path.to_path_buf();
         let compaction_model = config.compaction_model.clone();
+        let running_start_id = covered_start_id.clone();
+        let running_end_id = covered_end_id.clone();
         let ratio_before = usage_ratio;
         let cache_key = cache_key.unwrap_or_default();
 
@@ -470,72 +463,34 @@ impl Preheat {
                         let est_saved = est_covered_tok.saturating_sub(est_summary_tok);
                         let elapsed_ms = started.elapsed().as_millis() as u64;
 
-                        let branch_summary_entry =
-                            TranscriptEntry::BranchSummary(BranchSummaryEntry {
-                                id: Some(batch_compaction_id.clone()),
-                                parent_id: None,
-                                timestamp: chrono::Utc::now()
-                                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                                summary: Some(summary_text.clone()),
-                                covered_start_id: Some(covered_start_id.clone()),
-                                covered_end_id: Some(covered_end_id.clone()),
-                                covered_count: Some(covered_count),
-                                is_boundary: Some(false),
-                                preheat_compaction_id: Some(batch_compaction_id.clone()),
-                                estimated_covered_tokens_before: Some(est_covered_tok),
-                                estimated_summary_tokens: Some(est_summary_tok),
-                                estimated_tokens_saved: Some(est_saved),
-                                error: None,
-                                attempts: None,
-                            });
-
-                        let (transcript_compaction_entry_id, append_ok) = match persistence {
-                            PreheatPersistence::Deferred => (None, true),
-                            PreheatPersistence::Eager if transcript_path.as_os_str().is_empty() => {
-                                (Some(batch_compaction_id.clone()), true)
-                            }
-                            PreheatPersistence::Eager => {
-                                match insert_entry_after_message_id(
-                                    &transcript_path,
-                                    &covered_end_id,
-                                    &branch_summary_entry,
-                                ) {
-                                    Ok(()) => (Some(batch_compaction_id.clone()), true),
-                                    Err(e) => {
-                                        warn!(
-                                            "preheat insert_entry_after_message_id failed: {}",
-                                            e
-                                        );
-                                        (None, false)
-                                    }
-                                }
-                            }
-                        };
-
                         let result = CompactionResult {
                             summary_text,
                             covered_start_id,
                             covered_end_id,
                             covered_count,
-                            transcript_compaction_entry_id,
+                            transcript_compaction_entry_id: Some(batch_compaction_id.clone()),
                             estimated_covered_tokens_before: Some(est_covered_tok),
                             estimated_summary_tokens: Some(est_summary_tok),
                             estimated_tokens_saved: Some(est_saved),
                             preheat_elapsed_ms: elapsed_ms,
                         };
 
-                        if append_ok {
-                            let _ = ensure_user_message_sidecar_current(&transcript_path).await;
-                            let _ = eb.emit(AgentEvent::AutoCompactionEnd {
-                                elapsed_ms,
-                                summary_chars: result.summary_text.len(),
-                                covered_count,
-                                ratio_after: ratio_before,
-                                estimated_covered_tokens_before: est_covered_tok,
-                                estimated_summary_tokens: est_summary_tok,
-                                estimated_tokens_saved: est_saved,
-                            });
+                        if let Err(error) = write_preheat_cache(&transcript_path, &result) {
+                            warn!(
+                                transcript = %transcript_path.display(),
+                                %error,
+                                "failed to cache completed preheat; applying in this process can still proceed"
+                            );
                         }
+                        let _ = eb.emit(AgentEvent::AutoCompactionEnd {
+                            elapsed_ms,
+                            summary_chars: result.summary_text.len(),
+                            covered_count,
+                            ratio_after: ratio_before,
+                            estimated_covered_tokens_before: est_covered_tok,
+                            estimated_summary_tokens: est_summary_tok,
+                            estimated_tokens_saved: est_saved,
+                        });
 
                         return Ok(result);
                     }
@@ -558,41 +513,6 @@ impl Preheat {
                 }
             }
 
-            // T2-P0-002 Phase D：3 次重试全部失败 → 在 transcript 落一条
-            // BranchSummaryEntry { summary: None, error, attempts } 失败锚点。
-            // 同时承接 #T-040：LLM 因 batch 过长返回 `context_length_exceeded` 也走同一路径，
-            // 不再为「超大消息」单独引入硬截断（详见计划 §6.C 决议段 + 报告 §5.7）。
-            // reload 时 `session::manager::context::fold_entries_to_messages` 凭 `summary == None`
-            // 跳过该行，不会重建假摘要 ChatMessage（详见 transcript.rs 字段注释）。
-            let failure_entry = TranscriptEntry::BranchSummary(BranchSummaryEntry {
-                id: Some(batch_compaction_id.clone()),
-                parent_id: None,
-                timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                summary: None,
-                covered_start_id: Some(covered_start_id.clone()),
-                covered_end_id: Some(covered_end_id.clone()),
-                covered_count: Some(covered_count),
-                is_boundary: Some(false),
-                preheat_compaction_id: Some(batch_compaction_id.clone()),
-                estimated_covered_tokens_before: None,
-                estimated_summary_tokens: None,
-                estimated_tokens_saved: None,
-                error: Some(last_error.clone()),
-                attempts: Some(MAX_PREHEAT_RETRIES),
-            });
-            if matches!(persistence, PreheatPersistence::Eager)
-                && !transcript_path.as_os_str().is_empty()
-            {
-                if let Err(e) =
-                    insert_entry_after_message_id(&transcript_path, &covered_end_id, &failure_entry)
-                {
-                    warn!(
-                        "preheat failure-trail insert_entry_after_message_id failed: {}",
-                        e
-                    );
-                }
-            }
-
             let _ = eb.emit(AgentEvent::CompactionError {
                 exhausted_after_retries: true,
                 attempts: MAX_PREHEAT_RETRIES,
@@ -607,13 +527,10 @@ impl Preheat {
             )))
         });
 
-        let Some((run_s, run_e)) = snapshot_message_bounds_for_preheat(messages) else {
-            return false;
-        };
         self.state = PreheatState::Running {
             handle,
-            covered_start_id: run_s,
-            covered_end_id: run_e,
+            covered_start_id: running_start_id,
+            covered_end_id: running_end_id,
             covered_count,
             started_at: Instant::now(),
         };
@@ -827,10 +744,26 @@ pub(crate) async fn generate_summary_with_output_limit(
         Some(path) => ensure_user_message_sidecar_current(path).await,
         None => None,
     };
-    let blocks = machine_block::render_with_sidecar(
+    let verbatim_user_messages = sidecar_path
+        .as_deref()
+        .and_then(|path| {
+            recent_user_message_texts(path, machine_block::VERBATIM_MESSAGE_LIMIT)
+                .map_err(|error| {
+                    warn!(
+                        sidecar = %path.display(),
+                        %error,
+                        "failed to read recent user input from sidecar; falling back to snapshot"
+                    );
+                    error
+                })
+                .ok()
+        })
+        .unwrap_or_else(|| machine_block::collect_verbatim_user_messages(snapshot));
+    let blocks = machine_block::render_with_sidecar_for_messages(
         control,
-        &machine_block::collect_verbatim_user_messages(snapshot),
+        &verbatim_user_messages,
         sidecar_path.as_deref(),
+        snapshot,
     );
     Ok(machine_block::prepend(&blocks, &text))
 }
@@ -839,9 +772,8 @@ pub(crate) async fn generate_summary_with_output_limit(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// §5.7：`insert_entry_after_message_id` 的锚点必须是 **MessageId**（transcript MessageEntry 的 id），
-/// 不能是 CompactionSummary 消息的 msg_id（那是 BranchSummary entry 的 id）。
-/// 因此跳过 CompactionSummary 消息，取首个与最后一个普通消息的 msg_id。
+/// A marker must be appended after a durable normal-message tail, not after an already compacted
+/// summary's synthetic id. Skip `CompactionSummary` and use the first/last ordinary message ids.
 fn snapshot_message_bounds_for_preheat(messages: &[ChatMessage]) -> Option<(String, String)> {
     let first_start = messages.iter().find_map(|m| {
         if m.kind != MessageKind::CompactionSummary {

@@ -24,7 +24,10 @@ if (!root) {
   throw new Error("Tomcat webview root element was not found");
 }
 
+let webviewErrorReported = false;
+
 function reportWebviewError(error: Error): void {
+  webviewErrorReported = true;
   vscodeApi.postMessage({
     data: {
       message: error.message || "Unknown webview error",
@@ -54,6 +57,41 @@ function isErrorBoundaryCrashFixture(value: unknown): boolean {
   );
 }
 
+function isDomSnapshotRequest(value: unknown): value is { messageId: string } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const frame = value as {
+    channel?: unknown;
+    content?: { type?: unknown };
+    messageId?: unknown;
+  };
+  return (
+    frame.channel === "event" &&
+    frame.content?.type === "__test.capture_dom" &&
+    typeof frame.messageId === "string"
+  );
+}
+
+function ErrorFallbackDomSnapshotResponder() {
+  useEffect(() => {
+    const onMessage = (event: MessageEvent<unknown>) => {
+      if (!webviewErrorReported || !isDomSnapshotRequest(event.data)) {
+        return;
+      }
+      vscodeApi.postMessage({
+        data: { html: document.documentElement.outerHTML },
+        messageId: event.data.messageId,
+        type: "__test.dom_fallback_snapshot",
+      });
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  return null;
+}
+
 /**
  * This hook only reacts to the extension host's test-only event channel. Production
  * hosts never emit that frame, so the component stays inert outside the packaged E2E.
@@ -78,8 +116,11 @@ function ErrorBoundaryCrashFixture() {
 }
 
 ReactDOM.createRoot(root).render(
-  <WebviewErrorBoundary reportError={reportWebviewError}>
-    <ErrorBoundaryCrashFixture />
-    <App vscodeApi={vscodeApi} />
-  </WebviewErrorBoundary>,
+  <>
+    <ErrorFallbackDomSnapshotResponder />
+    <WebviewErrorBoundary reportError={reportWebviewError}>
+      <ErrorBoundaryCrashFixture />
+      <App vscodeApi={vscodeApi} />
+    </WebviewErrorBoundary>
+  </>,
 );

@@ -1750,8 +1750,12 @@ async fn interleaved_tail_placement_ab_probe() -> Result<(), Box<dyn std::error:
             .display()
             .to_string(),
     );
-    let wire_model =
-        common::apply_models_toml_entry_app_config(&mut cfg, &models_toml, &runtime_env, &model_id)?;
+    let wire_model = common::apply_models_toml_entry_app_config(
+        &mut cfg,
+        &models_toml,
+        &runtime_env,
+        &model_id,
+    )?;
     let provider = common::resolve_main_provider(&cfg);
     let probe_id = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let cache_key = format!("prompt-cache-ab:{wire_model}:{probe_id}");
@@ -1834,7 +1838,11 @@ async fn interleaved_tail_placement_ab_probe() -> Result<(), Box<dyn std::error:
         eprintln!(
             "phase=\"ab_tail_placement\" model={model_id} round={round} order={} \
              instr_prompt={} instr_cache_read={} input_prompt={} input_cache_read={}",
-            if instr_first { "instr_first" } else { "input_first" },
+            if instr_first {
+                "instr_first"
+            } else {
+                "input_first"
+            },
             instr_turn.usage.prompt_tokens,
             instr_read,
             input_turn.usage.prompt_tokens,

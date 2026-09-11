@@ -834,8 +834,7 @@ fn test_build_context_preserves_order_with_mixed_turns() {
     common::setup_logging();
     let _span = info_span!("test_build_context_preserves_order_with_mixed_turns").entered();
 
-    let mut summary = ChatMessage::compaction_summary("## Goal\nBuild a web app");
-    summary.msg_id = Some("sum_1".to_string());
+    let mut summary = ChatMessage::compaction_summary("## Goal\nBuild a web app", "sum_1");
     summary.timestamp = Some(TEST_TS.to_string());
 
     let mut user1 = ChatMessage::user("add auth");

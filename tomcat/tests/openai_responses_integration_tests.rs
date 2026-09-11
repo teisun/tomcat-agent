@@ -142,7 +142,7 @@ async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
     let fixture = responses_fixture();
     let (provider, model) = responses_provider_and_model(&fixture.config);
     let request = ChatRequest {
-        messages: vec![ChatMessage::user("Answer with exactly one word: ok")],
+        messages: vec![ChatMessage::user("Say exactly: hello")],
         model,
         temperature: None,
         max_tokens: Some(64),
@@ -162,18 +162,22 @@ async fn test_openai_responses_chat_real_request_maps_stop_finish_reason(
     Ok(())
 }
 
-/// [Responses 非流式 finish_reason=max_output_tokens] 低输出预算应映射为 `max_output_tokens`
+/// [Responses 非流式低输出预算] 真实服务返回可识别的终态
+///
+/// 网关可以在很小的预算下仍报告已完成（`stop`），也可以报告预算耗尽
+/// （`max_output_tokens`）；两者都是合法上游事实。精确的
+/// `max_output_tokens` 映射由适配器单测覆盖，不能依赖真实模型每次都选择截断。
 #[tokio::test]
-async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason(
+async fn test_openai_responses_chat_real_request_accepts_stop_or_max_output_tokens_at_low_budget(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !require_live_openai_responses_opt_in(
-        "test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason",
+        "test_openai_responses_chat_real_request_accepts_stop_or_max_output_tokens_at_low_budget",
     ) {
         return Ok(());
     }
     common::setup_logging();
     let _span = tracing::info_span!(
-        "test_openai_responses_chat_real_request_maps_max_output_tokens_finish_reason"
+        "test_openai_responses_chat_real_request_accepts_stop_or_max_output_tokens_at_low_budget"
     )
     .entered();
     common::load_openai_test_env();
@@ -199,10 +203,12 @@ async fn test_openai_responses_chat_real_request_maps_max_output_tokens_finish_r
         .await
         .map_err(|_| "chat 超时 60s，可能网络或上游不可达")??;
     assert!(!resp.choices.is_empty(), "chat 响应应包含 choices");
-    assert_eq!(
-        resp.choices[0].finish_reason.as_deref(),
-        Some("max_output_tokens"),
-        "低输出预算应稳定映射为 max_output_tokens，实际: {:?}",
+    assert!(
+        matches!(
+            resp.choices[0].finish_reason.as_deref(),
+            Some("stop" | "max_output_tokens")
+        ),
+        "低输出预算的终态应为 stop 或 max_output_tokens，实际: {:?}",
         resp.choices[0].finish_reason
     );
     Ok(())

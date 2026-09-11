@@ -20,6 +20,7 @@ use crate::core::llm::{
     ChatMessage, ChatMessageRole, ContinuityMetadata, MessageKind, ReasoningContinuation,
     ReasoningFormat, ReplayRequirement,
 };
+use crate::core::session::preheat_cache::write_preheat_cache;
 use crate::core::session::resume_index::{
     load_or_rebuild_resume_index, resume_index_path, ResumeAnchor, ResumeDayAnchor,
     ResumeEntryKind, ResumeIndex,
@@ -129,6 +130,7 @@ fn base_resume_index(total_entries: usize) -> ResumeIndex {
         total_entries,
         last_entry_id: None,
         latest_boundary: None,
+        pending_boundary_markers: Default::default(),
         recent_turn_starts: Vec::new(),
         latest_day_first_entry: None,
         latest_plan_event: None,
@@ -180,6 +182,193 @@ fn init_context_state_with_messages() {
     assert!(state.estimate_context_chars > 0);
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn matching_preheat_cache_restores_completed_summary_without_calling_an_llm() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key().to_string();
+    mgr.create_session(&key, None).unwrap();
+    let start_id = mgr
+        .append_message(serde_json::json!({"role":"user","content":"old request"}))
+        .unwrap();
+    let end_id = mgr
+        .append_message(serde_json::json!({"role":"assistant","content":"old response"}))
+        .unwrap();
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    let marker_id = compound_turn_id(&start_id, &end_id);
+    crate::core::session::transcript::append_entry(
+        &path,
+        &TranscriptEntry::BranchSummary(BranchSummaryEntry {
+            id: Some(marker_id.clone()),
+            parent_id: None,
+            timestamp: Utc::now().to_rfc3339(),
+            summary: None,
+            covered_start_id: Some(start_id.clone()),
+            covered_end_id: Some(end_id.clone()),
+            covered_count: Some(2),
+            is_boundary: Some(true),
+            preheat_compaction_id: Some(marker_id.clone()),
+            estimated_covered_tokens_before: Some(100),
+            estimated_summary_tokens: Some(10),
+            estimated_tokens_saved: Some(90),
+            error: None,
+            attempts: None,
+        }),
+    )
+    .unwrap();
+    write_preheat_cache(
+        &path,
+        &CompactionResult {
+            summary_text: "completed without applying".to_string(),
+            covered_start_id: start_id,
+            covered_end_id: end_id,
+            covered_count: 2,
+            transcript_compaction_entry_id: Some(marker_id),
+            estimated_covered_tokens_before: Some(100),
+            estimated_summary_tokens: Some(10),
+            estimated_tokens_saved: Some(90),
+            preheat_elapsed_ms: 140_000,
+        },
+    )
+    .unwrap();
+
+    let mut state = init_context_state(&mgr, &ContextConfig::default(), "system").unwrap();
+    let restored = state.preheat.poll_result();
+    assert!(matches!(
+        restored,
+        crate::core::compaction::preheat::PreheatOutcome::Completed(CompactionResult {
+            ref summary_text,
+            ..
+        }) if summary_text == "completed without applying"
+    ));
+}
+
+#[test]
+fn applied_preheat_body_makes_matching_cache_ineligible_for_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key().to_string();
+    mgr.create_session(&key, None).unwrap();
+    let start_id = mgr
+        .append_message(serde_json::json!({"role":"user","content":"old request"}))
+        .unwrap();
+    let end_id = mgr
+        .append_message(serde_json::json!({"role":"assistant","content":"old response"}))
+        .unwrap();
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    let marker_id = compound_turn_id(&start_id, &end_id);
+    crate::core::session::transcript::append_entry(
+        &path,
+        &TranscriptEntry::BranchSummary(BranchSummaryEntry {
+            id: Some(marker_id.clone()),
+            parent_id: None,
+            timestamp: Utc::now().to_rfc3339(),
+            summary: None,
+            covered_start_id: Some(start_id.clone()),
+            covered_end_id: Some(end_id.clone()),
+            covered_count: Some(2),
+            is_boundary: Some(true),
+            preheat_compaction_id: Some(marker_id.clone()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
+        }),
+    )
+    .unwrap();
+    crate::core::session::transcript::append_entry(
+        &path,
+        &TranscriptEntry::BranchSummaryText(
+            crate::core::session::transcript::BranchSummaryTextEntry {
+                id: Some(format!("{marker_id}:text")),
+                parent_id: Some(marker_id.clone()),
+                timestamp: Utc::now().to_rfc3339(),
+                for_id: marker_id.clone(),
+                summary: "already applied".to_string(),
+            },
+        ),
+    )
+    .unwrap();
+    write_preheat_cache(
+        &path,
+        &CompactionResult {
+            summary_text: "stale cached copy".to_string(),
+            covered_start_id: start_id,
+            covered_end_id: end_id,
+            covered_count: 2,
+            transcript_compaction_entry_id: Some(marker_id),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            preheat_elapsed_ms: 0,
+        },
+    )
+    .unwrap();
+
+    let mut state = init_context_state(&mgr, &ContextConfig::default(), "system").unwrap();
+    assert!(
+        matches!(
+            state.preheat.poll_result(),
+            crate::core::compaction::preheat::PreheatOutcome::NotReady
+        ),
+        "a durable body makes its matching crash cache ineligible for restoration"
+    );
+}
+
+#[test]
+fn mismatched_preheat_cache_is_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(dir.path().to_path_buf());
+    let key = mgr.current_session_key().to_string();
+    mgr.create_session(&key, None).unwrap();
+    let start_id = mgr
+        .append_message(serde_json::json!({"role":"user","content":"old request"}))
+        .unwrap();
+    let end_id = mgr
+        .append_message(serde_json::json!({"role":"assistant","content":"old response"}))
+        .unwrap();
+    let path = mgr.current_transcript_path().unwrap().unwrap();
+    crate::core::session::transcript::append_entry(
+        &path,
+        &TranscriptEntry::BranchSummary(BranchSummaryEntry {
+            id: Some("real-marker".to_string()),
+            parent_id: None,
+            timestamp: Utc::now().to_rfc3339(),
+            summary: None,
+            covered_start_id: Some(start_id.clone()),
+            covered_end_id: Some(end_id.clone()),
+            covered_count: Some(2),
+            is_boundary: Some(true),
+            preheat_compaction_id: Some("real-marker".to_string()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            error: None,
+            attempts: None,
+        }),
+    )
+    .unwrap();
+    write_preheat_cache(
+        &path,
+        &CompactionResult {
+            summary_text: "wrong result".to_string(),
+            covered_start_id: start_id,
+            covered_end_id: end_id,
+            covered_count: 2,
+            transcript_compaction_entry_id: Some("different-marker".to_string()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            preheat_elapsed_ms: 0,
+        },
+    )
+    .unwrap();
+
+    let state = init_context_state(&mgr, &ContextConfig::default(), "system").unwrap();
+    assert!(state.preheat.is_idle());
 }
 
 #[test]
@@ -993,8 +1182,7 @@ fn init_context_state_with_compaction_entry() {
 
 #[test]
 fn build_context_from_state_flattens_turns() {
-    let mut summary_msg = ChatMessage::compaction_summary("summary");
-    summary_msg.msg_id = Some("sum_1".to_string());
+    let mut summary_msg = ChatMessage::compaction_summary("summary", "sum_1");
     summary_msg.timestamp = Some("2026-04-04T12:00:00Z".to_string());
 
     let mut user_msg = ChatMessage::user("hello");

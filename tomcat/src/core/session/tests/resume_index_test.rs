@@ -5,8 +5,8 @@ use super::super::resume_index::{
 };
 use super::super::transcript::{
     append_line, insert_entry_after_message_id, mark_message_entries_after_anchor_superseded,
-    rewrite_message_text_entries_by_id, set_branch_summary_entry_is_boundary_true, write_header,
-    BranchSummaryEntry, MessageTextRewrite, SessionHeader, TranscriptEntry,
+    rewrite_message_text_entries_by_id, write_header, BranchSummaryEntry, BranchSummaryTextEntry,
+    MessageTextRewrite, SessionHeader, TranscriptEntry,
 };
 
 fn setup_mgr() -> (tempfile::TempDir, SessionManager) {
@@ -100,6 +100,59 @@ fn sidecar_records_latest_boundary_and_plan_event() {
 }
 
 #[test]
+fn marker_becomes_a_resume_boundary_only_after_its_linked_body_arrives() {
+    let (_dir, mgr) = setup_mgr();
+    let transcript_path = mgr.current_transcript_path().unwrap().unwrap();
+    mgr.append_message(serde_json::json!({"role":"user","content":"q1"}))
+        .unwrap();
+    let marker = TranscriptEntry::BranchSummary(BranchSummaryEntry {
+        id: Some("marker_1".to_string()),
+        parent_id: None,
+        timestamp: "2026-09-10T00:00:00.000Z".to_string(),
+        summary: None,
+        covered_start_id: None,
+        covered_end_id: None,
+        covered_count: Some(1),
+        is_boundary: Some(true),
+        preheat_compaction_id: Some("marker_1".to_string()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
+    });
+    super::super::transcript::append_entry(&transcript_path, &marker).unwrap();
+    let pending = load_or_rebuild_resume_index(&transcript_path)
+        .unwrap()
+        .index;
+    assert!(pending.latest_boundary.is_none());
+    assert!(pending.pending_boundary_markers.contains_key("marker_1"));
+
+    super::super::transcript::append_entry(
+        &transcript_path,
+        &TranscriptEntry::BranchSummaryText(BranchSummaryTextEntry {
+            id: Some("marker_1:text".to_string()),
+            parent_id: Some("marker_1".to_string()),
+            timestamp: "2026-09-10T00:00:01.000Z".to_string(),
+            for_id: "marker_1".to_string(),
+            summary: "summary".to_string(),
+        }),
+    )
+    .unwrap();
+    let completed = load_or_rebuild_resume_index(&transcript_path)
+        .unwrap()
+        .index;
+    assert_eq!(
+        completed
+            .latest_boundary
+            .as_ref()
+            .and_then(|anchor| anchor.entry_id.as_deref()),
+        Some("marker_1")
+    );
+    assert!(!completed.pending_boundary_markers.contains_key("marker_1"));
+}
+
+#[test]
 fn sidecar_missing_rebuilds_equivalent_to_full_scan() {
     let (_dir, mgr) = setup_mgr();
     for idx in 0..5 {
@@ -140,7 +193,7 @@ fn sidecar_schema_version_mismatch_falls_back_and_rebuilds() {
 
     let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
     assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
-    assert_eq!(rebuilt.index.schema_version, 3);
+    assert_eq!(rebuilt.index.schema_version, 4);
 }
 
 #[test]
@@ -169,7 +222,7 @@ fn legacy_exec_sidecar_heals_to_chat_on_first_hydrate() {
 
     let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
     assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
-    assert_eq!(rebuilt.index.schema_version, 3);
+    assert_eq!(rebuilt.index.schema_version, 4);
     assert_eq!(
         rebuilt.index.resume_control_state().mode,
         Some(AgentMode::Chat),
@@ -327,7 +380,7 @@ fn sidecar_inline_rebuilt_after_rewrite_stays_valid() {
         covered_start_id: None,
         covered_end_id: None,
         covered_count: Some(1),
-        is_boundary: Some(false),
+        is_boundary: Some(true),
         preheat_compaction_id: None,
         estimated_covered_tokens_before: None,
         estimated_summary_tokens: None,
@@ -336,7 +389,6 @@ fn sidecar_inline_rebuilt_after_rewrite_stays_valid() {
         attempts: None,
     });
     insert_entry_after_message_id(&transcript_path, &anchor_id, &inserted).unwrap();
-    set_branch_summary_entry_is_boundary_true(&transcript_path, "cmp_1").unwrap();
     let changed = rewrite_message_text_entries_by_id(
         &transcript_path,
         &[MessageTextRewrite {

@@ -508,6 +508,22 @@ function planEventMessageId(
   return `plan-event:${eventType}:${planId ?? "none"}:${detail && detail.length > 0 ? detail : "default"}`;
 }
 
+function upsertPlanEventMessage(
+  session: WebviewSessionSnapshot,
+  kind: "notice" | "warn",
+  text: string,
+  eventType: string,
+  planId: string | null | undefined,
+  detail: string | null | undefined,
+): void {
+  upsertTimelineItem(session, {
+    id: planEventMessageId(eventType, planId, detail),
+    kind,
+    text,
+    type: "message",
+  });
+}
+
 function activePlanId(session: WebviewSessionSnapshot): string | null {
   return session.activePlan?.planId ?? null;
 }
@@ -1565,11 +1581,13 @@ function applyHistoryPlanCustomEntry(
     }
     case "plan.review":
       if (typeof entry.summary === "string" && entry.summary.length > 0) {
-        pushMessage(
+        upsertPlanEventMessage(
           session,
           "notice",
           `Tomcat plan review: ${entry.summary}`,
-          planEventMessageId(eventName, planId, entry.summary),
+          eventName,
+          planId,
+          entry.summary,
         );
       }
       return;
@@ -1601,11 +1619,13 @@ function applyHistoryPlanCustomEntry(
       return;
     case "plan.verify":
       if (typeof entry.verdict === "string" && entry.verdict.length > 0) {
-        pushMessage(
+        upsertPlanEventMessage(
           session,
           "notice",
           `Tomcat plan verify: ${entry.verdict}`,
-          planEventMessageId(eventName, planId, entry.verdict),
+          eventName,
+          planId,
+          entry.verdict,
         );
       }
       return;
@@ -1616,11 +1636,13 @@ function applyHistoryPlanCustomEntry(
           typeof entry.reason === "string" && entry.reason.length > 0
             ? entry.reason
             : "review needs attention";
-        pushMessage(
+        upsertPlanEventMessage(
           session,
           "warn",
           `Tomcat plan warning: ${reason}`,
-          planEventMessageId(eventName, planId, reason),
+          eventName,
+          planId,
+          reason,
         );
       }
       return;
@@ -1637,6 +1659,7 @@ function applyHistoryEntry(
   historyToolArgs: Map<string, Record<string, unknown>>,
   standardToolResultIds: Set<string>,
   errorRecoveryActions: ReadonlyMap<string, ErrorRecovery>,
+  branchSummaryTexts: ReadonlyMap<string, string>,
 ): void {
   if (!isRecord(entry) || typeof entry.type !== "string") {
     return;
@@ -1646,16 +1669,31 @@ function applyHistoryEntry(
     if (entry.isBoundary !== true) {
       return;
     }
+    const id =
+      typeof entry.id === "string"
+        ? entry.id
+        : `boundary-${session.timeline.length + 1}`;
+    const summary =
+      typeof entry.summary === "string"
+        ? entry.summary
+        : branchSummaryTexts.get(id) ?? null;
+    if (summary === null) {
+      // The marker was appended before its asynchronous LLM result was ready. Until a linked
+      // branch_summary_text arrives, it is intentionally invisible rather than an empty card.
+      return;
+    }
     session.timeline.push({
       coveredCount:
         typeof entry.coveredCount === "number" ? entry.coveredCount : null,
-      id:
-        typeof entry.id === "string"
-          ? entry.id
-          : `boundary-${session.timeline.length + 1}`,
-      summary: typeof entry.summary === "string" ? entry.summary : null,
+      id,
+      summary,
       type: "boundary",
     } satisfies WebviewBoundaryBlock);
+    return;
+  }
+
+  if (entry.type === "branch_summary_text") {
+    // The payload belongs at its earlier marker's physical position; it never owns a timeline row.
     return;
   }
 
@@ -1697,6 +1735,20 @@ function applyHistoryEntry(
         ? entry.id
         : `history-message-${(text ?? role ?? "unknown").length}`;
     if (role === "user") {
+      if (entry.message.kind === "compaction_summary") {
+        session.timeline.push({
+          coveredCount:
+            typeof entry.message.coveredCount === "number"
+              ? entry.message.coveredCount
+              : typeof entry.message.covered_count === "number"
+                ? entry.message.covered_count
+                : null,
+          id,
+          summary: text ?? "",
+          type: "boundary",
+        } satisfies WebviewBoundaryBlock);
+        return;
+      }
       const noteTitle = systemNoteTitle(entry.message);
       if (noteTitle) {
         session.timeline.push({
@@ -1839,6 +1891,22 @@ function applyHistoryEntry(
     }
     applyHistoryPlanCustomEntry(session, entry);
   }
+}
+
+function buildBranchSummaryTextLookup(entries: unknown[]): Map<string, string> {
+  const summaries = new Map<string, string>();
+  for (const entry of entries) {
+    if (
+      !isRecord(entry) ||
+      entry.type !== "branch_summary_text" ||
+      typeof entry.forId !== "string" ||
+      typeof entry.summary !== "string"
+    ) {
+      continue;
+    }
+    summaries.set(entry.forId, entry.summary);
+  }
+  return summaries;
 }
 
 function createSessionRuntime(): SessionRuntimeState {
@@ -2315,7 +2383,6 @@ function shouldRetainLiveTimelineItem(
       return (
         item.status === "running" ||
         item.status === "streaming" ||
-        (item.toolName === "ask_question" && typeof item.summary === "string") ||
         (typeof item.assistantMessageId === "string" &&
           assistantGroupIds.has(item.assistantMessageId))
       );
@@ -3393,6 +3460,7 @@ export class WebviewStateStore {
     const toolCallToAssistant = buildToolCallToAssistantMap(renderableEntries);
     const historyToolArgs = buildHistoryToolArgsLookup(renderableEntries);
     const standardToolResultIds = buildHistoryToolResultIds(renderableEntries);
+    const branchSummaryTexts = buildBranchSummaryTextLookup(renderableEntries);
     const errorRecoveryActions = buildErrorRecoveryActions(
       renderableEntries,
       session.busy,
@@ -3408,6 +3476,7 @@ export class WebviewStateStore {
         historyToolArgs,
         standardToolResultIds,
         errorRecoveryActions,
+        branchSummaryTexts,
       );
     }
     const completedAskQuestionToolCalls = new Set(
@@ -3592,11 +3661,13 @@ export class WebviewStateStore {
     switch (event.type) {
       case "plan.review":
         if (event.summary) {
-          pushMessage(
+          upsertPlanEventMessage(
             session,
             "notice",
             `Tomcat plan review: ${event.summary}`,
-            planEventMessageId(event.type, event.planId, event.summary),
+            event.type,
+            event.planId,
+            event.summary,
           );
         }
         return;
@@ -3628,11 +3699,13 @@ export class WebviewStateStore {
         return;
       case "plan.verify":
         if (event.verdict) {
-          pushMessage(
+          upsertPlanEventMessage(
             session,
             "notice",
             `Tomcat plan verify: ${event.verdict}`,
-            planEventMessageId(event.type, event.planId, event.verdict),
+            event.type,
+            event.planId,
+            event.verdict,
           );
         }
         return;
@@ -3640,11 +3713,13 @@ export class WebviewStateStore {
       case "plan.code_review.warning":
         {
           const reason = event.reason ?? "review needs attention";
-          pushMessage(
+          upsertPlanEventMessage(
             session,
             "warn",
             `Tomcat plan warning: ${reason}`,
-            planEventMessageId(event.type, event.planId, reason),
+            event.type,
+            event.planId,
+            reason,
           );
         }
         return;

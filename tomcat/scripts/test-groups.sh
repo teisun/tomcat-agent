@@ -54,12 +54,14 @@ TOMCAT_INTEGRATION_FEATURE_TESTS=(
 
 # Deliberately manual: performance/browser bootstrap or additional paid providers.
 TOMCAT_INTEGRATION_MANUAL_TESTS=(
+  current_tail_guard_real_llm_e2e
   resume_hydration_perf
   verify_skill_browser_scripts
   model_presets_live_smoke_tests
   prompt_cache_real_llm_tests
   ui_acceptance_real_llm_e2e
   openai_files_integration_tests
+  plan_evidence_real_llm_acceptance
 )
 
 # Network-only cases inside otherwise offline binaries; run explicitly with the

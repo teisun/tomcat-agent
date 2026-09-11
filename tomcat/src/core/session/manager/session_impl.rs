@@ -778,7 +778,9 @@ impl SessionManager {
         let path = self.transcript_path(&session_id);
         let header = SessionHeader {
             r#type: "session".to_string(),
-            version: Some(3),
+            // v4 introduces marker-first `branch_summary` plus tail-appended
+            // `branch_summary_text`; readers must fold the pair before treating it as a boundary.
+            version: Some(4),
             id: session_id.clone(),
             timestamp: iso_ts(now),
             cwd: cwd.clone(),

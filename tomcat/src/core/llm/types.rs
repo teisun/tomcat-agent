@@ -945,7 +945,12 @@ impl ChatMessage {
         }
     }
 
-    pub fn compaction_summary(text: impl Into<String>) -> Self {
+    /// Builds a synthetic compaction summary with the durable transcript marker id that owns it.
+    ///
+    /// A summary without this id is indistinguishable from an ordinary user message to later
+    /// persistence paths, which is how historical summaries leaked into the transcript as user
+    /// bubbles. Keep the id mandatory at construction time.
+    pub fn compaction_summary(text: impl Into<String>, entry_id: impl Into<String>) -> Self {
         Self {
             role: ChatMessageRole::User,
             content: Some(ChatMessageContent::Text(text.into())),
@@ -962,7 +967,7 @@ impl ChatMessage {
             usage: None,
             summary_title: None,
             tool_display: None,
-            msg_id: None,
+            msg_id: Some(entry_id.into()),
             kind: MessageKind::CompactionSummary,
             timestamp: None,
         }

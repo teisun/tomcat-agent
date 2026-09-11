@@ -47,6 +47,124 @@ fn make_boundary_entry(ts: &str, summary: &str) -> TranscriptEntry {
     })
 }
 
+fn make_marker_entry(id: &str, ts: &str) -> TranscriptEntry {
+    TranscriptEntry::BranchSummary(BranchSummaryEntry {
+        id: Some(id.to_string()),
+        parent_id: None,
+        timestamp: ts.to_string(),
+        summary: None,
+        covered_start_id: Some("u1".to_string()),
+        covered_end_id: Some("a1".to_string()),
+        covered_count: Some(2),
+        is_boundary: Some(true),
+        preheat_compaction_id: Some(id.to_string()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        error: None,
+        attempts: None,
+    })
+}
+
+fn make_summary_body(id: &str, summary: &str, ts: &str) -> TranscriptEntry {
+    TranscriptEntry::BranchSummaryText(BranchSummaryTextEntry {
+        id: Some(format!("{id}:text")),
+        parent_id: Some(id.to_string()),
+        timestamp: ts.to_string(),
+        for_id: id.to_string(),
+        summary: summary.to_string(),
+    })
+}
+
+fn message_entry(id: &str, role: &str, content: &str, ts: &str) -> TranscriptEntry {
+    TranscriptEntry::Message(MessageEntry {
+        id: Some(id.to_string()),
+        parent_id: None,
+        timestamp: ts.to_string(),
+        message: serde_json::json!({"role":role,"content":content}),
+    })
+}
+
+#[test]
+fn unfulfilled_marker_is_not_a_boundary_and_cannot_drop_messages() {
+    let today = "2026-04-04T10:00:00Z";
+    let entries = vec![
+        message_entry("u1", "user", "original user input", today),
+        message_entry("a1", "assistant", "original answer", today),
+        make_marker_entry("marker-1", today),
+        message_entry("u2", "user", "live tail", today),
+    ];
+
+    let folded = fold_entries_to_messages(&entries, 0);
+    assert_eq!(
+        folded
+            .messages
+            .iter()
+            .filter_map(ChatMessage::text_content)
+            .collect::<Vec<_>>(),
+        ["original user input", "original answer", "live tail"],
+    );
+    let fold_start = compute_fold_start(
+        &entries,
+        chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap(),
+        1,
+    );
+    assert_eq!(
+        fold_start, 0,
+        "a marker without a body is not a resume boundary"
+    );
+}
+
+#[test]
+fn tail_appended_summary_body_applies_at_its_earlier_marker_without_dropping_live_tail() {
+    let ts = "2026-04-04T10:00:00Z";
+    let entries = vec![
+        message_entry("u1", "user", "old input", ts),
+        message_entry("a1", "assistant", "old answer", ts),
+        make_marker_entry("marker-1", ts),
+        message_entry("u2", "user", "new live input", ts),
+        make_summary_body("marker-1", "summary of old input", ts),
+    ];
+
+    let folded = fold_entries_to_messages(&entries, 0);
+    assert_eq!(
+        folded
+            .messages
+            .iter()
+            .filter_map(ChatMessage::text_content)
+            .collect::<Vec<_>>(),
+        ["summary of old input", "new live input"],
+    );
+    assert_eq!(
+        folded.messages[0].msg_id.as_deref(),
+        Some("marker-1"),
+        "the synthetic context message belongs to the marker, not the tail payload"
+    );
+}
+
+#[test]
+fn latest_completed_marker_wins_for_chained_compactions() {
+    let ts = "2026-04-04T10:00:00Z";
+    let entries = vec![
+        message_entry("u1", "user", "old input", ts),
+        make_marker_entry("marker-1", ts),
+        make_summary_body("marker-1", "first summary", ts),
+        message_entry("u2", "user", "more work", ts),
+        make_marker_entry("marker-2", ts),
+        make_summary_body("marker-2", "second summary", ts),
+    ];
+
+    let folded = fold_entries_to_messages(&entries, 0);
+    assert_eq!(
+        folded
+            .messages
+            .iter()
+            .filter_map(ChatMessage::text_content)
+            .collect::<Vec<_>>(),
+        ["second summary"],
+    );
+}
+
 #[test]
 fn fold_start_skips_old_entries() {
     let today = chrono::NaiveDate::from_ymd_opt(2026, 4, 4).unwrap();

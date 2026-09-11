@@ -281,6 +281,27 @@ async fn real_terra_preheat_apply_and_resume_first_request_guard() {
         "a Fits payload above the 50% watermark must start preheat"
     );
     require_successful_preheat(&mut agent).await;
+    let summary_result = match agent.context_state.as_mut().unwrap().preheat.poll_result() {
+        PreheatOutcome::Completed(result) => result,
+        _ => panic!("the restored real preheat result must remain available for inspection"),
+    };
+    assert!(
+        summary_result
+            .summary_text
+            .contains("<verbatim_user_messages>\nCopied verbatim")
+            && !summary_result.summary_text.contains("<verbatim_user_messages>\nCopied verbatim from the user. If anything below contradicts these, these win.\n(none)"),
+        "the real summary must contain captured user wording, not an empty verbatim block"
+    );
+    assert!(
+        summary_result.summary_text.contains("<recent_files>"),
+        "the real summary must carry the read/edit/write file index on the preheat path"
+    );
+    agent
+        .context_state
+        .as_mut()
+        .unwrap()
+        .preheat
+        .restore_completed(summary_result);
 
     // Phase 2: the ready preheat is applied at its recorded round boundary.
     let mut tail_assistant = assistant_read_call("tail-read", "src/main.rs");

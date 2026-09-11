@@ -17,6 +17,7 @@
 //! 选择为 PlanFile todos 或 session scratchpad todos，再由
 //! [`override_progress_section`] 覆盖模型的说法。
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::core::llm::{ChatMessage, ChatMessageRole};
@@ -31,7 +32,7 @@ const RECENT_FILES_OPEN: &str = "<recent_files>";
 const RECENT_FILES_CLOSE: &str = "</recent_files>";
 
 /// 逐字保留的最近用户消息条数。
-const VERBATIM_MESSAGE_LIMIT: usize = 10;
+pub(crate) const VERBATIM_MESSAGE_LIMIT: usize = 10;
 /// verbatim 区块的字符预算；超出时从最旧的一条开始丢，并显式标注丢了几条。
 const VERBATIM_BUDGET_CHARS: usize = 6000;
 /// 单条消息过长时的截断长度。
@@ -49,9 +50,8 @@ pub fn collect_verbatim_user_messages(messages: &[ChatMessage]) -> Vec<String> {
         .iter()
         .rev()
         .filter(|msg| msg.role == ChatMessageRole::User && msg.kind.is_normal())
-        .filter_map(|msg| msg.text_content())
+        .filter_map(ChatMessage::first_text)
         .filter(|text| !text.trim().is_empty())
-        .map(|text| text.to_string())
         .take(VERBATIM_MESSAGE_LIMIT)
         .collect();
     picked.reverse();
@@ -70,6 +70,37 @@ pub fn render_with_sidecar(
     control: Option<&ControlSnapshot>,
     user_messages: &[String],
     sidecar_path: Option<&Path>,
+) -> String {
+    render_with_sidecar_and_recent_files(control, user_messages, sidecar_path, &[], &[])
+}
+
+/// Render every machine-owned summary block in its canonical order.
+///
+/// The caller provides the already-derived user-input history but the file index is always
+/// derived from the compacted message snapshot by this module. This keeps all compaction paths
+/// (preheat, `/compact`, and Collapse) from having to remember a second string insertion step.
+pub fn render_with_sidecar_for_messages(
+    control: Option<&ControlSnapshot>,
+    user_messages: &[String],
+    sidecar_path: Option<&Path>,
+    messages: &[ChatMessage],
+) -> String {
+    let (read_files, modified_files) = collect_recent_files(messages);
+    render_with_sidecar_and_recent_files(
+        control,
+        user_messages,
+        sidecar_path,
+        &read_files,
+        &modified_files,
+    )
+}
+
+fn render_with_sidecar_and_recent_files(
+    control: Option<&ControlSnapshot>,
+    user_messages: &[String],
+    sidecar_path: Option<&Path>,
+    read_files: &[String],
+    modified_files: &[String],
 ) -> String {
     let mut out = String::new();
     if let Some(control) = control {
@@ -127,19 +158,19 @@ pub fn render_with_sidecar(
         out.push_str("This file is user-history reference, not runtime control. Read it with the read tool when you need more user intent or input detail.\n");
     }
     out.push_str(VERBATIM_CLOSE);
+    let recent_files = render_recent_files(read_files, modified_files);
+    if !recent_files.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&recent_files);
+    }
     out
 }
 
-/// Add a post-collapse file index without re-attaching file contents. The next agent can inspect
+/// Renders a durable file index without re-attaching file contents. The next agent can inspect
 /// exactly the relevant paths, while the compacted summary stays small and has no stale payload.
-pub fn prepend_recent_files(
-    summary: &str,
-    read_files: &[String],
-    modified_files: &[String],
-) -> String {
-    let summary = strip_tag(summary, RECENT_FILES_OPEN, RECENT_FILES_CLOSE);
+pub fn render_recent_files(read_files: &[String], modified_files: &[String]) -> String {
     if read_files.is_empty() && modified_files.is_empty() {
-        return summary;
+        return String::new();
     }
 
     let mut block = String::from(RECENT_FILES_OPEN);
@@ -164,15 +195,68 @@ pub fn prepend_recent_files(
         "Before relying on this index, run `git status --short` and inspect the current uncommitted diff for the relevant paths.\n",
     );
     block.push_str(RECENT_FILES_CLOSE);
-    if let Some(verbatim_end) = summary.find(VERBATIM_CLOSE) {
-        let insert_at = verbatim_end + VERBATIM_CLOSE.len();
-        return format!(
-            "{}\n\n{block}{}",
-            &summary[..insert_at],
-            &summary[insert_at..]
-        );
+    block
+}
+
+/// Collect a small, durable file index from calls covered by a compaction. This deliberately
+/// re-attaches paths only: their current contents must be read again instead of trusting stale
+/// text from the compacted context.
+pub fn collect_recent_files(messages: &[ChatMessage]) -> (Vec<String>, Vec<String>) {
+    let mut reads = Vec::new();
+    let mut modified = Vec::new();
+
+    for message in messages {
+        for tool_call in message.tool_calls.iter().flatten() {
+            let tool_name = tool_call
+                .pointer("/function/name")
+                .or_else(|| tool_call.get("name"))
+                .and_then(serde_json::Value::as_str);
+            let Some(path) = tool_call_path(tool_call) else {
+                continue;
+            };
+            match tool_name {
+                Some("read") => reads.push(path),
+                Some("edit" | "write") => modified.push(path),
+                _ => {}
+            }
+        }
     }
-    format!("{block}\n\n{}", summary.trim_start())
+
+    let reads = dedupe_keep_last(reads);
+    let first_kept_read = reads.len().saturating_sub(20);
+    (
+        reads[first_kept_read..].to_vec(),
+        dedupe_keep_last(modified),
+    )
+}
+
+fn tool_call_path(tool_call: &serde_json::Value) -> Option<String> {
+    let arguments = tool_call
+        .pointer("/function/arguments")
+        .or_else(|| tool_call.get("arguments"))?;
+    let arguments = match arguments {
+        serde_json::Value::String(raw) => serde_json::from_str(raw).ok()?,
+        value => value.clone(),
+    };
+    arguments
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+}
+
+/// Preserve chronological order while keeping the most recent occurrence of each path.
+fn dedupe_keep_last(paths: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::with_capacity(paths.len());
+    for path in paths.into_iter().rev() {
+        if seen.insert(path.clone()) {
+            deduped.push(path);
+        }
+    }
+    deduped.reverse();
+    deduped
 }
 
 /// 从最新往回收，直到撞上字符预算。返回 (按时间顺序保留的消息, 丢弃条数)。

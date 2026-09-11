@@ -69,7 +69,7 @@ pub async fn execute_for_tool(
         )));
     }
     let payload = answer_to_json(&result);
-    write_ask_question_transcript(runtime, &questions, &payload);
+    write_ask_question_transcript(runtime, &questions, &payload, tool_call_id);
     Ok(payload)
 }
 
@@ -255,6 +255,7 @@ fn write_ask_question_transcript(
     runtime: &PlanRuntime,
     questions: &[Question],
     payload: &serde_json::Value,
+    tool_call_id: Option<&str>,
 ) {
     let mut extra = serde_json::json!({
         "event": crate::infra::wire::WIRE_PLAN_ASK_QUESTION,
@@ -265,6 +266,12 @@ fn write_ask_question_transcript(
     let plan_id = runtime.active_plan().map(|plan| plan.id);
     if let (Some(obj), Some(plan_id)) = (extra.as_object_mut(), plan_id) {
         obj.insert("plan_id".into(), serde_json::Value::String(plan_id));
+    }
+    if let (Some(obj), Some(tool_call_id)) = (extra.as_object_mut(), tool_call_id) {
+        obj.insert(
+            "tool_call_id".into(),
+            serde_json::Value::String(tool_call_id.to_string()),
+        );
     }
     runtime.write_transcript_custom(extra);
 }

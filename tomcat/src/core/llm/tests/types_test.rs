@@ -28,6 +28,10 @@ fn chat_message_constructors() {
 
     let s = ChatMessage::system("you are helpful");
     assert!(matches!(s.role, ChatMessageRole::System));
+
+    let summary = ChatMessage::compaction_summary("compact old context", "summary-marker");
+    assert_eq!(summary.kind, MessageKind::CompactionSummary);
+    assert_eq!(summary.msg_id.as_deref(), Some("summary-marker"));
 }
 
 #[test]

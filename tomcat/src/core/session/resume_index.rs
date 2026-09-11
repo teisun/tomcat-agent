@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use crate::core::session::transcript::{
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
 
-pub const RESUME_INDEX_SCHEMA_VERSION: u32 = 3;
+pub const RESUME_INDEX_SCHEMA_VERSION: u32 = 4;
 const RECENT_TURN_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -56,6 +57,7 @@ pub(crate) enum ResumeEntryKind {
     ThinkingLevelChange,
     ThinkingTrace,
     BranchSummary,
+    BranchSummaryText,
     ToolResultsCompacted,
     Label,
     SessionInfo,
@@ -108,6 +110,12 @@ impl ResumeAnchor {
                 ordinal,
                 timestamp: e.timestamp.clone(),
                 entry_kind: ResumeEntryKind::BranchSummary,
+            },
+            TranscriptEntry::BranchSummaryText(e) => Self {
+                entry_id: e.id.clone(),
+                ordinal,
+                timestamp: e.timestamp.clone(),
+                entry_kind: ResumeEntryKind::BranchSummaryText,
             },
             TranscriptEntry::ToolResultsCompacted(e) => Self {
                 entry_id: e.id.clone(),
@@ -218,6 +226,13 @@ pub(crate) struct ResumeIndex {
     pub total_entries: usize,
     pub last_entry_id: Option<String>,
     pub latest_boundary: Option<ResumeAnchor>,
+    /// `branch_summary` markers waiting for a later `branch_summary_text` payload.
+    ///
+    /// This is persisted because incremental sidecar updates see the marker and its payload in
+    /// separate appends. A bare marker must not become a hydrate boundary: doing so would skip
+    /// the original messages before the LLM result exists.
+    #[serde(default)]
+    pub pending_boundary_markers: HashMap<String, ResumeAnchor>,
     pub recent_turn_starts: Vec<ResumeAnchor>,
     pub latest_day_first_entry: Option<ResumeDayAnchor>,
     pub latest_plan_event: Option<StoredPlanEventRef>,
@@ -272,6 +287,7 @@ fn parse_entry_id(entry: &TranscriptEntry) -> Option<String> {
         TranscriptEntry::ThinkingLevelChange(e) => e.id.clone(),
         TranscriptEntry::ThinkingTrace(e) => e.id.clone(),
         TranscriptEntry::BranchSummary(e) => e.id.clone(),
+        TranscriptEntry::BranchSummaryText(e) => e.id.clone(),
         TranscriptEntry::ToolResultsCompacted(e) => e.id.clone(),
         TranscriptEntry::Label(e) => e.id.clone(),
         TranscriptEntry::SessionInfo(e) => e.id.clone(),
@@ -287,6 +303,7 @@ fn parse_entry_timestamp(entry: &TranscriptEntry) -> &str {
         TranscriptEntry::ThinkingLevelChange(e) => &e.timestamp,
         TranscriptEntry::ThinkingTrace(e) => &e.timestamp,
         TranscriptEntry::BranchSummary(e) => &e.timestamp,
+        TranscriptEntry::BranchSummaryText(e) => &e.timestamp,
         TranscriptEntry::ToolResultsCompacted(e) => &e.timestamp,
         TranscriptEntry::Label(e) => &e.timestamp,
         TranscriptEntry::SessionInfo(e) => &e.timestamp,
@@ -311,10 +328,6 @@ fn is_user_turn_start(entry: &TranscriptEntry) -> bool {
         }
         _ => false,
     }
-}
-
-fn is_boundary(entry: &TranscriptEntry) -> bool {
-    matches!(entry, TranscriptEntry::BranchSummary(ce) if ce.is_boundary == Some(true))
 }
 
 fn maybe_plan_event(entry: &TranscriptEntry) -> Option<PlanEventRef> {
@@ -369,8 +382,24 @@ fn apply_entry(index: &mut ResumeIndex, entry: &TranscriptEntry, ordinal: usize)
     index.total_entries = ordinal + 1;
     index.last_entry_id = parse_entry_id(entry);
 
-    if is_boundary(entry) {
-        index.latest_boundary = Some(anchor.clone());
+    match entry {
+        TranscriptEntry::BranchSummary(summary) if summary.is_boundary == Some(true) => {
+            match (&summary.id, &summary.summary) {
+                (_, Some(_)) => index.latest_boundary = Some(anchor.clone()),
+                (Some(id), None) => {
+                    index
+                        .pending_boundary_markers
+                        .insert(id.clone(), anchor.clone());
+                }
+                (None, None) => {}
+            }
+        }
+        TranscriptEntry::BranchSummaryText(body) => {
+            if let Some(marker) = index.pending_boundary_markers.remove(&body.for_id) {
+                index.latest_boundary = Some(marker);
+            }
+        }
+        _ => {}
     }
     if is_user_turn_start(entry) {
         index.recent_turn_starts.push(anchor.clone());
@@ -425,6 +454,7 @@ fn build_empty_index(transcript_path: &Path) -> Result<ResumeIndex, AppError> {
         total_entries: 0,
         last_entry_id: None,
         latest_boundary: None,
+        pending_boundary_markers: HashMap::new(),
         recent_turn_starts: Vec::new(),
         latest_day_first_entry: None,
         latest_plan_event: None,

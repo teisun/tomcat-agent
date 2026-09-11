@@ -51,7 +51,7 @@ impl LlmProvider for CaptureProvider {
 #[test]
 fn messages_to_text_strips_machine_blocks_from_previous_summary_only() {
     let batch = messages_to_text(&[
-        ChatMessage::compaction_summary(OLD_MACHINE_BLOCKS),
+        ChatMessage::compaction_summary(OLD_MACHINE_BLOCKS, "old-summary"),
         ChatMessage::user("new tail input"),
     ]);
 
@@ -69,7 +69,7 @@ async fn update_request_strips_old_machine_blocks_from_both_prompt_channels() {
         request: Arc::clone(&request),
     };
     let snapshot = vec![
-        ChatMessage::compaction_summary(OLD_MACHINE_BLOCKS),
+        ChatMessage::compaction_summary(OLD_MACHINE_BLOCKS, "old-summary"),
         ChatMessage::user("new tail input"),
     ];
 

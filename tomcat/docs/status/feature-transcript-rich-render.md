@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-09 22:01 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-11 14:25 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0] 方案 E 预热/恢复收尾与全链验收完成**：预热缓存继续独立持久化为 `.preheat.jsonl`；`*.user_messages.jsonl` 只是 transcript 的可重建用户原话投影，不携带摘要正文。摘要 LLM `await` 返回后只在生成函数内刷新一次侧车，确保 verbatim 可看到等待期间新增或 Retry supersede 后的当前 user 消息；移除后台成功分支的重复刷新。恢复时若摘要已落入 transcript，会忽略同 marker 的缓存，避免重放；缺 marker 的旧缓存安全跳过。current-tail collapse 在覆盖转录尾部时走 O(1) append，保留中段插入兜底，并锁住 marker 应用幂等。真实 LLM 验收覆盖预热→apply→resume、全链 current-tail 与 collapse/replay；`integration-real-llm` 38/38、Rust `integration-parallel` 376/376、CLI E2E 97/97、QuickJS E2E 15/15、扩展 `gate:full` 均通过。兼容 provider 返回 `finish_reason=stop`，并删除只是在复读配置值的 `source_provider` 断言。CLI `0.1.48 → 0.1.49`、扩展 `0.1.62 → 0.1.63`、bundled CLI 同步。Cov% 未跑，仍为 —。@2026-09-11
 - [✓] **[P1] 缓存探针可对照 `prompt_cache_key` 与两种 wire**：`prompt_cache_real_llm_tests` 的增长前缀马拉松不再向 Terra 中转站发送 `temperature` / `max_tokens`（与生产请求同形）；新增 `TOMCAT_E2E_CACHE_PROBE_KEY=on|off` 诊断开关，以及 `interleaved_tail_placement_ab_probe`（同一时刻背靠背对比 tail 并进 `instructions` vs 放 `input` 末项）。实测 idatatlas 上 ON≈OFF（73%≈72%）且掉坑轮精确落到 4608（仅常热 system prefix），说明该网关未把客户端 `prompt_cache_key` 用于 GPT-5.6 可靠匹配；命中抖动不是 Tomcat 拼上下文形状问题。Cov% 未跑，仍为 —。@2026-09-09
 - [✓] **[P0] Build 审计整改与双网关真实验收完成**：`TodoItem.evidence` 仅持久化至 frontmatter / `update_plan` 返回值，不再干扰 Markdown Todos Board；删除可重算的 `tool_results_compacted` transcript marker，将 current-tail guard 合并为 `reasoning_loop` 顶部的单点请求前检查，覆盖新 turn、follow-up、retry 与 resume 首请求。L0 在摘要 boundary 后改为处理最近一个含工具结果的 turn，避免新 user 消息遮蔽前一回合的超大结果。OpenAI Responses 增加 `chat_collect`，使强制 SSE 的中转站仍可向摘要调用方提供完整响应。真实 idatatlas / fcodex `gpt-5.6-terra` 分别验证预热、摘要应用、重启 guard、build E2E、evidence 和缓存；`cargo test -p tomcat --lib` 2804 passed，CLI `0.1.47 → 0.1.48`、扩展 `0.1.61 → 0.1.62`、bundled CLI 同步。Cov% 未跑，仍为 —。@2026-09-09
 - [✓] **[P0] 验收测试与运行脚本整改完成**：Plan / Retry / Resume 测试对齐现有状态和历史保留行为；测试使用独立目录、模型配置和模拟服务，等待 CLI 进程及管道关闭后才清理资源。nested guard 只抽取判断便于测试，不放松原安全规则。VS Code 五种启动入口统一隔离 Electron 环境；截图直接取自测试窗口，不再误拍用户窗口。测试筛选拒绝零匹配，Rust 离线 / 真实联网 / 手动场景分类补齐；VSIX 共享构建并以内容哈希拒绝过期产物。@2026-09-08
@@ -92,7 +93,8 @@
 
 ### 🔌 INTERFACE (接口变更)
 - `LlmProvider::chat_collect(ChatRequest) -> ChatResponse`：新增“完整响应”抽象；普通 provider 直接复用非流式 `chat`，强制 SSE 的 OpenAI Responses 中转站在 adapter 内缓冲流，不把传输限制泄漏给 compaction / title / dispatcher 调用方。
-- 发布版本：CLI `0.1.48`、扩展 `0.1.62`、`bundledCliVersion=0.1.48`。
+- 预热恢复：`.preheat.jsonl` 保存尚未落入 transcript 的摘要缓存；`*.user_messages.jsonl` 只保存 active Normal user 的原始行投影，二者职责分离。应用过同一 marker 的摘要优先以 transcript 为准，恢复不二次导入缓存。
+- 发布版本：CLI `0.1.49`、扩展 `0.1.63`、`bundledCliVersion=0.1.49`。
 - `TomcatMessenger.disposeAsync({ timeoutMs? })`：新增可等待关闭的扩展内部方法，默认 5 秒，超时明确失败；原同步 `dispose()` 调用方式及关闭时序保持兼容。Plan / Acceptance 状态机、用户配置和正式 serve 协议不变，schema fixture 仅补齐已有 `FileDiffLine.skippedLines`。
 - 测试与构建：`test:integration` 使用独立 Vitest 配置并尊重文件筛选；Mocha 四入口开启 `failZero`。`packageVsix(skipBuild: true)` 及验收入口复用构建前验证 `.build-artifacts.json` 的输入/输出内容哈希；该本地产物记录不入库。
 - 发布版本：CLI `0.1.47`、扩展 `0.1.61`、`bundledCliVersion=0.1.47`。
@@ -193,6 +195,7 @@
 | 其余真实联网 / 手动测试未全部运行 | 本轮必验离线集与明确列出的真实窗口已通过；其他依赖真实模型行为、外部凭据或人工操作的测试不计入通过数，历史失败保留在整改记录与 Git 历史 | 按文档显式启用对应测试组后分别验证 |
 
 ### 集成说明
+- 最新补充（2026-09-11 14:25）：方案 E 六项收尾与版本发布完成。全量门禁：Rust `gate-full`、真实 `integration-real-llm`（38/38）、CLI E2E（97/97）、QuickJS E2E（15/15）以及扩展 `npm run gate:full` 全绿；版本镜像检查与 19 条版本工具测试通过。Cov% 未测，保持 —。
 - 最新补充（2026-09-09 22:01）：缓存马拉松去掉 Terra 拒绝的采样参数，并加上 `TOMCAT_E2E_CACHE_PROBE_KEY` 与交替 wire A/B。不推送、不发版；CLI `0.1.48` / 扩展 `0.1.62` 不变。Cov% 未测，保持 —。
 - 当前提交（2026-09-08 16:08）：验收整改计划于 15:51 完成，本次依用户新指令提交整改源码、测试、说明和状态文件；不推送、不发版。代码与验收结束时的 58 路径快照一致（排除账本的 SHA-256 为 `fabe312fca556e9e8ec2adca5b4d3781012039a207f58cf633098034963920f6`），提交前仅补状态/提交说明，不重复已通过的完整测试。CLI `0.1.47` / 扩展 `0.1.61` / bundled CLI `0.1.47` 不变；Cov% 未测，保持 —。完整命令、真实任务 ID、失败与补跑结果见 [验收整改记录](../reports/acceptance-remediation.md)。
 - 最新补充（2026-09-03 22:09）：依赖去重与 `[profile.fast]` 合入。`Cargo.lock` 573→541；CLI `0.1.44` / 扩展 `0.1.58` / bundled CLI `0.1.44`。验证：fmt、clippy `-D warnings`、`cargo check --all-targets`、`release-version check`、`git diff --check` 全绿。Cov% 未跑，仍为 —。

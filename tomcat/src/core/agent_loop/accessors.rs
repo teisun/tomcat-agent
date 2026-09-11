@@ -27,8 +27,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
-use crate::core::llm::{ChatMessage, LlmProvider, ResolvedCall};
+use crate::core::llm::{ChatMessage, LlmProvider, MessageKind, ResolvedCall};
 use crate::core::session::manager::{generate_entry_id, ContextState};
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::infra::event_bus::{EventBus, ScopedEventEmitter};
@@ -319,6 +320,13 @@ impl AgentLoop {
         &self,
         msg: &mut ChatMessage,
     ) -> Result<(), crate::infra::error::AppError> {
+        if msg.kind == MessageKind::CompactionSummary {
+            warn!(
+                msg_id = ?msg.msg_id,
+                "refusing to persist a compaction summary as an ordinary message"
+            );
+            return Ok(());
+        }
         let Some(ref sink) = self.config.message_append_sink else {
             return Ok(());
         };
