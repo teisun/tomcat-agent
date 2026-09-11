@@ -475,6 +475,103 @@ async fn run_interrupt_during_stream_preserves_partial_text() {
     );
 }
 
+#[tokio::test]
+async fn run_interrupt_during_blocking_collapse_returns_promptly() {
+    struct BlockingCompactionLlm {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for BlockingCompactionLlm {
+        fn provider_name(&self) -> &str {
+            "blocking-compaction"
+        }
+
+        async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, AppError> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            std::future::pending::<Result<ChatResponse, AppError>>().await
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: ChatRequest,
+        ) -> Result<
+            Box<dyn tokio_stream::Stream<Item = Result<StreamEvent, AppError>> + Send + Unpin>,
+            AppError,
+        > {
+            Err(AppError::Llm(
+                "main stream must not start during collapse".to_string(),
+            ))
+        }
+
+        fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
+            Ok(0)
+        }
+    }
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let compaction_provider: Arc<dyn LlmProvider> = Arc::new(BlockingCompactionLlm {
+        entered: Mutex::new(Some(entered_tx)),
+    });
+    let main_provider = Arc::new(MockLlmProvider::new(vec![]));
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(
+        test_binding(main_provider, "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "s-int-blocking-collapse".to_string(),
+            context_config: crate::infra::config::ContextConfig {
+                compaction_model: "compaction".to_string(),
+                ..Default::default()
+            },
+            compaction_provider: Some(compaction_provider),
+            ..Default::default()
+        },
+        cancel.clone(),
+    );
+
+    let mut user = ChatMessage::user("u".repeat(4_000));
+    user.msg_id = Some("u1".to_string());
+    let mut assistant = ChatMessage::assistant("a".repeat(4_000));
+    assistant.msg_id = Some("a1".to_string());
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: 8_000,
+        context_budget_chars: 200,
+        context_budget_tokens: 50,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    let cancel_after_collapse_started = cancel.clone();
+    tokio::spawn(async move {
+        entered_rx
+            .await
+            .expect("collapse provider should receive exactly one summary request");
+        cancel_after_collapse_started.cancel();
+    });
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(1),
+        agent.run(vec![ChatMessage::system("sys"), user, assistant]),
+    )
+    .await
+    .expect("outer cancel boundary must not wait for a non-cancellable collapse");
+    assert!(
+        outcome.is_interrupted(),
+        "blocking collapse should finish as Interrupted, got {outcome:?}"
+    );
+}
+
 /// Token 每回合重建：预取消的 token 应在 run() 入口立即返回 Interrupted；
 /// 新 token 的 AgentLoop 应能正常收束。验证架构文档 §6.2 的契约——
 /// CancellationToken 一旦 cancel 不可逆，必须每回合重建。

@@ -367,7 +367,26 @@ impl AgentLoop {
                 }
             }
 
-            match run_reasoning_loop(self, messages, attempt, max_attempts).await {
+            // 正常的 stream/tool await 会在内部优雅地处理取消，以便保留 partial
+            // assistant 与已完成的 tool result。此处是结构性兜底：后续新增的
+            // 非流式 await（例如 collapse 摘要）即使遗漏了 cancel race，也不能
+            // 让整个 turn 等到该操作自然结束。
+            let reasoning_result = {
+                let cancel = self.cancel_token.clone();
+                tokio::select! {
+                    biased;
+                    result = run_reasoning_loop(self, messages, attempt, max_attempts) => Some(result),
+                    _ = cancel.cancelled() => None,
+                }
+            };
+            let reasoning_result = reasoning_result.unwrap_or_else(|| {
+                Err(LoopError::Aborted {
+                    partial_text: String::new(),
+                    partial_messages: messages[self.start_idx..].to_vec(),
+                })
+            });
+
+            match reasoning_result {
                 Ok(text) => {
                     if attempt > 1 {
                         self.emit_event(AgentEvent::AutoRetryEnd {

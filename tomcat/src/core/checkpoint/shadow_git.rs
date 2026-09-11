@@ -1,7 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -78,6 +80,7 @@ pub struct ShadowGitStore {
     git_timeout: Duration,
     git_program: PathBuf,
     cooldown_until: Mutex<Option<Instant>>,
+    performance_configured: Mutex<bool>,
     lock: Mutex<()>,
     #[cfg(test)]
     file_count_calls: AtomicUsize,
@@ -101,6 +104,7 @@ impl ShadowGitStore {
             git_timeout: GIT_TIMEOUT,
             git_program: PathBuf::from(DEFAULT_GIT_PROGRAM),
             cooldown_until: Mutex::new(None),
+            performance_configured: Mutex::new(false),
             lock: Mutex::new(()),
             #[cfg(test)]
             file_count_calls: AtomicUsize::new(0),
@@ -151,6 +155,7 @@ impl ShadowGitStore {
             self.ensure_metadata_file()?;
             self.write_workdir_marker()?;
             self.ensure_exclude_file()?;
+            self.ensure_performance_config()?;
             return Ok(());
         }
 
@@ -180,9 +185,29 @@ impl ShadowGitStore {
         self.run_git(["config", "user.email", "tomcat@local"])?;
         self.run_git(["config", "commit.gpgsign", "false"])?;
         self.run_git(["config", "tag.gpgsign", "false"])?;
+        self.ensure_performance_config()?;
         self.ensure_metadata_file()?;
         self.write_workdir_marker()?;
         self.ensure_exclude_file()?;
+        Ok(())
+    }
+
+    fn ensure_performance_config(&self) -> Result<(), CheckpointError> {
+        let mut configured = self.performance_configured.lock();
+        if *configured {
+            return Ok(());
+        }
+        // 影子仓对整工作树执行 status/add，打开 Git 的原生大工作树优化，
+        // 避免 checkpoint 在文件多的项目里无谓变慢。
+        for (key, value) in [
+            ("core.untrackedCache", "true"),
+            ("feature.manyFiles", "true"),
+            ("index.version", "4"),
+            ("index.threads", "true"),
+        ] {
+            self.run_git(["config", key, value])?;
+        }
+        *configured = true;
         Ok(())
     }
 
@@ -298,23 +323,79 @@ impl ShadowGitStore {
         cmd.args(args);
 
         let mut child = cmd.spawn()?;
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                stop_child(&mut child);
+                return Err(missing_git_pipe("stdout"));
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                stop_child(&mut child);
+                return Err(missing_git_pipe("stderr"));
+            }
+        };
+        let stdout_reader = match spawn_pipe_reader("tomcat-checkpoint-stdout", stdout) {
+            Ok(reader) => reader,
+            Err(error) => {
+                drop(stderr);
+                stop_child(&mut child);
+                return Err(error.into());
+            }
+        };
+        let stderr_reader = match spawn_pipe_reader("tomcat-checkpoint-stderr", stderr) {
+            Ok(reader) => reader,
+            Err(error) => {
+                stop_child(&mut child);
+                let _ = collect_pipe_reader(stdout_reader);
+                return Err(error.into());
+            }
+        };
+
         let started = Instant::now();
-        loop {
-            if child.try_wait()?.is_some() {
-                return child.wait_with_output().map_err(CheckpointError::Io);
+        let wait_result = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok((status, false)),
+                Ok(None) => {}
+                Err(error) => {
+                    stop_child(&mut child);
+                    break Err(CheckpointError::Io(error));
+                }
             }
             if started.elapsed() >= self.git_timeout {
                 let _ = child.kill();
-                let output = child.wait_with_output()?;
-                return Err(CheckpointError::CommandTimedOut(summarize_git_failure(
-                    &describe_git_command(args),
-                    &self.work_tree,
-                    Some(self.git_timeout),
-                    &output,
-                )));
+                break child
+                    .wait()
+                    .map(|status| (status, true))
+                    .map_err(CheckpointError::Io);
             }
             std::thread::sleep(Duration::from_millis(25));
+        };
+
+        // stdout/stderr 必须从子进程启动起并发排空。若等 git 退出后才读取，
+        // 大工作树的 `git ls-files` 会写满 OS pipe，子进程等待读取、父进程
+        // 又等待子进程退出，最终只能等到 30 秒超时。
+        let stdout_result = collect_pipe_reader(stdout_reader);
+        let stderr_result = collect_pipe_reader(stderr_reader);
+        let (status, timed_out) = wait_result?;
+        let stdout = stdout_result?;
+        let stderr = stderr_result?;
+        let output = Output {
+            status,
+            stdout,
+            stderr,
+        };
+        if timed_out {
+            return Err(CheckpointError::CommandTimedOut(summarize_git_failure(
+                &describe_git_command(args),
+                &self.work_tree,
+                Some(self.git_timeout),
+                &output,
+            )));
         }
+        Ok(output)
     }
 
     fn git_status_has_changes(&self) -> Result<bool, CheckpointError> {
@@ -851,6 +932,46 @@ where
     args.into_iter()
         .map(|arg| arg.as_ref().to_os_string())
         .collect()
+}
+
+fn spawn_pipe_reader<R>(name: &str, pipe: R) -> io::Result<JoinHandle<io::Result<Vec<u8>>>>
+where
+    R: Read + Send + 'static,
+{
+    thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let mut pipe = pipe;
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+}
+
+fn missing_git_pipe(name: &str) -> CheckpointError {
+    CheckpointError::Io(io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        format!("git {name} pipe missing"),
+    ))
+}
+
+fn stop_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn collect_pipe_reader(
+    reader: JoinHandle<io::Result<Vec<u8>>>,
+) -> Result<Vec<u8>, CheckpointError> {
+    reader
+        .join()
+        .map_err(|_| {
+            CheckpointError::Io(io::Error::new(
+                io::ErrorKind::Other,
+                "git output reader thread panicked",
+            ))
+        })?
+        .map_err(CheckpointError::Io)
 }
 
 fn describe_git_command(args: &[OsString]) -> String {

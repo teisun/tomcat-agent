@@ -380,6 +380,29 @@ sequenceDiagram
     ChatLoop->>User: 回显 "^C interrupted"，回到 u> 提示
 ```
 
+#### 6.1.1 交还控制权边界
+
+`append_message(partial_messages)` 与 `persist_context_observability` 是中断成功的同步
+前置条件：它们返回后，用户下一轮能看到一致的 transcript。`record(Interrupt)` 的影子
+git checkpoint 只服务于未来 `/restore`，因此必须在上述两步后后台调度，**不得**挡在
+serve 的 `agent_idle` 之前；否则一个慢 git 或超时会把已经完成的中断伪装成
+`Stopping…`。
+
+```text
+Interrupted
+    │
+    ├─► partial transcript + context observability（同步，必须完成）
+    │       │
+    │       ├─► agent_idle（立即交还 UI 控制权）
+    │       └─► background record(Interrupt)（best-effort；失败仅记录日志）
+    │
+    └─► Hard Interrupt：不等待、不新建 checkpoint，直接 exit(130)
+```
+
+**推翻条件**：如果以后证明后台 checkpoint 会把下一轮的文件修改混入上一轮快照，则
+为每个 session 加 FIFO checkpoint 队列，并在下一轮第一个写文件工具前等待上一项完成；
+仍不得重新把它放回 `agent_idle` 关键路径。
+
 ### 6.2 Hard Interrupt（双击）
 
 时序在第 4 步插入"2 秒内再次 Ctrl+C"，`check_double_tap` 返回 `HardExit`，`ctrlc handler` 直接 `std::process::exit(130)`。此时 OS 清理 child 进程（bash 子进程会收到 SIGHUP 或继承退出），transcript 的完整性**完全依赖首击已经把 partial append 并 flush 到磁盘**——也就是 `SessionManager` 的 append-only JSONL 在首击后的 `append_message` 调用结束前必须走到 `fsync`，才保证双击场景下 transcript 不丢尾。

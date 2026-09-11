@@ -878,6 +878,94 @@ fn record_failure_does_not_break_turn() {
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 
+struct SlowRecordStore {
+    calls: Arc<AtomicUsize>,
+    sleep: Duration,
+}
+
+impl CheckpointStore for SlowRecordStore {
+    fn record(&self, _request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
+        std::thread::sleep(self.sleep);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CheckpointId::null())
+    }
+
+    fn list(
+        &self,
+        _session_id: &str,
+        _opts: ListOptions,
+    ) -> Result<Vec<CheckpointMeta>, CheckpointError> {
+        Ok(Vec::new())
+    }
+
+    fn show(&self, _id: &CheckpointId) -> Result<Option<CheckpointMeta>, CheckpointError> {
+        Ok(None)
+    }
+
+    fn diff(&self, _id: &CheckpointId) -> Result<CheckpointDiff, CheckpointError> {
+        Err(CheckpointError::Unsupported("not used in test".to_string()))
+    }
+
+    fn restore(
+        &self,
+        _id: &CheckpointId,
+        _opts: RestoreOptions,
+    ) -> Result<CheckpointRestoreReport, CheckpointError> {
+        Err(CheckpointError::Unsupported("not used in test".to_string()))
+    }
+
+    fn prune(&self, _retention: RetentionPolicy) -> Result<usize, CheckpointError> {
+        Ok(0)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn checkpoint_recording_does_not_block_turn_persistence_on_runtime() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_CKPT_BACKGROUND_RECORD_KEY";
+
+    let (_dir, mut ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    let calls = Arc::new(AtomicUsize::new(0));
+    ctx.scope_services.checkpoint_store = Arc::new(SlowRecordStore {
+        calls: Arc::clone(&calls),
+        sleep: Duration::from_millis(500),
+    });
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+
+    let started = Instant::now();
+    let appended_ids = persist_turn_result(
+        &ctx,
+        &mut state,
+        vec![crate::ChatMessage::assistant(
+            "durable before background checkpoint",
+        )],
+        CheckpointKind::TurnEnd,
+    )
+    .expect("checkpoint scheduling must not break turn persistence");
+
+    assert_eq!(appended_ids.len(), 1);
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "checkpoint record must not delay returning control to the turn"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "record runs after persist_turn_result returns"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background checkpoint should eventually run");
+
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
 struct PruneSpyStore {
     calls: Arc<AtomicUsize>,
     sleep: Duration,

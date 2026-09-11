@@ -217,6 +217,7 @@
 | **基础设施隐式** | `CheckpointStore` 不进入 system prompt、不进入 catalog；LLM 不能 `read_checkpoint` / `rollback`，避免污染推理。 | 模型别碰快照，省 token 也少幻觉。 |
 | **写入时机收敛** | 自动写入仅 **TurnEnd / Interrupt**；**Manual / Milestone** 为 API 预留；**无 ToolPre**；新增触发点必须改 enum。 | 少钩子；路径还原靠 `/restore --path`。 |
 | **存储与会话分离** | 影子 Git 在 `~/.tomcat/agents/<id>/checkpoints/<sha16>/`，**不**写到用户的 `agent_workspace_dir/.git`。 | 用户仓库里不出现第二套 git。 |
+| **交还控制权不等快照** | transcript 的 `append_message` 与 `persist_context_observability` 必须先同步完成；之后的 `CheckpointStore::record` 是后台 best-effort，不得挡住 `agent_idle` / 下一轮输入。**推翻条件**：若实测 restore 混入下一轮的文件变更，则为同一 session 增加 FIFO 队列，并在下一轮第一个写文件工具前等待上一张快照完成。 | 聊天记录先可靠落盘；拍回滚用的照片慢慢做，不能让 Stop 或 Send 转圈等它。 |
 | **transcript 是 source of truth** | **不删行**；**仅当** `/restore` 目标 ckpt 的 **`kind` 为 `TurnEnd` 或 `Interrupt`** 时，对锚点 **`message_anchor` 之后**打 **`superseded`**（见 [§5.4](#54-restore-语义transcript-与按路径还原)）。**Manual**（含 pre-rollback）、**Milestone** 或带 `--path` 的 restore **若目标 kind 非 TurnEnd/Interrupt** ⇒ **不打** `superseded`。hydrate **必须跳过** `superseded`。 | 整轮回撤才作废对话；单文件 restore 不动 transcript 游标。 |
 | **崩溃可恢复** | `ShadowGitStore` 的提交是 git 原子操作；元数据写入走 `write_file_atomic`（见 [`session-storage.md`](../session-storage.md)）。 | 半路崩了也别把元数据写半截。 |
 | **续跑无需用户介入** | `tomcat chat`（`--resume` 语义保持兼容）启动后 **恒** hydrate 已持久化上下文；**不**依赖 `RewindTo`/`Fresh` 分支；`last_checkpoint_id` 仅作列表/回滚锚点，**不**驱动开机策略。 | 能接着聊就静默接；**不**在开机弹「请回滚」。 |
@@ -297,6 +298,8 @@
 - **`ShadowGitStore`** 借鉴 `hermes-agent/tools/checkpoint_manager.py:117-622`：
   - 仓库根 `~/.tomcat/agents/<id>/checkpoints/<sha256(workdir)[:16]>/`；`HERMES_WORKDIR` 文件改名为 `TOMCAT_WORKDIR`，记录原始 `agent_workspace_dir`，便于 orphan GC。
   - `git_env` 显式 `GIT_CONFIG_GLOBAL=/dev/null` / `GIT_CONFIG_SYSTEM=/dev/null` / `GIT_CONFIG_NOSYSTEM=1`；`commit.gpgsign=false`、`tag.gpgSign=false` 写入仓库本地配置——避免 GPG pinentry 弹窗（hermes 实战教训）。
+  - 每个 git 子进程的 `stdout` 与 `stderr` 都要从 `spawn` 后立即并发排空；**禁止**先等待子进程退出、再读 pipe（大 `ls-files` 输出会写满 OS pipe，父子进程互等）。超时或 `kill` 后也必须先等待两个 reader 收到 EOF，再汇总为 `Output`。**推翻条件**：若 `CheckpointStore` 整体改为 async，则改用 `tokio::process::Child::wait_with_output` + `tokio::time::timeout`，删掉线程 reader。
+  - 影子仓初始化时启用 `core.untrackedCache=true`、`feature.manyFiles=true`、`index.version=4`、`index.threads=true`，降低整工作树的 `ls-files` / `status` / `add` 成本。
   - 子进程超时：**代码常量**（默认 **30 s**，**无**用户配置项；与 hermes 同量级兜底）。
 - **`NoopStore`**：`record` 直接返回 `Ok(CheckpointId::null())`、`list` 返回空向量；**仅当** `git --version` 探测失败（且后台安装尚未成功）时使用。**拟定**：`PR-CKF` 落地后，若后台安装成功，运行期可切换为 `ShadowGitStore`（见 [§2.2.2](#222-chat-入口-git-预检与后台安装拟定)）。
 
@@ -326,8 +329,8 @@
 
 #### 4.2.2 PR-CKB：写入时机与钩子（TurnEnd / Interrupt）
 
-- **`TurnEnd`**：在 `chat_loop`（或等价回合边界）中，**本轮** `AgentLoop::run` 返回 **`Completed`** 且 `append_message` + `persist_context_observability` **完成后** `record`；语义为「本 user turn 已收口」——供 **`/restore` 整轮或按 `--path`** 还原；**仅此 kind** 在 restore 前触发 **pre-rollback**（§4.2.3）。**`Interrupted` 路径是否也记 `TurnEnd`** 由实现 PR 定稿（默认 **不**记，仅 **Interrupt**）。
-- **`Interrupt`**：在 [`interrupt-and-cancellation.md §6.1`](../interrupt-and-cancellation.md) Soft Interrupt 时序：`append_message(partial_messages)` 完成、`renderer.flush()` 之后；`terminate_interrupted` 内 `record`。**Hard Interrupt（exit 130）路径不写入**。
+- **`TurnEnd`**：在 `chat_loop`（或等价回合边界）中，**本轮** `AgentLoop::run` 返回 **`Completed`** 且 `append_message` + `persist_context_observability` **完成后**调度后台 `record(TurnEnd)`；调用方不等待它，立即发 `agent_idle` / 允许下一轮输入。语义为「本 user turn 已收口」——供 **`/restore` 整轮或按 `--path`** 还原；**仅此 kind** 在 restore 前触发 **pre-rollback**（§4.2.3）。**`Interrupted` 路径是否也记 `TurnEnd`** 由实现 PR 定稿（默认 **不**记，仅 **Interrupt**）。
+- **`Interrupt`**：在 [`interrupt-and-cancellation.md §6.1`](../interrupt-and-cancellation.md) Soft Interrupt 时序：`append_message(partial_messages)` 完成、`renderer.flush()` 之后调度后台 `record(Interrupt)`。partial transcript 是同步前置条件；影子 git 快照不是。**Hard Interrupt（exit 130）路径不写入**。
 - **无 `ToolPre`**：轮内多次 `edit` / `write` **不**在 tool 前拍照；细粒度还原用 **`/restore <ck> --path <file>`** 指向 **TurnEnd / Interrupt**（或 **Manual** pre-rollback 等）已有 commit。
 - **dedup**：`(session_id, turn_id, kind)` **整轮去重**——同 turn 同 kind **至多 1 张** commit；`turn_id` 取自 `compound_turn_id`。
 
@@ -340,10 +343,12 @@
               tool_exec → primitives（无 ckpt 钩子）
                        │
                        ▼ Completed 且持久化完成
-              record(TurnEnd)   ◄── 整轮锚点 + pre-rollback 适用对象
-                       │
-                       ▼ 若 Soft Interrupt 路径
-              record(Interrupt)（partial 已落盘之后）
+              schedule record(TurnEnd) ──► 后台影子 git
+                       │                         ▲
+                       ▼ 立即交还控制权            │ 整轮锚点 + pre-rollback 适用对象
+              agent_idle / 下一轮输入             │
+                                                 ▼ 若 Soft Interrupt 路径
+                                  schedule record(Interrupt)（partial 已落盘之后）
 ```
 
 **说人话**：只在 **回合正常结束** 和 **软中断** 时拍照；中间改文件靠后面的 **`/restore --path`**。

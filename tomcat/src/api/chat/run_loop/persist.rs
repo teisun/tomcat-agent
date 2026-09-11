@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -94,18 +95,37 @@ fn maybe_record_turn_checkpoint(
     let Some(request) = build_turn_checkpoint_request(&session_id, kind, appended_row_ids) else {
         return;
     };
-    if let Err(err) = ctx.scope_services.checkpoint_store.record(request.clone()) {
-        append_checkpoint_error_detail(ctx, &request, &err);
+    let store = ctx.scope_services.checkpoint_store.clone();
+    let agent_trail_dir = ctx.scope_services.agent_trail_dir.clone();
+    let record = move || record_turn_checkpoint(store, agent_trail_dir, request);
+
+    // Checkpoint 是回滚保障，不是本轮 transcript 一致性的前置条件。把同步 git
+    // 放在 agent_idle 之前会让慢工作树、甚至单个 git 子进程超时都阻塞用户继续输入。
+    // async turn 内交给 blocking pool；纯同步调用方（主要是 unit test）保持同步语义。
+    if tokio::runtime::Handle::try_current().is_ok() {
+        drop(tokio::task::spawn_blocking(record));
+    } else {
+        record();
+    }
+}
+
+fn record_turn_checkpoint(
+    store: Arc<dyn crate::core::CheckpointStore>,
+    agent_trail_dir: std::path::PathBuf,
+    request: CheckpointRecordRequest,
+) {
+    if let Err(err) = store.record(request.clone()) {
+        append_checkpoint_error_detail(&agent_trail_dir, &request, &err);
         warn!("{}", checkpoint_warn_line(&err));
     }
 }
 
 fn append_checkpoint_error_detail(
-    ctx: &ChatContext,
+    agent_trail_dir: &Path,
     request: &CheckpointRecordRequest,
     err: &CheckpointError,
 ) {
-    let log_dir = ctx.scope_services.agent_trail_dir.join("logs");
+    let log_dir = agent_trail_dir.join("logs");
     if fs::create_dir_all(&log_dir).is_err() {
         return;
     }

@@ -3,9 +3,9 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::process::Command as StdCommand;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serial_test::serial;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -602,6 +602,47 @@ impl CheckpointStore for FixedCheckpointStore {
         _opts: RestoreOptions,
     ) -> Result<CheckpointRestoreReport, CheckpointError> {
         Ok(self.restore_report.clone())
+    }
+
+    fn prune(&self, _policy: crate::RetentionPolicy) -> Result<usize, CheckpointError> {
+        Ok(0)
+    }
+}
+
+struct SlowCheckpointStore {
+    calls: Arc<AtomicUsize>,
+    sleep: Duration,
+}
+
+impl CheckpointStore for SlowCheckpointStore {
+    fn record(&self, _request: CheckpointRecordRequest) -> Result<CheckpointId, CheckpointError> {
+        std::thread::sleep(self.sleep);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CheckpointId::null())
+    }
+
+    fn list(
+        &self,
+        _session_id: &str,
+        _opts: ListOptions,
+    ) -> Result<Vec<CheckpointMeta>, CheckpointError> {
+        Ok(Vec::new())
+    }
+
+    fn show(&self, _id: &CheckpointId) -> Result<Option<CheckpointMeta>, CheckpointError> {
+        Ok(None)
+    }
+
+    fn diff(&self, _id: &CheckpointId) -> Result<CheckpointDiff, CheckpointError> {
+        Ok(CheckpointDiff::default())
+    }
+
+    fn restore(
+        &self,
+        _id: &CheckpointId,
+        _opts: RestoreOptions,
+    ) -> Result<CheckpointRestoreReport, CheckpointError> {
+        Ok(CheckpointRestoreReport::default())
     }
 
     fn prune(&self, _policy: crate::RetentionPolicy) -> Result<usize, CheckpointError> {
@@ -1699,7 +1740,17 @@ async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {
         }),
     ];
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![stream]).await;
+    let checkpoint_calls = Arc::new(AtomicUsize::new(0));
+    install_checkpoint_store(
+        &state,
+        &slot.session_id,
+        Arc::new(SlowCheckpointStore {
+            calls: Arc::clone(&checkpoint_calls),
+            sleep: Duration::from_millis(500),
+        }),
+    );
 
+    let started = Instant::now();
     handle_command(
         Arc::clone(&state),
         ServeCommand::Prompt {
@@ -1712,10 +1763,18 @@ async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {
     .await
     .unwrap();
 
-    let lines = wait_for_line(&buffer, |line| {
-        line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
-    })
-    .await;
+    let lines = tokio::time::timeout(
+        Duration::from_millis(300),
+        wait_for_line(&buffer, |line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
+        }),
+    )
+    .await
+    .expect("agent_idle must not wait for a slow TurnEnd checkpoint");
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "TurnEnd checkpoint must not delay agent_idle"
+    );
     assert_eq!(
         count_event(&lines, "agent_end"),
         1,
@@ -1753,6 +1812,14 @@ async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {
         .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("state-after-idle"))
         .expect("state-after-idle response");
     assert_eq!(response["payload"]["busy"].as_bool(), Some(false));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while checkpoint_calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("TurnEnd checkpoint should still be recorded in the background");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1803,6 +1870,87 @@ async fn serve_prompt_with_precancelled_turn_emits_agent_idle_once() {
         !slot.is_busy(),
         "precancelled interrupted turn should leave the slot idle"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(env_lock)]
+async fn serve_interrupt_emits_idle_without_waiting_for_slow_checkpoint() {
+    let _api_key = install_test_api_key();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+    let provider: Arc<dyn LlmProvider> = Arc::new(ChannelMockLlm::new(vec![stream_rx]));
+    let (state, buffer, _temp, slot) =
+        build_initialized_state_with_provider(temp, cfg, provider).await;
+    let checkpoint_calls = Arc::new(AtomicUsize::new(0));
+    install_checkpoint_store(
+        &state,
+        &slot.session_id,
+        Arc::new(SlowCheckpointStore {
+            calls: Arc::clone(&checkpoint_calls),
+            sleep: Duration::from_millis(500),
+        }),
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Prompt {
+            id: Some("prompt-interrupt-background-checkpoint".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            text: "start then interrupt".to_string(),
+            params: ServeMessageParams::default(),
+        },
+    )
+    .await
+    .unwrap();
+    stream_tx
+        .send(Ok(StreamEvent::ContentDelta {
+            delta: "partial reply".to_string(),
+        }))
+        .expect("active stream receiver");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        wait_for_line(&buffer, |line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("message_update")
+        }),
+    )
+    .await
+    .expect("stream delta should reach the event writer");
+
+    let started = Instant::now();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::Interrupt {
+            id: Some("interrupt-background-checkpoint".to_string()),
+            session_id: Some(slot.session_id.clone()),
+        },
+    )
+    .await
+    .unwrap();
+    let lines = tokio::time::timeout(
+        Duration::from_millis(300),
+        wait_for_line(&buffer, |line| {
+            line.get("type").and_then(serde_json::Value::as_str) == Some("agent_idle")
+        }),
+    )
+    .await
+    .expect("agent_idle must not wait for a slow Interrupt checkpoint");
+
+    assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "Interrupt checkpoint must not delay agent_idle"
+    );
+    assert_eq!(count_event(&lines, "agent_interrupted"), 1);
+    assert_eq!(count_event(&lines, "agent_idle"), 1);
+    assert!(!slot.is_busy());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while checkpoint_calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Interrupt checkpoint should still be recorded in the background");
 }
 
 #[tokio::test(flavor = "current_thread")]
