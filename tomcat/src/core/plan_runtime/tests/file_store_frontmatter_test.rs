@@ -40,6 +40,52 @@ fn acceptance_commands_round_trip_and_default_to_empty_for_legacy_files() {
 }
 
 #[test]
+fn code_review_state_round_trips_and_defaults_for_legacy_files() {
+    let mut frontmatter = sample_frontmatter();
+    frontmatter.code_review_rounds = 2;
+    frontmatter.code_review_baseline_ms = Some(123_456);
+    frontmatter.code_review_open_findings = vec![crate::core::plan_runtime::Finding::new(
+        "P1".into(),
+        "runtime".into(),
+        "missing regression coverage".into(),
+    )
+    .with_reference("F01")];
+    frontmatter.code_review_disputed_findings = vec![crate::core::plan_runtime::DisputedFinding {
+        reference: "F02".into(),
+        severity: "P1".into(),
+        area: "compatibility".into(),
+        note: "legacy protocol stays enabled".into(),
+        resolution: "wontfix".into(),
+        reason: "explicit product trade-off".into(),
+    }];
+    let plan = PlanFile {
+        frontmatter: frontmatter.clone(),
+        body: String::new(),
+    };
+
+    let parsed = parse_plan_file(&serialize_plan_file(&plan).expect("serialize")).expect("parse");
+    assert_eq!(parsed.frontmatter.code_review_rounds, 2);
+    assert_eq!(parsed.frontmatter.code_review_baseline_ms, Some(123_456));
+    assert_eq!(
+        parsed.frontmatter.code_review_open_findings,
+        frontmatter.code_review_open_findings
+    );
+    assert_eq!(
+        parsed.frontmatter.code_review_disputed_findings,
+        frontmatter.code_review_disputed_findings
+    );
+
+    let legacy = parse_plan_file(
+        "---\nplan_id: legacy\ngoal: g\nstate: planning\ncreated_at: t\nschema_version: 1\ntodos: []\n---\n",
+    )
+    .expect("legacy plan remains readable");
+    assert_eq!(legacy.frontmatter.code_review_rounds, 0);
+    assert_eq!(legacy.frontmatter.code_review_baseline_ms, None);
+    assert!(legacy.frontmatter.code_review_open_findings.is_empty());
+    assert!(legacy.frontmatter.code_review_disputed_findings.is_empty());
+}
+
+#[test]
 fn acceptance_command_normalization_collapses_whitespace_and_dedupes_only() {
     assert_eq!(
         normalize_acceptance_command("  cd tomcat  &&\tcargo   test  "),

@@ -1,5 +1,6 @@
 use super::super::file_store::{
-    write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
+    read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoKind,
+    TodoStatus,
 };
 use super::super::{safety, PlanRuntime};
 use crate::core::session::AgentMode;
@@ -192,6 +193,27 @@ fn concurrent_exit_and_build_leave_one_chat_mode_transition() {
 #[test]
 fn dropped_inflight_review_releases_lease_without_consuming_a_round() {
     let runtime = PlanRuntime::new("session");
+    let plan_dir = tempfile::tempdir().unwrap();
+    let plan_path = plan_dir.path().join("plan-a.plan.md");
+    let mut frontmatter = super::sample_frontmatter();
+    frontmatter.plan_id = "plan-a".into();
+    frontmatter.state = PlanFileState::Executing;
+    frontmatter.todos.push(TodoItem {
+        id: "gate-review".into(),
+        content: "[gate] review".into(),
+        status: TodoStatus::Pending,
+        evidence: Vec::new(),
+        kind: TodoKind::GateCodeReview,
+    });
+    write_plan(
+        &plan_path,
+        &PlanFile {
+            frontmatter,
+            body: "## Goal\nreservation test\n".into(),
+        },
+        1_000,
+    )
+    .unwrap();
     let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
     {
         let events = events.clone();
@@ -201,6 +223,7 @@ fn dropped_inflight_review_releases_lease_without_consuming_a_round() {
         }));
     }
 
+    runtime.write_code_review_started_transcript("plan-a", 1, "plan-a:1", "tool-a", None, None);
     let lease = runtime
         .begin_code_review_round("plan-a", 0, "plan-a:1".into(), "tool-a".into(), false, 0)
         .expect("first reservation");
@@ -212,9 +235,28 @@ fn dropped_inflight_review_releases_lease_without_consuming_a_round() {
             .is_some(),
         "dropped future must not leave the in-process lease held"
     );
+    let persisted = read_plan(&plan_path).unwrap();
     assert_eq!(
-        events.lock()[0]["event"],
+        persisted.frontmatter.code_review_rounds, 0,
+        "dropping the dispatch future must not consume a durable round"
+    );
+    assert_eq!(
+        persisted.frontmatter.todos.last().unwrap().status,
+        TodoStatus::Pending,
+        "dropping the dispatch future must not leave the visible gate half-open"
+    );
+    let events = events.lock();
+    assert_eq!(
+        events[0]["event"],
+        crate::infra::wire::WIRE_PLAN_CODE_REVIEW_STARTED
+    );
+    assert_eq!(
+        events[1]["event"],
         crate::infra::wire::WIRE_PLAN_CODE_REVIEW
     );
-    assert_eq!(events.lock()[0]["aborted"], true);
+    assert_eq!(events[1]["aborted"], true);
+    assert_eq!(
+        events[0]["review_attempt_id"],
+        events[1]["review_attempt_id"]
+    );
 }

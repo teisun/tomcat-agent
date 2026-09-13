@@ -148,7 +148,7 @@ impl CodeReviewerDispatcher for AcceptCodeReviewer {
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        _open_findings: &[tomcat::core::plan_runtime::review::Finding],
+        _review_state: &tomcat::core::plan_runtime::file_store::PlanFileFrontmatter,
         _dispatch: &tomcat::core::plan_runtime::CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         CodeReviewSummary {

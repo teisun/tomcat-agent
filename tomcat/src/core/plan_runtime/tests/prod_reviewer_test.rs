@@ -22,11 +22,12 @@ async fn prod_plan_reviewer_stub_returns_aborted_with_origin() {
 #[tokio::test]
 async fn prod_code_reviewer_stub_returns_aborted_with_origin() {
     let d = ProdCodeReviewerDispatcher::stub("test_origin");
+    let review_state = super::sample_frontmatter();
     let r = d
         .dispatch(
             "demo",
             "noop",
-            &[],
+            &review_state,
             &CodeReviewDispatchInfo {
                 round: 1,
                 review_attempt_id: "demo:1".into(),

@@ -756,6 +756,7 @@ summary: verify ok
     let code = ProdCodeReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
     let explorer = ProdExplorerDispatcher::new("binding_test", reviewer_deps(&fx, None));
     let verifier = ProdVerifierDispatcher::new("binding_test", verifier_deps(&fx));
+    let review_state = super::sample_frontmatter();
 
     let plan_summary = plan
         .dispatch("binding_plan", "## Goal\nbinding\n", true)
@@ -764,7 +765,7 @@ summary: verify ok
         .dispatch(
             "binding_plan",
             "## Goal\nbinding\n",
-            &[],
+            &review_state,
             &crate::core::plan_runtime::CodeReviewDispatchInfo {
                 round: 1,
                 review_attempt_id: "binding_plan:1".into(),
@@ -932,11 +933,12 @@ async fn prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout() {
     let fx = build_fixture(fcodex, deepseek, fcodex_requests, deepseek_requests, false);
 
     let dispatcher = ProdCodeReviewerDispatcher::new("binding_test", reviewer_deps(&fx, None));
+    let review_state = super::sample_frontmatter();
     let summary = dispatcher
         .dispatch(
             "binding_plan",
             "## Goal\nbinding\n",
-            &[],
+            &review_state,
             &crate::core::plan_runtime::CodeReviewDispatchInfo {
                 round: 1,
                 review_attempt_id: "binding_plan:1".into(),

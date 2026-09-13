@@ -264,7 +264,7 @@ fn incremental_delta_uses_mtime_and_keeps_deleted_files_conservatively() {
 }
 
 #[test]
-fn reset_code_review_rounds_clears_only_transient_infrastructure_retries() {
+fn reset_review_infra_retries_clears_only_transient_infrastructure_retries() {
     let runtime = super::super::PlanRuntime::new("review-delta-state");
     assert_eq!(runtime.max_code_review_rounds(), 4);
     assert_eq!(
@@ -274,7 +274,7 @@ fn reset_code_review_rounds_clears_only_transient_infrastructure_retries() {
     assert_eq!(runtime.review_infra_retries("plan-a"), 0);
     assert_eq!(runtime.bump_review_infra_retry("plan-a"), 1);
 
-    runtime.reset_code_review_rounds("plan-a");
+    runtime.reset_review_infra_retries("plan-a");
 
     assert_eq!(runtime.review_infra_retries("plan-a"), 0);
 }
