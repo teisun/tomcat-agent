@@ -1552,6 +1552,17 @@ async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
         Some("hidden_output")
     );
     assert_eq!(empty_turns[1]["response_id"].as_str(), Some("resp_empty_2"));
+    let retry_ends = sink
+        .custom_entries
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["event"].as_str() == Some(wire::WIRE_AUTO_RETRY_END))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(retry_ends.len(), 1);
+    assert_eq!(retry_ends[0]["success"].as_bool(), Some(true));
+    assert_eq!(retry_ends[0]["attempt"].as_u64(), Some(3));
 }
 
 #[tokio::test]
@@ -1838,7 +1849,7 @@ async fn truncated_partial_visible_text_remains_a_completed_turn() {
 }
 
 #[tokio::test]
-async fn truncated_thinking_prefix_is_fatal_and_never_auto_retries() {
+async fn thinking_prefix_leak_is_retried_then_succeeds() {
     let stream = vec![
         Ok(StreamEvent::ReasoningSnapshot {
             thinking_text: Some(
@@ -1854,7 +1865,9 @@ async fn truncated_thinking_prefix_is_fatal_and_never_auto_retries() {
             reason: "stop".to_string(),
         }),
     ];
-    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+    let (provider, requests) =
+        RecordingStreamLlmProvider::new(vec![stream, ok_text_stream("recovered")]);
+    let sink = Arc::new(RecordingAppendSink::default());
     let mut loop_ = AgentLoop::new(
         test_binding(Arc::new(provider), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
@@ -1862,23 +1875,38 @@ async fn truncated_thinking_prefix_is_fatal_and_never_auto_retries() {
         AgentLoopConfig {
             max_attempts: 4,
             retry_base_delay_ms: 0,
-            session_id: "s-truncated-thinking".to_string(),
+            session_id: "s-thinking-prefix-leak".to_string(),
+            message_append_sink: Some(sink.clone()),
             ..Default::default()
         },
         CancellationToken::new(),
     );
 
     let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
-    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == "recovered")
+    );
     assert_eq!(
         requests.0.lock().unwrap().len(),
-        1,
-        "the truncated-thinking guard must not retry an unchanged request"
+        2,
+        "a leaked thinking prefix must retry before the successful response"
     );
+    let entries = sink.custom_entries.lock().unwrap().clone();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["event"].as_str() == Some("empty_turn"))
+            .count(),
+        1
+    );
+    assert!(entries.iter().any(|entry| {
+        entry["event"].as_str() == Some(wire::WIRE_AUTO_RETRY_END)
+            && entry["success"].as_bool() == Some(true)
+    }));
 }
 
 #[tokio::test]
-async fn duplicated_thinking_as_body_is_fatal_and_never_auto_retries() {
+async fn duplicated_thinking_as_body_is_retried_then_succeeds() {
     let stream = vec![
         Ok(StreamEvent::ReasoningSnapshot {
             thinking_text: Some("I will inspect the implementation before answering.".to_string()),
@@ -1892,7 +1920,9 @@ async fn duplicated_thinking_as_body_is_fatal_and_never_auto_retries() {
             reason: "stop".to_string(),
         }),
     ];
-    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+    let (provider, requests) =
+        RecordingStreamLlmProvider::new(vec![stream, ok_text_stream("recovered")]);
+    let sink = Arc::new(RecordingAppendSink::default());
     let mut loop_ = AgentLoop::new(
         test_binding(Arc::new(provider), "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
@@ -1901,6 +1931,7 @@ async fn duplicated_thinking_as_body_is_fatal_and_never_auto_retries() {
             max_attempts: 4,
             retry_base_delay_ms: 0,
             session_id: "s-duplicated-thinking".to_string(),
+            message_append_sink: Some(sink.clone()),
             ..Default::default()
         },
         CancellationToken::new(),
@@ -1908,9 +1939,14 @@ async fn duplicated_thinking_as_body_is_fatal_and_never_auto_retries() {
 
     assert!(matches!(
         loop_.run(vec![ChatMessage::user("hi")]).await,
-        AgentRunOutcome::Failed(_)
+        AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"
     ));
-    assert_eq!(requests.0.lock().unwrap().len(), 1);
+    assert_eq!(requests.0.lock().unwrap().len(), 2);
+    let entries = sink.custom_entries.lock().unwrap().clone();
+    assert!(entries.iter().any(|entry| {
+        entry["event"].as_str() == Some(wire::WIRE_AUTO_RETRY_END)
+            && entry["success"].as_bool() == Some(true)
+    }));
 }
 
 #[tokio::test]
