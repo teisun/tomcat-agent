@@ -283,6 +283,15 @@ pub struct PlanFileFrontmatter {
     pub unknown: serde_yaml::Mapping,
 }
 
+impl PlanFileFrontmatter {
+    /// `max=0` disables the review gate; it is not an exhausted review budget.
+    pub fn code_review_budget_exhausted(&self, max_code_review_rounds: u32) -> bool {
+        max_code_review_rounds > 0
+            && self.code_review_rounds > 0
+            && self.code_review_rounds >= max_code_review_rounds
+    }
+}
+
 /// `PlanFile = frontmatter + 自由 body`。
 #[derive(Debug, Clone)]
 pub struct PlanFile {

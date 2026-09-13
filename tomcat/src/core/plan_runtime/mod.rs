@@ -66,10 +66,11 @@ pub use plan_reviewer::{PlanReviewSummary, REVIEWER_ALLOW_REVIEW_EDIT};
 pub use review::Finding;
 pub use verify::VerifySummary;
 
-/// 主 Agent 对一条 P1 finding 的明确取舍。
+/// 主 Agent 对一条 blocker finding 的明确取舍。
 ///
-/// 只存 P1：P0 必须修复或交还用户，P2 从不阻塞、不需要申辩。`reference` 是本轮
-/// `F0X` 审计标签，不是跨轮稳定 id；跨轮去重依靠 reviewer brief 中的完整文本与理由。
+/// P1 可记录为 wontfix；P0 仅在预算耗尽交还、且用户以新消息明确确认后才能记录。
+/// P2 从不阻塞、不需要申辩。`reference` 是本轮 `F0X` 审计标签，不是跨轮稳定 id；
+/// 跨轮去重依靠 reviewer brief 中的完整文本与理由。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisputedFinding {
     pub reference: String,
@@ -97,7 +98,9 @@ pub enum NextAction {
         open_findings: Vec<review::Finding>,
     },
     StartReview,
-    ContinueWork,
+    ContinueWork {
+        remaining_work: Vec<String>,
+    },
 }
 
 impl NextAction {
@@ -108,7 +111,48 @@ impl NextAction {
             Self::RunAcceptance { .. } => "run_acceptance",
             Self::FixFindings { .. } => "fix_findings",
             Self::StartReview => "start_review",
-            Self::ContinueWork => "continue_work",
+            Self::ContinueWork { .. } => "continue_work",
+        }
+    }
+
+    /// The sole human-readable translation of a close-out decision. Tool results and
+    /// completion nudges consume this rather than reconstructing guidance from todos.
+    pub fn instruction(&self) -> String {
+        match self {
+            Self::Done => String::new(),
+            Self::HandOff {
+                reason,
+                open_findings,
+            } => format!(
+                "Stop unattended execution and hand this plan to the user ({reason}).\n{}",
+                code_reviewer::render_open_findings_list(open_findings)
+            ),
+            Self::RunAcceptance { residual_findings } => {
+                let review_context = if residual_findings.is_empty() {
+                    "Code review passed.".to_string()
+                } else {
+                    format!(
+                        "Code review reached its configured round budget after addressing findings during those rounds. Residual findings still requiring explicit acceptance handling:\n{}",
+                        residual_findings
+                            .iter()
+                            .map(|finding| format!("- {finding}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )
+                };
+                format!(
+                    "{review_context}\nSet the `[gate] Acceptance` todo to in_progress, load_skill(verify), run every declared `acceptance_commands` entry plus what the change's impact radius requires, then submit green_build_pass with evidence. The gate validates only real background-task evidence: exit 0 and a task started after the newest edit."
+                )
+            }
+            Self::FixFindings { open_findings } => format!(
+                "Fix the following unresolved code-review findings before starting another review:\n{}",
+                code_reviewer::render_open_findings_list(open_findings)
+            ),
+            Self::StartReview => "All work todos are done. Set the `[gate] review` todo to in_progress to start close-out. If the change touches no code files, both gates are skipped automatically and the plan completes in this same call.".into(),
+            Self::ContinueWork { remaining_work } => format!(
+                "You are still implementing. Complete only these remaining work todos with focused checks; the `[gate] Acceptance` step loads the `verify` skill for final acceptance:\n{}",
+                remaining_work.join("\n")
+            ),
         }
     }
 }
@@ -1069,16 +1113,20 @@ impl PlanRuntime {
                 };
             }
         }
-        let all_work_terminal = frontmatter
+        let remaining_work = frontmatter
             .todos
             .iter()
             .filter(|todo| matches!(todo.kind, file_store::TodoKind::Work))
-            .all(|todo| {
-                matches!(
+            .filter(|todo| {
+                !matches!(
                     todo.status,
                     file_store::TodoStatus::Completed | file_store::TodoStatus::Cancelled
                 )
             });
+        let remaining_work = remaining_work
+            .map(|todo| format!("- {} ({})", todo.id, todo.status.as_str()))
+            .collect::<Vec<_>>();
+        let all_work_terminal = remaining_work.is_empty();
         let review_pending = frontmatter.todos.iter().any(|todo| {
             todo.kind == file_store::TodoKind::GateCodeReview
                 && todo.status == file_store::TodoStatus::Pending
@@ -1086,7 +1134,7 @@ impl PlanRuntime {
         if all_work_terminal && review_pending && !frontmatter.code_review_pass {
             NextAction::StartReview
         } else {
-            NextAction::ContinueWork
+            NextAction::ContinueWork { remaining_work }
         }
     }
 
@@ -1135,7 +1183,11 @@ impl PlanRuntime {
     /// Records progress immediately before injecting a completion nudge.
     /// Returns true on the third identical observation (two idle nudges after
     /// the baseline); callers must then hand control back rather than nudging.
-    pub async fn note_completion_guard_nudge(&self, plan_id: &str) -> bool {
+    pub async fn note_completion_guard_nudge(
+        &self,
+        plan_id: &str,
+        next_action: &NextAction,
+    ) -> bool {
         let current = self.completion_guard_snapshot(plan_id).await;
         let mut observations = self.completion_guard_observations.lock();
         let previous = observations.entry(plan_id.to_owned()).or_default();
@@ -1160,6 +1212,15 @@ impl PlanRuntime {
                 "plan_id": plan_id,
                 "idle_nudges": 2,
                 "outcome": "handoff",
+                "phase": next_action.phase(),
+                "open_findings_count": match next_action {
+                    NextAction::HandOff { open_findings, .. }
+                    | NextAction::FixFindings { open_findings } => open_findings.len(),
+                    NextAction::Done
+                    | NextAction::RunAcceptance { .. }
+                    | NextAction::StartReview
+                    | NextAction::ContinueWork { .. } => 0,
+                },
             }));
         }
         true
@@ -1281,14 +1342,14 @@ impl PlanRuntime {
         summary
     }
 
-    /// 同步派发 verifier 前的 code reviewer。调用方负责：
-    /// 1. 先判断 / 递增 `code_review_rounds`
+    /// 同步派发 code reviewer。调用方负责：
+    /// 1. 在持有的 PlanFile frontmatter 快照中判断当前轮次
     /// 2. 调用 `CodeReviewSummary::normalize_for_result()`
     /// 3. 再写 transcript，保证 transcript 与 `update_plan.code_review` 口径一致
     pub async fn dispatch_code_reviewer(
         &self,
         plan_id: &str,
-        open_findings: &[review::Finding],
+        review_state: &file_store::PlanFileFrontmatter,
         dispatch: &CodeReviewDispatchInfo,
     ) -> code_reviewer::CodeReviewSummary {
         let Some(dispatcher) = self.code_reviewer.lock().clone() else {
@@ -1310,7 +1371,7 @@ impl PlanRuntime {
         };
 
         dispatcher
-            .dispatch(plan_id, &plan_text, open_findings, dispatch)
+            .dispatch(plan_id, &plan_text, review_state, dispatch)
             .await
     }
 
@@ -1587,7 +1648,7 @@ impl PlanRuntime {
     }
 
     /// Reserve an in-process review round without mutating the persisted plan.
-    /// The caller must call [`InFlightReview::mark_completed`] only after its
+    /// The caller must call [`InFlightReview::complete`] only after its
     /// completed result has been written to the plan file.
     pub fn begin_code_review_round(
         &self,
@@ -1618,7 +1679,7 @@ impl PlanRuntime {
         })
     }
 
-    pub fn reset_code_review_rounds(&self, plan_id: &str) {
+    pub fn reset_review_infra_retries(&self, plan_id: &str) {
         self.review_infra_retries.lock().remove(plan_id);
     }
 
@@ -1662,85 +1723,6 @@ impl PlanRuntime {
         Ok(Some(plan_id))
     }
 
-    /// 为迁移期间的既有单测提供“已经完成一次 review”的落盘夹具。
-    ///
-    /// 生产代码必须通过 `InFlightReview` 取得瞬态租约，并在结果写盘后提交；
-    /// 该 helper 不会被编译进生产构建。
-    #[cfg(test)]
-    pub fn try_begin_code_review_round(&self, plan_id: &str) -> Option<u32> {
-        let path = self.resolved_plan_path(plan_id).ok()?;
-        let mut plan = file_store::read_plan(&path).ok()?;
-        let next = plan.frontmatter.code_review_rounds.saturating_add(1);
-        if next > self.max_code_review_rounds() {
-            return None;
-        }
-        plan.frontmatter.code_review_rounds = next;
-        plan.frontmatter.code_review_baseline_ms = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-        );
-        file_store::write_plan(&path, &plan, self.lock_timeout_ms()).ok()?;
-        self.refresh_active_plan_after_write(path, &plan);
-        Some(next)
-    }
-
-    /// 为迁移期间的既有单测提供持久化的 open-finding 夹具。
-    #[cfg(test)]
-    pub fn set_unresolved_findings(&self, plan_id: &str, findings: Vec<review::Finding>) {
-        let Ok(path) = self.resolved_plan_path(plan_id) else {
-            return;
-        };
-        let Ok(mut plan) = file_store::read_plan(&path) else {
-            return;
-        };
-        plan.frontmatter.code_review_open_findings = findings;
-        let _ = file_store::write_plan(&path, &plan, self.lock_timeout_ms());
-        self.refresh_active_plan_after_write(path, &plan);
-    }
-
-    fn review_frontmatter(&self, plan_id: &str) -> Option<file_store::PlanFileFrontmatter> {
-        let path = self.resolved_plan_path(plan_id).ok()?;
-        file_store::read_plan(&path)
-            .ok()
-            .map(|plan| plan.frontmatter)
-    }
-
-    pub fn unresolved_findings(&self, plan_id: &str) -> Vec<review::Finding> {
-        self.review_frontmatter(plan_id)
-            .map(|frontmatter| frontmatter.code_review_open_findings)
-            .unwrap_or_default()
-    }
-
-    pub fn unresolved_finding_references(&self, plan_id: &str) -> Vec<String> {
-        self.review_frontmatter(plan_id)
-            .map(|frontmatter| {
-                frontmatter
-                    .code_review_open_findings
-                    .into_iter()
-                    .map(|finding| finding.reference)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    pub fn code_review_rounds(&self, plan_id: &str) -> u32 {
-        self.review_frontmatter(plan_id)
-            .map(|frontmatter| frontmatter.code_review_rounds)
-            .unwrap_or(0)
-    }
-
-    /// 返回计划的 code review 轮次是否已经用尽。
-    ///
-    /// 仅在至少派发过一次 review 时才视为「耗尽」；`max=0` 表示调用方关闭了
-    /// review 门禁，而不是「review 失败后耗尽」。这样 completion guard 不会把
-    /// 未启用门禁的计划误当作 handoff。
-    pub fn code_review_budget_exhausted(&self, plan_id: &str) -> bool {
-        let rounds = self.code_review_rounds(plan_id);
-        rounds > 0 && rounds >= self.max_code_review_rounds()
-    }
-
     /// 增加技术故障重试次数，返回增加后的次数。
     pub fn bump_review_infra_retry(&self, plan_id: &str) -> u32 {
         let mut retries = self.review_infra_retries.lock();
@@ -1759,12 +1741,6 @@ impl PlanRuntime {
 
     pub fn code_review_infra_retry_exhausted(&self, plan_id: &str) -> bool {
         self.review_infra_retries(plan_id) > 2
-    }
-
-    pub fn disputed_findings(&self, plan_id: &str) -> Vec<DisputedFinding> {
-        self.review_frontmatter(plan_id)
-            .map(|frontmatter| frontmatter.code_review_disputed_findings)
-            .unwrap_or_default()
     }
 
     // ─── P5 ask_question 面板注入 ──────────────────────────────────────
@@ -1983,7 +1959,7 @@ impl PlanRuntime {
         });
         // 一次 build 就是一次交付尝试，code review 轮数预算按次发放而不是按计划终身发放。
         // 少了这一步，同一进程里二次 build 同一个计划会因为计数器没清而直接跳过 review。
-        self.reset_code_review_rounds(&plan_id);
+        self.reset_review_infra_retries(&plan_id);
         self.plan_cache_observations.lock().remove(&plan_id);
 
         // E6：`[plan].auto_checkpoint_on_build`（默认 false）→ 写 `Manual{label="plan_build:..."}`。
@@ -2188,13 +2164,13 @@ pub struct CodeReviewDispatchInfo {
 
 #[async_trait::async_trait]
 pub trait CodeReviewerDispatcher: Send + Sync {
-    /// `open_findings` 是上一轮未清的 finding；实现应把它们渲染进 prompt，
-    /// 让 reviewer 按语义核销而不是重新发明问题；参考号仅在本轮输出中有效。
+    /// `review_state` is the caller's single durable snapshot. Implementations must
+    /// render its open and disputed findings without rereading the plan file.
     async fn dispatch(
         &self,
         plan_id: &str,
         plan_text: &str,
-        open_findings: &[review::Finding],
+        review_state: &file_store::PlanFileFrontmatter,
         dispatch: &CodeReviewDispatchInfo,
     ) -> code_reviewer::CodeReviewSummary;
 }

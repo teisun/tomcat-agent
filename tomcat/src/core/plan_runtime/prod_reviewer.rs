@@ -431,7 +431,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         &self,
         plan_id: &str,
         plan_text: &str,
-        open_findings: &[crate::core::plan_runtime::review::Finding],
+        review_state: &crate::core::plan_runtime::file_store::PlanFileFrontmatter,
         dispatch: &CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         let Some(deps) = self.deps.as_ref() else {
@@ -451,21 +451,13 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             Ok(path) => path,
             Err(err) => return CodeReviewSummary::aborted_with(err),
         };
-        let review_state = match crate::core::plan_runtime::file_store::read_plan(&plan_path) {
-            Ok(plan) => plan.frontmatter,
-            Err(err) => {
-                return CodeReviewSummary::aborted_with(format!(
-                    "read plan review state failed: {err}"
-                ));
-            }
-        };
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
         let changed_files = collect_git_changed_files(deps.agent_workspace_dir.as_path()).await;
         let previous_dispatch_ms = dispatch
             .is_incremental
             .then_some(review_state.code_review_baseline_ms)
             .flatten();
-        let is_incremental = dispatch.is_incremental && previous_dispatch_ms.is_some();
+        let is_incremental = dispatch.is_incremental;
         let delta_files = previous_dispatch_ms
             .map(|since_ms| {
                 changed_files_since(deps.agent_workspace_dir.as_path(), &changed_files, since_ms)
@@ -480,7 +472,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             delta_files: &delta_files,
             round: dispatch.round,
             is_incremental,
-            open_findings,
+            open_findings: &review_state.code_review_open_findings,
             disputed_findings: &review_state.code_review_disputed_findings,
         });
         let turns_limit = deps.max_turns.max(1);

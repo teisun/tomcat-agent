@@ -21,8 +21,7 @@ use crate::core::llm::{
     ChatMessage, ContinuityMetadata, MessageKind, PromptCacheKeyFamily, ReasoningContinuation,
     TokenUsage,
 };
-use crate::core::plan_runtime::file_store;
-use crate::core::plan_runtime::{NextAction, PlanRuntime};
+use crate::core::plan_runtime::{file_store, NextAction, PlanRuntime};
 use crate::infra::events::{AgentEvent, Message};
 
 use super::types::AgentLoop;
@@ -50,43 +49,20 @@ async fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<Stri
         .and_then(|path| file_store::read_plan(&path).ok())?;
 
     let next_action = plan_runtime.next_action(&plan.frontmatter).await;
-    let unfinished_work = plan
-        .frontmatter
-        .todos
-        .iter()
-        .filter(|todo| {
-            matches!(todo.kind, file_store::TodoKind::Work)
-                && !matches!(
-                    todo.status,
-                    file_store::TodoStatus::Completed | file_store::TodoStatus::Cancelled
-                )
-        })
-        .map(|todo| format!("- {} ({})", todo.id, todo.status.as_str()))
-        .collect::<Vec<_>>();
-    if matches!(next_action, NextAction::Done | NextAction::HandOff { .. }) {
+    if matches!(&next_action, NextAction::Done | NextAction::HandOff { .. }) {
         return None;
     }
-    if plan_runtime.note_completion_guard_nudge(&plan_id).await {
+    if plan_runtime
+        .note_completion_guard_nudge(&plan_id, &next_action)
+        .await
+    {
         return None;
     }
 
-    match next_action {
-        NextAction::Done | NextAction::HandOff { .. } => None,
-        NextAction::RunAcceptance { .. } => Some(format!(
-            "Plan `{plan_id}` is ready for green-build acceptance. Load the `verify` skill, run every project check through background bash, then submit successful task_id evidence via update_plan. Do not hand back before the plan reaches `completed`."
-        )),
-        NextAction::FixFindings { open_findings } => Some(format!(
-            "Plan `{plan_id}` has unresolved code-review findings. Fix them before requesting another review:\n{}",
-            crate::core::plan_runtime::code_reviewer::render_open_findings_section(&open_findings)
-        )),
-        NextAction::StartReview => Some(format!(
-            "All work todos for plan `{plan_id}` are terminal. Set `[gate] review` to in_progress with update_plan to start close-out; do not summarize or hand back."
-        )),
-        NextAction::ContinueWork => Some(format!(
-            "Plan `{plan_id}` is still executing. Continue only these remaining work todos with focused checks; do not summarize or hand back:\n{}",
-            unfinished_work.join("\n")
-        )),
-    }
+    Some(format!(
+        "Plan `{plan_id}`: {} Do not summarize or hand back.",
+        next_action.instruction()
+    ))
 }
 
 async fn should_apply_completion_guard(agent: &AgentLoop) -> Option<String> {

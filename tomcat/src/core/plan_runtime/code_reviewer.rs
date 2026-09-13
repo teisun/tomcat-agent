@@ -23,12 +23,9 @@ pub fn code_review_system_prompt_text() -> &'static str {
     load_prompt(PromptKey::ReviewerCode)
 }
 
-/// 上一轮未清 finding 渲染成 prompt 片段，要求 reviewer 逐条核销。
-pub(crate) fn render_open_findings_section(open_findings: &[Finding]) -> String {
-    if open_findings.is_empty() {
-        return String::new();
-    }
-    let lines = open_findings
+/// Render the factual finding list without assigning it to a particular consumer.
+pub(crate) fn render_open_findings_list(open_findings: &[Finding]) -> String {
+    open_findings
         .iter()
         .map(|finding| {
             let evidence = match finding.basis.as_deref() {
@@ -42,10 +39,23 @@ pub(crate) fn render_open_findings_section(open_findings: &[Finding]) -> String 
                 None => String::new(),
             };
             format!(
-                "         - {} [{}] {}: {}{}",
+                "- {} [{}] {}: {}{}",
                 finding.reference, finding.severity, finding.area, finding.note, evidence
             )
         })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 上一轮未清 finding 渲染成 prompt 片段，要求 reviewer 逐条核销。
+pub(crate) fn render_open_findings_section(open_findings: &[Finding]) -> String {
+    let list = render_open_findings_list(open_findings);
+    if list.is_empty() {
+        return String::new();
+    }
+    let lines = list
+        .lines()
+        .map(|line| format!("         {line}"))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
