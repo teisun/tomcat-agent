@@ -754,7 +754,17 @@ impl SessionManager {
         session_key: &str,
         cwd: Option<String>,
     ) -> Result<SessionEntry, AppError> {
-        self.create_session_with_activation(session_key, cwd, true)
+        self.create_session_with_project_root(session_key, cwd, None)
+    }
+
+    /// 创建新会话并持久化宿主验证过的项目根；运行 cwd 仍独立保留。
+    pub fn create_session_with_project_root(
+        &self,
+        session_key: &str,
+        cwd: Option<String>,
+        project_root: Option<String>,
+    ) -> Result<SessionEntry, AppError> {
+        self.create_session_with_activation(session_key, cwd, project_root, true)
     }
 
     /// 创建可列出但不激活的会话。既不修改 `sessions.json.current`，也不修改进程内 pin。
@@ -764,13 +774,24 @@ impl SessionManager {
         session_key: &str,
         cwd: Option<String>,
     ) -> Result<SessionEntry, AppError> {
-        self.create_session_with_activation(session_key, cwd, false)
+        self.create_detached_session_with_project_root(session_key, cwd, None)
+    }
+
+    /// 创建未激活会话并同时保存经宿主验证的项目根。
+    pub fn create_detached_session_with_project_root(
+        &self,
+        session_key: &str,
+        cwd: Option<String>,
+        project_root: Option<String>,
+    ) -> Result<SessionEntry, AppError> {
+        self.create_session_with_activation(session_key, cwd, project_root, false)
     }
 
     fn create_session_with_activation(
         &self,
         session_key: &str,
         cwd: Option<String>,
+        project_root: Option<String>,
         activate: bool,
     ) -> Result<SessionEntry, AppError> {
         let now = Utc::now().timestamp_millis();
@@ -784,6 +805,7 @@ impl SessionManager {
             id: session_id.clone(),
             timestamp: iso_ts(now),
             cwd: cwd.clone(),
+            project_root: project_root.clone(),
         };
         write_header(&path, &header)?;
         let entry = SessionEntry {
@@ -792,6 +814,7 @@ impl SessionManager {
             updated_at: now,
             session_file: Some(path.to_string_lossy().to_string()),
             cwd,
+            project_root,
             thinking_level: None,
             model_override: None,
             input_tokens: None,
@@ -819,7 +842,17 @@ impl SessionManager {
 
     /// 为当前固定 key 创建新的 session，并把 current 映射切到它。
     pub fn new_current_session(&self, cwd: Option<String>) -> Result<SessionEntry, AppError> {
-        let entry = self.create_session(self.current_session_key(), cwd)?;
+        self.new_current_session_with_project_root(cwd, None)
+    }
+
+    /// 创建新的当前会话并持久化经宿主验证的项目根。
+    pub fn new_current_session_with_project_root(
+        &self,
+        cwd: Option<String>,
+        project_root: Option<String>,
+    ) -> Result<SessionEntry, AppError> {
+        let entry =
+            self.create_session_with_project_root(self.current_session_key(), cwd, project_root)?;
         if self.has_pinned_session() {
             self.pin_session(&entry.session_id);
         }
@@ -828,10 +861,19 @@ impl SessionManager {
 
     /// 确保当前固定 key 已绑定某个 session；缺失时创建新的 current session。
     pub fn ensure_current_session(&self, cwd: Option<String>) -> Result<SessionEntry, AppError> {
+        self.ensure_current_session_with_project_root(cwd, None)
+    }
+
+    /// 确保当前会话存在；已有会话的项目根不可被新调用重写。
+    pub fn ensure_current_session_with_project_root(
+        &self,
+        cwd: Option<String>,
+        project_root: Option<String>,
+    ) -> Result<SessionEntry, AppError> {
         if let Some(entry) = self.current_session_entry()? {
             return Ok(entry);
         }
-        self.new_current_session(cwd)
+        self.new_current_session_with_project_root(cwd, project_root)
     }
 
     /// 把当前固定 key 切到某个已存在的 session_id。

@@ -139,6 +139,12 @@ pub struct SessionHeader {
     pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(
+        rename = "projectRoot",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub project_root: Option<String>,
 }
 
 /// 公共基座：id、parentId、timestamp，树形结构。预留供后续树形操作使用。

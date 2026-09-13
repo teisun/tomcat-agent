@@ -47,7 +47,7 @@
 |------|-----------------|---------------|-------------|----------------|------|
 | `global` | `{work_dir}/plugins/` | `{work_dir}/skills/` | `{work_dir}/packages/registry.json` | `{work_dir}/plugins/registry.json` | 所有 scope 的兜底层 |
 | `agent` | `{work_dir}/agents/<agentId>/plugins/` | `{work_dir}/agents/<agentId>/skills/` | `{work_dir}/agents/<agentId>/packages/registry.json` | `{work_dir}/agents/<agentId>/plugins/registry.json` | 当前 agent 私有层 |
-| `scope` | `<scope_root>/.tomcat/plugins/` | `<scope_root>/.tomcat/skills/` | `<scope_root>/.tomcat/packages/registry.json` | `<scope_root>/.tomcat/plugins/registry.json` | 当前 project 私有层；`scope_root` 必须先 canonicalize |
+| `scope` | `<scope_root>/.agents/plugins/` | `<scope_root>/.agents/skills/` | `<scope_root>/.agents/packages/registry.json` | `<scope_root>/.agents/plugins/registry.json` | 当前 project 私有层；`scope_root` 必须先 canonicalize |
 
 补充约束：
 

@@ -297,6 +297,10 @@ async fn verifier_blocks_non_whitelisted_tools() {
     for (name, arguments) in [
         ("update_plan", "{}"),
         ("web_search", r#"{"query":"rust async"}"#),
+        (
+            "package_install",
+            r#"{"source":"/tmp/never-installs","scope":"agent"}"#,
+        ),
         ("write", r#"{"path":"/tmp/demo.txt","content":"hi"}"#),
         (
             "edit",
@@ -517,6 +521,10 @@ async fn explorer_blocks_every_write_and_nesting_tool() {
         ),
         ("update_plan", "{}"),
         ("dispatch_agent", r#"{"tasks":[{"prompt":"nested"}]}"#),
+        (
+            "package_install",
+            r#"{"source":"/tmp/never-installs","scope":"agent"}"#,
+        ),
     ] {
         let tc = ToolCallInfo {
             id: format!("tc_{name}"),
@@ -549,4 +557,66 @@ async fn explorer_blocks_every_write_and_nesting_tool() {
             outcome.model_text
         );
     }
+}
+
+#[tokio::test]
+async fn package_install_rejects_plan_mode_before_backend_lookup() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let runtime = crate::core::plan_runtime::PlanRuntime::new("install-plan-guard");
+    runtime.enter_plan().unwrap();
+    let tc = ToolCallInfo {
+        id: "tc_install_plan".into(),
+        name: "package_install".into(),
+        arguments: r#"{"source":"/tmp/never-installs","scope":"agent"}"#.into(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        Some(&runtime),
+        None,
+        SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(outcome.model_text.contains("PLAN 模式不可用"));
+}
+
+#[tokio::test]
+async fn package_install_without_backend_is_a_zero_write_error() {
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(UnusedPrimitive);
+    let tc = ToolCallInfo {
+        id: "tc_install_missing_backend".into(),
+        name: "package_install".into(),
+        arguments: r#"{"source":"/tmp/never-installs","scope":"agent"}"#.into(),
+    };
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(outcome.is_error);
+    assert!(outcome.model_text.contains("没有安装后端"));
 }

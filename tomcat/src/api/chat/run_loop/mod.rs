@@ -1,5 +1,6 @@
 use std::io::{self, Write as IoWrite};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -40,12 +41,15 @@ mod workspace_state;
 
 pub(crate) use self::background::spawn_completion_subscriber;
 use self::cleanup::ensure_session;
+pub(crate) use self::persist::drain_checkpoint_record_tasks;
 use self::persist::push_turn_message;
 pub(crate) use self::rehydrate::has_resumable_tail_ask_question;
 use self::rehydrate::{make_fallback_context_state, nonfatal_error_hint};
 pub(crate) use self::rehydrate::{recover_context_state_after_failed_turn, render_error_message};
 use self::session_title::{maybe_emit_rule_session_title, maybe_spawn_semantic_session_title};
 pub(crate) use self::workspace_state::runtime_tail_provider;
+
+const CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 pub(crate) use self::cleanup::cleanup_plugin_sessions_on_session_end;
@@ -109,9 +113,12 @@ async fn observe_tool_surface(ctx: &ChatContext) -> ToolSurface {
         .connector_registry
         .as_ref()
         .is_some_and(|connectors| connectors.has_configured_mcp_servers());
-    ToolSurface::from_plugin_tools_with_policies(
+    let allow_package_install =
+        ctx.session_runtime.plan_runtime.mode() != crate::core::session::manager::AgentMode::Plan;
+    ToolSurface::from_plugin_tools_with_runtime_policies(
         allow_load_skill,
         allow_connector_tools,
+        allow_package_install,
         &plugin_tools,
     )
 }
@@ -505,6 +512,11 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
             auto_turn_count = 0;
         }
 
+        // The prior turn's snapshot may still be running while the user types.
+        // Before this input can execute tools and mutate the worktree, finish it
+        // so checkpoint order matches turn order without delaying agent_idle.
+        drain_checkpoint_record_tasks(ctx, CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT).await;
+
         let turn_token = {
             let mut guard = ctx.session_runtime.cancel_token.lock();
             *guard = CancellationToken::new();
@@ -568,6 +580,7 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
         println!();
     };
 
+    drain_checkpoint_record_tasks(ctx, CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT).await;
     cleanup::cleanup_chat_session_resources(ctx, exit_reason).await;
     events::stderr::unregister_chat_session_stderr_listeners(
         &*ctx.global_services.event_bus,
@@ -619,6 +632,7 @@ pub(crate) async fn run_chat_turn_with_message_and_snapshot(
     context_state: &mut crate::core::ContextState,
     turn_token: CancellationToken,
 ) -> Result<AgentRunOutcome, AppError> {
+    ctx.refresh_resource_inventory_before_turn().await?;
     let previous_system_len = prompt_snapshot.system_text().len();
     if refresh_prompt_snapshot(ctx, context_state.context_budget_chars, prompt_snapshot).await {
         context_state
@@ -643,6 +657,7 @@ pub async fn run_chat_turn_with_message(
     context_state: &mut crate::core::ContextState,
     turn_token: CancellationToken,
 ) -> Result<AgentRunOutcome, AppError> {
+    ctx.refresh_resource_inventory_before_turn().await?;
     let tool_definitions = build_tool_definitions(ctx).await;
     run_chat_turn_with_message_and_tool_definitions(
         ctx,
@@ -903,6 +918,9 @@ async fn run_chat_turn_with_message_and_tool_definitions(
     });
     if let Some(backend) = ctx.global_services.config_backend.clone() {
         agent_loop = agent_loop.with_config_backend(backend);
+    }
+    if let Some(backend) = ctx.global_services.package_install_backend.clone() {
+        agent_loop = agent_loop.with_package_install_backend(backend);
     }
     agent_loop = agent_loop.with_bash_task_registry(ctx.session_runtime.bash_task_registry.clone());
     agent_loop = agent_loop.with_web_fetch_runtime(ctx.global_services.web_fetch_runtime.clone());

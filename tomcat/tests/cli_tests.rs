@@ -4976,7 +4976,7 @@ fn test_user_skill_cli_list_reload_e2e() {
     info!("Arrange: add a malformed skill and a new valid skill before reload");
     let broken_dir = workspace
         .path()
-        .join(".tomcat")
+        .join(".agents")
         .join("skills")
         .join("broken");
     fs::create_dir_all(&broken_dir).unwrap();

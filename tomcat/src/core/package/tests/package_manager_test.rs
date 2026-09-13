@@ -626,3 +626,181 @@ fn uninstall_uses_package_registry_for_precise_cleanup() {
         .plugins
         .is_empty());
 }
+
+#[test]
+fn install_rejects_a_source_changed_after_preparation() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source = tempfile::tempdir().unwrap();
+    write_skill(source.path(), "changed-source", "before confirmation");
+
+    let prepared = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    std::fs::write(
+        source.path().join("SKILL.md"),
+        "---\nname: changed-source\ndescription: modified after confirmation\n---\n# Changed\n",
+    )
+    .unwrap();
+
+    let error = manager.install(prepared).unwrap_err().to_string();
+    assert!(
+        error.contains("来源在确认后发生变化"),
+        "unexpected error: {error}"
+    );
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    assert!(!paths.skills_dir.join("changed-source").exists());
+}
+
+#[test]
+fn install_rejects_source_target_overlap_in_both_directions() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source = workspace.path().join(".agents/skills");
+    write_skill(&source, "overlap", "source contains the target directory");
+
+    let prepared = manager
+        .prepare_install(
+            &source,
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    let error = manager.install(prepared).unwrap_err().to_string();
+    assert!(error.contains("不能重叠"), "unexpected error: {error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_install_rejects_special_files_in_source_tree() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source = tempfile::tempdir().unwrap();
+    write_skill(source.path(), "special-file", "contains a fifo");
+    let fifo = source.path().join("unexpected.fifo");
+    let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+    let error = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("特殊文件"), "unexpected error: {error}");
+}
+
+#[test]
+fn concurrent_prepared_installs_commit_exactly_one_owner() {
+    use std::sync::{Arc, Barrier};
+
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    write_skill(
+        source.path(),
+        "concurrent-owner",
+        "only one install may own this id",
+    );
+    let cfg = Arc::new(test_config(work_dir.path()));
+    let barrier = Arc::new(Barrier::new(2));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let cfg = Arc::clone(&cfg);
+        let barrier = Arc::clone(&barrier);
+        let source = source.path().to_path_buf();
+        let workspace = workspace.path().to_path_buf();
+        workers.push(std::thread::spawn(move || {
+            let manager = PackageManager::new(&cfg);
+            let prepared = manager
+                .prepare_install(&source, PackageVisibility::Scope, Some(&workspace), false)
+                .unwrap();
+            barrier.wait();
+            manager.install(prepared)
+        }));
+    }
+    let outcomes = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_err()).count(),
+        1
+    );
+
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    let registry = load_package_registry(&paths.package_registry_path).unwrap();
+    assert_eq!(registry.packages.len(), 1);
+    assert_eq!(registry.packages[0].name, "concurrent-owner");
+}
+
+#[test]
+fn uninstall_rolls_back_resources_and_registries_when_commit_fails() {
+    let work_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let cfg = test_config(work_dir.path());
+    let manager = PackageManager::new(&cfg);
+    let source = tempfile::tempdir().unwrap();
+    write_skill(
+        source.path(),
+        "rollback-uninstall",
+        "must be restored on a commit failure",
+    );
+    let prepared = manager
+        .prepare_install(
+            source.path(),
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+            false,
+        )
+        .unwrap();
+    manager.install(prepared).unwrap();
+    let paths =
+        resolve_layer_paths(&cfg, PackageVisibility::Scope, Some(workspace.path())).unwrap();
+    crate::core::package::manager::fail_next_registry_save_for_test(&paths.package_registry_path);
+
+    let error = manager
+        .uninstall(
+            "rollback-uninstall",
+            PackageVisibility::Scope,
+            Some(workspace.path()),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("package uninstall 失败"),
+        "unexpected error: {error}"
+    );
+    assert!(paths
+        .skills_dir
+        .join("rollback-uninstall/SKILL.md")
+        .is_file());
+    assert_eq!(
+        load_package_registry(&paths.package_registry_path)
+            .unwrap()
+            .packages
+            .len(),
+        1
+    );
+}

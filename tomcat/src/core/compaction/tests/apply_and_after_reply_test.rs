@@ -637,6 +637,7 @@ fn applying_the_same_preheat_result_twice_writes_one_linked_summary_body() {
             id: "sid".to_string(),
             timestamp: "2026-09-10T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -717,6 +718,7 @@ fn check_after_reply_stale_apply_keeps_history_and_preheat_idle() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

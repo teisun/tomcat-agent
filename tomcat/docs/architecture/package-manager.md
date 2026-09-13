@@ -17,7 +17,7 @@
 
 本文把安装层补齐为一个统一的 `PackageManager`：
 
-> **当前实现（2026-09）**：除 CLI 和 `/install` 外，原生 `package_install` 工具也可安装本地 package、裸 plugin 或裸 skill。它要求操作级确认，接受 `source`、`scope`（`scope` / `agent` / `global`）和可选 `force`，并返回 `inventory_dirty` 让下一轮会话清单刷新。项目层由 `workspace.project_resource_dir` 决定，默认 `<project>/.agents`；不要再按本文旧图中硬编码的 `<project>/.tomcat` 写文件。
+> **当前实现（2026-09）**：除 CLI 和 `/install` 外，原生 `package_install` 工具也可安装本地 package、裸 plugin 或裸 skill。它要求操作级确认，接受 `source`、`scope`（`scope` / `agent` / `global`），并返回 `inventory_dirty` 让下一轮会话清单刷新。项目层由 `workspace.project_resource_dir` 决定，默认 `<project>/.agents`；不要再按本文旧图中硬编码的 `<project>/.tomcat` 写文件。
 
 1. 提供两个安装前门：外层 shell CLI `tomcat install` / `tomcat uninstall` / `tomcat packages`，以及 code/claw 会话内的 `/install`。
 2. 一个 package 可同时携带 plugin 与 skill，但 **package 只是安装/分发单元**；runtime 内存中仍然分开走 plugin 与 skill 两条链路。

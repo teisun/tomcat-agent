@@ -11,6 +11,11 @@ use common::serve::{
     sse_finish, ServeChild,
 };
 
+// `tomcat serve` loads embedded assets before processing stdin. Match the other
+// real-stdio suite's budget so this remains a correctness wait, not a startup
+// performance assertion under the default four-way integration gate.
+const SERVE_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn initialize(child: &mut ServeChild) -> String {
     child.send_value(&json!({
         "type": "control_request",
@@ -18,7 +23,7 @@ fn initialize(child: &mut ServeChild) -> String {
         "subtype": "initialize",
         "payload": {}
     }));
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(SERVE_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_response")
             && value.get("requestId").and_then(|v| v.as_str()) == Some("init-1")
     });
@@ -35,7 +40,7 @@ fn new_session(child: &mut ServeChild, id: &str) -> String {
         "id": id,
         "params": {}
     }));
-    let frames = child.recv_until(Duration::from_secs(5), |value| {
+    let frames = child.recv_until(SERVE_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some(id)
     });
     let frame = frames.last().expect("new_session response");
@@ -84,7 +89,7 @@ fn serve_multi_session_concurrency_and_isolation() {
     let mut saw_end_a = false;
     let mut saw_end_b = false;
     while !(saw_end_a && saw_end_b) {
-        let value = child.recv_value(Duration::from_secs(5));
+        let value = child.recv_value(SERVE_TIMEOUT);
         assert_ndjson_line(&value);
         if value.get("type").and_then(|v| v.as_str()) == Some("agent_end") {
             match value.get("sessionId").and_then(|v| v.as_str()) {
@@ -192,7 +197,7 @@ fn serve_same_session_is_busy_until_turn_finishes() {
     let mut frames = Vec::new();
     let mut busy = None;
     for _ in 0..16 {
-        let value = child.recv_value(Duration::from_secs(5));
+        let value = child.recv_value(SERVE_TIMEOUT);
         if value.get("id").and_then(|v| v.as_str()) == Some("p2") {
             busy = Some(value.clone());
             frames.push(value);
@@ -204,7 +209,7 @@ fn serve_same_session_is_busy_until_turn_finishes() {
     assert_eq!(busy["success"].as_bool(), Some(false));
     assert_eq!(busy["error"].as_str(), Some("busy"));
 
-    let _ = child.recv_until(Duration::from_secs(5), |value| {
+    let _ = child.recv_until(SERVE_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("agent_end")
     });
 }

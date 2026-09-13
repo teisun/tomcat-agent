@@ -365,13 +365,7 @@ fn spawn_scripted_openai_stream_server_internal(
                 .push(request.clone());
             let handled_title = auto_title_response && request_is_session_title_request(&request);
             let (headers, parts) = if handled_title {
-                (
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
-                    vec![ScriptedPart {
-                        delay_ms: 0,
-                        body: session_title_response_json(&request, "Generated title"),
-                    }],
-                )
+                session_title_response(&request, "Generated title")
             } else {
                 let scripted = scripted
                     .pop_front()
@@ -419,13 +413,62 @@ fn request_is_session_title_request(request: &str) -> bool {
     let Some((_, body)) = request.split_once("\r\n\r\n") else {
         return false;
     };
-    let Ok(value) = serde_json::from_str::<Value>(body) else {
-        return false;
-    };
-    if value.get("stream").and_then(Value::as_bool) != Some(false) {
-        return false;
-    }
     body.contains("Generate a short chat title from the user's first message.\\n")
+}
+
+fn session_title_response(request: &str, title: &str) -> (&'static str, Vec<ScriptedPart>) {
+    if request_is_streaming(request) {
+        return (
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+            session_title_sse_parts(request, title),
+        );
+    }
+    (
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+        vec![ScriptedPart {
+            delay_ms: 0,
+            body: session_title_response_json(request, title),
+        }],
+    )
+}
+
+fn request_is_streaming(request: &str) -> bool {
+    request
+        .split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str::<Value>(body).ok())
+        .and_then(|body| body.get("stream").and_then(Value::as_bool))
+        == Some(true)
+}
+
+fn session_title_sse_parts(request: &str, title: &str) -> Vec<ScriptedPart> {
+    if request.starts_with("POST /v1/responses ") {
+        return vec![
+            ScriptedPart {
+                delay_ms: 0,
+                body: format!(
+                    "data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"title-mock\",\"content_index\":0,\"delta\":\"{title}\"}}\n\n"
+                ),
+            },
+            ScriptedPart {
+                delay_ms: 0,
+                body: "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n".to_string(),
+            },
+        ];
+    }
+    vec![
+        ScriptedPart {
+            delay_ms: 0,
+            body: format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{title}\"}}}}]}}\n\n"),
+        },
+        ScriptedPart {
+            delay_ms: 0,
+            body: "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n".to_string(),
+        },
+        ScriptedPart {
+            delay_ms: 0,
+            body: "data: [DONE]\n\n".to_string(),
+        },
+    ]
 }
 
 fn session_title_response_json(request: &str, title: &str) -> String {

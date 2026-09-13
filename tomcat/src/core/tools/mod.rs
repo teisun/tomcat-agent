@@ -8,6 +8,7 @@
 
 pub mod config_tool;
 pub mod contract;
+pub mod package_install;
 pub mod pipeline;
 pub mod plan_tool;
 pub mod primitive;

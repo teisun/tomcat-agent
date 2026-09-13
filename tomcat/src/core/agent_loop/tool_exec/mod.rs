@@ -52,7 +52,7 @@ use crate::infra::event_bus::ScopedEventEmitter;
 use crate::infra::events::ToolDisplay;
 use tracing::warn;
 
-use super::config_backend::SharedConfigBackend;
+use super::config_backend::{SharedConfigBackend, SharedPackageInstallBackend};
 use super::types::{BackgroundCompletionRoutes, ToolCallInfo};
 use guard::{
     explorer_allowed_tools_description, is_code_reviewer_whitelisted_tool,
@@ -140,6 +140,7 @@ struct ToolExecCtx<'a> {
     session_id: &'a str,
     tool_call_id: &'a str,
     config_backend: &'a Option<SharedConfigBackend>,
+    package_install_backend: &'a Option<SharedPackageInstallBackend>,
     bash_task_registry: &'a Option<Arc<BashTaskRegistry>>,
     read_file_state: Option<&'a Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
     openai_files_runtime: Option<&'a Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
@@ -289,6 +290,7 @@ pub(super) async fn execute_tool_full_with_policy(
         primitive,
         session_id,
         config_backend,
+        &None,
         bash_task_registry,
         read_file_state,
         openai_files_runtime,
@@ -316,6 +318,7 @@ pub(super) async fn execute_tool_full_with_policy_and_connectors(
     primitive: &Arc<dyn PrimitiveExecutor>,
     session_id: &str,
     config_backend: &Option<SharedConfigBackend>,
+    package_install_backend: &Option<SharedPackageInstallBackend>,
     bash_task_registry: &Option<Arc<BashTaskRegistry>>,
     read_file_state: Option<&Arc<crate::core::tools::pipeline::read_state::ReadFileState>>,
     openai_files_runtime: Option<&Arc<crate::core::llm::openai_files::OpenAiFilesRuntime>>,
@@ -339,6 +342,7 @@ pub(super) async fn execute_tool_full_with_policy_and_connectors(
         session_id,
         tool_call_id: &tc.id,
         config_backend,
+        package_install_backend,
         bash_task_registry,
         read_file_state,
         openai_files_runtime,
@@ -434,6 +438,27 @@ async fn execute_tool_tuple_full(
             true,
             Vec::new(),
         );
+    }
+
+    if tc.name == "package_install" {
+        if ctx.subagent_type != crate::core::agent_loop::types::SubagentType::User {
+            return (
+                "package_install 仅允许主会话调用；只读 explorer/reviewer/verifier 不会执行安装"
+                    .to_string(),
+                true,
+                Vec::new(),
+            );
+        }
+        if ctx
+            .plan_runtime
+            .is_some_and(|runtime| runtime.mode() == crate::core::session::manager::AgentMode::Plan)
+        {
+            return (
+                "package_install 在 PLAN 模式不可用；请先退出计划模式再安装资源".to_string(),
+                true,
+                Vec::new(),
+            );
+        }
     }
 
     // B1：plan 工具分发（优先于 primitive，因为这些工具不走 primitive）。

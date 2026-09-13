@@ -1400,3 +1400,41 @@ Parameters:
 }
 ```
 
+### `package_install`
+
+- Label: Package Install
+- Category: `config`
+- Permission scope: `Write`
+- Read only: `false`
+- Destructive: `true`
+- Search hint: `package install skill plugin source scope global agent`
+
+Install a local Tomcat package, skill, or plugin after confirmation. Pass a local source path and scope (`scope`, `agent`, or `global`); `scope` requires the session's explicit project root. The operation validates the package before writing and returns a machine-readable `status` (`installed`, `cancelled`, `denied`, or `failed`) plus installed resources and `inventory_dirty` for the next session refresh.
+
+Parameters:
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "scope": {
+      "description": "Installation scope. Defaults to scope. Scope requires this session to have an explicit project root.",
+      "enum": [
+        "scope",
+        "agent",
+        "global"
+      ],
+      "type": "string"
+    },
+    "source": {
+      "description": "Absolute local directory or package.json/plugin.json/SKILL.md to install.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "source"
+  ],
+  "type": "object"
+}
+```
+

@@ -303,10 +303,13 @@ async fn tool_catalog_is_identical_across_all_mode_and_executing_combinations() 
     );
     let executing = build_tool_definitions(&ctx).await;
 
-    assert_eq!(
-        serde_json::to_string(&chat).expect("serialize tools"),
-        serde_json::to_string(&planning).expect("serialize tools"),
-        "the actual LLM tool array must not change on Chat → Plan"
+    let planning_names = planning
+        .iter()
+        .filter_map(|tool| tool.get("function")?.get("name")?.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        !planning_names.contains("package_install"),
+        "package_install must be hidden from a planning prompt"
     );
     assert_eq!(
         serde_json::to_string(&chat).expect("serialize tools"),
@@ -588,6 +591,7 @@ fn effective_model_uses_session_override() {
         updated_at: 0,
         session_file: None,
         cwd: None,
+        project_root: None,
         thinking_level: None,
         model_override: Some("gpt-5.2".to_string()),
         input_tokens: None,
@@ -616,6 +620,7 @@ fn effective_model_uses_global_when_no_override() {
         updated_at: 0,
         session_file: None,
         cwd: None,
+        project_root: None,
         thinking_level: None,
         model_override: None,
         input_tokens: None,

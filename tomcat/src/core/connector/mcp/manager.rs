@@ -131,7 +131,7 @@ pub struct McpManager {
     trust: TrustStore,
     oauth_store: OAuthTokenStore,
     oauth_cancellations: DashMap<String, CancellationToken>,
-    workspace_root: std::path::PathBuf,
+    workspace_root: Option<std::path::PathBuf>,
 }
 
 struct ConnectedServer {
@@ -146,7 +146,10 @@ struct ConnectedServer {
 }
 
 impl McpManager {
-    pub fn new(cfg: &AppConfig, workspace_root: &std::path::Path) -> Result<Arc<Self>, AppError> {
+    pub fn new(
+        cfg: &AppConfig,
+        workspace_root: Option<&std::path::Path>,
+    ) -> Result<Arc<Self>, AppError> {
         let servers = match load_servers(cfg, workspace_root) {
             Ok(servers) => servers,
             Err(error) => {
@@ -174,7 +177,7 @@ impl McpManager {
             connections: RwLock::new(BTreeMap::new()),
             trust,
             oauth_store,
-            workspace_root: workspace_root.to_path_buf(),
+            workspace_root: workspace_root.map(std::path::Path::to_path_buf),
             oauth_cancellations: DashMap::new(),
         }))
     }
@@ -183,8 +186,8 @@ impl McpManager {
         self.states.read().values().cloned().collect()
     }
 
-    pub fn workspace_root(&self) -> &std::path::Path {
-        &self.workspace_root
+    pub fn workspace_root(&self) -> Option<&std::path::Path> {
+        self.workspace_root.as_deref()
     }
 
     pub fn remove_configured_server(
@@ -198,7 +201,13 @@ impl McpManager {
         let removed = match server.source {
             McpConfigSource::Global => remove_global_server(cfg, server_name)?,
             McpConfigSource::Project => {
-                remove_project_server(cfg, &self.workspace_root, server_name)?
+                let workspace_root = self.workspace_root.as_deref().ok_or_else(|| {
+                    AppError::Config(
+                        "project MCP configuration requires an explicit session project root"
+                            .into(),
+                    )
+                })?;
+                remove_project_server(cfg, workspace_root, server_name)?
             }
         };
         if removed {
@@ -221,7 +230,13 @@ impl McpManager {
         match server.source {
             McpConfigSource::Global => set_global_tool_filter(cfg, server_name, filter)?,
             McpConfigSource::Project => {
-                set_project_tool_filter(cfg, &self.workspace_root, server_name, filter)?
+                let workspace_root = self.workspace_root.as_deref().ok_or_else(|| {
+                    AppError::Config(
+                        "project MCP configuration requires an explicit session project root"
+                            .into(),
+                    )
+                })?;
+                set_project_tool_filter(cfg, workspace_root, server_name, filter)?
             }
         }
         Ok(())
@@ -404,7 +419,7 @@ impl McpManager {
     }
 
     pub fn reload_configuration(&self, cfg: &AppConfig) -> Result<Vec<String>, AppError> {
-        let servers = load_servers(cfg, &self.workspace_root)?;
+        let servers = load_servers(cfg, self.workspace_root.as_deref())?;
         self.connections.write().clear();
         *self.servers.write() = servers
             .iter()
@@ -447,7 +462,11 @@ impl McpManager {
         let startup_timeout = Duration::from_millis(server.config.startup_timeout_ms);
         let connected = match tokio::time::timeout(
             startup_timeout,
-            ConnectedServer::connect(&server, &self.workspace_root, self.oauth_store.clone()),
+            ConnectedServer::connect(
+                &server,
+                self.workspace_root.as_deref(),
+                self.oauth_store.clone(),
+            ),
         )
         .await
         {
@@ -742,7 +761,7 @@ fn initial_server_status(server: &ConfiguredMcpServer, trust: &TrustStore) -> Se
 impl ConnectedServer {
     async fn connect(
         server: &ConfiguredMcpServer,
-        workspace_root: &std::path::Path,
+        workspace_root: Option<&std::path::Path>,
         oauth_store: OAuthTokenStore,
     ) -> Result<Self, AppError> {
         let client = if server.config.url.is_some() {
@@ -974,7 +993,7 @@ mod tests {
             .to_string(),
         )
         .expect("write MCP config");
-        let manager = McpManager::new(&cfg, &workspace).expect("construct MCP manager");
+        let manager = McpManager::new(&cfg, Some(&workspace)).expect("construct MCP manager");
         (temp, manager)
     }
 
@@ -1002,7 +1021,7 @@ mod tests {
 
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
-        let manager = McpManager::new(&cfg, &workspace).expect("construct MCP manager");
+        let manager = McpManager::new(&cfg, Some(&workspace)).expect("construct MCP manager");
         (temp, manager)
     }
 

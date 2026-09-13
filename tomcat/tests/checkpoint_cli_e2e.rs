@@ -418,8 +418,9 @@ fn spawn_tool_then_text_openai_stream_server(
                             if summary == "request has no HTTP body" =>
                         {
                             // A transport-level probe/abandoned connection carries no protocol
-                            // message and must not advance or poison the explicit mock state.
-                            write_http_error(&mut stream, "400 Bad Request", &summary);
+                            // message. Closing it without a semantic HTTP error lets the active
+                            // streamed request retry instead of mistaking the probe's error for
+                            // its own response.
                         }
                         (expected_state, actual) => {
                             let message = format!(
@@ -443,7 +444,12 @@ fn spawn_tool_then_text_openai_stream_server(
 }
 
 #[cfg(unix)]
-fn wait_for_stage(stage: &Arc<AtomicUsize>, target: usize, timeout: Duration) {
+fn wait_for_stage(
+    stage: &Arc<AtomicUsize>,
+    target: usize,
+    timeout: Duration,
+    diagnostics: impl FnOnce() -> String,
+) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         let current = stage.load(Ordering::SeqCst);
@@ -459,8 +465,8 @@ fn wait_for_stage(stage: &Arc<AtomicUsize>, target: usize, timeout: Duration) {
     }
     assert!(
         stage.load(Ordering::SeqCst) >= target,
-        "server stage did not reach {target} within {:?}",
-        timeout
+        "server stage did not reach {target} within {timeout:?}; {}",
+        diagnostics()
     );
 }
 
@@ -500,6 +506,31 @@ fn wait_for_transcript(
     }
     panic!(
         "transcript barrier {description:?} was not reached within {timeout:?}; entries={last_entries:?}",
+    );
+}
+
+#[cfg(unix)]
+fn wait_for_checkpoint_kind(
+    store: &dyn CheckpointStore,
+    session_id: &str,
+    kind: CheckpointKind,
+    timeout: Duration,
+    diagnostics: impl FnOnce() -> String,
+) {
+    let deadline = Instant::now() + timeout;
+    let mut checkpoints = Vec::new();
+    while Instant::now() < deadline {
+        checkpoints = store
+            .list(session_id, Default::default())
+            .expect("list checkpoints while awaiting persistence");
+        if checkpoints.iter().any(|checkpoint| checkpoint.kind == kind) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "checkpoint {kind:?} was not persisted within {timeout:?}; checkpoints={checkpoints:?}; {}",
+        diagnostics()
     );
 }
 
@@ -863,6 +894,10 @@ fn test_hangup_during_run_leaves_interrupt_ckpt() {
     if !git_available() {
         return;
     }
+    // This starts an interactive CLI, not the lightweight `serve` process.
+    // The wait is a protocol barrier (first streamed delta), so tolerate a
+    // loaded CI runner rather than asserting startup latency.
+    const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
     common::setup_logging();
     let _span = info_span!("test_hangup_during_run_leaves_interrupt_ckpt").entered();
     let fx = setup_fixture();
@@ -911,8 +946,14 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     let mut child = CheckpointChild::spawn(&mut command);
     child.write_line("say hi");
 
-    wait_for_stage(&stage, 2, Duration::from_secs(3));
-    child.wait_for_stdout("partial from mock", Duration::from_secs(3));
+    wait_for_stage(&stage, 2, STARTUP_TIMEOUT, || {
+        format!(
+            "child stdout={:?}; stderr={:?}",
+            child.stdout_snapshot(),
+            child.stderr_snapshot()
+        )
+    });
+    child.wait_for_stdout("partial from mock", STARTUP_TIMEOUT);
     unsafe {
         libc::kill(child.pid() as i32, libc::SIGINT);
     }
@@ -969,7 +1010,7 @@ fn test_hangup_during_tool_run_allows_same_process_followup() {
     // The child boots a complete CLI process and performs several process-backed
     // tool operations. Keep the protocol barriers generous enough for a loaded
     // CI runner; these are correctness barriers, not latency assertions.
-    const TOOL_ROUND_TIMEOUT: Duration = Duration::from_secs(10);
+    const TOOL_ROUND_TIMEOUT: Duration = Duration::from_secs(20);
     const RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
     common::setup_logging();
@@ -1022,7 +1063,13 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     let chat_pid = child.pid();
     child.write_line("run slow tool");
 
-    wait_for_stage(&stage, 2, TOOL_ROUND_TIMEOUT);
+    wait_for_stage(&stage, 2, TOOL_ROUND_TIMEOUT, || {
+        format!(
+            "child stdout={:?}; stderr={:?}",
+            child.stdout_snapshot(),
+            child.stderr_snapshot()
+        )
+    });
     wait_for_transcript(
         &transcript_path,
         TOOL_ROUND_TIMEOUT,
@@ -1058,7 +1105,13 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
     // 第二轮的 call_stop → recovery write → final reply 竞争：mock 已发出
     // recovery-write tool call（stage 4），子进程却可能先因 EOF 退出。先以
     // 协议完成（stage 5）作为屏障，再验证 EOF 正常收尾。
-    wait_for_stage(&stage, 5, RECOVERY_TIMEOUT);
+    wait_for_stage(&stage, 5, RECOVERY_TIMEOUT, || {
+        format!(
+            "child stdout={:?}; stderr={:?}",
+            child.stdout_snapshot(),
+            child.stderr_snapshot()
+        )
+    });
     child.close_stdin();
 
     let output = child.finish(Duration::from_secs(30));
@@ -1076,9 +1129,39 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         "soft interrupt prompt must be visible before same-process followup; stderr={stderr}",
     );
     assert!(
+        output.stdout.contains("RECOVERED_E2E"),
+        "the followup turn must render its recovered reply; stdout={:?}; stderr={stderr}",
+        output.stdout
+    );
+    assert!(
+        !stderr.contains("\n[错误]"),
+        "the followup turn must complete rather than render a partial failed reply; stderr={stderr}"
+    );
+    assert!(
         stage.load(Ordering::SeqCst) >= 5,
         "exact followup, task cleanup, recovery write, and reply should complete; actual stage={}",
         stage.load(Ordering::SeqCst)
+    );
+    // `agent_end` is emitted before the shadow-git TurnEnd checkpoint worker
+    // commits. Poll the persisted contract instead of racing that worker.
+    wait_for_checkpoint_kind(
+        &fx.store,
+        &fx.session_id,
+        CheckpointKind::TurnEnd,
+        Duration::from_secs(10),
+        || {
+            let log = fx
+                .home_path
+                .join(".tomcat")
+                .join("agents")
+                .join("main")
+                .join("logs")
+                .join("checkpoint-record-errors.log");
+            format!(
+                "checkpoint errors={:?}; child stderr={stderr:?}",
+                fs::read_to_string(log).unwrap_or_else(|error| format!("unavailable: {error}")),
+            )
+        },
     );
     let entries = read_entries_tail(&transcript_path, 32).unwrap();
     assert!(

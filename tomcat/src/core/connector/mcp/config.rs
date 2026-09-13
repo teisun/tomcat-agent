@@ -232,7 +232,7 @@ pub fn project_mcp_path(cfg: &AppConfig, workspace_root: &Path) -> Result<PathBu
 
 pub fn load_servers(
     cfg: &AppConfig,
-    workspace_root: &Path,
+    workspace_root: Option<&Path>,
 ) -> Result<Vec<ConfiguredMcpServer>, AppError> {
     let mut merged = read_mcp_file(&global_mcp_path(cfg)?)?
         .mcp_servers
@@ -249,15 +249,17 @@ pub fn load_servers(
         })
         .collect::<BTreeMap<_, _>>();
 
-    for (name, config) in read_mcp_file(&project_mcp_path(cfg, workspace_root)?)?.mcp_servers {
-        merged.insert(
-            name,
-            ConfiguredMcpServer {
-                name: String::new(),
-                config,
-                source: McpConfigSource::Project,
-            },
-        );
+    if let Some(workspace_root) = workspace_root {
+        for (name, config) in read_mcp_file(&project_mcp_path(cfg, workspace_root)?)?.mcp_servers {
+            merged.insert(
+                name,
+                ConfiguredMcpServer {
+                    name: String::new(),
+                    config,
+                    source: McpConfigSource::Project,
+                },
+            );
+        }
     }
 
     merged
@@ -414,7 +416,7 @@ mod tests {
         )
         .expect("write config");
 
-        let servers = load_servers(&cfg, &workspace).expect("parse minimal MCP config");
+        let servers = load_servers(&cfg, Some(&workspace)).expect("parse minimal MCP config");
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "browser");
         assert_eq!(servers[0].config.command, "npx");
@@ -428,6 +430,24 @@ mod tests {
         assert_eq!(servers[0].config.call_timeout_ms, 120_000);
         assert!(servers[0].config.tool_filter.include.is_empty());
         assert!(servers[0].config.tool_filter.exclude.is_empty());
+    }
+    #[test]
+    fn no_project_root_loads_global_mcp_without_touching_a_project_path() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let global = get_work_dir(&cfg).expect("work dir").join("mcp.json");
+        std::fs::create_dir_all(global.parent().expect("global parent")).unwrap();
+        std::fs::write(
+            global,
+            r#"{"mcpServers":{"global-only":{"command":"node","args":[]}}}"#,
+        )
+        .unwrap();
+
+        let servers = load_servers(&cfg, None).expect("global MCP must work without a project");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "global-only");
+        assert_eq!(servers[0].source, McpConfigSource::Global);
     }
 
     #[test]
@@ -474,7 +494,7 @@ mod tests {
         )
         .expect("write project config");
 
-        let servers = load_servers(&cfg, &workspace).expect("load merged config");
+        let servers = load_servers(&cfg, Some(&workspace)).expect("load merged config");
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].config.command, "project");
         assert_eq!(servers[0].source, McpConfigSource::Project);

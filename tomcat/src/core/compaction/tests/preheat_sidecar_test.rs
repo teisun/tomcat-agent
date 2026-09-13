@@ -63,6 +63,7 @@ async fn preheat_summary_materializes_and_points_to_sidecar() {
             id: "preheat-sidecar".to_string(),
             timestamp: "2026-08-10T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -139,6 +140,7 @@ async fn preheat_background_computation_does_not_mutate_the_marker_transcript() 
             id: "marker-preheat".to_string(),
             timestamp: "2026-09-09T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

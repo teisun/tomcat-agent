@@ -31,7 +31,7 @@ await writeFile(path.join(root, "plugin.json"), `${JSON.stringify({
     },
   }],
 }, null, 2)}\n`, "utf8");
-await writeFile(path.join(root, "main.js"), `pi.registerTool({
+await writeFile(path.join(root, "main.js"), `tomcat.registerTool({
   name: ${JSON.stringify(`${id.replaceAll("-", "_")}_example`)},
   description: "TODO: replace this example tool",
   parameters: {

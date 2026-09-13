@@ -77,7 +77,8 @@ pub(crate) async fn handle_control_or_interrupt(
                             "close_session",
                             "list_sessions",
                             "interrupt",
-                            "ask_question"
+                            "ask_question",
+                            "confirmation"
                         ],
                         "sessionId": state.registry.active_session_id(),
                         // 见 `serve::attachment_root`：宿主必须在渲染 webview 之前拿到它。
@@ -114,7 +115,9 @@ pub(crate) async fn handle_control_or_interrupt(
             payload,
         } => {
             let frame = ControlFrame::response(request_id, session_id, payload);
-            state.ask_question.handle_control_response(&frame)?;
+            if !state.confirmation.handle_control_response(&frame)? {
+                state.ask_question.handle_control_response(&frame)?;
+            }
             Ok(true)
         }
         ServeCommand::ControlCancel {
@@ -123,7 +126,9 @@ pub(crate) async fn handle_control_or_interrupt(
             payload,
         } => {
             let frame = ControlFrame::cancel(request_id, session_id, payload);
-            state.ask_question.handle_control_cancel(&frame)?;
+            if !state.confirmation.handle_control_cancel(&frame)? {
+                state.ask_question.handle_control_cancel(&frame)?;
+            }
             Ok(true)
         }
         ServeCommand::Interrupt { id, session_id } => {
@@ -153,6 +158,9 @@ pub(crate) async fn handle_control_or_interrupt(
                 .ok_or_else(|| AppError::Config("unknown_session".to_string()))?;
             state
                 .ask_question
+                .cancel_live_session(&resolved, "interrupt");
+            state
+                .confirmation
                 .cancel_live_session(&resolved, "interrupt");
             slot.ctx.session_runtime.cancel_token.lock().cancel();
             slot.ctx.agent_registry.cascade_abort(&resolved);

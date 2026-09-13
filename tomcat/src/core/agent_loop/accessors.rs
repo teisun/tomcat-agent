@@ -57,6 +57,7 @@ impl AgentLoop {
             emitter,
             session_manager: None,
             config_backend: None,
+            package_install_backend: None,
             bash_task_registry: None,
             web_fetch_runtime: None,
             web_search_runtime: None,
@@ -86,6 +87,15 @@ impl AgentLoop {
         backend: super::config_backend::SharedConfigBackend,
     ) -> Self {
         self.config_backend = Some(backend);
+        self
+    }
+
+    /// Inject the immutable session-scoped package installation backend.
+    pub fn with_package_install_backend(
+        mut self,
+        backend: super::config_backend::SharedPackageInstallBackend,
+    ) -> Self {
+        self.package_install_backend = Some(backend);
         self
     }
 
@@ -221,6 +231,7 @@ impl AgentLoop {
             emitter,
             session_manager: None,
             config_backend: None,
+            package_install_backend: None,
             bash_task_registry: None,
             web_fetch_runtime: None,
             web_search_runtime: None,

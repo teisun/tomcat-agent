@@ -136,6 +136,11 @@ run_integration_parallel() {
     args+=("$arg")
   done < <(build_test_args "${TOMCAT_INTEGRATION_PARALLEL_TESTS[@]}" "${TOMCAT_INTEGRATION_FEATURE_TESTS[@]}")
 
+  # `assert_cmd::cargo::cargo_bin("tomcat")` launches target/debug/tomcat directly.
+  # nextest rebuilds test crates but does not necessarily refresh that executable, so
+  # an integration gate could exercise a stale serve/CLI binary after a library edit.
+  log_phase "构建 integration 依赖的 tomcat 二进制"
+  cargo build --bin tomcat
   ensure_nextest
   log_phase "开始 integration-parallel（默认 integration 门禁，nextest 4 并发）"
   cargo nextest run --features test-streamable-http-server --no-fail-fast "${args[@]}"

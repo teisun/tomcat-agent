@@ -9,6 +9,7 @@ fn make_header(id: &str) -> SessionHeader {
         id: id.to_string(),
         timestamp: "2025-01-01T00:00:00.000Z".to_string(),
         cwd: None,
+        project_root: None,
     }
 }
 

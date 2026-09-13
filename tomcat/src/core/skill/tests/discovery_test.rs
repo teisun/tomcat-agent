@@ -170,6 +170,48 @@ fn discover_accepts_a_valid_header_when_the_bounded_read_ends_mid_utf8_body_char
 }
 
 #[test]
+fn discover_rejects_a_header_without_a_complete_closing_delimiter_in_the_read_window() {
+    let temp = temp_dir("truncated_delimiter");
+    let project = temp.join("project");
+    let work_dir = temp.join("work");
+    let cfg = base_config(&work_dir);
+    write_raw(
+        &work_dir.join("skills").join("truncated").join("SKILL.md"),
+        &format!(
+            "---\nname: truncated\ndescription: {}\n--",
+            "x".repeat(4050)
+        ),
+    );
+
+    let set = discover(&cfg, &project);
+    assert!(!set.by_name.contains_key("truncated"));
+    assert!(set.diagnostics[0].reason.contains("完整的 --- 分隔行"));
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
+fn discover_rejects_invalid_utf8_inside_the_completed_header() {
+    let temp = temp_dir("invalid_header_utf8");
+    let project = temp.join("project");
+    let work_dir = temp.join("work");
+    let cfg = base_config(&work_dir);
+    let path = work_dir.join("skills").join("invalid").join("SKILL.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        b"---\nname: invalid\ndescription: \xff\n---\n# body\n",
+    )
+    .unwrap();
+
+    let set = discover(&cfg, &project);
+    assert!(!set.by_name.contains_key("invalid"));
+    assert!(set.diagnostics[0].reason.contains("不是 UTF-8"));
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[test]
 fn discover_ignores_loose_markdown_files_in_project_root() {
     let temp = temp_dir("ignore_loose_markdown");
     let project = temp.join("project");

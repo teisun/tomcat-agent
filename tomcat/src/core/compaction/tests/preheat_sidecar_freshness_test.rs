@@ -80,6 +80,7 @@ async fn sidecar_is_rebuilt_after_llm_await_before_machine_block_is_rendered() {
             id: "preheat-freshness".to_string(),
             timestamp: "2026-08-10T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

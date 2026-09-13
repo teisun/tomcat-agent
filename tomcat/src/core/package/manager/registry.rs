@@ -1,6 +1,12 @@
 use std::fs;
 use std::path::Path;
 
+#[cfg(test)]
+use std::path::PathBuf;
+
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 use crate::infra::{write_file_atomic, AppError};
 
 use super::super::model::{PackageRegistryFile, PluginRegistryFile};
@@ -96,10 +102,40 @@ where
         .map_err(|error| AppError::Config(format!("registry 损坏: {} ({error})", path.display())))
 }
 
+#[cfg(test)]
+static FAIL_NEXT_SAVE_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn fail_next_save_for_test(path: &Path) {
+    *FAIL_NEXT_SAVE_PATH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap() = Some(path.to_path_buf());
+}
+
+#[cfg(test)]
+fn consume_save_failure(path: &Path) -> bool {
+    let slot = FAIL_NEXT_SAVE_PATH.get_or_init(|| Mutex::new(None));
+    let mut pending = slot.lock().unwrap();
+    if pending.as_deref() == Some(path) {
+        *pending = None;
+        true
+    } else {
+        false
+    }
+}
+
 fn save_registry<T>(path: &Path, registry: &T) -> Result<(), AppError>
 where
     T: serde::Serialize,
 {
+    #[cfg(test)]
+    if consume_save_failure(path) {
+        return Err(AppError::Config(format!(
+            "测试注入的 registry 保存失败: {}",
+            path.display()
+        )));
+    }
     let json = serde_json::to_vec_pretty(registry).map_err(AppError::Serialize)?;
     write_file_atomic(path, &json)
 }

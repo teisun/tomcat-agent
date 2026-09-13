@@ -1094,6 +1094,52 @@ export async function activate(
       return webviewProvider.askUser(request, frame.sessionId, context.signal);
     },
   );
+  const confirmationHandler = messenger.registerControlRequestHandler(
+    "confirmation",
+    async (frame, controlContext) => {
+      const request =
+        frame.payload && typeof frame.payload === "object"
+          ? (frame.payload as Record<string, unknown>)
+          : null;
+      const suggestedRoot =
+        typeof request?.suggestedRoot === "string" ? request.suggestedRoot : undefined;
+      const preview =
+        typeof request?.preview === "string"
+          ? request.preview
+          : "A protected operation needs your approval.";
+      const allowOnce = "Allow once";
+      const allowRoot = "Always allow this folder";
+      const choice = await vscode.window.showWarningMessage(
+        preview,
+        { modal: true },
+        allowOnce,
+        ...(suggestedRoot ? [allowRoot] : []),
+      );
+      if (controlContext.signal.aborted) {
+        return { kind: "cancel" as const, payload: { reason: "host_disconnected" } };
+      }
+      if (choice === allowOnce) {
+        return {
+          kind: "response" as const,
+          payload: { decision: "allow_once" },
+          sessionId: frame.sessionId,
+        };
+      }
+      if (choice === allowRoot && suggestedRoot) {
+        return {
+          kind: "response" as const,
+          payload: { decision: "allow_and_persist_root", root: suggestedRoot },
+          sessionId: frame.sessionId,
+        };
+      }
+      return {
+        kind: "response" as const,
+        payload: { decision: "deny" },
+        sessionId: frame.sessionId,
+      };
+    },
+  );
+
   const stderrSubscription = messenger.onStderr((chunk) => {
     appendOutput(output, "stderr", chunk);
   });
@@ -1338,6 +1384,7 @@ export async function activate(
   disposeRuntime = () => {
     setupTerminal?.dispose();
     askQuestionHandler.dispose();
+    confirmationHandler.dispose();
     observedEventSubscription.dispose();
     stderrSubscription.dispose();
     frameErrorSubscription.dispose();

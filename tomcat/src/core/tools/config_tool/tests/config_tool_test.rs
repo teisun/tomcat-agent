@@ -1,19 +1,23 @@
 use std::sync::Arc;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
 use super::{
-    config_get_impl, config_set_impl, is_array_field, is_readable, is_writable, ChatConfigBackend,
-    ConfigToolContext,
+    config_get_impl, config_set_impl, is_array_field, is_readable, is_writable, ConfigToolContext,
 };
-use crate::core::agent_loop::ConfigBackend;
+use crate::core::agent_loop::{PackageInstallBackend, PackageInstallRequest, PackageInstallStatus};
 use crate::core::permission::{
     DefaultPermissionGate, GateConfig, PathRule, PathRuleMode, PermissionDecision, SessionGrants,
 };
 use crate::core::tools::contract::confirmation::{
     AllowAllConfirmation, DenyAllConfirmation, UserConfirmationProvider,
 };
+use crate::core::tools::package_install::{ChatPackageInstallBackend, PackageInstallContext};
 use crate::core::tools::primitive::PrimitiveOperation;
 use crate::infra::config::{load_config, load_config_toml_file};
 use crate::infra::error::AppError;
+use crate::infra::AuditStore;
 use serial_test::serial;
 use tempfile::TempDir;
 
@@ -396,6 +400,91 @@ async fn config_set_bash_forbidden_does_not_persist_env_merged_values() {
     assert_eq!(cfg.primitive.bash_forbidden, vec!["^rm -rf /$".to_string()]);
 }
 
+#[test]
+fn package_install_request_rejects_force_unknown_fields_and_relative_sources() {
+    let force = PackageInstallRequest::parse(&serde_json::json!({
+        "source": "/tmp/source",
+        "force": true,
+    }));
+    assert!(matches!(force, Err(AppError::Config(_))));
+
+    let relative = PackageInstallRequest::parse(&serde_json::json!({
+        "source": "./source",
+    }));
+    assert!(matches!(relative, Err(AppError::Config(_))));
+}
+
+#[tokio::test]
+async fn package_install_scope_requires_a_persisted_project_root() {
+    let dir = TempDir::new().unwrap();
+    let config_path = empty_config(&dir);
+    let source = dir.path().join("source-skill");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: no-project-root\ndescription: must not install\n---\n# Skill\n",
+    )
+    .unwrap();
+    let backend = ChatPackageInstallBackend {
+        ctx: PackageInstallContext::new(
+            load_config(Some(&config_path)).unwrap(),
+            dir.path().to_path_buf(),
+            None,
+            Arc::new(AllowAllConfirmation),
+        ),
+    };
+
+    let error = backend
+        .install(
+            PackageInstallRequest::parse(&serde_json::json!({
+                "source": source.to_string_lossy(),
+                "scope": "scope",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Config(_)));
+    assert!(!dir.path().join(".agents/skills/no-project-root").exists());
+}
+
+#[tokio::test]
+async fn package_install_rechecks_plan_mode_before_any_filesystem_write() {
+    let dir = TempDir::new().unwrap();
+    let config_path = empty_config(&dir);
+    let source = dir.path().join("source-skill");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: plan-blocked\ndescription: must not install\n---\n# Skill\n",
+    )
+    .unwrap();
+    let runtime = crate::core::plan_runtime::PlanRuntime::new("install-plan-mode");
+    runtime.enter_plan().unwrap();
+    let backend = ChatPackageInstallBackend {
+        ctx: PackageInstallContext::new(
+            load_config(Some(&config_path)).unwrap(),
+            dir.path().to_path_buf(),
+            None,
+            Arc::new(AllowAllConfirmation),
+        )
+        .with_plan_runtime(&runtime),
+    };
+
+    let error = backend
+        .install(
+            PackageInstallRequest::parse(&serde_json::json!({
+                "source": source.to_string_lossy(),
+                "scope": "agent",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Permission(_)));
+    assert!(!dir.path().join("agents/main/skills/plan-blocked").exists());
+}
+
 #[tokio::test]
 async fn package_install_confirms_then_installs_an_agent_skill() {
     let dir = TempDir::new().unwrap();
@@ -407,22 +496,50 @@ async fn package_install_confirms_then_installs_an_agent_skill() {
         "---\nname: release-notes\ndescription: write release notes\n---\n# Release notes\n",
     )
     .unwrap();
-    let backend = ChatConfigBackend {
-        ctx: ConfigToolContext::new(config_path, Arc::new(AllowAllConfirmation)),
+    let mut config = load_config(Some(&config_path)).unwrap();
+    config.security.enable_audit_log = true;
+    let audit_store = Arc::new(AuditStore::open_if_enabled(&config).unwrap().unwrap());
+    let backend = ChatPackageInstallBackend {
+        ctx: PackageInstallContext::new(
+            config,
+            dir.path().to_path_buf(),
+            None,
+            Arc::new(AllowAllConfirmation),
+        )
+        .with_audit_store(Arc::clone(&audit_store)),
     };
 
     let result = backend
-        .package_install(serde_json::json!({"source": source, "scope": "agent"}))
+        .install(
+            PackageInstallRequest::parse(&serde_json::json!({
+                "source": source.to_string_lossy(),
+                "scope": "agent"
+            }))
+            .unwrap(),
+        )
         .await
         .unwrap();
 
-    assert_eq!(result["installed"], true);
-    assert_eq!(result["resources"][0]["kind"], "skill");
-    assert_eq!(result["inventory_dirty"], true);
+    assert_eq!(result.status, PackageInstallStatus::Installed);
+    assert_eq!(result.resources[0].kind, "skill");
+    assert!(result.inventory_dirty);
     assert!(dir
         .path()
         .join("agents/main/skills/release-notes/SKILL.md")
         .is_file());
+    let statuses = audit_store
+        .query(&Default::default())
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.payload {
+            crate::infra::audit_store::AuditKindPayload::ToolCall {
+                tool_name, detail, ..
+            } if tool_name == "package_install" => detail,
+            _ => None,
+        })
+        .map(|detail| serde_json::from_str::<serde_json::Value>(&detail).unwrap()["status"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, vec!["installed", "approved"]);
 }
 
 #[tokio::test]
@@ -436,12 +553,27 @@ async fn package_install_denial_has_no_side_effects() {
         "---\nname: cancelled-skill\ndescription: must not install\n---\n# Cancelled\n",
     )
     .unwrap();
-    let backend = ChatConfigBackend {
-        ctx: ConfigToolContext::new(config_path, Arc::new(DenyAllConfirmation)),
+    let mut config = load_config(Some(&config_path)).unwrap();
+    config.security.enable_audit_log = true;
+    let audit_store = Arc::new(AuditStore::open_if_enabled(&config).unwrap().unwrap());
+    let backend = ChatPackageInstallBackend {
+        ctx: PackageInstallContext::new(
+            config,
+            dir.path().to_path_buf(),
+            None,
+            Arc::new(DenyAllConfirmation),
+        )
+        .with_audit_store(Arc::clone(&audit_store)),
     };
 
     let error = backend
-        .package_install(serde_json::json!({"source": source, "scope": "agent"}))
+        .install(
+            PackageInstallRequest::parse(&serde_json::json!({
+                "source": source.to_string_lossy(),
+                "scope": "agent"
+            }))
+            .unwrap(),
+        )
         .await
         .unwrap_err();
 
@@ -450,6 +582,19 @@ async fn package_install_denial_has_no_side_effects() {
         .path()
         .join("agents/main/skills/cancelled-skill")
         .exists());
+    let statuses = audit_store
+        .query(&Default::default())
+        .unwrap()
+        .into_iter()
+        .filter_map(|entry| match entry.payload {
+            crate::infra::audit_store::AuditKindPayload::ToolCall {
+                tool_name, detail, ..
+            } if tool_name == "package_install" => detail,
+            _ => None,
+        })
+        .map(|detail| serde_json::from_str::<serde_json::Value>(&detail).unwrap()["status"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, vec!["cancelled"]);
 }
 
 #[tokio::test]
@@ -479,15 +624,184 @@ async fn package_install_honors_a_denied_source_child_path_rule_before_confirmat
         SessionGrants::new(),
     )
     .into_arc();
-    let backend = ChatConfigBackend {
-        ctx: ConfigToolContext::new(config_path, Arc::new(AllowAllConfirmation)).with_gate(gate),
+    let backend = ChatPackageInstallBackend {
+        ctx: PackageInstallContext::new(
+            load_config(Some(&config_path)).unwrap(),
+            dir.path().to_path_buf(),
+            None,
+            Arc::new(AllowAllConfirmation),
+        )
+        .with_gate(gate),
     };
 
     let error = backend
-        .package_install(serde_json::json!({"source": source, "scope": "agent"}))
+        .install(
+            PackageInstallRequest::parse(&serde_json::json!({
+                "source": source.to_string_lossy(),
+                "scope": "agent"
+            }))
+            .unwrap(),
+        )
         .await
         .unwrap_err();
 
     assert!(matches!(error, AppError::Permission(_)));
     assert!(!dir.path().join("agents/main/skills/blocked-skill").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn package_install_rejects_symlink_and_special_files_in_source_tree() {
+    let dir = TempDir::new().unwrap();
+    let config_path = empty_config(&dir);
+    let source = dir.path().join("source-skill");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: checked-source\ndescription: source tree must be ordinary files\n---\n# Skill\n",
+    )
+    .unwrap();
+    symlink("/tmp", source.join("linked-child")).unwrap();
+    let backend = ChatPackageInstallBackend {
+        ctx: PackageInstallContext::new(
+            load_config(Some(&config_path)).unwrap(),
+            dir.path().to_path_buf(),
+            Some(dir.path().to_path_buf()),
+            Arc::new(AllowAllConfirmation),
+        ),
+    };
+    let request = || {
+        PackageInstallRequest::parse(&serde_json::json!({
+            "source": source.to_string_lossy(),
+            "scope": "scope",
+        }))
+        .unwrap()
+    };
+
+    let error = backend.install(request()).await.unwrap_err();
+    assert!(matches!(error, AppError::Config(_)));
+    assert!(error.to_string().contains("symbolic links"));
+
+    std::fs::remove_file(source.join("linked-child")).unwrap();
+    let fifo = source.join("special-child");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let error = backend.install(request()).await.unwrap_err();
+    assert!(matches!(error, AppError::Config(_)));
+    assert!(error.to_string().contains("special file"));
+    assert!(!dir.path().join(".agents/skills/checked-source").exists());
+}
+
+#[tokio::test]
+async fn package_install_requires_ordinary_source_read_authorization() {
+    let dir = TempDir::new().unwrap();
+    let config_path = empty_config(&dir);
+    let source = dir.path().join("foreign-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: source-needs-read\ndescription: must stay uninstalled\n---\n# Skill\n",
+    )
+    .unwrap();
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: dir.path().join("definition"),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let backend = ChatPackageInstallBackend {
+        ctx: PackageInstallContext::new(
+            load_config(Some(&config_path)).unwrap(),
+            dir.path().to_path_buf(),
+            None,
+            Arc::new(DenyAllConfirmation),
+        )
+        .with_gate(gate),
+    };
+
+    let error = backend
+        .install(
+            PackageInstallRequest::parse(&serde_json::json!({
+                "source": source.to_string_lossy(),
+                "scope": "agent",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Permission(_)));
+    assert!(error.to_string().contains("拒绝读取"));
+    assert!(!dir
+        .path()
+        .join("agents/main/skills/source-needs-read")
+        .exists());
+}
+
+#[tokio::test]
+async fn package_install_reads_a_readonly_source_but_rejects_a_readonly_target() {
+    let dir = TempDir::new().unwrap();
+    let config_path = empty_config(&dir);
+    let source = dir.path().join("readonly-source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: readonly-source\ndescription: source is readable\n---\n# Skill\n",
+    )
+    .unwrap();
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: dir.path().join("definition"),
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![
+                PathRule::new(source.to_string_lossy().to_string(), PathRuleMode::Readonly),
+                PathRule::new(
+                    dir.path().join("agents").to_string_lossy().to_string(),
+                    PathRuleMode::Readonly,
+                ),
+            ],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    )
+    .into_arc();
+    let backend = ChatPackageInstallBackend {
+        ctx: PackageInstallContext::new(
+            load_config(Some(&config_path)).unwrap(),
+            dir.path().to_path_buf(),
+            None,
+            Arc::new(AllowAllConfirmation),
+        )
+        .with_gate(gate),
+    };
+
+    let error = backend
+        .install(
+            PackageInstallRequest::parse(&serde_json::json!({
+                "source": source.to_string_lossy(),
+                "scope": "agent",
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, AppError::Permission(_)));
+    assert!(error.to_string().contains("目标被路径策略拒绝"));
+    assert!(!dir
+        .path()
+        .join("agents/main/skills/readonly-source")
+        .exists());
 }

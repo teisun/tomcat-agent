@@ -7,6 +7,11 @@ use serial_test::serial;
 
 use common::serve::{setup_serve_fixture, spawn_scripted_openai_stream_server, spawn_serve_child};
 
+// `tomcat serve` loads embedded assets before processing stdin. Match the other
+// real-stdio suite's budget so this remains a correctness wait, not a startup
+// performance assertion under the default four-way integration gate.
+const SERVE_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[test]
 #[serial]
 fn serve_parse_error_does_not_break_following_initialize() {
@@ -16,7 +21,7 @@ fn serve_parse_error_does_not_break_following_initialize() {
     let mut child = spawn_serve_child(&fx);
 
     child.send_raw("{not json");
-    let parse_error = child.recv_value(Duration::from_secs(5));
+    let parse_error = child.recv_value(SERVE_TIMEOUT);
     assert_eq!(parse_error["type"].as_str(), Some("response"));
     assert_eq!(parse_error["success"].as_bool(), Some(false));
     assert!(
@@ -33,7 +38,7 @@ fn serve_parse_error_does_not_break_following_initialize() {
         "subtype": "initialize",
         "payload": {}
     }));
-    let init = child.recv_until(Duration::from_secs(5), |value| {
+    let init = child.recv_until(SERVE_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_response")
             && value.get("requestId").and_then(|v| v.as_str()) == Some("init-1")
     });
@@ -56,7 +61,7 @@ fn serve_unknown_command_returns_error_response() {
         "type": "mystery",
         "id": "mystery-1"
     }));
-    let response = child.recv_value(Duration::from_secs(5));
+    let response = child.recv_value(SERVE_TIMEOUT);
     assert_eq!(response["type"].as_str(), Some("response"));
     assert_eq!(response["id"].as_str(), Some("mystery-1"));
     assert_eq!(response["success"].as_bool(), Some(false));
@@ -77,7 +82,7 @@ fn serve_parse_error_response_preserves_request_id() {
         "sessionId": null,
         "text": "hello"
     }));
-    let response = child.recv_value(Duration::from_secs(5));
+    let response = child.recv_value(SERVE_TIMEOUT);
     assert_eq!(response["type"].as_str(), Some("response"));
     assert_eq!(response["id"].as_str(), Some("bad-session-id"));
     assert!(
@@ -105,7 +110,7 @@ fn serve_set_thinking_level_roundtrip_over_real_stdio_writes_global_store() {
         "subtype": "initialize",
         "payload": {}
     }));
-    let init = child.recv_until(Duration::from_secs(5), |value| {
+    let init = child.recv_until(SERVE_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_response")
             && value.get("requestId").and_then(|v| v.as_str()) == Some("init-1")
     });
@@ -122,7 +127,7 @@ fn serve_set_thinking_level_roundtrip_over_real_stdio_writes_global_store() {
         "model": "gpt-5.4",
         "level": "high"
     }));
-    let response = child.recv_value(Duration::from_secs(5));
+    let response = child.recv_value(SERVE_TIMEOUT);
     assert_eq!(response["type"].as_str(), Some("response"));
     assert_eq!(response["id"].as_str(), Some("effort-1"));
     assert_eq!(response["success"].as_bool(), Some(true));
@@ -134,7 +139,7 @@ fn serve_set_thinking_level_roundtrip_over_real_stdio_writes_global_store() {
         "id": "state-1",
         "sessionId": response["sessionId"].as_str().unwrap_or_default()
     }));
-    let state = child.recv_until(Duration::from_secs(5), |value| {
+    let state = child.recv_until(SERVE_TIMEOUT, |value| {
         value.get("id").and_then(|v| v.as_str()) == Some("state-1")
     });
     let state_response = state
@@ -181,12 +186,12 @@ fn serve_eof_exits_cleanly() {
         "subtype": "initialize",
         "payload": {}
     }));
-    let _ = child.recv_until(Duration::from_secs(5), |value| {
+    let _ = child.recv_until(SERVE_TIMEOUT, |value| {
         value.get("type").and_then(|v| v.as_str()) == Some("control_response")
             && value.get("requestId").and_then(|v| v.as_str()) == Some("init-1")
     });
 
-    let output = child.wait_for_exit(Duration::from_secs(5));
+    let output = child.wait_for_exit(SERVE_TIMEOUT);
     assert!(
         output.status.success(),
         "serve should exit cleanly: {output:?}"

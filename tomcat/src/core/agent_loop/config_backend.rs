@@ -1,23 +1,11 @@
-//! # `ConfigBackend` 抽象（plan §6 / PR-7）
+//! # `ConfigBackend` and `PackageInstallBackend` contracts.
 //!
-//! `tool_exec::execute_tool` 内分发 `config_get` / `config_set` 这两条 LLM 工具时，
-//! 需要把"读 / 写 tomcat.config.toml"的实现注入进来：具体实现位于
-//! [`crate::core::tools::config_tool`]。
-//!
-//! 本模块只声明一个小契约 trait：调用方通过
-//! `Option<Arc<dyn ConfigBackend>>` 注入实现。`AgentLoop` 中字段为
-//! `Option<...>`，便于测试与不需要工具的场景（CLI 单测、子模块测试）
-//! 继续不传。
-//!
-//! ## 错误语义
-//!
-//! - 配置未启用（注入为 `None`）：execute_tool 直接返回 `is_error=true`，
-//!   payload 提示"未启用 config 工具"。
-//! - 白名单 / 硬黑名单拒绝：返回 [`AppError::Permission`]，execute_tool 包装为
-//!   `is_error=true`，文案不暴露白名单具体内容（`tools::config_tool` 内部已自带文案）。
-//! - 配置文件 IO / TOML 错误：返回 [`AppError::Io`] / [`AppError::Config`]，原样上抛。
-
+//! Configuration access and package installation have deliberately separate backends:
+//! configuration tools reread their file by design, while installation receives an
+//! immutable session snapshot so its scope cannot drift to the process working directory.
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::infra::error::AppError;
@@ -33,11 +21,93 @@ pub trait ConfigBackend: Send + Sync + 'static {
     /// 写入（或追加）一个配置项；返回结构化 JSON（至少含 `applied` / `message`），
     /// 由工具直接序列化给 LLM；CLI 展示提示由 `tool_exec` 额外补充。
     async fn config_set(&self, key: &str, value: &str) -> Result<serde_json::Value, AppError>;
-
-    /// Install a local Tomcat package, skill, or plugin after an operation-specific confirmation.
-    async fn package_install(&self, args: serde_json::Value)
-        -> Result<serde_json::Value, AppError>;
 }
 
-/// 类型别名：方便 `AgentLoop` / `tool_exec` 处使用。
+/// Fully validated local package-install request.  `source` is always an absolute
+/// path; callers cannot use the tool to make a relative path depend on process cwd.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageInstallRequest {
+    pub source: PathBuf,
+    pub visibility: crate::core::package::PackageVisibility,
+}
+
+impl PackageInstallRequest {
+    pub fn parse(value: &serde_json::Value) -> Result<Self, AppError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawRequest {
+            source: String,
+            #[serde(default)]
+            scope: Option<crate::core::package::PackageVisibility>,
+        }
+
+        let raw: RawRequest = serde_json::from_value(value.clone())
+            .map_err(|error| AppError::Config(format!("package_install 参数无效: {error}")))?;
+        if raw.source.trim().is_empty() {
+            return Err(AppError::Config(
+                "package_install.source 不能为空".to_string(),
+            ));
+        }
+        let source = PathBuf::from(raw.source);
+        if !source.is_absolute() {
+            return Err(AppError::Config(
+                "package_install.source 必须是绝对路径".to_string(),
+            ));
+        }
+        Ok(Self {
+            source,
+            visibility: raw
+                .scope
+                .unwrap_or(crate::core::package::PackageVisibility::Scope),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageInstallToolResource {
+    pub kind: String,
+    pub id: String,
+}
+
+/// Stable machine-readable terminal state for `package_install`.
+///
+/// Successful calls currently return `Installed`; the other variants reserve explicit
+/// values for backends that can complete a declined or failed operation without
+/// surfacing a transport/tool error.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageInstallStatus {
+    Installed,
+    Cancelled,
+    Denied,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageInstallToolResult {
+    pub status: PackageInstallStatus,
+    pub package: String,
+    pub version: String,
+    pub resources: Vec<PackageInstallToolResource>,
+    pub warnings: Vec<String>,
+    pub scope: String,
+    pub target_path: String,
+    pub inventory_dirty: bool,
+}
+
+#[async_trait]
+pub trait PackageInstallBackend: Send + Sync + 'static {
+    async fn install(
+        &self,
+        request: PackageInstallRequest,
+    ) -> Result<PackageInstallToolResult, AppError>;
+}
+
+/// Native package installation follows the same injection pattern, but uses its own
+/// immutable session context so package paths cannot inherit process cwd.
+pub type SharedPackageInstallBackend = Arc<dyn PackageInstallBackend>;
+
+/// Type alias used by the config-tool path.
 pub type SharedConfigBackend = Arc<dyn ConfigBackend>;

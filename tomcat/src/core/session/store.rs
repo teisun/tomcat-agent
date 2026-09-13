@@ -52,6 +52,9 @@ pub struct SessionEntry {
     pub session_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// 用户显式选择并由宿主验证的项目根；与运行 cwd 分开持久化。
+    pub project_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_level: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

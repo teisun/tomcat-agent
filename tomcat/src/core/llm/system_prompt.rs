@@ -33,7 +33,7 @@
 use serde_json::Value;
 
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
-use crate::core::tools::contract::catalog::builtin_tool_surface_with_policies;
+use crate::core::tools::contract::catalog::builtin_tool_surface_with_policies_and_install;
 use crate::core::tools::contract::registry::{tool_to_function_definition, Tool};
 
 pub trait SystemPromptSection: Send + Sync {
@@ -78,7 +78,28 @@ impl ToolSurface {
         allow_connector_tools: bool,
         plugin_tools: &[Tool],
     ) -> Self {
-        let builtin = builtin_tool_surface_with_policies(allow_load_skill, allow_connector_tools);
+        Self::from_plugin_tools_with_runtime_policies(
+            allow_load_skill,
+            allow_connector_tools,
+            true,
+            plugin_tools,
+        )
+    }
+
+    /// `package_install` is intentionally absent while the session is in PLAN
+    /// mode. Unlike connector readiness, the mode is an explicit user action
+    /// and is allowed to invalidate the prompt surface.
+    pub fn from_plugin_tools_with_runtime_policies(
+        allow_load_skill: bool,
+        allow_connector_tools: bool,
+        allow_package_install: bool,
+        plugin_tools: &[Tool],
+    ) -> Self {
+        let builtin = builtin_tool_surface_with_policies_and_install(
+            allow_load_skill,
+            allow_connector_tools,
+            allow_package_install,
+        );
         let mut plugin_tools = plugin_tools.iter().collect::<Vec<_>>();
         plugin_tools.sort_by(|left, right| {
             left.name

@@ -19,11 +19,15 @@ pub mod permission;
 pub mod preflight;
 
 pub use context::{ChatContext, ChatContextOverrides, CliConfirmation};
+pub(crate) use run_loop::drain_checkpoint_record_tasks;
 pub(crate) use run_loop::spawn_completion_subscriber;
 pub(crate) use run_loop::{build_prompt_snapshot, run_chat_turn_with_message_and_snapshot};
 pub use run_loop::{chat_loop, run_chat_turn, run_chat_turn_with_message};
 pub(crate) use run_loop::{
     has_resumable_tail_ask_question, recover_context_state_after_failed_turn, render_error_message,
+};
+pub(crate) use session_runtime::{
+    current_resource_inventory_epoch, publish_resource_inventory_change,
 };
 pub use session_runtime::{GlobalServices, ScopeServices, SessionRuntime, SessionRuntimeRegistry};
 

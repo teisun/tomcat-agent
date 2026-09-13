@@ -465,6 +465,7 @@ fn cold_rebuild_streams_without_loading_whole_file() {
             id: "sid_resume_rebuild".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

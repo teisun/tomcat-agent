@@ -1,5 +1,11 @@
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+use sha2::{Digest, Sha256};
 
 use uuid::Uuid;
 
@@ -33,18 +39,19 @@ pub(super) fn install_resource(
     fs::create_dir_all(parent).map_err(AppError::Io)?;
     reject_symlink_path(parent, "目标父目录")?;
     reject_symlink_path(&resource.destination_dir, "目标目录")?;
-    if parent.starts_with(&resource.source_dir) {
+    if paths_overlap(&resource.source_dir, &resource.destination_dir) {
         return Err(AppError::Config(format!(
-            "安装源目录不能与目标暂存目录重叠: {} -> {}",
+            "安装源目录与目标目录不能重叠: {} <-> {}",
             resource.source_dir.display(),
             resource.destination_dir.display()
         )));
     }
 
     let stage_dir = hidden_sibling_path(parent, &resource.id, "staging");
-    copy_dir_recursive(&resource.source_dir, &stage_dir).inspect_err(|_| {
-        let _ = remove_path_if_exists(&stage_dir);
-    })?;
+    copy_dir_snapshot_checked(&resource.source_dir, &stage_dir, &resource.source_digest)
+        .inspect_err(|_| {
+            let _ = remove_path_if_exists(&stage_dir);
+        })?;
 
     let backup_dir = if resource.destination_dir.exists() {
         if !force {
@@ -210,36 +217,190 @@ fn hidden_sibling_path(parent: &Path, stem: &str, suffix: &str) -> PathBuf {
     parent.join(format!(".{stem}.{suffix}.{}", Uuid::new_v4()))
 }
 
-fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), AppError> {
-    let metadata = fs::symlink_metadata(source).map_err(AppError::Io)?;
-    if metadata.file_type().is_symlink() {
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+/// Fingerprints the safe, regular-file-only source tree before confirmation. The
+/// digest records every relative name and every byte, so a changed source cannot
+/// be substituted between preparation and staging.
+pub(super) fn source_tree_digest(source: &Path) -> Result<String, AppError> {
+    let mut hasher = Sha256::new();
+    snapshot_tree(source, Path::new(""), None, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn copy_dir_snapshot_checked(
+    source: &Path,
+    target: &Path,
+    expected_digest: &str,
+) -> Result<(), AppError> {
+    let mut hasher = Sha256::new();
+    snapshot_tree(source, Path::new(""), Some(target), &mut hasher)?;
+    let actual_digest = format!("{:x}", hasher.finalize());
+    if actual_digest != expected_digest {
         return Err(AppError::Permission(format!(
-            "不支持复制符号链接目录: {}",
+            "安装来源在确认后发生变化，已拒绝写入目标: {}",
             source.display()
         )));
     }
+    Ok(())
+}
+
+/// Walks an already named source directory into a private staging snapshot. It
+/// accepts only regular files and directories, rejects every symbolic link and
+/// special file, and on Unix opens files with `O_NOFOLLOW` before copying bytes.
+/// Platforms without that no-follow primitive fail closed instead of performing
+/// an installation with weaker guarantees.
+fn snapshot_tree(
+    source: &Path,
+    relative: &Path,
+    target: Option<&Path>,
+    hasher: &mut Sha256,
+) -> Result<(), AppError> {
+    let directory_handle = open_source_directory(source)?;
+    let metadata = directory_handle.metadata().map_err(AppError::Io)?;
     if !metadata.is_dir() {
         return Err(AppError::Config(format!(
             "待安装资源必须是目录: {}",
             source.display()
         )));
     }
-    fs::create_dir_all(target).map_err(AppError::Io)?;
-    for entry in fs::read_dir(source).map_err(AppError::Io)? {
-        let entry = entry.map_err(AppError::Io)?;
+    if let Some(target) = target {
+        fs::create_dir_all(target).map_err(AppError::Io)?;
+        reject_symlink_path(target, "暂存目录")?;
+    }
+
+    let mut entries = fs::read_dir(source)
+        .map_err(AppError::Io)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AppError::Io)?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            AppError::Config(format!(
+                "安装来源含有非 UTF-8 路径名: {}",
+                entry.path().display()
+            ))
+        })?;
         let source_path = entry.path();
-        let target_path = target.join(entry.file_name());
+        let child_relative = relative.join(name);
+        let target_path = target.map(|target| target.join(name));
         let file_type = entry.file_type().map_err(AppError::Io)?;
         if file_type.is_symlink() {
             return Err(AppError::Permission(format!(
-                "不支持复制符号链接文件: {}",
+                "不支持复制符号链接: {}",
                 source_path.display()
             )));
         }
         if file_type.is_dir() {
-            copy_dir_recursive(&source_path, &target_path)?;
+            hasher.update(b"D\0");
+            hasher.update(child_relative.to_string_lossy().as_bytes());
+            snapshot_tree(
+                &source_path,
+                &child_relative,
+                target_path.as_deref(),
+                hasher,
+            )?;
         } else if file_type.is_file() {
-            fs::copy(&source_path, &target_path).map_err(AppError::Io)?;
+            hasher.update(b"F\0");
+            hasher.update(child_relative.to_string_lossy().as_bytes());
+            copy_regular_file(&source_path, target_path.as_deref(), hasher)?;
+        } else {
+            return Err(AppError::Permission(format!(
+                "安装来源包含不支持的特殊文件: {}",
+                source_path.display()
+            )));
+        }
+    }
+    ensure_source_directory_unchanged(source, &directory_handle)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_source_directory(path: &Path) -> Result<File, AppError> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(AppError::Io)
+}
+
+#[cfg(not(unix))]
+fn open_source_directory(_path: &Path) -> Result<File, AppError> {
+    Err(AppError::Permission(
+        "当前平台没有安全的无链接安装快照实现，package_install 已被阻止".to_string(),
+    ))
+}
+
+#[cfg(unix)]
+fn ensure_source_directory_unchanged(path: &Path, handle: &File) -> Result<(), AppError> {
+    let opened = handle.metadata().map_err(AppError::Io)?;
+    let current = fs::symlink_metadata(path).map_err(AppError::Io)?;
+    if current.file_type().is_symlink()
+        || !current.is_dir()
+        || opened.dev() != current.dev()
+        || opened.ino() != current.ino()
+    {
+        return Err(AppError::Permission(format!(
+            "安装来源目录在读取时发生变化，已拒绝写入目标: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_source_directory_unchanged(_path: &Path, _handle: &File) -> Result<(), AppError> {
+    Err(AppError::Permission(
+        "当前平台没有安全的无链接安装快照实现，package_install 已被阻止".to_string(),
+    ))
+}
+
+#[cfg(unix)]
+fn open_source_file(path: &Path) -> Result<File, AppError> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(AppError::Io)
+}
+
+#[cfg(not(unix))]
+fn open_source_file(_path: &Path) -> Result<File, AppError> {
+    Err(AppError::Permission(
+        "当前平台没有安全的无链接安装快照实现，package_install 已被阻止".to_string(),
+    ))
+}
+
+fn copy_regular_file(
+    source: &Path,
+    target: Option<&Path>,
+    hasher: &mut Sha256,
+) -> Result<(), AppError> {
+    let mut source_file = open_source_file(source)?;
+    let metadata = source_file.metadata().map_err(AppError::Io)?;
+    if !metadata.is_file() {
+        return Err(AppError::Permission(format!(
+            "安装来源在读取时不再是普通文件: {}",
+            source.display()
+        )));
+    }
+    let mut target_file = target
+        .map(|path| File::create(path).map_err(AppError::Io))
+        .transpose()?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = source_file.read(&mut buffer).map_err(AppError::Io)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        if let Some(target_file) = target_file.as_mut() {
+            target_file
+                .write_all(&buffer[..read])
+                .map_err(AppError::Io)?;
         }
     }
     Ok(())

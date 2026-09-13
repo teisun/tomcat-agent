@@ -293,6 +293,8 @@ fn catalog_scope_and_category_contracts_hold() {
         schema["properties"]["scope"]["enum"],
         serde_json::json!(["scope", "agent", "global"])
     );
+    assert!(schema["properties"].get("force").is_none());
+    assert_eq!(schema["additionalProperties"], Value::Bool(false));
 }
 
 #[test]

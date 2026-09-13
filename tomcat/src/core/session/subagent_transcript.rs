@@ -232,6 +232,7 @@ impl JsonlFileAppendSink {
             id: self.child_session_id.clone(),
             timestamp: iso_ts_now(),
             cwd: None,
+            project_root: None,
         };
         write_header(&self.path, &header)?;
 

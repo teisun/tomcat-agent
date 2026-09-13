@@ -520,6 +520,7 @@ fn remove_user_model_rejects_models_still_referenced_by_config_or_sessions() {
                     updated_at: 1,
                     session_file: None,
                     cwd: None,
+                    project_root: None,
                     thinking_level: None,
                     model_override: Some("custom-claude".to_string()),
                     input_tokens: None,

@@ -422,7 +422,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "package_install",
         label: "Package Install",
-        description: "Install a local Tomcat package, skill, or plugin after confirmation. Pass a local source path and scope (`scope`, `agent`, or `global`); the current workspace is used for scope installs. The operation validates the package before writing and returns installed resources plus `inventory_dirty` for the next session refresh.\n",
+        description: "Install a local Tomcat package, skill, or plugin after confirmation. Pass a local source path and scope (`scope`, `agent`, or `global`); `scope` requires the session's explicit project root. The operation validates the package before writing and returns a machine-readable `status` (`installed`, `cancelled`, `denied`, or `failed`) plus installed resources and `inventory_dirty` for the next session refresh.\n",
         display_summary: Some("Install a local package after confirmation."),
         parameters: package_install_parameters,
         scope: PermissionScope::Write,
@@ -559,9 +559,21 @@ pub fn builtin_tool_surface_with_policies(
     allow_load_skill: bool,
     allow_connector_tools: bool,
 ) -> BuiltinToolSurface {
+    builtin_tool_surface_with_policies_and_install(allow_load_skill, allow_connector_tools, true)
+}
+
+/// Builds a session-aware tool surface. Package installation is omitted while a
+/// session is planning, so the model cannot propose a write-only operation that
+/// the runtime will reject. The execution guard remains authoritative.
+pub fn builtin_tool_surface_with_policies_and_install(
+    allow_load_skill: bool,
+    allow_connector_tools: bool,
+    allow_package_install: bool,
+) -> BuiltinToolSurface {
     let entries = BUILTIN_TOOL_CATALOG
         .iter()
         .filter(|entry| allow_load_skill || entry.name != "load_skill")
+        .filter(|entry| allow_package_install || entry.name != "package_install")
         .filter(|entry| {
             allow_connector_tools
                 || !matches!(
@@ -1235,14 +1247,15 @@ fn config_set_parameters() -> Value {
 }
 
 fn package_install_parameters() -> Value {
-    object_schema(
+    let mut schema = object_schema(
         serde_json::json!({
-            "source": { "type": "string", "description": "Local directory or package.json/plugin.json/SKILL.md to install." },
-            "scope": { "type": "string", "enum": ["scope", "agent", "global"], "description": "Installation scope. Defaults to scope (the current workspace)." },
-            "force": { "type": "boolean", "description": "Replace a same-layer package or resource after confirmation. Defaults to false." }
+            "source": { "type": "string", "description": "Absolute local directory or package.json/plugin.json/SKILL.md to install." },
+            "scope": { "type": "string", "enum": ["scope", "agent", "global"], "description": "Installation scope. Defaults to scope. Scope requires this session to have an explicit project root." }
         }),
         &["source"],
-    )
+    );
+    schema["additionalProperties"] = Value::Bool(false);
+    schema
 }
 
 // ─── PLAN 模式工具 schema（T2-P1-002/003） ─────────────────────────────────

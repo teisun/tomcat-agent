@@ -222,7 +222,7 @@ mod tests {
             .to_string(),
         )
         .expect("write MCP config");
-        let manager = McpManager::new(&cfg, &workspace).expect("construct manager");
+        let manager = McpManager::new(&cfg, Some(&workspace)).expect("construct manager");
         manager
             .connect_server("fake")
             .await
@@ -272,7 +272,7 @@ return response;
 
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
-        let manager = McpManager::new(&cfg, &workspace).expect("construct manager");
+        let manager = McpManager::new(&cfg, Some(&workspace)).expect("construct manager");
         manager
             .connect_server("project-fake")
             .await

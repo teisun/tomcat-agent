@@ -284,6 +284,9 @@ export function ConnectorsSettingsView({
         </header>
         {state.error ? <div className="tc-banner tc-banner--warning">{state.error}</div> : null}
         {state.status ? <div className="tc-banner">{state.status}</div> : null}
+        <div className="tc-banner tc-settings-restart-hint" role="status">
+          Changes to the project resource directory take effect after restarting Tomcat.
+        </div>
         {groups.length === 0 ? (
           <section className="tc-empty-state">
             <h2>No connectors configured</h2>
@@ -373,7 +376,7 @@ export function ConnectorsSettingsView({
             <h2>Add Connector</h2>
             <div className="tc-connector-form-row"><span>Name</span><input aria-label="Name" value={name} onChange={(event) => setName(event.target.value)} /></div>
             <div className="tc-connector-form-row"><span>Type</span><div className="tc-connector-radio-row"><label><input checked type="radio" onChange={() => {}} /> MCP</label><label className="tc-muted"><input disabled type="radio" /> CLI (soon)</label><label className="tc-muted"><input disabled type="radio" /> A2A (soon)</label></div></div>
-            <div className="tc-connector-form-row"><span>Scope</span><div className="tc-connector-radio-row"><label><input checked={scope === "user"} name="scope" onChange={() => setScope("user")} type="radio" /> Global</label><label><input checked={scope === "workspace"} name="scope" onChange={() => setScope("workspace")} type="radio" /> Workspace</label></div></div>
+            <div className="tc-connector-form-row"><span>Scope</span><div className="tc-connector-radio-row"><label><input checked={scope === "user"} name="scope" onChange={() => setScope("user")} type="radio" /> Global</label><label className={state.connectorConfigPaths?.workspace ? undefined : "tc-muted"}><input checked={scope === "workspace"} disabled={!state.connectorConfigPaths?.workspace} name="scope" onChange={() => setScope("workspace")} type="radio" /> Workspace{state.connectorConfigPaths?.workspace ? "" : " (open a project first)"}</label></div></div>
             <div className="tc-connector-form-row"><span>Config file</span>{configurationPathForScope(state, scope) ? <button className="tc-connector-config-link" onClick={() => send(vscodeApi, "openConnectorConfig", { scope })} type="button"><code>{configurationPathForScope(state, scope)}</code></button> : <span className="tc-muted">Configuration file unavailable</span>}</div>
             <div className="tc-connector-form-row"><span>Connection</span><div className="tc-connector-radio-row"><label><input checked={transport === "stdio"} name="transport" onChange={() => setTransport("stdio")} type="radio" /> stdio</label><label><input checked={transport === "http"} name="transport" onChange={() => setTransport("http")} type="radio" /> HTTP</label></div></div>
             {transport === "http" && authMode === "oauth" ? <div className="tc-connector-form-row"><span>OAuth client ID</span><div><input aria-label="OAuth client ID" placeholder="Optional" value={clientId} onChange={(event) => setClientId(event.target.value)} /><small>Dynamic registration is used when empty.</small></div></div> : null}

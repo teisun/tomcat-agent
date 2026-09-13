@@ -68,6 +68,7 @@ pub struct ChatContext {
 #[derive(Default)]
 pub struct ChatContextOverrides {
     pub ask_question_panel: Option<Arc<dyn panels::AskQuestionPanel>>,
+    pub confirmation: Option<Arc<dyn UserConfirmationProvider>>,
     pub fetch_http_client: Option<reqwest::Client>,
     pub shared_agent_registry: Option<Arc<crate::core::agent_registry::AgentRegistry>>,
     pub shared_model_prefs: Option<Arc<ModelPrefsStore>>,
@@ -79,6 +80,11 @@ pub struct ChatContextOverrides {
 impl ChatContextOverrides {
     pub fn with_ask_question_panel(mut self, panel: Arc<dyn panels::AskQuestionPanel>) -> Self {
         self.ask_question_panel = Some(panel);
+        self
+    }
+
+    pub fn with_confirmation(mut self, confirmation: Arc<dyn UserConfirmationProvider>) -> Self {
+        self.confirmation = Some(confirmation);
         self
     }
 
@@ -153,7 +159,7 @@ fn build_model_prefs_store(config: &AppConfig) -> Result<Arc<ModelPrefsStore>, A
 
 fn connector_registry_for(
     config: &AppConfig,
-    workspace_root: &std::path::Path,
+    workspace_root: Option<&std::path::Path>,
 ) -> Result<Option<Arc<ConnectorRegistry>>, AppError> {
     config
         .connector
@@ -216,7 +222,8 @@ fn scope_runtime_cache(
 #[allow(clippy::too_many_arguments)]
 fn scope_runtime_for(
     config: &AppConfig,
-    agent_workspace_dir: std::path::PathBuf,
+    resource_root: std::path::PathBuf,
+    session_project_root: Option<std::path::PathBuf>,
     audit: Arc<dyn AuditRecorder>,
     llm_resolver: Arc<dyn crate::core::LlmResolver>,
     primitive: Arc<dyn PrimitiveExecutor>,
@@ -225,7 +232,7 @@ fn scope_runtime_for(
     overrides: &ChatContextOverrides,
 ) -> Result<Arc<ScopeContainer>, AppError> {
     let disable_cache = overrides.fetch_http_client.is_some();
-    let key = std::fs::canonicalize(&agent_workspace_dir).unwrap_or(agent_workspace_dir);
+    let key = std::fs::canonicalize(&resource_root).unwrap_or(resource_root);
     let current_tokio_handle = tokio::runtime::Handle::try_current().ok();
     if !disable_cache {
         if let Some(existing) = scope_runtime_cache()
@@ -258,7 +265,7 @@ fn scope_runtime_for(
         bash_task_registry,
         session,
     };
-    let connector_registry = connector_registry_for(config, &key)?;
+    let connector_registry = connector_registry_for(config, session_project_root.as_deref())?;
     let (tool_registry, function_registry, plugin_manager, plugin_function_invoker, dispatcher) =
         build_plugin_runtime(
             config,
@@ -352,7 +359,10 @@ impl ChatContext {
         std::fs::create_dir_all(&agent_definition_dir).map_err(AppError::Io)?;
         let agent_trail_dir = resolve_agent_trail_dir(&config)?;
         std::fs::create_dir_all(&agent_trail_dir).map_err(AppError::Io)?;
-        let current_session_entry = session.ensure_current_session(session_cwd.clone())?;
+        // CLI startup owns its cwd; persist it as the explicit project root rather
+        // than later treating the backend process cwd as an implicit fallback.
+        let current_session_entry = session
+            .ensure_current_session_with_project_root(session_cwd.clone(), session_cwd.clone())?;
         session.pin_session(&current_session_entry.session_id);
         migrate_legacy_layer0_tool_results(&agent_definition_dir, &agent_trail_dir);
 
@@ -382,12 +392,16 @@ impl ChatContext {
             ));
         let _ = llm_resolver.resolve(crate::core::llm::LlmScene::Main, None)?;
 
-        let audit: Arc<dyn AuditRecorder> = match AuditStore::open_if_enabled(&config)? {
-            Some(store) => Arc::new(FileAuditRecorder::new(Arc::new(store))),
+        let audit_store = AuditStore::open_if_enabled(&config)?.map(Arc::new);
+        let audit: Arc<dyn AuditRecorder> = match audit_store.as_ref() {
+            Some(store) => Arc::new(FileAuditRecorder::new(Arc::clone(store))),
             None => Arc::new(TracingAuditRecorder),
         };
         let workspace_roots = resolve_workspace_roots_paths(&config)?;
-        let cli_confirmation: Arc<dyn UserConfirmationProvider> = Arc::new(CliConfirmation);
+        let base_confirmation: Arc<dyn UserConfirmationProvider> = overrides
+            .confirmation
+            .clone()
+            .unwrap_or_else(|| Arc::new(CliConfirmation));
 
         let session_grants = crate::core::permission::SessionGrants::new();
         let agent_trail_readonly_dirs: Vec<std::path::PathBuf> = vec![
@@ -415,7 +429,7 @@ impl ChatContext {
 
         let confirmation: Arc<dyn UserConfirmationProvider> =
             Arc::new(permission::cwd_lazy::CwdLazyPrompt::new(
-                cli_confirmation,
+                base_confirmation,
                 agent_workspace_dir.clone(),
                 gate.clone(),
                 session_grants.clone(),
@@ -462,6 +476,17 @@ impl ChatContext {
                 Err(_) => None,
             };
 
+        let session_project_root = current_session_entry
+            .project_root
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_dir())
+            .and_then(|path| std::fs::canonicalize(path).ok());
+        let resource_root = session_project_root
+            .clone()
+            // Older session records have no explicit root. Keep their established discovery
+            // behavior, but do not use this fallback as an install target.
+            .unwrap_or_else(|| agent_workspace_dir.clone());
         let checkpoint_switcher =
             checkpoint_store_for(agent_trail_dir.clone(), agent_workspace_dir.clone());
         let checkpoint_store: Arc<dyn crate::core::CheckpointStore> = checkpoint_switcher.clone();
@@ -470,7 +495,8 @@ impl ChatContext {
         let session_arc = Arc::new(session.clone());
         let shared_scope_runtime = scope_runtime_for(
             &config,
-            agent_workspace_dir.clone(),
+            resource_root.clone(),
+            session_project_root.clone(),
             audit.clone(),
             llm_resolver.clone(),
             primitive.clone(),
@@ -595,6 +621,25 @@ impl ChatContext {
         plan_runtime.attach_checkpoint_store(checkpoint_store.clone());
         plan_runtime.register_todos_panel(Arc::new(panels::CliTodosPanel));
         plan_runtime.attach_ask_question_panel(ask_question_panel);
+
+        let mut package_install_context =
+            crate::core::tools::package_install::PackageInstallContext::new(
+                config.clone(),
+                agent_workspace_dir.clone(),
+                session_project_root.clone(),
+                confirmation.clone(),
+            )
+            .with_gate(gate.clone())
+            .with_plan_runtime(&plan_runtime);
+        if let Some(store) = audit_store.clone() {
+            package_install_context = package_install_context.with_audit_store(store);
+        }
+        let package_install_backend: Option<crate::core::agent_loop::SharedPackageInstallBackend> =
+            Some(Arc::new(
+                crate::core::tools::package_install::ChatPackageInstallBackend {
+                    ctx: package_install_context,
+                },
+            ));
 
         let agent_registry = overrides.shared_agent_registry.unwrap_or_else(|| {
             crate::core::agent_registry::AgentRegistry::new().attach_event_bus(event_bus.clone())
@@ -805,6 +850,7 @@ impl ChatContext {
             audit: audit.clone(),
             gate: gate.clone(),
             config_backend: config_backend.clone(),
+            package_install_backend: package_install_backend.clone(),
             web_fetch_runtime: web_fetch_runtime.clone(),
             web_search_runtime: web_search_runtime.clone(),
             plugin_manager,
@@ -816,6 +862,8 @@ impl ChatContext {
             checkpoint_switcher: checkpoint_switcher.clone(),
             checkpoint_store: checkpoint_store.clone(),
             agent_workspace_dir: agent_workspace_dir.clone(),
+            resource_root: resource_root.clone(),
+            session_project_root: session_project_root.clone(),
             agent_definition_dir: agent_definition_dir.clone(),
             agent_trail_dir: agent_trail_dir.clone(),
             cfg_path: cfg_path_snapshot.clone(),
@@ -828,6 +876,9 @@ impl ChatContext {
             cancel_token: cancel_token.clone(),
             last_interrupt_at: last_interrupt_at.clone(),
             hard_exit_requested: hard_exit_requested.clone(),
+            seen_resource_inventory_epoch: Arc::new(std::sync::atomic::AtomicU64::new(
+                crate::api::chat::session_runtime::current_resource_inventory_epoch(),
+            )),
             session_grants: session_grants.clone(),
             bash_task_registry: bash_task_registry.clone(),
             follow_up_queue: follow_up_queue.clone(),
@@ -835,6 +886,7 @@ impl ChatContext {
             completion_routes: completion_routes.clone(),
             delivered_completion: delivered_completion.clone(),
             completion_subscriber_handle: completion_subscriber_handle.clone(),
+            checkpoint_record_tasks: Arc::new(Mutex::new(Vec::new())),
             read_file_state: read_file_state.clone(),
             openai_files_runtime: Arc::new(Mutex::new(None)),
             thinking_display: thinking_display.clone(),
@@ -944,7 +996,7 @@ impl ChatContext {
         if handle.is_none() {
             *handle = Some(crate::core::skill::spawn_discovery_task(
                 self.config.clone(),
-                self.scope_services.agent_workspace_dir.clone(),
+                self.scope_services.resource_root.clone(),
             ));
         }
     }
@@ -976,6 +1028,26 @@ impl ChatContext {
         }
     }
 
+    /// Refresh cacheable skill/plugin inventories only before a later user turn. Active plugin
+    /// VMs are intentionally left alone by `refresh_plugin_catalog_inventory`; a new inventory
+    /// must not replace live plugin code halfway through a conversation.
+    pub(crate) async fn refresh_resource_inventory_before_turn(&self) -> Result<(), AppError> {
+        let current = crate::api::chat::current_resource_inventory_epoch();
+        let seen = self
+            .session_runtime
+            .seen_resource_inventory_epoch
+            .load(std::sync::atomic::Ordering::Acquire);
+        if current <= seen {
+            return Ok(());
+        }
+        self.reload_skill_set().await;
+        self.refresh_plugin_catalog_inventory().await?;
+        self.session_runtime
+            .seen_resource_inventory_epoch
+            .store(current, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
     pub(crate) async fn reload_skill_set(&self) -> crate::core::skill::SkillSet {
         if let Some(handle) = self
             .scope_services
@@ -987,10 +1059,16 @@ impl ChatContext {
             handle.abort();
         }
         let skill_set = if self.config.skills.enabled {
-            crate::core::skill::discover(&self.config, &self.scope_services.agent_workspace_dir)
+            crate::core::skill::discover(&self.config, &self.scope_services.resource_root)
         } else {
             crate::core::skill::SkillSet::default()
         };
+        if skill_set.warnings.iter().any(|warning| {
+            warning == "skills_discovery_roots_failed"
+                || warning.starts_with("skills_root_unreadable:")
+        }) {
+            return self.skill_set_snapshot();
+        }
         *self.scope_services.skill_set.write() = skill_set.clone();
         skill_set
     }
@@ -1006,8 +1084,7 @@ impl ChatContext {
             .ok()
             .flatten();
 
-        let catalog =
-            PluginCatalog::discover(&self.config, &self.scope_services.agent_workspace_dir)?;
+        let catalog = PluginCatalog::discover(&self.config, &self.scope_services.resource_root)?;
         let discovered_ids = catalog
             .iter()
             .map(|(plugin_id, _)| plugin_id.clone())
@@ -1071,7 +1148,7 @@ impl ChatContext {
 
         let function_catalog = refresh_host_function_registry(
             &self.config,
-            &self.scope_services.agent_workspace_dir,
+            &self.scope_services.resource_root,
             &self.global_services.function_registry,
         )?;
         let mut warnings = catalog.warnings.clone();
@@ -1617,13 +1694,13 @@ mod tests {
         let mut enabled = AppConfig::default();
         enabled.connector.enabled = true;
         enabled.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
-        assert!(connector_registry_for(&enabled, temp.path())
+        assert!(connector_registry_for(&enabled, Some(temp.path()))
             .expect("enabled connector registry")
             .is_some());
 
         let mut disabled = enabled.clone();
         disabled.connector.enabled = false;
-        assert!(connector_registry_for(&disabled, temp.path())
+        assert!(connector_registry_for(&disabled, Some(temp.path()))
             .expect("disabled connector registry")
             .is_none());
     }

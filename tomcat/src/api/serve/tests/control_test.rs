@@ -487,7 +487,7 @@ async fn shutdown_all_sessions_stops_live_plugin_vms_idempotently() {
     write_session_plugin_fixture(plugin_workspace.path(), PLUGIN_ID);
     let plugin_dir = plugin_workspace
         .path()
-        .join(".tomcat")
+        .join(".agents")
         .join("plugins")
         .join(PLUGIN_ID);
 

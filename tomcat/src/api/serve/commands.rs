@@ -24,6 +24,7 @@ use crate::core::connector::mcp::config::{
     McpConfigSource, McpOAuthConfig, McpServerConfig, ToolFilter,
 };
 use crate::core::connector::mcp::manager::ServerState;
+use crate::core::connector::ConnectorRegistry;
 use crate::core::llm::{
     list_model_views_with_prefs, list_provider_keys, remove_user_model, set_provider_key,
     upsert_user_model, ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind,
@@ -1311,18 +1312,11 @@ pub(crate) async fn handle_command(
             )))?;
         }
         ServeCommand::ListConnectors { id } => {
-            let connector = match resolve_connector_registry(&state) {
-                Ok(connector) => connector,
-                Err(error) => {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
-                }
-            };
+            // A settings panel may open before any chat session exists. In that case,
+            // expose the global configuration through an unbound connector registry;
+            // it must not invent a workspace from the serve process cwd.
+            let connector = resolve_connector_registry(&state)
+                .or_else(|_| ConnectorRegistry::new(&state.cfg, None))?;
             let global_config_path = match global_mcp_path(&state.cfg) {
                 Ok(path) => path,
                 Err(error) => {
@@ -1335,19 +1329,11 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            let project_config_path =
-                match project_mcp_path(&state.cfg, connector.mcp_manager().workspace_root()) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        send_error(
-                            &state,
-                            id,
-                            state.registry.active_session_id(),
-                            render_error_message(&error),
-                        )?;
-                        return Ok(());
-                    }
-                };
+            let project_config_path = connector
+                .mcp_manager()
+                .workspace_root()
+                .map(|root| project_mcp_path(&state.cfg, root))
+                .transpose()?;
             let servers = connector
                 .mcp_manager()
                 .statuses()
@@ -1355,10 +1341,12 @@ pub(crate) async fn handle_command(
                 .map(|status| {
                     let configured = connector.mcp_manager().configured_server(&status.name);
                     let config_path = match status.source {
-                        McpConfigSource::Global => global_config_path.clone(),
+                        McpConfigSource::Global => Some(global_config_path.clone()),
                         McpConfigSource::Project => project_config_path.clone(),
                     };
-                    let config_path_display = crate::infra::platform::format_home_path(&config_path);
+                    let config_path_display = config_path
+                        .as_ref()
+                        .map(|path| crate::infra::platform::format_home_path(path));
                     json!({
                         "name": status.name,
                         "source": status.source.as_str(),
@@ -1370,7 +1358,7 @@ pub(crate) async fn handle_command(
                         "url": configured.as_ref().and_then(|server| server.config.url.clone()),
                         "command": configured.as_ref().map(|server| server.config.command.clone()),
                         "configPath": config_path_display,
-                        "configPathRaw": config_path.to_string_lossy().to_string(),
+                        "configPathRaw": config_path.map(|path| path.to_string_lossy().to_string()),
                         "oauthConfigured": configured.as_ref().is_some_and(|server| {
                             server.config.oauth.is_some()
                                 || server.config.auth.as_deref() == Some("oauth")
@@ -1394,10 +1382,10 @@ pub(crate) async fn handle_command(
                     "display": crate::infra::platform::format_home_path(&global_config_path),
                     "raw": global_config_path.to_string_lossy().to_string(),
                 },
-                "workspace": {
-                    "display": crate::infra::platform::format_home_path(&project_config_path),
-                    "raw": project_config_path.to_string_lossy().to_string(),
-                },
+                "workspace": project_config_path.as_ref().map(|path| json!({
+                    "display": crate::infra::platform::format_home_path(path),
+                    "raw": path.to_string_lossy().to_string(),
+                })),
             });
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
@@ -1518,14 +1506,22 @@ pub(crate) async fn handle_command(
             };
             let use_workspace = scope.as_deref() == Some("workspace");
             let workspace_root = resolve_connector_registry(&state)
-                .map(|connector| connector.mcp_manager().workspace_root().to_path_buf())
-                .unwrap_or_else(|_| {
-                    resolve_active_slot(&state)
-                        .map(|slot| slot.ctx.scope_services.agent_workspace_dir.clone())
-                        .unwrap_or_default()
+                .ok()
+                .and_then(|connector| {
+                    connector
+                        .mcp_manager()
+                        .workspace_root()
+                        .map(|path| path.to_path_buf())
                 });
             let result = if use_workspace {
-                upsert_project_server(&state.cfg, &workspace_root, name.clone(), config)
+                match workspace_root.as_deref() {
+                    Some(workspace_root) => {
+                        upsert_project_server(&state.cfg, workspace_root, name.clone(), config)
+                    }
+                    None => Err(AppError::Config(
+                        "workspace connector configuration requires an explicit session project root".into(),
+                    )),
+                }
             } else {
                 upsert_global_server(&state.cfg, name.clone(), config)
             };

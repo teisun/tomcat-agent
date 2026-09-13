@@ -169,7 +169,9 @@ mod tests {
         )
         .expect("embedded skill-creator SKILL.md is UTF-8");
         assert!(skill_creator.contains("name: skill-creator"));
-        assert!(skill_creator.contains("package_install"));
+        assert!(SKILL_CREATOR_ASSETS
+            .get_file("scripts/init_skill.py")
+            .is_some());
         assert!(SKILL_CREATOR_ASSETS
             .get_file("scripts/quick_validate.py")
             .is_some());
@@ -261,6 +263,50 @@ mod tests {
                 .expect("load materialized connectors skill through the normal loader");
         assert!(connector_payload.contains("## Deferred connector workflow"));
         assert!(connector_payload.contains("tool_search(source=\"<source>\")"));
+    }
+
+    #[tokio::test]
+    async fn creator_assets_are_complete_loadable_and_reusable_across_projects() {
+        let temp = tempfile::tempdir().expect("test temp directory");
+        let work_dir = temp.path().join("work");
+        let workspace_a = temp.path().join("workspace-a");
+        let workspace_b = temp.path().join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).unwrap();
+        std::fs::create_dir_all(&workspace_b).unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+        materialize_builtin_skills(&cfg).expect("materialize creators");
+
+        for workspace in [&workspace_a, &workspace_b] {
+            let skills = discover(&cfg, workspace);
+            for (name, attachment, expected) in [
+                (
+                    "skill-creator",
+                    "scripts/init_skill.py",
+                    "Create a portable Tomcat skill",
+                ),
+                (
+                    "plugin-creator",
+                    "scripts/init_plugin.mjs",
+                    "tomcat.registerTool",
+                ),
+            ] {
+                let skill = skills.by_name.get(name).expect("creator discovered");
+                assert_eq!(skill.source, SkillSource::Managed);
+                let body = load_skill_payload(&SkillFilePrimitive, "__test__", skill, None)
+                    .await
+                    .expect("load creator body");
+                assert!(
+                    body.contains(&format!("<skill name=\"{name}\"")),
+                    "the normal loader must return the creator entrypoint"
+                );
+                let attachment =
+                    load_skill_payload(&SkillFilePrimitive, "__test__", skill, Some(attachment))
+                        .await
+                        .expect("load creator attachment");
+                assert!(attachment.contains(expected));
+            }
+        }
     }
 
     #[test]

@@ -20,6 +20,7 @@ fn valid_header_with_malformed_data_record_is_rebuilt() {
             id: "integrity".to_string(),
             timestamp: "2026-08-10T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -68,6 +69,7 @@ fn branch_summary_append_rebuilds_sidecar_once_then_preserves_next_fingerprint_h
             id: "fingerprint".to_string(),
             timestamp: "2026-08-10T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

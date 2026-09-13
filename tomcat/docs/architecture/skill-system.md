@@ -803,14 +803,14 @@ env：`TOMCAT__SKILLS__ENABLED` / `TOMCAT__SKILLS__PROMPT_BUDGET_PCT` / `TOMCAT_
 | `tomcat.config.toml` | `[skills] max_description_chars`     | 单条描述截断                            | config      | 默认 250。   |
 | `tomcat.config.toml` | `[skills] disabled`                | 按名拉黑技能                              | config      | 临时禁某几条。   |
 | `tomcat.config.toml` | `[skills] expose_to_reviewer`      | reviewer/verifier 是否可用 `load_skill` | config      | 默认 false。 |
-| 磁盘 P0              | `<agent_workspace_dir>/.tomcat/skills/` | 当前 project 本地技能（最高优先级）              | —           | 当前仓库自己写的技能。 |
+| 磁盘 P0              | `<agent_workspace_dir>/.agents/skills/` | 当前 project 本地技能（最高优先级）              | —           | 当前仓库自己写的技能。 |
 | 磁盘 P1              | `~/.tomcat/agents/<agentId>/skills/` | 当前 agent 专属技能                         | —           | 绑定 agent 的技能。 |
 | 磁盘 P2              | `~/.tomcat/skills/`                | 全局托管技能（Gateway 安装）                  | —           | 集中管理的技能。  |
 | 编译期资产源           | `tomcat/assets/skills/`             | 官方内置 skill 文件源（编译期）                  | build/init  | 不是发现根；`tomcat init` 写入 P2 Managed。 |
 
 
 > **技能不读 env override 正文**：与 `prompts/mod.rs` 同口径，`SKILL.md` 正文从磁盘读但不支持 env 注入；env 仅控制开关 / 预算 / 路径。
-> **能否「纯配置接入新技能」**：能——往当前 project 的 `.tomcat/skills/<name>/SKILL.md` 放一个文件即可，无需改码（与「新增工具要改 `catalog.rs`」不同）。这是技能相对内置工具的核心扩展性优势。
+> **能否「纯配置接入新技能」**：能——往当前 project 的 `.agents/skills/<name>/SKILL.md` 放一个文件即可，无需改码（与「新增工具要改 `catalog.rs`」不同）。这是技能相对内置工具的核心扩展性优势。
 
 ## 8. 错误模型 / 截断 / 警告
 

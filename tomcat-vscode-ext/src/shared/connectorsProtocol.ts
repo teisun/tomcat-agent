@@ -18,7 +18,8 @@ export interface ConnectorConfigPath {
 
 export interface ConnectorConfigPaths {
   global: ConnectorConfigPath;
-  workspace: ConnectorConfigPath;
+  /** Undefined when this session has no explicit project root. */
+  workspace?: ConnectorConfigPath;
 }
 
 export interface ConnectorView {

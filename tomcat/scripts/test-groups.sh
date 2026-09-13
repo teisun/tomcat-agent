@@ -21,6 +21,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   session_tests
   session_concurrency_tests
   plugin_tests
+  package_install_tool_tests
   llm_tests
   llm_gateway_toggle_tests
   context_management_tests

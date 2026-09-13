@@ -19,6 +19,7 @@ fn insert_entry_after_message_id_inserts_before_later_messages() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -76,6 +77,7 @@ fn mark_message_entries_after_anchor_superseded_marks_only_later_messages() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -146,6 +148,7 @@ fn mark_message_entries_after_anchor_superseded_requires_anchor() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -165,6 +168,7 @@ fn mark_tool_result_entries_by_tool_call_id_superseded_marks_only_matching_activ
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -261,6 +265,7 @@ fn mark_trailing_user_messages_superseded_marks_only_active_user_tail() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -324,6 +329,7 @@ fn mark_user_message_entry_superseded_by_id_is_precise_and_idempotent() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -420,6 +426,7 @@ fn rewrite_message_text_entries_by_id_updates_target_messages_only() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

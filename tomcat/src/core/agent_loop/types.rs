@@ -319,6 +319,9 @@ pub struct AgentLoop {
     /// CLI / 单测路径继续传 `None`，工具命中时返回"未启用"错误（不影响
     /// 4 原语的 execute_tool 主流程）。
     pub(super) config_backend: Option<super::config_backend::SharedConfigBackend>,
+    /// Optional typed package-install backend.  It is separate from `config_backend`
+    /// because its configuration and project-root snapshot must not drift during a session.
+    pub(super) package_install_backend: Option<super::config_backend::SharedPackageInstallBackend>,
     /// T2-P0-016 PR-I：bash 后台任务三件套（task_output / task_stop / task_list）
     /// 共享的注册表。注入路径：`ChatContext::from_config` 用 `agent_trail_dir/tool-results`
     /// 作 persist_dir 构造一份 `Arc<BashTaskRegistry>`，通过

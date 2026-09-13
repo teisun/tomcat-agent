@@ -32,6 +32,7 @@ fn save_and_load_store_roundtrip() {
             updated_at: 1_000_000,
             session_file: None,
             cwd: Some("/tmp".to_string()),
+            project_root: None,
             thinking_level: None,
             model_override: None,
             input_tokens: None,

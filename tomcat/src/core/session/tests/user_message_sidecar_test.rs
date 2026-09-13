@@ -13,6 +13,7 @@ fn header() -> SessionHeader {
         id: "sidecar-session".to_string(),
         timestamp: "2026-08-10T00:00:00.000Z".to_string(),
         cwd: None,
+        project_root: None,
     }
 }
 

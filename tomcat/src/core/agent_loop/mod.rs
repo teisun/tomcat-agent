@@ -156,7 +156,11 @@ pub(crate) async fn execute_tool_for_cross_module_test(
     tool_exec::execute_tool(primitive, &None, &None, Some(read_file_state), tool_call).await
 }
 
-pub use config_backend::{ConfigBackend, SharedConfigBackend};
+pub use config_backend::{
+    ConfigBackend, PackageInstallBackend, PackageInstallRequest, PackageInstallStatus,
+    PackageInstallToolResource, PackageInstallToolResult, SharedConfigBackend,
+    SharedPackageInstallBackend,
+};
 pub use current_tail_guard::{build_collapse_summary_artifacts_for_test, CollapseSummaryArtifacts};
 pub use types::{
     AgentLoop, AgentLoopConfig, AgentRunOutcome, AgentRunResult, BackgroundCompletionRoutes,

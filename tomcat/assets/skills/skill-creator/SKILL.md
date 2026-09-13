@@ -1,129 +1,121 @@
 ---
 name: skill-creator
-description: Create and refine Codex skills (folders containing `SKILL.md`). Use when you need help naming a skill, writing effective `name`/`description`, structuring the on-disk instructions, or adding scripts/references/assets for repeatable workflows.
-license: Complete terms in LICENSE.txt
+description: Create or update a Tomcat skill with focused instructions and only the scripts, references, or assets its workflow needs.
+license: Apache-2.0; see LICENSE.txt
 ---
 
 # Skill Creator
 
-This skill provides guidance for creating effective **Codex** skills.
+Create skills that give an agent useful, non-obvious guidance without constraining unrelated work.
 
-## How Codex Skills Work
+## Core principles
 
-- Ensure the experimental `skills` feature is enabled (config: `[features] skills = true`, or launch with `codex --enable skills`).
-- Codex discovers skills from `~/.codex/skills/**/SKILL.md` (recursive). Only files named exactly `SKILL.md` count.
-- Hidden entries and symlinks are skipped.
-- Codex injects **only** `name`, `description`, and the file path into runtime context.
-- The SKILL.md **body stays on disk** until you explicitly insert it (via `/skills` or by mentioning `$<skill-name>`).
-- Skills are loaded once at startup; restart Codex after edits if you don’t see changes.
+**Assume the agent can do ordinary work.** Include information only when it changes a decision, improves a result, or records a real constraint. Remove generic advice, repeated rules, speculative edge cases, and examples that do not make the work clearer.
 
-### What Skills Are For
+**Preserve the user's scope.** A skill supports the requested task. It must not silently broaden the assignment, modify unrelated configuration, or treat approval for one action as permission for another. A retrying or externally changing workflow needs a stopping condition that matches its risk.
 
-- Reusable workflows: “how we do X here”
-- Tooling playbooks: exact commands, flags, scripts, and verification loops
-- Local reference: schemas, conventions, checklists, templates
-- Bundled resources: scripts/assets that are better stored on disk than re-generated
+**Match detail to risk.** Use deterministic steps or scripts when safety, correctness, permissions, or a fragile workflow needs them. For ordinary work, state the outcome and decision criteria instead of forcing one rigid process.
 
-## Core Principles
+**Keep discovery precise.** The name and description are seen before the body. Describe what the skill does and when it applies. Do not turn one skill into a catch-all list of capabilities.
 
-### Keep `name`/`description` High-Signal
+**Reveal detail progressively.** Put purpose, essential constraints, and routing in `SKILL.md`. Put large examples, schemas, or mode-specific procedures in `references/`, and load only the file relevant to the current task.
 
-Codex validates only two required frontmatter fields:
+## Anatomy of a skill
 
-- `name`: non-empty, ≤100 characters, single line
-- `description`: non-empty, ≤500 characters, single line
+Every skill is a folder containing a required `SKILL.md` and only the optional resources its real workflow needs:
 
-Extra YAML keys are ignored by Codex, but keep frontmatter minimal to avoid confusion.
-
-Write descriptions so the right skill is obvious from the skills list:
-- Include “what it does” **and** “when to use it” (triggers, file types, tools, domains).
-- Prefer concrete keywords over generic phrasing (“BigQuery SQL”, “OpenAPI”, “Terraform”, “.docx”, “invoice PDFs”, “React”, “Postgres”).
-
-### Keep The Body Skimmable
-
-The body is only loaded when explicitly inserted, but once inserted it consumes context. Prefer:
-
-- Short “Quick start” + “Decision tree” sections
-- Links to on-disk `references/` docs for depth
-- Scripts for repeated, deterministic work
-
-### Match Guardrails To Fragility
-
-Use more structure when mistakes are costly or workflows are brittle:
-
-- High freedom: heuristics, checklists, examples
-- Medium freedom: pseudocode, templates, scripts with parameters
-- Low freedom: exact commands, strict templates, “do-not-skip” verification steps
-
-## Recommended Skill Layout (Not Required)
-
-Codex only cares about `SKILL.md`, but this structure keeps skills maintainable:
-
-```
+```text
 skill-name/
-├── SKILL.md (required)
-├── scripts/          # runnable helpers (optional)
-├── references/       # docs you may paste/insert (optional)
-└── assets/           # templates / binaries to copy (optional)
+|-- SKILL.md                 required instructions
+|   |-- YAML frontmatter     name and description
+|   `-- Markdown body        instructions loaded on use
+|-- scripts/                 optional deterministic helpers
+|-- references/              optional material loaded on demand
+`-- assets/                  optional files copied into an output
 ```
 
-## Skill Creation Workflow
+Choose the smallest useful structure. Do not create empty folders, examples, changelogs, or extra documentation without a concrete use.
 
-### Step 1: Collect Concrete Triggers
+### SKILL.md
 
-Start from real prompts you expect to see. Capture:
-- “User says …” examples (3–8)
-- Inputs involved (file types, repos, APIs, tools)
-- Outputs expected (formats, quality bar, constraints)
+The YAML frontmatter identifies a skill and determines when it can be considered. A portable Tomcat skill requires a lowercase hyphen-case string `name` and a one-line string `description`.
 
-### Step 2: Write Frontmatter (`name`, `description`)
+The body supplies the purpose, actual workflow, non-obvious constraints, and links to supporting files. Keep conditional procedures in references instead of placing every detail in the entrypoint.
 
-Keep both fields single-line.
+Skill information is available in three stages:
 
-Template:
+1. **Name and description** — used to decide whether the skill applies.
+2. **Body** — loaded when the skill is used.
+3. **Supporting resources** — read or executed only when the current task needs them.
 
-```markdown
----
-name: your-skill-name
-description: what it does + when to use it (<=500 chars, single line)
----
+A large limit is not a target. Move conditional material to a reference when it makes the main instructions easier to use.
+
+### Scripts
+
+Use `scripts/` when a repeated transformation would otherwise be re-created, or when a deterministic helper materially improves reliability.
+
+Good uses include repeated file conversions, data transformations, and safe validation. Run a changed script to verify observable behavior. Scripts must take explicit paths; do not rely on the process working directory or executable permissions.
+
+### References
+
+Use `references/` for maintained, task-specific information needed only in particular situations. Link each reference from this file and say when to load it. Keep one source of truth; do not copy a manual or tutorial simply because it is available elsewhere.
+
+For a large reference, add useful search words or a short contents list when that makes the needed section easier to find.
+
+### Assets
+
+Use `assets/` for files intended for generated output, such as templates, images, fonts, or starter projects. Assets are not instructions and should not be loaded into context unless inspection is needed for the task.
+
+## Create or update a skill
+
+Adapt the work to the request. A small edit may only require reading the existing header and body. A complex new skill may need realistic use cases, support files, initialization, writing, and validation.
+
+Ask a question only when a missing fact matters and cannot be safely inferred. Preserve the user's chosen location; otherwise create the skill in a separate source directory that the user controls.
+
+### Naming
+
+- Use lowercase letters, digits, and hyphens.
+- Keep names below 64 characters.
+- Prefer short, action-oriented names.
+- Name the folder after the skill.
+
+### Initialize a new skill
+
+Use the bundled initializer when it prevents avoidable format drift:
+
+```bash
+python3 "<skill directory>/scripts/init_skill.py" my-skill --path "<source directory>"
+python3 "<skill directory>/scripts/init_skill.py" my-skill --path "<source directory>" --resources scripts,references
 ```
 
-Recommendation: use lowercase hyphen-case names so `$your-skill-name` is easy to type.
+The initializer creates a source skill only. It never installs the skill, overwrites an existing folder, or changes workspace permissions. Request resource folders only when they will be used. If examples are created, replace or remove them before shipping.
 
-### Step 3: Scaffold The Folder
+### Write the instructions
 
-Create a folder under `~/.codex/skills/`:
+Write a concise description that says what the skill does and when it applies. Put the desired outcome, non-obvious context, genuine constraints, and useful references in the body. Do not prescribe an arbitrary number of steps or a fixed structure unless variation would create a concrete problem.
 
-- Manual: `mkdir -p ~/.codex/skills/<skill-name>/`
-- Scripted (from `~/.codex/skills`): `python3 skill-creator/scripts/init_skill.py <skill-name>` (see script help)
+For multi-stage work, read [workflows.md](references/workflows.md). For an output another program must consume, read [output-patterns.md](references/output-patterns.md).
 
-### Step 4: Write The Body (What To Do When Invoked)
+### Validate and iterate
 
-Default structure that works for most skills:
+Validate the completed source skill with:
 
-- `## Quick start` (fastest safe path)
-- `## Decision tree` (how to choose workflow)
-- `## Workflows` (numbered steps; include verification loops)
-- `## References` (what to open when)
+```bash
+python3 "<skill directory>/scripts/quick_validate.py" "<source skill directory>"
+```
 
-Use these reference guides when helpful:
-- Multi-step / branching processes: `skill-creator/references/workflows.md`
-- Strict output formats / examples: `skill-creator/references/output-patterns.md`
+The validator checks the portable format and unfinished placeholders. It does not prove that the instructions make good decisions. Also check that the description is specific, the references are discoverable, and every added script actually works.
 
-### Step 5: Add On-Disk Resources
+Improve the skill using a demonstrated failure or real usage. Prefer a narrow correction to collecting universal rules for every past incident.
 
-Add only what you’ll actually reuse:
-- `scripts/`: runnable helpers you don’t want to re-create (make executable; document usage in SKILL.md)
-- `references/`: deeper docs, schemas, checklists, examples
-- `assets/`: templates/binaries to copy into outputs
+## Tomcat-specific routes
 
-### Step 6: Validate And Iterate
+- For portable frontmatter, byte limits, and validation rules, read [portable-skills.md](references/portable-skills.md).
+- For packaging and the three installation scopes, read [tomcat-packages.md](references/tomcat-packages.md).
+- A standalone skill does not become a plugin merely because it has a `plugins/` folder. Follow the package manifest rules when plugin code is intended.
 
-- Run `python3 ~/.codex/skills/skill-creator/scripts/quick_validate.py ~/.codex/skills/<skill-name>` for a fast check.
-- Restart Codex and confirm the skill appears in `/skills`.
-- Try a real task by invoking `$<skill-name>` and refine the skill based on what was missing.
+Use `load_skill(name="skill-creator", file="references/<file>.md")` to load a reference when needed.
 
-## Tomcat adaptation
+Installing is separate from creating. With an explicit session project root, `scope` installs into that project; without one, report that scope is unavailable. `agent` and `global` installations require their own user confirmation and audit trail. Never bypass installation by copying into a managed directory, changing a registry, or using a shell command as a substitute for the authorized installer.
 
-Tomcat discovers managed built-ins from its global work directory. To distribute a new skill, create a local package, validate it, confirm the requested scope, then call `package_install`. Do not copy files directly into a project resource directory.
+An explorer is read-only. It can inspect a source skill and report validation evidence, but cannot claim it changed or installed anything.

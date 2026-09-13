@@ -79,7 +79,10 @@ pub struct ConnectorRegistry {
 }
 
 impl ConnectorRegistry {
-    pub fn new(cfg: &AppConfig, workspace_root: &std::path::Path) -> Result<Arc<Self>, AppError> {
+    pub fn new(
+        cfg: &AppConfig,
+        workspace_root: Option<&std::path::Path>,
+    ) -> Result<Arc<Self>, AppError> {
         Ok(Arc::new(Self {
             enabled: cfg.connector.enabled,
             config: cfg.clone(),
@@ -246,7 +249,8 @@ mod tests {
         )
         .expect("write MCP config");
 
-        let connectors = ConnectorRegistry::new(&cfg, &workspace).expect("connector registry");
+        let connectors =
+            ConnectorRegistry::new(&cfg, Some(&workspace)).expect("connector registry");
         let registry_impl = Arc::new(DefaultToolRegistry::new(
             Arc::new(MarkerExecutor("plugin")),
             Arc::new(TracingAuditRecorder),
@@ -288,7 +292,8 @@ mod tests {
         )
         .expect("write MCP config");
 
-        let connectors = ConnectorRegistry::new(&cfg, &workspace).expect("connector registry");
+        let connectors =
+            ConnectorRegistry::new(&cfg, Some(&workspace)).expect("connector registry");
         let registry_impl = Arc::new(DefaultToolRegistry::new(
             connectors.mcp_executor(),
             Arc::new(TracingAuditRecorder),
@@ -325,7 +330,8 @@ mod tests {
         )
         .expect("write MCP config");
 
-        let connectors = ConnectorRegistry::new(&cfg, &workspace).expect("connector registry");
+        let connectors =
+            ConnectorRegistry::new(&cfg, Some(&workspace)).expect("connector registry");
         let registry_impl = Arc::new(DefaultToolRegistry::new(
             connectors.mcp_executor(),
             Arc::new(TracingAuditRecorder),

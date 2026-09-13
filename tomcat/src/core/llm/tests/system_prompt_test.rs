@@ -58,6 +58,21 @@ fn planner_reminder_persists_plans_with_the_tool_for_each_changed_part() {
 }
 
 #[test]
+fn planning_surface_omits_package_install_but_chat_surface_keeps_it() {
+    let planning = ToolSurface::from_plugin_tools_with_runtime_policies(false, false, false, &[]);
+    let chat = ToolSurface::from_plugin_tools_with_runtime_policies(false, false, true, &[]);
+    let has = |surface: &ToolSurface, name: &str| {
+        surface
+            .function_definitions()
+            .iter()
+            .any(|definition| definition["function"]["name"].as_str() == Some(name))
+    };
+
+    assert!(!has(&planning, "package_install"));
+    assert!(has(&chat, "package_install"));
+}
+
+#[test]
 fn build_system_prompt_omits_dynamic_time() {
     let prompt = build_system_prompt("/tmp");
     assert!(!prompt.contains("Current date and time:"));

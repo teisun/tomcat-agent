@@ -1,3 +1,4 @@
+use crate::infra::error::AppError;
 use crate::infra::events::ToolDisplay;
 
 use super::super::ToolExecCtx;
@@ -45,12 +46,19 @@ pub(in super::super) async fn handle_package_install(
     ctx: &ToolExecCtx<'_>,
     args: &serde_json::Value,
 ) -> Result<String, String> {
-    let Some(backend) = ctx.config_backend.as_ref() else {
+    let Some(backend) = ctx.package_install_backend.as_ref() else {
         return Err("package_install 未启用：当前会话没有安装后端".to_string());
     };
+    let request = crate::core::agent_loop::PackageInstallRequest::parse(args)
+        .map_err(|error| error.to_string())?;
     backend
-        .package_install(args.clone())
+        .install(request)
         .await
+        .and_then(|result| {
+            serde_json::to_value(result).map_err(|error| {
+                AppError::Config(format!("序列化 package_install 结果失败: {error}"))
+            })
+        })
         .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()))
         .map_err(|error| error.to_string())
 }

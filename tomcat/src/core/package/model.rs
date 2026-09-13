@@ -330,6 +330,7 @@ pub struct PreparedInstallResource {
     pub id: String,
     pub source_path: String,
     pub source_dir: PathBuf,
+    pub source_digest: String,
     pub destination_dir: PathBuf,
     pub install_subpath: String,
 }

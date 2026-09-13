@@ -8,6 +8,30 @@ fn ok_response(data: serde_json::Value) -> String {
 }
 
 #[test]
+fn tomcat_is_the_public_plugin_bridge_and_keeps_the_legacy_alias() {
+    let mut instance =
+        PluginVmInstance::new(PluginEngineConfig::default(), "tomcat-bridge".to_string())
+            .expect("create quickjs instance");
+    instance
+        .register_host_binding(|_request_json| Ok(ok_response(serde_json::Value::Null)))
+        .expect("register host binding");
+    instance
+        .run_script(
+            r#"
+if (!globalThis.tomcat || globalThis.tomcat !== globalThis.pi) {
+  throw new Error("Tomcat bridge and legacy alias must reference the same API object");
+}
+tomcat.registerTool({
+  name: "tomcat_bridge_test",
+  description: "proves new generated source can use the Tomcat bridge",
+  execute: function (_id, params) { return { echoed: params }; }
+});
+"#,
+        )
+        .expect("Tomcat bridge should register a tool in the real QuickJS runtime");
+}
+
+#[test]
 fn dispatch_event_isolates_non_fatal_handler_errors() {
     let mut instance =
         PluginVmInstance::new(PluginEngineConfig::default(), "event-isolation".to_string())

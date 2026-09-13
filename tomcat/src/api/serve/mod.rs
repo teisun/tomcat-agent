@@ -10,6 +10,7 @@
 
 pub mod ask_question;
 pub mod commands;
+pub mod confirmation;
 pub mod control;
 pub mod event_pump;
 mod fanout_event_bus;
@@ -32,8 +33,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::chat::{
-    recover_context_state_after_failed_turn, spawn_completion_subscriber, ChatContext,
-    ChatContextOverrides,
+    drain_checkpoint_record_tasks, recover_context_state_after_failed_turn,
+    spawn_completion_subscriber, ChatContext, ChatContextOverrides,
 };
 use crate::core::agent_registry::AgentRegistry;
 use crate::core::llm::{ChatMessage, LlmScene};
@@ -46,6 +47,7 @@ use crate::{
 };
 
 use ask_question::ServeAskQuestionBridge;
+use confirmation::ServeConfirmationBridge;
 use fanout_event_bus::FanoutEventBus;
 use registry::{ChatContextRegistry, SessionSlot, SessionTurnState};
 use types::{NewSessionParams, ServeSessionMode};
@@ -65,6 +67,7 @@ pub(crate) struct ServeState {
     pub registry: Arc<ChatContextRegistry>,
     pub writer: WriterHandle,
     pub ask_question: ServeAskQuestionBridge,
+    pub confirmation: ServeConfirmationBridge,
     pub shared_model_catalog: crate::core::llm::SharedModelCatalog,
     pub shared_model_prefs: Arc<ModelPrefsStore>,
     pub shared_agent_registry: Arc<AgentRegistry>,
@@ -80,6 +83,7 @@ impl ServeState {
     ) -> Result<Arc<Self>, AppError> {
         let registry = Arc::new(ChatContextRegistry::new(cfg.serve.max_sessions));
         let ask_question = ServeAskQuestionBridge::new(writer.clone());
+        let confirmation = ServeConfirmationBridge::new(writer.clone());
         let shared_event_bus = Arc::new(FanoutEventBus::new());
         let shared_agent_registry = AgentRegistry::new().attach_event_bus(shared_event_bus.clone());
         let shared_model_catalog = crate::core::llm::SharedModelCatalog::load(&cfg)?;
@@ -88,6 +92,7 @@ impl ServeState {
             registry,
             writer,
             ask_question,
+            confirmation,
             shared_model_catalog,
             shared_model_prefs,
             shared_agent_registry,
@@ -270,23 +275,51 @@ pub(crate) fn normalize_session_mode(
     }
 }
 
+fn resolve_session_paths(
+    params: &NewSessionParams,
+) -> Result<(PathBuf, Option<PathBuf>), AppError> {
+    let Some(raw_cwd) = params.cwd.as_deref() else {
+        return Ok((
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            None,
+        ));
+    };
+    if raw_cwd.trim().is_empty() {
+        return Err(AppError::Config(
+            "new_session.cwd 不能为空字符串".to_string(),
+        ));
+    }
+    let supplied = PathBuf::from(raw_cwd);
+    if !supplied.is_absolute() {
+        return Err(AppError::Config(
+            "new_session.cwd 必须是绝对目录".to_string(),
+        ));
+    }
+    let cwd = crate::normalize_path(raw_cwd)?;
+    if !cwd.is_dir() {
+        return Err(AppError::Config(format!(
+            "new_session.cwd 必须是存在的目录: {}",
+            cwd.display()
+        )));
+    }
+    Ok((cwd.clone(), Some(crate::core::session::project_root(&cwd))))
+}
+
 pub(crate) fn create_detached_session(
     state: &ServeState,
     params: NewSessionParams,
 ) -> Result<crate::SessionEntry, AppError> {
     let mode = normalize_session_mode(&state.cfg, params.mode)?;
-    let cwd_path = params
-        .cwd
-        .as_deref()
-        .map(crate::normalize_path)
-        .transpose()?
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let (cwd_path, project_root) = resolve_session_paths(&params)?;
     let sessions_dir = resolve_sessions_dir(&state.cfg)?;
     std::fs::create_dir_all(&sessions_dir).map_err(AppError::Io)?;
     let session_key = session_key_for_agent(&state.cfg.agent.id, mode, &cwd_path);
     let session_manager = SessionManager::new_scoped(sessions_dir, session_key.clone());
-    session_manager
-        .create_detached_session(&session_key, Some(cwd_path.to_string_lossy().to_string()))
+    session_manager.create_detached_session_with_project_root(
+        &session_key,
+        Some(cwd_path.to_string_lossy().to_string()),
+        project_root.map(|path| path.to_string_lossy().to_string()),
+    )
 }
 
 pub(crate) async fn create_session_slot(
@@ -295,21 +328,22 @@ pub(crate) async fn create_session_slot(
     force_new: bool,
 ) -> Result<Arc<SessionSlot>, AppError> {
     let mode = normalize_session_mode(&state.cfg, params.mode)?;
-    let cwd_path = params
-        .cwd
-        .as_deref()
-        .map(crate::normalize_path)
-        .transpose()?
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let (cwd_path, project_root) = resolve_session_paths(&params)?;
     let sessions_dir = resolve_sessions_dir(&state.cfg)?;
     std::fs::create_dir_all(&sessions_dir).map_err(AppError::Io)?;
     let session_key = session_key_for_agent(&state.cfg.agent.id, mode, &cwd_path);
     let session_manager = SessionManager::new_scoped(sessions_dir, session_key);
     let cwd_string = Some(cwd_path.to_string_lossy().to_string());
     let current_entry = if force_new {
-        session_manager.new_current_session(cwd_string.clone())?
+        session_manager.new_current_session_with_project_root(
+            cwd_string.clone(),
+            project_root.map(|path| path.to_string_lossy().to_string()),
+        )?
     } else {
-        session_manager.ensure_current_session(cwd_string.clone())?
+        session_manager.ensure_current_session_with_project_root(
+            cwd_string.clone(),
+            project_root.map(|path| path.to_string_lossy().to_string()),
+        )?
     };
     session_manager.pin_session(&current_entry.session_id);
 
@@ -317,6 +351,11 @@ pub(crate) async fn create_session_slot(
         .suppress_cli_output()
         .with_shared_agent_registry(Arc::clone(&state.shared_agent_registry))
         .with_shared_model_prefs(Arc::clone(&state.shared_model_prefs))
+        .with_confirmation(
+            state
+                .confirmation
+                .provider_for_session(current_entry.session_id.clone()),
+        )
         .with_session_cwd_override(cwd_path.clone());
     let ctx = ChatContext::from_config_with_mode_and_overrides(state.cfg.clone(), mode, overrides)?;
     state.shared_event_bus.register_session_bus(
@@ -591,8 +630,12 @@ pub(crate) async fn cleanup_session_slot(
         }
     }
 
+    drain_checkpoint_record_tasks(&slot.ctx, SESSION_SHUTDOWN_TIMEOUT).await;
     event_pump::unregister_session_event_pump(slot);
     state.ask_question.clear_session(&slot.session_id);
+    state
+        .confirmation
+        .cancel_live_session(&slot.session_id, reason);
     state
         .shared_event_bus
         .unregister_session_bus(&slot.session_id);

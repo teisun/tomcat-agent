@@ -6,7 +6,7 @@ pub mod paths;
 
 pub use manager::{
     load_package_registry, load_plugin_registry, save_package_registry, save_plugin_registry,
-    PackageManager,
+    with_resource_transaction_lock, PackageManager,
 };
 pub use model::{
     DetectedPackageResource, DetectedPackageSource, DetectedPackageSourceKind, InstallOutcome,

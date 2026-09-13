@@ -33,6 +33,34 @@ fn create_session_and_list() {
 }
 
 #[test]
+fn project_root_roundtrips_through_store_and_transcript() {
+    let dir = temp_sessions_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mgr = SessionManager::new(dir.clone());
+    let entry = mgr
+        .create_session_with_project_root(
+            mgr.current_session_key(),
+            Some("/workspace/src".to_string()),
+            Some("/workspace".to_string()),
+        )
+        .unwrap();
+
+    assert_eq!(entry.project_root.as_deref(), Some("/workspace"));
+    assert_eq!(
+        mgr.get_session_by_id(&entry.session_id)
+            .unwrap()
+            .and_then(|stored| stored.project_root),
+        Some("/workspace".to_string())
+    );
+    let header =
+        crate::core::session::transcript::read_header(&mgr.transcript_path(&entry.session_id))
+            .unwrap();
+    assert_eq!(header.project_root.as_deref(), Some("/workspace"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn detached_session_is_listable_without_changing_durable_or_pinned_current() {
     let dir = temp_sessions_dir();
     let _ = std::fs::remove_dir_all(&dir);

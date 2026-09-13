@@ -35,12 +35,13 @@ const SYSTEM_TEMPLATES: &[(&str, PromptKey)] = &[
 ];
 
 // 优化前实测基线（chars），见 baseline todo。优化后必须严格小于以量化"净负"。
-const BASELINE_CHAT_TOOLDEFS: usize = 31_908;
+const BASELINE_CHAT_TOOLDEFS: usize = 32_004;
 // v2 adds four fixed deferred-connector meta-tools. Their bounded static cost replaces the
 // previously unbounded per-MCP schemas (34,182 -> 35,341). v3 adds required, auditable
-// completion evidence only to `update_plan` (35,341 -> 35,673). Keep one character above
-// each measured footprint as a strict ceiling against unreviewed prompt growth.
-const BASELINE_FULL_TOOLDEFS: usize = 35_674;
+// completion evidence only to `update_plan` (35,341 -> 35,673). v4 adds the native
+// package_install status contract (35,673 -> 36,548). Keep one character above each measured
+// footprint as a strict ceiling against unreviewed prompt growth.
+const BASELINE_FULL_TOOLDEFS: usize = 36_549;
 
 #[test]
 fn print_prompt_static_sizes() {

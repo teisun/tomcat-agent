@@ -2,6 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use tracing::warn;
@@ -45,6 +46,40 @@ pub(crate) fn schedule_checkpoint_prune(ctx: &ChatContext) {
             warn!(error = %err, "checkpoint prune failed");
         }
     });
+}
+
+/// Finish checkpoint writes that were deliberately decoupled from turn rendering.
+///
+/// This is only called while a session is being closed. A bounded wait preserves
+/// the interactive hot path but prevents a clean process exit from aborting the
+/// final turn's rollback checkpoint.
+pub(crate) async fn drain_checkpoint_record_tasks(ctx: &ChatContext, timeout: Duration) {
+    let tasks = {
+        let mut pending = ctx.session_runtime.checkpoint_record_tasks.lock();
+        std::mem::take(&mut *pending)
+    };
+    if tasks.is_empty() {
+        return;
+    }
+
+    let deadline = Instant::now() + timeout;
+    for mut task in tasks {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!("checkpoint writes did not finish before session shutdown timeout");
+            return;
+        }
+        match tokio::time::timeout(remaining, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "checkpoint write task failed during session shutdown");
+            }
+            Err(_) => {
+                tracing::warn!("checkpoint writes did not finish before session shutdown timeout");
+                return;
+            }
+        }
+    }
 }
 
 pub(crate) fn persist_turn_result(
@@ -102,8 +137,12 @@ fn maybe_record_turn_checkpoint(
     // Checkpoint 是回滚保障，不是本轮 transcript 一致性的前置条件。把同步 git
     // 放在 agent_idle 之前会让慢工作树、甚至单个 git 子进程超时都阻塞用户继续输入。
     // async turn 内交给 blocking pool；纯同步调用方（主要是 unit test）保持同步语义。
+    // Session shutdown waits for these registered handles within a bounded budget.
     if tokio::runtime::Handle::try_current().is_ok() {
-        drop(tokio::task::spawn_blocking(record));
+        let task = tokio::task::spawn_blocking(record);
+        let mut pending = ctx.session_runtime.checkpoint_record_tasks.lock();
+        pending.retain(|task| !task.is_finished());
+        pending.push(task);
     } else {
         record();
     }

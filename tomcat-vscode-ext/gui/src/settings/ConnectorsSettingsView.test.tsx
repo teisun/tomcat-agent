@@ -64,6 +64,16 @@ function renderView(snapshot: SettingsStateSnapshot = state()) {
 }
 
 describe("ConnectorsSettingsView", () => {
+  it("explains that project resource directory changes require a restart", () => {
+    renderView();
+
+    expect(
+      screen
+        .getByText("Changes to the project resource directory take effect after restarting Tomcat.")
+        .getAttribute("role"),
+    ).toBe("status");
+  });
+
   it("explains the saved configuration and connection without transport jargon", async () => {
     const { container, postMessage } = renderView();
 

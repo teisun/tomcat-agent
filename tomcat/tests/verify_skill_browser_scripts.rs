@@ -115,7 +115,7 @@ fn bootstrap_then_shot_writes_three_artifacts_and_rejects_console_errors() {
         .join("scripts");
     let browser_path = temp.path().join("playwright");
     assert!(
-        std::fs::read_to_string(skill_path.join("SKILL.md"))
+        std::fs::read_to_string(&skill_path)
             .expect("read materialized verify skill")
             .contains("workspace.project_resource_dir"),
         "verify guidance must require the configured project resource directory"

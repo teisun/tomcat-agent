@@ -1871,6 +1871,7 @@ fn test_check_after_reply_stale_emits_compaction_error() {
             id: "sid_err".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

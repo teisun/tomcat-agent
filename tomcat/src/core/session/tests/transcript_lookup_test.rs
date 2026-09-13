@@ -22,6 +22,7 @@ fn get_entry_finds_by_id() {
             id: "sid_003".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -59,6 +60,7 @@ fn get_leaf_entry_returns_last() {
             id: "sid_004".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -90,6 +92,7 @@ fn get_branch_single_entry() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -116,6 +119,7 @@ fn get_branch_unknown_leaf_returns_empty() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
@@ -135,6 +139,7 @@ fn get_children_empty_when_no_match() {
             id: "sid".to_string(),
             timestamp: "2025-01-01T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

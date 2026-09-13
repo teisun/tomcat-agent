@@ -156,7 +156,7 @@ function parseConnectorConfigPaths(payload: unknown): ConnectorConfigPaths | und
   if (!isRecord(payload) || !isRecord(payload.configPaths)) return undefined;
   const global = parseConnectorConfigPath(payload.configPaths.global);
   const workspace = parseConnectorConfigPath(payload.configPaths.workspace);
-  return global && workspace ? { global, workspace } : undefined;
+  return global ? { global, ...(workspace ? { workspace } : {}) } : undefined;
 }
 
 function parseConnectorsPayload(payload: unknown): {

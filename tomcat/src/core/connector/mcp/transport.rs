@@ -19,20 +19,27 @@ pub trait McpTransport: Send + Sync {
 /// environment variables are added explicitly, so an MCP configuration cannot
 /// silently inherit unrelated process secrets.
 pub struct StdioTransport {
-    workspace_root: PathBuf,
+    workspace_root: Option<PathBuf>,
 }
 
 impl StdioTransport {
-    pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
+    pub fn new(workspace_root: Option<&Path>) -> Self {
         Self {
-            workspace_root: workspace_root.into(),
+            workspace_root: workspace_root.map(Path::to_path_buf),
         }
     }
 
     fn command(&self, server: &ConfiguredMcpServer) -> tokio::process::Command {
         tokio::process::Command::new(&server.config.command).configure(|command| {
             command.args(&server.config.args);
-            command.current_dir(server.config.normalized_cwd(&self.workspace_root));
+            if let Some(cwd) = server.config.cwd.as_deref() {
+                let cwd = Path::new(cwd);
+                if cwd.is_absolute() {
+                    command.current_dir(cwd);
+                } else if let Some(workspace_root) = self.workspace_root.as_deref() {
+                    command.current_dir(workspace_root.join(cwd));
+                }
+            }
             command.env_clear();
             for key in ["PATH", "HOME"] {
                 if let Some(value) = std::env::var_os(key) {
@@ -333,10 +340,10 @@ mod tests {
 
     #[test]
     fn configured_env_is_added_after_environment_is_cleared() {
-        let transport = StdioTransport::new("/workspace");
+        let transport = StdioTransport::new(Some(Path::new("/workspace")));
         let server = ConfiguredMcpServer {
             name: "test".to_string(),
-            source: McpConfigSource::Global,
+            source: McpConfigSource::Project,
             config: McpServerConfig {
                 command: "echo".to_string(),
                 args: Vec::new(),
@@ -346,7 +353,7 @@ mod tests {
                 headers: Default::default(),
                 oauth: None,
 
-                cwd: None,
+                cwd: Some(std::path::PathBuf::from(".")),
                 trusted: false,
                 integrity: None,
                 startup_timeout_ms: 30_000,
@@ -373,7 +380,7 @@ mod tests {
             serde_json::json!({ "executablePath": executable }).to_string(),
         )
         .expect("fallback marker");
-        let transport = StdioTransport::new("/workspace");
+        let transport = StdioTransport::new(Some(Path::new("/workspace")));
         let server = ConfiguredMcpServer {
             name: "playwright".to_string(),
             source: McpConfigSource::Global,

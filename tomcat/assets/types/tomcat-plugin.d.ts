@@ -1,12 +1,5 @@
-/**
- * Tomcat plugin authoring types.
- *
- * Runtime note:
- * - `pi` is injected by the Tomcat host at runtime.
- * - Plugin source files should NOT import `pi_bridge.js`.
- * - For JS projects, enable `// @ts-check` or add this file to `jsconfig.json`.
- * - For TS projects, include this file via `tsconfig.json` or a triple-slash reference.
- */
+// Tomcat plugin authoring types.
+// The host injects the `tomcat` bridge at runtime. Plugin source must not import a bridge file.
 
 type TomcatJsonValue =
   | null
@@ -250,6 +243,8 @@ interface TomcatPluginAPI {
 }
 
 declare global {
+  const tomcat: TomcatPluginAPI;
+  /** @deprecated Compatibility alias. New plugins must use `tomcat`. */
   const pi: TomcatPluginAPI;
 }
 

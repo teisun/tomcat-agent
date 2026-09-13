@@ -321,6 +321,7 @@ async fn preheat_exhausted_keeps_its_unfulfilled_marker_and_emits_an_error() {
             id: "sid_d".to_string(),
             timestamp: "2026-04-26T00:00:00.000Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();

@@ -1,6 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+use parking_lot::{Mutex, RwLock};
 
 use chrono::Utc;
 use serde::Deserialize;
@@ -23,8 +26,8 @@ mod install_fs;
 mod registry;
 
 use self::install_fs::{
-    cleanup_install_artifacts, install_resource, prepare_force_remove_path, remove_path_if_exists,
-    rollback_install,
+    cleanup_install_artifacts, install_resource, prepare_force_remove_path, rollback_install,
+    InstallFsMutation,
 };
 use self::registry::RegistrySnapshot;
 pub use self::registry::{
@@ -34,6 +37,44 @@ pub use self::registry::{
 #[derive(Debug)]
 pub struct PackageManager<'a> {
     cfg: &'a AppConfig,
+}
+
+/// Serializes every registry-changing operation in one resource layer. The
+/// process-local mutex prevents competing chat/CLI tasks from racing first; the
+/// file lock then extends the same order across processes. Callers must obtain
+/// it only after user confirmation, never while waiting for a user decision.
+pub fn with_resource_transaction_lock<R>(
+    registry_path: &Path,
+    f: impl FnOnce() -> Result<R, AppError>,
+) -> Result<R, AppError> {
+    let layer_root = registry_path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            AppError::Config(format!(
+                "资源注册表路径缺少层目录: {}",
+                registry_path.display()
+            ))
+        })?
+        .to_path_buf();
+    let key = layer_root.canonicalize().unwrap_or(layer_root);
+    let slot = resource_transaction_coordinator()
+        .write()
+        .entry(key.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone();
+    let _memory_guard = slot.lock();
+    with_config_lock(&key.join(".tomcat-resource-transaction"), f)
+}
+
+fn resource_transaction_coordinator() -> &'static RwLock<HashMap<PathBuf, Arc<Mutex<()>>>> {
+    static COORDINATOR: OnceLock<RwLock<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    COORDINATOR.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_registry_save_for_test(path: &Path) {
+    registry::fail_next_save_for_test(path);
 }
 
 impl<'a> PackageManager<'a> {
@@ -143,6 +184,7 @@ impl<'a> PackageManager<'a> {
                 id: resource.id.clone(),
                 source_path: resource.source_path.clone(),
                 source_dir: resource.source_dir.clone(),
+                source_digest: install_fs::source_tree_digest(&resource.source_dir)?,
                 install_subpath: format!("{}/{}", resource.kind.registry_dir(), resource.id),
                 destination_dir,
             });
@@ -159,8 +201,8 @@ impl<'a> PackageManager<'a> {
     }
 
     pub fn install(&self, prepared: PreparedInstall) -> Result<InstallOutcome, AppError> {
-        let lock_path = prepared.layer_paths.package_registry_path.clone();
-        with_config_lock(&lock_path, || self.install_locked(prepared))
+        let registry_path = prepared.layer_paths.package_registry_path.clone();
+        with_resource_transaction_lock(&registry_path, || self.install_locked(prepared))
     }
 
     fn install_locked(&self, prepared: PreparedInstall) -> Result<InstallOutcome, AppError> {
@@ -172,6 +214,57 @@ impl<'a> PackageManager<'a> {
 
         let install_result = (|| -> Result<InstallOutcome, AppError> {
             let mut package_registry = package_snapshot.package_value()?;
+            let mut plugin_registry = plugin_snapshot.plugin_value()?;
+            if !prepared.force
+                && package_registry
+                    .packages
+                    .iter()
+                    .any(|record| record.name == prepared.detected.manifest.name)
+            {
+                return Err(AppError::Config(format!(
+                    "同层 package 已在等待确认期间被安装: {}",
+                    prepared.detected.manifest.name
+                )));
+            }
+            for resource in &prepared.resources {
+                let owned_by_other_package = package_registry.packages.iter().any(|record| {
+                    record.name != prepared.detected.manifest.name
+                        && match resource.kind {
+                            PackageResourceKind::Plugin => {
+                                record.plugins.iter().any(|plugin| plugin.id == resource.id)
+                            }
+                            PackageResourceKind::Skill => {
+                                record.skills.iter().any(|skill| skill.name == resource.id)
+                            }
+                        }
+                });
+                if owned_by_other_package {
+                    return Err(AppError::Config(format!(
+                        "{} `{}` is already owned by another package; force cannot take ownership",
+                        resource.kind.as_str(),
+                        resource.id
+                    )));
+                }
+                if resource.destination_dir.exists() && !prepared.force {
+                    return Err(AppError::Config(format!(
+                        "同层 {} 已在等待确认期间被安装: {}",
+                        resource.kind.as_str(),
+                        resource.id
+                    )));
+                }
+                if resource.kind == PackageResourceKind::Plugin
+                    && plugin_registry
+                        .plugins
+                        .iter()
+                        .any(|entry| entry.id == resource.id)
+                    && !prepared.force
+                {
+                    return Err(AppError::Config(format!(
+                        "plugin 注册表已归属同名 ID，拒绝覆盖: {}",
+                        resource.id
+                    )));
+                }
+            }
             let previous_record = package_registry
                 .packages
                 .iter()
@@ -180,7 +273,6 @@ impl<'a> PackageManager<'a> {
             package_registry
                 .packages
                 .retain(|record| record.name != prepared.detected.manifest.name);
-            let mut plugin_registry = plugin_snapshot.plugin_value()?;
             let plugin_ids = prepared
                 .resources
                 .iter()
@@ -334,49 +426,95 @@ impl<'a> PackageManager<'a> {
         scope_root: Option<&Path>,
     ) -> Result<UninstallOutcome, AppError> {
         let layer_paths = resolve_layer_paths(self.cfg, visibility, scope_root)?;
-        let mut package_registry = load_package_registry(&layer_paths.package_registry_path)?;
-        let Some(index) = package_registry
-            .packages
-            .iter()
-            .position(|record| record.name == package_name)
-        else {
-            return Err(AppError::Config(format!(
-                "package 未安装在 {visibility}: {package_name}"
-            )));
-        };
-        let record = package_registry.packages.remove(index);
-
-        let mut removed_paths = Vec::new();
-        for plugin in &record.plugins {
-            let path = resource_target_dir(&layer_paths, PackageResourceKind::Plugin, &plugin.id)?;
-            if remove_path_if_exists(&path)? {
-                removed_paths.push(path);
-            }
-        }
-        for skill in &record.skills {
-            let path = resource_target_dir(&layer_paths, PackageResourceKind::Skill, &skill.name)?;
-            if remove_path_if_exists(&path)? {
-                removed_paths.push(path);
-            }
-        }
-
-        save_package_registry(&layer_paths.package_registry_path, &package_registry)?;
-
-        let mut plugin_registry = load_plugin_registry(&layer_paths.plugin_registry_path)?;
-        let plugin_ids = record
-            .plugins
-            .iter()
-            .map(|plugin| plugin.id.clone())
-            .collect::<HashSet<_>>();
-        plugin_registry
-            .plugins
-            .retain(|entry| !plugin_ids.contains(&entry.id));
-        save_plugin_registry(&layer_paths.plugin_registry_path, &plugin_registry)?;
-
-        Ok(UninstallOutcome {
-            record,
-            removed_paths,
+        let registry_path = layer_paths.package_registry_path.clone();
+        with_resource_transaction_lock(&registry_path, || {
+            self.uninstall_locked(package_name, layer_paths)
         })
+    }
+
+    fn uninstall_locked(
+        &self,
+        package_name: &str,
+        layer_paths: LayerPaths,
+    ) -> Result<UninstallOutcome, AppError> {
+        let package_snapshot =
+            RegistrySnapshot::capture_package(&layer_paths.package_registry_path)?;
+        let plugin_snapshot = RegistrySnapshot::capture_plugin(&layer_paths.plugin_registry_path)?;
+        let mut mutations = Vec::new();
+        let uninstall_result = (|| -> Result<UninstallOutcome, AppError> {
+            let mut package_registry = package_snapshot.package_value()?;
+            let Some(index) = package_registry
+                .packages
+                .iter()
+                .position(|record| record.name == package_name)
+            else {
+                return Err(AppError::Config(format!(
+                    "package 未安装在 {}: {package_name}",
+                    layer_paths.visibility
+                )));
+            };
+            let record = package_registry.packages.remove(index);
+
+            for plugin in &record.plugins {
+                let path =
+                    resource_target_dir(&layer_paths, PackageResourceKind::Plugin, &plugin.id)?;
+                if let Some(mutation) = prepare_force_remove_path(&path)? {
+                    mutations.push(mutation);
+                }
+            }
+            for skill in &record.skills {
+                let path =
+                    resource_target_dir(&layer_paths, PackageResourceKind::Skill, &skill.name)?;
+                if let Some(mutation) = prepare_force_remove_path(&path)? {
+                    mutations.push(mutation);
+                }
+            }
+
+            save_package_registry(&layer_paths.package_registry_path, &package_registry)?;
+            let mut plugin_registry = plugin_snapshot.plugin_value()?;
+            let plugin_ids = record
+                .plugins
+                .iter()
+                .map(|plugin| plugin.id.clone())
+                .collect::<HashSet<_>>();
+            plugin_registry
+                .plugins
+                .retain(|entry| !plugin_ids.contains(&entry.id));
+            save_plugin_registry(&layer_paths.plugin_registry_path, &plugin_registry)?;
+
+            let removed_paths = mutations
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    InstallFsMutation::Removed { original_path, .. } => Some(original_path.clone()),
+                    InstallFsMutation::Installed { .. } => None,
+                })
+                .collect();
+            cleanup_install_artifacts(&mutations);
+            Ok(UninstallOutcome {
+                record,
+                removed_paths,
+            })
+        })();
+
+        match uninstall_result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => {
+                let rollback_errors = rollback_install(
+                    &layer_paths,
+                    &package_snapshot,
+                    &plugin_snapshot,
+                    &mutations,
+                );
+                if rollback_errors.is_empty() {
+                    Err(AppError::Config(format!("package uninstall 失败: {error}")))
+                } else {
+                    Err(AppError::Config(format!(
+                        "package uninstall 失败且 rollback 不完整: {error}; dirty_state: {}",
+                        rollback_errors.join(" | ")
+                    )))
+                }
+            }
+        }
     }
 
     pub fn list_packages(

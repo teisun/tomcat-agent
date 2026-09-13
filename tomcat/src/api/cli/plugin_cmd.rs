@@ -5,7 +5,9 @@ use std::path::Path;
 pub(crate) use crate::core::package::{
     load_plugin_registry, save_plugin_registry, PluginRegistryEntry, PluginRegistryFile,
 };
-use crate::core::package::{resolve_runtime_layer_paths, PackageVisibility};
+use crate::core::package::{
+    resolve_runtime_layer_paths, with_resource_transaction_lock, PackageVisibility,
+};
 use crate::ext::{parse_manifest, write_plugin_bundle_from_path};
 use crate::{
     resolve_plugins_dir, AppConfig, AppError, AuditStore, DefaultEventBus, DefaultToolRegistry,
@@ -247,15 +249,17 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
                             registry_path_value = info.plugin_root.display().to_string();
                             format_plugin_info(&info);
                         }
-                        let mut registry = load_plugin_registry(&reg_path)?;
-                        registry.plugins.retain(|e| e.id != *id);
-                        registry.plugins.push(PluginRegistryEntry {
-                            id: id.clone(),
-                            path: registry_path_value,
-                            enabled: true,
-                            loaded_at: chrono::Utc::now().to_rfc3339(),
-                        });
-                        save_plugin_registry(&reg_path, &registry)?;
+                        with_resource_transaction_lock(&reg_path, || {
+                            let mut registry = load_plugin_registry(&reg_path)?;
+                            registry.plugins.retain(|entry| entry.id != *id);
+                            registry.plugins.push(PluginRegistryEntry {
+                                id: id.clone(),
+                                path: registry_path_value,
+                                enabled: true,
+                                loaded_at: chrono::Utc::now().to_rfc3339(),
+                            });
+                            save_plugin_registry(&reg_path, &registry)
+                        })?;
                     }
                 }
                 Err(e) => {
@@ -293,9 +297,11 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
         }
         PluginSub::Unload { id } => match locate_registry_entry(cfg, &id)? {
             Some(located) => {
-                let mut registry = load_plugin_registry(&located.path)?;
-                registry.plugins.retain(|entry| entry.id != id);
-                save_plugin_registry(&located.path, &registry)?;
+                with_resource_transaction_lock(&located.path, || {
+                    let mut registry = load_plugin_registry(&located.path)?;
+                    registry.plugins.retain(|entry| entry.id != id);
+                    save_plugin_registry(&located.path, &registry)
+                })?;
                 let _ = pm.unload_plugin(&id);
                 println!("已卸载插件: {} ({})", id, located.visibility.as_str());
             }
@@ -303,11 +309,14 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
         },
         PluginSub::Enable { id } => match locate_registry_entry(cfg, &id)? {
             Some(located) => {
-                let mut registry = load_plugin_registry(&located.path)?;
-                if let Some(entry) = registry.plugins.iter_mut().find(|entry| entry.id == id) {
-                    entry.enabled = true;
-                    save_plugin_registry(&located.path, &registry)?;
-                }
+                with_resource_transaction_lock(&located.path, || {
+                    let mut registry = load_plugin_registry(&located.path)?;
+                    if let Some(entry) = registry.plugins.iter_mut().find(|entry| entry.id == id) {
+                        entry.enabled = true;
+                        save_plugin_registry(&located.path, &registry)?;
+                    }
+                    Ok(())
+                })?;
                 let _ = pm.enable_plugin(&id);
                 println!("已启用插件: {} ({})", id, located.visibility.as_str());
             }
@@ -315,11 +324,14 @@ pub(crate) fn run_plugin(sub: PluginSub, cfg: &AppConfig) -> Result<(), AppError
         },
         PluginSub::Disable { id } => match locate_registry_entry(cfg, &id)? {
             Some(located) => {
-                let mut registry = load_plugin_registry(&located.path)?;
-                if let Some(entry) = registry.plugins.iter_mut().find(|entry| entry.id == id) {
-                    entry.enabled = false;
-                    save_plugin_registry(&located.path, &registry)?;
-                }
+                with_resource_transaction_lock(&located.path, || {
+                    let mut registry = load_plugin_registry(&located.path)?;
+                    if let Some(entry) = registry.plugins.iter_mut().find(|entry| entry.id == id) {
+                        entry.enabled = false;
+                        save_plugin_registry(&located.path, &registry)?;
+                    }
+                    Ok(())
+                })?;
                 let _ = pm.disable_plugin(&id);
                 println!("已禁用插件: {} ({})", id, located.visibility.as_str());
             }

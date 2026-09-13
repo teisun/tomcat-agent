@@ -96,6 +96,9 @@ fn scan_root(
     }
 
     let Ok(entries) = std::fs::read_dir(root) else {
+        skill_set
+            .warnings
+            .push(format!("skills_root_unreadable:{}", root.display()));
         skill_set.diagnostics.push(SkillDiagnostic {
             path: root.to_path_buf(),
             reason: "skills 根目录不可读取".to_string(),
@@ -211,15 +214,53 @@ fn read_frontmatter_prefix(path: &Path) -> Result<String, String> {
             break;
         }
         buf.extend_from_slice(&chunk[..read]);
-    }
-    match String::from_utf8(buf) {
-        Ok(prefix) => Ok(prefix),
-        Err(error) if error.utf8_error().error_len().is_none() => {
-            let valid_up_to = error.utf8_error().valid_up_to();
-            let bytes = error.into_bytes();
-            String::from_utf8(bytes[..valid_up_to].to_vec())
-                .map_err(|error| format!("skill 文件不是 UTF-8 文本: {error}"))
+        if let Some(end) = complete_frontmatter_end(&buf) {
+            return String::from_utf8(buf[..end].to_vec())
+                .map_err(|error| format!("skill 文件不是 UTF-8 文本: {error}"));
         }
-        Err(error) => Err(format!("skill 文件不是 UTF-8 文本: {error}")),
     }
+    if !buf.starts_with(b"---\n") && !buf.starts_with(b"---\r\n") {
+        return Err("skill 文件缺少 frontmatter 分隔符 ---".to_string());
+    }
+    Err(format!(
+        "skill frontmatter 在 {FRONTMATTER_READ_LIMIT_BYTES} 字节内没有完整的 --- 分隔行"
+    ))
+}
+
+/// Returns the exclusive byte offset of a complete YAML closing delimiter. This
+/// deliberately works on bytes: a read may end halfway through a UTF-8 body
+/// character, but a complete ASCII delimiter before it is still safe to parse.
+fn complete_frontmatter_end(bytes: &[u8]) -> Option<usize> {
+    let opening_len = if bytes.starts_with(b"---\n") {
+        4
+    } else if bytes.starts_with(b"---\r\n") {
+        5
+    } else {
+        return None;
+    };
+    let mut line_start = opening_len;
+    while line_start < bytes.len() {
+        let line_end = bytes[line_start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| line_start + offset)
+            .unwrap_or(bytes.len());
+        let content_end = if line_end > line_start && bytes[line_end - 1] == b'\r' {
+            line_end - 1
+        } else {
+            line_end
+        };
+        if &bytes[line_start..content_end] == b"---" {
+            return Some(if line_end < bytes.len() {
+                line_end + 1
+            } else {
+                line_end
+            });
+        }
+        if line_end == bytes.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    None
 }

@@ -188,6 +188,26 @@ describe("settings panel model management flow", () => {
     });
   });
 
+  it("keeps the global connector config path when the nullable workspace path is absent", async () => {
+    const { panel } = createPanel({
+      ensureInitialized: async () => ({ attachmentRoot: null, capabilities: ["list_connectors"], protocolVersion: 1, serverVersion: "0.1.20", sessionId: null }),
+      messenger: {
+        sendListConnectors: vi.fn().mockResolvedValue({
+          payload: {
+            configPaths: { global: { display: "~/.tomcat/mcp.json", raw: "/tmp/home/.tomcat/mcp.json" }, workspace: null },
+            connectors: [],
+          },
+          success: true,
+        }),
+      },
+    });
+
+    await panel.__testingDispatchIntent({ data: { route: "connectors" }, messageId: "global-only-path", type: "settings.ready" } satisfies SettingsIntent);
+    expect(panel.__testingSnapshot().state.connectorConfigPaths).toEqual({
+      global: { display: "~/.tomcat/mcp.json", raw: "/tmp/home/.tomcat/mcp.json" },
+    });
+  });
+
   it("does not persist provider keys when model save fails", async () => {
     const { messenger, panel } = createPanel({
       messenger: {

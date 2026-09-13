@@ -1,8 +1,8 @@
-// pi_bridge.js — pi-mono compatible bridge layer for tomcat
-// Constructs globalThis.pi object that routes API calls through __pi_host_call.
+// Tomcat's built-in plugin bridge.
+// Constructs globalThis.tomcat; `pi` remains a compatibility alias for existing plugins.
 // Loaded by run_script_file_impl before user plugin scripts.
 // Authoring note: plugin source should not import this file directly; use
-// assets/types/tomcat-plugin.d.ts for IDE hints and let the host inject `pi`.
+// assets/types/tomcat-plugin.d.ts for IDE hints and let the host inject `tomcat`.
 // See: architecture/plugin-system/js-bridge-layer.md, architecture/plugin-system/host-call-protocol.md,
 //      architecture/plugin-system/js-api-alignment.md, architecture/plugin-system/async-hostcall-event-loop.md
 (function () {
@@ -114,8 +114,8 @@
   var __pi_commands = {}; // commandName -> { description, handler }
   var __pi_nextId = 1;
 
-  // -- Build globalThis.pi ---------------------------------------------------
-  globalThis.pi = {
+  // -- Build the public Tomcat plugin bridge ----------------------------------
+  globalThis.tomcat = {
 
     // =========================================================================
     // Event Subscription (pi-mono ExtensionAPI.on / off / emit / once)
@@ -426,6 +426,8 @@
       return hostCall('llm', 'setThinkingLevel', { level: level });
     }
   };
+  // Keep existing plugins runnable while new source uses the Tomcat API name.
+  globalThis.pi = globalThis.tomcat;
 
   // -- Shared ctx constructor (used by dispatch_event and invoke_command) ------
   function __pi_build_ctx(snapshot) {

@@ -965,12 +965,7 @@ fn collect_pipe_reader(
 ) -> Result<Vec<u8>, CheckpointError> {
     reader
         .join()
-        .map_err(|_| {
-            CheckpointError::Io(io::Error::new(
-                io::ErrorKind::Other,
-                "git output reader thread panicked",
-            ))
-        })?
+        .map_err(|_| CheckpointError::Io(io::Error::other("git output reader thread panicked")))?
         .map_err(CheckpointError::Io)
 }
 

@@ -632,6 +632,7 @@ fn write_session_header(path: &Path) {
             id: "sid".to_string(),
             timestamp: "2026-05-30T16:00:00Z".to_string(),
             cwd: None,
+            project_root: None,
         },
     )
     .unwrap();
