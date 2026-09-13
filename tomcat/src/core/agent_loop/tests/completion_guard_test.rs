@@ -18,7 +18,7 @@ use crate::core::plan_runtime::file_store::{
     GATE_CODE_REVIEW_TODO_CONTENT, GATE_CODE_REVIEW_TODO_ID,
 };
 use crate::core::plan_runtime::review::Finding;
-use crate::core::plan_runtime::PlanRuntime;
+use crate::core::plan_runtime::{NextAction, PlanRuntime};
 use crate::core::session::manager::{
     estimated_tokens_from_chars, CompactionResult, ContextState, MessageAppendSink,
 };
@@ -585,7 +585,7 @@ async fn guard_blocks_handback_while_todos_remain() {
     let plan_runtime = PlanRuntime::new("sess-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
 
-    let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
+    let mut agent = build_agent(Some(Arc::clone(&plan_runtime)), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
     let outcome = finalize(&mut agent, &mut messages).await;
 
@@ -662,7 +662,9 @@ async fn guard_blocks_handback_when_todos_done_but_review_pushed_back() {
         Finding::new("nit".into(), "tests".into(), "no regression test".into())
             .with_reference("F02"),
     ];
-    plan_runtime.set_unresolved_findings(&plan_id, findings.clone());
+    let mut plan = read_plan(&plan_path).unwrap();
+    plan.frontmatter.code_review_open_findings = findings.clone();
+    write_plan(&plan_path, &plan, 1_000).unwrap();
 
     let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
@@ -726,7 +728,7 @@ async fn exhausted_budget_keeps_the_agent_working_until_acceptance_can_start() {
     write_plan(&plan_path, &plan, 1_000).unwrap();
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
-    let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
+    let mut agent = build_agent(Some(Arc::clone(&plan_runtime)), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
     assert_eq!(
         finalize(&mut agent, &mut messages).await,
@@ -737,11 +739,20 @@ async fn exhausted_budget_keeps_the_agent_working_until_acceptance_can_start() {
         .last()
         .and_then(|message| message.text_content())
         .unwrap_or("");
+    assert!(text.contains("configured round budget"), "text={text}");
     assert!(
-        text.contains("ready for green-build acceptance"),
+        text.contains("run every declared `acceptance_commands` entry"),
         "text={text}"
     );
-    assert!(text.contains("run every project check"), "text={text}");
+    let current_plan = read_plan(&plan_path).unwrap();
+    let instruction = plan_runtime
+        .next_action(&current_plan.frontmatter)
+        .await
+        .instruction();
+    assert_eq!(
+        text,
+        format!("Plan `{plan_id}`: {instruction} Do not summarize or hand back.")
+    );
     assert!(
         messages
             .iter()
@@ -829,6 +840,8 @@ async fn guard_stops_after_two_zero_progress_nudges_and_hands_back() {
     assert_eq!(stalled_events[0]["event"], "plan.completion_guard.stalled");
     assert_eq!(stalled_events[0]["plan_id"], plan_id);
     assert_eq!(stalled_events[0]["idle_nudges"], 2);
+    assert_eq!(stalled_events[0]["phase"], "continue_work");
+    assert_eq!(stalled_events[0]["open_findings_count"], 0);
 
     cleanup_plan_file(&plan_path);
 }
@@ -845,8 +858,19 @@ async fn guard_progress_resets_the_zero_progress_nudge_counter() {
     let plan_runtime = PlanRuntime::new("sess-guard");
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
-    assert!(!plan_runtime.note_completion_guard_nudge(&plan_id).await);
-    assert!(!plan_runtime.note_completion_guard_nudge(&plan_id).await);
+    let action = NextAction::ContinueWork {
+        remaining_work: vec!["- t1 (pending)".into()],
+    };
+    assert!(
+        !plan_runtime
+            .note_completion_guard_nudge(&plan_id, &action)
+            .await
+    );
+    assert!(
+        !plan_runtime
+            .note_completion_guard_nudge(&plan_id, &action)
+            .await
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let mut plan = read_plan(&plan_path).unwrap();
@@ -854,12 +878,20 @@ async fn guard_progress_resets_the_zero_progress_nudge_counter() {
     write_plan(&plan_path, &plan, 1_000).unwrap();
 
     assert!(
-        !plan_runtime.note_completion_guard_nudge(&plan_id).await,
+        !plan_runtime
+            .note_completion_guard_nudge(&plan_id, &action)
+            .await,
         "a plan write between nudges must reset the idle counter"
     );
-    assert!(!plan_runtime.note_completion_guard_nudge(&plan_id).await);
     assert!(
-        plan_runtime.note_completion_guard_nudge(&plan_id).await,
+        !plan_runtime
+            .note_completion_guard_nudge(&plan_id, &action)
+            .await
+    );
+    assert!(
+        plan_runtime
+            .note_completion_guard_nudge(&plan_id, &action)
+            .await,
         "only two further no-progress nudges may stall the plan"
     );
 

@@ -53,6 +53,38 @@ pub fn cleanup_home(p: &std::path::Path) {
     }
 }
 
+pub fn review_frontmatter(plan_id: &str) -> PlanFileFrontmatter {
+    read_plan(&plan_path_for_id(plan_id).unwrap())
+        .unwrap()
+        .frontmatter
+}
+
+pub fn review_rounds(plan_id: &str) -> u32 {
+    review_frontmatter(plan_id).code_review_rounds
+}
+
+pub fn open_findings(plan_id: &str) -> Vec<Finding> {
+    review_frontmatter(plan_id).code_review_open_findings
+}
+
+pub fn open_finding_references(plan_id: &str) -> Vec<String> {
+    open_findings(plan_id)
+        .into_iter()
+        .map(|finding| finding.reference)
+        .collect()
+}
+
+pub fn disputed_findings(plan_id: &str) -> Vec<crate::core::plan_runtime::DisputedFinding> {
+    review_frontmatter(plan_id).code_review_disputed_findings
+}
+
+pub fn set_open_findings(plan_id: &str, findings: Vec<Finding>) {
+    let path = plan_path_for_id(plan_id).unwrap();
+    let mut plan = read_plan(&path).unwrap();
+    plan.frontmatter.code_review_open_findings = findings;
+    write_plan(&path, &plan, 1_000).unwrap();
+}
+
 pub fn fresh_planning_plan(rt: &PlanRuntime) -> String {
     rt.set_max_code_review_rounds(0);
     rt.enter_plan().unwrap();
@@ -134,6 +166,7 @@ pub struct MockCodeReviewerDispatcher {
     pub delay: Option<Duration>,
     /// 每轮收到的 open findings，供 D1-d 核销断言使用。
     open_findings_per_round: parking_lot::Mutex<Vec<Vec<Finding>>>,
+    dispatches: parking_lot::Mutex<Vec<crate::core::plan_runtime::CodeReviewDispatchInfo>>,
 }
 
 impl MockCodeReviewerDispatcher {
@@ -143,11 +176,16 @@ impl MockCodeReviewerDispatcher {
             call_count: AtomicUsize::new(0),
             delay: None,
             open_findings_per_round: parking_lot::Mutex::new(Vec::new()),
+            dispatches: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
     pub fn open_findings_per_round(&self) -> Vec<Vec<Finding>> {
         self.open_findings_per_round.lock().clone()
+    }
+
+    pub fn dispatches(&self) -> Vec<crate::core::plan_runtime::CodeReviewDispatchInfo> {
+        self.dispatches.lock().clone()
     }
 }
 
@@ -157,13 +195,14 @@ impl CodeReviewerDispatcher for MockCodeReviewerDispatcher {
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        open_findings: &[Finding],
+        review_state: &crate::core::plan_runtime::file_store::PlanFileFrontmatter,
         _dispatch: &crate::core::plan_runtime::CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         self.call_count.fetch_add(1, Ordering::Relaxed);
         self.open_findings_per_round
             .lock()
-            .push(open_findings.to_vec());
+            .push(review_state.code_review_open_findings.clone());
+        self.dispatches.lock().push(_dispatch.clone());
         if let Some(d) = self.delay {
             tokio::time::sleep(d).await;
         }

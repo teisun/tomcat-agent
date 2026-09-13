@@ -1,3 +1,4 @@
+use crate::core::plan_runtime::{review::Finding, NextAction};
 use crate::core::prompts::{load, render, PromptKey};
 
 #[test]
@@ -62,7 +63,7 @@ fn verification_and_planner_prompts_keep_focused_and_acceptance_roles_separate()
     assert!(
         verification.contains("Mid-work (including EXEC before final close-out): focused checks")
     );
-    assert!(verification.contains("Final acceptance: broader project checks once"));
+    assert!(verification.contains("Final acceptance: once, when finishing the change or delivery"));
     assert!(!verification.contains("green_build_evidence"));
 
     assert!(planner.contains("create_plan appends two gate todos"));
@@ -91,6 +92,8 @@ fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
         "complete check set",
         "scope proportional",
         "Scale the checks",
+        "every project check",
+        "full acceptance suite",
     ];
     let navigating_surfaces = [
         ("verification", verification),
@@ -138,6 +141,33 @@ fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
     assert!(verification.contains(
         "verify skill: the plan's declared\n  `acceptance_commands` are the mandatory floor"
     ));
+
+    let next_actions = [
+        NextAction::Done,
+        NextAction::HandOff {
+            reason: "test",
+            open_findings: vec![Finding::new("P1".into(), "test".into(), "test".into())],
+        },
+        NextAction::RunAcceptance {
+            residual_findings: vec!["F01 [P1] test: residual".into()],
+        },
+        NextAction::FixFindings {
+            open_findings: vec![Finding::new("P1".into(), "test".into(), "test".into())],
+        },
+        NextAction::StartReview,
+        NextAction::ContinueWork {
+            remaining_work: vec!["- work (pending)".into()],
+        },
+    ];
+    for action in next_actions {
+        let instruction = action.instruction();
+        for phrase in forbidden {
+            assert!(
+                !instruction.contains(phrase),
+                "NextAction instruction must not restate a superseded acceptance scope rule: {phrase:?}"
+            );
+        }
+    }
 }
 
 #[test]

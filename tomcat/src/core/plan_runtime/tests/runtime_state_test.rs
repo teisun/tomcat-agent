@@ -183,7 +183,9 @@ async fn next_action_is_the_single_close_out_decision_source() {
     frontmatter.todos[0].status = TodoStatus::Pending;
     assert_eq!(
         runtime.next_action(&frontmatter).await,
-        NextAction::ContinueWork
+        NextAction::ContinueWork {
+            remaining_work: vec!["- work (pending)".into()]
+        }
     );
 
     frontmatter.todos[0].status = TodoStatus::Completed;
