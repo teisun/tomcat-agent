@@ -1334,7 +1334,7 @@ fn update_plan_parameters() -> Value {
             },
             "dispute_findings": {
                 "type": "array",
-                "description": "P1 findings the main Agent explicitly accepts as a trade-off. Use only for wontfix; fixing code is communicated by a later review, not here.",
+                "description": "P1 findings, or P0 findings after an explicit user acknowledgement of a P0 handoff, that the main Agent accepts as a trade-off. Use only for wontfix; fixing code is communicated by a later review, not here.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -1366,7 +1366,7 @@ fn update_plan_parameters() -> Value {
             },
             "acceptance_commands": {
                 "type": "array",
-                "description": "Complete replacement for the plan's declared acceptance command list (one runnable command per entry). Omit to leave it unchanged. While planning/pending the list is replaced as given; once executing it is a ratchet: the new list must still contain every previously declared command, so it can only grow.",
+                "description": "Complete replacement for the plan's declared acceptance command list (one runnable command per entry). Omit to leave it unchanged. While planning/pending the list is replaced as given; once executing it is a ratchet: the new list must still contain every previously declared command, so it can only grow. A completed plan is immutable.",
                 "items": { "type": "string" }
             }
         }

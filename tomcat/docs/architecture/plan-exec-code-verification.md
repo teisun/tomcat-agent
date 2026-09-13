@@ -45,8 +45,9 @@ plan reviewer 核对：存在？可运行？           ② 梯子：按实际 di
 政策只写在 `assets/skills/verify/SKILL.md` 第 2 步；`system/verification.txt`、`plan/planner.txt`、
 `plan/executor.txt`、`update_plan` 的 acceptance 提示与 plan reviewer brief 只导航到它。
 `prompts/tests/load_test.rs::acceptance_scope_policy_lives_only_in_the_verify_skill` 是机械守卫：
-「complete check set / scope proportional / Scale the checks」在任何模板复活即红，梯子关键词只允许
-出现在 skill。code reviewer brief 不承担清单核对（用户决定：它只管代码质量）。
+「complete check set / scope proportional / Scale the checks / every project check / full acceptance
+suite」在模板或 `NextAction::instruction()` 复活即红，梯子关键词只允许出现在 skill。code reviewer
+brief 不承担清单核对（用户决定：它只管代码质量）。
 
 声明为空的老计划沿用旧行为并写 `plan.acceptance.commands_undeclared` 事件。若审计显示新计划
 普遍不声明，或声明系统性偏窄而 plan reviewer 与用户都没拦住，应在 `build_plan` 对代码计划强制
@@ -65,6 +66,17 @@ plan reviewer 核对：存在？可运行？           ② 梯子：按实际 di
 仍须用最新代码之后启动且零退出的后台任务证明全部改动。`plan.code_review.unreviewed_edit`
 是审计事件，残余 P0/P1 finding 不会被清除。若后续发现预算耗尽后的修改常引入本可由 review
 发现的问题，应降低 review 预算耗尽放行的范围或提高预算，而不是把旧 finding 静默删除。
+
+### 备案：声明命令持续失败的非进展预算（暂不启用）
+
+当前不对 acceptance 命令设固定重试次数：大型测试集可能需要多轮有意义的修复，固定三次会错误
+打断进展。已备案的启用条件是：真实 transcript 出现同一条声明命令连续至少五次失败、仍未交还，
+或用户反馈验收阶段空转。届时只对**非进展**收费：同一命令连续三次尝试中，相邻两次没有代码写入，
+或虽有写入但失败签名相同（退出码加 stderr 尾部哈希），才写 `plan.acceptance.stuck` 并让
+`NextAction` 交还用户。它不新增 frontmatter 字段，可由任务账本、代码 mtime 和进程内观察表得出。
+同类先例：`opencode/packages/opencode/src/session/processor.ts::DOOM_LOOP_THRESHOLD` 与
+`cc-fork-01/src/utils/hooks.ts::stop_hook_active` 都以“重复而无新信息”为停止条件；这里尚未
+启用，是因为 acceptance 命令的单次成本远高于普通工具调用。
 
 PlanFile 的每个 work todo 另有 `evidence: string[]`。EXEC 中 `content` 是已批准的工作描述，
 已有 work todo 不可由 upsert 改写；完成时用 `set_status.evidence` 记录命令、输出或交付路径。
@@ -242,7 +254,7 @@ tools/plan_tool/update_plan.rs::execute_for_tool
 | P2 P0/P1 review 门禁 | read-only code review、finding 机器分级、P1 申辩、P0 handoff、跨轮状态落盘。 | `plan_runtime/{file_store.rs,code_reviewer.rs}`；`update_plan.rs::{blocking_findings,prepare_disputes}`。 | `next_action_is_the_single_close_out_decision_source`；P0/P1 预算边界回归。 | P0 交还用户；P1 才可带清单验收；重启后 reviewer 仍知道上一轮的问题与 DELTA。 |
 | P3 受管 verify skill | 启动后物化 `verify/SKILL.md`；P0–P5 发现顺序；只允许 bash 与后台任务工具。 | `skill/builtin.rs::materialize_builtin_skills`；`assets/skills/verify/SKILL.md`。 | `plan_runtime::tests::verifier_can_expose_load_skill_when_config_enabled`（skill 暴露策略）；收口入口由 P1/P4 锁定。 | 不把命令写死在 Rust；skill 教模型按项目事实找检查。 |
 | P4 账本证据准入 | 精确命令、唯一 task ID、完成零退出码、开始时间新鲜度；合格快照写入 plan。 | `tools/plan_tool/update_plan.rs::require_green_build_pass`；`tools/primitive::BashTaskRegistry`。 | `green_build_gate_blocks_completion_until_pass`。 | 后台任务的真实记录才是绿构建凭据。 |
-| P5 收束与循环上限 | 文本收束 guard、review 预算、基础设施重试、重验周期上限和 warning。 | `agent_loop/turn_finalize.rs::completion_guard_instruction`；`infra/config/types/runtime.rs::PlanConfig`；`tools/plan_tool/update_plan.rs::prior_gate_cycles_exhausted`。 | `code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_with_{p0,p1}_residual`；周期上限直接测试：PENDING。 | 不让模型在未验收时只写总结离开，也不让它无限重跑。 |
+| P5 收束与循环上限 | 文本收束 guard、review 预算、基础设施重试、重验周期上限和 warning。 | `agent_loop/turn_finalize.rs::completion_guard_instruction`；`infra/config/types/runtime.rs::PlanConfig`；`tools/plan_tool/update_plan.rs::prior_gate_cycles_exhausted`。 | `final_review_round_immediately_hands_off_with_p0_residual`、`final_review_round_immediately_advances_to_acceptance_with_p1_residual`；周期上限直接测试：PENDING。 | 不让模型在未验收时只写总结离开，也不让它无限重跑。 |
 
 ---
 
@@ -348,7 +360,7 @@ tomcat/src/core/
 
 | 键 | 类型 / 默认 | 含义 | 说人话 |
 |----|-------------|------|--------|
-| `[plan].max_code_review_rounds` | `u32` / `2` | EXEC 收口最多派发多少次 code review；`0` 表示记录为跳过；用尽则无条件进入 acceptance，但有代码时绿构建仍必需。 | 默认首轮找错、次轮核销；要深审可显式提高。 |
+| `[plan].max_code_review_rounds` | `u32` / `4` | EXEC 收口最多派发多少次 code review；`0` 表示记录为跳过；最后一轮仅余 P1 才进入 acceptance，仍有 P0 则交还用户。 | 默认首轮找错，后续最多三轮核销；要深审可显式提高。 |
 | `[plan].max_completion_gate_cycles` | `u32` / `3` | 已完整通过后又改代码时，最多重跑几轮 review → build。 | 防止同一个计划无限重验。 |
 
 `[plan].verify_gate` 及 `PlanRuntime::dispatch_verifier` 是旧 verifier 资产的配置/API；当前 `update_plan` 不读取它来决定完成，不能把它当作关闭或开启本设计的开关。
@@ -376,8 +388,9 @@ review 已通过 + 未提交绿构建凭据
 review 技术故障连续超过两次
   → 保持 executing，写 transcript handoff，交还用户决定
 
-review 轮次耗尽
-  → `code_review_pass=true`，残余 finding 写 frontmatter/transcript，进入 acceptance
+review 最后一轮结束
+  ├─ 仅剩 P1 → `code_review_pass=true`，残余 finding 写 frontmatter/transcript，进入 acceptance
+  └─ 仍有 P0 → review gate 保持 pending，写 handoff 事件并交还用户
 
 此前已完整通过 + 重验周期达到上限
   → completed + warning（不把已失效凭据改写成新绿灯）
@@ -396,7 +409,7 @@ review 轮次耗尽
 | 维度 | 用例 / 编号 | 状态 | 说人话 |
 |------|-------------|------|--------|
 | 单元 / 收口 | `tools::plan_tool::tests::code_review_test::code_review_pass_completes_without_verifier` | ✅ 当前工作树 | code review 通过后不会调旧 verifier。 |
-| 单元 / P0/P1 | `tools::plan_tool::tests::code_review_test::code_review_rounds_exhaustion_{hands_off_with_p0,unconditionally_advances_to_acceptance_with_p1}_residual` | ✅ 当前工作树 | P0/P1 在预算内阻塞；预算耗尽后 P0 handoff、P1 才带着残余清单进入 acceptance。 |
+| 单元 / P0/P1 | `tools::plan_tool::tests::code_review_test::{final_review_round_immediately_hands_off_with_p0_residual,final_review_round_immediately_advances_to_acceptance_with_p1_residual}` | ✅ 当前工作树 | P0/P1 在预算内阻塞；最后一轮结束即 P0 handoff、P1 才带着残余清单进入 acceptance。 |
 | 单元 / 绿构建 | `tools::plan_tool::tests::code_review_test::green_build_gate_blocks_completion_until_pass` | ✅ 当前工作树 | 没有任务证据不能完成；合格任务才能完成。 |
 | 单元 / review 失败 | `tools::plan_tool::tests::code_review_test::resolved_findings_converge_to_completion_within_review_budget` | ✅ 当前工作树 | 预算内 finding 先回主 Agent 修复并在下一轮核销；预算耗尽时 P0 不会静默完成，P1 才可进入 acceptance。 |
 | 单元 / 审查恢复 | `tools::plan_tool::tests::code_review_test::second_review_round_receives_previous_open_findings_and_clears_fixed_ones` | ✅ 当前工作树 | 下一轮只应看到仍未解决的问题。 |

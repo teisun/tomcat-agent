@@ -48,6 +48,14 @@ plan reviewer 多看一眼、随计划一起被用户批准；code reviewer 不�
 [plan-exec-code-verification.md](plan-exec-code-verification.md)。运行时主动执行声明命令（B7''）
 仍是备选，仅当声明系统性偏窄且 plan reviewer 与用户都没拦住时再评估。
 
+### 备案：持续失败命令的非进展预算（暂不启用）
+
+不采用固定三次重试：大改动的全量测试可能需要超过三轮、且每轮都真实推进。仅当真实 transcript
+表明同一条 `acceptance_commands` 命令连续至少五次失败仍未交还，或用户反馈验收空转时，才考虑
+启用“非进展预算”。候选规则是：连续三次尝试中相邻两次没有代码写入，或有写入但
+`exit code + stderr 尾部哈希` 相同，则写 `plan.acceptance.stuck` 并由 `NextAction` 交还用户。
+它只用后台任务账本、代码 mtime 和进程内观察表，不改变 PlanFile schema。
+
 > 状态：已实现（以当前工作树为准）。
 > 适用：代码变更计划的 EXEC 收口。字段、调用协议与完整决策以 [plan-exec-code-verification.md](plan-exec-code-verification.md) 为权威来源。
 > 规范：[ARCHITECTURE_SPEC.md](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。相邻方案：[tools/reviewer.md](tools/reviewer.md)、[plan-runtime.md](plan-runtime.md)、[permission-system.md](permission-system.md)。

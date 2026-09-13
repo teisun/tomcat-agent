@@ -1512,6 +1512,9 @@ impl PlanRuntime {
         self.write_transcript_custom(payload);
     }
 
+    // These are independently persisted wire fields. Grouping them into an opaque
+    // context object would make recovery call sites less auditable.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn write_code_review_transcript(
         &self,
         plan_id: &str,

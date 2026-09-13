@@ -79,6 +79,46 @@ plan.update + plan.todos
   -> tool_execution_end(update_plan)
 ```
 
+### Code review 跨轮状态落盘
+
+reviewer 对话不是持久化对象；能跨进程恢复的是 PlanFile 的事实快照：
+
+```text
+第 N 轮完成
+  └─ PlanFileFrontmatter {
+       code_review_rounds,
+       code_review_baseline_ms,
+       code_review_open_findings,
+       code_review_disputed_findings
+     }
+               │
+               ▼
+进程重启后的第 N+1 轮
+  └─ 同一快照决定 round、是否 incremental、要核销的 finding 和 DELTA 基准
+```
+
+因此派发器接收调用方持有的 frontmatter 快照，不会为读取 open/disputed findings 再解析一次
+PlanFile；同一轮的判断不会出现两个事实源。
+
+### 子 Agent 的独立 `ReadFileState`
+
+`PlanReviewer`、`CodeReviewer` 以及每次新建的 reviewer 都各自创建 `ReadFileState`：
+
+```text
+reviewer A read(a.rs) ─► A 的 stamp 表
+reviewer B read(a.rs) ─► B 的空表 ─► 必须返回完整内容，不能拿到 A 的“文件未变”短路提示
+```
+
+去重只优化同一子 Agent 自己的重复读取，绝不能把一个 reviewer 的阅读历史变成另一个 reviewer
+的盲区。
+
+### 备案：Acceptance 命令的非进展预算（暂不启用）
+
+Acceptance 不采用“固定重试三次”：大型测试集中的每轮真实修复不能被次数上限误杀。若真实
+transcript 显示同一声明命令连续至少五次失败仍未交还，才评估启用非进展预算：连续三次之间无
+代码写入，或有写入但 `exit code + stderr 尾部哈希` 不变时，写 `plan.acceptance.stuck` 并交还用户。
+实现不增加 PlanFile 字段，依赖任务账本、代码 mtime 和进程内观察表。
+
 ### 1. 第一性原理设计
 
 `PlanReviewer` 和 `CodeReviewer` 现在是 **两个完全独立的子 Agent 类型**，而不是一个 reviewer + `ReviewKind` 开关。每个子 Agent 还有独立 `ReadFileState`：一个 reviewer 读过文件，不能让另一个 reviewer 的首次 read 被去重短路。

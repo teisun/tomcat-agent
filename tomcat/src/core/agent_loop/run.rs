@@ -427,7 +427,7 @@ impl AgentLoop {
                 }
                 Err(LoopError::Retryable(e)) => {
                     let elevated_retry_kind = is_retryable_llm_error(&e);
-                    // PLAN/EXEC 的 10 次预算只留给真实临时传输故障与限流；
+                    // PLAN/EXEC 的 10 次预算用于真实临时传输故障、限流与空响应；
                     // 其他可恢复类别仍保留交互档 4 次，避免长时间重试一个不会自愈的问题。
                     if unattended_execution
                         && !elevated_retry_kind
