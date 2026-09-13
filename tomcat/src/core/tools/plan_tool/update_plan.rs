@@ -873,7 +873,7 @@ fn run_acceptance_hint(residual_findings: &[String]) -> String {
         )
     };
     format!(
-        "{review_context}\nVerify ALL changes with the project's acceptance commands: set the `[gate] Acceptance` todo to in_progress, then load_skill(verify) to discover and run the commands (scope proportional to the change), and submit green_build_pass with evidence. {}",
+        "{review_context}\nVerify ALL changes with the project's acceptance commands: set the `[gate] Acceptance` todo to in_progress, then load_skill(verify) to discover and run the project's full documented check set, and submit green_build_pass with evidence. {}",
         acceptance_evidence_requirements()
     )
 }

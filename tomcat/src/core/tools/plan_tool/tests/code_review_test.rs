@@ -762,6 +762,12 @@ async fn green_build_gate_blocks_completion_until_pass() {
     assert!(review_passed["next_step"]["hint"]
         .as_str()
         .is_some_and(|hint| hint.contains("load_skill(verify)")));
+    assert!(review_passed["next_step"]["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("full documented check set")));
+    assert!(!review_passed["next_step"]["hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("scope proportional")));
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
     assert!(persisted.frontmatter.code_review_pass);
     assert!(!persisted.frontmatter.green_build_pass);
