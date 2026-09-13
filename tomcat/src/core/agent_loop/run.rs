@@ -63,8 +63,8 @@ use crate::core::session::{
 };
 use crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS;
 use crate::infra::error::{
-    classify_llm_failure, is_unsupported_multimodal_text, llm_http_status, llm_retry_after_ms,
-    llm_stage, llm_summary, AppError, LlmFailureKind,
+    is_retryable_llm_error, is_unsupported_multimodal_text, llm_http_status, llm_retry_after_ms,
+    llm_stage, llm_summary, AppError,
 };
 use crate::infra::events::{wire, AgentEvent};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -426,12 +426,7 @@ impl AgentLoop {
                     return Err(LoopError::Fatal(e));
                 }
                 Err(LoopError::Retryable(e)) => {
-                    let elevated_retry_kind = matches!(
-                        classify_llm_failure(&e).kind,
-                        LlmFailureKind::RateLimit
-                            | LlmFailureKind::UpstreamTransient
-                            | LlmFailureKind::StreamInterrupted
-                    );
+                    let elevated_retry_kind = is_retryable_llm_error(&e);
                     // PLAN/EXEC 的 10 次预算只留给真实临时传输故障与限流；
                     // 其他可恢复类别仍保留交互档 4 次，避免长时间重试一个不会自愈的问题。
                     if unattended_execution

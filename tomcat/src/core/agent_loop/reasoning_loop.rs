@@ -30,6 +30,7 @@ use tracing::info;
 use crate::core::llm::{
     ChatMessage, ChatMessageRole, ChatRequest, MessageKind, PromptCacheKeyFamily,
 };
+use crate::infra::error::llm_empty_response_error;
 use crate::infra::events::{AgentEvent, Message};
 
 use super::steering_injection::inject_follow_up_messages;
@@ -334,6 +335,10 @@ pub(super) async fn run_reasoning_loop(
         let has_no_visible_output = content_buf.trim().is_empty();
         let output_truncated = is_output_truncation_finish_reason(finish_reason.as_deref());
         let has_hidden_output = reasoning_continuation.is_some();
+        let response_id = reasoning_continuation
+            .as_ref()
+            .and_then(|continuation| continuation.provider_refs.as_ref())
+            .and_then(|refs| refs.openai_response_id.as_deref());
         let empty_turn_failure = tool_calls.is_empty()
             && (thinking_only_or_truncated
                 || (has_no_visible_output && (output_truncated || has_hidden_output)));
@@ -354,19 +359,44 @@ pub(super) async fn run_reasoning_loop(
                 "has_reasoning_continuation": reasoning_continuation.is_some(),
                 "completion_tokens": usage.as_ref().map(|usage| usage.completion_tokens),
                 "failure_kind": failure_kind,
+                "attempt": attempt,
+                "response_id": response_id,
             }));
             agent.clear_pending_assistant_entry_id();
             let message = match failure_kind {
                 "output_truncated" => {
                     "本轮输出在达到上限前没有产生可见回答。请使用 Resume 重试，或换一个模型后重试。"
+                        .to_string()
                 }
                 "hidden_output" => {
-                    "本轮产生了不可显示的推理、没有可见回答。请使用 Resume 重试，或换一个模型后重试。"
+                    if attempt >= max_attempts {
+                        format!(
+                            "本轮产生了不可显示的推理、没有可见回答。已自动重试 {} 次；请使用 Resume 重试，或换一个模型后重试。",
+                            attempt.saturating_sub(1)
+                        )
+                    } else {
+                        "本轮产生了不可显示的推理、没有可见回答。正在自动重试。".to_string()
+                    }
                 }
-                _ => "本轮只产生了思考、没有产生回答。请使用 Resume 重试，或换一个模型后重试。",
+                _ => {
+                    if attempt >= max_attempts {
+                        format!(
+                            "本轮只产生了思考、没有产生回答。已自动重试 {} 次；请使用 Resume 重试，或换一个模型后重试。",
+                            attempt.saturating_sub(1)
+                        )
+                    } else {
+                        "本轮只产生了思考、没有产生回答。正在自动重试。".to_string()
+                    }
+                }
             };
-            return Err(LoopError::Fatal(crate::infra::error::AppError::Llm(
-                message.to_string(),
+            if failure_kind == "output_truncated" {
+                return Err(LoopError::Fatal(crate::infra::error::AppError::Llm(
+                    message,
+                )));
+            }
+            return Err(LoopError::Retryable(llm_empty_response_error(
+                agent.llm.provider_name(),
+                message,
             )));
         }
 

@@ -102,6 +102,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
         LlmFailureKind::RateLimit => "retryable_rate_limit",
         LlmFailureKind::UpstreamTransient => "retryable_upstream_transient",
         LlmFailureKind::StreamInterrupted => "retryable_stream_interrupted",
+        LlmFailureKind::EmptyResponse => "retryable_empty_response",
         LlmFailureKind::UnsupportedMultimodal => "retryable_unsupported_multimodal",
         LlmFailureKind::Billing => "fatal_billing",
         LlmFailureKind::Authentication => "fatal_authentication",
@@ -127,6 +128,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
         | LlmFailureKind::RateLimit
         | LlmFailureKind::UpstreamTransient
         | LlmFailureKind::StreamInterrupted
+        | LlmFailureKind::EmptyResponse
         | LlmFailureKind::UnsupportedMultimodal => LoopError::Retryable(err),
         LlmFailureKind::Unknown if is_stream_terminal_error(&err) => LoopError::Retryable(err),
         LlmFailureKind::Billing

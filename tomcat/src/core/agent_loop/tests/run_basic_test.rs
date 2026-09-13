@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use crate::core::llm::multimodal::UNSUPPORTED_FILE_INPUT_PLACEHOLDER;
 use crate::core::llm::{
-    ChatMessage, ChatMessageContent, ChatMessageContentPart, MessageKind, ReasoningContinuation,
-    ReasoningFormat, StreamEvent,
+    ChatMessage, ChatMessageContent, ChatMessageContentPart, MessageKind, ProviderRefs,
+    ReasoningContinuation, ReasoningFormat, StreamEvent,
 };
 use crate::core::plan_runtime::file_store::PlanFileState;
 use crate::core::plan_runtime::PlanRuntime;
@@ -52,6 +52,47 @@ fn ok_text_stream(text: &str) -> Vec<Result<StreamEvent, AppError>> {
     vec![
         Ok(StreamEvent::ContentDelta {
             delta: text.to_string(),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]
+}
+
+fn hidden_empty_stream(response_id: &str) -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ReasoningSnapshot {
+            thinking_text: None,
+            reasoning_continuation: Some(ReasoningContinuation {
+                source_provider: "openai".to_string(),
+                source_api: "openai-responses".to_string(),
+                source_model: "gpt-5.4".to_string(),
+                format: ReasoningFormat::OpenaiResponsesReasoningItems,
+                opaque_payload: serde_json::json!([{
+                    "type": "reasoning",
+                    "id": "rsn_123",
+                    "encrypted_content": "opaque"
+                }]),
+                fallback_text: None,
+                provider_refs: Some(ProviderRefs {
+                    openai_response_id: Some(response_id.to_string()),
+                    replay_profile_id: None,
+                }),
+            }),
+            continuity: None,
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]
+}
+
+fn thinking_only_empty_stream() -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ReasoningSnapshot {
+            thinking_text: Some("reasoning without a visible answer".to_string()),
+            reasoning_continuation: None,
+            continuity: None,
         }),
         Ok(StreamEvent::FinishReason {
             reason: "stop".to_string(),
@@ -1431,42 +1472,86 @@ async fn run_empty_messages_fails_before_calling_the_llm() {
 }
 
 #[tokio::test]
-async fn reasoning_only_empty_turn_is_fatal_and_never_auto_retries() {
-    let stream = vec![
-        Ok(StreamEvent::ReasoningSnapshot {
-            thinking_text: Some("first reason through the task".to_string()),
-            reasoning_continuation: None,
-            continuity: None,
-        }),
-        Ok(StreamEvent::FinishReason {
-            reason: "stop".to_string(),
-        }),
-    ];
-    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        thinking_only_empty_stream(),
+        hidden_empty_stream("resp_empty_2"),
+        ok_text_stream("recovered"),
+    ]);
     let llm = Arc::new(provider);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let retry_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let retry_events = Arc::clone(&retry_events);
+        event_bus.on(
+            wire::WIRE_AUTO_RETRY_START,
+            Box::new(move |ctx: EventContext| {
+                retry_events.lock().unwrap().push(ctx.payload);
+                Ok(())
+            }),
+        );
+    }
+    let sink = Arc::new(RecordingAppendSink::default());
     let mut loop_ = AgentLoop::new(
         test_binding(llm, "gpt-4"),
         Arc::new(MockPrimitiveExecutor),
-        Arc::new(DefaultEventBus::new()),
+        event_bus,
         AgentLoopConfig {
             max_attempts: 4,
             retry_base_delay_ms: 0,
             session_id: "s-reasoning-only".to_string(),
+            message_append_sink: Some(sink.clone()),
             ..Default::default()
         },
         CancellationToken::new(),
     );
 
     let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
-    assert!(
-        matches!(outcome, AgentRunOutcome::Failed(_)),
-        "thinking-only response must surface as a failed turn"
-    );
+    let AgentRunOutcome::Completed(result) = outcome else {
+        panic!("hidden empty output should retry and recover");
+    };
+    assert_eq!(result.final_text, "recovered");
     assert_eq!(
         requests.0.lock().unwrap().len(),
-        1,
-        "the empty-turn guard must not retry an unchanged request"
+        3,
+        "two empty responses must be retried before the successful third request"
     );
+    assert_eq!(
+        retry_events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| event["attempt"].as_u64())
+            .collect::<Vec<_>>(),
+        vec![Some(2), Some(3)]
+    );
+    assert!(retry_events
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|event| event["maxAttempts"].as_u64() == Some(4)));
+    let empty_turns = sink
+        .custom_entries
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["event"].as_str() == Some("empty_turn"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(empty_turns.len(), 2);
+    assert_eq!(empty_turns[0]["event"].as_str(), Some("empty_turn"));
+    assert_eq!(empty_turns[0]["attempt"].as_u64(), Some(1));
+    assert_eq!(
+        empty_turns[0]["failure_kind"].as_str(),
+        Some("thinking_only")
+    );
+    assert!(empty_turns[0]["response_id"].is_null());
+    assert_eq!(empty_turns[1]["attempt"].as_u64(), Some(2));
+    assert_eq!(
+        empty_turns[1]["failure_kind"].as_str(),
+        Some("hidden_output")
+    );
+    assert_eq!(empty_turns[1]["response_id"].as_str(), Some("resp_empty_2"));
 }
 
 #[tokio::test]
@@ -1524,40 +1609,15 @@ async fn truncated_encrypted_thinking_without_visible_text_is_fatal() {
 }
 
 #[tokio::test]
-async fn hidden_reasoning_without_truncation_is_fatal() {
-    let stream = vec![
-        Ok(StreamEvent::ReasoningSnapshot {
-            thinking_text: None,
-            reasoning_continuation: Some(ReasoningContinuation {
-                source_provider: "anthropic".to_string(),
-                source_api: "anthropic-messages".to_string(),
-                source_model: "claude-opus-4-6".to_string(),
-                format: ReasoningFormat::AnthropicThinkingBlocks,
-                opaque_payload: serde_json::json!([{
-                    "type": "thinking",
-                    "signature": "sig_123"
-                }]),
-                fallback_text: None,
-                provider_refs: None,
-            }),
-            continuity: None,
-        }),
-        Ok(StreamEvent::Usage {
-            prompt_tokens: 1_000,
-            completion_tokens: 3,
-            total_tokens: Some(1_003),
-            cache_read_tokens: None,
-            cache_write_tokens: None,
-            reasoning_tokens: Some(3),
-            text_tokens: Some(0),
-        }),
-        Ok(StreamEvent::FinishReason {
-            reason: "stop".to_string(),
-        }),
-    ];
-    let (provider, requests) = RecordingStreamLlmProvider::new(vec![stream]);
+async fn hidden_reasoning_exhausts_interactive_budget_with_retry_count() {
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        hidden_empty_stream("resp_empty_1"),
+        hidden_empty_stream("resp_empty_2"),
+        hidden_empty_stream("resp_empty_3"),
+        hidden_empty_stream("resp_empty_4"),
+    ]);
     let mut loop_ = AgentLoop::new(
-        test_binding(Arc::new(provider), "claude-opus-4-6"),
+        test_binding(Arc::new(provider), "gpt-5.4"),
         Arc::new(MockPrimitiveExecutor),
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
@@ -1572,13 +1632,63 @@ async fn hidden_reasoning_without_truncation_is_fatal() {
     let outcome = loop_.run(vec![ChatMessage::user("hi")]).await;
 
     assert!(
-        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains("不可显示的推理")),
-        "a hidden reasoning continuation must fail even when the provider reports stop: {outcome:?}"
+        matches!(&outcome, AgentRunOutcome::Failed(error) if error.to_string().contains("已自动重试 3 次")),
+        "the exhausted error must state the actual automatic retry count: {outcome:?}"
     );
     assert_eq!(
         requests.0.lock().unwrap().len(),
-        1,
-        "the guard must not retry an unchanged hidden-reasoning request"
+        4,
+        "interactive empty responses use the four-request budget"
+    );
+}
+
+#[tokio::test]
+async fn hidden_empty_turn_uses_unattended_ten_request_budget() {
+    let mut streams = (0..5)
+        .map(|index| hidden_empty_stream(&format!("resp_empty_{index}")))
+        .collect::<Vec<_>>();
+    streams.push(ok_text_stream("recovered unattended"));
+    let (provider, requests) = RecordingStreamLlmProvider::new(streams);
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let retry_events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let retry_events = Arc::clone(&retry_events);
+        event_bus.on(
+            wire::WIRE_AUTO_RETRY_START,
+            Box::new(move |ctx: EventContext| {
+                retry_events.lock().unwrap().push(ctx.payload);
+                Ok(())
+            }),
+        );
+    }
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-5.4"),
+        Arc::new(MockPrimitiveExecutor),
+        event_bus,
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "hidden-empty-unattended".to_string(),
+            unattended_retry: true,
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let outcome = loop_.run(vec![ChatMessage::user("continue")]).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == "recovered unattended"),
+        "unattended empty responses should recover within the elevated budget: {outcome:?}"
+    );
+    assert_eq!(requests.0.lock().unwrap().len(), 6);
+    assert!(
+        retry_events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event["maxAttempts"].as_u64() == Some(10)),
+        "unattended retries must advertise the ten-request budget"
     );
 }
 

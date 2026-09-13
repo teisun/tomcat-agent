@@ -101,6 +101,15 @@ fn is_retryable_llm_error_matches_truth_table() {
     assert!(!is_retryable_llm_error(&AppError::Llm(
         "API 错误 503: legacy string".to_string()
     )));
+    let empty = llm_empty_response_error("openai-responses", "visible output missing");
+    assert_eq!(
+        classify_llm_failure(&empty).kind,
+        LlmFailureKind::EmptyResponse
+    );
+    assert!(
+        is_retryable_llm_error(&empty),
+        "typed empty responses must enter the ordinary retry policy"
+    );
 }
 
 #[test]

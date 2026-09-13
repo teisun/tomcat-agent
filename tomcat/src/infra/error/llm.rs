@@ -16,6 +16,7 @@ pub enum LlmFailureKind {
     RateLimit,
     UpstreamTransient,
     StreamInterrupted,
+    EmptyResponse,
     ContentFiltered,
     UnsupportedMultimodal,
     InvalidRequest,
@@ -31,6 +32,7 @@ impl LlmFailureKind {
             Self::RateLimit => "rate_limit",
             Self::UpstreamTransient => "upstream_transient",
             Self::StreamInterrupted => "stream_interrupted",
+            Self::EmptyResponse => "empty_response",
             Self::ContentFiltered => "content_filtered",
             Self::UnsupportedMultimodal => "unsupported_multimodal",
             Self::InvalidRequest => "invalid_request",
@@ -107,6 +109,7 @@ impl fmt::Display for LlmErrorStage {
 pub struct LlmError {
     provider: Option<String>,
     stage: Option<LlmErrorStage>,
+    explicit_kind: Option<LlmFailureKind>,
     http_status: Option<u16>,
     retry_after_ms: Option<u64>,
     code: Option<String>,
@@ -139,12 +142,26 @@ pub fn llm_stream_interrupted_error(
     AppError::LlmDetailed(Box::new(LlmError {
         provider: Some(provider.into()),
         stage: Some(LlmErrorStage::BodyRead),
+        explicit_kind: None,
         http_status: None,
         retry_after_ms: None,
         code: Some("stream_interrupted".to_string()),
         summary: summary.into(),
         source: None,
     }))
+}
+
+/// Upstream completed a request but returned neither visible text nor a tool
+/// call. This is a typed transient failure, rather than a message-text match.
+pub fn llm_empty_response_error(
+    provider: impl Into<String>,
+    summary: impl Into<String>,
+) -> AppError {
+    AppError::LlmDetailed(Box::new(LlmError::semantic(
+        provider,
+        LlmFailureKind::EmptyResponse,
+        summary,
+    )))
 }
 
 pub fn llm_http_status_error(
@@ -224,6 +241,7 @@ impl LlmError {
         Self {
             provider: Some(provider.into()),
             stage: Some(stage),
+            explicit_kind: None,
             http_status: None,
             retry_after_ms: None,
             code: None,
@@ -244,6 +262,7 @@ impl LlmError {
         Self {
             provider: Some(provider.into()),
             stage: Some(stage),
+            explicit_kind: None,
             http_status: None,
             retry_after_ms: None,
             code: None,
@@ -260,9 +279,27 @@ impl LlmError {
         Self {
             provider: Some(provider.into()),
             stage: None,
+            explicit_kind: None,
             http_status: None,
             retry_after_ms: None,
             code,
+            summary: summary.into(),
+            source: None,
+        }
+    }
+
+    pub fn semantic(
+        provider: impl Into<String>,
+        kind: LlmFailureKind,
+        summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider: Some(provider.into()),
+            stage: None,
+            explicit_kind: Some(kind),
+            http_status: None,
+            retry_after_ms: None,
+            code: None,
             summary: summary.into(),
             source: None,
         }
@@ -276,6 +313,7 @@ impl LlmError {
         Self {
             provider: Some(provider.into()),
             stage: None,
+            explicit_kind: None,
             http_status: Some(http_status),
             retry_after_ms: None,
             code: None,
@@ -293,6 +331,7 @@ impl LlmError {
         Self {
             provider: Some(provider.into()),
             stage: Some(stage),
+            explicit_kind: None,
             http_status: Some(http_status),
             retry_after_ms: None,
             code: None,
@@ -311,6 +350,10 @@ impl LlmError {
 
     pub fn stage(&self) -> Option<LlmErrorStage> {
         self.stage
+    }
+
+    pub fn explicit_kind(&self) -> Option<LlmFailureKind> {
+        self.explicit_kind
     }
 
     pub fn http_status_value(&self) -> Option<u16> {
@@ -399,6 +442,7 @@ pub fn is_retryable_llm_error(err: &AppError) -> bool {
         LlmFailureKind::RateLimit
             | LlmFailureKind::UpstreamTransient
             | LlmFailureKind::StreamInterrupted
+            | LlmFailureKind::EmptyResponse
     )
 }
 
@@ -448,6 +492,11 @@ pub fn is_context_overflow(err: &AppError) -> bool {
 /// RateLimit，或把「余额不足」错判为 Authentication。纯 `402 Payment Required` 没有
 /// 结构化错误时也归 Billing；孤立的 403 仍然只能是鉴权。
 pub fn classify_llm_failure(err: &AppError) -> LlmFailure {
+    if let AppError::LlmDetailed(detail) = err {
+        if let Some(kind) = detail.explicit_kind() {
+            return LlmFailure::new(kind, FailureDomain::Transport);
+        }
+    }
     let summary = llm_summary(err).unwrap_or_default();
     let (json_code, json_type) = structured_error_fields(&summary);
     let code = llm_code(err).or(json_code);
