@@ -42,7 +42,8 @@ update_plan(all todos completed)
            +--> tool result: update_plan.code_review
            +--> verdict=pass      -> verified green build -> completed
            +--> verdict=fail/partial -> stay executing, 修复后进入下一轮增量复审
-           +--> rounds exhausted  -> review gate pass + residual findings -> green-build acceptance
+           +--> rounds exhausted + P0 -> handoff to user
+           +--> rounds exhausted + P1 -> review gate pass + residual findings -> green-build acceptance
 ```
 
 ### Code review 时间线契约
@@ -51,15 +52,15 @@ update_plan(all todos completed)
 
 ```text
 plan.update + plan.todos
-  -> plan.code_review.started (parent, running)
+  -> plan.code_review.started (parent, running; process-local lease only)
   -> sub_agent_start/end (child audit only)
-  -> plan.code_review (parent, pass/fail/partial/aborted)
+  -> plan.code_review (parent, pass/fail/partial/aborted; every attempt has a terminal event)
   -> tool_execution_end(update_plan)
 ```
 
 ### 1. 第一性原理设计
 
-`PlanReviewer` 和 `CodeReviewer` 现在是 **两个完全独立的子 Agent 类型**，而不是一个 reviewer + `ReviewKind` 开关。
+`PlanReviewer` 和 `CodeReviewer` 现在是 **两个完全独立的子 Agent 类型**，而不是一个 reviewer + `ReviewKind` 开关。每个子 Agent 还有独立 `ReadFileState`：一个 reviewer 读过文件，不能让另一个 reviewer 的首次 read 被去重短路。
 
 - `SubagentType::PlanReviewer`
 - `SubagentType::CodeReviewer`
@@ -81,17 +82,18 @@ plan.update + plan.todos
 
 ### 3. EXEC 收口现在怎么走
 
-- 默认最多跑 **2 轮** code review（可由用户配置提高）：首轮审完整变更文件集；后续轮只对自上轮派发后修改的 DELTA 找新问题，同时逐条核销上一轮 open findings。DELTA 之外的文件冻结，除非 open finding 指向它或本轮修改直接波及它。
+- 默认最多跑 **4 轮** code review（可由用户配置提高）：首轮审完整变更文件集；后续轮只对自上轮派发后修改的 DELTA 找新问题，同时逐条核销上一轮 open findings。`code_review_rounds`、基准时间、open findings 和已裁决 finding 都写在 PlanFile，后端重启不丢这份交接账本；不续跑旧 reviewer 对话。
 - `verdict = pass`：先记录 review 已通过；仍必须提供当前代码 diff 的 green-build 证据，才会
   completed 并切回 CHAT。
 - `verdict = fail | partial`：plan 保持 `executing`，runtime 不自动造 todo，而是明确要求主 Agent：
   - `reopen` 一个已有 todo，或
   - `add` 一个修复 todo。
 - 修完再次 `update_plan` 收口时，只要预算尚未耗尽，就继续增量复审。
-- 轮次耗尽时，不论残余是 P0 还是 P1，runtime 都置 `code_review_pass = true` 并完成 review gate；残余清单同时写入 transcript 与 PlanFile frontmatter，`run_acceptance` 明示它们，随后必须对**全部改动**提交真实的 green-build 证据。它放行到 acceptance，不是 best-effort completed。
+- 轮次耗尽时，残余 P0 会保持 review gate pending 并 handoff 给用户；仅有 P1 才可完成 review gate、带残余进入 acceptance。用户的新消息会刷新轮次预算但不清空 findings。
 - `verdict = aborted`：按技术故障处理，不消耗正常轮次；重试仍无法恢复时同样保持
   `executing` 并交还用户。
 - P1 必须声明证据类别：用户可见缺陷标 `basis: "user_defect"`；计划不符标 `basis: "plan_mismatch"` 且必须附 `plan_ref`（被违反的具体计划条目的原文摘录）。缺少或无法在计划中找到这份证据的 P1 会被运行时降级为 P2。
+- 对每个标 completed 的 todo，reviewer 还要核对文字或 evidence 点名的文件、脚本和测试入口确实存在；缺失即为带该 todo 原文 `plan_ref` 的 P1 `plan_mismatch`。
 
 ### 4. verifier 当前状态
 

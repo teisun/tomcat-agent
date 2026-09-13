@@ -113,7 +113,7 @@ impl PrimitiveExecutor for DisplayPrimitive {
     ) -> Result<crate::core::tools::primitive::EditFileResult, AppError> {
         Ok(crate::core::tools::primitive::EditFileResult {
             path: path.to_string(),
-            applied: true,
+            applied: !path.ends_with("reject.txt"),
             added: Some(3),
             removed: Some(0),
             diff: Some(sample_diff()),
@@ -185,7 +185,7 @@ async fn write_success_populates_file_display() {
         None,
     )
     .await;
-    assert!(!outcome.is_error);
+    assert!(!outcome.is_error, "{}", outcome.model_text);
     assert_eq!(
         outcome.display,
         Some(ToolDisplay::File {
@@ -288,6 +288,72 @@ async fn hashline_edit_success_populates_file_display() {
             diff_truncated: false,
             expired: false,
         })
+    );
+}
+
+#[tokio::test]
+async fn rejected_hashline_edit_invalidates_its_read_stamp_for_a_refresh_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let rejected_path = dir.path().join("reject.txt");
+    std::fs::write(&rejected_path, "before\n").unwrap();
+    let metadata = std::fs::metadata(&rejected_path).unwrap();
+    let state = Arc::new(crate::core::tools::pipeline::read_state::ReadFileState::new());
+    let normalized_path =
+        crate::infra::platform::normalize_path(rejected_path.to_str().unwrap()).unwrap();
+    state.put(
+        normalized_path.clone(),
+        crate::core::tools::pipeline::read_state::ReadStamp {
+            mtime_ms: crate::core::tools::pipeline::read_state::metadata_mtime_ms(&metadata),
+            size: metadata.len(),
+            content_hash: crate::core::tools::pipeline::read_state::hash_content(b"before\n"),
+            offset: None,
+            limit: None,
+            is_partial_view: false,
+            render_mode: crate::core::tools::pipeline::read_state::ReadRenderMode::Plain,
+            covered_lines: Some((1, 1)),
+            reached_eof: true,
+            tool_call_id: Some("prior-read".into()),
+        },
+    );
+    let primitive: Arc<dyn PrimitiveExecutor> = Arc::new(DisplayPrimitive);
+    let tc = ToolCallInfo {
+        id: "rejected-hashline-edit".into(),
+        name: "hashline_edit".into(),
+        arguments: json!({
+            "path": rejected_path,
+            "edits": [{
+                "op": "replace",
+                "pos": "1#ab",
+                "end": "1#ab",
+                "lines": "after"
+            }]
+        })
+        .to_string(),
+    };
+
+    let outcome = execute_tool_full(
+        &primitive,
+        &None,
+        &None,
+        Some(&state),
+        None,
+        None,
+        None,
+        None,
+        None,
+        SubagentType::User,
+        &tokio_util::sync::CancellationToken::new(),
+        &tc,
+        None,
+        None,
+    )
+    .await;
+
+    assert!(!outcome.is_error, "{}", outcome.model_text);
+    assert!(outcome.model_text.contains("hashline 编辑被拒绝"));
+    assert!(
+        state.get(&normalized_path).is_none(),
+        "被拒编辑后的下一次 read 必须能刷新，而不是命中 FILE_UNCHANGED"
     );
 }
 

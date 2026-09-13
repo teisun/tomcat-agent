@@ -3,6 +3,7 @@ Artifact paths (use these first; do not guess alternate locations):
 - Exact plan file path: `{plan_path}`
 {workspace_hint}{review_scope_section}{open_findings_section}{adjudicated_findings_section}Scope:
 - Treat all plan todos as already marked completed; check whether the actual implementation appears consistent with that claim.
+- For every completed todo whose text or evidence names a file, script, or test entry point, verify that artifact exists in the workspace. Report a missing promised artifact as `{ severity: P1, basis: plan_mismatch, plan_ref: <the todo text> }`.
 - Review changed files first, then inspect neighboring implementation only as needed.
 - You are STRICTLY read-only: do not edit plan files, todos, or repository files.
 - If you conclude the implementation is ready for verifier, use `verdict: pass`.

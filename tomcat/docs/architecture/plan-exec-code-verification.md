@@ -2,6 +2,27 @@
 
 ## 2026-09 预算耗尽后的编辑与 Todo 证据
 
+### R3 事件触发的更正（2026-09-13）
+
+一次被取消的 reviewer 把 `gate-review: in_progress` 留在磁盘，且旧规则在预算耗尽后会让
+P0 跟 P1 一样自动放行。这两件事推翻了“半开态可恢复、预算耗尽一律验收”的假设：
+
+```text
+gate 启动命令 ──► 仅进程内 InFlightReview lease ──► 终态一次写盘
+                  Drop / 中断 ──► gate 仍 pending + aborted 事件
+
+第 4 轮仍有 P0 ──► handoff 给用户
+第 4 轮仅有 P1 ──► 带残余清单进入全量 Acceptance
+```
+
+跨轮 reviewer 不续跑旧对话。`PlanFileFrontmatter` 持久化轮次、基准时间、open findings 与
+已裁决 finding；下一轮仅审基准后的 DELTA 并核销 open findings。每个子 Agent 另建
+`ReadFileState`，因此 reviewer 的“已读”不会错误短路另一个 reviewer 的首次读取。
+
+未采用的备选保持记录：B7'「计划声明命令后逐条对账」、B7''「运行时执行声明命令」、B13'
+「续跑 reviewer 对话或交接笔记」。只有全量 verify 仍反复漏验，或结构化账本不足以让增量
+评审收敛时，才重新评估这些更重的机制。
+
 ```text
 代码修改发生在 Acceptance 期间
   ├─ review rounds 尚有余额             → review 与 acceptance 都重新变 stale
@@ -131,7 +152,8 @@ tools/plan_tool/update_plan.rs::execute_for_tool
 | `executing` | workspace root 已绑定且没有代码 diff | `completed` | 写 `plan.complete` | 文档、配置或计划类交付不被代码门禁误挡。 |
 | `executing` | 当前代码的两个持久化门禁都新鲜 | `completed` | 不重复运行 review/build | 同一份代码不反复验。 |
 | `executing` | review 未通过或有未裁决 P0/P1，且预算未尽 | `executing` | 写 review 结果，主 Agent 重开或新增修复 todo | 真问题先修，仍有复审预算就继续。 |
-| `executing` | review 预算耗尽 | `executing` | 无条件完成 review gate、持久化残余 finding，进入 green-build acceptance | 评审意见不能无限卡住流程；残余会带入客观验收。 |
+| `executing` | review 预算耗尽且残余含 P0 | `executing` | review gate 保持 pending，写 handoff，等待新的用户消息刷新预算 | P0 不能由无人值守流程替用户接受。 |
+| `executing` | review 预算耗尽且仅剩 P1 | `executing` | 完成 review gate、持久化残余 finding，进入 green-build acceptance | P1 可作为明确风险继续由客观验收收口。 |
 | `executing` | review 新鲜但没有新鲜绿构建证据 | `executing` | `BadArgs` 指引加载 `verify` skill | 审过不等于跑过。 |
 | `executing` | 合格后台任务证据已提交 | `completed` | 持久化 `green_build_*` 后完成 | 账本确认命令真成功才放行。 |
 | `executing` | 已完整通过后又改代码，重验周期达到上限 | `completed` + warning | 保留失效状态并记录“沿用最后一次通过结果” | 这是防止无尽重验的明确逃逸，不是新的绿构建通过。 |
@@ -143,7 +165,7 @@ tools/plan_tool/update_plan.rs::execute_for_tool
 | 术语 | 语义 | 数据载体 | 行为约束 | 说人话 |
 |------|------|----------|----------|--------|
 | **代码 diff** | 当前工作区相对 `HEAD` 的已跟踪变更加未跟踪文件中，扩展名属于代码集合的路径。 | `CodeDiffContext.changed_code_files` | 过滤 `.rs`、`.ts`、`.tsx`、`.js`、`.py`、`.go`、`.java`、`.sh`、`.sql`、`.vue` 等；删除文件没有 mtime 时用当前时间作保守下界。 | 只有真改代码才触发代码验收。 |
-| **review gate 放行** | reviewer 无未裁决 P0/P1，或已跑满配置的 review 预算。 | `code_review_pass`、`code_review_pass_at_ms`、`code_review_residual_findings[]` | 预算未尽时，P0/P1 仍阻塞；预算耗尽时一律放行，残余明确持久化并交给 acceptance。 | 先让评审找错；它不能无限卡住，但留下的问题不会被藏起来。 |
+| **review gate 放行** | reviewer 无未裁决 P0/P1，或预算耗尽且仅剩 P1。 | `code_review_pass`、`code_review_pass_at_ms`、`code_review_residual_findings[]`、`code_review_handoff` | 预算内 P0/P1 阻塞；耗尽后 P0 交还用户，P1 才可携残余进 acceptance。 | P0 不能静默带病放行。 |
 | **绿构建通过** | 至少一条由运行时核实的后台验收任务覆盖当前代码。 | `green_build_pass`、`green_build_evidence[]` | 每条证据要有精确命令、任务 ID、启动时间和零退出码。 | 不是“我跑过了”，而是能查到哪条命令什么时候成功。 |
 | **新鲜（fresh）** | review 或验收发生在当前代码最新修改之后。 | `code_review_pass_at_ms`、`GreenBuildEvidence.started_at_ms`、`newest_edit_mtime_ms` | 通过时间必须 `>=` 最新 mtime；代码再改会清空两项 gate。 | 改完代码后，旧绿灯自动失效。 |
 | **P1 申辩** | 主 Agent 把某个未决 P1 作为已接受取舍，而非声称已修。 | `dispute_findings[{ref,area,resolution:"wontfix",reason}]` 与 runtime disputed findings | P0 不可申辩；P2 不阻塞也无需申辩；修复必须改代码后复审。 | P1 可以说明“为什么不改”，P0 必须修。 |
@@ -179,7 +201,7 @@ tools/plan_tool/update_plan.rs::execute_for_tool
 |------|------|------|------|----------|---------------|--------|
 | R1 代码范围 | 哪些计划必须经过代码门禁？ | **采用** 已绑定 workspace root 的 Git 路径清单加扩展名过滤和 mtime；**拒绝** 任何 todo 完成即强制构建。 | Tomcat `plan_runtime/code_reviewer.rs::collect_code_diff_context`、`is_code_path`；cc-fork-01 `verificationAgent.ts` “files changed”输入。 | 设计：`git diff --name-only HEAD` 与未跟踪文件合并后筛代码路径。理由：只让实际代码变化承担 review/build 成本，且删除也会使旧证据失效。 | **未入选**：从 todo 内容、`TodoKind` 或模型声明推测代码变更。**拒因**：它们不是工作树事实，且 `TodoKind` 不存在于当前 schema。 | 看 Git 实际变了什么，不看模型把 todo 起了什么名字。 |
 | R2 绿构建凭据 | 怎样证明验收命令真的跑过并覆盖最后一次编辑？ | **采用** `BashTaskRegistry` 的后台任务作为唯一凭据；**拒绝** verifier 文本、人工字符串或 cargo-check 专用记录。 | Tomcat `update_plan.rs::require_green_build_pass`、`file_store.rs::GreenBuildEvidence`；cc-fork-01 `verificationAgent.ts` 的 Command/Output 要求。 | 设计：提交 `{command, task_id}`，运行时核验命令、`Finished(exit_code=0)`、freshness 后写入快照。理由：命令执行事实无法由主 Agent 的自然语言伪造。 | **未入选**：旧版 `VerifySummary` 或 `cargo check` 自动运行。**拒因**：前者已不在收口链路，后者不能覆盖项目特定 build/test/UI smoke。 | 让运行时查后台任务的收据，而不是相信一句“测试通过”。 |
-| R3 代码审查与申辩 | 什么 finding 阻塞，又如何处理有意识的取舍？ | **采用** 预算内 P0/P1 阻塞、P2 advisory，且仅允许 P1 `wontfix` 申辩；预算耗尽后无条件放行到 acceptance。 | Tomcat `update_plan.rs::blocking_findings`、`prepare_disputes`；`review.rs::Finding::tier`；cc-fork-01 `verificationAgent.ts` 的“验证前先确认不是有意行为”规则。 | 设计：运行时按 finding 分级；P1 还须给出 `user_defect` 或可在计划正文查到的 `plan_mismatch` 引用。预算内可以修复/申辩，预算外将残余持久化而不无限复审。 | **未入选**：P0/P1 一律自动通过或所有 finding 一律永久阻塞。**拒因**：前者丢失首轮纠错，后者会把主观评审变成死锁。 | 大问题先修；评审跑满时带着清单去跑客观验收。 |
+| R3 代码审查与申辩 | 什么 finding 阻塞，又如何处理有意识的取舍？ | **采用** 预算内 P0/P1 阻塞、P2 advisory；预算耗尽时 P0 handoff、仅 P1 可进 acceptance。P1 可 `wontfix`，P0 只在用户确认 handoff 后可带理由接受。 | Tomcat `update_plan.rs::{blocking_findings,prepare_disputes}`、`PlanRuntime::refresh_code_review_budget_after_user_message`；`review.rs::Finding::tier`。 | 预算是无人值守的边界，不是替用户接受 P0 的授权；新用户消息才会重开一段预算，open findings 继续随 reviewer brief 传递。 | **未入选**：P0/P1 一律自动通过或所有 finding 永久阻塞。**拒因**：前者越权，后者会死锁。 | 评审跑满不等于 P0 消失；业主回话才可继续。 |
 | R4 循环控制 | 代码反复修改导致验收不断失效时怎样避免无穷循环？ | **采用** 持久化 `completion_gate_cycles` 上限（默认 3，最小 1）；**拒绝**无上限重验。 | Tomcat `file_store.rs::PlanFileFrontmatter`、`update_plan.rs::prior_gate_cycles_exhausted`；`infra/config/types/runtime.rs::PlanConfig`；cc-fork-01 `verificationAgent.ts` 对真实命令优先而非无限叙述的约束。 | 设计：先前已完整通过、随后代码变更且重验次数达到上限时，写 warning 后完成。理由：把逃逸显式、可观察，避免 Agent 在同一门禁上空转。 | **未入选**：把上限当作“自动绿灯”，或删除上限。**拒因**：前者误报验收成功，后者不能终止循环。 | 到上限是明确交付取舍：会提示沿用旧结果，但不会把它伪装成新验证。 |
 
 ### 3.2 实施点（已闭环）
@@ -187,7 +209,7 @@ tools/plan_tool/update_plan.rs::execute_for_tool
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
 | P1 代码范围与持久化门禁 | 代码路径筛选、mtime 新鲜度、PlanFile gate 字段与重验周期。 | `plan_runtime/code_reviewer.rs::{collect_code_diff_context,is_code_path}`；`plan_runtime/file_store.rs::{PlanFileFrontmatter,GreenBuildEvidence}`；`tools/plan_tool/update_plan.rs::{code_gates_are_fresh,invalidate_code_gates}`。 | `code_review_pass_completes_without_verifier`；`green_build_gate_blocks_completion_until_pass`。 | 每次最后收口都比较当前代码和已存凭据。 |
-| P2 P0/P1 review 门禁 | read-only code review、finding 机器分级、P1 申辩、结果/事件回传。 | `plan_runtime/code_reviewer.rs`；`plan_runtime/review.rs::Finding`；`tools/plan_tool/update_plan.rs::{blocking_findings,prepare_disputes}`。 | `code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_with_{p0,p1}_residual`；`code_review_downgrades_uncited_plan_mismatch_but_keeps_cited_p1`。 | 预算内发现严重问题就先修；预算用尽后带着清单去验收。 |
+| P2 P0/P1 review 门禁 | read-only code review、finding 机器分级、P1 申辩、P0 handoff、跨轮状态落盘。 | `plan_runtime/{file_store.rs,code_reviewer.rs}`；`update_plan.rs::{blocking_findings,prepare_disputes}`。 | `next_action_is_the_single_close_out_decision_source`；P0/P1 预算边界回归。 | P0 交还用户；P1 才可带清单验收；重启后 reviewer 仍知道上一轮的问题与 DELTA。 |
 | P3 受管 verify skill | 启动后物化 `verify/SKILL.md`；P0–P5 发现顺序；只允许 bash 与后台任务工具。 | `skill/builtin.rs::materialize_builtin_skills`；`assets/skills/verify/SKILL.md`。 | `plan_runtime::tests::verifier_can_expose_load_skill_when_config_enabled`（skill 暴露策略）；收口入口由 P1/P4 锁定。 | 不把命令写死在 Rust；skill 教模型按项目事实找检查。 |
 | P4 账本证据准入 | 精确命令、唯一 task ID、完成零退出码、开始时间新鲜度；合格快照写入 plan。 | `tools/plan_tool/update_plan.rs::require_green_build_pass`；`tools/primitive::BashTaskRegistry`。 | `green_build_gate_blocks_completion_until_pass`。 | 后台任务的真实记录才是绿构建凭据。 |
 | P5 收束与循环上限 | 文本收束 guard、review 预算、基础设施重试、重验周期上限和 warning。 | `agent_loop/turn_finalize.rs::completion_guard_instruction`；`infra/config/types/runtime.rs::PlanConfig`；`tools/plan_tool/update_plan.rs::prior_gate_cycles_exhausted`。 | `code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_with_{p0,p1}_residual`；周期上限直接测试：PENDING。 | 不让模型在未验收时只写总结离开，也不让它无限重跑。 |
@@ -333,7 +355,7 @@ review 轮次耗尽
 
 `turn_finalize::completion_guard_instruction` 还会在根 Agent 试图用纯文本结束、且已 review 通过但绿构建未通过时，注入继续指令，要求加载 skill、运行后台命令、提交 `task_id`。注入本身另有 `MAX_COMPLETION_GUARD_INJECTIONS=8` 上限，避免文本循环。
 
-**说人话**：基础设施失败会明确交还；正常 review 用尽预算会转入客观验收，仍必须有新鲜绿构建凭据。只有“已完整验过又反复修改到周期上限”会带 warning 完成，而且不会假装那是新一轮绿构建。
+**说人话**：基础设施失败和预算耗尽后的 P0 都会明确交还；只有预算耗尽后仅剩 P1 才转入客观验收，仍必须有新鲜绿构建凭据。只有“已完整验过又反复修改到周期上限”会带 warning 完成，而且不会假装那是新一轮绿构建。
 
 ---
 
@@ -342,9 +364,9 @@ review 轮次耗尽
 | 维度 | 用例 / 编号 | 状态 | 说人话 |
 |------|-------------|------|--------|
 | 单元 / 收口 | `tools::plan_tool::tests::code_review_test::code_review_pass_completes_without_verifier` | ✅ 当前工作树 | code review 通过后不会调旧 verifier。 |
-| 单元 / P0/P1 | `tools::plan_tool::tests::code_review_test::code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_with_{p0,p1}_residual` | ✅ 当前工作树 | P0/P1 在预算内阻塞；预算耗尽后都带着残余清单转入 acceptance。 |
+| 单元 / P0/P1 | `tools::plan_tool::tests::code_review_test::code_review_rounds_exhaustion_{hands_off_with_p0,unconditionally_advances_to_acceptance_with_p1}_residual` | ✅ 当前工作树 | P0/P1 在预算内阻塞；预算耗尽后 P0 handoff、P1 才带着残余清单进入 acceptance。 |
 | 单元 / 绿构建 | `tools::plan_tool::tests::code_review_test::green_build_gate_blocks_completion_until_pass` | ✅ 当前工作树 | 没有任务证据不能完成；合格任务才能完成。 |
-| 单元 / review 失败 | `tools::plan_tool::tests::code_review_test::resolved_findings_converge_to_completion_within_review_budget` | ✅ 当前工作树 | 预算内 finding 先回主 Agent 修复并在下一轮核销；预算耗尽时不会静默完成，而是进入 acceptance。 |
+| 单元 / review 失败 | `tools::plan_tool::tests::code_review_test::resolved_findings_converge_to_completion_within_review_budget` | ✅ 当前工作树 | 预算内 finding 先回主 Agent 修复并在下一轮核销；预算耗尽时 P0 不会静默完成，P1 才可进入 acceptance。 |
 | 单元 / 审查恢复 | `tools::plan_tool::tests::code_review_test::second_review_round_receives_previous_open_findings_and_clears_fixed_ones` | ✅ 当前工作树 | 下一轮只应看到仍未解决的问题。 |
 | 单元 / verifier 遗留资产 | `tools::plan_tool::tests::verify_test::update_plan_does_not_dispatch_dormant_verifier_even_when_attached` | ✅ 当前工作树 | 旧 verifier 即使挂载也不进当前收口流。 |
 | 关键承诺 / mtime 与周期上限 | 直接覆盖 `code_gates_are_fresh`、失效后重验与 `completion_gate_cycles` 的场景 | PENDING | 设计已实现，但需把这些边界单独锁成测试。 |
@@ -371,7 +393,7 @@ review 轮次耗尽
 - ~~`TodoKind{Task,Research}`、research URL/`file:line` evidence 是完成门禁的一部分~~ → **否**：当前 `TodoItem` 只有 `id/content/status`，没有 `TodoKind` 或 research evidence；它们不属于现行代码验收路径。
 - ~~收口时运行 `cargo check` / `tsc --noEmit` 并自动记为通过~~ → **否**：当前门禁不固定命令。`verify` skill 按项目文档、manifest、CI 与变更范围发现 build/test/lint/UI smoke，再由后台任务账本核验。
 - ~~`update_plan` 在 code review 后派发 internal verifier，并由 `[plan].verify_gate` 决定是否收口~~ → **否**：`update_plan_does_not_dispatch_dormant_verifier_even_when_attached` 锁定当前行为；旧 verifier 代码保留但不做完成事实源。
-- ~~review 预算耗尽即可 best-effort completed~~ → **否**：review 没有通过时保持 `executing` 并交还用户。唯一完成逃逸是“此前完整通过后、代码又变且重验周期到顶”，并且必须携带 warning。
+- ~~review 预算耗尽即可 best-effort completed~~ → **否**：预算耗尽后的残余 P0 保持 `executing` 并交还用户；只有残余仅 P1 才可进入 acceptance。唯一完成逃逸是“此前完整通过后、代码又变且重验周期到顶”，并且必须携带 warning。
 - **跨文档修订**：`delivery-accuracy-and-completeness.md` 只保留本设计在交付可靠性总图中的定位；字段、顺序、协议和验收真相均以本文为准。
 
 ---

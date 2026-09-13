@@ -17,10 +17,22 @@ status transition ──evidence─────┘
 因此已有 work todo 的 upsert content 改动会被拒，并指向 `set_status.evidence`；planning/pending
 仍允许改稿。完成而没有 evidence 仅发 warning（保证旧调用可恢复），不伪造验证通过。
 
-review 预算耗尽时，代码再改不重新打开没有预算的 review gate：若仍在 Acceptance，只刷新
-review 通过时间、保留 residual findings 并记录 `plan.code_review.unreviewed_edit`，要求新的
-绿构建覆盖该次编辑；若已有绿构建，则只使 acceptance 失效。推翻条件是审计显示此分支造成
-可避免的严重漏检，届时收紧预算放行策略而非丢弃审计事件。
+review 预算耗尽时不再把 P0 和 P1 混为一谈：残余 P0 立即 handoff 给用户，残余仅 P1 才进入
+Acceptance。用户发新消息是重新开始无人值守 review 预算的明确边界，未解决 findings 不会被清除。
+若审计显示 P1 放行也产生可避免的严重漏检，应收紧放行策略而非丢弃审计事件。
+
+### R3 事件触发的口径修正（2026-09-13）
+
+一次被取消的 review 曾把 gate 的 `in_progress` 半开态写到磁盘，并让后续执行无路可走；
+另一次预算耗尽则把 P0 当 P1 一样自动放行。这推翻了“半开态可在下次补救”和“轮次上限
+可替用户接受风险”两个前提。现在 gate 的启动只保留在当前进程：review 用
+`InFlightReview` lease，Acceptance 用进程内启动标记；磁盘只保存 `pending` 或
+`completed`。lease 被 Drop 会留下 aborted 终态，P0 则保留 pending gate 并 handoff。
+
+跨轮 reviewer 复用持久化的轮次、基准时间、open findings 和已裁决 findings，而不续跑旧
+子 Agent 对话；每一个 reviewer 也拥有独立 `ReadFileState`，其首次 read 不会被另一轮短路。
+若全量 verify 仍反复被缩窄，或结构化账本不足以支持增量 review，再重新评估计划命令清单
+对账或运行时主动执行命令，而不是现在提前引入它们。
 
 > 状态：已实现（以当前工作树为准）。
 > 适用：代码变更计划的 EXEC 收口。字段、调用协议与完整决策以 [plan-exec-code-verification.md](plan-exec-code-verification.md) 为权威来源。
@@ -29,7 +41,7 @@ review 通过时间、保留 residual findings 并记录 `plan.code_review.unrev
 
 ## 摘要
 
-当前实现把“代码计划完成”定义为可复核的运行时事实，而不是 Agent 的完成声明：已绑定 workspace root 的工作树中存在代码 diff 时，计划必须先通过 P0/P1 code review，再提交由后台 bash 任务账本核验的新鲜绿构建证据。证据为 `{command, task_id}`，运行时反查任务的精确命令、`exit_code=0` 和启动时间是否晚于最新代码编辑。
+当前实现把“代码计划完成”定义为可复核的运行时事实，而不是 Agent 的完成声明：已绑定 workspace root 的工作树中存在代码 diff 时，计划必须先通过 P0/P1 code review，再提交由后台 bash 任务账本核验的新鲜绿构建证据。预算耗尽的 P0 必须交还用户，不能自动完成。证据为 `{command, task_id}`，运行时反查任务的精确命令、`exit_code=0` 和启动时间是否晚于最新代码编辑。
 
 本文是交付可靠性总览；[plan-exec-code-verification.md](plan-exec-code-verification.md) 是协议和实现顺序的单一事实源。旧版 `TodoKind`/research evidence、自动 `cargo check`/`tsc`、以及“code reviewer 后派发 verifier”的说法均不再描述当前实现。
 
@@ -141,7 +153,7 @@ update_plan
 | **新鲜门禁** | review/build 的时间覆盖当前代码最新修改。 | frontmatter 时间/证据与 `newest_edit_mtime_ms` | 代码修改会使 `code_review_pass`、`green_build_pass` 和 evidence 失效。 | 旧绿灯不能盖新代码。 |
 | **绿构建证据** | 后台 bash 任务的可复核收据。 | `GreenBuildEvidence` | 精确命令、唯一 task ID、`Finished(exit_code=0)`、启动时间新鲜。 | 后台任务跑成功才作数。 |
 | **P0/P1 门禁** | P0/critical/blocker 和 P1/major finding 阻止完成。 | `review::Finding::tier` | P2/unknown 归为不阻塞；reviewer 的 `pass` 文本不能覆盖 P0/P1。 | 严重问题一票否决。 |
-| **P1 申辩** | 主 Agent 接受 P1 取舍的书面记录。 | `dispute_findings` 与 runtime disputed findings | 只允许 `wontfix` 且理由非空；P0 不可申辩，修复必须改代码后复审。 | P1 可以解释为什么不改，P0 不行。 |
+| **P1 申辩** | 主 Agent 接受 P1 取舍的书面记录。 | `dispute_findings` 与 runtime disputed findings | 只允许 `wontfix` 且理由非空；P0 仅在已 handoff 且用户发新消息确认后可申辩；修复必须改代码后复审。 | P1 可以解释为什么不改；P0 必须先交给用户裁决。 |
 | **完成周期上限** | 已完整验证后再改代码时的重验次数限制。 | `completion_gate_cycles` | 默认 3，最小 1；到顶会以 warning 完成，而非产生新通过证据。 | 防无限重验，但不会把旧收据洗成新收据。 |
 
 本文的“收口”是 `update_plan` 中所有 todo 已完成后计算 `derived_completed` 的调用，不是 Agent 返回自然语言总结的时刻。
@@ -176,7 +188,7 @@ update_plan
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
 | P1 diff 与 freshness | 代码路径筛选、mtime、持久化 pass/evidence/cycle 字段。 | `plan_runtime/code_reviewer.rs`、`plan_runtime/file_store.rs`、`update_plan.rs`。 | `green_build_gate_blocks_completion_until_pass`；mtime/cycle 边界：PENDING。 | 每份绿灯都对应一份具体代码。 |
-| P2 code review | read-only reviewer、P0/P1 判定、P1 申辩与 handoff。 | `plan_runtime/{code_reviewer.rs,review.rs}`、`update_plan.rs`。 | `code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_with_{p0,p1}_residual`；`code_review_downgrades_uncited_plan_mismatch_but_keeps_cited_p1`。 | 预算内审查先挡住大问题；预算用尽后带着残余清单进入 acceptance。 |
+| P2 code review | read-only reviewer、P0/P1 判定、P1 申辩与 handoff。 | `plan_runtime/{code_reviewer.rs,review.rs}`、`update_plan.rs`。 | `code_review_rounds_exhaustion_{hands_off_with_p0,unconditionally_advances_to_acceptance_with_p1}_residual`；`code_review_downgrades_uncited_plan_mismatch_but_keeps_cited_p1`。 | 预算内审查先挡住大问题；预算用尽后 P0 交还，只有 P1 能进入 acceptance。 |
 | P3 verify 证据 | 内置 skill 物化、后台命令与账本准入。 | `skill/builtin.rs` + `assets/skills/verify/**`、`tools/primitive`、`update_plan.rs`。 | `green_build_gate_blocks_completion_until_pass`。 | skill 会找检查，账本会验收据。 |
 | P4 收束防逃避 | 纯文本结束时的继续指令、review/build 不完整时保持 EXEC。 | `agent_loop/turn_finalize.rs::completion_guard_instruction`。 | `agent_loop/tests/completion_guard_test.rs` 的计划未收口 guard 覆盖。 | 没验完不能只写一句“完成了”。 |
 
@@ -237,7 +249,7 @@ turn_finalize.rs
 
 | 键 | 默认 | 含义 | 说人话 |
 |----|------|------|--------|
-| `[plan].max_code_review_rounds` | `2` | 收口可派发 code review 的最大次数；`0` 为跳过 review；预算用尽会携带残余 finding 进入 acceptance，代码绿构建仍要求。 | 默认两轮轻量收口；要深审可显式提高。 |
+| `[plan].max_code_review_rounds` | `4` | 收口可派发 code review 的最大次数；`0` 为跳过 review；预算用尽时残余 P0 handoff，残余仅 P1 才带入 acceptance，代码绿构建仍要求。 | 四轮给三次真实修复机会，同时保留无人值守的明确上限。 |
 | `[plan].max_completion_gate_cycles` | `3` | 已完整通过后代码又变时，最多重验的 review→build 周期；运行时最小钳制为 `1`。 | 防止修修验验没完。 |
 
 旧 `[plan].verify_gate` 不控制本文完成路径：当前 `update_plan` 不自动调旧 verifier。
@@ -248,18 +260,19 @@ turn_finalize.rs
 
 ```text
 workspace root 已绑定且代码路径为空   → completed
-P0/P1 未裁决                         → executing + code_review result
+P0/P1 未裁决且预算未尽                 → executing + code_review result
 review 已通过但没有 green evidence   → Err(BadArgs) + load_skill 指引
 task 不存在 / 未完成 / 非零 / 不新鲜  → Err(BadArgs)，仍 executing
 task 账本全部核验通过                 → persist evidence + completed
 review 基础设施重试耗尽               → executing + handoff
-review 轮次耗尽                       → review gate pass + 残余清单 + acceptance
+review 轮次耗尽 + 残余 P0              → executing + handoff
+review 轮次耗尽 + 残余仅 P1            → review gate pass + 残余清单 + acceptance
 重验周期到顶（此前完整通过过）        → completed + warning
 ```
 
 没有 workspace root 时，`code_gate_required=false`，因此不会要求绿构建证据；生产路径应绑定 workspace root，才能完整启用代码路径过滤与 mtime freshness。
 
-**说人话**：正常 review 用尽预算会转入客观验收，基础设施故障才交还；所有代码改动仍必须有真实绿构建凭据。
+**说人话**：正常 review 用尽预算时，P0 也要交还用户，只有 P1 转入客观验收；所有代码改动仍必须有真实绿构建凭据。
 
 ---
 
@@ -269,7 +282,7 @@ review 轮次耗尽                       → review gate pass + 残余清单 + 
 |------|-------------|------|--------|
 | P0/P1 判定 | `tools::plan_tool::tests::code_review_test::only_p0_p1_block_completion_even_when_reviewer_says_pass` | ✅ 当前工作树 | 严重 finding 优先于模型 verdict。 |
 | 绿构建账本 | `tools::plan_tool::tests::code_review_test::green_build_gate_blocks_completion_until_pass` | ✅ 当前工作树 | 没有有效后台收据不能完成。 |
-| review 失败 / 预算耗尽 | `tools::plan_tool::tests::code_review_test::code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_with_{p0,p1}_residual` | ✅ 当前工作树 | 预算内 finding 先阻塞；耗尽时放行 review gate、留痕并继续客观验收，不会偷标 completed。 |
+| review 失败 / 预算耗尽 | `tools::plan_tool::tests::code_review_test::code_review_rounds_exhaustion_{hands_off_with_p0,unconditionally_advances_to_acceptance_with_p1}_residual` | ✅ 当前工作树 | 预算内 finding 先阻塞；耗尽时 P0 handoff、P1 才放行 review gate 并进入客观验收，不会偷标 completed。 |
 | 旧 verifier 不接管 | `tools::plan_tool::tests::verify_test::update_plan_does_not_dispatch_dormant_verifier_even_when_attached` | ✅ 当前工作树 | 文档不会误称还有自动 verifier。 |
 | mtime 与周期上限 | 独立 direct tests | PENDING | 应补齐“编辑使证据过期”和“周期到顶 warning”的精确边界。 |
 | 文档 | 本文与 [plan-exec-code-verification.md](plan-exec-code-verification.md) | ✅ 2026-08-10 | 高层与权威设计不两张皮。 |

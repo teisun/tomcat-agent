@@ -165,6 +165,24 @@ struct QueueCodeReviewer {
     call_count: std::sync::atomic::AtomicUsize,
 }
 
+struct BlockingCodeReviewer {
+    started: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl CodeReviewerDispatcher for BlockingCodeReviewer {
+    async fn dispatch(
+        &self,
+        _plan_id: &str,
+        _plan_text: &str,
+        _open_findings: &[tomcat::core::plan_runtime::review::Finding],
+        _dispatch: &tomcat::core::plan_runtime::CodeReviewDispatchInfo,
+    ) -> CodeReviewSummary {
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
 impl QueueCodeReviewer {
     fn new(summaries: Vec<CodeReviewSummary>) -> Self {
         Self {
@@ -1263,6 +1281,90 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
             .call_count
             .load(std::sync::atomic::Ordering::Relaxed),
         0
+    );
+    cleanup_home(&home);
+}
+
+/// 真实 plan 工具调用被取消时，review lease 必须自动释放，不能把半开态或轮次写盘。
+#[tokio::test]
+async fn h9b_cancelled_code_review_releases_lease_and_can_restart() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let (rt, _panel, _ckpt) = build_runtime_with_spies();
+    rt.set_max_code_review_rounds(1);
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    std::fs::write(workspace.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(workspace.path())
+        .status()
+        .unwrap()
+        .success());
+    rt.attach_workspace_root(workspace.path().to_path_buf());
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    rt.attach_code_reviewer(Arc::new(BlockingCodeReviewer {
+        started: started.clone(),
+    }));
+    rt.enter_plan().unwrap();
+    let out = create_plan::execute(
+        &rt,
+        create_plan::CreatePlanArgs {
+            goal: "g".into(),
+            draft: "ok".into(),
+            todos: vec![
+                create_plan::TodoArg {
+                    id: "t1".into(),
+                    content: "a".into(),
+                    status: TodoStatus::Pending,
+                },
+                create_plan::TodoArg {
+                    id: "t2".into(),
+                    content: "b".into(),
+                    status: TodoStatus::Pending,
+                },
+            ],
+        },
+    )
+    .unwrap();
+    let plan_id = out["plan_id"].as_str().unwrap().to_string();
+    promote_to_exec(&rt, &plan_id);
+    let ready = complete_all_plan_todos(&rt, &plan_id).await;
+    assert_eq!(ready["next_step"]["phase"], "start_review");
+
+    let review_runtime = rt.clone();
+    let review_plan_id = plan_id.clone();
+    let review_task = tokio::spawn(async move {
+        start_close_out_gate(&review_runtime, &review_plan_id, GATE_CODE_REVIEW_TODO_ID).await
+    });
+    started.notified().await;
+    review_task.abort();
+    assert!(review_task.await.unwrap_err().is_cancelled());
+
+    let plan = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert_eq!(plan.frontmatter.code_review_rounds, 0);
+    assert!(!plan.frontmatter.code_review_pass);
+    assert_eq!(
+        plan.frontmatter
+            .todos
+            .iter()
+            .find(|todo| todo.id == GATE_CODE_REVIEW_TODO_ID)
+            .unwrap()
+            .status,
+        TodoStatus::Pending
+    );
+
+    let restarted_reviewer = Arc::new(QueueCodeReviewer::new(vec![pass_code_review()]));
+    rt.attach_code_reviewer(restarted_reviewer.clone());
+    let restarted = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
+    assert_eq!(restarted["code_review"]["verdict"], "pass");
+    assert_eq!(rt.code_review_rounds(&plan_id), 1);
+    assert_eq!(
+        restarted_reviewer
+            .call_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
     );
     cleanup_home(&home);
 }
