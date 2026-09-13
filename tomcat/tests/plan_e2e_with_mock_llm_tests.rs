@@ -175,7 +175,7 @@ impl CodeReviewerDispatcher for BlockingCodeReviewer {
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        _open_findings: &[tomcat::core::plan_runtime::review::Finding],
+        _review_state: &tomcat::core::plan_runtime::file_store::PlanFileFrontmatter,
         _dispatch: &tomcat::core::plan_runtime::CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         self.started.notify_one();
@@ -198,7 +198,7 @@ impl CodeReviewerDispatcher for QueueCodeReviewer {
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        _open_findings: &[tomcat::core::plan_runtime::review::Finding],
+        _review_state: &tomcat::core::plan_runtime::file_store::PlanFileFrontmatter,
         _dispatch: &tomcat::core::plan_runtime::CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         self.call_count
@@ -1264,7 +1264,13 @@ async fn h8_code_review_pass_completes_without_verifier() {
     assert!(out.get("verify").is_none());
     assert_eq!(out["plan_state_after"], "executing");
     assert_eq!(out["next_step"]["phase"], "run_acceptance");
-    assert_eq!(rt.code_review_rounds(&plan_id), 1);
+    assert_eq!(
+        read_plan(&plan_path_for_id(&plan_id).unwrap())
+            .unwrap()
+            .frontmatter
+            .code_review_rounds,
+        1
+    );
     assert_eq!(
         reviewer
             .call_count
@@ -1286,6 +1292,14 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
     rt.set_max_code_review_rounds(1);
+    let events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let events = Arc::clone(&events);
+        rt.attach_transcript_appender(Arc::new(move |event| {
+            events.lock().push(event);
+            Ok(())
+        }));
+    }
     let workspace = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(workspace.path().join("src")).unwrap();
     std::fs::write(workspace.path().join("src/main.rs"), "fn main() {}\n").unwrap();
@@ -1340,7 +1354,15 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
     assert_eq!(first["code_review"]["verdict"], "fail");
     assert!(first.get("verify").is_none());
     assert_eq!(first["plan_state_after"], "executing");
-    assert_eq!(rt.code_review_rounds(&plan_id), 1);
+    assert_eq!(first["code_review_pass"], true);
+    assert_eq!(first["next_step"]["phase"], "run_acceptance");
+    assert_eq!(
+        read_plan(&plan_path_for_id(&plan_id).unwrap())
+            .unwrap()
+            .frontmatter
+            .code_review_rounds,
+        1
+    );
     assert_eq!(
         reviewer
             .call_count
@@ -1353,62 +1375,7 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );
-
-    update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            path: None,
-            replace: false,
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
-            dispute_findings: vec![],
-            green_build_pass: None,
-            green_build_evidence: vec![],
-            acceptance_commands: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    std::fs::write(
-        workspace.path().join("src/main.rs"),
-        "fn main() { /* regression coverage added */ }\n",
-    )
-    .unwrap();
-    let second = update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            path: None,
-            replace: false,
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::Completed,
-            }],
-            dispute_findings: vec![],
-            green_build_pass: None,
-            green_build_evidence: vec![],
-            acceptance_commands: None,
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(second["next_step"]["phase"], "start_review");
-    let second = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
-    assert_eq!(second["code_review"], serde_json::Value::Null);
-    assert!(second.get("verify").is_none());
-    // 复审已有残余 P1、轮次又用尽了：review 门放行，但后续仍须由
-    // acceptance 的真实 green-build 证据决定能否完成。
-    assert_eq!(second["plan_state_after"], "executing");
-    assert_eq!(second["code_review_pass"], true);
-    assert_eq!(second["next_step"]["phase"], "run_acceptance");
-    assert!(second["warnings"]
+    assert!(first["warnings"]
         .as_array()
         .unwrap()
         .iter()
@@ -1436,6 +1403,14 @@ async fn h9b_cancelled_code_review_releases_lease_and_can_restart() {
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
     rt.set_max_code_review_rounds(1);
+    let events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let events = Arc::clone(&events);
+        rt.attach_transcript_appender(Arc::new(move |event| {
+            events.lock().push(event);
+            Ok(())
+        }));
+    }
     let workspace = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(workspace.path().join("src")).unwrap();
     std::fs::write(workspace.path().join("src/main.rs"), "fn main() {}\n").unwrap();
@@ -1499,12 +1474,40 @@ async fn h9b_cancelled_code_review_releases_lease_and_can_restart() {
             .status,
         TodoStatus::Pending
     );
+    assert!(
+        events.lock().iter().any(|event| {
+            event["event"] == "plan.code_review" && event["aborted"].as_bool() == Some(true)
+        }),
+        "取消的 review 必须留下 aborted 终态事件"
+    );
+    let resumed = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: Vec::new(),
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            acceptance_commands: None,
+        },
+    )
+    .await
+    .expect("Resume 后仍应能继续同一计划");
+    assert_eq!(resumed["next_step"]["phase"], "start_review");
 
     let restarted_reviewer = Arc::new(QueueCodeReviewer::new(vec![pass_code_review()]));
     rt.attach_code_reviewer(restarted_reviewer.clone());
     let restarted = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
     assert_eq!(restarted["code_review"]["verdict"], "pass");
-    assert_eq!(rt.code_review_rounds(&plan_id), 1);
+    assert_eq!(
+        read_plan(&plan_path_for_id(&plan_id).unwrap())
+            .unwrap()
+            .frontmatter
+            .code_review_rounds,
+        1
+    );
     assert_eq!(
         restarted_reviewer
             .call_count
@@ -1960,11 +1963,14 @@ applied_changes: false
     let plan_summary = plan_dispatcher
         .dispatch(plan_id, "## Goal\nship reviewer\n", true)
         .await;
+    let review_state = read_plan(&plan_path_for_id(plan_id).unwrap())
+        .unwrap()
+        .frontmatter;
     let code_summary = code_dispatcher
         .dispatch(
             plan_id,
             "## Goal\nship reviewer\n",
-            &[],
+            &review_state,
             &tomcat::core::plan_runtime::CodeReviewDispatchInfo {
                 round: 1,
                 review_attempt_id: "mock-review-attempt".into(),

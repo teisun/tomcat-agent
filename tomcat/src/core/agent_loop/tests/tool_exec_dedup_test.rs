@@ -136,6 +136,40 @@ async fn tool_exec_read_second_call_returns_unchanged_stub() {
 }
 
 #[tokio::test]
+async fn tool_exec_read_state_is_independent_per_subagent() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
+    let file = dir_path.join("independent-state.txt");
+    std::fs::write(&file, b"shared source\n").unwrap();
+    let primitive = make_executor(&dir_path);
+    let agent_a_state = Arc::new(ReadFileState::new());
+    let agent_b_state = Arc::new(ReadFileState::new());
+    let call = make_tc(&format!(
+        r#"{{"path":{:?},"line_numbers":false}}"#,
+        file.to_string_lossy()
+    ));
+
+    let (first_a, first_a_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&agent_a_state), &call).await;
+    assert!(!first_a_error, "{first_a}");
+    let (second_a, second_a_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&agent_a_state), &call).await;
+    assert!(!second_a_error, "{second_a}");
+    assert!(
+        second_a.starts_with(FILE_UNCHANGED_STUB),
+        "the same subagent may deduplicate its own repeated read: {second_a:?}"
+    );
+
+    let (first_b, first_b_error, _) =
+        execute_tool(&primitive, &None, &None, Some(&agent_b_state), &call).await;
+    assert!(!first_b_error, "{first_b}");
+    assert!(
+        first_b.contains("shared source") && !first_b.starts_with(FILE_UNCHANGED_STUB),
+        "a second subagent needs an independent first read: {first_b:?}"
+    );
+}
+
+#[tokio::test]
 async fn tool_exec_read_line_numbers_then_hashline_refetches_for_edit_anchors() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
