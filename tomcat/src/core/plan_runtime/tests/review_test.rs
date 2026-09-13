@@ -187,6 +187,8 @@ fn build_code_review_prompt_first_round_lists_the_complete_changed_file_set() {
     assert!(prompt.contains("tests/lib.rs"));
     assert!(!prompt.contains("Incremental review"));
     assert!(!prompt.contains("git diff --stat HEAD"));
+    assert!(prompt.contains("verify that artifact exists in the workspace"));
+    assert!(prompt.contains("basis: plan_mismatch"));
     assert!(prompt.contains("STRICTLY read-only"));
     assert!(prompt.contains("use `.`"));
     assert!(prompt.contains("do not guess an absolute root"));
@@ -243,19 +245,19 @@ fn incremental_delta_uses_mtime_and_keeps_deleted_files_conservatively() {
 }
 
 #[test]
-fn reset_code_review_rounds_also_clears_incremental_review_timestamp() {
+fn reset_code_review_rounds_clears_only_transient_infrastructure_retries() {
     let runtime = super::super::PlanRuntime::new("review-delta-state");
-    assert_eq!(runtime.max_code_review_rounds(), 2);
+    assert_eq!(runtime.max_code_review_rounds(), 4);
     assert_eq!(
         crate::infra::config::PlanConfig::default().max_code_review_rounds,
-        2
+        4
     );
-    runtime.set_last_code_review_dispatch_ms("plan-a", 123);
-    assert_eq!(runtime.last_code_review_dispatch_ms("plan-a"), Some(123));
+    assert_eq!(runtime.review_infra_retries("plan-a"), 0);
+    assert_eq!(runtime.bump_review_infra_retry("plan-a"), 1);
 
     runtime.reset_code_review_rounds("plan-a");
 
-    assert_eq!(runtime.last_code_review_dispatch_ms("plan-a"), None);
+    assert_eq!(runtime.review_infra_retries("plan-a"), 0);
 }
 
 #[test]

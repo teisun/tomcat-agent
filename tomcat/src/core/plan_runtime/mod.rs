@@ -80,6 +80,39 @@ pub struct DisputedFinding {
     pub reason: String,
 }
 
+/// The single close-out decision source for update results, completion nudges,
+/// and gate admission. Consumers translate this value; they must not infer a
+/// different next step from todo state themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextAction {
+    Done,
+    HandOff {
+        reason: &'static str,
+        open_findings: Vec<review::Finding>,
+    },
+    RunAcceptance {
+        residual_findings: Vec<String>,
+    },
+    FixFindings {
+        open_findings: Vec<review::Finding>,
+    },
+    StartReview,
+    ContinueWork,
+}
+
+impl NextAction {
+    pub const fn phase(&self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::HandOff { .. } => "handoff",
+            Self::RunAcceptance { .. } => "run_acceptance",
+            Self::FixFindings { .. } => "fix_findings",
+            Self::StartReview => "start_review",
+            Self::ContinueWork => "continue_work",
+        }
+    }
+}
+
 /// The single authoritative todo source preserved in a compaction summary.
 ///
 /// A readable active PlanFile wins even when it has no todos: that empty list is
@@ -109,7 +142,13 @@ pub struct ControlSnapshot {
 }
 
 /// 恢复时读计划文件；不存在或读不动都当作"没有计划"，由调用方决定兜底。
-fn read_plan_for_restore(path: &std::path::Path) -> Option<file_store::PlanFile> {
+///
+/// 旧版本可能把 runtime gate 持久化为 `in_progress`。此处在同一把计划文件锁内
+/// 将它恢复为 `pending`，由调用者据此补上唯一的 review 中止终态事件。
+fn read_plan_for_restore(
+    path: &std::path::Path,
+    lock_timeout_ms: u64,
+) -> Option<file_store::RuntimeGateRecovery> {
     if !path.is_file() {
         tracing::warn!(
             target: "plan_runtime::recover",
@@ -118,8 +157,8 @@ fn read_plan_for_restore(path: &std::path::Path) -> Option<file_store::PlanFile>
         );
         return None;
     }
-    match file_store::read_plan(path) {
-        Ok(plan) => Some(plan),
+    match file_store::recover_runtime_gates_on_load(path, lock_timeout_ms) {
+        Ok(recovery) => Some(recovery),
         Err(err) => {
             tracing::warn!(
                 target: "plan_runtime::recover",
@@ -183,28 +222,28 @@ pub struct PlanRuntime {
     explorer: Mutex<Option<Arc<dyn ExplorerDispatcher>>>,
     /// `[plan].verify_gate` 当前值：`soft`（默认）或 `gate`。
     verify_gate_mode: RwLock<String>,
-    /// green build 前 code reviewer 的最大尝试轮次。默认 2；0 表示直接跳过 code review。
+    /// green build 前 code reviewer 的最大尝试轮次。默认 4；0 表示直接跳过 code review。
     max_code_review_rounds: AtomicU32,
+    /// A review is only in flight in this process. Persisting this half-open
+    /// state would strand the plan if the parent turn is interrupted.
+    in_flight_code_reviews: parking_lot::Mutex<std::collections::HashSet<String>>,
+    /// Acceptance is a multi-tool protocol (start gate → run checks → submit
+    /// task evidence), so its started state is process-local too. It must not
+    /// be inferred from a persisted todo status.
+    in_flight_acceptances: parking_lot::Mutex<std::collections::HashSet<String>>,
     /// 代码编辑使上一轮验收失效后，允许重新运行 review + green build 的最大周期。
     max_completion_gate_cycles: AtomicU32,
     /// 计数 reviewer 派发轮次（用于 `[reviewer] max_review_rounds` 软上限 warning）。
     reviewer_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
-    /// 计数 verifier 前 code reviewer 实际派发轮次。
-    code_review_rounds: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
     /// 执行中 plan 的 provider 缓存观测；用于在 `plan.complete` 留下本次 build 的实测比率。
     plan_cache_observations:
         parking_lot::Mutex<std::collections::HashMap<String, PlanCacheObservation>>,
-    /// 上一次 code reviewer 派发的 wall-clock 时间，用 mtime 划定下一轮增量范围。
-    last_code_review_dispatch_ms: parking_lot::Mutex<std::collections::HashMap<String, u128>>,
-    /// 上一轮 code review 留下的未清 finding。下一轮 reviewer 逐条按语义核销已修项；
-    /// 不用不稳定的跨轮 finding id。completion guard 也据此说明尚未解决的问题。
-    unresolved_findings:
-        parking_lot::Mutex<std::collections::HashMap<String, Vec<review::Finding>>>,
-    /// 主 Agent 已书面申辩、用户需要看到的 P1 取舍。仅在当前计划执行期间保留；
-    /// 重新 build 同一计划意味着重新开始一次审查，因此与未清 finding 一起清空。
-    disputed_findings: parking_lot::Mutex<std::collections::HashMap<String, Vec<DisputedFinding>>>,
     /// 技术故障不会消耗正常 review 预算，但也不能无限重试。
     review_infra_retries: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
+    /// Completion-guard nudge 的零进度观测只属于当前进程的一段无人值守执行。
+    completion_guard_observations:
+        parking_lot::Mutex<std::collections::HashMap<String, CompletionGuardObservation>>,
+    completion_guard_stalled: parking_lot::Mutex<std::collections::HashSet<String>>,
     /// 根 Agent 工作区；无工作区（大多数纯单测 / 非 Git 项目）时跳过代码 diff 门禁。
     workspace_root: Mutex<Option<PathBuf>>,
     /// 后台 bash 任务账本，用于核验 green build 证据。
@@ -242,6 +281,70 @@ pub struct PlanRuntime {
     transcript_event_notifier: Mutex<Option<TranscriptEventNotifier>>,
 }
 
+/// Owns one process-local code-review dispatch reservation.
+///
+/// A round becomes durable only after the caller has persisted its completed
+/// result. Dropping an unfinished lease therefore releases the reservation,
+/// preserves the plan's pending gate, and emits the terminal aborted event that
+/// stops the UI's review timer.
+pub struct InFlightReview<'a> {
+    runtime: &'a PlanRuntime,
+    plan_id: String,
+    round: u32,
+    review_attempt_id: String,
+    tool_call_id: String,
+    is_incremental: bool,
+    delta_file_count: usize,
+    completed: bool,
+    aborted_summary: Option<code_reviewer::CodeReviewSummary>,
+}
+
+impl InFlightReview<'_> {
+    pub fn round(&self) -> u32 {
+        self.round
+    }
+
+    pub fn review_attempt_id(&self) -> &str {
+        &self.review_attempt_id
+    }
+
+    pub fn complete(mut self) {
+        self.completed = true;
+    }
+
+    /// 将已取得的失败摘要交给 Drop 统一写出终态事件。消费 lease 后立即释放
+    /// 内存预约，但不修改计划文件，也不会消耗本轮 review 预算。
+    pub fn abort(mut self, summary: code_reviewer::CodeReviewSummary) {
+        self.aborted_summary = Some(summary);
+    }
+}
+
+impl Drop for InFlightReview<'_> {
+    fn drop(&mut self) {
+        self.runtime
+            .in_flight_code_reviews
+            .lock()
+            .remove(&self.plan_id);
+        if self.completed {
+            return;
+        }
+        let summary = self.aborted_summary.take().unwrap_or_else(|| {
+            code_reviewer::CodeReviewSummary::aborted_with(
+                "code review dispatch ended before a terminal result",
+            )
+        });
+        self.runtime.write_code_review_transcript(
+            &self.plan_id,
+            &summary,
+            self.round,
+            &self.review_attempt_id,
+            &self.tool_call_id,
+            self.is_incremental,
+            self.delta_file_count,
+        );
+    }
+}
+
 /// 由 PlanRuntime 调用，把 `serde_json::Value` 写入当前 transcript 的 `Custom` 行。
 pub type TranscriptAppender =
     Arc<dyn Fn(serde_json::Value) -> Result<(), crate::infra::error::AppError> + Send + Sync>;
@@ -262,6 +365,13 @@ struct PlanCacheObservation {
     consecutive_cache_miss_max: u32,
     tail_changed_count: u32,
     tail_change_miss_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompletionGuardObservation {
+    plan_mtime_ms: Option<u128>,
+    newest_code_mtime_ms: Option<u128>,
+    idle_nudges: u32,
 }
 
 impl PlanCacheObservation {
@@ -353,15 +463,15 @@ impl PlanRuntime {
             verifier: Mutex::new(None),
             explorer: Mutex::new(None),
             verify_gate_mode: RwLock::new("soft".into()),
-            max_code_review_rounds: AtomicU32::new(2),
+            max_code_review_rounds: AtomicU32::new(4),
+            in_flight_code_reviews: parking_lot::Mutex::new(std::collections::HashSet::new()),
+            in_flight_acceptances: parking_lot::Mutex::new(std::collections::HashSet::new()),
             max_completion_gate_cycles: AtomicU32::new(3),
             reviewer_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            code_review_rounds: parking_lot::Mutex::new(std::collections::HashMap::new()),
             plan_cache_observations: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            last_code_review_dispatch_ms: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            unresolved_findings: parking_lot::Mutex::new(std::collections::HashMap::new()),
-            disputed_findings: parking_lot::Mutex::new(std::collections::HashMap::new()),
             review_infra_retries: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            completion_guard_observations: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            completion_guard_stalled: parking_lot::Mutex::new(std::collections::HashSet::new()),
             workspace_root: Mutex::new(None),
             bash_task_registry: Mutex::new(None),
             session_model: parking_lot::Mutex::new(None),
@@ -589,8 +699,17 @@ impl PlanRuntime {
         state: ResumeControlState,
     ) -> Result<(), PlanRuntimeError> {
         *self.mode.write() = state.mode.unwrap_or(AgentMode::Chat);
+        let mut recovered_review = None;
         let active_plan = state.plan_path.as_ref().and_then(|path| {
-            read_plan_for_restore(path).map(|plan| ActivePlan::from_file(path.clone(), &plan))
+            read_plan_for_restore(path, self.lock_timeout_ms).map(|recovery| {
+                if recovery.recovered_code_review {
+                    recovered_review = Some((
+                        recovery.plan.frontmatter.plan_id.clone(),
+                        recovery.plan.frontmatter.code_review_rounds,
+                    ));
+                }
+                ActivePlan::from_file(path.clone(), &recovery.plan)
+            })
         });
         if state.plan_path.is_some() && active_plan.is_none() {
             self.write_transcript_custom(serde_json::json!({
@@ -600,6 +719,19 @@ impl PlanRuntime {
             }));
         }
         *self.active_plan.write() = active_plan;
+        if let Some((plan_id, completed_rounds)) = recovered_review {
+            self.write_code_review_transcript(
+                &plan_id,
+                &code_reviewer::CodeReviewSummary::aborted_with(
+                    "recovered legacy in-progress code review was reset to pending",
+                ),
+                completed_rounds.saturating_add(1),
+                &format!("{plan_id}:legacy"),
+                "recovery",
+                false,
+                0,
+            );
+        }
         Ok(())
     }
 
@@ -621,7 +753,9 @@ impl PlanRuntime {
         let mode = self.mode();
         let active_plan = self.active_plan();
         let plan_path = active_plan.as_ref().map(|plan| plan.path.clone());
-        let plan = plan_path.as_deref().and_then(read_plan_for_restore);
+        let plan = plan_path
+            .as_deref()
+            .and_then(|path| file_store::read_plan(path).ok());
         let plan_file_state = plan
             .as_ref()
             .map(|plan| plan.frontmatter.state.as_str().to_string());
@@ -655,13 +789,27 @@ impl PlanRuntime {
     /// plan。无论哪条路径，都不会改会话模式。
     pub fn sync_active_plan_from_disk(&self) -> Result<Option<String>, PlanRuntimeError> {
         if let Some(active) = self.active_plan() {
-            let Some(plan) = read_plan_for_restore(&active.path) else {
+            let Some(recovery) = read_plan_for_restore(&active.path, self.lock_timeout_ms) else {
                 *self.active_plan.write() = None;
                 return Ok(None);
             };
+            let plan = recovery.plan;
             let refreshed = ActivePlan::from_file(active.path, &plan);
             let plan_id = refreshed.id.clone();
             *self.active_plan.write() = Some(refreshed);
+            if recovery.recovered_code_review {
+                self.write_code_review_transcript(
+                    &plan_id,
+                    &code_reviewer::CodeReviewSummary::aborted_with(
+                        "recovered legacy in-progress code review was reset to pending",
+                    ),
+                    plan.frontmatter.code_review_rounds.saturating_add(1),
+                    &format!("{plan_id}:legacy"),
+                    "recovery",
+                    false,
+                    0,
+                );
+            }
             return Ok(Some(plan_id));
         }
 
@@ -682,8 +830,29 @@ impl PlanRuntime {
             if matches!(plan.frontmatter.state, file_store::PlanFileState::Executing)
                 && self.owns_executing_plan(&plan)
             {
-                let plan_id = plan.frontmatter.plan_id.clone();
-                *self.active_plan.write() = Some(ActivePlan::from_file(path, &plan));
+                let Some(recovery) = read_plan_for_restore(&path, self.lock_timeout_ms) else {
+                    continue;
+                };
+                let plan_id = recovery.plan.frontmatter.plan_id.clone();
+                *self.active_plan.write() =
+                    Some(ActivePlan::from_file(path.clone(), &recovery.plan));
+                if recovery.recovered_code_review {
+                    self.write_code_review_transcript(
+                        &plan_id,
+                        &code_reviewer::CodeReviewSummary::aborted_with(
+                            "recovered legacy in-progress code review was reset to pending",
+                        ),
+                        recovery
+                            .plan
+                            .frontmatter
+                            .code_review_rounds
+                            .saturating_add(1),
+                        &format!("{plan_id}:legacy"),
+                        "recovery",
+                        false,
+                        0,
+                    );
+                }
                 return Ok(Some(plan_id));
             }
         }
@@ -762,6 +931,23 @@ impl PlanRuntime {
         self.code_reviewer.lock().is_some()
     }
 
+    /// Start the process-local acceptance protocol. The on-disk gate remains
+    /// pending until a real, verified green-build result is committed.
+    pub fn begin_acceptance(&self, plan_id: &str) -> bool {
+        self.in_flight_acceptances.lock().insert(plan_id.to_owned())
+    }
+
+    /// Whether this process received the explicit `[gate] Acceptance` start
+    /// command required before it may accept green-build task evidence.
+    pub fn acceptance_is_in_flight(&self, plan_id: &str) -> bool {
+        self.in_flight_acceptances.lock().contains(plan_id)
+    }
+
+    /// Finish or abandon the process-local acceptance protocol.
+    pub fn finish_acceptance(&self, plan_id: &str) {
+        self.in_flight_acceptances.lock().remove(plan_id);
+    }
+
     /// 注入 verifier 派发器（生产由 `ChatContext::from_config` 装配 verifier 子 Agent 派发；
     /// 测试可注入 mock / 自定义实现）。
     pub fn attach_verifier(&self, dispatcher: Arc<dyn VerifierDispatcher>) {
@@ -832,6 +1018,151 @@ impl PlanRuntime {
 
     pub fn workspace_root(&self) -> Option<PathBuf> {
         self.workspace_root.lock().clone()
+    }
+
+    pub async fn next_action(&self, frontmatter: &file_store::PlanFileFrontmatter) -> NextAction {
+        if frontmatter.state == file_store::PlanFileState::Completed {
+            return NextAction::Done;
+        }
+        if self.completion_guard_is_stalled(&frontmatter.plan_id).await {
+            return NextAction::HandOff {
+                reason: "stalled",
+                open_findings: frontmatter.code_review_open_findings.clone(),
+            };
+        }
+        if frontmatter.code_review_handoff {
+            return NextAction::HandOff {
+                reason: "p0_residual",
+                open_findings: frontmatter.code_review_open_findings.clone(),
+            };
+        }
+        if self.code_review_infra_retry_exhausted(&frontmatter.plan_id) {
+            return NextAction::HandOff {
+                reason: "review_infrastructure_retries_exhausted",
+                open_findings: frontmatter.code_review_open_findings.clone(),
+            };
+        }
+        if frontmatter.code_review_pass && !frontmatter.green_build_pass {
+            return NextAction::RunAcceptance {
+                residual_findings: frontmatter.code_review_residual_findings.clone(),
+            };
+        }
+        if !frontmatter.code_review_open_findings.is_empty() {
+            let newest_edit_mtime_ms = match self.workspace_root() {
+                Some(workspace_root) => {
+                    code_reviewer::collect_code_diff_context(&workspace_root)
+                        .await
+                        .newest_edit_mtime_ms
+                }
+                None => None,
+            };
+            let no_newer_code = match (newest_edit_mtime_ms, frontmatter.code_review_baseline_ms) {
+                (Some(newest), Some(baseline)) => newest <= baseline,
+                (None, _) => true,
+                // A legacy/incomplete review state lacks a safe delta boundary.
+                // Do not spend a review round until the executor changes code.
+                (Some(_), None) => true,
+            };
+            if no_newer_code {
+                return NextAction::FixFindings {
+                    open_findings: frontmatter.code_review_open_findings.clone(),
+                };
+            }
+        }
+        let all_work_terminal = frontmatter
+            .todos
+            .iter()
+            .filter(|todo| matches!(todo.kind, file_store::TodoKind::Work))
+            .all(|todo| {
+                matches!(
+                    todo.status,
+                    file_store::TodoStatus::Completed | file_store::TodoStatus::Cancelled
+                )
+            });
+        let review_pending = frontmatter.todos.iter().any(|todo| {
+            todo.kind == file_store::TodoKind::GateCodeReview
+                && todo.status == file_store::TodoStatus::Pending
+        });
+        if all_work_terminal && review_pending && !frontmatter.code_review_pass {
+            NextAction::StartReview
+        } else {
+            NextAction::ContinueWork
+        }
+    }
+
+    async fn completion_guard_snapshot(&self, plan_id: &str) -> CompletionGuardObservation {
+        let plan_mtime_ms = self
+            .resolved_plan_path(plan_id)
+            .ok()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis());
+        let newest_code_mtime_ms = match self.workspace_root() {
+            Some(workspace_root) => {
+                code_reviewer::collect_code_diff_context(&workspace_root)
+                    .await
+                    .newest_edit_mtime_ms
+            }
+            None => None,
+        };
+        CompletionGuardObservation {
+            plan_mtime_ms,
+            newest_code_mtime_ms,
+            idle_nudges: 0,
+        }
+    }
+
+    async fn completion_guard_is_stalled(&self, plan_id: &str) -> bool {
+        if !self.completion_guard_stalled.lock().contains(plan_id) {
+            return false;
+        }
+        let current = self.completion_guard_snapshot(plan_id).await;
+        let mut observations = self.completion_guard_observations.lock();
+        let Some(previous) = observations.get_mut(plan_id) else {
+            return true;
+        };
+        if previous.plan_mtime_ms != current.plan_mtime_ms
+            || previous.newest_code_mtime_ms != current.newest_code_mtime_ms
+        {
+            *previous = current;
+            self.completion_guard_stalled.lock().remove(plan_id);
+            return false;
+        }
+        true
+    }
+
+    /// Records progress immediately before injecting a completion nudge.
+    /// Returns true on the third identical observation (two idle nudges after
+    /// the baseline); callers must then hand control back rather than nudging.
+    pub async fn note_completion_guard_nudge(&self, plan_id: &str) -> bool {
+        let current = self.completion_guard_snapshot(plan_id).await;
+        let mut observations = self.completion_guard_observations.lock();
+        let previous = observations.entry(plan_id.to_owned()).or_default();
+        if previous.plan_mtime_ms == current.plan_mtime_ms
+            && previous.newest_code_mtime_ms == current.newest_code_mtime_ms
+        {
+            previous.idle_nudges = previous.idle_nudges.saturating_add(1);
+        } else {
+            *previous = current;
+        }
+        if previous.idle_nudges < 2 {
+            return false;
+        }
+        drop(observations);
+        if self
+            .completion_guard_stalled
+            .lock()
+            .insert(plan_id.to_owned())
+        {
+            self.write_transcript_custom(serde_json::json!({
+                "event": "plan.completion_guard.stalled",
+                "plan_id": plan_id,
+                "idle_nudges": 2,
+                "outcome": "handoff",
+            }));
+        }
+        true
     }
 
     pub fn attach_bash_task_registry(
@@ -957,6 +1288,7 @@ impl PlanRuntime {
     pub async fn dispatch_code_reviewer(
         &self,
         plan_id: &str,
+        open_findings: &[review::Finding],
         dispatch: &CodeReviewDispatchInfo,
     ) -> code_reviewer::CodeReviewSummary {
         let Some(dispatcher) = self.code_reviewer.lock().clone() else {
@@ -977,11 +1309,8 @@ impl PlanRuntime {
             }
         };
 
-        // 上一轮未清 finding 一并交给 reviewer，由它逐条按当前代码语义核销；
-        // 参考号仅在本轮有效，不能把措辞变化伪装成稳定跨轮 id。
-        let open_findings = self.unresolved_findings(plan_id);
         dispatcher
-            .dispatch(plan_id, &plan_text, &open_findings, dispatch)
+            .dispatch(plan_id, &plan_text, open_findings, dispatch)
             .await
     }
 
@@ -1129,6 +1458,8 @@ impl PlanRuntime {
         round: u32,
         review_attempt_id: &str,
         tool_call_id: &str,
+        is_incremental: bool,
+        delta_file_count: usize,
     ) {
         let mut payload = summary.to_json();
         if let Some(obj) = payload.as_object_mut() {
@@ -1155,6 +1486,14 @@ impl PlanRuntime {
             obj.insert(
                 "tool_call_id".to_string(),
                 serde_json::Value::String(tool_call_id.to_string()),
+            );
+            obj.insert(
+                "is_incremental".to_string(),
+                serde_json::Value::Bool(is_incremental),
+            );
+            obj.insert(
+                "delta_file_count".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(delta_file_count)),
             );
             if !summary.child_session_id.is_empty() {
                 obj.insert(
@@ -1247,75 +1586,148 @@ impl PlanRuntime {
             .unwrap_or(0)
     }
 
-    pub fn try_begin_code_review_round(&self, plan_id: &str) -> Option<u32> {
-        let max_rounds = self.max_code_review_rounds();
-        let mut rounds = self.code_review_rounds.lock();
-        let current = rounds.get(plan_id).copied().unwrap_or(0);
-        if current >= max_rounds {
+    /// Reserve an in-process review round without mutating the persisted plan.
+    /// The caller must call [`InFlightReview::mark_completed`] only after its
+    /// completed result has been written to the plan file.
+    pub fn begin_code_review_round(
+        &self,
+        plan_id: &str,
+        completed_rounds: u32,
+        review_attempt_id: String,
+        tool_call_id: String,
+        is_incremental: bool,
+        delta_file_count: usize,
+    ) -> Option<InFlightReview<'_>> {
+        if completed_rounds >= self.max_code_review_rounds() {
             return None;
         }
-        let next = current + 1;
-        rounds.insert(plan_id.to_string(), next);
-        Some(next)
+        let mut in_flight = self.in_flight_code_reviews.lock();
+        if !in_flight.insert(plan_id.to_string()) {
+            return None;
+        }
+        Some(InFlightReview {
+            runtime: self,
+            plan_id: plan_id.to_string(),
+            round: completed_rounds + 1,
+            review_attempt_id,
+            tool_call_id,
+            is_incremental,
+            delta_file_count,
+            completed: false,
+            aborted_summary: None,
+        })
     }
 
     pub fn reset_code_review_rounds(&self, plan_id: &str) {
-        self.code_review_rounds.lock().remove(plan_id);
-        self.last_code_review_dispatch_ms.lock().remove(plan_id);
-        self.unresolved_findings.lock().remove(plan_id);
-        self.disputed_findings.lock().remove(plan_id);
         self.review_infra_retries.lock().remove(plan_id);
     }
 
-    /// 记录本轮 code review 之后仍未清掉的 finding（`pass` 时传空 Vec 即可清空）。
-    pub fn set_unresolved_findings(&self, plan_id: &str, findings: Vec<review::Finding>) {
-        let mut guard = self.unresolved_findings.lock();
-        if findings.is_empty() {
-            guard.remove(plan_id);
-        } else {
-            guard.insert(plan_id.to_string(), findings);
+    /// A new root-user message resumes a plan previously stopped on an unresolved P0.
+    ///
+    /// The user message is the explicit boundary for a fresh unattended review budget.
+    /// Findings remain in the durable brief; only the completed-round counter is reset.
+    pub fn refresh_code_review_budget_after_user_message(
+        &self,
+    ) -> Result<Option<String>, PlanRuntimeError> {
+        let Some(active) = self.active_plan().filter(ActivePlan::is_executing) else {
+            return Ok(None);
+        };
+        let path = active.path.clone();
+        let changed = file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
+            if !plan.frontmatter.code_review_handoff {
+                return Ok::<bool, PlanRuntimeError>(false);
+            }
+            plan.frontmatter.code_review_rounds = 0;
+            plan.frontmatter.code_review_handoff = false;
+            plan.frontmatter.code_review_handoff_acknowledged = true;
+            Ok(true)
+        })
+        .map_err(|error| match error {
+            file_store::LockedPlanMutationError::Plan(error) => {
+                PlanRuntimeError::from_plan_io(error)
+            }
+            file_store::LockedPlanMutationError::Callback(error) => error,
+        })?;
+        if !changed {
+            return Ok(None);
         }
+        let plan = file_store::read_plan(&path).map_err(PlanRuntimeError::from_plan_io)?;
+        let plan_id = plan.frontmatter.plan_id.clone();
+        self.refresh_active_plan_after_write(path, &plan);
+        self.write_transcript_custom(serde_json::json!({
+            "event": "plan.code_review.budget_refreshed",
+            "plan_id": plan_id,
+            "outcome": "user_message_acknowledged_handoff",
+        }));
+        Ok(Some(plan_id))
+    }
+
+    /// 为迁移期间的既有单测提供“已经完成一次 review”的落盘夹具。
+    ///
+    /// 生产代码必须通过 `InFlightReview` 取得瞬态租约，并在结果写盘后提交；
+    /// 该 helper 不会被编译进生产构建。
+    #[cfg(test)]
+    pub fn try_begin_code_review_round(&self, plan_id: &str) -> Option<u32> {
+        let path = self.resolved_plan_path(plan_id).ok()?;
+        let mut plan = file_store::read_plan(&path).ok()?;
+        let next = plan.frontmatter.code_review_rounds.saturating_add(1);
+        if next > self.max_code_review_rounds() {
+            return None;
+        }
+        plan.frontmatter.code_review_rounds = next;
+        plan.frontmatter.code_review_baseline_ms = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        );
+        file_store::write_plan(&path, &plan, self.lock_timeout_ms()).ok()?;
+        self.refresh_active_plan_after_write(path, &plan);
+        Some(next)
+    }
+
+    /// 为迁移期间的既有单测提供持久化的 open-finding 夹具。
+    #[cfg(test)]
+    pub fn set_unresolved_findings(&self, plan_id: &str, findings: Vec<review::Finding>) {
+        let Ok(path) = self.resolved_plan_path(plan_id) else {
+            return;
+        };
+        let Ok(mut plan) = file_store::read_plan(&path) else {
+            return;
+        };
+        plan.frontmatter.code_review_open_findings = findings;
+        let _ = file_store::write_plan(&path, &plan, self.lock_timeout_ms());
+        self.refresh_active_plan_after_write(path, &plan);
+    }
+
+    fn review_frontmatter(&self, plan_id: &str) -> Option<file_store::PlanFileFrontmatter> {
+        let path = self.resolved_plan_path(plan_id).ok()?;
+        file_store::read_plan(&path)
+            .ok()
+            .map(|plan| plan.frontmatter)
     }
 
     pub fn unresolved_findings(&self, plan_id: &str) -> Vec<review::Finding> {
-        self.unresolved_findings
-            .lock()
-            .get(plan_id)
-            .cloned()
+        self.review_frontmatter(plan_id)
+            .map(|frontmatter| frontmatter.code_review_open_findings)
             .unwrap_or_default()
     }
 
-    pub(crate) fn last_code_review_dispatch_ms(&self, plan_id: &str) -> Option<u128> {
-        self.last_code_review_dispatch_ms
-            .lock()
-            .get(plan_id)
-            .copied()
-    }
-
-    pub(crate) fn set_last_code_review_dispatch_ms(&self, plan_id: &str, timestamp_ms: u128) {
-        self.last_code_review_dispatch_ms
-            .lock()
-            .insert(plan_id.to_string(), timestamp_ms);
-    }
-
     pub fn unresolved_finding_references(&self, plan_id: &str) -> Vec<String> {
-        self.unresolved_findings
-            .lock()
-            .get(plan_id)
-            .map(|findings| {
-                findings
-                    .iter()
-                    .map(|finding| finding.reference.clone())
+        self.review_frontmatter(plan_id)
+            .map(|frontmatter| {
+                frontmatter
+                    .code_review_open_findings
+                    .into_iter()
+                    .map(|finding| finding.reference)
                     .collect()
             })
             .unwrap_or_default()
     }
 
     pub fn code_review_rounds(&self, plan_id: &str) -> u32 {
-        self.code_review_rounds
-            .lock()
-            .get(plan_id)
-            .copied()
+        self.review_frontmatter(plan_id)
+            .map(|frontmatter| frontmatter.code_review_rounds)
             .unwrap_or(0)
     }
 
@@ -1327,13 +1739,6 @@ impl PlanRuntime {
     pub fn code_review_budget_exhausted(&self, plan_id: &str) -> bool {
         let rounds = self.code_review_rounds(plan_id);
         rounds > 0 && rounds >= self.max_code_review_rounds()
-    }
-
-    /// 技术故障刚发生时退还本轮正常 review 配额。
-    pub fn refund_code_review_round(&self, plan_id: &str) {
-        if let Some(rounds) = self.code_review_rounds.lock().get_mut(plan_id) {
-            *rounds = rounds.saturating_sub(1);
-        }
     }
 
     /// 增加技术故障重试次数，返回增加后的次数。
@@ -1356,36 +1761,9 @@ impl PlanRuntime {
         self.review_infra_retries(plan_id) > 2
     }
 
-    pub fn add_disputed_finding(&self, plan_id: &str, finding: review::Finding, reason: String) {
-        let reference = finding.reference.clone();
-        let disputed = DisputedFinding {
-            reference,
-            severity: finding.severity,
-            area: finding.area,
-            note: finding.note,
-            resolution: "wontfix".into(),
-            reason,
-        };
-        self.write_transcript_custom(serde_json::json!({
-            "event": "plan.code_review.dispute",
-            "plan_id": plan_id,
-            "finding": disputed,
-        }));
-        self.disputed_findings
-            .lock()
-            .entry(plan_id.to_owned())
-            .or_default()
-            .push(disputed);
-        if let Some(open) = self.unresolved_findings.lock().get_mut(plan_id) {
-            open.retain(|item| item.reference != finding.reference);
-        }
-    }
-
     pub fn disputed_findings(&self, plan_id: &str) -> Vec<DisputedFinding> {
-        self.disputed_findings
-            .lock()
-            .get(plan_id)
-            .cloned()
+        self.review_frontmatter(plan_id)
+            .map(|frontmatter| frontmatter.code_review_disputed_findings)
             .unwrap_or_default()
     }
 
@@ -1548,6 +1926,17 @@ impl PlanRuntime {
             plan.frontmatter.session_key = Some(self.session_key.clone());
             plan.frontmatter.session_id = session_id.clone();
             plan.frontmatter.state = file_store::PlanFileState::Executing;
+            plan.frontmatter.code_review_rounds = 0;
+            plan.frontmatter.code_review_baseline_ms = None;
+            plan.frontmatter.code_review_open_findings.clear();
+            plan.frontmatter.code_review_disputed_findings.clear();
+            plan.frontmatter.code_review_residual_findings.clear();
+            plan.frontmatter.code_review_handoff = false;
+            plan.frontmatter.code_review_handoff_acknowledged = false;
+            plan.frontmatter.code_review_pass = false;
+            plan.frontmatter.code_review_pass_at_ms = None;
+            plan.frontmatter.green_build_pass = false;
+            plan.frontmatter.green_build_evidence.clear();
             Ok(BuildCommit {
                 plan_id,
                 prev_disk_state,
@@ -1659,10 +2048,23 @@ impl PlanRuntime {
             None => return Ok(None),
         };
         let plan_id = active.id;
+        self.finish_acceptance(&plan_id);
         // ② 改写磁盘
         let path = active.path;
+        // The legacy recovery write is intentionally separate from the state
+        // demotion below: it records the terminal review event once while the
+        // raw half-open state is still observable.
+        let had_legacy_review_in_progress =
+            file_store::recover_runtime_gates_on_load(&path, self.lock_timeout_ms)
+                .map_err(PlanRuntimeError::from_plan_io)?
+                .recovered_code_review;
         file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
             plan.frontmatter.state = file_store::PlanFileState::Pending;
+            for todo in &mut plan.frontmatter.todos {
+                if todo.kind.is_gate() && todo.status == file_store::TodoStatus::InProgress {
+                    todo.status = file_store::TodoStatus::Pending;
+                }
+            }
             Ok::<(), PlanRuntimeError>(())
         })
         .map_err(|e| match e {
@@ -1681,6 +2083,20 @@ impl PlanRuntime {
             Some(&plan_id),
             Some(path),
         );
+        if had_legacy_review_in_progress {
+            let summary = code_reviewer::CodeReviewSummary::aborted_with(
+                "recovered legacy in-progress code review was reset to pending",
+            );
+            self.write_code_review_transcript(
+                &plan_id,
+                &summary,
+                0,
+                &format!("{plan_id}:legacy"),
+                "recovery",
+                false,
+                0,
+            );
+        }
         Ok(Some(plan_id))
     }
 
@@ -1766,6 +2182,8 @@ pub struct CodeReviewDispatchInfo {
     pub round: u32,
     pub review_attempt_id: String,
     pub tool_call_id: String,
+    pub is_incremental: bool,
+    pub delta_file_count: usize,
 }
 
 #[async_trait::async_trait]

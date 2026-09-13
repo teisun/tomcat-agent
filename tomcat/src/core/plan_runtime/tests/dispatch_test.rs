@@ -59,6 +59,12 @@ fn resolved_plan_path_prefers_active_external_path() {
                 green_build_evidence: Vec::new(),
                 code_review_pass: false,
                 code_review_pass_at_ms: None,
+                code_review_rounds: 0,
+                code_review_baseline_ms: None,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
                 code_review_residual_findings: Vec::new(),
                 completion_gate_cycles: 0,
                 unknown: Default::default(),
@@ -106,6 +112,12 @@ fn concurrent_exit_and_build_leave_one_chat_mode_transition() {
                 green_build_evidence: Vec::new(),
                 code_review_pass: false,
                 code_review_pass_at_ms: None,
+                code_review_rounds: 0,
+                code_review_baseline_ms: None,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
                 code_review_residual_findings: Vec::new(),
                 completion_gate_cycles: 0,
                 unknown: Default::default(),
@@ -173,4 +185,34 @@ fn concurrent_exit_and_build_leave_one_chat_mode_transition() {
         mode_events, 2,
         "enter produces Plan and exactly one of exit/build produces Chat"
     );
+}
+
+#[test]
+fn dropped_inflight_review_releases_lease_without_consuming_a_round() {
+    let runtime = PlanRuntime::new("session");
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let events = events.clone();
+        runtime.attach_transcript_appender(std::sync::Arc::new(move |event| {
+            events.lock().push(event);
+            Ok(())
+        }));
+    }
+
+    let lease = runtime
+        .begin_code_review_round("plan-a", 0, "plan-a:1".into(), "tool-a".into(), false, 0)
+        .expect("first reservation");
+    drop(lease);
+
+    assert!(
+        runtime
+            .begin_code_review_round("plan-a", 0, "plan-a:1".into(), "tool-b".into(), false, 0,)
+            .is_some(),
+        "dropped future must not leave the in-process lease held"
+    );
+    assert_eq!(
+        events.lock()[0]["event"],
+        crate::infra::wire::WIRE_PLAN_CODE_REVIEW
+    );
+    assert_eq!(events.lock()[0]["aborted"], true);
 }

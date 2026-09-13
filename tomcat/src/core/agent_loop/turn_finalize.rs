@@ -21,8 +21,8 @@ use crate::core::llm::{
     ChatMessage, ContinuityMetadata, MessageKind, PromptCacheKeyFamily, ReasoningContinuation,
     TokenUsage,
 };
-use crate::core::plan_runtime::file_store::{self, TodoStatus};
-use crate::core::plan_runtime::PlanRuntime;
+use crate::core::plan_runtime::file_store;
+use crate::core::plan_runtime::{NextAction, PlanRuntime};
 use crate::infra::events::{AgentEvent, Message};
 
 use super::types::AgentLoop;
@@ -43,81 +43,58 @@ pub(super) enum TurnOutcome {
 ///
 /// 判据用计划文件的 `state` 而不是"还有没有未完成的 todo"：
 /// todo 可能全勾完了但 code review 打回，此时 state 仍是 `executing`，活儿也确实没干完。
-fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<String> {
+async fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<String> {
     let plan_id = plan_runtime.executing_plan_id()?;
     let plan = plan_runtime
         .active_plan_path()
         .and_then(|path| file_store::read_plan(&path).ok())?;
 
-    let unfinished: Vec<&file_store::TodoItem> = plan
+    let next_action = plan_runtime.next_action(&plan.frontmatter).await;
+    let unfinished_work = plan
         .frontmatter
         .todos
         .iter()
-        .filter(|todo| matches!(todo.status, TodoStatus::Pending | TodoStatus::InProgress))
-        .collect();
-
-    if !unfinished.is_empty() {
-        let in_progress: Vec<&str> = unfinished
-            .iter()
-            .filter(|todo| todo.status == TodoStatus::InProgress)
-            .map(|todo| todo.id.as_str())
-            .collect();
-        let in_progress = if in_progress.is_empty() {
-            "(none)".to_string()
-        } else {
-            in_progress.join(", ")
-        };
-        return Some(format!(
-            "The plan `{plan_id}` is still `executing`: {} of {} todos are not done yet \
-             (in_progress: {in_progress}). Keep working — pick up the next todo and call tools. \
-             Do not summarize or hand back until the plan reaches `completed`.",
-            unfinished.len(),
-            plan.frontmatter.todos.len(),
-        ));
+        .filter(|todo| {
+            matches!(todo.kind, file_store::TodoKind::Work)
+                && !matches!(
+                    todo.status,
+                    file_store::TodoStatus::Completed | file_store::TodoStatus::Cancelled
+                )
+        })
+        .map(|todo| format!("- {} ({})", todo.id, todo.status.as_str()))
+        .collect::<Vec<_>>();
+    if matches!(next_action, NextAction::Done | NextAction::HandOff { .. }) {
+        return None;
     }
-
-    if plan.frontmatter.code_review_pass && !plan.frontmatter.green_build_pass {
-        return Some(format!(
-            "All todos and code review for plan `{plan_id}` are complete, but green-build acceptance has not passed. \
-             Load the `verify` skill, run the discovered checks through background bash, then submit its successful task_id evidence via update_plan. \
-             Do not hand back before the plan reaches `completed`."
-        ));
-    }
-
-    // 基础设施连续失败仍须交还用户；这不是正常 review 预算可以收口的情形。
-    if plan_runtime.code_review_infra_retry_exhausted(&plan_id) {
+    if plan_runtime.note_completion_guard_nudge(&plan_id).await {
         return None;
     }
 
-    let findings = plan_runtime.unresolved_finding_references(&plan_id);
-    let findings = if findings.is_empty() {
-        "(see the latest code review result)".to_string()
-    } else {
-        findings.join(", ")
-    };
-    if plan_runtime.code_review_budget_exhausted(&plan_id) {
-        return Some(format!(
-            "All todos of plan `{plan_id}` are checked off but the final code review still has unresolved findings: {findings}. \
-             Fix them now by reopening an existing work todo. After that todo is completed, the exhausted review budget will \
-             automatically advance this plan to green-build acceptance without dispatching another reviewer. Do not hand back yet."
-        ));
+    match next_action {
+        NextAction::Done | NextAction::HandOff { .. } => None,
+        NextAction::RunAcceptance { .. } => Some(format!(
+            "Plan `{plan_id}` is ready for green-build acceptance. Load the `verify` skill, run every project check through background bash, then submit successful task_id evidence via update_plan. Do not hand back before the plan reaches `completed`."
+        )),
+        NextAction::FixFindings { open_findings } => Some(format!(
+            "Plan `{plan_id}` has unresolved code-review findings. Fix them before requesting another review:\n{}",
+            crate::core::plan_runtime::code_reviewer::render_open_findings_section(&open_findings)
+        )),
+        NextAction::StartReview => Some(format!(
+            "All work todos for plan `{plan_id}` are terminal. Set `[gate] review` to in_progress with update_plan to start close-out; do not summarize or hand back."
+        )),
+        NextAction::ContinueWork => Some(format!(
+            "Plan `{plan_id}` is still executing. Continue only these remaining work todos with focused checks; do not summarize or hand back:\n{}",
+            unfinished_work.join("\n")
+        )),
     }
-    Some(format!(
-        "All todos of plan `{plan_id}` are checked off but the plan is still `executing`, \
-         which means code review has not passed. Unresolved findings: {findings}. \
-         Fix them and re-run the review. Do not hand back with findings outstanding."
-    ))
 }
 
-fn should_apply_completion_guard(agent: &AgentLoop) -> Option<String> {
+async fn should_apply_completion_guard(agent: &AgentLoop) -> Option<String> {
     if !agent.config.subagent_type.is_root() {
         return None;
     }
-    agent
-        .config
-        .plan_runtime
-        .as_ref()
-        .and_then(|rt| completion_guard_instruction(rt))
+    let runtime = agent.config.plan_runtime.as_ref()?;
+    completion_guard_instruction(runtime).await
 }
 /// 处理 text-only 回合的全部副作用：消息落盘、timing ⑤、收束事件发射。
 ///
@@ -188,7 +165,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
     // Completion guard：计划还没收口就想用一段文字收工时，注入继续指令并把回合续上。
     // 放在 timing ⑤ 之前 —— 这个回合根本没结束，不该走收束流程。
     if agent.completion_guard_injections < MAX_COMPLETION_GUARD_INJECTIONS {
-        if let Some(instruction) = should_apply_completion_guard(agent) {
+        if let Some(instruction) = should_apply_completion_guard(agent).await {
             agent.completion_guard_injections += 1;
             let mut nudge = ChatMessage::user(&instruction);
             nudge.kind = MessageKind::Nudge;

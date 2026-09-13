@@ -67,6 +67,20 @@ fn matches_request_misses_when_size_changes() {
 }
 
 #[test]
+fn independent_subagent_read_states_do_not_share_dedup_stamps() {
+    let first = ReadFileState::new();
+    let second = ReadFileState::new();
+    let path = std::path::PathBuf::from("/workspace/src/lib.rs");
+    first.put(path.clone(), stamp(100, 1024, None, None));
+
+    assert!(first.get(&path).is_some());
+    assert!(
+        second.get(&path).is_none(),
+        "a separate reviewer must perform its own first read"
+    );
+}
+
+#[test]
 fn matches_request_misses_when_window_differs() {
     let s = stamp(100, 1024, Some(1), Some(50));
     assert!(!s.matches_request(100, 1024, Some(1), Some(60), ReadRenderMode::Plain));

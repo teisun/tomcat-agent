@@ -6,17 +6,16 @@ use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
-use super::super::turn_finalize::{
-    finalize_turn_after_text, TurnOutcome, MAX_COMPLETION_GUARD_INJECTIONS,
-};
+use super::super::turn_finalize::{finalize_turn_after_text, TurnOutcome};
 use super::super::types::SubagentType;
 use super::super::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
 use crate::core::compaction::{preheat::Preheat, run_layer0_cleanup};
 use crate::core::llm::{ChatMessage, MessageKind, StreamEvent};
 use crate::core::plan_runtime::file_store::{
-    plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
-    TodoStatus,
+    plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
+    TodoItem, TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_CONTENT, GATE_ACCEPTANCE_TODO_ID,
+    GATE_CODE_REVIEW_TODO_CONTENT, GATE_CODE_REVIEW_TODO_ID,
 };
 use crate::core::plan_runtime::review::Finding;
 use crate::core::plan_runtime::PlanRuntime;
@@ -62,6 +61,12 @@ fn write_plan_file(plan_id: &str, state: PlanFileState, todos: Vec<TodoItem>) ->
             green_build_evidence: Vec::new(),
             code_review_pass: false,
             code_review_pass_at_ms: None,
+            code_review_rounds: 0,
+            code_review_baseline_ms: None,
+            code_review_open_findings: Vec::new(),
+            code_review_disputed_findings: Vec::new(),
+            code_review_handoff: false,
+            code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
             completion_gate_cycles: 0,
             unknown: serde_yaml::Mapping::new(),
@@ -587,8 +592,9 @@ async fn guard_blocks_handback_while_todos_remain() {
     let injected = messages.last().unwrap();
     assert_eq!(injected.kind, MessageKind::Nudge);
     let text = injected.text_content().unwrap_or("");
-    assert!(text.contains("2 of 3 todos are not done"), "text={text}");
-    assert!(text.contains("in_progress: t2"), "text={text}");
+    assert!(text.contains("remaining work todos"), "text={text}");
+    assert!(text.contains("t2 (in_progress)"), "text={text}");
+    assert!(text.contains("t3 (pending)"), "text={text}");
 
     cleanup_plan_file(&plan_path);
 }
@@ -663,8 +669,18 @@ async fn guard_blocks_handback_when_todos_done_but_review_pushed_back() {
 
     assert_eq!(outcome, TurnOutcome::Continue);
     let text = messages.last().unwrap().text_content().unwrap_or("");
-    assert!(text.contains("code review has not passed"), "text={text}");
-    assert!(text.contains("F01, F02"), "text={text}");
+    assert!(
+        text.contains("unresolved code-review findings"),
+        "text={text}"
+    );
+    assert!(
+        text.contains("F01 [concern] logic: missing null check"),
+        "text={text}"
+    );
+    assert!(
+        text.contains("F02 [nit] tests: no regression test"),
+        "text={text}"
+    );
 
     cleanup_plan_file(&plan_path);
 }
@@ -676,23 +692,38 @@ async fn exhausted_budget_keeps_the_agent_working_until_acceptance_can_start() {
     let plan_path = write_plan_file(
         &plan_id,
         PlanFileState::Executing,
-        vec![todo("t1", TodoStatus::Completed)],
+        vec![
+            todo("t1", TodoStatus::Completed),
+            TodoItem {
+                id: GATE_CODE_REVIEW_TODO_ID.into(),
+                content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
+                status: TodoStatus::Completed,
+                evidence: Vec::new(),
+                kind: TodoKind::GateCodeReview,
+            },
+            TodoItem {
+                id: GATE_ACCEPTANCE_TODO_ID.into(),
+                content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
+                status: TodoStatus::Pending,
+                evidence: Vec::new(),
+                kind: TodoKind::GateAcceptance,
+            },
+        ],
     );
     let plan_runtime = PlanRuntime::new("sess-guard");
-    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
-    plan_runtime.bind_plan_file_for_test(plan_path.clone());
     plan_runtime.set_max_code_review_rounds(1);
-    plan_runtime
-        .try_begin_code_review_round(&plan_id)
-        .expect("the only review round starts");
-    plan_runtime.set_unresolved_findings(
-        &plan_id,
-        vec![Finding::new(
-            "concern".into(),
-            "logic".into(),
-            "missing null check".into(),
-        )],
-    );
+    let mut plan = read_plan(&plan_path).unwrap();
+    plan.frontmatter.code_review_rounds = 1;
+    plan.frontmatter.code_review_pass = true;
+    plan.frontmatter.code_review_residual_findings =
+        vec!["F01 [P1] logic: missing null check".into()];
+    plan.frontmatter.code_review_open_findings = vec![Finding::new(
+        "concern".into(),
+        "logic".into(),
+        "missing null check".into(),
+    )];
+    write_plan(&plan_path, &plan, 1_000).unwrap();
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
     let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
@@ -706,13 +737,10 @@ async fn exhausted_budget_keeps_the_agent_working_until_acceptance_can_start() {
         .and_then(|message| message.text_content())
         .unwrap_or("");
     assert!(
-        text.contains("reopening an existing work todo"),
+        text.contains("ready for green-build acceptance"),
         "text={text}"
     );
-    assert!(
-        text.contains("green-build acceptance without dispatching another reviewer"),
-        "text={text}"
-    );
+    assert!(text.contains("run every project check"), "text={text}");
     assert!(
         messages
             .iter()
@@ -761,7 +789,7 @@ async fn exhausted_infra_retries_stop_completion_guard() {
 }
 
 #[tokio::test]
-async fn guard_stops_after_the_injection_cap_and_hands_back() {
+async fn guard_stops_after_two_zero_progress_nudges_and_hands_back() {
     let _home = home_guard();
     let plan_id = unique_plan_id("guard_cap");
     let plan_path = write_plan_file(
@@ -772,10 +800,18 @@ async fn guard_stops_after_the_injection_cap_and_hands_back() {
     let plan_runtime = PlanRuntime::new("sess-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
+    let stalled_events = Arc::new(Mutex::new(Vec::new()));
+    {
+        let stalled_events = Arc::clone(&stalled_events);
+        plan_runtime.attach_transcript_appender(Arc::new(move |event| {
+            stalled_events.lock().unwrap().push(event);
+            Ok(())
+        }));
+    }
 
     let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
-    for round in 0..MAX_COMPLETION_GUARD_INJECTIONS {
+    for round in 0..2 {
         assert_eq!(
             finalize(&mut agent, &mut messages).await,
             TurnOutcome::Continue,
@@ -785,7 +821,45 @@ async fn guard_stops_after_the_injection_cap_and_hands_back() {
     assert_eq!(
         finalize(&mut agent, &mut messages).await,
         TurnOutcome::Finished,
-        "触顶后必须交还用户，不能无限打转"
+        "连续两次零进度 nudge 后必须交还用户，不能无限打转"
+    );
+    let stalled_events = stalled_events.lock().unwrap();
+    assert_eq!(stalled_events.len(), 1);
+    assert_eq!(stalled_events[0]["event"], "plan.completion_guard.stalled");
+    assert_eq!(stalled_events[0]["plan_id"], plan_id);
+    assert_eq!(stalled_events[0]["idle_nudges"], 2);
+
+    cleanup_plan_file(&plan_path);
+}
+
+#[tokio::test]
+async fn guard_progress_resets_the_zero_progress_nudge_counter() {
+    let _home = home_guard();
+    let plan_id = unique_plan_id("guard_progress_resets");
+    let plan_path = write_plan_file(
+        &plan_id,
+        PlanFileState::Executing,
+        vec![todo("t1", TodoStatus::Pending)],
+    );
+    let plan_runtime = PlanRuntime::new("sess-guard");
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
+
+    assert!(!plan_runtime.note_completion_guard_nudge(&plan_id).await);
+    assert!(!plan_runtime.note_completion_guard_nudge(&plan_id).await);
+
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let mut plan = read_plan(&plan_path).unwrap();
+    plan.body.push_str("progress was recorded\n");
+    write_plan(&plan_path, &plan, 1_000).unwrap();
+
+    assert!(
+        !plan_runtime.note_completion_guard_nudge(&plan_id).await,
+        "a plan write between nudges must reset the idle counter"
+    );
+    assert!(!plan_runtime.note_completion_guard_nudge(&plan_id).await);
+    assert!(
+        plan_runtime.note_completion_guard_nudge(&plan_id).await,
+        "only two further no-progress nudges may stall the plan"
     );
 
     cleanup_plan_file(&plan_path);
@@ -904,7 +978,7 @@ async fn guard_cap_survives_tool_rounds_between_text_turns() {
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
 
     let mut streams = Vec::new();
-    for idx in 0..MAX_COMPLETION_GUARD_INJECTIONS {
+    for idx in 0..2 {
         streams.push(text_stream(&format!("guarded text {idx}")));
         streams.push(tool_stream(&format!("call_{idx}")));
     }

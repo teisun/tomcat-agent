@@ -163,7 +163,7 @@ async fn docs_only_review_start_skips_both_gates_and_completes() {
 }
 
 #[tokio::test]
-async fn failed_review_returns_implement_focused_instead_of_immediately_restarting_review() {
+async fn failed_review_requires_a_code_change_before_restarting_review() {
     let _guard = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let workspace = git_workspace_with_uncommitted_code();
@@ -180,6 +180,10 @@ async fn failed_review_returns_implement_focused_instead_of_immediately_restarti
                 "runtime".into(),
                 "missing regression coverage".into(),
             )],
+            ..Default::default()
+        },
+        CodeReviewSummary {
+            verdict: Some("pass".into()),
             ..Default::default()
         },
     ])));
@@ -201,10 +205,10 @@ async fn failed_review_returns_implement_focused_instead_of_immediately_restarti
     .await
     .unwrap();
 
-    assert_eq!(out["next_step"]["phase"], "implement_focused");
+    assert_eq!(out["next_step"]["phase"], "fix_findings");
     assert!(out["next_step"]["hint"]
         .as_str()
-        .is_some_and(|hint| hint.contains("F01: missing regression coverage")));
+        .is_some_and(|hint| hint.contains("F01 [P1] runtime: missing regression coverage")));
     assert!(out["warnings"]
         .as_array()
         .unwrap()
@@ -219,6 +223,47 @@ async fn failed_review_returns_implement_focused_instead_of_immediately_restarti
         TodoStatus::Pending,
         "failed review must reopen the visible gate"
     );
+
+    let zero_change = update_plan::execute(
+        &runtime,
+        args(
+            &plan_id,
+            vec![update_plan::UpdateOp::SetStatus {
+                id: GATE_CODE_REVIEW_TODO_ID.into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        ),
+    )
+    .await
+    .expect_err("unresolved findings without a code delta must not consume another review round");
+    assert!(
+        zero_change
+            .to_string()
+            .contains("Fix the following unresolved code-review findings"),
+        "error={zero_change}"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    std::fs::write(
+        workspace.join("src/lib.rs"),
+        "pub fn changed() { /* regression coverage added */ }\n",
+    )
+    .unwrap();
+    let changed = update_plan::execute(
+        &runtime,
+        args(
+            &plan_id,
+            vec![update_plan::UpdateOp::SetStatus {
+                id: GATE_CODE_REVIEW_TODO_ID.into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        ),
+    )
+    .await
+    .expect("a code change must allow the next incremental review");
+    assert_eq!(changed["next_step"]["phase"], "run_acceptance");
     let _ = std::fs::remove_dir_all(workspace);
     cleanup_home(&home);
 }
@@ -350,6 +395,11 @@ async fn green_build_without_acceptance_in_progress_is_rejected() {
     let runtime = PlanRuntime::new("session-a");
     let plan_id = fresh_planning_plan(&runtime);
     mark_plan_executing(&runtime, &plan_id, "session-a");
+    let path = plan_path_for_id(&plan_id).unwrap();
+    let mut plan = read_plan(&path).unwrap();
+    plan.frontmatter.code_review_pass = true;
+    write_plan(&path, &plan, 1_000).unwrap();
+    runtime.bind_plan_file_for_test(path);
 
     let error = update_plan::execute(
         &runtime,
@@ -368,7 +418,7 @@ async fn green_build_without_acceptance_in_progress_is_rejected() {
 
     assert!(error
         .to_string()
-        .contains("只能在 `[gate] Acceptance` 为 in_progress 时提交"));
+        .contains("只能在 `[gate] Acceptance` 已启动的当前运行时提交"));
     cleanup_home(&home);
 }
 

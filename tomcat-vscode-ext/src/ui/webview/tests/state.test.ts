@@ -408,6 +408,33 @@ describe("WebviewStateStore wire routing", () => {
     });
   });
 
+  it("marks an orphaned running code review as aborted on interruption", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applyEvent({
+      planId: "plan-1",
+      reviewAttemptId: "plan-1:1",
+      round: 1,
+      sessionId: "s1",
+      type: "plan.code_review.started",
+    } as never);
+
+    store.applyEvent({
+      sessionId: "s1",
+      type: "agent_interrupted",
+    } as never);
+
+    expect(
+      store
+        .snapshot()
+        .sessionViews.s1.timeline.find((item) => item.type === "review"),
+    ).toMatchObject({
+      reviewAttemptId: "plan-1:1",
+      status: "done",
+      verdict: "aborted",
+    });
+  });
+
   it("ignores generic code reviewer lifecycle events without a plan review attempt", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");

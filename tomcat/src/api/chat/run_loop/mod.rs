@@ -678,6 +678,17 @@ async fn run_chat_turn_with_message_and_tool_definitions(
     context_state: &mut crate::core::ContextState,
     turn_token: CancellationToken,
 ) -> Result<AgentRunOutcome, AppError> {
+    // A root user reply is the explicit boundary that may reopen an execution
+    // paused on an unresolved P0. Never infer acknowledgement from model text.
+    if input_message.is_some() {
+        if let Err(error) = ctx
+            .session_runtime
+            .plan_runtime
+            .refresh_code_review_budget_after_user_message()
+        {
+            tracing::warn!(error = %error, "failed to refresh code-review budget after user input");
+        }
+    }
     ctx.session_runtime
         .plan_runtime
         .attach_cancel_hook(turn_token.clone());

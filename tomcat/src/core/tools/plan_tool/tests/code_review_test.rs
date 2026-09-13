@@ -59,7 +59,13 @@ mod explicit_gates_update_plan {
 
         if green_build_pass.is_some() && out["code_review_pass"].as_bool() == Some(true) {
             let review_result = out["code_review"].clone();
-            if !gate_is_in_progress(&out, TodoKind::GateAcceptance) {
+            let plan_id_for_acceptance = plan_id
+                .as_deref()
+                .or_else(|| out["plan_id"].as_str())
+                .expect("acceptance requires a plan id");
+            if !gate_is_in_progress(&out, TodoKind::GateAcceptance)
+                && !runtime.acceptance_is_in_flight(plan_id_for_acceptance)
+            {
                 raw::execute(
                     runtime,
                     gate_args(plan_id.clone(), path.clone(), GATE_ACCEPTANCE_TODO_ID),
@@ -211,6 +217,8 @@ async fn code_review_pass_completes_without_verifier() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
+    let workspace = git_workspace_with_code("tomcat_review_state_restart_");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
     let captured: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
         std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
     {
@@ -294,10 +302,12 @@ async fn code_review_pass_completes_without_verifier() {
 }
 
 #[tokio::test]
-async fn p0_blocks_its_review_round_but_not_unconditional_budget_exhaustion() {
+async fn p0_blocks_its_review_round_and_hands_off_when_budget_is_exhausted() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
+    let workspace = git_workspace_with_code("tomcat_p0_handoff_");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
     rt.attach_code_reviewer(std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![
         CodeReviewSummary {
             aborted: false,
@@ -353,23 +363,11 @@ async fn p0_blocks_its_review_round_but_not_unconditional_budget_exhaustion() {
             .as_str()
             .is_some_and(|text| text.contains("verdict=pass"))));
 
-    update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            path: None,
-            replace: false,
-            dispute_findings: Vec::new(),
-            green_build_pass: None,
-            green_build_evidence: Vec::new(),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
-        },
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { /* ownership check added */ }\n",
     )
-    .await
     .unwrap();
     let exhausted = update_plan::execute(
         &rt,
@@ -380,22 +378,30 @@ async fn p0_blocks_its_review_round_but_not_unconditional_budget_exhaustion() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::Completed,
-            }],
+            ops: Vec::new(),
         },
     )
     .await
     .unwrap();
-    assert_eq!(exhausted["code_review_pass"], true);
-    assert_eq!(exhausted["next_step"]["phase"], "run_acceptance");
+    assert_eq!(exhausted["code_review_pass"], false);
+    assert_eq!(exhausted["next_step"]["phase"], "handoff");
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert!(persisted.frontmatter.code_review_handoff);
     assert_eq!(
         persisted.frontmatter.code_review_residual_findings,
         vec!["F01 [P0] authorization: missing ownership check"]
     );
+
+    assert_eq!(
+        rt.refresh_code_review_budget_after_user_message()
+            .expect("user acknowledgement refreshes the budget"),
+        Some(plan_id.clone())
+    );
+    let refreshed = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert_eq!(refreshed.frontmatter.code_review_rounds, 0);
+    assert!(!refreshed.frontmatter.code_review_handoff);
+    assert!(refreshed.frontmatter.code_review_handoff_acknowledged);
+    assert_eq!(refreshed.frontmatter.code_review_open_findings.len(), 1);
     cleanup_home(&home);
 }
 
@@ -432,7 +438,13 @@ async fn exhausted_review_budget_still_rejects_fabricated_green_build_evidence()
         .expect("first review should return its finding");
     assert_eq!(first["code_review_pass"], false);
 
-    update_plan::execute(
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { /* regression coverage added */ }\n",
+    )
+    .unwrap();
+    let exhausted = update_plan::execute(
         &rt,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id.clone()),
@@ -441,19 +453,11 @@ async fn exhausted_review_budget_still_rejects_fabricated_green_build_evidence()
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
+            ops: Vec::new(),
         },
     )
     .await
-    .expect("reopen work todo");
-
-    let exhausted = update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
-        .await
-        .expect("exhausted review budget should fail open into acceptance");
+    .expect("exhausted review budget should fail open into acceptance");
     assert_eq!(exhausted["code_review_pass"], true);
     assert_eq!(exhausted["next_step"]["phase"], "run_acceptance");
 
@@ -1040,6 +1044,8 @@ async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_wi
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
+    let workspace = git_workspace_with_code("tomcat_p1_review_exhaustion_");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
     let captured: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
         std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
     {
@@ -1119,31 +1125,27 @@ async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_wi
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );
-    assert_eq!(first["next_step"]["phase"], "implement_focused");
+    let after_first_review = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    let current_code = crate::core::plan_runtime::code_reviewer::collect_code_diff_context(
+        &rt.workspace_root().expect("wrapper attaches workspace"),
+    )
+    .await;
+    assert!(
+        current_code.newest_edit_mtime_ms <= after_first_review.frontmatter.code_review_baseline_ms,
+        "zero-code-change review must retain its baseline: current={current_code:?}, baseline={:?}",
+        after_first_review.frontmatter.code_review_baseline_ms
+    );
+    assert_eq!(first["next_step"]["phase"], "fix_findings");
     assert!(first["next_step"]["hint"]
         .as_str()
-        .is_some_and(|hint| hint.contains("F01: missing guard")));
+        .is_some_and(|hint| hint.contains("F01 [P1] logic: missing guard")));
 
-    let reopen = update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            path: None,
-            replace: false,
-            dispute_findings: Vec::new(),
-            green_build_pass: None,
-            green_build_evidence: Vec::new(),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
-        },
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { /* guard added */ }\n",
     )
-    .await
     .unwrap();
-    assert!(reopen.get("verify").is_none());
-
     let second = update_plan::execute(
         &rt,
         update_plan::UpdatePlanArgs {
@@ -1153,11 +1155,7 @@ async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_wi
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::Completed,
-            }],
+            ops: Vec::new(),
         },
     )
     .await
@@ -1199,7 +1197,7 @@ async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_wi
     let second_warnings = second["warnings"].as_array().expect("warnings array");
     assert!(second_warnings.iter().any(|warning| warning
         .as_str()
-        .is_some_and(|text| text.contains("无条件通过 review gate"))));
+        .is_some_and(|text| text.contains("仅剩 P1"))));
 
     let events = captured.lock();
     let exhausted = events
@@ -1227,10 +1225,12 @@ async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_wi
 }
 
 #[tokio::test]
-async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_with_p0_residual() {
+async fn code_review_rounds_exhaustion_hands_off_with_p0_residual() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
+    let workspace = git_workspace_with_code("tomcat_p0_review_exhaustion_");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
     rt.attach_code_reviewer(std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![
         CodeReviewSummary {
             aborted: false,
@@ -1255,25 +1255,12 @@ async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_wi
     assert_eq!(first["code_review_pass"], false);
     assert_eq!(first["plan_state_after"], "executing");
 
-    update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            path: None,
-            replace: false,
-            dispute_findings: Vec::new(),
-            green_build_pass: None,
-            green_build_evidence: Vec::new(),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
-        },
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { /* authorization fixed */ }\n",
     )
-    .await
     .unwrap();
-
     let exhausted = update_plan::execute(
         &rt,
         update_plan::UpdatePlanArgs {
@@ -1283,24 +1270,21 @@ async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_wi
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::Completed,
-            }],
+            ops: Vec::new(),
         },
     )
     .await
     .unwrap();
 
     assert!(exhausted["code_review"].is_null());
-    assert_eq!(exhausted["code_review_pass"], true);
+    assert_eq!(exhausted["code_review_pass"], false);
     assert_eq!(exhausted["plan_state_after"], "executing");
-    assert_eq!(exhausted["next_step"]["phase"], "run_acceptance");
+    assert_eq!(exhausted["next_step"]["phase"], "handoff");
     assert!(exhausted["next_step"]["hint"]
         .as_str()
         .is_some_and(|hint| hint.contains("F01 [P0] security: authorization can be bypassed")));
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert!(persisted.frontmatter.code_review_handoff);
     assert_eq!(
         persisted.frontmatter.code_review_residual_findings,
         vec!["F01 [P0] security: authorization can be bypassed"]
@@ -1313,6 +1297,8 @@ async fn resolved_findings_converge_to_completion_within_review_budget() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
+    let workspace = git_workspace_with_code("tomcat_resolved_review_finding_");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
     let first_finding = Finding::new(
         "P1".into(),
         "logic".into(),
@@ -1368,7 +1354,13 @@ async fn resolved_findings_converge_to_completion_within_review_budget() {
     );
     assert_eq!(rt.code_review_rounds(&plan_id), 1);
 
-    update_plan::execute(
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { /* authorization guard added */ }\n",
+    )
+    .unwrap();
+    let second = update_plan::execute(
         &rt,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id.clone()),
@@ -1377,16 +1369,11 @@ async fn resolved_findings_converge_to_completion_within_review_budget() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
+            ops: Vec::new(),
         },
     )
     .await
     .unwrap();
-    let second = update_plan::execute(&rt, complete_all()).await.unwrap();
 
     assert_eq!(second["code_review"]["verdict"], "pass");
     assert_eq!(second["plan_state_after"], "executing");
@@ -1485,6 +1472,8 @@ async fn second_review_round_receives_previous_open_findings_and_clears_fixed_on
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let rt = PlanRuntime::new("session-a");
+    let workspace = git_workspace_with_code("tomcat_review_state_restart_");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
     let round1 =
         Finding::new("P1".into(), "logic".into(), "missing guard".into()).with_reference("F01");
     let round2 = Finding::new("P1".into(), "tests".into(), "no regression test".into())
@@ -1539,9 +1528,23 @@ async fn second_review_round_receives_previous_open_findings_and_clears_fixed_on
         vec!["F01".to_string()]
     );
 
+    // Simulate a backend restart: only the PlanFile may carry the review
+    // baseline and the open finding into the second dispatch.
+    let recreated = PlanRuntime::new("session-a");
+    recreated.attach_code_reviewer(reviewer.clone());
+    recreated.set_max_code_review_rounds(8);
+    recreated.bind_plan_file_for_test(plan_path_for_id(&plan_id).unwrap());
+    recreated.attach_workspace_root(workspace.path().to_path_buf());
+    std::thread::sleep(Duration::from_millis(5));
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { /* fixed */ }\n",
+    )
+    .unwrap();
+
     // 重开一个 todo 再收口，触发第 2 轮。
     update_plan::execute(
-        &rt,
+        &recreated,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id.clone()),
             path: None,
@@ -1558,7 +1561,7 @@ async fn second_review_round_receives_previous_open_findings_and_clears_fixed_on
     )
     .await
     .unwrap();
-    update_plan::execute(&rt, complete_all(plan_id.clone()))
+    update_plan::execute(&recreated, complete_all(plan_id.clone()))
         .await
         .unwrap();
 
@@ -1572,7 +1575,7 @@ async fn second_review_round_receives_previous_open_findings_and_clears_fixed_on
     );
     // 第 2 轮没再报 round1 → 视为已修，只剩 round2。
     assert_eq!(
-        rt.unresolved_finding_references(&plan_id),
+        recreated.unresolved_finding_references(&plan_id),
         vec!["F01".to_string()]
     );
     cleanup_home(&home);
@@ -1868,7 +1871,13 @@ async fn edit_during_acceptance_after_exhausted_review_keeps_gates_and_accepts_f
     update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
         .await
         .expect("first review returns the finding");
-    update_plan::execute(
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { /* regression coverage added */ }\n",
+    )
+    .unwrap();
+    let exhausted = update_plan::execute(
         &rt,
         update_plan::UpdatePlanArgs {
             plan_id: Some(plan_id.clone()),
@@ -1877,18 +1886,11 @@ async fn edit_during_acceptance_after_exhausted_review_keeps_gates_and_accepts_f
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
+            ops: Vec::new(),
         },
     )
     .await
-    .expect("reopen work todo to consume the review budget");
-    let exhausted = update_plan::execute(&rt, complete_all_args(&plan_id, None, Vec::new()))
-        .await
-        .expect("review budget should fail open");
+    .expect("review budget should fail open");
     assert_eq!(exhausted["code_review_pass"], true);
 
     let review_again = update_plan::execute(

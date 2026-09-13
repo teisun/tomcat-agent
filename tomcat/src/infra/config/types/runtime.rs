@@ -77,7 +77,7 @@ pub struct PlanConfig {
     /// 默认 1（仅首次 create_plan 必跑；后续 update_plan 不再触发，由调用方控制）。
     #[serde(default = "default_plan_max_review_rounds")]
     pub max_review_rounds: u32,
-    /// EXEC 完成前 code reviewer 的最大尝试轮次。默认 2；0 表示直接跳过 code review。
+    /// EXEC 完成前 code reviewer 的最大尝试轮次。默认 4；0 表示直接跳过 code review。
     #[serde(default = "default_plan_max_code_review_rounds")]
     pub max_code_review_rounds: u32,
     /// 代码再次编辑后，review + 绿构建最多重跑几轮。默认 3；至少为 1。
@@ -97,8 +97,8 @@ fn default_plan_max_review_rounds() -> u32 {
 }
 
 fn default_plan_max_code_review_rounds() -> u32 {
-    // 首轮找问题、次轮核销修复；需要更深审查时由用户显式提高预算。
-    2
+    // 首轮找问题，预留三次真实修复后的核销机会。
+    4
 }
 
 fn default_plan_max_completion_gate_cycles() -> u32 {

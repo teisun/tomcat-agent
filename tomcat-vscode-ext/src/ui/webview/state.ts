@@ -653,6 +653,20 @@ function upsertDoneCodeReviewRow(
   } satisfies WebviewReviewRow);
 }
 
+/** A review dispatch has no durable "running" state. If its parent turn ends
+ * without a terminal review event, render the orphaned row as aborted rather
+ * than leaving a timer running indefinitely. */
+function abortRunningCodeReviewRows(session: WebviewSessionSnapshot): void {
+  for (const item of session.timeline) {
+    if (item.type !== "review" || item.status !== "running") {
+      continue;
+    }
+    item.status = "done";
+    item.verdict = "aborted";
+    item.summary = item.summary ?? "Code review was interrupted before completion.";
+  }
+}
+
 function cloneTimelineItem<T extends WebviewTimelineItem>(item: T): T {
   return JSON.parse(JSON.stringify(item)) as T;
 }
@@ -1864,6 +1878,7 @@ function applyHistoryEntry(
 
   if (entry.type === "custom") {
     if (entry.event === "agent.interrupted") {
+      abortRunningCodeReviewRows(session);
       const preferredId =
         typeof entry.id === "string"
           ? `agent-interrupted:${entry.id}`
@@ -3058,6 +3073,7 @@ export class WebviewStateStore {
                 : [],
           });
         }
+        abortRunningCodeReviewRows(session);
         clearActiveAssistant(runtime);
         return sessionRenderMutation(session.sessionId);
       }
@@ -3089,6 +3105,7 @@ export class WebviewStateStore {
       case "agent_interrupted":
         clearActiveAssistant(runtime);
         markRunningToolsInterrupted(session);
+        abortRunningCodeReviewRows(session);
         if (!messageExistsAtTail(session, "warn", "Tomcat turn interrupted")) {
           pushMessage(session, "warn", "Tomcat turn interrupted");
         }

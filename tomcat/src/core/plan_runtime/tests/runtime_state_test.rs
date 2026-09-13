@@ -1,4 +1,5 @@
-use super::super::{PlanRuntime, PlanRuntimeError};
+use super::super::file_store::{PlanFileState, TodoItem, TodoKind, TodoStatus};
+use super::super::{NextAction, PlanRuntime, PlanRuntimeError};
 use crate::core::session::AgentMode;
 
 #[test]
@@ -145,4 +146,73 @@ fn recovering_without_sidecar_state_defaults_to_chat() {
 
     assert_eq!(runtime.mode(), AgentMode::Chat);
     assert!(runtime.active_plan().is_none());
+}
+
+#[tokio::test]
+async fn next_action_is_the_single_close_out_decision_source() {
+    let runtime = PlanRuntime::new("session");
+    let mut frontmatter = super::sample_frontmatter();
+    frontmatter.todos = vec![
+        TodoItem {
+            id: "work".into(),
+            content: "implement".into(),
+            status: TodoStatus::Completed,
+            evidence: Vec::new(),
+            kind: TodoKind::Work,
+        },
+        TodoItem {
+            id: "gate-review".into(),
+            content: "[gate] review".into(),
+            status: TodoStatus::Pending,
+            evidence: Vec::new(),
+            kind: TodoKind::GateCodeReview,
+        },
+        TodoItem {
+            id: "gate-acceptance".into(),
+            content: "[gate] Acceptance".into(),
+            status: TodoStatus::Pending,
+            evidence: Vec::new(),
+            kind: TodoKind::GateAcceptance,
+        },
+    ];
+    assert_eq!(
+        runtime.next_action(&frontmatter).await,
+        NextAction::StartReview
+    );
+
+    frontmatter.todos[0].status = TodoStatus::Pending;
+    assert_eq!(
+        runtime.next_action(&frontmatter).await,
+        NextAction::ContinueWork
+    );
+
+    frontmatter.todos[0].status = TodoStatus::Completed;
+    frontmatter.code_review_pass = true;
+    assert!(matches!(
+        runtime.next_action(&frontmatter).await,
+        NextAction::RunAcceptance { .. }
+    ));
+
+    frontmatter.code_review_pass = false;
+    frontmatter.code_review_open_findings = vec![super::super::review::Finding::new(
+        "P1".into(),
+        "logic".into(),
+        "fix".into(),
+    )];
+    assert!(matches!(
+        runtime.next_action(&frontmatter).await,
+        NextAction::FixFindings { .. }
+    ));
+
+    frontmatter.code_review_handoff = true;
+    assert!(matches!(
+        runtime.next_action(&frontmatter).await,
+        NextAction::HandOff {
+            reason: "p0_residual",
+            ..
+        }
+    ));
+
+    frontmatter.state = PlanFileState::Completed;
+    assert_eq!(runtime.next_action(&frontmatter).await, NextAction::Done);
 }

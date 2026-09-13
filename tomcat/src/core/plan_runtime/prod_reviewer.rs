@@ -17,8 +17,8 @@ use crate::core::llm::{
 };
 use crate::core::plan_runtime::code_reviewer::{
     build_code_review_prompt, changed_files_since, code_review_system_prompt_text,
-    code_reviewer_allowed_tools_with_policy, collect_git_changed_files, unix_timestamp_ms,
-    CodeReviewPromptInput, CodeReviewSummary,
+    code_reviewer_allowed_tools_with_policy, collect_git_changed_files, CodeReviewPromptInput,
+    CodeReviewSummary,
 };
 use crate::core::plan_runtime::explorer::{
     build_explorer_prompt, explorer_system_prompt_text, ExplorerReport, ExplorerTask,
@@ -67,7 +67,8 @@ pub struct ProdReviewerDeps {
     pub agent_trail_dir: String,
     pub checkpoint_store: Arc<dyn CheckpointStore>,
     pub context_config: ContextConfig,
-    pub read_file_state: Arc<ReadFileState>,
+    /// 每个子 Agent 的 read 去重表必须独立；这里只传同一份配置，而非共享状态。
+    pub refresh_mutation_stamp: bool,
     pub llm_files_config: LlmFilesConfig,
     pub sessions_dir: std::path::PathBuf,
     pub agent_workspace_dir: std::path::PathBuf,
@@ -224,7 +225,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
         let event_bus = Arc::clone(&deps.event_bus);
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let read_file_state = Arc::clone(&deps.read_file_state);
+        let refresh_mutation_stamp = deps.refresh_mutation_stamp;
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
         let expose_skills =
@@ -282,6 +283,9 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                 &parent_session_id,
                 SubagentType::PlanReviewer,
                 move |spawn_ctx| async move {
+                    let read_file_state = Arc::new(ReadFileState::with_mutation_stamp_refresh(
+                        refresh_mutation_stamp,
+                    ));
                     let child_session_id = spawn_ctx.child_session_id.clone();
                     let cancel_token = spawn_ctx.cancel_token.clone();
                     let transcript_root = agent_trail_dir.clone();
@@ -447,18 +451,26 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             Ok(path) => path,
             Err(err) => return CodeReviewSummary::aborted_with(err),
         };
+        let review_state = match crate::core::plan_runtime::file_store::read_plan(&plan_path) {
+            Ok(plan) => plan.frontmatter,
+            Err(err) => {
+                return CodeReviewSummary::aborted_with(format!(
+                    "read plan review state failed: {err}"
+                ));
+            }
+        };
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
         let changed_files = collect_git_changed_files(deps.agent_workspace_dir.as_path()).await;
-        let previous_dispatch_ms = (dispatch.round > 1)
-            .then(|| plan_runtime.last_code_review_dispatch_ms(plan_id))
+        let previous_dispatch_ms = dispatch
+            .is_incremental
+            .then_some(review_state.code_review_baseline_ms)
             .flatten();
-        let is_incremental = previous_dispatch_ms.is_some();
+        let is_incremental = dispatch.is_incremental && previous_dispatch_ms.is_some();
         let delta_files = previous_dispatch_ms
             .map(|since_ms| {
                 changed_files_since(deps.agent_workspace_dir.as_path(), &changed_files, since_ms)
             })
             .unwrap_or_default();
-        plan_runtime.set_last_code_review_dispatch_ms(plan_id, unix_timestamp_ms());
         let initial_user_message = build_code_review_prompt(CodeReviewPromptInput {
             plan_id,
             plan_text,
@@ -469,7 +481,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
             round: dispatch.round,
             is_incremental,
             open_findings,
-            disputed_findings: &plan_runtime.disputed_findings(plan_id),
+            disputed_findings: &review_state.code_review_disputed_findings,
         });
         let turns_limit = deps.max_turns.max(1);
 
@@ -477,7 +489,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         let event_bus = Arc::clone(&deps.event_bus);
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let read_file_state = Arc::clone(&deps.read_file_state);
+        let refresh_mutation_stamp = deps.refresh_mutation_stamp;
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
         let bash_config = deps.bash_config.clone();
@@ -541,6 +553,9 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                 &parent_session_id,
                 SubagentType::CodeReviewer,
                 move |spawn_ctx| async move {
+                    let read_file_state = Arc::new(ReadFileState::with_mutation_stamp_refresh(
+                        refresh_mutation_stamp,
+                    ));
                     let child_session_id = spawn_ctx.child_session_id.clone();
                     let cancel_token = spawn_ctx.cancel_token.clone();
                     let transcript_root = agent_trail_dir.clone();
@@ -843,7 +858,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
         let event_bus = Arc::clone(&deps.event_bus);
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let read_file_state = Arc::clone(&deps.read_file_state);
+        let refresh_mutation_stamp = deps.refresh_mutation_stamp;
         let bash_config = deps.bash_config.clone();
         let gate = Arc::clone(&deps.gate);
         let confirmation = Arc::clone(&deps.confirmation);
@@ -896,6 +911,9 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                 &parent_session_id,
                 SubagentType::Explorer,
                 move |spawn_ctx| async move {
+                    let read_file_state = Arc::new(ReadFileState::with_mutation_stamp_refresh(
+                        refresh_mutation_stamp,
+                    ));
                     let child_session_id = spawn_ctx.child_session_id.clone();
                     let cancel_token = spawn_ctx.cancel_token.clone();
                     let transcript_root = agent_trail_dir.clone();

@@ -233,7 +233,8 @@ pub struct ProdVerifierDeps {
     pub agent_trail_dir: String,
     pub checkpoint_store: Arc<dyn CheckpointStore>,
     pub context_config: ContextConfig,
-    pub read_file_state: Arc<ReadFileState>,
+    /// 与根会话相同的 read-stamp 刷新策略；状态本身在每个子 Agent 内独立。
+    pub refresh_mutation_stamp: bool,
     pub llm_files_config: LlmFilesConfig,
     pub sessions_dir: std::path::PathBuf,
     pub web_fetch_runtime: Arc<crate::core::tools::web_fetch::WebFetchRuntime>,
@@ -308,7 +309,7 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
         let event_bus = Arc::clone(&deps.event_bus);
         let agent_trail_dir = deps.agent_trail_dir.clone();
         let checkpoint_store = Arc::clone(&deps.checkpoint_store);
-        let read_file_state = Arc::clone(&deps.read_file_state);
+        let refresh_mutation_stamp = deps.refresh_mutation_stamp;
         let web_fetch_runtime = Arc::clone(&deps.web_fetch_runtime);
         let shared_skill_set = Arc::clone(&deps.skill_set);
         let skill_set = deps.skill_set.read().clone();
@@ -382,6 +383,9 @@ impl VerifierDispatcher for ProdVerifierDispatcher {
                 &parent_session_id,
                 SubagentType::Verifier,
                 move |spawn_ctx| async move {
+                    let read_file_state = Arc::new(ReadFileState::with_mutation_stamp_refresh(
+                        refresh_mutation_stamp,
+                    ));
                     let child_session_id = spawn_ctx.child_session_id.clone();
                     let cancel_token = spawn_ctx.cancel_token.clone();
                     let transcript_root = agent_trail_dir.clone();

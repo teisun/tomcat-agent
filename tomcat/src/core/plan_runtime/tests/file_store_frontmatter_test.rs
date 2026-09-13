@@ -93,6 +93,16 @@ fn plan_file_schema_version_v1_locked() {
 }
 
 #[test]
+fn read_plan_normalizes_legacy_runtime_gates_from_in_progress_to_pending() {
+    let legacy = "---\nplan_id: legacy\ngoal: g\nstate: executing\ncreated_at: t\nschema_version: 1\ntodos:\n  - id: gate-review\n    content: \"[gate] review\"\n    status: in_progress\n    kind: gate_code_review\n  - id: gate-acceptance\n    content: \"[gate] Acceptance\"\n    status: in_progress\n    kind: gate_acceptance\n---\n";
+
+    let parsed = parse_plan_file(legacy).expect("legacy plan remains readable");
+
+    assert_eq!(parsed.frontmatter.todos[0].status, TodoStatus::Pending);
+    assert_eq!(parsed.frontmatter.todos[1].status, TodoStatus::Pending);
+}
+
+#[test]
 fn plan_file_rejects_more_than_three_in_progress_on_write() {
     let mut frontmatter = sample_frontmatter();
     for id in ["t3", "t4", "t5"] {

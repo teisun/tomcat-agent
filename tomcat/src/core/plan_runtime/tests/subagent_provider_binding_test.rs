@@ -29,7 +29,6 @@ use crate::core::llm::{
 };
 use crate::core::permission::{BashAstChecker, DefaultPermissionGate, GateConfig, SessionGrants};
 use crate::core::skill::SkillSet;
-use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::HashlineSegment;
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::tools::primitive::PrimitiveOperation;
@@ -112,6 +111,12 @@ fn write_planning_plan(plan_id: &str, body: &str) -> PathBuf {
                 green_build_evidence: Vec::new(),
                 code_review_pass: false,
                 code_review_pass_at_ms: None,
+                code_review_rounds: 0,
+                code_review_baseline_ms: None,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
                 code_review_residual_findings: Vec::new(),
                 completion_gate_cycles: 0,
                 unknown: Default::default(),
@@ -515,7 +520,7 @@ fn reviewer_deps(fx: &BindingFixture, model_override: Option<&str>) -> ProdRevie
         agent_trail_dir: fx.agent_trail_dir.to_string_lossy().to_string(),
         checkpoint_store: Arc::new(NoopStore),
         context_config: ContextConfig::default(),
-        read_file_state: Arc::new(ReadFileState::default()),
+        refresh_mutation_stamp: true,
         llm_files_config: LlmFilesConfig::default(),
         sessions_dir: fx.agent_trail_dir.join("sessions"),
         agent_workspace_dir: fx.workspace.path().to_path_buf(),
@@ -545,7 +550,7 @@ fn verifier_deps(fx: &BindingFixture) -> ProdVerifierDeps {
         agent_trail_dir: fx.agent_trail_dir.to_string_lossy().to_string(),
         checkpoint_store: Arc::new(NoopStore),
         context_config: ContextConfig::default(),
-        read_file_state: Arc::new(ReadFileState::default()),
+        refresh_mutation_stamp: true,
         llm_files_config: LlmFilesConfig::default(),
         sessions_dir: fx.agent_trail_dir.join("sessions"),
         web_fetch_runtime: Arc::new(
@@ -763,6 +768,8 @@ summary: verify ok
                 round: 1,
                 review_attempt_id: "binding_plan:1".into(),
                 tool_call_id: "tc-binding".into(),
+                is_incremental: false,
+                delta_file_count: 0,
             },
         )
         .await;
@@ -933,6 +940,8 @@ async fn prod_code_reviewer_keepalive_only_provider_surfaces_idle_timeout() {
                 round: 1,
                 review_attempt_id: "binding_plan:1".into(),
                 tool_call_id: "tc-binding".into(),
+                is_incremental: false,
+                delta_file_count: 0,
             },
         )
         .await;

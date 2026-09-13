@@ -31,6 +31,8 @@ async fn prod_code_reviewer_stub_returns_aborted_with_origin() {
                 round: 1,
                 review_attempt_id: "demo:1".into(),
                 tool_call_id: "tc-demo".into(),
+                is_incremental: false,
+                delta_file_count: 0,
             },
         )
         .await;
@@ -128,6 +130,12 @@ fn review_prompt_uses_active_external_plan_path() {
                 green_build_evidence: Vec::new(),
                 code_review_pass: false,
                 code_review_pass_at_ms: None,
+                code_review_rounds: 0,
+                code_review_baseline_ms: None,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
                 code_review_residual_findings: Vec::new(),
                 completion_gate_cycles: 0,
                 unknown: Default::default(),

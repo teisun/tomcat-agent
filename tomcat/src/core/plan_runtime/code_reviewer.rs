@@ -24,7 +24,7 @@ pub fn code_review_system_prompt_text() -> &'static str {
 }
 
 /// 上一轮未清 finding 渲染成 prompt 片段，要求 reviewer 逐条核销。
-fn render_open_findings_section(open_findings: &[Finding]) -> String {
+pub(crate) fn render_open_findings_section(open_findings: &[Finding]) -> String {
     if open_findings.is_empty() {
         return String::new();
     }
@@ -42,8 +42,8 @@ fn render_open_findings_section(open_findings: &[Finding]) -> String {
                 None => String::new(),
             };
             format!(
-                "         - [{}] {}: {}{}",
-                finding.severity, finding.area, finding.note, evidence
+                "         - {} [{}] {}: {}{}",
+                finding.reference, finding.severity, finding.area, finding.note, evidence
             )
         })
         .collect::<Vec<_>>()
@@ -307,7 +307,10 @@ pub async fn collect_git_changed_files(workspace_root: &std::path::Path) -> Vec<
     let mut changed_files = BTreeSet::new();
     for line in run_git_lines(
         workspace_root,
-        &["diff", "--name-only", "--no-ext-diff", "HEAD"],
+        // `git -C <workspace-subdir>` normally prints paths relative to the
+        // repository root. `--relative` keeps them relative to workspace_root,
+        // which is the base used below for mtime and reviewer navigation.
+        &["diff", "--relative", "--name-only", "--no-ext-diff", "HEAD"],
     )
     .await
     {
@@ -530,6 +533,47 @@ mod tests {
         assert_eq!(
             collect_git_changed_files(root).await,
             vec!["tracked.rs".to_string(), "untracked.rs".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_files_are_relative_to_a_nested_workspace_root() {
+        let repo = tempfile::tempdir().expect("repo");
+        let root = repo.path();
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).expect("nested");
+        std::fs::write(nested.join("tracked.rs"), "fn before() {}\n").expect("seed");
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .expect("git init")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .status()
+            .expect("git add")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=tomcat-test",
+                "-c",
+                "user.email=tomcat-test@example.invalid",
+                "commit",
+                "-qm",
+                "seed",
+            ])
+            .current_dir(root)
+            .status()
+            .expect("git commit")
+            .success());
+        std::fs::write(nested.join("tracked.rs"), "fn after() {}\n").expect("modify");
+
+        assert_eq!(
+            collect_git_changed_files(&nested).await,
+            vec!["tracked.rs".to_string()]
         );
     }
 }

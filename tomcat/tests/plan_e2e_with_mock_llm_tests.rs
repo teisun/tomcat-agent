@@ -45,7 +45,6 @@ use tomcat::core::plan_runtime::{
 };
 use tomcat::core::session::{AgentMode, ResumeControlState};
 use tomcat::core::skill::SkillSet;
-use tomcat::core::tools::pipeline::read_state::ReadFileState;
 use tomcat::core::tools::plan_tool::{create_plan, todos, update_plan};
 use tomcat::core::tools::primitive::BashTaskRegistry;
 use tomcat::core::tools::web_fetch::WebFetchRuntime;
@@ -414,6 +413,12 @@ fn write_test_plan(plan_id: &str, body: &str) {
                 green_build_evidence: vec![],
                 code_review_pass: false,
                 code_review_pass_at_ms: None,
+                code_review_rounds: 0,
+                code_review_baseline_ms: None,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
                 code_review_residual_findings: vec![],
                 completion_gate_cycles: 0,
                 unknown: Default::default(),
@@ -756,7 +761,7 @@ async fn h1b_mock_coding_trajectory_uses_visible_gates_and_fresh_evidence() {
     let ready = complete_all_plan_todos(&rt, &plan_id).await;
     assert_eq!(ready["next_step"]["phase"], "start_review");
     let rejected = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
-    assert_eq!(rejected["next_step"]["phase"], "implement_focused");
+    assert_eq!(rejected["next_step"]["phase"], "fix_findings");
     assert_eq!(
         rejected["code_review"]["findings"][0]["note"],
         "missing regression coverage"
@@ -779,6 +784,12 @@ async fn h1b_mock_coding_trajectory_uses_visible_gates_and_fresh_evidence() {
         },
     )
     .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { /* regression coverage added */ }\n",
+    )
     .unwrap();
     let ready_again = update_plan::execute(
         &rt,
@@ -816,7 +827,10 @@ async fn h1b_mock_coding_trajectory_uses_visible_gates_and_fresh_evidence() {
                 .find(|item| item["id"] == GATE_ACCEPTANCE_TODO_ID)
         })
         .expect("acceptance gate");
-    assert_eq!(acceptance_gate["status"], "in_progress");
+    assert_eq!(
+        acceptance_gate["status"], "pending",
+        "Acceptance start is process-local; a gate must never persist half-open"
+    );
     let done = update_plan::execute(
         &rt,
         update_plan::UpdatePlanArgs {
@@ -1113,7 +1127,16 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
     let home = setup_home();
     let (rt, _panel, _ckpt) = build_runtime_with_spies();
     rt.set_max_code_review_rounds(1);
-    rt.attach_workspace_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    std::fs::write(workspace.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(workspace.path())
+        .status()
+        .unwrap()
+        .success());
+    rt.attach_workspace_root(workspace.path().to_path_buf());
     let reviewer = Arc::new(QueueCodeReviewer::new(vec![CodeReviewSummary {
         verdict: Some("fail".into()),
         findings: vec![tomcat::core::plan_runtime::review::Finding::new(
@@ -1190,6 +1213,12 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
     .await
     .unwrap();
 
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    std::fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { /* regression coverage added */ }\n",
+    )
+    .unwrap();
     let second = update_plan::execute(
         &rt,
         update_plan::UpdatePlanArgs {
@@ -1212,8 +1241,8 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
     let second = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
     assert_eq!(second["code_review"], serde_json::Value::Null);
     assert!(second.get("verify").is_none());
-    // 复审说了 fail 却没列出 finding，轮次又用尽了：review 门无条件放行，
-    // 后续仍须由 acceptance 的真实 green-build 证据决定能否完成。
+    // 复审已有残余 P1、轮次又用尽了：review 门放行，但后续仍须由
+    // acceptance 的真实 green-build 证据决定能否完成。
     assert_eq!(second["plan_state_after"], "executing");
     assert_eq!(second["code_review_pass"], true);
     assert_eq!(second["next_step"]["phase"], "run_acceptance");
@@ -1222,7 +1251,7 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
         .unwrap()
         .iter()
         .filter_map(serde_json::Value::as_str)
-        .any(|w| w.contains("轮次预算已用尽") && w.contains("无条件通过 review gate")));
+        .any(|w| w.contains("轮次预算已用尽") && w.contains("仅剩 P1")));
     assert_eq!(
         reviewer
             .call_count
@@ -1347,7 +1376,7 @@ summary: verifier child completed
             agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
-            read_file_state: Arc::new(ReadFileState::default()),
+            refresh_mutation_stamp: true,
             web_fetch_runtime,
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
@@ -1528,7 +1557,7 @@ summary: verifier observed long fake cargo to completion
             agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
-            read_file_state: Arc::new(ReadFileState::default()),
+            refresh_mutation_stamp: true,
             web_fetch_runtime,
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
@@ -1634,7 +1663,7 @@ applied_changes: false
             agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
-            read_file_state: Arc::new(ReadFileState::default()),
+            refresh_mutation_stamp: true,
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
@@ -1664,7 +1693,7 @@ applied_changes: false
             agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
-            read_file_state: Arc::new(ReadFileState::default()),
+            refresh_mutation_stamp: true,
             agent_workspace_dir: workspace.path().to_path_buf(),
             skill_set: Arc::new(RwLock::new(SkillSet::default())),
             skills_config: AppConfig::default().skills,
@@ -1692,6 +1721,8 @@ applied_changes: false
                 round: 1,
                 review_attempt_id: "mock-review-attempt".into(),
                 tool_call_id: "mock-tool-call".into(),
+                is_incremental: false,
+                delta_file_count: 0,
             },
         )
         .await;
@@ -1772,7 +1803,7 @@ applied_changes: false
             agent_trail_dir: agent_trail_dir.to_string_lossy().to_string(),
             checkpoint_store: Arc::new(NoopStore),
             context_config: ContextConfig::default(),
-            read_file_state: Arc::new(ReadFileState::default()),
+            refresh_mutation_stamp: true,
             llm_files_config: AppConfig::default().llm.files,
             sessions_dir: agent_trail_dir.join("sessions"),
             agent_workspace_dir: workspace.path().to_path_buf(),

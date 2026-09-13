@@ -78,6 +78,10 @@ pub enum PlanError {
     #[error("plan 文件 todo id 重复: {id}")]
     DuplicateTodoId { id: String },
 
+    /// Runtime-managed gates never persist a half-open lifecycle state.
+    #[error("runtime-managed gate `{id}` may not be persisted as in_progress")]
+    RuntimeGateInProgress { id: String },
+
     /// 写盘 IO 错误（rename / open / write 等）。
     #[error("plan 文件 IO 错误: {0}")]
     Io(#[from] std::io::Error),
@@ -216,6 +220,30 @@ pub struct PlanFileFrontmatter {
     pub code_review_pass: bool,
     #[serde(default)]
     pub code_review_pass_at_ms: Option<u128>,
+    /// Completed code-review rounds for this plan. In-flight work is memory-only
+    /// and is intentionally never persisted.
+    #[serde(default)]
+    pub code_review_rounds: u32,
+    /// Dispatch timestamp of the latest completed review, used to select the
+    /// next incremental review's code delta.
+    #[serde(default)]
+    pub code_review_baseline_ms: Option<u128>,
+    /// Blocking findings carried to the next review or returned to the executor
+    /// when no code changed after the review.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub code_review_open_findings: Vec<crate::core::plan_runtime::review::Finding>,
+    /// P1 trade-offs explicitly accepted by the executor. Kept with the other
+    /// review state so a process restart preserves the reviewer brief.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub code_review_disputed_findings: Vec<crate::core::plan_runtime::DisputedFinding>,
+    /// Review budget ended with an unresolved P0. Unattended execution must
+    /// stop until a new user message explicitly starts a fresh review window.
+    #[serde(default)]
+    pub code_review_handoff: bool,
+    /// Set when a new root-user message acknowledges the handoff and refreshes
+    /// the review budget. This makes the P0 trade-off auditable.
+    #[serde(default)]
+    pub code_review_handoff_acknowledged: bool,
     /// 评审预算耗尽时带入 acceptance 的剩余 P0/P1 finding 摘要。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub code_review_residual_findings: Vec<String>,
@@ -287,6 +315,18 @@ pub fn serialize_plan_file(plan: &PlanFile) -> Result<String, PlanError> {
 
 /// 从磁盘文本反序列化 PlanFile（分离 frontmatter / body）。
 pub fn parse_plan_file(text: &str) -> Result<PlanFile, PlanError> {
+    parse_plan_file_with_gate_recovery(text, true)
+}
+
+/// Parse a plan with an explicit policy for legacy runtime-managed gate states.
+///
+/// Ordinary reads expose stranded legacy gates as retryable pending work. The
+/// restore path first parses without this recovery so it can atomically persist
+/// the reset and append one terminal aborted review event.
+fn parse_plan_file_with_gate_recovery(
+    text: &str,
+    normalize_runtime_gate_states: bool,
+) -> Result<PlanFile, PlanError> {
     let stripped = text
         .strip_prefix("---\n")
         .ok_or(PlanError::FrontmatterDelimMissing)?;
@@ -303,8 +343,22 @@ pub fn parse_plan_file(text: &str) -> Result<PlanFile, PlanError> {
         }
     }
     let body = stripped.get(body_start..).unwrap_or("").to_string();
-    let frontmatter: PlanFileFrontmatter =
+    let mut frontmatter: PlanFileFrontmatter =
         serde_yaml::from_str(yaml).map_err(|e| PlanError::YamlParse(e.to_string()))?;
+    if normalize_runtime_gate_states {
+        // Files written before the no-half-open-state invariant may contain a
+        // stranded gate after an interrupted review. Read them as retryable,
+        // durable pending state; all newly written files are validated below.
+        for todo in &mut frontmatter.todos {
+            if matches!(
+                todo.kind,
+                TodoKind::GateCodeReview | TodoKind::GateAcceptance
+            ) && todo.status == TodoStatus::InProgress
+            {
+                todo.status = TodoStatus::Pending;
+            }
+        }
+    }
     enforce_required_fields(&frontmatter)?;
     if frontmatter.schema_version != PLAN_FILE_SCHEMA_VERSION {
         return Err(PlanError::SchemaVersion {
@@ -350,6 +404,11 @@ pub fn validate_frontmatter_invariants(fm: &PlanFileFrontmatter) -> Result<(), P
     }
     let mut seen = std::collections::HashSet::with_capacity(fm.todos.len());
     for t in &fm.todos {
+        if matches!(t.kind, TodoKind::GateCodeReview | TodoKind::GateAcceptance)
+            && t.status == TodoStatus::InProgress
+        {
+            return Err(PlanError::RuntimeGateInProgress { id: t.id.clone() });
+        }
         if !seen.insert(&t.id) {
             return Err(PlanError::DuplicateTodoId { id: t.id.clone() });
         }
@@ -359,7 +418,7 @@ pub fn validate_frontmatter_invariants(fm: &PlanFileFrontmatter) -> Result<(), P
 
 // ─── 读 / 写 / lock（高层 API） ────────────────────────────────────────────
 
-fn read_plan_from_disk(path: &Path) -> Result<PlanFile, PlanError> {
+fn read_plan_text(path: &Path) -> Result<String, PlanError> {
     let bytes = std::fs::read(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             PlanError::NotFound {
@@ -369,8 +428,11 @@ fn read_plan_from_disk(path: &Path) -> Result<PlanFile, PlanError> {
             PlanError::Io(e)
         }
     })?;
-    let text = String::from_utf8_lossy(&bytes).to_string();
-    parse_plan_file(&text)
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn read_plan_from_disk(path: &Path) -> Result<PlanFile, PlanError> {
+    parse_plan_file(&read_plan_text(path)?)
 }
 
 fn write_serialized_plan_atomic(path: &Path, serialized: &str) -> Result<(), PlanError> {
@@ -406,6 +468,50 @@ fn write_serialized_plan_atomic(path: &Path, serialized: &str) -> Result<(), Pla
 /// 读取 plan 文件（不上锁，read-only path）。
 pub fn read_plan(path: &Path) -> Result<PlanFile, PlanError> {
     read_plan_from_disk(path)
+}
+
+/// Result of atomically restoring a plan that predates the no-half-open-gate
+/// invariant. `recovered_code_review` tells the caller whether it must emit the
+/// corresponding terminal `plan.code_review` aborted event.
+pub struct RuntimeGateRecovery {
+    pub plan: PlanFile,
+    pub recovered_code_review: bool,
+}
+
+/// Atomically recover legacy runtime-managed gates while loading a resumable
+/// plan. This is deliberately separate from [`read_plan`]: a plain read must
+/// stay side-effect free, whereas restore must make the retryable state durable
+/// before its caller resumes work.
+pub fn recover_runtime_gates_on_load(
+    path: &Path,
+    lock_timeout_ms: u64,
+) -> Result<RuntimeGateRecovery, PlanError> {
+    let lock_path = lock_path_for(path);
+    with_advisory_lock(&lock_path, lock_timeout_ms, || {
+        let raw = read_plan_text(path)?;
+        let mut plan = parse_plan_file_with_gate_recovery(&raw, false)?;
+        let recovered_code_review = plan.frontmatter.todos.iter().any(|todo| {
+            todo.kind == TodoKind::GateCodeReview && todo.status == TodoStatus::InProgress
+        });
+        let recovered_any_gate = plan
+            .frontmatter
+            .todos
+            .iter()
+            .any(|todo| todo.kind.is_gate() && todo.status == TodoStatus::InProgress);
+        if recovered_any_gate {
+            for todo in &mut plan.frontmatter.todos {
+                if todo.kind.is_gate() && todo.status == TodoStatus::InProgress {
+                    todo.status = TodoStatus::Pending;
+                }
+            }
+            let serialized = serialize_plan_file(&plan)?;
+            write_serialized_plan_atomic(path, &serialized)?;
+        }
+        Ok(RuntimeGateRecovery {
+            plan,
+            recovered_code_review,
+        })
+    })
 }
 
 /// `update_plan_locked` 的错误：底层 plan I/O / 解析错误与调用方业务错误分流。

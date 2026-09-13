@@ -24,6 +24,57 @@ fn cancel_token_demotes_executing_to_pending() {
 }
 
 #[test]
+fn restore_persists_legacy_in_progress_gates_and_emits_one_aborted_review() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let path = plan_path_for_id("legacy_review").unwrap();
+    std::fs::write(
+        &path,
+        "---\nplan_id: legacy_review\ngoal: g\nstate: executing\nsession_key: session-a\nsession_id: sid-session-a\ncreated_at: t\nschema_version: 1\ntodos:\n  - id: gate-review\n    content: \"[gate] review\"\n    status: in_progress\n    kind: gate_code_review\n  - id: gate-acceptance\n    content: \"[gate] Acceptance\"\n    status: in_progress\n    kind: gate_acceptance\n---\n",
+    )
+    .unwrap();
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let rt = PlanRuntime::new("session-a");
+    {
+        let events = std::sync::Arc::clone(&events);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |event| {
+            events.lock().push(event);
+            Ok(())
+        }));
+    }
+
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: Some(AgentMode::Chat),
+        plan_path: Some(path.clone()),
+        plan_id: Some("legacy_review".into()),
+    })
+    .unwrap();
+
+    let persisted = read_plan(&path).unwrap();
+    assert!(persisted
+        .frontmatter
+        .todos
+        .iter()
+        .all(|todo| !todo.kind.is_gate() || todo.status == TodoStatus::Pending));
+    assert_eq!(events.lock().len(), 1);
+    assert_eq!(events.lock()[0]["event"], "plan.code_review");
+    assert_eq!(events.lock()[0]["aborted"], true);
+
+    rt.attach_from_resume_state(ResumeControlState {
+        mode: Some(AgentMode::Chat),
+        plan_path: Some(path),
+        plan_id: Some("legacy_review".into()),
+    })
+    .unwrap();
+    assert_eq!(
+        events.lock().len(),
+        1,
+        "持久化恢复后再次加载不得重复写 aborted 终态"
+    );
+    cleanup_home(&home);
+}
+
+#[test]
 fn cancel_outside_exec_is_noop() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
@@ -76,6 +127,12 @@ fn concurrent_write_plan_serialized_by_lock() {
             green_build_evidence: Vec::new(),
             code_review_pass: false,
             code_review_pass_at_ms: None,
+            code_review_rounds: 0,
+            code_review_baseline_ms: None,
+            code_review_open_findings: Vec::new(),
+            code_review_disputed_findings: Vec::new(),
+            code_review_handoff: false,
+            code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
             completion_gate_cycles: 0,
             unknown: Default::default(),
