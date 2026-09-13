@@ -194,6 +194,28 @@ pub struct GreenBuildEvidence {
     pub exit_code: i32,
 }
 
+/// Canonical form used both when persisting `acceptance_commands` and when
+/// reconciling them against recorded bash tasks: surrounding whitespace is
+/// trimmed and internal whitespace runs collapse to one space. Nothing else is
+/// interpreted; a declared command is matched as one opaque string, so `a && b`
+/// never satisfies a declaration of `a` and `cargo test --lib foo` never
+/// satisfies `cargo test`.
+pub fn normalize_acceptance_command(command: &str) -> String {
+    command.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Normalizes a declared list: canonical form per entry, empty entries dropped,
+/// duplicates removed while preserving first-seen order.
+pub fn normalize_acceptance_commands<S: AsRef<str>>(commands: &[S]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    commands
+        .iter()
+        .map(|command| normalize_acceptance_command(command.as_ref()))
+        .filter(|command| !command.is_empty())
+        .filter(|command| seen.insert(command.clone()))
+        .collect()
+}
+
 /// PlanFile 顶部 YAML frontmatter；**v1 schema**。
 ///
 /// 未声明字段通过 `#[serde(flatten)]` 兜底到 `unknown`，写盘时保留，
@@ -250,6 +272,12 @@ pub struct PlanFileFrontmatter {
     /// 已实际运行的「review → green build」门禁周期数。
     #[serde(default)]
     pub completion_gate_cycles: u32,
+    /// Acceptance commands declared while planning. Each entry is one runnable
+    /// command, kept verbatim; `[gate] Acceptance` must present a finished,
+    /// fresh, exit-0 task for every entry. The list is the mandatory floor of the
+    /// acceptance scope: an executing plan may append to it but never remove from it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_commands: Vec<String>,
     /// 未来扩展字段；read 时收集，write 时原样写回（保前向兼容）。
     #[serde(flatten)]
     pub unknown: serde_yaml::Mapping,

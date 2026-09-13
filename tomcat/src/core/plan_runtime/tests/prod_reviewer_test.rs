@@ -138,6 +138,7 @@ fn review_prompt_uses_active_external_plan_path() {
                 code_review_handoff_acknowledged: false,
                 code_review_residual_findings: Vec::new(),
                 completion_gate_cycles: 0,
+                acceptance_commands: Vec::new(),
                 unknown: Default::default(),
             },
             body: "## Goal\nexternal\n".into(),

@@ -31,6 +31,7 @@ fn args(plan_id: &str, ops: Vec<update_plan::UpdateOp>) -> update_plan::UpdatePl
         dispute_findings: Vec::new(),
         green_build_pass: None,
         green_build_evidence: Vec::new(),
+        acceptance_commands: None,
         ops,
     }
 }
@@ -336,6 +337,7 @@ async fn replace_reinjects_runtime_owned_gates() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::Upsert {
                 id: "replacement".into(),
                 content: Some("new work".into()),
@@ -411,6 +413,7 @@ async fn green_build_without_acceptance_in_progress_is_rejected() {
             dispute_findings: Vec::new(),
             green_build_pass: Some(true),
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
         },
     )
     .await
@@ -466,6 +469,7 @@ async fn replace_rejects_runtime_gate_ids() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::Upsert {
                 id: GATE_CODE_REVIEW_TODO_ID.into(),
                 content: Some("attempt to replace runtime gate".into()),

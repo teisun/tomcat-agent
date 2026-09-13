@@ -168,6 +168,7 @@ async fn plan_build_accepts_explicit_path_and_followup_update_plan_uses_same_pat
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "step1".into(),
                 content: None,
@@ -344,6 +345,7 @@ fn default_build_target_prefers_planning_pending_then_path() {
         create_plan::CreatePlanArgs {
             goal: "first".into(),
             draft: "draft-1".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "step".into(),
@@ -357,6 +359,7 @@ fn default_build_target_prefers_planning_pending_then_path() {
         create_plan::CreatePlanArgs {
             goal: "second".into(),
             draft: "draft-2".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "step".into(),

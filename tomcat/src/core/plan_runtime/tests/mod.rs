@@ -51,6 +51,7 @@ pub(super) fn sample_frontmatter() -> super::file_store::PlanFileFrontmatter {
         code_review_handoff_acknowledged: false,
         code_review_residual_findings: Vec::new(),
         completion_gate_cycles: 0,
+        acceptance_commands: Vec::new(),
         unknown: serde_yaml::Mapping::new(),
     }
 }

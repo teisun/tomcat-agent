@@ -135,6 +135,7 @@ fn concurrent_write_plan_serialized_by_lock() {
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
             completion_gate_cycles: 0,
+            acceptance_commands: Vec::new(),
             unknown: Default::default(),
         },
         body: "## seed\n".into(),

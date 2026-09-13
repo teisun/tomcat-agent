@@ -104,6 +104,7 @@ fn write_external_plan(path: &std::path::Path, plan_id: &str) {
         code_review_handoff_acknowledged: false,
         code_review_residual_findings: vec![],
         completion_gate_cycles: 0,
+        acceptance_commands: Vec::new(),
         unknown: Default::default(),
     };
     let plan = PlanFile {
@@ -207,6 +208,7 @@ async fn full_plan_lifecycle_create_build_complete() {
             create_plan::CreatePlanArgs {
                 goal: "ship full path".into(),
                 draft: "## Goal\n收口".into(),
+                acceptance_commands: Vec::new(),
                 todos: vec![
                     create_plan::TodoArg {
                         id: "a".into(),
@@ -257,6 +259,7 @@ async fn full_plan_lifecycle_create_build_complete() {
                 dispute_findings: vec![],
                 green_build_pass: None,
                 green_build_evidence: vec![],
+                acceptance_commands: None,
             },
         )
         .await
@@ -276,6 +279,7 @@ async fn full_plan_lifecycle_create_build_complete() {
                 dispute_findings: vec![],
                 green_build_pass: None,
                 green_build_evidence: vec![],
+                acceptance_commands: None,
             },
         )
         .await
@@ -295,6 +299,7 @@ async fn full_plan_lifecycle_create_build_complete() {
                 dispute_findings: vec![],
                 green_build_pass: None,
                 green_build_evidence: vec![],
+                acceptance_commands: None,
             },
         )
         .await
@@ -318,6 +323,7 @@ async fn full_plan_lifecycle_create_build_complete() {
                 dispute_findings: vec![],
                 green_build_pass: None,
                 green_build_evidence: vec![],
+                acceptance_commands: None,
             },
         )
         .await
@@ -351,6 +357,7 @@ async fn build_then_cancel_demotes_pending_and_resume_works() {
             create_plan::CreatePlanArgs {
                 goal: "long task".into(),
                 draft: "long bullets".into(),
+                acceptance_commands: Vec::new(),
                 todos: vec![create_plan::TodoArg {
                     id: "t1".into(),
                     content: "long".into(),
@@ -416,6 +423,7 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
                 dispute_findings: vec![],
                 green_build_pass: None,
                 green_build_evidence: vec![],
+                acceptance_commands: None,
             },
         )
         .await
@@ -442,6 +450,7 @@ async fn build_by_explicit_path_keeps_followup_updates_on_same_file() {
                 dispute_findings: vec![],
                 green_build_pass: None,
                 green_build_evidence: vec![],
+                acceptance_commands: None,
             },
         )
         .await
@@ -580,6 +589,7 @@ async fn create_plan_dispatches_reviewer_summary_into_tool_result() {
             create_plan::CreatePlanArgs {
                 goal: "integ".into(),
                 draft: "outline".into(),
+                acceptance_commands: Vec::new(),
                 todos: vec![create_plan::TodoArg {
                     id: "t1".into(),
                     content: "step".into(),
@@ -616,6 +626,7 @@ async fn raw_edit_to_plan_file_blocked_in_planning_and_executing() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "d".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "x".into(),
@@ -692,6 +703,7 @@ async fn todos_always_writes_session_never_plan_file() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "d".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![create_plan::TodoArg {
                 id: "plan_t1".into(),
                 content: "plan task".into(),

@@ -69,6 +69,7 @@ fn write_plan_file(plan_id: &str, state: PlanFileState, todos: Vec<TodoItem>) ->
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
             completion_gate_cycles: 0,
+            acceptance_commands: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },
         body: "## body\n".to_string(),

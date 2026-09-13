@@ -1296,6 +1296,11 @@ fn create_plan_parameters() -> Value {
                     },
                     "required": ["id", "content"]
                 }
+            },
+            "acceptance_commands": {
+                "type": "array",
+                "description": "Declared acceptance commands: the mandatory floor that `[gate] Acceptance` must run. One complete, runnable shell command per entry, exactly as it will be launched (put any `cd` inside the command). Size it to the change's impact radius; the verify skill decides how far beyond this floor to widen. Blank entries are dropped and duplicates removed.",
+                "items": { "type": "string" }
             }
         },
         "required": ["goal", "draft", "todos"]
@@ -1348,7 +1353,7 @@ fn update_plan_parameters() -> Value {
             },
             "green_build_evidence": {
                 "type": "array",
-                "description": "Finished background bash commands used as green-build evidence. Required with green_build_pass=true; command must exactly match the recorded task.",
+                "description": "Finished background bash commands used as green-build evidence. Required with green_build_pass=true; command must exactly match the recorded task, and every declared `acceptance_commands` entry must appear here with its own task_id (extra commands are fine, narrower substitutes are not).",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -1358,6 +1363,11 @@ fn update_plan_parameters() -> Value {
                     "required": ["command", "task_id"],
                     "additionalProperties": false
                 }
+            },
+            "acceptance_commands": {
+                "type": "array",
+                "description": "Complete replacement for the plan's declared acceptance command list (one runnable command per entry). Omit to leave it unchanged. While planning/pending the list is replaced as given; once executing it is a ratchet: the new list must still contain every previously declared command, so it can only grow.",
+                "items": { "type": "string" }
             }
         }
     })

@@ -61,6 +61,7 @@ pub fn fresh_planning_plan(rt: &PlanRuntime) -> String {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "fresh draft body".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![
                 create_plan::TodoArg {
                     id: "t1".into(),
@@ -258,6 +259,7 @@ pub fn good_args_with_todo() -> create_plan::CreatePlanArgs {
     create_plan::CreatePlanArgs {
         goal: "g".into(),
         draft: "draft body content".into(),
+        acceptance_commands: Vec::new(),
         todos: vec![create_plan::TodoArg {
             id: "t1".into(),
             content: "step".into(),
@@ -314,6 +316,7 @@ pub fn write_plan_file_at(
         code_review_handoff_acknowledged: false,
         code_review_residual_findings: Vec::new(),
         completion_gate_cycles: 0,
+        acceptance_commands: Vec::new(),
         unknown: Default::default(),
     };
     let plan = PlanFile {

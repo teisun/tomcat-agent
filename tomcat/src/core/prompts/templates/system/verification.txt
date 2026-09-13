@@ -22,6 +22,9 @@ as visual acceptance.
   (one test / one package / one target) proportional to the edit.
 - Final acceptance: broader project checks once, when finishing the change
   or delivery — not once per todo and not as a pre-review dress rehearsal.
+  Its scope is defined in one place, the verify skill: the plan's declared
+  `acceptance_commands` are the mandatory floor, and the change's impact radius
+  decides how far beyond that floor to widen.
 
 If a foreground timeout or wait expires while a task is still running, do not rerun the same command unchanged. Inspect it with `task_output`, continue independent work, or use `task_stop` when stopping it is appropriate.
 

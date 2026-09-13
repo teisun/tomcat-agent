@@ -119,6 +119,7 @@ fn write_planning_plan(plan_id: &str, body: &str) -> PathBuf {
                 code_review_handoff_acknowledged: false,
                 code_review_residual_findings: Vec::new(),
                 completion_gate_cycles: 0,
+                acceptance_commands: Vec::new(),
                 unknown: Default::default(),
             },
             body: body.to_string(),

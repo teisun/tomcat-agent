@@ -1,7 +1,64 @@
 use super::super::file_store::{
-    parse_plan_file, serialize_plan_file, PlanError, PlanFile, PlanFileState, TodoItem, TodoStatus,
+    normalize_acceptance_command, normalize_acceptance_commands, parse_plan_file,
+    serialize_plan_file, PlanError, PlanFile, PlanFileState, TodoItem, TodoStatus,
 };
 use super::sample_frontmatter;
+
+#[test]
+fn acceptance_commands_round_trip_and_default_to_empty_for_legacy_files() {
+    let mut frontmatter = sample_frontmatter();
+    frontmatter.acceptance_commands = vec![
+        "cd tomcat && cargo test --lib plan_tool".into(),
+        "cd tomcat-vscode-ext && npm test".into(),
+    ];
+    let plan = PlanFile {
+        frontmatter,
+        body: String::new(),
+    };
+    let text = serialize_plan_file(&plan).expect("serialize");
+    assert!(
+        text.contains("acceptance_commands:\n- cd tomcat && cargo test --lib plan_tool\n- cd tomcat-vscode-ext && npm test\n"),
+        "declared commands must be persisted verbatim as a YAML list:\n{text}"
+    );
+    let parsed = parse_plan_file(&text).expect("parse");
+    assert_eq!(
+        parsed.frontmatter.acceptance_commands,
+        plan.frontmatter.acceptance_commands
+    );
+
+    let legacy_text = serialize_plan_file(&PlanFile {
+        frontmatter: sample_frontmatter(),
+        body: String::new(),
+    })
+    .expect("serialize legacy shape");
+    assert!(
+        !legacy_text.contains("acceptance_commands"),
+        "an undeclared list must not be written as an empty key:\n{legacy_text}"
+    );
+    let legacy = parse_plan_file(&legacy_text).expect("legacy plan remains readable");
+    assert!(legacy.frontmatter.acceptance_commands.is_empty());
+}
+
+#[test]
+fn acceptance_command_normalization_collapses_whitespace_and_dedupes_only() {
+    assert_eq!(
+        normalize_acceptance_command("  cd tomcat  &&\tcargo   test  "),
+        "cd tomcat && cargo test"
+    );
+    // Whitespace-only differences collapse; anything else is a different command. A narrower
+    // filter never matches the declared broad command it was carved out of.
+    assert_eq!(
+        normalize_acceptance_commands(&[
+            "cargo test",
+            "  cargo   test ",
+            "",
+            "   ",
+            "cargo test --lib foo",
+            "cargo test",
+        ]),
+        vec!["cargo test".to_string(), "cargo test --lib foo".to_string()]
+    );
+}
 
 #[test]
 fn plan_file_round_trip_frontmatter() {

@@ -52,6 +52,7 @@ async fn update_plan_set_status_returns_full_items_snapshot() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: None,
@@ -89,6 +90,7 @@ async fn work_todo_content_is_frozen_while_executing() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::Upsert {
                 id: "t1".into(),
                 content: Some("silently broaden the approved task".into()),
@@ -124,6 +126,7 @@ async fn set_status_completed_accepts_evidence_and_persists_to_frontmatter() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: Some(evidence.clone().into()),
@@ -157,6 +160,7 @@ async fn planning_state_still_allows_content_rewrite() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::Upsert {
                 id: "t1".into(),
                 content: Some("refined planning description".into()),
@@ -188,6 +192,7 @@ async fn completed_work_todo_without_evidence_produces_warning() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: None,
@@ -230,6 +235,7 @@ async fn update_plan_allows_two_independent_in_progress_todos() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -268,6 +274,7 @@ async fn update_plan_cross_session_allowed_for_planning_pending() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::Upsert {
                 id: "t1".into(),
                 content: Some("edited by b".into()),
@@ -305,6 +312,7 @@ async fn update_plan_cross_session_rejected_for_executing() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::Upsert {
                 id: "t1".into(),
                 content: Some("intruder".into()),
@@ -368,6 +376,7 @@ async fn update_plan_plan_id_prefers_active_external_path() {
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
             completion_gate_cycles: 0,
+            acceptance_commands: Vec::new(),
             unknown: Default::default(),
         },
         body: "## Goal\nexternal\n".into(),
@@ -387,6 +396,7 @@ async fn update_plan_plan_id_prefers_active_external_path() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: None,
@@ -431,6 +441,7 @@ async fn update_plan_in_exec_promotes_completed() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -489,6 +500,7 @@ async fn update_plan_reopen_completed_to_pending_and_emits_plan_pending() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: None,
@@ -514,5 +526,136 @@ async fn update_plan_reopen_completed_to_pending_and_emits_plan_pending() {
         .expect("缺少 plan.pending 事件");
     assert_eq!(event["plan_id"], plan_id);
     assert_eq!(event["state"], "pending");
+    cleanup_home(&home);
+}
+
+fn acceptance_commands_args(
+    plan_id: &str,
+    acceptance_commands: Option<Vec<&str>>,
+) -> update_plan::UpdatePlanArgs {
+    update_plan::UpdatePlanArgs {
+        plan_id: Some(plan_id.into()),
+        path: None,
+        replace: false,
+        dispute_findings: Vec::new(),
+        green_build_pass: None,
+        green_build_evidence: Vec::new(),
+        acceptance_commands: acceptance_commands
+            .map(|list| list.into_iter().map(str::to_string).collect()),
+        ops: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn acceptance_commands_are_replaced_while_planning_and_untouched_when_omitted() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+    let path = plan_path_for_id(&plan_id).unwrap();
+
+    update_plan::execute(
+        &rt,
+        acceptance_commands_args(
+            &plan_id,
+            Some(vec!["cargo test --lib a", "cargo test --lib b"]),
+        ),
+    )
+    .await
+    .expect("declare while planning");
+    assert_eq!(
+        read_plan(&path).unwrap().frontmatter.acceptance_commands,
+        vec![
+            "cargo test --lib a".to_string(),
+            "cargo test --lib b".to_string()
+        ]
+    );
+
+    // Still planning: the whole list may be rewritten, including dropping entries.
+    update_plan::execute(
+        &rt,
+        acceptance_commands_args(&plan_id, Some(vec!["  cargo   test --lib b "])),
+    )
+    .await
+    .expect("shrink while planning");
+    assert_eq!(
+        read_plan(&path).unwrap().frontmatter.acceptance_commands,
+        vec!["cargo test --lib b".to_string()]
+    );
+
+    // `None` leaves the declaration alone.
+    update_plan::execute(&rt, acceptance_commands_args(&plan_id, None))
+        .await
+        .expect("omit");
+    assert_eq!(
+        read_plan(&path).unwrap().frontmatter.acceptance_commands,
+        vec!["cargo test --lib b".to_string()]
+    );
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn executing_acceptance_commands_only_ratchet_wider() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let rt = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&rt);
+    let path = plan_path_for_id(&plan_id).unwrap();
+    update_plan::execute(
+        &rt,
+        acceptance_commands_args(&plan_id, Some(vec!["cargo test", "npm test"])),
+    )
+    .await
+    .unwrap();
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    // Widening is allowed: every previously declared command is still present.
+    update_plan::execute(
+        &rt,
+        acceptance_commands_args(
+            &plan_id,
+            Some(vec!["npm test", "cargo test", "cargo clippy --all-targets"]),
+        ),
+    )
+    .await
+    .expect("append while executing");
+    assert_eq!(
+        read_plan(&path).unwrap().frontmatter.acceptance_commands,
+        vec![
+            "npm test".to_string(),
+            "cargo test".to_string(),
+            "cargo clippy --all-targets".to_string(),
+        ]
+    );
+
+    // Narrowing is rejected, including the "replace with a narrower filter" variant, and the
+    // persisted list is left untouched.
+    let error = update_plan::execute(
+        &rt,
+        acceptance_commands_args(
+            &plan_id,
+            Some(vec!["cargo test --lib foo", "cargo clippy --all-targets"]),
+        ),
+    )
+    .await
+    .expect_err("dropping declared commands while executing must fail");
+    let message = error.to_string();
+    assert!(
+        message.contains("只能追加、不能删除"),
+        "unexpected error: {message}"
+    );
+    assert!(message.contains("`npm test`") && message.contains("`cargo test`"));
+    assert!(
+        !message.contains("`cargo clippy --all-targets`"),
+        "commands that are still present must not be reported as missing: {message}"
+    );
+    assert_eq!(
+        read_plan(&path).unwrap().frontmatter.acceptance_commands,
+        vec![
+            "npm test".to_string(),
+            "cargo test".to_string(),
+            "cargo clippy --all-targets".to_string(),
+        ]
+    );
     cleanup_home(&home);
 }

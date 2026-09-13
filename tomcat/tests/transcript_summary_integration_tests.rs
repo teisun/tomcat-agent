@@ -834,6 +834,7 @@ async fn update_plan_emits_plan_todos_event() {
         create_plan::CreatePlanArgs {
             goal: "ship feature X".into(),
             draft: "## Goal\nship X".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "step 1".into(),
@@ -862,6 +863,7 @@ async fn update_plan_emits_plan_todos_event() {
             dispute_findings: vec![],
             green_build_pass: None,
             green_build_evidence: vec![],
+            acceptance_commands: None,
         },
     )
     .await

@@ -18,6 +18,27 @@ residual findings 继续可见。若 review 预算与 completion-cycle 预算都
 派发下一轮 review。该策略的推翻条件是数据表明预算耗尽分支的严重缺陷率不可接受，届时调整预算
 或恢复 review，而不是悄悄把 review 状态改成已覆盖。
 
+## 2026-09-13 两个 reviewer 对验收清单的分工
+
+计划 frontmatter 新增 `acceptance_commands`（验收命令清单，`[gate] Acceptance` 的地板，运行时逐条
+对账）。两个 reviewer 对它的职责刻意不对称：
+
+```text
+PlanReviewer（review_brief.txt Scope）          CodeReviewer（code_review_brief.txt）
+  核对 acceptance_commands：                        不核对清单、不评判验收范围
+    · 改代码的计划必须声明                             （用户决定：专注代码质量，
+    · 每条是完整可运行命令                              不因测试事务产出无关 P1）
+    · 覆盖 todos 触及的包 / 项目级检查触发条件
+    · 覆盖 todo 承诺新建的测试 / 脚本
+  偏窄 → concern 并列应补命令，
+  或直接 update_plan acceptance_commands 修正
+  （计划仍在 planning，整体替换）
+```
+
+这不是给 plan reviewer 加新职责，而是 `plan_review.txt` 已有的「所述验证是否真能证明结论」的具体化。
+`prompts/tests/load_test.rs::acceptance_scope_policy_lives_only_in_the_verify_skill` 同时守卫两边：
+plan brief 必须提到 `acceptance_commands` 且不复述梯子细节，code brief 不得出现 `acceptance_commands`。
+
 > 当前权威口径（2026-09-03）
 > 本文档旧版曾把 reviewer 描述成一个靠 `ReviewKind::{Plan, Code}` 区分形态的统一子 Agent，并且把 code review 写成 verifier 前置环节。该描述已经过时。现在请以本页顶部的“当前架构”小节和仓库代码为准；若下文旧段落与这里冲突，以这里为准。
 

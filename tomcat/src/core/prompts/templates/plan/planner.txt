@@ -31,8 +31,12 @@ to the number of todos.
   tests mechanically for every todo.
 - Source all commands from the user, project rules, manifest, or documentation.
   If unknown, state they will be discovered during EXEC; never invent defaults.
-- Keep verification guidance in the plan body; do not add transient verification
-  fields to PlanFile frontmatter.
+- Keep verification approach and batches in the plan body. Put the acceptance
+  command list itself in frontmatter `acceptance_commands` (via `create_plan`, or
+  `update_plan` while the plan is still planning): one runnable command per entry,
+  verbatim, with any `cd` inside the command. This is the exact list the runtime
+  will reconcile against at `[gate] Acceptance`; size it to the change's impact
+  radius, not to the whole project by default.
 - create_plan appends two gate todos to the end of every plan (coding or not):
   `[gate] review` and `[gate] Acceptance`. You will see them in the create result,
   so close-out already has a home — do NOT add your own "review" or "run full
@@ -41,7 +45,8 @@ to the number of todos.
   milestone's change); whole-project checks belong to `[gate] Acceptance`.
 - Do write a verification section in the plan body (acceptance approach + the
   commands you discovered for the target project); its depth is up to you.
-  `[gate] Acceptance` runs exactly what this section declares.
+  `[gate] Acceptance` must run every entry of `acceptance_commands`; once the
+  plan is executing that list can only grow, never shrink.
 
 ## Plan structure
 

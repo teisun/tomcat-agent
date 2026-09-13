@@ -70,6 +70,76 @@ fn verification_and_planner_prompts_keep_focused_and_acceptance_roles_separate()
     assert!(planner.contains("verification section in the plan body"));
 }
 
+/// Acceptance scope policy is written exactly once, in the verify skill. Every
+/// other surface only navigates to it. This guard stops the four surfaces from
+/// drifting into contradictory scope rules again (full-suite-by-default versus
+/// proportional-to-change), which is what allowed a narrow run to pass a plan
+/// that had declared a full check set.
+#[test]
+fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
+    const VERIFY_SKILL: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/skills/verify/SKILL.md"
+    ));
+    let verification = load(PromptKey::SystemVerification);
+    let planner = load(PromptKey::PlannerReminder);
+    let executor = load(PromptKey::ExecutorReminderFmt);
+    let plan_review_brief = load(PromptKey::ReviewerPlanBrief);
+    let code_review_brief = load(PromptKey::ReviewerCodeBrief);
+
+    let forbidden = [
+        "complete check set",
+        "scope proportional",
+        "Scale the checks",
+    ];
+    let navigating_surfaces = [
+        ("verification", verification),
+        ("planner", planner),
+        ("executor", executor),
+        ("plan review brief", plan_review_brief),
+    ];
+    for (name, text) in navigating_surfaces.iter().copied().chain([
+        ("verify skill", VERIFY_SKILL),
+        ("code review brief", code_review_brief),
+    ]) {
+        for phrase in forbidden {
+            assert!(
+                !text.contains(phrase),
+                "{name} must not restate a superseded acceptance scope rule: {phrase:?}"
+            );
+        }
+    }
+    for (name, text) in navigating_surfaces {
+        assert!(
+            text.contains("acceptance_commands"),
+            "{name} must point at the declared acceptance command list"
+        );
+    }
+    // The code reviewer stays focused on code quality: it neither checks the declared list nor
+    // reasons about acceptance scope (user decision, 2026-09-13).
+    assert!(
+        !code_review_brief.contains("acceptance_commands"),
+        "code review brief must not take on acceptance-list duties"
+    );
+
+    let ladder_markers = ["Floor:", "Ladder:", "Ratchet:", "L0 ", "L3 "];
+    for marker in ladder_markers {
+        assert!(
+            VERIFY_SKILL.contains(marker),
+            "verify skill must define {marker:?}"
+        );
+        for (name, text) in navigating_surfaces {
+            assert!(
+                !text.contains(marker),
+                "{name} must navigate to the verify skill instead of restating {marker:?}"
+            );
+        }
+    }
+    assert!(verification.contains(
+        "verify skill: the plan's declared\n  `acceptance_commands` are the mandatory floor"
+    ));
+}
+
 #[test]
 fn planner_prompt_carries_a_generic_plan_structure_section() {
     let s = load(PromptKey::PlannerReminder);
@@ -198,9 +268,11 @@ fn every_tool_named_in_a_template_exists_in_the_catalog() {
     /// 反引号里的非工具标识符：字段名、枚举值、外部命令。
     const NON_TOOL_IDENTIFIERS: &[&str] = &[
         "aborted",
+        "acceptance_commands",
         "applied_changes",
         "block",
         "cancelled",
+        "cd",
         "changes_summary",
         "code_review",
         "code_review_pass",

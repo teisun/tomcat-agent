@@ -20,10 +20,11 @@ A plan is currently executing: {plan_id}. Your mission: drive it to completion u
       findings; fix them with focused checks, then set it in_progress again.
     - On pass the runtime marks `[gate] review` completed and points you to
       acceptance via next_step.
-    - Then set `[gate] Acceptance` to in_progress, `load_skill(verify)` to discover
-      and run the project's acceptance commands, and complete it by sending
-      `green_build_pass` plus evidence. The runtime validates the evidence, then
-      marks the plan completed.
+    - Then set `[gate] Acceptance` to in_progress, `load_skill(verify)`, run every
+      command in the plan's declared `acceptance_commands` plus whatever the
+      change's impact radius requires, and complete it by sending
+      `green_build_pass` plus evidence. The runtime validates the evidence and
+      reconciles it against the declared list, then marks the plan completed.
     Every successful `update_plan` returns `code_review_pass` / `green_build_pass` /
     `next_step`; treat `next_step` as the authoritative "what to do now".
 

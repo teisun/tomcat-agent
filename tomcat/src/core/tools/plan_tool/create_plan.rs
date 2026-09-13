@@ -14,9 +14,10 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::{
-        plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem,
-        TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_CONTENT, GATE_ACCEPTANCE_TODO_ID,
-        GATE_CODE_REVIEW_TODO_CONTENT, GATE_CODE_REVIEW_TODO_ID, PLAN_FILE_SCHEMA_VERSION,
+        normalize_acceptance_commands, plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter,
+        PlanFileState, TodoItem, TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_CONTENT,
+        GATE_ACCEPTANCE_TODO_ID, GATE_CODE_REVIEW_TODO_CONTENT, GATE_CODE_REVIEW_TODO_ID,
+        PLAN_FILE_SCHEMA_VERSION,
     },
     ops,
     safety::assert_plan_id_safe,
@@ -42,6 +43,10 @@ pub struct CreatePlanArgs {
     pub draft: String,
     /// 任务列表（必填，至少 1 项）。
     pub todos: Vec<TodoArg>,
+    /// 验收命令清单（可选）。每项一条可运行命令，原样保存；`[gate] Acceptance`
+    /// 必须为每一条提供对应的绿构建任务。空白项会被丢弃、重复项去重。
+    #[serde(default)]
+    pub acceptance_commands: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,6 +223,7 @@ pub fn execute(
         code_review_handoff_acknowledged: false,
         code_review_residual_findings: Vec::new(),
         completion_gate_cycles: 0,
+        acceptance_commands: normalize_acceptance_commands(&args.acceptance_commands),
         unknown: serde_yaml::Mapping::new(),
     };
     let body = default_body(&args.goal, &args.draft);

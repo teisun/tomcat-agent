@@ -22,8 +22,9 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::{
-        read_plan, update_plan_locked, write_plan, GreenBuildEvidence, PlanFileState, TodoItem,
-        TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_ID, GATE_CODE_REVIEW_TODO_ID,
+        normalize_acceptance_command, normalize_acceptance_commands, read_plan, update_plan_locked,
+        write_plan, GreenBuildEvidence, PlanFileState, TodoItem, TodoKind, TodoStatus,
+        GATE_ACCEPTANCE_TODO_ID, GATE_CODE_REVIEW_TODO_ID,
     },
     review::{Finding, SeverityTier},
     NextAction, PlanRuntime,
@@ -54,6 +55,10 @@ pub struct UpdatePlanArgs {
     pub green_build_pass: Option<bool>,
     #[serde(default)]
     pub green_build_evidence: Vec<GreenBuildEvidenceArg>,
+    /// 声明的验收命令清单（完整期望列表）。`None` 表示不改动。planning / pending
+    /// 下整体替换；executing 下只许追加——新列表必须包含旧列表的每一条（棘轮）。
+    #[serde(default)]
+    pub acceptance_commands: Option<Vec<String>>,
 }
 
 pub use super::shared_todo_ops::SharedTodoOpArg as UpdateOp;
@@ -69,7 +74,7 @@ pub struct DisputeFindingArg {
     pub reason: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GreenBuildEvidenceArg {
     /// 人类可读的验收命令；必须与后台任务实际启动的命令一致，防止伪造证据描述。
     pub command: String,
@@ -146,6 +151,11 @@ pub async fn execute_for_tool(
             plan_state_before,
             &plan.frontmatter.todos,
             &args.ops,
+        )?;
+        apply_acceptance_commands(
+            plan_state_before,
+            &mut plan.frontmatter.acceptance_commands,
+            args.acceptance_commands.as_deref(),
         )?;
         let completion_evidence_warnings =
             completion_evidence_warnings(&plan.frontmatter.todos, &args.ops);
@@ -873,7 +883,7 @@ fn run_acceptance_hint(residual_findings: &[String]) -> String {
         )
     };
     format!(
-        "{review_context}\nVerify ALL changes with the project's acceptance commands: set the `[gate] Acceptance` todo to in_progress, then load_skill(verify) to discover and run the project's full documented check set, and submit green_build_pass with evidence. {}",
+        "{review_context}\nSet the `[gate] Acceptance` todo to in_progress, load_skill(verify), run every declared `acceptance_commands` entry plus what the change's impact radius requires, then submit green_build_pass with evidence. {}",
         acceptance_evidence_requirements()
     )
 }
@@ -1082,6 +1092,35 @@ fn require_green_build_pass(
         });
     }
 
+    // Floor check: every command the plan declared must have its own verified task. Extra
+    // commands are welcome (the impact radius may demand more), but a narrower substitute such as
+    // a single-test filter never satisfies a declared package- or project-wide command.
+    let declared = &plan.frontmatter.acceptance_commands;
+    if declared.is_empty() {
+        runtime.write_transcript_custom(serde_json::json!({
+            "event": "plan.acceptance.commands_undeclared",
+            "plan_id": &plan.frontmatter.plan_id,
+            "evidence_count": verified.len(),
+        }));
+    } else {
+        let ran: std::collections::BTreeSet<String> = verified
+            .iter()
+            .map(|evidence| normalize_acceptance_command(&evidence.command))
+            .collect();
+        let missing: Vec<String> = declared
+            .iter()
+            .filter(|command| !ran.contains(&normalize_acceptance_command(command)))
+            .map(|command| format!("`{command}`"))
+            .collect();
+        if !missing.is_empty() {
+            return Err(ToolError::BadArgs(format!(
+                "计划声明的 acceptance_commands 尚有 {} 条没有对应的绿构建证据：{}。请原样运行每一条声明命令（可以额外运行更多，但不能用更窄的命令替代），再连同全部 task_id 一并提交",
+                missing.len(),
+                missing.join("、")
+            )));
+        }
+    }
+
     plan.frontmatter.green_build_pass = true;
     plan.frontmatter.green_build_evidence = verified;
     write_plan(path, plan, runtime.lock_timeout_ms())?;
@@ -1090,6 +1129,7 @@ fn require_green_build_pass(
         "event": "plan.green_build",
         "plan_id": &plan.frontmatter.plan_id,
         "pass": true,
+        "declared_acceptance_commands": &plan.frontmatter.acceptance_commands,
         "evidence": &plan.frontmatter.green_build_evidence,
     }));
     Ok(())
@@ -1242,6 +1282,45 @@ fn enforce_cross_session_policy(
             runtime.session_key()
         )));
     }
+    Ok(())
+}
+
+/// The declared acceptance command list is the mandatory floor of `[gate] Acceptance`.
+///
+/// While the plan is still being written (planning / pending) the list is simply replaced.
+/// Once execution has started it becomes a ratchet: the new list must still contain every
+/// previously declared command, so the executor can widen acceptance when it discovers a
+/// larger impact radius but can never quietly drop a check the approved plan promised.
+fn apply_acceptance_commands(
+    plan_state: PlanFileState,
+    declared: &mut Vec<String>,
+    requested: Option<&[String]>,
+) -> Result<(), ToolError> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    let next = normalize_acceptance_commands(requested);
+    if matches!(
+        plan_state,
+        PlanFileState::Executing | PlanFileState::Completed
+    ) {
+        let removed: Vec<&str> = declared
+            .iter()
+            .filter(|command| !next.contains(&normalize_acceptance_command(command)))
+            .map(String::as_str)
+            .collect();
+        if !removed.is_empty() {
+            return Err(ToolError::BadArgs(format!(
+                "执行中的 acceptance_commands 只能追加、不能删除；以下已声明命令缺失：{}。如需扩大验收范围，请提交包含旧命令的完整列表",
+                removed
+                    .iter()
+                    .map(|command| format!("`{command}`"))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )));
+        }
+    }
+    *declared = next;
     Ok(())
 }
 

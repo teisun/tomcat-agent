@@ -170,6 +170,7 @@ async fn real_terra_completion_evidence_persists_without_board_rendering() {
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
             completion_gate_cycles: 0,
+            acceptance_commands: Vec::new(),
             unknown: Default::default(),
         },
         body: "\

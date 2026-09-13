@@ -237,8 +237,14 @@ mod tests {
             .expect("load materialized verify skill through the normal loader");
         assert!(payload.contains("<skill name=\"verify\" location=\"SKILL.md\">"));
         assert!(payload.contains("## Green-build verification"));
-        assert!(payload.contains("Run the project's complete check set"));
-        assert!(payload.contains("never omit or replace a named command"));
+        assert!(
+            payload.contains("Decide the acceptance scope with a floor, a ladder, and a ratchet")
+        );
+        assert!(payload.contains("every declared acceptance command in the plan"));
+        assert!(payload.contains("you may only widen, never narrow"));
+        assert!(payload.contains("a full project run is not the default"));
+        assert!(!payload.contains("complete check set"));
+        assert!(!payload.contains("Scale the checks"));
         assert!(payload.contains("## UI acceptance"));
         assert!(!payload.contains("name: verify"));
 

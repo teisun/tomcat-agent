@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Discover and run this project's full build/test/lint verification commands (P0–P5 discovery), then report real green-build evidence.
+description: Run the plan's declared acceptance commands plus the checks the change's impact radius requires (P0–P5 discovery), then report real green-build evidence.
 allowed-tools:
   - read
   - search_files
@@ -28,11 +28,30 @@ describe what would be tested.
    - P4: a narrowly scoped smoke command inferred from the changed code;
    - P5: if no runnable command can be found, explain that fact with the files inspected and run the smallest safe parse/type/build check available.
 
-2. Run the project's complete check set: format, lint, full tests, build, and
-   project-specific UI checks where they exist. Every acceptance command explicitly
-   named in the approved plan is mandatory; you may run additional relevant checks,
-   but never omit or replace a named command with a narrower one. Do not invent
-   project tests or claim visual checks that do not exist.
+2. Decide the acceptance scope with a floor, a ladder, and a ratchet:
+   - Floor: every declared acceptance command in the plan (`acceptance_commands`
+     in the plan frontmatter, plus any command the user or the plan body names) is
+     mandatory. Run each one verbatim as its own background task; never merge two
+     declared commands into one, and never substitute a narrower command such as a
+     single-test filter for a declared package- or project-wide one. The runtime
+     rejects acceptance when a declared command has no matching finished task.
+   - Ladder: for what the diff actually touched, widen from the change outward
+     until every affected boundary is covered:
+       L0 the tests owning the changed files;
+       L1 the whole package / crate / module that owns them, plus that package's
+          lint or typecheck;
+       L2 every package that depends on it, when the change touches a public API,
+          an exported symbol, a shared type, or a wire/protocol contract;
+       L3 the project's full documented check set, when the change touches
+          core/shared/infra code, configuration, build files, dependency
+          manifests or lockfiles, spans several packages, or the plan names it.
+     Compute dependents from the project's own graph (for example
+     `cargo tree -i <crate>`, workspace manifests, or package imports) instead of
+     guessing.
+   - Ratchet: you may only widen, never narrow. If you cannot state which
+     boundary the change stops at, move up one level. A small, isolated change
+     legitimately stops at L0 or L1; a full project run is not the default.
+   Do not invent project tests or claim visual checks that do not exist.
 
 Before choosing an output directory, read `workspace.project_resource_dir` from the active Tomcat configuration. It defaults to `.agents`. Pass the resolved project directory explicitly to `--out` so a custom setting such as `.workspace-data` stores screenshots under `.workspace-data/shots`; never rely on the script default for a custom configuration.
 

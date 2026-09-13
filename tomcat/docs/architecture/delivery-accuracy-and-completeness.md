@@ -31,8 +31,22 @@ Acceptance。用户发新消息是重新开始无人值守 review 预算的明�
 
 跨轮 reviewer 复用持久化的轮次、基准时间、open findings 和已裁决 findings，而不续跑旧
 子 Agent 对话；每一个 reviewer 也拥有独立 `ReadFileState`，其首次 read 不会被另一轮短路。
-若全量 verify 仍反复被缩窄，或结构化账本不足以支持增量 review，再重新评估计划命令清单
-对账或运行时主动执行命令，而不是现在提前引入它们。
+
+### 验收范围：声明清单地板 + 影响半径梯子（2026-09-13）
+
+同一事故还暴露出第二个漏洞：计划在正文里声明了 gate-fast / release / npm 三套检查，执行只跑了
+四条窄测试，运行时照样放行——它只核对「你说跑了的那条确实跑了」，不核对「该跑的都跑了没」，
+因为正文的验收段是散文。第一版修法「默认跑项目全量检查」被否决：小计划代价过高，且与系统
+提示词「先窄后宽」的既有规则矛盾，也挡不住计划阶段就写窄。
+
+现在验收范围由三件事决定：**地板**——计划 frontmatter 的 `acceptance_commands` 逐条必跑，
+运行时把每条声明与已核验的后台任务对账，缺一拒绝并列出；**梯子**——声明之外按实际 diff 的
+影响半径（改动文件 → 所属包 → 依赖它的包 → 项目全量检查集）决定加多少，定义只写在 verify
+skill；**棘轮**——说不清停在哪一级就上一级，计划执行后清单只能追加。清单在 PLAN 期写、由
+plan reviewer 多看一眼、随计划一起被用户批准；code reviewer 不承担这项核对。老计划未声明时沿用
+旧行为并记 `plan.acceptance.commands_undeclared` 事件。协议细节见
+[plan-exec-code-verification.md](plan-exec-code-verification.md)。运行时主动执行声明命令（B7''）
+仍是备选，仅当声明系统性偏窄且 plan reviewer 与用户都没拦住时再评估。
 
 > 状态：已实现（以当前工作树为准）。
 > 适用：代码变更计划的 EXEC 收口。字段、调用协议与完整决策以 [plan-exec-code-verification.md](plan-exec-code-verification.md) 为权威来源。

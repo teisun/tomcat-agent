@@ -12,16 +12,45 @@ gate 启动命令 ──► 仅进程内 InFlightReview lease ──► 终态�
                   Drop / 中断 ──► gate 仍 pending + aborted 事件
 
 第 4 轮仍有 P0 ──► handoff 给用户
-第 4 轮仅有 P1 ──► 带残余清单进入全量 Acceptance
+第 4 轮仅有 P1 ──► 带残余清单进入 Acceptance
 ```
 
 跨轮 reviewer 不续跑旧对话。`PlanFileFrontmatter` 持久化轮次、基准时间、open findings 与
 已裁决 finding；下一轮仅审基准后的 DELTA 并核销 open findings。每个子 Agent 另建
 `ReadFileState`，因此 reviewer 的“已读”不会错误短路另一个 reviewer 的首次读取。
 
-未采用的备选保持记录：B7'「计划声明命令后逐条对账」、B7''「运行时执行声明命令」、B13'
-「续跑 reviewer 对话或交接笔记」。只有全量 verify 仍反复漏验，或结构化账本不足以让增量
-评审收敛时，才重新评估这些更重的机制。
+未采用的备选保持记录：B7''「运行时执行声明命令」、B13'「续跑 reviewer 对话或交接笔记」。
+只有声明清单系统性偏窄且计划审阅没能拦住，或结构化账本不足以让增量评审收敛时，才重新评估
+这些更重的机制。
+
+### 验收范围口径：地板 + 梯子 + 棘轮（2026-09-13）
+
+第一轮修正曾把 verify skill 改成「跑项目完整检查集，只多不少」。它与 `system/verification.txt`
+的「先窄后宽、无项目证据不默认全 workspace」直接矛盾，而且没有打中真正的漏洞：计划正文的
+验收段是散文，运行时读不懂，所以计划写了三套检查、执行只跑四条窄测试也照样放行。7 个参考
+实现（codex `AGENTS.md:66-68`、opencode `session/prompt/default.txt:75`、pi `AGENTS.md:31-33`、
+cc-fork-01 `constants/prompts.ts:240` 等）没有一个要求默认全量；口径都是「项目 / 用户声明的
+命令必跑 + 从改动处向外扩」。现口径：
+
+```text
+PLAN 期                                    EXEC 期 [gate] Acceptance
+frontmatter.acceptance_commands            ① 地板：声明清单逐条跑，一条一后台任务，命令原样
+  = 逐条可运行命令（机器可读）                    运行时第五项核验：每条声明都有对应绿任务，缺一拒绝
+plan reviewer 核对：存在？可运行？           ② 梯子：按实际 diff 的影响半径决定要不要往上加
+  配得上 todos 触及的范围？                       L0 改动文件的测试 → L1 所属包测试+lint →
+用户批准计划                                     L2 依赖它的包 → L3 项目全量检查集
+                                           ③ 棘轮：说不清停在哪一级 → 上一级；executing 后清单只增不减
+```
+
+政策只写在 `assets/skills/verify/SKILL.md` 第 2 步；`system/verification.txt`、`plan/planner.txt`、
+`plan/executor.txt`、`update_plan` 的 acceptance 提示与 plan reviewer brief 只导航到它。
+`prompts/tests/load_test.rs::acceptance_scope_policy_lives_only_in_the_verify_skill` 是机械守卫：
+「complete check set / scope proportional / Scale the checks」在任何模板复活即红，梯子关键词只允许
+出现在 skill。code reviewer brief 不承担清单核对（用户决定：它只管代码质量）。
+
+声明为空的老计划沿用旧行为并写 `plan.acceptance.commands_undeclared` 事件。若审计显示新计划
+普遍不声明，或声明系统性偏窄而 plan reviewer 与用户都没拦住，应在 `build_plan` 对代码计划强制
+非空，或按 workspace 依赖图机器化 L1/L2（见计划文档 7.4 推翻条件）。
 
 ```text
 代码修改发生在 Acceptance 期间
@@ -166,7 +195,8 @@ tools/plan_tool/update_plan.rs::execute_for_tool
 |------|------|----------|----------|--------|
 | **代码 diff** | 当前工作区相对 `HEAD` 的已跟踪变更加未跟踪文件中，扩展名属于代码集合的路径。 | `CodeDiffContext.changed_code_files` | 过滤 `.rs`、`.ts`、`.tsx`、`.js`、`.py`、`.go`、`.java`、`.sh`、`.sql`、`.vue` 等；删除文件没有 mtime 时用当前时间作保守下界。 | 只有真改代码才触发代码验收。 |
 | **review gate 放行** | reviewer 无未裁决 P0/P1，或预算耗尽且仅剩 P1。 | `code_review_pass`、`code_review_pass_at_ms`、`code_review_residual_findings[]`、`code_review_handoff` | 预算内 P0/P1 阻塞；耗尽后 P0 交还用户，P1 才可携残余进 acceptance。 | P0 不能静默带病放行。 |
-| **绿构建通过** | 至少一条由运行时核实的后台验收任务覆盖当前代码。 | `green_build_pass`、`green_build_evidence[]` | 每条证据要有精确命令、任务 ID、启动时间和零退出码。 | 不是“我跑过了”，而是能查到哪条命令什么时候成功。 |
+| **绿构建通过** | 至少一条由运行时核实的后台验收任务覆盖当前代码，且计划声明的每条验收命令都有对应任务。 | `green_build_pass`、`green_build_evidence[]`、`acceptance_commands[]` | 每条证据要有精确命令、任务 ID、启动时间和零退出码；声明清单按 trim + 折叠空白后整串比对，可多不可少。 | 不是“我跑过了”，而是能查到哪条命令什么时候成功，而且计划承诺要跑的一条都不少。 |
+| **声明的验收地板** | 计划在 PLAN 期写进 frontmatter 的验收命令清单。 | `acceptance_commands: string[]` | planning / pending 可整体替换；executing 后只许追加（棘轮）；空表示未声明。 | 计划阶段就把「验收要跑什么」写成机器能对账的清单。 |
 | **新鲜（fresh）** | review 或验收发生在当前代码最新修改之后。 | `code_review_pass_at_ms`、`GreenBuildEvidence.started_at_ms`、`newest_edit_mtime_ms` | 通过时间必须 `>=` 最新 mtime；代码再改会清空两项 gate。 | 改完代码后，旧绿灯自动失效。 |
 | **P1 申辩** | 主 Agent 把某个未决 P1 作为已接受取舍，而非声称已修。 | `dispute_findings[{ref,area,resolution:"wontfix",reason}]` 与 runtime disputed findings | P0 不可申辩；P2 不阻塞也无需申辩；修复必须改代码后复审。 | P1 可以说明“为什么不改”，P0 必须修。 |
 | **完成周期** | 已完整通过过一次后，又因代码修改而重新执行的 review → build 门禁次数。 | `completion_gate_cycles` | 仅在“此前 review+build 都通过”的重验中，review 再次通过时加一；`max_completion_gate_cycles` 最小为 1。 | 记录同一计划被反复改、反复验了几轮。 |
@@ -230,6 +260,7 @@ tools/plan_tool/update_plan.rs::execute_for_tool
 | `green_build_pass` | `boolean` | 否 | `false` | 新代码会清为 `false`；不是模型可自由宣称的结果。 | 当前代码是否真跑过验收。 |
 | `green_build_evidence` | `GreenBuildEvidence[]` | 否 | `[]` | 需至少一项 `started_at_ms >= newest_edit_mtime_ms`。 | 留下验收收据。 |
 | `completion_gate_cycles` | `integer` | 否 | `0` | 已完整通过后重新 review 成功才递增。 | 已经重验过几轮。 |
+| `acceptance_commands` | `string[]` | 否 | `[]`（空不落盘） | 写入时 trim、折叠空白、去空、去重；executing / completed 状态下新列表必须包含旧列表每一项。 | 计划承诺的验收命令清单。 |
 
 ```text
 GreenBuildEvidence
@@ -245,7 +276,8 @@ GreenBuildEvidence
 |------|-----------|------|--------|----------|------|--------|
 | `dispute_findings` | `array` | 否 | `[]` | 接受 P1 取舍时 | 每项必须有 `ref`、`area`、`resolution:"wontfix"`、非空 `reason`。 | 对 P1 说明为什么故意不修。 |
 | `green_build_pass` | `boolean` | 否 | 缺省 | verify skill 的命令都通过后 | 只有 `true` 才进入证据核验；`false` 会清已有 green-build 结果。 | 成功后才申请放行。 |
-| `green_build_evidence` | `array` | `green_build_pass=true` 时是 | `[]` | 同上 | `{command,task_id}`；命令须与账本完全一致，任务 ID 不得重复。 | 把后台任务收据交给运行时。 |
+| `green_build_evidence` | `array` | `green_build_pass=true` 时是 | `[]` | 同上 | `{command,task_id}`；命令须与账本完全一致，任务 ID 不得重复；声明的每条 `acceptance_commands` 都要在此出现。 | 把后台任务收据交给运行时。 |
+| `acceptance_commands` | `string[]` | 否 | 缺省（不改动） | PLAN 期修订清单；EXEC 期扩大范围 | 传完整期望列表。planning / pending 整体替换；executing 下缺少任一旧项 → BadArgs 列出缺失命令。`create_plan` 同名字段用于首次声明。 | 改验收清单只能越改越宽。 |
 
 ```jsonc
 // review 已通过后，提交当前代码的新鲜后台任务证据
@@ -264,9 +296,9 @@ GreenBuildEvidence
 
 ### 4.3 证据核验顺序
 
-`require_green_build_pass` 对每一项 evidence 依次拒绝：空命令、重复 ID、账本无此任务、任务未 `Finished`、非零退出码、命令不一致、或任务早于最新代码编辑。所有条目通过后才写 `green_build_pass=true` 与快照。
+`require_green_build_pass` 对每一项 evidence 依次拒绝：空命令、重复 ID、账本无此任务、任务未 `Finished`、非零退出码、命令不一致、或任务早于最新代码编辑。全部条目通过后做第五项对账：`acceptance_commands` 的每一条都要有一条已核验证据与之 `normalize_acceptance_command`（trim + 折叠空白）后相等，缺项 → BadArgs 列出缺失命令，不写 `green_build_pass`；声明为空 → 写 `plan.acceptance.commands_undeclared` 事件后放行。之后才写 `green_build_pass=true` 与快照，`plan.green_build` 事件带 `declared_acceptance_commands`。
 
-**说人话**：不是拿一张任务 ID 就够；它必须是这次会话中那条相同命令、跑完且成功、跑得比最后一次编辑晚。
+**说人话**：不是拿一张任务 ID 就够；它必须是这次会话中那条相同命令、跑完且成功、跑得比最后一次编辑晚；而且计划里承诺要跑的每一条都得在收据里，多跑可以，用一条更窄的命令顶替不行。
 
 ---
 

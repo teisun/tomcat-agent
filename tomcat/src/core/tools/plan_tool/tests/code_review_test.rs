@@ -34,6 +34,7 @@ mod explicit_gates_update_plan {
             dispute_findings,
             green_build_pass,
             green_build_evidence,
+            acceptance_commands,
         } = args;
         let mut out = raw::execute(
             runtime,
@@ -45,6 +46,7 @@ mod explicit_gates_update_plan {
                 dispute_findings,
                 green_build_pass: None,
                 green_build_evidence: Vec::new(),
+                acceptance_commands,
             },
         )
         .await?;
@@ -82,6 +84,7 @@ mod explicit_gates_update_plan {
                     dispute_findings: Vec::new(),
                     green_build_pass,
                     green_build_evidence,
+                    acceptance_commands: None,
                 },
             )
             .await?;
@@ -106,6 +109,7 @@ mod explicit_gates_update_plan {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
         }
     }
 
@@ -158,6 +162,7 @@ fn complete_all_args(
         dispute_findings: Vec::new(),
         green_build_pass,
         green_build_evidence,
+        acceptance_commands: None,
         ops: vec![
             update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
@@ -188,6 +193,7 @@ fn submit_green_evidence_args(
             command: command.into(),
             task_id: task_id.into(),
         }],
+        acceptance_commands: None,
         ops: Vec::new(),
     }
 }
@@ -258,6 +264,7 @@ async fn code_review_pass_completes_without_verifier() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -336,6 +343,7 @@ async fn p0_blocks_its_review_round_and_hands_off_when_budget_is_exhausted() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -378,6 +386,7 @@ async fn p0_blocks_its_review_round_and_hands_off_when_budget_is_exhausted() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -453,6 +462,7 @@ async fn exhausted_review_budget_still_rejects_fabricated_green_build_evidence()
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -507,6 +517,7 @@ async fn p2_only_finding_does_not_block_completion_even_when_reviewer_says_fail(
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -577,6 +588,7 @@ async fn p1_dispute_with_reason_unblocks_and_excludes_open_finding() {
         dispute_findings,
         green_build_pass: None,
         green_build_evidence: Vec::new(),
+        acceptance_commands: None,
         ops: vec![
             update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
@@ -645,6 +657,7 @@ async fn p0_cannot_be_disputed() {
             }],
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -683,6 +696,7 @@ async fn dispute_rejects_non_wontfix_resolution() {
             }],
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -741,6 +755,7 @@ async fn green_build_gate_blocks_completion_until_pass() {
         dispute_findings: Vec::new(),
         green_build_pass,
         green_build_evidence,
+        acceptance_commands: None,
         ops: vec![
             update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
@@ -764,10 +779,10 @@ async fn green_build_gate_blocks_completion_until_pass() {
         .is_some_and(|hint| hint.contains("load_skill(verify)")));
     assert!(review_passed["next_step"]["hint"]
         .as_str()
-        .is_some_and(|hint| hint.contains("full documented check set")));
+        .is_some_and(|hint| hint.contains("declared `acceptance_commands`")));
     assert!(!review_passed["next_step"]["hint"]
         .as_str()
-        .is_some_and(|hint| hint.contains("scope proportional")));
+        .is_some_and(|hint| hint.contains("complete check set")));
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
     assert!(persisted.frontmatter.code_review_pass);
     assert!(!persisted.frontmatter.green_build_pass);
@@ -845,6 +860,7 @@ async fn gates_skipped_when_diff_has_no_code() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -899,6 +915,7 @@ async fn aborted_code_review_keeps_plan_executing() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -978,6 +995,7 @@ async fn aborted_code_review_refunds_round_and_stops_after_bounded_retries() {
         dispute_findings: Vec::new(),
         green_build_pass: None,
         green_build_evidence: Vec::new(),
+        acceptance_commands: None,
         ops: vec![
             update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
@@ -998,6 +1016,7 @@ async fn aborted_code_review_refunds_round_and_stops_after_bounded_retries() {
         dispute_findings: Vec::new(),
         green_build_pass: None,
         green_build_evidence: Vec::new(),
+        acceptance_commands: None,
         ops: vec![update_plan::UpdateOp::SetStatus {
             id: "t1".into(),
             content: None,
@@ -1090,6 +1109,7 @@ async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_wi
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -1161,6 +1181,7 @@ async fn code_review_rounds_exhaustion_unconditionally_advances_to_acceptance_wi
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -1276,6 +1297,7 @@ async fn code_review_rounds_exhaustion_hands_off_with_p0_residual() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -1338,6 +1360,7 @@ async fn resolved_findings_converge_to_completion_within_review_budget() {
         dispute_findings: Vec::new(),
         green_build_pass: None,
         green_build_evidence: Vec::new(),
+        acceptance_commands: None,
         ops: vec![
             update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
@@ -1375,6 +1398,7 @@ async fn resolved_findings_converge_to_completion_within_review_budget() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -1443,6 +1467,7 @@ async fn code_review_transcript_matches_tool_result_after_normalization() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -1512,6 +1537,7 @@ async fn second_review_round_receives_previous_open_findings_and_clears_fixed_on
         dispute_findings: Vec::new(),
         green_build_pass: None,
         green_build_evidence: Vec::new(),
+        acceptance_commands: None,
         ops: vec![
             update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
@@ -1558,6 +1584,7 @@ async fn second_review_round_receives_previous_open_findings_and_clears_fixed_on
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: None,
@@ -1892,6 +1919,7 @@ async fn edit_during_acceptance_after_exhausted_review_keeps_gates_and_accepts_f
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -1908,6 +1936,7 @@ async fn edit_during_acceptance_after_exhausted_review_keeps_gates_and_accepts_f
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: GATE_CODE_REVIEW_TODO_ID.into(),
                 content: None,
@@ -1931,6 +1960,7 @@ async fn edit_during_acceptance_after_exhausted_review_keeps_gates_and_accepts_f
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: GATE_ACCEPTANCE_TODO_ID.into(),
                 content: None,
@@ -2036,6 +2066,7 @@ async fn stale_green_evidence_after_exhausted_review_reopens_only_acceptance() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -2106,6 +2137,7 @@ async fn code_edit_invalidates_full_gate_and_requires_review_and_fresh_evidence(
                 command: "true".into(),
                 task_id: fresh_task.task_id.clone(),
             }],
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: None,
@@ -2166,6 +2198,7 @@ async fn completion_gate_cycle_cap_closes_without_another_review_rerun() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![update_plan::UpdateOp::SetStatus {
                 id: "t1".into(),
                 content: None,
@@ -2226,6 +2259,7 @@ async fn rebuild_resets_code_review_rounds() {
             dispute_findings: Vec::new(),
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -2420,6 +2454,181 @@ async fn green_build_evidence_rejects_empty_duplicate_unknown_and_blank_inputs()
     cleanup_home(&home);
 }
 
+fn declare_acceptance_commands(plan_id: &str, commands: &[&str]) {
+    let path = plan_path_for_id(plan_id).unwrap();
+    let mut plan = read_plan(&path).unwrap();
+    plan.frontmatter.acceptance_commands = commands.iter().map(|c| c.to_string()).collect();
+    write_plan(&path, &plan, 2000).unwrap();
+}
+
+async fn finished_task(
+    registry: &crate::core::tools::primitive::BashTaskRegistry,
+    workspace: &std::path::Path,
+    command: &str,
+) -> update_plan::GreenBuildEvidenceArg {
+    let task = registry
+        .spawn(command.into(), Some(workspace.to_path_buf()))
+        .await
+        .expect("spawn a registered verification task");
+    registry
+        .wait_for_finish(&task.task_id)
+        .await
+        .expect("wait for the verification task");
+    update_plan::GreenBuildEvidenceArg {
+        command: command.into(),
+        task_id: task.task_id,
+    }
+}
+
+/// The declared list is the floor: extra commands are fine, but every declared entry needs its
+/// own finished task. Whitespace-only differences still match; anything else does not.
+#[tokio::test]
+async fn acceptance_reconciles_evidence_against_declared_commands() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let workspace = git_workspace_with_code("tomcat_acceptance_declared_");
+    let registry = std::sync::Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
+        workspace.path().join(".task-logs"),
+    ));
+    let events: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
+    rt.attach_bash_task_registry(registry.clone());
+    rt.attach_code_reviewer(std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![
+        passing_code_review(),
+    ])));
+    {
+        let sink = std::sync::Arc::clone(&events);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+    let plan_id = fresh_planning_plan(&rt);
+    declare_acceptance_commands(&plan_id, &["true", "echo declared"]);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+
+    let ran_true = finished_task(&registry, workspace.path(), "true").await;
+    let ran_extra = finished_task(&registry, workspace.path(), "echo extra").await;
+    // A narrower variant of a declared command is a different command.
+    let ran_narrow = finished_task(&registry, workspace.path(), "echo declared --only one").await;
+
+    let error = update_plan::execute(
+        &rt,
+        complete_all_args(
+            &plan_id,
+            Some(true),
+            vec![ran_true.clone(), ran_extra.clone(), ran_narrow],
+        ),
+    )
+    .await
+    .expect_err("evidence that skips a declared command must not pass acceptance");
+    assert_bad_args(
+        error,
+        "计划声明的 acceptance_commands 尚有 1 条没有对应的绿构建证据：`echo declared`。请原样运行每一条声明命令（可以额外运行更多，但不能用更窄的命令替代），再连同全部 task_id 一并提交",
+    );
+    let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
+    assert!(!persisted.frontmatter.green_build_pass);
+    assert!(persisted.frontmatter.green_build_evidence.is_empty());
+    assert!(
+        !events
+            .lock()
+            .iter()
+            .any(|event| event["event"] == "plan.green_build"),
+        "a rejected reconciliation must not record a green build"
+    );
+
+    // Whitespace-only differences in the launched command still satisfy the declaration.
+    let ran_declared = finished_task(&registry, workspace.path(), "echo   declared").await;
+    let out = update_plan::execute(
+        &rt,
+        complete_all_args(
+            &plan_id,
+            Some(true),
+            vec![ran_true, ran_extra, ran_declared],
+        ),
+    )
+    .await
+    .expect("every declared command plus extras passes acceptance");
+    assert_eq!(out["plan_state_after"], "completed");
+    let green = events
+        .lock()
+        .iter()
+        .find(|event| event["event"] == "plan.green_build")
+        .cloned()
+        .expect("plan.green_build event");
+    assert_eq!(
+        green["declared_acceptance_commands"],
+        serde_json::json!(["true", "echo declared"])
+    );
+    assert_eq!(green["evidence"].as_array().map(Vec::len), Some(3));
+    assert!(
+        !events
+            .lock()
+            .iter()
+            .any(|event| event["event"] == "plan.acceptance.commands_undeclared"),
+        "a declared plan must not be flagged as undeclared"
+    );
+    cleanup_home(&home);
+}
+
+/// Plans written before the declared list existed (or that chose not to declare one) still
+/// complete on evidence alone; the runtime records that no floor was available to reconcile.
+#[tokio::test]
+async fn acceptance_without_declared_commands_passes_and_records_undeclared_event() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let workspace = git_workspace_with_code("tomcat_acceptance_undeclared_");
+    let registry = std::sync::Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
+        workspace.path().join(".task-logs"),
+    ));
+    let events: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
+    rt.attach_bash_task_registry(registry.clone());
+    rt.attach_code_reviewer(std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![
+        passing_code_review(),
+    ])));
+    {
+        let sink = std::sync::Arc::clone(&events);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+    rt.set_max_code_review_rounds(1);
+    assert!(read_plan(&plan_path_for_id(&plan_id).unwrap())
+        .unwrap()
+        .frontmatter
+        .acceptance_commands
+        .is_empty());
+
+    let ran_true = finished_task(&registry, workspace.path(), "true").await;
+    let out = update_plan::execute(&rt, complete_all_args(&plan_id, Some(true), vec![ran_true]))
+        .await
+        .expect("undeclared plans keep completing on verified evidence");
+    assert_eq!(out["plan_state_after"], "completed");
+
+    let undeclared = events
+        .lock()
+        .iter()
+        .find(|event| event["event"] == "plan.acceptance.commands_undeclared")
+        .cloned()
+        .expect("plan.acceptance.commands_undeclared event");
+    assert_eq!(undeclared["plan_id"], plan_id);
+    assert_eq!(undeclared["evidence_count"], 1);
+    assert!(events
+        .lock()
+        .iter()
+        .any(|event| event["event"] == "plan.green_build"));
+    cleanup_home(&home);
+}
+
 #[tokio::test]
 async fn disputes_reject_non_unresolved_p2_and_reasonless_p1_findings() {
     let _g = home_lock().lock().unwrap();
@@ -2442,6 +2651,7 @@ async fn disputes_reject_non_unresolved_p2_and_reasonless_p1_findings() {
             }],
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -2475,6 +2685,7 @@ async fn disputes_reject_non_unresolved_p2_and_reasonless_p1_findings() {
             }],
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )
@@ -2505,6 +2716,7 @@ async fn disputes_reject_non_unresolved_p2_and_reasonless_p1_findings() {
             }],
             green_build_pass: None,
             green_build_evidence: Vec::new(),
+            acceptance_commands: None,
             ops: Vec::new(),
         },
     )

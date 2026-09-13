@@ -553,6 +553,7 @@ fn seed_counter_planning_plan(fx: &CliFixture, goal: &str) -> common::CreatedPla
         code_review_handoff_acknowledged: false,
             code_review_residual_findings: vec![],
             completion_gate_cycles: 0,
+            acceptance_commands: Vec::new(),
             unknown: Default::default(),
         },
         body: format!(

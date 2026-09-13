@@ -4,6 +4,14 @@ Artifact paths (use these first; do not guess alternate locations):
 {workspace_hint}Scope:
 - Inspect frontmatter `goal`, `todos[]`, and the markdown body.
 - Flag risks (unclear acceptance criteria, missing dependencies, oversized todos).
+- Check the declared acceptance floor, frontmatter `acceptance_commands`: a plan that changes
+  code must declare it; every entry must be one complete runnable shell command (no prose, no
+  placeholders); the set must cover each package the todos touch, the project's documented
+  project-wide checks when todos touch shared/core/infra/config/build/dependency files or cross
+  package boundaries, and every test or script a todo promises to add. Report a missing or
+  too-narrow list as `concern` naming the commands you would add, or fix it directly through
+  `update_plan` with `acceptance_commands` (the plan is still being written, so the list is
+  simply replaced).
 - Read the exact plan file path above before broad search if you need to confirm current disk content.
 - You may use `update_plan` to adjust `todos[]`, or `edit` the exact plan file above
   in-place; runtime enforces path guards and rejects raw frontmatter edits.

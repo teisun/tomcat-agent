@@ -439,6 +439,7 @@ fn write_test_plan(plan_id: &str, body: &str) {
                 code_review_handoff_acknowledged: false,
                 code_review_residual_findings: vec![],
                 completion_gate_cycles: 0,
+                acceptance_commands: Vec::new(),
                 unknown: Default::default(),
             },
             body: body.to_string(),
@@ -602,6 +603,7 @@ async fn complete_all_plan_todos(rt: &PlanRuntime, plan_id: &str) -> serde_json:
             dispute_findings: vec![],
             green_build_pass: None,
             green_build_evidence: vec![],
+            acceptance_commands: None,
         },
     )
     .await
@@ -623,6 +625,7 @@ async fn start_close_out_gate(rt: &PlanRuntime, plan_id: &str, gate_id: &str) ->
             dispute_findings: vec![],
             green_build_pass: None,
             green_build_evidence: vec![],
+            acceptance_commands: None,
         },
     )
     .await
@@ -644,6 +647,7 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
         create_plan::CreatePlanArgs {
             goal: "ship feature X".into(),
             draft: "## Goal\nship X".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![
                 create_plan::TodoArg {
                     id: "t1".into(),
@@ -692,6 +696,7 @@ async fn h1_e2e_full_lifecycle_with_panel_and_complete_events() {
                 dispute_findings: vec![],
                 green_build_pass: None,
                 green_build_evidence: vec![],
+                acceptance_commands: None,
             },
         )
         .await
@@ -758,6 +763,7 @@ async fn h1b_mock_coding_trajectory_uses_visible_gates_and_fresh_evidence() {
         create_plan::CreatePlanArgs {
             goal: "coding gate trajectory".into(),
             draft: "## Goal\nexercise visible gates".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![
                 create_plan::TodoArg {
                     id: "t1".into(),
@@ -799,6 +805,7 @@ async fn h1b_mock_coding_trajectory_uses_visible_gates_and_fresh_evidence() {
             dispute_findings: vec![],
             green_build_pass: None,
             green_build_evidence: vec![],
+            acceptance_commands: None,
         },
     )
     .await
@@ -823,6 +830,7 @@ async fn h1b_mock_coding_trajectory_uses_visible_gates_and_fresh_evidence() {
             dispute_findings: vec![],
             green_build_pass: None,
             green_build_evidence: vec![],
+            acceptance_commands: None,
         },
     )
     .await
@@ -862,6 +870,133 @@ async fn h1b_mock_coding_trajectory_uses_visible_gates_and_fresh_evidence() {
                 command: "true".into(),
                 task_id: ticket.task_id.to_string(),
             }],
+            acceptance_commands: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(done["next_step"]["phase"], "done");
+    assert_eq!(done["plan_state_after"], "completed");
+    cleanup_home(&home);
+}
+
+// ─── H2c：小计划只声明一条窄命令 → 仅凭该条即完成（不强制全量）─────────────
+
+/// The declared acceptance list is the floor and nothing forces a project-wide run: a plan
+/// that declares one narrow command completes on exactly that evidence. Substituting a
+/// different command, even a successful one, is rejected because the declared one was skipped.
+#[tokio::test]
+async fn h2c_small_plan_completes_on_its_single_declared_acceptance_command() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_home();
+    let (rt, _panel, _ckpt) = build_runtime_with_spies();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    std::fs::write(workspace.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(workspace.path())
+        .status()
+        .unwrap()
+        .success());
+    let task_dir = tempfile::tempdir().unwrap();
+    let registry = Arc::new(BashTaskRegistry::new(task_dir.path().join("task-logs")));
+    rt.attach_workspace_root(workspace.path().to_path_buf());
+    rt.attach_bash_task_registry(registry.clone());
+    rt.set_max_code_review_rounds(1);
+    rt.attach_code_reviewer(Arc::new(QueueCodeReviewer::new(vec![pass_code_review()])));
+
+    rt.enter_plan().unwrap();
+    let created = create_plan::execute(
+        &rt,
+        create_plan::CreatePlanArgs {
+            goal: "tiny isolated fix".into(),
+            draft: "## Goal\none narrow test is the whole acceptance".into(),
+            acceptance_commands: vec!["echo  narrow-test".into()],
+            todos: vec![
+                create_plan::TodoArg {
+                    id: "t1".into(),
+                    content: "implement".into(),
+                    status: TodoStatus::Pending,
+                },
+                create_plan::TodoArg {
+                    id: "t2".into(),
+                    content: "test".into(),
+                    status: TodoStatus::Pending,
+                },
+            ],
+        },
+    )
+    .unwrap();
+    let plan_id = created["plan_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        read_plan(&plan_path_for_id(&plan_id).unwrap())
+            .unwrap()
+            .frontmatter
+            .acceptance_commands,
+        vec!["echo narrow-test".to_string()],
+        "create_plan persists the normalized declaration"
+    );
+    promote_to_exec(&rt, &plan_id);
+
+    let ready = complete_all_plan_todos(&rt, &plan_id).await;
+    assert_eq!(ready["next_step"]["phase"], "start_review");
+    let reviewed = start_close_out_gate(&rt, &plan_id, GATE_CODE_REVIEW_TODO_ID).await;
+    assert_eq!(reviewed["next_step"]["phase"], "run_acceptance");
+    start_close_out_gate(&rt, &plan_id, GATE_ACCEPTANCE_TODO_ID).await;
+
+    // A different (even broader) successful command does not stand in for the declared one.
+    let substitute = registry
+        .spawn("true".into(), Some(workspace.path().to_path_buf()))
+        .await
+        .unwrap();
+    registry.wait_for_finish(&substitute.task_id).await.unwrap();
+    let rejected = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            ops: vec![],
+            dispute_findings: vec![],
+            green_build_pass: Some(true),
+            green_build_evidence: vec![update_plan::GreenBuildEvidenceArg {
+                command: "true".into(),
+                task_id: substitute.task_id.to_string(),
+            }],
+            acceptance_commands: None,
+        },
+    )
+    .await
+    .expect_err("skipping the declared command must not pass acceptance");
+    assert!(
+        rejected.to_string().contains("`echo narrow-test`"),
+        "the rejection names the missing declared command: {rejected}"
+    );
+
+    // Exactly the declared command, launched with different spacing, is all it takes.
+    let declared = registry
+        .spawn(
+            "echo narrow-test".into(),
+            Some(workspace.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+    registry.wait_for_finish(&declared.task_id).await.unwrap();
+    let done = update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id),
+            path: None,
+            replace: false,
+            ops: vec![],
+            dispute_findings: vec![],
+            green_build_pass: Some(true),
+            green_build_evidence: vec![update_plan::GreenBuildEvidenceArg {
+                command: "echo narrow-test".into(),
+                task_id: declared.task_id.to_string(),
+            }],
+            acceptance_commands: None,
         },
     )
     .await
@@ -912,6 +1047,7 @@ fn h4_exec_mode_raw_edit_on_plan_file_is_blocked() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "a".into(),
@@ -945,6 +1081,7 @@ async fn h6_cancel_during_exec_demotes_plan_to_pending() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "a".into(),
@@ -981,6 +1118,7 @@ async fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "a".into(),
@@ -1006,6 +1144,7 @@ async fn h7_update_plan_in_progress_in_planning_rejected_by_mode_matrix() {
             dispute_findings: vec![],
             green_build_pass: None,
             green_build_evidence: vec![],
+            acceptance_commands: None,
         },
     )
     .await
@@ -1064,6 +1203,7 @@ async fn h5_reviewer_aborted_summary_used_when_dispatcher_returns_aborted() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "a".into(),
@@ -1098,6 +1238,7 @@ async fn h8_code_review_pass_completes_without_verifier() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![
                 create_plan::TodoArg {
                     id: "t1".into(),
@@ -1174,6 +1315,7 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![
                 create_plan::TodoArg {
                     id: "t1".into(),
@@ -1226,6 +1368,7 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
             dispute_findings: vec![],
             green_build_pass: None,
             green_build_evidence: vec![],
+            acceptance_commands: None,
         },
     )
     .await
@@ -1251,6 +1394,7 @@ async fn h9_code_review_non_pass_returns_to_main_then_rounds_exhaustion_advances
             dispute_findings: vec![],
             green_build_pass: None,
             green_build_evidence: vec![],
+            acceptance_commands: None,
         },
     )
     .await
@@ -1313,6 +1457,7 @@ async fn h9b_cancelled_code_review_releases_lease_and_can_restart() {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![
                 create_plan::TodoArg {
                     id: "t1".into(),
@@ -1390,6 +1535,7 @@ async fn h10_code_review_long_multibyte_summary_round_trips_without_truncation()
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "ok".into(),
+            acceptance_commands: Vec::new(),
             todos: vec![
                 create_plan::TodoArg {
                     id: "t1".into(),
