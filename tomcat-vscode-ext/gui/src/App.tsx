@@ -170,6 +170,7 @@ const EMPTY_CONTEXT_SEARCH_STATE: ContextSearchState = {
 interface PendingComposerSubmission {
   draft: ComposerDraft;
   messageId: string;
+  revision: number;
   sessionId: string | null;
 }
 
@@ -1261,6 +1262,7 @@ function submitPrompt(
   onSubmitted({
     draft,
     messageId: userMessageId,
+    revision: 0,
     sessionId: activeSessionId ?? null,
   });
   postIntent(vscodeApi, "prompt", {
@@ -1307,23 +1309,19 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const composerWorkRegistryRef = useRef(new ComposerWorkRegistry());
   const pendingInsertionsRef = useRef<Array<{ reference: WebviewReference; sessionId: string }>>([]);
   const pendingComposerSubmissionRef = useRef<PendingComposerSubmission | null>(null);
-  const pendingDraftSyncRef = useRef<{
-    draft: ComposerDraft;
-    sessionId: string;
-  } | null>(null);
-  const draftSyncTimerRef = useRef<number | null>(null);
-  /**
-   * What the host was last told, per session, so identical drafts are not resent.
-   *
-   * Needed because the composer emits a change on mount and on every session switch.
-   * Those emissions carry an empty draft that the host already assumes, so syncing them
-   * is pure protocol noise — and this whole design exists to keep the typing path off
-   * the wire.
-   */
+  const pendingDraftSyncRef = useRef(new Map<string, ComposerDraft>());
+  const draftSyncTimerRef = useRef(new Map<string, number>());
+  /** What the host was last told, per session, so identical drafts are not resent. */
   const syncedDraftRef = useRef(new Map<string, string>());
-  // Local keystrokes win over a delayed host hydration for the current session. Without
-  // this, a failed send can leave an older persisted draft that overwrites newer text.
-  const locallyEditedDraftsRef = useRef(new Set<string>());
+  /**
+   * The latest real edit for each session. A host snapshot is only a backup: it must not
+   * replace a newer local draft while the user is switching between sessions.
+   */
+  const localComposerDraftsRef = useRef(new Map<string, ComposerDraft>());
+  /** Monotonic local edit identity, so returning to identical text is still a new draft. */
+  const localDraftRevisionsRef = useRef(new Map<string, number>());
+  /** The last host snapshot lets us distinguish a new host reference from a local deletion. */
+  const hostComposerDraftsRef = useRef(new Map<string, ComposerDraft>());
   const applyingBackendDraftRef = useRef(false);
   const appliedComposerDraftRef = useRef<{
     // A digest of the draft content rather than a revision counter. The host no longer
@@ -1397,40 +1395,47 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     });
   }, [pendingQuestionCounts, state.activeSessionId]);
 
-  const flushComposerDraft = useCallback(() => {
-    if (draftSyncTimerRef.current !== null) {
-      window.clearTimeout(draftSyncTimerRef.current);
-      draftSyncTimerRef.current = null;
+  const flushComposerDraft = useCallback((sessionId?: string) => {
+    const sessionIds = sessionId
+      ? [sessionId]
+      : [...pendingDraftSyncRef.current.keys()];
+    for (const pendingSessionId of sessionIds) {
+      const timer = draftSyncTimerRef.current.get(pendingSessionId);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        draftSyncTimerRef.current.delete(pendingSessionId);
+      }
+      const draft = pendingDraftSyncRef.current.get(pendingSessionId);
+      pendingDraftSyncRef.current.delete(pendingSessionId);
+      if (!draft) {
+        continue;
+      }
+      const signature = composerDraftSignature(draft);
+      const lastSynced = syncedDraftRef.current.get(pendingSessionId);
+      // An empty draft the host was never told about is the state it already assumes;
+      // an unchanged draft is nothing to tell it either. Clearing a draft the host *does*
+      // hold still syncs, because that is what deletes the file.
+      if (signature === (lastSynced ?? composerDraftSignature(EMPTY_COMPOSER_DRAFT))) {
+        continue;
+      }
+      syncedDraftRef.current.set(pendingSessionId, signature);
+      postIntent(vscodeApi, "syncComposerDraft", {
+        segments: draft.segments,
+        sessionId: pendingSessionId,
+        text: draft.text,
+      });
     }
-    const pending = pendingDraftSyncRef.current;
-    pendingDraftSyncRef.current = null;
-    if (!pending) {
-      return;
-    }
-    const signature = composerDraftSignature(pending.draft);
-    const lastSynced = syncedDraftRef.current.get(pending.sessionId);
-    // An empty draft the host was never told about is the state it already assumes;
-    // an unchanged draft is nothing to tell it either. Clearing a draft the host *does*
-    // hold still syncs, because that is what deletes the file.
-    if (signature === (lastSynced ?? composerDraftSignature(EMPTY_COMPOSER_DRAFT))) {
-      return;
-    }
-    syncedDraftRef.current.set(pending.sessionId, signature);
-    postIntent(vscodeApi, "syncComposerDraft", {
-      segments: pending.draft.segments,
-      sessionId: pending.sessionId,
-      text: pending.draft.text,
-    });
   }, [vscodeApi]);
 
   const scheduleComposerDraftSync = useCallback((sessionId: string, draft: ComposerDraft) => {
-    pendingDraftSyncRef.current = { draft, sessionId };
-    if (draftSyncTimerRef.current !== null) {
-      window.clearTimeout(draftSyncTimerRef.current);
+    pendingDraftSyncRef.current.set(sessionId, draft);
+    const previousTimer = draftSyncTimerRef.current.get(sessionId);
+    if (previousTimer !== undefined) {
+      window.clearTimeout(previousTimer);
     }
-    draftSyncTimerRef.current = window.setTimeout(
-      flushComposerDraft,
-      COMPOSER_DRAFT_DEBOUNCE_MS,
+    draftSyncTimerRef.current.set(
+      sessionId,
+      window.setTimeout(() => flushComposerDraft(sessionId), COMPOSER_DRAFT_DEBOUNCE_MS),
     );
   }, [flushComposerDraft]);
 
@@ -1526,56 +1531,78 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
   useEffect(() => {
     const sessionId = activeSession?.sessionId;
-    const backendDraft = activeSession?.composerDraft;
     const composer = composerRef.current;
-    if (!sessionId || !backendDraft || !composer) {
+    if (!sessionId || !composer) {
       return;
     }
-    const signature = composerDraftSignature(backendDraft);
-    const applied = appliedComposerDraftRef.current;
-    if (applied?.sessionId === sessionId && applied.signature === signature) {
-      return;
+    const backendDraft = activeSession.composerDraft;
+    const backendComposerDraft: ComposerDraft = {
+      hasContent:
+        backendDraft?.segments.some(
+          (segment) => segment.type === "reference" || segment.text.trim().length > 0,
+        ) === true || (backendDraft?.text.trim().length ?? 0) > 0,
+      segments: backendDraft?.segments ?? [],
+      text: backendDraft?.text ?? "",
+    };
+    const localDraft = localComposerDraftsRef.current.get(sessionId);
+    const previousBackendDraft = hostComposerDraftsRef.current.get(sessionId);
+    if (backendDraft) {
+      hostComposerDraftsRef.current.set(sessionId, backendComposerDraft);
     }
-    const isSessionSwitch = applied?.sessionId !== sessionId;
-    if (!isSessionSwitch && locallyEditedDraftsRef.current.has(sessionId)) {
-      const presentReferenceIds = new Set(
-        composer
-          .getDraft()
-          .segments
-          .filter(isWebviewReference)
-          .map(referenceIdentity),
+    let nextDraft = localDraft ?? backendComposerDraft;
+
+    // A received snapshot establishes the baseline used when the user later clears it.
+    // A locally edited session remains locally authoritative until send handling retires it.
+    if (!localDraft && backendDraft) {
+      syncedDraftRef.current.set(sessionId, composerDraftSignature(backendComposerDraft));
+    }
+
+    if (localDraft && backendDraft) {
+      const localReferenceIds = new Set(
+        localDraft.segments.filter(isWebviewReference).map(referenceIdentity),
+      );
+      const previousHostReferenceIds = new Set(
+        previousBackendDraft?.segments.filter(isWebviewReference).map(referenceIdentity),
       );
       const missingReferences = backendDraft.segments
         .filter(isWebviewReference)
-        .filter((reference) => !presentReferenceIds.has(referenceIdentity(reference)));
+        .filter(
+          (reference) =>
+            !localReferenceIds.has(referenceIdentity(reference))
+            && !previousHostReferenceIds.has(referenceIdentity(reference)),
+        );
       if (missingReferences.length > 0) {
-        // Local typing wins over stale host text, but it must never discard durable
-        // references that were added by a host-side picker while the draft was dirty.
         applyingBackendDraftRef.current = true;
         try {
+          if (!draftsEqual(composer.getDraft(), localDraft)) {
+            composer.replaceDraft(localDraft);
+          }
           composer.insertReferences(missingReferences);
+          nextDraft = composer.getDraft();
+          localComposerDraftsRef.current.set(sessionId, nextDraft);
+          if (pendingDraftSyncRef.current.has(sessionId)) {
+            pendingDraftSyncRef.current.set(sessionId, nextDraft);
+          }
         } finally {
           applyingBackendDraftRef.current = false;
         }
       }
+    }
+
+    const signature = composerDraftSignature(nextDraft);
+    const applied = appliedComposerDraftRef.current;
+    if (applied?.sessionId === sessionId && applied.signature === signature) {
       return;
     }
     appliedComposerDraftRef.current = { sessionId, signature };
-    const nextDraft: ComposerDraft = {
-      hasContent:
-        backendDraft.segments.some(
-          (segment) =>
-            segment.type === "reference" || segment.text.trim().length > 0,
-        ) || backendDraft.text.trim().length > 0,
-      segments: backendDraft.segments,
-      text: backendDraft.text,
-    };
     if (!draftsEqual(composer.getDraft(), nextDraft)) {
       applyingBackendDraftRef.current = true;
-      composer.replaceDraft(nextDraft);
-      applyingBackendDraftRef.current = false;
+      try {
+        composer.replaceDraft(nextDraft);
+      } finally {
+        applyingBackendDraftRef.current = false;
+      }
     }
-    locallyEditedDraftsRef.current.delete(sessionId);
   }, [activeSession?.composerDraft, activeSession?.sessionId]);
 
   useEffect(() => {
@@ -1696,8 +1723,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
 
   useEffect(() => {
     const pending = pendingComposerSubmissionRef.current;
-    const composer = composerRef.current;
-    if (!pending || !composer) {
+    if (!pending) {
       return;
     }
     const resolved = resolvePendingComposerSubmission(state, pending);
@@ -1708,11 +1734,35 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     if (resolved.message.deliveryState === "failed") {
       return;
     }
-    if (state.activeSessionId !== resolved.sessionId) {
+
+    // Confirmation can arrive while another session is on screen. Retire the submitted
+    // session's local cache first; otherwise a later switch would resurrect sent input.
+    const stored = localComposerDraftsRef.current.get(resolved.sessionId);
+    const isSubmittedRevisionCurrent =
+      (localDraftRevisionsRef.current.get(resolved.sessionId) ?? 0) === pending.revision;
+    if (stored && isSubmittedRevisionCurrent && draftsEqual(stored, pending.draft)) {
+      localComposerDraftsRef.current.delete(resolved.sessionId);
+      syncedDraftRef.current.delete(resolved.sessionId);
+      pendingDraftSyncRef.current.delete(resolved.sessionId);
+      const timer = draftSyncTimerRef.current.get(resolved.sessionId);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        draftSyncTimerRef.current.delete(resolved.sessionId);
+      }
+    }
+
+    if (!isSubmittedRevisionCurrent || state.activeSessionId !== resolved.sessionId) {
       return;
     }
-    if (draftsEqual(composer.getDraft(), pending.draft)) {
+    const composer = composerRef.current;
+    if (!composer || !draftsEqual(composer.getDraft(), pending.draft)) {
+      return;
+    }
+    applyingBackendDraftRef.current = true;
+    try {
       composer.clear();
+    } finally {
+      applyingBackendDraftRef.current = false;
     }
   }, [state]);
 
@@ -2461,6 +2511,10 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         ready={state.ready}
         onSwitchSession={(sessionId) => {
           if (draftForkFeedback.pending) return;
+          const activeSessionId = stateRef.current.activeSessionId;
+          if (activeSessionId) {
+            flushComposerDraft(activeSessionId);
+          }
           postIntent(vscodeApi, "switchSession", {
             sessionId,
           });
@@ -2703,10 +2757,16 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         }}
         onContextWindowChange={handleSetContextWindow}
         onDraftChange={(draft) => {
-          if (activeSession?.sessionId) {
-            locallyEditedDraftsRef.current.add(activeSession.sessionId);
-            scheduleComposerDraftSync(activeSession.sessionId, draft);
+          const sessionId = stateRef.current.activeSessionId;
+          if (applyingBackendDraftRef.current || !sessionId) {
+            return;
           }
+          localComposerDraftsRef.current.set(sessionId, draft);
+          localDraftRevisionsRef.current.set(
+            sessionId,
+            (localDraftRevisionsRef.current.get(sessionId) ?? 0) + 1,
+          );
+          scheduleComposerDraftSync(sessionId, draft);
         }}
         onModeChange={handleModeChange}
         onModelChange={(modelId) => {
@@ -2767,7 +2827,12 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
             activeSession?.sessionId,
             canPrompt,
             (pending) => {
-              pendingComposerSubmissionRef.current = pending;
+              pendingComposerSubmissionRef.current = {
+                ...pending,
+                revision: pending.sessionId
+                  ? (localDraftRevisionsRef.current.get(pending.sessionId) ?? 0)
+                  : 0,
+              };
             },
           );
         }}

@@ -13,7 +13,7 @@ describe("serve fixture resource ownership", () => {
     }
   });
 
-  it("isolates config, models and credentials without altering inherited safety flags", () => {
+  it("isolates config, models, credentials, and the disposable child process", () => {
     const parent = {
       HOME: "/real-home", PATH: "/bin", TOMCAT_AGENT_ACTIVE: "1",
       TOMCAT__AGENT__ID: "other", TOMCAT__STORAGE__WORK_DIR: "/real-storage",
@@ -24,13 +24,14 @@ describe("serve fixture resource ownership", () => {
     const env = serveFixtureEnvironment("/private-fixture", parent);
     expect(parent).toEqual(before);
     expect(env).toMatchObject({ HOME: "/private-fixture", USERPROFILE: "/private-fixture",
-      PATH: "/bin", TOMCAT_AGENT_ACTIVE: "1", OPENAI_API_KEY: "dummy-key",
+      PATH: "/bin", OPENAI_API_KEY: "dummy-key",
       TOMCAT__STORAGE__WORK_DIR: path.join("/private-fixture", ".tomcat"),
       TOMCAT__LLM__DEFAULT_MODEL: "gpt-5.4", HTTP_PROXY: "", https_proxy: "" });
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(env.TOMCAT__AGENT__ID).toBeUndefined();
+    expect(env.TOMCAT_AGENT_ACTIVE).toBeUndefined();
     expect({ ...parent, ...env }.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(serveFixtureEnvironment("/fixture", {})).not.toHaveProperty("TOMCAT_AGENT_ACTIVE");
+    expect(serveFixtureEnvironment("/fixture", {}).TOMCAT_AGENT_ACTIVE).toBeUndefined();
   });
 
   it("uses the same private home/cwd for initialization and runtime", async () => {

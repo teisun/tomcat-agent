@@ -562,13 +562,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     onSubmit,
   };
 
-  const updateDraft = (next: ComposerDraft) => {
+  const applyDraft = (next: ComposerDraft): boolean => {
     if (sameDraft(draftRef.current, next)) {
-      return;
+      return false;
     }
     setDraft(next);
     draftRef.current = next;
-    latestHandlersRef.current.onDraftChange(next);
+    return true;
+  };
+
+  const updateDraft = (next: ComposerDraft) => {
+    if (applyDraft(next)) {
+      latestHandlersRef.current.onDraftChange(next);
+    }
   };
 
   const mentionSuggestion = useMemo(() =>
@@ -908,7 +914,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     },
     replaceDraft(nextDraft: ComposerDraft) {
       if (!editor) {
-        updateDraft(nextDraft);
+        applyDraft(nextDraft);
         return;
       }
       const segments = nextDraft.segments.length
@@ -918,7 +924,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           : [];
       editor.commands.setContent(createComposerDocument(segments), { emitUpdate: false });
       editor.commands.focus("end");
-      updateDraft(serializeComposerDocument(editor.getJSON()));
+      applyDraft(serializeComposerDocument(editor.getJSON()));
     },
   }), [editor, insertReferences, mentionSuggestion]);
 

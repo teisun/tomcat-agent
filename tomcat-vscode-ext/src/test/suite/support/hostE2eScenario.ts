@@ -3190,6 +3190,20 @@ export async function assertWebviewMultiSessionFlow(
   );
   assert.ok(sessions.includes(sessionB!), "expected session B to be tracked");
 
+  // This is intentionally a real editor input, not a synthetic state frame: the regression
+  // happened between the webview's input event and host snapshots.
+  const draftB = "session B keeps its own unsent draft";
+  await setComposerInputValue(api, draftB);
+  await waitForWebviewState(
+    api,
+    (state) =>
+      state.activeSessionId === sessionB &&
+      state.sessionViews[sessionB]?.composerDraft?.text === draftB
+        ? state
+        : undefined,
+    20_000,
+  );
+
   await api.__testing.sendWebviewIntent(
     buildWebviewIntent({
       data: { sessionId: sessionA },
@@ -3206,6 +3220,50 @@ export async function assertWebviewMultiSessionFlow(
         : undefined,
     20_000,
   );
+
+  await api.__testing.sendWebviewIntent(
+    buildWebviewIntent({
+      data: { sessionId: sessionB },
+      messageId: "webview-draft-switch-back-to-b",
+      type: "switchSession",
+    }),
+  );
+  await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionB && snapshot.html.includes(draftB)
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+
+  // A new webview document must hydrate the same B draft rather than copy A's text or clear B.
+  await api.__testing.reloadWebview();
+  await waitForWebviewState(
+    api,
+    (state) =>
+      state.activeSessionId === sessionB &&
+      state.sessionViews[sessionB]?.composerDraft?.text === draftB
+        ? state
+        : undefined,
+    20_000,
+  );
+  const reloaded = await waitForWebviewDomSnapshot(
+    api,
+    (snapshot) =>
+      snapshot.activeSessionId === sessionB && snapshot.html.includes(draftB)
+        ? snapshot
+        : undefined,
+    20_000,
+  );
+  assert.ok(
+    reloaded.html.includes(draftB),
+    "expected the real webview DOM to display session B's draft after reload",
+  );
+  if (process.env.TOMCAT_E2E_SCREENSHOT === "1") {
+    await api.__testing.focusWebview();
+    await captureTranscriptVisual("draft-switch-reload");
+  }
 }
 
 export async function assertWebviewSessionSwitchRestoreFlow(
@@ -4608,6 +4666,7 @@ async function captureTranscriptVisual(
     | "collapsed"
     | "compact-control-position-and-icon"
     | "diff-double-pane"
+    | "draft-switch-reload"
     | "expanded"
     | "file-drop-reference"
     | "file-drop-reference-hover"

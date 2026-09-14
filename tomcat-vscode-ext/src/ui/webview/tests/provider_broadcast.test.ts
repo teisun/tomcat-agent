@@ -84,6 +84,26 @@ afterEach(() => {
 });
 
 describe("provider broadcast frames", () => {
+
+  it("projects the newest in-memory draft when publishing a full state frame", async () => {
+    const { postedFrames, provider } = createProvider();
+    const internals = provider as unknown as {
+      draftStore: { update(sessionId: string, mutate: (draft: { text: string }) => { text: string }): void };
+      postStateFrame(): Promise<void>;
+      stateStore: { setComposerDraft(sessionId: string, draft: { segments: []; text: string }): void };
+    };
+    internals.stateStore.setComposerDraft("s1", { segments: [], text: "old snapshot text" });
+    internals.draftStore.update("s1", (draft) => ({ ...draft, text: "newest typed text" }));
+
+    await internals.postStateFrame();
+
+    const frame = postedFrames.at(-1);
+    expect(frame).toMatchObject({
+      channel: "state",
+      content: { sessionViews: { s1: { composerDraft: { text: "newest typed text" } } } },
+    });
+    provider.dispose();
+  });
   it("emits sessionPatch frames for streaming message deltas", async () => {
     const { postedFrames, provider } = createProvider();
 

@@ -217,6 +217,12 @@ export class ComposerDraftStore {
   /** In-memory truth. The disk is a backup of this, not the other way round. */
   private readonly drafts = new Map<string, ComposerDraft>();
 
+  /** A mutation generation per session. A late disk read may only install its own generation. */
+  private readonly revisions = new Map<string, number>();
+
+  /** One cold read per session; repeated callers await the same result. */
+  private readonly hydrations = new Map<string, Promise<ComposerDraft>>();
+
   private readonly pendingWrites = new Map<string, ReturnType<typeof setTimeout>>();
 
   /** In-flight disk writes, so `flush` can await them and tests can be deterministic. */
@@ -269,6 +275,20 @@ export class ComposerDraftStore {
     await this.rootReady;
   }
 
+  private revision(sessionId: string): number {
+    return this.revisions.get(sessionId) ?? 0;
+  }
+
+  private bumpRevision(sessionId: string): number {
+    const next = this.revision(sessionId) + 1;
+    this.revisions.set(sessionId, next);
+    return next;
+  }
+
+  private currentDraft(sessionId: string): ComposerDraft {
+    return this.drafts.get(sessionId) ?? EMPTY_DRAFT;
+  }
+
   /**
    * Read a session's draft, falling back to empty for anything unreadable.
    *
@@ -282,28 +302,53 @@ export class ComposerDraftStore {
     this.assertSessionId(sessionId);
     const cached = this.drafts.get(sessionId);
     if (cached) return cached;
+    const existing = this.hydrations.get(sessionId);
+    if (existing) return existing;
 
-    if (isKnownSession && !(await isKnownSession(sessionId))) {
-      await this.discard(sessionId);
-      return EMPTY_DRAFT;
-    }
+    const startedAt = this.revision(sessionId);
+    const stillCurrent = () => this.revision(sessionId) === startedAt;
+    const loading = (async (): Promise<ComposerDraft> => {
+      if (isKnownSession && !(await isKnownSession(sessionId))) {
+        if (stillCurrent()) {
+          await this.discard(sessionId);
+        }
+        return this.currentDraft(sessionId);
+      }
 
-    const uri = this.draftUri(sessionId);
-    let raw: string;
+      const uri = this.draftUri(sessionId);
+      let raw: string;
+      try {
+        raw = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+      } catch {
+        // A missing draft is normal. A newer edit wins if it arrived while reading.
+        return this.currentDraft(sessionId);
+      }
+      if (!stillCurrent()) {
+        return this.currentDraft(sessionId);
+      }
+
+      const draft = parseDraft(raw);
+      if (!draft) {
+        // Do not move aside a file that a newer update is about to replace.
+        if (stillCurrent()) {
+          await this.quarantine(sessionId, uri, startedAt);
+        }
+        return this.currentDraft(sessionId);
+      }
+      if (!stillCurrent()) {
+        return this.currentDraft(sessionId);
+      }
+      this.drafts.set(sessionId, draft);
+      return draft;
+    })();
+    this.hydrations.set(sessionId, loading);
     try {
-      raw = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
-    } catch {
-      // No draft on disk is the overwhelmingly common case, not an error.
-      return EMPTY_DRAFT;
+      return await loading;
+    } finally {
+      if (this.hydrations.get(sessionId) === loading) {
+        this.hydrations.delete(sessionId);
+      }
     }
-
-    const draft = parseDraft(raw);
-    if (!draft) {
-      await this.quarantine(uri);
-      return EMPTY_DRAFT;
-    }
-    this.drafts.set(sessionId, draft);
-    return draft;
   }
 
   /** The current draft without touching the disk. */
@@ -319,6 +364,7 @@ export class ComposerDraftStore {
   update(sessionId: string, mutate: (current: ComposerDraft) => ComposerDraft): ComposerDraft {
     this.assertSessionId(sessionId);
     const next = mutate(this.peek(sessionId));
+    this.bumpRevision(sessionId);
     this.drafts.set(sessionId, next);
     this.scheduleWrite(sessionId);
     return next;
@@ -391,9 +437,40 @@ export class ComposerDraftStore {
       clearTimeout(pending);
       this.pendingWrites.delete(sessionId);
     }
+    this.bumpRevision(sessionId);
     this.drafts.delete(sessionId);
     await this.inFlight.get(sessionId)?.catch(() => undefined);
     await this.deleteFile(this.draftUri(sessionId));
+  }
+
+  /**
+   * Clear only if no draft mutation happened after the caller captured `expectedRevision`.
+   * This turns send acknowledgement into an identity check rather than a content comparison.
+   */
+  async discardIfRevision(sessionId: string, expectedRevision: number): Promise<boolean> {
+    this.assertSessionId(sessionId);
+    if (this.revision(sessionId) !== expectedRevision) {
+      return false;
+    }
+    const pending = this.pendingWrites.get(sessionId);
+    if (pending) {
+      clearTimeout(pending);
+      this.pendingWrites.delete(sessionId);
+    }
+    const retirementRevision = this.bumpRevision(sessionId);
+    this.drafts.delete(sessionId);
+    await this.inFlight.get(sessionId)?.catch(() => undefined);
+    if (this.revision(sessionId) !== retirementRevision) {
+      return false;
+    }
+    await this.deleteFile(this.draftUri(sessionId));
+    return true;
+  }
+
+  /** Revision of the current in-memory draft, for acknowledgement identity checks. */
+  currentRevision(sessionId: string): number {
+    this.assertSessionId(sessionId);
+    return this.revision(sessionId);
   }
 
   /**
@@ -408,6 +485,7 @@ export class ComposerDraftStore {
       clearTimeout(pending);
       this.pendingWrites.delete(sessionId);
     }
+    this.bumpRevision(sessionId);
     await this.inFlight.get(sessionId);
     try {
       await vscode.workspace.fs.delete(this.draftUri(sessionId), { useTrash: false });
@@ -431,13 +509,16 @@ export class ComposerDraftStore {
     await this.inFlight.get(sessionId);
     const previous = this.drafts.get(sessionId);
     const owned = cloneDraft(draft);
+    const revision = this.bumpRevision(sessionId);
     this.drafts.set(sessionId, owned);
     try {
       await this.writeNow(sessionId);
       return cloneDraft(owned);
     } catch (error) {
-      if (previous) this.drafts.set(sessionId, previous);
-      else this.drafts.delete(sessionId);
+      if (this.revision(sessionId) === revision) {
+        if (previous) this.drafts.set(sessionId, previous);
+        else this.drafts.delete(sessionId);
+      }
       throw error;
     }
   }
@@ -474,13 +555,16 @@ export class ComposerDraftStore {
     }
 
     const owned = cloneDraft(draft);
+    const revision = this.bumpRevision(sessionId);
     this.drafts.set(sessionId, owned);
     try {
       await this.writeNow(sessionId);
       return cloneDraft(owned);
     } catch (error) {
-      if (cached) this.drafts.set(sessionId, cached);
-      else this.drafts.delete(sessionId);
+      if (this.revision(sessionId) === revision) {
+        if (cached) this.drafts.set(sessionId, cached);
+        else this.drafts.delete(sessionId);
+      }
       throw error;
     }
   }
@@ -520,13 +604,37 @@ export class ComposerDraftStore {
    * The user gets a working composer immediately; the bad file stays on disk so the
    * failure can actually be diagnosed rather than guessed at from a log line.
    */
-  private async quarantine(uri: vscode.Uri): Promise<void> {
-    const target = uri.with({ path: `${uri.path}.corrupt` });
+  private async quarantine(
+    sessionId: string,
+    uri: vscode.Uri,
+    expectedRevision: number,
+  ): Promise<void> {
+    // Join the same per-session I/O lane as writes and deletes. A new update may arrive while
+    // the corrupt file is being moved, but its write will run afterward instead of racing this
+    // rename against a fresh file at the same path.
+    const previous = this.inFlight.get(sessionId) ?? Promise.resolve();
+    const move = previous.catch(() => undefined).then(async () => {
+      if (this.revision(sessionId) !== expectedRevision) {
+        return;
+      }
+      const target = uri.with({ path: `${uri.path}.corrupt` });
+      try {
+        await vscode.workspace.fs.rename(uri, target, { overwrite: true });
+        console.warn(`Tomcat quarantined an unreadable draft at ${target.fsPath}`);
+      } catch {
+        // A failed rename is only allowed to delete the same generation it inspected.
+        if (this.revision(sessionId) === expectedRevision) {
+          await this.deleteFile(uri);
+        }
+      }
+    });
+    this.inFlight.set(sessionId, move);
     try {
-      await vscode.workspace.fs.rename(uri, target, { overwrite: true });
-      console.warn(`Tomcat quarantined an unreadable draft at ${target.fsPath}`);
-    } catch {
-      await this.deleteFile(uri);
+      await move;
+    } finally {
+      if (this.inFlight.get(sessionId) === move) {
+        this.inFlight.delete(sessionId);
+      }
     }
   }
 }

@@ -988,6 +988,39 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     };
   }
 
+  /**
+   * State decoration may wait for plan metadata. Re-read each in-memory draft immediately
+   * before publishing so that a keystroke during that wait cannot be sent as an old frame.
+   */
+  private projectCurrentDraft(
+    sessionId: string,
+    session: WebviewStateSnapshot["sessionViews"][string],
+  ): WebviewStateSnapshot["sessionViews"][string] {
+    if (!this.draftStore.trackedSessions().includes(sessionId)) {
+      return session;
+    }
+    const draft = this.draftStore.peek(sessionId);
+    const { available, missing } = this.markMissingAttachments(draft.attachments);
+    return {
+      ...session,
+      composerDraft: { segments: draft.segments, text: draft.text },
+      pendingAttachments: [
+        ...available.map((attachment) => this.toPendingView(attachment, false)),
+        ...missing.map((attachment) => this.toPendingView(attachment, true)),
+      ],
+    };
+  }
+
+  private projectCurrentDrafts(snapshot: WebviewStateSnapshot): WebviewStateSnapshot {
+    const sessionViews = Object.fromEntries(
+      Object.entries(snapshot.sessionViews).map(([sessionId, session]) => [
+        sessionId,
+        this.projectCurrentDraft(sessionId, session),
+      ]),
+    );
+    return { ...snapshot, sessionViews };
+  }
+
   private findToolCard(
     toolCallId: string,
   ): { sessionId: string; tool: WebviewToolCard } | undefined {
@@ -1224,12 +1257,31 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     },
   ): Promise<void> {
     const userMessageId = options?.messageId ?? randomUUID();
+    const draftAtSubmit = submitKind === "prompt" ? this.draftStore.peek(sessionId) : null;
     // Steering messages join a turn already in flight and carry no attachments.
     const attachments = options?.attachments ?? (
       submitKind === "prompt"
-        ? this.draftStore.peek(sessionId).attachments
+        ? draftAtSubmit!.attachments
         : []
     );
+    const submittedDraft: ComposerDraft | null = draftAtSubmit
+      ? {
+          attachments: [...attachments],
+          segments: [...(segments ?? draftAtSubmit.segments)],
+          text,
+        }
+      : null;
+
+    let submittedRevision: number | null = null;
+    // The prompt payload is the authoritative compose snapshot. Persist it before waiting for
+    // the acknowledgement: on a failed request it remains available, and on success we can
+    // prove whether anything changed after submission. Retried history is deliberately not
+    // written over a newer compose box.
+    if (submittedDraft && !options?.retrying) {
+      this.draftStore.update(sessionId, () => submittedDraft);
+      submittedRevision = this.draftStore.currentRevision(sessionId);
+    }
+
     this.stateStore.setActiveSession(sessionId);
     if (options?.retrying) {
       this.stateStore.markLocalUserMessagePending(sessionId, userMessageId);
@@ -1273,12 +1325,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
         );
       } else {
         this.stateStore.markLocalUserMessageConfirmed(sessionId, userMessageId);
-        if (submitKind === "prompt") {
-          // The acknowledgement is the single signal that clears the draft. Clearing on
-          // optimism would lose the user's message whenever a send failed. The webview
-          // drops any attachment feedback on its own once the strip empties, so there is
-          // nothing to tell it here.
-          await this.draftStore.discard(sessionId);
+        if (
+          submitKind === "prompt"
+          && submittedRevision !== null
+          && await this.draftStore.discardIfRevision(sessionId, submittedRevision)
+        ) {
+          // The acknowledgement clears only the exact draft revision that it sent.
+          // Returning to identical text later is still a new user edit and must remain.
           this.stateStore.clearPendingAttachments(sessionId);
           await this.syncImagePreviewPanel(sessionId);
         }
@@ -2489,9 +2542,9 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
     if (!this.view || !this.isReady) {
       return;
     }
-    const snapshot = this.decorateStateSnapshot(
+    const snapshot = this.projectCurrentDrafts(this.decorateStateSnapshot(
       await this.enrichPlanCards(this.stateStore.snapshot()),
-    );
+    ));
     await this.postMessage({
       channel: "state",
       content: snapshot,
@@ -2508,12 +2561,13 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       return;
     }
     const tab = this.stateStore.snapshotSessionTab(sessionId);
+    const enriched = await this.enrichPlanSession(view);
     await this.postMessage({
       channel: "sessionView",
       content: {
         sessionId,
         tab,
-        view: await this.enrichPlanSession(view),
+        view: this.projectCurrentDraft(sessionId, enriched),
       },
       messageId: createHostFrameMessageId("session-view"),
     });

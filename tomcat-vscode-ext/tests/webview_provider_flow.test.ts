@@ -573,6 +573,139 @@ describe("webview provider integration", () => {
     provider.dispose();
   });
 
+  it("keeps a newer edit when the earlier prompt is acknowledged", async () => {
+    const response = deferred<Record<string, unknown>>();
+    const { messenger, provider } = buildProvider({
+      requestImpl: async (command) => {
+        if (command.type === "prompt") return response.promise;
+        return { success: true };
+      },
+    });
+    await provider.dispatchTestIntent({ messageId: "ready-draft-retirement", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "first prompt" },
+      messageId: "draft-before-prompt",
+      type: "syncComposerDraft",
+    });
+
+    const sending = provider.dispatchTestIntent({
+      data: { sessionId: "session-1", text: "first prompt" },
+      messageId: "prompt-before-new-edit",
+      type: "prompt",
+    });
+    await vi.waitFor(() => expect(messenger.requestCalls.some((call) => call.type === "prompt")).toBe(true));
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "newer draft" },
+      messageId: "draft-after-prompt",
+      type: "syncComposerDraft",
+    });
+    response.resolve({ success: true });
+    await sending;
+
+    expect(provider.currentState().sessionViews["session-1"]?.composerDraft).toMatchObject({
+      text: "newer draft",
+    });
+    provider.dispose();
+  });
+
+  it("keeps an edit that returns to the same text while a prompt is pending", async () => {
+    const response = deferred<Record<string, unknown>>();
+    const { messenger, provider } = buildProvider({
+      requestImpl: async (command) =>
+        command.type === "prompt" ? response.promise : { success: true },
+    });
+    await provider.dispatchTestIntent({ messageId: "ready-same-text", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "same text" },
+      messageId: "draft-before-same-text-prompt",
+      type: "syncComposerDraft",
+    });
+    const sending = provider.dispatchTestIntent({
+      data: { sessionId: "session-1", text: "same text" },
+      messageId: "same-text-prompt",
+      type: "prompt",
+    });
+    await vi.waitFor(() => expect(messenger.requestCalls.some((call) => call.type === "prompt")).toBe(true));
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "temporary text" },
+      messageId: "draft-temporary-text",
+      type: "syncComposerDraft",
+    });
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "same text" },
+      messageId: "draft-returned-to-same-text",
+      type: "syncComposerDraft",
+    });
+    response.resolve({ success: true });
+    await sending;
+
+    expect(provider.currentState().sessionViews["session-1"]?.composerDraft).toMatchObject({
+      text: "same text",
+    });
+    provider.dispose();
+  });
+
+  it("does not clear a newer composer draft after a successful history retry", async () => {
+    const response = deferred<Record<string, unknown>>();
+    const { messenger, provider } = buildProvider({
+      requestImpl: async (command) =>
+        command.type === "prompt" ? response.promise : { success: true },
+    });
+    await provider.dispatchTestIntent({ messageId: "ready-retry-preserves-draft", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "new draft beside retry" },
+      messageId: "draft-beside-retry",
+      type: "syncComposerDraft",
+    });
+    const internals = provider as unknown as {
+      sendUserMessage(
+        sessionId: string,
+        kind: "prompt",
+        text: string,
+        segments: [],
+        options: { attachments: []; messageId: string; retrying: true },
+      ): Promise<void>;
+    };
+    const retrying = internals.sendUserMessage(
+      "session-1",
+      "prompt",
+      "old failed prompt",
+      [],
+      { attachments: [], messageId: "retrying-user-message", retrying: true },
+    );
+    await vi.waitFor(() => expect(messenger.requestCalls.some((call) => call.type === "prompt")).toBe(true));
+    response.resolve({ success: true });
+    await retrying;
+
+    expect(provider.currentState().sessionViews["session-1"]?.composerDraft).toMatchObject({
+      text: "new draft beside retry",
+    });
+    provider.dispose();
+  });
+
+  it("keeps the submitted draft after a failed prompt", async () => {
+    const { provider } = buildProvider({
+      requestImpl: async (command) =>
+        command.type === "prompt" ? { error: "offline", success: false } : { success: true },
+    });
+    await provider.dispatchTestIntent({ messageId: "ready-failed-draft", type: "ready" });
+    await provider.dispatchTestIntent({
+      data: { segments: [], sessionId: "session-1", text: "retry this" },
+      messageId: "draft-before-failure",
+      type: "syncComposerDraft",
+    });
+    await provider.dispatchTestIntent({
+      data: { sessionId: "session-1", text: "retry this" },
+      messageId: "failed-prompt",
+      type: "prompt",
+    });
+
+    expect(provider.currentState().sessionViews["session-1"]?.composerDraft).toMatchObject({
+      text: "retry this",
+    });
+    provider.dispose();
+  });
+
   it("routes mixed picker selections into attachments and references", async () => {
     const { provider } = buildProvider();
     __testing.registerFile("/workspace/diagram.png", "png-bytes");

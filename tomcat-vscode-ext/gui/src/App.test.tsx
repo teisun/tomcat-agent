@@ -3252,6 +3252,128 @@ describe("Tomcat webview App", () => {
     expect(screen.getByLabelText("src/folder/")).toBeTruthy();
   });
 
+  it("keeps independent composer drafts while switching A to B and back", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    await emitState({
+      channel: "state",
+      content: snapshot,
+      messageId: "state-independent-drafts-s1",
+    });
+
+    const selectSession = async (sessionId: "s1" | "s2") => {
+      fireEvent.click(screen.getByTestId("session-select"));
+      fireEvent.click(
+        screen.getAllByTestId("session-option").find(
+          (option) => option.textContent?.includes(sessionId),
+        ) ?? screen.getAllByTestId("session-option")[0],
+      );
+      await emitState({
+        channel: "state",
+        content: approvalDraftSnapshot(sessionId),
+        messageId: `state-independent-drafts-${sessionId}-${postMessage.mock.calls.length}`,
+      });
+    };
+
+    fireEvent.paste(screen.getByTestId("composer-input"), {
+      clipboardData: { getData: () => "draft from A" },
+    });
+    await selectSession("s2");
+    expect(screen.getByTestId("composer-input").textContent?.trim()).toBe("");
+
+    fireEvent.paste(screen.getByTestId("composer-input"), {
+      clipboardData: { getData: () => "draft from B" },
+    });
+    await selectSession("s1");
+    expect(screen.getByTestId("composer-input").textContent).toContain("draft from A");
+
+    await selectSession("s2");
+    expect(screen.getByTestId("composer-input").textContent).toContain("draft from B");
+    expect(postMessage.mock.calls.map(([message]) => message)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          data: expect.objectContaining({ sessionId: "s1", text: "draft from A" }),
+          type: "syncComposerDraft",
+        }),
+        expect.objectContaining({
+          data: expect.objectContaining({ sessionId: "s2", text: "draft from B" }),
+          type: "syncComposerDraft",
+        }),
+      ]),
+    );
+  });
+
+  it("does not resurrect A's sent draft when confirmation arrives while B is active", async () => {
+    const { postMessage } = mount();
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "state-send-in-a",
+    });
+    fireEvent.paste(screen.getByTestId("composer-input"), {
+      clipboardData: { getData: () => "sent from A" },
+    });
+    fireEvent.click(screen.getByTestId("send-button"));
+    const userMessageId = postMessage.mock.calls.find(([message]) => message.type === "prompt")?.[0]
+      ?.data?.userMessageId;
+    expect(typeof userMessageId).toBe("string");
+
+    const confirmedWhileBActive = approvalDraftSnapshot("s2");
+    confirmedWhileBActive.sessionViews.s1.timeline = [{
+      id: userMessageId,
+      kind: "user",
+      text: "sent from A",
+      type: "message",
+    }];
+    await emitState({
+      channel: "state",
+      content: confirmedWhileBActive,
+      messageId: "state-confirm-a-while-b-active",
+    });
+
+    const backToA = approvalDraftSnapshot("s1");
+    backToA.sessionViews.s1.timeline = confirmedWhileBActive.sessionViews.s1.timeline;
+    await emitState({
+      channel: "state",
+      content: backToA,
+      messageId: "state-return-to-a-after-confirmation",
+    });
+    expect(screen.getByTestId("composer-input").textContent?.trim()).toBe("");
+  });
+
+  it("keeps a post-submit edit that returns to the same visible text", async () => {
+    const { postMessage } = mount();
+    await emitState({
+      channel: "state",
+      content: approvalDraftSnapshot("s1"),
+      messageId: "state-same-text-submit",
+    });
+    const textbox = screen.getByTestId("composer-input");
+    fireEvent.paste(textbox, { clipboardData: { getData: () => "same visible text" } });
+    fireEvent.click(screen.getByTestId("send-button"));
+    const userMessageId = postMessage.mock.calls.find(([message]) => message.type === "prompt")?.[0]
+      ?.data?.userMessageId;
+    fireEvent.paste(textbox, { clipboardData: { getData: () => " changed" } });
+    fireEvent.keyDown(textbox, { ctrlKey: true, key: "z" });
+    fireEvent.paste(textbox, { clipboardData: { getData: () => "same visible text" } });
+    expect(textbox.textContent).toContain("same visible text");
+
+    const confirmed = approvalDraftSnapshot("s1");
+    confirmed.sessionViews.s1.timeline = [{
+      id: userMessageId,
+      kind: "user",
+      text: "same visible text",
+      type: "message",
+    }];
+    await emitState({
+      channel: "state",
+      content: confirmed,
+      messageId: "state-same-text-submit-confirmed",
+    });
+
+    expect(screen.getByTestId("composer-input").textContent).toContain("same visible text");
+  });
+
   it("hydrates every reference from one durable draft snapshot", async () => {
     mount();
     const state = approvalDraftSnapshot("s1");
@@ -3306,6 +3428,29 @@ describe("Tomcat webview App", () => {
 
     expect(screen.getAllByTestId("composer-reference-chip")).toHaveLength(2);
     expect(screen.getByLabelText("src/folder/")).toBeTruthy();
+  });
+
+  it("does not restore a reference the user removed when an old snapshot repeats", async () => {
+    mount();
+    const state = approvalDraftSnapshot("s1");
+    state.sessionViews.s1.composerDraft = {
+      segments: [{ kind: "file", label: "app.ts", path: "src/app.ts", type: "reference" }],
+      text: "app.ts ",
+    };
+    await emitState({
+      channel: "state",
+      content: state,
+      messageId: "state-reference-before-delete",
+    });
+    fireEvent.click(screen.getByTestId("composer-reference-chip-remove"));
+    expect(screen.queryByTestId("composer-reference-chip")).toBeNull();
+
+    await emitState({
+      channel: "state",
+      content: state,
+      messageId: "state-reference-old-repeat",
+    });
+    expect(screen.queryByTestId("composer-reference-chip")).toBeNull();
   });
 
   it("keeps composer content until a sent prompt is confirmed, then clears it", async () => {

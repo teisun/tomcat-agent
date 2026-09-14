@@ -421,6 +421,23 @@ describe("Composer", () => {
     expect(onInterrupt).not.toHaveBeenCalled();
   });
 
+  it("hydrates a draft without treating it as a user edit", async () => {
+    const { onDraftChange, ref } = renderComposer();
+    onDraftChange.mockClear();
+
+    await act(async () => {
+      ref.current?.replaceDraft({
+        hasContent: true,
+        segments: [{ text: "restored B draft", type: "text" }],
+        text: "restored B draft",
+      });
+    });
+
+    expect(ref.current?.getDraft().text).toBe("restored B draft");
+    expect(screen.getByTestId("composer-input").textContent).toContain("restored B draft");
+    expect(onDraftChange).not.toHaveBeenCalled();
+  });
+
   it("inserts references as inline chips and deduplicates them", async () => {
     const { onDraftChange, ref } = renderComposer();
 

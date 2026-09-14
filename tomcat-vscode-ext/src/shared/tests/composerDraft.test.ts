@@ -182,6 +182,91 @@ describe("ComposerDraftStore hydration", () => {
     expect(draft.attachments[0]?.sourcePath).toBeNull();
   });
 
+  it("keeps a newer edit when an older disk read finishes later", async () => {
+    const store = newStore(400);
+    let finishRead: ((value: Uint8Array) => void) | undefined;
+    const delayedRead = new Promise<Uint8Array>((resolve) => {
+      finishRead = resolve;
+    });
+    vi.spyOn(vscode.workspace.fs, "readFile").mockImplementationOnce(
+      async () => delayedRead,
+    );
+
+    const loading = store.hydrate(SESSION);
+    store.update(SESSION, (draft) => ({ ...draft, text: "newer text" }));
+    finishRead?.(new TextEncoder().encode(JSON.stringify({
+      attachments: [],
+      schemaVersion: 2,
+      segments: [],
+      text: "older text",
+    })));
+
+    expect((await loading).text).toBe("newer text");
+    expect(store.peek(SESSION).text).toBe("newer text");
+  });
+
+  it("shares concurrent cold reads for the same session", async () => {
+    __testing.registerFile(
+      draftPath(),
+      JSON.stringify({ schemaVersion: 2, segments: [], text: "one disk read" }),
+    );
+    const readFile = vi.spyOn(vscode.workspace.fs, "readFile");
+    const store = newStore();
+
+    const [first, second] = await Promise.all([store.hydrate(SESSION), store.hydrate(SESSION)]);
+
+    expect(first.text).toBe("one disk read");
+    expect(second.text).toBe("one disk read");
+    expect(readFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an explicit clear when an older cold read completes afterward", async () => {
+    const store = newStore();
+    let finishRead: ((value: Uint8Array) => void) | undefined;
+    const delayedRead = new Promise<Uint8Array>((resolve) => {
+      finishRead = resolve;
+    });
+    vi.spyOn(vscode.workspace.fs, "readFile").mockImplementationOnce(async () => delayedRead);
+
+    const loading = store.hydrate(SESSION);
+    await store.discard(SESSION);
+    finishRead?.(new TextEncoder().encode(JSON.stringify({
+      schemaVersion: 2,
+      segments: [],
+      text: "discarded old text",
+    })));
+
+    expect(await loading).toEqual(EMPTY_DRAFT);
+    expect(store.peek(SESSION)).toEqual(EMPTY_DRAFT);
+  });
+
+  it("writes a newer edit after a corrupt draft is isolated", async () => {
+    __testing.registerFile(draftPath(), "{ broken json");
+    const store = newStore(0);
+    const originalRename = vscode.workspace.fs.rename.bind(vscode.workspace.fs);
+    let releaseRename: (() => void) | undefined;
+    const pausedRename = new Promise<void>((resolve) => {
+      releaseRename = resolve;
+    });
+    const rename = vi.spyOn(vscode.workspace.fs, "rename").mockImplementationOnce(async (from, to, options) => {
+      await pausedRename;
+      await originalRename(from, to, options);
+    });
+
+    const loading = store.hydrate(SESSION);
+    for (let index = 0; index < 4; index += 1) {
+      await Promise.resolve();
+    }
+    expect(rename).toHaveBeenCalledTimes(1);
+    store.update(SESSION, (draft) => ({ ...draft, text: "new after corrupt read" }));
+    releaseRename?.();
+    await loading;
+    await vi.runAllTimersAsync();
+    await store.flush();
+
+    expect(__testing.readFile(draftPath())).toContain("new after corrupt read");
+  });
+
   it("quarantines an unreadable draft and still hands back a usable composer", async () => {
     __testing.registerFile(draftPath(), "{ this is not json");
 
@@ -284,6 +369,18 @@ describe("ComposerDraftStore lifecycle", () => {
     expect(__testing.readFile(draftPath())).toBeUndefined();
     expect(__testing.readFile(draftPath("sid_other"))).toContain("still typing");
     expect(store.peek(SESSION)).toEqual(EMPTY_DRAFT);
+  });
+
+  it("does not clear a later edit that returns to the submitted text", async () => {
+    const store = newStore(0);
+    store.update(SESSION, (draft) => ({ ...draft, text: "same words" }));
+    const submittedRevision = store.currentRevision(SESSION);
+
+    store.update(SESSION, (draft) => ({ ...draft, text: "temporary edit" }));
+    store.update(SESSION, (draft) => ({ ...draft, text: "same words" }));
+
+    expect(await store.discardIfRevision(SESSION, submittedRevision)).toBe(false);
+    expect(store.peek(SESSION).text).toBe("same words");
   });
 
   it("cancels a scheduled write when the draft is discarded first", async () => {

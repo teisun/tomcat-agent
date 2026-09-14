@@ -107,6 +107,26 @@ describe("stateReconcile", () => {
     expect(reconciled.connectionStatus).toBe("degraded");
   });
 
+  it("keeps a session draft change when everything else is unchanged", () => {
+    const previous = snapshot();
+    const next = snapshot();
+    next.sessionViews.s2.composerDraft = {
+      segments: [{ text: "B draft", type: "text" }],
+      text: "B draft",
+    };
+
+    const full = reconcileStateSnapshot(previous, next);
+    const single = mergeSessionViewSnapshot(previous, {
+      sessionId: "s2",
+      view: next.sessionViews.s2,
+    });
+
+    expect(full.sessionViews.s2).not.toBe(previous.sessionViews.s2);
+    expect(full.sessionViews.s2.composerDraft?.text).toBe("B draft");
+    expect(single.sessionViews.s2).not.toBe(previous.sessionViews.s2);
+    expect(single.sessionViews.s2.composerDraft?.text).toBe("B draft");
+  });
+
   it("reuses unchanged timeline entries and untouched sessions", () => {
     const previous = snapshot();
     const next = snapshot();

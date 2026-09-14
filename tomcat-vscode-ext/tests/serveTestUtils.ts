@@ -127,7 +127,10 @@ export function warmTomcatBinaryForSuite(timeoutMs = 120_000): void {
 
 export function serveFixtureEnvironment(homePath: string, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...inherited };
-  // Remove user config/model/credential overrides, never the active-agent guard.
+  // The fixture owns a disposable HOME and storage directory, so child `tomcat init`
+  // commands cannot touch the agent session. Override the inherited nested-agent
+  // guard for that private subprocess or the real-serve test cannot initialize.
+  env.TOMCAT_AGENT_ACTIVE = undefined;
   for (const key of Object.keys(env)) {
     if (key.startsWith("TOMCAT__") || /_API_KEY$/i.test(key)) env[key] = undefined;
   }

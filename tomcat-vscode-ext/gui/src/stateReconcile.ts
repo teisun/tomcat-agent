@@ -130,6 +130,7 @@ export function reconcileSessionSnapshot(
       (entry: WebviewPendingAttachment) => entry.id,
     ) ?? nextPendingAttachments;
   const activePlan = reconcileValue(previous?.activePlan, next.activePlan);
+  const composerDraft = reconcileValue(previous?.composerDraft, next.composerDraft);
   if (
     previous &&
     previous.busy === next.busy &&
@@ -146,13 +147,15 @@ export function reconcileSessionSnapshot(
     previous.planTodos === planTodos &&
     previous.sessionTodos === sessionTodos &&
     previous.pendingAttachments === pendingAttachments &&
-    previous.activePlan === activePlan
+    previous.activePlan === activePlan &&
+    previous.composerDraft === composerDraft
   ) {
     return previous;
   }
   return {
     ...next,
     checkpoints,
+    composerDraft,
     pendingAttachments,
     activePlan,
     planTodos,

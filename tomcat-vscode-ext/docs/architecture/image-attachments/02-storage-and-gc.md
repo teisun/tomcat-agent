@@ -131,7 +131,39 @@
 
 **为什么必须等 ack 才清**：乐观清理的话，一次失败的发送会把用户正要发的内容弄丢。代价是「ack 之后、清理之前」崩溃会让已发送的文字留在输入框里 —— 轻微烦人、一眼可辨、零数据损失。这个取舍的完整论证见 [`01` §3.4](01-placement-decision.md#34-新的失败模式以及为什么它更好)。
 
-### 2.5 升级影响（一次性）
+### 2.5 切换、重载与发送的保留规则
+
+一份草稿只属于一个 `sessionId`。会话 A 和 B 的输入、引用和附件互不覆盖；切换会话只换屏幕上显示的草稿，不算一次编辑，也不会清空另一份。
+
+```text
+  用户在 A 输入 ──→ 保存 A 的最新值
+  切到 B        ──→ 只显示 B 的最新值
+  再切回 A      ──→ 只显示 A 的最新值
+
+  旧磁盘读取 / 旧 state 帧晚到  ──→ 不得覆盖较新的内存输入
+  发送失败                       ──→ 保留原草稿
+  发送成功                       ──→ 只清除“这次发送的那一次编辑”
+  发送期间又输入                 ──→ 保留后来输入（即使又改回相同文字）
+```
+
+实现上，每个会话有自己的防抖队列和“最新值”。冷读会检查它开始读取后是否已有新修改；完整状态帧在真正发送给 webview 前会再读取一次内存草稿。这样“迟到”的读取或界面刷新只会失效，不能倒写用户输入。
+
+**回归测试入口**：
+
+```bash
+# 草稿文件的迟到读取、清空和并发读取
+npm exec -- vitest run src/shared/tests/composerDraft.test.ts --maxWorkers 1
+
+# host 的完整状态帧和发送期间的新编辑
+npm exec -- vitest run src/ui/webview/tests/provider_broadcast.test.ts \
+  tests/webview_provider_flow.test.ts --maxWorkers 1
+
+# 真实 VS Code：A/B 各自输入、来回切换、重载后检查 DOM 和状态
+TOMCAT_E2E_GREP='keeps multiple Tomcat webview sessions isolated' \
+  npm run test:e2e:webview-devhost
+```
+
+### 2.6 升级影响（一次性）
 
 旧版本把草稿存在后端 `sessions_dir/drafts/<sessionId>.json`。**这些草稿不做迁移，直接丢弃** —— `SessionManager::discard_legacy_draft_dir()` 在 serve 启动时删掉整个旧目录。
 
