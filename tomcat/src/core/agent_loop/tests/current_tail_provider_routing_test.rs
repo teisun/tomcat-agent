@@ -44,16 +44,15 @@ async fn collapse_summary_uses_compaction_provider_cross_provider() {
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
 
-    let system = ChatMessage::system("sys");
     let mut user = ChatMessage::user("u".repeat(4_000));
     user.msg_id = Some("u1".to_string());
     let mut assistant = ChatMessage::assistant("a".repeat(4_000));
     assistant.msg_id = Some("a1".to_string());
     let tail_chars = user.text_content().unwrap().len() + assistant.text_content().unwrap().len();
-    let mut messages = vec![system, user, assistant];
+    let mut messages = vec![user, assistant];
 
     agent.set_context_state(Some(ContextState {
         messages: vec![],
@@ -80,6 +79,6 @@ async fn collapse_summary_uses_compaction_provider_cross_provider() {
     assert_eq!(compaction_calls.len(), 1);
     assert_eq!(compaction_calls[0].provider, "deepseek");
     assert_eq!(compaction_calls[0].model, "compaction-x");
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
 }

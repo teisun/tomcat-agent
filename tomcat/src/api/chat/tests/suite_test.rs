@@ -190,17 +190,16 @@ fn rebuild_turn_messages_uses_context_state_and_keeps_current_input_at_tail() {
     let mut current_input = crate::ChatMessage::user("current user input");
     current_input.msg_id = Some("current-input-id".to_string());
 
-    let rebuilt = rebuild_turn_messages("system prompt", &state, &[(current_input.clone(), false)]);
+    let rebuilt = rebuild_turn_messages(&state, &[(current_input.clone(), false)]);
 
-    assert_eq!(rebuilt.len(), 4);
-    assert_eq!(rebuilt[0].role, crate::core::llm::ChatMessageRole::System);
+    assert_eq!(rebuilt.len(), 3);
     assert_eq!(
-        rebuilt[1].text_content(),
+        rebuilt[0].text_content(),
         Some("summary replaces old history"),
-        "the summary must immediately follow the system prompt"
+        "the rebuilt working list must begin with compacted history"
     );
     assert_eq!(
-        rebuilt[2].text_content(),
+        rebuilt[1].text_content(),
         Some("[Previous tool result replaced to save context space]"),
         "the rebuild must use the L0-rewritten context, not stale source text"
     );

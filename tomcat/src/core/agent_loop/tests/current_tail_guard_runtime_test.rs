@@ -78,7 +78,6 @@ async fn mid_turn_guard_reduced_tail_is_recomputed_after_reload() {
     mgr.create_session(key, None).unwrap();
     let transcript = mgr.current_transcript_path().unwrap().unwrap();
 
-    let system = ChatMessage::system("sys");
     let mut user = ChatMessage::user("read everything");
     user.msg_id = Some("u1".to_string());
     let mut assistant = assistant_with_tool_calls(&[
@@ -102,9 +101,9 @@ async fn mid_turn_guard_reduced_tail_is_recomputed_after_reload() {
         append_transcript_message(&transcript, tool);
     }
 
-    let mut messages = vec![system, user, assistant];
+    let mut messages = vec![user, assistant];
     messages.append(&mut tools);
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     let config = ContextConfig {
         current_tail_compactable_min_chars: 1,
@@ -128,8 +127,8 @@ async fn mid_turn_guard_reduced_tail_is_recomputed_after_reload() {
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -255,8 +254,7 @@ async fn resume_without_marker_reduces_before_first_request() {
     let mut state = init_context_state(&mgr, &config, "sys").unwrap();
     state.context_budget_chars = 4_000;
     state.context_budget_tokens = 1_000;
-    let mut messages = vec![ChatMessage::system("sys")];
-    messages.extend(state.messages.clone());
+    let mut messages = state.messages.clone();
     let mut agent = AgentLoop::new(
         test_binding(
             Arc::new(ChatOnlyMockLlm {
@@ -274,15 +272,15 @@ async fn resume_without_marker_reduces_before_first_request() {
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(state));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
         .await
         .unwrap();
 
-    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
     assert!(
         !agent.context_state.as_ref().unwrap().is_over_budget(),
         "the raw transcript must be reduced before its first resumed request"
@@ -332,7 +330,6 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
     let plan_runtime = PlanRuntime::new("sess-plan-exec");
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
-    let system = ChatMessage::system("sys");
     let mut user = ChatMessage::user("u".repeat(4_000));
     user.msg_id = Some("u1".to_string());
     let mut assistant = ChatMessage::assistant("a".repeat(4_000));
@@ -340,8 +337,8 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
     append_transcript_message(&transcript, &user);
     append_transcript_message(&transcript, &assistant);
 
-    let mut messages = vec![system, user, assistant];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut messages = vec![user, assistant];
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     let mut agent = AgentLoop::new(
         test_binding(
@@ -359,8 +356,8 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -384,7 +381,7 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
         .await
         .unwrap();
 
-    let summary = &messages[1];
+    let summary = &messages[0];
     let text = summary.text_content().unwrap_or("");
     assert_eq!(summary.kind, MessageKind::CompactionSummary);
     assert!(text.starts_with("<control_state>"));
@@ -425,11 +422,10 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
     let plan_runtime = PlanRuntime::new("sess-plan-pending");
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("u".repeat(4_000));
     let assistant = ChatMessage::assistant("a".repeat(4_000));
-    let mut messages = vec![system, user, assistant];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut messages = vec![user, assistant];
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     let mut agent = AgentLoop::new(
         test_binding(
@@ -447,8 +443,8 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -468,7 +464,7 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
         .await
         .unwrap();
 
-    let text = messages[1].text_content().unwrap_or("");
+    let text = messages[0].text_content().unwrap_or("");
     assert!(text.contains("mode: chat"));
     assert!(text.contains("plan_file_state: pending"));
     assert!(text.contains("first pending"));
@@ -478,11 +474,10 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
 
 #[tokio::test]
 async fn collapse_to_branch_summary_omits_control_snapshot_for_child_agents_without_plan_runtime() {
-    let system = ChatMessage::system("sys");
     let user = ChatMessage::user("u".repeat(4_000));
     let assistant = ChatMessage::assistant("a".repeat(4_000));
-    let mut messages = vec![system, user, assistant];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut messages = vec![user, assistant];
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     let mut agent = AgentLoop::new(
         test_binding(
@@ -501,8 +496,8 @@ async fn collapse_to_branch_summary_omits_control_snapshot_for_child_agents_with
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -522,8 +517,8 @@ async fn collapse_to_branch_summary_omits_control_snapshot_for_child_agents_with
         .await
         .unwrap();
 
-    let text = messages[1].text_content().unwrap_or("");
-    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    let text = messages[0].text_content().unwrap_or("");
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
     assert!(
         !text.starts_with("<control_state>"),
         "child agent should not inherit parent plan snapshot: {text}"

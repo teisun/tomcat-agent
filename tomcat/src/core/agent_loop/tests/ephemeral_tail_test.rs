@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
-use crate::core::agent_loop::reasoning_loop::{cache_key_for, with_ephemeral_tail};
+use crate::core::agent_loop::reasoning_loop::{assemble_request_messages, cache_key_for};
 use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, EphemeralTailProvider, SubagentType};
 use crate::core::llm::{ChatMessage, ChatRequest, MessageKind};
 use crate::infra::DefaultEventBus;
@@ -36,19 +36,21 @@ fn agent(config: AgentLoopConfig) -> AgentLoop {
 }
 
 #[test]
-fn ephemeral_tail_is_request_only_and_not_a_persisted_message() {
-    let persistent = vec![ChatMessage::system("stable"), ChatMessage::user("question")];
+fn system_prompt_only_appears_at_request_assembly() {
+    let persistent = vec![ChatMessage::user("question")];
     let loop_ = agent(AgentLoopConfig {
+        system_prompt: Some("stable".to_string()),
         ephemeral_tail_provider: Some(Arc::new(StaticTail(
             "<system_reminder>runtime state</system_reminder>",
         ))),
         ..Default::default()
     });
 
-    let outgoing = with_ephemeral_tail(&persistent, &loop_);
+    let outgoing = assemble_request_messages(&persistent, &loop_);
 
-    assert_eq!(persistent.len(), 2, "source history must stay unchanged");
+    assert_eq!(persistent.len(), 1, "source history must stay unchanged");
     assert_eq!(outgoing.len(), 3);
+    assert_eq!(outgoing[0].text_content(), Some("stable"));
     assert_eq!(
         outgoing.last().map(|message| message.kind),
         Some(MessageKind::EphemeralTail)
@@ -66,6 +68,7 @@ fn mutable_ephemeral_tail_does_not_rewrite_existing_history() {
     ));
     let loop_ = agent(AgentLoopConfig {
         session_id: "cache-prefix-session".to_string(),
+        system_prompt: Some("stable system".to_string()),
         tool_definitions: vec![serde_json::json!({
             "type": "function",
             "function": {
@@ -77,11 +80,8 @@ fn mutable_ephemeral_tail_does_not_rewrite_existing_history() {
         ephemeral_tail_provider: Some(Arc::new(MutableTail(Arc::clone(&tail)))),
         ..Default::default()
     });
-    let first_history = vec![
-        ChatMessage::system("stable system"),
-        ChatMessage::user("first"),
-    ];
-    let first_messages = with_ephemeral_tail(&first_history, &loop_);
+    let first_history = vec![ChatMessage::user("first")];
+    let first_messages = assemble_request_messages(&first_history, &loop_);
     let first_request = ChatRequest {
         messages: first_messages,
         model: "gpt-5.4".to_string(),
@@ -94,7 +94,7 @@ fn mutable_ephemeral_tail_does_not_rewrite_existing_history() {
     second_history.push(ChatMessage::assistant("first response"));
     second_history.push(ChatMessage::user("second"));
     *tail.lock() = "<system_reminder>permissions: granted</system_reminder>".to_string();
-    let second_messages = with_ephemeral_tail(&second_history, &loop_);
+    let second_messages = assemble_request_messages(&second_history, &loop_);
     let second_request = ChatRequest {
         messages: second_messages,
         model: "gpt-5.4".to_string(),
@@ -120,7 +120,7 @@ fn mutable_ephemeral_tail_does_not_rewrite_existing_history() {
     assert_eq!(
         first_request.messages[0].text_content(),
         second_request.messages[0].text_content(),
-        "the system message belongs to the stable prefix"
+        "the assembled system message belongs to the stable prefix"
     );
     assert_ne!(
         second_request
@@ -162,20 +162,22 @@ fn cache_key_is_scoped_by_session_and_request_family() {
 fn subagent_request_uses_its_own_cache_key_family_and_own_tail() {
     let parent = agent(AgentLoopConfig {
         session_id: "session-1".to_string(),
+        system_prompt: Some("parent system".to_string()),
         subagent_type: SubagentType::User,
         ephemeral_tail_provider: Some(Arc::new(StaticTail("parent runtime facts"))),
         ..Default::default()
     });
     let subagent = agent(AgentLoopConfig {
         session_id: "session-1".to_string(),
+        system_prompt: Some("subagent system".to_string()),
         subagent_type: SubagentType::Verifier,
         ephemeral_tail_provider: Some(Arc::new(StaticTail("verifier runtime facts"))),
         ..Default::default()
     });
-    let history = vec![ChatMessage::system("stable"), ChatMessage::user("question")];
+    let history = vec![ChatMessage::user("question")];
 
-    let parent_request = with_ephemeral_tail(&history, &parent);
-    let subagent_request = with_ephemeral_tail(&history, &subagent);
+    let parent_request = assemble_request_messages(&history, &parent);
+    let subagent_request = assemble_request_messages(&history, &subagent);
 
     assert_eq!(
         parent_request.last().and_then(ChatMessage::text_content),
@@ -191,6 +193,7 @@ fn subagent_request_uses_its_own_cache_key_family_and_own_tail() {
 #[test]
 fn ephemeral_tail_survives_collapse() {
     let loop_ = agent(AgentLoopConfig {
+        system_prompt: Some("stable system".to_string()),
         ephemeral_tail_provider: Some(Arc::new(StaticTail(
             "<system_reminder>current permissions</system_reminder>",
         ))),
@@ -198,15 +201,11 @@ fn ephemeral_tail_survives_collapse() {
     });
     let mut summary = ChatMessage::user("compacted history");
     summary.kind = MessageKind::CompactionSummary;
-    let collapsed_history = vec![
-        ChatMessage::system("stable system"),
-        summary,
-        ChatMessage::user("new question"),
-    ];
+    let collapsed_history = vec![summary, ChatMessage::user("new question")];
 
-    let request = with_ephemeral_tail(&collapsed_history, &loop_);
+    let request = assemble_request_messages(&collapsed_history, &loop_);
 
-    assert_eq!(request.len(), collapsed_history.len() + 1);
+    assert_eq!(request.len(), collapsed_history.len() + 2);
     assert_eq!(request[1].kind, MessageKind::CompactionSummary);
     assert_eq!(
         request.last().and_then(ChatMessage::text_content),

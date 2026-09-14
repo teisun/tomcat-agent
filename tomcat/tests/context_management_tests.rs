@@ -732,6 +732,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     let config = AgentLoopConfig {
         session_id: "sess-ctx-overflow".to_string(),
         max_attempts: 3,
+        system_prompt: Some("system prompt".to_string()),
         retry_base_delay_ms: 0,
         context_config: ContextConfig {
             keep_recent_turns: 1,
@@ -791,8 +792,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         session_obs: Default::default(),
         live: Default::default(),
     };
-    let mut messages = vec![ChatMessage::system(system_text)];
-    messages.extend(build_context_from_state(&ctx_state));
+    let mut messages = build_context_from_state(&ctx_state);
     messages.push(current_user);
     agent.set_context_state(Some(ctx_state));
 
@@ -1384,6 +1384,7 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
     let config = AgentLoopConfig {
         session_id: "sess-user-msg".to_string(),
         max_attempts: 1,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
@@ -1396,7 +1397,7 @@ async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::er
         abort,
     );
 
-    let messages = vec![ChatMessage::system("system"), ChatMessage::user("hello")];
+    let messages = vec![ChatMessage::user("hello")];
 
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run(messages))
         .await
@@ -1447,6 +1448,7 @@ async fn test_agent_loop_message_append_sink_persists_assistant_immediately(
     let config = AgentLoopConfig {
         session_id: "sess-append-sink".to_string(),
         max_attempts: 1,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         message_append_sink: Some(sink),
         ..Default::default()
@@ -1460,7 +1462,7 @@ async fn test_agent_loop_message_append_sink_persists_assistant_immediately(
         abort,
     );
 
-    let messages = vec![ChatMessage::system("system"), persisted_user];
+    let messages = vec![persisted_user];
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), agent.run(messages))
         .await
         .map_err(|_| "run() timeout 5s")?
@@ -1513,6 +1515,7 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
     let config = AgentLoopConfig {
         session_id: "sess-phantom".to_string(),
         max_attempts: 3,
+        system_prompt: Some(system_text.to_string()),
         retry_base_delay_ms: 0,
         context_config: ContextConfig {
             keep_recent_turns: 1,
@@ -1568,8 +1571,7 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
         session_obs: Default::default(),
         live: Default::default(),
     };
-    let mut messages = vec![ChatMessage::system(system_text)];
-    messages.extend(build_context_from_state(&ctx_state));
+    let mut messages = build_context_from_state(&ctx_state);
     messages.push(trigger_user);
     agent.set_context_state(Some(ctx_state));
 
@@ -2286,6 +2288,7 @@ async fn test_context_overflow_trim_events_have_correct_payload(
     let config = AgentLoopConfig {
         session_id: "sess-overflow-payload".to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         context_config: ContextConfig::default(),
         ..Default::default()

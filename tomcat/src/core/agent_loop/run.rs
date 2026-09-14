@@ -172,6 +172,12 @@ impl AgentLoop {
     /// `Interrupted` 与 `Completed` 共用 `AgentRunResult` 载荷，调用方走同一
     /// 持久化路径即可（T-004 / T-017）。
     pub async fn run(&mut self, initial_messages: Vec<ChatMessage>) -> AgentRunOutcome {
+        debug_assert!(
+            initial_messages
+                .iter()
+                .all(|message| message.role != ChatMessageRole::System),
+            "system prompt must be assembled only when constructing the LLM request"
+        );
         self.completion_guard_injections = 0;
         if self.cancel_token.is_cancelled() {
             // 入口兜底：token 已经被上一轮 cancel 但未重建，立即以空 partial 返回 Interrupted

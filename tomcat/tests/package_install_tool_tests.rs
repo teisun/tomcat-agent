@@ -186,6 +186,7 @@ async fn package_install_dispatcher_installs_creator_skill_and_exposes_result_ne
         AgentLoopConfig {
             session_id: "package-install-dispatcher".to_string(),
             max_attempts: 1,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             ..Default::default()
         },

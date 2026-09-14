@@ -338,8 +338,7 @@ async fn boundary_application_runs_layer0_before_final_context_metrics() {
         session_obs: Default::default(),
         live: Default::default(),
     }));
-    let mut initial_messages = vec![ChatMessage::system("sys")];
-    initial_messages.extend(history);
+    let mut initial_messages = history;
     initial_messages.push(ChatMessage::user("current input"));
 
     let outcome = loop_.run(initial_messages).await;

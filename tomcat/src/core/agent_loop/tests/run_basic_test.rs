@@ -296,6 +296,7 @@ async fn run_retries_on_429_then_succeeds() {
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
         max_attempts: 3,
+        system_prompt: None,
         session_id: "s1".to_string(),
         ..Default::default()
     };
@@ -345,6 +346,7 @@ async fn run_unattended_transport_retries_past_interactive_budget_without_manual
         AgentLoopConfig {
             // The fifth request is past the interactive budget of four.
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "unattended-transport-retry".to_string(),
             unattended_retry: true,
@@ -414,6 +416,7 @@ async fn run_unattended_billing_429_stops_without_elevated_retries() {
         event_bus,
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "unattended-billing-retry".to_string(),
             plan_runtime: Some(plan_runtime),
@@ -487,6 +490,7 @@ async fn run_unattended_transport_exhaustion_stops_at_ten_attempts() {
         event_bus,
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "unattended-transport-exhaustion".to_string(),
             plan_runtime: Some(plan_runtime),
@@ -575,6 +579,7 @@ async fn run_unattended_non_billing_429_retries_past_interactive_budget() {
         event_bus,
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "unattended-rate-limit-retry".to_string(),
             plan_runtime: Some(plan_runtime),
@@ -642,6 +647,7 @@ async fn run_retry_after_is_announced_and_used_instead_of_exponential_backoff() 
         event_bus,
         AgentLoopConfig {
             max_attempts: 2,
+            system_prompt: None,
             // A timeout below would fail if the loop ignored Retry-After and used this fallback.
             retry_base_delay_ms: 60_000,
             session_id: "retry-after-wait".to_string(),
@@ -683,6 +689,7 @@ async fn run_stops_after_one_request_when_overflow_trim_cannot_shrink_payload() 
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "overflow-no-progress".to_string(),
             ..Default::default()
@@ -729,6 +736,7 @@ async fn run_second_overflow_collapses_and_strictly_shrinks_main_requests() {
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "overflow-collapse-progress".to_string(),
             ..Default::default()
@@ -874,6 +882,7 @@ async fn run_respects_configured_max_attempts() {
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
         max_attempts: 2,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         session_id: "s1".to_string(),
         ..Default::default()
@@ -930,6 +939,7 @@ async fn run_honors_larger_configured_attempt_budget() {
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
         max_attempts: 5,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         session_id: "s1".to_string(),
         ..Default::default()
@@ -990,6 +1000,7 @@ async fn run_retries_unsupported_file_once_then_degrades_before_next_attempt() {
     }
     let config = AgentLoopConfig {
         max_attempts: 4,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         session_id: "s-unsupported-file".to_string(),
         ..Default::default()
@@ -1095,6 +1106,7 @@ async fn run_unsupported_file_exhausts_full_retry_budget_before_failing() {
     }
     let config = AgentLoopConfig {
         max_attempts: 4,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         session_id: "s-unsupported-file-fatal".to_string(),
         ..Default::default()
@@ -1130,6 +1142,7 @@ async fn run_retry_sleep_is_interruptible() {
     let event_bus = Arc::new(DefaultEventBus::new());
     let config = AgentLoopConfig {
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 5_000,
         session_id: "s1".to_string(),
         ..Default::default()
@@ -1168,6 +1181,7 @@ async fn run_persists_auto_retry_events_to_transcript_sink() {
     let sink = Arc::new(RecordingAppendSink::default());
     let config = AgentLoopConfig {
         max_attempts: 2,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         session_id: "s-retry-transcript".to_string(),
         message_append_sink: Some(sink.clone()),
@@ -1498,6 +1512,7 @@ async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
         event_bus,
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "s-reasoning-only".to_string(),
             message_append_sink: Some(sink.clone()),
@@ -1605,6 +1620,7 @@ async fn truncated_encrypted_thinking_without_visible_text_is_fatal() {
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "encrypted-thinking-truncated".to_string(),
             ..Default::default()
@@ -1633,6 +1649,7 @@ async fn hidden_reasoning_exhausts_interactive_budget_with_retry_count() {
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "hidden-reasoning-not-truncated".to_string(),
             ..Default::default()
@@ -1678,6 +1695,7 @@ async fn hidden_empty_turn_uses_unattended_ten_request_budget() {
         event_bus,
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "hidden-empty-unattended".to_string(),
             unattended_retry: true,
@@ -1726,6 +1744,7 @@ async fn responses_max_output_tokens_without_visible_text_is_fatal() {
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "responses-thinking-truncated".to_string(),
             ..Default::default()
@@ -1874,6 +1893,7 @@ async fn thinking_prefix_leak_is_retried_then_succeeds() {
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "s-thinking-prefix-leak".to_string(),
             message_append_sink: Some(sink.clone()),
@@ -1929,6 +1949,7 @@ async fn duplicated_thinking_as_body_is_retried_then_succeeds() {
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "s-duplicated-thinking".to_string(),
             message_append_sink: Some(sink.clone()),
@@ -1971,6 +1992,7 @@ async fn short_non_prefix_body_after_thinking_remains_a_valid_reply() {
         Arc::new(DefaultEventBus::new()),
         AgentLoopConfig {
             max_attempts: 4,
+            system_prompt: None,
             retry_base_delay_ms: 0,
             session_id: "s-short-final-body".to_string(),
             ..Default::default()

@@ -423,6 +423,7 @@ fn default_config(session_id: &str) -> AgentLoopConfig {
     AgentLoopConfig {
         session_id: session_id.to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0, // 集成测试中将延迟置零，避免等待
         ..Default::default()
     }
@@ -1131,6 +1132,7 @@ async fn test_agent_loop_retryable_error_retries_and_succeeds(
     let config = AgentLoopConfig {
         session_id: "sess-retry".to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
@@ -1182,6 +1184,7 @@ async fn test_agent_loop_gateway_503_retries_and_succeeds() -> Result<(), Box<dy
     let config = AgentLoopConfig {
         session_id: "sess-503-retry".to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
@@ -1241,6 +1244,7 @@ async fn test_agent_loop_retryable_503_exhaustion_emits_auto_retry_end(
     let config = AgentLoopConfig {
         session_id: "sess-503-fail".to_string(),
         max_attempts: 2,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         ..Default::default()
     };
@@ -1377,6 +1381,7 @@ async fn test_agent_loop_fatal_error_401_terminates_immediately(
     let config = AgentLoopConfig {
         session_id: "sess-fatal".to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         ..Default::default()
     };

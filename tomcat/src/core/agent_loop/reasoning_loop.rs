@@ -37,17 +37,41 @@ use super::steering_injection::inject_follow_up_messages;
 use super::types::{unix_ts_ms, AgentLoop, LoopError, ToolCallInfo};
 use super::{current_tail_guard, stream_handler, tool_dispatcher, turn_finalize, turn_summary};
 
-pub(crate) fn with_ephemeral_tail(messages: &[ChatMessage], agent: &AgentLoop) -> Vec<ChatMessage> {
-    let mut request_messages = messages.to_vec();
-    let Some(provider) = agent.config.ephemeral_tail_provider.as_ref() else {
-        return request_messages;
-    };
-    let tail = provider.render_ephemeral_tail();
-    if !tail.trim().is_empty() {
-        let mut tail = ChatMessage::user(tail);
+/// Creates the provider request without changing the persisted conversation.
+///
+/// `system_prompt` belongs to the stable request envelope, persisted messages
+/// stay in their chronological order, and the mutable ephemeral instruction is
+/// always last. Keeping these three domains separate lets compaction operate on
+/// only durable messages.
+pub(crate) fn assemble_request_messages(
+    messages: &[ChatMessage],
+    agent: &AgentLoop,
+) -> Vec<ChatMessage> {
+    let system_prompt = agent
+        .config
+        .system_prompt
+        .as_deref()
+        .filter(|prompt| !prompt.trim().is_empty());
+    let ephemeral_tail = agent
+        .config
+        .ephemeral_tail_provider
+        .as_ref()
+        .map(|provider| provider.render_ephemeral_tail())
+        .filter(|tail| !tail.trim().is_empty());
+
+    let mut request_messages = Vec::with_capacity(
+        messages.len()
+            + usize::from(system_prompt.is_some())
+            + usize::from(ephemeral_tail.is_some()),
+    );
+    if let Some(system_prompt) = system_prompt {
+        request_messages.push(ChatMessage::system(system_prompt));
+    }
+    request_messages.extend_from_slice(messages);
+    if let Some(ephemeral_tail) = ephemeral_tail {
+        let mut tail = ChatMessage::user(ephemeral_tail);
         tail.kind = MessageKind::EphemeralTail;
         request_messages.push(tail);
-        return request_messages;
     }
     request_messages
 }
@@ -127,7 +151,7 @@ pub(super) async fn run_reasoning_loop(
             timestamp: unix_ts_ms(),
         });
 
-        let request_messages = with_ephemeral_tail(messages, agent);
+        let request_messages = assemble_request_messages(messages, agent);
         let ephemeral_tail = request_messages
             .iter()
             .rev()

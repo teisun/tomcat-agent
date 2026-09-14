@@ -73,7 +73,6 @@ async fn mid_turn_guard_rewrites_tail_and_transcript() {
     let transcript = dir.path().join("session.jsonl");
     write_session_header(&transcript);
 
-    let system = ChatMessage::system("sys");
     let mut user = ChatMessage::user("read everything");
     user.msg_id = Some("u1".to_string());
     let calls: Vec<_> = (1..=5)
@@ -101,9 +100,9 @@ async fn mid_turn_guard_rewrites_tail_and_transcript() {
         append_transcript_message(&transcript, tool);
     }
 
-    let mut messages = vec![system, user, assistant];
+    let mut messages = vec![user, assistant];
     messages.append(&mut tools);
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     let config = AgentLoopConfig {
         session_id: "sess-mid-turn".to_string(),
@@ -125,8 +124,8 @@ async fn mid_turn_guard_rewrites_tail_and_transcript() {
         config,
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -233,7 +232,6 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
         },
     ]);
 
-    let system = ChatMessage::system("sys");
     let mut user = ChatMessage::user("u".repeat(4_000));
     user.msg_id = Some("u1".to_string());
     let mut tool_calls = (1..=25)
@@ -267,8 +265,8 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     append_transcript_message(&transcript, &assistant);
     let transcript_prefix_before_collapse = std::fs::read_to_string(&transcript).unwrap();
 
-    let mut messages = vec![system, user, assistant];
-    let tail_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut messages = vec![user, assistant];
+    let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     let config = AgentLoopConfig {
         session_id: "sess-collapse".to_string(),
@@ -285,8 +283,8 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
         config,
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -310,8 +308,8 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
         .await
         .unwrap();
 
-    assert_eq!(messages.len(), 2, "system + collapsed summary");
-    let summary = &messages[1];
+    assert_eq!(messages.len(), 1, "collapsed summary");
+    let summary = &messages[0];
     assert_eq!(
         summary.kind,
         crate::core::llm::MessageKind::CompactionSummary
@@ -375,7 +373,7 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
 async fn preheat_starts_at_tool_round_when_ratio_reaches_half() {
     let mut user = ChatMessage::user("u".repeat(100));
     user.msg_id = Some("u1".to_string());
-    let mut messages = vec![ChatMessage::system("sys"), user];
+    let mut messages = vec![user];
     let config = AgentLoopConfig {
         session_id: "sess-midturn-preheat".to_string(),
         ..Default::default()
@@ -392,8 +390,8 @@ async fn preheat_starts_at_tool_round_when_ratio_reaches_half() {
         config,
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: 100,
@@ -430,7 +428,7 @@ async fn midturn_preheat_anchor_in_tail_applies_and_keeps_surviving_tail_raw() {
     let raw_tail = "tail must remain raw ".repeat(4_000);
     let mut tail = tool_message("t1", "call-1", &raw_tail);
     tail.timestamp = Some("2026-09-08T00:00:00Z".to_string());
-    let mut messages = vec![ChatMessage::system("sys"), first, covered_end, tail];
+    let mut messages = vec![first, covered_end, tail];
     let mut preheat = Preheat::new();
     preheat.restore_completed(CompactionResult {
         summary_text: "preheated prefix summary".to_string(),
@@ -463,8 +461,8 @@ async fn midturn_preheat_anchor_in_tail_applies_and_keeps_surviving_tail_raw() {
         config,
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: 900,
@@ -484,18 +482,18 @@ async fn midturn_preheat_anchor_in_tail_applies_and_keeps_surviving_tail_raw() {
         .await
         .unwrap();
 
-    assert_eq!(messages.len(), 3, "system + prefix summary + raw tail");
+    assert_eq!(messages.len(), 2, "prefix summary + raw tail");
     assert_eq!(
-        messages[1].kind,
+        messages[0].kind,
         crate::core::llm::MessageKind::CompactionSummary
     );
     assert_eq!(
-        messages[2].text_content(),
+        messages[1].text_content(),
         Some(raw_tail.as_str()),
         "history_end must protect a surviving 80K tail even when no recent turns are retained"
     );
     assert_eq!(
-        agent.start_idx, 2,
+        agent.start_idx, 1,
         "the surviving tool result is still the active-tail start after the summary"
     );
     assert_eq!(
@@ -538,7 +536,7 @@ async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
     user.msg_id = Some("u1".to_string());
     let mut first_assistant = ChatMessage::assistant("a".repeat(400));
     first_assistant.msg_id = Some("a1".to_string());
-    let mut messages = vec![ChatMessage::system("sys"), user, first_assistant];
+    let mut messages = vec![user, first_assistant];
     let mut agent = AgentLoop::new(
         test_binding(
             Arc::new(ChatOnlyMockLlm {
@@ -554,8 +552,8 @@ async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: 3_400,
@@ -606,9 +604,9 @@ async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
     );
     assert_eq!(switched.load(Ordering::SeqCst), 1);
     assert_eq!(errors.load(Ordering::SeqCst), 0);
-    assert_eq!(messages.len(), 3, "system + summary + surviving later tool");
+    assert_eq!(messages.len(), 2, "summary + surviving later tool");
     assert_eq!(
-        messages[1].kind,
+        messages[0].kind,
         crate::core::llm::MessageKind::CompactionSummary
     );
     assert_eq!(
@@ -643,7 +641,6 @@ async fn midturn_summary_boundary_lands_on_round_boundary() {
     second_assistant.msg_id = Some("a2".to_string());
     let second_tool = tool_message("t2", "tc2", &"two\n".repeat(25));
     let mut messages = vec![
-        ChatMessage::system("sys"),
         user,
         first_assistant,
         first_tool,
@@ -662,7 +659,7 @@ async fn midturn_summary_boundary_lands_on_round_boundary() {
         estimated_tokens_saved: None,
         preheat_elapsed_ms: 0,
     });
-    let chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let chars: usize = messages.iter().map(estimate_msg_chars).sum();
     let mut agent = AgentLoop::new(
         test_binding(
             Arc::new(ChatOnlyMockLlm {
@@ -678,8 +675,8 @@ async fn midturn_summary_boundary_lands_on_round_boundary() {
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: chars + 800,
@@ -694,18 +691,18 @@ async fn midturn_summary_boundary_lands_on_round_boundary() {
         session_obs: Default::default(),
         live: Default::default(),
     }));
-    let tail_before = messages[4..].to_vec();
+    let tail_before = messages[3..].to_vec();
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
         .await
         .unwrap();
 
     assert_eq!(
-        messages[1].kind,
+        messages[0].kind,
         crate::core::llm::MessageKind::CompactionSummary
     );
     assert_eq!(
-        messages[2].role,
+        messages[1].role,
         crate::core::llm::ChatMessageRole::Assistant,
         "the first raw message after a preheat summary must begin the next complete tool round"
     );

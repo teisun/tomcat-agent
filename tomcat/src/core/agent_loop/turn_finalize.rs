@@ -168,22 +168,17 @@ pub(super) async fn finalize_turn_after_text_with_usage(
     let compaction_cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let mut preheat_started: Option<(usize, f64)> = None;
     if agent.context_state.is_some() {
-        let first_non_system = messages
-            .iter()
-            .position(|message| message.role != crate::core::llm::ChatMessageRole::System)
-            .unwrap_or(messages.len());
-
         // Step 1: restore ExhaustedPending → Running from the full working set, whose tail is
         // the transcript tail while this turn is being finalized.
         let restart_needed = agent.context_state.as_ref().is_some_and(|ctx_state| {
             ctx_state.usage_ratio() >= 0.50 && ctx_state.preheat.is_exhausted_pending()
         });
         if restart_needed {
-            ensure_working_message_ids(agent, &mut messages[first_non_system..])?;
+            ensure_working_message_ids(agent, messages)?;
             if let Some(ctx_state) = agent.context_state.as_mut() {
                 ctx_state.preheat.try_restart_if_pending(
                     ctx_state.usage_ratio(),
-                    &messages[first_non_system..],
+                    messages,
                     &ctx_state.transcript_path,
                     compaction_cache_key.clone(),
                     Arc::clone(&compaction_provider),
@@ -204,13 +199,13 @@ pub(super) async fn finalize_turn_after_text_with_usage(
             ctx_state.usage_ratio() >= 0.50 && ctx_state.preheat.is_idle()
         });
         if start_needed {
-            ensure_working_message_ids(agent, &mut messages[first_non_system..])?;
+            ensure_working_message_ids(agent, messages)?;
             if let Some(ctx_state) = agent.context_state.as_mut() {
                 let ratio = ctx_state.usage_ratio();
-                let covered_count = messages.len().saturating_sub(first_non_system);
+                let covered_count = messages.len();
                 if ctx_state.preheat.try_start(
                     ratio,
-                    &messages[first_non_system..],
+                    messages,
                     &ctx_state.transcript_path,
                     compaction_cache_key,
                     Arc::clone(&compaction_provider),

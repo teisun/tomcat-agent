@@ -255,7 +255,6 @@ fn append_planned_messages_with_rehydrate_retry(
     loop {
         let mut messages = build_context_from_state(context_state);
         let mut appended_messages = Vec::new();
-        messages.insert(0, ChatMessage::system(system_text));
 
         let mut append_error = None;
         for message in planned_messages.iter().skip(next_pending_idx) {
@@ -305,12 +304,10 @@ fn append_planned_messages_with_rehydrate_retry(
 /// so the provider receives the new flattened history and the already-persisted current-turn
 /// messages remain at the tail.
 pub(crate) fn rebuild_turn_messages(
-    system_text: &str,
     context_state: &crate::core::ContextState,
     appended_messages: &[(ChatMessage, bool)],
 ) -> Vec<ChatMessage> {
-    let mut rebuilt = vec![ChatMessage::system(system_text)];
-    rebuilt.extend(build_context_from_state(context_state));
+    let mut rebuilt = build_context_from_state(context_state);
     rebuilt.extend(appended_messages.iter().map(|(message, _)| message.clone()));
     rebuilt
 }
@@ -857,7 +854,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         compaction_count = context_state.session_obs.compaction_count
     );
     let mut messages = if boundary_applied {
-        rebuild_turn_messages(system_text, context_state, &appended_messages)
+        rebuild_turn_messages(context_state, &appended_messages)
     } else {
         messages
     };
@@ -882,6 +879,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         } else {
             ctx.config.llm.agent_max_attempts
         },
+        system_prompt: Some(system_text.to_string()),
         unattended_retry: false,
         max_tool_rounds: usize::MAX,
         retry_base_delay_ms: ctx.config.llm.agent_retry_base_delay_ms,

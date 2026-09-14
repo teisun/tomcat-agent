@@ -560,12 +560,9 @@ async fn run_interrupt_during_blocking_collapse_returns_promptly() {
         cancel_after_collapse_started.cancel();
     });
 
-    let outcome = tokio::time::timeout(
-        Duration::from_secs(1),
-        agent.run(vec![ChatMessage::system("sys"), user, assistant]),
-    )
-    .await
-    .expect("outer cancel boundary must not wait for a non-cancellable collapse");
+    let outcome = tokio::time::timeout(Duration::from_secs(1), agent.run(vec![user, assistant]))
+        .await
+        .expect("outer cancel boundary must not wait for a non-cancellable collapse");
     assert!(
         outcome.is_interrupted(),
         "blocking collapse should finish as Interrupted, got {outcome:?}"

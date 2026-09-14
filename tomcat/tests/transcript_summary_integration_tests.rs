@@ -275,6 +275,7 @@ fn default_config(session_id: &str, title: Arc<dyn LlmProvider>) -> AgentLoopCon
     AgentLoopConfig {
         session_id: session_id.to_string(),
         max_attempts: 3,
+        system_prompt: None,
         retry_base_delay_ms: 0,
         title_provider: Some(title),
         title_model: "utility-flash".to_string(),

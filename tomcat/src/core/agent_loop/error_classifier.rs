@@ -19,9 +19,7 @@ use tracing::info;
 
 use crate::core::agent_loop::current_tail_guard::collapse_to_branch_summary;
 use crate::core::compaction::force_drop_oldest_after_confirmed_overflow;
-use crate::core::llm::{
-    degrade_unsupported_multimodal, Capabilities, ChatMessage, ChatMessageRole,
-};
+use crate::core::llm::{degrade_unsupported_multimodal, Capabilities, ChatMessage};
 use crate::core::session::manager::{
     build_context_from_state, estimate_msg_chars, estimated_tokens_from_chars,
 };
@@ -235,13 +233,7 @@ pub(super) async fn handle_overflow_retry(
 
         let tail_start = agent.context_tail_start.min(messages.len());
         let tail: Vec<ChatMessage> = messages[tail_start..].to_vec();
-        let mut rebuilt: Vec<ChatMessage> = Vec::new();
-        if messages
-            .first()
-            .is_some_and(|m| m.role == ChatMessageRole::System)
-        {
-            rebuilt.push(messages[0].clone());
-        }
+        let mut rebuilt = Vec::new();
         rebuilt.extend(build_context_from_state(ctx_state));
         let tail_start_in_rebuilt = rebuilt.len();
         rebuilt.extend(tail);

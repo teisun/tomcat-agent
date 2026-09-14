@@ -270,6 +270,7 @@ async fn real_terra_agent_loop_applies_preheat_during_build_task() {
         AgentLoopConfig {
             session_id: format!("current-tail-e2e-{wire_model}"),
             max_attempts: 1,
+            system_prompt: Some("You are a build task agent.".to_string()),
             max_tool_rounds: 8,
             tool_definitions: vec![tool_definition("read"), tool_definition("write")],
             context_config: tomcat::ContextConfig {
@@ -287,17 +288,13 @@ async fn real_terra_agent_loop_applies_preheat_during_build_task() {
         },
         CancellationToken::new(),
     );
-    let initial_messages = vec![
-        ChatMessage::system("You are a build task agent."),
-        initial_user,
-    ];
+    let initial_messages = vec![initial_user];
     let initial_chars = initial_messages
         .iter()
-        .skip(1)
         .map(tomcat::core::session::estimate_msg_chars)
         .sum();
     agent.set_context_state(Some(tomcat::ContextState {
-        messages: initial_messages[1..].to_vec(),
+        messages: initial_messages.clone(),
         estimate_context_chars: initial_chars,
         context_budget_chars: TEST_CONTEXT_WINDOW_TOKENS * 4,
         context_budget_tokens: TEST_CONTEXT_WINDOW_TOKENS - TEST_OUTPUT_RESERVE_TOKENS,

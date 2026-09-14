@@ -248,11 +248,11 @@ async fn real_terra_preheat_apply_and_resume_first_request_guard() {
     assistant.msg_id = Some("preheat-assistant".to_string());
     let mut tool = ChatMessage::tool("preheat-read", &"source line\n".repeat(1_000));
     tool.msg_id = Some("preheat-tool".to_string());
-    let mut messages = vec![ChatMessage::system("system"), user, assistant, tool];
-    let chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut messages = vec![user, assistant, tool];
+    let chars: usize = messages.iter().map(estimate_msg_chars).sum();
     let mut agent = make_agent(binding.clone(), context_config.clone(), temp.path());
-    agent.start_idx = 1;
-    agent.context_tail_start = 1;
+    agent.start_idx = 0;
+    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: chars,
@@ -313,9 +313,9 @@ async fn real_terra_preheat_apply_and_resume_first_request_guard() {
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
         .await
         .expect("apply ready preheat");
-    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
     assert_eq!(
-        messages[2].role,
+        messages[1].role,
         crate::core::llm::ChatMessageRole::Assistant,
         "the first raw entry after a preheat summary must begin the next complete tool round"
     );
@@ -366,11 +366,10 @@ async fn real_terra_preheat_apply_and_resume_first_request_guard() {
         init_context_state(&manager, &context_config, "system").expect("hydrate raw transcript");
     resumed_state.context_budget_chars = 4_000;
     resumed_state.context_budget_tokens = 1_000;
-    let mut resumed_messages = vec![ChatMessage::system("system")];
-    resumed_messages.extend(resumed_state.messages.clone());
+    let mut resumed_messages = resumed_state.messages.clone();
     let mut resumed_agent = make_agent(binding, context_config, temp.path());
-    resumed_agent.start_idx = 1;
-    resumed_agent.context_tail_start = 1;
+    resumed_agent.start_idx = 0;
+    resumed_agent.context_tail_start = 0;
     resumed_agent.set_context_state(Some(resumed_state));
     current_tail_guard::maybe_reduce_before_next_llm(&mut resumed_agent, &mut resumed_messages)
         .await
@@ -384,5 +383,5 @@ async fn real_terra_preheat_apply_and_resume_first_request_guard() {
             .is_over_budget(),
         "the first-request guard must reduce raw resumed context before a provider request"
     );
-    assert_eq!(resumed_messages[1].kind, MessageKind::CompactionSummary);
+    assert_eq!(resumed_messages[0].kind, MessageKind::CompactionSummary);
 }

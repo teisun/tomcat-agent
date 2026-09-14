@@ -320,6 +320,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                     }
                     let cfg = AgentLoopConfig {
                         max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
+                        system_prompt: Some(system_text.clone()),
                         unattended_retry: true,
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
@@ -353,7 +354,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone());
                     // PlanReviewer tool whitelist does not include `bash`, so it does not need
                     // a dedicated BashTaskRegistry.
-                    let initial_messages = vec![
+                    let initial_messages = [
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),
                     ];
@@ -361,7 +362,7 @@ impl PlanReviewerDispatcher for ProdPlanReviewerDispatcher {
                         initial_message_sink.as_ref(),
                         &initial_messages,
                     );
-                    let run_outcome = agent_loop.run(initial_messages).await;
+                    let run_outcome = agent_loop.run(vec![initial_messages[1].clone()]).await;
 
                     let (summary, label) = build_plan_summary_from_outcome(
                         origin,
@@ -597,6 +598,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                     }
                     let cfg = AgentLoopConfig {
                         max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
+                        system_prompt: Some(system_text.clone()),
                         unattended_retry: true,
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
@@ -629,7 +631,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                     let mut agent_loop =
                         AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
                             .with_bash_task_registry(bash_task_registry);
-                    let initial_messages = vec![
+                    let initial_messages = [
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),
                     ];
@@ -637,7 +639,7 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
                         initial_message_sink.as_ref(),
                         &initial_messages,
                     );
-                    let run_outcome = agent_loop.run(initial_messages).await;
+                    let run_outcome = agent_loop.run(vec![initial_messages[1].clone()]).await;
 
                     let (summary, label) = build_code_summary_from_outcome(
                         origin,
@@ -948,6 +950,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                     );
                     let cfg = AgentLoopConfig {
                         max_attempts: crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS,
+                        system_prompt: Some(system_text.clone()),
                         unattended_retry: true,
                         max_tool_rounds: turns_limit as usize,
                         retry_base_delay_ms:
@@ -976,7 +979,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                     let mut agent_loop =
                         AgentLoop::new(binding, primitive, event_bus, cfg, cancel_token.clone())
                             .with_bash_task_registry(bash_task_registry);
-                    let initial_messages = vec![
+                    let initial_messages = [
                         ChatMessage::system(&system_text),
                         ChatMessage::user(&initial_user_message),
                     ];
@@ -984,7 +987,7 @@ impl ExplorerDispatcher for ProdExplorerDispatcher {
                         initial_message_sink.as_ref(),
                         &initial_messages,
                     );
-                    let run_outcome = agent_loop.run(initial_messages).await;
+                    let run_outcome = agent_loop.run(vec![initial_messages[1].clone()]).await;
 
                     let (report, label) = build_explorer_report_from_outcome(
                         origin,

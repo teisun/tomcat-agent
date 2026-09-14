@@ -108,6 +108,12 @@ pub trait EphemeralTailProvider: Send + Sync {
 
 pub struct AgentLoopConfig {
     pub max_attempts: u32,
+    /// 请求组装时置于消息列表之前的稳定 system prompt。
+    ///
+    /// 它不是会话历史：不会进入 `ContextState.messages`，也不会落盘到主会话
+    /// transcript。子 agent 的初始 transcript 仍显式写入相同 system 行，保证
+    /// 既有审计格式不变。
+    pub system_prompt: Option<String>,
     /// Explicitly select the larger retry budget for a headless child agent.
     ///
     /// This is intentionally independent from `plan_runtime`: read-only reviewers must not
@@ -181,6 +187,7 @@ impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
             max_attempts: DEFAULT_AGENT_MAX_ATTEMPTS,
+            system_prompt: None,
             unattended_retry: false,
             max_tool_rounds: usize::MAX,
             retry_base_delay_ms: DEFAULT_AGENT_RETRY_BASE_DELAY_MS,

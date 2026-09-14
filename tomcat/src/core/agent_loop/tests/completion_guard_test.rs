@@ -542,10 +542,10 @@ async fn timing5_applies_preheat_whose_anchor_is_in_the_current_turn() {
         },
         CancellationToken::new(),
     );
-    agent.start_idx = 2;
-    agent.context_tail_start = 2;
+    agent.start_idx = 1;
+    agent.context_tail_start = 1;
     agent.set_context_state(Some(state));
-    let mut messages = vec![ChatMessage::system("sys"), historical, current];
+    let mut messages = vec![historical, current];
 
     assert_eq!(
         finalize_turn_after_text(
@@ -567,10 +567,10 @@ async fn timing5_applies_preheat_whose_anchor_is_in_the_current_turn() {
 
     assert_eq!(switched.load(Ordering::SeqCst), 1);
     assert_eq!(errors.load(Ordering::SeqCst), 0);
-    assert_eq!(messages.len(), 3);
-    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
-    assert_eq!(messages[2].text_content(), Some("final response"));
-    assert_eq!(agent.start_idx, 2);
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages[1].text_content(), Some("final response"));
+    assert_eq!(agent.start_idx, 1);
     assert_eq!(
         messages[agent.start_idx..].len(),
         1,

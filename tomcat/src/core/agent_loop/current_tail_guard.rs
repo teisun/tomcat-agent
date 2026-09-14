@@ -347,15 +347,11 @@ fn start_midturn_preheat_if_needed(
         return Ok(());
     }
 
-    let first_non_system = messages
-        .iter()
-        .position(|message| message.role != ChatMessageRole::System)
-        .unwrap_or(messages.len());
-    if first_non_system == messages.len() {
+    if messages.is_empty() {
         return Ok(());
     }
-    ensure_working_message_ids(agent, &mut messages[first_non_system..])?;
-    let snapshot = messages[first_non_system..].to_vec();
+    ensure_working_message_ids(agent, messages)?;
+    let snapshot = messages.to_vec();
     let transcript_path = ctx_state.transcript_path.clone();
     let compaction_provider = agent.compaction_provider();
     let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
@@ -425,17 +421,9 @@ pub(super) fn apply_ready_preheat(
     // The working set includes the active turn while ContextState owns only completed history.
     // Fold both into the same coordinate system, then let apply_boundary move the tail cursor
     // as it replaces the covered prefix.
-    let state_start = usize::from(
-        messages
-            .first()
-            .is_some_and(|message| message.role == ChatMessageRole::System),
-    );
-    let mut turn_start = agent
-        .start_idx
-        .saturating_sub(state_start)
-        .min(messages.len().saturating_sub(state_start));
+    let mut turn_start = agent.start_idx.min(messages.len());
     let applied = agent.context_state.as_mut().is_some_and(|ctx_state| {
-        ctx_state.messages = messages[state_start..].to_vec();
+        ctx_state.messages = messages.clone();
         crate::core::compaction::apply::apply_and_emit_boundary(
             ctx_state,
             result,
@@ -459,11 +447,7 @@ pub(super) fn apply_ready_preheat(
         return Ok(false);
     };
     let tail = ctx_state.messages.split_off(turn_start);
-    let mut rebuilt = Vec::new();
-    if state_start == 1 {
-        rebuilt.push(messages[0].clone());
-    }
-    rebuilt.extend(build_context_from_state(ctx_state));
+    let mut rebuilt = build_context_from_state(ctx_state);
     let rebuilt_turn_start = rebuilt.len();
     rebuilt.extend(tail);
     *messages = rebuilt;
@@ -685,14 +669,7 @@ fn rebuild_messages_from_context(agent: &mut AgentLoop, messages: &mut Vec<ChatM
         return;
     };
     let tail = messages[agent.start_idx.min(messages.len())..].to_vec();
-    let mut rebuilt = Vec::new();
-    if messages
-        .first()
-        .is_some_and(|msg| msg.role == ChatMessageRole::System)
-    {
-        rebuilt.push(messages[0].clone());
-    }
-    rebuilt.extend(build_context_from_state(ctx_state));
+    let mut rebuilt = build_context_from_state(ctx_state);
     let new_tail_start = rebuilt.len();
     rebuilt.extend(tail);
     *messages = rebuilt;
@@ -726,12 +703,7 @@ pub(super) async fn collapse_to_branch_summary(
 ) -> Result<(), AppError> {
     let plan_runtime = agent.config.plan_runtime.clone();
     let session_model = agent.wire_model().to_string();
-    let mut working: Vec<ChatMessage> = messages
-        .iter()
-        .filter(|msg| msg.role != ChatMessageRole::System)
-        .cloned()
-        .collect();
-    ensure_working_message_ids(agent, &mut working)?;
+    ensure_working_message_ids(agent, messages)?;
     let transcript_path = agent
         .context_state
         .as_ref()
@@ -741,7 +713,7 @@ pub(super) async fn collapse_to_branch_summary(
     let compaction_provider = agent.compaction_provider();
     let cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let artifacts = build_collapse_summary_artifacts(
-        &working,
+        messages,
         compaction_provider.as_ref(),
         &agent.config.context_config.compaction_model,
         CollapseSummaryRequest {
@@ -779,15 +751,7 @@ pub(super) async fn collapse_to_branch_summary(
         ctx_state.session_obs.compaction_count.saturating_add(1);
     ctx_state.session_obs.compaction_tokens_freed += estimated_tokens_from_chars(saved_chars);
 
-    let mut rebuilt = Vec::new();
-    if messages
-        .first()
-        .is_some_and(|msg| msg.role == ChatMessageRole::System)
-    {
-        rebuilt.push(messages[0].clone());
-    }
-    rebuilt.push(summary_msg);
-    *messages = rebuilt;
+    *messages = vec![summary_msg];
     agent.start_idx = messages.len().saturating_sub(1);
     agent.context_tail_start = agent.start_idx;
     Ok(())
@@ -831,12 +795,7 @@ async fn build_collapse_summary_artifacts(
     compaction_model: &str,
     request: CollapseSummaryRequest<'_>,
 ) -> Result<CollapseSummaryArtifacts, AppError> {
-    let working: Vec<ChatMessage> = messages
-        .iter()
-        .filter(|msg| msg.role != ChatMessageRole::System)
-        .cloned()
-        .collect();
-    let (covered_start_id, covered_end_id) = collapse_bounds(&working)
+    let (covered_start_id, covered_end_id) = collapse_bounds(messages)
         .ok_or_else(|| AppError::Config("collapse 缺少 message 锚点".to_string()))?;
     // 控制态与用户原话由 generate_summary 内的 machine_block 统一拼接，
     // recent-files 也在同一个入口生成，避免不同 compaction 路径漏掉其中一块。
@@ -844,7 +803,7 @@ async fn build_collapse_summary_artifacts(
         .plan_runtime
         .map(|rt| rt.control_snapshot(request.session_model));
     let summary_text = generate_summary_with_output_limit(
-        &working,
+        messages,
         None,
         llm,
         compaction_model,
@@ -857,7 +816,7 @@ async fn build_collapse_summary_artifacts(
     )
     .await?;
     let entry_id = compound_turn_id(&covered_start_id, &covered_end_id);
-    let covered_count = working
+    let covered_count = messages
         .iter()
         .filter(|msg| msg.kind != MessageKind::CompactionSummary)
         .count();
@@ -878,7 +837,7 @@ async fn build_collapse_summary_artifacts(
         attempts: None,
     });
     let summary_message = apply_collapse_summary(
-        &working,
+        messages,
         &summary_text,
         &covered_start_id,
         &covered_end_id,
