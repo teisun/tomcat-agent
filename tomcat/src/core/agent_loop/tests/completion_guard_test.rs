@@ -10,7 +10,7 @@ use super::super::turn_finalize::{finalize_turn_after_text, TurnOutcome};
 use super::super::types::SubagentType;
 use super::super::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
-use crate::core::compaction::{preheat::Preheat, run_layer0_cleanup};
+use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{ChatMessage, MessageKind, StreamEvent};
 use crate::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
@@ -19,9 +19,7 @@ use crate::core::plan_runtime::file_store::{
 };
 use crate::core::plan_runtime::review::Finding;
 use crate::core::plan_runtime::{NextAction, PlanRuntime};
-use crate::core::session::manager::{
-    estimated_tokens_from_chars, CompactionResult, ContextState, MessageAppendSink,
-};
+use crate::core::session::manager::{CompactionResult, ContextState, MessageAppendSink};
 use crate::core::tools::pipeline::read_state::{ReadFileState, ReadStamp};
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
@@ -337,6 +335,8 @@ async fn successful_boundary_switch_runs_both_layer0_cleanup_steps() {
         estimated_tokens_saved: Some(8),
         preheat_elapsed_ms: 0,
     });
+    agent.start_idx = state_messages.len();
+    agent.context_tail_start = state_messages.len();
     agent.set_context_state(Some(ContextState {
         messages: state_messages.clone(),
         estimate_context_chars,
@@ -358,16 +358,15 @@ async fn successful_boundary_switch_runs_both_layer0_cleanup_steps() {
         TurnOutcome::Finished
     );
 
-    let state = agent.context_state.as_ref().expect("context state");
     assert_eq!(
-        state.messages[2].text_content(),
+        messages[2].text_content(),
         Some(crate::core::compaction::TOOL_RESULT_PLACEHOLDER),
         "a successful boundary makes the surviving old turn eligible for L0-B"
     );
-    let persisted = state.messages[4].text_content().unwrap_or("");
+    let persisted = messages[4].text_content().unwrap_or("");
     assert!(
         persisted.starts_with("[Tool result persisted:"),
-        "the current tail's large result must use L0-A after boundary: {persisted}"
+        "the latest historical tool result must use L0-A after boundary: {persisted}"
     );
     assert!(
         trail
@@ -413,32 +412,6 @@ async fn timing5_boundary_cleanup_matches_reference_and_emits_one_release() {
         preheat_elapsed_ms: 0,
     };
 
-    // Reference the pre-refactor timing⑤ behavior: successful L2 apply followed by one L0 pass.
-    let mut expected = ContextState {
-        messages: state_messages.clone(),
-        estimate_context_chars,
-        context_budget_chars: 40_000,
-        context_budget_tokens: 10_000,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        latest_plan_event: None,
-        resume_control: Default::default(),
-        preheat: Preheat::new(),
-        session_obs: Default::default(),
-        live: Default::default(),
-    };
-    expected.on_assistant_message_appended(FINAL_TEXT.len());
-    expected.apply_boundary(compaction_result.clone()).unwrap();
-    let expected_l0 = run_layer0_cleanup(&mut expected, &config, trail.path(), "sess-guard");
-    for persisted in &expected_l0.persisted {
-        expected.session_obs.tool_result_chars_persisted += persisted.original_chars;
-    }
-    expected.session_obs.compaction_count = 1;
-    expected.session_obs.compaction_tokens_freed = 8
-        + estimated_tokens_from_chars(expected_l0.persist_chars_freed)
-        + estimated_tokens_from_chars(expected_l0.placeholder_chars_freed);
-
     let event_bus = Arc::new(DefaultEventBus::new());
     let release_events = Arc::new(AtomicUsize::new(0));
     let release_events_cb = Arc::clone(&release_events);
@@ -465,6 +438,10 @@ async fn timing5_boundary_cleanup_matches_reference_and_emits_one_release() {
     );
     let mut preheat = Preheat::new();
     preheat.restore_completed(compaction_result);
+    // This fixture models a boundary that covered already-completed history. The final assistant
+    // reply appended by `finalize` is the only active-tail message.
+    agent.start_idx = state_messages.len();
+    agent.context_tail_start = state_messages.len();
     agent.set_context_state(Some(ContextState {
         messages: state_messages.clone(),
         estimate_context_chars,
@@ -486,28 +463,130 @@ async fn timing5_boundary_cleanup_matches_reference_and_emits_one_release() {
         TurnOutcome::Finished
     );
 
-    let actual = agent.context_state.as_ref().expect("context state");
     assert_eq!(
-        serde_json::to_vec(&actual.messages).unwrap(),
-        serde_json::to_vec(&expected.messages).unwrap(),
-        "moving L0 inside apply must preserve timing⑤'s final message bytes"
+        messages[0].kind,
+        MessageKind::CompactionSummary,
+        "the completed prefix must become a summary in the next request payload"
     );
     assert_eq!(
-        actual.estimate_context_chars, expected.estimate_context_chars,
-        "timing⑤'s context estimate must remain identical to the reference sequence"
+        messages[2].text_content(),
+        Some("[Previous tool result replaced to save context space]"),
+        "Layer 0 placeholder cleanup must rewrite historical tools"
     );
-    assert_eq!(
-        actual.session_obs.compaction_count, expected.session_obs.compaction_count,
-        "a successful boundary counts once"
+    assert!(
+        messages[4]
+            .text_content()
+            .is_some_and(|text| text.starts_with("[Tool result persisted:")),
+        "Layer 0 persistence must rewrite the latest historical tool result"
     );
-    assert_eq!(
-        actual.session_obs.compaction_tokens_freed, expected.session_obs.compaction_tokens_freed,
-        "L2 and L0 releases must be counted exactly once"
-    );
+    assert_eq!(messages[agent.start_idx].text_content(), Some(FINAL_TEXT));
     assert_eq!(
         release_events.load(Ordering::SeqCst),
         1,
         "moving L0 into apply must not retain a second timing⑤ release emitter"
+    );
+}
+
+#[tokio::test]
+async fn timing5_applies_preheat_whose_anchor_is_in_the_current_turn() {
+    let switched = Arc::new(AtomicUsize::new(0));
+    let errors = Arc::new(AtomicUsize::new(0));
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let switched_cb = Arc::clone(&switched);
+    event_bus.on(
+        wire::WIRE_BOUNDARY_SWITCHED,
+        Box::new(move |_| {
+            switched_cb.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let errors_cb = Arc::clone(&errors);
+    event_bus.on(
+        wire::WIRE_COMPACTION_ERROR,
+        Box::new(move |_| {
+            errors_cb.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+
+    let sink = Arc::new(RecordingMessageSink::default());
+    let mut historical = user_message_with_id("historical", &"h".repeat(900));
+    historical.timestamp = Some("2026-09-14T00:00:00Z".to_string());
+    let mut current = user_message_with_id("current", &"c".repeat(900));
+    current.timestamp = Some("2026-09-14T00:00:01Z".to_string());
+    let mut state = empty_context_state();
+    state.messages = vec![historical.clone()];
+    state.estimate_context_chars = 1_800;
+    state.context_budget_chars = 2_000;
+    state.context_budget_tokens = 500;
+    state.preheat.restore_completed(CompactionResult {
+        summary_text: "summary".to_string(),
+        covered_start_id: "historical".to_string(),
+        covered_end_id: "current".to_string(),
+        covered_count: 2,
+        transcript_compaction_entry_id: Some("cmp-historical-current".to_string()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
+    });
+
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![])), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::clone(&event_bus) as Arc<dyn EventBus>,
+        AgentLoopConfig {
+            session_id: "sess-timing5-current-anchor".to_string(),
+            message_append_sink: Some(sink.clone()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.start_idx = 2;
+    agent.context_tail_start = 2;
+    agent.set_context_state(Some(state));
+    let mut messages = vec![ChatMessage::system("sys"), historical, current];
+
+    assert_eq!(
+        finalize_turn_after_text(
+            &mut agent,
+            &mut messages,
+            "final response",
+            1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap(),
+        TurnOutcome::Finished
+    );
+
+    assert_eq!(switched.load(Ordering::SeqCst), 1);
+    assert_eq!(errors.load(Ordering::SeqCst), 0);
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages[2].text_content(), Some("final response"));
+    assert_eq!(agent.start_idx, 2);
+    assert_eq!(
+        messages[agent.start_idx..].len(),
+        1,
+        "the returned new-message tail must exclude the summary already represented in history"
+    );
+    let persisted = sink.messages.lock().unwrap();
+    assert_eq!(
+        persisted.len(),
+        1,
+        "only the final surviving tail message is appended; the summary is not duplicated"
+    );
+    assert_eq!(
+        persisted[0]
+            .get("content")
+            .and_then(serde_json::Value::as_str),
+        Some("final response")
     );
 }
 

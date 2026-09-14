@@ -611,7 +611,8 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config).chars_freed;
+    let history_end = state.messages.len();
+    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
     assert!(reduced > 0);
 
     if state.usage_ratio() >= 0.50 {
@@ -935,7 +936,8 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    compact_tool_results(&mut state, &config);
+    let history_end = state.messages.len();
+    compact_tool_results(&mut state, &config, history_end);
 
     info!("Assert: old turns replaced, recent preserved");
     // Turns: turn 0 = msgs[0..3], turn 1 = msgs[3..6], turn 2 = msgs[6..9] (recent)
@@ -1000,7 +1002,8 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    compact_tool_results(&mut state, &config);
+    let history_end = state.messages.len();
+    compact_tool_results(&mut state, &config, history_end);
 
     let tool_msgs: Vec<&ChatMessage> = state
         .messages
@@ -1063,7 +1066,8 @@ fn test_compact_tool_results_estimate_precise() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config).chars_freed;
+    let history_end = state.messages.len();
+    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
 
     let expected_reduced = content_len - PLACEHOLDER.len();
     assert_eq!(
@@ -1250,8 +1254,9 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         live: Default::default(),
     };
     let config = ContextConfig::default();
+    let history_end = state.messages.len();
     let (results, _) =
-        layer0_persist_large_results(&mut state, &config, dir.path(), "sess_persist");
+        layer0_persist_large_results(&mut state, &config, dir.path(), "sess_persist", history_end);
     assert_eq!(results.len(), 1);
 
     let readback = std::fs::read_to_string(&results[0].persisted_path)?;
@@ -1855,11 +1860,13 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
     assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
 }
 
-/// [L2 事件] check_after_reply 在 stale apply 时 emit CompactionError
+/// [L2 stale] stale apply 丢弃缓存并继续；用户无法通过 Notice 修复内部锚点失配。
 #[test]
-fn test_check_after_reply_stale_emits_compaction_error() {
+fn test_check_after_reply_stale_discards_preheat_without_compaction_error() {
     common::setup_logging();
-    let _span = info_span!("test_check_after_reply_stale_emits_compaction_error").entered();
+    let _span =
+        info_span!("test_check_after_reply_stale_discards_preheat_without_compaction_error")
+            .entered();
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("stale_err.jsonl");
@@ -1935,15 +1942,17 @@ fn test_check_after_reply_stale_emits_compaction_error() {
     };
     let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter, &env);
 
-    info!("Assert: CompactionError event received, not switched");
+    info!("Assert: stale preheat discarded, not switched");
     assert!(!switched, "stale apply should not switch");
     let errors = compaction_errors.lock().unwrap();
-    assert_eq!(errors.len(), 1, "should emit exactly one CompactionError");
-    let payload = &errors[0];
     assert_eq!(
-        payload.get("source").and_then(|v| v.as_str()),
-        Some("apply"),
-        "error source should be 'apply'"
+        errors.len(),
+        0,
+        "a stale internal cache result must not surface a user-actionable CompactionError"
+    );
+    assert!(
+        state.preheat.is_idle(),
+        "the stale completed result is discarded"
     );
 }
 
@@ -2117,11 +2126,13 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
 
     // Step 1: L0+L1
     info!("Act Step 1: run_layer0_cleanup");
+    let history_end = state.messages.len();
     let outcome = tomcat::core::compaction::run_layer0_cleanup(
         &mut state,
         &ContextConfig::default(),
         dir.path(),
         "pipeline_sess",
+        history_end,
     );
     info!(
         "L0+L1: persisted={}, persist_freed={}, placeholder_freed={}, ratio={:.3}",

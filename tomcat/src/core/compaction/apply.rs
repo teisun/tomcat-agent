@@ -48,7 +48,16 @@ pub fn check_after_reply(
 
     match state.preheat.poll_result() {
         PreheatOutcome::Completed(result) => {
-            apply_and_emit_boundary(state, result, ratio_before, false, emitter, env)
+            let mut turn_start = state.messages.len();
+            apply_and_emit_boundary(
+                state,
+                result,
+                ratio_before,
+                false,
+                emitter,
+                env,
+                &mut turn_start,
+            )
         }
         _ => false,
     }
@@ -95,7 +104,16 @@ pub async fn check_before_request(
     if state.preheat.is_finished() {
         let applied = match state.preheat.poll_result() {
             PreheatOutcome::Completed(result) => {
-                apply_and_emit_boundary(state, result, ratio_before, false, emitter, env)
+                let mut turn_start = state.messages.len();
+                apply_and_emit_boundary(
+                    state,
+                    result,
+                    ratio_before,
+                    false,
+                    emitter,
+                    env,
+                    &mut turn_start,
+                )
             }
             _ => false,
         };
@@ -111,7 +129,16 @@ pub async fn check_before_request(
     if ratio >= 0.98 && state.preheat.is_running() {
         let applied = match state.preheat.await_result(Duration::from_secs(30)).await {
             PreheatOutcome::Completed(result) => {
-                apply_and_emit_boundary(state, result, ratio_before, true, emitter, env)
+                let mut turn_start = state.messages.len();
+                apply_and_emit_boundary(
+                    state,
+                    result,
+                    ratio_before,
+                    true,
+                    emitter,
+                    env,
+                    &mut turn_start,
+                )
             }
             _ => false,
         };
@@ -144,6 +171,7 @@ pub(crate) fn apply_and_emit_boundary(
     was_sync_wait: bool,
     emitter: &ScopedEventEmitter,
     env: &BoundaryEnv<'_>,
+    turn_start: &mut usize,
 ) -> bool {
     let covered_count = result.covered_count;
     let saved = result.estimated_tokens_saved.unwrap_or(0);
@@ -157,17 +185,12 @@ pub(crate) fn apply_and_emit_boundary(
             covered_end_id: result.covered_end_id.clone(),
         };
         warn!(
+            target: "tomcat_chat_diag",
             %error,
-            "apply_boundary stale: keeping the unfulfilled compaction marker as a harmless no-op"
+            phase = "apply_boundary_stale",
+            "discarding stale preheat result without surfacing a user-actionable compaction error"
         );
         state.preheat.discard_cached_completed();
-        let _ = emitter.emit(AgentEvent::CompactionError {
-            exhausted_after_retries: false,
-            attempts: 0,
-            error: error.to_string(),
-            source: "apply".to_string(),
-            ratio: Some(state.usage_ratio()),
-        });
         return false;
     }
 
@@ -187,7 +210,7 @@ pub(crate) fn apply_and_emit_boundary(
         return false;
     }
 
-    match state.apply_boundary(result.clone()) {
+    match state.apply_boundary(result.clone(), turn_start) {
         Ok(()) => {
             state.session_obs.compaction_tokens_freed += saved;
             state.session_obs.compaction_count =
@@ -202,22 +225,17 @@ pub(crate) fn apply_and_emit_boundary(
                 estimated_tokens_freed: saved,
             });
 
-            run_layer0_after_boundary(state, emitter, env);
+            run_layer0_after_boundary(state, emitter, env, *turn_start);
             true
         }
         Err(e @ AppError::ApplyBoundaryStale { .. }) => {
             warn!(
+                target: "tomcat_chat_diag",
                 error = %e,
-                "apply_boundary became stale after its precondition; preserving the marker and body for reload"
+                phase = "apply_boundary_stale_after_precondition",
+                "discarding stale preheat result without surfacing a user-actionable compaction error"
             );
             state.preheat.discard_cached_completed();
-            let _ = emitter.emit(AgentEvent::CompactionError {
-                exhausted_after_retries: false,
-                attempts: 0,
-                error: e.to_string(),
-                source: "apply".to_string(),
-                ratio: Some(state.usage_ratio()),
-            });
             false
         }
         Err(e) => {
@@ -242,8 +260,9 @@ pub(crate) fn run_layer0_after_boundary(
     state: &mut ContextState,
     emitter: &ScopedEventEmitter,
     env: &BoundaryEnv<'_>,
+    history_end: usize,
 ) {
-    let l0 = run_layer0_cleanup(state, env.config, env.work_dir, env.session_id);
+    let l0 = run_layer0_cleanup(state, env.config, env.work_dir, env.session_id, history_end);
     for persisted in &l0.persisted {
         state.session_obs.tool_result_chars_persisted += persisted.original_chars;
     }

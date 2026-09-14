@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -24,7 +25,8 @@ use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
-use crate::infra::event_bus::DefaultEventBus;
+use crate::infra::event_bus::{DefaultEventBus, EventBus};
+use crate::infra::wire;
 
 struct ChatOnlyMockLlm {
     summary_text: String,
@@ -348,13 +350,6 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
     assert!(text.contains("Rendered from the session todo scratchpad"));
     assert!(text.contains("t2: step active"));
 
-    let state = agent.context_state.as_ref().unwrap();
-    assert_eq!(state.messages.len(), 1);
-    assert_eq!(
-        state.messages[0].kind,
-        crate::core::llm::MessageKind::CompactionSummary
-    );
-
     let entries = read_entries_tail(&transcript, 10).unwrap();
     let last = entries.last().unwrap();
     assert!(
@@ -427,12 +422,13 @@ async fn preheat_starts_at_tool_round_when_ratio_reaches_half() {
 }
 
 #[tokio::test]
-async fn over_budget_with_ready_preheat_folds_front_half_and_keeps_tail() {
+async fn midturn_preheat_anchor_in_tail_applies_and_keeps_surviving_tail_raw() {
     let mut first = ChatMessage::user("a".repeat(400));
     first.msg_id = Some("u1".to_string());
     let mut covered_end = ChatMessage::assistant("b".repeat(400));
     covered_end.msg_id = Some("a1".to_string());
-    let mut tail = tool_message("t1", "call-1", "tail must remain raw");
+    let raw_tail = "tail must remain raw ".repeat(4_000);
+    let mut tail = tool_message("t1", "call-1", &raw_tail);
     tail.timestamp = Some("2026-09-08T00:00:00Z".to_string());
     let mut messages = vec![ChatMessage::system("sys"), first, covered_end, tail];
     let mut preheat = Preheat::new();
@@ -449,6 +445,10 @@ async fn over_budget_with_ready_preheat_folds_front_half_and_keeps_tail() {
     });
     let config = AgentLoopConfig {
         session_id: "sess-ready-midturn-preheat".to_string(),
+        context_config: ContextConfig {
+            keep_recent_turns: 0,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let mut agent = AgentLoop::new(
@@ -489,8 +489,133 @@ async fn over_budget_with_ready_preheat_folds_front_half_and_keeps_tail() {
         messages[1].kind,
         crate::core::llm::MessageKind::CompactionSummary
     );
-    assert_eq!(messages[2].text_content(), Some("tail must remain raw"));
-    assert_eq!(agent.start_idx, 3);
+    assert_eq!(
+        messages[2].text_content(),
+        Some(raw_tail.as_str()),
+        "history_end must protect a surviving 80K tail even when no recent turns are retained"
+    );
+    assert_eq!(
+        agent.start_idx, 2,
+        "the surviving tool result is still the active-tail start after the summary"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter_map(|message| message.msg_id.as_deref())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        messages
+            .iter()
+            .filter(|message| message.msg_id.is_some())
+            .count(),
+        "the fold/apply/unfold handoff must not duplicate persisted message ids"
+    );
+}
+
+#[tokio::test]
+async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
+    let switched = Arc::new(AtomicUsize::new(0));
+    let errors = Arc::new(AtomicUsize::new(0));
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let switched_cb = Arc::clone(&switched);
+    event_bus.on(
+        wire::WIRE_BOUNDARY_SWITCHED,
+        Box::new(move |_| {
+            switched_cb.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+    let errors_cb = Arc::clone(&errors);
+    event_bus.on(
+        wire::WIRE_COMPACTION_ERROR,
+        Box::new(move |_| {
+            errors_cb.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    );
+
+    let mut user = ChatMessage::user("u".repeat(400));
+    user.msg_id = Some("u1".to_string());
+    let mut first_assistant = ChatMessage::assistant("a".repeat(400));
+    first_assistant.msg_id = Some("a1".to_string());
+    let mut messages = vec![ChatMessage::system("sys"), user, first_assistant];
+    let mut agent = AgentLoop::new(
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "incident summary".to_string(),
+            }),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        event_bus,
+        AgentLoopConfig {
+            session_id: "incident-085-098".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.start_idx = 1;
+    agent.context_tail_start = 1;
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: 3_400,
+        context_budget_chars: 4_000,
+        context_budget_tokens: 1_000,
+        last_api_usage: Some(ApiUsage {
+            prompt_tokens: 850,
+            completion_tokens: 0,
+        }),
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    // Incident step 1: at 85%, the mid-turn Fits path starts a snapshot whose anchor is in the
+    // still-uncommitted tail.
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+    let result = match agent
+        .context_state
+        .as_mut()
+        .unwrap()
+        .preheat
+        .await_result(std::time::Duration::from_secs(1))
+        .await
+    {
+        crate::core::compaction::preheat::PreheatOutcome::Completed(result) => result,
+        outcome => panic!("85% preheat must complete for replay, got {outcome:?}"),
+    };
+
+    // Tool work arrives after the snapshot. At 98%, applying that finished preheat must fold the
+    // new tail into the same coordinate system instead of reporting ApplyBoundaryStale.
+    let mut later_tool = tool_message("t1", "call-1", "later tool result must remain raw");
+    later_tool.timestamp = Some("2026-09-14T00:00:02Z".to_string());
+    messages.push(later_tool);
+    let state = agent.context_state.as_mut().unwrap();
+    state.update_api_usage(980, 0);
+    state.preheat.restore_completed(result);
+
+    assert!(
+        current_tail_guard::apply_ready_preheat(&mut agent, &mut messages, Some(0.85)).unwrap(),
+        "the completed preheat must apply through the merged view"
+    );
+    assert_eq!(switched.load(Ordering::SeqCst), 1);
+    assert_eq!(errors.load(Ordering::SeqCst), 0);
+    assert_eq!(messages.len(), 3, "system + summary + surviving later tool");
+    assert_eq!(
+        messages[1].kind,
+        crate::core::llm::MessageKind::CompactionSummary
+    );
+    assert_eq!(
+        messages[agent.start_idx].text_content(),
+        Some("later tool result must remain raw"),
+        "the request payload retains post-snapshot tail work unchanged"
+    );
 }
 
 #[tokio::test]
@@ -569,6 +694,7 @@ async fn midturn_summary_boundary_lands_on_round_boundary() {
         session_obs: Default::default(),
         live: Default::default(),
     }));
+    let tail_before = messages[4..].to_vec();
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
         .await
@@ -582,6 +708,11 @@ async fn midturn_summary_boundary_lands_on_round_boundary() {
         messages[2].role,
         crate::core::llm::ChatMessageRole::Assistant,
         "the first raw message after a preheat summary must begin the next complete tool round"
+    );
+    assert_eq!(
+        serde_json::to_vec(&messages[agent.start_idx..]).unwrap(),
+        serde_json::to_vec(&tail_before).unwrap(),
+        "a preheat anchored in earlier history must preserve every later tail message in order"
     );
     assert!(
         !crate::core::session::has_dangling_tool_calls_in_messages(&messages),

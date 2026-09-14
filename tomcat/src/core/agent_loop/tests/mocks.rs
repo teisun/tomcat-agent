@@ -151,6 +151,7 @@ impl LlmProvider for MockLlmProviderFatal {
 pub(super) struct RecordedChatCall {
     pub(super) provider: String,
     pub(super) model: String,
+    pub(super) message_texts: Vec<String>,
 }
 
 /// 记录 `chat` 请求的 provider，用于断言 compaction 路由是否命中预期 provider/model。
@@ -184,6 +185,11 @@ impl LlmProvider for RecordingChatLlmProvider {
         self.calls.lock().unwrap().push(RecordedChatCall {
             provider: self.provider_name.to_string(),
             model: req.model.clone(),
+            message_texts: req
+                .messages
+                .iter()
+                .filter_map(|message| message.text_content().map(str::to_string))
+                .collect(),
         });
         Ok(ChatResponse {
             id: None,

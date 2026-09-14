@@ -420,8 +420,14 @@ impl ContextState {
 
     /// 将已完成的 CompactionResult 应用到 messages 列表：
     /// 找到最后一条 `msg_id == covered_end_id` 的消息，将其及之前所有消息替换为摘要消息。
-    /// 无匹配时返回 [`AppError::ApplyBoundaryStale`]。
-    pub fn apply_boundary(&mut self, result: CompactionResult) -> Result<(), AppError> {
+    /// `turn_start` 是当前未完成 tail 在本列表坐标系中的起点；替换前缀后在此处同步
+    /// 平移，避免调用方拥有一个已过期的下标。无匹配时返回
+    /// [`AppError::ApplyBoundaryStale`]。
+    pub fn apply_boundary(
+        &mut self,
+        result: CompactionResult,
+        turn_start: &mut usize,
+    ) -> Result<(), AppError> {
         let end_idx = self
             .messages
             .iter()
@@ -447,7 +453,17 @@ impl ContextState {
             .unwrap_or_else(|| compound_turn_id(&result.covered_start_id, &result.covered_end_id));
         let summary_msg = ChatMessage::compaction_summary(&result.summary_text, summary_entry_id);
 
+        debug_assert!(
+            *turn_start <= self.messages.len(),
+            "turn_start must be a valid boundary in the pre-rewrite message list"
+        );
+        let removed = end_idx.saturating_add(1);
         self.messages.splice(..=end_idx, [summary_msg]);
+        *turn_start = if *turn_start >= removed {
+            (*turn_start).saturating_sub(removed).saturating_add(1)
+        } else {
+            1
+        };
         self.estimate_context_chars =
             self.estimate_context_chars.saturating_sub(batch_chars) + summary_chars;
         self.invalidate_api_usage();

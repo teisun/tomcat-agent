@@ -141,7 +141,8 @@ pub struct Layer0CleanupOutcome {
 }
 
 /// Layer 0 步骤 A：超大 tool result 落盘 + preview 占位符。
-/// 扫描最新一个包含 tool 消息的 UserTurn，单条 >= `layer0_single_result_max_chars` 时落盘。
+/// 只在 `messages[..history_end]` 中扫描最新一个包含 tool 消息的 UserTurn，单条 >=
+/// `layer0_single_result_max_chars` 时落盘。
 /// 请求前刚追加的 user 消息还没有工具结果；跳过它，才能在 loop 顶部应用 boundary 时仍清理
 /// 前一已完成 tool round 的大结果。
 pub fn layer0_persist_large_results(
@@ -149,10 +150,12 @@ pub fn layer0_persist_large_results(
     config: &ContextConfig,
     work_dir: &Path,
     session_id: &str,
+    history_end: usize,
 ) -> (Vec<PersistedResult>, usize) {
     let mut results = Vec::new();
     let mut persist_chars_freed = 0usize;
     let single_max = config.layer0_single_result_max_chars;
+    let history_end = history_end.min(state.messages.len());
 
     // Find the most recent logical turn that actually contains a tool result. A new user
     // message may already be in the outgoing request when a preheated boundary is applied,
@@ -160,11 +163,12 @@ pub fn layer0_persist_large_results(
     let turn_starts: Vec<usize> = state
         .messages
         .iter()
+        .take(history_end)
         .enumerate()
         .filter(|(_, message)| message.starts_logical_turn())
         .map(|(index, _)| index)
         .collect();
-    let mut next_turn_start = state.messages.len();
+    let mut next_turn_start = history_end;
     let mut latest_tool_turn = None;
     for &turn_start in turn_starts.iter().rev() {
         if state.messages[turn_start..next_turn_start]
@@ -226,17 +230,21 @@ pub struct PlaceholderOutcome {
     pub tool_call_ids: Vec<String>,
 }
 
-/// Layer 1：从 compactable zone（排除最近 `config.keep_recent_turns` 个 turns）中，
+/// Layer 1：从 `history_end` 之前的 compactable zone（排除最近
+/// `config.keep_recent_turns` 个 turns）中，
 /// 将长度 **大于** `ContextConfig::layer0_placeholder_threshold_chars`（默认 10_000）的 tool result 替换为占位符。
 pub fn compact_tool_results(
     state: &mut ContextState,
     config: &ContextConfig,
+    history_end: usize,
 ) -> PlaceholderOutcome {
     let threshold = config.layer0_placeholder_threshold_chars;
     let protected_turns = config.keep_recent_turns;
+    let history_end = history_end.min(state.messages.len());
 
     // Find the start of the protected tail turns.
-    let protected_start = find_protected_turn_start(&state.messages, protected_turns);
+    let protected_start =
+        find_protected_turn_start(&state.messages, protected_turns).min(history_end);
     if protected_start == 0 {
         return PlaceholderOutcome::default();
     }
@@ -309,7 +317,7 @@ fn find_protected_turn_start(messages: &[crate::core::llm::ChatMessage], m: usiz
 // run_layer0_cleanup: Combined L0 persist + L1 placeholder (TASK-20)
 // ---------------------------------------------------------------------------
 
-/// TASK-20: L0 步骤 A（最后一 turn 落盘）+ 步骤 B（compactable zone 占位符替换）。
+/// TASK-20: L0 步骤 A（最后一历史 turn 落盘）+ 步骤 B（历史 compactable zone 占位符替换）。
 ///
 /// 正常调用方是成功应用 boundary 后的结构性后续步骤；current-tail guard 仅在已确认的
 /// 溢出风险下复用它作为保命路径。
@@ -318,10 +326,11 @@ pub fn run_layer0_cleanup(
     config: &ContextConfig,
     work_dir: &Path,
     session_id: &str,
+    history_end: usize,
 ) -> Layer0CleanupOutcome {
     let (persisted, persist_chars_freed) =
-        layer0_persist_large_results(state, config, work_dir, session_id);
-    let placeholder = compact_tool_results(state, config);
+        layer0_persist_large_results(state, config, work_dir, session_id, history_end);
+    let placeholder = compact_tool_results(state, config, history_end);
     let evicted_tool_call_ids = persisted
         .iter()
         .map(|p| p.tool_call_id.clone())

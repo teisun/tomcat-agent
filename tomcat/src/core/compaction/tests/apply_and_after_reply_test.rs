@@ -7,7 +7,7 @@ use crate::core::agent_loop::{execute_tool_for_cross_module_test, ToolCallInfo};
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{ChatMessageRole, MessageKind};
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
-use crate::core::session::manager::compound_turn_id;
+use crate::core::session::manager::{compound_turn_id, estimate_msg_chars};
 use crate::core::session::transcript::{
     append_entry, read_header, write_header, BranchSummaryEntry, SessionHeader, TranscriptEntry,
 };
@@ -149,7 +149,8 @@ fn apply_boundary_replaces_covered_range() {
         preheat_elapsed_ms: 0,
     };
     let old_ratio = state.usage_ratio();
-    state.apply_boundary(result).unwrap();
+    let mut turn_start = state.messages.len();
+    state.apply_boundary(result, &mut turn_start).unwrap();
 
     assert_eq!(state.messages.len(), 2);
     assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
@@ -183,7 +184,8 @@ fn apply_boundary_not_found_returns_err() {
         estimated_tokens_saved: None,
         preheat_elapsed_ms: 0,
     };
-    let res = state.apply_boundary(result);
+    let mut turn_start = state.messages.len();
+    let res = state.apply_boundary(result, &mut turn_start);
     assert!(matches!(
         res,
         Err(AppError::ApplyBoundaryStale { covered_end_id }) if covered_end_id == "also_nonexistent"
@@ -208,10 +210,64 @@ fn apply_boundary_missing_start_id_splices_from_zero_to_end() {
         estimated_tokens_saved: None,
         preheat_elapsed_ms: 0,
     };
-    state.apply_boundary(result).unwrap();
+    let mut turn_start = state.messages.len();
+    state.apply_boundary(result, &mut turn_start).unwrap();
     assert_eq!(state.messages.len(), 1);
     assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
     assert_eq!(state.messages[0].text_content(), Some("merged"));
+}
+
+#[test]
+fn apply_boundary_shifts_turn_start_for_history_boundary_and_tail_boundary() {
+    let result_for = |covered_end_id: &str| crate::core::session::manager::CompactionResult {
+        summary_text: "summary".into(),
+        covered_start_id: "m0".into(),
+        covered_end_id: covered_end_id.into(),
+        covered_count: 1,
+        transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
+    };
+    let state_for = || {
+        let mut state = make_state(0, 100_000, 25_000);
+        state.messages = vec![
+            user_msg_with_id("m0", "zero"),
+            user_msg_with_id("m1", "one"),
+            user_msg_with_id("m2", "two"),
+            user_msg_with_id("m3", "three"),
+        ];
+        state.estimate_context_chars = state.messages.iter().map(estimate_msg_chars).sum();
+        state
+    };
+
+    // The boundary ends before the current turn. Only the trailing current-turn message moves.
+    let mut state = state_for();
+    let mut turn_start = 3;
+    state
+        .apply_boundary(result_for("m1"), &mut turn_start)
+        .unwrap();
+    assert_eq!(turn_start, 2);
+    assert_eq!(state.messages[turn_start].msg_id.as_deref(), Some("m3"));
+
+    // The boundary ends immediately before the current turn.
+    let mut state = state_for();
+    let mut turn_start = 2;
+    state
+        .apply_boundary(result_for("m1"), &mut turn_start)
+        .unwrap();
+    assert_eq!(turn_start, 1);
+    assert_eq!(state.messages[turn_start].msg_id.as_deref(), Some("m2"));
+
+    // The boundary consumes the first current-turn message. The surviving tail starts after S.
+    let mut state = state_for();
+    let mut turn_start = 2;
+    state
+        .apply_boundary(result_for("m2"), &mut turn_start)
+        .unwrap();
+    assert_eq!(turn_start, 1);
+    assert_eq!(state.messages[turn_start].msg_id.as_deref(), Some("m3"));
 }
 
 #[test]
@@ -318,6 +374,7 @@ fn successful_boundary_runs_both_layer0_steps_invalidates_read_stamps_and_emits_
     let env = boundary_env(&config, dir.path(), &read_file_state);
     let mut state = l0_test_state();
     let chars_before = state.estimate_context_chars;
+    let mut turn_start = state.messages.len();
 
     assert!(apply_and_emit_boundary(
         &mut state,
@@ -326,6 +383,7 @@ fn successful_boundary_runs_both_layer0_steps_invalidates_read_stamps_and_emits_
         false,
         &emitter,
         &env,
+        &mut turn_start,
     ));
 
     assert_eq!(
@@ -408,6 +466,7 @@ async fn boundary_eviction_forces_a_real_reread_instead_of_an_unchanged_stub() {
     let config = l0_test_config();
     let env = boundary_env(&config, dir.path(), read_file_state.as_ref());
     let mut state = l0_test_state();
+    let mut turn_start = state.messages.len();
     assert!(apply_and_emit_boundary(
         &mut state,
         l0_test_result(),
@@ -415,6 +474,7 @@ async fn boundary_eviction_forces_a_real_reread_instead_of_an_unchanged_stub() {
         false,
         &emitter,
         &env,
+        &mut turn_start,
     ));
     assert!(
         read_file_state.is_empty(),
@@ -462,6 +522,7 @@ fn boundary_without_layer0_savings_does_not_emit_release_event() {
         user_msg_with_id("covered-end", "covered end"),
         user_msg_with_id("small-tail", "small tail"),
     ];
+    let mut turn_start = state.messages.len();
 
     assert!(apply_and_emit_boundary(
         &mut state,
@@ -470,6 +531,7 @@ fn boundary_without_layer0_savings_does_not_emit_release_event() {
         false,
         &emitter,
         &env,
+        &mut turn_start,
     ));
     assert_eq!(
         layer0_events.load(Ordering::SeqCst),
@@ -672,6 +734,7 @@ fn applying_the_same_preheat_result_twice_writes_one_linked_summary_body() {
     let emitter =
         crate::infra::ScopedEventEmitter::new(Arc::new(DefaultEventBus::new()), "s-apply-test");
 
+    let mut turn_start = state.messages.len();
     assert!(apply_and_emit_boundary(
         &mut state,
         result.clone(),
@@ -679,13 +742,23 @@ fn applying_the_same_preheat_result_twice_writes_one_linked_summary_body() {
         false,
         &emitter,
         &env,
+        &mut turn_start,
     ));
     // Model the retry/restart boundary where memory still contains the raw covered range, but
     // the durable body was already appended. The tail guard must make the second apply idempotent.
     let mut retry_state = l0_test_state();
     retry_state.transcript_path = path.clone();
+    let mut retry_turn_start = retry_state.messages.len();
     assert!(
-        apply_and_emit_boundary(&mut retry_state, result, 0.85, false, &emitter, &env),
+        apply_and_emit_boundary(
+            &mut retry_state,
+            result,
+            0.85,
+            false,
+            &emitter,
+            &env,
+            &mut retry_turn_start,
+        ),
         "a retry with raw memory should reuse the existing durable body"
     );
 
@@ -791,7 +864,9 @@ fn layer0_threshold_from_config() {
         layer0_single_result_max_chars: 100_000,
         ..Default::default()
     };
-    let (results, _) = layer0_persist_large_results(&mut state, &config, dir.path(), "test");
+    let history_end = state.messages.len();
+    let (results, _) =
+        layer0_persist_large_results(&mut state, &config, dir.path(), "test", history_end);
     assert!(
         results.is_empty(),
         "60K < 100K threshold should NOT persist"
@@ -803,6 +878,8 @@ fn layer0_threshold_from_config() {
     };
     let mut state2 = make_state(60_000, 100_000, 25_000);
     state2.messages = vec![user_msg("q"), tool_msg("tc_cfg2", &"y".repeat(60_000))];
-    let (results2, _) = layer0_persist_large_results(&mut state2, &config2, dir.path(), "test");
+    let history_end = state2.messages.len();
+    let (results2, _) =
+        layer0_persist_large_results(&mut state2, &config2, dir.path(), "test", history_end);
     assert_eq!(results2.len(), 1, "60K > 50K threshold should persist");
 }

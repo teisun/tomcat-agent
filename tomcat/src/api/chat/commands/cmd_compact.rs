@@ -74,7 +74,8 @@ pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, 
     let before_ratio = state.usage_ratio();
     // 先复用自动压缩的第一档，避免把不再需要的超大工具结果再次送给摘要模型。
     // 摘要成功后会用 boundary 丢弃整个前缀，因此这里不需要把临时占位符写回 transcript。
-    compact_tool_results(&mut state, &ctx.config.context);
+    let history_end = state.messages.len();
+    compact_tool_results(&mut state, &ctx.config.context, history_end);
     let covered_count = state.messages.len();
     let covered_start_id = state
         .messages

@@ -14,8 +14,9 @@ fn layer0_persist_skips_small() {
     let mut state = make_state(1_000, 100_000, 25_000);
     state.messages = vec![user_msg("q"), tool_msg("tc_2", "small")];
     let config = ContextConfig::default();
+    let history_end = state.messages.len();
     let (results, _) =
-        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
+        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session", history_end);
     assert!(results.is_empty());
 }
 
@@ -106,7 +107,8 @@ fn compact_tool_results_skips_already_persisted() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config).chars_freed;
+    let history_end = state.messages.len();
+    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
     assert_eq!(
         reduced, 0,
         "already persisted results should not be replaced"
@@ -125,7 +127,8 @@ fn compact_tool_results_skips_placeholder() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config).chars_freed;
+    let history_end = state.messages.len();
+    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
     assert_eq!(
         reduced, 0,
         "already replaced results should not be re-replaced"
@@ -142,7 +145,8 @@ fn evicted_bash_result_keeps_log_path() {
         ..Default::default()
     };
 
-    compact_tool_results(&mut state, &config);
+    let history_end = state.messages.len();
+    compact_tool_results(&mut state, &config, history_end);
     let text = state.messages[1].text_content().unwrap_or("");
     assert_eq!(
         text,
@@ -167,7 +171,8 @@ fn evicted_json_result_keeps_log_path_for_both_field_spellings() {
             ..Default::default()
         };
 
-        compact_tool_results(&mut state, &config);
+        let history_end = state.messages.len();
+        compact_tool_results(&mut state, &config, history_end);
         let expected = format!("[Previous tool result replaced; full log at {path}]");
         assert_eq!(state.messages[1].text_content(), Some(expected.as_str()));
     }
@@ -186,7 +191,8 @@ fn read_result_without_path_stays_bare_placeholder() {
         ..Default::default()
     };
 
-    compact_tool_results(&mut state, &config);
+    let history_end = state.messages.len();
+    compact_tool_results(&mut state, &config, history_end);
     assert_eq!(
         state.messages[1].text_content(),
         Some(TOOL_RESULT_PLACEHOLDER)
@@ -206,9 +212,11 @@ fn placeholder_text_is_stable_across_rewrites() {
         ..Default::default()
     };
 
-    compact_tool_results(&mut state, &config);
+    let history_end = state.messages.len();
+    compact_tool_results(&mut state, &config, history_end);
     let once = state.messages[1].text_content().unwrap_or("").to_string();
-    compact_tool_results(&mut state, &config);
+    let history_end = state.messages.len();
+    compact_tool_results(&mut state, &config, history_end);
     assert_eq!(state.messages[1].text_content(), Some(once.as_str()));
 }
 
@@ -222,7 +230,8 @@ fn compact_tool_results_respects_placeholder_threshold_from_config() {
         layer0_placeholder_threshold_chars: 30_000,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &high_threshold).chars_freed;
+    let history_end = state.messages.len();
+    let reduced = compact_tool_results(&mut state, &high_threshold, history_end).chars_freed;
     assert_eq!(
         reduced, 0,
         "content below custom threshold should not be replaced"
@@ -242,8 +251,9 @@ fn layer0_persist_skips_below_threshold() {
     let medium = "x".repeat(20_000);
     state.messages = vec![user_msg("q"), tool_msg("tc_a", &medium)];
     let config = ContextConfig::default();
+    let history_end = state.messages.len();
     let (results, _) =
-        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
+        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session", history_end);
     assert!(
         results.is_empty(),
         "20K < 50K threshold should NOT trigger persistence"
@@ -257,7 +267,9 @@ fn layer0_persist_file_readable() {
     let mut state = make_state(original.len(), 100_000, 25_000);
     state.messages = vec![user_msg("q"), tool_msg("tc_read", &original)];
     let config = ContextConfig::default();
-    let (results, _) = layer0_persist_large_results(&mut state, &config, dir.path(), "sess1");
+    let history_end = state.messages.len();
+    let (results, _) =
+        layer0_persist_large_results(&mut state, &config, dir.path(), "sess1", history_end);
     assert_eq!(results.len(), 1);
     let content = std::fs::read_to_string(&results[0].persisted_path).unwrap();
     assert_eq!(

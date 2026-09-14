@@ -4,8 +4,8 @@
 //! 进入"收束分支"做四步 cleanup：
 //!
 //! 1. `on_assistant_message_appended(content_buf.len())` + `messages.push(assistant)`
-//! 2. **Timing ⑤**：preheat.try_restart_if_pending → L2
-//!    `check_after_reply`（仅 ratio ≥ 0.85；boundary 成功时在内部执行 L0 cleanup）
+//! 2. **Timing ⑤**：preheat.try_restart_if_pending → `apply_ready_preheat`
+//!    （仅 ratio ≥ 0.85；fold → apply → unfold，成功时只在 history_end 内执行 L0）
 //!    → preheat.try_start（Idle → Running）
 //! 3. 条件发射 `AutoCompactionStart`
 //! 4. `emit_context_metrics()` + `TurnEnd { tool_results: [] }`
@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use crate::core::compaction::apply::BoundaryEnv;
 use crate::core::llm::{
     ChatMessage, ContinuityMetadata, MessageKind, PromptCacheKeyFamily, ReasoningContinuation,
     TokenUsage,
@@ -24,7 +23,10 @@ use crate::core::llm::{
 use crate::core::plan_runtime::{file_store, NextAction, PlanRuntime};
 use crate::infra::events::{AgentEvent, Message};
 
-use super::types::AgentLoop;
+use super::{
+    current_tail_guard::{apply_ready_preheat, ensure_working_message_ids},
+    types::AgentLoop,
+};
 
 /// 连续注入上限。到顶后停止注入、交还用户，避免模型卡在同一个坎上无限打转。
 pub(super) const MAX_COMPLETION_GUARD_INJECTIONS: u32 = 8;
@@ -153,8 +155,9 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         }
     }
 
-    // Timing ⑤: try_restart → check_after_reply (successful boundary includes L0)
-    // → try_start → metrics.
+    // Timing ⑤: try_restart → non-blocking boundary apply (including L0)
+    // → try_start → metrics. Preheat snapshots the current working set because Scheme E requires
+    // its covered end to be the durable transcript tail.
     let compaction_provider = agent.compaction_provider();
     let compaction_emitter = Arc::new(agent.emitter.clone());
     let control_snapshot = agent
@@ -164,48 +167,61 @@ pub(super) async fn finalize_turn_after_text_with_usage(
         .map(|rt| rt.control_snapshot(Some(agent.wire_model())));
     let compaction_cache_key = PromptCacheKeyFamily::Compaction.key_for(&agent.config.session_id);
     let mut preheat_started: Option<(usize, f64)> = None;
-    let boundary_env = BoundaryEnv {
-        config: &agent.config.context_config,
-        work_dir: std::path::Path::new(&agent.config.agent_trail_dir),
-        session_id: &agent.config.session_id,
-        read_file_state: agent.config.read_file_state.as_ref(),
-    };
-    if let Some(ref mut ctx_state) = agent.context_state {
-        // Step 1: restore ExhaustedPending → Running.
-        ctx_state.preheat.try_restart_if_pending(
-            ctx_state.usage_ratio(),
-            &ctx_state.messages,
-            &ctx_state.transcript_path,
-            compaction_cache_key.clone(),
-            Arc::clone(&compaction_provider),
-            agent.config.compaction_output_limit,
-            &agent.config.context_config,
-            Arc::clone(&compaction_emitter),
-            control_snapshot.clone(),
-        );
+    if agent.context_state.is_some() {
+        let first_non_system = messages
+            .iter()
+            .position(|message| message.role != crate::core::llm::ChatMessageRole::System)
+            .unwrap_or(messages.len());
 
-        // Step 2: L2 non-blocking poll + apply boundary.
-        let _boundary_applied = crate::core::compaction::apply::check_after_reply(
-            ctx_state,
-            &agent.emitter,
-            &boundary_env,
-        );
+        // Step 1: restore ExhaustedPending → Running from the full working set, whose tail is
+        // the transcript tail while this turn is being finalized.
+        let restart_needed = agent.context_state.as_ref().is_some_and(|ctx_state| {
+            ctx_state.usage_ratio() >= 0.50 && ctx_state.preheat.is_exhausted_pending()
+        });
+        if restart_needed {
+            ensure_working_message_ids(agent, &mut messages[first_non_system..])?;
+            if let Some(ctx_state) = agent.context_state.as_mut() {
+                ctx_state.preheat.try_restart_if_pending(
+                    ctx_state.usage_ratio(),
+                    &messages[first_non_system..],
+                    &ctx_state.transcript_path,
+                    compaction_cache_key.clone(),
+                    Arc::clone(&compaction_provider),
+                    agent.config.compaction_output_limit,
+                    &agent.config.context_config,
+                    Arc::clone(&compaction_emitter),
+                    control_snapshot.clone(),
+                );
+            }
+        }
+
+        // Step 2: L2 non-blocking poll + apply boundary. This is shared with the mid-turn
+        // guard so the boundary is always located in a merged history-plus-tail view.
+        let _boundary_applied = apply_ready_preheat(agent, messages, Some(0.85))?;
 
         // Step 4: Idle → Running (start new preheat if conditions met).
-        let ratio = ctx_state.usage_ratio();
-        let turn_count = ctx_state.turn_count();
-        if ctx_state.preheat.try_start(
-            ratio,
-            &ctx_state.messages,
-            &ctx_state.transcript_path,
-            compaction_cache_key,
-            Arc::clone(&compaction_provider),
-            agent.config.compaction_output_limit,
-            &agent.config.context_config,
-            Arc::clone(&compaction_emitter),
-            control_snapshot.clone(),
-        ) {
-            preheat_started = Some((turn_count, ratio));
+        let start_needed = agent.context_state.as_ref().is_some_and(|ctx_state| {
+            ctx_state.usage_ratio() >= 0.50 && ctx_state.preheat.is_idle()
+        });
+        if start_needed {
+            ensure_working_message_ids(agent, &mut messages[first_non_system..])?;
+            if let Some(ctx_state) = agent.context_state.as_mut() {
+                let ratio = ctx_state.usage_ratio();
+                let covered_count = messages.len().saturating_sub(first_non_system);
+                if ctx_state.preheat.try_start(
+                    ratio,
+                    &messages[first_non_system..],
+                    &ctx_state.transcript_path,
+                    compaction_cache_key,
+                    Arc::clone(&compaction_provider),
+                    agent.config.compaction_output_limit,
+                    &agent.config.context_config,
+                    Arc::clone(&compaction_emitter),
+                    control_snapshot.clone(),
+                ) {
+                    preheat_started = Some((covered_count, ratio));
+                }
+            }
         }
     }
 

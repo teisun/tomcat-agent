@@ -126,7 +126,7 @@ current-tail guard（已超预算的紧急减负） 单条 >= 10K  → Step 0 si
 ### 2.3 为什么选这条路线，不选其他路线
 
 1. **压力点在 mid-turn，不在 turn 末尾。** 如果等最终 assistant 回复后再处理，已经白白发出过载请求了。
-2. **历史 compaction 不是 current-tail guard。** `ContextState.messages` 与局部 `messages[start_idx..]` 在 Tomcat 里不是同一视角，不能混看。
+2. **历史 compaction 不是 current-tail guard。** `ContextState.messages` 与局部 `messages[start_idx..]` 在 Tomcat 里不是同一视角，不能混看；任何 ready preheat 都必须经 `apply_ready_preheat` 的 fold → apply → unfold 事务消费，不能直接对其中一份列表调用 `check_after_reply`。
 3. **减负必须可恢复。** `read`、`search_files`、只读 `bash` 都有不同 replay 路径，不能把所有 tool result 当普通长字符串切一刀。
 4. **长 plan 场景需要 split + keepalive。** 只做 reduction 不足以保证执行态连续性；只做 summary 又会把当前 step / pending work 压没。
 5. **阶段二与阶段三必须分开。** 本期先把“发请求前避免超载”做对；`finish_reason` 驱动的 same-turn recovery 留给后续反应型阶段。

@@ -937,6 +937,55 @@ fold 第二遍: 读到 entry 9 才清掉 1~8、放入 compaction_summary(X)
 
 即：`**ContextState.messages` 是持久化 transcript 与 LLM 请求之间的内存层**——负责 Compaction 折叠与估算维护；`ChatMessage` 已是 LLM wire 格式，无需额外转换。
 
+#### 5.6.1 过渡契约：合并视图事务（2026-09-14）
+
+上面的“上下文管理与工作集无交集”只适用于压缩发生在 user turn **之间**的早期实现。
+current-tail guard 和 timing ⑤ 可以在 turn 内消费异步预热结果，因此不能再假定
+`covered_end_id` 一定位于 `ContextState.messages`。
+
+```text
+before   working = [system][历史][当前 tail]     state = [历史]
+fold     state   =           [历史][当前 tail]    cursor = 当前 tail 起点
+apply    state   =           [摘要][幸存 tail]    apply_boundary 同步平移 cursor
+L0       只处理 state[..cursor]                  幸存 tail 不被落盘或占位
+unfold   state   =           [摘要]               working = [system][摘要][幸存 tail]
+```
+
+`apply_ready_preheat(agent, messages, min_ratio)` 是 mid-turn 与 timing ⑤ 唯一允许消费
+ready preheat 的入口。它在应用前 fold，在应用和 Layer 0 后按平移后的游标 unfold；
+因此 `covered_end_id` 查找、摘要替换、L0 的历史边界共用同一个坐标系。`history_end`
+是 L0 的硬上界，不再依赖 `keep_recent_turns` 恰好覆盖当前 tail。
+
+timing ⑤ 的 `try_restart_if_pending` / `try_start` 必须快照 working messages（排除 system
+prompt）：Scheme E 只允许把 marker 追加到 transcript 尾，而刚完成的 assistant 消息正是
+该尾部。这个预热可以覆盖刚结束的 turn；若产品需要“最近一回合一定 raw”，须单独放宽
+Scheme E、允许在指定 message 后插入 marker，不能悄悄改回旧快照。
+
+#### 5.6.2 列表归属决策记录
+
+**问题和证据。** 以前，`start_midturn_preheat_if_needed` 从 working messages 取得
+`covered_end_id`，而 `apply_and_emit_boundary` 在落后一整个 tail 的
+`ContextState.messages` 中定位它。这会确定性触发 `ApplyBoundaryStale`，而不是可由用户
+修复的输入错误。
+
+**调研。** Codex 在
+`codex/codex-rs/core/src/context_manager/history.rs::ContextManager::record_items` 中即时更新
+权威 history，再由 `for_prompt` 派生请求视图；Claude Code 的
+`cc-fork-01/src/services/compact/sessionMemoryCompact.ts` 使用
+`lastSummarizedMessageId`，锚点失配时回退同步压缩；Pi 在
+`pi/packages/coding-agent/src/core/compaction/compaction.ts` 按 entry id 压缩，失配时丢弃
+过期候选；OpenCode 从 DB 读取会话历史后在
+`opencode/packages/opencode/src/session/compaction.ts` 同步压缩。没有参考实现把“权威列表
+落后于请求视图”当作正常状态后再向用户报错。
+
+**当前决策。** 先用本节的合并视图事务止血；随后迁移到单列表：回合间列表停在
+`ContextState.messages`，回合内 move 给 `AgentLoop` 独占。届时保留游标和
+`history_end` 不变量，删除 fold / unfold / rebuild 胶水。
+
+**反例与推翻条件。** 当前 serve 在回合中只读 metrics，不读完整消息列表，所以不需要
+`Arc<Mutex<Vec<ChatMessage>>>`。若未来增加回合中的外部全文读取或写入（例如实时 `/context`
+查看或非-steering 注入），应改用带明确并发协议的共享权威状态，而不是恢复双列表。
+
 ### 5.7 消息级 ID 与 Compaction 一致性
 
 本节约定 **MessageId**（`ChatMessage.msg_id`）与 **Compaction** 之间的 id 体系，用于解决摘要应用失败、restore 失败、水位下降不及预期等与 **id 不一致或 transcript 行序** 相关的问题。**实现须与本文对齐**（实现排期独立于本文档迭代）。

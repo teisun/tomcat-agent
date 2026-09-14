@@ -12,7 +12,11 @@ use super::mocks::{
 };
 use crate::core::compaction::preheat::{Preheat, PreheatOutcome};
 use crate::core::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent};
-use crate::core::session::manager::ContextState;
+use crate::core::session::manager::{ContextState, MessageAppendSink};
+use crate::core::session::transcript::{
+    append_entry, read_entries_tail, write_header, BranchSummaryEntry, MessageEntry, SessionHeader,
+    TranscriptEntry,
+};
 use crate::infra::config::ContextConfig;
 use crate::infra::error::AppError;
 use crate::infra::event_bus::{DefaultEventBus, EventBus};
@@ -43,6 +47,47 @@ impl LlmProvider for FailingChatProvider {
 
     fn count_tokens(&self, _messages: &[ChatMessage]) -> Result<u32, AppError> {
         Ok(0)
+    }
+}
+
+struct JsonlMessageSink {
+    path: PathBuf,
+}
+
+impl JsonlMessageSink {
+    fn append_with_id(&self, message: serde_json::Value, id: &str) -> Result<String, AppError> {
+        append_entry(
+            &self.path,
+            &TranscriptEntry::Message(MessageEntry {
+                id: Some(id.to_string()),
+                parent_id: None,
+                timestamp: "2026-09-14T00:00:00Z".to_string(),
+                message,
+            }),
+        )?;
+        Ok(id.to_string())
+    }
+}
+
+impl MessageAppendSink for JsonlMessageSink {
+    fn append_message(&self, message: serde_json::Value) -> Result<String, AppError> {
+        let id = format!(
+            "sink-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        self.append_with_id(message, &id)
+    }
+
+    fn append_message_with_id(
+        &self,
+        message: serde_json::Value,
+        id: &str,
+    ) -> Result<String, AppError> {
+        self.append_with_id(message, id)
+    }
+
+    fn append_custom_entry(&self, _extra: serde_json::Value) -> Result<(), AppError> {
+        Ok(())
     }
 }
 
@@ -177,6 +222,118 @@ async fn timing5_try_start_uses_compaction_provider_same_provider() {
     assert_eq!(compaction_calls.len(), 1);
     assert_eq!(compaction_calls[0].provider, "openai");
     assert_eq!(compaction_calls[0].model, "compaction-x");
+    assert!(
+        compaction_calls[0]
+            .message_texts
+            .last()
+            .is_some_and(|text| text.contains("assistant tail reply")),
+        "timing⑤ must preheat the full working set through the durable current-turn tail"
+    );
+}
+
+#[tokio::test]
+async fn timing5_try_start_snapshots_working_set_and_appends_tail_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript_path = dir.path().join("timing5.jsonl");
+    write_header(
+        &transcript_path,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(4),
+            id: "sess-timing5-marker".to_string(),
+            timestamp: "2026-09-14T00:00:00Z".to_string(),
+            cwd: None,
+            project_root: None,
+        },
+    )
+    .unwrap();
+    let sink = Arc::new(JsonlMessageSink {
+        path: transcript_path.clone(),
+    });
+    sink.append_message_with_id(
+        serde_json::json!({"role": "user", "content": "old user"}),
+        "u1",
+    )
+    .unwrap();
+    sink.append_message_with_id(
+        serde_json::json!({"role": "assistant", "content": "old assistant"}),
+        "a1",
+    )
+    .unwrap();
+
+    let calls = Arc::new(Mutex::new(Vec::<RecordedChatCall>::new()));
+    let compaction_provider: Arc<dyn LlmProvider> = Arc::new(RecordingChatLlmProvider::new(
+        "compaction",
+        "summary",
+        Arc::clone(&calls),
+    ));
+    let mut historical_user = user_message("u1", "old user");
+    let historical_assistant = assistant_message("a1", "old assistant");
+    historical_user.timestamp = Some("2026-09-14T00:00:00Z".to_string());
+    let mut state =
+        build_context_state(vec![historical_user.clone(), historical_assistant.clone()]);
+    state.estimate_context_chars = 100;
+    state.context_budget_chars = 100;
+    state.context_budget_tokens = 25;
+    state.transcript_path = transcript_path.clone();
+    let event_bus: Arc<dyn EventBus> = Arc::new(DefaultEventBus::new());
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(FailingChatProvider), "main"),
+        Arc::new(MockPrimitiveExecutor),
+        event_bus,
+        AgentLoopConfig {
+            session_id: "sess-timing5-marker".to_string(),
+            compaction_provider: Some(compaction_provider),
+            message_append_sink: Some(sink),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.start_idx = 2;
+    agent.context_tail_start = 2;
+    agent.set_context_state(Some(state));
+    let mut messages = vec![historical_user, historical_assistant];
+
+    finalize_turn_after_text(
+        &mut agent,
+        &mut messages,
+        "current turn assistant",
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_preheat_completed(&mut agent).await;
+
+    let final_message_id = messages
+        .last()
+        .and_then(|message| message.msg_id.as_deref())
+        .expect("the finalized assistant must have a durable message id");
+    let entries = read_entries_tail(&transcript_path, 8).unwrap();
+    let marker = entries
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptEntry::BranchSummary(BranchSummaryEntry {
+                covered_end_id: Some(covered_end_id),
+                ..
+            }) => Some(covered_end_id),
+            _ => None,
+        })
+        .expect("timing⑤ must append a marker for the working-set snapshot");
+    assert_eq!(marker, final_message_id);
+    assert!(
+        calls.lock().unwrap().first().is_some_and(|call| {
+            call.message_texts
+                .last()
+                .is_some_and(|text| text.contains("current turn assistant"))
+        }),
+        "the compaction request must include the just-finished assistant tail"
+    );
 }
 
 #[tokio::test]

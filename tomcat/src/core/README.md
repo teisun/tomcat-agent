@@ -164,7 +164,7 @@ flowchart TD
       |    4. set_context_state → AgentLoop
       |
       v  AgentLoop::run()
-      |    - Layer 2: timing ②/⑤/mid-turn apply boundary；成功分支内紧接 Layer 0 落盘/占位
+      |    - Layer 2: timing ②/⑤/mid-turn 的 ready preheat 统一经 apply_ready_preheat（fold → apply → unfold）；成功分支内仅在 history_end 前执行 Layer 0 落盘/占位
       |    - Layer 3 Attempt: ContextOverflow → force_drop_oldest → 重试
       |    - 动态维护 estimate_context_chars
       |

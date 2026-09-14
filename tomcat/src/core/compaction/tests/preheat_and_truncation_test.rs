@@ -69,7 +69,8 @@ fn compact_tool_results_reduces_budget() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config).chars_freed;
+    let history_end = state.messages.len();
+    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
     assert!(reduced > 0);
 }
 
@@ -83,7 +84,8 @@ fn compact_tool_results_protects_recent() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config).chars_freed;
+    let history_end = state.messages.len();
+    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
     assert_eq!(reduced, 0);
 }
 
@@ -100,7 +102,8 @@ fn compact_tool_results_skips_small() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let reduced = compact_tool_results(&mut state, &config).chars_freed;
+    let history_end = state.messages.len();
+    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
     assert_eq!(reduced, 0);
 }
 
@@ -398,8 +401,9 @@ fn layer0_persist_creates_files() {
         tool_msg_with_id("tc_1_msg", "tc_1", &big_content),
     ];
     let config = ContextConfig::default();
+    let history_end = state.messages.len();
     let (results, _) =
-        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session");
+        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session", history_end);
     assert_eq!(results.len(), 1);
     assert!(std::path::Path::new(&results[0].persisted_path).exists());
     assert!(state.estimate_context_chars < 60_000);

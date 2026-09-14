@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use tracing::{info, warn};
 
-use crate::core::compaction::apply::{check_after_reply, BoundaryEnv};
+use crate::core::compaction::apply::BoundaryEnv;
 use crate::core::compaction::preheat::{generate_summary_with_output_limit, SummaryRequestOptions};
 use crate::core::compaction::{
     compact_tool_results, is_persisted_tool_result_text, persist_tool_result_text,
@@ -280,38 +280,19 @@ fn reduce_before_next_llm(
     messages: &mut Vec<ChatMessage>,
 ) -> Result<ReductionResult, AppError> {
     let mut result = ReductionResult::default();
-    if apply_midturn_preheat(agent, messages)? {
+    if apply_ready_preheat(agent, messages, None)? {
         result.mutated = true;
         if !context_is_over_budget(agent) {
             return Ok(result);
         }
     }
-    let boundary_env = BoundaryEnv {
-        config: &agent.config.context_config,
-        work_dir: Path::new(&agent.config.agent_trail_dir),
-        session_id: &agent.config.session_id,
-        read_file_state: agent.config.read_file_state.as_ref(),
-    };
-
-    let applied_history = {
-        let Some(ctx_state) = agent.context_state.as_mut() else {
-            return Ok(result);
-        };
-        check_after_reply(ctx_state, &agent.emitter, &boundary_env)
-    };
-    if applied_history {
-        rebuild_messages_from_context(agent, messages);
-        result.mutated = true;
-        if !context_is_over_budget(agent) {
-            return Ok(result);
-        }
-    }
-
     let history_reduced = {
         let Some(ctx_state) = agent.context_state.as_mut() else {
             return Ok(result);
         };
-        let placeholder = compact_tool_results(ctx_state, &agent.config.context_config);
+        let history_end = ctx_state.messages.len();
+        let placeholder =
+            compact_tool_results(ctx_state, &agent.config.context_config, history_end);
         if placeholder.chars_freed > 0 {
             ctx_state.invalidate_api_usage();
         }
@@ -408,14 +389,22 @@ fn start_midturn_preheat_if_needed(
     Ok(())
 }
 
-/// Apply a ready build-mode preheat to exactly its recorded `covered_end_id`, leaving all tool
-/// calls made after the waterline in the live tail. The shared apply path writes the completed
-/// body as an append-only row; a missing boundary is stale, so the regular Reduce/Collapse
-/// fallbacks handle the current context.
-fn apply_midturn_preheat(
+/// Apply a ready preheat against the merged history-plus-tail view. The current implementation
+/// restores the pre-existing two-list ownership after applying; the explicit cursor makes the
+/// later single-list migration a local deletion of that fold/unfold glue rather than a second
+/// semantic rewrite.
+pub(super) fn apply_ready_preheat(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
+    min_ratio: Option<f64>,
 ) -> Result<bool, AppError> {
+    let Some(ctx_state) = agent.context_state.as_ref() else {
+        return Ok(false);
+    };
+    if min_ratio.is_some_and(|minimum| ctx_state.usage_ratio() < minimum) {
+        return Ok(false);
+    }
+
     let Some(result) = (match agent.context_state.as_mut() {
         Some(ctx_state) if ctx_state.preheat.is_finished() => match ctx_state.preheat.poll_result()
         {
@@ -433,19 +422,20 @@ fn apply_midturn_preheat(
         session_id: &agent.config.session_id,
         read_file_state: agent.config.read_file_state.as_ref(),
     };
-    // Build-mode keeps the current tool-round working set in `messages`; ContextState can still
-    // lag behind it while the loop is between tool calls. Synchronize it before handing off to
-    // the same boundary application primitive used by normal turn boundaries, so the covered
-    // prefix is replaced while the later tool round remains in the raw tail.
+    // The working set includes the active turn while ContextState owns only completed history.
+    // Fold both into the same coordinate system, then let apply_boundary move the tail cursor
+    // as it replaces the covered prefix.
     let state_start = usize::from(
         messages
             .first()
             .is_some_and(|message| message.role == ChatMessageRole::System),
     );
+    let mut turn_start = agent
+        .start_idx
+        .saturating_sub(state_start)
+        .min(messages.len().saturating_sub(state_start));
     let applied = agent.context_state.as_mut().is_some_and(|ctx_state| {
         ctx_state.messages = messages[state_start..].to_vec();
-        ctx_state.estimate_context_chars = ctx_state.messages.iter().map(estimate_msg_chars).sum();
-        ctx_state.invalidate_api_usage();
         crate::core::compaction::apply::apply_and_emit_boundary(
             ctx_state,
             result,
@@ -453,16 +443,32 @@ fn apply_midturn_preheat(
             false,
             &agent.emitter,
             &boundary_env,
+            &mut turn_start,
         )
     });
     if !applied {
+        if let Some(ctx_state) = agent.context_state.as_mut() {
+            ctx_state.messages.truncate(turn_start);
+        }
         return Ok(false);
     }
-    // The applied prefix and the live suffix now form one persisted context. Rebuild from this
-    // authoritative state, leaving the next assistant/tool pair as the new current tail.
-    agent.start_idx = messages.len();
-    agent.context_tail_start = messages.len();
-    rebuild_messages_from_context(agent, messages);
+
+    // Split at the cursor after Layer 2 and Layer 0 have both finished. Layer 0 only received
+    // this cursor as its history_end, so the surviving tail is still raw.
+    let Some(ctx_state) = agent.context_state.as_mut() else {
+        return Ok(false);
+    };
+    let tail = ctx_state.messages.split_off(turn_start);
+    let mut rebuilt = Vec::new();
+    if state_start == 1 {
+        rebuilt.push(messages[0].clone());
+    }
+    rebuilt.extend(build_context_from_state(ctx_state));
+    let rebuilt_turn_start = rebuilt.len();
+    rebuilt.extend(tail);
+    *messages = rebuilt;
+    agent.start_idx = rebuilt_turn_start;
+    agent.context_tail_start = rebuilt_turn_start;
     Ok(true)
 }
 
@@ -932,17 +938,21 @@ fn apply_collapse_summary(
         session_obs: Default::default(),
         live: Default::default(),
     };
-    temp.apply_boundary(CompactionResult {
-        summary_text: summary_text.to_string(),
-        covered_start_id: covered_start_id.to_string(),
-        covered_end_id: covered_end_id.to_string(),
-        covered_count: working.len(),
-        transcript_compaction_entry_id: Some(entry_id.to_string()),
-        estimated_covered_tokens_before: None,
-        estimated_summary_tokens: None,
-        estimated_tokens_saved: None,
-        preheat_elapsed_ms: 0,
-    })?;
+    let mut turn_start = temp.messages.len();
+    temp.apply_boundary(
+        CompactionResult {
+            summary_text: summary_text.to_string(),
+            covered_start_id: covered_start_id.to_string(),
+            covered_end_id: covered_end_id.to_string(),
+            covered_count: working.len(),
+            transcript_compaction_entry_id: Some(entry_id.to_string()),
+            estimated_covered_tokens_before: None,
+            estimated_summary_tokens: None,
+            estimated_tokens_saved: None,
+            preheat_elapsed_ms: 0,
+        },
+        &mut turn_start,
+    )?;
     temp.messages
         .into_iter()
         .next()
@@ -962,7 +972,7 @@ fn collapse_bounds(working: &[ChatMessage]) -> Option<(String, String)> {
     Some((start, end))
 }
 
-fn ensure_working_message_ids(
+pub(super) fn ensure_working_message_ids(
     agent: &AgentLoop,
     working: &mut [ChatMessage],
 ) -> Result<(), AppError> {

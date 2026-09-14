@@ -487,6 +487,76 @@ async fn mid_turn_guard_runs_first_tail_wave_before_recheck() {
 }
 
 #[tokio::test]
+async fn tail_placeholder_waves_still_run_after_a_preheat_boundary() {
+    let mut agent = make_agent(ContextConfig {
+        current_tail_compactable_min_chars: 1,
+        current_tail_single_result_max_chars: 20_000,
+        ..Default::default()
+    });
+    let mut historical = ChatMessage::user("old context");
+    historical.msg_id = Some("historical".to_string());
+    let tail_user = ChatMessage::user("read the active files");
+    let tail_assistant = assistant_with_tool_calls(&[
+        ("tc1", "read"),
+        ("tc2", "read"),
+        ("tc3", "read"),
+        ("tc4", "read"),
+        ("tc5", "read"),
+    ]);
+    let mut messages = vec![ChatMessage::system("sys"), historical.clone(), tail_user];
+    messages.push(tail_assistant);
+    for index in 1..=5 {
+        messages.push(ChatMessage::tool(&format!("tc{index}"), &"x".repeat(3_000)));
+    }
+    let total_chars: usize = messages.iter().skip(1).map(estimate_msg_chars).sum();
+    let mut preheat = Preheat::new();
+    preheat.restore_completed(CompactionResult {
+        summary_text: "summary".to_string(),
+        covered_start_id: "historical".to_string(),
+        covered_end_id: "historical".to_string(),
+        covered_count: 1,
+        transcript_compaction_entry_id: Some("cmp-historical".to_string()),
+        estimated_covered_tokens_before: None,
+        estimated_summary_tokens: None,
+        estimated_tokens_saved: None,
+        preheat_elapsed_ms: 0,
+    });
+    agent.start_idx = 2;
+    agent.context_tail_start = 2;
+    agent.set_context_state(Some(ContextState {
+        messages: vec![historical],
+        estimate_context_chars: total_chars,
+        context_budget_chars: 12_000,
+        context_budget_tokens: 3_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat,
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    assert_eq!(messages[1].kind, MessageKind::CompactionSummary);
+    assert_eq!(
+        messages[agent.start_idx].text_content(),
+        Some("read the active files"),
+        "the surviving active turn remains the tail after the history boundary"
+    );
+    assert!(
+        messages[agent.start_idx..]
+            .iter()
+            .any(|message| message.text_content() == Some(TOOL_RESULT_PLACEHOLDER)),
+        "when the boundary alone is insufficient, normal tail placeholder waves still run"
+    );
+}
+
+#[tokio::test]
 async fn mid_turn_guard_runs_second_tail_wave_when_first_is_not_enough() {
     let mut agent = make_agent(ContextConfig {
         current_tail_compactable_min_chars: 1,

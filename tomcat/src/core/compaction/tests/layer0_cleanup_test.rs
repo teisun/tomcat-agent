@@ -35,7 +35,8 @@ fn run_layer0_cleanup_persists_then_compacts() {
     state.messages = msgs;
 
     let config = ContextConfig::default();
-    let outcome = run_layer0_cleanup(&mut state, &config, dir.path(), "sess_a1");
+    let history_end = state.messages.len();
+    let outcome = run_layer0_cleanup(&mut state, &config, dir.path(), "sess_a1", history_end);
 
     assert!(
         !outcome.persisted.is_empty(),
@@ -83,7 +84,14 @@ fn run_layer0_cleanup_no_tool_results_is_noop() {
     ];
 
     let before = state.estimate_context_chars;
-    let outcome = run_layer0_cleanup(&mut state, &ContextConfig::default(), dir.path(), "sess_a2");
+    let history_end = state.messages.len();
+    let outcome = run_layer0_cleanup(
+        &mut state,
+        &ContextConfig::default(),
+        dir.path(),
+        "sess_a2",
+        history_end,
+    );
 
     assert!(outcome.persisted.is_empty());
     assert_eq!(outcome.persist_chars_freed, 0);
@@ -104,11 +112,13 @@ fn layer0_persists_previous_tool_turn_when_fresh_user_turn_has_no_results() {
     ];
     state.estimate_context_chars = state.messages.iter().map(estimate_msg_chars).sum();
 
+    let history_end = state.messages.len();
     let outcome = run_layer0_cleanup(
         &mut state,
         &ContextConfig::default(),
         dir.path(),
         "sess_a2b",
+        history_end,
     );
 
     assert_eq!(outcome.persisted.len(), 1);
@@ -117,6 +127,47 @@ fn layer0_persists_previous_tool_turn_when_fresh_user_turn_has_no_results() {
             .text_content()
             .is_some_and(|text| text.starts_with("[Tool result persisted:")),
         "a fresh request must not hide the most recent completed tool result from Layer 0"
+    );
+}
+
+#[test]
+fn run_layer0_cleanup_never_mutates_messages_after_history_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let historical_tool = "h".repeat(20_000);
+    let tail_tool = "t".repeat(60_000);
+    let mut state = make_state(0, 100_000, 25_000);
+    state.messages = vec![
+        user_msg_with_id("historical-user", "completed turn"),
+        tool_msg_with_id("historical-tool", "historical-call", &historical_tool),
+        user_msg_with_id("tail-user", "active turn"),
+        tool_msg_with_id("tail-tool", "tail-call", &tail_tool),
+    ];
+    state.estimate_context_chars = state.messages.iter().map(estimate_msg_chars).sum();
+    let tail_before = state.messages[2..].to_vec();
+    let config = ContextConfig {
+        keep_recent_turns: 0,
+        ..Default::default()
+    };
+
+    let outcome = run_layer0_cleanup(&mut state, &config, dir.path(), "sess_history_end", 2);
+
+    assert_eq!(
+        state.messages[1].text_content(),
+        Some(TOOL_RESULT_PLACEHOLDER),
+        "the compactable historical result should still be eligible for Layer 0"
+    );
+    assert_eq!(
+        serde_json::to_vec(&state.messages[2..]).unwrap(),
+        serde_json::to_vec(&tail_before).unwrap(),
+        "Layer 0 must not persist or placeholder any active-turn message"
+    );
+    assert!(outcome.persisted.is_empty());
+    assert!(
+        !dir.path()
+            .join("tool-results")
+            .join("sess_history_end")
+            .exists(),
+        "the tail's 60K result must not be persisted by the history-only cleanup"
     );
 }
 
@@ -152,7 +203,14 @@ fn run_layer0_cleanup_mixed_sizes() {
     let mut state = make_state(total, total * 2, total / 2);
     state.messages = msgs;
 
-    let outcome = run_layer0_cleanup(&mut state, &ContextConfig::default(), dir.path(), "sess_a3");
+    let history_end = state.messages.len();
+    let outcome = run_layer0_cleanup(
+        &mut state,
+        &ContextConfig::default(),
+        dir.path(),
+        "sess_a3",
+        history_end,
+    );
 
     // Turn 0 medium (15K > 10K placeholder threshold, in compactable zone): L1 placeholder
     let t0_tool = &state.messages[1];
@@ -201,7 +259,14 @@ fn run_layer0_cleanup_freed_values_consistent_with_estimate() {
     state.messages = msgs;
 
     let before = state.estimate_context_chars;
-    let outcome = run_layer0_cleanup(&mut state, &ContextConfig::default(), dir.path(), "sess_a4");
+    let history_end = state.messages.len();
+    let outcome = run_layer0_cleanup(
+        &mut state,
+        &ContextConfig::default(),
+        dir.path(),
+        "sess_a4",
+        history_end,
+    );
 
     let reported_freed = outcome.persist_chars_freed + outcome.placeholder_chars_freed;
     assert!(reported_freed > 0, "should report freed chars");
