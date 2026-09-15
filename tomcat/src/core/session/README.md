@@ -78,7 +78,7 @@
 | `session list/new/switch/delete/archive/search` | 依赖 SessionManager，空会话列表时提示 |
 | `plugin list/load/unload/enable/disable/info` | 插件注册表与加载状态管理 |
 | `audit list/show/export` | 占位，待 T1-P1-001 对接 |
-| `chat [--resume]` | 进入交互式对话模式（流式渲染、多轮上下文、工具调用） |
+| `chat [--resume]` | 进入交互式对话模式（流式渲染、多轮上下文、工具调用）；仅自动续跑待回答的 `ask_question`，崩溃修复出的普通工具尾部会等待用户输入 |
 
 ---
 

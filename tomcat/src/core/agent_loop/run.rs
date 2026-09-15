@@ -7,10 +7,10 @@
 //!
 //! ```text
 //! ┌────────────────────────────────────────────────────────────────────────┐
-//! │  AgentLoop::run(initial_messages)              ← 调用方：api::chat     │
+//! │  AgentLoop::run_turn(initial_messages, start)  ← 调用方：api::chat     │
 //! └────────────────────────────────────────────────────────────────────────┘
-//!    │  ① 入口三检：cancel_token.is_cancelled? │ steering_queue 注入 │
-//!    │              start_idx 标记当前回合尾部
+//!    │  ① 入口三检：cancel_token.is_cancelled? │ start_idx 直接传入 │
+//!    │              steering_queue 注入到已标记的回合尾部
 //!    ▼
 //! ┌── 第一层 Conversation Loop  (本文件 AgentLoop::run) ────────────────────┐
 //! │  emit AgentStart                                                         │
@@ -172,7 +172,24 @@ impl AgentLoop {
     /// 返回 `AgentRunOutcome` 三态：`Completed` / `Interrupted` / `Failed`。
     /// `Interrupted` 与 `Completed` 共用 `AgentRunResult` 载荷，调用方走同一
     /// 持久化路径即可（T-004 / T-017）。
+    /// Compatibility wrapper for callers whose list ends in exactly one user
+    /// message that starts the turn. Call [`Self::run_turn`] when the caller
+    /// already knows the precise boundary.
     pub async fn run(&mut self, initial_messages: Vec<ChatMessage>) -> AgentRunOutcome {
+        let turn_start = initial_messages.len().saturating_sub(1);
+        self.run_turn(initial_messages, turn_start).await
+    }
+
+    /// Runs one turn with the exact index at which its protected tail starts.
+    ///
+    /// The caller computes the boundary while appending the input. Establish it
+    /// before steering is drained, so injected steering belongs to the same
+    /// protected tail rather than changing how the boundary is inferred.
+    pub async fn run_turn(
+        &mut self,
+        initial_messages: Vec<ChatMessage>,
+        turn_start: usize,
+    ) -> AgentRunOutcome {
         debug_assert!(
             initial_messages
                 .iter()
@@ -186,6 +203,7 @@ impl AgentLoop {
             "ContextState.messages must be parked empty while AgentLoop owns the working list"
         );
         let mut messages = initial_messages;
+        self.start_idx = turn_start.min(messages.len());
         let outcome = self.run_inner(&mut messages).await;
         self.park_messages(messages);
         outcome
@@ -216,11 +234,6 @@ impl AgentLoop {
             });
             return AgentRunOutcome::Failed(err);
         }
-
-        self.start_idx = match messages.last() {
-            Some(m) if m.role == ChatMessageRole::User => messages.len().saturating_sub(1),
-            _ => messages.len(),
-        };
 
         loop {
             match self.run_attempt_loop(messages).await {

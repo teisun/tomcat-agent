@@ -47,7 +47,7 @@ Layer 3  Reasoning Loop
 - **AgentLoopConfig**：`max_attempts`、`max_tool_rounds`、`retry_base_delay_ms`、`model`、`session_id`、`tool_definitions`、`context_config`，以及仅用于请求组装的 `system_prompt: Option<String>`。
 - **AgentRunResult**：`{ final_text: String, new_messages: Vec<ChatMessage> }`，run 成功时最后一轮 LLM 文本回复及本次产生的所有新消息。
 - **AgentLoop::new(llm, primitive, event_bus, config, cancel_token)**：标准构造函数；内部创建默认的 steering_queue、follow_up_queue。
-- **AgentLoop::run(&mut self, initial_messages: Vec<ChatMessage>) -> Result<AgentRunResult, AppError>**：主入口；执行第一层 Conversation Loop（含 FollowUp 检查）、第二层 Attempt Loop（重试与 classify_error）、第三层 Reasoning Loop（LLM 流式 + 工具执行 + Steering/Abort 检查）。
+- **AgentLoop::run_turn(&mut self, messages, turn_start) -> AgentRunOutcome**：主入口；`turn_start` 由调用方在追加用户输入时精确记录，执行第一层 Conversation Loop（含 FollowUp 检查）、第二层 Attempt Loop（重试与 classify_error）、第三层 Reasoning Loop（LLM 流式 + 工具执行 + Steering/Abort 检查）。**`run(messages)`** 仅是兼容封装，适用于列表以且仅以一条用户消息收尾的调用方。
 - **AgentLoop::steer(&self, msg: String)**：向 steering_queue 推入 `ChatMessage::steering(msg)`；第三层每工具执行完后检查，非空则注入并跳过剩余工具进入下一轮 LLM。
 - **AgentLoop::follow_up(&self, msg: String)**：向 follow_up_queue 推入 `ChatMessage::user(msg)`；第一层循环尾部检查，非空则 drain 追加到 messages 并 continue。
 - **AgentLoop::abort(&self)**：调用 `cancel_token.cancel()`；第三层每工具执行前检查取消状态，命中后返回中断结果并发布 `agent_end(interrupted)`。
@@ -55,7 +55,7 @@ Layer 3  Reasoning Loop
 
 ### 3.2 上下文管理 API（TASK-17）
 
-- **ContextState**：回合间的停车位和上下文预算/预热/观测状态，包含 `messages: Vec<ChatMessage>`、`estimate_context_chars`、`context_budget_chars`。运行 `AgentLoop` 时 `messages` 必须为空；工作列表在 `run()` 返回时统一停回。Turn 边界从消息序列隐式推导。
+- **ContextState**：回合间的停车位和上下文预算/预热/观测状态，包含 `messages: Vec<ChatMessage>`、`estimate_context_chars`、`context_budget_chars`。运行 `AgentLoop` 时 `messages` 必须为空；工作列表在 `run_turn()` 返回时统一停回。Turn 边界由追加输入的外层精确传入，steering 随后追加到该受保护尾部。
 - **init_context_state(session, config, system_text) -> ContextState**：从 transcript 加载历史，解析为 ChatMessage 列表，识别已有 Compaction entry 标记为 `kind: CompactionSummary`。
 - **消息请求组装**：`assemble_request_messages()` 是唯一出口，生成 `[system_prompt?] + working_messages + [ephemeral_tail?]`；system 和 ephemeral tail 都不写入停车列表。
 - **ContextConfig**：上下文管理配置，含 `context_window`、`max_output_tokens`、`keep_recent_turns`、`layer0_single_result_max_chars`、`layer0_placeholder_threshold_chars`、`current_tail_compactable_min_chars`、`current_tail_single_result_max_chars`、`compaction_model`、`compaction_max_tokens`。

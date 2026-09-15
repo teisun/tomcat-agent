@@ -1,14 +1,16 @@
 use super::super::*;
+use crate::api::chat::has_resumable_tail_ask_question;
 use crate::api::chat::run_loop::cleanup_plugin_sessions_on_session_end;
 use crate::api::chat::run_loop::{
-    build_tool_definitions, compose_planned_turn_messages, should_auto_drain_resume,
+    append_planned_messages_with_rehydrate_retry, build_tool_definitions,
+    compose_planned_turn_messages, should_auto_drain_resume,
 };
-use crate::core::session::manager::init_context_state;
+use crate::core::session::manager::{init_context_state, MessageAppendSink};
 use crate::SessionEntry;
 use crate::{
-    AgentRunOutcome, AppConfig, CheckpointDiff, CheckpointError, CheckpointId, CheckpointKind,
-    CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport, CheckpointStore, ListOptions,
-    RestoreOptions, RetentionPolicy, SessionManager,
+    AgentRunOutcome, AppConfig, AppError, CheckpointDiff, CheckpointError, CheckpointId,
+    CheckpointKind, CheckpointMeta, CheckpointRecordRequest, CheckpointRestoreReport,
+    CheckpointStore, ListOptions, RestoreOptions, RetentionPolicy, SessionManager,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -16,7 +18,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -79,6 +81,70 @@ impl Drop for EnvGuard {
                 unsafe { std::env::remove_var(self.key) };
             }
         }
+    }
+}
+
+struct FailFirstAppendInvariantSink {
+    delegate: Arc<dyn MessageAppendSink>,
+    failed_once: AtomicBool,
+}
+
+impl FailFirstAppendInvariantSink {
+    fn new(delegate: Arc<dyn MessageAppendSink>) -> Self {
+        Self {
+            delegate,
+            failed_once: AtomicBool::new(false),
+        }
+    }
+}
+
+impl MessageAppendSink for FailFirstAppendInvariantSink {
+    fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
+        if !self.failed_once.swap(true, Ordering::SeqCst) {
+            return Err(AppError::invariant(
+                "append_message_chain",
+                "injected once to exercise rehydrate retry",
+            ));
+        }
+        self.delegate.append_message(value)
+    }
+
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        self.delegate.append_custom_entry(extra)
+    }
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        self.delegate.append_message_with_id(value, forced_id)
+    }
+}
+
+struct AlwaysFailAppendSink;
+
+impl MessageAppendSink for AlwaysFailAppendSink {
+    fn append_message(&self, _value: serde_json::Value) -> Result<String, AppError> {
+        Err(AppError::Permission(
+            "injected ordinary append failure".to_string(),
+        ))
+    }
+
+    fn append_custom_entry(&self, _extra: serde_json::Value) -> Result<(), AppError> {
+        Err(AppError::Permission(
+            "injected ordinary append failure".to_string(),
+        ))
+    }
+
+    fn append_message_with_id(
+        &self,
+        _value: serde_json::Value,
+        _forced_id: &str,
+    ) -> Result<String, AppError> {
+        Err(AppError::Permission(
+            "injected ordinary append failure".to_string(),
+        ))
     }
 }
 
@@ -172,6 +238,59 @@ fn resume_without_pending_question_does_not_start_a_zero_input_turn() {
     );
     assert!(should_auto_drain_resume(true, true));
     assert!(!should_auto_drain_resume(false, true));
+}
+
+#[test]
+fn resume_after_healed_dangling_tool_call_waits_for_user_input() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_RESUME_HEALED_TOOL_KEY";
+
+    let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "update the deployment manifest"
+        }))
+        .expect("seed user message");
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call_crashed_bash",
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "arguments": r#"{"command":"deploy"}"#
+                }
+            }]
+        }))
+        .expect("seed dangling non-replay-safe tool call");
+
+    let state = init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys")
+        .expect("hydrate heals a dangling tool call");
+
+    assert!(
+        state
+            .messages
+            .last()
+            .is_some_and(|message| message.role == crate::core::llm::ChatMessageRole::Tool),
+        "hydrate must append a durable synthetic tool result for the crashed call"
+    );
+    let has_pending_question = has_resumable_tail_ask_question(&ctx.session_runtime.session)
+        .expect("inspect healed transcript tail");
+    assert!(
+        !has_pending_question,
+        "a healed non-replay-safe tool is not a pending ask_question"
+    );
+    assert!(
+        !should_auto_drain_resume(true, has_pending_question),
+        "--resume must wait for an explicit user message after a healed ordinary tool call"
+    );
+
+    // SAFETY: remove the test-only model credential variable.
+    unsafe { std::env::remove_var(ENV_KEY) };
 }
 
 #[test]
@@ -1333,6 +1452,125 @@ fn append_message_chain_rehydrate_reloads_context_from_transcript() {
     );
 
     // SAFETY: 清理测试环境变量。
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn rehydrate_during_planned_append_retakes_list() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_REHYDRATE_RETAKE_KEY";
+
+    let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "durable history"
+        }))
+        .expect("seed durable history");
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+    let mut messages = std::mem::take(&mut state.messages);
+    let planned = vec![
+        crate::ChatMessage::user("first planned message"),
+        crate::ChatMessage::user("second planned message"),
+    ];
+    let sink: Arc<dyn MessageAppendSink> = Arc::new(FailFirstAppendInvariantSink::new(Arc::clone(
+        &ctx.session_runtime.message_append_sink,
+    )));
+
+    let first_appended_id = append_planned_messages_with_rehydrate_retry(
+        &ctx,
+        "sys",
+        &ctx.config.context,
+        &planned,
+        &sink,
+        &mut state,
+        &mut messages,
+    )
+    .expect("one append-chain invariant should rehydrate and retry");
+
+    assert!(
+        first_appended_id.is_some(),
+        "the retry must report the durable id of the first planned message"
+    );
+    assert!(
+        state.messages.is_empty(),
+        "rehydrated parking state must be taken back into the working list before retrying"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter_map(crate::ChatMessage::text_content)
+            .collect::<Vec<_>>(),
+        vec![
+            "durable history",
+            "first planned message",
+            "second planned message",
+        ],
+        "rehydrate must preserve old history and continue every unappended planned message once"
+    );
+    let durable_ids: Vec<_> = messages
+        .iter()
+        .filter_map(|message| message.msg_id.as_deref())
+        .collect();
+    assert_eq!(durable_ids.len(), 3);
+    assert_eq!(
+        durable_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        durable_ids.len(),
+        "the retry must not duplicate durable message ids"
+    );
+
+    // SAFETY: remove the test-only model credential variable.
+    unsafe { std::env::remove_var(ENV_KEY) };
+}
+
+#[test]
+fn append_failure_without_rehydrate_parks_list_back() {
+    const ENV_KEY: &str = "TOMCAT_CHAT_APPEND_PARK_ON_ERROR_KEY";
+
+    let (_dir, ctx, _transcript_path) = checkpoint_recording_test_context(ENV_KEY);
+    ctx.session_runtime
+        .session
+        .append_message(serde_json::json!({
+            "role": "user",
+            "content": "durable history"
+        }))
+        .expect("seed durable history");
+    let mut state =
+        init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
+    let mut messages = std::mem::take(&mut state.messages);
+    let before = serde_json::to_value(&messages).expect("serialize parked list baseline");
+    let sink: Arc<dyn MessageAppendSink> = Arc::new(AlwaysFailAppendSink);
+
+    let error = append_planned_messages_with_rehydrate_retry(
+        &ctx,
+        "sys",
+        &ctx.config.context,
+        &[crate::ChatMessage::user("new message")],
+        &sink,
+        &mut state,
+        &mut messages,
+    )
+    .expect_err("ordinary append error must propagate");
+
+    assert!(
+        matches!(error, AppError::Permission(_)),
+        "a non-invariant append error must not attempt rehydration"
+    );
+    assert!(
+        messages.is_empty(),
+        "after an error the local owner must surrender the list to the parking slot"
+    );
+    assert_eq!(
+        serde_json::to_value(&state.messages).expect("serialize parked list"),
+        before,
+        "an append failure must return the taken list to ContextState unchanged"
+    );
+
+    // SAFETY: remove the test-only model credential variable.
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 

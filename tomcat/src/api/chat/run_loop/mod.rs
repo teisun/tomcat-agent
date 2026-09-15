@@ -52,8 +52,9 @@ const CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A resumed process may send a zero-input request only after it has repaired a
 /// persisted `ask_question` tail into a completed tool result. An assistant-ended
-/// transcript has no new causal input, so replaying it would violate the request
-/// protocol and needlessly wake the model.
+/// transcript, including one healed after a crashed non-replay-safe tool call,
+/// has no new causal input: it waits for user input rather than replaying or
+/// continuing the model request.
 pub(crate) fn should_auto_drain_resume(resume_requested: bool, has_pending_question: bool) -> bool {
     resume_requested && has_pending_question
 }
@@ -248,11 +249,12 @@ fn drain_planned_turn_messages(
     compose_planned_turn_messages_from_message(input_message, drain_follow_up_messages(ctx))
 }
 
-fn append_planned_messages_with_rehydrate_retry(
+pub(crate) fn append_planned_messages_with_rehydrate_retry(
     ctx: &ChatContext,
     system_text: &str,
     context_config: &crate::infra::ContextConfig,
     planned_messages: &[ChatMessage],
+    message_append_sink: &Arc<dyn crate::core::session::manager::MessageAppendSink>,
     context_state: &mut crate::core::ContextState,
     messages: &mut Vec<ChatMessage>,
 ) -> Result<Option<String>, AppError> {
@@ -263,11 +265,7 @@ fn append_planned_messages_with_rehydrate_retry(
         let messages_before_append = messages.len();
         let mut append_error = None;
         for message in planned_messages.iter().skip(next_pending_idx) {
-            if let Err(err) = push_turn_message(
-                messages,
-                &ctx.session_runtime.message_append_sink,
-                message.clone(),
-            ) {
+            if let Err(err) = push_turn_message(messages, message_append_sink, message.clone()) {
                 append_error = Some(err);
                 break;
             }
@@ -292,6 +290,10 @@ fn append_planned_messages_with_rehydrate_retry(
                 retried_after_rehydrate = true;
                 continue;
             }
+            // `messages` was taken from the inter-turn parking slot. An ordinary
+            // append failure cannot be repaired by rehydration, so park the list
+            // before returning rather than relying on an outer recovery caller.
+            context_state.messages = std::mem::take(messages);
             return Err(err);
         }
 
@@ -798,6 +800,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         system_text,
         &context_config,
         &planned_messages,
+        &ctx.session_runtime.message_append_sink,
         context_state,
         &mut messages,
     )?;
@@ -1002,7 +1005,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         session_stderr_listeners_active = true,
         message_stream_listener_registered = true
     );
-    let outcome = agent_loop.run(messages).await;
+    let outcome = agent_loop.run_turn(messages, turn_start).await;
     if let Some(ids) = &thinking_persist_listener_ids {
         thinking_persist::unregister_thinking_persist_listeners(
             &*ctx.global_services.event_bus,
