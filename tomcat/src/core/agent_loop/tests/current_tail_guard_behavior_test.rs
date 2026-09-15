@@ -170,7 +170,6 @@ async fn mid_turn_guard_fits_is_noop() {
     let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -215,7 +214,6 @@ async fn over_budget_without_preheat_still_collapses() {
     let total_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: total_chars,
@@ -271,7 +269,6 @@ async fn mid_turn_guard_stops_after_history_compaction_without_touching_tail() {
     let total_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 3;
-    agent.context_tail_start = 3;
     agent.set_context_state(Some(ContextState {
         messages: vec![old_user, old_tool, recent_user],
         estimate_context_chars: total_chars,
@@ -339,7 +336,7 @@ async fn mid_turn_guard_boundary_runs_layer0_before_rebuilding_messages() {
     ];
     let total_chars: usize = state_messages.iter().map(estimate_msg_chars).sum();
     let mut state = ContextState {
-        messages: state_messages.clone(),
+        messages: Vec::new(),
         estimate_context_chars: total_chars,
         context_budget_chars: 800,
         context_budget_tokens: 200,
@@ -365,7 +362,6 @@ async fn mid_turn_guard_boundary_runs_layer0_before_rebuilding_messages() {
     });
     let mut messages = state_messages;
     agent.start_idx = messages.len();
-    agent.context_tail_start = messages.len();
     agent.set_context_state(Some(state));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -375,13 +371,13 @@ async fn mid_turn_guard_boundary_runs_layer0_before_rebuilding_messages() {
     assert_eq!(
         messages[0].kind,
         MessageKind::CompactionSummary,
-        "the message rebuild must observe the applied boundary"
+        "the working list must observe the applied boundary"
     );
     assert!(
         messages
             .iter()
             .any(|message| { message.text_content() == Some(TOOL_RESULT_PLACEHOLDER) }),
-        "the rebuild must observe L0's placeholder, proving L0 ran before rebuild"
+        "the working list must observe L0's placeholder, proving L0 ran during apply"
     );
     assert!(
         messages.iter().any(|message| {
@@ -429,7 +425,6 @@ async fn mid_turn_guard_runs_first_tail_wave_before_recheck() {
     let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -515,7 +510,6 @@ async fn tail_placeholder_waves_still_run_after_a_preheat_boundary() {
         preheat_elapsed_ms: 0,
     });
     agent.start_idx = 1;
-    agent.context_tail_start = 1;
     agent.set_context_state(Some(ContextState {
         messages: vec![historical],
         estimate_context_chars: total_chars,
@@ -579,7 +573,6 @@ async fn mid_turn_guard_runs_second_tail_wave_when_first_is_not_enough() {
     let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -648,7 +641,6 @@ async fn current_tail_guard_catches_a_single_turn_that_jumps_from_low_watermark(
     );
 
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     let mut state = ContextState {
         messages: vec![],
         estimate_context_chars: initial_chars,
@@ -725,7 +717,6 @@ async fn mid_turn_guard_rewrites_oldest_whitelisted_tools_and_preserves_noncompa
     let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -798,7 +789,6 @@ async fn mid_turn_guard_respects_single_result_threshold_override() {
     let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -865,7 +855,6 @@ async fn mid_turn_guard_collapses_when_two_candidates_remain() {
     let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -906,7 +895,6 @@ async fn collapse_post_weigh_keeps_going_even_if_summary_is_still_over_budget() 
     let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -953,7 +941,6 @@ async fn collapse_handles_missing_msg_ids_without_sink() {
     let tail_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,

@@ -88,30 +88,13 @@ pub(crate) fn persist_turn_result(
     new_messages: Vec<crate::core::llm::ChatMessage>,
     kind: CheckpointKind,
 ) -> Result<Vec<String>, AppError> {
-    let mut appended_row_ids = Vec::new();
-    for message in new_messages {
-        let mut chat_message = message;
-        if chat_message.msg_id.is_none() {
-            let row_id = ctx
-                .session_runtime
-                .session
-                .append_message(serde_json::to_value(&chat_message)?)?;
-            chat_message.msg_id = Some(row_id);
-        }
-        let row_id = chat_message.msg_id.clone().unwrap_or_default();
-        if !row_id.is_empty() {
-            appended_row_ids.push(row_id.clone());
-        }
-        let already_present = chat_message.msg_id.as_deref().is_some_and(|msg_id| {
-            context_state
-                .messages
-                .iter()
-                .any(|existing| existing.msg_id.as_deref() == Some(msg_id))
-        });
-        if !already_present {
-            context_state.messages.push(chat_message);
-        }
-    }
+    // The AgentLoop owns the list during a turn and parks it in `context_state` on every
+    // exit. Every message has already been appended through its sink; this layer only turns
+    // those durable ids into checkpoint input and persists observability.
+    let appended_row_ids = new_messages
+        .into_iter()
+        .filter_map(|message| message.msg_id)
+        .collect::<Vec<_>>();
     ctx.session_runtime
         .session
         .persist_context_observability(context_state)?;

@@ -75,7 +75,6 @@ impl AgentLoop {
             pending_assistant_entry_id: None,
             reasoning_turn_budget_exhausted: false,
             start_idx: 0,
-            context_tail_start: 0,
             completion_guard_injections: 0,
         }
     }
@@ -249,7 +248,6 @@ impl AgentLoop {
             pending_assistant_entry_id: None,
             reasoning_turn_budget_exhausted: false,
             start_idx: 0,
-            context_tail_start: 0,
             completion_guard_injections: 0,
         }
     }
@@ -395,24 +393,6 @@ impl AgentLoop {
         let row_id = self.persist_message_with_forced_id_if_needed(&mut msg, forced_id)?;
         messages.push(msg);
         Ok(row_id)
-    }
-
-    pub(super) fn sync_persisted_messages_into_context(&mut self, messages: &[ChatMessage]) {
-        let Some(ref mut ctx_state) = self.context_state else {
-            return;
-        };
-        for msg in messages {
-            let Some(msg_id) = msg.msg_id.as_deref() else {
-                continue;
-            };
-            let exists = ctx_state
-                .messages
-                .iter()
-                .any(|existing| existing.msg_id.as_deref() == Some(msg_id));
-            if !exists {
-                ctx_state.messages.push(msg.clone());
-            }
-        }
     }
 
     /// 刷新实时 token 指标并发射 `ContextMetricsUpdate` 事件（仅当 `context_state`

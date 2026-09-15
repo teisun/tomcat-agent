@@ -10,10 +10,10 @@ use crate::infra::ScopedEventEmitter;
 
 pub(crate) fn maybe_emit_rule_session_title(
     session: &SessionManager,
-    appended_messages: &[(ChatMessage, bool)],
+    appended_messages: &[ChatMessage],
     emitter: &Arc<ScopedEventEmitter>,
 ) {
-    for (message, _) in appended_messages {
+    for message in appended_messages {
         if message.role != ChatMessageRole::User {
             continue;
         }
@@ -41,14 +41,14 @@ pub(crate) fn maybe_emit_rule_session_title(
 
 pub(crate) fn maybe_spawn_semantic_session_title(
     session: &SessionManager,
-    appended_messages: &[(ChatMessage, bool)],
+    appended_messages: &[ChatMessage],
     title_provider: Arc<dyn LlmProvider>,
     title_model: String,
     title_output_limit: Option<u32>,
     emitter: Arc<ScopedEventEmitter>,
     session_id: String,
 ) {
-    for (message, _) in appended_messages {
+    for message in appended_messages {
         if message.role != ChatMessageRole::User {
             continue;
         }

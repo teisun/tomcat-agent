@@ -1750,7 +1750,6 @@ async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {
         }),
     );
 
-    let started = Instant::now();
     handle_command(
         Arc::clone(&state),
         ServeCommand::Prompt {
@@ -1771,9 +1770,10 @@ async fn serve_prompt_emits_agent_idle_after_agent_end_and_marks_slot_idle() {
     )
     .await
     .expect("agent_idle must not wait for a slow TurnEnd checkpoint");
-    assert!(
-        started.elapsed() < Duration::from_millis(300),
-        "TurnEnd checkpoint must not delay agent_idle"
+    assert_eq!(
+        checkpoint_calls.load(Ordering::SeqCst),
+        0,
+        "agent_idle must be emitted before the slow TurnEnd checkpoint finishes",
     );
     assert_eq!(
         count_event(&lines, "agent_end"),

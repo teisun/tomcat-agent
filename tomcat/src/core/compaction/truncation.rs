@@ -147,6 +147,7 @@ pub struct Layer0CleanupOutcome {
 /// 前一已完成 tool round 的大结果。
 pub fn layer0_persist_large_results(
     state: &mut ContextState,
+    messages: &mut [crate::core::llm::ChatMessage],
     config: &ContextConfig,
     work_dir: &Path,
     session_id: &str,
@@ -155,13 +156,12 @@ pub fn layer0_persist_large_results(
     let mut results = Vec::new();
     let mut persist_chars_freed = 0usize;
     let single_max = config.layer0_single_result_max_chars;
-    let history_end = history_end.min(state.messages.len());
+    let history_end = history_end.min(messages.len());
 
     // Find the most recent logical turn that actually contains a tool result. A new user
     // message may already be in the outgoing request when a preheated boundary is applied,
     // but it cannot have tool output yet.
-    let turn_starts: Vec<usize> = state
-        .messages
+    let turn_starts: Vec<usize> = messages
         .iter()
         .take(history_end)
         .enumerate()
@@ -171,7 +171,7 @@ pub fn layer0_persist_large_results(
     let mut next_turn_start = history_end;
     let mut latest_tool_turn = None;
     for &turn_start in turn_starts.iter().rev() {
-        if state.messages[turn_start..next_turn_start]
+        if messages[turn_start..next_turn_start]
             .iter()
             .any(|message| message.role == ChatMessageRole::Tool)
         {
@@ -184,7 +184,7 @@ pub fn layer0_persist_large_results(
         return (results, persist_chars_freed);
     };
 
-    for msg in state.messages[last_turn_start..last_turn_end].iter_mut() {
+    for msg in messages[last_turn_start..last_turn_end].iter_mut() {
         if msg.role != ChatMessageRole::Tool {
             continue;
         }
@@ -235,23 +235,23 @@ pub struct PlaceholderOutcome {
 /// 将长度 **大于** `ContextConfig::layer0_placeholder_threshold_chars`（默认 10_000）的 tool result 替换为占位符。
 pub fn compact_tool_results(
     state: &mut ContextState,
+    messages: &mut [crate::core::llm::ChatMessage],
     config: &ContextConfig,
     history_end: usize,
 ) -> PlaceholderOutcome {
     let threshold = config.layer0_placeholder_threshold_chars;
     let protected_turns = config.keep_recent_turns;
-    let history_end = history_end.min(state.messages.len());
+    let history_end = history_end.min(messages.len());
 
     // Find the start of the protected tail turns.
-    let protected_start =
-        find_protected_turn_start(&state.messages, protected_turns).min(history_end);
+    let protected_start = find_protected_turn_start(messages, protected_turns).min(history_end);
     if protected_start == 0 {
         return PlaceholderOutcome::default();
     }
 
     let mut outcome = PlaceholderOutcome::default();
 
-    for msg in state.messages[..protected_start].iter_mut() {
+    for msg in messages[..protected_start].iter_mut() {
         if msg.role != ChatMessageRole::Tool {
             continue;
         }
@@ -323,14 +323,15 @@ fn find_protected_turn_start(messages: &[crate::core::llm::ChatMessage], m: usiz
 /// 溢出风险下复用它作为保命路径。
 pub fn run_layer0_cleanup(
     state: &mut ContextState,
+    messages: &mut [crate::core::llm::ChatMessage],
     config: &ContextConfig,
     work_dir: &Path,
     session_id: &str,
     history_end: usize,
 ) -> Layer0CleanupOutcome {
     let (persisted, persist_chars_freed) =
-        layer0_persist_large_results(state, config, work_dir, session_id, history_end);
-    let placeholder = compact_tool_results(state, config, history_end);
+        layer0_persist_large_results(state, messages, config, work_dir, session_id, history_end);
+    let placeholder = compact_tool_results(state, messages, config, history_end);
     let evicted_tool_call_ids = persisted
         .iter()
         .map(|p| p.tool_call_id.clone())

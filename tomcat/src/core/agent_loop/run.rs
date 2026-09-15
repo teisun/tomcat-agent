@@ -10,7 +10,7 @@
 //! │  AgentLoop::run(initial_messages)              ← 调用方：api::chat     │
 //! └────────────────────────────────────────────────────────────────────────┘
 //!    │  ① 入口三检：cancel_token.is_cancelled? │ steering_queue 注入 │
-//!    │              start_idx / context_tail_start 标记
+//!    │              start_idx 标记当前回合尾部
 //!    ▼
 //! ┌── 第一层 Conversation Loop  (本文件 AgentLoop::run) ────────────────────┐
 //! │  emit AgentStart                                                         │
@@ -59,7 +59,8 @@
 
 use crate::core::llm::{ChatMessage, ChatMessageRole};
 use crate::core::session::{
-    find_dangling_tail_tool_call_ids, manager::INTERRUPTED_TOOL_RESULT_TEXT,
+    find_dangling_tail_tool_call_ids,
+    manager::{estimate_msg_chars, INTERRUPTED_TOOL_RESULT_TEXT},
 };
 use crate::infra::config::DEFAULT_AGENT_MAX_ATTEMPTS;
 use crate::infra::error::{
@@ -178,6 +179,19 @@ impl AgentLoop {
                 .all(|message| message.role != ChatMessageRole::System),
             "system prompt must be assembled only when constructing the LLM request"
         );
+        debug_assert!(
+            self.context_state
+                .as_ref()
+                .is_none_or(|state| state.messages.is_empty()),
+            "ContextState.messages must be parked empty while AgentLoop owns the working list"
+        );
+        let mut messages = initial_messages;
+        let outcome = self.run_inner(&mut messages).await;
+        self.park_messages(messages);
+        outcome
+    }
+
+    async fn run_inner(&mut self, messages: &mut Vec<ChatMessage>) -> AgentRunOutcome {
         self.completion_guard_injections = 0;
         if self.cancel_token.is_cancelled() {
             // 入口兜底：token 已经被上一轮 cancel 但未重建，立即以空 partial 返回 Interrupted
@@ -195,9 +209,7 @@ impl AgentLoop {
 
         self.emit_event(AgentEvent::AgentStart);
 
-        let mut messages = initial_messages;
-
-        if let Err(err) = inject_steering_messages(self, &mut messages) {
+        if let Err(err) = inject_steering_messages(self, messages) {
             self.emit_event(AgentEvent::AgentEnd {
                 messages: vec![],
                 error: Some(err.to_string()),
@@ -205,15 +217,13 @@ impl AgentLoop {
             return AgentRunOutcome::Failed(err);
         }
 
-        self.context_tail_start = match messages.last() {
+        self.start_idx = match messages.last() {
             Some(m) if m.role == ChatMessageRole::User => messages.len().saturating_sub(1),
             _ => messages.len(),
         };
 
-        self.start_idx = self.context_tail_start;
-
         loop {
-            match self.run_attempt_loop(&mut messages).await {
+            match self.run_attempt_loop(messages).await {
                 Ok(final_text) => {
                     let new_messages = messages[self.start_idx..].to_vec();
                     let result = AgentRunResult {
@@ -226,20 +236,18 @@ impl AgentLoop {
                     });
 
                     if self.reasoning_turn_budget_exhausted {
-                        self.sync_persisted_messages_into_context(&result.new_messages);
                         return AgentRunOutcome::Completed(result);
                     }
 
                     let mut q = self.follow_up_queue.lock();
                     if q.is_empty() {
                         drop(q);
-                        self.sync_persisted_messages_into_context(&result.new_messages);
                         return AgentRunOutcome::Completed(result);
                     }
                     let drained: Vec<_> = q.drain(..).collect();
                     drop(q);
                     for msg in drained {
-                        if let Err(err) = self.push_message(&mut messages, msg) {
+                        if let Err(err) = self.push_message(messages, msg) {
                             return AgentRunOutcome::Failed(err);
                         }
                     }
@@ -248,10 +256,8 @@ impl AgentLoop {
                 Err(LoopError::Aborted {
                     partial_text,
                     partial_messages,
-                }) => return self.terminate_interrupted(partial_text, partial_messages),
+                }) => return self.terminate_interrupted(messages, partial_text, partial_messages),
                 Err(LoopError::Fatal(e)) => {
-                    let new_messages = messages[self.start_idx..].to_vec();
-                    self.sync_persisted_messages_into_context(&new_messages);
                     self.emit_event(AgentEvent::AgentEnd {
                         messages: vec![],
                         error: Some(e.to_string()),
@@ -265,24 +271,35 @@ impl AgentLoop {
         }
     }
 
+    fn park_messages(&mut self, messages: Vec<ChatMessage>) {
+        if let Some(context_state) = self.context_state.as_mut() {
+            context_state.messages = messages;
+        }
+    }
+
     /// 终结 Conversation Loop 的 `Interrupted` 分支：先发独立 `Interrupted` 事件
     /// （T2-P0-007 引入的细分订阅点），再发兼容老订阅者的 `AgentEnd(error="interrupted")`，
     /// 最后封装 `AgentRunOutcome::Interrupted` 返回。
     fn terminate_interrupted(
         &mut self,
+        messages: &mut Vec<ChatMessage>,
         partial_text: String,
-        mut partial_messages: Vec<ChatMessage>,
+        partial_messages: Vec<ChatMessage>,
     ) -> AgentRunOutcome {
-        let added_tool_results = append_missing_interrupted_tool_results(&mut partial_messages);
-        if added_tool_results > 0 {
-            if let Some(ref mut ctx_state) = self.context_state {
-                for _ in 0..added_tool_results {
-                    ctx_state.on_message_appended(INTERRUPTED_TOOL_RESULT_TEXT.len());
-                }
+        let mut repaired_tail = partial_messages;
+        let added_tool_results = append_missing_interrupted_tool_results(&mut repaired_tail);
+        for message in repaired_tail
+            .iter()
+            .skip(repaired_tail.len().saturating_sub(added_tool_results))
+        {
+            if let Err(error) = self.push_message(messages, message.clone()) {
+                tracing::warn!(%error, "failed to persist interrupted tool-result repair");
+            } else if let Some(ctx_state) = self.context_state.as_mut() {
+                ctx_state.on_message_appended(estimate_msg_chars(message));
             }
         }
-        self.sync_persisted_messages_into_context(&partial_messages);
-        let tool_results_count = partial_messages
+        let new_messages = messages[self.start_idx.min(messages.len())..].to_vec();
+        let tool_results_count = new_messages
             .iter()
             .filter(|m| m.role == ChatMessageRole::Tool)
             .count();
@@ -304,7 +321,7 @@ impl AgentLoop {
         });
         AgentRunOutcome::Interrupted(AgentRunResult {
             final_text: partial_text,
-            new_messages: partial_messages,
+            new_messages,
         })
     }
 

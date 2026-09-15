@@ -127,6 +127,57 @@ fn overbudget_context_state(messages: Vec<ChatMessage>) -> ContextState {
     }
 }
 
+#[tokio::test]
+async fn run_moves_history_in_and_parks_it_back() {
+    let mut historical = ChatMessage::user("earlier completed turn");
+    historical.msg_id = Some("history-id".to_string());
+    let mut context_state = overbudget_context_state(vec![historical.clone()]);
+    let mut messages = std::mem::take(&mut context_state.messages);
+    let mut current_user = ChatMessage::user("current turn");
+    current_user.msg_id = Some("current-id".to_string());
+    messages.push(current_user.clone());
+
+    let llm = Arc::new(MockLlmProvider::new(vec![ok_text_stream("done")]));
+    let mut loop_ = AgentLoop::new(
+        test_binding(llm, "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "single-list-park".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    loop_.set_context_state(Some(context_state));
+
+    let result = loop_.run(messages).await.unwrap();
+    assert_eq!(
+        result
+            .new_messages
+            .iter()
+            .filter_map(|message| message.msg_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec!["current-id"],
+        "new_messages contains the current turn but excludes parked history"
+    );
+
+    let parked = loop_
+        .take_context_state()
+        .expect("context state parked on exit");
+    assert_eq!(parked.messages[0].msg_id.as_deref(), Some("history-id"));
+    assert_eq!(parked.messages[1].msg_id.as_deref(), Some("current-id"));
+    assert_eq!(
+        parked
+            .messages
+            .iter()
+            .filter_map(|message| message.msg_id.as_deref())
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2,
+        "the parked list has no duplicate durable ids"
+    );
+}
+
 fn large_user_turn(label: &str) -> ChatMessage {
     ChatMessage::user(format!("{label}: {}", "x".repeat(3_200)))
 }
@@ -749,6 +800,7 @@ async fn run_second_overflow_collapses_and_strictly_shrinks_main_requests() {
         completion_tokens: 0,
     });
     stale_estimate.post_usage_appended_chars = 0;
+    stale_estimate.messages.clear();
     loop_.set_context_state(Some(stale_estimate));
 
     let outcome = loop_.run(initial_messages).await;
@@ -772,9 +824,12 @@ async fn run_second_overflow_collapses_and_strictly_shrinks_main_requests() {
         "first overflow must make strict L3 progress"
     );
     assert!(
-        recorded[2].messages.len() < recorded[1].messages.len()
-            && request_chars(2) < request_chars(1),
-        "second overflow must take Collapse and send a strictly smaller payload"
+        request_chars(2) < request_chars(1)
+            && recorded[2]
+                .messages
+                .iter()
+                .any(|message| message.kind == MessageKind::CompactionSummary),
+        "second overflow must take Collapse and send a strictly smaller summary payload"
     );
 
     let context = loop_
@@ -785,12 +840,75 @@ async fn run_second_overflow_collapses_and_strictly_shrinks_main_requests() {
         "one L3 reduction plus one Collapse must be recorded"
     );
     assert!(
-        matches!(
-            context.messages.as_slice(),
-            [message] if message.kind == MessageKind::CompactionSummary
-        ),
-        "second overflow must replace retained history with a compaction summary"
+        context
+            .messages
+            .first()
+            .is_some_and(|message| message.kind == MessageKind::CompactionSummary),
+        "second overflow must park the compacted history as a leading summary"
     );
+}
+
+#[tokio::test]
+async fn tail_only_overflow_falls_back_to_collapse_on_first_attempt() {
+    let initial_messages = vec![ChatMessage::user("oversized current input ".repeat(1_000))];
+    let initial_chars = initial_messages.iter().map(estimate_msg_chars).sum();
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            400,
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+        ))],
+        ok_text_stream("recovered after first-overflow collapse"),
+    ]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 2,
+            retry_base_delay_ms: 0,
+            session_id: "tail-only-overflow".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    loop_.set_context_state(Some(ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: initial_chars,
+        // The local pre-request guard must accept the request. The provider error below is the
+        // authoritative overflow signal that exercises the L3 tail-only fallback.
+        context_budget_chars: initial_chars.saturating_mul(2),
+        context_budget_tokens: initial_chars,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: std::path::PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: crate::core::compaction::preheat::Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    let outcome = loop_.run(initial_messages).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "a tail-only overflow must collapse and retry in the same attempt: {outcome:?}"
+    );
+    let requests = requests.0.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "initial overflow plus collapsed retry");
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.kind == MessageKind::CompactionSummary),
+        "the retry must use the branch summary rather than the oversized tail"
+    );
+    let parked = loop_
+        .take_context_state()
+        .expect("context parked after retry");
+    assert_eq!(parked.session_obs.compaction_count, 1);
+    assert_eq!(parked.messages[0].kind, MessageKind::CompactionSummary);
 }
 
 #[tokio::test]
@@ -815,6 +933,7 @@ async fn guard_runs_before_first_request_of_a_turn() {
     let mut context_state = overbudget_context_state(initial_messages.clone());
     context_state.context_budget_chars = 4_000;
     context_state.context_budget_tokens = 1_000;
+    context_state.messages.clear();
     loop_.set_context_state(Some(context_state));
 
     let outcome = loop_.run(initial_messages).await;

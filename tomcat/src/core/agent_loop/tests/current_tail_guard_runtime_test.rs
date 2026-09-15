@@ -128,7 +128,6 @@ async fn mid_turn_guard_reduced_tail_is_recomputed_after_reload() {
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -273,7 +272,6 @@ async fn resume_without_marker_reduces_before_first_request() {
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(state));
 
     current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
@@ -357,7 +355,6 @@ async fn collapse_to_branch_summary_keeps_executing_snapshot() {
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -444,7 +441,6 @@ async fn collapse_to_branch_summary_keeps_pending_snapshot_when_no_in_progress_e
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -497,7 +493,6 @@ async fn collapse_to_branch_summary_omits_control_snapshot_for_child_agents_with
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,

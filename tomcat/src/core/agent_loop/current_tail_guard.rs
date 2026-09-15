@@ -15,8 +15,8 @@ use crate::core::llm::{
 };
 use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{
-    build_context_from_state, compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars,
-    generate_entry_id, CompactionResult, ContextState,
+    compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, generate_entry_id,
+    CompactionResult, ContextState,
 };
 use crate::core::session::transcript::{
     append_entry, entry_id, insert_entry_after_message_id, read_entries_tail,
@@ -242,15 +242,17 @@ pub(super) fn build_precheck_decision(
             .current_tail_compactable_min_chars,
     )
     .len();
-    let max_reducible = estimate_history_reduction_tokens(ctx_state, &agent.config.context_config)
-        + estimate_tail_reduction_tokens(
-            messages,
-            agent.start_idx.min(messages.len()),
-            agent
-                .config
-                .context_config
-                .current_tail_compactable_min_chars,
-        );
+    let history_end = agent.start_idx.min(messages.len());
+    let max_reducible =
+        estimate_history_reduction_tokens(messages, history_end, &agent.config.context_config)
+            + estimate_tail_reduction_tokens(
+                messages,
+                history_end,
+                agent
+                    .config
+                    .context_config
+                    .current_tail_compactable_min_chars,
+            );
     let (route, route_reason) = if ctx_state.preheat.is_finished() {
         // D3：预热收益一旦就绪，就优先尝试整条 Reduce 链路
         // （apply 历史 -> 历史再压 -> tail reduction），而不是先用纯理论
@@ -290,9 +292,13 @@ fn reduce_before_next_llm(
         let Some(ctx_state) = agent.context_state.as_mut() else {
             return Ok(result);
         };
-        let history_end = ctx_state.messages.len();
-        let placeholder =
-            compact_tool_results(ctx_state, &agent.config.context_config, history_end);
+        let history_end = agent.start_idx.min(messages.len());
+        let placeholder = compact_tool_results(
+            ctx_state,
+            messages,
+            &agent.config.context_config,
+            history_end,
+        );
         if placeholder.chars_freed > 0 {
             ctx_state.invalidate_api_usage();
         }
@@ -306,7 +312,6 @@ fn reduce_before_next_llm(
     };
     if history_reduced > 0 {
         result.freed_chars += history_reduced;
-        rebuild_messages_from_context(agent, messages);
         result.mutated = true;
         if !context_is_over_budget(agent) {
             return Ok(result);
@@ -385,10 +390,7 @@ fn start_midturn_preheat_if_needed(
     Ok(())
 }
 
-/// Apply a ready preheat against the merged history-plus-tail view. The current implementation
-/// restores the pre-existing two-list ownership after applying; the explicit cursor makes the
-/// later single-list migration a local deletion of that fold/unfold glue rather than a second
-/// semantic rewrite.
+/// Apply a ready preheat directly to the sole working list.
 pub(super) fn apply_ready_preheat(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
@@ -418,42 +420,19 @@ pub(super) fn apply_ready_preheat(
         session_id: &agent.config.session_id,
         read_file_state: agent.config.read_file_state.as_ref(),
     };
-    // The working set includes the active turn while ContextState owns only completed history.
-    // Fold both into the same coordinate system, then let apply_boundary move the tail cursor
-    // as it replaces the covered prefix.
-    let mut turn_start = agent.start_idx.min(messages.len());
-    let applied = agent.context_state.as_mut().is_some_and(|ctx_state| {
-        ctx_state.messages = messages.clone();
-        crate::core::compaction::apply::apply_and_emit_boundary(
-            ctx_state,
-            result,
-            ctx_state.usage_ratio(),
-            false,
-            &agent.emitter,
-            &boundary_env,
-            &mut turn_start,
-        )
-    });
-    if !applied {
-        if let Some(ctx_state) = agent.context_state.as_mut() {
-            ctx_state.messages.truncate(turn_start);
-        }
-        return Ok(false);
-    }
-
-    // Split at the cursor after Layer 2 and Layer 0 have both finished. Layer 0 only received
-    // this cursor as its history_end, so the surviving tail is still raw.
     let Some(ctx_state) = agent.context_state.as_mut() else {
         return Ok(false);
     };
-    let tail = ctx_state.messages.split_off(turn_start);
-    let mut rebuilt = build_context_from_state(ctx_state);
-    let rebuilt_turn_start = rebuilt.len();
-    rebuilt.extend(tail);
-    *messages = rebuilt;
-    agent.start_idx = rebuilt_turn_start;
-    agent.context_tail_start = rebuilt_turn_start;
-    Ok(true)
+    Ok(crate::core::compaction::apply::apply_and_emit_boundary(
+        ctx_state,
+        messages,
+        result,
+        ctx_state.usage_ratio(),
+        false,
+        &agent.emitter,
+        &boundary_env,
+        &mut agent.start_idx,
+    ))
 }
 
 fn reduce_current_tail_messages(
@@ -620,11 +599,13 @@ fn collect_tail_candidates(
 }
 
 fn estimate_history_reduction_tokens(
-    state: &ContextState,
+    messages: &[ChatMessage],
+    history_end: usize,
     config: &crate::infra::config::ContextConfig,
 ) -> usize {
-    let protected_start = find_protected_turn_start(&state.messages, config.keep_recent_turns);
-    let reducible_chars: usize = state.messages[..protected_start]
+    let history = &messages[..history_end.min(messages.len())];
+    let protected_start = find_protected_turn_start(history, config.keep_recent_turns);
+    let reducible_chars: usize = history[..protected_start]
         .iter()
         .filter(|msg| msg.role == ChatMessageRole::Tool)
         .filter_map(|msg| msg.text_content())
@@ -662,19 +643,6 @@ fn find_protected_turn_start(messages: &[ChatMessage], keep_recent_turns: usize)
         return 0;
     }
     turn_starts[turn_starts.len() - keep_recent_turns]
-}
-
-fn rebuild_messages_from_context(agent: &mut AgentLoop, messages: &mut Vec<ChatMessage>) {
-    let Some(ctx_state) = agent.context_state.as_ref() else {
-        return;
-    };
-    let tail = messages[agent.start_idx.min(messages.len())..].to_vec();
-    let mut rebuilt = build_context_from_state(ctx_state);
-    let new_tail_start = rebuilt.len();
-    rebuilt.extend(tail);
-    *messages = rebuilt;
-    agent.start_idx = new_tail_start;
-    agent.context_tail_start = new_tail_start;
 }
 
 fn rewrite_transcript_best_effort(path: &Path, rewrites: Vec<MessageTextRewrite>) {
@@ -743,7 +711,6 @@ pub(super) async fn collapse_to_branch_summary(
     let summary_msg = artifacts.summary_message;
     let new_chars = estimate_msg_chars(&summary_msg);
     let saved_chars = ctx_state.estimate_context_chars.saturating_sub(new_chars);
-    ctx_state.messages = vec![summary_msg.clone()];
     ctx_state.estimate_context_chars = new_chars;
     ctx_state.invalidate_api_usage();
     ctx_state.preheat.abort();
@@ -752,8 +719,7 @@ pub(super) async fn collapse_to_branch_summary(
     ctx_state.session_obs.compaction_tokens_freed += estimated_tokens_from_chars(saved_chars);
 
     *messages = vec![summary_msg];
-    agent.start_idx = messages.len().saturating_sub(1);
-    agent.context_tail_start = agent.start_idx;
+    agent.start_idx = 1;
     Ok(())
 }
 
@@ -883,8 +849,9 @@ fn apply_collapse_summary(
     entry_id: &str,
 ) -> Result<ChatMessage, AppError> {
     let total_chars: usize = working.iter().map(estimate_msg_chars).sum();
+    let mut messages = working.to_vec();
     let mut temp = ContextState {
-        messages: working.to_vec(),
+        messages: Vec::new(),
         estimate_context_chars: total_chars,
         context_budget_chars: total_chars,
         context_budget_tokens: 1,
@@ -897,8 +864,9 @@ fn apply_collapse_summary(
         session_obs: Default::default(),
         live: Default::default(),
     };
-    let mut turn_start = temp.messages.len();
+    let mut turn_start = messages.len();
     temp.apply_boundary(
+        &mut messages,
         CompactionResult {
             summary_text: summary_text.to_string(),
             covered_start_id: covered_start_id.to_string(),
@@ -912,7 +880,7 @@ fn apply_collapse_summary(
         },
         &mut turn_start,
     )?;
-    temp.messages
+    messages
         .into_iter()
         .next()
         .ok_or_else(|| AppError::internal("collapse summary missing"))

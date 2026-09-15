@@ -134,7 +134,7 @@ fn apply_boundary_replaces_covered_range() {
     let m0 = user_msg_with_id("m0", &"a".repeat(5000));
     let m1 = user_msg_with_id("m1", &"b".repeat(3000));
     let m2 = user_msg_with_id("m2", &"c".repeat(2000));
-    state.messages = vec![m0, m1, m2];
+    let mut messages = vec![m0, m1, m2];
     state.estimate_context_chars = 10_000;
 
     let result = crate::core::session::manager::CompactionResult {
@@ -149,17 +149,19 @@ fn apply_boundary_replaces_covered_range() {
         preheat_elapsed_ms: 0,
     };
     let old_ratio = state.usage_ratio();
-    let mut turn_start = state.messages.len();
-    state.apply_boundary(result, &mut turn_start).unwrap();
+    let mut turn_start = messages.len();
+    state
+        .apply_boundary(&mut messages, result, &mut turn_start)
+        .unwrap();
 
-    assert_eq!(state.messages.len(), 2);
-    assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
-    assert_eq!(state.messages[0].text_content(), Some("short summary"));
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages[0].text_content(), Some("short summary"));
     assert_eq!(
-        state.messages[0].msg_id.as_deref(),
+        messages[0].msg_id.as_deref(),
         Some(compound_turn_id("m0", "m1").as_str())
     );
-    assert_eq!(state.messages[1].msg_id.as_deref(), Some("m2"));
+    assert_eq!(messages[1].msg_id.as_deref(), Some("m2"));
     assert!(state.last_api_usage.is_none());
     let new_ratio = state.usage_ratio();
     assert!(
@@ -171,7 +173,7 @@ fn apply_boundary_replaces_covered_range() {
 #[test]
 fn apply_boundary_not_found_returns_err() {
     let mut state = make_state(1000, 10_000, 2_500);
-    state.messages = vec![user_msg("x")]; // no msg_id set → won't match
+    let mut messages = vec![user_msg("x")]; // no msg_id set → won't match
 
     let result = crate::core::session::manager::CompactionResult {
         summary_text: "summary".into(),
@@ -184,8 +186,8 @@ fn apply_boundary_not_found_returns_err() {
         estimated_tokens_saved: None,
         preheat_elapsed_ms: 0,
     };
-    let mut turn_start = state.messages.len();
-    let res = state.apply_boundary(result, &mut turn_start);
+    let mut turn_start = messages.len();
+    let res = state.apply_boundary(&mut messages, result, &mut turn_start);
     assert!(matches!(
         res,
         Err(AppError::ApplyBoundaryStale { covered_end_id }) if covered_end_id == "also_nonexistent"
@@ -196,7 +198,7 @@ fn apply_boundary_not_found_returns_err() {
 fn apply_boundary_missing_start_id_splices_from_zero_to_end() {
     let mut state = make_state(0, 100_000, 25_000);
     let m = user_msg_with_id("still_end", &"b".repeat(1000));
-    state.messages = vec![m];
+    let mut messages = vec![m];
     state.estimate_context_chars = 5_000;
 
     let result = crate::core::session::manager::CompactionResult {
@@ -210,11 +212,13 @@ fn apply_boundary_missing_start_id_splices_from_zero_to_end() {
         estimated_tokens_saved: None,
         preheat_elapsed_ms: 0,
     };
-    let mut turn_start = state.messages.len();
-    state.apply_boundary(result, &mut turn_start).unwrap();
-    assert_eq!(state.messages.len(), 1);
-    assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
-    assert_eq!(state.messages[0].text_content(), Some("merged"));
+    let mut turn_start = messages.len();
+    state
+        .apply_boundary(&mut messages, result, &mut turn_start)
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages[0].text_content(), Some("merged"));
 }
 
 #[test]
@@ -232,42 +236,42 @@ fn apply_boundary_shifts_turn_start_for_history_boundary_and_tail_boundary() {
     };
     let state_for = || {
         let mut state = make_state(0, 100_000, 25_000);
-        state.messages = vec![
+        let messages = vec![
             user_msg_with_id("m0", "zero"),
             user_msg_with_id("m1", "one"),
             user_msg_with_id("m2", "two"),
             user_msg_with_id("m3", "three"),
         ];
-        state.estimate_context_chars = state.messages.iter().map(estimate_msg_chars).sum();
-        state
+        state.estimate_context_chars = messages.iter().map(estimate_msg_chars).sum();
+        (state, messages)
     };
 
     // The boundary ends before the current turn. Only the trailing current-turn message moves.
-    let mut state = state_for();
+    let (mut state, mut messages) = state_for();
     let mut turn_start = 3;
     state
-        .apply_boundary(result_for("m1"), &mut turn_start)
+        .apply_boundary(&mut messages, result_for("m1"), &mut turn_start)
         .unwrap();
     assert_eq!(turn_start, 2);
-    assert_eq!(state.messages[turn_start].msg_id.as_deref(), Some("m3"));
+    assert_eq!(messages[turn_start].msg_id.as_deref(), Some("m3"));
 
     // The boundary ends immediately before the current turn.
-    let mut state = state_for();
+    let (mut state, mut messages) = state_for();
     let mut turn_start = 2;
     state
-        .apply_boundary(result_for("m1"), &mut turn_start)
+        .apply_boundary(&mut messages, result_for("m1"), &mut turn_start)
         .unwrap();
     assert_eq!(turn_start, 1);
-    assert_eq!(state.messages[turn_start].msg_id.as_deref(), Some("m2"));
+    assert_eq!(messages[turn_start].msg_id.as_deref(), Some("m2"));
 
     // The boundary consumes the first current-turn message. The surviving tail starts after S.
-    let mut state = state_for();
+    let (mut state, mut messages) = state_for();
     let mut turn_start = 2;
     state
-        .apply_boundary(result_for("m2"), &mut turn_start)
+        .apply_boundary(&mut messages, result_for("m2"), &mut turn_start)
         .unwrap();
     assert_eq!(turn_start, 1);
-    assert_eq!(state.messages[turn_start].msg_id.as_deref(), Some("m3"));
+    assert_eq!(messages[turn_start].msg_id.as_deref(), Some("m3"));
 }
 
 #[test]
@@ -281,7 +285,9 @@ fn check_after_reply_skips_below_085() {
     let read_file_state = ReadFileState::default();
     let dir = tempfile::tempdir().unwrap();
     let env = boundary_env(&config, dir.path(), &read_file_state);
-    let switched = check_after_reply(&mut state, &emitter, &env);
+    let mut messages = Vec::new();
+    let mut turn_start = 0;
+    let switched = check_after_reply(&mut state, &mut messages, &emitter, &env, &mut turn_start);
     assert!(!switched, "ratio 0.50 should not trigger check_after_reply");
 }
 
@@ -296,7 +302,9 @@ fn check_after_reply_skips_when_no_preheat() {
     let read_file_state = ReadFileState::default();
     let dir = tempfile::tempdir().unwrap();
     let env = boundary_env(&config, dir.path(), &read_file_state);
-    let switched = check_after_reply(&mut state, &emitter, &env);
+    let mut messages = Vec::new();
+    let mut turn_start = 0;
+    let switched = check_after_reply(&mut state, &mut messages, &emitter, &env, &mut turn_start);
     assert!(!switched, "idle preheat should skip");
 }
 
@@ -315,7 +323,7 @@ fn check_after_reply_boundary_switched_event_carries_session_id() {
     let emitter = crate::infra::ScopedEventEmitter::new(bus, "sid-apply-boundary");
     let mut state = make_state(0, 1_000, 250);
     state.update_api_usage(900, 0);
-    state.messages = vec![
+    let mut messages = vec![
         user_msg_with_id("start", "a"),
         user_msg_with_id("end", "b"),
         user_msg_with_id("tail", "c"),
@@ -338,7 +346,8 @@ fn check_after_reply_boundary_switched_event_carries_session_id() {
     let read_file_state = ReadFileState::default();
     let dir = tempfile::tempdir().unwrap();
     let env = boundary_env(&config, dir.path(), &read_file_state);
-    let switched = check_after_reply(&mut state, &emitter, &env);
+    let mut turn_start = messages.len();
+    let switched = check_after_reply(&mut state, &mut messages, &emitter, &env, &mut turn_start);
     assert!(switched, "预热完成时应应用 boundary");
 
     let ctx = captured
@@ -374,10 +383,12 @@ fn successful_boundary_runs_both_layer0_steps_invalidates_read_stamps_and_emits_
     let env = boundary_env(&config, dir.path(), &read_file_state);
     let mut state = l0_test_state();
     let chars_before = state.estimate_context_chars;
-    let mut turn_start = state.messages.len();
+    let mut messages = std::mem::take(&mut state.messages);
+    let mut turn_start = messages.len();
 
     assert!(apply_and_emit_boundary(
         &mut state,
+        &mut messages,
         l0_test_result(),
         0.85,
         false,
@@ -387,8 +398,7 @@ fn successful_boundary_runs_both_layer0_steps_invalidates_read_stamps_and_emits_
     ));
 
     assert_eq!(
-        state
-            .messages
+        messages
             .iter()
             .filter(|message| {
                 message.role == ChatMessageRole::Tool
@@ -400,8 +410,7 @@ fn successful_boundary_runs_both_layer0_steps_invalidates_read_stamps_and_emits_
         "the old, compactable tool result must become exactly one placeholder"
     );
     assert_eq!(
-        state
-            .messages
+        messages
             .iter()
             .filter(|message| {
                 message.role == ChatMessageRole::Tool
@@ -466,9 +475,11 @@ async fn boundary_eviction_forces_a_real_reread_instead_of_an_unchanged_stub() {
     let config = l0_test_config();
     let env = boundary_env(&config, dir.path(), read_file_state.as_ref());
     let mut state = l0_test_state();
-    let mut turn_start = state.messages.len();
+    let mut messages = std::mem::take(&mut state.messages);
+    let mut turn_start = messages.len();
     assert!(apply_and_emit_boundary(
         &mut state,
+        &mut messages,
         l0_test_result(),
         0.85,
         false,
@@ -517,15 +528,16 @@ fn boundary_without_layer0_savings_does_not_emit_release_event() {
     let dir = tempfile::tempdir().unwrap();
     let env = boundary_env(&config, dir.path(), &read_file_state);
     let mut state = make_state(100, 4_000, 1_000);
-    state.messages = vec![
+    let mut messages = vec![
         user_msg_with_id("covered-start", "covered start"),
         user_msg_with_id("covered-end", "covered end"),
         user_msg_with_id("small-tail", "small tail"),
     ];
-    let mut turn_start = state.messages.len();
+    let mut turn_start = messages.len();
 
     assert!(apply_and_emit_boundary(
         &mut state,
+        &mut messages,
         l0_test_result(),
         0.85,
         false,
@@ -556,15 +568,16 @@ async fn all_boundary_entry_paths_inherit_layer0_cleanup() {
         let mut state = l0_test_state();
         state.update_api_usage(prompt_tokens, 0);
         state.preheat.restore_completed(l0_test_result());
+        let mut messages = std::mem::take(&mut state.messages);
+        let mut turn_start = messages.len();
 
         assert!(
-            check_before_request(&mut state, &emitter, &env).await,
+            check_before_request(&mut state, &mut messages, &emitter, &env, &mut turn_start,).await,
             "timing② must apply the ready boundary at ratio {}",
             prompt_tokens as f64 / 1000.0
         );
         assert_eq!(
-            state
-                .messages
+            messages
                 .iter()
                 .filter(|message| {
                     message.text_content()
@@ -593,14 +606,15 @@ async fn all_boundary_entry_paths_inherit_layer0_cleanup() {
     let mut state = l0_test_state();
     state.update_api_usage(850, 0);
     state.preheat.restore_completed(l0_test_result());
+    let mut messages = std::mem::take(&mut state.messages);
+    let mut turn_start = messages.len();
 
     assert!(
-        check_after_reply(&mut state, &emitter, &env),
+        check_after_reply(&mut state, &mut messages, &emitter, &env, &mut turn_start,),
         "timing⑤ must apply its ready boundary"
     );
     assert_eq!(
-        state
-            .messages
+        messages
             .iter()
             .filter(|message| {
                 message.text_content()
@@ -633,9 +647,17 @@ fn skipped_or_stale_boundary_never_rewrites_layer0_history() {
     let below_original = serde_json::to_vec(&below_threshold.messages).unwrap();
     below_threshold.update_api_usage(840, 0);
     below_threshold.preheat.restore_completed(l0_test_result());
-    assert!(!check_after_reply(&mut below_threshold, &emitter, &env));
+    let mut below_messages = std::mem::take(&mut below_threshold.messages);
+    let mut below_turn_start = below_messages.len();
+    assert!(!check_after_reply(
+        &mut below_threshold,
+        &mut below_messages,
+        &emitter,
+        &env,
+        &mut below_turn_start,
+    ));
     assert_eq!(
-        serde_json::to_vec(&below_threshold.messages).unwrap(),
+        serde_json::to_vec(&below_messages).unwrap(),
         below_original,
         "below 0.85 must not rewrite history"
     );
@@ -643,9 +665,17 @@ fn skipped_or_stale_boundary_never_rewrites_layer0_history() {
     let mut no_preheat = l0_test_state();
     let no_preheat_original = serde_json::to_vec(&no_preheat.messages).unwrap();
     no_preheat.update_api_usage(850, 0);
-    assert!(!check_after_reply(&mut no_preheat, &emitter, &env));
+    let mut no_preheat_messages = std::mem::take(&mut no_preheat.messages);
+    let mut no_preheat_turn_start = no_preheat_messages.len();
+    assert!(!check_after_reply(
+        &mut no_preheat,
+        &mut no_preheat_messages,
+        &emitter,
+        &env,
+        &mut no_preheat_turn_start,
+    ));
     assert_eq!(
-        serde_json::to_vec(&no_preheat.messages).unwrap(),
+        serde_json::to_vec(&no_preheat_messages).unwrap(),
         no_preheat_original,
         "an idle preheat must not rewrite history"
     );
@@ -656,9 +686,17 @@ fn skipped_or_stale_boundary_never_rewrites_layer0_history() {
     let mut stale_result = l0_test_result();
     stale_result.covered_end_id = "missing-end".to_string();
     stale.preheat.restore_completed(stale_result);
-    assert!(!check_after_reply(&mut stale, &emitter, &env));
+    let mut stale_messages = std::mem::take(&mut stale.messages);
+    let mut stale_turn_start = stale_messages.len();
+    assert!(!check_after_reply(
+        &mut stale,
+        &mut stale_messages,
+        &emitter,
+        &env,
+        &mut stale_turn_start,
+    ));
     assert_eq!(
-        serde_json::to_vec(&stale.messages).unwrap(),
+        serde_json::to_vec(&stale_messages).unwrap(),
         stale_original,
         "a stale boundary must not run L0"
     );
@@ -734,9 +772,11 @@ fn applying_the_same_preheat_result_twice_writes_one_linked_summary_body() {
     let emitter =
         crate::infra::ScopedEventEmitter::new(Arc::new(DefaultEventBus::new()), "s-apply-test");
 
-    let mut turn_start = state.messages.len();
+    let mut messages = std::mem::take(&mut state.messages);
+    let mut turn_start = messages.len();
     assert!(apply_and_emit_boundary(
         &mut state,
+        &mut messages,
         result.clone(),
         0.85,
         false,
@@ -748,10 +788,12 @@ fn applying_the_same_preheat_result_twice_writes_one_linked_summary_body() {
     // the durable body was already appended. The tail guard must make the second apply idempotent.
     let mut retry_state = l0_test_state();
     retry_state.transcript_path = path.clone();
-    let mut retry_turn_start = retry_state.messages.len();
+    let mut retry_messages = std::mem::take(&mut retry_state.messages);
+    let mut retry_turn_start = retry_messages.len();
     assert!(
         apply_and_emit_boundary(
             &mut retry_state,
+            &mut retry_messages,
             result,
             0.85,
             false,
@@ -821,7 +863,7 @@ fn check_after_reply_stale_apply_keeps_history_and_preheat_idle() {
     state.transcript_path = path.clone();
     state.update_api_usage(900, 0);
     // "still_end" is not the covered_end_id "stale_end" → stale apply
-    state.messages = vec![user_msg_with_id("still_end", "x")];
+    let mut messages = vec![user_msg_with_id("still_end", "x")];
     let stale_result = crate::core::session::manager::CompactionResult {
         summary_text: "sum".into(),
         covered_start_id: "gone_start".into(),
@@ -838,7 +880,8 @@ fn check_after_reply_stale_apply_keeps_history_and_preheat_idle() {
     let read_file_state = ReadFileState::default();
     let dir = tempfile::tempdir().unwrap();
     let env = boundary_env(&config, dir.path(), &read_file_state);
-    let switched = check_after_reply(&mut state, &emitter, &env);
+    let mut turn_start = messages.len();
+    let switched = check_after_reply(&mut state, &mut messages, &emitter, &env, &mut turn_start);
     assert!(!switched, "stale apply should not emit boundary switched");
     assert!(
         state.preheat.is_idle(),
@@ -858,15 +901,21 @@ fn layer0_threshold_from_config() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = make_state(60_000, 100_000, 25_000);
     let big_content = "x".repeat(60_000);
-    state.messages = vec![user_msg("q"), tool_msg("tc_cfg", &big_content)];
+    let mut messages = vec![user_msg("q"), tool_msg("tc_cfg", &big_content)];
 
     let config = ContextConfig {
         layer0_single_result_max_chars: 100_000,
         ..Default::default()
     };
-    let history_end = state.messages.len();
-    let (results, _) =
-        layer0_persist_large_results(&mut state, &config, dir.path(), "test", history_end);
+    let history_end = messages.len();
+    let (results, _) = layer0_persist_large_results(
+        &mut state,
+        &mut messages,
+        &config,
+        dir.path(),
+        "test",
+        history_end,
+    );
     assert!(
         results.is_empty(),
         "60K < 100K threshold should NOT persist"
@@ -878,8 +927,15 @@ fn layer0_threshold_from_config() {
     };
     let mut state2 = make_state(60_000, 100_000, 25_000);
     state2.messages = vec![user_msg("q"), tool_msg("tc_cfg2", &"y".repeat(60_000))];
-    let history_end = state2.messages.len();
-    let (results2, _) =
-        layer0_persist_large_results(&mut state2, &config2, dir.path(), "test", history_end);
+    let mut messages2 = std::mem::take(&mut state2.messages);
+    let history_end = messages2.len();
+    let (results2, _) = layer0_persist_large_results(
+        &mut state2,
+        &mut messages2,
+        &config2,
+        dir.path(),
+        "test",
+        history_end,
+    );
     assert_eq!(results2.len(), 1, "60K > 50K threshold should persist");
 }

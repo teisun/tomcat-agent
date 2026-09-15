@@ -30,24 +30,21 @@ fn l1_turn_boundary_with_steering_messages() {
 
     let total: usize = msgs.iter().map(estimate_msg_chars).sum();
     let mut state = make_state(total, total, total / 4);
-    state.messages = msgs;
+    let mut messages = msgs;
 
     let config = ContextConfig {
         keep_recent_turns: 5,
         ..Default::default()
     };
-    let history_end = state.messages.len();
-    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
 
     // Turns 0-2 are in compactable zone (3 real turns before the protected 5)
     // Their tool results should be replaced
     assert!(reduced > 0, "should compact tool results in turns 0-2");
 
     // The steering message itself should not have been touched
-    let steering = state
-        .messages
-        .iter()
-        .find(|m| m.kind == MessageKind::Steering);
+    let steering = messages.iter().find(|m| m.kind == MessageKind::Steering);
     assert!(steering.is_some(), "steering message should still exist");
     assert_eq!(
         steering.unwrap().text_content(),
@@ -68,21 +65,20 @@ fn l1_keep_recent_turns_reads_config_value() {
 
     let total: usize = msgs.iter().map(estimate_msg_chars).sum();
     let mut state = make_state(total, total, total / 4);
-    state.messages = msgs;
+    let mut messages = msgs;
 
     let config = ContextConfig {
         keep_recent_turns: 2,
         ..Default::default()
     };
-    let history_end = state.messages.len();
-    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
     assert!(
         reduced > 0,
         "older turns should become compactable once keep_recent_turns shrinks"
     );
 
-    let tool_texts: Vec<_> = state
-        .messages
+    let tool_texts: Vec<_> = messages
         .iter()
         .filter(|msg| msg.role == crate::core::llm::ChatMessageRole::Tool)
         .map(|msg| msg.text_content())
@@ -104,14 +100,14 @@ fn l3_drop_oldest_with_compaction_summary_as_first() {
     let user_text = "new question text ".repeat(100);
 
     let mut state = make_state(0, 100_000, 1_000);
-    state.messages = vec![
+    let mut messages = vec![
         summary_msg(&summary_text), // turn 0 start (CompactionSummary)
         assistant_msg(&asst_text),  // turn 0 body
         tool_msg_with_id("t0", "tc0", &tool_text),
         user_msg_with_id("u1", &user_text), // turn 1 start
         assistant_msg("new answer"),        // turn 1 body
     ];
-    let total: usize = state.messages.iter().map(estimate_msg_chars).sum();
+    let total: usize = messages.iter().map(estimate_msg_chars).sum();
     state.estimate_context_chars = total;
 
     // Verify ratio is high enough before dropping
@@ -121,21 +117,44 @@ fn l3_drop_oldest_with_compaction_summary_as_first() {
         state.usage_ratio()
     );
 
-    let (turns_removed, chars_removed) = force_drop_oldest_after_confirmed_overflow(&mut state);
+    let mut history_end = messages.len();
+    let (turns_removed, chars_removed) =
+        force_drop_oldest_after_confirmed_overflow(&mut state, &mut messages, &mut history_end);
 
     assert!(turns_removed >= 1, "should drop at least one turn");
     assert!(chars_removed > 0, "should free some chars");
-    assert!(!state.messages.is_empty(), "should not drain all messages");
+    assert!(!messages.is_empty(), "should not drain all messages");
 
     // CompactionSummary turn was the oldest — it should have been dropped
-    let has_summary = state
-        .messages
+    let has_summary = messages
         .iter()
         .any(|m| m.kind == MessageKind::CompactionSummary);
     assert!(
         !has_summary,
         "CompactionSummary (oldest turn) should have been dropped"
     );
+}
+
+#[test]
+fn l3_can_drop_entire_history_when_tail_exists() {
+    let history = user_msg_with_id("history", &"h".repeat(8_000));
+    let tail = user_msg_with_id("tail", "current request must survive");
+    let mut messages = vec![history, tail.clone()];
+    let mut state = make_state(
+        messages.iter().map(estimate_msg_chars).sum(),
+        100_000,
+        1_000,
+    );
+    let mut turn_start = 1;
+
+    let (turns_removed, chars_removed) =
+        force_drop_oldest_after_confirmed_overflow(&mut state, &mut messages, &mut turn_start);
+
+    assert_eq!(turns_removed, 1);
+    assert!(chars_removed > 0);
+    assert_eq!(turn_start, 0);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].msg_id, tail.msg_id);
 }
 
 #[test]
@@ -148,7 +167,8 @@ fn apply_boundary_with_msg_id_matching() {
         user_msg_with_id("m4", "fourth"),
         user_msg_with_id("m5", "fifth"),
     ];
-    state.estimate_context_chars = state.messages.iter().map(estimate_msg_chars).sum();
+    let mut messages = std::mem::take(&mut state.messages);
+    state.estimate_context_chars = messages.iter().map(estimate_msg_chars).sum();
 
     let result = crate::core::session::manager::CompactionResult {
         summary_text: "summary of m1-m3".into(),
@@ -161,15 +181,17 @@ fn apply_boundary_with_msg_id_matching() {
         estimated_tokens_saved: None,
         preheat_elapsed_ms: 0,
     };
-    let mut turn_start = state.messages.len();
-    state.apply_boundary(result, &mut turn_start).unwrap();
+    let mut turn_start = messages.len();
+    state
+        .apply_boundary(&mut messages, result, &mut turn_start)
+        .unwrap();
 
-    assert_eq!(state.messages.len(), 3, "summary + m4 + m5");
+    assert_eq!(messages.len(), 3, "summary + m4 + m5");
     assert_eq!(
-        state.messages[0].kind,
+        messages[0].kind,
         crate::core::llm::MessageKind::CompactionSummary
     );
-    assert_eq!(state.messages[0].text_content(), Some("summary of m1-m3"));
-    assert_eq!(state.messages[1].msg_id.as_deref(), Some("m4"));
-    assert_eq!(state.messages[2].msg_id.as_deref(), Some("m5"));
+    assert_eq!(messages[0].text_content(), Some("summary of m1-m3"));
+    assert_eq!(messages[1].msg_id.as_deref(), Some("m4"));
+    assert_eq!(messages[2].msg_id.as_deref(), Some("m5"));
 }

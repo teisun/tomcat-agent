@@ -5,7 +5,7 @@
 //! - `mocks`：跨用例共享的 `temp_sessions_dir`。
 //! - `crud_test`：会话条目 CRUD、store 路径、transcript 路径与只读查询。
 //! - `append_test`：`append_*` 写入路径与 `try_append_message` 校验、`generate_entry_id`。
-//! - `hydrate_test`：`init_context_state` 与 `build_context_from_state`
+//! - `hydrate_test`：`init_context_state` 与停车列表恢复
 //!   六种场景的状态还原。
 //! - `fold_test`：`compute_fold_start` / `filter_turns_by_day` 纯函数等价类。
 //! - `context_state_test`：`ContextState::estimated_token_count` / `usage_ratio` /

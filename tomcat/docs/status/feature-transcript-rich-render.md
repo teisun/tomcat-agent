@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-13 15:59 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-15 15:19 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0] 单列表上下文重构（方案 B）主体已落地**：持久消息列表现为唯一权威；回合开始以 `mem::take` 移交给 `AgentLoop`，结束统一停回 `ContextState.messages`。system prompt 移出持久列表，仅在请求组装时附加；L0/L1/L2/L3 均显式操作同一列表并维护 `start_idx`，tail-only overflow 在首次失败时能直接 collapse。已迁移受影响的单元、集成与 ignored 真实 LLM 用例，新增 serve stdio 长会话验收；真实 Terra 长会话、mid-turn/runtime 用例和 `integration-real-llm` 曾完成验收。期间补齐了 tool-only assistant 的 OpenAI-compatible `content: null` wire 兼容、`--resume` 不重放 assistant 尾部，以及代码评审被跳过时的 transcript 审计事件。当前复核已发现后续整改项（steering 的回合起点传递、失败路径归还列表、skipped 评审的低调 UI 呈现与验收记录回填），故分支保持 ACTIVE；本次提交按用户指令不重跑测试。@2026-09-15
 - [✓] **[P0] 计划收口的声明命令—绿构建凭据对账已用真实 Terra 验收**：`acceptance_commands` 仍是验收下限；每条声明必须对应一条已完成、exit 0、晚于最后编辑、命令与 task ID 实际启动值一致的后台任务。新增手动真实 LLM 用例，让 `idatatlas/gpt-5.6-terra` 在同一次 `update_plan` 调用中启动 Acceptance 并提交精确凭据；用隔离 Git 工作区中的 `test -s acceptance_probe.rs && git status --porcelain -- acceptance_probe.rs | grep -q '^??'` 验证 `&&`、管道、`--` 与正则引用均能端到端对账、持久化并收口为 completed。真实用例与 Clippy 均通过；此前 R1–R7 收口整改的完整 Rust lib 验证为 2875 passed / 2 ignored。标准版本脚本已将 CLI `0.1.50 → 0.1.51`、扩展 `0.1.64 → 0.1.65`、bundled CLI 同步为 `0.1.51`，镜像检查通过。Cov% 未测，保持 —。@2026-09-13
 - [✓] **[P0] 可配置项目资源目录、原生包安装与 Creator 内置技能完成**：新增 `workspace.project_resource_dir`（默认 `<project>/.agents`）并让技能、插件、MCP 配置、项目包和验收截图统一使用它；Connector 设置页只显示并打开后端实际下发的配置文件路径，旧响应缺路径时明确显示“Configuration file unavailable”，不再猜测或创建错误文件。`package_install` 进入原生工具契约，完成确认、路径策略递归检查、原子 registry 写入与安装账本；内置 `skill-creator` / `plugin-creator` 可生成可校验技能和含参数验证的插件骨架。验证：Rust 安装/路径层定向 5 项通过，扩展类型检查与 12 项协议/Settings 测试通过，GUI 4 项通过；完整扩展 `lint + 61 files / 560 tests` 通过；浏览器实测 Add Connector 的缺路径状态显示正确、控制台无 error，证据在 `~/.tomcat/temp/connector-path-unavailable/`。完整 Rust `cargo test --lib` 曾发现 scope 测试的旧 `.tomcat` 断言，已改为 `.agents` 并定向复验；另有 Claude adaptive 既有失败未作为本次功能通过证据。收口与已知限制见 [验收整改记录](../reports/acceptance-remediation.md)。@2026-09-12
 - [✓] **[P0] Stop 点击约 30 秒延迟已根治并完成版本升级**：根因是 checkpoint 的影子 Git 进程先写满 stdout/stderr 管道、父线程却先等待进程退出，双方互等至 30 秒超时，`agent_idle` 因而迟迟未发出。现在启动 Git 后立即由两个 reader 线程并发排空两条管道，超时仍会终止并收集完整输出；turn 的 transcript/context observability 继续同步落盘，而耗时的 checkpoint record 转入 blocking pool，不再位于 `agent_idle` 关键路径。`AgentLoop` 外层另有 biased cancel race 作兜底，影子仓开启 Git 大工作树优化。新增大 stdout/stderr、超时、异步持久化及 serve Stop 回归，先前 `cargo test --lib` 为 2817 passed / 0 failed / 2 ignored；本次提交阶段依用户指令未重跑测试。CLI `0.1.49 → 0.1.50`、扩展 `0.1.63 → 0.1.64`、bundled CLI 同步。Cov% 未跑，仍为 —。@2026-09-11
@@ -95,6 +96,9 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- `AgentLoopConfig::system_prompt`：system prompt 不再作为持久 `ChatMessage` 存在，`assemble_request_messages` 在真正发请求时组装它。
+- compaction 原语：`apply_boundary`、L0 清理和 L3 裁剪改为显式接收工作列表与历史上界；`AgentLoop::run` 期间 `ContextState.messages` 是空停车位。
+- `plan.code_review` transcript 事件：无可审代码或 reviewer 时会显式记录 `verdict: "skipped"`，供审计与 UI 后续低调呈现。
 - `LlmProvider::chat_collect(ChatRequest) -> ChatResponse`：新增“完整响应”抽象；普通 provider 直接复用非流式 `chat`，强制 SSE 的 OpenAI Responses 中转站在 adapter 内缓冲流，不把传输限制泄漏给 compaction / title / dispatcher 调用方。
 - 预热恢复：`.preheat.jsonl` 保存尚未落入 transcript 的摘要缓存；`*.user_messages.jsonl` 只保存 active Normal user 的原始行投影，二者职责分离。应用过同一 marker 的摘要优先以 transcript 为准，恢复不二次导入缓存。
 - Checkpoint：持久化时序改为「transcript/context 同步落盘 → `agent_idle` → 后台 checkpoint/Git snapshot」，无新增 serve 协议或用户配置；Git 输出读取和 AgentLoop 取消 race 均为内部实现。
@@ -192,6 +196,7 @@
 ### ⚠️ BLOCKED (阻塞/风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
+| 单列表复核整改 | 尚需补齐回合起点/失败归还的结构保证、skipped 评审低调 UI 与 Phase 5 验收记录；无外部依赖阻塞 | 下一轮整改 |
 | 窄侧栏显示不足 | 本轮真实截图中长标题会截断，底栏控件和长工具内容拥挤；未修改产品布局 | 后续单独做布局改进及视觉验收 |
 | 系统 Save As 未完整验证 | 图片测试未自动走完原生保存窗口选路径、保存文件的全过程；403 是主动测试越界图片时的预期拒绝，不是正常图片失败 | 后续补原生保存流程验收 |
 | 审查结论的范围 | 运行时达到两轮审查上限后放行，并非新一轮零问题审查；最后的通知可见性意见已补真实窗口提示与点击恢复证据，见整改记录 | 如需独立确认，另行审查补证结果 |

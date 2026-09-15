@@ -960,8 +960,3 @@ pub fn init_context_state_with_limits(
     state.apply_limits(limits);
     Ok(state)
 }
-
-/// Messages from ContextState, ready for LLM (no system prompt).
-pub fn build_context_from_state(state: &ContextState) -> Vec<ChatMessage> {
-    state.messages.clone()
-}

@@ -857,6 +857,15 @@ async fn gates_skipped_when_diff_has_no_code() {
     let rt = PlanRuntime::new("session-a");
     rt.attach_workspace_root(workspace.clone());
     rt.attach_code_reviewer(reviewer.clone());
+    let captured: std::sync::Arc<parking_lot::Mutex<Vec<serde_json::Value>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let sink = std::sync::Arc::clone(&captured);
+        rt.attach_transcript_appender(std::sync::Arc::new(move |extra| {
+            sink.lock().push(extra);
+            Ok(())
+        }));
+    }
     let plan_id = fresh_planning_plan(&rt);
     mark_plan_executing(&rt, &plan_id, "session-a");
     rt.set_max_code_review_rounds(1);
@@ -895,6 +904,14 @@ async fn gates_skipped_when_diff_has_no_code() {
             .load(std::sync::atomic::Ordering::Relaxed),
         0
     );
+    let events = captured.lock();
+    let skipped_review = events
+        .iter()
+        .find(|event| event["event"] == "plan.code_review")
+        .expect("跳过 review 也必须留下可审计的 plan.code_review 事件");
+    assert_eq!(skipped_review["verdict"], "skipped");
+    assert_eq!(skipped_review["skip_reason"], "no_reviewable_code_diff");
+    assert_eq!(skipped_review["code_review_pass"], true);
 
     let _ = std::fs::remove_dir_all(workspace);
     cleanup_home(&home);

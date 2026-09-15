@@ -1,7 +1,7 @@
 use super::super::*;
 use crate::api::chat::run_loop::cleanup_plugin_sessions_on_session_end;
 use crate::api::chat::run_loop::{
-    build_tool_definitions, compose_planned_turn_messages, rebuild_turn_messages,
+    build_tool_definitions, compose_planned_turn_messages, should_auto_drain_resume,
 };
 use crate::core::session::manager::init_context_state;
 use crate::SessionEntry;
@@ -165,7 +165,17 @@ fn compose_planned_turn_messages_preserves_auto_turn_follow_up_order() {
 }
 
 #[test]
-fn rebuild_turn_messages_uses_context_state_and_keeps_current_input_at_tail() {
+fn resume_without_pending_question_does_not_start_a_zero_input_turn() {
+    assert!(
+        !should_auto_drain_resume(true, false),
+        "an assistant-ended transcript has no causal input for another LLM request"
+    );
+    assert!(should_auto_drain_resume(true, true));
+    assert!(!should_auto_drain_resume(false, true));
+}
+
+#[test]
+fn working_messages_keep_compacted_history_and_current_input_at_tail() {
     let summary =
         crate::ChatMessage::compaction_summary("summary replaces old history", "summary-id");
     let mut placeholder = crate::ChatMessage::tool(
@@ -173,51 +183,39 @@ fn rebuild_turn_messages_uses_context_state_and_keeps_current_input_at_tail() {
         "[Previous tool result replaced to save context space]",
     );
     placeholder.msg_id = Some("placeholder-id".to_string());
-    let state = crate::core::session::manager::ContextState {
-        messages: vec![summary, placeholder],
-        estimate_context_chars: 100,
-        context_budget_chars: 4_000,
-        context_budget_tokens: 1_000,
-        last_api_usage: None,
-        post_usage_appended_chars: 0,
-        transcript_path: PathBuf::new(),
-        latest_plan_event: None,
-        resume_control: Default::default(),
-        preheat: crate::core::compaction::preheat::Preheat::new(),
-        session_obs: Default::default(),
-        live: Default::default(),
-    };
+    let mut messages = vec![summary, placeholder];
     let mut current_input = crate::ChatMessage::user("current user input");
     current_input.msg_id = Some("current-input-id".to_string());
+    messages.push(current_input.clone());
 
-    let rebuilt = rebuild_turn_messages(&state, &[(current_input.clone(), false)]);
-
-    assert_eq!(rebuilt.len(), 3);
+    assert_eq!(messages.len(), 3);
     assert_eq!(
-        rebuilt[0].text_content(),
+        messages[0].text_content(),
         Some("summary replaces old history"),
         "the rebuilt working list must begin with compacted history"
     );
     assert_eq!(
-        rebuilt[1].text_content(),
+        messages[1].text_content(),
         Some("[Previous tool result replaced to save context space]"),
         "the rebuild must use the L0-rewritten context, not stale source text"
     );
     assert_eq!(
-        rebuilt.last().and_then(crate::ChatMessage::text_content),
+        messages.last().and_then(crate::ChatMessage::text_content),
         Some("current user input"),
         "the already-persisted current user input must remain at the tail"
     );
     assert_eq!(
-        rebuilt.last().and_then(|message| message.msg_id.as_deref()),
+        messages
+            .last()
+            .and_then(|message| message.msg_id.as_deref()),
         Some("current-input-id"),
-        "rebuild must reuse the persisted message rather than append a duplicate"
+        "the working list must reuse the persisted message rather than append a duplicate"
     );
     assert!(
-        rebuilt
+        messages
             .iter()
             .all(|message| message.text_content() != Some("old full history")),
-        "covered history must not reappear after rebuild"
+        "covered history must not reappear in the working list"
     );
 }
 
@@ -854,9 +852,13 @@ fn record_failure_does_not_break_turn() {
     });
     let mut state =
         init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
-    let messages = vec![crate::ChatMessage::assistant(
-        "checkpoint failure should be nonfatal",
-    )];
+    let messages = pre_persist_turn_messages(
+        &ctx,
+        &mut state,
+        vec![crate::ChatMessage::assistant(
+            "checkpoint failure should be nonfatal",
+        )],
+    );
 
     let appended_ids =
         persist_turn_result(&ctx, &mut state, messages, crate::CheckpointKind::TurnEnd).unwrap();
@@ -938,15 +940,15 @@ async fn checkpoint_recording_does_not_block_turn_persistence_on_runtime() {
         init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
 
     let started = Instant::now();
-    let appended_ids = persist_turn_result(
+    let messages = pre_persist_turn_messages(
         &ctx,
         &mut state,
         vec![crate::ChatMessage::assistant(
             "durable before background checkpoint",
         )],
-        CheckpointKind::TurnEnd,
-    )
-    .expect("checkpoint scheduling must not break turn persistence");
+    );
+    let appended_ids = persist_turn_result(&ctx, &mut state, messages, CheckpointKind::TurnEnd)
+        .expect("checkpoint scheduling must not break turn persistence");
 
     assert_eq!(appended_ids.len(), 1);
     assert!(
@@ -1167,6 +1169,26 @@ fn checkpoint_recording_test_context(
         .unwrap()
         .expect("transcript path");
     (dir, ctx, transcript_path)
+}
+
+fn pre_persist_turn_messages(
+    ctx: &ChatContext,
+    state: &mut crate::ContextState,
+    messages: Vec<crate::ChatMessage>,
+) -> Vec<crate::ChatMessage> {
+    messages
+        .into_iter()
+        .map(|mut message| {
+            let row_id = ctx
+                .session_runtime
+                .session
+                .append_message(serde_json::to_value(&message).expect("serialize test message"))
+                .expect("pre-persist test message");
+            message.msg_id = Some(row_id);
+            state.messages.push(message.clone());
+            message
+        })
+        .collect()
 }
 
 fn chat_turn_test_context(
@@ -1848,7 +1870,11 @@ fn turn_end_writes_checkpoint() {
     });
     let mut state =
         init_context_state(&ctx.session_runtime.session, &ctx.config.context, "sys").unwrap();
-    let messages = vec![crate::ChatMessage::assistant("turn end reply")];
+    let messages = pre_persist_turn_messages(
+        &ctx,
+        &mut state,
+        vec![crate::ChatMessage::assistant("turn end reply")],
+    );
 
     let appended_ids =
         persist_turn_result(&ctx, &mut state, messages, crate::CheckpointKind::TurnEnd).unwrap();
@@ -1892,10 +1918,14 @@ fn interrupt_writes_checkpoint_after_partial_persist() {
         "type": "function",
         "function": { "name": "read", "arguments": r#"{"path":"note.txt"}"# }
     })];
-    let messages = vec![
-        crate::ChatMessage::assistant_with_tool_calls(Some("partial reply"), tool_calls),
-        crate::ChatMessage::tool("call_1", "tool result"),
-    ];
+    let messages = pre_persist_turn_messages(
+        &ctx,
+        &mut state,
+        vec![
+            crate::ChatMessage::assistant_with_tool_calls(Some("partial reply"), tool_calls),
+            crate::ChatMessage::tool("call_1", "tool result"),
+        ],
+    );
 
     let appended_ids =
         persist_turn_result(&ctx, &mut state, messages, crate::CheckpointKind::Interrupt).unwrap();

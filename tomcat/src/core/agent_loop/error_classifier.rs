@@ -7,8 +7,8 @@
 //!    "指数退避重试"或"立即终止"。
 //! 2. [`handle_overflow_retry`]：当 Attempt Loop 捕获 `Retryable(context_overflow)`
 //!    时，对 `context_state` 做一次 L3 强制截断（`force_drop_oldest_after_confirmed_overflow`）并
-//!    用 `build_context_from_state` 重建 `messages`，发送 `ContextOverflowTrimStart/End`
-//!    事件，更新压缩计数，供下一轮 Attempt 重试。
+//!    直接截断工作消息列表，发送 `ContextOverflowTrimStart/End` 事件，更新压缩计数，
+//!    供下一轮 Attempt 重试。
 //!
 //! 历史：原 `classify_error` 位于 `convert.rs`；L3 trim 逻辑内联在 `run.rs` 的
 //! `run_attempt_loop` 中（约 90 行）。T2-P0-001 将两者聚合到本文件，一方面为 T2-P0-003
@@ -20,9 +20,7 @@ use tracing::info;
 use crate::core::agent_loop::current_tail_guard::collapse_to_branch_summary;
 use crate::core::compaction::force_drop_oldest_after_confirmed_overflow;
 use crate::core::llm::{degrade_unsupported_multimodal, Capabilities, ChatMessage};
-use crate::core::session::manager::{
-    build_context_from_state, estimate_msg_chars, estimated_tokens_from_chars,
-};
+use crate::core::session::manager::{estimate_msg_chars, estimated_tokens_from_chars};
 use crate::infra::error::{
     classify_llm_failure, is_context_overflow, is_unsupported_multimodal_text, llm_http_status,
     llm_stage, llm_summary, AppError, LlmFailureKind,
@@ -137,7 +135,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
     }
 }
 
-/// L3 强制截断 + 消息重建，仅在 `Retryable` 分支内由 Attempt Loop 调用。
+/// L3 强制截断，仅在 `Retryable` 分支内由 Attempt Loop 调用。
 ///
 /// ## 行为约定
 ///
@@ -146,8 +144,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
 /// - 命中 overflow + `context_state` 存在：
 ///   1. 发 `ContextOverflowTrimStart { ratio: ratio_before }`
 ///   2. `force_drop_oldest_after_confirmed_overflow` 截断 → 累计 `compaction_tokens_freed` / `+1 compaction_count`
-///   3. 用 System prompt（若有）+ `build_context_from_state(ctx_state)` + 原 `messages[tail_start..]`
-///      重建 `*messages`；同步 `agent.start_idx = tail_start_in_rebuilt`（治本约束，防 T-017 类幽灵）
+///   3. 若历史前缀已空，立刻折叠整个工作列表，确保重试请求发生实质缩小
 ///   4. 发 `ContextOverflowTrimEnd { ratio_before, ratio_after, will_retry: true, .. }`
 ///   5. 写诊断 `l3_trim_done`（含 `compaction_count_after`），返回 `applied: true`
 /// - 命中 overflow 但 `context_state.is_none()`：
@@ -160,7 +157,7 @@ pub(super) fn classify_error(err: AppError) -> LoopError {
 /// - **不**在本函数内更新 `last_err` 或判断 `attempt == max_attempts` —— 那两个决定仍由
 ///   `run_attempt_loop` 持有，避免 retry 控制流所有权扩散。
 /// - 事件通过 `agent.emit_event(...)`（`pub(super)`）发射；时序严格保持
-///   `ContextOverflowTrimStart` → （trim/rebuild） → `ContextOverflowTrimEnd` 各一次。
+///   `ContextOverflowTrimStart` → （trim/collapse） → `ContextOverflowTrimEnd` 各一次。
 pub(super) async fn handle_overflow_retry(
     agent: &mut AgentLoop,
     messages: &mut Vec<ChatMessage>,
@@ -217,36 +214,38 @@ pub(super) async fn handle_overflow_retry(
     let mut trim_tokens = 0usize;
     let mut trim_turns = 0usize;
     let mut collapse_failed = None;
-    if attempt >= 2 {
+    let mut collapsed = attempt >= 2;
+    if collapsed {
         // 被动 overflow 的第二次命中直接复用主动侧最强的 Collapse，不另造一套
         // “递进裁剪”。这条路径能覆盖原先 L3 永远原样保留 tail 的盲点。
         if let Err(error) = collapse_to_branch_summary(agent, messages).await {
             collapse_failed = Some(error);
         }
     } else if let Some(ref mut ctx_state) = agent.context_state {
-        let (turns_removed, chars_removed) = force_drop_oldest_after_confirmed_overflow(ctx_state);
+        let (turns_removed, chars_removed) =
+            force_drop_oldest_after_confirmed_overflow(ctx_state, messages, &mut agent.start_idx);
         trim_turns = turns_removed;
         trim_tokens = estimated_tokens_from_chars(chars_removed);
-        ctx_state.session_obs.compaction_tokens_freed += trim_tokens;
-        ctx_state.session_obs.compaction_count =
-            ctx_state.session_obs.compaction_count.saturating_add(1);
-
-        let tail_start = agent.context_tail_start.min(messages.len());
-        let tail: Vec<ChatMessage> = messages[tail_start..].to_vec();
-        let mut rebuilt = Vec::new();
-        rebuilt.extend(build_context_from_state(ctx_state));
-        let tail_start_in_rebuilt = rebuilt.len();
-        rebuilt.extend(tail);
-        *messages = rebuilt;
-        agent.start_idx = tail_start_in_rebuilt;
+        if chars_removed > 0 {
+            ctx_state.session_obs.compaction_tokens_freed += trim_tokens;
+            ctx_state.session_obs.compaction_count =
+                ctx_state.session_obs.compaction_count.saturating_add(1);
+        }
+    }
+    if !collapsed && trim_turns == 0 {
+        // No completed historical turn remains. Retrying the original payload cannot recover,
+        // so collapse the current tail in this same overflow attempt.
+        collapsed = true;
+        if let Err(error) = collapse_to_branch_summary(agent, messages).await {
+            collapse_failed = Some(error);
+        }
     }
     let after_message_count = messages.len();
     let after_chars = messages.iter().map(estimate_msg_chars).sum::<usize>();
-    // “裁剪成功”不能只看函数是否被调用。消息条数与估算字符数必须同时下降，
-    // 否则下一次请求是同一 payload，重试没有任何进展。
+    // “裁剪成功”不能只看函数是否被调用。至少消息条数或估算字符数必须严格下降；
+    // Collapse 可合法地用一条摘要替换一条超长 user 消息，因此不能要求两者同时下降。
     let applied = collapse_failed.is_none()
-        && after_message_count < before_message_count
-        && after_chars < before_chars;
+        && (after_message_count < before_message_count || after_chars < before_chars);
 
     let ratio_after = agent
         .context_state
@@ -272,7 +271,7 @@ pub(super) async fn handle_overflow_retry(
         attempt,
         turns_removed = trim_turns,
         trim_tokens,
-        route = if attempt >= 2 { "collapse" } else { "reduce" },
+        route = if collapsed { "collapse" } else { "reduce" },
         before_message_count,
         after_message_count,
         before_chars,

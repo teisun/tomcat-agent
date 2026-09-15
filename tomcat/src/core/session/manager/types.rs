@@ -425,22 +425,19 @@ impl ContextState {
     /// [`AppError::ApplyBoundaryStale`]。
     pub fn apply_boundary(
         &mut self,
+        messages: &mut Vec<ChatMessage>,
         result: CompactionResult,
         turn_start: &mut usize,
     ) -> Result<(), AppError> {
-        let end_idx = self
-            .messages
+        let end_idx = messages
             .iter()
             .rposition(|m| m.msg_id.as_deref() == Some(result.covered_end_id.as_str()))
             .ok_or(AppError::ApplyBoundaryStale {
                 covered_end_id: result.covered_end_id.clone(),
             })?;
 
-        let batch_chars: usize = self.messages[..=end_idx]
-            .iter()
-            .map(estimate_msg_chars)
-            .sum();
-        let replaced_message_ids = self.messages[..=end_idx]
+        let batch_chars: usize = messages[..=end_idx].iter().map(estimate_msg_chars).sum();
+        let replaced_message_ids = messages[..=end_idx]
             .iter()
             .filter_map(|message| message.msg_id.as_deref())
             .map(str::to_owned)
@@ -454,11 +451,11 @@ impl ContextState {
         let summary_msg = ChatMessage::compaction_summary(&result.summary_text, summary_entry_id);
 
         debug_assert!(
-            *turn_start <= self.messages.len(),
+            *turn_start <= messages.len(),
             "turn_start must be a valid boundary in the pre-rewrite message list"
         );
         let removed = end_idx.saturating_add(1);
-        self.messages.splice(..=end_idx, [summary_msg]);
+        messages.splice(..=end_idx, [summary_msg]);
         *turn_start = if *turn_start >= removed {
             (*turn_start).saturating_sub(removed).saturating_add(1)
         } else {
@@ -477,19 +474,21 @@ impl ContextState {
         );
         Ok(())
     }
-
-    /// 当前上下文中的 turn 数：user 消息 + compaction 摘要消息之和。
-    pub fn turn_count(&self) -> usize {
-        self.messages
-            .iter()
-            .filter(|m| m.role == ChatMessageRole::User || m.kind == MessageKind::CompactionSummary)
-            .count()
-    }
 }
 
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/// 当前消息列表中的 logical turn 数：user 消息 + compaction 摘要消息之和。
+pub fn turn_count(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            message.role == ChatMessageRole::User || message.kind == MessageKind::CompactionSummary
+        })
+        .count()
+}
 
 /// 与 `ContextState::estimated_token_count` 的纯字符 fallback 一致：`chars / 4`。
 #[inline]

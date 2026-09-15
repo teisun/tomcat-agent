@@ -777,7 +777,7 @@ fold 第二遍: 读到 entry 9 才清掉 1~8、放入 compaction_summary(X)
 
 - **保留**：原先写入的 `Message` 行（user / assistant / tool）**不删除、不改写**，仍在 `.jsonl` 中，便于审计、回放与调试。
 - **BranchSummary（transcript 行）**：触发预热时，`covered_end_id` 仍是尾条，前台追加 `type: branch_summary` marker（`id = S::E`、`summary:null`、`isBoundary:true`）。应用时前台再追加关联 `type: branch_summary_text` 正文（`forId = S::E`）；不再原地改写 marker 或删除行。旧的内联 `branch_summary` 与 `isBoundary=false` 记录仍可读取，以兼容历史 transcript。
-- **构建 LLM 上下文**：`messages` / `build_context_from_state`（直接返回 `state.messages.clone()`）在内存中按 Compaction 元数据 **折叠**——已摘要区间只表现为一条 `ChatMessage::compaction_summary`，**不把同一区间的原始消息再次拼进 prompt**（避免双倍 token）。
+- **构建 LLM 上下文**：回合间停放的 `ContextState.messages` 已按 Compaction 元数据**折叠**；进入回合后它 move 为唯一工作列表。请求边界才临时组装 `[system?] + messages + [ephemeral tail?]`，不把已摘要区间的原始消息再次拼进 prompt。
 
 若未来需要「物理瘦身」大文件，可作为独立运维能力（压缩归档副本），**不**作为默认行为。
 
@@ -785,27 +785,20 @@ fold 第二遍: 读到 entry 9 才清掉 1~8、放入 compaction_summary(X)
 
 #### 统一的消息表示
 
-重构后消息表示从四层简化为两层（旧：transcript JSONL → TurnEntry → AgentMessage → ChatMessage）：
+`ChatMessage` 是 transcript、运行期工作集和 LLM 请求的统一消息类型。消息只有一份；
+区别只在它回合间停放，还是被当前 `AgentLoop` 独占运行。
 
 ```
-  ┌─ transcript JSONL ─┐    ┌── ChatMessage ───────────────────────────────┐
-  │ serde_json::Value   │    │ 统一类型：LLM wire + 内部工作集 + 上下文管理  │
-  │ (磁盘持久化格式)    │    │ role + content + tool_calls                  │
-  └─────────┬──────────┘    │ + msg_id / kind / timestamp (#[serde(skip)]) │
-            │                └─────────────────────────────────────────────┘
-            │ fold_entries_to_messages
-            │ （Compaction 区间折叠为 ChatMessage::compaction_summary）
-            └──────────────────────────►│
-                                        ▼
-                              messages: Vec<ChatMessage>
-                              ContextState 上的扁平消息列表
+              turn boundary                       AgentLoop::run
 
-  ④ LLM / run 结束后：
-       new_messages = messages[start_idx..]
-       → 逐条 messages.push(msg) 追加到 ContextState.messages
-       → serde_json 写入 JSONL
+ ContextState.messages -- mem::take --> working_messages -- park --> ContextState.messages
+   parked between turns                 exclusively owned            parked on every exit
+          |                                  |
+          |                                  +-- L0 / L2 / L3 rewrite this one list
+          +-- next turn <--------------------+
 
-  落盘：ChatMessage ──serde_json──► JSONL 行追加（msg_id/kind/timestamp 被 skip）
+ request = [system_prompt?] + working_messages + [ephemeral_tail?]
+             transient only                       transient only
 ```
 
 - `**ChatMessage**`：统一的消息类型（`role` + `content` + `tool_calls`），由 `src/core/llm/types.rs` 定义。已有的 `Steering`（用户中途注入指令）和 `CompactionSummary`（摘要）通过 `kind: MessageKind` 字段（`#[serde(skip)]`）区分，无需单独类型。
@@ -816,7 +809,8 @@ fold 第二遍: 读到 entry 9 才清掉 1~8、放入 compaction_summary(X)
 
 #### `messages` 的定位
 
-`messages` 是 **上下文管理模块的扁平内存视图**，直接存储 `Vec<ChatMessage>`，无分组层：
+工作列表是扁平的 `Vec<ChatMessage>`，无分组层。它在回合间就是
+`ContextState.messages`；运行期被 move 出来后，`ContextState.messages` 为空：
 
 ```
   messages: Vec<ChatMessage>
@@ -831,7 +825,7 @@ fold 第二遍: 读到 entry 9 才清掉 1~8、放入 compaction_summary(X)
       └─ ...
 ```
 
-- `ContextState.turn_count()` 统计 `messages` 中满足 `is_turn_start()` 条件的消息数。
+- `turn_count(messages)` 统计列表中满足 `is_turn_start()` 条件的消息数。
 - `find_protected_turn_start()` 从尾部倒数 `keep_recent_turns` 个 turn start，返回保护区起始索引。
 
 #### 发给 LLM 的完整链路
@@ -855,10 +849,8 @@ fold 第二遍: 读到 entry 9 才清掉 1~8、放入 compaction_summary(X)
   │  ◆ 发起 LLM 请求前检查（详见下方 ⑤→② 循环）：                            │
   │    preheat.try_restart_if_pending(...)（② 补偿 ExhaustedPending）        │
   │                                                                         │
-  │  build_context_from_state(state) → state.messages.clone()               │
-  │       + 注入 system prompt                                              │
-  │       + 追加本轮 ChatMessage::user(...)                                 │
-  │       ──► initial_messages: Vec<ChatMessage>                            │
+  │  mem::take(state.messages) + 追加并落盘本轮 ChatMessage::user(...)       │
+  │       ──► working_messages: Vec<ChatMessage>                            │
   │                                                                         │
   │  AgentLoop::run(initial_messages)                                       │
   └─────────────────────────────────────────────────────────────────────────┘
@@ -880,25 +872,25 @@ fold 第二遍: 读到 entry 9 才清掉 1~8、放入 compaction_summary(X)
   │  estimateContextChars += result.len()       ← 实时更新                  │
   │  update_api_usage(usage)                    ← 从 StreamEvent 更新       │
   │                                                                         │
-  │  reasoning loop 内 messages 自由增长，不做压缩。                          │
+  │  L0/L2/L3 直接改写 working_messages；无第二份历史消息列表。               │
   │  若 API 返回 Context Overflow → 触发 Layer 3 物理截断（见 §6.4）         │
   │  最终 LLM 回复（无 tool_calls）→ 退出 reasoning loop                    │
   └─────────────────────────────────────────────────────────────────────────┘
                           │
                           ▼
   ┌─────────────────────────────────────────────────────────────────────────┐
-  │ ④ user turn 完成：追加 + 持久化                                          │
+  │ ④ user turn 完成：停放 + 持久化观测                                      │
   │                                                                         │
-  │  new_messages = messages[start_idx..]（本轮新增的 ChatMessage 片段）      │
-  │  逐条 state.messages.push(msg)           ← 追加到 ContextState         │
-  │  再 serde_json 写入 transcript 中尚未落盘的 ChatMessage 行              │
+  │  run 的统一出口：state.messages = working_messages                      │
+  │  new_messages = messages[start_idx..] 仅提供 checkpoint 的 row ids       │
+  │  消息已通过 AgentLoop 的 append sink 写入 transcript                     │
   └─────────────────────────────────────────────────────────────────────────┘
                           │
                           ▼
   ┌─────────────────────────────────────────────────────────────────────────┐
   │ ⑤ LLM 回复后：上下文管理检查（绝不阻塞 UI）                               │
   │                                                                         │
-  │  此时 messages 已包含刚完成的 turn 的所有消息。                           │
+  │  此时 working_messages 已包含刚完成的 turn 的所有消息。                   │
   │                                                                         │
   │  → preheat.try_restart_if_pending(...)（⑤ 与 ② 双点恢复）               │
   │  → 若 ratio >= 0.85：Layer 2 回复后检查                                 │
@@ -920,46 +912,21 @@ fold 第二遍: 读到 entry 9 才清掉 1~8、放入 compaction_summary(X)
   │    → 若 ratio >= 0.98：Layer 2 发请求前检查                              │
   │      （完成→切换；未完成→化异步为同步，阻塞等待）                        │
   │                                                                         │
-  │  若 boundary 已切换：从已更新的 state.messages 重新拍平                   │
-  │       + 注入 system prompt + 已持久化的本轮 user 输入                     │
-  │       ──► initial_messages: Vec<ChatMessage>                            │
+  │  若 boundary 已切换：继续使用已改写的 working_messages                   │
+  │       ──► AgentLoop::run(working_messages)                              │
   │                                                                         │
-  │  AgentLoop::run(initial_messages) → 进入 ③                              │
+  │  AgentLoop::run(working_messages) → 进入 ③                              │
   └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-`**messages`（ContextState）与 `messages`（reasoning loop 工作集）的关系**：
+`ContextState.messages` 与 reasoning loop 的 `messages` 从不是两份内容：前者是回合间
+停车位，后者是同一列表被 move 出来后的运行期名字。`estimateContextChars` 在每次 append/
+rewrite 时维护，`last_api_usage` 在 provider Usage 到达时刷新。
 
-- `**ContextState.messages`**：管理**已完成的历史消息**。只在 ② 进入前读取（clone）、④ 结束后追加、⑤ 被 L0/L1/L2 修改。
-- `**reasoning loop messages`**：实时工作集，包含历史 + 当前 turn 正在产生的新消息。每次进入 ② 时从 `ContextState.messages` clone 构建。
-- **估算更新**：`estimateContextChars` 在 ③ 每次 push 时实时累加，`last_api_usage` 在每次 LLM 响应后刷新。
-- **上下文管理与工作集 `messages` 无交集**：⑤ 只会在 `ContextState.messages` 上轮询/应用 Layer 2；Layer 0 仅在该 boundary 成功应用后作为结构性后续操作。reasoning loop 内的工作集 `messages` 不受压缩影响。下一轮 ② 时从更新后的 `ContextState.messages` 重建，自然包含 Boundary 切换后的摘要。
-
-即：`**ContextState.messages` 是持久化 transcript 与 LLM 请求之间的内存层**——负责 Compaction 折叠与估算维护；`ChatMessage` 已是 LLM wire 格式，无需额外转换。
-
-#### 5.6.1 过渡契约：合并视图事务（2026-09-14）
-
-上面的“上下文管理与工作集无交集”只适用于压缩发生在 user turn **之间**的早期实现。
-current-tail guard 和 timing ⑤ 可以在 turn 内消费异步预热结果，因此不能再假定
-`covered_end_id` 一定位于 `ContextState.messages`。
-
-```text
-before   working = [system][历史][当前 tail]     state = [历史]
-fold     state   =           [历史][当前 tail]    cursor = 当前 tail 起点
-apply    state   =           [摘要][幸存 tail]    apply_boundary 同步平移 cursor
-L0       只处理 state[..cursor]                  幸存 tail 不被落盘或占位
-unfold   state   =           [摘要]               working = [system][摘要][幸存 tail]
-```
-
-`apply_ready_preheat(agent, messages, min_ratio)` 是 mid-turn 与 timing ⑤ 唯一允许消费
-ready preheat 的入口。它在应用前 fold，在应用和 Layer 0 后按平移后的游标 unfold；
-因此 `covered_end_id` 查找、摘要替换、L0 的历史边界共用同一个坐标系。`history_end`
-是 L0 的硬上界，不再依赖 `keep_recent_turns` 恰好覆盖当前 tail。
-
-timing ⑤ 的 `try_restart_if_pending` / `try_start` 必须快照 working messages（排除 system
-prompt）：Scheme E 只允许把 marker 追加到 transcript 尾，而刚完成的 assistant 消息正是
-该尾部。这个预热可以覆盖刚结束的 turn；若产品需要“最近一回合一定 raw”，须单独放宽
-Scheme E、允许在指定 message 后插入 marker，不能悄悄改回旧快照。
+`apply_ready_preheat(agent, messages, min_ratio)` 是 mid-turn 和 timing ⑤ 共享的 ready
+preheat 入口。它直接在工作列表上定位 `covered_end_id`、替换前缀为摘要，并用
+`&mut start_idx` 同步平移当前 tail 边界。随后 Layer 0 只接收这个边界作为 `history_end`，
+因此绝不会修改幸存的当前 tail。
 
 #### 5.6.2 列表归属决策记录
 
@@ -968,23 +935,33 @@ Scheme E、允许在指定 message 后插入 marker，不能悄悄改回旧快�
 `ContextState.messages` 中定位它。这会确定性触发 `ApplyBoundaryStale`，而不是可由用户
 修复的输入错误。
 
-**调研。** Codex 在
-`codex/codex-rs/core/src/context_manager/history.rs::ContextManager::record_items` 中即时更新
-权威 history，再由 `for_prompt` 派生请求视图；Claude Code 的
-`cc-fork-01/src/services/compact/sessionMemoryCompact.ts` 使用
-`lastSummarizedMessageId`，锚点失配时回退同步压缩；Pi 在
-`pi/packages/coding-agent/src/core/compaction/compaction.ts` 按 entry id 压缩，失配时丢弃
-过期候选；OpenCode 从 DB 读取会话历史后在
-`opencode/packages/opencode/src/session/compaction.ts` 同步压缩。没有参考实现把“权威列表
-落后于请求视图”当作正常状态后再向用户报错。
+**调研（2026-09-15，逐文件复核）。**
 
-**当前决策。** 先用本节的合并视图事务止血；随后迁移到单列表：回合间列表停在
-`ContextState.messages`，回合内 move 给 `AgentLoop` 独占。届时保留游标和
-`history_end` 不变量，删除 fold / unfold / rebuild 胶水。
+- Codex：`/Users/yankeben/workspace/codex/codex-rs/core/src/context_manager/history.rs`
+  的 `ContextManager::record_items` 追加唯一的 `items`，`ContextManager::for_prompt`
+  只在请求前对该历史做 normalize 并消费/克隆快照；`history_version` 明确随 compact/
+  rollback 重写递增。
+- Continue：`/Users/yankeben/workspace/continue/gui/src/redux/util/constructMessages.ts`
+  的 `constructMessages` 从 `ChatHistoryItem[]` 过滤/派生请求数组，并在最后通过
+  `getSystemMessageWithRules` + `unshift` 临时放入 system message；历史中的 system
+  消息会被跳过。这是“系统提示属于请求组装”的直接反例证据，而不是可持久化历史。
+- VS Code：`/Users/yankeben/workspace/vscode/src/vs/workbench/contrib/chat/common/model/chatModel.ts`
+  的 `ChatModel::_requests` 保存会话请求序列；其
+  `chatInputStatePersistence.test.ts::stores image payloads separately from frequently updated input state`
+  还把大附件载荷和高频输入状态分开持久化。它不采用 Rust 后端所有权模型，因此不能照抄，
+  但佐证“高频/临时请求材料不应制造第二份会漂移的会话权威数据”。
 
-**反例与推翻条件。** 当前 serve 在回合中只读 metrics，不读完整消息列表，所以不需要
-`Arc<Mutex<Vec<ChatMessage>>>`。若未来增加回合中的外部全文读取或写入（例如实时 `/context`
-查看或非-steering 注入），应改用带明确并发协议的共享权威状态，而不是恢复双列表。
+三者的共同点是：权威历史和临时请求材料有明确边界；没有一个把“权威列表落后于当前请求
+尾巴”当正常状态后再让摘要应用猜测如何拼回。
+
+**当前决策。** 单列表已经落地：回合间列表停在 `ContextState.messages`，回合内 move
+给 `AgentLoop` 独占。`apply_boundary`、L0 和 L3 都显式接收工作列表；`start_idx` /
+`history_end` 是保护当前 tail 的硬上界，前缀被改写时由原语同步平移。旧的 fold /
+unfold / rebuild 胶水已删除，因此预热锚点不可能落在“权威状态看不见的尾巴”。
+
+**反例与推翻条件。** 这个设计适合单个 AgentLoop 独占列表。若未来在回合中增加外部的
+全文读写者（例如实时 `/context` 编辑器、并行 agent 或非-steering 注入），move 独占无法
+表达这些并发需求；届时应设计带版本/锁语义的共享权威状态，而不是恢复两份会漂移的列表。
 
 ### 5.7 消息级 ID 与 Compaction 一致性
 
@@ -1244,26 +1221,30 @@ fn apply_and_emit_boundary(state, result):
     let summary_chars = result.summary_text.len()
     let summary_msg = ChatMessage::compaction_summary(&result.summary_text, marker_id)
 
-    state.messages.splice(..=end_idx, [summary_msg])
+    messages.splice(..=end_idx, [summary_msg])
     # 注意：使用 saturating_sub 防止 usize 下溢（累积估算误差可能导致 batch_chars > estimate）
     state.estimate_context_chars = state.estimate_context_chars.saturating_sub(batch_chars)
     state.estimate_context_chars += summary_chars
 
     invalidate_api_usage(state)
-    run_layer0_after_boundary(state)
+    run_layer0_after_boundary(state, messages, history_end)
 ```
 
 ### 6.4 Layer 3：物理截断（防御性兜底）
 
-API 返回 Context Overflow 错误时触发。从 `messages` 头部起，逐 turn drain（找到第一个 turn 的结束位置），**直到 ratio < 0.50**。
+API 返回 Context Overflow 错误时触发。它只可改写当前工作列表中
+`messages[..start_idx]` 的历史前缀，绝不跨过当前 tail；逐 turn drain，直到 ratio < 0.50。
 
 ```
-fn force_drop_oldest_to_target(state: &mut ContextState):
-    while state.usage_ratio() >= 0.50 && !state.messages.is_empty():
-        # 找到最老 turn 的结束索引：从 messages[1..] 找下一个 turn start，drain 该范围
-        let turn_end = find_next_turn_start(&state.messages, 1).unwrap_or(state.messages.len())
-        let removed: Vec<_> = state.messages.drain(..turn_end).collect()
+fn force_drop_oldest_after_confirmed_overflow(state, messages, start_idx):
+    while state.usage_ratio() >= 0.50 && start_idx > 0:
+        # 在 messages[1..start_idx] 找下一个 turn start，drain 最老完整历史 turn
+        let turn_end = find_next_turn_start(&messages[..start_idx], 1)
+        if turn_end.is_none() && start_idx == messages.len():
+            break  # 回合间只剩一个 turn：保留它，避免空请求
+        let removed = messages.drain(..turn_end.unwrap_or(start_idx)).collect()
         let removed_chars = sum(removed.map(|m| estimate_msg_chars(&m)))
+        start_idx -= removed.len()
         state.estimate_context_chars =
             state.estimate_context_chars.saturating_sub(removed_chars)
     invalidate_api_usage(state)
@@ -1273,15 +1254,17 @@ fn force_drop_oldest_to_target(state: &mut ContextState):
 
 **设计定位**：几乎不可达的安全网。正常运行中，0.50 的 Layer 1 异步预热 + Layer 2 应用通常已足够将 ratio 降回 0.1~0.2。Layer 3 是最后兜底。
 
-#### 6.4.1 Context Overflow 自动重试时的 `messages` 重拼（图二，与 `run.rs` 一致）
+#### 6.4.1 tail-only overflow 的同次 Collapse
 
-在 reasoning loop 的 **可重试**路径中，当错误被判定为 **Context Overflow** 且已执行 **`force_drop_oldest_to_target`**（内部先 **`invalidate_api_usage`**，见 [`cascade.rs`](../../../src/core/compaction/cascade.rs)）后，**同一次 LLM 调用**重试前将工作集 **`messages`** 重组为：
+当 `start_idx == 0`，说明没有可删的历史；旧实现会用原 payload 再试或直接失败。
+现在第一次 overflow 就复用 `collapse_to_branch_summary` 把整个工作列表收为摘要，再立即重试：
 
-1. **可选保留首条 `System`**：若 `messages[0]` 为 system 消息，则拷贝到重建列表首部（保留系统提示不被折叠丢失）。
-2. **`build_context_from_state(ctx_state)`**：直接返回 `state.messages.clone()`（已经是 drain 后的历史上下文）。
-3. **尾部原位保留**：`messages[self.context_tail_start ..]`（当前 user turn 在 overflow 前已产生的 assistant/tool 等），与 `start_idx` 更新配合，避免截断正在进行的轮次。
+```text
+messages = [ current_user | tool / assistant ... ]    start_idx = 0
+overflow -> L3 cannot drain -> collapse -> [ Summary ]    start_idx = 1
+```
 
-上述顺序在实现中为：`rebuilt = [optional System] + build_context_from_state + tail`；随后写回 **`messages`** 并调整 **`start_idx`**。这与 **§5.6** 中「`**ContextState.messages**` 在 ⑤ 被 L3 修改、下一轮 ② 从之重建」的模型一致，但 overflow 重试发生在 **同轮**内，故需显式重拼 **`messages`**。
+这保证每个 retry 都严格缩小 payload。第二次及以后的 overflow 仍直接走同一 collapse 原语。
 
 > **Layer 3 不受 m 值保护区约束**：当所有 turn 都在 protected zone 内（`protected_start = 0`）时，Layer 0/1/2 无法工作。Layer 3 作为最后兜底，**必须能删除任何 turn**（包括 protected zone 内的），否则极端场景下无法降压。
 
@@ -1296,7 +1279,7 @@ fn force_drop_oldest_to_target(state: &mut ContextState):
 /compact                                      Context Overflow
         │                                           │
         ▼                                           ▼
-生成可持久化摘要 + 写 branch_summary boundary    先 force_drop_oldest_to_target
+生成可持久化摘要 + 写 branch_summary boundary    先 force_drop_oldest_after_confirmed_overflow
         │                                           │
         ▼                                           ▼
 重载会话：以后每轮都从摘要继续                 同一轮立即重组更小 payload 并重试
@@ -1305,9 +1288,9 @@ fn force_drop_oldest_to_target(state: &mut ContextState):
 | 场景 | 目标 | 实现 | 持久化语义 |
 |---|---|---|---|
 | 手动 `/compact`（CLI / serve） | 把会话的**长期基线**变小，同时尽可能保留已经完成工作的可读摘要 | [`cmd_compact::compact_session`](../../../src/api/chat/commands/cmd_compact.rs)：先做可丢弃的大工具结果清理，再 `generate_summary`，最后 `append_compaction_boundary` | 是。`branch_summary` 成为新的 transcript boundary，重进会话仍从摘要恢复。 |
-| 自动 overflow 恢复 | 让**本次已经失败的请求**获得一个立刻可发送的 payload | [`force_drop_oldest_to_target`](../../../src/core/compaction/cascade.rs)；第二次 overflow 改走 [`collapse_to_branch_summary`](../../../src/core/agent_loop/current_tail_guard.rs) | 首次 L3 截断只改内存；第二次 Collapse 使用摘要收敛工作集。这里优先保证请求能继续，不承诺保存全部逐条历史。 |
+| 自动 overflow 恢复 | 让**本次已经失败的请求**获得一个立刻可发送的 payload | [`force_drop_oldest_after_confirmed_overflow`](../../../src/core/compaction/cascade.rs)；历史前缀为空或第二次 overflow 时走 [`collapse_to_branch_summary`](../../../src/core/agent_loop/current_tail_guard.rs) | 首次 L3 截断只改内存；Collapse 使用摘要收敛工作集。这里优先保证请求能继续，不承诺保存全部逐条历史。 |
 
-因此“手动命令没有调用 `force_drop_oldest_to_target`”不是实现漏接：前者需要一个能跨重启解释既往工作的 checkpoint，后者需要在错误返回后的最短路径内腾出空间。两条路径共用 `ContextState`、摘要生成能力和 `usage_ratio` 作为结果度量，但不共享触发策略。
+因此“手动命令没有调用 `force_drop_oldest_after_confirmed_overflow`”不是实现漏接：前者需要一个能跨重启解释既往工作的 checkpoint，后者需要在错误返回后的最短路径内腾出空间。两条路径共用 `ContextState`、摘要生成能力和 `usage_ratio` 作为结果度量，但不共享触发策略。
 
 验收不以“命令成功”或“boundary 已写入”为准：CLI 重载后的 `usage_ratio`，以及 serve 响应内的 `afterUsageRatio`，都必须严格小于压缩前的值。
 

@@ -328,10 +328,18 @@ fn transport_message_value(
 ) -> Value {
     let content = message.content.clone();
     let role = message.role.clone();
+    let is_tool_calling_assistant =
+        matches!(role, ChatMessageRole::Assistant) && message.tool_calls.is_some();
     let mut value = serde_json::to_value(message).unwrap_or_else(|_| json!({}));
     if let Value::Object(ref mut object) = value {
         // `kind` belongs to the transcript ledger, not the OpenAI-compatible wire schema.
         object.remove("kind");
+        // OpenAI's chat-completions schema permits `content: null` for a tool-only assistant
+        // message. Some compatible gateways reject the omitted field, so keep the wire shape
+        // explicit whenever this assistant turn is carried solely by `tool_calls`.
+        if is_tool_calling_assistant && !object.contains_key("content") {
+            object.insert("content".to_string(), Value::Null);
+        }
     }
     if let Some(content) = content {
         let content_value = match content {

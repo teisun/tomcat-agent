@@ -325,7 +325,7 @@ async fn boundary_application_runs_layer0_before_final_context_metrics() {
         preheat_elapsed_ms: 0,
     });
     loop_.set_context_state(Some(ContextState {
-        messages: history.clone(),
+        messages: Vec::new(),
         estimate_context_chars,
         context_budget_chars: 40_000,
         context_budget_tokens: 10_000,
@@ -492,7 +492,7 @@ async fn normalized_usage_starts_preheat_at_half_watermark() {
     let mut initial_message = ChatMessage::user("summarize when needed");
     initial_message.msg_id = Some("preheat-user".to_string());
     loop_.set_context_state(Some(ContextState {
-        messages: vec![initial_message.clone()],
+        messages: Vec::new(),
         estimate_context_chars: 0,
         context_budget_chars: 3_488_000,
         context_budget_tokens: 872_000,
@@ -789,7 +789,7 @@ async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_con
         .run(vec![ChatMessage::user("first round keeps usage")])
         .await
         .unwrap();
-    let carried_state = first_loop.take_context_state().expect("carried state");
+    let mut carried_state = first_loop.take_context_state().expect("carried state");
     assert!(
         carried_state.live.input_tokens_used > 0,
         "first loop should materialize non-zero metrics before model switch"
@@ -837,11 +837,10 @@ async fn context_metrics_update_remains_nonzero_when_model_changes_with_same_con
         },
         CancellationToken::new(),
     );
+    let mut second_messages = std::mem::take(&mut carried_state.messages);
+    second_messages.push(ChatMessage::user("second round after model switch"));
     second_loop.set_context_state(Some(carried_state));
-    let _ = second_loop
-        .run(vec![ChatMessage::user("second round after model switch")])
-        .await
-        .unwrap();
+    let _ = second_loop.run(second_messages).await.unwrap();
 
     let captured = payloads.lock().unwrap().clone();
     assert!(

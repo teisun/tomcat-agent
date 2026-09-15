@@ -63,7 +63,8 @@ pub(crate) async fn run(
 /// 执行 `/compact` 的共享核心，供 CLI 和 serve 入口调用。
 pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, AppError> {
     let mut state = load_context_state(ctx, "")?;
-    if state.messages.is_empty() {
+    let mut messages = std::mem::take(&mut state.messages);
+    if messages.is_empty() {
         return Ok(CompactReport {
             before_ratio: state.usage_ratio(),
             after_ratio: state.usage_ratio(),
@@ -74,17 +75,11 @@ pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, 
     let before_ratio = state.usage_ratio();
     // 先复用自动压缩的第一档，避免把不再需要的超大工具结果再次送给摘要模型。
     // 摘要成功后会用 boundary 丢弃整个前缀，因此这里不需要把临时占位符写回 transcript。
-    let history_end = state.messages.len();
-    compact_tool_results(&mut state, &ctx.config.context, history_end);
-    let covered_count = state.messages.len();
-    let covered_start_id = state
-        .messages
-        .first()
-        .and_then(|message| message.msg_id.clone());
-    let covered_end_id = state
-        .messages
-        .last()
-        .and_then(|message| message.msg_id.clone());
+    let history_end = messages.len();
+    compact_tool_results(&mut state, &mut messages, &ctx.config.context, history_end);
+    let covered_count = messages.len();
+    let covered_start_id = messages.first().and_then(|message| message.msg_id.clone());
+    let covered_end_id = messages.last().and_then(|message| message.msg_id.clone());
     let entry = ctx
         .session_runtime
         .session
@@ -95,7 +90,7 @@ pub(crate) async fn compact_session(ctx: &ChatContext) -> Result<CompactReport, 
         .plan_runtime
         .control_snapshot(Some(compaction_call.wire_model()));
     let summary = generate_summary_with_output_limit(
-        &state.messages,
+        &messages,
         None,
         compaction_call.provider_impl.as_ref(),
         &compaction_call.model,

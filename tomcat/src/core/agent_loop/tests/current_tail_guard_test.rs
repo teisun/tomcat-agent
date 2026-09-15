@@ -125,7 +125,6 @@ async fn mid_turn_guard_rewrites_tail_and_transcript() {
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -284,7 +283,6 @@ async fn collapse_to_branch_summary_keeps_planning_snapshot() {
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: tail_chars,
@@ -391,7 +389,6 @@ async fn preheat_starts_at_tool_round_when_ratio_reaches_half() {
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: 100,
@@ -462,7 +459,6 @@ async fn midturn_preheat_anchor_in_tail_applies_and_keeps_surviving_tail_raw() {
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: 900,
@@ -553,7 +549,6 @@ async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: 3_400,
@@ -676,7 +671,6 @@ async fn midturn_summary_boundary_lands_on_round_boundary() {
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: chars + 800,

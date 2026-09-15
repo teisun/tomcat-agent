@@ -324,6 +324,15 @@ pub async fn execute_for_tool(
             plan.frontmatter.code_review_pass = true;
             plan.frontmatter.green_build_pass = true;
             finalize_plan_completed(runtime, &target_plan_id, &path, &mut plan)?;
+            runtime.write_code_review_skipped_transcript(
+                &target_plan_id,
+                if runtime.workspace_root().is_none() {
+                    "workspace_unavailable"
+                } else {
+                    "no_reviewable_code_diff"
+                },
+                tool_call_id,
+            );
         } else if runtime.has_code_reviewer()
             && !plan
                 .frontmatter
@@ -475,6 +484,11 @@ pub async fn execute_for_tool(
             rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
             write_plan(&path, &plan, runtime.lock_timeout_ms())?;
             runtime.refresh_active_plan_after_write(path.clone(), &plan);
+            runtime.write_code_review_skipped_transcript(
+                &target_plan_id,
+                "reviewer_unavailable",
+                tool_call_id,
+            );
         } else {
             let exhaustion = settle_exhausted_review(&mut plan.frontmatter);
             let rounds = plan.frontmatter.code_review_rounds;

@@ -7,7 +7,7 @@
 - **核心文件**：
   - `src/core/agent_loop/` — ToolCallInfo、AgentLoopConfig、AgentLoop、LoopError
   - `src/core/compaction/` — 四层上下文防护算法（Layer 0~3）、Compaction Prompt 模板、context overflow 检测
-  - `src/core/session/manager/` — ContextState、init_context_state、build_context_from_state、estimate_msg_chars
+  - `src/core/session/manager/` — ContextState、init_context_state、estimate_msg_chars
   - `src/core/llm/types.rs` — ChatMessage（含 MessageKind）、ChatRequest/ChatResponse
   - `src/lib.rs` — 对外导出 AgentLoop、AgentLoopConfig、AgentRunResult、ChatMessage、ContextState、ContextConfig 等
 
@@ -36,7 +36,7 @@ Layer 3  Reasoning Loop
 ## 2. 设计方案 (Design Details)
 
 - **设计模式**：三层嵌套循环（Conversation → Attempt → Reasoning），职责分离；消息统一使用 `ChatMessage`，无需在 LLM 边界做类型转换。`MessageKind` 枚举区分 Normal/Steering/CompactionSummary 等内部语义。
-- **关键权衡**：System Prompt 与工具定义由**调用方**（如 chat）拼装并注入：AgentLoop 只接受已拼好的 `initial_messages`（含首条 System 若需要）和构造时传入的 `config.tool_definitions`，不在 Loop 内再拼 system，便于多调用方复用同一 Loop 逻辑。Transcript 持久化由调用方在 `run()` 返回后根据 `AgentRunResult` 自行 append 并写入 Session，AgentLoop 不依赖 SessionManager。
+- **关键权衡**：会话消息只有一份。回合间停放在 `ContextState.messages`，进入 `AgentLoop::run` 时 move 到局部工作列表，所有退出路径再停回该字段。`system_prompt` 由 `AgentLoopConfig` 保存，只在构造 `ChatRequest` 时临时前置；它不属于会话历史，也不进入 transcript。每条消息由 AgentLoop 的 append sink 落盘，调用方在 `run()` 返回后只持久化观测与 checkpoint。
 - **线程安全/并发**：`steering_queue`、`follow_up_queue` 为 `Arc<Mutex<Vec<ChatMessage>>>`，`cancel_token` 为 `CancellationToken`；`steer()`、`follow_up()`、`abort()` 可从其他线程调用，`run()` 内读队列与取消信号，无数据竞争。流式 delta 通过 `EventBus` 的 `message_update` 事件推送，调用方（如 `chat.rs`）通过 `event_bus.on("message_update", ...)` 订阅。
 
 ## 3. 核心 API 与数据结构 (API Definitions)
@@ -44,7 +44,7 @@ Layer 3  Reasoning Loop
 - **ChatMessage**：统一消息类型（OpenAI wire format），含 `role`/`content`/`tool_calls`/`tool_call_id` 等字段。三个 `#[serde(skip)]` 字段 `msg_id`/`kind`/`timestamp` 携带内部元数据。
 - **MessageKind**：`Normal`/`Steering`/`CompactionSummary`，区分不同语义的 user 消息。
 - **ToolCallInfo**：`{ id, name, arguments }`，仅在流式积累 + 工具执行阶段使用的临时类型。
-- **AgentLoopConfig**：`max_attempts`（默认 4，跟随 `[llm].agent_max_attempts`）、`max_tool_rounds`（默认 `usize::MAX`，由 token 预算与工具轮次逻辑兜底）、`retry_base_delay_ms`（默认 500ms，跟随 `[llm].agent_retry_base_delay_ms`，实际等待带 `±20%` jitter 且封顶 8s）、`model`、`session_id`、`tool_definitions: Vec<serde_json::Value>`（由调用方 `build_tool_definitions()` 等生成）、`context_config`。
+- **AgentLoopConfig**：`max_attempts`、`max_tool_rounds`、`retry_base_delay_ms`、`model`、`session_id`、`tool_definitions`、`context_config`，以及仅用于请求组装的 `system_prompt: Option<String>`。
 - **AgentRunResult**：`{ final_text: String, new_messages: Vec<ChatMessage> }`，run 成功时最后一轮 LLM 文本回复及本次产生的所有新消息。
 - **AgentLoop::new(llm, primitive, event_bus, config, cancel_token)**：标准构造函数；内部创建默认的 steering_queue、follow_up_queue。
 - **AgentLoop::run(&mut self, initial_messages: Vec<ChatMessage>) -> Result<AgentRunResult, AppError>**：主入口；执行第一层 Conversation Loop（含 FollowUp 检查）、第二层 Attempt Loop（重试与 classify_error）、第三层 Reasoning Loop（LLM 流式 + 工具执行 + Steering/Abort 检查）。
@@ -55,9 +55,9 @@ Layer 3  Reasoning Loop
 
 ### 3.2 上下文管理 API（TASK-17）
 
-- **ContextState**：运行时上下文状态，包含 `messages: Vec<ChatMessage>`、`estimate_context_chars: usize`、`context_budget_chars: usize`。在 `chat_loop` 外层初始化一次、跨迭代复用。Turn 边界从消息序列隐式推导（`role: user` = turn start）。
+- **ContextState**：回合间的停车位和上下文预算/预热/观测状态，包含 `messages: Vec<ChatMessage>`、`estimate_context_chars`、`context_budget_chars`。运行 `AgentLoop` 时 `messages` 必须为空；工作列表在 `run()` 返回时统一停回。Turn 边界从消息序列隐式推导。
 - **init_context_state(session, config, system_text) -> ContextState**：从 transcript 加载历史，解析为 ChatMessage 列表，识别已有 Compaction entry 标记为 `kind: CompactionSummary`。
-- **build_context_from_state(state) -> Vec<ChatMessage>**：`state.messages.clone()`（trivial clone，内存表示 = LLM wire format）。
+- **消息请求组装**：`assemble_request_messages()` 是唯一出口，生成 `[system_prompt?] + working_messages + [ephemeral_tail?]`；system 和 ephemeral tail 都不写入停车列表。
 - **ContextConfig**：上下文管理配置，含 `context_window`、`max_output_tokens`、`keep_recent_turns`、`layer0_single_result_max_chars`、`layer0_placeholder_threshold_chars`、`current_tail_compactable_min_chars`、`current_tail_single_result_max_chars`、`compaction_model`、`compaction_max_tokens`。
 
 ### 3.3 四层防护算法（`compaction/`）
@@ -159,17 +159,17 @@ flowchart TD
       |
       v  每轮用户输入:
       |    1. 更新 estimateContextChars（新消息）
-      |    2. 先生成 messages 快照并追加已持久化的本轮输入
-      |    3. timing ② check_before_request；若成功 apply boundary（内含 L0），从 ContextState 重建快照
-      |    4. set_context_state → AgentLoop
+      |    2. mem::take ContextState.messages，直接追加并落盘本轮输入
+      |    3. timing ② check_before_request；若成功 apply boundary（内含 L0），继续使用同一工作列表
+      |    4. set_context_state（停车列表为空）→ AgentLoop
       |
       v  AgentLoop::run()
-      |    - Layer 2: timing ②/⑤/mid-turn 的 ready preheat 统一经 apply_ready_preheat（fold → apply → unfold）；成功分支内仅在 history_end 前执行 Layer 0 落盘/占位
-      |    - Layer 3 Attempt: ContextOverflow → force_drop_oldest → 重试
+      |    - Layer 2: timing ②/⑤/mid-turn 的 ready preheat 直接改写工作列表；Layer 0 严格止于 history_end
+      |    - Layer 3 Attempt: ContextOverflow → force_drop_oldest；历史为空则同次 collapse → 重试
       |    - 动态维护 estimate_context_chars
       |
       v  take_context_state ← 取回 ContextState
-      |    - new_messages 逐条 append_message + extend context_state.messages
+      |    - 列表已由 run() 停回；new_messages 仅用于 checkpoint 行 id
       |    - 下一轮继续使用同一 ContextState
 ```
 
@@ -178,12 +178,12 @@ flowchart TD
 chat 层构造并调用 AgentLoop 的典型片段（见 `src/api/chat.rs`）：
 
 ```rust
-let mut messages = build_context_from_state(&context_state);
-messages.insert(0, ChatMessage::system(&system_text));
-messages.push(ChatMessage::user(&input));
+let mut messages = std::mem::take(&mut context_state.messages);
+append_planned_messages(&mut messages, ChatMessage::user(&input))?;
 
 let config = AgentLoopConfig {
     max_attempts: 3,
+    system_prompt: Some(system_text),
     model: model.clone(),
     session_id: ctx.session.current_session_key().to_string(),
     tool_definitions: build_tool_definitions(),
@@ -198,18 +198,13 @@ let mut agent_loop = AgentLoop::new(
     ctx.cancelled.clone(),
 );
 
-let run_result = agent_loop.run(messages).await;
-match run_result {
-    Ok(result) => {
-        for msg in result.new_messages {
-            let row_id = ctx.session.append_message(serde_json::to_value(&msg)?)?;
-            let mut cm = msg;
-            cm.msg_id = Some(row_id);
-            context_state.messages.push(cm);
-        }
-    }
-    Err(e) => return Err(e),
-}
+agent_loop.set_context_state(Some(context_state));
+let result = agent_loop.run(messages).await?;
+let context_state = agent_loop
+    .take_context_state()
+    .expect("run parks the working list on every exit");
+persist_context_observability(&context_state)?;
+record_turn_checkpoint(result.new_messages.iter().filter_map(|m| m.msg_id.as_deref()))?;
 ```
 
 ## 8. 验收标准 (Testing & QA)

@@ -1569,6 +1569,39 @@ impl PlanRuntime {
         self.write_transcript_custom(payload);
     }
 
+    /// Records an explicit audit event when a code-review gate is safely skipped.
+    ///
+    /// A passing gate without a reviewer dispatch is still a state transition that
+    /// unlocks acceptance (or completes a docs-only plan). Persisting it in the same
+    /// event family prevents transcript readers from mistaking “no review record” for
+    /// a missing or failed review.
+    pub(crate) fn write_code_review_skipped_transcript(
+        &self,
+        plan_id: &str,
+        reason: &str,
+        tool_call_id: &str,
+    ) {
+        self.write_transcript_custom(serde_json::json!({
+            "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW,
+            "plan_id": plan_id,
+            "round": 0,
+            "rounds": 0,
+            "review_attempt_id": format!("skipped:{reason}"),
+            "tool_call_id": tool_call_id,
+            "aborted": false,
+            "verdict": "skipped",
+            "skipped": true,
+            "skip_reason": reason,
+            "summary": format!("code review skipped: {reason}"),
+            "changes_summary": "none",
+            "findings": [],
+            "reviewer_turns_used": 0,
+            "reviewer_turns_limit": self.max_code_review_rounds(),
+            "reviewer_stop_reason": reason,
+            "code_review_pass": true,
+        }));
+    }
+
     /// 代码评审预算用尽仍有未清 finding：记录残余，随后由 acceptance 的绿构建证据收口。
     pub(crate) fn write_code_review_exhausted_transcript(
         &self,

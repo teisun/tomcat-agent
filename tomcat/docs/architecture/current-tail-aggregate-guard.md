@@ -76,7 +76,7 @@ current-tail guard（已超预算的紧急减负） 单条 >= 10K  → Step 0 si
 
 | 术语 | 语义（大白话） | 数据载体 | 行为约束 | 说人话 |
 | --- | --- | --- | --- | --- |
-| **current tail** | 当前 reasoning 回合里新长出来的尾巴 | `reasoning_loop` 局部 `messages[agent.start_idx..]`；`Agent::start_idx` / `context_tail_start` | A/B/C 只允许扫描和改写这段；**不能**只盯 `ContextState.messages` 老前缀；split 成功后必须同步挪 `start_idx` 与 `context_tail_start` | 这篇方案处理的是“眼前这轮新堆起来的货”，不是老仓库。 |
+| **current tail** | 当前 reasoning 回合里新长出来的尾巴 | `reasoning_loop` 局部 `messages[agent.start_idx..]`；`Agent::start_idx` | `start_idx` 是 L0/L3 的硬上界；前缀替换时原语必须同步平移它，tail 永不被 L0/L3 越界改写 | 这篇方案处理的是“眼前这轮新堆起来的货”，不是老仓库。 |
 | **mid-turn aggregate precheck** | 当前轮里每次 tool round 结束后、下次 LLM 请求发出前的称重与路由 | `reasoning_loop.rs` 中 `tool_dispatcher` 返回与下一次 `llm.chat_stream(...)` 之间；`AggregatePrecheckDecision` | 每个 tool round 都要跑；只负责测量和决策，**不直接改写消息**；`working_set_tokens >= 0.90 * budget` 只打黄灯日志，不直接分流 | 每跑完一拨工具都要过磅一次。 |
 | **working_set_tokens** | 下一次 LLM 请求整份 prompt 的估算总重 | `ContextState::estimated_token_count()`；`last_api_usage` + `post_usage_appended_chars` | 是 A 的主判据；B/C 改写消息后必须同步修正相关计数，否则下一次称重会失真 | 看的是整车多重，不是某一个箱子多重。 |
 | **context_budget_tokens** | Prompt 可用上限 | `ContextState.context_budget_tokens`，来自 `context_window - max_output_tokens` | 本文统一使用这个名字；**不再**使用旧草案名 `promptBudgetBeforeReserve`；A 不再额外扣一次 output reserve | 红线已经扣过输出位了，不要再扣第二遍。 |
@@ -126,7 +126,7 @@ current-tail guard（已超预算的紧急减负） 单条 >= 10K  → Step 0 si
 ### 2.3 为什么选这条路线，不选其他路线
 
 1. **压力点在 mid-turn，不在 turn 末尾。** 如果等最终 assistant 回复后再处理，已经白白发出过载请求了。
-2. **历史 compaction 不是 current-tail guard。** `ContextState.messages` 与局部 `messages[start_idx..]` 在 Tomcat 里不是同一视角，不能混看；任何 ready preheat 都必须经 `apply_ready_preheat` 的 fold → apply → unfold 事务消费，不能直接对其中一份列表调用 `check_after_reply`。
+2. **历史与 current-tail 在一份工作列表上有不同边界。** `messages[..start_idx]` 是可由 L0/L3 处理的历史前缀，`messages[start_idx..]` 是受保护 tail；ready preheat 可按锚点改写前缀或覆盖 tail，但必须经 `apply_ready_preheat`，由原语同步平移 `start_idx`。
 3. **减负必须可恢复。** `read`、`search_files`、只读 `bash` 都有不同 replay 路径，不能把所有 tool result 当普通长字符串切一刀。
 4. **长 plan 场景需要 split + keepalive。** 只做 reduction 不足以保证执行态连续性；只做 summary 又会把当前 step / pending work 压没。
 5. **阶段二与阶段三必须分开。** 本期先把“发请求前避免超载”做对；`finish_reason` 驱动的 same-turn recovery 留给后续反应型阶段。
@@ -292,7 +292,7 @@ still overweight?
   - 直接复用既有 `BranchSummaryEntry` + `apply_boundary` 语义；
   - `covered_start_id` 取当前 working messages 首条，`covered_end_id` 取当前 working messages 末条；
   - apply 成功后，局部 `messages` 中只保留一条 `ChatMessage::compaction_summary(...)`；
-  - 同步更新 `agent.start_idx`、`agent.context_tail_start`；
+  - 摘要归入历史，设 `agent.start_idx = 1`；
   - 调用 `ctx_state.invalidate_api_usage()`。
 
 ```text
@@ -621,7 +621,7 @@ after tool_dispatcher returns:
             keepalive = build_keepalive_snapshot(...)
             append branch_summary
             apply_boundary
-            move start_idx/context_tail_start to summary
+            set start_idx = 1 (summary is history)
             invalidate_api_usage()
             record afterCollapse diagnostic
             continue next llm.chat_stream

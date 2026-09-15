@@ -290,7 +290,6 @@ async fn timing5_try_start_snapshots_working_set_and_appends_tail_marker() {
         CancellationToken::new(),
     );
     agent.start_idx = 2;
-    agent.context_tail_start = 2;
     agent.set_context_state(Some(state));
     let mut messages = vec![historical_user, historical_assistant];
 

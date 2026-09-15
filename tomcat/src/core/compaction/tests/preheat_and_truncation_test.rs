@@ -60,7 +60,7 @@ fn floor_char_boundary_multibyte() {
 fn compact_tool_results_reduces_budget() {
     let mut state = make_state(11_000, 5_000, 1_250);
     // Turn 1: [user, large tool result]  Turn 2: [user] — m=1 protects turn 2
-    state.messages = vec![
+    let mut messages = vec![
         user_msg("q"),
         tool_msg("c1", &"x".repeat(25_000)),
         user_msg("q2"),
@@ -69,8 +69,8 @@ fn compact_tool_results_reduces_budget() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let history_end = state.messages.len();
-    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
     assert!(reduced > 0);
 }
 
@@ -79,13 +79,13 @@ fn compact_tool_results_protects_recent() {
     let tool_content = "x".repeat(25_000);
     let mut state = make_state(25_000, 5_000, 1_250);
     // Only one turn (one user message), m=1 → everything protected
-    state.messages = vec![user_msg("q"), tool_msg("c1", &tool_content)];
+    let mut messages = vec![user_msg("q"), tool_msg("c1", &tool_content)];
     let config = ContextConfig {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let history_end = state.messages.len();
-    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
     assert_eq!(reduced, 0);
 }
 
@@ -93,7 +93,7 @@ fn compact_tool_results_protects_recent() {
 fn compact_tool_results_skips_small() {
     let mut state = make_state(5_000, 3_000, 750);
     // Small tool result (1000 < 10_000 threshold) → not replaced
-    state.messages = vec![
+    let mut messages = vec![
         user_msg("q"),
         tool_msg("c1", &"x".repeat(1_000)),
         user_msg("q2"),
@@ -102,36 +102,40 @@ fn compact_tool_results_skips_small() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let history_end = state.messages.len();
-    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
     assert_eq!(reduced, 0);
 }
 
 #[test]
 fn confirmed_overflow_drops_a_turn_even_when_local_estimate_is_low() {
     let mut state = make_state(4000, 4000, 1000);
-    state.messages = vec![
+    let mut messages = vec![
         user_msg(&"x".repeat(2000)),
         user_msg(&"y".repeat(1000)),
         user_msg(&"z".repeat(500)),
     ];
     state.context_budget_tokens = 100_000;
-    let (turns_removed, _) = force_drop_oldest_after_confirmed_overflow(&mut state);
+    let mut history_end = messages.len();
+    let (turns_removed, _) =
+        force_drop_oldest_after_confirmed_overflow(&mut state, &mut messages, &mut history_end);
     assert_eq!(turns_removed, 1);
-    assert_eq!(state.messages.len(), 2);
+    assert_eq!(messages.len(), 2);
     assert!(state.usage_ratio() < 0.50);
 }
 
 #[test]
 fn confirmed_overflow_never_empties_the_last_turn() {
     let mut state = make_state(4000, 4000, 1000);
-    state.messages = vec![user_msg(&"x".repeat(3000))];
+    let mut messages = vec![user_msg(&"x".repeat(3000))];
 
-    let (turns_removed, chars_removed) = force_drop_oldest_after_confirmed_overflow(&mut state);
+    let mut history_end = messages.len();
+    let (turns_removed, chars_removed) =
+        force_drop_oldest_after_confirmed_overflow(&mut state, &mut messages, &mut history_end);
 
     assert_eq!(turns_removed, 0);
     assert_eq!(chars_removed, 0);
-    assert_eq!(state.messages.len(), 1);
+    assert_eq!(messages.len(), 1);
 }
 
 #[test]
@@ -396,20 +400,25 @@ fn layer0_persist_creates_files() {
     let mut state = make_state(60_000, 100_000, 25_000);
     let big_content = "x".repeat(60_000);
     // Layer 0 persists tool results from the last turn (after the last user message)
-    state.messages = vec![
+    let mut messages = vec![
         user_msg("question"),
         tool_msg_with_id("tc_1_msg", "tc_1", &big_content),
     ];
     let config = ContextConfig::default();
-    let history_end = state.messages.len();
-    let (results, _) =
-        layer0_persist_large_results(&mut state, &config, dir.path(), "test_session", history_end);
+    let history_end = messages.len();
+    let (results, _) = layer0_persist_large_results(
+        &mut state,
+        &mut messages,
+        &config,
+        dir.path(),
+        "test_session",
+        history_end,
+    );
     assert_eq!(results.len(), 1);
     assert!(std::path::Path::new(&results[0].persisted_path).exists());
     assert!(state.estimate_context_chars < 60_000);
     // Check the tool message content was replaced
-    let tool = state
-        .messages
+    let tool = messages
         .iter()
         .find(|m| m.role == ChatMessageRole::Tool)
         .unwrap();

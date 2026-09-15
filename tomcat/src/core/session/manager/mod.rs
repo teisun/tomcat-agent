@@ -9,8 +9,8 @@ mod tests;
 mod types;
 
 pub use context::{
-    build_context_from_state, init_context_state, init_context_state_with_limits,
-    INTERRUPTED_TOOL_RESULT_TEXT, PENDING_TOOL_RESULT_TEXT, UNKNOWN_RESTART_TOOL_RESULT_TEXT,
+    init_context_state, init_context_state_with_limits, INTERRUPTED_TOOL_RESULT_TEXT,
+    PENDING_TOOL_RESULT_TEXT, UNKNOWN_RESTART_TOOL_RESULT_TEXT,
 };
 pub(crate) use session_impl::extract_user_text_from_content;
 #[allow(unused_imports)]
@@ -18,8 +18,8 @@ pub use session_impl::generate_entry_id;
 pub use session_impl::SessionManager;
 pub use session_impl::{derive_title_from_user_message, is_rule_derived_title};
 pub use types::{
-    compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, AgentMode, ApiUsage,
-    CompactionResult, ContextLiveMetrics, ContextState, PlanEventKind, PlanEventRef,
+    compound_turn_id, estimate_msg_chars, estimated_tokens_from_chars, turn_count, AgentMode,
+    ApiUsage, CompactionResult, ContextLiveMetrics, ContextState, PlanEventKind, PlanEventRef,
     PlanModeTransition, ResumeControlState,
 };
 

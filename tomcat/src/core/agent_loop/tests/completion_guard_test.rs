@@ -253,7 +253,7 @@ async fn layer0_does_not_rewrite_history_without_a_boundary_switch() {
         .map(crate::core::session::manager::estimate_msg_chars)
         .sum();
     agent.set_context_state(Some(ContextState {
-        messages: state_messages.clone(),
+        messages: Vec::new(),
         estimate_context_chars,
         context_budget_chars: 80_000,
         context_budget_tokens: 20_000,
@@ -273,15 +273,14 @@ async fn layer0_does_not_rewrite_history_without_a_boundary_switch() {
         TurnOutcome::Finished
     );
 
-    let state = agent.context_state.as_ref().expect("context state");
     assert!(
-        state.messages[1]
+        messages[1]
             .text_content()
             .is_some_and(|content| content.len() > 10_000),
         "the old 12K tool result must remain intact until a boundary applies"
     );
     assert_eq!(
-        state.messages[3].text_content().map(str::len),
+        messages[3].text_content().map(str::len),
         Some(60_000),
         "the newest 60K tool result must remain in context without a boundary"
     );
@@ -336,9 +335,8 @@ async fn successful_boundary_switch_runs_both_layer0_cleanup_steps() {
         preheat_elapsed_ms: 0,
     });
     agent.start_idx = state_messages.len();
-    agent.context_tail_start = state_messages.len();
     agent.set_context_state(Some(ContextState {
-        messages: state_messages.clone(),
+        messages: Vec::new(),
         estimate_context_chars,
         context_budget_chars: 40_000,
         context_budget_tokens: 10_000,
@@ -441,9 +439,8 @@ async fn timing5_boundary_cleanup_matches_reference_and_emits_one_release() {
     // This fixture models a boundary that covered already-completed history. The final assistant
     // reply appended by `finalize` is the only active-tail message.
     agent.start_idx = state_messages.len();
-    agent.context_tail_start = state_messages.len();
     agent.set_context_state(Some(ContextState {
-        messages: state_messages.clone(),
+        messages: Vec::new(),
         estimate_context_chars,
         context_budget_chars: 40_000,
         context_budget_tokens: 10_000,
@@ -543,7 +540,6 @@ async fn timing5_applies_preheat_whose_anchor_is_in_the_current_turn() {
         CancellationToken::new(),
     );
     agent.start_idx = 1;
-    agent.context_tail_start = 1;
     agent.set_context_state(Some(state));
     let mut messages = vec![historical, current];
 
@@ -616,7 +612,7 @@ async fn layer0_without_boundary_keeps_read_stamp_and_tool_result_intact() {
         ChatMessage::tool("latest-small", "small result"),
     ];
     agent.set_context_state(Some(ContextState {
-        messages: state_messages.clone(),
+        messages: Vec::new(),
         estimate_context_chars: 40_000,
         context_budget_chars: 100_000,
         context_budget_tokens: 25_000,
@@ -636,9 +632,8 @@ async fn layer0_without_boundary_keeps_read_stamp_and_tool_result_intact() {
         TurnOutcome::Finished
     );
 
-    let state = agent.context_state.as_ref().expect("context state");
     assert_eq!(
-        state.messages[1].text_content(),
+        messages[1].text_content(),
         Some(old_tool_text.as_str()),
         "without a successful boundary, Layer 0 must not rewrite old results"
     );

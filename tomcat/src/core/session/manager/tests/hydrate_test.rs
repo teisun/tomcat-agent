@@ -1,4 +1,4 @@
-//! # `init_context_state` 与 `build_context_from_state` 还原路径
+//! # `init_context_state` 与停车列表还原路径
 //!
 //! 覆盖：
 //!
@@ -6,8 +6,7 @@
 //!   未创建会话 / boundary 边界丢弃旧轮 / 非 boundary compaction 保留旧轮
 //!   六种场景，断言 `messages` / `estimate_context_chars` / `context_budget_chars`
 //!   等字段符合预期。
-//! - `build_context_from_state`：把 `ContextState` 拼成最终发给 LLM 的
-//!   `Vec<ChatMessage>`，验证顺序与 role/kind 不丢失。
+//! - `ContextState.messages`：保存恢复后的工作列表，验证顺序与 role/kind 不丢失。
 
 use std::path::PathBuf;
 
@@ -1181,7 +1180,7 @@ fn init_context_state_with_compaction_entry() {
 }
 
 #[test]
-fn build_context_from_state_flattens_turns() {
+fn hydrated_messages_preserve_turn_order() {
     let mut summary_msg = ChatMessage::compaction_summary("summary", "sum_1");
     summary_msg.timestamp = Some("2026-04-04T12:00:00Z".to_string());
 
@@ -1207,7 +1206,7 @@ fn build_context_from_state_flattens_turns() {
         session_obs: Default::default(),
         live: Default::default(),
     };
-    let msgs = build_context_from_state(&state);
+    let msgs = state.messages.clone();
     assert_eq!(msgs.len(), 3);
     assert_eq!(msgs[0].kind, MessageKind::CompactionSummary);
     assert_eq!(msgs[1].role, ChatMessageRole::User);

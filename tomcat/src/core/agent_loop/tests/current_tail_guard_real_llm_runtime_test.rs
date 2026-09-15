@@ -252,7 +252,6 @@ async fn real_terra_preheat_apply_and_resume_first_request_guard() {
     let chars: usize = messages.iter().map(estimate_msg_chars).sum();
     let mut agent = make_agent(binding.clone(), context_config.clone(), temp.path());
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
     agent.set_context_state(Some(ContextState {
         messages: Vec::new(),
         estimate_context_chars: chars,
@@ -366,10 +365,9 @@ async fn real_terra_preheat_apply_and_resume_first_request_guard() {
         init_context_state(&manager, &context_config, "system").expect("hydrate raw transcript");
     resumed_state.context_budget_chars = 4_000;
     resumed_state.context_budget_tokens = 1_000;
-    let mut resumed_messages = resumed_state.messages.clone();
+    let mut resumed_messages = std::mem::take(&mut resumed_state.messages);
     let mut resumed_agent = make_agent(binding, context_config, temp.path());
     resumed_agent.start_idx = 0;
-    resumed_agent.context_tail_start = 0;
     resumed_agent.set_context_state(Some(resumed_state));
     current_tail_guard::maybe_reduce_before_next_llm(&mut resumed_agent, &mut resumed_messages)
         .await

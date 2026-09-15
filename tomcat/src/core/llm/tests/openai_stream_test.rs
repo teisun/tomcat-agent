@@ -685,6 +685,8 @@ fn mimo_tool_turn_replays_reasoning_content() {
     );
     let wire = transport_messages(&[message], "mimo-v2.5-pro", true, None);
     assert_eq!(wire[0]["reasoning_content"], "mimo plan");
+    assert_eq!(wire[0]["content"], serde_json::Value::Null);
+    assert_eq!(wire[0]["tool_calls"][0]["function"]["name"], "read");
 }
 
 #[tokio::test]

@@ -1527,7 +1527,7 @@ impl SessionManager {
     /// 追加 `thinking_trace`（`llm.thinking.persist=true` 时由 chat 层调用）。
     ///
     /// 注意：该条目仅用于调试 / 审计回放，不参与 `init_context_state` hydrate；
-    /// 上行 messages 仍保持 `build_context_from_state -> messages.clone()` 不变。
+    /// 上行 messages 仍保持从已停车的列表 clone 的语义不变。
     pub fn append_thinking_trace(
         &self,
         text: &str,

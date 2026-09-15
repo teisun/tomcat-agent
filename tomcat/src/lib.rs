@@ -14,13 +14,6 @@ pub use api::chat::{chat_loop, run_chat_turn, ChatContext};
 pub use api::run_cli;
 pub use core::agent_loop::AgentRunOutcome;
 pub use core::{
-    build_context_from_state, compound_turn_id, fnv1a_hex, init_context_state,
-    init_context_state_with_limits, load_store, project_root, resolve_session_mode, save_store,
-    session_key_for, session_key_for_agent, BranchSummaryEntry, CompactionResult, ContextState,
-    ErrorEntry, SessionEntry, SessionHeader, SessionManager, SessionMode, SessionStore,
-    TranscriptEntry, DEFAULT_SESSION_KEY,
-};
-pub use core::{
     build_provider, AgentLoop, AgentLoopConfig, AgentRunResult, AllowAllConfirmation, AuthStore,
     BashExecutionState, BashNextAction, BashResult, Capabilities, ChatMessage,
     ChatMessageContentPart, ChatRequest, ChatResponse, ChatResponseChoice, CheckpointDiff,
@@ -35,6 +28,12 @@ pub use core::{
     SearchFilesStats, SearchFilesTarget, SessionTokenUsage, ShadowGitStore, StreamEvent,
     SwitchingCheckpointStore, ThinkingLevel, Tool, ToolCallInfo, ToolExecutor, ToolRegistry,
     UserConfirmationProvider, WriteFileResult, FILE_MAX_BYTES, IMAGE_MAX_BYTES,
+};
+pub use core::{
+    compound_turn_id, fnv1a_hex, init_context_state, init_context_state_with_limits, load_store,
+    project_root, resolve_session_mode, save_store, session_key_for, session_key_for_agent,
+    BranchSummaryEntry, CompactionResult, ContextState, ErrorEntry, SessionEntry, SessionHeader,
+    SessionManager, SessionMode, SessionStore, TranscriptEntry, DEFAULT_SESSION_KEY,
 };
 pub use ext::{
     invoke_host_func, invoke_host_func_with, parse_manifest, transpile_pi_plugin_for_quickjs,

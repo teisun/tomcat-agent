@@ -15,12 +15,12 @@ use tomcat::core::session::{estimate_msg_chars, MessageAppendSink};
 use tomcat::core::tools::pipeline::read_state::ReadFileState;
 use tomcat::infra::ScopedEventEmitter;
 use tomcat::{
-    build_context_from_state, compound_turn_id, init_context_state, llm_http_status_error,
-    run_chat_turn, AgentLoop, AgentLoopConfig, AppConfig, AppError, BashResult, Capabilities,
-    ChatContext, ChatMessage, ChatRequest, ChatResponse, ContextConfig, ContextState,
-    DefaultEventBus, DirEntry, EditFileResult, EditOperation, EventBus, EventContext, LlmProvider,
-    LlmResolver, LlmScene, PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager,
-    StreamEvent, WriteFileResult,
+    compound_turn_id, init_context_state, llm_http_status_error, run_chat_turn, AgentLoop,
+    AgentLoopConfig, AppConfig, AppError, BashResult, Capabilities, ChatContext, ChatMessage,
+    ChatRequest, ChatResponse, ContextConfig, ContextState, DefaultEventBus, DirEntry,
+    EditFileResult, EditOperation, EventBus, EventContext, LlmProvider, LlmResolver, LlmScene,
+    PrimitiveExecutor, PrimitiveOperation, ResolvedCall, SessionManager, StreamEvent,
+    WriteFileResult,
 };
 use tracing::{info, info_span};
 
@@ -611,16 +611,22 @@ fn test_compaction_pipeline_layer1_then_layer3_recovers_budget() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let history_end = state.messages.len();
-    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
+    let mut messages = std::mem::take(&mut state.messages);
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
     assert!(reduced > 0);
 
     if state.usage_ratio() >= 0.50 {
-        tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(&mut state);
+        let mut history_end = messages.len();
+        tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(
+            &mut state,
+            &mut messages,
+            &mut history_end,
+        );
     }
 
     assert!(state.usage_ratio() < 0.50);
-    assert!(!state.messages.is_empty());
+    assert!(!messages.is_empty());
 }
 
 /// [Session 重载] 写入消息与 `type: branch_summary` 摘要行后 init_context_state 正确重建
@@ -682,7 +688,7 @@ fn test_session_reload_with_branch_summary_entries() -> Result<(), Box<dyn std::
         .any(|m| m.text_content().is_some_and(|t| t.contains("new question")));
     assert!(has_new_msg, "应含 compaction 之后的 new question 消息");
 
-    let msgs = build_context_from_state(&state);
+    let msgs = state.messages.clone();
     assert!(msgs.len() >= 3, "展平后消息数应 >= 3");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -779,7 +785,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         + estimate_msg_chars(&current_user);
 
     let ctx_state = ContextState {
-        messages: historical_messages,
+        messages: vec![],
         estimate_context_chars: estimated_chars,
         context_budget_chars: 1_000_000,
         context_budget_tokens: 250_000,
@@ -792,7 +798,7 @@ async fn test_context_overflow_triggers_compaction_and_retries(
         session_obs: Default::default(),
         live: Default::default(),
     };
-    let mut messages = build_context_from_state(&ctx_state);
+    let mut messages = historical_messages;
     messages.push(current_user);
     agent.set_context_state(Some(ctx_state));
 
@@ -826,10 +832,10 @@ async fn test_context_overflow_triggers_compaction_and_retries(
     Ok(())
 }
 
-/// [build_context_from_state 端到端] CompactionSummary + user/assistant/tool 混合展平后消息顺序正确
+/// [context_messages_clone 端到端] CompactionSummary + user/assistant/tool 混合展平后消息顺序正确
 ///
 /// 验证：CompactionSummary 转为 CompactionSummary，普通消息展平顺序保持
-/// 意义：TASK-17 上下文重建——build_context_from_state 正确性的端到端验证
+/// 意义：TASK-17 上下文重建——context_messages_clone 正确性的端到端验证
 #[test]
 fn test_build_context_preserves_order_with_mixed_turns() {
     common::setup_logging();
@@ -875,7 +881,7 @@ fn test_build_context_preserves_order_with_mixed_turns() {
         live: Default::default(),
     };
 
-    let msgs = build_context_from_state(&state);
+    let msgs = state.messages.clone();
 
     assert_eq!(msgs.len(), 5, "应展平为 5 条消息");
     assert!(
@@ -936,14 +942,14 @@ fn test_compact_tool_results_replaces_with_placeholder() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let history_end = state.messages.len();
-    compact_tool_results(&mut state, &config, history_end);
+    let mut messages = std::mem::take(&mut state.messages);
+    let history_end = messages.len();
+    compact_tool_results(&mut state, &mut messages, &config, history_end);
 
     info!("Assert: old turns replaced, recent preserved");
     // Turns: turn 0 = msgs[0..3], turn 1 = msgs[3..6], turn 2 = msgs[6..9] (recent)
     // Tool messages are at index 1, 4, 7
-    let tool_msgs: Vec<&ChatMessage> = state
-        .messages
+    let tool_msgs: Vec<&ChatMessage> = messages
         .iter()
         .filter(|m| m.role == ChatMessageRole::Tool)
         .collect();
@@ -1002,11 +1008,11 @@ fn test_compact_tool_results_replaces_all_large_in_compactable_zone() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let history_end = state.messages.len();
-    compact_tool_results(&mut state, &config, history_end);
+    let mut messages = std::mem::take(&mut state.messages);
+    let history_end = messages.len();
+    compact_tool_results(&mut state, &mut messages, &config, history_end);
 
-    let tool_msgs: Vec<&ChatMessage> = state
-        .messages
+    let tool_msgs: Vec<&ChatMessage> = messages
         .iter()
         .filter(|m| m.role == ChatMessageRole::Tool)
         .collect();
@@ -1066,8 +1072,9 @@ fn test_compact_tool_results_estimate_precise() {
         keep_recent_turns: 1,
         ..Default::default()
     };
-    let history_end = state.messages.len();
-    let reduced = compact_tool_results(&mut state, &config, history_end).chars_freed;
+    let mut messages = std::mem::take(&mut state.messages);
+    let history_end = messages.len();
+    let reduced = compact_tool_results(&mut state, &mut messages, &config, history_end).chars_freed;
 
     let expected_reduced = content_len - PLACEHOLDER.len();
     assert_eq!(
@@ -1254,9 +1261,16 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         live: Default::default(),
     };
     let config = ContextConfig::default();
-    let history_end = state.messages.len();
-    let (results, _) =
-        layer0_persist_large_results(&mut state, &config, dir.path(), "sess_persist", history_end);
+    let mut messages = std::mem::take(&mut state.messages);
+    let history_end = messages.len();
+    let (results, _) = layer0_persist_large_results(
+        &mut state,
+        &mut messages,
+        &config,
+        dir.path(),
+        "sess_persist",
+        history_end,
+    );
     assert_eq!(results.len(), 1);
 
     let readback = std::fs::read_to_string(&results[0].persisted_path)?;
@@ -1265,8 +1279,7 @@ fn test_layer0_persist_and_readback() -> Result<(), Box<dyn std::error::Error>> 
         "persisted content should match original"
     );
 
-    let tool_in_state = state
-        .messages
+    let tool_in_state = messages
         .iter()
         .find(|m| m.role == ChatMessageRole::Tool)
         .expect("tool message should exist");
@@ -1369,7 +1382,7 @@ fn test_session_reload_boundary_false_skipped() -> Result<(), Box<dyn std::error
 
 /// [Fix B+C] agent_loop 返回的 new_messages 首条应为 role=User 的 ChatMessage
 ///
-/// 验证：修复后 start_idx = context_tail_start → new_messages 包含 User 消息
+/// 验证：start_idx 指向当前回合起点 → new_messages 包含 User 消息
 /// 意义：确保新消息列表完整包含用户输入
 #[tokio::test]
 async fn test_new_messages_includes_user_message() -> Result<(), Box<dyn std::error::Error>> {
@@ -1558,7 +1571,7 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
         .sum::<usize>()
         + estimate_msg_chars(&trigger_user);
     let ctx_state = ContextState {
-        messages: historical_messages,
+        messages: vec![],
         estimate_context_chars: system_text.len() + big_chars,
         context_budget_chars: 1_000_000,
         context_budget_tokens: 250_000,
@@ -1571,7 +1584,7 @@ async fn test_l3_rebuild_estimate_consistent_no_phantom() -> Result<(), Box<dyn 
         session_obs: Default::default(),
         live: Default::default(),
     };
-    let mut messages = build_context_from_state(&ctx_state);
+    let mut messages = historical_messages;
     messages.push(trigger_user);
     agent.set_context_state(Some(ctx_state));
 
@@ -1671,10 +1684,16 @@ fn test_force_drop_estimate_consistent_after_l3() {
         session_obs: Default::default(),
         live: Default::default(),
     };
+    let mut messages = std::mem::take(&mut state.messages);
 
-    tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(&mut state);
+    let mut history_end = messages.len();
+    tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(
+        &mut state,
+        &mut messages,
+        &mut history_end,
+    );
 
-    let remaining_msg_chars: usize = state.messages.iter().map(estimate_msg_chars).sum();
+    let remaining_msg_chars: usize = messages.iter().map(estimate_msg_chars).sum();
     let expected = system_chars + remaining_msg_chars;
     assert_eq!(
         state.estimate_context_chars, expected,
@@ -1682,7 +1701,7 @@ fn test_force_drop_estimate_consistent_after_l3() {
         state.estimate_context_chars, expected
     );
     assert!(
-        !state.messages.is_empty(),
+        !messages.is_empty(),
         "should have at least one remaining message after L3"
     );
 }
@@ -1813,7 +1832,7 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
     let mut m2 = ChatMessage::user("c".repeat(2000));
     m2.msg_id = Some("u2".to_string());
     m2.timestamp = Some(TEST_TS.to_string());
-    state.messages = vec![m0, m1, m2];
+    let mut messages = vec![m0, m1, m2];
     state.estimate_context_chars = 10_000;
     state.update_api_usage(900, 0); // ratio = 0.90 >= 0.85
 
@@ -1842,7 +1861,14 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
         session_id: "ctx-after-reply-boundary",
         read_file_state: &read_file_state,
     };
-    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter, &env);
+    let mut turn_start = messages.len();
+    let switched = tomcat::core::compaction::apply::check_after_reply(
+        &mut state,
+        &mut messages,
+        &emitter,
+        &env,
+        &mut turn_start,
+    );
 
     info!("Assert: BoundarySwitched event received");
     assert!(switched, "should have applied boundary");
@@ -1858,8 +1884,8 @@ fn test_check_after_reply_emits_boundary_switched_on_apply() {
         "payload should have ratioAfter"
     );
 
-    assert_eq!(state.messages.len(), 2, "summary + u2 after splice");
-    assert_eq!(state.messages[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(messages.len(), 2, "summary + u2 after splice");
+    assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
 }
 
 /// [L2 stale] stale apply 丢弃缓存并继续；用户无法通过 Notice 修复内部锚点失配。
@@ -1942,7 +1968,15 @@ fn test_check_after_reply_stale_discards_preheat_without_compaction_error() {
         session_id: "ctx-after-reply-stale",
         read_file_state: &read_file_state,
     };
-    let switched = tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter, &env);
+    let mut messages = std::mem::take(&mut state.messages);
+    let mut turn_start = messages.len();
+    let switched = tomcat::core::compaction::apply::check_after_reply(
+        &mut state,
+        &mut messages,
+        &emitter,
+        &env,
+        &mut turn_start,
+    );
 
     info!("Assert: stale preheat discarded, not switched");
     assert!(!switched, "stale apply should not switch");
@@ -2000,7 +2034,7 @@ async fn test_check_before_request_emits_boundary_switched() {
     let mut m2 = ChatMessage::user("c".repeat(2000));
     m2.msg_id = Some("u2".to_string());
     m2.timestamp = Some(TEST_TS.to_string());
-    state.messages = vec![m0, m1, m2];
+    let mut messages = vec![m0, m1, m2];
     state.estimate_context_chars = 10_000;
     state.update_api_usage(750, 0); // ratio = 0.75 >= 0.70
 
@@ -2019,6 +2053,7 @@ async fn test_check_before_request_emits_boundary_switched() {
 
     info!("Act: check_before_request");
     let emitter = scoped_emitter(event_bus.clone(), "ctx-before-request-boundary");
+    let mut turn_start = messages.len();
     let config = ContextConfig::default();
     let work_dir = tempfile::tempdir().unwrap();
     let read_file_state = ReadFileState::default();
@@ -2028,8 +2063,14 @@ async fn test_check_before_request_emits_boundary_switched() {
         session_id: "ctx-before-request-boundary",
         read_file_state: &read_file_state,
     };
-    let applied =
-        tomcat::core::compaction::apply::check_before_request(&mut state, &emitter, &env).await;
+    let applied = tomcat::core::compaction::apply::check_before_request(
+        &mut state,
+        &mut messages,
+        &emitter,
+        &env,
+        &mut turn_start,
+    )
+    .await;
 
     info!("Assert: BoundarySwitched event + messages shortened");
     assert!(applied, "should apply boundary in check_before_request");
@@ -2051,7 +2092,7 @@ async fn test_check_before_request_emits_boundary_switched() {
         ratio_before,
         ratio_after
     );
-    assert_eq!(state.messages.len(), 2, "summary + u2");
+    assert_eq!(messages.len(), 2, "summary + u2");
 }
 
 // ────────── Group D: L0->L1->L2->L3 全管线 + 事件时序 ─────────────────────
@@ -2118,19 +2159,21 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         session_obs: Default::default(),
         live: Default::default(),
     };
+    let mut messages = std::mem::take(&mut state.messages);
 
     info!(
         "initial: messages={}, estimate_chars={}, ratio={:.3}",
-        state.messages.len(),
+        messages.len(),
         state.estimate_context_chars,
         state.usage_ratio()
     );
 
     // Step 1: L0+L1
     info!("Act Step 1: run_layer0_cleanup");
-    let history_end = state.messages.len();
+    let history_end = messages.len();
     let outcome = tomcat::core::compaction::run_layer0_cleanup(
         &mut state,
+        &mut messages,
         &ContextConfig::default(),
         dir.path(),
         "pipeline_sess",
@@ -2174,7 +2217,7 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
 
     if turn_starts.len() > 5 {
         let cover_end_idx = turn_starts[turn_starts.len() - 5] - 1;
-        let covered_end = state.messages[..=cover_end_idx]
+        let covered_end = messages[..=cover_end_idx]
             .iter()
             .rev()
             .find_map(|m| m.msg_id.clone())
@@ -2205,14 +2248,20 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
             session_id: "pipeline_sess",
             read_file_state: &read_file_state,
         };
-        let switched =
-            tomcat::core::compaction::apply::check_after_reply(&mut state, &emitter, &env);
+        let mut turn_start = messages.len();
+        let switched = tomcat::core::compaction::apply::check_after_reply(
+            &mut state,
+            &mut messages,
+            &emitter,
+            &env,
+            &mut turn_start,
+        );
         info!(
             "L2: switched={}, ratio before={:.3}, after={:.3}, messages={}",
             switched,
             ratio_before_apply,
             state.usage_ratio(),
-            state.messages.len()
+            messages.len()
         );
     }
 
@@ -2223,8 +2272,13 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
     );
     if state.usage_ratio() >= 0.50 {
         info!("Act Step 3: force_drop_oldest_after_confirmed_overflow");
+        let mut history_end = messages.len();
         let (turns_removed, chars_removed) =
-            tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(&mut state);
+            tomcat::core::compaction::force_drop_oldest_after_confirmed_overflow(
+                &mut state,
+                &mut messages,
+                &mut history_end,
+            );
         info!(
             "L3: turns_removed={}, chars_removed={}, ratio={:.3}",
             turns_removed,
@@ -2234,7 +2288,7 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
     }
 
     info!("Assert: pipeline completed, chars consistent");
-    let actual_chars: usize = state.messages.iter().map(estimate_msg_chars).sum();
+    let actual_chars: usize = messages.iter().map(estimate_msg_chars).sum();
     let diff = (state.estimate_context_chars as i64 - actual_chars as i64).unsigned_abs();
     assert!(
         diff <= (actual_chars / 10 + 100) as u64,
@@ -2243,7 +2297,7 @@ fn test_full_compaction_pipeline_l0_l1_l2_l3_with_event_sequence() {
         actual_chars,
         diff
     );
-    assert!(!state.messages.is_empty(), "should not drain all messages");
+    assert!(!messages.is_empty(), "should not drain all messages");
 }
 
 // ────────── Group F: L3 overflow 事件 payload 断言 ────────────────────────
@@ -2322,7 +2376,7 @@ async fn test_context_overflow_trim_events_have_correct_payload(
         + estimate_msg_chars(&current_user);
     let budget_tokens = (estimate / 4) + 100; // ~10_100 — ratio will be ~0.99
     let ctx_state = ContextState {
-        messages: historical_messages,
+        messages: vec![],
         estimate_context_chars: estimate,
         context_budget_chars: estimate * 4,
         context_budget_tokens: budget_tokens,
@@ -2335,7 +2389,7 @@ async fn test_context_overflow_trim_events_have_correct_payload(
         session_obs: Default::default(),
         live: Default::default(),
     };
-    let mut messages = build_context_from_state(&ctx_state);
+    let mut messages = historical_messages;
     messages.push(current_user);
     agent.set_context_state(Some(ctx_state));
 

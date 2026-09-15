@@ -51,11 +51,11 @@ pub use primitives::{
 };
 pub use session::context_metrics;
 pub use session::{
-    build_context_from_state, compound_turn_id, fnv1a_hex, init_context_state,
-    init_context_state_with_limits, load_store, project_root, resolve_session_mode, save_store,
-    session_key_for, session_key_for_agent, ApiUsage, BranchSummaryEntry, CompactionResult,
-    ContextState, ErrorEntry, ModelPrefs, ModelPrefsStore, SessionEntry, SessionHeader,
-    SessionManager, SessionMode, SessionStore, TranscriptEntry, DEFAULT_SESSION_KEY,
+    compound_turn_id, fnv1a_hex, init_context_state, init_context_state_with_limits, load_store,
+    project_root, resolve_session_mode, save_store, session_key_for, session_key_for_agent,
+    ApiUsage, BranchSummaryEntry, CompactionResult, ContextState, ErrorEntry, ModelPrefs,
+    ModelPrefsStore, SessionEntry, SessionHeader, SessionManager, SessionMode, SessionStore,
+    TranscriptEntry, DEFAULT_SESSION_KEY,
 };
 pub use tools::contract::confirmation;
 pub use tools::contract::confirmation::{

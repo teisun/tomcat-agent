@@ -7,7 +7,9 @@ use tracing::{info, warn};
 
 use crate::core::compaction::preheat::PreheatOutcome;
 use crate::core::compaction::run_layer0_cleanup;
-use crate::core::session::manager::{estimated_tokens_from_chars, CompactionResult, ContextState};
+use crate::core::session::manager::{
+    estimated_tokens_from_chars, turn_count, CompactionResult, ContextState,
+};
 use crate::core::session::transcript::{
     append_entry, read_entries_tail, BranchSummaryTextEntry, TranscriptEntry,
 };
@@ -35,11 +37,13 @@ pub struct BoundaryEnv<'a> {
 /// 在 reasoning loop 最终 assistant 回复后检查：
 /// ratio >= 0.85 且预热已完成 → 立即应用 boundary switch。
 /// 不阻塞——预热未完成则跳过。
-#[must_use = "a successful boundary application may require the caller to rebuild its message snapshot"]
+#[must_use = "a successful boundary application rewrites the supplied working message list"]
 pub fn check_after_reply(
     state: &mut ContextState,
+    messages: &mut Vec<crate::core::llm::ChatMessage>,
     emitter: &ScopedEventEmitter,
     env: &BoundaryEnv<'_>,
+    turn_start: &mut usize,
 ) -> bool {
     if state.usage_ratio() < 0.85 {
         return false;
@@ -47,18 +51,16 @@ pub fn check_after_reply(
     let ratio_before = state.usage_ratio();
 
     match state.preheat.poll_result() {
-        PreheatOutcome::Completed(result) => {
-            let mut turn_start = state.messages.len();
-            apply_and_emit_boundary(
-                state,
-                result,
-                ratio_before,
-                false,
-                emitter,
-                env,
-                &mut turn_start,
-            )
-        }
+        PreheatOutcome::Completed(result) => apply_and_emit_boundary(
+            state,
+            messages,
+            result,
+            ratio_before,
+            false,
+            emitter,
+            env,
+            turn_start,
+        ),
         _ => false,
     }
 }
@@ -70,14 +72,16 @@ pub fn check_after_reply(
 /// 在发起下一次 LLM 请求前检查：
 /// - ratio >= 0.70：已完成则切换
 /// - ratio >= 0.98：未完成则 await（30s 超时）
-#[must_use = "a successful boundary application requires rebuilding the outgoing message snapshot"]
+#[must_use = "a successful boundary application rewrites the supplied working message list"]
 pub async fn check_before_request(
     state: &mut ContextState,
+    messages: &mut Vec<crate::core::llm::ChatMessage>,
     emitter: &ScopedEventEmitter,
     env: &BoundaryEnv<'_>,
+    turn_start: &mut usize,
 ) -> bool {
     let ratio = state.usage_ratio();
-    let user_turns_len = state.turn_count();
+    let user_turns_len = turn_count(messages);
     let preheat_finished = state.preheat.is_finished();
     let preheat_running = state.preheat.is_running();
     info!(
@@ -103,18 +107,16 @@ pub async fn check_before_request(
 
     if state.preheat.is_finished() {
         let applied = match state.preheat.poll_result() {
-            PreheatOutcome::Completed(result) => {
-                let mut turn_start = state.messages.len();
-                apply_and_emit_boundary(
-                    state,
-                    result,
-                    ratio_before,
-                    false,
-                    emitter,
-                    env,
-                    &mut turn_start,
-                )
-            }
+            PreheatOutcome::Completed(result) => apply_and_emit_boundary(
+                state,
+                messages,
+                result,
+                ratio_before,
+                false,
+                emitter,
+                env,
+                turn_start,
+            ),
             _ => false,
         };
         info!(
@@ -128,18 +130,16 @@ pub async fn check_before_request(
 
     if ratio >= 0.98 && state.preheat.is_running() {
         let applied = match state.preheat.await_result(Duration::from_secs(30)).await {
-            PreheatOutcome::Completed(result) => {
-                let mut turn_start = state.messages.len();
-                apply_and_emit_boundary(
-                    state,
-                    result,
-                    ratio_before,
-                    true,
-                    emitter,
-                    env,
-                    &mut turn_start,
-                )
-            }
+            PreheatOutcome::Completed(result) => apply_and_emit_boundary(
+                state,
+                messages,
+                result,
+                ratio_before,
+                true,
+                emitter,
+                env,
+                turn_start,
+            ),
             _ => false,
         };
         info!(
@@ -164,8 +164,12 @@ pub async fn check_before_request(
 // apply_and_emit_boundary
 // ---------------------------------------------------------------------------
 
+// The primitive deliberately receives both the working list and its tail cursor explicitly:
+// hiding either in `ContextState` would recreate the two-list ownership ambiguity this API removes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_and_emit_boundary(
     state: &mut ContextState,
+    messages: &mut Vec<crate::core::llm::ChatMessage>,
     result: CompactionResult,
     ratio_before: f64,
     was_sync_wait: bool,
@@ -176,8 +180,7 @@ pub(crate) fn apply_and_emit_boundary(
     let covered_count = result.covered_count;
     let saved = result.estimated_tokens_saved.unwrap_or(0);
 
-    if !state
-        .messages
+    if !messages
         .iter()
         .any(|message| message.msg_id.as_deref() == Some(result.covered_end_id.as_str()))
     {
@@ -210,7 +213,7 @@ pub(crate) fn apply_and_emit_boundary(
         return false;
     }
 
-    match state.apply_boundary(result.clone(), turn_start) {
+    match state.apply_boundary(messages, result.clone(), turn_start) {
         Ok(()) => {
             state.session_obs.compaction_tokens_freed += saved;
             state.session_obs.compaction_count =
@@ -225,7 +228,7 @@ pub(crate) fn apply_and_emit_boundary(
                 estimated_tokens_freed: saved,
             });
 
-            run_layer0_after_boundary(state, emitter, env, *turn_start);
+            run_layer0_after_boundary(state, messages, emitter, env, *turn_start);
             true
         }
         Err(e @ AppError::ApplyBoundaryStale { .. }) => {
@@ -258,11 +261,19 @@ pub(crate) fn apply_and_emit_boundary(
 /// current-tail guard 三条路径的语义完全一致。
 pub(crate) fn run_layer0_after_boundary(
     state: &mut ContextState,
+    messages: &mut [crate::core::llm::ChatMessage],
     emitter: &ScopedEventEmitter,
     env: &BoundaryEnv<'_>,
     history_end: usize,
 ) {
-    let l0 = run_layer0_cleanup(state, env.config, env.work_dir, env.session_id, history_end);
+    let l0 = run_layer0_cleanup(
+        state,
+        messages,
+        env.config,
+        env.work_dir,
+        env.session_id,
+        history_end,
+    );
     for persisted in &l0.persisted {
         state.session_obs.tool_result_chars_persisted += persisted.original_chars;
     }

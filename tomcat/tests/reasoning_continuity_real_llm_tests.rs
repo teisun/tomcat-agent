@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tomcat::core::llm::{ContinuityMetadata, ReasoningContinuation};
 use tomcat::{
-    build_context_from_state, init_context_state, AppConfig, AppError, ChatMessage, ChatRequest,
-    ContextConfig, LlmProvider, SessionManager, StreamEvent, TranscriptEntry,
+    init_context_state, AppConfig, AppError, ChatMessage, ChatRequest, ContextConfig, LlmProvider,
+    SessionManager, StreamEvent, TranscriptEntry,
 };
 
 const STREAM_TIMEOUT: Duration = Duration::from_secs(120);
@@ -694,7 +694,7 @@ async fn deepseek_switch_model_roundtrip_replays_tool_turn_reasoning_content(
         let second = run_chat(
             provider.clone(),
             ChatRequest {
-                messages: build_context_from_state(&state),
+                messages: state.messages.clone(),
                 model: config.llm.default_model.clone(),
                 temperature: None,
                 max_tokens: Some(256),

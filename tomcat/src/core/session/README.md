@@ -63,7 +63,7 @@
 - **构造**：`SessionManager::new(sessions_dir: PathBuf)` 或 `SessionManager::from_sessions_dir(sessions_dir: &str)`（内部 normalize_path）。
 - **CRUD**：`create_session`、`get_session`、`list_sessions`、`update_session`、`delete_session`、`archive_session`。
 - **消息**：`append_message`（核心路径：链违规 `panic!`）、`try_append_message`（插件/dispatcher：链违规返回 `AppError::Config`）；以及 `append_thinking_level_change`、`append_model_change`、`append_compaction`、`append_session_info`、`append_label_change`；`get_entries`、`get_entry`、`get_children`、`get_leaf_entry`、`get_branch`。链校验逻辑见 `append_message_chain.rs`。
-- **上下文**：`init_context_state` 按天筛选 + 不足 10 向前补齐，构建 `ContextState`；`build_context_from_state` 返回 `Vec<ChatMessage>`（即 `state.messages.clone()`）。
+- **上下文**：`init_context_state` 按天筛选 + 不足 10 向前补齐，构建 `ContextState`。`ContextState.messages` 是回合间的停车列表；运行中的 `AgentLoop` 通过 move 取得工作列表，并在退出时停回。
 
 ---
 
@@ -92,7 +92,7 @@
 
 ### 5.2 架构
 
-`run_chat` → `ChatContext::from_config` → `tokio::Runtime::block_on(chat_loop)`。主循环：rustyline 读输入 → `init_context_state` + `build_context_from_state` 组装历史 → AgentLoop 流式输出（MarkdownRenderer 高亮）→ 工具调用循环 → 写 transcript。
+`run_chat` → `ChatContext::from_config` → `tokio::Runtime::block_on(chat_loop)`。主循环：rustyline 读输入 → `init_context_state` 后从停车位 move 历史并追加当前输入 → AgentLoop 流式输出（MarkdownRenderer 高亮）→ 工具调用循环 → 消息经 append sink 写 transcript，列表在退出时停回。
 
 ### 5.3 关键设计
 

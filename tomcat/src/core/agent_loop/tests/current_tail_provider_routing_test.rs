@@ -45,7 +45,6 @@ async fn collapse_summary_uses_compaction_provider_cross_provider() {
         CancellationToken::new(),
     );
     agent.start_idx = 0;
-    agent.context_tail_start = 0;
 
     let mut user = ChatMessage::user("u".repeat(4_000));
     user.msg_id = Some("u1".to_string());

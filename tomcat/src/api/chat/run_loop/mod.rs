@@ -14,8 +14,7 @@ use crate::core::llm::{
     SystemPromptSnapshot, ToolSurface,
 };
 use crate::core::session::manager::{
-    build_context_from_state, estimate_msg_chars, init_context_state,
-    init_context_state_with_limits,
+    estimate_msg_chars, init_context_state, init_context_state_with_limits, turn_count,
 };
 use crate::infra::error::AppError;
 use crate::infra::events::AgentEvent;
@@ -50,6 +49,14 @@ use self::session_title::{maybe_emit_rule_session_title, maybe_spawn_semantic_se
 pub(crate) use self::workspace_state::runtime_tail_provider;
 
 const CHECKPOINT_SHUTDOWN_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A resumed process may send a zero-input request only after it has repaired a
+/// persisted `ask_question` tail into a completed tool result. An assistant-ended
+/// transcript has no new causal input, so replaying it would violate the request
+/// protocol and needlessly wake the model.
+pub(crate) fn should_auto_drain_resume(resume_requested: bool, has_pending_question: bool) -> bool {
+    resume_requested && has_pending_question
+}
 
 #[cfg(test)]
 pub(crate) use self::cleanup::cleanup_plugin_sessions_on_session_end;
@@ -241,25 +248,23 @@ fn drain_planned_turn_messages(
     compose_planned_turn_messages_from_message(input_message, drain_follow_up_messages(ctx))
 }
 
-type PlannedAppendOutcome = (Vec<ChatMessage>, Vec<(ChatMessage, bool)>);
-
 fn append_planned_messages_with_rehydrate_retry(
     ctx: &ChatContext,
     system_text: &str,
     context_config: &crate::infra::ContextConfig,
     planned_messages: &[ChatMessage],
     context_state: &mut crate::core::ContextState,
-) -> Result<PlannedAppendOutcome, AppError> {
+    messages: &mut Vec<ChatMessage>,
+) -> Result<Option<String>, AppError> {
     let mut next_pending_idx = 0usize;
     let mut retried_after_rehydrate = false;
+    let mut first_appended_id = None;
     loop {
-        let mut messages = build_context_from_state(context_state);
-        let mut appended_messages = Vec::new();
-
+        let messages_before_append = messages.len();
         let mut append_error = None;
         for message in planned_messages.iter().skip(next_pending_idx) {
             if let Err(err) = push_turn_message(
-                &mut messages,
+                messages,
                 &ctx.session_runtime.message_append_sink,
                 message.clone(),
             ) {
@@ -267,13 +272,9 @@ fn append_planned_messages_with_rehydrate_retry(
                 break;
             }
             context_state.on_message_appended(estimate_msg_chars(message));
-            // `push_turn_message` may have minted a transcript id. Keep the exact persisted
-            // copy so a timing② rebuild can append it without writing a duplicate entry.
-            let persisted_message = messages
-                .last()
-                .cloned()
-                .expect("push_turn_message must append exactly one message");
-            appended_messages.push((persisted_message, false));
+            if first_appended_id.is_none() {
+                first_appended_id = messages.last().and_then(|message| message.msg_id.clone());
+            }
         }
 
         if let Some(err) = append_error {
@@ -286,30 +287,16 @@ fn append_planned_messages_with_rehydrate_retry(
                     context_state,
                 )
             {
-                next_pending_idx += appended_messages.len();
+                next_pending_idx += messages.len().saturating_sub(messages_before_append);
+                *messages = std::mem::take(&mut context_state.messages);
                 retried_after_rehydrate = true;
                 continue;
             }
             return Err(err);
         }
 
-        return Ok((messages, appended_messages));
+        return Ok(first_appended_id);
     }
-}
-
-/// Rebuild the outgoing turn after `ctx_state` changed.
-///
-/// `ContextState` is the single source of truth for persisted history. Any mutation after a
-/// message snapshot was built (for example boundary apply plus L0 cleanup) must call this helper
-/// so the provider receives the new flattened history and the already-persisted current-turn
-/// messages remain at the tail.
-pub(crate) fn rebuild_turn_messages(
-    context_state: &crate::core::ContextState,
-    appended_messages: &[(ChatMessage, bool)],
-) -> Vec<ChatMessage> {
-    let mut rebuilt = build_context_from_state(context_state);
-    rebuilt.extend(appended_messages.iter().map(|(message, _)| message.clone()));
-    rebuilt
 }
 
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
@@ -411,9 +398,21 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     }
 
     let mut auto_turn_count: u32 = 0;
-    // `--resume` is a real zero-input turn: it may reopen a tail ask_question before the
-    // next model request, rather than waiting for an unrelated new user prompt.
-    let mut resume_without_input = resume;
+    // `--resume` must not replay an assistant-ended transcript. Its only zero-input
+    // responsibility is resolving a persisted ask_question tail into a tool result,
+    // which then becomes the causal input of the resumed request.
+    let has_pending_resume_question = if resume {
+        match has_resumable_tail_ask_question(&ctx.session_runtime.session) {
+            Ok(pending) => pending,
+            Err(error) => {
+                warn!(error = %error, "failed to inspect pending ask_question state for --resume");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let mut resume_without_input = should_auto_drain_resume(resume, has_pending_resume_question);
     let mut fatal_error: Option<AppError> = None;
 
     let exit_reason = loop {
@@ -793,21 +792,23 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         });
         return Ok(AgentRunOutcome::Failed(error));
     }
-    let (messages, appended_messages) = append_planned_messages_with_rehydrate_retry(
+    let mut messages = std::mem::take(&mut context_state.messages);
+    let first_appended_id = append_planned_messages_with_rehydrate_retry(
         ctx,
         system_text,
         &context_config,
         &planned_messages,
         context_state,
+        &mut messages,
     )?;
     maybe_emit_rule_session_title(
         &ctx.session_runtime.session,
-        &appended_messages,
+        &planned_messages,
         &root_event_emitter,
     );
     maybe_spawn_semantic_session_title(
         &ctx.session_runtime.session,
-        &appended_messages,
+        &planned_messages,
         session_title_provider,
         session_title_model,
         session_title_output_limit,
@@ -819,12 +820,12 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         phase = "chat_after_user_append",
         ratio = context_state.usage_ratio(),
         compaction_count = context_state.session_obs.compaction_count,
-        turns = context_state.turn_count()
+        turns = turn_count(&messages)
     );
 
     context_state.preheat.try_restart_if_pending(
         context_state.usage_ratio(),
-        &context_state.messages,
+        &messages,
         &context_state.transcript_path,
         PromptCacheKeyFamily::Compaction.key_for(&session_id),
         compaction_provider.clone(),
@@ -843,8 +844,22 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         session_id: &session_id,
         read_file_state: ctx.session_runtime.read_file_state.as_ref(),
     };
-    let boundary_applied =
-        check_before_request(context_state, &root_event_emitter, &boundary_env).await;
+    let mut turn_start = first_appended_id
+        .as_deref()
+        .and_then(|id| {
+            messages
+                .iter()
+                .position(|message| message.msg_id.as_deref() == Some(id))
+        })
+        .unwrap_or(messages.len());
+    let _boundary_applied = check_before_request(
+        context_state,
+        &mut messages,
+        &root_event_emitter,
+        &boundary_env,
+        &mut turn_start,
+    )
+    .await;
     info!(
         target: "tomcat_chat_diag",
         phase = "chat_after_timing2_check",
@@ -853,11 +868,6 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         ratio = context_state.usage_ratio(),
         compaction_count = context_state.session_obs.compaction_count
     );
-    let mut messages = if boundary_applied {
-        rebuild_turn_messages(context_state, &appended_messages)
-    } else {
-        messages
-    };
     if let std::borrow::Cow::Owned(degraded) =
         degrade_unsupported_multimodal(&messages, &main_call.capabilities)
     {

@@ -26,10 +26,10 @@ pub(crate) use append_message_chain::{
 };
 pub use context_metrics::{ContextLiveMetrics, ContextMetrics};
 pub use manager::{
-    build_context_from_state, compound_turn_id, estimate_msg_chars, init_context_state,
-    init_context_state_with_limits, AgentMode, ApiUsage, CompactionResult, ContextState,
-    MessageAppendSink, PlanEventKind, PlanEventRef, ResumeControlState, SessionManager,
-    INTERRUPTED_TOOL_RESULT_TEXT, PENDING_TOOL_RESULT_TEXT, UNKNOWN_RESTART_TOOL_RESULT_TEXT,
+    compound_turn_id, estimate_msg_chars, init_context_state, init_context_state_with_limits,
+    AgentMode, ApiUsage, CompactionResult, ContextState, MessageAppendSink, PlanEventKind,
+    PlanEventRef, ResumeControlState, SessionManager, INTERRUPTED_TOOL_RESULT_TEXT,
+    PENDING_TOOL_RESULT_TEXT, UNKNOWN_RESTART_TOOL_RESULT_TEXT,
 };
 pub use model_thinking::{ModelPrefs, ModelPrefsStore};
 pub use resume_index::RESUME_INDEX_SCHEMA_VERSION;
