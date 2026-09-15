@@ -91,6 +91,7 @@ fn serve_dts_includes_plan_code_review_findings() {
     assert!(dts.contains("taskId?: null | string;"));
     assert!(dts.contains("type: \"plan.code_review\";"));
     assert!(dts.contains("changesSummary?: null | string;"));
+    assert!(dts.contains("skipReason?: null | string;"));
     assert!(dts.contains("findings?: ServeFinding[] | null;"));
     assert!(dts.contains("rounds?: null | number;"));
 }
@@ -258,6 +259,7 @@ fn serve_emitted_event_validates_against_generated_schema() {
             review_attempt_id: Some("plan-1:1".to_string()),
             tool_call_id: Some("tc-update".to_string()),
             child_session_id: Some("code-reviewer-child".to_string()),
+            skip_reason: None,
         }))
         .expect("serialize plan.code_review event"),
     ))

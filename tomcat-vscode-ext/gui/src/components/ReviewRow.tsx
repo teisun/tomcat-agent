@@ -84,6 +84,21 @@ function ReviewRowComponent({ item }: { item: WebviewReviewRow }) {
   }
 
   const verdict = item.verdict ?? "aborted";
+  if (verdict === "skipped") {
+    return (
+      <div className={shellClassName} data-testid="review-row-wrapper">
+        {leadingIcon}
+        <div className="tc-tool-row tc-review-row" data-testid="review-row-skipped">
+          <div className="tc-tool-row__header">
+            <span className="tc-review-row__count">
+              Code review skipped · {item.summary ?? "review skipped"}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const findings = item.findings ?? [];
   const findingsLabel = `${findings.length} finding${findings.length === 1 ? "" : "s"}`;
   const header = (

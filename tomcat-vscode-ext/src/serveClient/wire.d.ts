@@ -149,6 +149,7 @@ export type ServePlanEvent = {
   round?: null | number;
   rounds?: null | number;
   sessionId?: null | string;
+  skipReason?: null | string;
   summary?: null | string;
   toolCallId?: null | string;
   type: "plan.code_review";

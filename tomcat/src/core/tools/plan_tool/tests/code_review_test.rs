@@ -911,6 +911,15 @@ async fn gates_skipped_when_diff_has_no_code() {
         .expect("跳过 review 也必须留下可审计的 plan.code_review 事件");
     assert_eq!(skipped_review["verdict"], "skipped");
     assert_eq!(skipped_review["skip_reason"], "no_reviewable_code_diff");
+    assert_eq!(
+        skipped_review["review_attempt_id"],
+        format!(
+            "skipped:no_reviewable_code_diff:{}",
+            skipped_review["tool_call_id"]
+                .as_str()
+                .expect("skipped review event carries its originating tool call id")
+        )
+    );
     assert_eq!(skipped_review["code_review_pass"], true);
 
     let _ = std::fs::remove_dir_all(workspace);

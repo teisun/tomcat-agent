@@ -94,4 +94,23 @@ describe("ReviewRow", () => {
       "No structured findings were returned.",
     );
   });
+
+  it("renders a skipped review as one low-key non-expandable line", () => {
+    render(
+      <ReviewRow
+        item={buildReview({
+          findings: [],
+          summary: "no code changes",
+          verdict: "skipped",
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("review-row-skipped").textContent).toBe(
+      "Code review skipped · no code changes",
+    );
+    expect(screen.queryByTestId("review-row-toggle")).toBeNull();
+    expect(screen.queryByTestId("review-row-verdict")).toBeNull();
+    expect(screen.queryByTestId("review-row-findings-count")).toBeNull();
+  });
 });

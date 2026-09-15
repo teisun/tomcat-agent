@@ -374,6 +374,37 @@ describe("WebviewStateStore wire routing", () => {
     vi.useRealTimers();
   });
 
+  it("renders skipped code review as a completed low-key timeline row", () => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+
+    store.applyEvent({
+      findings: [],
+      planId: "plan-1",
+      reviewAttemptId: "skipped:no_reviewable_code_diff:tc-update",
+      round: 0,
+      rounds: 0,
+      sessionId: "s1",
+      skipReason: "no_reviewable_code_diff",
+      summary: "code review skipped: no_reviewable_code_diff",
+      toolCallId: "tc-update",
+      type: "plan.code_review",
+      verdict: "skipped",
+    } as never);
+
+    const reviews = store
+      .snapshot()
+      .sessionViews.s1.timeline.filter((item) => item.type === "review");
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({
+      anchorToolCallId: "tc-update",
+      reviewAttemptId: "skipped:no_reviewable_code_diff:tc-update",
+      status: "done",
+      summary: "no code changes",
+      verdict: "skipped",
+    });
+  });
+
   it("hydrates a running code review row with its original start time", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");

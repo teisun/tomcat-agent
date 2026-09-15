@@ -56,6 +56,36 @@ fn resolve_bash_production_policy(
     }
 }
 
+/// Translates a durable plan transcript entry into the camelCase live-event
+/// contract before it crosses the serve boundary.
+fn normalize_plan_transcript_event_for_live_delivery(
+    mut payload: serde_json::Value,
+    session_id: &str,
+) -> Option<(String, serde_json::Value)> {
+    let event_name = payload
+        .get("event")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| name.starts_with("plan.") || name.starts_with("session."))
+        .map(str::to_owned)?;
+    let obj = payload.as_object_mut()?;
+    obj.remove("event");
+    if let Some(plan_id) = obj.remove("plan_id") {
+        obj.insert("planId".to_string(), plan_id);
+    }
+    if let Some(skip_reason) = obj.remove("skip_reason") {
+        obj.insert("skipReason".to_string(), skip_reason);
+    }
+    obj.insert(
+        "type".to_string(),
+        serde_json::Value::String(event_name.clone()),
+    );
+    obj.insert(
+        "sessionId".to_string(),
+        serde_json::Value::String(session_id.to_owned()),
+    );
+    Some((event_name, payload))
+}
+
 pub struct ChatContext {
     pub global_services: GlobalServices,
     pub scope_services: ScopeServices,
@@ -796,27 +826,13 @@ impl ChatContext {
 
             let plan_event_bus = event_bus.clone();
             let plan_event_session_id = current_session_entry.session_id.clone();
-            plan_runtime.attach_transcript_event_notifier(Arc::new(move |mut payload| {
-                if let Some(event_name) = payload
-                    .get("event")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|name| name.starts_with("plan.") || name.starts_with("session."))
+            plan_runtime.attach_transcript_event_notifier(Arc::new(move |payload| {
+                if let Some((event_name, payload)) =
+                    normalize_plan_transcript_event_for_live_delivery(
+                        payload,
+                        &plan_event_session_id,
+                    )
                 {
-                    let event_name = event_name.to_string();
-                    if let Some(obj) = payload.as_object_mut() {
-                        obj.remove("event");
-                        if let Some(plan_id) = obj.remove("plan_id") {
-                            obj.insert("planId".to_string(), plan_id);
-                        }
-                        obj.insert(
-                            "type".to_string(),
-                            serde_json::Value::String(event_name.clone()),
-                        );
-                        obj.insert(
-                            "sessionId".to_string(),
-                            serde_json::Value::String(plan_event_session_id.clone()),
-                        );
-                    }
                     if let Err(error) = plan_event_bus.emit_sync(
                         &event_name,
                         crate::infra::EventContext::new(event_name.clone(), payload)
@@ -1658,7 +1674,10 @@ mod tests {
 
     use serial_test::serial;
 
-    use super::{connector_registry_for, resolve_bash_production_policy, ChatContext};
+    use super::{
+        connector_registry_for, normalize_plan_transcript_event_for_live_delivery,
+        resolve_bash_production_policy, ChatContext,
+    };
     use crate::core::llm::{DefaultLlmResolver, LlmResolver, ModelCatalog};
     use crate::core::plan_runtime::prod_reviewer::resolve_subagent_runtime;
     use crate::{AppConfig, ModelPrefsStore, ThinkingLevel};
@@ -1686,6 +1705,28 @@ mod tests {
             crate::core::tools::primitive::BashTaskRegistry::new(policy.persist_dir.clone())
                 .with_foreground_wait_ms(policy.foreground_wait_ms);
         assert_eq!(registry.foreground_wait_ms(), 9_000);
+    }
+
+    #[test]
+    fn live_plan_event_preserves_skipped_review_reason_in_camel_case() {
+        let (event_name, payload) = normalize_plan_transcript_event_for_live_delivery(
+            serde_json::json!({
+                "event": "plan.code_review",
+                "plan_id": "plan-1",
+                "skip_reason": "no_reviewable_code_diff",
+            }),
+            "session-1",
+        )
+        .expect("plan event should be emitted live");
+
+        assert_eq!(event_name, "plan.code_review");
+        assert_eq!(payload["type"], "plan.code_review");
+        assert_eq!(payload["sessionId"], "session-1");
+        assert_eq!(payload["planId"], "plan-1");
+        assert_eq!(payload["skipReason"], "no_reviewable_code_diff");
+        assert!(payload.get("event").is_none());
+        assert!(payload.get("plan_id").is_none());
+        assert!(payload.get("skip_reason").is_none());
     }
 
     #[test]

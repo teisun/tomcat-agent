@@ -1586,7 +1586,10 @@ impl PlanRuntime {
             "plan_id": plan_id,
             "round": 0,
             "rounds": 0,
-            "review_attempt_id": format!("skipped:{reason}"),
+            // A plan may pass through more than one skipped review gate. Include
+            // the originating tool call so transcript consumers do not collapse
+            // distinct audit events into one timeline item.
+            "review_attempt_id": format!("skipped:{reason}:{tool_call_id}"),
             "tool_call_id": tool_call_id,
             "aborted": false,
             "verdict": "skipped",

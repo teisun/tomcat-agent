@@ -258,7 +258,12 @@ export interface WebviewPlanFileCard extends WebviewPlanFileRef {
   type: "plan";
 }
 
-export type WebviewReviewVerdict = "aborted" | "fail" | "partial" | "pass";
+export type WebviewReviewVerdict =
+  | "aborted"
+  | "fail"
+  | "partial"
+  | "pass"
+  | "skipped";
 
 export interface WebviewReviewFinding {
   area: string;

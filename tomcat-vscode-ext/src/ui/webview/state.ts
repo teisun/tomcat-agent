@@ -534,9 +534,23 @@ function parseReviewVerdict(
   return value === "pass" ||
     value === "fail" ||
     value === "partial" ||
-    value === "aborted"
+    value === "aborted" ||
+    value === "skipped"
     ? value
     : undefined;
+}
+
+function skippedReviewSummary(value: unknown): string {
+  switch (value) {
+    case "no_reviewable_code_diff":
+      return "no code changes";
+    case "reviewer_unavailable":
+      return "reviewer not configured";
+    case "workspace_unavailable":
+      return "workspace unavailable";
+    default:
+      return "review skipped";
+  }
 }
 
 function parseReviewFindings(value: unknown): WebviewReviewFinding[] {
@@ -622,6 +636,7 @@ function upsertDoneCodeReviewRow(
     reviewAttemptId?: unknown;
     round?: unknown;
     rounds?: unknown;
+    skipReason?: unknown;
     toolCallId?: unknown;
     summary?: unknown;
     verdict?: unknown;
@@ -647,7 +662,12 @@ function upsertDoneCodeReviewRow(
     rounds: typeof round === "number" ? round : null,
     startedAt: existing?.startedAt,
     status: "done",
-    summary: typeof input.summary === "string" ? input.summary : null,
+    summary:
+      verdict === "skipped"
+        ? skippedReviewSummary(input.skipReason)
+        : typeof input.summary === "string"
+          ? input.summary
+          : null,
     type: "review",
     verdict,
   } satisfies WebviewReviewRow);
@@ -1625,6 +1645,7 @@ function applyHistoryPlanCustomEntry(
           reviewAttemptId: entry.review_attempt_id ?? entry.reviewAttemptId,
           round: entry.round,
           rounds: entry.rounds,
+          skipReason: entry.skip_reason ?? entry.skipReason,
           toolCallId: entry.tool_call_id ?? entry.toolCallId,
           summary: entry.summary,
           verdict: entry.verdict,
@@ -3708,6 +3729,7 @@ export class WebviewStateStore {
             reviewAttemptId: event.reviewAttemptId,
             round: event.round,
             rounds: event.rounds,
+            skipReason: event.skipReason,
             toolCallId: event.toolCallId,
             summary: event.summary,
             verdict: event.verdict,

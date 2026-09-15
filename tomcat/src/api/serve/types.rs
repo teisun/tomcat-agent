@@ -938,6 +938,8 @@ pub enum ServePlanEvent {
         tool_call_id: Option<String>,
         #[serde(rename = "childSessionId", skip_serializing_if = "Option::is_none")]
         child_session_id: Option<String>,
+        #[serde(rename = "skipReason", skip_serializing_if = "Option::is_none")]
+        skip_reason: Option<String>,
     },
     #[serde(rename = "plan.explorer.started")]
     PlanExplorerStarted {
