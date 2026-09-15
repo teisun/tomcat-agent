@@ -310,6 +310,11 @@ fn real_terra_long_session_exercises_single_list_handoffs() {
         0,
         "single-list path must not surface a compaction error"
     );
+    assert_eq!(
+        event_count(&all_frames, "llm_notice"),
+        0,
+        "a successful long session must not emit a backend notice for the webview to render"
+    );
     assert!(
         !child.stderr().contains("apply_boundary_stale"),
         "no stale boundary is permitted in production serve stderr: {}",
