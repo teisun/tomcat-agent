@@ -1,6 +1,6 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-15 20:10 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-15 22:57 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
 - [✓] **(版本发布)** CLI `0.1.52 → 0.1.53`、扩展 `0.1.66 → 0.1.67`、bundled CLI `0.1.52 → 0.1.53`：使用 `node scripts/release-version.mjs bump --all patch` 统一更新权威版本清单与 Cargo/npm 镜像，随后 `node scripts/release-version.mjs check` 通过；Cov% 未跑，仍为 —。@2026-09-15
@@ -55,7 +55,7 @@
 - [✓] **[P1]** release 构建 dead-code/unused-import 告警收口：仅测试使用的 `assert_active_tool_result_integrity`、`run_tool_calls`、`finalize_turn_after_text` 加 `#[cfg(test)]`，生产路径继续走 `*_with_usage`；`cargo check --lib` 无上述 4 条 warning。@2026-08-01
 - [✓] **[P0/P1]** Retry/Resume 失败恢复已按 append-only transcript 收口：Retry 在同一把 transcript 锁内先给源 user 与其后的残留消息盖 `superseded`（源行另带 `turn_failed`），再复制出新 user；重启注水不会重复提示词，也不会留下无归属的半截 assistant。Resume 不复制 user，只在完整 tool-result 活尾巴（含 `[pending]` 自愈占位）时续跑。磁盘继续保留失败 user、auto-retry custom 和 error 供审计；界面则只投影当前尝试——点击 Retry/Resume 或发送新提示后，已了结的错误卡消失；Retry 的旧 user 气泡也随之隐藏，Resume 保留原 user 与工具链。`role:tool` 的自愈占位不误判为对话继续，错误卡仍可给 Resume。压缩按钮位于新建按钮右侧，改用 `codicon-layers`。验证：Rust 定向 copy-forward/幂等盖章与 extension state/provider/flow 回归通过；带截图的 host E2E Retry/Resume 两路径通过；扩展 `gate:full` 全绿。@2026-08-02
 - [✓] **[P0]** Planner/Executor 仅在 `dispatch_agent` description 条件满足时派发 Explorer；catalog 明确简单任务、已知位置、一两批直接工具、自审及 Reviewer 已覆盖时禁用，并锁定首次合并问题、仅新阻塞点可二次派发；同步 prompt/catalog 回归和生成文档。@2026-07-29
-- [✓] **[P0]** Planner todo 改为“非简单任务按 milestone 精确拆解、简单单面修改使用 flat linear todo”；每个问题固定为“背景与证据 → 根因 → 解决方案（Key decisions）→ 验证”，要求不了解代码上下文的读者也能看懂，并删除一处重复第一性原理文案。@2026-07-29
+- [✓] **[P0]** 主助手与 PLAN 的表达规范已分层：主助手保留总览/复杂章节 ASCII 图、言简意赅、术语通俗解释和背景交代；PLAN 区分问题四个子章节与功能需求三个子章节，并要求完整说明写入计划。关键决策保留具体文件/符号/契约、前后行为及范围边界，删除强制 non-goals 和重复旧文；既有 milestone/todo 拆解、验收策略与审查器模板不变。回归按通用与计划专属要求分别校验，提示词定向 28 项通过，最后精简文案后 planner 单项复验通过；`rustfmt --check`、`git diff --check` 通过。未测覆盖率，Cov% 保持 —。@2026-09-15
 - [✓] **[P0]** Plan Preview selection 去重修复：列表项获得精确源行，selection identity 始终纳入文本快照 hash；不同条目可连续加入、完全相同引用仍去重，wire 协议不变；补齐 blockquote 内列表项递归行号映射与 2s 连续稳定性 host E2E 断言。@2026-07-29
 - [✓] **[P1]** 真实 PLAN 行为冒烟覆盖简单单面任务与双问题非简单任务：两类场景都只用直接读工具、`dispatch_agent=0`，分别生成 flat linear todos 与 milestone todos；结构和通俗解释要求通过，同时保留 renderer 样例预期与 todo/正文矛盾的生成质量风险。@2026-07-29
 - [✓] **(版本发布)** CLI `0.1.21` + Extension `0.1.31` + bundled CLI `0.1.21`：统一执行 `node scripts/release-version.mjs bump --all patch`，已验证 `check` 通过且 Cargo/npm 镜像一致。@2026-07-28

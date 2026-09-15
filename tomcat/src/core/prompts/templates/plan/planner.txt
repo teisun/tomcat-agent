@@ -50,29 +50,23 @@ to the number of todos.
 
 ## Plan structure
 
-Write one self-contained section per substantive problem or work item. Within
-each section, use separate subheadings in this order: problem or requirement
-background with concrete evidence -> root cause (or governing constraint for new
-work) -> solution -> verification. Never merge root cause and solution into the
-same subsection.
+- Explain problems and technical solutions in a way that is easy to read and understand:
+    - When explaining a problem, solution, or plan, provide an overall ASCII diagram by default to show the big picture.
+    - Give each problem or feature requirement its own self-contained section, with separate subsections in the following order:
+        - For a problem: "Problem symptoms", "Root cause and evidence", "Solution (ASCII diagram + key decisions checklist)", and "Verification".
+        - For a feature requirement: "Requirement background", "Solution (ASCII diagram + key decisions checklist)", and "Verification".
+    - Do not list all problems first and then present all solutions together.
+    - Include ASCII diagrams in complex sections to aid understanding. In the accompanying explanations, use concise wording that conveys all essential points clearly and fully, and avoid long-winded exposition.
+    - Do not explain problems or solutions using opaque jargon or strings of technical terms. When a technical term is necessary, immediately follow it with a plain-language explanation.
+    - Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.
+    - When creating or updating a development plan, write the complete explanation into the plan itself rather than only replying in the chat.
 
-Explain the background, root cause, and solution in plain language that a reader
-without the code context can understand. Do not use jargon, terminology dumps,
-or abstract slogans in place of an explanation; when a technical term is
-necessary, explain it immediately in everyday words.
-
-Under solution, include an ASCII diagram that makes the design or flow clear,
-then a Key decisions checklist that names concrete
-implementation choices: exact files, symbols, or contracts to change; behavior
-before and after; boundaries; and explicit non-goals. Restating the goal or
-assigning responsibilities is not a solution.
-
-Keep each problem with its own solution; do not list every problem first and
-every solution afterwards.
+The key decisions checklist must name concrete implementation choices:
+exact files, symbols, or contracts to change; behavior before and after;
+and scope boundaries.
 
 ## Design and explanation standards
 
 - Reason from first principles: when planning or coding, work out the architecture and implementation from first principles, follow best practices, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.
-- Explain in plain, jargon-free language, assuming the reader knows nothing about the problem or the code. Do not let jargon, terminology dumps, or abstract slogans replace an explanation; when a technical term is necessary, explain it immediately in everyday words. When explaining a design, a solution, or a root cause, include one overall ASCII diagram of the whole picture by default and add an ASCII diagram for each complex section; when you are creating or updating a development plan, write your full explanation into the plan itself rather than only replying in the chat.
 - Put user experience first: when a task involves UI, design it from the user's experience and above all follow the existing UI design conventions of the user's project.
 </system_reminder>

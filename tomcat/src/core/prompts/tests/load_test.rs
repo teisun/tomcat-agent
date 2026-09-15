@@ -182,36 +182,49 @@ fn planner_prompt_carries_a_generic_plan_structure_section() {
         .expect("Plan structure should end before Design standards")
         .0;
 
-    assert!(s.contains("## Plan structure"));
-    assert!(normalized.contains("one self-contained section per substantive problem"));
-    assert!(normalized.contains("separate subheadings in this order"));
+    assert!(normalized
+        .contains("Give each problem or feature requirement its own self-contained section"));
+    assert!(normalized.contains("with separate subsections in the following order"));
+    let problem = section
+        .lines()
+        .find(|line| line.trim_start().starts_with("- For a problem:"))
+        .expect("problems need their own subsection sequence")
+        .trim();
+    assert_eq!(
+        problem,
+        "- For a problem: \"Problem symptoms\", \"Root cause and evidence\", \"Solution (ASCII diagram + key decisions checklist)\", and \"Verification\"."
+    );
+    let feature = section
+        .lines()
+        .find(|line| {
+            line.trim_start()
+                .starts_with("- For a feature requirement:")
+        })
+        .expect("feature requirements need their own subsection sequence")
+        .trim();
+    assert_eq!(
+        feature,
+        "- For a feature requirement: \"Requirement background\", \"Solution (ASCII diagram + key decisions checklist)\", and \"Verification\"."
+    );
+    assert!(normalized
+        .contains("Do not list all problems first and then present all solutions together"));
     assert!(normalized.contains(
-        "problem or requirement background with concrete evidence -> root cause (or governing constraint for new work) -> solution -> verification"
+        "When creating or updating a development plan, write the complete explanation into the plan itself rather than only replying in the chat."
     ));
-    assert!(normalized.contains("Never merge root cause and solution into the same subsection"));
-    assert!(
-        normalized.contains("plain language that a reader without the code context can understand")
-    );
-    assert!(normalized.contains("Do not use jargon, terminology dumps, or abstract slogans"));
     assert!(normalized
-        .contains("when a technical term is necessary, explain it immediately in everyday words"));
-    assert!(normalized
-        .contains("Under solution, include an ASCII diagram that makes the design or flow clear"));
-    assert!(normalized.contains("then a Key decisions checklist"));
+        .contains("The key decisions checklist must name concrete implementation choices"));
     assert!(normalized.contains("exact files, symbols, or contracts to change"));
-    assert!(normalized.contains("behavior before and after; boundaries; and explicit non-goals"));
-    assert!(
-        normalized.contains("Restating the goal or assigning responsibilities is not a solution")
-    );
-    assert!(normalized.contains("do not list every problem first and every solution afterwards"));
+    assert!(normalized.contains("behavior before and after; and scope boundaries"));
 
-    assert!(section.contains("same subsection.\n\nExplain the background"));
-    assert!(section.contains("everyday words.\n\nUnder solution"));
-    assert!(section.contains("not a solution.\n\nKeep each problem"));
+    let checklist = section
+        .split_once("\n\nThe key decisions checklist")
+        .expect("planner must retain concrete implementation requirements")
+        .1;
     assert!(
-        section.lines().all(|line| line.len() <= 100),
-        "Plan structure prose should stay reviewable instead of collapsing into long lines"
+        checklist.lines().all(|line| line.len() <= 100),
+        "Plan-specific prose should stay reviewable instead of collapsing into long lines"
     );
+    assert!(!normalized.contains("root cause (or governing constraint for new work)"));
 
     assert!(!s.contains(
         "Reason from first principles: an existing design may be overturned when it does not"
@@ -453,7 +466,7 @@ fn core_identity_has_operating_principles_and_tool_lines_placeholder() {
     assert!(s.contains("no fabrication"));
     assert!(s.contains("first principles"));
     // #7 人话/ASCII 与 #8 UI 现常驻 core_identity。
-    assert!(s.contains("plain, jargon-free language"));
+    assert!(s.contains("immediately follow it with a plain-language explanation"));
     assert!(s.contains("ASCII diagram"));
     assert!(s.contains("Put user experience first"));
 }
@@ -524,12 +537,12 @@ fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
     assert!(s.contains("Put user experience first"));
 }
 
-/// S6/S8 are shared by every actor, while S7 needs an edit-capable planning
-/// surface and is deliberately absent from the read-only code reviewer.
+/// S6/S8 remain shared. Core identity keeps general explanation rules, while
+/// planner adds plan structure; the reviewer templates are unchanged in this update.
 #[test]
-fn standards_6_7_8_are_scoped_and_byte_identical() {
+fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
     const S6: &str = "Reason from first principles: when planning or coding, work out the architecture and implementation from first principles, follow best practices, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.";
-    const S7: &str = "Explain in plain, jargon-free language, assuming the reader knows nothing about the problem or the code. Do not let jargon, terminology dumps, or abstract slogans replace an explanation; when a technical term is necessary, explain it immediately in everyday words. When explaining a design, a solution, or a root cause, include one overall ASCII diagram of the whole picture by default and add an ASCII diagram for each complex section; when you are creating or updating a development plan, write your full explanation into the plan itself rather than only replying in the chat.";
+    const REVIEWER_S7: &str = "Explain in plain, jargon-free language, assuming the reader knows nothing about the problem or the code. Do not let jargon, terminology dumps, or abstract slogans replace an explanation; when a technical term is necessary, explain it immediately in everyday words. When explaining a design, a solution, or a root cause, include one overall ASCII diagram of the whole picture by default and add an ASCII diagram for each complex section; when you are creating or updating a development plan, write your full explanation into the plan itself rather than only replying in the chat.";
     const S8: &str = "Put user experience first: when a task involves UI, design it from the user's experience and above all follow the existing UI design conventions of the user's project.";
 
     let identity = load(PromptKey::SystemCoreIdentity);
@@ -551,15 +564,39 @@ fn standards_6_7_8_are_scoped_and_byte_identical() {
             "{label} 应逐字出现在 reviewer_code"
         );
     }
-    for (label, text) in [
-        ("core_identity", identity),
-        ("planner", planner),
-        ("reviewer_plan", reviewer_plan),
+    let common_explanation_rules = [
+        "Explain problems and technical solutions in a way that is easy to read and understand:",
+        "When explaining a problem, solution, or plan, provide an overall ASCII diagram by default to show the big picture.",
+        "Include ASCII diagrams in complex sections to aid understanding. In the accompanying explanations, use concise wording that conveys all essential points clearly and fully, and avoid long-winded exposition.",
+        "Do not explain problems or solutions using opaque jargon or strings of technical terms. When a technical term is necessary, immediately follow it with a plain-language explanation.",
+        "Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.",
+    ];
+    for (label, text) in [("core_identity", identity), ("planner", planner)] {
+        for rule in common_explanation_rules {
+            assert_eq!(
+                text.matches(rule).count(),
+                1,
+                "{label} must preserve each shared explanation rule exactly once: {rule}"
+            );
+        }
+        assert!(
+            !text.contains("Explain in plain, jargon-free language"),
+            "{label} must not retain the old explanation rule"
+        );
+    }
+    for plan_only in [
+        "Give each problem or feature requirement its own self-contained section",
+        "When creating or updating a development plan, write the complete explanation into the plan itself rather than only replying in the chat.",
     ] {
-        assert!(text.contains(S7), "S7 应逐字出现在 {label}");
+        assert!(planner.contains(plan_only));
+        assert!(!identity.contains(plan_only));
     }
     assert!(
-        !reviewer_code.contains(S7),
+        reviewer_plan.contains(REVIEWER_S7),
+        "plan reviewer wording is outside this update's scope"
+    );
+    assert!(
+        !reviewer_code.contains(REVIEWER_S7),
         "read-only code reviewer must not promise plan-file ASCII explanations"
     );
 }
