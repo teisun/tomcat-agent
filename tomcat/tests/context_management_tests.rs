@@ -2053,7 +2053,7 @@ async fn test_check_before_request_emits_boundary_switched() {
 
     info!("Act: check_before_request");
     let emitter = scoped_emitter(event_bus.clone(), "ctx-before-request-boundary");
-    let mut turn_start = messages.len();
+    let mut turn_start = messages.len() - 1;
     let config = ContextConfig::default();
     let work_dir = tempfile::tempdir().unwrap();
     let read_file_state = ReadFileState::default();
@@ -2093,6 +2093,18 @@ async fn test_check_before_request_emits_boundary_switched() {
         ratio_after
     );
     assert_eq!(messages.len(), 2, "summary + u2");
+    assert_eq!(
+        turn_start, 1,
+        "replacing two historical entries with one summary must shift the active user cursor"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.msg_id.as_deref() == Some("u2"))
+            .count(),
+        1,
+        "the active user message is already durable and must not be duplicated during apply"
+    );
 }
 
 // ────────── Group D: L0->L1->L2->L3 全管线 + 事件时序 ─────────────────────

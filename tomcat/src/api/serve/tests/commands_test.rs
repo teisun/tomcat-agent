@@ -31,6 +31,58 @@ use crate::{
 // 协议上只有 ingest_attachment 携带字节，因此测试也必须先把字节交给后端换回哈希，
 // 再用哈希去发送 —— 这跟真实客户端走的是同一条路。
 
+#[tokio::test]
+#[serial(env_lock)]
+async fn serve_turn_state_lease_roundtrip_preserves_parked_messages() {
+    let _api_key = install_test_api_key();
+    let (_state, _buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let mut history = ChatMessage::user("durable historical request");
+    history.msg_id = Some("history-user".to_string());
+    let mut active_tail = ChatMessage::user("durable active request");
+    active_tail.msg_id = Some("tail-user".to_string());
+    let expected_ids = vec!["history-user", "tail-user"];
+    {
+        let mut turn_state = slot.turn_state.lock();
+        turn_state
+            .as_mut()
+            .expect("idle slot has parked turn state")
+            .context_state
+            .messages = vec![history, active_tail];
+    }
+
+    {
+        let mut lease = TurnStateLease::acquire(Arc::clone(&slot)).expect("acquire turn lease");
+        assert!(
+            slot.turn_state.lock().is_none(),
+            "the slot must not expose a second authoritative list while leased"
+        );
+        assert_eq!(
+            lease
+                .context_state_mut()
+                .messages
+                .iter()
+                .filter_map(|message| message.msg_id.as_deref())
+                .collect::<Vec<_>>(),
+            expected_ids,
+            "the lease receives the exact parked list"
+        );
+    }
+
+    let turn_state = slot.turn_state.lock();
+    assert_eq!(
+        turn_state
+            .as_ref()
+            .expect("drop must return turn state to the slot")
+            .context_state
+            .messages
+            .iter()
+            .filter_map(|message| message.msg_id.as_deref())
+            .collect::<Vec<_>>(),
+        expected_ids,
+        "dropping the lease must return the same parked list without rebuilding it"
+    );
+}
+
 /// 1x1 PNG，最小的合法位图。
 fn test_png_bytes() -> Vec<u8> {
     vec![

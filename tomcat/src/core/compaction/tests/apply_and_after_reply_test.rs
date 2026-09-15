@@ -5,6 +5,7 @@ use super::super::layer0_persist_large_results;
 use super::mocks::*;
 use crate::core::agent_loop::{execute_tool_for_cross_module_test, ToolCallInfo};
 use crate::core::compaction::preheat::Preheat;
+use crate::core::compaction::test_support::{assert_tail_invariant, durable_ids};
 use crate::core::llm::{ChatMessageRole, MessageKind};
 use crate::core::permission::{DefaultPermissionGate, GateConfig, PermissionGate, SessionGrants};
 use crate::core::session::manager::{compound_turn_id, estimate_msg_chars};
@@ -272,6 +273,41 @@ fn apply_boundary_shifts_turn_start_for_history_boundary_and_tail_boundary() {
         .unwrap();
     assert_eq!(turn_start, 1);
     assert_eq!(messages[turn_start].msg_id.as_deref(), Some("m3"));
+}
+
+#[test]
+fn apply_boundary_preserves_tail_invariant() {
+    let mut state = make_state(0, 100_000, 25_000);
+    let mut messages = vec![
+        user_msg_with_id("history-0", "historical first"),
+        user_msg_with_id("history-1", "historical second"),
+        user_msg_with_id("tail-0", "current first"),
+        user_msg_with_id("tail-1", "current second"),
+    ];
+    state.estimate_context_chars = messages.iter().map(estimate_msg_chars).sum();
+    let mut turn_start = 2;
+    let before_tail_ids = durable_ids(&messages, turn_start);
+
+    state
+        .apply_boundary(
+            &mut messages,
+            crate::core::session::manager::CompactionResult {
+                summary_text: "historical summary".into(),
+                covered_start_id: "history-0".into(),
+                covered_end_id: "history-1".into(),
+                covered_count: 2,
+                transcript_compaction_entry_id: None,
+                estimated_covered_tokens_before: None,
+                estimated_summary_tokens: None,
+                estimated_tokens_saved: None,
+                preheat_elapsed_ms: 0,
+            },
+            &mut turn_start,
+        )
+        .unwrap();
+
+    assert_eq!(turn_start, 1);
+    assert_tail_invariant(&before_tail_ids, &messages, turn_start);
 }
 
 #[test]

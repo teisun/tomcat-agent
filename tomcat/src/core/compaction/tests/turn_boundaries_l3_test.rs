@@ -1,5 +1,6 @@
 use super::super::{compact_tool_results, force_drop_oldest_after_confirmed_overflow};
 use super::mocks::*;
+use crate::core::compaction::test_support::{assert_tail_invariant, durable_ids};
 use crate::core::llm::MessageKind;
 use crate::core::session::manager::estimate_msg_chars;
 use crate::infra::config::ContextConfig;
@@ -146,6 +147,7 @@ fn l3_can_drop_entire_history_when_tail_exists() {
         1_000,
     );
     let mut turn_start = 1;
+    let before_tail_ids = durable_ids(&messages, turn_start);
 
     let (turns_removed, chars_removed) =
         force_drop_oldest_after_confirmed_overflow(&mut state, &mut messages, &mut turn_start);
@@ -155,6 +157,7 @@ fn l3_can_drop_entire_history_when_tail_exists() {
     assert_eq!(turn_start, 0);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].msg_id, tail.msg_id);
+    assert_tail_invariant(&before_tail_ids, &messages, turn_start);
 }
 
 #[test]

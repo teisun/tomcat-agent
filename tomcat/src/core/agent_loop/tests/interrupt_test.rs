@@ -12,6 +12,7 @@
 //!   立即返回 Interrupted；新 token 的 AgentLoop 应能正常收束（架构 §6.2）。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -23,7 +24,7 @@ use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::retry_delay::sleep_provider_retry_delay;
 use crate::core::llm::{ChatMessage, ChatRequest, ChatResponse, LlmProvider, StreamEvent};
 use crate::core::session::find_dangling_tail_tool_call_ids;
-use crate::core::session::manager::ContextState;
+use crate::core::session::manager::{ContextState, MessageAppendSink};
 use crate::infra::error::AppError;
 use crate::infra::event_bus::EventBus;
 use crate::infra::wire;
@@ -38,6 +39,33 @@ fn dangling_tool_call_ids(messages: &[ChatMessage]) -> Option<Vec<String>> {
         .collect::<Result<Vec<_>, _>>()
         .expect("chat messages should serialize");
     find_dangling_tail_tool_call_ids(&recent)
+}
+
+#[derive(Default)]
+struct RecordingMessageSink {
+    next_id: AtomicUsize,
+    messages: Mutex<Vec<serde_json::Value>>,
+}
+
+impl MessageAppendSink for RecordingMessageSink {
+    fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(value);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(format!("persisted-{id}"))
+    }
+
+    fn append_custom_entry(&self, _extra: serde_json::Value) -> Result<(), AppError> {
+        Ok(())
+    }
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(value);
+        Ok(forced_id.to_string())
+    }
 }
 
 /// Abort：工具执行前/中设置 abort_signal，run 返回 Err，agent_end 含 interrupted。
@@ -268,6 +296,99 @@ async fn run_interrupt_during_active_tool_appends_synthetic_tool_result() {
         dangling_tool_call_ids(&result.new_messages),
         None,
         "单工具调用中断后尾部应已闭合"
+    );
+}
+
+#[tokio::test]
+async fn interrupt_appends_interrupted_tool_results_into_single_list_with_ids() {
+    let stream_tools: Vec<Result<StreamEvent, AppError>> = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("c1".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/a"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ];
+    let sink = Arc::new(RecordingMessageSink::default());
+    let sink_for_config: Arc<dyn MessageAppendSink> = sink.clone();
+    let cancel = CancellationToken::new();
+    let mut agent = AgentLoop::new(
+        test_binding(Arc::new(MockLlmProvider::new(vec![stream_tools])), "gpt-4"),
+        Arc::new(SleepyMockPrimitive),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            message_append_sink: Some(sink_for_config),
+            session_id: "s-int-single-list-ids".to_string(),
+            ..Default::default()
+        },
+        cancel.clone(),
+    );
+    agent.set_context_state(Some(ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: 0,
+        context_budget_chars: 10_000,
+        context_budget_tokens: 2_500,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+    let cancel_bg = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        cancel_bg.cancel();
+    });
+    let mut user = ChatMessage::user("read one file");
+    user.msg_id = Some("seeded-user".to_string());
+
+    let outcome = agent.run(vec![user]).await;
+
+    assert!(
+        outcome.is_interrupted(),
+        "tool cancellation must interrupt the turn"
+    );
+    let parked = agent
+        .take_context_state()
+        .expect("interrupted turn must park its only message list");
+    assert_eq!(
+        parked.messages.len(),
+        3,
+        "user + tool-call assistant + synthetic result"
+    );
+    assert_eq!(
+        parked
+            .messages
+            .last()
+            .and_then(|message| message.tool_call_id.as_deref()),
+        Some("c1")
+    );
+    assert_eq!(
+        parked.messages.last().and_then(ChatMessage::text_content),
+        Some("[interrupted]")
+    );
+    assert!(
+        parked
+            .messages
+            .iter()
+            .all(|message| message.msg_id.is_some()),
+        "every durable message in the parked single list must carry its persisted id"
+    );
+    assert_eq!(
+        sink.messages.lock().unwrap().len(),
+        2,
+        "only the assistant tool call and synthetic tool result are newly persisted"
+    );
+    assert_eq!(
+        dangling_tool_call_ids(&parked.messages),
+        None,
+        "the persisted interrupted tool result must close the parked tool-call tail"
     );
 }
 

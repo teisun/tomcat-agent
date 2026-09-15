@@ -15,14 +15,14 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use super::super::steering_injection::{inject_follow_up_messages, inject_steering_messages};
-use crate::core::agent_loop::{AgentLoop, AgentLoopConfig};
+use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{
     ChatMessage, ChatMessageRole, ChatRequest, ChatResponse, LlmProvider, MessageKind, StreamEvent,
 };
 use crate::core::session::manager::{estimate_msg_chars, ContextState};
 use crate::core::session::transcript::{read_entries_tail, TranscriptEntry};
-use crate::infra::error::AppError;
+use crate::infra::error::{llm_http_status_error, AppError};
 use crate::infra::DefaultEventBus;
 use crate::SessionManager;
 
@@ -124,6 +124,96 @@ async fn run_steering_skips_remaining_tools() {
     let result = loop_.run(messages).await.unwrap();
     assert!(result.final_text.contains("steered"));
     assert_eq!(read_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn steering_injected_at_turn_start_stays_in_tail() {
+    let llm = Arc::new(RecordingMockLlmProvider::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            400,
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+        ))],
+        vec![
+            Ok(StreamEvent::ContentDelta {
+                delta: "recovered".to_string(),
+            }),
+            Ok(StreamEvent::FinishReason {
+                reason: "stop".to_string(),
+            }),
+        ],
+    ]));
+    let steering_queue = Arc::new(parking_lot::Mutex::new(vec![{
+        let mut steering = ChatMessage::steering("stop after this request");
+        steering.msg_id = Some("steering-tail".to_string());
+        steering
+    }]));
+    let mut history = ChatMessage::user("large historical request ".repeat(400));
+    history.msg_id = Some("history-user".to_string());
+    let mut current_user = ChatMessage::user("current user request");
+    current_user.msg_id = Some("current-user".to_string());
+    let mut agent = AgentLoop::new_with_steering_queue(
+        test_binding(llm.clone(), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 2,
+            retry_base_delay_ms: 0,
+            session_id: "steering-start-boundary".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+        steering_queue,
+    );
+    agent.set_context_state(Some(ContextState {
+        messages: Vec::new(),
+        estimate_context_chars: 1,
+        context_budget_chars: 100_000,
+        context_budget_tokens: 25_000,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: std::path::PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat: Preheat::new(),
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    let result = match agent.run_turn(vec![history, current_user], 1).await {
+        AgentRunOutcome::Completed(result) => result,
+        other => panic!("L3 should remove only history and retry: {other:?}"),
+    };
+
+    let new_ids = result
+        .new_messages
+        .iter()
+        .filter_map(|message| message.msg_id.as_deref())
+        .collect::<Vec<_>>();
+    assert!(
+        new_ids.contains(&"current-user") && new_ids.contains(&"steering-tail"),
+        "the explicit boundary must keep both the original input and injected steering in new_messages: {new_ids:?}"
+    );
+    let requests = llm.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2, "overflow retry should exercise L3");
+    assert!(
+        !requests[1]
+            .messages
+            .iter()
+            .any(|message| message.msg_id.as_deref() == Some("history-user")),
+        "L3 may remove history"
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|message| message.msg_id.as_deref() == Some("current-user"))
+            && requests[1]
+                .messages
+                .iter()
+                .any(|message| message.msg_id.as_deref() == Some("steering-tail")),
+        "L3 must never delete the user input or steering injected after the explicit boundary"
+    );
 }
 
 /// FollowUp：run 前先 follow_up("next")，同一上下文继续，final_text 含两轮回复。

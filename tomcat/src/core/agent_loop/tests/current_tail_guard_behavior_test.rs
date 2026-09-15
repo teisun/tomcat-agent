@@ -8,6 +8,7 @@ use super::super::current_tail_guard::{self, GuardRoute, GuardRouteReason};
 use super::super::{AgentLoop, AgentLoopConfig};
 use super::mocks::{test_binding, MockPrimitiveExecutor};
 use crate::core::compaction::preheat::Preheat;
+use crate::core::compaction::test_support::{assert_tail_invariant, durable_ids};
 use crate::core::compaction::TOOL_RESULT_PLACEHOLDER;
 use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, MessageKind,
@@ -207,13 +208,17 @@ async fn over_budget_without_preheat_still_collapses() {
         current_tail_compactable_min_chars: 1,
         ..Default::default()
     });
-    let user = ChatMessage::user("apply a write");
-    let assistant = assistant_with_tool_calls(&[("tc1", "write")]);
-    let tool = ChatMessage::tool("tc1", &"x".repeat(8_000));
+    let mut user = ChatMessage::user("apply a write");
+    user.msg_id = Some("tail-user".to_string());
+    let mut assistant = assistant_with_tool_calls(&[("tc1", "write")]);
+    assistant.msg_id = Some("tail-assistant".to_string());
+    let mut tool = ChatMessage::tool("tc1", &"x".repeat(8_000));
+    tool.msg_id = Some("tail-tool".to_string());
     let mut messages = vec![user, assistant, tool];
     let total_chars: usize = messages.iter().map(estimate_msg_chars).sum();
 
     agent.start_idx = 0;
+    let before_tail_ids = durable_ids(&messages, agent.start_idx);
     agent.set_context_state(Some(ContextState {
         messages: vec![],
         estimate_context_chars: total_chars,
@@ -242,6 +247,11 @@ async fn over_budget_without_preheat_still_collapses() {
     assert!(decision.after_collapse.is_some());
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].kind, MessageKind::CompactionSummary);
+    assert_eq!(
+        agent.start_idx, 1,
+        "collapse summary is history; the active-tail cursor must advance past it"
+    );
+    assert_tail_invariant(&before_tail_ids, &messages, agent.start_idx);
 }
 
 #[tokio::test]

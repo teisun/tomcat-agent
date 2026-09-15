@@ -507,6 +507,91 @@ async fn midturn_preheat_anchor_in_tail_applies_and_keeps_surviving_tail_raw() {
 }
 
 #[tokio::test]
+async fn midturn_apply_shifts_start_idx_anchor_in_history() {
+    let mut historical_user = ChatMessage::user("old request ".repeat(40));
+    historical_user.msg_id = Some("history-user".to_string());
+    let mut historical_reply = ChatMessage::assistant("old reply ".repeat(40));
+    historical_reply.msg_id = Some("history-assistant".to_string());
+    let mut active_user = ChatMessage::user("current request ".repeat(40));
+    active_user.msg_id = Some("tail-user".to_string());
+    let mut active_reply = ChatMessage::assistant("current reply ".repeat(40));
+    active_reply.msg_id = Some("tail-assistant".to_string());
+    let expected_tail = vec![
+        serde_json::to_value(&active_user).unwrap(),
+        serde_json::to_value(&active_reply).unwrap(),
+    ];
+    let mut messages = vec![historical_user, historical_reply, active_user, active_reply];
+    let mut preheat = Preheat::new();
+    preheat.restore_completed(CompactionResult {
+        summary_text: "historical summary".to_string(),
+        covered_start_id: "history-user".to_string(),
+        covered_end_id: "history-assistant".to_string(),
+        covered_count: 2,
+        transcript_compaction_entry_id: None,
+        estimated_covered_tokens_before: Some(200),
+        estimated_summary_tokens: Some(8),
+        estimated_tokens_saved: Some(192),
+        preheat_elapsed_ms: 1,
+    });
+    let mut agent = AgentLoop::new(
+        test_binding(
+            Arc::new(ChatOnlyMockLlm {
+                summary_text: "unused".to_string(),
+            }),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "sess-history-anchor-preheat".to_string(),
+            context_config: ContextConfig {
+                keep_recent_turns: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    agent.start_idx = 2;
+    agent.set_context_state(Some(ContextState {
+        messages: vec![],
+        estimate_context_chars: 900,
+        context_budget_chars: 400,
+        context_budget_tokens: 100,
+        last_api_usage: None,
+        post_usage_appended_chars: 0,
+        transcript_path: PathBuf::new(),
+        latest_plan_event: None,
+        resume_control: Default::default(),
+        preheat,
+        session_obs: Default::default(),
+        live: Default::default(),
+    }));
+
+    current_tail_guard::maybe_reduce_before_next_llm(&mut agent, &mut messages)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        messages[0].kind,
+        crate::core::llm::MessageKind::CompactionSummary
+    );
+    assert_eq!(
+        agent.start_idx, 1,
+        "replacing two historical messages with one summary must shift the active-tail cursor"
+    );
+    assert_eq!(
+        messages[agent.start_idx..]
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        expected_tail,
+        "the active tail must stay byte-for-byte unchanged when only history is summarized"
+    );
+}
+
+#[tokio::test]
 async fn incident_replay_from_085_to_098_applies_tail_anchor_without_stale() {
     let switched = Arc::new(AtomicUsize::new(0));
     let errors = Arc::new(AtomicUsize::new(0));
