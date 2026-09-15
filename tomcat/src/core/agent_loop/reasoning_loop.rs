@@ -331,9 +331,14 @@ pub(super) async fn run_reasoning_loop(
 
         final_text.push_str(&content_buf);
 
+        let has_malformed_tool_call = tool_calls_buf
+            .iter()
+            .any(|tool_call| tool_call.name.trim().is_empty());
         let tool_calls: Vec<ToolCallInfo> = tool_calls_buf
             .into_iter()
-            .filter(|tc| !tc.name.is_empty())
+            // A malformed streaming delta may carry an empty/whitespace tool name.
+            // It cannot be executed or replayed as a valid OpenAI tool_call.
+            .filter(|tc| !tc.name.trim().is_empty())
             .map(|tc| ToolCallInfo {
                 id: tc.id,
                 name: tc.name,
@@ -364,7 +369,8 @@ pub(super) async fn run_reasoning_loop(
             .and_then(|continuation| continuation.provider_refs.as_ref())
             .and_then(|refs| refs.openai_response_id.as_deref());
         let empty_turn_failure = tool_calls.is_empty()
-            && (thinking_only_or_truncated
+            && (has_malformed_tool_call
+                || thinking_only_or_truncated
                 || (has_no_visible_output && (output_truncated || has_hidden_output)));
         if empty_turn_failure {
             let thinking_chars = thinking_text.as_deref().map(str::len).unwrap_or_default();
@@ -372,6 +378,8 @@ pub(super) async fn run_reasoning_loop(
                 "output_truncated"
             } else if has_hidden_output {
                 "hidden_output"
+            } else if has_malformed_tool_call {
+                "malformed_tool_call"
             } else {
                 "thinking_only"
             };
@@ -400,6 +408,16 @@ pub(super) async fn run_reasoning_loop(
                         )
                     } else {
                         "本轮产生了不可显示的推理、没有可见回答。正在自动重试。".to_string()
+                    }
+                }
+                "malformed_tool_call" => {
+                    if attempt >= max_attempts {
+                        format!(
+                            "模型返回了缺少工具名称的无效工具调用。已自动重试 {} 次；请使用 Resume 重试，或换一个模型后重试。",
+                            attempt.saturating_sub(1)
+                        )
+                    } else {
+                        "模型返回了缺少工具名称的无效工具调用。正在自动重试。".to_string()
                     }
                 }
                 _ => {

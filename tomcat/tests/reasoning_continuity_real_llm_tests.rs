@@ -178,7 +178,14 @@ fn merge_tool_call_delta(
 fn finalized_tool_calls(tool_calls: Vec<ToolCallAccum>) -> Vec<Value> {
     tool_calls
         .into_iter()
-        .filter(|tool_call| tool_call.name.is_some())
+        // Match the AgentLoop's acceptance rule: a blank name is not a
+        // executable/replayable tool call and must never become invalid wire.
+        .filter(|tool_call| {
+            tool_call
+                .name
+                .as_deref()
+                .is_some_and(|name| !name.trim().is_empty())
+        })
         .map(|tool_call| {
             json!({
                 "id": tool_call.id.unwrap_or_else(|| "call_missing".to_string()),

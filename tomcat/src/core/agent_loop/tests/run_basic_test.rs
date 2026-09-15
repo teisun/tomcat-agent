@@ -100,6 +100,20 @@ fn thinking_only_empty_stream() -> Vec<Result<StreamEvent, AppError>> {
     ]
 }
 
+fn malformed_tool_call_stream() -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_blank_name".to_string()),
+            name: Some("   ".to_string()),
+            arguments_delta: Some(r#"{"city":"Hangzhou"}"#.to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".to_string(),
+        }),
+    ]
+}
+
 fn pdf_user_message() -> ChatMessage {
     let pdf_b64 = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4\n%%EOF\n");
     ChatMessage::user_with_parts(vec![
@@ -845,6 +859,60 @@ async fn run_second_overflow_collapses_and_strictly_shrinks_main_requests() {
             .first()
             .is_some_and(|message| message.kind == MessageKind::CompactionSummary),
         "second overflow must park the compacted history as a leading summary"
+    );
+}
+
+#[tokio::test]
+async fn l3_force_drop_never_crosses_history_end() {
+    let mut oldest = large_user_turn("oldest");
+    oldest.msg_id = Some("history-oldest".to_string());
+    let mut newer = large_user_turn("newer");
+    newer.msg_id = Some("history-newer".to_string());
+    let mut active_tail = large_user_turn("active tail");
+    active_tail.msg_id = Some("tail-user".to_string());
+    let expected_tail = serde_json::to_value(&active_tail).unwrap();
+    let initial_messages = vec![oldest, newer, active_tail];
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        vec![Err(llm_http_status_error(
+            "mock",
+            400,
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+        ))],
+        ok_text_stream("recovered after dropping history only"),
+    ]);
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 2,
+            retry_base_delay_ms: 0,
+            session_id: "l3-preserves-active-tail".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    let mut state = overbudget_context_state(initial_messages.clone());
+    state.messages.clear();
+    loop_.set_context_state(Some(state));
+
+    let outcome = loop_.run(initial_messages).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(_)),
+        "a single L3 trim should retry successfully: {outcome:?}"
+    );
+    let recorded = requests.0.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 2, "original request plus L3 retry");
+    let retried_tail = recorded[1]
+        .messages
+        .iter()
+        .find(|message| message.msg_id.as_deref() == Some("tail-user"))
+        .expect("L3 must not cross the active-tail boundary");
+    assert_eq!(
+        serde_json::to_value(retried_tail).unwrap(),
+        expected_tail,
+        "the active user message must be replayed unchanged after L3 drops history"
     );
 }
 
@@ -1697,6 +1765,44 @@ async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
     assert_eq!(retry_ends.len(), 1);
     assert_eq!(retry_ends[0]["success"].as_bool(), Some(true));
     assert_eq!(retry_ends[0]["attempt"].as_u64(), Some(3));
+}
+
+#[tokio::test]
+async fn malformed_tool_call_name_retries_instead_of_becoming_invalid_replay_wire() {
+    let (provider, requests) =
+        RecordingStreamLlmProvider::new(vec![malformed_tool_call_stream(), ok_text_stream("ok")]);
+    let sink = Arc::new(RecordingAppendSink::default());
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-4"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "malformed-tool-name".to_string(),
+            message_append_sink: Some(sink.clone()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    let AgentRunOutcome::Completed(result) = loop_.run(vec![ChatMessage::user("hi")]).await else {
+        panic!("a malformed tool call should retry and then complete");
+    };
+
+    assert_eq!(result.final_text, "ok");
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        2,
+        "the invalid tool call must not be replayed into a second request"
+    );
+    assert!(
+        sink.custom_entries.lock().unwrap().iter().any(|entry| {
+            entry["event"].as_str() == Some("empty_turn")
+                && entry["failure_kind"].as_str() == Some("malformed_tool_call")
+        }),
+        "the retry reason must be auditable"
+    );
 }
 
 #[tokio::test]
