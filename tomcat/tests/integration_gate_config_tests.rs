@@ -209,11 +209,7 @@ fn promoted_parallel_and_nextest_real_llm_filters_stay_in_sync() {
         "hostcall_tests",
         "primitives_tools_tests",
         "tool_catalog_doc",
-        "serve_multi_session",
-        "serve_ask_question_tests",
         "serve_schema_fixture",
-        "serve_robustness_tests",
-        "serve_stdio_e2e",
     ];
     let parallel_set = parallel.iter().cloned().collect::<BTreeSet<_>>();
     for binary in promoted_from_old_serial {
@@ -222,10 +218,33 @@ fn promoted_parallel_and_nextest_real_llm_filters_stay_in_sync() {
             "默认并行组应包含原串行 binary `{binary}`"
         );
     }
-    assert!(
-        serial.is_empty(),
-        "serial 兜底组默认应为空，实际：{serial:?}"
+    assert_eq!(
+        serial,
+        [
+            "serve_multi_session",
+            "serve_ask_question_tests",
+            "serve_robustness_tests",
+            "serve_stdio_e2e",
+        ],
+        "process-heavy stdio binaries need one concurrent Serve child family",
     );
+    let serial_override = config["profile"]["default"]["overrides"]
+        .as_array()
+        .and_then(|overrides| {
+            overrides
+                .iter()
+                .find(|override_config| override_config["test-group"].as_str() == Some("serial"))
+        })
+        .expect("default profile must assign serial binaries to the serial test group");
+    let serial_filter = serial_override["filter"]
+        .as_str()
+        .expect("serial override filter should be a string");
+    for binary in &serial {
+        assert!(
+            serial_filter.contains(&format!("binary({binary})")),
+            "serial binary missing from default profile override: {binary}",
+        );
+    }
     assert!(
         !real_llm_cli.is_empty(),
         "live CLI inventory must not be empty"

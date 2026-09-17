@@ -440,6 +440,13 @@ Parameters:
 {
   "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id.",
   "properties": {
+    "acceptance_commands": {
+      "description": "Declared acceptance commands: the mandatory floor that `[gate] Acceptance` must run. One complete, runnable shell command per entry, exactly as it will be launched (put any `cd` inside the command). Size it to the change's impact radius; the verify skill decides how far beyond this floor to widen. Blank entries are dropped and duplicates removed.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "draft": {
       "description": "Markdown for the plan body `## Plan` section (approach, key decisions, constraints; <= ~2000 chars). Do NOT include the `## Goal` / `## Plan` / `## Todos Board` headings yourself.",
       "type": "string"
@@ -507,8 +514,15 @@ Parameters:
 {
   "description": "Apply todo ops, submit a P1 code-review dispute, or submit verified green-build evidence to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
   "properties": {
+    "acceptance_commands": {
+      "description": "Complete replacement for the plan's declared acceptance command list (one runnable command per entry). Omit to leave it unchanged. While planning/pending the list is replaced as given; once executing it is a ratchet: the new list must still contain every previously declared command, so it can only grow. A completed plan is immutable.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "dispute_findings": {
-      "description": "P1 findings the main Agent explicitly accepts as a trade-off. Use only for wontfix; fixing code is communicated by a later review, not here.",
+      "description": "P1 findings, or P0 findings after an explicit user acknowledgement of a P0 handoff, that the main Agent accepts as a trade-off. Use only for wontfix; fixing code is communicated by a later review, not here.",
       "items": {
         "additionalProperties": false,
         "properties": {
@@ -542,7 +556,7 @@ Parameters:
       "type": "array"
     },
     "green_build_evidence": {
-      "description": "Finished background bash commands used as green-build evidence. Required with green_build_pass=true; command must exactly match the recorded task.",
+      "description": "Finished background bash commands used as green-build evidence. Required with green_build_pass=true; command must exactly match the recorded task, and every declared `acceptance_commands` entry must appear here with its own task_id (extra commands are fine, narrower substitutes are not).",
       "items": {
         "additionalProperties": false,
         "properties": {
@@ -946,7 +960,7 @@ Parameters:
 - Destructive: `false`
 - Search hint: `bash background task output tail log`
 
-Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until the task finishes or `wait_ms` elapses (default 5000; block=true clamps to 5000-600000ms; block=false ignores wait_ms). Mid-stream output does not interrupt the wait. Blocking waits add a `wakeReason` of `finished` | `wait_window_elapsed`; a `wait_window_elapsed` wakeReason is NOT a failure, so inspect `content` first (`content=""` means no new output arrived during that slice) and wait again only if you still need to. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.
+Read incremental output from a background `bash` task (started with run_in_background=true). Returns a UTF-8 lossy chunk from `since` plus `finished` and `exit_code`; pass the previous response's `next_offset` as the next `since` to tail across turns (first call may omit `since`). `block=false` (default) returns immediately; `block=true` waits until the task finishes or `wait_ms` elapses (default 5000; block=true clamps to 5000-600000ms; block=false ignores wait_ms). For builds and tests, prefer `block=true` with `wait_ms` at least 300000, up to 600000, unless another task truly needs the result sooner. Mid-stream output does not interrupt the wait. Blocking waits add a `wakeReason` of `finished` | `wait_window_elapsed`; a `wait_window_elapsed` wakeReason is NOT a failure, so inspect `content` first (`content=""` means no new output arrived during that slice) and wait again only if you still need to. Do not busy-poll. See the background bash tasks section in the system prompt for the full workflow.
 
 Parameters:
 

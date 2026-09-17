@@ -464,6 +464,20 @@ function getDefaultCwd(): string | undefined {
   return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
+async function selectConnectorWorkspaceRoot(): Promise<string | null> {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length === 0) {
+    return null;
+  }
+  if (folders.length === 1) {
+    return folders[0].uri.fsPath;
+  }
+  const selected = await vscode.window.showWorkspaceFolderPick({
+    placeHolder: "Select the workspace for Tomcat connector settings",
+  });
+  return selected?.uri.fsPath ?? null;
+}
+
 function bundledExecutableName(
   platform: NodeJS.Platform = process.platform,
 ): string {
@@ -933,6 +947,7 @@ export async function activate(
     extensionVersion,
     messenger,
     onModelCatalogChanged: () => webviewProvider.refreshModelCatalog(),
+    selectConnectorWorkspaceRoot,
   });
   const selectionCodeLensProvider = new TomcatSelectionCodeLensProvider();
   let selectionCodeLensTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1212,15 +1227,11 @@ export async function activate(
   );
   const openSettingsCommand = vscode.commands.registerCommand(
     TOMCAT_OPEN_SETTINGS_COMMAND,
-    async (route?: "models") => {
-      const initializeResult = await ensureInitialized();
-      if (!hasAnyModelAdminCapability(initializeResult)) {
-        await showWarningMessage(
-          promptHistory,
-          "The connected `tomcat serve` does not support model management yet.",
-        );
-        return;
-      }
+    async (route?: SettingsRoute) => {
+      // Settings includes the connector controls. The panel advertises the exact
+      // operations this Serve instance supports after its ready handshake, so a
+      // missing model-management capability must not hide connector settings.
+      await ensureInitialized();
       settingsPanel.reveal(route ?? "models");
     },
   );

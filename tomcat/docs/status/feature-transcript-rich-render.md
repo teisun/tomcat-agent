@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-15 22:57 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-17 19:11 +0800 | ACTIVE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0] MCP Connector 工作区添加与安全重载已完成**：设置页现在可将 connector 保存到当前工作区，并将“配置已保存、连接启动失败”作为部分成功回执展示，不再误报为保存失败；后端在 Deny 与配置重载删除条目时退休旧连接 generation，避免旧的 in-flight 连接在同 key 重加后恢复可用工具面。补齐 manager/control/UI/installed-VSIX 回归；本轮 `gate-full`（357 并行 + 23 串行 + 38 真实 LLM）、扩展 `gate:full`、installed `accept:connectors`、release、audit、wire 与版本/空白检查均通过。@2026-09-17
 - [✓] **(版本发布)** CLI `0.1.52 → 0.1.53`、扩展 `0.1.66 → 0.1.67`、bundled CLI `0.1.52 → 0.1.53`：使用 `node scripts/release-version.mjs bump --all patch` 统一更新权威版本清单与 Cargo/npm 镜像，随后 `node scripts/release-version.mjs check` 通过；Cov% 未跑，仍为 —。@2026-09-15
 - [✓] **[P0] 单列表上下文重构（方案 B）主体已落地**：持久消息列表现为唯一权威；回合开始以 `mem::take` 移交给 `AgentLoop`，结束统一停回 `ContextState.messages`。system prompt 移出持久列表，仅在请求组装时附加；L0/L1/L2/L3 均显式操作同一列表并维护 `start_idx`，tail-only overflow 在首次失败时能直接 collapse。已迁移受影响的单元、集成与 ignored 真实 LLM 用例，新增 serve stdio 长会话验收；真实 Terra 长会话、mid-turn/runtime 用例和 `integration-real-llm` 曾完成验收。期间补齐了 tool-only assistant 的 OpenAI-compatible `content: null` wire 兼容、`--resume` 不重放 assistant 尾部，以及代码评审被跳过时的 transcript 审计事件。当前复核已发现后续整改项（steering 的回合起点传递、失败路径归还列表、skipped 评审的低调 UI 呈现与验收记录回填），故分支保持 ACTIVE；本次提交按用户指令不重跑测试。@2026-09-15
 - [✓] **[P0] 计划收口的声明命令—绿构建凭据对账已用真实 Terra 验收**：`acceptance_commands` 仍是验收下限；每条声明必须对应一条已完成、exit 0、晚于最后编辑、命令与 task ID 实际启动值一致的后台任务。新增手动真实 LLM 用例，让 `idatatlas/gpt-5.6-terra` 在同一次 `update_plan` 调用中启动 Acceptance 并提交精确凭据；用隔离 Git 工作区中的 `test -s acceptance_probe.rs && git status --porcelain -- acceptance_probe.rs | grep -q '^??'` 验证 `&&`、管道、`--` 与正则引用均能端到端对账、持久化并收口为 completed。真实用例与 Clippy 均通过；此前 R1–R7 收口整改的完整 Rust lib 验证为 2875 passed / 2 ignored。标准版本脚本已将 CLI `0.1.50 → 0.1.51`、扩展 `0.1.64 → 0.1.65`、bundled CLI 同步为 `0.1.51`，镜像检查通过。Cov% 未测，保持 —。@2026-09-13
@@ -97,6 +98,7 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- Connector Settings：`SettingsConnectorReceipt` 区分 `configSaved`、`connectionStarted` 与 `postSaveError`；工作区 Add Connector 可在配置持久化成功而启动连接失败时准确提示用户。MCP manager 在 Deny 和配置重载移除 connector 时退休 generation，旧连接不可重新暴露工具面。
 - `AgentLoopConfig::system_prompt`：system prompt 不再作为持久 `ChatMessage` 存在，`assemble_request_messages` 在真正发请求时组装它。
 - compaction 原语：`apply_boundary`、L0 清理和 L3 裁剪改为显式接收工作列表与历史上界；`AgentLoop::run` 期间 `ContextState.messages` 是空停车位。
 - `plan.code_review` transcript 事件：无可审代码或 reviewer 时会显式记录 `verdict: "skipped"`，供审计与 UI 后续低调呈现。

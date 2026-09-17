@@ -16,6 +16,11 @@ export interface Capabilities {
   vision?: boolean;
   web_search?: boolean;
 }
+export interface ConnectorContext {
+  workspaceRoot?: null | string;
+}
+export type ConnectorScope = "global" | "workspace";
+
 export type DiffTag = "add" | "del" | "ctx" | "gap";
 
 export interface FileDiffLine {
@@ -149,6 +154,7 @@ export type ServePlanEvent = {
   round?: null | number;
   rounds?: null | number;
   sessionId?: null | string;
+  skipReason?: null | string;
   summary?: null | string;
   toolCallId?: null | string;
   type: "plan.code_review";
@@ -416,12 +422,13 @@ export type ServeCommand = {
   args: string[];
   auth?: null | string;
   command: string;
+  context: ConnectorContext;
   env?: Record<string, string>;
   headers?: Record<string, string>;
   id?: null | string;
   name: string;
   oauth?: any;
-  scope?: null | string;
+  scope: ConnectorScope;
   type: "add_connector";
   url?: null | string;
 } | {
@@ -437,6 +444,58 @@ export type ServeCommand = {
   sessionId?: null | string;
   type: "restore_checkpoint";
 } | {
+  configKey: string;
+  context: ConnectorContext;
+  exclude?: string[];
+  id?: null | string;
+  include?: string[];
+  type: "set_connector_tool_filter";
+} | {
+  configKey: string;
+  context: ConnectorContext;
+  id?: null | string;
+  trusted: boolean;
+  type: "set_connector_trust";
+} | {
+  configKey: string;
+  context: ConnectorContext;
+  id?: null | string;
+  type: "cancel_login_connector";
+} | {
+  configKey: string;
+  context: ConnectorContext;
+  id?: null | string;
+  type: "list_connector_tools";
+} | {
+  configKey: string;
+  context: ConnectorContext;
+  id?: null | string;
+  type: "login_connector";
+} | {
+  configKey: string;
+  context: ConnectorContext;
+  id?: null | string;
+  type: "logout_connector";
+} | {
+  configKey: string;
+  context: ConnectorContext;
+  id?: null | string;
+  type: "reload_connector";
+} | {
+  configKey: string;
+  context: ConnectorContext;
+  id?: null | string;
+  type: "remove_connector";
+} | {
+  configKey: string;
+  context: ConnectorContext;
+  id?: null | string;
+  type: "test_connector";
+} | {
+  context: ConnectorContext;
+  id?: null | string;
+  type: "list_connectors";
+} | {
   contextWindow: number;
   id?: null | string;
   model: string;
@@ -447,13 +506,6 @@ export type ServeCommand = {
   id?: null | string;
   type: "set_provider_key";
   value: string;
-} | {
-  exclude?: string[];
-  id?: null | string;
-  include?: string[];
-  name: string;
-  scope?: null | string;
-  type: "set_connector_tool_filter";
 } | {
   id?: null | string;
   level: string;
@@ -478,35 +530,6 @@ export type ServeCommand = {
   id?: null | string;
   modelId: string;
   type: "remove_model";
-} | {
-  id?: null | string;
-  name: string;
-  trusted: boolean;
-  type: "set_connector_trust";
-} | {
-  id?: null | string;
-  name: string;
-  type: "cancel_login_connector";
-} | {
-  id?: null | string;
-  name: string;
-  type: "list_connector_tools";
-} | {
-  id?: null | string;
-  name: string;
-  type: "login_connector";
-} | {
-  id?: null | string;
-  name: string;
-  type: "logout_connector";
-} | {
-  id?: null | string;
-  name: string;
-  type: "remove_connector";
-} | {
-  id?: null | string;
-  name: string;
-  type: "test_connector";
 } | {
   id?: null | string;
   params: RetainAttachmentLeasesParams;
@@ -582,16 +605,10 @@ export type ServeCommand = {
   type: "resume";
 } | {
   id?: null | string;
-  type: "list_connectors";
-} | {
-  id?: null | string;
   type: "list_models";
 } | {
   id?: null | string;
   type: "list_provider_keys";
-} | {
-  id?: null | string;
-  type: "reload_connector";
 } | {
   payload?: any;
   requestId: string;

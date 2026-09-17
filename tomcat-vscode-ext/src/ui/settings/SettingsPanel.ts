@@ -23,6 +23,7 @@ import type {
 } from "../../serveClient/wire";
 import type {
   SettingsCapabilities,
+  SettingsConnectorReceipt,
   SettingsHostFrame,
   SettingsIntent,
   SettingsModelCapabilities,
@@ -228,6 +229,8 @@ export interface SettingsPanelDeps {
   extensionVersion: string | null;
   messenger: TomcatMessenger;
   onModelCatalogChanged?(): Promise<void> | void;
+  /** The extension host, not a webview/editor heuristic, owns workspace choice. */
+  selectConnectorWorkspaceRoot?(): Promise<string | null>;
 }
 
 type SettingsDomAction = {
@@ -294,6 +297,9 @@ export class SettingsPanel implements vscode.Disposable {
   >();
   private route: SettingsRoute = "models";
   private connectorRefreshTimer?: ReturnType<typeof setInterval>;
+  private connectorContextValue?: { workspaceRoot?: string | null };
+  private connectorContextSelection?: Promise<{ workspaceRoot?: string | null }>;
+  private viewEpoch = 0;
   private state: SettingsStateSnapshot = {
     capabilities: {
       listModels: false,
@@ -321,11 +327,51 @@ export class SettingsPanel implements vscode.Disposable {
     return process.env.TOMCAT_E2E_SCREENSHOT !== "1";
   }
 
-  dispose(): void {
+  private async connectorContext(): Promise<{ workspaceRoot?: string | null }> {
+    if (this.connectorContextValue) {
+      return this.connectorContextValue;
+    }
+    if (!this.connectorContextSelection) {
+      this.connectorContextSelection = (async () => {
+        const workspaceRoot = this.deps.selectConnectorWorkspaceRoot
+          ? await this.deps.selectConnectorWorkspaceRoot()
+          : await this.selectDefaultConnectorWorkspaceRoot();
+        const context = { workspaceRoot };
+        this.connectorContextValue = context;
+        return context;
+      })();
+    }
+    return this.connectorContextSelection;
+  }
+
+  private async selectDefaultConnectorWorkspaceRoot(): Promise<string | null> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (folders.length === 0) {
+      return null;
+    }
+    if (folders.length === 1) {
+      return folders[0].uri.fsPath;
+    }
+    const selected = await vscode.window.showWorkspaceFolderPick({
+      placeHolder: "Select the workspace for Tomcat connector settings",
+    });
+    return selected?.uri.fsPath ?? null;
+  }
+
+  private resetConnectorViewLifecycle(): void {
     if (this.connectorRefreshTimer) {
       clearInterval(this.connectorRefreshTimer);
       this.connectorRefreshTimer = undefined;
     }
+    // A closed settings panel must not retain a project chosen for a prior view.
+    // The next view explicitly asks the Host again, including in multi-root workspaces.
+    this.connectorContextValue = undefined;
+    this.connectorContextSelection = undefined;
+    this.viewEpoch += 1;
+  }
+
+  dispose(): void {
+    this.resetConnectorViewLifecycle();
     for (const pending of this.pendingDomSnapshots.values()) {
       clearTimeout(pending.timeout);
       pending.reject(
@@ -368,6 +414,7 @@ export class SettingsPanel implements vscode.Disposable {
         );
       }
       this.pendingDomSnapshots.clear();
+      this.resetConnectorViewLifecycle();
       this.webviewReady = false;
       this.panel = undefined;
     });
@@ -489,18 +536,21 @@ export class SettingsPanel implements vscode.Disposable {
         await this.refreshState();
         return;
       case "listConnectorTools": {
-        const response = await this.deps.messenger.sendListConnectorTools(intent.data.name);
+        const response = await this.deps.messenger.sendListConnectorTools(
+          intent.data.configKey,
+          await this.connectorContext(),
+        );
         this.state = {
           ...this.state,
           connectorTools: response.success ? parseConnectorToolsPayload(response.payload) : [],
           error: response.success ? null : response.error ?? "Unable to load connector tools.",
-          selectedConnector: intent.data.name,
+          selectedConnector: intent.data.configKey,
         };
         this.postState();
         return;
       }
       case "addConnector":
-        await this.handleAddConnector(intent.data.connector);
+        await this.handleAddConnector(intent.data.connector, intent.messageId);
         return;
       case "removeConnector":
       case "reloadConnector":
@@ -509,20 +559,17 @@ export class SettingsPanel implements vscode.Disposable {
       case "logoutConnector":
       case "trustConnector":
       case "denyConnector":
-        await this.handleConnectorAction(intent.type, intent.data.name);
+        await this.handleConnectorAction(intent.type, intent.data.configKey);
         return;
       case "openConnectorConfig":
-        await this.openConnectorConfig(intent.data.name, intent.data.scope);
+        await this.openConnectorConfig(intent.data.configKey, intent.data.scope);
         return;
       case "setConnectorToolFilter": {
-        const connectorScope = this.state.connectors?.find((connector) => connector.name === intent.data.name)?.source === "Global"
-          ? "user"
-          : "workspace";
         const response = await this.deps.messenger.sendSetConnectorToolFilter(
-          intent.data.name,
+          intent.data.configKey,
           intent.data.filter.include,
           intent.data.filter.exclude,
-          connectorScope,
+          await this.connectorContext(),
         );
         await this.refreshState(
           response.success ? null : response.error ?? "Unable to update connector tools.",
@@ -534,13 +581,13 @@ export class SettingsPanel implements vscode.Disposable {
   }
 
   private async openConnectorConfig(
-    name?: string,
-    scope?: "user" | "workspace",
+    configKey?: string,
+    scope?: "global" | "workspace",
   ): Promise<void> {
-    const connector = name
-      ? this.state.connectors?.find((entry) => entry.name === name)
+    const connector = configKey
+      ? this.state.connectors?.find((entry) => entry.configKey === configKey)
       : undefined;
-    const scopedConfigPath = scope === "user"
+    const scopedConfigPath = scope === "global"
       ? this.state.connectorConfigPaths?.global
       : scope === "workspace"
         ? this.state.connectorConfigPaths?.workspace
@@ -637,7 +684,27 @@ export class SettingsPanel implements vscode.Disposable {
     }
   }
 
-  private async handleAddConnector(input: ConnectorInput): Promise<void> {
+  private async handleAddConnector(
+    input: ConnectorInput,
+    requestId: string,
+  ): Promise<void> {
+    const failed = (error: string): void => {
+      const receipt: SettingsConnectorReceipt = {
+        configSaved: false,
+        connectionStarted: false,
+        error,
+        name: input.name,
+        requestId,
+      };
+      this.state = {
+        ...this.state,
+        connectorReceipt: receipt,
+        error,
+        status: "Connector add failed.",
+      };
+      this.postState();
+      void this.refreshState(error, "Connector add failed.", null, receipt);
+    };
     try {
       const response = await this.deps.messenger.sendAddConnector({
         args: input.args ?? [],
@@ -647,46 +714,61 @@ export class SettingsPanel implements vscode.Disposable {
         headers: input.headers,
         name: input.name,
         oauth: input.oauth,
+        context: await this.connectorContext(),
         scope: input.scope,
         url: input.url,
       });
       if (!response.success) {
-        await this.refreshState(
-          response.error ?? "Unable to add connector.",
-          "Connector add failed.",
-        );
-        return;      }
-      if (input.transport === "http" && input.oauth !== undefined) {
-        await this.refreshState(null, "Authorizing connector…");
-        const login = await this.deps.messenger.sendLoginConnector(input.name);
-        if (login.success && (login.payload as { authorizing?: boolean } | undefined)?.authorizing) {
-          return;
-        }
-        await this.refreshState(
-          login.success ? null : login.error ?? "Connector saved, but OAuth authorization failed.",
-          login.success ? "Connector authorized and connected." : "Connector saved; authorization is still required.",
-        );
-        return;      }
-      await this.refreshState(null, "Connector saved.");
+        failed(response.error ?? "Unable to add connector.");
+        return;
+      }
+      const payload = isRecord(response.payload) ? response.payload : {};
+      const configSaved = payload.configSaved === true;
+      const connectionStarted = payload.connectionStarted === true;
+      const postSaveError = typeof payload.postSaveError === "string" ? payload.postSaveError : null;
+      if (!configSaved) {
+        failed(postSaveError ?? "Connector did not acknowledge configuration persistence.");
+        return;
+      }
+      const receipt: SettingsConnectorReceipt = {
+        configSaved,
+        connectionStarted,
+        error: postSaveError,
+        name: input.name,
+        requestId,
+      };
+      const status = connectionStarted
+        ? "Connector saved. Connection is starting."
+        : `Connector saved, but connection was not started.${postSaveError ? ` ${postSaveError}` : ""}`;
+      this.state = {
+        ...this.state,
+        connectorReceipt: receipt,
+        error: null,
+        status,
+      };
+      this.postState();
+      void this.refreshState(null, status, null, receipt);
     } catch (error) {
-      await this.refreshState(String(error), "Connector add failed.");    }
+      failed(String(error));
+    }
   }
 
   private async handleConnectorAction(
     action: "removeConnector" | "reloadConnector" | "loginConnector" | "logoutConnector" | "trustConnector" | "denyConnector" | "cancelLoginConnector",
-    name: string,
+    configKey: string,
   ): Promise<void> {
+    const context = await this.connectorContext();
     const response = action === "removeConnector"
-      ? await this.deps.messenger.sendRemoveConnector(name)
+      ? await this.deps.messenger.sendRemoveConnector(configKey, context)
       : action === "trustConnector" || action === "denyConnector"
-        ? await this.deps.messenger.sendSetConnectorTrust(name, action === "trustConnector")
+        ? await this.deps.messenger.sendSetConnectorTrust(configKey, action === "trustConnector", context)
         : action === "reloadConnector"
-          ? await this.deps.messenger.sendReloadConnector()
+          ? await this.deps.messenger.sendReloadConnector(configKey, context)
           : action === "loginConnector"
-            ? await this.deps.messenger.sendLoginConnector(name)
+            ? await this.deps.messenger.sendLoginConnector(configKey, context)
             : action === "cancelLoginConnector"
-              ? await this.deps.messenger.sendCancelLoginConnector(name)
-              : await this.deps.messenger.sendLogoutConnector(name);
+              ? await this.deps.messenger.sendCancelLoginConnector(configKey, context)
+              : await this.deps.messenger.sendLogoutConnector(configKey, context);
     await this.refreshState(      response.success ? null : response.error ?? "Connector operation failed.",
       response.success
         ? action === "loginConnector"
@@ -751,7 +833,9 @@ export class SettingsPanel implements vscode.Disposable {
     error: string | null = null,
     status: string | null = null,
     warnings: string[] | null = null,
+    connectorReceipt: SettingsConnectorReceipt | null = null,
   ): Promise<void> {
+    const viewEpoch = ++this.viewEpoch;
     const initializeResult = await this.deps.ensureInitialized();
     const capabilities = this.buildCapabilities(initializeResult);
     const providerKeysResult = capabilities.listProviderKeys
@@ -770,6 +854,9 @@ export class SettingsPanel implements vscode.Disposable {
         connectors: this.state.connectors ?? [],
         configPaths: this.state.connectorConfigPaths,
       };
+    if (viewEpoch !== this.viewEpoch) {
+      return;
+    }
     this.state = {
       capabilities,
       error: error ?? modelsResult.error ?? providerKeysResult.error ?? connectorsResult.error,
@@ -779,6 +866,7 @@ export class SettingsPanel implements vscode.Disposable {
       providerKeys: providerKeysResult.providerKeys,
       connectors: connectorsResult.connectors,
       connectorConfigPaths: connectorsResult.configPaths,
+      connectorReceipt,
       ready: true,
       route: this.route,
       serverVersion: initializeResult.serverVersion,
@@ -845,7 +933,7 @@ export class SettingsPanel implements vscode.Disposable {
     configPaths?: ConnectorConfigPaths;
   }> {
     try {
-      const response = await this.deps.messenger.sendListConnectors();
+      const response = await this.deps.messenger.sendListConnectors(await this.connectorContext());
       if (response.success) {
         const parsed = parseConnectorsPayload(response.payload);
         return { error: null, ...parsed };
@@ -965,7 +1053,7 @@ export class SettingsPanel implements vscode.Disposable {
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';"
+      content="default-src 'none'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; style-src ${webview.cspSource}; script-src ${webview.cspSource} 'nonce-${nonce}';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     ${styleTags}

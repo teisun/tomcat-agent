@@ -1171,8 +1171,18 @@ function handleCommand(frame) {
               "ingest_attachment",
               "retain_attachment_leases",
               "cache_attachment_thumbnail",
-            ],
-            protocolVersion: 2,
+              "list_connectors",
+              "list_connector_tools",
+              "add_connector",
+              "remove_connector",
+              "set_connector_trust",
+              "test_connector",
+              "login_connector",
+              "cancel_login_connector",
+              "logout_connector",
+              "reload_connector",
+              "set_connector_tool_filter",
+            ],            protocolVersion: 2,
             sessionId,
           },
           requestId: frame.requestId,
@@ -1183,6 +1193,83 @@ function handleCommand(frame) {
       return;
     case "control_response":
       handleApprovalResponse(frame, false);
+      return;
+    case "list_connectors": {
+      send({
+        id: frame.id,
+        payload: {
+          configPaths: {
+            global: { display: "~/.tomcat/mcp.json", raw: "~/.tomcat/mcp.json" },
+            workspace: { display: ".agents/mcp.json", raw: ".agents/mcp.json" },
+          },
+          connectors: [
+            {
+              auth: "none",
+              command: "node",
+              configKey: "mcp:manual-global",
+              configPath: "~/.tomcat/mcp.json",
+              configPathRaw: "~/.tomcat/mcp.json",
+              name: "manual-global",
+              oauthConfigured: false,
+              resourceCount: 0,
+              source: "global",
+              state: "connected",
+              toolCount: 1,
+              transport: "stdio",
+              trust: { state: "trusted" },
+              url: null,
+            },
+          ],
+        },
+        success: true,
+        type: "response",
+      });
+      return;
+    }
+    case "list_connector_tools":
+      send({
+        id: frame.id,
+        payload: {
+          configKey: frame.configKey,
+          tools: [{
+            description: "Manual acceptance connector probe",
+            enabled: true,
+            label: "connector_probe",
+            modelName: "mcp__manual_global__connector_probe",
+            rawName: "connector_probe",
+          }],
+        },
+        success: true,
+        type: "response",
+      });
+      return;
+    case "add_connector":
+      send({
+        id: frame.id,
+        payload: {
+          configKey: `mcp:manual-${frame.name}`,
+          connectionStarted: true,
+          configSaved: true,
+          name: frame.name,
+        },
+        success: true,
+        type: "response",
+      });
+      return;
+    case "remove_connector":
+    case "set_connector_trust":
+    case "test_connector":
+    case "login_connector":
+    case "cancel_login_connector":
+    case "logout_connector":
+    case "reload_connector":
+    case "set_connector_tool_filter":
+      send({
+        id: frame.id,
+        payload: { configKey: frame.configKey, updated: true },
+        success: true,
+        type: "response",
+      });
       return;
     case "control_cancel":
       handleApprovalResponse(frame, true);

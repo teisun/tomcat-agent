@@ -20,7 +20,7 @@ use crate::api::chat::commands::{
     checkpoint_kind_label, compact_session, restore_core, RestoreCoreReport,
 };
 use crate::core::connector::mcp::config::{
-    global_mcp_path, project_mcp_path, upsert_global_server, upsert_project_server,
+    add_global_server, add_project_server, connector_config_key, global_mcp_path, project_mcp_path,
     McpConfigSource, McpOAuthConfig, McpServerConfig, ToolFilter,
 };
 use crate::core::connector::mcp::manager::ServerState;
@@ -47,11 +47,12 @@ use crate::{CheckpointId, ListOptions, SessionManager, SessionMode};
 
 use super::control;
 use super::types::{
-    AttachmentMode, CacheThumbnailInput, IngestAttachmentInput, IngestAttachmentResponse,
-    ListModelsPayload, ListProviderKeysPayload, ListSessionsScope, OutFrame, RemoveModelResponse,
-    ResponseFrame, ServeAttachment, ServeAttachmentKind, ServeCommand, ServeContentSegment,
-    ServeContextRefKind, ServeContextReference, ServeMessageParams, ServeSessionMode,
-    SetPlanModeAction, SetProviderKeyResponse, UpsertModelResponse,
+    AttachmentMode, CacheThumbnailInput, ConnectorScope, IngestAttachmentInput,
+    IngestAttachmentResponse, ListModelsPayload, ListProviderKeysPayload, ListSessionsScope,
+    OutFrame, RemoveModelResponse, ResponseFrame, ServeAttachment, ServeAttachmentKind,
+    ServeCommand, ServeContentSegment, ServeContextRefKind, ServeContextReference,
+    ServeMessageParams, ServeSessionMode, SetPlanModeAction, SetProviderKeyResponse,
+    UpsertModelResponse,
 };
 use super::{
     cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
@@ -1311,12 +1312,8 @@ pub(crate) async fn handle_command(
                 ),
             )))?;
         }
-        ServeCommand::ListConnectors { id } => {
-            // A settings panel may open before any chat session exists. In that case,
-            // expose the global configuration through an unbound connector registry;
-            // it must not invent a workspace from the serve process cwd.
-            let connector = resolve_connector_registry(&state)
-                .or_else(|_| ConnectorRegistry::new(&state.cfg, None))?;
+        ServeCommand::ListConnectors { id, context } => {
+            let connector = resolve_connector_registry_for_context(&state, &context)?;
             let global_config_path = match global_mcp_path(&state.cfg) {
                 Ok(path) => path,
                 Err(error) => {
@@ -1338,18 +1335,27 @@ pub(crate) async fn handle_command(
                 .mcp_manager()
                 .statuses()
                 .into_iter()
-                .map(|status| {
-                    let configured = connector.mcp_manager().configured_server(&status.name);
+                .map(|status| -> Result<serde_json::Value, AppError> {
+                    let configured = connector
+                        .mcp_manager()
+                        .configured_server(&status.config_key);
                     let config_path = match status.source {
                         McpConfigSource::Global => Some(global_config_path.clone()),
                         McpConfigSource::Project => project_config_path.clone(),
                     };
-                    let config_path_display = config_path
-                        .as_ref()
-                        .map(|path| crate::infra::platform::format_home_path(path));
-                    json!({
+                    let config_path = config_path.ok_or_else(|| {
+                        AppError::Config(format!(
+                            "workspace connector '{}' has no selected workspace path",
+                            status.name
+                        ))
+                    })?;
+                    let config_key = status.config_key;
+                    let config_path_display = crate::infra::platform::format_home_path(&config_path);
+                    Ok(json!({
+                        "configKey": config_key,
                         "name": status.name,
-                        "source": status.source.as_str(),
+                        "source": status.source.wire_scope(),
+                        "overridden": status.overridden,
                         "state": status.state.code(),
                         "trust": status.trust,
                         "toolCount": status.tool_count,
@@ -1358,7 +1364,7 @@ pub(crate) async fn handle_command(
                         "url": configured.as_ref().and_then(|server| server.config.url.clone()),
                         "command": configured.as_ref().map(|server| server.config.command.clone()),
                         "configPath": config_path_display,
-                        "configPathRaw": config_path.map(|path| path.to_string_lossy().to_string()),
+                        "configPathRaw": config_path.to_string_lossy().to_string(),
                         "oauthConfigured": configured.as_ref().is_some_and(|server| {
                             server.config.oauth.is_some()
                                 || server.config.auth.as_deref() == Some("oauth")
@@ -1375,8 +1381,9 @@ pub(crate) async fn handle_command(
                                 "exclude": server.config.tool_filter.exclude,
                             })
                         }),
-                    })
-                })                .collect::<Vec<_>>();
+                    }))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let config_paths = json!({
                 "global": {
                     "display": crate::infra::platform::format_home_path(&global_config_path),
@@ -1393,8 +1400,12 @@ pub(crate) async fn handle_command(
                 Some(json!({ "connectors": servers, "configPaths": config_paths })),
             )))?;
         }
-        ServeCommand::ListConnectorTools { id, name } => {
-            let connector = match resolve_connector_registry(&state) {
+        ServeCommand::ListConnectorTools {
+            id,
+            config_key,
+            context,
+        } => {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
                 Ok(connector) => connector,
                 Err(error) => {
                     send_error(
@@ -1406,7 +1417,7 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            let tools = match connector.mcp_manager().list_tools(&name) {
+            let tools = match connector.mcp_manager().list_tools(&config_key) {
                 Ok(tools) => tools,
                 Err(error) => {
                     send_error(
@@ -1432,7 +1443,7 @@ pub(crate) async fn handle_command(
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(json!({ "name": name, "tools": tools })),
+                Some(json!({ "configKey": config_key, "tools": tools })),
             )))?;
         }
         ServeCommand::AddConnector {
@@ -1446,7 +1457,20 @@ pub(crate) async fn handle_command(
             env,
             auth,
             scope,
+            context,
         } => {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
             let static_bearer = headers.iter().find_map(|(key, value)| {
                 key.eq_ignore_ascii_case("authorization")
                     .then(|| {
@@ -1481,7 +1505,9 @@ pub(crate) async fn handle_command(
                 ));
             }
             headers.retain(|key, _| !key.eq_ignore_ascii_case("authorization"));
-            let auth = auth.or_else(|| static_bearer.as_ref().map(|_| "bearer".to_string()));
+            let auth = auth
+                .or_else(|| static_bearer.as_ref().map(|_| "bearer".to_string()))
+                .unwrap_or_else(|| "none".to_string());
             let oauth = oauth
                 .map(serde_json::from_value::<McpOAuthConfig>)
                 .transpose()
@@ -1493,7 +1519,7 @@ pub(crate) async fn handle_command(
                 command,
                 args,
                 url,
-                auth,
+                auth: Some(auth),
                 headers,
                 oauth,
                 env,
@@ -1504,26 +1530,28 @@ pub(crate) async fn handle_command(
                 call_timeout_ms: 120_000,
                 tool_filter: ToolFilter::default(),
             };
-            let use_workspace = scope.as_deref() == Some("workspace");
-            let workspace_root = resolve_connector_registry(&state)
-                .ok()
-                .and_then(|connector| {
-                    connector
-                        .mcp_manager()
-                        .workspace_root()
-                        .map(|path| path.to_path_buf())
-                });
-            let result = if use_workspace {
-                match workspace_root.as_deref() {
-                    Some(workspace_root) => {
-                        upsert_project_server(&state.cfg, workspace_root, name.clone(), config)
-                    }
-                    None => Err(AppError::Config(
+            let use_workspace = matches!(scope, ConnectorScope::Workspace);
+            let workspace_root = connector_context_workspace_root(&context)?;
+            let config_path = if use_workspace {
+                let workspace_root = workspace_root.as_deref().ok_or_else(|| {
+                    AppError::Config(
                         "workspace connector configuration requires an explicit session project root".into(),
-                    )),
-                }
+                    )
+                })?;
+                project_mcp_path(&state.cfg, workspace_root)?
             } else {
-                upsert_global_server(&state.cfg, name.clone(), config)
+                global_mcp_path(&state.cfg)?
+            };
+            let config_key = connector_config_key(&config_path, &name)?;
+            let result = if use_workspace {
+                add_project_server(
+                    &state.cfg,
+                    workspace_root.as_deref().expect("validated workspace root"),
+                    name.clone(),
+                    config,
+                )
+            } else {
+                add_global_server(&state.cfg, name.clone(), config)
             };
             if let Err(error) = result {
                 send_error(
@@ -1534,137 +1562,66 @@ pub(crate) async fn handle_command(
                 )?;
                 return Ok(());
             }
-            if let Some(token) = static_bearer {
-                let connector = resolve_connector_registry(&state)?;
-                connector
-                    .mcp_manager()
-                    .save_static_bearer(&name, token, token_resource)?;
-            }
-            let connector = match resolve_connector_registry(&state) {
-                Ok(connector) => connector,
-                Err(error) => {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
-                }
-            };
-            connector.mcp_manager().reload_configuration(&state.cfg)?;
-            if use_workspace {
-                connector.mcp_manager().approve(&name)?;
-            }
-            if let Err(error) = connector.mcp_manager().connect_server(&name).await {
-                warn!(server = %name, error = %error, "connector configuration saved but server is not ready yet");
-            }
-            state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                id,
-                state.registry.active_session_id(),
-                Some(json!({ "name": name })),
-            )))?;
-        }
-        ServeCommand::RemoveConnector { id, name } => {
-            let connector = match resolve_connector_registry(&state) {
-                Ok(connector) => connector,
-                Err(error) => {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
-                }
-            };
-            let removed = match connector
-                .mcp_manager()
-                .remove_configured_server(&name, &state.cfg)
-            {
-                Ok(removed) => removed,
-                Err(error) => {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
-                }
-            };
-            if removed {
-                connector.reload().await?;
-            }
-            state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                id,
-                state.registry.active_session_id(),
-                Some(json!({ "name": name, "removed": removed })),
-            )))?;
-        }
-        ServeCommand::SetConnectorTrust { id, name, trusted } => {
-            let connector = match resolve_connector_registry(&state) {
-                Ok(connector) => connector,
-                Err(error) => {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
-                }
-            };
-            let result = if trusted {
-                connector.approve_and_connect(&name).await
+            ConnectorRegistry::synchronize_cached_config_change(
+                &state.cfg,
+                if use_workspace {
+                    McpConfigSource::Project
+                } else {
+                    McpConfigSource::Global
+                },
+                workspace_root.as_deref(),
+            )?;
+            let manager = connector.mcp_manager();
+            let post_save_error = if let Some(token) = static_bearer {
+                manager
+                    .save_static_bearer(&config_key, token, token_resource)
+                    .err()
+                    .map(|error| render_error_message(&error))
+            } else if use_workspace {
+                manager
+                    .approve(&config_key)
+                    .err()
+                    .map(|error| render_error_message(&error))
             } else {
-                connector.deny(&name)
+                None
             };
-            if let Err(error) = result {
-                send_error(
-                    &state,
+            if let Some(error) = post_save_error {
+                state.writer.send(OutFrame::Response(ResponseFrame::ok(
                     id,
                     state.registry.active_session_id(),
-                    render_error_message(&error),
-                )?;
+                    Some(json!({
+                        "name": name,
+                        "configKey": config_key,
+                        "configSaved": true,
+                        "connectionStarted": false,
+                        "postSaveError": error,
+                    })),
+                )))?;
                 return Ok(());
             }
-            state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                id,
-                state.registry.active_session_id(),
-                Some(json!({ "name": name, "trusted": trusted })),
-            )))?;
-        }
-        ServeCommand::TestConnector { id, name } => {
-            let connector = match resolve_connector_registry(&state) {
-                Ok(connector) => connector,
-                Err(error) => {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
+            let connect_key = config_key.clone();
+            tokio::spawn(async move {
+                if let Err(error) = manager.connect_server(&connect_key).await {
+                    warn!(config_key = %connect_key, error = %error, "connector configuration saved but server is not ready yet");
                 }
-            };
-            if let Err(error) = connector.mcp_manager().reconnect_server(&name).await {
-                send_error(
-                    &state,
-                    id,
-                    state.registry.active_session_id(),
-                    render_error_message(&error),
-                )?;
-                return Ok(());
-            }
+            });
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(json!({ "name": name, "connected": true })),
+                Some(json!({
+                    "name": name,
+                    "configKey": config_key,
+                    "configSaved": true,
+                    "connectionStarted": true,
+                })),
             )))?;
         }
-        ServeCommand::LoginConnector { id, name } => {
-            let connector = match resolve_connector_registry(&state) {
+        ServeCommand::RemoveConnector {
+            id,
+            config_key,
+            context,
+        } => {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
                 Ok(connector) => connector,
                 Err(error) => {
                     send_error(
@@ -1677,20 +1634,50 @@ pub(crate) async fn handle_command(
                 }
             };
             let manager = connector.mcp_manager();
-            let login_name = name.clone();
-            tokio::spawn(async move {
-                if let Err(error) = manager.login_server(&login_name).await {
-                    warn!(server = %login_name, error = %error, "connector OAuth login failed");
+            let source = match manager.configured_server_source(&config_key) {
+                Ok(source) => source,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
                 }
-            });
+            };
+            let removed = match manager.remove_configured_server(&config_key, &state.cfg) {
+                Ok(removed) => removed,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            if removed {
+                ConnectorRegistry::synchronize_cached_config_change(
+                    &state.cfg,
+                    source,
+                    manager.workspace_root(),
+                )?;
+            }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(json!({ "name": name, "authorizing": true })),
+                Some(json!({ "configKey": config_key, "removed": removed })),
             )))?;
         }
-        ServeCommand::CancelLoginConnector { id, name } => {
-            let connector = match resolve_connector_registry(&state) {
+        ServeCommand::SetConnectorTrust {
+            id,
+            config_key,
+            trusted,
+            context,
+        } => {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
                 Ok(connector) => connector,
                 Err(error) => {
                     send_error(
@@ -1702,47 +1689,12 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            let cancelled = connector.mcp_manager().cancel_login(&name);
-            state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                id,
-                state.registry.active_session_id(),
-                Some(json!({ "name": name, "cancelled": cancelled })),
-            )))?;
-        }
-        ServeCommand::LogoutConnector { id, name } => {
-            let connector = match resolve_connector_registry(&state) {
-                Ok(connector) => connector,
-                Err(error) => {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
-                }
+            let result = if trusted {
+                connector.approve_and_connect(&config_key).await
+            } else {
+                connector.deny(&config_key)
             };
-            let removed = connector.mcp_manager().logout_server(&name)?;
-            state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                id,
-                state.registry.active_session_id(),
-                Some(json!({ "name": name, "loggedOut": removed })),
-            )))?;
-        }
-        ServeCommand::ReloadConnector { id } => {
-            let connector = match resolve_connector_registry(&state) {
-                Ok(connector) => connector,
-                Err(error) => {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
-                }
-            };
-            if let Err(error) = connector.reload().await {
+            if let Err(error) = result {
                 send_error(
                     &state,
                     id,
@@ -1754,18 +1706,173 @@ pub(crate) async fn handle_command(
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(json!({ "reloaded": true })),
+                Some(json!({ "configKey": config_key, "trusted": trusted })),
+            )))?;
+        }
+        ServeCommand::TestConnector {
+            id,
+            config_key,
+            context,
+        } => {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            if let Err(error) = connector.mcp_manager().reconnect_server(&config_key).await {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "configKey": config_key, "connected": true })),
+            )))?;
+        }
+        ServeCommand::LoginConnector {
+            id,
+            config_key,
+            context,
+        } => {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let manager = connector.mcp_manager();
+            let login_key = config_key.clone();
+            tokio::spawn(async move {
+                if let Err(error) = manager.login_server(&login_key).await {
+                    warn!(config_key = %login_key, error = %error, "connector OAuth login failed");
+                }
+            });
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "configKey": config_key, "authorizing": true })),
+            )))?;
+        }
+        ServeCommand::CancelLoginConnector {
+            id,
+            config_key,
+            context,
+        } => {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let cancelled = connector.mcp_manager().cancel_login(&config_key);
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "configKey": config_key, "cancelled": cancelled })),
+            )))?;
+        }
+        ServeCommand::LogoutConnector {
+            id,
+            config_key,
+            context,
+        } => {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let removed = connector.mcp_manager().logout_server(&config_key)?;
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "configKey": config_key, "loggedOut": removed })),
+            )))?;
+        }
+        ServeCommand::ReloadConnector {
+            id,
+            config_key,
+            context,
+        } => {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            if let Err(error) = connector.mcp_manager().reconnect_server(&config_key).await {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(json!({ "configKey": config_key, "reloaded": true })),
             )))?;
         }
         ServeCommand::SetConnectorToolFilter {
             id,
-            name,
+            config_key,
             include,
             exclude,
-            scope: _,
+            context,
         } => {
-            let connector = match resolve_connector_registry(&state) {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
                 Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let manager = connector.mcp_manager();
+            let source = match manager.configured_server_source(&config_key) {
+                Ok(source) => source,
                 Err(error) => {
                     send_error(
                         &state,
@@ -1777,9 +1884,7 @@ pub(crate) async fn handle_command(
                 }
             };
             let filter = ToolFilter { include, exclude };
-            if let Err(error) = connector
-                .mcp_manager()
-                .set_configured_tool_filter(&name, filter, &state.cfg)
+            if let Err(error) = manager.set_configured_tool_filter(&config_key, filter, &state.cfg)
             {
                 send_error(
                     &state,
@@ -1789,21 +1894,23 @@ pub(crate) async fn handle_command(
                 )?;
                 return Ok(());
             }
-            if let Ok(connector) = resolve_connector_registry(&state) {
-                if let Err(error) = connector.reload().await {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
-                }
+            if let Err(error) = ConnectorRegistry::synchronize_cached_config_change(
+                &state.cfg,
+                source,
+                manager.workspace_root(),
+            ) {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
             }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(json!({ "name": name, "updated": true })),
+                Some(json!({ "configKey": config_key, "updated": true })),
             )))?;
         }
         ServeCommand::DiscardDetachedSession { id, session_id } => {
@@ -1946,15 +2053,40 @@ fn resolve_active_slot(state: &ServeState) -> Result<Arc<super::registry::Sessio
         .ok_or_else(|| AppError::Config("unknown_session".to_string()))
 }
 
-fn resolve_connector_registry(
+fn connector_context_workspace_root(
+    context: &super::types::ConnectorContext,
+) -> Result<Option<std::path::PathBuf>, AppError> {
+    let Some(workspace_root) = context.workspace_root.as_deref() else {
+        return Ok(None);
+    };
+    if workspace_root.trim().is_empty() {
+        return Err(AppError::Config(
+            "connector context workspaceRoot cannot be empty".to_string(),
+        ));
+    }
+    let root = crate::normalize_path(workspace_root)?;
+    if !root.is_dir() {
+        return Err(AppError::Config(format!(
+            "connector context workspaceRoot must be an existing directory: {}",
+            root.display()
+        )));
+    }
+    Ok(Some(root))
+}
+
+fn resolve_connector_registry_for_context(
     state: &ServeState,
+    context: &super::types::ConnectorContext,
 ) -> Result<Arc<crate::core::connector::ConnectorRegistry>, AppError> {
-    resolve_active_slot(state)?
-        .ctx
-        .global_services
-        .connector_registry
-        .clone()
-        .ok_or_else(|| AppError::Config("connector_disabled".to_string()))
+    if !state.cfg.connector.enabled {
+        return Err(AppError::Config(
+            "connector support is disabled".to_string(),
+        ));
+    }
+    let workspace_root = connector_context_workspace_root(context)?;
+    // ConnectorRegistry owns the process-wide identity cache. Settings and chat
+    // both resolve through it, keyed by the explicit workspace context.
+    ConnectorRegistry::new(&state.cfg, workspace_root.as_deref())
 }
 
 fn resolve_model_catalog_snapshot(

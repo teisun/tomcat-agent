@@ -24,6 +24,11 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# The runtime marks this parent shell as an active agent. Integration tests launch
+# disposable CLI processes that intentionally mutate their own temporary HOME;
+# do not let that parent-only safety marker leak into those isolated processes.
+unset TOMCAT_AGENT_ACTIVE
+
 . "$REPO_ROOT/scripts/test-groups.sh"
 
 # 非 TTY（IDE/CI/管道）下若继承 EDITOR=vim 等，子进程会阻塞等输入，表现为测试「卡死」。

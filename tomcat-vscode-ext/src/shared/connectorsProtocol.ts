@@ -9,7 +9,7 @@ export type ConnectorState =
   | "needs_authorization"
   | "blocked"
   | "failed";
-export type ConnectorSource = "Global" | "Workspace" | "Unknown";
+export type ConnectorScope = "global" | "workspace";
 
 export interface ConnectorConfigPath {
   display: string;
@@ -23,10 +23,13 @@ export interface ConnectorConfigPaths {
 }
 
 export interface ConnectorView {
+  configKey: string;
   name: string;
   type: ConnectorType;
   transport: ConnectorTransport;
-  source: ConnectorSource;
+  source: ConnectorScope;
+  /** The Global definition is visible for management but Workspace owns execution. */
+  overridden: boolean;
   auth?: "none" | "bearer" | "oauth" | null;
   oauthConfigured: boolean;
   state: ConnectorState;
@@ -70,7 +73,7 @@ export interface ConnectorInput {
     scopes?: string[];
     callbackUrl?: string;
   };
-  scope: "workspace" | "user";
+  scope: ConnectorScope;
 }
 
 export interface ConnectorsHostFrame {
@@ -86,18 +89,16 @@ export function normalizeConnectorView(value: unknown): ConnectorView | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
   const state = typeof raw.state === "string" ? raw.state : "failed";
-  const source = raw.source === "Workspace"
-    ? "Workspace"
-    : raw.source === "Global" || raw.source === "User"
-      ? "Global"
-      : "Unknown";
+  const source = raw.source === "workspace" ? "workspace" : raw.source === "global" ? "global" : null;
   const transport = typeof raw.url === "string" ? "http" : "stdio";
-  if (typeof raw.name !== "string") return null;
+  if (typeof raw.name !== "string" || typeof raw.configKey !== "string" || !source) return null;
   return {
+    configKey: raw.configKey,
     name: raw.name,
     type: "mcp",
     transport,
     source,
+    overridden: raw.overridden === true,
     auth: raw.auth === "none" || raw.auth === "bearer" || raw.auth === "oauth" ? raw.auth : null,
     oauthConfigured: raw.oauthConfigured === true || raw.auth === "oauth",
     state: state as ConnectorState,

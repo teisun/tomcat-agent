@@ -175,11 +175,27 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         ),
     )
     .expect("write isolated connector test model");
-    let (state, buffer, _temp, _slot) = build_initialized_state_with_config(temp, cfg).await;
+    let (state, buffer, _temp, slot) = build_initialized_state_with_config(temp, cfg).await;
+    let session_connector = slot
+        .ctx
+        .global_services
+        .connector_registry
+        .as_ref()
+        .expect("connector registry")
+        .clone();
+    let workspace_root = session_connector
+        .mcp_manager()
+        .workspace_root()
+        .expect("session workspace root")
+        .to_path_buf();
+    let connector_context = crate::api::serve::types::ConnectorContext {
+        workspace_root: Some(workspace_root.to_string_lossy().into_owned()),
+    };
     handle_command(
         Arc::clone(&state),
         ServeCommand::ListConnectors {
             id: Some("list-empty-connectors".to_string()),
+            context: connector_context.clone(),
         },
     )
     .await
@@ -217,7 +233,8 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
             oauth: None,
             env: Default::default(),
             auth: None,
-            scope: Some("workspace".to_string()),
+            scope: crate::api::serve::types::ConnectorScope::Workspace,
+            context: connector_context.clone(),
         },
     )
     .await
@@ -226,12 +243,42 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         line.get("id").and_then(serde_json::Value::as_str) == Some("add-connector")
     })
     .await;
-    assert!(lines.iter().any(|line| line["success"] == true));
+    let added = lines
+        .iter()
+        .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some("add-connector"))
+        .expect("add response");
+    assert_eq!(added["success"], true);
+    assert_eq!(added["payload"]["configSaved"], true);
+    assert_eq!(added["payload"]["connectionStarted"], true);
+    assert!(
+        Arc::ptr_eq(
+            &session_connector,
+            &crate::core::connector::ConnectorRegistry::new(&state.cfg, Some(&workspace_root))
+                .expect("settings connector registry"),
+        ),
+        "settings and chat must resolve the same context registry",
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let connected = session_connector
+                .mcp_manager()
+                .statuses()
+                .into_iter()
+                .any(|status| status.name == "fake" && status.state.code() == "connected");
+            if connected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("background connector connection completes");
 
     handle_command(
         Arc::clone(&state),
         ServeCommand::ListConnectors {
             id: Some("list-connectors".to_string()),
+            context: connector_context.clone(),
         },
     )
     .await
@@ -246,7 +293,15 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         .expect("list response");
     let summary = &listed["payload"]["connectors"][0];
     assert_eq!(summary["name"], "fake");
-    assert_eq!(summary["source"], "Workspace");
+    assert_eq!(summary["source"], "workspace");
+    let config_key = summary["configKey"]
+        .as_str()
+        .expect("connector summary config key")
+        .to_string();
+    assert!(
+        config_key.starts_with("mcp:"),
+        "connector summary must expose an opaque path-and-name config identity",
+    );
     assert!(
         listed["payload"]["configPaths"]["workspace"]["raw"]
             .as_str()
@@ -277,7 +332,8 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         Arc::clone(&state),
         ServeCommand::ListConnectorTools {
             id: Some("list-tools".to_string()),
-            name: "fake".to_string(),
+            config_key: config_key.clone(),
+            context: connector_context.clone(),
         },
     )
     .await
@@ -299,10 +355,10 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         Arc::clone(&state),
         ServeCommand::SetConnectorToolFilter {
             id: Some("filter-tools".to_string()),
-            name: "fake".to_string(),
+            config_key: config_key.clone(),
             include: vec!["capture".to_string()],
             exclude: vec![],
-            scope: Some("workspace".to_string()),
+            context: connector_context.clone(),
         },
     )
     .await
@@ -316,7 +372,8 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         Arc::clone(&state),
         ServeCommand::ListConnectorTools {
             id: Some("list-filtered-tools".to_string()),
-            name: "fake".to_string(),
+            config_key,
+            context: connector_context,
         },
     )
     .await
@@ -436,6 +493,152 @@ async fn serve_interrupt_unknown_session_returns_error_response() {
     assert_eq!(
         response.get("error").and_then(serde_json::Value::as_str),
         Some("unknown_session")
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn disabled_connector_add_returns_error_without_persisting_configuration() {
+    const CONNECTOR_TEST_API_KEY_ENV: &str = "TOMCAT_SERVE_DISABLED_CONNECTOR_TEST_API_KEY";
+
+    let _api_key = EnvGuard::set(CONNECTOR_TEST_API_KEY_ENV, "test-key");
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.workspace.project_resource_dir = ".workspace-data".to_string();
+    cfg.connector.enabled = false;
+    fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"[[models]]
+id = "gpt-5.4"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "serve-disabled-connector-test"
+api_key_env = "{CONNECTOR_TEST_API_KEY_ENV}"
+base_url = "http://127.0.0.1:1"
+capabilities = {{ vision = true, files = true, tools = true, reasoning = true, web_search = false }}
+"#
+        ),
+    )
+    .expect("write isolated connector test model");
+    let (state, buffer, _temp, slot) = build_initialized_state_with_config(temp, cfg).await;
+    let workspace_root =
+        std::path::PathBuf::from(slot.cwd.clone().expect("session workspace root"));
+    let context = crate::api::serve::types::ConnectorContext {
+        workspace_root: Some(workspace_root.to_string_lossy().into_owned()),
+    };
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::AddConnector {
+            id: Some("disabled-add-connector".to_string()),
+            name: "blocked".to_string(),
+            command: "node".to_string(),
+            args: vec![],
+            url: None,
+            headers: Default::default(),
+            oauth: None,
+            env: Default::default(),
+            auth: None,
+            scope: crate::api::serve::types::ConnectorScope::Workspace,
+            context,
+        },
+    )
+    .await
+    .expect("disabled add produces a response");
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("disabled-add-connector")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("disabled-add-connector")
+        })
+        .expect("disabled add response");
+    assert_eq!(response["success"], false);
+    assert!(response["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("connector support is disabled")));
+    assert!(
+        !workspace_root.join(".workspace-data/mcp.json").exists(),
+        "disabled Add must not create the workspace connector configuration"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
+async fn add_reports_saved_configuration_when_bearer_storage_fails() {
+    const CONNECTOR_TEST_API_KEY_ENV: &str = "TOMCAT_SERVE_PARTIAL_ADD_TEST_API_KEY";
+
+    let _api_key = EnvGuard::set(CONNECTOR_TEST_API_KEY_ENV, "test-key");
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let mut cfg = serve_test_config(temp.path(), "http://127.0.0.1:1");
+    cfg.connector.enabled = true;
+    fs::write(
+        temp.path().join("models.toml"),
+        format!(
+            r#"[[models]]
+id = "gpt-5.4"
+model_name = "gpt-5.4"
+api = "openai-responses"
+provider = "serve-partial-add-test"
+api_key_env = "{CONNECTOR_TEST_API_KEY_ENV}"
+base_url = "http://127.0.0.1:1"
+capabilities = {{ vision = true, files = true, tools = true, reasoning = true, web_search = false }}
+"#
+        ),
+    )
+    .expect("write isolated connector test model");
+    let (state, buffer, _temp, slot) = build_initialized_state_with_config(temp, cfg).await;
+    let work_dir = crate::infra::config::get_work_dir(&state.cfg).expect("work directory");
+    fs::write(work_dir.join("connector-oauth.json"), "not valid JSON")
+        .expect("poison bearer storage after registry initialization");
+    let workspace_root =
+        std::path::PathBuf::from(slot.cwd.clone().expect("session workspace root"));
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::AddConnector {
+            id: Some("partial-add-connector".to_string()),
+            name: "saved-without-bearer".to_string(),
+            command: String::new(),
+            args: vec![],
+            url: Some("http://127.0.0.1:1/mcp".to_string()),
+            headers: std::collections::BTreeMap::from([(
+                "Authorization".to_string(),
+                "Bearer controlled-test-token".to_string(),
+            )]),
+            oauth: None,
+            env: Default::default(),
+            auth: Some("bearer".to_string()),
+            scope: crate::api::serve::types::ConnectorScope::Global,
+            context: crate::api::serve::types::ConnectorContext {
+                workspace_root: Some(workspace_root.to_string_lossy().into_owned()),
+            },
+        },
+    )
+    .await
+    .expect("partial add produces a response");
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("partial-add-connector")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("partial-add-connector")
+        })
+        .expect("partial add response");
+    assert_eq!(response["success"], true);
+    assert_eq!(response["payload"]["configSaved"], true);
+    assert_eq!(response["payload"]["connectionStarted"], false);
+    assert!(response["payload"]["postSaveError"].as_str().is_some());
+    assert!(
+        work_dir.join("mcp.json").exists(),
+        "configuration remains saved"
     );
 }
 

@@ -12,9 +12,13 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use std::collections::VecDeque;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tomcat::{
     init_context_state, llm_http_status_error, run_chat_turn, AppConfig, AppError, BashResult,
@@ -2724,6 +2728,84 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
     }
 }
 
+fn run_background_bash_autofeed_real_llm_chat(
+    fx: &BackgroundBashP1RealLlmFixture,
+    prompt: String,
+    timeout: std::time::Duration,
+) -> CliChatRunCapture {
+    let executable = std::env::var_os("CARGO_BIN_EXE_tomcat")
+        .expect("cargo must expose the tomcat integration-test binary");
+    let mut child = ProcessCommand::new(executable)
+        .arg("code")
+        .current_dir(&fx.scratch)
+        .env("HOME", fx._home.path())
+        .env("USERPROFILE", fx._home.path())
+        .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
+        .env("RUST_LOG", "tomcat=info")
+        .env_remove("TOMCAT_AGENT_ACTIVE")
+        .env(common::DEEPSEEK_TEST_API_KEY_ENV, &fx.api_key)
+        .env("TOMCAT__LLM__PROVIDER", "openai")
+        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
+        .env(
+            "TOMCAT__LLM__API_KEY_ENV",
+            common::DEEPSEEK_TEST_API_KEY_ENV,
+        )
+        .env("TOMCAT__LLM__DEFAULT_MODEL", common::deepseek_test_model())
+        .env(
+            "TOMCAT__CONTEXT__COMPACTION_MODEL",
+            common::deepseek_test_model(),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tomcat code");
+    let mut stdin = child.stdin.take().expect("tomcat stdin");
+    stdin
+        .write_all(format!("{prompt}\n").as_bytes())
+        .expect("write chat prompt");
+    stdin.flush().expect("flush chat prompt");
+
+    let mut stdout = child.stdout.take().expect("tomcat stdout");
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).expect("read tomcat stdout");
+        bytes
+    });
+    let mut stderr = child.stderr.take().expect("tomcat stderr");
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).expect("read tomcat stderr");
+        bytes
+    });
+
+    // `assert_cmd::write_stdin` closes stdin immediately. Keep the interactive session alive
+    // long enough for the two-second child task to enqueue its synthetic follow-up, then send
+    // EOF so the normal CLI drain/exit path can render the final response.
+    thread::sleep(std::time::Duration::from_secs(8));
+    drop(stdin);
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll tomcat code") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("stop timed-out tomcat code");
+            break child.wait().expect("reap timed-out tomcat code");
+        }
+        thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let stdout =
+        String::from_utf8_lossy(&stdout_reader.join().expect("join stdout reader")).to_string();
+    let stderr =
+        String::from_utf8_lossy(&stderr_reader.join().expect("join stderr reader")).to_string();
+    CliChatRunCapture {
+        success: status.success(),
+        stdout,
+        stderr,
+    }
+}
+
 fn run_background_bash_p1_real_llm_chat(
     fx: &BackgroundBashP1RealLlmFixture,
     prompt: String,
@@ -2785,85 +2867,77 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
     common::load_deepseek_test_env();
     let _span = info_span!("test_user_background_bash_autofeed_real_llm_cli").entered();
 
-    let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016c_bg_autofeed");
-    let bg_done = fx.scratch.join("bg_done.txt");
-    let marker = fx.scratch.join("marker.txt");
-    let _ = fs::remove_file(&bg_done);
-    let _ = fs::remove_file(&marker);
+    // This is deliberately a real-provider black-box check. Each independent attempt still
+    // requires the complete tool sequence; bounded retries absorb an occasional model turn
+    // that describes the required bash call instead of issuing it.
+    let mut failures = Vec::new();
+    for attempt in 1..=3 {
+        let fx = setup_background_bash_p1_real_llm_fixture(&format!(
+            "e2e_cli016c_bg_autofeed_{attempt}",
+        ));
+        let bg_done = fx.scratch.join("bg_done.txt");
+        let marker = fx.scratch.join("marker.txt");
+        let _ = fs::remove_file(&bg_done);
+        let _ = fs::remove_file(&marker);
 
-    let prompt = format!(
-        concat!(
-            "以下内容就是完整步骤；不要要求我重复步骤，不要反问，不要 ask_question。 ",
-            "请严格按下面步骤执行，不要偏离，不要解释策略： ",
-            "1. 只启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
-            "2. 这个后台 bash 的 command 必须精确执行：sleep 2; printf BG_DONE > \"{bg_done}\"。 ",
-            "3. 启动后台任务后，立刻创建文件 \"{marker}\"，内容必须精确为 MARKER。 ",
-            "4. 从这一步开始，禁止调用 task_output、task_list、task_stop，也不要再启动新的 bash；你必须等待 runtime 自动注入的 <background-task-finished ...> 系统消息。 ",
-            "5. 只有在看到该系统消息之后，才允许读取并确认 \"{bg_done}\" 和 \"{marker}\" 都存在且内容正确。 ",
-            "6. 全部确认后，只回复一行 AUTOFEED_OK 并停止；不要输出别的结尾。"
-        ),
-        bg_done = bg_done.display(),
-        marker = marker.display(),
-    );
+        let prompt = format!(
+            concat!(
+                "以下内容就是完整步骤；不要要求我重复步骤，不要反问，不要 ask_question。 ",
+                "请严格按下面步骤执行，不要偏离，不要解释策略： ",
+                "1. 只启动一个后台 bash 任务，必须设置 run_in_background=true。 ",
+                "2. 这个后台 bash 的 command 必须精确执行：sleep 2; printf BG_DONE > \"{bg_done}\"。 ",
+                "3. 启动后台任务后，立刻创建文件 \"{marker}\"，内容必须精确为 MARKER。 ",
+                "4. 从这一步开始，禁止调用 task_output、task_list、task_stop，也不要再启动新的 bash；你必须等待 runtime 自动注入的 <background-task-finished ...> 系统消息。 ",
+                "5. 只有在看到该系统消息之后，才允许读取并确认 \"{bg_done}\" 和 \"{marker}\" 都存在且内容正确。 ",
+                "6. 全部确认后，只回复一行 AUTOFEED_OK 并停止；不要输出别的结尾。"
+            ),
+            bg_done = bg_done.display(),
+            marker = marker.display(),
+        );
 
-    info!("Act: tomcat chat 触发后台 bash auto-feed，timeout 120s");
-    let run =
-        run_background_bash_p1_real_llm_chat(&fx, prompt, std::time::Duration::from_secs(120));
-    let stdout = run.stdout;
-    let stderr = run.stderr;
-    info!("[tomcat chat stdout] {}", trunc(&stdout, 1500));
-    if !stderr.is_empty() {
-        info!("[tomcat chat stderr] {}", trunc(&stderr, 2000));
-    }
-    info!("Assert: exit 0 + stderr 含 [bg] task + 两文件落盘 + stdout 含 AUTOFEED_OK");
-    let core_ok = run.success
-        && stderr.contains("[bg] task")
-        && stderr.contains("queued for next turn")
-        && bg_done.exists()
-        && marker.exists()
-        && stdout.contains("AUTOFEED_OK");
-    if !core_ok
-        && maybe_skip_transient_deepseek_connect_failure(
+        info!(
+            attempt,
+            "Act: tomcat chat 触发后台 bash auto-feed，timeout 120s"
+        );
+        let run = run_background_bash_autofeed_real_llm_chat(
+            &fx,
+            prompt,
+            std::time::Duration::from_secs(120),
+        );
+        let stdout = run.stdout;
+        let stderr = run.stderr;
+        let core_ok = run.success
+            && stderr.contains("[bg] task")
+            && stderr.contains("queued for next turn")
+            && bg_done.is_file()
+            && marker.is_file()
+            && fs::read_to_string(&bg_done).is_ok_and(|text| text == "BG_DONE")
+            && fs::read_to_string(&marker).is_ok_and(|text| text == "MARKER")
+            && stdout.contains("AUTOFEED_OK");
+        if core_ok {
+            return;
+        }
+        if maybe_skip_transient_deepseek_connect_failure(
             "test_user_background_bash_autofeed_real_llm_cli",
             &stdout,
             &stderr,
             "background bash auto-feed",
-        )
-    {
-        return;
+        ) {
+            return;
+        }
+        failures.push(format!(
+            "attempt {attempt}: success={} bg_done={:?} marker={:?} stdout={} stderr={}",
+            run.success,
+            fs::read_to_string(&bg_done).unwrap_or_default(),
+            fs::read_to_string(&marker).unwrap_or_default(),
+            trunc(&stdout, 600),
+            trunc(&stderr, 1200),
+        ));
     }
-    assert!(
-        run.success,
-        "tomcat chat 应 exit 0；stderr: {}",
-        trunc(&stderr, 1200)
-    );
-    assert!(
-        stderr.contains("[bg] task") && stderr.contains("queued for next turn"),
-        "stderr 应含后台完成 auto-feed 提示，实际: {}",
-        trunc(&stderr, 1200)
-    );
-    assert!(
-        bg_done.exists(),
-        "后台任务产物应存在: {}",
-        bg_done.display()
-    );
-    assert!(marker.exists(), "独立工作产物应存在: {}", marker.display());
-    let bg_done_text = fs::read_to_string(&bg_done).unwrap_or_default();
-    let marker_text = fs::read_to_string(&marker).unwrap_or_default();
-    assert_eq!(
-        bg_done_text, "BG_DONE",
-        "bg_done.txt 内容应精确为 BG_DONE，实际: {:?}",
-        bg_done_text
-    );
-    assert_eq!(
-        marker_text, "MARKER",
-        "marker.txt 内容应精确为 MARKER，实际: {:?}",
-        marker_text
-    );
-    assert!(
-        stdout.contains("AUTOFEED_OK"),
-        "stdout 应含 AUTOFEED_OK，实际: {}",
-        trunc(&stdout, 600)
+
+    panic!(
+        "background bash auto-feed must complete the strict tool sequence in one of three independent real-LLM attempts:\n{}",
+        failures.join("\n---\n"),
     );
 }
 
@@ -6329,7 +6403,10 @@ async fn test_chat_path_web_search_survives_idle_gap_between_turns() {
         std::time::Duration::ZERO,
     )
     .await;
-    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(2));
+    // The plugin's 200ms idle budget is the behavior under test. Keep the
+    // loopback client's transport timeout generous so a busy four-way gate does
+    // not turn an unrelated scheduler delay into a false search failure.
+    let fetch_client = server.client_for("api.tavily.com", std::time::Duration::from_secs(10));
 
     const ENV_KEY: &str = "TOMCAT_WEB_SEARCH_IDLE_CHAT_KEY";
     let _env = EnvGuard::set_many(&[

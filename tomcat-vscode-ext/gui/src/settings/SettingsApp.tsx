@@ -271,8 +271,21 @@ function runSettingsDomAction(action: SettingsDomAction | undefined): void {
     target.click();
     return;
   }
-  if (action.kind === "setInputValue" && target instanceof HTMLInputElement) {
-    target.value = action.value ?? "";
+  if (
+    action.kind === "setInputValue"
+    && (target instanceof HTMLInputElement
+      || target instanceof HTMLTextAreaElement
+      || target instanceof HTMLSelectElement)
+  ) {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(target),
+      "value",
+    );
+    if (descriptor?.set) {
+      descriptor.set.call(target, action.value ?? "");
+    } else {
+      target.value = action.value ?? "";
+    }
     target.dispatchEvent(new Event("input", { bubbles: true }));
     target.dispatchEvent(new Event("change", { bubbles: true }));
   }
@@ -1195,6 +1208,7 @@ export function SettingsApp({
         </button>
         <button
           className="tc-settings-nav__item"
+          data-testid="settings-nav-connectors"
           onClick={() =>
             send(vscodeApi, {
               data: { route: "connectors" },

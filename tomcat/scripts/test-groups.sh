@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 集成测试二进制分类唯一来源。
-# 默认进入并发组；只有 3x 连跑证明确实互踩或压垮机器时，才退回串行兜底组。
+# Default to four-way parallelism. Process-heavy stdio suites use the serial
+# group below: three gate runs showed their isolated Serve children consistently
+# miss the 10-second first-frame budget when launched alongside one another.
 
 TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   audit_tests
@@ -41,11 +42,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   hostcall_tests
   primitives_tools_tests
   tool_catalog_doc
-  serve_multi_session
-  serve_ask_question_tests
   serve_schema_fixture
-  serve_robustness_tests
-  serve_stdio_e2e
 )
 
 # Local HTTP/OAuth fake, compiled only with the test-server feature.
@@ -78,6 +75,10 @@ TOMCAT_INTEGRATION_MANUAL_CASES=(
 )
 
 TOMCAT_INTEGRATION_SERIAL_TESTS=(
+  serve_multi_session
+  serve_ask_question_tests
+  serve_robustness_tests
+  serve_stdio_e2e
 )
 
 # 真 LLM E2E（需当前 OpenAI target 对应 key；部分 target 还需 DEEPSEEK_API_KEY / MIMO_API_KEY）。
@@ -92,6 +93,7 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
 # `./scripts/run-integration-tests.sh integration-real-llm` 显式触发。
 TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
   current_tail_guard_real_llm_tests
+  single_list_real_llm_long_session_e2e
   openai_responses_integration_tests
 
   plan_real_llm_inprocess_tests

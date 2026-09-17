@@ -1,9 +1,13 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use tracing::warn;
 
+use crate::core::connector::mcp::config::{global_mcp_path, project_mcp_path, McpConfigSource};
 use crate::core::connector::mcp::executor::McpToolExecutor;
 use crate::core::connector::mcp::manager::McpManager;
 use crate::core::tools::contract::registry::{Tool, ToolExecutor};
@@ -78,17 +82,70 @@ pub struct ConnectorRegistry {
     started: AtomicBool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ConnectorRegistryCacheKey {
+    global_config_path: PathBuf,
+    workspace_config_path: Option<PathBuf>,
+    enabled: bool,
+    disabled: Vec<String>,
+}
+
+fn connector_registry_cache(
+) -> &'static RwLock<HashMap<ConnectorRegistryCacheKey, Arc<ConnectorRegistry>>> {
+    static CACHE: OnceLock<RwLock<HashMap<ConnectorRegistryCacheKey, Arc<ConnectorRegistry>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn normalized_config_path(path: &Path) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let Some(file_name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    std::fs::canonicalize(parent)
+        .unwrap_or_else(|_| parent.to_path_buf())
+        .join(file_name)
+}
+
+fn connector_registry_cache_key(
+    cfg: &AppConfig,
+    workspace_root: Option<&Path>,
+) -> Result<ConnectorRegistryCacheKey, AppError> {
+    let mut disabled = cfg.connector.disabled.clone();
+    disabled.sort();
+    Ok(ConnectorRegistryCacheKey {
+        global_config_path: normalized_config_path(&global_mcp_path(cfg)?),
+        workspace_config_path: workspace_root
+            .map(|root| project_mcp_path(cfg, root).map(|path| normalized_config_path(&path)))
+            .transpose()?,
+        enabled: cfg.connector.enabled,
+        disabled,
+    })
+}
+
 impl ConnectorRegistry {
     pub fn new(
         cfg: &AppConfig,
         workspace_root: Option<&std::path::Path>,
     ) -> Result<Arc<Self>, AppError> {
-        Ok(Arc::new(Self {
+        let key = connector_registry_cache_key(cfg, workspace_root)?;
+        if let Some(existing) = connector_registry_cache().read().get(&key).cloned() {
+            return Ok(existing);
+        }
+
+        let created = Arc::new(Self {
             enabled: cfg.connector.enabled,
             config: cfg.clone(),
             mcp: McpManager::new(cfg, workspace_root)?,
             started: AtomicBool::new(false),
-        }))
+        });
+        let mut cache = connector_registry_cache().write();
+        Ok(cache
+            .entry(key)
+            .or_insert_with(|| Arc::clone(&created))
+            .clone())
     }
 
     pub fn mcp_manager(&self) -> Arc<McpManager> {
@@ -112,9 +169,12 @@ impl ConnectorRegistry {
             return;
         }
         for status in self.mcp.statuses() {
+            if status.overridden {
+                continue;
+            }
             let manager = self.mcp.clone();
             tokio::spawn(async move {
-                connect_with_backoff(manager, status.name).await;
+                connect_with_backoff(manager, status.config_key).await;
             });
         }
     }
@@ -134,6 +194,35 @@ impl ConnectorRegistry {
             if let Err(error) = self.mcp.connect_server(&server_name).await {
                 warn!(server = %server_name, error = %error, "MCP server did not become ready after reload");
             }
+        }
+        Ok(())
+    }
+
+    /// Reconcile every cached registry touched by a config-file mutation without
+    /// starting network work. A Global file is shared by all workspaces; a
+    /// Project file belongs only to its explicitly selected workspace.
+    pub fn synchronize_cached_config_change(
+        cfg: &AppConfig,
+        source: McpConfigSource,
+        workspace_root: Option<&Path>,
+    ) -> Result<(), AppError> {
+        let changed_global_path = normalized_config_path(&global_mcp_path(cfg)?);
+        let cache = connector_registry_cache().read();
+        let mut registries = Vec::new();
+        for registry in cache.values() {
+            // A Tomcat process can host independent AppConfig roots in tests and
+            // embedded callers. A Global update crosses workspaces, not roots.
+            if normalized_config_path(&global_mcp_path(&registry.config)?) != changed_global_path {
+                continue;
+            }
+            if source == McpConfigSource::Global || registry.mcp.workspace_root() == workspace_root
+            {
+                registries.push(Arc::clone(registry));
+            }
+        }
+        drop(cache);
+        for registry in registries {
+            registry.mcp.reload_configuration(cfg)?;
         }
         Ok(())
     }
@@ -311,6 +400,50 @@ mod tests {
                 .state,
             crate::core::connector::mcp::manager::ServerState::Pending
         ));
+    }
+
+    #[test]
+    fn global_config_changes_reconcile_every_cached_workspace_registry() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let first_workspace = temp.path().join("first-workspace");
+        let second_workspace = temp.path().join("second-workspace");
+        std::fs::create_dir_all(&first_workspace).expect("first workspace");
+        std::fs::create_dir_all(&second_workspace).expect("second workspace");
+        let mut cfg = AppConfig::default();
+        cfg.connector.enabled = true;
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let config_path = get_work_dir(&cfg).expect("work dir").join("mcp.json");
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("config directory");
+        std::fs::write(
+            &config_path,
+            fake_mcp_config(fake_fixture_args(&[])).to_string(),
+        )
+        .expect("write global config");
+
+        let first = ConnectorRegistry::new(&cfg, Some(&first_workspace)).expect("first registry");
+        let second =
+            ConnectorRegistry::new(&cfg, Some(&second_workspace)).expect("second registry");
+        let key = first
+            .mcp_manager()
+            .configured_server("fake")
+            .expect("first global connector")
+            .config_key;
+        assert_eq!(second.mcp_manager().statuses().len(), 1);
+
+        assert!(first
+            .mcp_manager()
+            .remove_configured_server(&key, &cfg)
+            .expect("remove global connector"));
+        ConnectorRegistry::synchronize_cached_config_change(
+            &cfg,
+            crate::core::connector::mcp::config::McpConfigSource::Global,
+            None,
+        )
+        .expect("synchronize global change");
+
+        assert!(first.mcp_manager().statuses().is_empty());
+        assert!(second.mcp_manager().statuses().is_empty());
     }
 
     #[tokio::test]

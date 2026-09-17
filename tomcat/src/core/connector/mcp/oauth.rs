@@ -25,7 +25,7 @@ use crate::AppConfig;
 const TOKEN_FILE_NAME: &str = "connector-oauth.json";
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredOAuthToken {
     pub access_token: String,
@@ -117,6 +117,23 @@ impl OAuthTokenStore {
         let mut file = self.read_file()?;
         file.servers.insert(server_name.to_string(), token);
         self.write_file(&file)
+    }
+
+    fn save_if_current(
+        &self,
+        server_name: &str,
+        expected: &StoredOAuthToken,
+        updated: StoredOAuthToken,
+    ) -> Result<bool, AppError> {
+        let _guard = self.lock.lock();
+        let _file_guard = self.acquire_file_lock()?;
+        let mut file = self.read_file()?;
+        if file.servers.get(server_name) != Some(expected) {
+            return Ok(false);
+        }
+        file.servers.insert(server_name.to_string(), updated);
+        self.write_file(&file)?;
+        Ok(true)
     }
 
     pub fn save_static_bearer(
@@ -240,20 +257,25 @@ impl OAuthTokenStore {
         })?;
         let updated = StoredOAuthToken {
             access_token: refreshed.access_token.clone(),
-            refresh_token: refreshed.refresh_token.or(token.refresh_token),
+            refresh_token: refreshed.refresh_token.or(token.refresh_token.clone()),
             expires_at: refreshed
                 .expires_in
                 .map(|secs| now_secs().saturating_add(secs)),
-            token_endpoint: token.token_endpoint,
-            issuer: token.issuer,
-            resource: token.resource,
-            mcp_url: token.mcp_url,
-            client_metadata_url: token.client_metadata_url,
-            scopes: token.scopes,
-            client_id: token.client_id,
-            client_secret: token.client_secret,
+            token_endpoint: token.token_endpoint.clone(),
+            issuer: token.issuer.clone(),
+            resource: token.resource.clone(),
+            mcp_url: token.mcp_url.clone(),
+            client_metadata_url: token.client_metadata_url.clone(),
+            scopes: token.scopes.clone(),
+            client_id: token.client_id.clone(),
+            client_secret: token.client_secret.clone(),
         };
-        self.save(server_name, updated)?;
+        // The refresh runs outside the file lock. Commit only if the exact
+        // credential that started it is still current: logout, removal, or a
+        // newer login wins over this late network response.
+        if !self.save_if_current(server_name, &token, updated)? {
+            return Ok(None);
+        }
         Ok(Some(refreshed.access_token))
     }
     fn acquire_file_lock(&self) -> Result<File, AppError> {
@@ -834,6 +856,52 @@ mod tests {
         }))
         .expect("authorization metadata");
         assert_eq!(metadata.token_endpoint, "http://127.0.0.1/token");
+    }
+
+    #[test]
+    fn stale_refresh_cannot_restore_a_removed_or_replaced_token() {
+        let temp = tempfile::tempdir().expect("temp");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().to_string_lossy().into_owned());
+        let store = OAuthTokenStore::open(&cfg).expect("store");
+        let original = super::StoredOAuthToken {
+            access_token: "old-access".to_string(),
+            refresh_token: Some("old-refresh".to_string()),
+            expires_at: Some(0),
+            token_endpoint: "https://example.test/token".to_string(),
+            issuer: None,
+            resource: None,
+            mcp_url: None,
+            client_metadata_url: None,
+            scopes: Vec::new(),
+            client_id: "test-client".to_string(),
+            client_secret: None,
+        };
+        let updated = super::StoredOAuthToken {
+            access_token: "late-access".to_string(),
+            ..original.clone()
+        };
+        store
+            .save("server", original.clone())
+            .expect("save original");
+        assert!(store.remove("server").expect("logout"));
+        assert!(!store
+            .save_if_current("server", &original, updated.clone())
+            .expect("reject late refresh after removal"));
+        assert!(store.load("server").expect("load after removal").is_none());
+
+        store.save("server", updated.clone()).expect("new login");
+        assert!(!store
+            .save_if_current("server", &original, original.clone())
+            .expect("reject late refresh after replacement"));
+        assert_eq!(
+            store
+                .load("server")
+                .expect("load replacement")
+                .expect("replacement")
+                .access_token,
+            "late-access"
+        );
     }
 
     #[test]

@@ -1140,12 +1140,14 @@ fn assert_planning_phase_smoke(
         !plan.frontmatter.todos.is_empty(),
         "planning-only 用例结束后 todos 不应为空"
     );
-    let stdout_a = String::from_utf8_lossy(&out_a.stdout);
+    let transcript =
+        std::fs::read_to_string(&fx.transcript_path).expect("read planning smoke transcript");
     assert!(
-        stdout_a.contains("u[Plan|"),
-        "进程 A stdout 应展示 planning user prompt；实际前 4000 字符：{}",
-        tail_chars(&out_a.stdout, 4000)
+        transcript.contains("Use the create_plan tool"),
+        "planning-only transcript 应保留提交给模型的 planning user prompt；日志文件：{}",
+        fx.diag_log.path.display()
     );
+    let stdout_a = String::from_utf8_lossy(&out_a.stdout);
     assert!(
         stdout_a.contains("agent.main[Plan]>"),
         "进程 A stdout 应展示 planning agent prompt；实际前 4000 字符：{}",

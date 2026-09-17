@@ -78,6 +78,7 @@ async fn fake_streamable_http_oauth_round_trips_without_a_human() {
         .expect("expire stored token for refresh");
 
     let server = ConfiguredMcpServer {
+        config_key: "fake".to_string(),
         name: "fake".to_string(),
         source: McpConfigSource::Global,
         config: McpServerConfig {
@@ -152,6 +153,7 @@ async fn valid_oauth_token_survives_transient_discovery_failure() {
         )
         .expect("save valid token");
     let server = ConfiguredMcpServer {
+        config_key: "fake".to_string(),
         name: "fake".to_string(),
         source: McpConfigSource::Global,
         config: McpServerConfig {

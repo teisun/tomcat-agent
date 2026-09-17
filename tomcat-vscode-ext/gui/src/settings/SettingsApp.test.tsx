@@ -69,6 +69,22 @@ async function emitState(content: SettingsStateSnapshot) {
   });
 }
 
+async function emitDomAction(action: {
+  kind: "clickTestId" | "setInputValue";
+  testId: string;
+  value?: string;
+}) {
+  await act(async () => {
+    window.dispatchEvent(new MessageEvent("message", {
+      data: {
+        channel: "event",
+        content: { action, type: "__test.dom_action" },
+        messageId: `settings-dom-action-${action.testId}`,
+      },
+    }));
+  });
+}
+
 function readyState(
   overrides: Partial<SettingsStateSnapshot> = {},
 ): SettingsStateSnapshot {
@@ -102,6 +118,64 @@ function getPasswordInput(scope: HTMLElement): HTMLInputElement {
 }
 
 describe("SettingsApp", () => {
+  it("drives React-controlled connector form inputs through the DOM-action bridge", async () => {
+    const { postMessage } = mount();
+    await emitState(readyState({ connectors: [], route: "connectors" }));
+
+    await emitDomAction({ kind: "clickTestId", testId: "connector-add-open" });
+    await emitDomAction({ kind: "setInputValue", testId: "connector-name", value: "controlled" });
+    await emitDomAction({ kind: "setInputValue", testId: "connector-command", value: "node" });
+    await emitDomAction({ kind: "setInputValue", testId: "connector-args", value: "server.mjs" });
+    await emitDomAction({ kind: "clickTestId", testId: "connector-add-submit" });
+
+    expect(postMessage).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        connector: expect.objectContaining({
+          args: ["server.mjs"],
+          command: "node",
+          name: "controlled",
+        }),
+      }),
+      type: "addConnector",
+    }));
+  });
+
+  it("treats a saved connector with a deferred connection error as a successful add", async () => {
+    const { postMessage } = mount();
+    await emitState(readyState({ connectors: [], route: "connectors" }));
+
+    await emitDomAction({ kind: "clickTestId", testId: "connector-add-open" });
+    await emitDomAction({ kind: "setInputValue", testId: "connector-name", value: "saved-partial" });
+    await emitDomAction({ kind: "setInputValue", testId: "connector-command", value: "node" });
+    await emitDomAction({ kind: "clickTestId", testId: "connector-add-submit" });
+
+    const addRequests = postMessage.mock.calls
+      .map(([message]) => message as SettingsIntent)
+      .filter(
+        (message): message is Extract<SettingsIntent, { type: "addConnector" }> =>
+          message.type === "addConnector",
+      );
+    const addRequest = addRequests[addRequests.length - 1];
+    expect(addRequest).toBeDefined();
+
+    await emitState(readyState({
+      connectorReceipt: {
+        configSaved: true,
+        connectionStarted: false,
+        error: "trust store is temporarily unavailable",
+        name: "saved-partial",
+        requestId: addRequest!.messageId,
+      },
+      connectors: [],
+      route: "connectors",
+      status: "Connector saved, but connection was not started. trust store is temporarily unavailable",
+    }));
+
+    expect(screen.queryByRole("dialog", { name: "Add Connector" })).toBeNull();
+    expect(screen.getByText(/connector saved, but connection was not started/i)).toBeTruthy();
+    expect(screen.queryByText("Unable to add connector.")).toBeNull();
+  });
+
   it("posts a ready handshake, defaults to the official tab, and supports keyboard tab switching", async () => {
     const { postMessage } = mount();
 

@@ -1,6 +1,6 @@
 use crate::api::chat::ChatContext;
 use crate::core::connector::mcp::config::{
-    remove_global_server, set_global_tool_filter, upsert_global_server, McpServerConfig, ToolFilter,
+    add_global_server, remove_global_server, set_global_tool_filter, McpServerConfig, ToolFilter,
 };
 use crate::core::connector::mcp::trust::{
     SafeLaunchSnapshot, TrustConfirmationReason, TrustStatus,
@@ -283,7 +283,7 @@ async fn add(
         call_timeout_ms: 120_000,
         tool_filter: ToolFilter::default(),
     };
-    match upsert_global_server(&ctx.config, name.clone(), config) {
+    match add_global_server(&ctx.config, name.clone(), config) {
         Ok(()) => {
             println!("[connector] 已写入全局 mcp.json: {name}");
             if let Some(registry) = registry(ctx) {

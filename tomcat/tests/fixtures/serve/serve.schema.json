@@ -535,9 +535,13 @@
       {
         "type": "object",
         "required": [
+          "context",
           "type"
         ],
         "properties": {
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
           "id": {
             "type": [
               "string",
@@ -555,18 +559,22 @@
       {
         "type": "object",
         "required": [
-          "name",
+          "configKey",
+          "context",
           "type"
         ],
         "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
           "id": {
             "type": [
               "string",
               "null"
             ]
-          },
-          "name": {
-            "type": "string"
           },
           "type": {
             "type": "string",
@@ -581,7 +589,9 @@
         "required": [
           "args",
           "command",
+          "context",
           "name",
+          "scope",
           "type"
         ],
         "properties": {
@@ -599,6 +609,9 @@
           },
           "command": {
             "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
           },
           "env": {
             "default": {},
@@ -625,10 +638,7 @@
           },
           "oauth": true,
           "scope": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "$ref": "#/definitions/ConnectorScope"
           },
           "type": {
             "type": "string",
@@ -647,18 +657,22 @@
       {
         "type": "object",
         "required": [
-          "name",
+          "configKey",
+          "context",
           "type"
         ],
         "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
           "id": {
             "type": [
               "string",
               "null"
             ]
-          },
-          "name": {
-            "type": "string"
           },
           "type": {
             "type": "string",
@@ -671,19 +685,23 @@
       {
         "type": "object",
         "required": [
-          "name",
+          "configKey",
+          "context",
           "trusted",
           "type"
         ],
         "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
           "id": {
             "type": [
               "string",
               "null"
             ]
-          },
-          "name": {
-            "type": "string"
           },
           "trusted": {
             "type": "boolean"
@@ -699,18 +717,22 @@
       {
         "type": "object",
         "required": [
-          "name",
+          "configKey",
+          "context",
           "type"
         ],
         "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
           "id": {
             "type": [
               "string",
               "null"
             ]
-          },
-          "name": {
-            "type": "string"
           },
           "type": {
             "type": "string",
@@ -723,18 +745,22 @@
       {
         "type": "object",
         "required": [
-          "name",
+          "configKey",
+          "context",
           "type"
         ],
         "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
           "id": {
             "type": [
               "string",
               "null"
             ]
-          },
-          "name": {
-            "type": "string"
           },
           "type": {
             "type": "string",
@@ -747,18 +773,22 @@
       {
         "type": "object",
         "required": [
-          "name",
+          "configKey",
+          "context",
           "type"
         ],
         "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
           "id": {
             "type": [
               "string",
               "null"
             ]
-          },
-          "name": {
-            "type": "string"
           },
           "type": {
             "type": "string",
@@ -771,18 +801,22 @@
       {
         "type": "object",
         "required": [
-          "name",
+          "configKey",
+          "context",
           "type"
         ],
         "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
           "id": {
             "type": [
               "string",
               "null"
             ]
-          },
-          "name": {
-            "type": "string"
           },
           "type": {
             "type": "string",
@@ -795,9 +829,17 @@
       {
         "type": "object",
         "required": [
+          "configKey",
+          "context",
           "type"
         ],
         "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
           "id": {
             "type": [
               "string",
@@ -815,10 +857,17 @@
       {
         "type": "object",
         "required": [
-          "name",
+          "configKey",
+          "context",
           "type"
         ],
         "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
           "exclude": {
             "default": [],
             "type": "array",
@@ -838,15 +887,6 @@
             "items": {
               "type": "string"
             }
-          },
-          "name": {
-            "type": "string"
-          },
-          "scope": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "type": {
             "type": "string",
@@ -1285,6 +1325,27 @@
             "type": "boolean"
           }
         }
+      },
+      "ConnectorContext": {
+        "description": "The VS Code host—not the active chat session or process cwd—selects the workspace whose connector configuration is being managed.",
+        "type": "object",
+        "properties": {
+          "workspaceRoot": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConnectorScope": {
+        "description": "Scope is part of connector identity. A Workspace request must carry an explicit project context; Global never falls back to process cwd.",
+        "type": "string",
+        "enum": [
+          "global",
+          "workspace"
+        ]
       },
       "GetMessagesParams": {
         "description": "`get_messages` 的分页/裁剪参数。",
@@ -3812,6 +3873,12 @@
                 "minimum": 0.0
               },
               "sessionId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "skipReason": {
                 "type": [
                   "string",
                   "null"

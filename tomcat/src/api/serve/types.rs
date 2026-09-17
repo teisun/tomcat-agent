@@ -214,6 +214,24 @@ impl From<ModelKeyStatus> for SetProviderKeyResponse {
     }
 }
 
+/// Scope is part of connector identity. A Workspace request must carry an
+/// explicit project context; Global never falls back to process cwd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectorScope {
+    Global,
+    Workspace,
+}
+
+/// The VS Code host—not the active chat session or process cwd—selects the
+/// workspace whose connector configuration is being managed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConnectorContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+}
+
 /// UI 通过 stdin 发送给 `tomcat serve` 的命令帧。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -371,12 +389,15 @@ pub enum ServeCommand {
     ListConnectors {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     ListConnectorTools {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     AddConnector {
@@ -395,63 +416,77 @@ pub enum ServeCommand {
         env: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth: Option<String>,
-
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        scope: Option<String>,
+        scope: ConnectorScope,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     RemoveConnector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     SetConnectorTrust {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        #[serde(rename = "configKey")]
+        config_key: String,
         trusted: bool,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     TestConnector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     LoginConnector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     CancelLoginConnector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     LogoutConnector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     ReloadConnector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     SetConnectorToolFilter {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
+        #[serde(rename = "configKey")]
+        config_key: String,
         #[serde(default)]
         include: Vec<String>,
         #[serde(default)]
         exclude: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        scope: Option<String>,
+        context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
     NewSession {

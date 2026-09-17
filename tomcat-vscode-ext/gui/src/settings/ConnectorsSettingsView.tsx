@@ -16,18 +16,22 @@ function send(
   vscodeApi: VsCodeApiLike<SettingsIntent>,
   type: SettingsIntent["type"],
   data?: unknown,
-): void {
+): string {
+  const messageId = `connector-${type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   vscodeApi.postMessage({
-    messageId: `connector-${type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    messageId,
     type,
     ...(data === undefined ? {} : { data }),
   } as SettingsIntent);
+  return messageId;
 }
 
 function statusLabel(connector: ConnectorView): string {
   switch (connector.state) {
     case "connected":
       return "Connected";
+    case "pending":
+      return "Pending";
     case "connecting":
       return "Connecting";
     case "needs_confirmation":
@@ -53,9 +57,9 @@ function configurationPath(connector: ConnectorView): string | null {
 
 function configurationPathForScope(
   state: SettingsStateSnapshot,
-  scope: "user" | "workspace",
+  scope: "global" | "workspace",
 ): string | null {
-  const configured = scope === "user"
+  const configured = scope === "global"
     ? state.connectorConfigPaths?.global
     : state.connectorConfigPaths?.workspace;
   return configured?.display ?? null;
@@ -87,42 +91,46 @@ export function ConnectorsSettingsView({
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
   const [name, setName] = useState("");
-  const [authMode, setAuthMode] = useState<"oauth" | "bearer" | "none">("oauth");
+  const [authMode, setAuthMode] = useState<"oauth" | "bearer" | "none">("none");
   const [bearerToken, setBearerToken] = useState("");
   const [customHeaders, setCustomHeaders] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [envText, setEnvText] = useState("");
-  // `user` remains the stable wire value for the global configuration file.
-  const [scope, setScope] = useState<"workspace" | "user">("user");
+  const [scope, setScope] = useState<"workspace" | "global">("global");
+  const [submissionId, setSubmissionId] = useState<string | null>(null);
   const [clientId, setClientId] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
   useEffect(() => {
-    if (state.selectedConnector === selected?.name) {
+    if (state.selectedConnector === selected?.configKey) {
       setTools(state.connectorTools ?? []);
     }
-  }, [selected?.name, state.connectorTools, state.selectedConnector]);
+  }, [selected?.configKey, state.connectorTools, state.selectedConnector]);
 
   useEffect(() => {
-    if (!isSubmitting || !state.status || state.status === "Authorizing connector…") {
+    const receipt = state.connectorReceipt;
+    if (!isSubmitting || !submissionId || receipt?.requestId !== submissionId) {
       return;
     }
     setIsSubmitting(false);
-    if (state.status.includes("connected") || state.status === "Connector saved.") {
+    setSubmissionId(null);
+    if (receipt.configSaved) {
       setShowAdd(false);
+      return;
     }
-  }, [isSubmitting, state.status]);
+    setFormError(receipt.error ?? "Unable to add connector.");
+  }, [isSubmitting, submissionId, state.connectorReceipt]);
 
   useEffect(() => {
     if (!selected) {
       return;
     }
-    const fresh = connectors.find((connector) => connector.name === selected.name);
+    const fresh = connectors.find((connector) => connector.configKey === selected.configKey);
     if (fresh) {
       setSelected(fresh);
     }
-  }, [connectors, selected?.name]);
+  }, [connectors, selected?.configKey]);
 
   useEffect(() => {
     if (state.status && state.status !== "Authorizing connector…") {
@@ -133,6 +141,7 @@ export function ConnectorsSettingsView({
   const groups = useMemo(() => {
     const order: ConnectorView["state"][] = [
       "connected",
+      "pending",
       "connecting",
       "needs_confirmation",
       "needs_authorization",
@@ -156,18 +165,20 @@ export function ConnectorsSettingsView({
   function openDetail(connector: ConnectorView): void {
     setSelected(connector);
     setTools([]);
-    send(vscodeApi, "listConnectorTools", { name: connector.name });
+    if (!connector.overridden) {
+      send(vscodeApi, "listConnectorTools", { name: connector.name, configKey: connector.configKey });
+    }
   }
 
   function openAdd(): void {
-    setScope("user");
+    setScope("global");
     setFormError(null);
     setIsSubmitting(false);
     setShowAdd(true);
   }
 
   function toggleTool(tool: ConnectorToolView): void {
-    if (!selected) {
+    if (!selected || selected.overridden) {
       return;
     }
     const next = tools.map((entry) =>
@@ -189,7 +200,7 @@ export function ConnectorsSettingsView({
         ]),
       ),
     };
-    send(vscodeApi, "setConnectorToolFilter", { name: selected.name, filter });
+    send(vscodeApi, "setConnectorToolFilter", { name: selected.name, configKey: selected.configKey, filter });
   }
 
   function submitAdd(): void {
@@ -256,7 +267,8 @@ export function ConnectorsSettingsView({
           env,
           scope,
         };
-    send(vscodeApi, "addConnector", { connector: input });
+    const requestId = send(vscodeApi, "addConnector", { connector: input });
+    setSubmissionId(requestId);
     setIsSubmitting(true);
     setFormError(null);
   }
@@ -280,7 +292,7 @@ export function ConnectorsSettingsView({
             <h1>Connectors</h1>
             <p>Connect MCP services. Their tools are available only when Tomcat needs them.</p>
           </div>
-          <button className="tc-button tc-button--secondary" onClick={openAdd} type="button">+ Add Connector</button>
+          <button className="tc-button tc-button--secondary" data-testid="connector-add-open" onClick={openAdd} type="button">+ Add Connector</button>
         </header>
         {state.error ? <div className="tc-banner tc-banner--warning">{state.error}</div> : null}
         {state.status ? <div className="tc-banner">{state.status}</div> : null}
@@ -297,13 +309,13 @@ export function ConnectorsSettingsView({
             <h2 className="tc-settings-group__title">{group.label}</h2>
             <div className="tc-connector-list">
               {group.items.map((connector) => (
-                <button className="tc-connector-card" key={connector.name} onClick={() => openDetail(connector)} type="button">
+                <button className="tc-connector-card" data-testid={`connector-card-${connector.name}`} key={connector.configKey} onClick={() => openDetail(connector)} type="button">
                   <span className={statusClass(connector)} aria-hidden="true">●</span>
                   <span className="tc-connector-card__body">
                     <strong>{connector.name}</strong>
-                    <span>{statusLabel(connector)} · {connector.toolCount} tools · {connector.transport}</span>
+                    <span>{statusLabel(connector)} · {connector.overridden ? "Overridden by workspace" : `${connector.toolCount} tools · ${connector.transport}`}</span>
                   </span>
-                  <span className="tc-connector-card__source">{connector.source}</span>
+                  <span className="tc-connector-card__source">{connector.source}{connector.overridden ? " · overridden" : ""}</span>
                   <span aria-hidden="true">›</span>
                 </button>
               ))}
@@ -322,7 +334,7 @@ export function ConnectorsSettingsView({
               <div><dt>Scope</dt><dd>{selected.source}</dd></div>
               <div>
                 <dt>Config file</dt>
-                <dd>{configurationPath(selected) ? <button className="tc-connector-config-link" onClick={() => send(vscodeApi, "openConnectorConfig", { name: selected.name })} type="button"><code>{configurationPath(selected)}</code></button> : <span className="tc-muted">Configuration file unavailable</span>}</dd>
+                <dd>{configurationPath(selected) ? <button className="tc-connector-config-link" onClick={() => send(vscodeApi, "openConnectorConfig", { configKey: selected.configKey })} type="button"><code>{configurationPath(selected)}</code></button> : <span className="tc-muted">Configuration file unavailable</span>}</dd>
               </div>
               <div><dt>Connection</dt><dd><code>{selected.transport}</code></dd></div>
               {selected.transport === "http" ? (
@@ -332,12 +344,13 @@ export function ConnectorsSettingsView({
                 </>
               ) : <div><dt>Local command</dt><dd><code>{selected.command ?? "—"}</code></dd></div>}
             </dl>
+            {selected.overridden ? <div className="tc-banner tc-banner--warning">This Global connector is overridden by the same-named Workspace connector. Remove the Workspace connector to make it active again.</div> : null}
 
             {selected.transport === "http" && (selected.oauthConfigured || selected.auth === "oauth") ? (
               <div className="tc-connector-inline-actions">
-                <button className="tc-button tc-button--secondary" disabled={busyAction === "login"} onClick={() => { setBusyAction("login"); send(vscodeApi, "loginConnector", { name: selected.name }); }} type="button">{busyAction === "login" ? "Authorizing…" : "Login / Re-login"}</button>
-                {busyAction === "login" ? <button className="tc-button tc-button--secondary" onClick={() => { send(vscodeApi, "cancelLoginConnector", { name: selected.name }); setBusyAction(null); }} type="button">Cancel</button> : null}
-                <button className="tc-button tc-button--secondary" onClick={() => send(vscodeApi, "logoutConnector", { name: selected.name })} type="button">Logout</button>
+                <button className="tc-button tc-button--secondary" data-testid="connector-login" disabled={selected.overridden || busyAction === "login"} onClick={() => { setBusyAction("login"); send(vscodeApi, "loginConnector", { name: selected.name, configKey: selected.configKey }); }} type="button">{busyAction === "login" ? "Authorizing…" : "Login / Re-login"}</button>
+                {busyAction === "login" ? <button className="tc-button tc-button--secondary" data-testid="connector-cancel-login" disabled={selected.overridden} onClick={() => { send(vscodeApi, "cancelLoginConnector", { name: selected.name, configKey: selected.configKey }); setBusyAction(null); }} type="button">Cancel</button> : null}
+                <button className="tc-button tc-button--secondary" disabled={selected.overridden} onClick={() => send(vscodeApi, "logoutConnector", { name: selected.name, configKey: selected.configKey })} type="button">Logout</button>
               </div>
             ) : null}
 
@@ -348,7 +361,7 @@ export function ConnectorsSettingsView({
               </div>
               <div className="tc-connector-tools">
                 {tools.map((tool) => (
-                  <button aria-label={`${tool.label}: ${tool.enabled ? "enabled" : "disabled"}`} className="tc-connector-tool" key={tool.modelName} onClick={() => toggleTool(tool)} type="button">
+                  <button aria-label={`${tool.label}: ${tool.enabled ? "enabled" : "disabled"}`} className="tc-connector-tool" disabled={selected.overridden} key={tool.modelName} onClick={() => toggleTool(tool)} type="button">
                     <span>{tool.label}</span>
                     <span className={`tc-connector-tool__indicator ${tool.enabled ? "tc-connector-tool__indicator--enabled" : ""}`} aria-hidden="true" />
                   </button>
@@ -357,12 +370,12 @@ export function ConnectorsSettingsView({
             </section>
 
             <footer className="tc-modal__footer tc-connector-modal__footer">
-              <button className="tc-button tc-button--secondary" onClick={() => send(vscodeApi, "reloadConnector", { name: selected.name })} type="button">↻ Reload</button>
+              <button className="tc-button tc-button--secondary" disabled={selected.overridden} onClick={() => send(vscodeApi, "reloadConnector", { name: selected.name, configKey: selected.configKey })} type="button">↻ Reload</button>
               <div className="tc-connector-modal__footer-actions">
-                {selected.state === "needs_confirmation" || selected.state === "blocked" ? <button className="tc-button" onClick={() => send(vscodeApi, "trustConnector", { name: selected.name })} type="button">Trust</button> : null}
-                {selected.state === "needs_confirmation" ? <button className="tc-button tc-button--secondary" onClick={() => send(vscodeApi, "denyConnector", { name: selected.name })} type="button">Deny</button> : null}
-                <button className="tc-button tc-button--danger" onClick={() => { send(vscodeApi, "removeConnector", { name: selected.name }); setSelected(null); }} type="button">Remove</button>
-                <button className="tc-button tc-button--primary" onClick={() => setSelected(null)} type="button">Done</button>
+                {selected.state === "needs_confirmation" || selected.state === "blocked" ? <button className="tc-button" data-testid="connector-trust" disabled={selected.overridden} onClick={() => send(vscodeApi, "trustConnector", { name: selected.name, configKey: selected.configKey })} type="button">Trust</button> : null}
+                {selected.state === "needs_confirmation" ? <button className="tc-button tc-button--secondary" disabled={selected.overridden} onClick={() => send(vscodeApi, "denyConnector", { name: selected.name, configKey: selected.configKey })} type="button">Deny</button> : null}
+                <button className="tc-button tc-button--danger" onClick={() => { send(vscodeApi, "removeConnector", { name: selected.name, configKey: selected.configKey }); setSelected(null); }} type="button">Remove</button>
+                <button className="tc-button tc-button--primary" data-testid="connector-detail-done" onClick={() => setSelected(null)} type="button">Done</button>
               </div>
             </footer>
           </section>
@@ -374,15 +387,15 @@ export function ConnectorsSettingsView({
           <section aria-label="Add Connector" className="tc-modal tc-connector-modal" role="dialog">
             <button className="tc-modal__close" onClick={() => setShowAdd(false)} type="button">×</button>
             <h2>Add Connector</h2>
-            <div className="tc-connector-form-row"><span>Name</span><input aria-label="Name" value={name} onChange={(event) => setName(event.target.value)} /></div>
+            <div className="tc-connector-form-row"><span>Name</span><input aria-label="Name" data-testid="connector-name" value={name} onChange={(event) => setName(event.target.value)} /></div>
             <div className="tc-connector-form-row"><span>Type</span><div className="tc-connector-radio-row"><label><input checked type="radio" onChange={() => {}} /> MCP</label><label className="tc-muted"><input disabled type="radio" /> CLI (soon)</label><label className="tc-muted"><input disabled type="radio" /> A2A (soon)</label></div></div>
-            <div className="tc-connector-form-row"><span>Scope</span><div className="tc-connector-radio-row"><label><input checked={scope === "user"} name="scope" onChange={() => setScope("user")} type="radio" /> Global</label><label className={state.connectorConfigPaths?.workspace ? undefined : "tc-muted"}><input checked={scope === "workspace"} disabled={!state.connectorConfigPaths?.workspace} name="scope" onChange={() => setScope("workspace")} type="radio" /> Workspace{state.connectorConfigPaths?.workspace ? "" : " (open a project first)"}</label></div></div>
+            <div className="tc-connector-form-row"><span>Scope</span><div className="tc-connector-radio-row"><label><input checked={scope === "global"} data-testid="connector-scope-global" name="scope" onChange={() => setScope("global")} type="radio" /> Global</label><label className={state.connectorConfigPaths?.workspace ? undefined : "tc-muted"}><input checked={scope === "workspace"} data-testid="connector-scope-workspace" disabled={!state.connectorConfigPaths?.workspace} name="scope" onChange={() => setScope("workspace")} type="radio" /> Workspace{state.connectorConfigPaths?.workspace ? "" : " (open a project first)"}</label></div></div>
             <div className="tc-connector-form-row"><span>Config file</span>{configurationPathForScope(state, scope) ? <button className="tc-connector-config-link" onClick={() => send(vscodeApi, "openConnectorConfig", { scope })} type="button"><code>{configurationPathForScope(state, scope)}</code></button> : <span className="tc-muted">Configuration file unavailable</span>}</div>
-            <div className="tc-connector-form-row"><span>Connection</span><div className="tc-connector-radio-row"><label><input checked={transport === "stdio"} name="transport" onChange={() => setTransport("stdio")} type="radio" /> stdio</label><label><input checked={transport === "http"} name="transport" onChange={() => setTransport("http")} type="radio" /> HTTP</label></div></div>
+            <div className="tc-connector-form-row"><span>Connection</span><div className="tc-connector-radio-row"><label><input checked={transport === "stdio"} data-testid="connector-transport-stdio" name="transport" onChange={() => setTransport("stdio")} type="radio" /> stdio</label><label><input checked={transport === "http"} data-testid="connector-transport-http" name="transport" onChange={() => setTransport("http")} type="radio" /> HTTP</label></div></div>
             {transport === "http" && authMode === "oauth" ? <div className="tc-connector-form-row"><span>OAuth client ID</span><div><input aria-label="OAuth client ID" placeholder="Optional" value={clientId} onChange={(event) => setClientId(event.target.value)} /><small>Dynamic registration is used when empty.</small></div></div> : null}
-            {transport === "http" ? <><div className="tc-connector-form-row"><span>Remote URL</span><input aria-label="URL" placeholder="https://example.com/mcp" value={url} onChange={(event) => setUrl(event.target.value)} /></div><div className="tc-connector-form-row"><span>Authentication</span><select aria-label="Authentication" value={authMode} onChange={(event) => setAuthMode(event.target.value as "oauth" | "bearer" | "none")}><option value="oauth">OAuth 2.0</option><option value="bearer">Bearer token</option><option value="none">None</option></select></div>{authMode === "bearer" ? <div className="tc-connector-form-row"><span>Bearer token</span><input aria-label="Bearer token" type="password" placeholder="Stored locally" value={bearerToken} onChange={(event) => setBearerToken(event.target.value)} /></div> : null}<div className="tc-connector-form-row"><span>Custom headers</span><div><textarea aria-label="Custom headers" rows={3} placeholder="Header: value" value={customHeaders} onChange={(event) => setCustomHeaders(event.target.value)} /><small>One header per line.</small></div></div><p className="tc-connector-form-help">Add saves the configuration and starts OAuth authorization.</p></> : <><div className="tc-connector-form-row"><span>Local command</span><input aria-label="Command" placeholder="npx" value={command} onChange={(event) => setCommand(event.target.value)} /></div><div className="tc-connector-form-row"><span>Arguments</span><input aria-label="Args" placeholder="-y @playwright/mcp" value={args} onChange={(event) => setArgs(event.target.value)} /></div><div className="tc-connector-form-row"><span>Environment</span><div><textarea aria-label="Environment" rows={3} placeholder="KEY=value" value={envText} onChange={(event) => setEnvText(event.target.value)} /><small>One variable per line.</small></div></div></>}
+            {transport === "http" ? <><div className="tc-connector-form-row"><span>Remote URL</span><input aria-label="URL" data-testid="connector-url" placeholder="https://example.com/mcp" value={url} onChange={(event) => setUrl(event.target.value)} /></div><div className="tc-connector-form-row"><span>Authentication</span><select aria-label="Authentication" data-testid="connector-auth" value={authMode} onChange={(event) => setAuthMode(event.target.value as "oauth" | "bearer" | "none")}><option value="oauth">OAuth 2.0</option><option value="bearer">Bearer token</option><option value="none">None</option></select></div>{authMode === "bearer" ? <div className="tc-connector-form-row"><span>Bearer token</span><input aria-label="Bearer token" type="password" placeholder="Stored locally" value={bearerToken} onChange={(event) => setBearerToken(event.target.value)} /></div> : null}<div className="tc-connector-form-row"><span>Custom headers</span><div><textarea aria-label="Custom headers" rows={3} placeholder="Header: value" value={customHeaders} onChange={(event) => setCustomHeaders(event.target.value)} /><small>One header per line.</small></div></div><p className="tc-connector-form-help">Add saves the configuration and starts a connection. OAuth authorization starts only when you choose Login.</p></> : <><div className="tc-connector-form-row"><span>Local command</span><input aria-label="Command" data-testid="connector-command" placeholder="npx" value={command} onChange={(event) => setCommand(event.target.value)} /></div><div className="tc-connector-form-row"><span>Arguments</span><input aria-label="Args" data-testid="connector-args" placeholder="-y @playwright/mcp" value={args} onChange={(event) => setArgs(event.target.value)} /></div><div className="tc-connector-form-row"><span>Environment</span><div><textarea aria-label="Environment" rows={3} placeholder="KEY=value" value={envText} onChange={(event) => setEnvText(event.target.value)} /><small>One variable per line.</small></div></div></>}
             {formError ? <div className="tc-banner tc-banner--warning">{formError}</div> : null}
-            <footer className="tc-modal__footer"><button className="tc-button tc-button--secondary" onClick={() => { if (isSubmitting) send(vscodeApi, "cancelLoginConnector", { name: name.trim() }); setIsSubmitting(false); setShowAdd(false); }} type="button">Cancel</button><button className="tc-button tc-button--primary" disabled={isSubmitting} onClick={submitAdd} type="button">{isSubmitting ? "Connecting…" : "Add"}</button></footer>
+            <footer className="tc-modal__footer"><button className="tc-button tc-button--secondary" onClick={() => { setSubmissionId(null); setIsSubmitting(false); setShowAdd(false); }} type="button">Cancel</button><button className="tc-button tc-button--primary" data-testid="connector-add-submit" disabled={isSubmitting} onClick={submitAdd} type="button">{isSubmitting ? "Saving…" : "Add"}</button></footer>
           </section>
         </div>
       ) : null}

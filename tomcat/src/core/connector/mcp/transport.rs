@@ -183,7 +183,7 @@ impl McpTransport for HttpTransport {
         })?;
         let client = http_client_for(url)?;
         let mut config = self.config(server)?;
-        let stored_token = self.oauth_store.load(&server.name)?;
+        let stored_token = self.oauth_store.load(&server.config_key)?;
         let stored_identity_matches = if let Some(token) = stored_token.as_ref() {
             if token.mcp_url.as_deref().or(token.resource.as_deref()) != Some(url) {
                 false
@@ -250,7 +250,7 @@ impl McpTransport for HttpTransport {
         };
         let token = if can_use_stored_token {
             self.oauth_store
-                .refresh_if_needed(&client, &server.name)
+                .refresh_if_needed(&client, &server.config_key)
                 .await?
         } else {
             None
@@ -279,7 +279,8 @@ impl McpTransport for HttpTransport {
                 )));
             }
         }
-        let transport = rmcp::transport::StreamableHttpClientTransport::from_config(config);
+        let transport =
+            rmcp::transport::StreamableHttpClientTransport::with_client(client.clone(), config);
         match ().serve(transport).await {
             Ok(client) => Ok(client),
             Err(error) => {
@@ -295,12 +296,13 @@ impl McpTransport for HttpTransport {
                 if token.is_some() && server.config.auth.as_deref() != Some("bearer") {
                     if let Some(refreshed) = self
                         .oauth_store
-                        .force_refresh(&client, &server.name)
+                        .force_refresh(&client, &server.config_key)
                         .await?
                     {
                         let retry_config = self.config(server)?.auth_header(refreshed);
                         let retry_transport =
-                            rmcp::transport::StreamableHttpClientTransport::from_config(
+                            rmcp::transport::StreamableHttpClientTransport::with_client(
+                                client.clone(),
                                 retry_config,
                             );
                         return ().serve(retry_transport).await.map_err(|retry_error| {
@@ -342,6 +344,7 @@ mod tests {
     fn configured_env_is_added_after_environment_is_cleared() {
         let transport = StdioTransport::new(Some(Path::new("/workspace")));
         let server = ConfiguredMcpServer {
+            config_key: "mcp:test".to_string(),
             name: "test".to_string(),
             source: McpConfigSource::Project,
             config: McpServerConfig {
@@ -382,6 +385,7 @@ mod tests {
         .expect("fallback marker");
         let transport = StdioTransport::new(Some(Path::new("/workspace")));
         let server = ConfiguredMcpServer {
+            config_key: "mcp:playwright".to_string(),
             name: "playwright".to_string(),
             source: McpConfigSource::Global,
             config: McpServerConfig {
@@ -423,6 +427,7 @@ mod tests {
             crate::core::connector::mcp::oauth::OAuthTokenStore::open(&app_config).expect("store");
         let transport = super::HttpTransport::new(store);
         let server = ConfiguredMcpServer {
+            config_key: "mcp:http".to_string(),
             name: "http".to_string(),
             source: McpConfigSource::Global,
             config: McpServerConfig {

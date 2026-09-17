@@ -19,30 +19,6 @@ import type {
 import type { SettingsIntent } from "../../../shared/settingsProtocol";
 import { captureWorkbenchArtifacts, WorkbenchFindDriver } from "./workbenchFindDriver";
 
-let dummyLanguageModelRegistration: vscode.Disposable | undefined;
-type LanguageModelRegistry = {
-  registerLanguageModelChatProvider(
-    vendor: string,
-    provider: {
-      provideLanguageModelChatInformation(
-        options: unknown,
-        token: vscode.CancellationToken,
-      ): vscode.ProviderResult<unknown[]>;
-      provideLanguageModelChatResponse(
-        model: unknown,
-        messages: readonly unknown[],
-        options: unknown,
-        progress: vscode.Progress<unknown>,
-        token: vscode.CancellationToken,
-      ): Thenable<void>;
-      provideTokenCount(
-        model: unknown,
-        text: string | unknown,
-        token: vscode.CancellationToken,
-      ): Thenable<number>;
-    },
-  ): vscode.Disposable;
-};
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -71,31 +47,8 @@ async function waitFor(
 
 type CaptureRegion = "editor" | "sidebar" | "window";
 
-export async function getTomcatExtensionApi(): Promise<TomcatExtensionApi> {
-  if (!dummyLanguageModelRegistration) {
-    const registry = vscode.lm as unknown as LanguageModelRegistry;
-    dummyLanguageModelRegistration = registry.registerLanguageModelChatProvider(
-      "tomcat-test",
-      {
-        provideLanguageModelChatInformation: async () => [
-          {
-            capabilities: {},
-            family: "test",
-            id: "tomcat-e2e-model",
-            isDefault: true,
-            isUserSelectable: true,
-            maxInputTokens: 4_096,
-            maxOutputTokens: 4_096,
-            name: "tomcat-e2e-model",
-            version: "1.0.0",
-          },
-        ],
-        provideLanguageModelChatResponse: async () => undefined,
-        provideTokenCount: async () => 1,
-      },
-    );
-  }
 
+export async function getTomcatExtensionApi(): Promise<TomcatExtensionApi> {
   const extension =
     vscode.extensions.getExtension<TomcatExtensionApi>(EXTENSION_ID);
 

@@ -447,12 +447,19 @@ export class TomcatMessenger {
     ) as Promise<TypedResponseFrame<UpsertModelResponse>>;
   }
 
-  sendListConnectors(timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
-    return this.request({ type: "list_connectors" }, timeoutMs);
+  sendListConnectors(
+    context: { workspaceRoot?: string | null },
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request({ context, type: "list_connectors" }, timeoutMs);
   }
 
-  sendListConnectorTools(name: string, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
-    return this.request({ name, type: "list_connector_tools" }, timeoutMs);
+  sendListConnectorTools(
+    configKey: string,
+    context: { workspaceRoot?: string | null },
+    timeoutMs = this.timeoutMs(),
+  ): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "list_connector_tools" }, timeoutMs);
   }
 
   sendAddConnector(input: {
@@ -464,45 +471,46 @@ export class TomcatMessenger {
     auth?: "none" | "bearer" | "oauth";
     env?: Record<string, string>;
     oauth?: unknown;
-    scope?: "user" | "workspace" | null;
+    scope: "global" | "workspace";
+    context: { workspaceRoot?: string | null };
   }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
     return this.request({ ...input, type: "add_connector" }, timeoutMs);
   }
 
-  sendRemoveConnector(name: string, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
-    return this.request({ name, type: "remove_connector" }, timeoutMs);
+  sendRemoveConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "remove_connector" }, timeoutMs);
   }
 
-  sendReloadConnector(timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
-    return this.request({ type: "reload_connector" }, timeoutMs);
+  sendReloadConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "reload_connector" }, timeoutMs);
   }
-  sendSetConnectorTrust(name: string, trusted: boolean, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
-    return this.request({ name, trusted, type: "set_connector_trust" }, timeoutMs);
-  }
-
-  sendTestConnector(name: string, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
-    return this.request({ name, type: "test_connector" }, timeoutMs);
+  sendSetConnectorTrust(configKey: string, trusted: boolean, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ configKey, context, trusted, type: "set_connector_trust" }, timeoutMs);
   }
 
-  sendLoginConnector(name: string, timeoutMs = 300_000): Promise<ResponseFrame> {
-    return this.request({ name, type: "login_connector" }, timeoutMs);
+  sendTestConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "test_connector" }, timeoutMs);
   }
 
-  sendLogoutConnector(name: string, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
-    return this.request({ name, type: "logout_connector" }, timeoutMs);
+  sendLoginConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = 300_000): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "login_connector" }, timeoutMs);
   }
 
-  sendCancelLoginConnector(name: string, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
-    return this.request({ name, type: "cancel_login_connector" }, timeoutMs);
+  sendLogoutConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "logout_connector" }, timeoutMs);
+  }
+
+  sendCancelLoginConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
+    return this.request({ configKey, context, type: "cancel_login_connector" }, timeoutMs);
   }
   sendSetConnectorToolFilter(
-    name: string,
+    configKey: string,
     include: string[],
     exclude: string[],
-    scope: "user" | "workspace" = "workspace",
+    context: { workspaceRoot?: string | null },
     timeoutMs = this.timeoutMs(),
   ): Promise<ResponseFrame> {
-    return this.request({ exclude, include, name, scope, type: "set_connector_tool_filter" }, timeoutMs);
+    return this.request({ configKey, context, exclude, include, type: "set_connector_tool_filter" }, timeoutMs);
   }
 
 

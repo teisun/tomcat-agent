@@ -32,12 +32,14 @@ function state(): SettingsStateSnapshot {
     connectors: [
       {
         command: "npx",
+        configKey: "mcp:/tmp/.tomcat/mcp.json:playwright",
         configPath: "~/.tomcat/mcp.json",
         configPathRaw: "/tmp/.tomcat/mcp.json",
         name: "playwright",
         oauthConfigured: false,
+        overridden: false,
         resourceCount: 0,
-        source: "Global",
+        source: "global",
         state: "connected",
         toolCount: 2,
         transport: "stdio",
@@ -49,8 +51,7 @@ function state(): SettingsStateSnapshot {
     providerKeys: [],
     ready: true,
     route: "connectors",
-    selectedConnector: "playwright",
-  };
+    selectedConnector: "mcp:/tmp/.tomcat/mcp.json:playwright",  };
 }
 
 function renderView(snapshot: SettingsStateSnapshot = state()) {
@@ -89,7 +90,7 @@ describe("ConnectorsSettingsView", () => {
     fireEvent.click(screen.getByRole("button", { name: "~/.tomcat/mcp.json" }));
     expect(postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { name: "playwright" },
+        data: { configKey: "mcp:/tmp/.tomcat/mcp.json:playwright" },
         type: "openConnectorConfig",
       }),
     );
@@ -105,6 +106,20 @@ describe("ConnectorsSettingsView", () => {
         data: { route: "models" },
         type: "settings.ready",
       }),
+    );
+  });
+
+  it("shows overridden Global connectors without attempting tool or connection actions", async () => {
+    const snapshot = state();
+    snapshot.connectors![0].overridden = true;
+    const { postMessage } = renderView(snapshot);
+
+    fireEvent.click(screen.getByRole("button", { name: /playwright/i }));
+
+    expect(screen.getByText(/overridden by the same-named Workspace connector/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "↻ Reload" })).toHaveProperty("disabled", true);
+    expect(postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "listConnectorTools" }),
     );
   });
 
@@ -124,7 +139,7 @@ describe("ConnectorsSettingsView", () => {
     fireEvent.click(screen.getByRole("button", { name: "~/.tomcat/mcp.json" }));
     expect(postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { scope: "user" },
+        data: { scope: "global" },
         type: "openConnectorConfig",
       }),
     );

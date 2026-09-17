@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
+
+use fs2::FileExt;
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -67,37 +70,33 @@ struct TrustFile {
 
 pub struct TrustStore {
     path: PathBuf,
-    state: Mutex<TrustFile>,
+    lock_path: PathBuf,
+    lock: Mutex<()>,
 }
 
 impl TrustStore {
     pub fn open(cfg: &AppConfig) -> Result<Self, AppError> {
         let path = get_work_dir(cfg)?.join("connector-trust.json");
-        let state = if path.exists() {
-            let content = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&content).map_err(|error| {
-                AppError::Config(format!(
-                    "parse connector trust store '{}': {error}",
-                    path.display()
-                ))
-            })?
-        } else {
-            TrustFile::default()
-        };
+        if path.exists() {
+            let _ = read_trust_file(&path)?;
+        }
         Ok(Self {
+            lock_path: path.with_extension("lock"),
             path,
-            state: Mutex::new(state),
+            lock: Mutex::new(()),
         })
     }
 
     pub fn decide(&self, server: &ConfiguredMcpServer) -> Result<TrustDecision, AppError> {
         match self.inspect(server)? {
             TrustStatus::Trusted => {
-                let mut state = self.state.lock();
-                if !state.servers.contains_key(&server.name) {
+                let _guard = self.lock.lock();
+                let _file_guard = self.acquire_file_lock()?;
+                let mut state = self.read_file()?;
+                if !state.servers.contains_key(&server.config_key) {
                     state
                         .servers
-                        .insert(server.name.clone(), trust_record(server, false));
+                        .insert(server.config_key.clone(), trust_record(server, false));
                     persist(&self.path, &state)?;
                 }
                 Ok(TrustDecision::Allowed)
@@ -114,8 +113,10 @@ impl TrustStore {
         let fingerprint = command_fingerprint(server);
         let snapshot = safe_launch_snapshot(server);
         let command_args_cwd_fingerprint = command_args_cwd_fingerprint(server);
-        let state = self.state.lock();
-        match state.servers.get(&server.name) {
+        let _guard = self.lock.lock();
+        let _file_guard = self.acquire_file_lock()?;
+        let state = self.read_file()?;
+        match state.servers.get(&server.config_key) {
             Some(record) if record.denied => Ok(TrustStatus::Blocked),
             Some(record) if record.command_fingerprint == fingerprint => Ok(TrustStatus::Trusted),
             // A global connector is configured by this user, not by the opened
@@ -155,19 +156,42 @@ impl TrustStore {
     }
 
     pub fn approve(&self, server: &ConfiguredMcpServer) -> Result<(), AppError> {
-        let mut state = self.state.lock();
+        let _guard = self.lock.lock();
+        let _file_guard = self.acquire_file_lock()?;
+        let mut state = self.read_file()?;
         state
             .servers
-            .insert(server.name.clone(), trust_record(server, false));
+            .insert(server.config_key.clone(), trust_record(server, false));
         persist(&self.path, &state)
     }
 
     pub fn deny(&self, server: &ConfiguredMcpServer) -> Result<(), AppError> {
-        let mut state = self.state.lock();
+        let _guard = self.lock.lock();
+        let _file_guard = self.acquire_file_lock()?;
+        let mut state = self.read_file()?;
         state
             .servers
-            .insert(server.name.clone(), trust_record(server, true));
+            .insert(server.config_key.clone(), trust_record(server, true));
         persist(&self.path, &state)
+    }
+
+    fn acquire_file_lock(&self) -> Result<File, AppError> {
+        let parent = self.lock_path.parent().ok_or_else(|| {
+            AppError::Config("connector trust lock has no parent directory".to_string())
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&self.lock_path)?;
+        file.lock_exclusive()?;
+        Ok(file)
+    }
+
+    fn read_file(&self) -> Result<TrustFile, AppError> {
+        read_trust_file(&self.path)
     }
 }
 
@@ -325,6 +349,19 @@ fn base64_digest<D: Digest>(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(D::digest(bytes))
 }
 
+fn read_trust_file(path: &std::path::Path) -> Result<TrustFile, AppError> {
+    if !path.exists() {
+        return Ok(TrustFile::default());
+    }
+    let content = std::fs::read_to_string(path)?;
+    serde_json::from_str(&content).map_err(|error| {
+        AppError::Config(format!(
+            "parse connector trust store '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
 fn persist(path: &std::path::Path, state: &TrustFile) -> Result<(), AppError> {
     let contents = serde_json::to_vec_pretty(state)
         .map_err(|error| AppError::Config(format!("serialize connector trust store: {error}")))?;
@@ -342,6 +379,7 @@ mod tests {
 
     fn server(source: McpConfigSource, command: &str) -> ConfiguredMcpServer {
         ConfiguredMcpServer {
+            config_key: format!("mcp:test:{}", source.wire_scope()),
             name: "browser".to_string(),
             config: McpServerConfig {
                 command: command.to_string(),
@@ -361,6 +399,26 @@ mod tests {
             },
             source,
         }
+    }
+
+    #[test]
+    fn deny_is_isolated_by_config_key_for_same_named_connectors() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let store = TrustStore::open(&cfg).expect("open trust store");
+        let global = server(McpConfigSource::Global, "npx");
+        let project = server(McpConfigSource::Project, "npx");
+
+        store.deny(&global).expect("deny global connector");
+        assert_eq!(
+            store.inspect(&global).expect("inspect global"),
+            TrustStatus::Blocked
+        );
+        assert!(matches!(
+            store.inspect(&project).expect("inspect project"),
+            TrustStatus::NeedsConfirmation { .. }
+        ));
     }
 
     #[test]

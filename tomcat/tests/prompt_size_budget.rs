@@ -34,14 +34,13 @@ const SYSTEM_TEMPLATES: &[(&str, PromptKey)] = &[
     ("workspace_state", PromptKey::SystemWorkspaceState),
 ];
 
-// 优化前实测基线（chars），见 baseline todo。优化后必须严格小于以量化"净负"。
-const BASELINE_CHAT_TOOLDEFS: usize = 32_004;
-// v2 adds four fixed deferred-connector meta-tools. Their bounded static cost replaces the
-// previously unbounded per-MCP schemas (34,182 -> 35,341). v3 adds required, auditable
-// completion evidence only to `update_plan` (35,341 -> 35,673). v4 adds the native
-// package_install status contract (35,673 -> 36,548). Keep one character above each measured
-// footprint as a strict ceiling against unreviewed prompt growth.
-const BASELINE_FULL_TOOLDEFS: usize = 36_549;
+// Current accepted contract baseline (chars). Keep one character above the latest measured
+// footprint so an unreviewed prompt-growth regression fails this test.
+const BASELINE_CHAT_TOOLDEFS: usize = 33_198;
+// v5 adds the declared acceptance-command contract and ratcheted green-build evidence to the
+// plan tools (32,004 -> 33,197; 36,549 -> 37,742). The chat and full catalogs share that schema
+// growth; keep one character above each measured footprint as a strict ceiling.
+const BASELINE_FULL_TOOLDEFS: usize = 37_743;
 
 #[test]
 fn print_prompt_static_sizes() {

@@ -105,10 +105,12 @@ describe("settings panel model management flow", () => {
       sendListModels: () => Promise<unknown>;
       sendListConnectors: () => Promise<unknown>;
       sendListProviderKeys: () => Promise<unknown>;
+      sendAddConnector: (input: unknown) => Promise<unknown>;
       sendSetProviderKey: (envName: string, value: string) => Promise<unknown>;
       sendUpsertModel: (model: unknown) => Promise<unknown>;
     }>;
     onModelCatalogChanged?: () => Promise<void> | void;
+    selectConnectorWorkspaceRoot?: () => Promise<string | null>;
   }) {
     const messenger = {
       sendListModels: vi.fn().mockResolvedValue({
@@ -123,6 +125,7 @@ describe("settings panel model management flow", () => {
         payload: { keys: [] },
         success: true,
       }),
+      sendAddConnector: vi.fn().mockResolvedValue({ payload: null, success: true }),
       sendSetProviderKey: vi.fn().mockResolvedValue({ payload: null, success: true }),
       sendUpsertModel: vi.fn().mockResolvedValue({ payload: null, success: true }),
       ...overrides?.messenger,
@@ -148,6 +151,7 @@ describe("settings panel model management flow", () => {
       extensionVersion: overrides?.extensionVersion ?? "0.1.24",
       messenger: messenger as never,
       onModelCatalogChanged: overrides?.onModelCatalogChanged,
+      selectConnectorWorkspaceRoot: overrides?.selectConnectorWorkspaceRoot,
     });
     return { messenger, panel };
   }
@@ -206,6 +210,49 @@ describe("settings panel model management flow", () => {
     expect(panel.__testingSnapshot().state.connectorConfigPaths).toEqual({
       global: { display: "~/.tomcat/mcp.json", raw: "/tmp/home/.tomcat/mcp.json" },
     });
+  });
+
+  it("uses the explicitly selected workspace for every connector request", async () => {
+    const selectConnectorWorkspaceRoot = vi.fn().mockResolvedValue("/workspace-b");
+    const { messenger, panel } = createPanel({
+      ensureInitialized: async () => ({ attachmentRoot: null, capabilities: ["list_connectors"], protocolVersion: 1, serverVersion: "0.1.20", sessionId: null }),
+      selectConnectorWorkspaceRoot,
+    });
+
+    await panel.__testingDispatchIntent({
+      data: { route: "connectors" },
+      messageId: "explicit-workspace-context",
+      type: "settings.ready",
+    } satisfies SettingsIntent);
+
+    expect(selectConnectorWorkspaceRoot).toHaveBeenCalledTimes(1);
+    expect(messenger.sendListConnectors).toHaveBeenCalledWith({ workspaceRoot: "/workspace-b" });
+  });
+
+  it("reselects the workspace after the settings view is closed", async () => {
+    const selectConnectorWorkspaceRoot = vi
+      .fn()
+      .mockResolvedValueOnce("/workspace-a")
+      .mockResolvedValueOnce("/workspace-b");
+    const { messenger, panel } = createPanel({
+      ensureInitialized: async () => ({ attachmentRoot: null, capabilities: ["list_connectors"], protocolVersion: 1, serverVersion: "0.1.20", sessionId: null }),
+      selectConnectorWorkspaceRoot,
+    });
+
+    await panel.__testingDispatchIntent({
+      data: { route: "connectors" },
+      messageId: "first-workspace",
+      type: "settings.ready",
+    } satisfies SettingsIntent);
+    panel.dispose();
+    await panel.__testingDispatchIntent({
+      data: { route: "connectors" },
+      messageId: "second-workspace",
+      type: "settings.ready",
+    } satisfies SettingsIntent);
+
+    expect(selectConnectorWorkspaceRoot).toHaveBeenCalledTimes(2);
+    expect(messenger.sendListConnectors).toHaveBeenLastCalledWith({ workspaceRoot: "/workspace-b" });
   });
 
   it("does not persist provider keys when model save fails", async () => {
@@ -383,6 +430,48 @@ describe("settings panel model management flow", () => {
 
     expect(messenger.sendListProviderKeys).toHaveBeenCalledTimes(1);
     expect(messenger.sendListModels).not.toHaveBeenCalled();
+  });
+
+  it("keeps a saved connector receipt when post-save setup cannot start a connection", async () => {
+    const { panel } = createPanel({
+      messenger: {
+        sendAddConnector: vi.fn().mockResolvedValue({
+          payload: {
+            configSaved: true,
+            connectionStarted: false,
+            postSaveError: "trust store is temporarily unavailable",
+          },
+          success: true,
+        }),
+      },
+    });
+
+    await panel.__testingDispatchIntent({
+      data: {
+        connector: {
+          auth: "none",
+          command: "node",
+          name: "saved-partial-connector",
+          scope: "global",
+          transport: "stdio",
+          type: "mcp",
+        },
+      },
+      messageId: "saved-partial-connector",
+      type: "addConnector",
+    } satisfies SettingsIntent);
+
+    const snapshot = panel.__testingSnapshot().state;
+    expect(snapshot.error).toBeNull();
+    expect(snapshot.connectorReceipt).toEqual({
+      configSaved: true,
+      connectionStarted: false,
+      error: "trust store is temporarily unavailable",
+      name: "saved-partial-connector",
+      requestId: "saved-partial-connector",
+    });
+    expect(snapshot.status).toContain("Connector saved, but connection was not started.");
+    expect(snapshot.status).toContain("trust store is temporarily unavailable");
   });
 
   it("marks the webview ready only after the settings.ready handshake arrives", async () => {

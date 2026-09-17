@@ -474,15 +474,13 @@ async fn deepseek_chat_roundtrip_replays_tool_turn_reasoning_content(
 }
 
 #[tokio::test]
-async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn mimo_chat_roundtrip_replays_reasoning_content() -> Result<(), Box<dyn std::error::Error>> {
     require_api_key("MIMO_API_KEY");
 
     let fixture = mimo_continuity_config();
     let config = &fixture.config;
     let provider = common::resolve_main_provider(config);
-    let prompt =
-        "Call lookup_weather exactly once for Hangzhou on tomorrow, then wait for the tool result.";
+    let prompt = "Explain why 3 * 7 equals 21 in one short sentence.";
 
     for attempt in 1..=DEEPSEEK_CAPTURE_ATTEMPTS {
         let first_turn = capture_stream_turn(
@@ -498,33 +496,23 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
                 model_override: None,
                 thinking_level: None,
                 cache_key: None,
-                tools: Some(weather_tool_definitions()),
+                tools: None,
             },
         )
         .await?;
 
         let Some(reasoning_continuation) = first_turn.reasoning_continuation.clone() else {
-            tracing::warn!(
-                attempt,
-                "MiMo tool turn 未返回 continuity snapshot，重试捕获"
-            );
+            tracing::warn!(attempt, "MiMo 未返回 continuity snapshot，重试捕获");
             continue;
         };
         let Some(continuity) = first_turn.continuity.clone() else {
-            tracing::warn!(
-                attempt,
-                "MiMo tool turn 未返回 continuity metadata，重试捕获"
-            );
+            tracing::warn!(attempt, "MiMo 未返回 continuity metadata，重试捕获");
             continue;
         };
-        if first_turn.tool_calls.is_empty() {
-            tracing::warn!(attempt, "MiMo 首轮未触发 tool call，重试捕获");
-            continue;
-        }
 
         assert!(
-            continuity.had_tool_call,
-            "MiMo tool turn continuity 应标记 had_tool_call=true"
+            !continuity.had_tool_call,
+            "MiMo reasoning-only turn without tools must not claim a tool call"
         );
         assert_eq!(reasoning_continuation.source_provider, "mimo");
         assert_eq!(reasoning_continuation.source_api, "chat_completions");
@@ -535,33 +523,19 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
             "MiMo continuity snapshot 应携带 reasoning_content"
         );
 
-        let tool_call_id = first_turn.tool_calls[0]["id"]
-            .as_str()
-            .expect("tool_call id missing")
-            .to_string();
-        let assistant = ChatMessage::assistant_with_tool_calls(
-            (!first_turn.assistant_text.trim().is_empty())
-                .then_some(first_turn.assistant_text.as_str()),
-            first_turn.tool_calls.clone(),
-        )
-        .with_reasoning_state(
-            first_turn.thinking_text.clone(),
-            Some(reasoning_continuation),
-            Some(continuity),
-        );
+        let assistant = ChatMessage::assistant(first_turn.assistant_text.clone())
+            .with_reasoning_state(
+                first_turn.thinking_text.clone(),
+                Some(reasoning_continuation),
+                Some(continuity),
+            );
         let second = run_chat(
             provider.clone(),
             ChatRequest {
                 messages: vec![
                     ChatMessage::user(prompt),
                     assistant,
-                    ChatMessage::tool(
-                        &tool_call_id,
-                        r#"{"city":"Hangzhou","day":"tomorrow","forecast":"sunny 25C"}"#,
-                    ),
-                    ChatMessage::user(
-                        "Do not call any more tools. Answer directly in one short sentence.",
-                    ),
+                    ChatMessage::user("Answer directly in one short sentence."),
                 ],
                 model: config.llm.default_model.clone(),
                 temperature: None,
@@ -578,15 +552,12 @@ async fn mimo_chat_roundtrip_replays_tool_turn_reasoning_content(
         .await?;
         assert!(
             !second.choices.is_empty(),
-            "MiMo tool-turn continuity replay 第二轮应返回 choices"
+            "MiMo reasoning continuity replay 第二轮应返回 choices"
         );
         return Ok(());
     }
 
-    Err(
-        std::io::Error::other("MiMo 在多次尝试后仍未拿到带 tool-call 的 continuity snapshot")
-            .into(),
-    )
+    Err(std::io::Error::other("MiMo 在两次尝试后仍未拿到 reasoning continuity snapshot").into())
 }
 
 #[tokio::test]

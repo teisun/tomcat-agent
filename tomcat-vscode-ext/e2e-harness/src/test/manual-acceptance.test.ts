@@ -14,10 +14,16 @@ const hostE2e = require(path.resolve(
 };
 
 type DomSnapshot = Awaited<ReturnType<TomcatApi["__testing"]["captureWebviewDom"]>>;
-type PreviewDomSnapshot = Awaited<
-  ReturnType<TomcatApi["__testing"]["captureImagePreviewDom"]>
->;
-type WebviewState = ReturnType<TomcatApi["__testing"]["getWebviewState"]>;
+type PreviewDomSnapshot = {
+  activeId: string | null;
+  activeThumbIndex: number;
+  position: number;
+  stageClientWidth: number;
+  stageScrollWidth: number;
+  thumbCount: number;
+  total: number;
+  zoom: "fit" | number;
+};type WebviewState = ReturnType<TomcatApi["__testing"]["getWebviewState"]>;
 
 type TomcatApi = {
   __testing: {
@@ -73,17 +79,24 @@ type TomcatApi = {
         }
       >;
     };
-    captureImagePreviewDom(): Promise<{
-      activeId: string | null;
-      activeThumbIndex: number;
-      position: number;
-      stageClientWidth: number;
-      stageScrollWidth: number;
-      thumbCount: number;
-      total: number;
-      zoom: "fit" | number;
-    }>;
-    clearObservedEvents(): void;
+    captureImagePreviewDom(): Promise<PreviewDomSnapshot>;
+    clearObservedEvents(): void;    captureSettingsDom(): Promise<{ html: string }>;
+    getSettingsPanelState(): {
+      route: "connectors" | "models";
+      state: {
+        connectorTools?: Array<{ rawName: string }>;
+        connectors?: Array<{ configKey: string; name: string; source: string }>;
+        ready: boolean;
+        selectedConnector?: string | null;
+      };
+      visible: boolean;
+      webviewReady: boolean;
+    };
+    sendSettingsIntent(intent: {
+      data?: Record<string, unknown>;
+      messageId: string;
+      type: string;
+    }): Promise<void>;
     dispatchImagePreviewDomAction(action: {
       kind: "fit" | "next" | "previous" | "zoomIn" | "zoomOut";
     }): Promise<void>;
@@ -786,6 +799,73 @@ suite("Tomcat manual acceptance", () => {
         vscode.ConfigurationTarget.Global,
       );
 
+
+    await api.__testing.executeCommand("tomcat.openSettings");
+    await (async () => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 20_000) {
+        const snapshot = api.__testing.getSettingsPanelState();
+        if (snapshot.visible && snapshot.webviewReady) {
+          return;
+        }
+        await pause(100);
+      }
+      throw new Error(
+        `Timed out waiting for the Settings webview to mount: ${JSON.stringify(
+          api.__testing.getSettingsPanelState(),
+        )}`,
+      );
+    })();
+    await api.__testing.sendSettingsIntent({
+      data: { route: "connectors" },
+      messageId: "manual-acceptance-open-connectors",
+      type: "settings.ready",
+    });
+    const connectorSettings = await (async () => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 20_000) {
+        const snapshot = api.__testing.getSettingsPanelState();
+        const connector = snapshot.state.connectors?.find(
+          (entry) => entry.configKey === "mcp:manual-global",
+        );
+        if (snapshot.visible && snapshot.webviewReady && snapshot.route === "connectors" && connector) {
+          return { connector, snapshot };
+        }
+        await pause(100);
+      }
+      throw new Error(
+        `Timed out waiting for the installed connectors settings view: ${JSON.stringify(
+          api.__testing.getSettingsPanelState(),
+        )}`,
+      );
+    })();
+    await api.__testing.sendSettingsIntent({
+      data: {
+        configKey: connectorSettings.connector.configKey,
+        name: connectorSettings.connector.name,
+      },
+      messageId: "manual-acceptance-list-connector-tools",
+      type: "listConnectorTools",
+    });
+    const connectorToolsLoaded = await (async () => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 15_000) {
+        const snapshot = api.__testing.getSettingsPanelState().state;
+        if (
+          snapshot.selectedConnector === connectorSettings.connector.configKey &&
+          snapshot.connectorTools?.some((tool) => tool.rawName === "connector_probe")
+        ) {
+          return snapshot;
+        }
+        await pause(100);
+      }
+      throw new Error("Timed out waiting for the connector tool list.");
+    })();
+    const connectorDom = await api.__testing.captureSettingsDom();
+    assert.ok(connectorDom.html.includes("Connectors"));
+    assert.ok(connectorDom.html.includes("manual-global"));
+    assert.ok(connectorDom.html.includes("connector_probe"));
+    screenshots.push(await captureScreenshot("25-connectors-installed.png"));
     const toolScrollMetric = toolExpanded.toolBodyMetrics.find((entry) =>
       /Searched workspace/i.test(entry.title),
     );
@@ -804,6 +884,12 @@ suite("Tomcat manual acceptance", () => {
         },
         composer: {
           passed: true,
+        },
+        connectors: {
+          passed:
+            connectorSettings.snapshot.route === "connectors" &&
+            connectorSettings.connector.source === "global" &&
+            connectorToolsLoaded.connectorTools?.some((tool) => tool.rawName === "connector_probe") === true,
         },
         imageAttachments: {
           passed:

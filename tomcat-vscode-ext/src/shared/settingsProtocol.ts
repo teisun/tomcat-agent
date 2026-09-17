@@ -84,6 +84,14 @@ export interface SettingsConnectorCapabilities {
   login: boolean;
 }
 
+export interface SettingsConnectorReceipt {
+  requestId: string;
+  configSaved: boolean;
+  connectionStarted: boolean;
+  error?: string | null;
+  name?: string | null;
+}
+
 export interface SettingsStateSnapshot {
   capabilities: SettingsCapabilities;
   error?: string | null;
@@ -95,6 +103,8 @@ export interface SettingsStateSnapshot {
   connectorConfigPaths?: ConnectorConfigPaths;
   connectorCapabilities?: SettingsConnectorCapabilities;
   connectorTools?: ConnectorToolView[];
+  connectorReceipt?: SettingsConnectorReceipt | null;
+
   selectedConnector?: string | null;
   ready: boolean;
   route: SettingsRoute;
@@ -155,7 +165,7 @@ export type SettingsIntent =
   | {
       messageId: string;
       type: "listConnectorTools" | "reloadConnector" | "removeConnector" | "loginConnector" | "logoutConnector" | "trustConnector" | "denyConnector" | "cancelLoginConnector";
-      data: { name: string };
+      data: { name: string; configKey: string };
     }
   | {
       messageId: string;
@@ -165,12 +175,12 @@ export type SettingsIntent =
   | {
       messageId: string;
       type: "setConnectorToolFilter";
-      data: { name: string; filter: ConnectorToolFilter };
+      data: { name: string; configKey: string; filter: ConnectorToolFilter };
     }
   | {
       messageId: string;
       type: "openConnectorConfig";
-      data: { name?: string; scope?: "user" | "workspace" };
+      data: { configKey?: string; scope?: "global" | "workspace" };
     };
 
 export interface VsCodeApiLike<TMessage = unknown> {
@@ -283,16 +293,17 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
     case "logoutConnector":
     case "trustConnector":
     case "denyConnector":
-    case "cancelLoginConnector":      return isRecord(value.data) && typeof value.data.name === "string";
+    case "cancelLoginConnector":
+      return isRecord(value.data) && typeof value.data.name === "string" && typeof value.data.configKey === "string";
     case "addConnector":
       return isRecord(value.data) && isRecord(value.data.connector) && typeof value.data.connector.name === "string";
     case "setConnectorToolFilter":
-      return isRecord(value.data) && typeof value.data.name === "string" && isRecord(value.data.filter);
+      return isRecord(value.data) && typeof value.data.name === "string" && typeof value.data.configKey === "string" && isRecord(value.data.filter);
     case "openConnectorConfig":
       return (
         isRecord(value.data) &&
-        (typeof value.data.name === "string" ||
-          value.data.scope === "user" ||
+        (typeof value.data.configKey === "string" ||
+          value.data.scope === "global" ||
           value.data.scope === "workspace")
       );
 
