@@ -881,7 +881,7 @@ impl PlanRuntime {
     |                                                NextAction:
     |                                                   - StartReview: explicitly start `[gate] review`
     |                                                   - FixFindings: repair and request another review
-    |                                                   - RunAcceptance: load `verify`, submit fresh task evidence
+    |                                                   - RunAcceptance: load `verify`, submit matching green-task evidence
     |                                                   - HandOff: final round still has P0
     |                                                   - Done: clear runtime.active_plan_id / EXECUTOR_REMINDER / catalog / prompt → CHAT
      |

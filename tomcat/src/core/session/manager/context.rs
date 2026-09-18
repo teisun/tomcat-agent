@@ -172,10 +172,31 @@ pub(super) fn compute_turn_window_start(
     earlier_anchor(today_anchor, recent_turn_anchor)
 }
 
+/// A hydration slice may only begin at a user message that can establish a
+/// replay turn. Starting at an assistant tool call or its result would split
+/// the provider protocol pair across the slice boundary.
+fn snap_to_protocol_safe_start(
+    index: &ResumeIndex,
+    candidate: Option<ResumeAnchor>,
+) -> Option<ResumeAnchor> {
+    let candidate = candidate?;
+    index
+        .recent_turn_starts
+        .iter()
+        .rev()
+        .find(|anchor| anchor.ordinal <= candidate.ordinal)
+        .cloned()
+}
+
 pub(super) fn compute_slice_start_anchor(
     index: &ResumeIndex,
     today: NaiveDate,
 ) -> Option<ResumeAnchor> {
+    let candidate = compute_slice_start_candidate(index, today);
+    snap_to_protocol_safe_start(index, candidate)
+}
+
+fn compute_slice_start_candidate(index: &ResumeIndex, today: NaiveDate) -> Option<ResumeAnchor> {
     later_anchor(
         index.latest_boundary.clone(),
         compute_turn_window_start(index, today),
@@ -231,6 +252,7 @@ fn targeted_hydration_entries_with_load(
 ) -> Result<HydrateLoadOutcome, AppError> {
     let index = load.index.clone();
     let latest_plan_event = index.latest_plan_event_ref();
+    let raw_slice_start_candidate = compute_slice_start_candidate(&index, today);
     let slice_start_anchor = compute_slice_start_anchor(&index, today);
     let slice_start_ordinal = slice_start_anchor
         .as_ref()
@@ -251,6 +273,21 @@ fn targeted_hydration_entries_with_load(
     let (mut entries, tail_stats) = read_entries_tail_with_stats(path, k.max(1))?;
     let mut io_stats = load.stats;
     add_transcript_stats(&mut io_stats, tail_stats);
+
+    if let Some(candidate) = raw_slice_start_candidate.as_ref() {
+        let candidate_matches = entries.iter().any(|entry| candidate.matches_entry(entry));
+        if !candidate_matches {
+            let (_, rebuild_stats) = rebuild_resume_index(path)?;
+            io_stats.bytes_scanned += rebuild_stats.bytes_scanned;
+            io_stats.entries_scanned += rebuild_stats.entries_scanned;
+
+            let mut fallback = full_hydration_entries(session, path)?;
+            fallback.io_stats.bytes_scanned += io_stats.bytes_scanned;
+            fallback.io_stats.entries_scanned += io_stats.entries_scanned;
+            fallback.fallback = "full+rebuild";
+            return Ok(fallback);
+        }
+    }
 
     if let Some(anchor) = slice_start_anchor.as_ref() {
         let edge_matches = entries

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use super::super::code_reviewer::{
-    build_code_review_prompt, changed_files_since, code_review_system_prompt_text,
+    build_code_review_prompt, code_review_system_prompt_text,
     code_reviewer_allowed_tools_with_policy, CodeReviewPromptInput, CodeReviewSummary,
     CODE_REVIEWER_ALLOWED_TOOLS,
 };
@@ -194,7 +194,7 @@ fn build_code_review_prompt_first_round_lists_the_complete_changed_file_set() {
         plan_path: Path::new("/tmp/plan-1.plan.md"),
         workspace_root: Some(Path::new("/repo/root")),
         changed_files: &["src/lib.rs".into(), "tests/lib.rs".into()],
-        delta_files: &[],
+        review_files: &[],
         round: 1,
         is_incremental: false,
         open_findings: &[],
@@ -214,7 +214,7 @@ fn build_code_review_prompt_first_round_lists_the_complete_changed_file_set() {
 }
 
 #[test]
-fn build_code_review_prompt_incremental_round_limits_new_findings_to_delta() {
+fn build_code_review_prompt_follow_up_round_uses_the_current_complete_diff() {
     let open_findings = vec![super::super::review::Finding::new(
         "P1".into(),
         "src/frozen.rs".into(),
@@ -226,41 +226,18 @@ fn build_code_review_prompt_incremental_round_limits_new_findings_to_delta() {
         plan_path: Path::new("/tmp/plan-1.plan.md"),
         workspace_root: Some(Path::new("/repo/root")),
         changed_files: &["src/delta.rs".into(), "src/frozen.rs".into()],
-        delta_files: &["src/delta.rs".into()],
+        review_files: &["src/delta.rs".into(), "src/frozen.rs".into()],
         round: 8,
         is_incremental: true,
         open_findings: &open_findings,
         disputed_findings: &[],
     });
-    assert!(prompt.contains("Incremental review (round 8)."));
+    assert!(prompt.contains("Follow-up review (round 8)."));
     assert!(prompt.contains("src/delta.rs"));
-    assert!(
-        prompt.contains("Every other changed file is frozen"),
-        "增量轮必须明确冻结 DELTA 补集: {prompt}"
-    );
-    assert!(prompt.contains("Open findings from the previous review round"));
     assert!(prompt.contains("src/frozen.rs"));
+    assert!(prompt.contains("timestamp cannot provide a reliable per-file delta"));
+    assert!(prompt.contains("Open findings from the previous review round"));
     assert!(!prompt.contains("git diff --stat HEAD"));
-}
-
-#[test]
-fn incremental_delta_uses_mtime_and_keeps_deleted_files_conservatively() {
-    let workspace = tempfile::tempdir().expect("workspace");
-    let source = workspace.path().join("src/lib.rs");
-    std::fs::create_dir_all(source.parent().expect("parent")).expect("create src");
-    std::fs::write(&source, "pub fn current() {}\n").expect("write source");
-    let files = vec!["src/lib.rs".to_string(), "src/deleted.rs".to_string()];
-
-    assert_eq!(
-        changed_files_since(workspace.path(), &files, 0),
-        files,
-        "文件 mtime 晚于 epoch，缺失路径也必须保守保留"
-    );
-    assert_eq!(
-        changed_files_since(workspace.path(), &files, u128::MAX),
-        vec!["src/deleted.rs".to_string()],
-        "未来阈值过滤已有文件，但无 mtime 的删除必须继续复审"
-    );
 }
 
 #[test]

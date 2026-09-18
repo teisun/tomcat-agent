@@ -147,7 +147,7 @@ async fn run_chat_stream_preserves_finish_reason_and_trailing_usage() {
 }
 
 #[tokio::test]
-async fn run_chat_stream_empty_llm_error_returns_err_without_event() {
+async fn run_chat_stream_empty_llm_error_returns_err_and_emits_structured_error() {
     let stream = vec![
         Ok(StreamEvent::LlmError {
             reason: "error:boom".to_string(),
@@ -177,13 +177,16 @@ async fn run_chat_stream_empty_llm_error_returns_err_without_event() {
 
     assert!(matches!(err, LoopError::Retryable(_)));
     assert!(
-        observed.lock().unwrap().is_empty(),
-        "no output 时不应发 LlmError 事件"
+        observed.lock().unwrap().iter().any(|event| {
+            event["errorMessage"].as_str() == Some("boom")
+                && event["errorCode"].as_str() == Some("server_error")
+        }),
+        "terminal failures must remain visible even when no deltas preceded them"
     );
 }
 
 #[tokio::test]
-async fn run_chat_stream_with_text_and_llm_error_keeps_structured_event() {
+async fn run_chat_stream_with_text_and_llm_error_discards_partial_output_and_retries() {
     let stream = vec![
         Ok(StreamEvent::ContentDelta {
             delta: "partial".to_string(),
@@ -209,22 +212,25 @@ async fn run_chat_stream_with_text_and_llm_error_keeps_structured_event() {
         }),
     );
 
-    let outcome = run_chat_stream(&mut agent, make_request(), 1, 4)
-        .await
-        .expect("text + llm error should keep partial output");
-
-    assert_eq!(outcome.content_buf, "partial");
-    assert_eq!(outcome.finish_reason.as_deref(), Some("error:server_error"));
-    assert_eq!(outcome.error_message.as_deref(), Some("boom"));
-    assert_eq!(outcome.error_code.as_deref(), Some("server_error"));
+    let err = match run_chat_stream(&mut agent, make_request(), 1, 4).await {
+        Ok(_) => panic!("a terminal LLM error must discard partial output and retry"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, LoopError::Retryable(_)));
     let observed = observed.lock().unwrap();
     assert_eq!(observed.len(), 1);
-    assert_eq!(observed[0]["errorMessage"].as_str(), Some("boom"));
+    assert!(
+        observed[0]["errorMessage"]
+            .as_str()
+            .is_some_and(|message| message.contains("boom") && message.contains("已丢弃 7 字")),
+        "the visible error must disclose discarded partial output: {:?}",
+        observed[0]
+    );
     assert_eq!(observed[0]["errorCode"].as_str(), Some("server_error"));
 }
 
 #[tokio::test]
-async fn run_chat_stream_with_tool_calls_and_llm_error_keeps_tool_branch() {
+async fn run_chat_stream_with_tool_calls_and_llm_error_discards_partial_calls_and_retries() {
     let stream = vec![
         Ok(StreamEvent::ToolCallDelta {
             index: 0,
@@ -252,13 +258,11 @@ async fn run_chat_stream_with_tool_calls_and_llm_error_keeps_tool_branch() {
         }),
     );
 
-    let outcome = run_chat_stream(&mut agent, make_request(), 1, 4)
-        .await
-        .expect("tool calls + llm error should still keep tool branch");
-
-    assert_eq!(outcome.tool_calls_buf.len(), 1);
-    assert_eq!(outcome.tool_calls_buf[0].name, "write");
-    assert_eq!(outcome.error_message.as_deref(), Some("boom"));
+    let err = match run_chat_stream(&mut agent, make_request(), 1, 4).await {
+        Ok(_) => panic!("a terminal LLM error must discard partial tool calls"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, LoopError::Retryable(_)));
     assert_eq!(observed.lock().unwrap().len(), 1);
 }
 
@@ -302,11 +306,6 @@ async fn run_chat_stream_warn_log_never_contains_base64_payload() {
     let _ = run_chat_stream(&mut agent, req, 1, 4).await;
 
     let rendered = String::from_utf8(logs.lock().unwrap().clone()).expect("utf8 logs");
-    assert!(
-        rendered.contains("stream_terminal_error"),
-        "应捕获到 stream_terminal_error warn：{}",
-        rendered
-    );
     assert!(
         rendered.contains("input_file"),
         "形状日志应只暴露 part 类型：{}",

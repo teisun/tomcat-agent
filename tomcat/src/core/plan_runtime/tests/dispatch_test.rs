@@ -59,15 +59,12 @@ fn resolved_plan_path_prefers_active_external_path() {
                 green_build_pass: false,
                 green_build_evidence: Vec::new(),
                 code_review_pass: false,
-                code_review_pass_at_ms: None,
                 code_review_rounds: 0,
-                code_review_baseline_ms: None,
                 code_review_open_findings: Vec::new(),
                 code_review_disputed_findings: Vec::new(),
                 code_review_handoff: false,
                 code_review_handoff_acknowledged: false,
                 code_review_residual_findings: Vec::new(),
-                completion_gate_cycles: 0,
                 acceptance_commands: Vec::new(),
                 unknown: Default::default(),
             },
@@ -113,15 +110,12 @@ fn concurrent_exit_and_build_leave_one_chat_mode_transition() {
                 green_build_pass: false,
                 green_build_evidence: Vec::new(),
                 code_review_pass: false,
-                code_review_pass_at_ms: None,
                 code_review_rounds: 0,
-                code_review_baseline_ms: None,
                 code_review_open_findings: Vec::new(),
                 code_review_disputed_findings: Vec::new(),
                 code_review_handoff: false,
                 code_review_handoff_acknowledged: false,
                 code_review_residual_findings: Vec::new(),
-                completion_gate_cycles: 0,
                 acceptance_commands: Vec::new(),
                 unknown: Default::default(),
             },
@@ -191,7 +185,7 @@ fn concurrent_exit_and_build_leave_one_chat_mode_transition() {
 }
 
 #[test]
-fn dropped_inflight_review_releases_lease_without_consuming_a_round() {
+fn park_resets_persisted_review_in_progress_and_emits_aborted() {
     let runtime = PlanRuntime::new("session");
     let plan_dir = tempfile::tempdir().unwrap();
     let plan_path = plan_dir.path().join("plan-a.plan.md");
@@ -201,7 +195,7 @@ fn dropped_inflight_review_releases_lease_without_consuming_a_round() {
     frontmatter.todos.push(TodoItem {
         id: "gate-review".into(),
         content: "[gate] review".into(),
-        status: TodoStatus::Pending,
+        status: TodoStatus::InProgress,
         evidence: Vec::new(),
         kind: TodoKind::GateCodeReview,
     });
@@ -223,40 +217,26 @@ fn dropped_inflight_review_releases_lease_without_consuming_a_round() {
         }));
     }
 
-    runtime.write_code_review_started_transcript("plan-a", 1, "plan-a:1", "tool-a", None, None);
-    let lease = runtime
-        .begin_code_review_round("plan-a", 0, "plan-a:1".into(), "tool-a".into(), false, 0)
-        .expect("first reservation");
-    drop(lease);
-
-    assert!(
-        runtime
-            .begin_code_review_round("plan-a", 0, "plan-a:1".into(), "tool-b".into(), false, 0,)
-            .is_some(),
-        "dropped future must not leave the in-process lease held"
+    runtime.bind_plan_file_for_test(plan_path.clone());
+    assert_eq!(
+        runtime.park_executing_plan().unwrap().as_deref(),
+        Some("plan-a")
     );
     let persisted = read_plan(&plan_path).unwrap();
     assert_eq!(
         persisted.frontmatter.code_review_rounds, 0,
-        "dropping the dispatch future must not consume a durable round"
+        "parking a half-open review must not consume a durable round"
     );
     assert_eq!(
         persisted.frontmatter.todos.last().unwrap().status,
         TodoStatus::Pending,
-        "dropping the dispatch future must not leave the visible gate half-open"
+        "parking must reset the visible review gate"
     );
     let events = events.lock();
-    assert_eq!(
-        events[0]["event"],
-        crate::infra::wire::WIRE_PLAN_CODE_REVIEW_STARTED
-    );
     assert_eq!(
         events[1]["event"],
         crate::infra::wire::WIRE_PLAN_CODE_REVIEW
     );
     assert_eq!(events[1]["aborted"], true);
-    assert_eq!(
-        events[0]["review_attempt_id"],
-        events[1]["review_attempt_id"]
-    );
+    assert_eq!(events[1]["review_attempt_id"], "plan-a:recovery");
 }

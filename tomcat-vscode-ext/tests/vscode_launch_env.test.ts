@@ -62,6 +62,8 @@ describe("VS Code GUI launch environment", () => {
         expect(supplied).toBeGreaterThan(0);
         expect(received.launchArgs!.filter((arg) => arg.startsWith("--remote-debugging-port=")))
           .toEqual([`--remote-debugging-port=${supplied}`]);
+        expect(received.launchArgs!.filter((arg) => arg === "--password-store=basic"))
+          .toEqual(["--password-store=basic"]);
         if (port) expect(supplied).toBe(port);
         return 0;
       }, { launchArgs, extensionTestsEnv: { TOMCAT_VSIX_VISUAL_ARTIFACTS_DIR: root } });
@@ -135,7 +137,7 @@ describe("VS Code GUI launch environment", () => {
     expect(warning).toHaveBeenCalledOnce();
   });
 
-  it.each(["verify-vsix", "install-e2e", "devhost", "manual-acceptance", "image-acceptance"])(
+  it.each(["verify-vsix", "install-e2e", "devhost", "manual-acceptance", "image-acceptance", "model-switch-reverify", "ask-question-reverify"])(
     "executes the actual %s launch call with a stub runner (without running main/install/build)", async (name) => {
       const root = await temp();
       const file = path.resolve(__dirname, `../scripts/run-vscode-${name}.ts`);

@@ -16,7 +16,7 @@ use crate::core::llm::{
     ChatMessage, LlmProvider, LlmResolver, LlmScene, ResolvedCall, SharedModelCatalog,
 };
 use crate::core::plan_runtime::code_reviewer::{
-    build_code_review_prompt, changed_files_since, code_review_system_prompt_text,
+    build_code_review_prompt, code_review_system_prompt_text,
     code_reviewer_allowed_tools_with_policy, collect_git_changed_files, CodeReviewPromptInput,
     CodeReviewSummary,
 };
@@ -454,23 +454,21 @@ impl CodeReviewerDispatcher for ProdCodeReviewerDispatcher {
         };
         let workspace_root = Some(deps.agent_workspace_dir.as_path());
         let changed_files = collect_git_changed_files(deps.agent_workspace_dir.as_path()).await;
-        let previous_dispatch_ms = dispatch
-            .is_incremental
-            .then_some(review_state.code_review_baseline_ms)
-            .flatten();
         let is_incremental = dispatch.is_incremental;
-        let delta_files = previous_dispatch_ms
-            .map(|since_ms| {
-                changed_files_since(deps.agent_workspace_dir.as_path(), &changed_files, since_ms)
-            })
-            .unwrap_or_default();
+        // The previous review timestamp is not a content boundary. Incremental
+        // review keeps its round context, but receives the current full diff.
+        let review_files = if is_incremental {
+            changed_files.clone()
+        } else {
+            Vec::new()
+        };
         let initial_user_message = build_code_review_prompt(CodeReviewPromptInput {
             plan_id,
             plan_text,
             plan_path: &plan_path,
             workspace_root,
             changed_files: &changed_files,
-            delta_files: &delta_files,
+            review_files: &review_files,
             round: dispatch.round,
             is_incremental,
             open_findings: &review_state.code_review_open_findings,

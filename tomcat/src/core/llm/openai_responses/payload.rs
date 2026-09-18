@@ -26,8 +26,6 @@ use crate::core::llm::types::{
 };
 
 pub(super) const MAX_OUTPUT_TOKENS_NOTICE: &str = "达到 max_output_tokens，回答可能未完成";
-const REASONING_EXHAUSTION_MIN_OUTPUT_TOKENS: u64 = 128;
-const REASONING_EXHAUSTION_PERCENT: u64 = 95;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ResponsesTerminalMetadata {
@@ -107,55 +105,12 @@ fn incomplete_metadata(reason: &str, has_tool_calls: bool) -> ResponsesTerminalM
     ResponsesTerminalMetadata::error(reason.trim(), None)
 }
 
-fn response_has_nonempty_output_text(response: &Value) -> bool {
-    response
-        .get("output")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
-        .filter_map(|item| item.get("content").and_then(Value::as_array))
-        .flatten()
-        .any(|part| {
-            part.get("type").and_then(Value::as_str) == Some("output_text")
-                && part
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| !text.trim().is_empty())
-        })
-}
-
-fn completed_empty_reasoning_likely_exhausted(response: &Value) -> bool {
-    let output_tokens = response
-        .get("usage")
-        .and_then(|usage| usage.get("output_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let reasoning_tokens = response
-        .get("usage")
-        .and_then(|usage| usage.get("output_tokens_details"))
-        .and_then(|details| details.get("reasoning_tokens"))
-        .or_else(|| {
-            response
-                .get("usage")
-                .and_then(|usage| usage.get("reasoning_output_tokens"))
-        })
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-
-    output_tokens >= REASONING_EXHAUSTION_MIN_OUTPUT_TOKENS
-        && !response_has_nonempty_output_text(response)
-        && reasoning_tokens.saturating_mul(100)
-            >= output_tokens.saturating_mul(REASONING_EXHAUSTION_PERCENT)
-}
-
 /// 将 Responses 端点的终态统一成内部 finish reason。
 ///
-/// 这里的“完成但空输出且几乎全是 reasoning token”是对上游 `completed` 误报的**诊断性
-/// 兜底**：它改写为 `max_output_tokens`，让用户知道回复可能因输出预算耗尽而未完成。
-/// 它不决定一轮对话能否成功；后者仍由 agent loop 的空回合守卫负责，且该守卫只拒绝
-/// “有 thinking、无正文、无工具”的回合。因此纯工具轮与端点合法的结构化空 `end_turn`
-/// 仍不会被本启发式误伤。
+/// 此处只忠实翻译上游明确报告的终态：`completed`/`done` 映射为 `stop`，
+/// `incomplete_details.reason` 决定不完整的终态。响应 usage 只描述消耗，不可
+/// 反向推断或改写上游结束原因；空回合是否需要重试由 agent loop 基于可见/隐藏
+/// 输出的事实信号判断。
 pub(super) fn infer_terminal_metadata(
     status_hint: Option<&str>,
     response: Option<&Value>,
@@ -188,13 +143,6 @@ pub(super) fn infer_terminal_metadata(
 
     if let Some(reason) = incomplete_reason {
         return incomplete_metadata(reason, has_tool_calls);
-    }
-
-    if !has_tool_calls
-        && matches!(status, Some("completed" | "done"))
-        && response.is_some_and(completed_empty_reasoning_likely_exhausted)
-    {
-        return ResponsesTerminalMetadata::max_output_tokens();
     }
 
     if has_tool_calls {

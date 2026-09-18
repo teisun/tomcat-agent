@@ -61,8 +61,9 @@ Before choosing an output directory, read `workspace.project_resource_dir` from 
    a realistic wait slice until it finishes.
 
 4. A command is valid evidence only when its background task is `Finished` with
-   `exit_code=0`, and it started after the newest code edit. Failed, stopped, reused,
-   or still-running tasks are not evidence.
+   `exit_code=0` and the submitted command matches the task's actual command. Failed,
+   stopped, reused, or still-running tasks are not evidence. If code changes during
+   acceptance, apply the review-and-rerun rules below before submitting evidence.
 
 5. When all selected checks pass, call `update_plan` with:
 
@@ -77,10 +78,28 @@ Before choosing an output directory, read `workspace.project_resource_dir` from 
 }
 ```
 
-The runtime validates the task ID, actual command, exit code, and freshness itself.
+The runtime validates the task ID, actual command, and exit code itself.
 Never set `green_build_pass` to true without this evidence. If discovery found no
 meaningful command, leave the plan open and report the concrete missing acceptance
 path rather than fabricating success.
+
+## Review acceptance-phase edits
+
+Acceptance is not a free pass to make unreviewed changes. If a check exposes a
+problem and you edit code while verifying:
+
+1. Review the diff yourself before submitting evidence. State the change's intent
+   and affected boundary; do not rely on an earlier review of older code.
+2. Add or extend the regression test that owns the changed behavior, then include
+   it in the green-build run. Running only the old checks is insufficient.
+3. If any code changes after a check starts or finishes, rerun the affected check
+   before submitting evidence. Submit only green evidence that reflects the code
+   currently in the workspace.
+
+These are mandatory acceptance-quality steps, not optional advice. The runtime
+validates that evidence belongs to this session, finished successfully, and names
+the command it ran; deciding whether a content change requires a rerun belongs to
+this review step rather than to a filesystem timestamp.
 
 ## UI acceptance
 

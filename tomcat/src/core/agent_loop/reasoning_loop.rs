@@ -25,7 +25,7 @@
 //! 的 300 行红线。抽为本文件的 `pub(super)` 自由函数，签名 `&mut AgentLoop`，
 //! 与 `stream_handler` / `tool_dispatcher` / `turn_finalize` 协议一致。
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::core::llm::{
     ChatMessage, ChatMessageRole, ChatRequest, MessageKind, PromptCacheKeyFamily,
@@ -95,6 +95,66 @@ fn is_output_truncation_finish_reason(reason: Option<&str>) -> bool {
     )
 }
 
+/// Removes leading tool results whose declaration is absent from the request history.
+///
+/// Context recovery can intentionally start from a recent anchor. A tool result
+/// without its earlier assistant function call is invalid provider input and
+/// cannot be reconstructed safely, so a leading orphan is discarded before
+/// request assembly. Older compacted history may intentionally retain tool
+/// rows without their original declaration, so only the recovered-prefix shape
+/// is repaired here.
+pub(super) fn remove_orphan_tool_results(messages: &mut Vec<ChatMessage>) -> Vec<String> {
+    let mut orphaned_call_ids = Vec::new();
+    let mut at_recovered_prefix = true;
+    messages.retain(|message| {
+        if message.role != ChatMessageRole::Tool {
+            at_recovered_prefix = false;
+            return true;
+        }
+        if !at_recovered_prefix {
+            return true;
+        }
+        let Some(call_id) = message.tool_call_id.as_deref() else {
+            orphaned_call_ids.push("<missing tool_call_id>".to_string());
+            return false;
+        };
+        orphaned_call_ids.push(call_id.to_string());
+        false
+    });
+    orphaned_call_ids
+}
+
+/// Validates the durable message sequence immediately before sending it.
+///
+/// Orphaned tool results can safely be discarded because their declaration is
+/// outside the recovered context. A dangling assistant tool call or invalid
+/// tail cannot be repaired here, so the request is rejected explicitly.
+pub(super) fn validate_request_shape(messages: &mut Vec<ChatMessage>) -> Result<(), LoopError> {
+    let orphaned_call_ids = remove_orphan_tool_results(messages);
+    if !orphaned_call_ids.is_empty() {
+        warn!(
+            orphaned_call_ids = ?orphaned_call_ids,
+            "discarded tool results whose function calls are absent from the request history"
+        );
+    }
+    if crate::core::session::has_dangling_tool_calls_in_messages(messages) {
+        return Err(LoopError::Fatal(crate::infra::error::AppError::invariant(
+            "llm_request",
+            "refusing to send a transcript with unpaired tool calls; hydrate or resolve the pending tool result first",
+        )));
+    }
+    if !matches!(
+        messages.last().map(|message| &message.role),
+        Some(ChatMessageRole::User | ChatMessageRole::Tool)
+    ) {
+        return Err(LoopError::Fatal(crate::infra::error::AppError::invariant(
+            "llm_request",
+            "refusing to send a transcript whose tail is not a user input or completed tool result",
+        )));
+    }
+    Ok(())
+}
+
 fn prompt_prefix_fingerprint_enabled() -> bool {
     std::env::var("TOMCAT_PROMPT_PREFIX_FINGERPRINT")
         .ok()
@@ -123,21 +183,7 @@ pub(super) async fn run_reasoning_loop(
         current_tail_guard::maybe_reduce_before_next_llm(agent, messages)
             .await
             .map_err(LoopError::Fatal)?;
-        if crate::core::session::has_dangling_tool_calls_in_messages(messages) {
-            return Err(LoopError::Fatal(crate::infra::error::AppError::invariant(
-                "llm_request",
-                "refusing to send a transcript with unpaired tool calls; hydrate or resolve the pending tool result first",
-            )));
-        }
-        if !matches!(
-            messages.last().map(|message| &message.role),
-            Some(ChatMessageRole::User | ChatMessageRole::Tool)
-        ) {
-            return Err(LoopError::Fatal(crate::infra::error::AppError::invariant(
-                "llm_request",
-                "refusing to send a transcript whose tail is not a user input or completed tool result",
-            )));
-        }
+        validate_request_shape(messages)?;
 
         if let Some(ref mut ctx_state) = agent.context_state {
             ctx_state.live.finish_reason = None;
@@ -346,13 +392,11 @@ pub(super) async fn run_reasoning_loop(
             })
             .collect();
 
-        // “只思考、不回答”不是成功回合。不能只看 thinking_text：Anthropic 可能
-        // 加密它，OpenAI Responses 也可能因 display 配置省略它。截断终态与
-        // reasoning continuation 是能区分隐藏推理和合法空 end_turn 的事实信号。
-        // `completion_tokens` 只说明本轮消耗过输出配额；合法结构化收尾也会消耗
-        // token，不能拿它当失败判据。若某个 provider 发生“隐藏推理 + stop”却
-        // 不提供 reasoning_continuation，必须由该 provider 把终态适配为截断类，
-        // 而不是在这里重新引入 usage 猜测。
+        // “只思考、不回答”不是成功回合。不能只看 thinking_text：provider 可加密或
+        // 因 display 配置省略它。终态、reasoning continuation 和 provider 明确报告的
+        // reasoning token 都是事实信号；provider 适配层只翻译上游终态，不依据 usage
+        // 猜测或改写 finish reason。`completion_tokens` 仅表示输出配额消耗，合法结构化
+        // 收尾也会消耗它，不能作为失败判据。
         let thinking_only_or_truncated = thinking_text.as_deref().is_some_and(|thinking| {
             let content = content_buf.trim();
             !thinking.trim().is_empty()
@@ -363,7 +407,11 @@ pub(super) async fn run_reasoning_loop(
         });
         let has_no_visible_output = content_buf.trim().is_empty();
         let output_truncated = is_output_truncation_finish_reason(finish_reason.as_deref());
-        let has_hidden_output = reasoning_continuation.is_some();
+        let has_hidden_output = reasoning_continuation.is_some()
+            || usage
+                .as_ref()
+                .and_then(|usage| usage.reasoning_tokens)
+                .is_some_and(|tokens| tokens > 0);
         let response_id = reasoning_continuation
             .as_ref()
             .and_then(|continuation| continuation.provider_refs.as_ref())
@@ -388,8 +436,11 @@ pub(super) async fn run_reasoning_loop(
                 "turn_index": turn_index,
                 "finish_reason": finish_reason.as_deref(),
                 "thinking_chars": thinking_chars,
+                "thinking_text": thinking_text.as_deref(),
                 "has_reasoning_continuation": reasoning_continuation.is_some(),
                 "completion_tokens": usage.as_ref().map(|usage| usage.completion_tokens),
+                "reasoning_tokens": usage.as_ref().and_then(|usage| usage.reasoning_tokens),
+                "text_tokens": usage.as_ref().and_then(|usage| usage.text_tokens),
                 "failure_kind": failure_kind,
                 "attempt": attempt,
                 "response_id": response_id,

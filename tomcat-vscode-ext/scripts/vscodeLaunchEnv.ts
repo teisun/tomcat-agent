@@ -64,6 +64,7 @@ export async function runVsCodeGuiTests<T extends GuiOptions>(
 ): Promise<number> {
   const env = options.extensionTestsEnv ?? process.env;
   const launchArgs = [...(options.launchArgs ?? [])];
+  if (!launchArgs.includes("--password-store=basic")) launchArgs.push("--password-store=basic");
   const existingPort = launchArgs.find((arg) => arg.startsWith("--remote-debugging-port="));
   const cdpPort = existingPort ? Number(existingPort.split("=")[1]) : await reserveCapturePort();
   if (!Number.isInteger(cdpPort) || cdpPort <= 0 || cdpPort > 65535) throw new Error("Invalid VS Code capture port");

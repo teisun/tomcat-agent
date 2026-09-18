@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
-use super::super::turn_finalize::{finalize_turn_after_text, TurnOutcome};
+use super::super::turn_finalize::{
+    finalize_turn_after_text, TurnOutcome, MAX_COMPLETION_GUARD_INJECTIONS,
+};
 use super::super::types::SubagentType;
 use super::super::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use super::mocks::{test_binding, MockLlmProvider, MockPrimitiveExecutor};
@@ -58,15 +60,12 @@ fn write_plan_file(plan_id: &str, state: PlanFileState, todos: Vec<TodoItem>) ->
             green_build_pass: false,
             green_build_evidence: Vec::new(),
             code_review_pass: false,
-            code_review_pass_at_ms: None,
             code_review_rounds: 0,
-            code_review_baseline_ms: None,
             code_review_open_findings: Vec::new(),
             code_review_disputed_findings: Vec::new(),
             code_review_handoff: false,
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
-            completion_gate_cycles: 0,
             acceptance_commands: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },
@@ -825,7 +824,9 @@ async fn exhausted_budget_keeps_the_agent_working_until_acceptance_can_start() {
         .instruction();
     assert_eq!(
         text,
-        format!("Plan `{plan_id}`: {instruction} Do not summarize or hand back.")
+        format!(
+            "[Automated runtime message — not the user. Do not reply to it or acknowledge it.] Your previous response ended without a tool call. Push the plan with a tool call now.\nPlan `{plan_id}`: {instruction}"
+        )
     );
     assert!(
         messages
@@ -910,12 +911,114 @@ async fn guard_stops_after_two_zero_progress_nudges_and_hands_back() {
         "连续两次零进度 nudge 后必须交还用户，不能无限打转"
     );
     let stalled_events = stalled_events.lock().unwrap();
-    assert_eq!(stalled_events.len(), 1);
+    assert_eq!(stalled_events.len(), 3);
     assert_eq!(stalled_events[0]["event"], "plan.completion_guard.stalled");
     assert_eq!(stalled_events[0]["plan_id"], plan_id);
     assert_eq!(stalled_events[0]["idle_nudges"], 2);
     assert_eq!(stalled_events[0]["phase"], "continue_work");
     assert_eq!(stalled_events[0]["open_findings_count"], 0);
+    assert_eq!(stalled_events[1]["event"], wire::WIRE_PLAN_STALLED);
+    assert_eq!(stalled_events[1]["reason"], "idle_nudges");
+    assert_eq!(
+        stalled_events[1]["remaining_work"],
+        serde_json::json!(["- t1 (pending)"])
+    );
+    assert_eq!(stalled_events[2]["event"], wire::WIRE_PLAN_PENDING);
+    assert_eq!(
+        read_plan(&plan_path).unwrap().frontmatter.state,
+        PlanFileState::Pending
+    );
+
+    cleanup_plan_file(&plan_path);
+}
+
+#[tokio::test]
+async fn guard_injection_cap_hands_back_visibly() {
+    let _home = home_guard();
+    let plan_id = unique_plan_id("guard_injection_cap");
+    let plan_path = write_plan_file(
+        &plan_id,
+        PlanFileState::Executing,
+        vec![todo("t1", TodoStatus::Pending)],
+    );
+    let plan_runtime = PlanRuntime::new("sess-guard");
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    {
+        let events = Arc::clone(&events);
+        plan_runtime.attach_transcript_appender(Arc::new(move |event| {
+            events.lock().unwrap().push(event);
+            Ok(())
+        }));
+    }
+    let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
+    agent.completion_guard_injections = MAX_COMPLETION_GUARD_INJECTIONS;
+    let mut messages = vec![ChatMessage::user("start building")];
+
+    assert_eq!(
+        finalize(&mut agent, &mut messages).await,
+        TurnOutcome::Finished
+    );
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| {
+        event["event"] == wire::WIRE_PLAN_STALLED && event["reason"] == "injection_cap"
+    }));
+    assert_eq!(
+        read_plan(&plan_path).unwrap().frontmatter.state,
+        PlanFileState::Pending
+    );
+
+    cleanup_plan_file(&plan_path);
+}
+
+#[tokio::test]
+async fn tool_round_budget_hands_back_an_unfinished_plan_visibly() {
+    let _home = home_guard();
+    let plan_id = unique_plan_id("tool_round_budget");
+    let plan_path = write_plan_file(
+        &plan_id,
+        PlanFileState::Executing,
+        vec![todo("t1", TodoStatus::Pending)],
+    );
+    let plan_runtime = PlanRuntime::new("sess-guard");
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    {
+        let events = Arc::clone(&events);
+        plan_runtime.attach_transcript_appender(Arc::new(move |event| {
+            events.lock().unwrap().push(event);
+            Ok(())
+        }));
+    }
+    let stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call-read".into()),
+            name: Some("read".into()),
+            arguments_delta: Some(r#"{"path":"README.md"}"#.into()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "tool_calls".into(),
+        }),
+    ];
+    let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
+    agent.llm = Arc::new(MockLlmProvider::new(vec![stream]));
+    agent.config.max_tool_rounds = 1;
+
+    assert!(matches!(
+        agent.run(vec![ChatMessage::user("continue")]).await,
+        AgentRunOutcome::Completed(_)
+    ));
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| {
+        event["event"] == wire::WIRE_PLAN_STALLED && event["reason"] == "tool_round_budget"
+    }));
+    assert_eq!(
+        read_plan(&plan_path).unwrap().frontmatter.state,
+        PlanFileState::Pending
+    );
 
     cleanup_plan_file(&plan_path);
 }
@@ -967,6 +1070,92 @@ async fn guard_progress_resets_the_zero_progress_nudge_counter() {
             .note_completion_guard_nudge(&plan_id, &action)
             .await,
         "only two further no-progress nudges may stall the plan"
+    );
+
+    cleanup_plan_file(&plan_path);
+}
+
+#[tokio::test]
+async fn guard_progress_resets_when_existing_dirty_code_file_content_changes() {
+    let _home = home_guard();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let source = workspace.path().join("src/lib.rs");
+    std::fs::create_dir_all(source.parent().expect("source parent")).expect("create source dir");
+    std::fs::write(&source, "pub fn initial() {}\n").expect("seed source");
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(workspace.path())
+        .status()
+        .expect("git init")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["add", "src/lib.rs"])
+        .current_dir(workspace.path())
+        .status()
+        .expect("git add")
+        .success());
+    assert!(std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=tomcat-test",
+            "-c",
+            "user.email=tomcat-test@example.invalid",
+            "commit",
+            "-qm",
+            "seed",
+        ])
+        .current_dir(workspace.path())
+        .status()
+        .expect("git commit")
+        .success());
+    std::fs::write(&source, "pub fn first_dirty_version() {}\n").expect("make source dirty");
+
+    let plan_id = unique_plan_id("guard_dirty_code_progress");
+    let plan_path = write_plan_file(
+        &plan_id,
+        PlanFileState::Executing,
+        vec![todo("t1", TodoStatus::Pending)],
+    );
+    let plan_runtime = PlanRuntime::new("sess-guard");
+    plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
+    plan_runtime.bind_plan_file_for_test(plan_path.clone());
+    plan_runtime.attach_workspace_root(workspace.path().to_path_buf());
+    let action = NextAction::ContinueWork {
+        remaining_work: vec!["- t1 (pending)".into()],
+    };
+
+    assert!(
+        !plan_runtime
+            .note_completion_guard_nudge(&plan_id, &action)
+            .await
+    );
+    assert!(
+        !plan_runtime
+            .note_completion_guard_nudge(&plan_id, &action)
+            .await
+    );
+
+    std::fs::write(&source, "pub fn second_dirty_version() {}\n")
+        .expect("edit existing dirty source");
+    assert!(
+        !plan_runtime
+            .note_completion_guard_nudge(&plan_id, &action)
+            .await,
+        "a content edit to an existing dirty code file must reset idle"
+    );
+    std::fs::write(&source, "pub fn second_dirty_version() {}\n")
+        .expect("rewrite identical source");
+    assert!(
+        !plan_runtime
+            .note_completion_guard_nudge(&plan_id, &action)
+            .await,
+        "a no-op rewrite must still count as idle"
+    );
+    assert!(
+        plan_runtime
+            .note_completion_guard_nudge(&plan_id, &action)
+            .await,
+        "only two no-progress nudges after the content edit may stall the plan"
     );
 
     cleanup_plan_file(&plan_path);

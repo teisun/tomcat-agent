@@ -20,7 +20,10 @@ use crate::core::llm::{
     ChatMessage, ChatMessageContent, ChatMessageContentPart, MessageKind, ProviderRefs,
     ReasoningContinuation, ReasoningFormat, StreamEvent,
 };
-use crate::core::plan_runtime::file_store::PlanFileState;
+use crate::core::plan_runtime::file_store::{
+    read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoKind,
+    TodoStatus,
+};
 use crate::core::plan_runtime::PlanRuntime;
 use crate::core::session::manager::{
     estimate_msg_chars, ApiUsage, ContextState, MessageAppendSink,
@@ -93,6 +96,23 @@ fn thinking_only_empty_stream() -> Vec<Result<StreamEvent, AppError>> {
             thinking_text: Some("reasoning without a visible answer".to_string()),
             reasoning_continuation: None,
             continuity: None,
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "stop".to_string(),
+        }),
+    ]
+}
+
+fn reasoning_tokens_only_stream() -> Vec<Result<StreamEvent, AppError>> {
+    vec![
+        Ok(StreamEvent::Usage {
+            prompt_tokens: 1_000,
+            completion_tokens: 284,
+            total_tokens: Some(1_284),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: Some(284),
+            text_tokens: Some(0),
         }),
         Ok(StreamEvent::FinishReason {
             reason: "stop".to_string(),
@@ -506,6 +526,97 @@ async fn run_unattended_billing_429_stops_without_elevated_retries() {
     assert!(
         retry_events.lock().unwrap().is_empty(),
         "billing must not emit a waiting/retry notification"
+    );
+}
+
+#[tokio::test]
+async fn failed_run_does_not_double_report_a_stalled_plan() {
+    let directory = tempfile::tempdir().expect("plan directory");
+    let path = directory.path().join("plan.plan.md");
+    write_plan(
+        &path,
+        &PlanFile {
+            frontmatter: PlanFileFrontmatter {
+                plan_id: "failed-run".into(),
+                goal: "prove fatal errors do not park plans".into(),
+                state: PlanFileState::Executing,
+                session_key: Some("failed-run-session".into()),
+                session_id: None,
+                created_at: "2026-09-18T00:00:00Z".into(),
+                schema_version: 1,
+                todos: vec![TodoItem {
+                    id: "work".into(),
+                    content: "unfinished work".into(),
+                    status: TodoStatus::Pending,
+                    evidence: Vec::new(),
+                    kind: TodoKind::Work,
+                }],
+                green_build_pass: false,
+                green_build_evidence: Vec::new(),
+                code_review_pass: false,
+                code_review_rounds: 0,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
+                code_review_residual_findings: Vec::new(),
+                acceptance_commands: Vec::new(),
+                unknown: Default::default(),
+            },
+            body: String::new(),
+        },
+        1_000,
+    )
+    .expect("write plan");
+    let runtime = PlanRuntime::new("failed-run-session");
+    runtime.bind_plan_file_for_test(path.clone());
+    let events = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    {
+        let events = events.clone();
+        runtime.attach_transcript_appender(Arc::new(move |event| {
+            events.lock().unwrap().push(event);
+            Ok(())
+        }));
+    }
+    let mut loop_ = AgentLoop::new(
+        test_binding(
+            Arc::new(MockLlmProvider::new(vec![vec![
+                Ok(StreamEvent::LlmError {
+                    reason: "error:content_filter".into(),
+                    message: "content blocked".into(),
+                    code: Some("content_filter".into()),
+                }),
+                Ok(StreamEvent::FinishReason {
+                    reason: "error:content_filter".into(),
+                }),
+            ]])),
+            "gpt-4",
+        ),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            session_id: "failed-run-session".into(),
+            plan_runtime: Some(runtime),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    assert!(matches!(
+        loop_.run(vec![ChatMessage::user("continue")]).await,
+        AgentRunOutcome::Failed(_)
+    ));
+    assert_eq!(
+        read_plan(&path).expect("read plan").frontmatter.state,
+        PlanFileState::Executing
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| event["event"] == wire::WIRE_PLAN_STALLED),
+        "fatal errors have their own surfaced outcome and must not add a stalled-plan card"
     );
 }
 
@@ -1765,6 +1876,173 @@ async fn empty_turn_retries_then_succeeds_with_attempt_evidence() {
     assert_eq!(retry_ends.len(), 1);
     assert_eq!(retry_ends[0]["success"].as_bool(), Some(true));
     assert_eq!(retry_ends[0]["attempt"].as_u64(), Some(3));
+}
+
+#[tokio::test]
+async fn responses_completed_reasoning_only_retries_as_hidden_output() {
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        hidden_empty_stream("resp_completed_reasoning_only"),
+        ok_text_stream("recovered"),
+    ]);
+    let sink = Arc::new(RecordingAppendSink::default());
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-5"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "responses-completed-reasoning-only".to_string(),
+            message_append_sink: Some(sink.clone()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    assert!(matches!(
+        loop_.run(vec![ChatMessage::user("continue")]).await,
+        AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"
+    ));
+    assert_eq!(requests.0.lock().unwrap().len(), 2);
+    assert!(sink.custom_entries.lock().unwrap().iter().any(|entry| {
+        entry["event"].as_str() == Some("empty_turn")
+            && entry["failure_kind"].as_str() == Some("hidden_output")
+            && entry["attempt"].as_u64() == Some(1)
+    }));
+}
+
+#[tokio::test]
+async fn reasoning_tokens_without_continuation_still_counts_as_hidden_output() {
+    let (provider, requests) = RecordingStreamLlmProvider::new(vec![
+        reasoning_tokens_only_stream(),
+        ok_text_stream("recovered"),
+    ]);
+    let sink = Arc::new(RecordingAppendSink::default());
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-5"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "reasoning-tokens-without-continuation".to_string(),
+            message_append_sink: Some(sink.clone()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    assert!(matches!(
+        loop_.run(vec![ChatMessage::user("continue")]).await,
+        AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"
+    ));
+    assert_eq!(requests.0.lock().unwrap().len(), 2);
+    assert!(sink.custom_entries.lock().unwrap().iter().any(|entry| {
+        entry["event"].as_str() == Some("empty_turn")
+            && entry["failure_kind"].as_str() == Some("hidden_output")
+    }));
+}
+
+#[tokio::test]
+async fn terminal_error_after_whitespace_delta_is_retried_without_persisting_assistant_text() {
+    let failed_stream = vec![
+        Ok(StreamEvent::ContentDelta {
+            delta: " ".to_string(),
+        }),
+        Ok(StreamEvent::LlmError {
+            reason: "error:server_error".to_string(),
+            message: "overloaded".to_string(),
+            code: Some("server_error".to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "error:server_error".to_string(),
+        }),
+    ];
+    let (provider, requests) =
+        RecordingStreamLlmProvider::new(vec![failed_stream, ok_text_stream("recovered")]);
+    let sink = Arc::new(RecordingAppendSink::default());
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-5"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "terminal-error-after-whitespace".to_string(),
+            message_append_sink: Some(sink.clone()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    assert!(matches!(
+        loop_.run(vec![ChatMessage::user("continue")]).await,
+        AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"
+    ));
+    assert_eq!(requests.0.lock().unwrap().len(), 2);
+    assert_eq!(
+        sink.messages.lock().unwrap().len(),
+        1,
+        "the discarded whitespace turn must never become an assistant transcript message"
+    );
+    assert!(sink.custom_entries.lock().unwrap().iter().any(|entry| {
+        entry["event"].as_str() == Some("stream_terminal_error")
+            && entry["code"].as_str() == Some("server_error")
+            && entry["discarded_text"].as_str() == Some(" ")
+            && entry["attempt"].as_u64() == Some(1)
+    }));
+}
+
+#[tokio::test]
+async fn terminal_error_after_partial_tool_call_discards_the_call_and_retries() {
+    let failed_stream = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_partial".to_string()),
+            name: Some("read".to_string()),
+            arguments_delta: Some(r#"{"path":"/tmp/partial"#.to_string()),
+        }),
+        Ok(StreamEvent::LlmError {
+            reason: "error:server_error".to_string(),
+            message: "overloaded".to_string(),
+            code: Some("server_error".to_string()),
+        }),
+        Ok(StreamEvent::FinishReason {
+            reason: "error:server_error".to_string(),
+        }),
+    ];
+    let (provider, requests) =
+        RecordingStreamLlmProvider::new(vec![failed_stream, ok_text_stream("recovered")]);
+    let sink = Arc::new(RecordingAppendSink::default());
+    let mut loop_ = AgentLoop::new(
+        test_binding(Arc::new(provider), "gpt-5"),
+        Arc::new(MockPrimitiveExecutor),
+        Arc::new(DefaultEventBus::new()),
+        AgentLoopConfig {
+            max_attempts: 4,
+            retry_base_delay_ms: 0,
+            session_id: "terminal-error-after-partial-tool".to_string(),
+            message_append_sink: Some(sink.clone()),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+
+    assert!(matches!(
+        loop_.run(vec![ChatMessage::user("continue")]).await,
+        AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"
+    ));
+    assert_eq!(
+        requests.0.lock().unwrap().len(),
+        2,
+        "the partial tool call must not become a second tool-loop request"
+    );
+    assert!(sink.custom_entries.lock().unwrap().iter().any(|entry| {
+        entry["event"].as_str() == Some("stream_terminal_error")
+            && entry["discarded_tool_calls"][0]["id"].as_str() == Some("call_partial")
+            && entry["discarded_tool_calls"][0]["arguments"].as_str()
+                == Some(r#"{"path":"/tmp/partial"#)
+    }));
 }
 
 #[tokio::test]

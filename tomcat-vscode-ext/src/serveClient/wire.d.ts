@@ -183,14 +183,6 @@ export type ServePlanEvent = {
   state?: null | string;
   type: "plan.complete";
 } | {
-  changedCodeFiles?: null | string[];
-  maxCodeReviewRounds?: null | number;
-  newestEditMtimeMs?: null | number;
-  planId?: null | string;
-  rounds?: null | number;
-  sessionId?: null | string;
-  type: "plan.code_review.unreviewed_edit";
-} | {
   childSessionId?: null | string;
   planId?: null | string;
   reviewAttemptId?: null | string;
@@ -220,6 +212,13 @@ export type ServePlanEvent = {
   sessionId?: null | string;
   type: "plan.code_review.exhausted";
   unresolvedFindings?: null | string[];
+} | {
+  idleNudges?: null | number;
+  planId?: null | string;
+  reason?: null | string;
+  remainingWork?: null | string[];
+  sessionId?: null | string;
+  type: "plan.stalled";
 } | {
   path?: null | string;
   planId?: null | string;

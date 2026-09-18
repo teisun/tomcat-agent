@@ -231,6 +231,7 @@ fn wire_plan_transition_constants_are_stable() {
         "session.agent_mode.changed"
     );
     assert_eq!(wire::WIRE_PLAN_PENDING, "plan.pending");
+    assert_eq!(wire::WIRE_PLAN_STALLED, "plan.stalled");
     assert_eq!(wire::WIRE_PLAN_UPDATE, "plan.update");
     assert_eq!(wire::WIRE_PLAN_COMPLETE, "plan.complete");
 }

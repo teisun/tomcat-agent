@@ -12,6 +12,7 @@
 //! - `ResponsesStream`：SSE 帧切分、NDJSON fallback；上层与 `OpenAiProvider` 同 Stream 契约。
 
 use super::*;
+use crate::core::agent_loop::{AgentLoop, AgentLoopConfig, AgentRunOutcome};
 use crate::core::llm::multimodal::{
     UNSUPPORTED_FILE_INPUT_PLACEHOLDER, UNSUPPORTED_IMAGE_INPUT_PLACEHOLDER,
 };
@@ -21,17 +22,24 @@ use crate::core::llm::types::{
     ChatMessage, ChatMessageContentPart, ChatRequest, ContextReference, MessageKind, StreamEvent,
     ThinkingSource,
 };
-use crate::core::llm::{Capabilities, Credential, ModelEntry};
+use crate::core::llm::{Capabilities, Credential, ModelEntry, ResolvedCall};
+use crate::core::session::manager::MessageAppendSink;
+use crate::core::tools::primitive::{
+    BashResult, DirEntry, EditFileResult, EditOperation, PrimitiveExecutor, PrimitiveOperation,
+    WriteFileResult,
+};
 use crate::infra::error::{
     classify_llm_failure, llm_http_status, llm_http_status_error, llm_retry_after_ms, llm_stage,
     llm_summary, AppError, LlmErrorStage, LlmFailureKind,
 };
 use crate::infra::events::ToolDisplay;
-use crate::infra::LlmConfig;
+use crate::infra::{wire, DefaultEventBus, EventBus, EventContext, LlmConfig};
 
 use bytes::Bytes;
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 const TEST_KEY_ENV: &str = "__OPENAI_RESPONSES_TEST_KEY__";
 
@@ -134,6 +142,107 @@ fn build_responses_input_test(
 
 fn new_responses_stream<S>(stream: S, prefer_ndjson: bool) -> ResponsesStream<S> {
     ResponsesStream::new(stream, prefer_ndjson, test_profile(), true)
+}
+
+/// The cross-layer flows below are text-only. Reaching this executor would mean
+/// the adapter or agent loop incorrectly invented a tool call.
+struct UnusedPrimitive;
+
+#[async_trait::async_trait]
+impl PrimitiveExecutor for UnusedPrimitive {
+    async fn read_file(&self, _path: &str, _plugin_id: &str) -> Result<String, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+
+    async fn list_dir(&self, _path: &str, _plugin_id: &str) -> Result<Vec<DirEntry>, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+
+    async fn write_file(
+        &self,
+        _path: &str,
+        _content: &str,
+        _overwrite: bool,
+        _plugin_id: &str,
+    ) -> Result<WriteFileResult, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+
+    async fn edit_file(
+        &self,
+        _path: &str,
+        _edits: Vec<EditOperation>,
+        _plugin_id: &str,
+    ) -> Result<EditFileResult, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+
+    async fn execute_bash(
+        &self,
+        _command: &str,
+        _cwd: Option<&str>,
+        _plugin_id: &str,
+        _foreground_wait_ms: Option<u64>,
+    ) -> Result<BashResult, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+
+    async fn require_user_confirmation(
+        &self,
+        _operation: PrimitiveOperation,
+        _preview: &str,
+        _plugin_id: &str,
+    ) -> Result<bool, AppError> {
+        unreachable!("cross-layer stream fixture must not call tools")
+    }
+}
+
+#[derive(Default)]
+struct CrossLayerAppendSink {
+    messages: Mutex<Vec<serde_json::Value>>,
+    custom_entries: Mutex<Vec<serde_json::Value>>,
+}
+
+impl MessageAppendSink for CrossLayerAppendSink {
+    fn append_message(&self, value: serde_json::Value) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(value);
+        Ok("cross-layer-message".to_string())
+    }
+
+    fn append_custom_entry(&self, extra: serde_json::Value) -> Result<(), AppError> {
+        self.custom_entries.lock().unwrap().push(extra);
+        Ok(())
+    }
+
+    fn append_message_with_id(
+        &self,
+        value: serde_json::Value,
+        forced_id: &str,
+    ) -> Result<String, AppError> {
+        self.messages.lock().unwrap().push(value);
+        Ok(forced_id.to_string())
+    }
+}
+
+fn cross_layer_agent(
+    provider: OpenAiResponsesProvider,
+    sink: Option<Arc<dyn MessageAppendSink>>,
+) -> (AgentLoop, Arc<DefaultEventBus>) {
+    let event_bus = Arc::new(DefaultEventBus::new());
+    let agent = AgentLoop::new(
+        ResolvedCall::from_parts_unchecked(Arc::new(provider), "gpt-5", "gpt-5"),
+        Arc::new(UnusedPrimitive),
+        event_bus.clone(),
+        AgentLoopConfig {
+            max_attempts: 2,
+            message_append_sink: sink,
+            retry_base_delay_ms: 0,
+            session_id: "responses-cross-layer".to_string(),
+            ..Default::default()
+        },
+        CancellationToken::new(),
+    );
+    (agent, event_bus)
 }
 
 #[test]
@@ -408,7 +517,7 @@ fn responses_payload_completed_function_call_prefers_tool_calls_finish_reason() 
 }
 
 #[test]
-fn responses_payload_completed_empty_reasoning_exhaustion_maps_to_max_output_tokens() {
+fn responses_payload_completed_reasoning_only_stays_stop() {
     let raw = json!({
         "id": "resp_reasoning_exhausted",
         "status": "completed",
@@ -424,12 +533,12 @@ fn responses_payload_completed_empty_reasoning_exhaustion_maps_to_max_output_tok
 
     assert_eq!(
         response.choices[0].finish_reason.as_deref(),
-        Some("max_output_tokens"),
-        "completed + no visible output + reasoning-dominated output budget is likely a truncated answer"
+        Some("stop"),
+        "a completed response remains stop regardless of its reasoning-token ratio"
     );
     assert_eq!(
         response.choices[0].message.finish_reason.as_deref(),
-        Some("max_output_tokens")
+        Some("stop")
     );
 }
 
@@ -2070,6 +2179,45 @@ async fn responses_stream_parses_sse_chunks() {
 }
 
 #[tokio::test]
+async fn responses_stream_completed_with_text_and_reasoning_dominance_stays_stop_without_notice() {
+    use tokio_stream::StreamExt;
+
+    // Proxies may omit response.output[] from the terminal event even after emitting
+    // text deltas. Terminal metadata must still faithfully preserve `completed`.
+    let chunks: Vec<Result<Bytes, AppError>> = vec![
+        Ok(Bytes::from(
+            "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"content_index\":0,\"delta\":\"继续执行。\"}\n\n",
+        )),
+        Ok(Bytes::from(
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":182514,\"output_tokens\":245,\"total_tokens\":182759,\"output_tokens_details\":{\"reasoning_tokens\":236}}}}\n\n",
+        )),
+    ];
+    let mut stream = new_responses_stream(tokio_stream::iter(chunks), false);
+    let mut events = Vec::new();
+    while let Some(item) = stream.next().await {
+        events.push(item.expect("stream event"));
+    }
+
+    assert!(events.iter().any(
+        |event| matches!(event, StreamEvent::ContentDelta { delta } if delta == "继续执行。")
+    ));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, StreamEvent::FinishReason { reason } if reason == "stop")));
+    assert!(events
+        .iter()
+        .all(|event| !matches!(event, StreamEvent::LlmNotice { .. })));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        StreamEvent::Usage {
+            reasoning_tokens: Some(236),
+            text_tokens: Some(9),
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
 async fn responses_stream_parses_ndjson_fallback() {
     use tokio_stream::StreamExt;
 
@@ -2461,6 +2609,165 @@ async fn responses_chat_stream_retries_503_before_first_delta_and_succeeds() {
     }
     assert_eq!(server.request_count(), 2);
     assert_eq!(text, "Hello");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cross_layer_completed_reasoning_only_retries_in_the_agent_loop() {
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body: responses_sse_body(&[
+                r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":284,"output_tokens_details":{"reasoning_tokens":284}}}}"#,
+            ]),
+            delay_ms: 0,
+            declared_content_length: None,
+        },
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body: responses_sse_body(&[
+                r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"recovered"}"#,
+                r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            ]),
+            delay_ms: 0,
+            declared_content_length: None,
+        },
+    ])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+    let sink = Arc::new(CrossLayerAppendSink::default());
+    let (mut agent, _) = cross_layer_agent(provider, Some(sink.clone()));
+    let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"),
+        "completed reasoning-only output must be retried: {outcome:?}"
+    );
+    assert_eq!(server.request_count(), 2);
+    assert!(sink.custom_entries.lock().unwrap().iter().any(|entry| {
+        entry["event"] == "empty_turn"
+            && entry["failure_kind"] == "hidden_output"
+            && entry["attempt"] == 1
+    }));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cross_layer_completed_text_with_bare_terminal_payload_stays_stop_without_notice() {
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body: responses_sse_body(&[
+            r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"继续执行。"}"#,
+            r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":245,"output_tokens_details":{"reasoning_tokens":236}}}}"#,
+        ]),
+        delay_ms: 0,
+        declared_content_length: None,
+    }])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+    let (mut agent, event_bus) = cross_layer_agent(provider, None);
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let notices_sink = notices.clone();
+    let _listener = event_bus.on(
+        wire::WIRE_LLM_NOTICE,
+        Box::new(move |context: EventContext| {
+            notices_sink.lock().unwrap().push(context.payload);
+            Ok(())
+        }),
+    );
+
+    let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == "继续执行。")
+    );
+    assert!(notices.lock().unwrap().is_empty());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cross_layer_terminal_error_after_whitespace_retries_without_a_tool_branch() {
+    let server = MockHttpServer::start(vec![
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body: responses_sse_body(&[
+                r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":" "}"#,
+                r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"overloaded"}}}"#,
+            ]),
+            delay_ms: 0,
+            declared_content_length: None,
+        },
+        ScriptedHttpResponse {
+            status: 200,
+            headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+            body: responses_sse_body(&[
+                r#"{"type":"response.output_text.delta","item_id":"m1","content_index":0,"delta":"recovered"}"#,
+                r#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            ]),
+            delay_ms: 0,
+            declared_content_length: None,
+        },
+    ])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+    let sink = Arc::new(CrossLayerAppendSink::default());
+    let (mut agent, _) = cross_layer_agent(provider, Some(sink.clone()));
+    let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
+
+    assert!(
+        matches!(outcome, AgentRunOutcome::Completed(ref result) if result.final_text == "recovered"),
+        "a terminal provider failure must retry instead of becoming a blank assistant turn: {outcome:?}"
+    );
+    assert_eq!(server.request_count(), 2);
+    assert_eq!(
+        sink.messages.lock().unwrap().len(),
+        1,
+        "the whitespace before a terminal error must not persist as an assistant message"
+    );
+    assert!(sink.custom_entries.lock().unwrap().iter().any(|entry| {
+        entry["event"] == "stream_terminal_error"
+            && entry["discarded_text"] == " "
+            && entry["code"] == "server_error"
+    }));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn cross_layer_explicit_max_output_tokens_stays_fatal() {
+    let server = MockHttpServer::start(vec![ScriptedHttpResponse {
+        status: 200,
+        headers: vec![("Content-Type".to_string(), "text/event-stream".to_string())],
+        body: responses_sse_body(&[
+            r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":128000}}}"#,
+        ]),
+        delay_ms: 0,
+        declared_content_length: None,
+    }])
+    .await;
+    let provider = responses_stream_test_provider(server.base_url.clone(), None, 0);
+    let (mut agent, event_bus) = cross_layer_agent(provider, None);
+    let notices = Arc::new(Mutex::new(Vec::new()));
+    let notices_sink = notices.clone();
+    let _listener = event_bus.on(
+        wire::WIRE_LLM_NOTICE,
+        Box::new(move |context: EventContext| {
+            notices_sink.lock().unwrap().push(context.payload);
+            Ok(())
+        }),
+    );
+    let outcome = agent.run(vec![ChatMessage::user("continue")]).await;
+
+    assert!(matches!(outcome, AgentRunOutcome::Failed(_)));
+    assert_eq!(server.request_count(), 1);
+    assert!(notices
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| event["finishReason"] == "max_output_tokens"));
     server.shutdown().await;
 }
 

@@ -57,6 +57,7 @@ export function planEventState(
     case "plan.complete":
       return "completed";
     case "plan.pending":
+    case "plan.stalled":
       return "pending";
     case "plan.create":
     case "plan.update":

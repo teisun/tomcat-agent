@@ -166,7 +166,7 @@ async fn docs_only_review_start_skips_both_gates_and_completes() {
 }
 
 #[tokio::test]
-async fn failed_review_requires_a_code_change_before_restarting_review() {
+async fn failed_review_can_be_explicitly_restarted_after_fixes() {
     let _guard = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let workspace = git_workspace_with_uncommitted_code();
@@ -227,7 +227,7 @@ async fn failed_review_requires_a_code_change_before_restarting_review() {
         "failed review must reopen the visible gate"
     );
 
-    let zero_change = update_plan::execute(
+    let restarted = update_plan::execute(
         &runtime,
         args(
             &plan_id,
@@ -239,41 +239,14 @@ async fn failed_review_requires_a_code_change_before_restarting_review() {
         ),
     )
     .await
-    .expect_err("unresolved findings without a code delta must not consume another review round");
-    assert!(
-        zero_change
-            .to_string()
-            .contains("Fix the following unresolved code-review findings"),
-        "error={zero_change}"
-    );
-
-    std::thread::sleep(std::time::Duration::from_millis(10));
-    std::fs::write(
-        workspace.join("src/lib.rs"),
-        "pub fn changed() { /* regression coverage added */ }\n",
-    )
-    .unwrap();
-    let changed = update_plan::execute(
-        &runtime,
-        args(
-            &plan_id,
-            vec![update_plan::UpdateOp::SetStatus {
-                id: GATE_CODE_REVIEW_TODO_ID.into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
-        ),
-    )
-    .await
-    .expect("a code change must allow the next incremental review");
-    assert_eq!(changed["next_step"]["phase"], "run_acceptance");
+    .expect("the model may explicitly restart review after it fixes the findings");
+    assert_eq!(restarted["next_step"]["phase"], "run_acceptance");
     let _ = std::fs::remove_dir_all(workspace);
     cleanup_home(&home);
 }
 
 #[tokio::test]
-async fn code_edit_during_acceptance_after_review_budget_keeps_review_and_requires_fresh_acceptance(
-) {
+async fn code_edit_during_acceptance_keeps_review_and_acceptance_state() {
     let _guard = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let workspace = git_workspace_with_uncommitted_code();
@@ -323,7 +296,7 @@ async fn code_edit_during_acceptance_after_review_budget_keeps_review_and_requir
 }
 
 #[tokio::test]
-async fn code_edit_abandons_the_in_flight_acceptance_before_a_fresh_acceptance_starts() {
+async fn acceptance_start_persists_to_disk_and_is_idempotent() {
     let _guard = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let workspace = git_workspace_with_uncommitted_code();
@@ -359,7 +332,7 @@ async fn code_edit_abandons_the_in_flight_acceptance_before_a_fresh_acceptance_s
     )
     .await
     .unwrap();
-    update_plan::execute(
+    let first = update_plan::execute(
         &runtime,
         args(
             &plan_id,
@@ -372,33 +345,19 @@ async fn code_edit_abandons_the_in_flight_acceptance_before_a_fresh_acceptance_s
     )
     .await
     .expect("the first acceptance may start");
-    assert!(runtime.acceptance_is_in_flight(&plan_id));
-
-    std::thread::sleep(std::time::Duration::from_millis(10));
-    std::fs::write(workspace.join("src/lib.rs"), "pub fn changed_again() {}\n").unwrap();
-    let reopened = update_plan::execute(&runtime, args(&plan_id, Vec::new()))
-        .await
-        .unwrap();
-    assert_eq!(reopened["next_step"]["phase"], "start_review");
-    assert!(
-        !runtime.acceptance_is_in_flight(&plan_id),
-        "invalidating the acceptance gate must abandon its process-local marker"
+    assert_eq!(first["active_in_progress"], GATE_ACCEPTANCE_TODO_ID);
+    assert_eq!(
+        read_plan(&plan_path_for_id(&plan_id).unwrap())
+            .unwrap()
+            .frontmatter
+            .todos
+            .iter()
+            .find(|todo| todo.id == GATE_ACCEPTANCE_TODO_ID)
+            .map(|todo| todo.status),
+        Some(TodoStatus::InProgress)
     );
 
-    update_plan::execute(
-        &runtime,
-        args(
-            &plan_id,
-            vec![update_plan::UpdateOp::SetStatus {
-                id: GATE_CODE_REVIEW_TODO_ID.into(),
-                content: None,
-                status: TodoStatus::InProgress,
-            }],
-        ),
-    )
-    .await
-    .expect("the changed code may receive its fresh review");
-    update_plan::execute(
+    let second = update_plan::execute(
         &runtime,
         args(
             &plan_id,
@@ -410,10 +369,47 @@ async fn code_edit_abandons_the_in_flight_acceptance_before_a_fresh_acceptance_s
         ),
     )
     .await
-    .expect("a fresh acceptance must start after invalidation");
-    assert!(runtime.acceptance_is_in_flight(&plan_id));
+    .expect("reasserting an acceptance start is an idempotent no-op");
+    assert_eq!(second["active_in_progress"], GATE_ACCEPTANCE_TODO_ID);
 
     let _ = std::fs::remove_dir_all(workspace);
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn completed_acceptance_gate_cannot_be_restarted() {
+    let _guard = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let runtime = PlanRuntime::new("session-a");
+    let plan_id = fresh_planning_plan(&runtime);
+    mark_plan_executing(&runtime, &plan_id, "session-a");
+    let path = plan_path_for_id(&plan_id).unwrap();
+    let mut plan = read_plan(&path).unwrap();
+    plan.frontmatter.code_review_pass = true;
+    plan.frontmatter.green_build_pass = true;
+    for todo in &mut plan.frontmatter.todos {
+        todo.status = TodoStatus::Completed;
+    }
+    write_plan(&path, &plan, 1_000).unwrap();
+    runtime.bind_plan_file_for_test(path);
+
+    let error = update_plan::execute(
+        &runtime,
+        args(
+            &plan_id,
+            vec![update_plan::UpdateOp::SetStatus {
+                id: GATE_ACCEPTANCE_TODO_ID.into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        ),
+    )
+    .await
+    .expect_err("a completed acceptance gate has terminal durable state");
+
+    assert!(error
+        .to_string()
+        .contains("gate_acceptance is not pending and cannot be started again"));
     cleanup_home(&home);
 }
 
@@ -520,7 +516,7 @@ async fn green_build_without_acceptance_in_progress_is_rejected() {
 
     assert!(error
         .to_string()
-        .contains("只能在 `[gate] Acceptance` 已启动的当前运行时提交"));
+        .contains("只能在 `[gate] Acceptance` 已启动时提交"));
     cleanup_home(&home);
 }
 

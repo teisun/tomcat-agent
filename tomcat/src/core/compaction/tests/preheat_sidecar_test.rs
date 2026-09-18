@@ -8,7 +8,8 @@ use crate::core::llm::{
     ChatMessage, ChatRequest, ChatResponse, ChatResponseChoice, LlmProvider, StreamEvent,
 };
 use crate::core::session::transcript::{
-    append_entry, read_entries_tail, write_header, MessageEntry, SessionHeader, TranscriptEntry,
+    append_entry, read_entries_tail, write_header, CustomEntry, MessageEntry, SessionHeader,
+    TranscriptEntry,
 };
 use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 use crate::infra::config::ContextConfig;
@@ -194,4 +195,125 @@ async fn preheat_background_computation_does_not_mutate_the_marker_transcript() 
         after_marker,
         "background preheat may cache the result separately but must not mutate the transcript"
     );
+}
+
+#[tokio::test]
+async fn preheat_starts_when_custom_rows_follow_the_latest_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("custom-tail-preheat.jsonl");
+    write_header(
+        &transcript,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "custom-tail-preheat".to_string(),
+            timestamp: "2026-09-09T00:00:00.000Z".to_string(),
+            cwd: None,
+            project_root: None,
+        },
+    )
+    .unwrap();
+    let mut user = ChatMessage::user("input");
+    user.msg_id = Some("u1".to_string());
+    let mut assistant = ChatMessage::assistant("output");
+    assistant.msg_id = Some("a1".to_string());
+    for message in [&user, &assistant] {
+        append_entry(
+            &transcript,
+            &TranscriptEntry::Message(MessageEntry {
+                id: message.msg_id.clone(),
+                parent_id: None,
+                timestamp: "2026-09-09T00:00:01.000Z".to_string(),
+                message: serde_json::json!({
+                    "role": if message.role == crate::core::llm::ChatMessageRole::User { "user" } else { "assistant" },
+                    "content": message.text_content().unwrap(),
+                }),
+            }),
+        )
+        .unwrap();
+    }
+    append_entry(
+        &transcript,
+        &TranscriptEntry::Custom(CustomEntry {
+            id: Some("diagnostic".to_string()),
+            parent_id: None,
+            timestamp: "2026-09-09T00:00:02.000Z".to_string(),
+            extra: serde_json::json!({"event": "agent.tool_parallelism"}),
+        }),
+    )
+    .unwrap();
+
+    let mut preheat = Preheat::new();
+    assert!(preheat.try_start(
+        0.95,
+        &[user, assistant],
+        &transcript,
+        None,
+        Arc::new(SummaryProvider),
+        None,
+        &ContextConfig::default(),
+        Arc::new(ScopedEventEmitter::new(
+            Arc::new(DefaultEventBus::new()),
+            "custom-tail-preheat",
+        )),
+        None,
+    ));
+}
+
+#[tokio::test]
+async fn aborting_preheat_persists_a_terminal_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("aborted-preheat.jsonl");
+    write_header(
+        &transcript,
+        &SessionHeader {
+            r#type: "session".to_string(),
+            version: Some(3),
+            id: "aborted-preheat".to_string(),
+            timestamp: "2026-09-09T00:00:00.000Z".to_string(),
+            cwd: None,
+            project_root: None,
+        },
+    )
+    .unwrap();
+    let mut user = ChatMessage::user("input");
+    user.msg_id = Some("u1".to_string());
+    append_entry(
+        &transcript,
+        &TranscriptEntry::Message(MessageEntry {
+            id: user.msg_id.clone(),
+            parent_id: None,
+            timestamp: "2026-09-09T00:00:01.000Z".to_string(),
+            message: serde_json::json!({"role": "user", "content": "input"}),
+        }),
+    )
+    .unwrap();
+
+    let mut preheat = Preheat::new();
+    assert!(preheat.try_start(
+        0.95,
+        &[user],
+        &transcript,
+        None,
+        Arc::new(SummaryProvider),
+        None,
+        &ContextConfig::default(),
+        Arc::new(ScopedEventEmitter::new(
+            Arc::new(DefaultEventBus::new()),
+            "aborted-preheat",
+        )),
+        None,
+    ));
+    preheat.abort();
+
+    assert!(read_entries_tail(&transcript, 8)
+        .unwrap()
+        .iter()
+        .any(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::Custom(custom)
+                    if custom.extra["event"].as_str() == Some("compaction_aborted")
+            )
+        }));
 }

@@ -11,7 +11,8 @@
 //!   - 目标 plan `state == executing` 且 `session_key != current_session_key`：拒
 //! - 写盘后 EXEC 由 `NextAction` 统一裁决：work todo 全部终态后显式启动 review
 //!   gate；review 通过或仅余 P1 的最后一轮进入 Acceptance，P0 则交还用户。每条
-//!   `acceptance_commands` 声明都必须以新鲜、成功的后台任务证据完成验收。
+//!   `acceptance_commands` 声明都必须以成功、命令匹配的后台任务证据完成验收；验收
+//!   期间若改了代码，是否需要复审或重跑检查由 `verify` skill 按实际内容判断。
 //! - 返回 JSON（G1）：`plan_id` / `path` / `applied` / `items[]` /
 //!   `active_in_progress` / `plan_state_before` / `plan_state_after` / `warnings[]` /
 //!   `panel_snapshot_id` / `code_review` / `verify`（节流后 panel 刷新版本；目前与 timestamp 等价）。
@@ -22,9 +23,10 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::{
-        normalize_acceptance_command, normalize_acceptance_commands, read_plan, update_plan_locked,
-        write_plan, GreenBuildEvidence, PlanFileState, TodoItem, TodoKind, TodoStatus,
-        GATE_ACCEPTANCE_TODO_ID, GATE_CODE_REVIEW_TODO_ID,
+        apply_close_out_transition, normalize_acceptance_command, normalize_acceptance_commands,
+        read_plan, update_plan_locked, write_plan, CloseOutTransition, GreenBuildEvidence,
+        PlanFileState, TodoItem, TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_ID,
+        GATE_CODE_REVIEW_TODO_ID,
     },
     review::{Finding, SeverityTier},
     NextAction, PlanRuntime,
@@ -212,7 +214,6 @@ pub async fn execute_for_tool(
     let mut warnings = tx.warnings;
     let mut code_review_json = serde_json::Value::Null;
     let mut diff_context = crate::core::plan_runtime::code_reviewer::CodeDiffContext::default();
-    let mut unreviewed_edit_event = None;
 
     for (finding, reason) in prepared_disputes {
         let reference = finding.reference.clone();
@@ -234,95 +235,32 @@ pub async fn execute_for_tool(
         ));
     }
 
-    // Before the code-review budget is exhausted, code edits make both gates stale. Afterwards,
-    // acceptance owns the remaining verification: reopening review only produces another
-    // fail-open exhaustion event and prevents a fresh acceptance proof from being submitted.
-    if code_gate_state_needs_freshness_check(&plan.frontmatter) {
+    if matches!(tx.gate_start, Some(GateStart::Review)) {
+        let next_action = runtime.next_action(&plan.frontmatter).await;
+        let explicit_restart_after_fixes = matches!(next_action, NextAction::FixFindings { .. })
+            && all_work_todos_terminal(&plan.frontmatter.todos);
+        let explicit_restart_of_completed_review =
+            gate_has_status(
+                &plan.frontmatter.todos,
+                TodoKind::GateCodeReview,
+                TodoStatus::Completed,
+            ) && all_work_todos_terminal(&plan.frontmatter.todos);
+        if !matches!(next_action, NextAction::StartReview)
+            && !explicit_restart_after_fixes
+            && !explicit_restart_of_completed_review
+        {
+            return Err(ToolError::BadArgs(next_action.instruction()));
+        }
+        plan = persist_review_started(runtime, &path)?;
         if let Some(workspace_root) = runtime.workspace_root() {
             diff_context = crate::core::plan_runtime::code_reviewer::collect_code_diff_context(
                 &workspace_root,
             )
             .await;
-            if let Some(mtime) = diff_context.newest_edit_mtime_ms {
-                if code_review_is_stale(&plan.frontmatter, mtime) {
-                    let had_previous_full_gate =
-                        plan.frontmatter.code_review_pass && plan.frontmatter.green_build_pass;
-                    let review_budget_exhausted = plan
-                        .frontmatter
-                        .code_review_budget_exhausted(runtime.max_code_review_rounds());
-                    if review_budget_exhausted && !plan.frontmatter.green_build_pass {
-                        // This is the normal acceptance-in-progress case. `pass_at_ms` records
-                        // the same budget fail-open decision that the old reopen→exhausted round
-                        // would have recorded, so this edit is not reconsidered on every later
-                        // update_plan call. Keep residual findings: they remain relevant until
-                        // the plan is completed.
-                        plan.frontmatter.code_review_pass_at_ms = Some(now_unix_ms());
-                        warnings.push(format!(
-                            "code review 预算已用尽（{}/{}）；本次代码改动不再复审，继续用 Acceptance 的新鲜绿构建证据收口",
-                            plan.frontmatter.code_review_rounds,
-                            runtime.max_code_review_rounds(),
-                        ));
-                        unreviewed_edit_event =
-                            Some((diff_context.changed_code_files.clone(), mtime));
-                    } else if had_previous_full_gate
-                        && plan.frontmatter.completion_gate_cycles
-                            >= runtime.max_completion_gate_cycles()
-                    {
-                        warnings.push(format!(
-                            "代码在已通过门禁后再次修改，但验收重跑已达到上限 {}；按上限放行收口",
-                            runtime.max_completion_gate_cycles()
-                        ));
-                        runtime_complete_all_gates(&mut plan.frontmatter.todos);
-                        plan.frontmatter.state = PlanFileState::Completed;
-                    } else if review_budget_exhausted && plan.frontmatter.green_build_pass {
-                        invalidate_acceptance_gate_only(&mut plan.frontmatter);
-                        runtime.finish_acceptance(&target_plan_id);
-                        plan.frontmatter.completion_gate_cycles =
-                            plan.frontmatter.completion_gate_cycles.saturating_add(1);
-                    } else {
-                        invalidate_code_gates(&mut plan.frontmatter);
-                        runtime.finish_acceptance(&target_plan_id);
-                        if had_previous_full_gate {
-                            plan.frontmatter.completion_gate_cycles =
-                                plan.frontmatter.completion_gate_cycles.saturating_add(1);
-                        }
-                    }
-                    rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
-                    write_plan(&path, &plan, runtime.lock_timeout_ms())?;
-                    runtime.refresh_active_plan_after_write(path.clone(), &plan);
-                }
-            }
-        }
-    }
-
-    if let Some((changed_code_files, newest_edit_mtime_ms)) = unreviewed_edit_event {
-        runtime.write_code_review_unreviewed_edit_transcript(
-            &target_plan_id,
-            plan.frontmatter.code_review_rounds,
-            &changed_code_files,
-            newest_edit_mtime_ms,
-        );
-    }
-
-    if matches!(tx.gate_start, Some(GateStart::Review)) {
-        let next_action = runtime.next_action(&plan.frontmatter).await;
-        if !matches!(next_action, NextAction::StartReview) {
-            return Err(ToolError::BadArgs(next_action.instruction()));
-        }
-        if diff_context.changed_code_files.is_empty() && diff_context.newest_edit_mtime_ms.is_none()
-        {
-            if let Some(workspace_root) = runtime.workspace_root() {
-                diff_context = crate::core::plan_runtime::code_reviewer::collect_code_diff_context(
-                    &workspace_root,
-                )
-                .await;
-            }
         }
 
         if runtime.workspace_root().is_none() || diff_context.changed_code_files.is_empty() {
-            runtime_complete_all_gates(&mut plan.frontmatter.todos);
-            plan.frontmatter.code_review_pass = true;
-            plan.frontmatter.green_build_pass = true;
+            apply_close_out_transition(&mut plan.frontmatter, CloseOutTransition::AllGatesSkipped);
             finalize_plan_completed(runtime, &target_plan_id, &path, &mut plan)?;
             runtime.write_code_review_skipped_transcript(
                 &target_plan_id,
@@ -340,39 +278,11 @@ pub async fn execute_for_tool(
         {
             let next_round = plan.frontmatter.code_review_rounds.saturating_add(1);
             let review_attempt_id = format!("{target_plan_id}:{next_round}");
-            let is_incremental = plan.frontmatter.code_review_baseline_ms.is_some();
-            let delta_file_count = if is_incremental {
-                runtime
-                    .workspace_root()
-                    .map(|workspace_root| {
-                        crate::core::plan_runtime::code_reviewer::changed_files_since(
-                            &workspace_root,
-                            &diff_context.changed_code_files,
-                            plan.frontmatter.code_review_baseline_ms.unwrap_or_default(),
-                        )
-                        .len()
-                    })
-                    .unwrap_or(0)
-            } else {
-                diff_context.changed_code_files.len()
-            };
-            let review_lease = runtime
-                .begin_code_review_round(
-                    &target_plan_id,
-                    plan.frontmatter.code_review_rounds,
-                    review_attempt_id.clone(),
-                    tool_call_id.to_string(),
-                    is_incremental,
-                    delta_file_count,
-                )
-                .ok_or_else(|| {
-                    ToolError::BadArgs(
-                        "code review is already in progress or its review budget is exhausted"
-                            .into(),
-                    )
-                })?;
-            let round = review_lease.round();
-            let review_baseline_ms = now_unix_ms();
+            let is_incremental = plan.frontmatter.code_review_rounds > 0;
+            // Incremental rounds use the current full changed-file set. The previous
+            // review cannot provide a reliable timestamp-based content boundary.
+            let delta_file_count = diff_context.changed_code_files.len();
+            let round = next_round;
             let dispatch = crate::core::plan_runtime::CodeReviewDispatchInfo {
                 round,
                 review_attempt_id: review_attempt_id.clone(),
@@ -406,47 +316,10 @@ pub async fn execute_for_tool(
                         summary.reviewer_stop_reason, retries
                     ));
                 }
-                // `abort` 消费 lease；其 Drop 负责落一条终态 aborted event，
-                // 不写 review 状态，也不消耗持久化轮次。
-                review_lease.abort(summary);
-            } else {
-                let disputed = plan.frontmatter.code_review_disputed_findings.clone();
-                let blocking = blocking_findings(&summary.findings, &disputed);
-                let exhaustion = if !blocking.is_empty() {
-                    if summary.verdict.as_deref() == Some("pass") && !blocking.is_empty() {
-                        warnings.push(
-                            "code reviewer verdict=pass 但仍返回未裁决 P0/P1 finding；运行时按 finding 阻止收口"
-                                .into(),
-                        );
-                    }
-                    plan.frontmatter.code_review_open_findings = blocking;
-                    plan.frontmatter.code_review_pass = false;
-                    plan.frontmatter.code_review_pass_at_ms = None;
-                    runtime_set_gate_status(
-                        &mut plan.frontmatter.todos,
-                        TodoKind::GateCodeReview,
-                        TodoStatus::Pending,
-                    );
-                    if round >= runtime.max_code_review_rounds() {
-                        let exhaustion = settle_exhausted_review(&mut plan.frontmatter);
-                        warnings.push(exhaustion.warning(round, runtime.max_code_review_rounds()));
-                        Some(exhaustion)
-                    } else {
-                        None
-                    }
-                } else {
-                    plan.frontmatter.code_review_open_findings.clear();
-                    plan.frontmatter.code_review_residual_findings.clear();
-                    record_code_review_pass(&mut plan.frontmatter, false);
-                    runtime_set_gate_status(
-                        &mut plan.frontmatter.todos,
-                        TodoKind::GateCodeReview,
-                        TodoStatus::Completed,
-                    );
-                    None
-                };
-                plan.frontmatter.code_review_rounds = round;
-                plan.frontmatter.code_review_baseline_ms = Some(review_baseline_ms);
+                apply_close_out_transition(
+                    &mut plan.frontmatter,
+                    CloseOutTransition::ReviewAborted,
+                );
                 rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
                 write_plan(&path, &plan, runtime.lock_timeout_ms())?;
                 runtime.refresh_active_plan_after_write(path.clone(), &plan);
@@ -459,7 +332,47 @@ pub async fn execute_for_tool(
                     is_incremental,
                     delta_file_count,
                 );
-                review_lease.complete();
+            } else {
+                let disputed = plan.frontmatter.code_review_disputed_findings.clone();
+                let blocking = blocking_findings(&summary.findings, &disputed);
+                let exhaustion = if !blocking.is_empty() {
+                    if summary.verdict.as_deref() == Some("pass") && !blocking.is_empty() {
+                        warnings.push(
+                            "code reviewer verdict=pass 但仍返回未裁决 P0/P1 finding；运行时按 finding 阻止收口"
+                                .into(),
+                        );
+                    }
+                    apply_close_out_transition(
+                        &mut plan.frontmatter,
+                        CloseOutTransition::ReviewFailed { findings: blocking },
+                    );
+                    if round >= runtime.max_code_review_rounds() {
+                        let exhaustion = settle_exhausted_review(&mut plan.frontmatter);
+                        warnings.push(exhaustion.warning(round, runtime.max_code_review_rounds()));
+                        Some(exhaustion)
+                    } else {
+                        None
+                    }
+                } else {
+                    apply_close_out_transition(
+                        &mut plan.frontmatter,
+                        CloseOutTransition::ReviewPassed,
+                    );
+                    None
+                };
+                plan.frontmatter.code_review_rounds = round;
+                rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
+                write_plan(&path, &plan, runtime.lock_timeout_ms())?;
+                runtime.refresh_active_plan_after_write(path.clone(), &plan);
+                runtime.write_code_review_transcript(
+                    &target_plan_id,
+                    &summary,
+                    round,
+                    &review_attempt_id,
+                    tool_call_id,
+                    is_incremental,
+                    delta_file_count,
+                );
                 if let Some(exhaustion) = exhaustion {
                     exhaustion.write_transcript(runtime, &target_plan_id, round);
                 }
@@ -474,13 +387,7 @@ pub async fn execute_for_tool(
                 },
                 runtime.max_code_review_rounds(),
             ));
-            plan.frontmatter.code_review_residual_findings.clear();
-            record_code_review_pass(&mut plan.frontmatter, false);
-            runtime_set_gate_status(
-                &mut plan.frontmatter.todos,
-                TodoKind::GateCodeReview,
-                TodoStatus::Completed,
-            );
+            apply_close_out_transition(&mut plan.frontmatter, CloseOutTransition::ReviewPassed);
             rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
             write_plan(&path, &plan, runtime.lock_timeout_ms())?;
             runtime.refresh_active_plan_after_write(path.clone(), &plan);
@@ -505,11 +412,18 @@ pub async fn execute_for_tool(
         if !matches!(next_action, NextAction::RunAcceptance { .. }) {
             return Err(ToolError::BadArgs(next_action.instruction()));
         }
-        if !runtime.begin_acceptance(&target_plan_id) {
-            return Err(ToolError::BadArgs(
-                "`[gate] Acceptance` is already in progress in this runtime; submit its task evidence or cancel the plan before starting it again"
-                    .into(),
-            ));
+        if gate_has_status(
+            &plan.frontmatter.todos,
+            TodoKind::GateAcceptance,
+            TodoStatus::Pending,
+        ) {
+            apply_close_out_transition(
+                &mut plan.frontmatter,
+                CloseOutTransition::AcceptanceStarted,
+            );
+            rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
+            write_plan(&path, &plan, runtime.lock_timeout_ms())?;
+            runtime.refresh_active_plan_after_write(path.clone(), &plan);
         }
     }
 
@@ -520,32 +434,20 @@ pub async fn execute_for_tool(
             ));
         }
         if args.green_build_pass == Some(true) {
-            if !runtime.acceptance_is_in_flight(&target_plan_id) {
+            if !gate_has_status(
+                &plan.frontmatter.todos,
+                TodoKind::GateAcceptance,
+                TodoStatus::InProgress,
+            ) {
                 return Err(ToolError::BadArgs(
-                    "只能在 `[gate] Acceptance` 已启动的当前运行时提交 green_build_pass；请先将该 gate 设为 in_progress，再运行 verify skill"
+                    "只能在 `[gate] Acceptance` 已启动时提交 green_build_pass；请先将该 gate 设为 in_progress，再运行 verify skill"
                         .into(),
                 ));
             }
-            if diff_context.newest_edit_mtime_ms.is_none() {
-                if let Some(workspace_root) = runtime.workspace_root() {
-                    diff_context =
-                        crate::core::plan_runtime::code_reviewer::collect_code_diff_context(
-                            &workspace_root,
-                        )
-                        .await;
-                }
-            }
-            let newest_edit_mtime_ms = diff_context.newest_edit_mtime_ms.ok_or_else(|| {
-                ToolError::BadArgs(
-                    "当前没有可核验的代码 diff；docs-only 计划应由 `[gate] review` 自动跳过".into(),
-                )
-            })?;
-            require_green_build_pass(runtime, &args, newest_edit_mtime_ms, &path, &mut plan)?;
-            runtime.finish_acceptance(&target_plan_id);
-            runtime_set_gate_status(
-                &mut plan.frontmatter.todos,
-                TodoKind::GateAcceptance,
-                TodoStatus::Completed,
+            let evidence = require_green_build_pass(runtime, &args, &plan)?;
+            apply_close_out_transition(
+                &mut plan.frontmatter,
+                CloseOutTransition::AcceptancePassed { evidence },
             );
             rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
             if plan_completion_ready(&plan.frontmatter.todos) {
@@ -554,10 +456,15 @@ pub async fn execute_for_tool(
                 write_plan(&path, &plan, runtime.lock_timeout_ms())?;
                 runtime.refresh_active_plan_after_write(path.clone(), &plan);
             }
+            runtime.write_transcript_custom(serde_json::json!({
+                "event": "plan.green_build",
+                "plan_id": &plan.frontmatter.plan_id,
+                "pass": true,
+                "declared_acceptance_commands": &plan.frontmatter.acceptance_commands,
+                "evidence": &plan.frontmatter.green_build_evidence,
+            }));
         } else {
-            runtime.finish_acceptance(&target_plan_id);
-            plan.frontmatter.green_build_pass = false;
-            plan.frontmatter.green_build_evidence.clear();
+            apply_close_out_transition(&mut plan.frontmatter, CloseOutTransition::AcceptanceFailed);
             write_plan(&path, &plan, runtime.lock_timeout_ms())?;
             runtime.refresh_active_plan_after_write(path.clone(), &plan);
         }
@@ -647,6 +554,56 @@ fn required_gate(todos: &[TodoItem], kind: TodoKind) -> Result<&TodoItem, ToolEr
     })
 }
 
+/// Durably claim the review gate before dispatching the reviewer. The plan-file
+/// lock makes the persisted `in_progress` state the cross-call reservation.
+fn persist_review_started(
+    runtime: &PlanRuntime,
+    path: &std::path::Path,
+) -> Result<crate::core::plan_runtime::file_store::PlanFile, ToolError> {
+    match update_plan_locked(path, runtime.lock_timeout_ms(), |plan| {
+        if plan.frontmatter.state != PlanFileState::Executing {
+            return Err(ToolError::BadArgs(
+                "review gate may only start while the plan is executing".into(),
+            ));
+        }
+        if gate_has_status(
+            &plan.frontmatter.todos,
+            TodoKind::GateCodeReview,
+            TodoStatus::InProgress,
+        ) {
+            return Err(ToolError::BadArgs(
+                "code review is already in progress".into(),
+            ));
+        }
+        let status = required_gate(&plan.frontmatter.todos, TodoKind::GateCodeReview)?.status;
+        if !matches!(status, TodoStatus::Pending | TodoStatus::Completed) {
+            return Err(ToolError::BadArgs(
+                "[gate] review is not pending and cannot be started again".into(),
+            ));
+        }
+        if plan
+            .frontmatter
+            .code_review_budget_exhausted(runtime.max_code_review_rounds())
+        {
+            return Err(ToolError::BadArgs(
+                "code review budget is exhausted and cannot be started again".into(),
+            ));
+        }
+
+        apply_close_out_transition(&mut plan.frontmatter, CloseOutTransition::ReviewRestarted);
+        rewrite_todos_board(&mut plan.body, &plan.frontmatter.todos);
+        Ok::<_, ToolError>(plan.clone())
+    }) {
+        Ok(plan) => Ok(plan),
+        Err(crate::core::plan_runtime::file_store::LockedPlanMutationError::Plan(error)) => {
+            Err(error.into())
+        }
+        Err(crate::core::plan_runtime::file_store::LockedPlanMutationError::Callback(error)) => {
+            Err(error)
+        }
+    }
+}
+
 /// Extract runtime-owned gate transitions, then let the existing shared op engine mutate only
 /// ordinary work items. `replace=true` is intentionally a reconstruction of work todos plus the
 /// old gates: it cannot erase gates or synthesize a Work item with a gate id.
@@ -732,7 +689,17 @@ fn apply_plan_todo_ops(
             GateStart::Review => TodoKind::GateCodeReview,
             GateStart::Acceptance => TodoKind::GateAcceptance,
         };
-        if required_gate(todos, gate_kind)?.status != TodoStatus::Pending {
+        let current_status = required_gate(todos, gate_kind)?.status;
+        let can_start = match gate_kind {
+            TodoKind::GateCodeReview => {
+                matches!(current_status, TodoStatus::Pending | TodoStatus::Completed)
+            }
+            TodoKind::GateAcceptance => {
+                matches!(current_status, TodoStatus::Pending | TodoStatus::InProgress)
+            }
+            TodoKind::Work => false,
+        };
+        if !can_start {
             return Err(ToolError::BadArgs(format!(
                 "{} is not pending and cannot be started again",
                 gate_kind.as_str()
@@ -763,36 +730,10 @@ fn gate_has_status(todos: &[TodoItem], kind: TodoKind, status: TodoStatus) -> bo
         .any(|todo| todo.kind == kind && todo.status == status)
 }
 
-fn runtime_set_gate_status(todos: &mut [TodoItem], kind: TodoKind, status: TodoStatus) {
-    if let Some(gate) = todos.iter_mut().find(|todo| todo.kind == kind) {
-        gate.status = status;
-    }
-}
-
-fn runtime_complete_all_gates(todos: &mut [TodoItem]) {
-    runtime_set_gate_status(todos, TodoKind::GateCodeReview, TodoStatus::Completed);
-    runtime_set_gate_status(todos, TodoKind::GateAcceptance, TodoStatus::Completed);
-}
-
 fn plan_completion_ready(todos: &[TodoItem]) -> bool {
     all_work_todos_terminal(todos)
         && gate_has_status(todos, TodoKind::GateCodeReview, TodoStatus::Completed)
         && gate_has_status(todos, TodoKind::GateAcceptance, TodoStatus::Completed)
-}
-
-fn code_gate_state_needs_freshness_check(
-    frontmatter: &crate::core::plan_runtime::file_store::PlanFileFrontmatter,
-) -> bool {
-    frontmatter.code_review_pass || frontmatter.green_build_pass
-}
-
-fn code_review_is_stale(
-    frontmatter: &crate::core::plan_runtime::file_store::PlanFileFrontmatter,
-    newest_edit_mtime_ms: u128,
-) -> bool {
-    frontmatter
-        .code_review_pass_at_ms
-        .is_none_or(|passed_at| passed_at < newest_edit_mtime_ms)
 }
 
 fn format_residual_findings(findings: &[Finding]) -> Vec<String> {
@@ -851,27 +792,19 @@ fn settle_exhausted_review(
         .iter()
         .any(|finding| finding.tier() == SeverityTier::P0)
     {
-        frontmatter.code_review_handoff = true;
-        frontmatter.code_review_pass = false;
-        frontmatter.code_review_pass_at_ms = None;
-        runtime_set_gate_status(
-            &mut frontmatter.todos,
-            TodoKind::GateCodeReview,
-            TodoStatus::Pending,
-        );
-        runtime_set_gate_status(
-            &mut frontmatter.todos,
-            TodoKind::GateAcceptance,
-            TodoStatus::Pending,
+        apply_close_out_transition(
+            frontmatter,
+            CloseOutTransition::ReviewHandedOff {
+                residual_findings: residual_findings.clone(),
+            },
         );
         ExhaustedReviewSettlement::HandOff { residual_findings }
     } else {
-        frontmatter.code_review_handoff = false;
-        record_code_review_pass(frontmatter, false);
-        runtime_set_gate_status(
-            &mut frontmatter.todos,
-            TodoKind::GateCodeReview,
-            TodoStatus::Completed,
+        apply_close_out_transition(
+            frontmatter,
+            CloseOutTransition::ReviewExhaustedFailOpen {
+                residual_findings: residual_findings.clone(),
+            },
         );
         ExhaustedReviewSettlement::RunAcceptance { residual_findings }
     }
@@ -909,58 +842,7 @@ fn finalize_plan_completed(
     Ok(())
 }
 
-fn now_unix_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-
-fn invalidate_code_gates(
-    frontmatter: &mut crate::core::plan_runtime::file_store::PlanFileFrontmatter,
-) {
-    frontmatter.code_review_pass = false;
-    frontmatter.code_review_pass_at_ms = None;
-    frontmatter.code_review_residual_findings.clear();
-    frontmatter.green_build_pass = false;
-    frontmatter.green_build_evidence.clear();
-    runtime_set_gate_status(
-        &mut frontmatter.todos,
-        TodoKind::GateCodeReview,
-        TodoStatus::Pending,
-    );
-    runtime_set_gate_status(
-        &mut frontmatter.todos,
-        TodoKind::GateAcceptance,
-        TodoStatus::Pending,
-    );
-}
-
-/// A fresh verification proof is needed, but the completed review decision remains authoritative.
-/// This is used only after the review budget was already exhausted.
-fn invalidate_acceptance_gate_only(
-    frontmatter: &mut crate::core::plan_runtime::file_store::PlanFileFrontmatter,
-) {
-    frontmatter.green_build_pass = false;
-    frontmatter.green_build_evidence.clear();
-    runtime_set_gate_status(
-        &mut frontmatter.todos,
-        TodoKind::GateAcceptance,
-        TodoStatus::Pending,
-    );
-}
-
-fn record_code_review_pass(
-    frontmatter: &mut crate::core::plan_runtime::file_store::PlanFileFrontmatter,
-    is_rerun_after_previous_full_gate: bool,
-) {
-    frontmatter.code_review_pass = true;
-    frontmatter.code_review_pass_at_ms = Some(now_unix_ms());
-    if is_rerun_after_previous_full_gate {
-        frontmatter.completion_gate_cycles = frontmatter.completion_gate_cycles.saturating_add(1);
-    }
-}
-
+#[cfg(test)]
 fn green_build_guidance(residual_findings: &[String]) -> ToolError {
     ToolError::BadArgs(format!(
         "代码 diff 已通过（或跳过）code review，但绿构建验收尚未通过。{}",
@@ -974,31 +856,9 @@ fn green_build_guidance(residual_findings: &[String]) -> ToolError {
 fn require_green_build_pass(
     runtime: &PlanRuntime,
     args: &UpdatePlanArgs,
-    newest_edit_mtime_ms: u128,
-    path: &std::path::Path,
-    plan: &mut crate::core::plan_runtime::file_store::PlanFile,
-) -> Result<(), ToolError> {
-    if plan.frontmatter.green_build_pass
-        && plan
-            .frontmatter
-            .green_build_evidence
-            .iter()
-            .any(|evidence| evidence.started_at_ms >= newest_edit_mtime_ms)
-    {
-        return Ok(());
-    }
-
-    if args.green_build_pass != Some(true) {
-        if args.green_build_pass == Some(false) {
-            plan.frontmatter.green_build_pass = false;
-            plan.frontmatter.green_build_evidence.clear();
-            write_plan(path, plan, runtime.lock_timeout_ms())?;
-            runtime.refresh_active_plan_after_write(path.to_path_buf(), plan);
-        }
-        return Err(green_build_guidance(
-            &plan.frontmatter.code_review_residual_findings,
-        ));
-    }
+    plan: &crate::core::plan_runtime::file_store::PlanFile,
+) -> Result<Vec<GreenBuildEvidence>, ToolError> {
+    debug_assert_eq!(args.green_build_pass, Some(true));
     if args.green_build_evidence.is_empty() {
         return Err(ToolError::BadArgs(
             "green_build_pass=true 必须同时传入至少一个 green_build_evidence.task_id".into(),
@@ -1050,12 +910,6 @@ fn require_green_build_pass(
                 evidence.task_id
             )));
         }
-        if task.started_at_unix_ms < newest_edit_mtime_ms {
-            return Err(ToolError::BadArgs(format!(
-                "后台任务 `{}` 启动于最新代码修改之前，证据已过期；请重新运行验收命令",
-                evidence.task_id
-            )));
-        }
         verified.push(GreenBuildEvidence {
             command: task.command,
             task_id: task.task_id.to_string(),
@@ -1093,18 +947,7 @@ fn require_green_build_pass(
         }
     }
 
-    plan.frontmatter.green_build_pass = true;
-    plan.frontmatter.green_build_evidence = verified;
-    write_plan(path, plan, runtime.lock_timeout_ms())?;
-    runtime.refresh_active_plan_after_write(path.to_path_buf(), plan);
-    runtime.write_transcript_custom(serde_json::json!({
-        "event": "plan.green_build",
-        "plan_id": &plan.frontmatter.plan_id,
-        "pass": true,
-        "declared_acceptance_commands": &plan.frontmatter.acceptance_commands,
-        "evidence": &plan.frontmatter.green_build_evidence,
-    }));
-    Ok(())
+    Ok(verified)
 }
 
 fn prepare_disputes(
@@ -1450,6 +1293,20 @@ mod tests {
         }
         .instruction();
         assert!(green_build_guidance(&[]).to_string().contains(&instruction));
+    }
+
+    #[test]
+    fn acceptance_hint_matches_runtime_evidence_rules_without_mtime() {
+        let hint = NextAction::RunAcceptance {
+            residual_findings: Vec::new(),
+        }
+        .instruction();
+
+        assert!(hint.contains("from this session"));
+        assert!(hint.contains("a finished task, exit 0, and an exact command match"));
+        assert!(hint.contains("If code changes during acceptance"));
+        assert!(!hint.contains("newest edit"));
+        assert!(!hint.contains("mtime"));
     }
 
     #[test]

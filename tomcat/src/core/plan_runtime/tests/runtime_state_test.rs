@@ -215,6 +215,18 @@ async fn next_action_is_the_single_close_out_decision_source() {
         }
     ));
 
+    frontmatter.code_review_handoff = false;
+    frontmatter.code_review_open_findings.clear();
+    frontmatter.code_review_pass = true;
+    frontmatter.green_build_pass = true;
+    frontmatter.todos[1].status = TodoStatus::Completed;
+    frontmatter.todos[2].status = TodoStatus::Completed;
+    assert_eq!(
+        runtime.next_action(&frontmatter).await,
+        NextAction::Done,
+        "executing plans with terminal work and both gates passed must not return an empty ContinueWork"
+    );
+
     frontmatter.state = PlanFileState::Completed;
     assert_eq!(runtime.next_action(&frontmatter).await, NextAction::Done);
 }

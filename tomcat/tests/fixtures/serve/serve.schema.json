@@ -4132,66 +4132,6 @@
             }
           },
           {
-            "description": "预算耗尽后的代码改动没有再次派发 reviewer；仅作为审计事件保留。",
-            "type": "object",
-            "required": [
-              "type"
-            ],
-            "properties": {
-              "changedCodeFiles": {
-                "type": [
-                  "array",
-                  "null"
-                ],
-                "items": {
-                  "type": "string"
-                }
-              },
-              "maxCodeReviewRounds": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "uint32",
-                "minimum": 0.0
-              },
-              "newestEditMtimeMs": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "uint128",
-                "minimum": 0.0
-              },
-              "planId": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "rounds": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
-                "format": "uint32",
-                "minimum": 0.0
-              },
-              "sessionId": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "plan.code_review.unreviewed_edit"
-                ]
-              }
-            }
-          },
-          {
             "type": "object",
             "required": [
               "type"

@@ -80,9 +80,6 @@ pub struct PlanConfig {
     /// EXEC 完成前 code reviewer 的最大尝试轮次。默认 4；0 表示直接跳过 code review。
     #[serde(default = "default_plan_max_code_review_rounds")]
     pub max_code_review_rounds: u32,
-    /// 代码再次编辑后，review + 绿构建最多重跑几轮。默认 3；至少为 1。
-    #[serde(default = "default_plan_max_completion_gate_cycles")]
-    pub max_completion_gate_cycles: u32,
     /// Verifier gate 模式：`soft`（默认，FAIL 仅 advisory）或 `gate`（FAIL 阻止 completed）。
     #[serde(default = "default_plan_verify_gate")]
     pub verify_gate: String,
@@ -101,10 +98,6 @@ fn default_plan_max_code_review_rounds() -> u32 {
     4
 }
 
-fn default_plan_max_completion_gate_cycles() -> u32 {
-    3
-}
-
 fn default_plan_verify_gate() -> String {
     "soft".to_string()
 }
@@ -116,7 +109,6 @@ impl Default for PlanConfig {
             auto_checkpoint_on_build: false,
             max_review_rounds: default_plan_max_review_rounds(),
             max_code_review_rounds: default_plan_max_code_review_rounds(),
-            max_completion_gate_cycles: default_plan_max_completion_gate_cycles(),
             verify_gate: default_plan_verify_gate(),
         }
     }

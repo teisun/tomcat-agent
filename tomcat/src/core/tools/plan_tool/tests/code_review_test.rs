@@ -1,8 +1,6 @@
 use super::common::*;
 use std::time::Duration;
 
-use crate::core::plan_runtime::file_store::GreenBuildEvidence;
-
 // These tests predate visible close-out gates. Keep their domain assertions, but
 // drive the production protocol explicitly: work update → review gate → (when
 // evidence is supplied) acceptance gate. Production never performs this implicit
@@ -51,7 +49,24 @@ mod explicit_gates_update_plan {
         )
         .await?;
 
-        if out["next_step"]["phase"].as_str() == Some("start_review") {
+        let all_work_terminal = out["items"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .filter(|item| {
+                    !matches!(
+                        item["id"].as_str(),
+                        Some(GATE_CODE_REVIEW_TODO_ID | GATE_ACCEPTANCE_TODO_ID)
+                    )
+                })
+                .all(|item| matches!(item["status"].as_str(), Some("completed" | "cancelled")))
+        });
+        let needs_explicit_review_restart = out["next_step"]["phase"].as_str()
+            == Some("fix_findings")
+            && all_work_terminal
+            && out["code_review"].is_null();
+        if out["next_step"]["phase"].as_str() == Some("start_review")
+            || needs_explicit_review_restart
+        {
             out = raw::execute(
                 runtime,
                 gate_args(plan_id.clone(), path.clone(), GATE_CODE_REVIEW_TODO_ID),
@@ -61,13 +76,7 @@ mod explicit_gates_update_plan {
 
         if green_build_pass.is_some() && out["code_review_pass"].as_bool() == Some(true) {
             let review_result = out["code_review"].clone();
-            let plan_id_for_acceptance = plan_id
-                .as_deref()
-                .or_else(|| out["plan_id"].as_str())
-                .expect("acceptance requires a plan id");
-            if !gate_is_in_progress(&out, TodoKind::GateAcceptance)
-                && !runtime.acceptance_is_in_flight(plan_id_for_acceptance)
-            {
+            if !gate_is_in_progress(&out, TodoKind::GateAcceptance) {
                 raw::execute(
                     runtime,
                     gate_args(plan_id.clone(), path.clone(), GATE_ACCEPTANCE_TODO_ID),
@@ -203,19 +212,6 @@ fn assert_bad_args(error: ToolError, expected: impl AsRef<str>) {
         ToolError::BadArgs(message) => assert_eq!(message, expected.as_ref()),
         other => panic!("expected ToolError::BadArgs, got {other:?}"),
     }
-}
-
-fn seed_previous_full_gate(plan: &mut PlanFile, completion_gate_cycles: u32) {
-    plan.frontmatter.code_review_pass = true;
-    plan.frontmatter.code_review_pass_at_ms = Some(0);
-    plan.frontmatter.green_build_pass = true;
-    plan.frontmatter.green_build_evidence = vec![GreenBuildEvidence {
-        command: "old verification".into(),
-        task_id: "old-task".into(),
-        started_at_ms: 0,
-        exit_code: 0,
-    }];
-    plan.frontmatter.completion_gate_cycles = completion_gate_cycles;
 }
 
 #[tokio::test]
@@ -938,6 +934,14 @@ async fn aborted_code_review_keeps_plan_executing() {
         "reviewer spawn failed",
     )]));
     let verifier = std::sync::Arc::new(MockVerifierDispatcher::new(vec![ok_verify_pass()]));
+    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    {
+        let events = events.clone();
+        rt.attach_transcript_appender(std::sync::Arc::new(move |event| {
+            events.lock().push(event);
+            Ok(())
+        }));
+    }
     rt.attach_code_reviewer(reviewer.clone());
     rt.attach_verifier(verifier.clone());
     let plan_id = fresh_planning_plan(&rt);
@@ -976,6 +980,9 @@ async fn aborted_code_review_keeps_plan_executing() {
     assert!(out.get("verify").is_none());
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
     assert_eq!(persisted.frontmatter.state, PlanFileState::Executing);
+    assert!(persisted.frontmatter.todos.iter().any(|todo| {
+        todo.kind == TodoKind::GateCodeReview && todo.status == TodoStatus::Pending
+    }));
     assert_eq!(
         reviewer
             .call_count
@@ -1002,6 +1009,129 @@ async fn aborted_code_review_keeps_plan_executing() {
         }),
         "aborted code review 应明确说明未拿到通过结论"
     );
+    assert!(events.lock().iter().any(|event| {
+        event["event"] == crate::infra::wire::WIRE_PLAN_CODE_REVIEW && event["aborted"] == true
+    }));
+    cleanup_home(&home);
+}
+
+#[tokio::test]
+async fn review_gate_is_durably_in_progress_and_rejects_a_second_start() {
+    let _g = home_lock().lock().unwrap();
+    let home = setup_isolated_home();
+    let workspace = git_workspace_with_code("tomcat_review_durable_start_");
+    let rt = PlanRuntime::new("session-a");
+    rt.attach_workspace_root(workspace.path().to_path_buf());
+    let mut mock = MockCodeReviewerDispatcher::new(vec![passing_code_review()]);
+    mock.delay = Some(Duration::from_millis(300));
+    rt.attach_code_reviewer(std::sync::Arc::new(mock));
+    let plan_id = fresh_planning_plan(&rt);
+    mark_plan_executing(&rt, &plan_id, "session-a");
+
+    crate::core::tools::plan_tool::update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            acceptance_commands: None,
+            ops: vec![
+                update_plan::UpdateOp::SetStatus {
+                    id: "t1".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+                update_plan::UpdateOp::SetStatus {
+                    id: "t2".into(),
+                    content: None,
+                    status: TodoStatus::Completed,
+                },
+            ],
+        },
+    )
+    .await
+    .expect("work completion exposes the review gate");
+
+    let start_args = update_plan::UpdatePlanArgs {
+        plan_id: Some(plan_id.clone()),
+        path: None,
+        replace: false,
+        dispute_findings: Vec::new(),
+        green_build_pass: None,
+        green_build_evidence: Vec::new(),
+        acceptance_commands: None,
+        ops: vec![update_plan::UpdateOp::SetStatus {
+            id: GATE_CODE_REVIEW_TODO_ID.into(),
+            content: None,
+            status: TodoStatus::InProgress,
+        }],
+    };
+    let first_start = {
+        let runtime = rt.clone();
+        tokio::spawn(async move {
+            crate::core::tools::plan_tool::update_plan::execute(&runtime, start_args).await
+        })
+    };
+
+    for _ in 0..20 {
+        let plan = read_plan(&plan_path_for_id(&plan_id).unwrap()).expect("read plan");
+        if plan.frontmatter.todos.iter().any(|todo| {
+            todo.kind == TodoKind::GateCodeReview && todo.status == TodoStatus::InProgress
+        }) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).expect("read plan");
+    assert!(
+        persisted
+            .frontmatter
+            .todos
+            .iter()
+            .any(|todo| todo.kind == TodoKind::GateCodeReview
+                && todo.status == TodoStatus::InProgress)
+    );
+
+    let second_start = crate::core::tools::plan_tool::update_plan::execute(
+        &rt,
+        update_plan::UpdatePlanArgs {
+            plan_id: Some(plan_id.clone()),
+            path: None,
+            replace: false,
+            dispute_findings: Vec::new(),
+            green_build_pass: None,
+            green_build_evidence: Vec::new(),
+            acceptance_commands: None,
+            ops: vec![update_plan::UpdateOp::SetStatus {
+                id: GATE_CODE_REVIEW_TODO_ID.into(),
+                content: None,
+                status: TodoStatus::InProgress,
+            }],
+        },
+    )
+    .await
+    .expect_err("the persisted review gate is the cross-call reservation");
+    assert!(
+        second_start
+            .to_string()
+            .contains("not pending and cannot be started again"),
+        "unexpected error: {second_start}"
+    );
+
+    first_start
+        .await
+        .expect("review task joins")
+        .expect("first review completes");
+    let settled = read_plan(&plan_path_for_id(&plan_id).unwrap()).expect("read settled plan");
+    assert!(settled
+        .frontmatter
+        .todos
+        .iter()
+        .any(|todo| todo.kind == TodoKind::GateCodeReview && todo.status == TodoStatus::Completed));
+
     cleanup_home(&home);
 }
 
@@ -1061,10 +1191,6 @@ async fn aborted_second_review_preserves_the_first_completed_round_state() {
 
     let after = review_frontmatter(&plan_id);
     assert_eq!(after.code_review_rounds, before.code_review_rounds);
-    assert_eq!(
-        after.code_review_baseline_ms,
-        before.code_review_baseline_ms
-    );
     assert_eq!(
         after.code_review_open_findings,
         before.code_review_open_findings
@@ -1261,16 +1387,6 @@ async fn final_review_round_immediately_advances_to_acceptance_with_p1_residual(
             .call_count
             .load(std::sync::atomic::Ordering::Relaxed),
         0
-    );
-    let after_first_review = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
-    let current_code = crate::core::plan_runtime::code_reviewer::collect_code_diff_context(
-        &rt.workspace_root().expect("wrapper attaches workspace"),
-    )
-    .await;
-    assert!(
-        current_code.newest_edit_mtime_ms <= after_first_review.frontmatter.code_review_baseline_ms,
-        "zero-code-change review must retain its baseline: current={current_code:?}, baseline={:?}",
-        after_first_review.frontmatter.code_review_baseline_ms
     );
     assert_eq!(first["next_step"]["phase"], "run_acceptance");
     assert!(first["next_step"]["hint"]
@@ -1825,7 +1941,7 @@ async fn green_build_evidence_rejects_nonzero_and_running_background_tasks() {
 }
 
 #[tokio::test]
-async fn green_build_evidence_rejects_task_started_before_latest_code_edit() {
+async fn green_build_evidence_accepts_finished_registered_task_regardless_of_file_mtime() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let workspace = git_workspace_with_code("tomcat_green_evidence_stale_");
@@ -1854,7 +1970,7 @@ async fn green_build_evidence_rejects_task_started_before_latest_code_edit() {
     )
     .unwrap();
 
-    let error = update_plan::execute(
+    let accepted = update_plan::execute(
         &rt,
         complete_all_args(
             &plan_id,
@@ -1866,11 +1982,11 @@ async fn green_build_evidence_rejects_task_started_before_latest_code_edit() {
         ),
     )
     .await
-    .expect_err("a verification task started before the latest edit is stale");
-    assert!(error.to_string().contains("证据已过期"));
+    .expect("mtime must not decide whether a real registered green task is accepted");
+    assert_eq!(accepted["plan_state_after"], "completed");
     let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
     assert!(persisted.frontmatter.code_review_pass);
-    assert!(!persisted.frontmatter.green_build_pass);
+    assert!(persisted.frontmatter.green_build_pass);
     cleanup_home(&home);
 }
 
@@ -2104,224 +2220,11 @@ async fn edit_during_acceptance_after_exhausted_review_keeps_gates_and_accepts_f
             .count(),
         1
     );
-    let unreviewed_edit = events
-        .iter()
-        .find(|event| event["event"] == "plan.code_review.unreviewed_edit")
-        .expect("must retain an auditable unreviewed edit event");
-    assert_eq!(unreviewed_edit["rounds"], 1);
-    assert_eq!(
-        unreviewed_edit["changed_code_files"],
-        serde_json::json!(["src/main.rs"])
-    );
     let complete = events
         .iter()
         .find(|event| event["event"] == "plan.complete")
         .expect("completion event should include the build cache observation");
     assert_eq!(complete["cacheObservation"]["cacheHitRatio"], 0.41);
-    cleanup_home(&home);
-}
-
-#[tokio::test]
-async fn stale_green_evidence_after_exhausted_review_reopens_only_acceptance() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let workspace = git_workspace_with_code("tomcat_exhausted_stale_green_");
-    let rt = PlanRuntime::new("session-a");
-    rt.attach_workspace_root(workspace.path().to_path_buf());
-    let plan_id = fresh_planning_plan(&rt);
-    mark_plan_executing(&rt, &plan_id, "session-a");
-    rt.set_max_code_review_rounds(1);
-    let path = plan_path_for_id(&plan_id).unwrap();
-    let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.code_review_rounds = 1;
-    plan.frontmatter.code_review_baseline_ms = Some(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    );
-    for todo in &mut plan.frontmatter.todos {
-        if matches!(
-            todo.kind,
-            TodoKind::GateCodeReview | TodoKind::GateAcceptance
-        ) {
-            todo.status = TodoStatus::Completed;
-        }
-    }
-    seed_previous_full_gate(&mut plan, 0);
-    plan.frontmatter.code_review_residual_findings =
-        vec!["F01 [P1] tests: pending acceptance".into()];
-    write_plan(&path, &plan, 2000).unwrap();
-    rt.refresh_active_plan_after_write(path, &plan);
-
-    let out = update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            path: None,
-            replace: false,
-            dispute_findings: Vec::new(),
-            green_build_pass: None,
-            green_build_evidence: Vec::new(),
-            acceptance_commands: None,
-            ops: Vec::new(),
-        },
-    )
-    .await
-    .expect("stale green evidence must reopen only acceptance");
-
-    assert_eq!(out["code_review_pass"], true);
-    assert_eq!(out["green_build_pass"], false);
-    assert_eq!(out["next_step"]["phase"], "run_acceptance");
-    let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
-    assert_eq!(persisted.frontmatter.completion_gate_cycles, 1);
-    assert_eq!(
-        persisted.frontmatter.code_review_residual_findings,
-        vec!["F01 [P1] tests: pending acceptance"]
-    );
-    assert!(persisted
-        .frontmatter
-        .todos
-        .iter()
-        .any(|todo| todo.kind == TodoKind::GateCodeReview && todo.status == TodoStatus::Completed));
-    assert!(persisted
-        .frontmatter
-        .todos
-        .iter()
-        .any(|todo| todo.kind == TodoKind::GateAcceptance && todo.status == TodoStatus::Pending));
-    cleanup_home(&home);
-}
-
-#[tokio::test]
-async fn code_edit_invalidates_full_gate_and_requires_review_and_fresh_evidence() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let workspace = git_workspace_with_code("tomcat_gate_edit_invalidation_");
-    let registry = std::sync::Arc::new(crate::core::tools::primitive::BashTaskRegistry::new(
-        workspace.path().join(".task-logs"),
-    ));
-    let reviewer =
-        std::sync::Arc::new(MockCodeReviewerDispatcher::new(vec![passing_code_review()]));
-    let rt = PlanRuntime::new("session-a");
-    rt.attach_workspace_root(workspace.path().to_path_buf());
-    rt.attach_bash_task_registry(registry.clone());
-    rt.attach_code_reviewer(reviewer.clone());
-    let plan_id = fresh_planning_plan(&rt);
-    mark_plan_executing(&rt, &plan_id, "session-a");
-    rt.set_max_code_review_rounds(1);
-
-    let path = plan_path_for_id(&plan_id).unwrap();
-    let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.todos[1].status = TodoStatus::Completed;
-    seed_previous_full_gate(&mut plan, 0);
-    write_plan(&path, &plan, 2000).unwrap();
-    rt.refresh_active_plan_after_write(path, &plan);
-
-    let fresh_task = registry
-        .spawn("true".into(), Some(workspace.path().to_path_buf()))
-        .await
-        .unwrap();
-    registry.wait_for_finish(&fresh_task.task_id).await.unwrap();
-    let out = update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            path: None,
-            replace: false,
-            dispute_findings: Vec::new(),
-            green_build_pass: Some(true),
-            green_build_evidence: vec![update_plan::GreenBuildEvidenceArg {
-                command: "true".into(),
-                task_id: fresh_task.task_id.clone(),
-            }],
-            acceptance_commands: None,
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::Completed,
-            }],
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(out["code_review"]["verdict"], "pass");
-    assert_eq!(out["plan_state_after"], "completed");
-    assert_eq!(
-        reviewer
-            .call_count
-            .load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "the edit must invalidate the prior review"
-    );
-    let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
-    assert!(persisted.frontmatter.code_review_pass);
-    assert!(persisted.frontmatter.green_build_pass);
-    assert_eq!(
-        persisted.frontmatter.green_build_evidence[0].task_id,
-        fresh_task.task_id
-    );
-    assert_eq!(persisted.frontmatter.completion_gate_cycles, 1);
-    cleanup_home(&home);
-}
-
-#[tokio::test]
-async fn completion_gate_cycle_cap_closes_without_another_review_rerun() {
-    let _g = home_lock().lock().unwrap();
-    let home = setup_isolated_home();
-    let workspace = git_workspace_with_code("tomcat_gate_cycle_cap_");
-    let reviewer = std::sync::Arc::new(MockCodeReviewerDispatcher::new(Vec::new()));
-    let rt = PlanRuntime::new("session-a");
-    rt.attach_workspace_root(workspace.path().to_path_buf());
-    rt.attach_code_reviewer(reviewer.clone());
-    let plan_id = fresh_planning_plan(&rt);
-    mark_plan_executing(&rt, &plan_id, "session-a");
-    rt.set_max_code_review_rounds(1);
-    rt.set_max_completion_gate_cycles(1);
-
-    let path = plan_path_for_id(&plan_id).unwrap();
-    let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.todos[1].status = TodoStatus::Completed;
-    seed_previous_full_gate(&mut plan, 1);
-    write_plan(&path, &plan, 2000).unwrap();
-    rt.refresh_active_plan_after_write(path, &plan);
-
-    let out = update_plan::execute(
-        &rt,
-        update_plan::UpdatePlanArgs {
-            plan_id: Some(plan_id.clone()),
-            path: None,
-            replace: false,
-            dispute_findings: Vec::new(),
-            green_build_pass: None,
-            green_build_evidence: Vec::new(),
-            acceptance_commands: None,
-            ops: vec![update_plan::UpdateOp::SetStatus {
-                id: "t1".into(),
-                content: None,
-                status: TodoStatus::Completed,
-            }],
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(out["plan_state_after"], "completed");
-    assert!(out["warnings"].as_array().unwrap().iter().any(|warning| {
-        warning
-            .as_str()
-            .is_some_and(|text| text.contains("验收重跑已达到上限 1"))
-    }));
-    assert_eq!(
-        reviewer
-            .call_count
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "the configured cap must prevent another reviewer dispatch"
-    );
-    let persisted = read_plan(&plan_path_for_id(&plan_id).unwrap()).unwrap();
-    assert_eq!(persisted.frontmatter.state, PlanFileState::Completed);
-    assert_eq!(persisted.frontmatter.completion_gate_cycles, 1);
     cleanup_home(&home);
 }
 
@@ -2377,7 +2280,7 @@ async fn rebuild_resets_code_review_rounds() {
     .unwrap();
     assert_eq!(review_rounds(&plan_id), 1);
 
-    // 计划回到 pending 后重新 build —— 预算按次发放，计数与未清项一起清零。
+    // 计划回到 pending 后重新 build —— 预算按次发放，但历史事实不能被 Resume 清掉。
     let path = plan_path_for_id(&plan_id).unwrap();
     let mut plan = read_plan(&path).unwrap();
     plan.frontmatter.state = PlanFileState::Pending;
@@ -2387,7 +2290,7 @@ async fn rebuild_resets_code_review_rounds() {
         .expect("二次 build 失败");
 
     assert_eq!(review_rounds(&plan_id), 0);
-    assert!(open_finding_references(&plan_id).is_empty());
+    assert_eq!(open_finding_references(&plan_id), vec!["F01".to_string()]);
     cleanup_home(&home);
 }
 

@@ -18,7 +18,7 @@ use crate::core::session::transcript::{
 use crate::infra::error::AppError;
 use crate::infra::platform::write_file_atomic;
 
-pub const RESUME_INDEX_SCHEMA_VERSION: u32 = 4;
+pub const RESUME_INDEX_SCHEMA_VERSION: u32 = 5;
 const RECENT_TURN_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -321,10 +321,10 @@ fn is_user_turn_start(entry: &TranscriptEntry) -> bool {
     match entry {
         TranscriptEntry::Message(me) => {
             me.message.get("role").and_then(|v| v.as_str()) == Some("user")
-                && !MessageKind::from_persisted(
+                && MessageKind::from_persisted(
                     me.message.get("kind").and_then(serde_json::Value::as_str),
                 )
-                .is_non_turn_start()
+                .is_replay_input()
         }
         _ => false,
     }

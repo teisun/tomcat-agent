@@ -16,6 +16,8 @@
 
 use std::sync::Arc;
 
+use tracing::warn;
+
 use crate::core::llm::{
     ChatMessage, ContinuityMetadata, MessageKind, PromptCacheKeyFamily, ReasoningContinuation,
     TokenUsage,
@@ -58,11 +60,14 @@ async fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<Stri
         .note_completion_guard_nudge(&plan_id, &next_action)
         .await
     {
+        if let Err(error) = plan_runtime.hand_back_stalled_plan("idle_nudges", Some(2)) {
+            warn!(%error, plan_id, "failed to hand back stalled plan");
+        }
         return None;
     }
 
     Some(format!(
-        "Plan `{plan_id}`: {} Do not summarize or hand back.",
+        "[Automated runtime message — not the user. Do not reply to it or acknowledge it.] Your previous response ended without a tool call. Push the plan with a tool call now.\nPlan `{plan_id}`: {}",
         next_action.instruction()
     ))
 }
@@ -127,6 +132,7 @@ pub(super) async fn finalize_turn_after_text_with_usage(
     continuity: Option<ContinuityMetadata>,
     usage: Option<TokenUsage>,
 ) -> Result<TurnOutcome, crate::infra::error::AppError> {
+    let has_error_code = error_code.is_some();
     if let Some(ref mut ctx_state) = agent.context_state {
         ctx_state.on_assistant_message_appended(content_buf.len());
     }
@@ -142,8 +148,17 @@ pub(super) async fn finalize_turn_after_text_with_usage(
 
     // Completion guard：计划还没收口就想用一段文字收工时，注入继续指令并把回合续上。
     // 放在 timing ⑤ 之前 —— 这个回合根本没结束，不该走收束流程。
-    if agent.completion_guard_injections < MAX_COMPLETION_GUARD_INJECTIONS {
-        if let Some(instruction) = should_apply_completion_guard(agent).await {
+    if !has_error_code {
+        if agent.completion_guard_injections >= MAX_COMPLETION_GUARD_INJECTIONS {
+            if agent.config.subagent_type.is_root() {
+                if let Some(runtime) = agent.config.plan_runtime.as_ref() {
+                    if let Err(error) = runtime.hand_back_stalled_plan("injection_cap", None) {
+                        warn!(%error, "failed to hand back plan after completion-guard cap");
+                    }
+                    return Ok(TurnOutcome::Finished);
+                }
+            }
+        } else if let Some(instruction) = should_apply_completion_guard(agent).await {
             agent.completion_guard_injections += 1;
             let mut nudge = ChatMessage::user(&instruction);
             nudge.kind = MessageKind::Nudge;

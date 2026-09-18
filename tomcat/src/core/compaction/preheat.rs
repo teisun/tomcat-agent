@@ -79,7 +79,7 @@ use crate::core::session::manager::{
 };
 use crate::core::session::preheat_cache::write_preheat_cache;
 use crate::core::session::transcript::{
-    append_entry, entry_id, read_entries_tail, BranchSummaryEntry, TranscriptEntry,
+    append_entry, entry_id, read_entries_tail, BranchSummaryEntry, CustomEntry, TranscriptEntry,
 };
 use crate::core::session::user_message_sidecar::{
     ensure_user_message_sidecar_current, recent_user_message_texts,
@@ -94,6 +94,7 @@ use super::machine_block;
 use super::truncation::floor_char_boundary;
 
 const MAX_PREHEAT_RETRIES: u32 = 3;
+const PREHEAT_TAIL_MESSAGE_SCAN: usize = 256;
 /// 生成摘要时随调用携带的可选运行时资料，避免入口继续膨胀位置参数。
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SummaryRequestOptions<'a> {
@@ -189,6 +190,7 @@ enum PreheatState {
     },
     Running {
         handle: JoinHandle<Result<CompactionResult, AppError>>,
+        transcript_path: std::path::PathBuf,
         #[allow(dead_code)]
         covered_start_id: String,
         #[allow(dead_code)]
@@ -198,6 +200,34 @@ enum PreheatState {
         started_at: Instant,
     },
     ExhaustedPending,
+}
+
+fn append_preheat_terminal_event(
+    transcript_path: &Path,
+    event: &'static str,
+    error: Option<String>,
+) {
+    if transcript_path.as_os_str().is_empty() {
+        return;
+    }
+    let mut extra = serde_json::json!({
+        "event": event,
+        "source": "preheat",
+    });
+    if let Some(error) = error {
+        extra["error"] = serde_json::Value::String(error);
+    }
+    if let Err(error) = append_entry(
+        transcript_path,
+        &TranscriptEntry::Custom(CustomEntry {
+            id: None,
+            parent_id: None,
+            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            extra,
+        }),
+    ) {
+        warn!(%error, transcript = %transcript_path.display(), "failed to persist preheat terminal diagnostic");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,25 +404,29 @@ impl Preheat {
         let covered_count = snapshot.len();
 
         // This is the only moment where appending a boundary marker also puts it exactly at the
-        // semantic cut: the snapshot's covered end is still the transcript tail. Never defer
-        // this write into the background task, where intervening tool rows would make it a costly
-        // mid-file insertion.
+        // semantic cut: the snapshot's covered end is still the latest durable message. Custom
+        // diagnostic rows may follow that message during a tool loop and do not change the
+        // conversation boundary. Never defer this write into the background task, where
+        // intervening message rows would make it a costly mid-file insertion.
         if !transcript_path.as_os_str().is_empty() {
-            let covered_end_is_tail = match read_entries_tail(transcript_path, 1) {
-                Ok(entries) => entries
-                    .last()
-                    .and_then(entry_id)
-                    .is_some_and(|id| id == covered_end_id),
-                Err(error) => {
-                    warn!(
-                        transcript = %transcript_path.display(),
-                        %error,
-                        "could not verify preheat marker placement"
-                    );
-                    false
-                }
-            };
-            if !covered_end_is_tail {
+            let covered_end_is_latest_message =
+                match read_entries_tail(transcript_path, PREHEAT_TAIL_MESSAGE_SCAN) {
+                    Ok(entries) => entries
+                        .iter()
+                        .rev()
+                        .find(|entry| matches!(entry, TranscriptEntry::Message(_)))
+                        .and_then(entry_id)
+                        .is_some_and(|id| id == covered_end_id),
+                    Err(error) => {
+                        warn!(
+                            transcript = %transcript_path.display(),
+                            %error,
+                            "could not verify preheat marker placement"
+                        );
+                        false
+                    }
+                };
+            if !covered_end_is_latest_message {
                 warn!(
                     transcript = %transcript_path.display(),
                     covered_end_id,
@@ -432,6 +466,8 @@ impl Preheat {
         let running_end_id = covered_end_id.clone();
         let ratio_before = usage_ratio;
         let cache_key = cache_key.unwrap_or_default();
+        let running_transcript_path = transcript_path.clone();
+        let terminal_transcript_path = transcript_path.clone();
 
         let existing_summary = find_last_summary(&snapshot);
 
@@ -520,6 +556,11 @@ impl Preheat {
                 source: "preheat".to_string(),
                 ratio: Some(ratio_before),
             });
+            append_preheat_terminal_event(
+                &terminal_transcript_path,
+                "compaction_failed",
+                Some(last_error.clone()),
+            );
 
             Err(AppError::Llm(format!(
                 "preheat exhausted after {} retries: {}",
@@ -529,6 +570,7 @@ impl Preheat {
 
         self.state = PreheatState::Running {
             handle,
+            transcript_path: running_transcript_path,
             covered_start_id: running_start_id,
             covered_end_id: running_end_id,
             covered_count,
@@ -593,20 +635,27 @@ impl Preheat {
 
         let old = std::mem::replace(&mut self.state, PreheatState::Idle);
         match old {
-            PreheatState::Running { handle, .. } => {
-                match futures_util::FutureExt::now_or_never(handle) {
-                    Some(Ok(Ok(result))) => PreheatOutcome::Completed(result),
-                    Some(Ok(Err(_e))) => {
-                        self.state = PreheatState::ExhaustedPending;
-                        PreheatOutcome::Exhausted
-                    }
-                    Some(Err(e)) => {
-                        warn!("preheat task panicked: {}", e);
-                        PreheatOutcome::Failed
-                    }
-                    None => PreheatOutcome::NotReady,
+            PreheatState::Running {
+                handle,
+                transcript_path,
+                ..
+            } => match futures_util::FutureExt::now_or_never(handle) {
+                Some(Ok(Ok(result))) => PreheatOutcome::Completed(result),
+                Some(Ok(Err(_e))) => {
+                    self.state = PreheatState::ExhaustedPending;
+                    PreheatOutcome::Exhausted
                 }
-            }
+                Some(Err(e)) => {
+                    warn!("preheat task panicked: {}", e);
+                    append_preheat_terminal_event(
+                        &transcript_path,
+                        "compaction_failed",
+                        Some(e.to_string()),
+                    );
+                    PreheatOutcome::Failed
+                }
+                None => PreheatOutcome::NotReady,
+            },
             _ => PreheatOutcome::NotReady,
         }
     }
@@ -628,33 +677,49 @@ impl Preheat {
 
         let old = std::mem::replace(&mut self.state, PreheatState::Idle);
         match old {
-            PreheatState::Running { handle, .. } => {
-                match tokio::time::timeout(timeout, handle).await {
-                    Ok(Ok(Ok(result))) => PreheatOutcome::Completed(result),
-                    Ok(Ok(Err(_e))) => {
-                        self.state = PreheatState::ExhaustedPending;
-                        PreheatOutcome::Exhausted
-                    }
-                    Ok(Err(e)) => {
-                        warn!("preheat task panicked during await: {}", e);
-                        PreheatOutcome::Failed
-                    }
-                    Err(_) => {
-                        warn!("preheat timed out after {:?}, clearing", timeout);
-                        PreheatOutcome::Failed
-                    }
+            PreheatState::Running {
+                handle,
+                transcript_path,
+                ..
+            } => match tokio::time::timeout(timeout, handle).await {
+                Ok(Ok(Ok(result))) => PreheatOutcome::Completed(result),
+                Ok(Ok(Err(_e))) => {
+                    self.state = PreheatState::ExhaustedPending;
+                    PreheatOutcome::Exhausted
                 }
-            }
+                Ok(Err(e)) => {
+                    warn!("preheat task panicked during await: {}", e);
+                    append_preheat_terminal_event(
+                        &transcript_path,
+                        "compaction_failed",
+                        Some(e.to_string()),
+                    );
+                    PreheatOutcome::Failed
+                }
+                Err(_) => {
+                    warn!("preheat timed out after {:?}, clearing", timeout);
+                    append_preheat_terminal_event(
+                        &transcript_path,
+                        "compaction_aborted",
+                        Some(format!("preheat timed out after {timeout:?}")),
+                    );
+                    PreheatOutcome::Failed
+                }
+            },
             _ => PreheatOutcome::NotReady,
         }
     }
 
     /// any → Idle。取消运行中任务 + 清除 pending。
     pub fn abort(&mut self) {
-        if let PreheatState::Running { handle, .. } =
-            std::mem::replace(&mut self.state, PreheatState::Idle)
+        if let PreheatState::Running {
+            handle,
+            transcript_path,
+            ..
+        } = std::mem::replace(&mut self.state, PreheatState::Idle)
         {
             handle.abort();
+            append_preheat_terminal_event(&transcript_path, "compaction_aborted", None);
         }
     }
 }

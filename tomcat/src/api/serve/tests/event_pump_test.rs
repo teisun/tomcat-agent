@@ -244,6 +244,7 @@ async fn serve_event_pump_streams_plan_transition_events() {
         wire::WIRE_PLAN_ENTER,
         wire::WIRE_PLAN_EXIT,
         wire::WIRE_PLAN_PENDING,
+        wire::WIRE_PLAN_STALLED,
         wire::WIRE_PLAN_COMPLETE,
     ] {
         slot.ctx
@@ -261,7 +262,7 @@ async fn serve_event_pump_streams_plan_transition_events() {
                         "state": match event_name {
                             wire::WIRE_PLAN_ENTER => "planning",
                             wire::WIRE_PLAN_EXIT => "chat",
-                            wire::WIRE_PLAN_PENDING => "pending",
+                            wire::WIRE_PLAN_PENDING | wire::WIRE_PLAN_STALLED => "pending",
                             _ => "completed",
                         }
                     }),
@@ -271,11 +272,11 @@ async fn serve_event_pump_streams_plan_transition_events() {
             .unwrap();
     }
 
-    let lines = wait_for_lines(&buffer, 4).await;
+    let lines = wait_for_lines(&buffer, 5).await;
     assert_eq!(
         lines.len(),
-        4,
-        "expected four routed plan events, got {lines:?}"
+        5,
+        "expected five routed plan events, got {lines:?}"
     );
     assert_eq!(
         lines
@@ -286,6 +287,7 @@ async fn serve_event_pump_streams_plan_transition_events() {
             Some(wire::WIRE_PLAN_ENTER),
             Some(wire::WIRE_PLAN_EXIT),
             Some(wire::WIRE_PLAN_PENDING),
+            Some(wire::WIRE_PLAN_STALLED),
             Some(wire::WIRE_PLAN_COMPLETE),
         ]
     );

@@ -27,7 +27,7 @@
 //!    只把计划文件推进到 completed；会话仍是 Chat
 //! 6. transcript 至少有一条 `plan.review` 自定义事件
 //! 7. 有 reviewable Git diff 时 transcript 至少有一条 `plan.code_review` 自定义事件；
-//!    否则 `code_review_pass` 必须为 true 且 `code_review_pass_at_ms` 为 None
+//!    否则 `code_review_pass` 必须为 true
 //! 8. transcript 不应再出现 `plan.verify` 自定义事件（链路已掐断）
 //!
 //! ## 软断言（不强求）
@@ -810,8 +810,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
             plan_review_idx.is_some(),
             "transcript 应含至少一条 plan.review 自定义事件，实际未发现"
         );
-        let review_auto_skipped = final_plan.frontmatter.code_review_pass
-            && final_plan.frontmatter.code_review_pass_at_ms.is_none();
+        let review_auto_skipped = final_plan.frontmatter.code_review_pass;
         assert!(
             plan_code_review_idx.is_some() || review_auto_skipped,
             "有 reviewable Git diff 时 transcript 应含 plan.code_review；无 diff 时必须由运行时自动通过 code review gate。events={plan_code_review_idx:?}, plan={:?}",

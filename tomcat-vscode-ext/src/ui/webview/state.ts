@@ -508,6 +508,21 @@ function planEventMessageId(
   return `plan-event:${eventType}:${planId ?? "none"}:${detail && detail.length > 0 ? detail : "default"}`;
 }
 
+function planStalledReasonText(reason: unknown): string {
+  switch (reason) {
+    case "idle_nudges":
+      return "连续 2 轮没有推进（计划和代码内容都没变）";
+    case "injection_cap":
+      return "一次运行里催促已达上限";
+    case "tool_round_budget":
+      return "这一轮工具调用次数用尽";
+    case "run_ended_while_executing":
+      return "运行结束时计划还没收口";
+    default:
+      return "无人值守执行没有继续推进";
+  }
+}
+
 function upsertPlanEventMessage(
   session: WebviewSessionSnapshot,
   kind: "notice" | "warn",
@@ -1606,6 +1621,31 @@ function applyHistoryPlanCustomEntry(
     case "plan.pending":
       syncHistoryPlanRef();
       return;
+    case "plan.stalled": {
+      const reason =
+        typeof entry.reason === "string" && entry.reason.length > 0
+          ? entry.reason
+          : undefined;
+      const remaining = Array.isArray(entry.remaining_work)
+        ? entry.remaining_work.filter((item): item is string => typeof item === "string")
+        : [];
+      if (session.activePlan) {
+        session.activePlan = {
+          ...session.activePlan,
+          planId: planId ?? session.activePlan.planId ?? null,
+          state: "pending",
+        };
+      }
+      upsertPlanEventMessage(
+        session,
+        "warn",
+        `计划已暂停：${planStalledReasonText(reason)}${remaining.length ? `。剩余待办：${remaining.join("；")}` : ""}`,
+        eventName,
+        planId,
+        reason,
+      );
+      return;
+    }
     case "plan.todos": {
       const todos = parseTodos(entry.todos);
       if (todos.length > 0 || Array.isArray(entry.todos)) {
@@ -3697,6 +3737,19 @@ export class WebviewStateStore {
     }
 
     switch (event.type) {
+      case "plan.stalled": {
+        const reason = event.reason;
+        const remaining = event.remainingWork ?? [];
+        upsertPlanEventMessage(
+          session,
+          "warn",
+          `计划已暂停：${planStalledReasonText(reason)}${remaining.length ? `。剩余待办：${remaining.join("；")}` : ""}`,
+          event.type,
+          event.planId,
+          reason,
+        );
+        return;
+      }
       case "plan.review":
         if (event.summary) {
           upsertPlanEventMessage(

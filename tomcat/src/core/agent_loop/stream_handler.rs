@@ -450,56 +450,69 @@ pub(super) async fn run_chat_stream(
         }
     }
 
-    let has_usable_output = !content_buf.is_empty() || !tool_calls_buf.is_empty();
     if let Some(message) = error_message.clone() {
         let reason = error_reason
             .clone()
             .or_else(|| finish_reason.clone())
             .unwrap_or_else(|| "error".to_string());
-        if has_usable_output {
-            warn!(
-                target: "tomcat_chat_diag",
-                phase = "stream_terminal_error",
-                model = %request_model,
-                provider = agent.llm.provider_name(),
-                code = ?error_code,
-                message = %message,
-                input_items = request_input_items,
-                shape = %request_shape,
-                will_retry = false,
-                attempt
-            );
-            agent.emit_event(AgentEvent::LlmError {
-                reason,
-                error_code: error_code.clone(),
-                error_message: message,
-            });
+        let loop_err = classify_error(llm_stream_terminal_error(
+            agent.llm.provider_name().to_string(),
+            message.clone(),
+            error_code.clone(),
+        ));
+        let will_retry = matches!(&loop_err, LoopError::Retryable(_)) && attempt < max_attempts;
+        let discarded_text_chars = content_buf.chars().count();
+        let discarded_tool_calls = tool_calls_buf
+            .iter()
+            .map(|tool_call| {
+                serde_json::json!({
+                    "id": tool_call.id,
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                })
+            })
+            .collect::<Vec<_>>();
+        let displayed_message = if content_buf.trim().is_empty() {
+            message.clone()
         } else {
-            let loop_err = classify_error(llm_stream_terminal_error(
-                agent.llm.provider_name().to_string(),
-                message.clone(),
-                error_code.clone(),
-            ));
-            let will_retry = matches!(&loop_err, LoopError::Retryable(_)) && attempt < max_attempts;
-            warn!(
-                target: "tomcat_chat_diag",
-                phase = "stream_terminal_error",
-                model = %request_model,
-                provider = agent.llm.provider_name(),
-                code = ?error_code,
-                message = %message,
-                input_items = request_input_items,
-                shape = %request_shape,
-                will_retry,
-                attempt
-            );
-            agent.emit_event(AgentEvent::MessageEnd {
-                message: Message(serde_json::json!({})),
-                assistant_message_id: assistant_message_id.clone(),
-            });
-            agent.clear_pending_assistant_entry_id();
-            return Err(loop_err);
+            format!("{message}（已丢弃 {discarded_text_chars} 字未完成输出）")
+        };
+        warn!(
+            target: "tomcat_chat_diag",
+            phase = "stream_terminal_error",
+            model = %request_model,
+            provider = agent.llm.provider_name(),
+            code = ?error_code,
+            message = %message,
+            input_items = request_input_items,
+            shape = %request_shape,
+            discarded_text_chars,
+            discarded_tool_calls = discarded_tool_calls.len(),
+            will_retry,
+            attempt
+        );
+        if let Err(error) = agent.persist_custom_entry_if_needed(serde_json::json!({
+            "event": "stream_terminal_error",
+            "reason": reason,
+            "code": error_code,
+            "message": message,
+            "discarded_text": content_buf,
+            "discarded_tool_calls": discarded_tool_calls,
+            "attempt": attempt,
+        })) {
+            warn!(%error, "failed to persist terminal-stream diagnostic");
         }
+        agent.emit_event(AgentEvent::LlmError {
+            reason,
+            error_code,
+            error_message: displayed_message,
+        });
+        agent.emit_event(AgentEvent::MessageEnd {
+            message: Message(serde_json::json!({})),
+            assistant_message_id: assistant_message_id.clone(),
+        });
+        agent.clear_pending_assistant_entry_id();
+        return Err(loop_err);
     }
 
     if finish_reason.is_some() && usage.is_none() {

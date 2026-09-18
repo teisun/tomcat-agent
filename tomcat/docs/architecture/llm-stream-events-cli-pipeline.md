@@ -523,7 +523,7 @@ P1 StreamEvent::Thinking
 
 > 关联：空响应整改阶段一（[`read.md`](tools/read.md) §7.4 整轮交互图）；实现：`agent_loop/stream_handler.rs`、`agent_loop/types.rs`。
 
-Responses 官方协议没有 Chat Completions 的 `finish_reason` 字段；Tomcat 的内部终局语义由 `response.status`、`response.incomplete_details.reason`、`response.error` / 顶层 `error`、以及 `output[]` 中是否已收敛 `function_call` 共同推导。实现上仍保留内部四类字符串：`stop`、`tool_calls`、`max_output_tokens`、`error:...`。
+Responses 官方协议没有 Chat Completions 的 `finish_reason` 字段；Tomcat 的内部终局语义由 `response.status`、`response.incomplete_details.reason`、`response.error` / 顶层 `error`、以及 `output[]` 中是否已收敛 `function_call` 共同推导。实现上仍保留内部四类字符串：`stop`、`tool_calls`、`max_output_tokens`、`error:...`。适配层只翻译上游明确报告的状态：`completed` / `done` 恒映射为 `stop`；只有明确的 `incomplete_details.reason=max_output_tokens` 才映射为 `max_output_tokens`。`usage` 描述消耗，绝不反向猜测或改写结束原因；空回合是否需要重试由 agent loop 根据事实信号裁定。
 
 与此同时，Responses 流里 **`FinishReason` 可能早于 trailing `Usage` 到达**。当前实现收到 `FinishReason` 只记录终局语义，不提前 `break`，继续消费流尾直到自然结束，保证 `finish_reason`、结构化错误元数据与 `last_api_usage` 同时保住。
 
@@ -549,12 +549,12 @@ LLM stream 事件顺序（Responses API 常见）:
 │  ContentDelta    → 累积 + MessageUpdate                               │
 │  ToolCallDelta   → 累积                                               │
 │  FinishReason    → finish_reason = Some(reason)  // 只记，不 break    │
-│  LlmError        → 发 `AgentEvent::LlmError`，保存 error_message/code │
+│  LlmError        → 记录诊断、丢弃不完整输出/工具调用、发错误事件并返回失败 │
 │  LlmNotice       → 回合结束后发 `AgentEvent::LlmNotice`（轻提示）      │
 │  Usage           → ctx_state.update_api_usage(...)  // 尾巴仍更新     │
 │  stream None     → break                                              │
 │  MessageEnd      → 配对 UI                                            │
-│  return StreamOutcome {                                               │
+│  正常流才 return StreamOutcome {                                      │
 │      content_buf, tool_calls_buf,                                     │
 │      finish_reason: Some("stop"|"tool_calls"|...),                    │
 │      error_message/error_code,                                        │

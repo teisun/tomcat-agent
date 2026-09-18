@@ -1,7 +1,7 @@
 use super::super::manager::{AgentMode, PlanEventKind, SessionManager};
 use super::super::resume_index::{
     load_or_rebuild_resume_index, rebuild_resume_index, resume_index_path,
-    take_last_inline_rebuild_stats_for_tests, ResumeIndexSource,
+    take_last_inline_rebuild_stats_for_tests, ResumeIndexSource, RESUME_INDEX_SCHEMA_VERSION,
 };
 use super::super::transcript::{
     append_line, insert_entry_after_message_id, mark_message_entries_after_anchor_superseded,
@@ -193,7 +193,7 @@ fn sidecar_schema_version_mismatch_falls_back_and_rebuilds() {
 
     let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
     assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
-    assert_eq!(rebuilt.index.schema_version, 4);
+    assert_eq!(rebuilt.index.schema_version, RESUME_INDEX_SCHEMA_VERSION);
 }
 
 #[test]
@@ -222,7 +222,7 @@ fn legacy_exec_sidecar_heals_to_chat_on_first_hydrate() {
 
     let rebuilt = load_or_rebuild_resume_index(&transcript_path).unwrap();
     assert_eq!(rebuilt.source, ResumeIndexSource::Rebuilt);
-    assert_eq!(rebuilt.index.schema_version, 4);
+    assert_eq!(rebuilt.index.schema_version, RESUME_INDEX_SCHEMA_VERSION);
     assert_eq!(
         rebuilt.index.resume_control_state().mode,
         Some(AgentMode::Chat),

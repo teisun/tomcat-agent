@@ -75,6 +75,12 @@ fn normalize_plan_transcript_event_for_live_delivery(
     if let Some(skip_reason) = obj.remove("skip_reason") {
         obj.insert("skipReason".to_string(), skip_reason);
     }
+    if let Some(idle_nudges) = obj.remove("idle_nudges") {
+        obj.insert("idleNudges".to_string(), idle_nudges);
+    }
+    if let Some(remaining_work) = obj.remove("remaining_work") {
+        obj.insert("remainingWork".to_string(), remaining_work);
+    }
     obj.insert(
         "type".to_string(),
         serde_json::Value::String(event_name.clone()),
@@ -644,7 +650,6 @@ impl ChatContext {
         plan_runtime.set_auto_checkpoint_on_build(config.plan.auto_checkpoint_on_build);
         plan_runtime.set_verify_gate_mode(config.plan.verify_gate.clone());
         plan_runtime.set_max_code_review_rounds(config.plan.max_code_review_rounds);
-        plan_runtime.set_max_completion_gate_cycles(config.plan.max_completion_gate_cycles);
         plan_runtime.attach_workspace_root(agent_workspace_dir.clone());
         plan_runtime.attach_bash_task_registry(bash_task_registry.clone());
         plan_runtime.set_expose_skills_to_reviewer(config.skills.expose_to_reviewer);

@@ -320,6 +320,22 @@ describe("TranscriptView", () => {
     expect(screen.getByTestId("file-chip").textContent).toContain("demo.ts");
   });
 
+  it("shows progress whenever busy even without a user message in the loaded window", () => {
+    render(
+      <TranscriptView
+        busy
+        canBuildPlan={false}
+        onAnswer={vi.fn()}
+        onBuildPlan={vi.fn()}
+        onOpenFile={vi.fn()}
+        onOpenPlanFile={vi.fn()}
+        timeline={[{ id: "plan-build", title: "开始执行计划", type: "boundary" }]}
+      />,
+    );
+
+    expect(screen.getByTestId("progress-row")).toBeTruthy();
+  });
+
   it("folds a lone task-family tool into a thinking group instead of flattening it", () => {
     const timeline: WebviewTimelineItem[] = [
       {

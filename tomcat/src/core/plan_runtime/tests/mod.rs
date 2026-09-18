@@ -1,4 +1,5 @@
 mod catalog_test;
+mod close_out_transition_test;
 mod completion_flow_test;
 mod dispatch_test;
 mod file_store_frontmatter_test;
@@ -42,15 +43,12 @@ pub(super) fn sample_frontmatter() -> super::file_store::PlanFileFrontmatter {
         green_build_pass: false,
         green_build_evidence: Vec::new(),
         code_review_pass: false,
-        code_review_pass_at_ms: None,
         code_review_rounds: 0,
-        code_review_baseline_ms: None,
         code_review_open_findings: Vec::new(),
         code_review_disputed_findings: Vec::new(),
         code_review_handoff: false,
         code_review_handoff_acknowledged: false,
         code_review_residual_findings: Vec::new(),
-        completion_gate_cycles: 0,
         acceptance_commands: Vec::new(),
         unknown: serde_yaml::Mapping::new(),
     }

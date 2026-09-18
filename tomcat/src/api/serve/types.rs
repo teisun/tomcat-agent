@@ -1039,25 +1039,6 @@ pub enum ServePlanEvent {
         #[serde(rename = "codeReviewPass", skip_serializing_if = "Option::is_none")]
         code_review_pass: Option<bool>,
     },
-    /// 预算耗尽后的代码改动没有再次派发 reviewer；仅作为审计事件保留。
-    #[serde(rename = "plan.code_review.unreviewed_edit")]
-    PlanCodeReviewUnreviewedEdit {
-        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
-        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
-        plan_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        rounds: Option<u32>,
-        #[serde(
-            rename = "maxCodeReviewRounds",
-            skip_serializing_if = "Option::is_none"
-        )]
-        max_code_review_rounds: Option<u32>,
-        #[serde(rename = "changedCodeFiles", skip_serializing_if = "Option::is_none")]
-        changed_code_files: Option<Vec<String>>,
-        #[serde(rename = "newestEditMtimeMs", skip_serializing_if = "Option::is_none")]
-        newest_edit_mtime_ms: Option<u128>,
-    },
     #[serde(rename = "plan.complete")]
     PlanComplete {
         #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
@@ -1081,6 +1062,19 @@ pub enum ServePlanEvent {
         path: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         state: Option<String>,
+    },
+    #[serde(rename = "plan.stalled")]
+    PlanStalled {
+        #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+        plan_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(rename = "idleNudges", skip_serializing_if = "Option::is_none")]
+        idle_nudges: Option<u32>,
+        #[serde(rename = "remainingWork", skip_serializing_if = "Option::is_none")]
+        remaining_work: Option<Vec<String>>,
     },
     #[serde(rename = "plan.todos")]
     PlanTodos {

@@ -2,21 +2,18 @@
 
 ## 2026-09 预算耗尽后的 acceptance 交接
 
-Code review 轮次仍是有限预算。预算尚有余额时，代码编辑会使 review 与 acceptance 都失效；
-预算已耗尽后，Acceptance 中的编辑不再伪造一次“新 review”：
+Code review 轮次仍是有限预算。Acceptance 期间若编辑代码，不自动伪造一次“新 review”或
+失效已有门禁；`verify` skill 明确要求模型按实际 diff 自审、补测试并重跑受影响检查：
 
 ```text
-edit after exhausted review
-  ├─ no accepted green build → keep review pass + residual findings
-  │                            emit plan.code_review.unreviewed_edit
-  │                            require fresh Acceptance evidence
-  └─ accepted green build    → invalidate Acceptance only
+edit during Acceptance
+  └─ review the new diff → add or extend regression coverage
+                         → rerun affected checks → submit green task evidence
 ```
 
-`unreviewed_edit` 明确记录这是一段未获得额外 review 的变更，供 transcript 和后续验收判断；
-residual findings 继续可见。若 review 预算与 completion-cycle 预算都允许，常规 stale 分支照旧
-派发下一轮 review。该策略的推翻条件是数据表明预算耗尽分支的严重缺陷率不可接受，届时调整预算
-或恢复 review，而不是悄悄把 review 状态改成已覆盖。
+运行时只核验本会话后台任务、命令匹配和零退出码；是否因代码改动重跑由模型按内容判断。
+残余 finding 继续可见。若数据表明验收期间的修改常引入本可由 review 发现的严重缺陷，
+应调整 review 预算或收紧 verify skill，而不是恢复时间戳检查。
 
 ## 2026-09-13 两个 reviewer 对验收清单的分工
 
@@ -73,7 +70,8 @@ update_plan(all todos completed)
 
 ```text
 plan.update + plan.todos
-  -> plan.code_review.started (parent, running; process-local lease only)
+  -> PlanFile gate-review=in_progress (durable cross-call reservation)
+  -> plan.code_review.started (parent, running)
   -> sub_agent_start/end (child audit only)
   -> plan.code_review (parent, pass/fail/partial/aborted; every attempt has a terminal event)
   -> tool_execution_end(update_plan)
@@ -87,14 +85,13 @@ reviewer 对话不是持久化对象；能跨进程恢复的是 PlanFile 的事�
 第 N 轮完成
   └─ PlanFileFrontmatter {
        code_review_rounds,
-       code_review_baseline_ms,
        code_review_open_findings,
        code_review_disputed_findings
      }
                │
                ▼
 进程重启后的第 N+1 轮
-  └─ 同一快照决定 round、是否 incremental、要核销的 finding 和 DELTA 基准
+  └─ 同一快照决定 round、要核销的 finding；后续轮复审当前完整 diff
 ```
 
 因此派发器接收调用方持有的 frontmatter 快照，不会为读取 open/disputed findings 再解析一次
@@ -117,7 +114,7 @@ reviewer B read(a.rs) ─► B 的空表 ─► 必须返回完整内容，不�
 Acceptance 不采用“固定重试三次”：大型测试集中的每轮真实修复不能被次数上限误杀。若真实
 transcript 显示同一声明命令连续至少五次失败仍未交还，才评估启用非进展预算：连续三次之间无
 代码写入，或有写入但 `exit code + stderr 尾部哈希` 不变时，写 `plan.acceptance.stuck` 并交还用户。
-实现不增加 PlanFile 字段，依赖任务账本、代码 mtime 和进程内观察表。
+实现不增加 PlanFile 字段，依赖任务账本、代码内容指纹和进程内观察表。
 
 ### 1. 第一性原理设计
 
@@ -143,7 +140,7 @@ transcript 显示同一声明命令连续至少五次失败仍未交还，才评
 
 ### 3. EXEC 收口现在怎么走
 
-- 默认最多跑 **4 轮** code review（可由用户配置提高）：首轮审完整变更文件集；后续轮只对自上轮派发后修改的 DELTA 找新问题，同时逐条核销上一轮 open findings。`code_review_rounds`、基准时间、open findings 和已裁决 finding 都写在 PlanFile，后端重启不丢这份交接账本；不续跑旧 reviewer 对话。
+- 默认最多跑 **4 轮** code review（可由用户配置提高）：首轮和后续轮都审当前完整变更文件集；后续轮先逐条核销上一轮 open findings。`code_review_rounds`、open findings 和已裁决 finding 都写在 PlanFile，后端重启不丢这份交接账本；不续跑旧 reviewer 对话。
 - `verdict = pass`：先记录 review 已通过；仍必须提供当前代码 diff 的 green-build 证据，才会
   completed 并切回 CHAT。
 - `verdict = fail | partial`：plan 保持 `executing`，runtime 不自动造 todo，而是明确要求主 Agent：

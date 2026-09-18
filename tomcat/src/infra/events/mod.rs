@@ -154,6 +154,8 @@ pub mod wire {
     pub const WIRE_PLAN_UPDATE: &str = "plan.update";
     /// 已完成 / 中断后的 plan 被 reopen 到 `pending`。
     pub const WIRE_PLAN_PENDING: &str = "plan.pending";
+    /// Unattended execution ended before plan completion and control was returned to the user.
+    pub const WIRE_PLAN_STALLED: &str = "plan.stalled";
     /// plan reviewer 子 Agent 派发成功，父侧记住 child 指针。
     pub const WIRE_PLAN_REVIEW_STARTED: &str = "plan.review.started";
     /// reviewer 子 Agent 返回（含 `aborted: true` 分支）。
@@ -183,8 +185,6 @@ pub mod wire {
     pub const WIRE_PLAN_RESTORE: &str = "plan.restore";
     /// code review 轮次预算用尽但仍有未清 finding，交还用户。
     pub const WIRE_PLAN_CODE_REVIEW_EXHAUSTED: &str = "plan.code_review.exhausted";
-    /// code review 已按预算放行后又检测到代码改动；不重开 gate，但必须留下未复审改动的审计痕迹。
-    pub const WIRE_PLAN_CODE_REVIEW_UNREVIEWED_EDIT: &str = "plan.code_review.unreviewed_edit";
     /// session 标题异步 LLM 覆盖后推送。
     pub const WIRE_SESSION_TITLE_UPDATED: &str = "session.title_updated";
     /// `todos` 工具写入 session scratchpad 后推送。

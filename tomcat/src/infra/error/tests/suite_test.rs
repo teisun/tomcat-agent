@@ -228,6 +228,15 @@ fn llm_failure_classification_obeys_billing_before_status() {
             FailureDomain::Account,
         ),
         (
+            llm_http_status_error(
+                "fcodex",
+                403,
+                r#"{"error":{"type":"content_policy_violation","message":"content policy blocked this request"}}"#,
+            ),
+            LlmFailureKind::ContentFiltered,
+            FailureDomain::Content,
+        ),
+        (
             llm_http_status_error("deepseek", 429, "SPEND_LIMIT reached"),
             LlmFailureKind::Billing,
             FailureDomain::Account,

@@ -519,6 +519,24 @@ pub fn classify_llm_failure(err: &AppError) -> LlmFailure {
         return LlmFailure::new(LlmFailureKind::ContextOverflow, FailureDomain::Context);
     }
 
+    if matches_any(
+        code.as_deref(),
+        &[
+            "content_policy_violation",
+            "content_filter",
+            "content_filtered",
+        ],
+    ) || matches_any(
+        error_type.as_deref(),
+        &[
+            "content_policy_violation",
+            "content_filter",
+            "content_filtered",
+        ],
+    ) {
+        return LlmFailure::new(LlmFailureKind::ContentFiltered, FailureDomain::Content);
+    }
+
     if is_billing_signal(code.as_deref())
         || is_billing_signal(error_type.as_deref())
         || is_billing_text(&summary)

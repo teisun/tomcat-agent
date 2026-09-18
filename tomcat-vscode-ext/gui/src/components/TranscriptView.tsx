@@ -422,7 +422,7 @@ export function TranscriptView({
         <div className="tc-live-cluster" data-testid="live-cluster">
           {renderCluster(liveClusterTimeline, busy)}
         </div>
-      ) : null}
+      ) : busy ? <ProgressRow busy /> : null}
       <div
         aria-hidden="true"
         className="tc-transcript__spacer"

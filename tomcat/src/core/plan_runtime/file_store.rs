@@ -78,10 +78,6 @@ pub enum PlanError {
     #[error("plan 文件 todo id 重复: {id}")]
     DuplicateTodoId { id: String },
 
-    /// Runtime-managed gates never persist a half-open lifecycle state.
-    #[error("runtime-managed gate `{id}` may not be persisted as in_progress")]
-    RuntimeGateInProgress { id: String },
-
     /// 写盘 IO 错误（rename / open / write 等）。
     #[error("plan 文件 IO 错误: {0}")]
     Io(#[from] std::io::Error),
@@ -232,24 +228,17 @@ pub struct PlanFileFrontmatter {
     pub created_at: String,
     pub schema_version: i32,
     pub todos: Vec<TodoItem>,
-    /// 最近一次针对当前代码 diff 的绿构建验收是否已经通过。
+    /// 最近一次绿构建验收是否已经通过。
     #[serde(default)]
     pub green_build_pass: bool,
     #[serde(default)]
     pub green_build_evidence: Vec<GreenBuildEvidence>,
-    /// 最近一次针对当前代码 diff 的 review gate 是否已放行（可能是预算耗尽后的放行）。
+    /// 最近一次 review gate 是否已放行（可能是预算耗尽后的放行）。
     #[serde(default)]
     pub code_review_pass: bool,
-    #[serde(default)]
-    pub code_review_pass_at_ms: Option<u128>,
-    /// Completed code-review rounds for this plan. In-flight work is memory-only
-    /// and is intentionally never persisted.
+    /// Completed code-review rounds for this plan.
     #[serde(default)]
     pub code_review_rounds: u32,
-    /// Dispatch timestamp of the latest completed review, used to select the
-    /// next incremental review's code delta.
-    #[serde(default)]
-    pub code_review_baseline_ms: Option<u128>,
     /// Blocking findings carried to the next review or returned to the executor
     /// when no code changed after the review.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -269,9 +258,6 @@ pub struct PlanFileFrontmatter {
     /// 评审预算耗尽时带入 acceptance 的剩余 P0/P1 finding 摘要。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub code_review_residual_findings: Vec<String>,
-    /// 已实际运行的「review → green build」门禁周期数。
-    #[serde(default)]
-    pub completion_gate_cycles: u32,
     /// Acceptance commands declared while planning. Each entry is one runnable
     /// command, kept verbatim; `[gate] Acceptance` must present a finished,
     /// fresh, exit-0 task for every entry. The list is the mandatory floor of the
@@ -289,6 +275,186 @@ impl PlanFileFrontmatter {
         max_code_review_rounds > 0
             && self.code_review_rounds > 0
             && self.code_review_rounds >= max_code_review_rounds
+    }
+}
+
+/// The complete set of domain transitions allowed to mutate close-out facts.
+///
+/// Keeping the flag and its visible gate in the same transition prevents a
+/// resumed plan from observing contradictory durable state.
+#[derive(Debug, Clone)]
+pub enum CloseOutTransition {
+    ReviewRestarted,
+    ReviewAborted,
+    ReviewFailed {
+        findings: Vec<crate::core::plan_runtime::review::Finding>,
+    },
+    ReviewPassed,
+    ReviewExhaustedFailOpen {
+        residual_findings: Vec<String>,
+    },
+    ReviewHandedOff {
+        residual_findings: Vec<String>,
+    },
+    AllGatesSkipped,
+    AcceptanceStarted,
+    AcceptanceFailed,
+    AcceptancePassed {
+        evidence: Vec<GreenBuildEvidence>,
+    },
+}
+
+fn set_gate_status(todos: &mut [TodoItem], kind: TodoKind, status: TodoStatus) {
+    if let Some(gate) = todos.iter_mut().find(|todo| todo.kind == kind) {
+        gate.status = status;
+    }
+}
+
+/// Returns whether durable close-out flags agree with their visible gates.
+pub fn close_out_is_consistent(frontmatter: &PlanFileFrontmatter) -> bool {
+    let gate_status = |kind| {
+        frontmatter
+            .todos
+            .iter()
+            .find(|todo| todo.kind == kind)
+            .map(|todo| todo.status)
+    };
+    let review_consistent = gate_status(TodoKind::GateCodeReview) == Some(TodoStatus::Completed)
+        && frontmatter.code_review_pass
+        || gate_status(TodoKind::GateCodeReview) != Some(TodoStatus::Completed)
+            && !frontmatter.code_review_pass;
+    let acceptance_consistent = gate_status(TodoKind::GateAcceptance)
+        == Some(TodoStatus::Completed)
+        && frontmatter.green_build_pass
+        || gate_status(TodoKind::GateAcceptance) != Some(TodoStatus::Completed)
+            && !frontmatter.green_build_pass;
+    review_consistent && acceptance_consistent
+}
+
+/// Applies one atomic close-out transition and records a release-build warning
+/// if an invariant ever drifts. Callers must not mutate a close-out flag or
+/// runtime gate directly.
+pub fn apply_close_out_transition(
+    frontmatter: &mut PlanFileFrontmatter,
+    transition: CloseOutTransition,
+) {
+    match transition {
+        CloseOutTransition::ReviewRestarted => {
+            frontmatter.code_review_pass = false;
+            frontmatter.code_review_residual_findings.clear();
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateCodeReview,
+                TodoStatus::InProgress,
+            );
+        }
+        CloseOutTransition::ReviewAborted => {
+            frontmatter.code_review_pass = false;
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateCodeReview,
+                TodoStatus::Pending,
+            );
+        }
+        CloseOutTransition::ReviewFailed { findings } => {
+            frontmatter.code_review_pass = false;
+            frontmatter.code_review_open_findings = findings;
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateCodeReview,
+                TodoStatus::Pending,
+            );
+        }
+        CloseOutTransition::ReviewPassed => {
+            frontmatter.code_review_pass = true;
+            frontmatter.code_review_open_findings.clear();
+            frontmatter.code_review_residual_findings.clear();
+            frontmatter.code_review_handoff = false;
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateCodeReview,
+                TodoStatus::Completed,
+            );
+        }
+        CloseOutTransition::ReviewExhaustedFailOpen { residual_findings } => {
+            frontmatter.code_review_pass = true;
+            frontmatter.code_review_handoff = false;
+            frontmatter.code_review_residual_findings = residual_findings;
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateCodeReview,
+                TodoStatus::Completed,
+            );
+        }
+        CloseOutTransition::ReviewHandedOff { residual_findings } => {
+            frontmatter.code_review_pass = false;
+            frontmatter.code_review_handoff = true;
+            frontmatter.code_review_residual_findings = residual_findings;
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateCodeReview,
+                TodoStatus::Pending,
+            );
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateAcceptance,
+                TodoStatus::Pending,
+            );
+        }
+        CloseOutTransition::AllGatesSkipped => {
+            frontmatter.code_review_pass = true;
+            frontmatter.green_build_pass = true;
+            frontmatter.code_review_open_findings.clear();
+            frontmatter.code_review_residual_findings.clear();
+            frontmatter.code_review_handoff = false;
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateCodeReview,
+                TodoStatus::Completed,
+            );
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateAcceptance,
+                TodoStatus::Completed,
+            );
+        }
+        CloseOutTransition::AcceptanceStarted => {
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateAcceptance,
+                TodoStatus::InProgress,
+            );
+        }
+        CloseOutTransition::AcceptanceFailed => {
+            frontmatter.green_build_pass = false;
+            frontmatter.green_build_evidence.clear();
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateAcceptance,
+                TodoStatus::InProgress,
+            );
+        }
+        CloseOutTransition::AcceptancePassed { evidence } => {
+            frontmatter.green_build_pass = true;
+            frontmatter.green_build_evidence = evidence;
+            set_gate_status(
+                &mut frontmatter.todos,
+                TodoKind::GateAcceptance,
+                TodoStatus::Completed,
+            );
+        }
+    }
+
+    if !close_out_is_consistent(frontmatter) {
+        tracing::warn!(
+            plan_id = %frontmatter.plan_id,
+            frontmatter = ?frontmatter,
+            "close-out transition produced inconsistent gate state"
+        );
+        debug_assert!(
+            false,
+            "close-out transition produced inconsistent gate state: {frontmatter:?}"
+        );
     }
 }
 
@@ -352,18 +518,6 @@ pub fn serialize_plan_file(plan: &PlanFile) -> Result<String, PlanError> {
 
 /// 从磁盘文本反序列化 PlanFile（分离 frontmatter / body）。
 pub fn parse_plan_file(text: &str) -> Result<PlanFile, PlanError> {
-    parse_plan_file_with_gate_recovery(text, true)
-}
-
-/// Parse a plan with an explicit policy for legacy runtime-managed gate states.
-///
-/// Ordinary reads expose stranded legacy gates as retryable pending work. The
-/// restore path first parses without this recovery so it can atomically persist
-/// the reset and append one terminal aborted review event.
-fn parse_plan_file_with_gate_recovery(
-    text: &str,
-    normalize_runtime_gate_states: bool,
-) -> Result<PlanFile, PlanError> {
     let stripped = text
         .strip_prefix("---\n")
         .ok_or(PlanError::FrontmatterDelimMissing)?;
@@ -380,22 +534,8 @@ fn parse_plan_file_with_gate_recovery(
         }
     }
     let body = stripped.get(body_start..).unwrap_or("").to_string();
-    let mut frontmatter: PlanFileFrontmatter =
+    let frontmatter: PlanFileFrontmatter =
         serde_yaml::from_str(yaml).map_err(|e| PlanError::YamlParse(e.to_string()))?;
-    if normalize_runtime_gate_states {
-        // Files written before the no-half-open-state invariant may contain a
-        // stranded gate after an interrupted review. Read them as retryable,
-        // durable pending state; all newly written files are validated below.
-        for todo in &mut frontmatter.todos {
-            if matches!(
-                todo.kind,
-                TodoKind::GateCodeReview | TodoKind::GateAcceptance
-            ) && todo.status == TodoStatus::InProgress
-            {
-                todo.status = TodoStatus::Pending;
-            }
-        }
-    }
     enforce_required_fields(&frontmatter)?;
     if frontmatter.schema_version != PLAN_FILE_SCHEMA_VERSION {
         return Err(PlanError::SchemaVersion {
@@ -441,11 +581,6 @@ pub fn validate_frontmatter_invariants(fm: &PlanFileFrontmatter) -> Result<(), P
     }
     let mut seen = std::collections::HashSet::with_capacity(fm.todos.len());
     for t in &fm.todos {
-        if matches!(t.kind, TodoKind::GateCodeReview | TodoKind::GateAcceptance)
-            && t.status == TodoStatus::InProgress
-        {
-            return Err(PlanError::RuntimeGateInProgress { id: t.id.clone() });
-        }
         if !seen.insert(&t.id) {
             return Err(PlanError::DuplicateTodoId { id: t.id.clone() });
         }
@@ -507,17 +642,17 @@ pub fn read_plan(path: &Path) -> Result<PlanFile, PlanError> {
     read_plan_from_disk(path)
 }
 
-/// Result of atomically restoring a plan that predates the no-half-open-gate
-/// invariant. `recovered_code_review` tells the caller whether it must emit the
-/// corresponding terminal `plan.code_review` aborted event.
+/// Result of atomically restoring half-open gates. `recovered_code_review`
+/// tells the caller whether it must emit the corresponding terminal
+/// `plan.code_review` aborted event.
 pub struct RuntimeGateRecovery {
     pub plan: PlanFile,
     pub recovered_code_review: bool,
 }
 
-/// Atomically recover legacy runtime-managed gates while loading a resumable
-/// plan. This is deliberately separate from [`read_plan`]: a plain read must
-/// stay side-effect free, whereas restore must make the retryable state durable
+/// Atomically recover half-open runtime gates while loading a resumable plan.
+/// This is deliberately separate from [`read_plan`]: a plain read must stay
+/// side-effect free, whereas restore must make the retryable state durable
 /// before its caller resumes work.
 pub fn recover_runtime_gates_on_load(
     path: &Path,
@@ -526,7 +661,7 @@ pub fn recover_runtime_gates_on_load(
     let lock_path = lock_path_for(path);
     with_advisory_lock(&lock_path, lock_timeout_ms, || {
         let raw = read_plan_text(path)?;
-        let mut plan = parse_plan_file_with_gate_recovery(&raw, false)?;
+        let mut plan = parse_plan_file(&raw)?;
         let recovered_code_review = plan.frontmatter.todos.iter().any(|todo| {
             todo.kind == TodoKind::GateCodeReview && todo.status == TodoStatus::InProgress
         });

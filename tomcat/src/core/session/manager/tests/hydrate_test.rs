@@ -658,7 +658,7 @@ fn compute_k_from_anchor_ordinal_and_total() {
 }
 
 #[test]
-fn slice_lower_bound_is_min_of_boundary_today_and_nth_turn() {
+fn slice_start_snaps_boundary_and_today_anchors_to_preceding_replay_turn() {
     let today = chrono::NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
     let mut index = base_resume_index(100);
     index.latest_boundary = Some(make_anchor("boundary", 40));
@@ -672,12 +672,39 @@ fn slice_lower_bound_is_min_of_boundary_today_and_nth_turn() {
     });
 
     let slice_start = compute_slice_start_anchor(&index, today).expect("slice start");
-    assert_eq!(slice_start.entry_id.as_deref(), Some("boundary"));
+    assert_eq!(
+        slice_start.entry_id.as_deref(),
+        Some("turn_earlier"),
+        "a boundary is not a protocol-safe start; use the preceding replay turn"
+    );
 
     index.latest_boundary = None;
     let slice_start =
         compute_slice_start_anchor(&index, today).expect("slice start without boundary");
     assert_eq!(slice_start.entry_id.as_deref(), Some("turn_earlier"));
+}
+
+#[test]
+fn today_anchor_never_starts_on_a_tool_result() {
+    let today = chrono::NaiveDate::from_ymd_opt(2025, 1, 2).unwrap();
+    let mut index = base_resume_index(20);
+    index.recent_turn_starts = vec![make_anchor("user_before_midnight_tool", 8)];
+    index.latest_day_first_entry = Some(ResumeDayAnchor {
+        date: today.to_string(),
+        first_entry: ResumeAnchor {
+            entry_id: Some("tool_result_after_midnight".to_string()),
+            ordinal: 10,
+            timestamp: "2025-01-02T00:00:01.000Z".to_string(),
+            entry_kind: ResumeEntryKind::Message,
+        },
+    });
+
+    let slice_start = compute_slice_start_anchor(&index, today).expect("safe slice start");
+    assert_eq!(
+        slice_start.entry_id.as_deref(),
+        Some("user_before_midnight_tool"),
+        "the tool result's function declaration must remain in the recovered window"
+    );
 }
 
 #[test]

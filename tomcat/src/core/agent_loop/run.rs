@@ -243,22 +243,30 @@ impl AgentLoop {
                         final_text: final_text.clone(),
                         new_messages,
                     };
+
+                    if self.reasoning_turn_budget_exhausted {
+                        self.hand_back_unfinished_plan("tool_round_budget").await;
+                        self.emit_event(AgentEvent::AgentEnd {
+                            messages: vec![],
+                            error: None,
+                        });
+                        return AgentRunOutcome::Completed(result);
+                    }
+
+                    if self.follow_up_queue.lock().is_empty() {
+                        self.hand_back_unfinished_plan("run_ended_while_executing")
+                            .await;
+                        self.emit_event(AgentEvent::AgentEnd {
+                            messages: vec![],
+                            error: None,
+                        });
+                        return AgentRunOutcome::Completed(result);
+                    }
+                    let drained: Vec<_> = self.follow_up_queue.lock().drain(..).collect();
                     self.emit_event(AgentEvent::AgentEnd {
                         messages: vec![],
                         error: None,
                     });
-
-                    if self.reasoning_turn_budget_exhausted {
-                        return AgentRunOutcome::Completed(result);
-                    }
-
-                    let mut q = self.follow_up_queue.lock();
-                    if q.is_empty() {
-                        drop(q);
-                        return AgentRunOutcome::Completed(result);
-                    }
-                    let drained: Vec<_> = q.drain(..).collect();
-                    drop(q);
                     for msg in drained {
                         if let Err(err) = self.push_message(messages, msg) {
                             return AgentRunOutcome::Failed(err);
@@ -290,6 +298,116 @@ impl AgentLoop {
         }
     }
 
+    async fn hand_back_unfinished_plan(&self, reason: &str) {
+        hand_back_unfinished_plan_if_needed(
+            self.config.subagent_type.is_root(),
+            self.config.plan_runtime.as_ref(),
+            reason,
+        )
+        .await;
+    }
+}
+
+#[cfg(test)]
+mod unfinished_plan_handoff_tests {
+    use super::hand_back_unfinished_plan_if_needed;
+    use crate::core::plan_runtime::file_store::{
+        read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoKind,
+        TodoStatus,
+    };
+    use crate::core::plan_runtime::PlanRuntime;
+
+    #[tokio::test]
+    async fn run_ended_while_executing_hands_back_visibly() {
+        let directory = tempfile::tempdir().expect("plan directory");
+        let path = directory.path().join("plan.plan.md");
+        let plan = PlanFile {
+            frontmatter: PlanFileFrontmatter {
+                plan_id: "run-exit".into(),
+                goal: "finish remaining work".into(),
+                state: PlanFileState::Executing,
+                session_key: Some("session".into()),
+                session_id: None,
+                created_at: "2026-09-18T00:00:00Z".into(),
+                schema_version: 1,
+                todos: vec![TodoItem {
+                    id: "work".into(),
+                    content: "finish implementation".into(),
+                    status: TodoStatus::Pending,
+                    evidence: Vec::new(),
+                    kind: TodoKind::Work,
+                }],
+                green_build_pass: false,
+                green_build_evidence: Vec::new(),
+                code_review_pass: false,
+                code_review_rounds: 0,
+                code_review_open_findings: Vec::new(),
+                code_review_disputed_findings: Vec::new(),
+                code_review_handoff: false,
+                code_review_handoff_acknowledged: false,
+                code_review_residual_findings: Vec::new(),
+                acceptance_commands: Vec::new(),
+                unknown: Default::default(),
+            },
+            body: String::new(),
+        };
+        write_plan(&path, &plan, 1_000).expect("write plan");
+
+        let runtime = PlanRuntime::new("session");
+        runtime.bind_plan_file_for_test(path.clone());
+        let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        {
+            let events = events.clone();
+            runtime.attach_transcript_appender(std::sync::Arc::new(move |event| {
+                events.lock().push(event);
+                Ok(())
+            }));
+        }
+
+        hand_back_unfinished_plan_if_needed(true, Some(&runtime), "run_ended_while_executing")
+            .await;
+
+        assert_eq!(
+            read_plan(&path).expect("read plan").frontmatter.state,
+            PlanFileState::Pending
+        );
+        assert!(events.lock().iter().any(|event| {
+            event["event"] == crate::infra::wire::WIRE_PLAN_STALLED
+                && event["reason"] == "run_ended_while_executing"
+        }));
+    }
+}
+
+async fn hand_back_unfinished_plan_if_needed(
+    is_root_agent: bool,
+    runtime: Option<&std::sync::Arc<crate::core::plan_runtime::PlanRuntime>>,
+    reason: &str,
+) {
+    if !is_root_agent {
+        return;
+    }
+    let Some(runtime) = runtime else {
+        return;
+    };
+    let Some(path) = runtime.active_plan_path() else {
+        return;
+    };
+    let Ok(plan) = crate::core::plan_runtime::file_store::read_plan(&path) else {
+        return;
+    };
+    if matches!(
+        runtime.next_action(&plan.frontmatter).await,
+        crate::core::plan_runtime::NextAction::Done
+            | crate::core::plan_runtime::NextAction::HandOff { .. }
+    ) {
+        return;
+    }
+    if let Err(error) = runtime.hand_back_stalled_plan(reason, None) {
+        warn!(%error, reason, "failed to hand back unfinished plan at run exit");
+    }
+}
+
+impl AgentLoop {
     /// 终结 Conversation Loop 的 `Interrupted` 分支：先发独立 `Interrupted` 事件
     /// （T2-P0-007 引入的细分订阅点），再发兼容老订阅者的 `AgentEnd(error="interrupted")`，
     /// 最后封装 `AgentRunOutcome::Interrupted` 返回。

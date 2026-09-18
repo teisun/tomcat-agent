@@ -24,7 +24,7 @@ fn cancel_token_demotes_executing_to_pending() {
 }
 
 #[test]
-fn restore_persists_legacy_in_progress_gates_and_emits_one_aborted_review() {
+fn restore_recovers_in_progress_gates_and_emits_one_aborted_review() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let path = plan_path_for_id("legacy_review").unwrap();
@@ -126,15 +126,12 @@ fn concurrent_write_plan_serialized_by_lock() {
             green_build_pass: false,
             green_build_evidence: Vec::new(),
             code_review_pass: false,
-            code_review_pass_at_ms: None,
             code_review_rounds: 0,
-            code_review_baseline_ms: None,
             code_review_open_findings: Vec::new(),
             code_review_disputed_findings: Vec::new(),
             code_review_handoff: false,
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
-            completion_gate_cycles: 0,
             acceptance_commands: Vec::new(),
             unknown: Default::default(),
         },

@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::core::prompts::{load as load_prompt, render as render_prompt, PromptKey};
 
@@ -93,7 +94,7 @@ pub(crate) struct CodeReviewPromptInput<'a> {
     pub plan_path: &'a Path,
     pub workspace_root: Option<&'a Path>,
     pub changed_files: &'a [String],
-    pub delta_files: &'a [String],
+    pub review_files: &'a [String],
     pub round: u32,
     pub is_incremental: bool,
     pub open_findings: &'a [Finding],
@@ -107,7 +108,7 @@ pub(crate) fn build_code_review_prompt(input: CodeReviewPromptInput<'_>) -> Stri
         plan_path,
         workspace_root,
         changed_files,
-        delta_files,
+        review_files,
         round,
         is_incremental,
         open_findings,
@@ -125,12 +126,12 @@ pub(crate) fn build_code_review_prompt(input: CodeReviewPromptInput<'_>) -> Stri
         })
         .unwrap_or_default();
     let review_scope_section = if is_incremental {
-        let delta = render_changed_files(delta_files);
+        let review_files = render_changed_files(review_files);
         format!(
-            "         Incremental review (round {round}).\n\
-             >>> DELTA — the ONLY files to review for NEW problems this round (changed since the previous review round; includes untracked new files):\n\
-             {delta}\
-             Every other changed file is frozen (already reviewed in an earlier round, unchanged since): do NOT open new issues there. Look at one ONLY if (a) an open finding below points into it, or (b) a DELTA change's impact reaches it (then flag the regression — do NOT re-review its unrelated pre-existing code).\n"
+            "         Follow-up review (round {round}).\n\
+             A timestamp cannot provide a reliable per-file delta, so review the current complete changed-file set (including untracked new files):\n\
+             {review_files}\
+             Recheck prior findings below first. Do not re-report a prior issue that is fixed; report any new P0/P1 problem you find in the current diff.\n"
         )
     } else {
         format!(
@@ -319,7 +320,7 @@ pub async fn collect_git_changed_files(workspace_root: &std::path::Path) -> Vec<
         workspace_root,
         // `git -C <workspace-subdir>` normally prints paths relative to the
         // repository root. `--relative` keeps them relative to workspace_root,
-        // which is the base used below for mtime and reviewer navigation.
+        // which is the base used below for content reads and reviewer navigation.
         &["diff", "--relative", "--name-only", "--no-ext-diff", "HEAD"],
     )
     .await
@@ -342,52 +343,63 @@ pub async fn collect_git_changed_files(workspace_root: &std::path::Path) -> Vec<
     changed_files.into_iter().collect()
 }
 
-/// 从完整 changed-files 集合筛出上次 reviewer 派发后被修改的文件。
+/// Fingerprint the current code-only Git delta for completion-guard progress.
 ///
-/// 删除文件没有可读取的 mtime，保守地保留在增量集，避免删代码的改动逃过复审。
-/// mtime 只用于缩小导航范围；它晚于 `since_ms` 才入选，因此误报至多多审一次。
-pub(crate) fn changed_files_since(
-    workspace_root: &std::path::Path,
-    changed_files: &[String],
-    since_ms: u128,
-) -> Vec<String> {
-    changed_files
-        .iter()
-        .filter(|relative| {
-            file_modified_ms(&workspace_root.join(relative))
-                .map(|modified_ms| modified_ms > since_ms)
-                .unwrap_or(true)
-        })
-        .cloned()
-        .collect()
+/// Tracked files contribute Git's binary diff against HEAD, while untracked
+/// code files contribute their current path and bytes. This distinguishes an
+/// edit to an already-dirty file from a no-op rewrite without treating
+/// non-code files as implementation progress.
+pub async fn code_diff_content_fingerprint(workspace_root: &std::path::Path) -> Option<String> {
+    let changed_code_files = collect_git_changed_files(workspace_root)
+        .await
+        .into_iter()
+        .filter(|path| is_code_path(path))
+        .collect::<Vec<_>>();
+    let mut untracked_code_files = run_git_lines(
+        workspace_root,
+        &["ls-files", "--others", "--exclude-standard"],
+    )
+    .await
+    .into_iter()
+    .filter(|path| is_code_path(path))
+    .collect::<Vec<_>>();
+    untracked_code_files.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"tomcat-code-diff-fingerprint-v1\0");
+    if !changed_code_files.is_empty() {
+        let mut args = vec![
+            "diff".to_string(),
+            "--relative".to_string(),
+            "--no-ext-diff".to_string(),
+            "--binary".to_string(),
+            "HEAD".to_string(),
+            "--".to_string(),
+        ];
+        args.extend(changed_code_files.iter().cloned());
+        let tracked_diff = run_git_capture_owned(workspace_root, &args).await?;
+        update_fingerprint_component(&mut hasher, b"tracked-diff", &tracked_diff);
+    }
+    for path in untracked_code_files {
+        let contents = tokio::fs::read(workspace_root.join(&path)).await.ok()?;
+        update_fingerprint_component(&mut hasher, b"untracked-path", path.as_bytes());
+        update_fingerprint_component(&mut hasher, b"untracked-contents", &contents);
+    }
+
+    Some(format!("{:x}", hasher.finalize()))
 }
 
-pub(crate) fn unix_timestamp_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
+fn update_fingerprint_component(hasher: &mut Sha256, label: &[u8], contents: &[u8]) {
+    hasher.update((label.len() as u64).to_be_bytes());
+    hasher.update(label);
+    hasher.update((contents.len() as u64).to_be_bytes());
+    hasher.update(contents);
 }
 
-fn file_modified_ms(path: &std::path::Path) -> Option<u128> {
-    std::fs::metadata(path)
-        .ok()?
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_millis())
-}
-
-/// 当前 Git diff 中的代码文件和其中最新的文件修改时间。
-///
-/// 不读取 diff 正文、更不计算内容哈希：`git --name-only` + 文件 metadata 足以把
-/// 「验收前又改过代码」和「仍是同一份代码」区分开。删除的代码文件没有 mtime，
-/// 用当前时间作为保守下界，迫使后续验收在删除之后启动。
+/// 当前 Git diff 中的代码文件。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodeDiffContext {
     pub changed_code_files: Vec<String>,
-    pub newest_edit_mtime_ms: Option<u128>,
 }
 
 pub async fn collect_code_diff_context(workspace_root: &std::path::Path) -> CodeDiffContext {
@@ -396,21 +408,7 @@ pub async fn collect_code_diff_context(workspace_root: &std::path::Path) -> Code
         .into_iter()
         .filter(|path| is_code_path(path))
         .collect();
-    if changed_code_files.is_empty() {
-        return CodeDiffContext::default();
-    }
-
-    let now_ms = unix_timestamp_ms();
-    let newest_edit_mtime_ms = changed_code_files
-        .iter()
-        .filter_map(|relative| file_modified_ms(&workspace_root.join(relative)))
-        .max()
-        .or(Some(now_ms));
-
-    CodeDiffContext {
-        changed_code_files,
-        newest_edit_mtime_ms,
-    }
+    CodeDiffContext { changed_code_files }
 }
 
 fn is_code_path(path: &str) -> bool {
@@ -468,6 +466,20 @@ async fn run_git_capture(workspace_root: &std::path::Path, args: &[&str]) -> Opt
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+async fn run_git_capture_owned(
+    workspace_root: &std::path::Path,
+    args: &[String],
+) -> Option<Vec<u8>> {
+    let output = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
 async fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<String> {
     run_git_capture(workspace_root, args)
         .await
@@ -483,7 +495,7 @@ async fn run_git_lines(workspace_root: &std::path::Path, args: &[&str]) -> Vec<S
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_git_changed_files, is_code_path};
+    use super::{code_diff_content_fingerprint, collect_git_changed_files, is_code_path};
 
     #[test]
     fn user_visible_markup_and_styles_trigger_code_review() {
@@ -543,6 +555,74 @@ mod tests {
         assert_eq!(
             collect_git_changed_files(root).await,
             vec!["tracked.rs".to_string(), "untracked.rs".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn code_diff_fingerprint_changes_for_code_not_non_code_or_noop_rewrites() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let root = workspace.path();
+        std::fs::write(root.join("tracked.rs"), "fn before() {}\n").expect("seed tracked");
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(root)
+            .status()
+            .expect("git init")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["add", "tracked.rs"])
+            .current_dir(root)
+            .status()
+            .expect("git add")
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=tomcat-test",
+                "-c",
+                "user.email=tomcat-test@example.invalid",
+                "commit",
+                "-qm",
+                "seed",
+            ])
+            .current_dir(root)
+            .status()
+            .expect("git commit")
+            .success());
+
+        std::fs::write(root.join("tracked.rs"), "fn first_dirty_version() {}\n")
+            .expect("modify tracked");
+        let first = code_diff_content_fingerprint(root)
+            .await
+            .expect("fingerprint");
+
+        std::fs::write(root.join("tracked.rs"), "fn second_dirty_version() {}\n")
+            .expect("modify already dirty file");
+        let second = code_diff_content_fingerprint(root)
+            .await
+            .expect("fingerprint");
+        assert_ne!(
+            first, second,
+            "an edit to an already-dirty code file is meaningful progress"
+        );
+
+        std::fs::write(root.join("README.md"), "non-code change\n").expect("write non-code");
+        let after_non_code = code_diff_content_fingerprint(root)
+            .await
+            .expect("fingerprint");
+        assert_eq!(
+            second, after_non_code,
+            "non-code paths must not reset the completion-guard progress signal"
+        );
+
+        std::fs::write(root.join("tracked.rs"), "fn second_dirty_version() {}\n")
+            .expect("rewrite identical content");
+        assert_eq!(
+            after_non_code,
+            code_diff_content_fingerprint(root)
+                .await
+                .expect("fingerprint"),
+            "a no-op rewrite must not reset the completion-guard progress signal"
         );
     }
 

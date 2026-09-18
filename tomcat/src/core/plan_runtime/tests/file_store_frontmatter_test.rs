@@ -1,6 +1,7 @@
 use super::super::file_store::{
     normalize_acceptance_command, normalize_acceptance_commands, parse_plan_file,
-    serialize_plan_file, PlanError, PlanFile, PlanFileState, TodoItem, TodoStatus,
+    recover_runtime_gates_on_load, serialize_plan_file, write_plan, PlanError, PlanFile,
+    PlanFileState, TodoItem, TodoStatus,
 };
 use super::sample_frontmatter;
 
@@ -43,7 +44,6 @@ fn acceptance_commands_round_trip_and_default_to_empty_for_legacy_files() {
 fn code_review_state_round_trips_and_defaults_for_legacy_files() {
     let mut frontmatter = sample_frontmatter();
     frontmatter.code_review_rounds = 2;
-    frontmatter.code_review_baseline_ms = Some(123_456);
     frontmatter.code_review_open_findings = vec![crate::core::plan_runtime::Finding::new(
         "P1".into(),
         "runtime".into(),
@@ -65,7 +65,6 @@ fn code_review_state_round_trips_and_defaults_for_legacy_files() {
 
     let parsed = parse_plan_file(&serialize_plan_file(&plan).expect("serialize")).expect("parse");
     assert_eq!(parsed.frontmatter.code_review_rounds, 2);
-    assert_eq!(parsed.frontmatter.code_review_baseline_ms, Some(123_456));
     assert_eq!(
         parsed.frontmatter.code_review_open_findings,
         frontmatter.code_review_open_findings
@@ -80,7 +79,6 @@ fn code_review_state_round_trips_and_defaults_for_legacy_files() {
     )
     .expect("legacy plan remains readable");
     assert_eq!(legacy.frontmatter.code_review_rounds, 0);
-    assert_eq!(legacy.frontmatter.code_review_baseline_ms, None);
     assert!(legacy.frontmatter.code_review_open_findings.is_empty());
     assert!(legacy.frontmatter.code_review_disputed_findings.is_empty());
 }
@@ -196,13 +194,148 @@ fn plan_file_schema_version_v1_locked() {
 }
 
 #[test]
-fn read_plan_normalizes_legacy_runtime_gates_from_in_progress_to_pending() {
-    let legacy = "---\nplan_id: legacy\ngoal: g\nstate: executing\ncreated_at: t\nschema_version: 1\ntodos:\n  - id: gate-review\n    content: \"[gate] review\"\n    status: in_progress\n    kind: gate_code_review\n  - id: gate-acceptance\n    content: \"[gate] Acceptance\"\n    status: in_progress\n    kind: gate_acceptance\n---\n";
+fn ordinary_reads_preserve_all_gate_in_progress_states() {
+    let plan_text = "---\nplan_id: plan\ngoal: g\nstate: executing\ncreated_at: t\nschema_version: 1\ntodos:\n  - id: gate-review\n    content: \"[gate] review\"\n    status: in_progress\n    kind: gate_code_review\n  - id: gate-acceptance\n    content: \"[gate] Acceptance\"\n    status: in_progress\n    kind: gate_acceptance\n---\n";
 
-    let parsed = parse_plan_file(legacy).expect("legacy plan remains readable");
+    let parsed = parse_plan_file(plan_text).expect("plan remains readable");
 
-    assert_eq!(parsed.frontmatter.todos[0].status, TodoStatus::Pending);
-    assert_eq!(parsed.frontmatter.todos[1].status, TodoStatus::Pending);
+    assert_eq!(parsed.frontmatter.todos[0].status, TodoStatus::InProgress);
+    assert_eq!(parsed.frontmatter.todos[1].status, TodoStatus::InProgress);
+}
+
+#[test]
+fn acceptance_in_progress_survives_serialize_and_parse_round_trip() {
+    let mut frontmatter = sample_frontmatter();
+    frontmatter.todos.push(TodoItem {
+        id: "gate-acceptance".into(),
+        content: "[gate] Acceptance".into(),
+        status: TodoStatus::InProgress,
+        evidence: Vec::new(),
+        kind: crate::core::plan_runtime::file_store::TodoKind::GateAcceptance,
+    });
+    let plan = PlanFile {
+        frontmatter,
+        body: String::new(),
+    };
+
+    let parsed = parse_plan_file(&serialize_plan_file(&plan).expect("serialize acceptance"))
+        .expect("parse acceptance");
+    assert_eq!(
+        parsed.frontmatter.todos.last().map(|todo| todo.status),
+        Some(TodoStatus::InProgress)
+    );
+}
+
+#[test]
+fn review_in_progress_survives_serialize_and_parse_round_trip() {
+    let mut frontmatter = sample_frontmatter();
+    frontmatter.todos.push(TodoItem {
+        id: "gate-review".into(),
+        content: "[gate] review".into(),
+        status: TodoStatus::InProgress,
+        evidence: Vec::new(),
+        kind: crate::core::plan_runtime::file_store::TodoKind::GateCodeReview,
+    });
+    let plan = PlanFile {
+        frontmatter,
+        body: String::new(),
+    };
+
+    let parsed = parse_plan_file(&serialize_plan_file(&plan).expect("serialize review"))
+        .expect("parse review");
+    assert_eq!(
+        parsed.frontmatter.todos.last().map(|todo| todo.status),
+        Some(TodoStatus::InProgress)
+    );
+}
+
+#[test]
+fn recovery_resets_persisted_acceptance_in_progress() {
+    let dir = tempfile::tempdir().expect("temp plan directory");
+    let path = dir.path().join("plan.plan.md");
+    let mut frontmatter = sample_frontmatter();
+    frontmatter.todos.push(TodoItem {
+        id: "gate-acceptance".into(),
+        content: "[gate] Acceptance".into(),
+        status: TodoStatus::InProgress,
+        evidence: Vec::new(),
+        kind: crate::core::plan_runtime::file_store::TodoKind::GateAcceptance,
+    });
+    write_plan(
+        &path,
+        &PlanFile {
+            frontmatter,
+            body: String::new(),
+        },
+        1_000,
+    )
+    .expect("acceptance in progress is persistable");
+
+    let recovered = recover_runtime_gates_on_load(&path, 1_000).expect("recover plan");
+    assert_eq!(
+        recovered
+            .plan
+            .frontmatter
+            .todos
+            .last()
+            .map(|todo| todo.status),
+        Some(TodoStatus::Pending)
+    );
+    assert_eq!(
+        parse_plan_file(&std::fs::read_to_string(&path).expect("read plan"))
+            .expect("parse recovered plan")
+            .frontmatter
+            .todos
+            .last()
+            .map(|todo| todo.status),
+        Some(TodoStatus::Pending),
+        "recovery must make the retryable state durable"
+    );
+}
+
+#[test]
+fn recovery_resets_persisted_review_in_progress() {
+    let dir = tempfile::tempdir().expect("temp plan directory");
+    let path = dir.path().join("plan.plan.md");
+    let mut frontmatter = sample_frontmatter();
+    frontmatter.todos.push(TodoItem {
+        id: "gate-review".into(),
+        content: "[gate] review".into(),
+        status: TodoStatus::InProgress,
+        evidence: Vec::new(),
+        kind: crate::core::plan_runtime::file_store::TodoKind::GateCodeReview,
+    });
+    write_plan(
+        &path,
+        &PlanFile {
+            frontmatter,
+            body: String::new(),
+        },
+        1_000,
+    )
+    .expect("review in progress is persistable");
+
+    let recovered = recover_runtime_gates_on_load(&path, 1_000).expect("recover plan");
+    assert_eq!(
+        recovered
+            .plan
+            .frontmatter
+            .todos
+            .last()
+            .map(|todo| todo.status),
+        Some(TodoStatus::Pending)
+    );
+    assert!(recovered.recovered_code_review);
+    assert_eq!(
+        parse_plan_file(&std::fs::read_to_string(&path).expect("read plan"))
+            .expect("parse recovered plan")
+            .frontmatter
+            .todos
+            .last()
+            .map(|todo| todo.status),
+        Some(TodoStatus::Pending),
+        "recovery must make the retryable state durable"
+    );
 }
 
 #[test]

@@ -268,23 +268,20 @@ fn serve_emitted_event_validates_against_generated_schema() {
         out_frame_validator.is_valid(&out_frame_sample),
         "plan.code_review out_frame should validate: {out_frame_sample}"
     );
-    let unreviewed_edit_frame = serde_json::to_value(OutFrame::Event(
-        serde_json::to_value(ServeEvent::Plan(
-            ServePlanEvent::PlanCodeReviewUnreviewedEdit {
-                session_id: Some("s1".to_string()),
-                plan_id: Some("plan-1".to_string()),
-                rounds: Some(2),
-                max_code_review_rounds: Some(2),
-                changed_code_files: Some(vec!["src/lib.rs".to_string()]),
-                newest_edit_mtime_ms: Some(1_726_000_000_000),
-            },
-        ))
-        .expect("serialize plan.code_review.unreviewed_edit event"),
+    let stalled_frame = serde_json::to_value(OutFrame::Event(
+        serde_json::to_value(ServeEvent::Plan(ServePlanEvent::PlanStalled {
+            session_id: Some("s1".to_string()),
+            plan_id: Some("plan-1".to_string()),
+            reason: Some("idle_nudges".to_string()),
+            idle_nudges: Some(2),
+            remaining_work: Some(vec!["- t1 (pending)".to_string()]),
+        }))
+        .expect("serialize plan.stalled event"),
     ))
-    .expect("out_frame plan.code_review.unreviewed_edit sample");
+    .expect("out_frame plan.stalled sample");
     assert!(
-        out_frame_validator.is_valid(&unreviewed_edit_frame),
-        "plan.code_review.unreviewed_edit out_frame should validate: {unreviewed_edit_frame}"
+        out_frame_validator.is_valid(&stalled_frame),
+        "plan.stalled out_frame should validate: {stalled_frame}"
     );
 }
 

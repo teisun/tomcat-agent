@@ -2380,7 +2380,7 @@ async fn serve_prompt_with_inline_file_attachment_builds_multimodal_message() {
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn serve_prompt_retries_stream_terminal_refusal_without_rendering_llm_error() {
+async fn serve_prompt_retries_stream_terminal_refusal_and_surfaces_the_retry_error() {
     let _api_key = install_test_api_key();
     let refusal = unsupported_file_input_stream(
         "[OneOfParam] [input[0].content[1]] [invalid_enum_value] Invalid value: 'input_file'. Supported values are: 'input_text'.",
@@ -2401,7 +2401,11 @@ async fn serve_prompt_retries_stream_terminal_refusal_without_rendering_llm_erro
     .await;
 
     assert_eq!(count_event(&lines, "auto_retry_start"), 1);
-    assert_eq!(count_event(&lines, "llm_error"), 0);
+    assert_eq!(
+        count_event(&lines, "llm_error"),
+        1,
+        "each terminal stream error must remain visible while the retry proceeds"
+    );
     let recorded = requests.0.lock().clone();
     assert_eq!(
         recorded.len(),
@@ -2461,7 +2465,11 @@ async fn serve_prompt_degrades_after_second_refusal_and_succeeds() {
     // Provider-call ladder is pinned in `run_basic_test`; this serve test keeps its scope
     // to the real stdout/session stack: the user should see the notice and still land on a
     // successful assistant turn.
-    assert_eq!(count_event(&lines, "llm_error"), 0);
+    assert_eq!(
+        count_event(&lines, "llm_error"),
+        2,
+        "both terminal refusals must remain visible before the degraded retry"
+    );
     let recorded = requests.0.lock().clone();
     assert_eq!(
         recorded.len(),
@@ -2522,7 +2530,11 @@ async fn serve_prompt_exhausted_stream_terminal_refusal_surfaces_one_final_error
     })
     .await;
 
-    assert_eq!(count_event(&lines, "llm_error"), 0);
+    assert_eq!(
+        count_event(&lines, "llm_error"),
+        4,
+        "each exhausted terminal refusal must remain visible for diagnosis"
+    );
     let final_errors = lines
         .iter()
         .filter(|line| {
@@ -5659,15 +5671,12 @@ async fn serve_set_plan_mode_exit_returns_plan_mode_to_chat_without_changing_pla
             green_build_pass: false,
             green_build_evidence: Vec::new(),
             code_review_pass: false,
-            code_review_pass_at_ms: None,
             code_review_rounds: 0,
-            code_review_baseline_ms: None,
             code_review_open_findings: Vec::new(),
             code_review_disputed_findings: Vec::new(),
             code_review_handoff: false,
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
-            completion_gate_cycles: 0,
             acceptance_commands: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },
@@ -5760,15 +5769,12 @@ async fn serve_build_persists_kickoff_message_before_responding() {
             green_build_pass: false,
             green_build_evidence: Vec::new(),
             code_review_pass: false,
-            code_review_pass_at_ms: None,
             code_review_rounds: 0,
-            code_review_baseline_ms: None,
             code_review_open_findings: Vec::new(),
             code_review_disputed_findings: Vec::new(),
             code_review_handoff: false,
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
-            completion_gate_cycles: 0,
             acceptance_commands: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },
@@ -5942,15 +5948,12 @@ async fn serve_get_state_ignores_persisted_context_ratio() {
             green_build_pass: false,
             green_build_evidence: Vec::new(),
             code_review_pass: false,
-            code_review_pass_at_ms: None,
             code_review_rounds: 0,
-            code_review_baseline_ms: None,
             code_review_open_findings: Vec::new(),
             code_review_disputed_findings: Vec::new(),
             code_review_handoff: false,
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
-            completion_gate_cycles: 0,
             acceptance_commands: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },

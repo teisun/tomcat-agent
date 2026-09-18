@@ -126,6 +126,43 @@ describe("derivePlanActivity", () => {
 });
 
 describe("WebviewStateStore wire routing", () => {
+  it.each([
+    ["idle_nudges", "连续 2 轮没有推进（计划和代码内容都没变）"],
+    ["injection_cap", "一次运行里催促已达上限"],
+    ["tool_round_budget", "这一轮工具调用次数用尽"],
+    ["run_ended_while_executing", "运行结束时计划还没收口"],
+  ])("renders plan.stalled reason %s as a visible Chinese notice", (reason, explanation) => {
+    const store = new WebviewStateStore();
+    store.setActiveSession("s1");
+    store.applySessionState({
+      activePlan: { id: "plan-1", path: "/workspace/plan.plan.md", state: "executing" },
+      agentMode: "chat",
+      busy: false,
+      model: "gpt-5",
+      sessionId: "s1",
+    });
+
+    store.applyEvent({
+      planId: "plan-1",
+      reason,
+      remainingWork: ["- t1 (pending)"],
+      sessionId: "s1",
+      type: "plan.stalled",
+    } as never);
+
+    const view = store.snapshot().sessionViews.s1;
+    expect(view.activePlan?.state).toBe("pending");
+    expect(view.timeline).toContainEqual(expect.objectContaining({
+      kind: "warn",
+      text: expect.stringContaining(`计划已暂停：${explanation}`),
+      type: "message",
+    }));
+    expect(view.timeline).not.toContainEqual(expect.objectContaining({
+      text: expect.stringContaining(reason),
+      type: "message",
+    }));
+  });
+
   it("renders llm_error body once and puts label on the message header metadata", () => {
     const store = new WebviewStateStore();
     store.setActiveSession("s1");
