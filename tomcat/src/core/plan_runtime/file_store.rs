@@ -78,6 +78,10 @@ pub enum PlanError {
     #[error("plan 文件 todo id 重复: {id}")]
     DuplicateTodoId { id: String },
 
+    /// 验收 todo 是最终收口步骤，一个 plan 只能有一个。
+    #[error("一个计划仅允许一个Acceptance todo, 且kind=Acceptance只赋予最终验收todo")]
+    MultipleAcceptanceTodos,
+
     /// 写盘 IO 错误（rename / open / write 等）。
     #[error("plan 文件 IO 错误: {0}")]
     Io(#[from] std::io::Error),
@@ -117,42 +121,35 @@ pub enum TodoStatus {
     Cancelled,
 }
 
-/// Todo 的所有者和生命周期。
+/// Todo 的语义类型。
 ///
-/// 普通工作项由 planner / executor 推进；两种 gate 由 runtime 创建，并且只有 runtime
-/// 能把它们写入终态。将此语义落在数据模型中，而不是根据标题匹配，避免提示词、UI 文案或
-/// 用户自定义 id 漂移后绕过收口门禁。
+/// `Acceptance` 是 LLM 写入的最终验收步骤。运行时只在该步骤开始时向 LLM 返回
+/// verify 提示；它不会创建、推进或校验该 todo。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoKind {
     #[default]
     Work,
-    GateCodeReview,
-    GateAcceptance,
+    Acceptance,
+    /// Old plan files may carry a kind this runtime no longer understands.
+    /// Keep their todos visible and treat them like ordinary todos without
+    /// retaining any gate-specific behaviour.
+    #[serde(other)]
+    Unknown,
 }
 
 impl TodoKind {
     pub fn as_str(self) -> &'static str {
         match self {
             TodoKind::Work => "work",
-            TodoKind::GateCodeReview => "gate_code_review",
-            TodoKind::GateAcceptance => "gate_acceptance",
+            TodoKind::Acceptance => "acceptance",
+            TodoKind::Unknown => "unknown",
         }
-    }
-
-    pub fn is_gate(self) -> bool {
-        !matches!(self, TodoKind::Work)
     }
 }
 
 /// 同时进行的 todo 上限：允许有限并行，仍保持面板和收口状态可读。
 pub const MAX_IN_PROGRESS_TODOS: usize = 3;
-
-/// Runtime 追加的收口门禁 id。它们是工具契约的一部分，不能由模型创建或删除。
-pub const GATE_CODE_REVIEW_TODO_ID: &str = "gate-review";
-pub const GATE_ACCEPTANCE_TODO_ID: &str = "gate-acceptance";
-pub const GATE_CODE_REVIEW_TODO_CONTENT: &str = "[gate] review";
-pub const GATE_ACCEPTANCE_TODO_CONTENT: &str = "[gate] Acceptance";
 
 impl TodoStatus {
     pub fn as_str(&self) -> &'static str {
@@ -178,40 +175,6 @@ pub struct TodoItem {
     pub kind: TodoKind,
 }
 
-/// 一次可复核的绿构建任务引用。
-///
-/// `task_id` 指向运行时创建的后台 bash 任务；其余字段是验证通过时的快照，便于
-/// transcript 与计划文件在会话恢复后解释“哪次命令放行了收口”。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GreenBuildEvidence {
-    pub command: String,
-    pub task_id: String,
-    pub started_at_ms: u128,
-    pub exit_code: i32,
-}
-
-/// Canonical form used both when persisting `acceptance_commands` and when
-/// reconciling them against recorded bash tasks: surrounding whitespace is
-/// trimmed and internal whitespace runs collapse to one space. Nothing else is
-/// interpreted; a declared command is matched as one opaque string, so `a && b`
-/// never satisfies a declaration of `a` and `cargo test --lib foo` never
-/// satisfies `cargo test`.
-pub fn normalize_acceptance_command(command: &str) -> String {
-    command.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Normalizes a declared list: canonical form per entry, empty entries dropped,
-/// duplicates removed while preserving first-seen order.
-pub fn normalize_acceptance_commands<S: AsRef<str>>(commands: &[S]) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
-    commands
-        .iter()
-        .map(|command| normalize_acceptance_command(command.as_ref()))
-        .filter(|command| !command.is_empty())
-        .filter(|command| seen.insert(command.clone()))
-        .collect()
-}
-
 /// PlanFile 顶部 YAML frontmatter；**v1 schema**。
 ///
 /// 未声明字段通过 `#[serde(flatten)]` 兜底到 `unknown`，写盘时保留，
@@ -228,11 +191,6 @@ pub struct PlanFileFrontmatter {
     pub created_at: String,
     pub schema_version: i32,
     pub todos: Vec<TodoItem>,
-    /// 最近一次绿构建验收是否已经通过。
-    #[serde(default)]
-    pub green_build_pass: bool,
-    #[serde(default)]
-    pub green_build_evidence: Vec<GreenBuildEvidence>,
     /// 最近一次 review gate 是否已放行（可能是预算耗尽后的放行）。
     #[serde(default)]
     pub code_review_pass: bool,
@@ -258,12 +216,6 @@ pub struct PlanFileFrontmatter {
     /// 评审预算耗尽时带入 acceptance 的剩余 P0/P1 finding 摘要。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub code_review_residual_findings: Vec<String>,
-    /// Acceptance commands declared while planning. Each entry is one runnable
-    /// command, kept verbatim; `[gate] Acceptance` must present a finished,
-    /// fresh, exit-0 task for every entry. The list is the mandatory floor of the
-    /// acceptance scope: an executing plan may append to it but never remove from it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acceptance_commands: Vec<String>,
     /// 未来扩展字段；read 时收集，write 时原样写回（保前向兼容）。
     #[serde(flatten)]
     pub unknown: serde_yaml::Mapping,
@@ -275,186 +227,6 @@ impl PlanFileFrontmatter {
         max_code_review_rounds > 0
             && self.code_review_rounds > 0
             && self.code_review_rounds >= max_code_review_rounds
-    }
-}
-
-/// The complete set of domain transitions allowed to mutate close-out facts.
-///
-/// Keeping the flag and its visible gate in the same transition prevents a
-/// resumed plan from observing contradictory durable state.
-#[derive(Debug, Clone)]
-pub enum CloseOutTransition {
-    ReviewRestarted,
-    ReviewAborted,
-    ReviewFailed {
-        findings: Vec<crate::core::plan_runtime::review::Finding>,
-    },
-    ReviewPassed,
-    ReviewExhaustedFailOpen {
-        residual_findings: Vec<String>,
-    },
-    ReviewHandedOff {
-        residual_findings: Vec<String>,
-    },
-    AllGatesSkipped,
-    AcceptanceStarted,
-    AcceptanceFailed,
-    AcceptancePassed {
-        evidence: Vec<GreenBuildEvidence>,
-    },
-}
-
-fn set_gate_status(todos: &mut [TodoItem], kind: TodoKind, status: TodoStatus) {
-    if let Some(gate) = todos.iter_mut().find(|todo| todo.kind == kind) {
-        gate.status = status;
-    }
-}
-
-/// Returns whether durable close-out flags agree with their visible gates.
-pub fn close_out_is_consistent(frontmatter: &PlanFileFrontmatter) -> bool {
-    let gate_status = |kind| {
-        frontmatter
-            .todos
-            .iter()
-            .find(|todo| todo.kind == kind)
-            .map(|todo| todo.status)
-    };
-    let review_consistent = gate_status(TodoKind::GateCodeReview) == Some(TodoStatus::Completed)
-        && frontmatter.code_review_pass
-        || gate_status(TodoKind::GateCodeReview) != Some(TodoStatus::Completed)
-            && !frontmatter.code_review_pass;
-    let acceptance_consistent = gate_status(TodoKind::GateAcceptance)
-        == Some(TodoStatus::Completed)
-        && frontmatter.green_build_pass
-        || gate_status(TodoKind::GateAcceptance) != Some(TodoStatus::Completed)
-            && !frontmatter.green_build_pass;
-    review_consistent && acceptance_consistent
-}
-
-/// Applies one atomic close-out transition and records a release-build warning
-/// if an invariant ever drifts. Callers must not mutate a close-out flag or
-/// runtime gate directly.
-pub fn apply_close_out_transition(
-    frontmatter: &mut PlanFileFrontmatter,
-    transition: CloseOutTransition,
-) {
-    match transition {
-        CloseOutTransition::ReviewRestarted => {
-            frontmatter.code_review_pass = false;
-            frontmatter.code_review_residual_findings.clear();
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateCodeReview,
-                TodoStatus::InProgress,
-            );
-        }
-        CloseOutTransition::ReviewAborted => {
-            frontmatter.code_review_pass = false;
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateCodeReview,
-                TodoStatus::Pending,
-            );
-        }
-        CloseOutTransition::ReviewFailed { findings } => {
-            frontmatter.code_review_pass = false;
-            frontmatter.code_review_open_findings = findings;
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateCodeReview,
-                TodoStatus::Pending,
-            );
-        }
-        CloseOutTransition::ReviewPassed => {
-            frontmatter.code_review_pass = true;
-            frontmatter.code_review_open_findings.clear();
-            frontmatter.code_review_residual_findings.clear();
-            frontmatter.code_review_handoff = false;
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateCodeReview,
-                TodoStatus::Completed,
-            );
-        }
-        CloseOutTransition::ReviewExhaustedFailOpen { residual_findings } => {
-            frontmatter.code_review_pass = true;
-            frontmatter.code_review_handoff = false;
-            frontmatter.code_review_residual_findings = residual_findings;
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateCodeReview,
-                TodoStatus::Completed,
-            );
-        }
-        CloseOutTransition::ReviewHandedOff { residual_findings } => {
-            frontmatter.code_review_pass = false;
-            frontmatter.code_review_handoff = true;
-            frontmatter.code_review_residual_findings = residual_findings;
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateCodeReview,
-                TodoStatus::Pending,
-            );
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateAcceptance,
-                TodoStatus::Pending,
-            );
-        }
-        CloseOutTransition::AllGatesSkipped => {
-            frontmatter.code_review_pass = true;
-            frontmatter.green_build_pass = true;
-            frontmatter.code_review_open_findings.clear();
-            frontmatter.code_review_residual_findings.clear();
-            frontmatter.code_review_handoff = false;
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateCodeReview,
-                TodoStatus::Completed,
-            );
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateAcceptance,
-                TodoStatus::Completed,
-            );
-        }
-        CloseOutTransition::AcceptanceStarted => {
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateAcceptance,
-                TodoStatus::InProgress,
-            );
-        }
-        CloseOutTransition::AcceptanceFailed => {
-            frontmatter.green_build_pass = false;
-            frontmatter.green_build_evidence.clear();
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateAcceptance,
-                TodoStatus::InProgress,
-            );
-        }
-        CloseOutTransition::AcceptancePassed { evidence } => {
-            frontmatter.green_build_pass = true;
-            frontmatter.green_build_evidence = evidence;
-            set_gate_status(
-                &mut frontmatter.todos,
-                TodoKind::GateAcceptance,
-                TodoStatus::Completed,
-            );
-        }
-    }
-
-    if !close_out_is_consistent(frontmatter) {
-        tracing::warn!(
-            plan_id = %frontmatter.plan_id,
-            frontmatter = ?frontmatter,
-            "close-out transition produced inconsistent gate state"
-        );
-        debug_assert!(
-            false,
-            "close-out transition produced inconsistent gate state: {frontmatter:?}"
-        );
     }
 }
 
@@ -569,6 +341,7 @@ fn enforce_required_fields(fm: &PlanFileFrontmatter) -> Result<(), PlanError> {
 /// 写盘前对 frontmatter 做不变量校验（有限 in_progress / id 唯一）。
 pub fn validate_frontmatter_invariants(fm: &PlanFileFrontmatter) -> Result<(), PlanError> {
     enforce_required_fields(fm)?;
+    validate_single_acceptance(&fm.todos)?;
     let in_progress_count = fm
         .todos
         .iter()
@@ -584,6 +357,22 @@ pub fn validate_frontmatter_invariants(fm: &PlanFileFrontmatter) -> Result<(), P
         if !seen.insert(&t.id) {
             return Err(PlanError::DuplicateTodoId { id: t.id.clone() });
         }
+    }
+    Ok(())
+}
+
+/// A plan may have one final acceptance todo at most. Both tool write paths
+/// call this before writing, and file serialization repeats the check so raw
+/// runtime writers cannot bypass the invariant.
+pub fn validate_single_acceptance(todos: &[TodoItem]) -> Result<(), PlanError> {
+    if todos
+        .iter()
+        .filter(|todo| matches!(todo.kind, TodoKind::Acceptance))
+        .take(2)
+        .count()
+        > 1
+    {
+        return Err(PlanError::MultipleAcceptanceTodos);
     }
     Ok(())
 }
@@ -640,50 +429,6 @@ fn write_serialized_plan_atomic(path: &Path, serialized: &str) -> Result<(), Pla
 /// 读取 plan 文件（不上锁，read-only path）。
 pub fn read_plan(path: &Path) -> Result<PlanFile, PlanError> {
     read_plan_from_disk(path)
-}
-
-/// Result of atomically restoring half-open gates. `recovered_code_review`
-/// tells the caller whether it must emit the corresponding terminal
-/// `plan.code_review` aborted event.
-pub struct RuntimeGateRecovery {
-    pub plan: PlanFile,
-    pub recovered_code_review: bool,
-}
-
-/// Atomically recover half-open runtime gates while loading a resumable plan.
-/// This is deliberately separate from [`read_plan`]: a plain read must stay
-/// side-effect free, whereas restore must make the retryable state durable
-/// before its caller resumes work.
-pub fn recover_runtime_gates_on_load(
-    path: &Path,
-    lock_timeout_ms: u64,
-) -> Result<RuntimeGateRecovery, PlanError> {
-    let lock_path = lock_path_for(path);
-    with_advisory_lock(&lock_path, lock_timeout_ms, || {
-        let raw = read_plan_text(path)?;
-        let mut plan = parse_plan_file(&raw)?;
-        let recovered_code_review = plan.frontmatter.todos.iter().any(|todo| {
-            todo.kind == TodoKind::GateCodeReview && todo.status == TodoStatus::InProgress
-        });
-        let recovered_any_gate = plan
-            .frontmatter
-            .todos
-            .iter()
-            .any(|todo| todo.kind.is_gate() && todo.status == TodoStatus::InProgress);
-        if recovered_any_gate {
-            for todo in &mut plan.frontmatter.todos {
-                if todo.kind.is_gate() && todo.status == TodoStatus::InProgress {
-                    todo.status = TodoStatus::Pending;
-                }
-            }
-            let serialized = serialize_plan_file(&plan)?;
-            write_serialized_plan_atomic(path, &serialized)?;
-        }
-        Ok(RuntimeGateRecovery {
-            plan,
-            recovered_code_review,
-        })
-    })
 }
 
 /// `update_plan_locked` 的错误：底层 plan I/O / 解析错误与调用方业务错误分流。

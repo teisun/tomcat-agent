@@ -161,70 +161,31 @@ async fn next_action_is_the_single_close_out_decision_source() {
             kind: TodoKind::Work,
         },
         TodoItem {
-            id: "gate-review".into(),
-            content: "[gate] review".into(),
+            id: "acceptance".into(),
+            content: "验收".into(),
             status: TodoStatus::Pending,
             evidence: Vec::new(),
-            kind: TodoKind::GateCodeReview,
-        },
-        TodoItem {
-            id: "gate-acceptance".into(),
-            content: "[gate] Acceptance".into(),
-            status: TodoStatus::Pending,
-            evidence: Vec::new(),
-            kind: TodoKind::GateAcceptance,
+            kind: TodoKind::Acceptance,
         },
     ];
     assert_eq!(
         runtime.next_action(&frontmatter).await,
-        NextAction::StartReview
+        NextAction::ContinueWork {
+            remaining_work: vec!["- acceptance (pending)".into()]
+        }
     );
 
-    frontmatter.todos[0].status = TodoStatus::Pending;
+    frontmatter.todos[1].status = TodoStatus::InProgress;
     assert_eq!(
         runtime.next_action(&frontmatter).await,
-        NextAction::ContinueWork {
-            remaining_work: vec!["- work (pending)".into()]
-        }
+        NextAction::RunVerify
     );
 
-    frontmatter.todos[0].status = TodoStatus::Completed;
-    frontmatter.code_review_pass = true;
-    assert!(matches!(
-        runtime.next_action(&frontmatter).await,
-        NextAction::RunAcceptance { .. }
-    ));
-
-    frontmatter.code_review_pass = false;
-    frontmatter.code_review_open_findings = vec![super::super::review::Finding::new(
-        "P1".into(),
-        "logic".into(),
-        "fix".into(),
-    )];
-    assert!(matches!(
-        runtime.next_action(&frontmatter).await,
-        NextAction::FixFindings { .. }
-    ));
-
-    frontmatter.code_review_handoff = true;
-    assert!(matches!(
-        runtime.next_action(&frontmatter).await,
-        NextAction::HandOff {
-            reason: "p0_residual",
-            ..
-        }
-    ));
-
-    frontmatter.code_review_handoff = false;
-    frontmatter.code_review_open_findings.clear();
-    frontmatter.code_review_pass = true;
-    frontmatter.green_build_pass = true;
     frontmatter.todos[1].status = TodoStatus::Completed;
-    frontmatter.todos[2].status = TodoStatus::Completed;
     assert_eq!(
         runtime.next_action(&frontmatter).await,
         NextAction::Done,
-        "executing plans with terminal work and both gates passed must not return an empty ContinueWork"
+        "executing plans with only terminal todos must finish"
     );
 
     frontmatter.state = PlanFileState::Completed;

@@ -99,6 +99,7 @@ fn shared_todo_ops_upsert_can_insert_and_update() {
             id: "t1".into(),
             content: Some("first".into()),
             status: Some(TodoStatus::Pending),
+            todo_kind: None,
         }],
         false,
     )
@@ -109,6 +110,7 @@ fn shared_todo_ops_upsert_can_insert_and_update() {
             id: "t1".into(),
             content: Some("updated".into()),
             status: Some(TodoStatus::Completed),
+            todo_kind: None,
         }],
         false,
     )
@@ -127,6 +129,7 @@ fn set_status_completed_persists_evidence() {
             id: "t1".into(),
             content: Some("implement the change".into()),
             status: None,
+            todo_kind: None,
         }],
         false,
     )

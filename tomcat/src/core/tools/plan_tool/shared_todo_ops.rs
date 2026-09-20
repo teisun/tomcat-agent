@@ -18,6 +18,10 @@ pub enum SharedTodoOpArg {
         content: Option<String>,
         #[serde(default)]
         status: Option<TodoStatus>,
+        /// Todo semantic type. The operation discriminator already owns the
+        /// `kind` wire key, so this deliberately uses a distinct name.
+        #[serde(default)]
+        todo_kind: Option<TodoKind>,
     },
     SetStatus {
         id: String,
@@ -78,8 +82,9 @@ pub fn apply_shared_todo_ops(
                     id,
                     content,
                     status,
+                    todo_kind,
                 } => {
-                    apply_upsert(&mut rebuilt, id, content.as_ref(), *status)?;
+                    apply_upsert(&mut rebuilt, id, content.as_ref(), *status, *todo_kind)?;
                 }
                 SharedTodoOpArg::SetStatus { .. } | SharedTodoOpArg::Remove { .. } => {
                     return Err(ToolError::BadArgs(
@@ -98,7 +103,8 @@ pub fn apply_shared_todo_ops(
                 id,
                 content,
                 status,
-            } => apply_upsert(todos, id, content.as_ref(), *status)?,
+                todo_kind,
+            } => apply_upsert(todos, id, content.as_ref(), *status, *todo_kind)?,
             SharedTodoOpArg::SetStatus {
                 id,
                 status,
@@ -143,26 +149,17 @@ fn apply_upsert(
     id: &str,
     content: Option<&String>,
     status: Option<TodoStatus>,
+    todo_kind: Option<TodoKind>,
 ) -> Result<(), ToolError> {
-    let exists = todos.iter().any(|t| t.id == id);
-    if exists {
+    if let Some(existing) = todos.iter_mut().find(|todo| todo.id == id) {
         if let Some(content) = content {
-            ops::apply_todos_ops(
-                todos,
-                &[ops::TodoOp::SetContent {
-                    id: id.to_string(),
-                    content: content.clone(),
-                }],
-            )?;
+            existing.content = content.clone();
         }
         if let Some(status) = status {
-            ops::apply_todos_ops(
-                todos,
-                &[ops::TodoOp::SetStatus {
-                    id: id.to_string(),
-                    status,
-                }],
-            )?;
+            existing.status = status;
+        }
+        if let Some(todo_kind) = todo_kind {
+            existing.kind = todo_kind;
         }
         return Ok(());
     }
@@ -179,7 +176,7 @@ fn apply_upsert(
             content: content.clone(),
             status: status.unwrap_or(TodoStatus::Pending),
             evidence: Vec::new(),
-            kind: TodoKind::Work,
+            kind: todo_kind.unwrap_or(TodoKind::Work),
         })],
     )?;
     Ok(())

@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tomcat::core::llm::thinking_policy::ThinkingFormat;
 use tomcat::core::llm::{ChatMessage, StreamEvent};
 use tomcat::core::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, write_plan, PlanFileState, TodoStatus,
+    plan_path_for_id, read_plan, write_plan, PlanFileState, TodoKind, TodoStatus,
 };
 use tomcat::core::plan_runtime::{PlanRuntime, TranscriptAppender};
 use tomcat::core::session::{AgentMode, ResumeControlState};
@@ -835,11 +835,11 @@ async fn update_plan_emits_plan_todos_event() {
         create_plan::CreatePlanArgs {
             goal: "ship feature X".into(),
             draft: "## Goal\nship X".into(),
-            acceptance_commands: Vec::new(),
             todos: vec![create_plan::TodoArg {
                 id: "t1".into(),
                 content: "step 1".into(),
                 status: TodoStatus::Pending,
+                kind: TodoKind::Work,
             }],
         },
     )
@@ -861,10 +861,6 @@ async fn update_plan_emits_plan_todos_event() {
                 content: None,
                 status: TodoStatus::InProgress,
             }],
-            dispute_findings: vec![],
-            green_build_pass: None,
-            green_build_evidence: vec![],
-            acceptance_commands: None,
         },
     )
     .await
@@ -914,6 +910,7 @@ async fn todos_tool_emits_session_todos_event() {
                 id: "t1".into(),
                 content: Some("chat scratchpad".into()),
                 status: Some(TodoStatus::Pending),
+                todo_kind: None,
             }],
         },
     )

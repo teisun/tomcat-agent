@@ -44,8 +44,8 @@ pub(super) enum TurnOutcome {
 
 /// 计划尚未收口时，模型不能靠"回一段文字"结束回合。
 ///
-/// 判据用计划文件的 `state` 而不是"还有没有未完成的 todo"：
-/// todo 可能全勾完了但 code review 打回，此时 state 仍是 `executing`，活儿也确实没干完。
+/// 收口判据统一由 `next_action` 决定：`Done` / `HandOff` 结束本回合；
+/// `ContinueWork`（仍有未完成 todo）或 `RunVerify`（最终验收进行中）会注入继续指令。
 async fn completion_guard_instruction(plan_runtime: &PlanRuntime) -> Option<String> {
     let plan_id = plan_runtime.executing_plan_id()?;
     let plan = plan_runtime

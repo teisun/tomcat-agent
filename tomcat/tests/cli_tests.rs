@@ -5725,9 +5725,9 @@ async fn test_cli_chat_path_retry_exhausted_503_skips_failed_prompt_and_allows_n
     unsafe { std::env::remove_var(ENV_KEY) };
 }
 
-/// Responses 终局元数据应随 assistant message 一起持久化到 transcript。
+/// 终局 LLM 错误应返回结构化失败，而不是把半截输出伪装成 assistant 消息。
 #[tokio::test]
-async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata() {
+async fn test_run_chat_turn_returns_terminal_error_metadata() {
     common::setup_logging();
     let _span =
         info_span!("test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata")
@@ -5735,6 +5735,7 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
 
     const ENV_KEY: &str = "TOMCAT_RESPONSES_FINISH_REASON_CLI_KEY";
     let (_dir, mut ctx) = deterministic_chat_context_fixture(ENV_KEY);
+    ctx.config.llm.agent_max_attempts = 1;
     let mock_llm = Arc::new(DeterministicMockLlm::new(vec![vec![
         Ok(StreamEvent::ContentDelta {
             delta: "partial".to_string(),
@@ -5742,7 +5743,7 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
         Ok(StreamEvent::LlmError {
             reason: "error:boom".to_string(),
             message: "boom".to_string(),
-            code: Some("server_error".to_string()),
+            code: Some("invalid_request".to_string()),
         }),
         Ok(StreamEvent::FinishReason {
             reason: "error:boom".to_string(),
@@ -5771,42 +5772,12 @@ async fn test_run_chat_turn_persists_assistant_finish_reason_and_error_metadata(
     .expect("run_chat_turn timeout 5s")
     .expect("run_chat_turn result");
 
-    let result = match outcome {
-        tomcat::AgentRunOutcome::Completed(result) => result,
-        other => panic!("应正常 Completed，实际: {other:?}"),
+    let error = match outcome {
+        tomcat::AgentRunOutcome::Failed(tomcat::AppError::LlmDetailed(error)) => error,
+        other => panic!("应返回结构化 LLM failure，实际: {other:?}"),
     };
-    let assistant = result
-        .new_messages
-        .iter()
-        .rev()
-        .find(|msg| msg.role == tomcat::core::llm::ChatMessageRole::Assistant)
-        .expect("should persist assistant message");
-    assert_eq!(assistant.finish_reason.as_deref(), Some("error:boom"));
-    assert_eq!(assistant.error_message.as_deref(), Some("boom"));
-    assert_eq!(assistant.error_code.as_deref(), Some("server_error"));
-
-    let transcript_path = ctx
-        .session_runtime
-        .session
-        .current_transcript_path()
-        .expect("current_transcript_path")
-        .expect("transcript path should exist");
-    let transcript = fs::read_to_string(&transcript_path).expect("read transcript");
-    assert!(
-        transcript.contains("\"finish_reason\":\"error:boom\""),
-        "transcript 应保留 finish_reason，实际: {}",
-        trunc(&transcript, 800)
-    );
-    assert!(
-        transcript.contains("\"error_message\":\"boom\""),
-        "transcript 应保留 error_message，实际: {}",
-        trunc(&transcript, 800)
-    );
-    assert!(
-        transcript.contains("\"error_code\":\"server_error\""),
-        "transcript 应保留 error_code，实际: {}",
-        trunc(&transcript, 800)
-    );
+    assert_eq!(error.summary(), "boom");
+    assert_eq!(error.code(), Some("invalid_request"));
 
     // SAFETY: 清理测试环境变量。
     unsafe { std::env::remove_var(ENV_KEY) };

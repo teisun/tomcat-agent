@@ -28,14 +28,12 @@ fn executor_prompt_renders_plan_id() {
 }
 
 #[test]
-fn executor_prompt_describes_visible_close_out_gates() {
+fn executor_prompt_points_final_acceptance_to_verify_skill() {
     let rendered = load(PromptKey::ExecutorReminderFmt);
-    assert!(rendered.contains("[gate] review"));
-    assert!(rendered.contains("[gate] Acceptance"));
-    assert!(rendered.contains("set `[gate] review` to in_progress"));
     assert!(rendered.contains("load_skill(verify)"));
-    assert!(rendered.contains("next_step"));
-    assert!(!rendered.contains("when ALL todos in the PlanFile flip to `completed`"));
+    assert!(rendered.contains("按影响范围复核 diff 并验证"));
+    assert!(!rendered.contains("[gate]"));
+    assert!(!rendered.contains("green_build"));
 }
 
 #[test]
@@ -52,7 +50,7 @@ fn verification_prompt_points_ui_changes_to_verify_skill() {
     assert!(s.contains("frontend, or VS Code webview changes"));
     assert!(s.contains("verify\nskill's UI acceptance guidance"));
     assert!(s.contains("PNG plus ARIA snapshot"));
-    assert!(s.contains("green-build evidence"));
+    assert!(!s.contains("green-build evidence"));
 }
 
 #[test]
@@ -64,18 +62,16 @@ fn verification_and_planner_prompts_keep_focused_and_acceptance_roles_separate()
         verification.contains("Mid-work (including EXEC before final close-out): focused checks")
     );
     assert!(verification.contains("Final acceptance: once, when finishing the change or delivery"));
+    assert!(verification.contains("Load the verify skill\n  (`load_skill(verify)`) and follow it"));
     assert!(!verification.contains("green_build_evidence"));
 
-    assert!(planner.contains("create_plan appends two gate todos"));
-    assert!(planner.contains("Keep any milestone verification todo focused"));
-    assert!(planner.contains("verification section in the plan body"));
+    assert!(planner.contains("one final todo with `kind=acceptance`"));
+    assert!(planner.contains("intermediate verification todos use `kind=work`"));
+    assert!(planner.contains("human-readable \"Acceptance\" section"));
 }
 
-/// Acceptance scope policy is written exactly once, in the verify skill. Every
-/// other surface only navigates to it. This guard stops the four surfaces from
-/// drifting into contradictory scope rules again (full-suite-by-default versus
-/// proportional-to-change), which is what allowed a narrow run to pass a plan
-/// that had declared a full check set.
+/// Acceptance scope policy is written in the verify skill. Other prompts only
+/// tell the executor to load it for final acceptance.
 #[test]
 fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
     const VERIFY_SKILL: &str = include_str!(concat!(
@@ -114,18 +110,16 @@ fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
     }
     for (name, text) in navigating_surfaces {
         assert!(
-            text.contains("acceptance_commands"),
-            "{name} must point at the declared acceptance command list"
+            !text.contains("acceptance_commands"),
+            "{name} must not resurrect the removed acceptance command contract"
         );
     }
-    // The code reviewer stays focused on code quality: it neither checks the declared list nor
-    // reasons about acceptance scope (user decision, 2026-09-13).
     assert!(
         !code_review_brief.contains("acceptance_commands"),
-        "code review brief must not take on acceptance-list duties"
+        "code review brief must not mention removed acceptance-list duties"
     );
 
-    let ladder_markers = ["Floor:", "Ladder:", "Ratchet:", "L0 ", "L3 "];
+    let ladder_markers = ["Ladder:", "Ratchet:", "L0 ", "L3 "];
     for marker in ladder_markers {
         assert!(
             VERIFY_SKILL.contains(marker),
@@ -138,9 +132,7 @@ fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
             );
         }
     }
-    assert!(verification.contains(
-        "verify skill: the plan's declared\n  `acceptance_commands` are the mandatory floor"
-    ));
+    assert!(verification.contains("review the diff against the plan"));
 
     let next_actions = [
         NextAction::Done,
@@ -148,13 +140,7 @@ fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
             reason: "test",
             open_findings: vec![Finding::new("P1".into(), "test".into(), "test".into())],
         },
-        NextAction::RunAcceptance {
-            residual_findings: vec!["F01 [P1] test: residual".into()],
-        },
-        NextAction::FixFindings {
-            open_findings: vec![Finding::new("P1".into(), "test".into(), "test".into())],
-        },
-        NextAction::StartReview,
+        NextAction::RunVerify,
         NextAction::ContinueWork {
             remaining_work: vec!["- work (pending)".into()],
         },
@@ -192,7 +178,7 @@ fn planner_prompt_carries_a_generic_plan_structure_section() {
         .trim();
     assert_eq!(
         problem,
-        "- For a problem: \"Problem symptoms\", \"Root cause and evidence\", \"Solution (ASCII diagram + key decisions checklist)\", and \"Verification\"."
+        "- For a problem: \"Problem symptoms\", \"Root cause and evidence\", \"Solution\", and \"Verification\"."
     );
     let feature = section
         .lines()
@@ -204,7 +190,10 @@ fn planner_prompt_carries_a_generic_plan_structure_section() {
         .trim();
     assert_eq!(
         feature,
-        "- For a feature requirement: \"Requirement background\", \"Solution (ASCII diagram + key decisions checklist)\", and \"Verification\"."
+        "- For a feature requirement: \"Requirement background\", \"Solution\", and \"Verification\"."
+    );
+    assert!(
+        section.contains("Every Solution must contain a plain-language key decisions checklist")
     );
     assert!(normalized
         .contains("Do not list all problems first and then present all solutions together"));
@@ -311,6 +300,7 @@ fn every_tool_named_in_a_template_exists_in_the_catalog() {
     /// 反引号里的非工具标识符：字段名、枚举值、外部命令。
     const NON_TOOL_IDENTIFIERS: &[&str] = &[
         "aborted",
+        "acceptance",
         "acceptance_commands",
         "applied_changes",
         "block",
@@ -343,8 +333,11 @@ fn every_tool_named_in_a_template_exists_in_the_catalog() {
         "rg",
         "since",
         "task_id",
+        "todo_kind",
+        "upsert",
         "verdict",
         "wait_ms",
+        "work",
         "workspace_roots",
     ];
 
@@ -525,12 +518,11 @@ fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
     assert!(!s.contains("Err on the side"));
     assert!(!s.contains("of more, smaller items"));
     // engineering-standards #9：按独特风险分层的多视角测试。
-    assert!(s.contains("unit, integration, and\n  E2E"));
-    assert!(s.contains("only where it catches a distinct failure type"));
+    assert!(s.contains("unit, integration, and E2E coverage"));
+    assert!(s.contains("where each layer catches a\n  distinct failure type"));
     assert!(s.contains("verification batches as shared\n  build/test boundaries"));
-    assert!(s.contains("share a build target"));
-    assert!(s.contains("milestone-level verification"));
-    assert!(s.contains("user, project rules, manifest, or documentation"));
+    assert!(s.contains("Treat milestones as delivery boundaries"));
+    assert!(s.contains("Source commands from the user, project rules, manifests"));
     // engineering-standards #6-8 在 planner 的重申锚点。
     assert!(s.contains("first principles"));
     assert!(s.contains("ASCII diagram"));
@@ -542,7 +534,6 @@ fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
 #[test]
 fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
     const S6: &str = "Reason from first principles: when planning or coding, work out the architecture and implementation from first principles, follow best practices, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.";
-    const REVIEWER_S7: &str = "Explain in plain, jargon-free language, assuming the reader knows nothing about the problem or the code. Do not let jargon, terminology dumps, or abstract slogans replace an explanation; when a technical term is necessary, explain it immediately in everyday words. When explaining a design, a solution, or a root cause, include one overall ASCII diagram of the whole picture by default and add an ASCII diagram for each complex section; when you are creating or updating a development plan, write your full explanation into the plan itself rather than only replying in the chat.";
     const S8: &str = "Put user experience first: when a task involves UI, design it from the user's experience and above all follow the existing UI design conventions of the user's project.";
 
     let identity = load(PromptKey::SystemCoreIdentity);
@@ -567,7 +558,6 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
     let common_explanation_rules = [
         "Explain problems and technical solutions in a way that is easy to read and understand:",
         "When explaining a problem, solution, or plan, provide an overall ASCII diagram by default to show the big picture.",
-        "Include ASCII diagrams in complex sections to aid understanding. In the accompanying explanations, use concise wording that conveys all essential points clearly and fully, and avoid long-winded exposition.",
         "Do not explain problems or solutions using opaque jargon or strings of technical terms. When a technical term is necessary, immediately follow it with a plain-language explanation.",
         "Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.",
     ];
@@ -584,6 +574,33 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
             "{label} must not retain the old explanation rule"
         );
     }
+    assert_eq!(
+        identity
+            .matches(
+                "All writing must use plain language—say it plainly, say it plainly, say it plainly."
+            )
+            .count(),
+        1,
+        "core_identity must retain the plain-language rule exactly once"
+    );
+    assert_eq!(
+        identity
+            .matches(
+                "Include ASCII diagrams in complex sections to aid understanding. In the accompanying explanations, prioritize clear and complete communication while avoiding unnecessarily long-winded exposition."
+            )
+            .count(),
+        1,
+        "core_identity must retain the updated concise-explanation rule exactly once"
+    );
+    assert_eq!(
+        planner
+            .matches(
+                "Include ASCII diagrams in complex sections to aid understanding. In the accompanying explanations, use concise wording that conveys all essential points clearly and fully, and avoid long-winded exposition."
+            )
+            .count(),
+        1,
+        "planner must retain its role-specific concise-explanation rule exactly once"
+    );
     for plan_only in [
         "Give each problem or feature requirement its own self-contained section",
         "When creating or updating a development plan, write the complete explanation into the plan itself rather than only replying in the chat.",
@@ -591,12 +608,9 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
         assert!(planner.contains(plan_only));
         assert!(!identity.contains(plan_only));
     }
+    assert!(reviewer_plan.contains("say it plainly"));
     assert!(
-        reviewer_plan.contains(REVIEWER_S7),
-        "plan reviewer wording is outside this update's scope"
-    );
-    assert!(
-        !reviewer_code.contains(REVIEWER_S7),
+        !reviewer_code.contains("Explain in plain, jargon-free language"),
         "read-only code reviewer must not promise plan-file ASCII explanations"
     );
 }
@@ -647,10 +661,7 @@ fn planner_and_system_verification_share_one_scoped_batch_per_target_contract() 
     let verification = load(PromptKey::SystemVerification);
 
     assert!(planner.contains("verification batches as shared\n  build/test boundaries"));
-    assert!(
-        planner.contains("Group todos that share a build target into named verification batches")
-    );
-    assert!(planner.contains("milestone-level verification as the default granularity"));
+    assert!(planner.contains("Treat milestones as delivery boundaries"));
     assert!(verification
         .contains("Do not schedule the same test family once per todo and again at the end"));
     assert!(verification

@@ -453,7 +453,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "create_plan",
         label: "Create Plan",
-        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, writes frontmatter under an advisory lock, then appends runtime-owned `[gate] review` and `[gate] Acceptance` todos to the end of the returned list. The gates are the visible close-out flow and must not be supplied by the caller. The runtime then runs an advisory reviewer whose summary rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.\n",
+        description: "Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, and writes frontmatter under an advisory lock. A coding plan may include one final todo with kind `acceptance`; the runtime does not append todos. The runtime then runs an advisory reviewer whose summary rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.\n",
         display_summary: Some("Create a plan file under ~/.tomcat/plans/ and run an advisory reviewer (PLAN mode only)."),
         parameters: create_plan_parameters,
         scope: PermissionScope::Write,
@@ -468,7 +468,7 @@ pub const BUILTIN_TOOL_CATALOG: &[BuiltinToolCatalogEntry] = &[
     BuiltinToolCatalogEntry {
         name: "update_plan",
         label: "Update Plan",
-        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. In EXEC, an existing work todo's `content` is frozen; record progress and verification in `set_status.evidence` instead. Up to three independent todos may be `in_progress`. When all todos reach `completed` in EXEC, the runtime runs applicable completion gates before allowing state=completed. Only frontmatter.todos is mutated; plan body markdown is left untouched.\n",
+        description: "Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. In EXEC, an existing work todo's `content` is frozen; record progress and verification in `set_status.evidence` instead. Up to three independent todos may be `in_progress`. A plan completes when it has at least one todo and every todo is completed or cancelled. Starting a final `acceptance` todo returns a verify-skill hint; only frontmatter.todos is mutated.\n",
         display_summary: Some("Apply todo-only incremental ops to the active plan (CHAT/PLAN/EXEC)."),
         parameters: update_plan_parameters,
         scope: PermissionScope::Write,
@@ -706,7 +706,11 @@ fn todo_status_property(description: &str) -> Value {
     })
 }
 
-fn shared_todo_op_item_schema(status_description: &str, include_evidence: bool) -> Value {
+fn shared_todo_op_item_schema(
+    status_description: &str,
+    include_evidence: bool,
+    include_todo_kind: bool,
+) -> Value {
     let mut set_status_properties = serde_json::json!({
         "kind": {
             "type": "string",
@@ -726,27 +730,35 @@ fn shared_todo_op_item_schema(status_description: &str, include_evidence: bool) 
             "description": "Completion evidence. Only valid with status=`completed`; include concrete verification such as task:<id>, file:<path>, or a command outcome."
         });
     }
+    let mut upsert_properties = serde_json::json!({
+        "kind": {
+            "type": "string",
+            "const": "upsert",
+            "description": "Operation kind."
+        },
+        "id": {
+            "type": "string",
+            "description": "Target todo id (kebab-case)."
+        },
+        "content": {
+            "type": "string",
+            "description": "Todo content. Required when creating a brand-new todo."
+        },
+        "status": todo_status_property(status_description)
+    });
+    if include_todo_kind {
+        upsert_properties["todo_kind"] = serde_json::json!({
+            "type": "string",
+            "enum": ["work", "acceptance"],
+            "description": "Todo semantic type. Defaults to work. `kind` already identifies the operation, so todo type uses this separate key. `acceptance` is only for the one final acceptance todo in a plan."
+        });
+    }
     serde_json::json!({
         "oneOf": [
             {
                 "type": "object",
                 "description": "`upsert` creates a todo if id is new, else updates the provided fields.",
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "const": "upsert",
-                        "description": "Operation kind."
-                    },
-                    "id": {
-                        "type": "string",
-                        "description": "Target todo id (kebab-case)."
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Todo content. Required when creating a brand-new todo."
-                    },
-                    "status": todo_status_property(status_description)
-                },
+                "properties": upsert_properties,
                 "required": ["kind", "id"],
                 "additionalProperties": false
             },
@@ -1263,7 +1275,7 @@ fn package_install_parameters() -> Value {
 fn create_plan_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id.",
+        "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id. For a coding plan, normally include one final `kind=acceptance` todo and describe its acceptance in plain language in the plan body; omitting it does not block creation.",
         "properties": {
             "goal": {
                 "type": "string",
@@ -1292,15 +1304,15 @@ fn create_plan_parameters() -> Value {
                             "type": "string",
                             "enum": ["pending", "in_progress", "completed", "cancelled"],
                             "description": "Initial status. Defaults to `pending`."
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["work", "acceptance"],
+                            "description": "Optional todo semantic type, default `work`. `acceptance` is only for the final acceptance todo; a plan may have at most one."
                         }
                     },
                     "required": ["id", "content"]
                 }
-            },
-            "acceptance_commands": {
-                "type": "array",
-                "description": "Declared acceptance commands: the mandatory floor that `[gate] Acceptance` must run. One complete, runnable shell command per entry, exactly as it will be launched (put any `cd` inside the command). Size it to the change's impact radius; the verify skill decides how far beyond this floor to widen. Blank entries are dropped and duplicates removed.",
-                "items": { "type": "string" }
             }
         },
         "required": ["goal", "draft", "todos"]
@@ -1310,7 +1322,7 @@ fn create_plan_parameters() -> Value {
 fn update_plan_parameters() -> Value {
     serde_json::json!({
         "type": "object",
-        "description": "Apply todo ops, submit a P1 code-review dispute, or submit verified green-build evidence to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
+        "description": "Apply todo ops to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
         "properties": {
             "plan_id": {
                 "type": "string",
@@ -1326,48 +1338,12 @@ fn update_plan_parameters() -> Value {
             },
             "ops": {
                 "type": "array",
-                "description": "Ordered todo mutations applied atomically. Omit or pass [] only when submitting dispute_findings or green-build evidence.",
+                "description": "Ordered todo mutations applied atomically.",
                 "items": shared_todo_op_item_schema(
                     "For `upsert` (optional) and `set_status` (required). At most one todo may be `in_progress`; `in_progress` only allowed when plan.state == executing.",
                     true,
+                    true,
                 )
-            },
-            "dispute_findings": {
-                "type": "array",
-                "description": "P1 findings, or P0 findings after an explicit user acknowledgement of a P0 handoff, that the main Agent accepts as a trade-off. Use only for wontfix; fixing code is communicated by a later review, not here.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "ref": { "type": "string", "description": "Round-local finding reference such as F01." },
-                        "area": { "type": "string", "description": "Finding area copied for audit readability; matching uses ref." },
-                        "resolution": { "type": "string", "enum": ["wontfix"] },
-                        "reason": { "type": "string", "description": "Concrete accepted trade-off reason." }
-                    },
-                    "required": ["ref", "area", "resolution", "reason"],
-                    "additionalProperties": false
-                }
-            },
-            "green_build_pass": {
-                "type": "boolean",
-                "description": "Set true only after loading the verify skill and completing its background acceptance commands."
-            },
-            "green_build_evidence": {
-                "type": "array",
-                "description": "Finished background bash commands used as green-build evidence. Required with green_build_pass=true; command must exactly match the recorded task, and every declared `acceptance_commands` entry must appear here with its own task_id (extra commands are fine, narrower substitutes are not).",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string" },
-                        "task_id": { "type": "string" }
-                    },
-                    "required": ["command", "task_id"],
-                    "additionalProperties": false
-                }
-            },
-            "acceptance_commands": {
-                "type": "array",
-                "description": "Complete replacement for the plan's declared acceptance command list (one runnable command per entry). Omit to leave it unchanged. While planning/pending the list is replaced as given; once executing it is a ratchet: the new list must still contain every previously declared command, so it can only grow. A completed plan is immutable.",
-                "items": { "type": "string" }
             }
         }
     })
@@ -1396,6 +1372,7 @@ fn todos_parameters() -> Value {
                 "minItems": 1,
                 "items": shared_todo_op_item_schema(
                     "For `upsert` (optional) and `set_status` (required).",
+                    false,
                     false,
                 )
             }

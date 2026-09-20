@@ -81,9 +81,8 @@ pub struct DisputedFinding {
     pub reason: String,
 }
 
-/// The single close-out decision source for update results, completion nudges,
-/// and gate admission. Consumers translate this value; they must not infer a
-/// different next step from todo state themselves.
+/// The single close-out decision source for update results and completion
+/// nudges. Runtime does not schedule review or acceptance work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NextAction {
     Done,
@@ -91,13 +90,7 @@ pub enum NextAction {
         reason: &'static str,
         open_findings: Vec<review::Finding>,
     },
-    RunAcceptance {
-        residual_findings: Vec<String>,
-    },
-    FixFindings {
-        open_findings: Vec<review::Finding>,
-    },
-    StartReview,
+    RunVerify,
     ContinueWork {
         remaining_work: Vec<String>,
     },
@@ -108,9 +101,7 @@ impl NextAction {
         match self {
             Self::Done => "done",
             Self::HandOff { .. } => "handoff",
-            Self::RunAcceptance { .. } => "run_acceptance",
-            Self::FixFindings { .. } => "fix_findings",
-            Self::StartReview => "start_review",
+            Self::RunVerify => "run_verify",
             Self::ContinueWork { .. } => "continue_work",
         }
     }
@@ -127,32 +118,15 @@ impl NextAction {
                 "Stop unattended execution and hand this plan to the user ({reason}).\n{}",
                 code_reviewer::render_open_findings_list(open_findings)
             ),
-            Self::RunAcceptance { residual_findings } => {
-                let review_context = if residual_findings.is_empty() {
-                    "Code review passed.".to_string()
-                } else {
-                    format!(
-                        "Code review reached its configured round budget after addressing findings during those rounds. Residual findings still requiring explicit acceptance handling:\n{}",
-                        residual_findings
-                            .iter()
-                            .map(|finding| format!("- {finding}"))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    )
-                };
+            Self::RunVerify => {
+                "load_skill(verify)；按影响范围复核 diff 并验证；完成后勾掉本验收 todo".into()
+            }
+            Self::ContinueWork { remaining_work } => {
                 format!(
-                    "{review_context}\nSet the `[gate] Acceptance` todo to in_progress, load_skill(verify), run every declared `acceptance_commands` entry plus what the change's impact radius requires, then submit green_build_pass with evidence. The gate validates only real background-task evidence from this session: a finished task, exit 0, and an exact command match. If code changes during acceptance, follow the verify skill to review the change and rerun affected checks."
+                    "You are still implementing. Complete these remaining todos:\n{}",
+                    remaining_work.join("\n")
                 )
             }
-            Self::FixFindings { open_findings } => format!(
-                "Fix the following unresolved code-review findings before starting another review:\n{}",
-                code_reviewer::render_open_findings_list(open_findings)
-            ),
-            Self::StartReview => "All work todos are done. Set the `[gate] review` todo to in_progress to start close-out. If the change touches no code files, both gates are skipped automatically and the plan completes in this same call.".into(),
-            Self::ContinueWork { remaining_work } => format!(
-                "You are still implementing. Complete only these remaining work todos with focused checks; the `[gate] Acceptance` step loads the `verify` skill for final acceptance:\n{}",
-                remaining_work.join("\n")
-            ),
         }
     }
 }
@@ -185,14 +159,13 @@ pub struct ControlSnapshot {
     pub progress: Option<ProgressSource>,
 }
 
-/// 恢复时读计划文件；不存在或读不动都当作"没有计划"，由调用方决定兜底。
+/// 恢复时只读计划文件；不存在或读不动都当作"没有计划"，由调用方决定兜底。
 ///
-/// 半开 gate 会在同一把计划文件锁内恢复为 `pending`，由调用者据此补上一条
-/// review 中止终态事件。
+/// Todo 状态属于计划本身，恢复和 park 都不得改写它。
 fn read_plan_for_restore(
     path: &std::path::Path,
-    lock_timeout_ms: u64,
-) -> Option<file_store::RuntimeGateRecovery> {
+    _lock_timeout_ms: u64,
+) -> Option<file_store::PlanFile> {
     if !path.is_file() {
         tracing::warn!(
             target: "plan_runtime::recover",
@@ -201,8 +174,8 @@ fn read_plan_for_restore(
         );
         return None;
     }
-    match file_store::recover_runtime_gates_on_load(path, lock_timeout_ms) {
-        Ok(recovery) => Some(recovery),
+    match file_store::read_plan(path) {
+        Ok(plan) => Some(plan),
         Err(err) => {
             tracing::warn!(
                 target: "plan_runtime::recover",
@@ -667,17 +640,9 @@ impl PlanRuntime {
         state: ResumeControlState,
     ) -> Result<(), PlanRuntimeError> {
         *self.mode.write() = state.mode.unwrap_or(AgentMode::Chat);
-        let mut recovered_review = None;
         let active_plan = state.plan_path.as_ref().and_then(|path| {
-            read_plan_for_restore(path, self.lock_timeout_ms).map(|recovery| {
-                if recovery.recovered_code_review {
-                    recovered_review = Some((
-                        recovery.plan.frontmatter.plan_id.clone(),
-                        recovery.plan.frontmatter.code_review_rounds,
-                    ));
-                }
-                ActivePlan::from_file(path.clone(), &recovery.plan)
-            })
+            read_plan_for_restore(path, self.lock_timeout_ms)
+                .map(|plan| ActivePlan::from_file(path.clone(), &plan))
         });
         if state.plan_path.is_some() && active_plan.is_none() {
             self.write_transcript_custom(serde_json::json!({
@@ -687,19 +652,6 @@ impl PlanRuntime {
             }));
         }
         *self.active_plan.write() = active_plan;
-        if let Some((plan_id, completed_rounds)) = recovered_review {
-            self.write_code_review_transcript(
-                &plan_id,
-                &code_reviewer::CodeReviewSummary::aborted_with(
-                    "recovered half-open code review was reset to pending",
-                ),
-                completed_rounds.saturating_add(1),
-                &format!("{plan_id}:recovery"),
-                "recovery",
-                false,
-                0,
-            );
-        }
         Ok(())
     }
 
@@ -757,27 +709,13 @@ impl PlanRuntime {
     /// plan。无论哪条路径，都不会改会话模式。
     pub fn sync_active_plan_from_disk(&self) -> Result<Option<String>, PlanRuntimeError> {
         if let Some(active) = self.active_plan() {
-            let Some(recovery) = read_plan_for_restore(&active.path, self.lock_timeout_ms) else {
+            let Some(plan) = read_plan_for_restore(&active.path, self.lock_timeout_ms) else {
                 *self.active_plan.write() = None;
                 return Ok(None);
             };
-            let plan = recovery.plan;
             let refreshed = ActivePlan::from_file(active.path, &plan);
             let plan_id = refreshed.id.clone();
             *self.active_plan.write() = Some(refreshed);
-            if recovery.recovered_code_review {
-                self.write_code_review_transcript(
-                    &plan_id,
-                    &code_reviewer::CodeReviewSummary::aborted_with(
-                        "recovered half-open code review was reset to pending",
-                    ),
-                    plan.frontmatter.code_review_rounds.saturating_add(1),
-                    &format!("{plan_id}:recovery"),
-                    "recovery",
-                    false,
-                    0,
-                );
-            }
             return Ok(Some(plan_id));
         }
 
@@ -798,29 +736,11 @@ impl PlanRuntime {
             if matches!(plan.frontmatter.state, file_store::PlanFileState::Executing)
                 && self.owns_executing_plan(&plan)
             {
-                let Some(recovery) = read_plan_for_restore(&path, self.lock_timeout_ms) else {
+                let Some(plan) = read_plan_for_restore(&path, self.lock_timeout_ms) else {
                     continue;
                 };
-                let plan_id = recovery.plan.frontmatter.plan_id.clone();
-                *self.active_plan.write() =
-                    Some(ActivePlan::from_file(path.clone(), &recovery.plan));
-                if recovery.recovered_code_review {
-                    self.write_code_review_transcript(
-                        &plan_id,
-                        &code_reviewer::CodeReviewSummary::aborted_with(
-                            "recovered half-open code review was reset to pending",
-                        ),
-                        recovery
-                            .plan
-                            .frontmatter
-                            .code_review_rounds
-                            .saturating_add(1),
-                        &format!("{plan_id}:recovery"),
-                        "recovery",
-                        false,
-                        0,
-                    );
-                }
+                let plan_id = plan.frontmatter.plan_id.clone();
+                *self.active_plan.write() = Some(ActivePlan::from_file(path.clone(), &plan));
                 return Ok(Some(plan_id));
             }
         }
@@ -972,50 +892,23 @@ impl PlanRuntime {
                 open_findings: frontmatter.code_review_open_findings.clone(),
             };
         }
-        if frontmatter.code_review_handoff {
-            return NextAction::HandOff {
-                reason: "p0_residual",
-                open_findings: frontmatter.code_review_open_findings.clone(),
-            };
+        if frontmatter.todos.iter().any(|todo| {
+            matches!(todo.kind, file_store::TodoKind::Acceptance)
+                && matches!(todo.status, file_store::TodoStatus::InProgress)
+        }) {
+            return NextAction::RunVerify;
         }
-        if self.code_review_infra_retry_exhausted(&frontmatter.plan_id) {
-            return NextAction::HandOff {
-                reason: "review_infrastructure_retries_exhausted",
-                open_findings: frontmatter.code_review_open_findings.clone(),
-            };
-        }
-        if frontmatter.code_review_pass && !frontmatter.green_build_pass {
-            return NextAction::RunAcceptance {
-                residual_findings: frontmatter.code_review_residual_findings.clone(),
-            };
-        }
-        if !frontmatter.code_review_open_findings.is_empty() {
-            return NextAction::FixFindings {
-                open_findings: frontmatter.code_review_open_findings.clone(),
-            };
-        }
-        let remaining_work = frontmatter
-            .todos
-            .iter()
-            .filter(|todo| matches!(todo.kind, file_store::TodoKind::Work))
-            .filter(|todo| {
-                !matches!(
-                    todo.status,
-                    file_store::TodoStatus::Completed | file_store::TodoStatus::Cancelled
-                )
-            });
+        let remaining_work = frontmatter.todos.iter().filter(|todo| {
+            !matches!(
+                todo.status,
+                file_store::TodoStatus::Completed | file_store::TodoStatus::Cancelled
+            )
+        });
         let remaining_work = remaining_work
             .map(|todo| format!("- {} ({})", todo.id, todo.status.as_str()))
             .collect::<Vec<_>>();
-        let all_work_terminal = remaining_work.is_empty();
-        if all_work_terminal {
-            if frontmatter.code_review_pass && frontmatter.green_build_pass {
-                NextAction::Done
-            } else if !frontmatter.code_review_pass {
-                NextAction::StartReview
-            } else {
-                NextAction::ContinueWork { remaining_work }
-            }
+        if remaining_work.is_empty() {
+            NextAction::Done
         } else {
             NextAction::ContinueWork { remaining_work }
         }
@@ -1095,11 +988,9 @@ impl PlanRuntime {
                 "outcome": "handoff",
                 "phase": next_action.phase(),
                 "open_findings_count": match next_action {
-                    NextAction::HandOff { open_findings, .. }
-                    | NextAction::FixFindings { open_findings } => open_findings.len(),
+                    NextAction::HandOff { open_findings, .. } => open_findings.len(),
                     NextAction::Done
-                    | NextAction::RunAcceptance { .. }
-                    | NextAction::StartReview
+                    | NextAction::RunVerify
                     | NextAction::ContinueWork { .. } => 0,
                 },
             }));
@@ -1223,10 +1114,10 @@ impl PlanRuntime {
         summary
     }
 
-    /// 同步派发 code reviewer。调用方负责：
+    /// 同步派发保留的 code reviewer。它不在默认完成路径中；手动或实验调用方负责：
     /// 1. 在持有的 PlanFile frontmatter 快照中判断当前轮次
     /// 2. 调用 `CodeReviewSummary::normalize_for_result()`
-    /// 3. 再写 transcript，保证 transcript 与 `update_plan.code_review` 口径一致
+    /// 3. 再写对应的 code-review transcript。
     pub async fn dispatch_code_reviewer(
         &self,
         plan_id: &str,
@@ -1260,10 +1151,8 @@ impl PlanRuntime {
     ///
     /// 1. **必须**在 `write_plan` 释放 advisory lock **之后**调用。
     /// 2. 读取 plan 文件 → 调 dispatcher → 解析 `<verify>` block → 返回 `VerifySummary`。
-    /// 3. 失败 / parse 错 / max_turns / parent abort → `verdict=aborted`；
-    ///    调用方（`update_plan`）**不**因此失败，而是按 `verify_gate` 决定是否收工。
-    /// 4. transcript `plan.verify` 事件由调用方在 `normalize_for_gate()` 之后统一写入，
-    ///    以保证 transcript 与 `update_plan.verify` 共用同一份最终语义。
+    /// 3. 失败 / parse 错 / max_turns / parent abort → `verdict=aborted`。
+    /// 4. 它保留给独立的手动/实验流程；默认计划完成与 `update_plan` 不调用它。
     /// 5. 若 dispatcher 未注入 → 返回 `placeholder_pending`。
     pub async fn dispatch_verifier(&self, plan_id: &str) -> verify::VerifySummary {
         let Some(dispatcher) = self.verifier.lock().clone() else {
@@ -1391,117 +1280,6 @@ impl PlanRuntime {
             }
         }
         self.write_transcript_custom(payload);
-    }
-
-    // These are independently persisted wire fields. Grouping them into an opaque
-    // context object would make recovery call sites less auditable.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn write_code_review_transcript(
-        &self,
-        plan_id: &str,
-        summary: &code_reviewer::CodeReviewSummary,
-        round: u32,
-        review_attempt_id: &str,
-        tool_call_id: &str,
-        is_incremental: bool,
-        delta_file_count: usize,
-    ) {
-        let mut payload = summary.to_json();
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert(
-                "event".to_string(),
-                serde_json::Value::String(crate::infra::wire::WIRE_PLAN_CODE_REVIEW.to_string()),
-            );
-            obj.insert(
-                "plan_id".to_string(),
-                serde_json::Value::String(plan_id.to_string()),
-            );
-            obj.insert(
-                "rounds".to_string(),
-                serde_json::Value::Number(serde_json::Number::from(round)),
-            );
-            obj.insert(
-                "round".to_string(),
-                serde_json::Value::Number(serde_json::Number::from(round)),
-            );
-            obj.insert(
-                "review_attempt_id".to_string(),
-                serde_json::Value::String(review_attempt_id.to_string()),
-            );
-            obj.insert(
-                "tool_call_id".to_string(),
-                serde_json::Value::String(tool_call_id.to_string()),
-            );
-            obj.insert(
-                "is_incremental".to_string(),
-                serde_json::Value::Bool(is_incremental),
-            );
-            obj.insert(
-                "delta_file_count".to_string(),
-                serde_json::Value::Number(serde_json::Number::from(delta_file_count)),
-            );
-            if !summary.child_session_id.is_empty() {
-                obj.insert(
-                    "child_session_id".to_string(),
-                    serde_json::Value::String(summary.child_session_id.clone()),
-                );
-            }
-        }
-        self.write_transcript_custom(payload);
-    }
-
-    /// Records an explicit audit event when a code-review gate is safely skipped.
-    ///
-    /// A passing gate without a reviewer dispatch is still a state transition that
-    /// unlocks acceptance (or completes a docs-only plan). Persisting it in the same
-    /// event family prevents transcript readers from mistaking “no review record” for
-    /// a missing or failed review.
-    pub(crate) fn write_code_review_skipped_transcript(
-        &self,
-        plan_id: &str,
-        reason: &str,
-        tool_call_id: &str,
-    ) {
-        self.write_transcript_custom(serde_json::json!({
-            "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW,
-            "plan_id": plan_id,
-            "round": 0,
-            "rounds": 0,
-            // A plan may pass through more than one skipped review gate. Include
-            // the originating tool call so transcript consumers do not collapse
-            // distinct audit events into one timeline item.
-            "review_attempt_id": format!("skipped:{reason}:{tool_call_id}"),
-            "tool_call_id": tool_call_id,
-            "aborted": false,
-            "verdict": "skipped",
-            "skipped": true,
-            "skip_reason": reason,
-            "summary": format!("code review skipped: {reason}"),
-            "changes_summary": "none",
-            "findings": [],
-            "reviewer_turns_used": 0,
-            "reviewer_turns_limit": self.max_code_review_rounds(),
-            "reviewer_stop_reason": reason,
-            "code_review_pass": true,
-        }));
-    }
-
-    /// 代码评审预算用尽仍有未清 finding：记录残余，随后由 acceptance 的绿构建证据收口。
-    pub(crate) fn write_code_review_exhausted_transcript(
-        &self,
-        plan_id: &str,
-        rounds: u32,
-        residual_findings: &[String],
-    ) {
-        self.write_transcript_custom(serde_json::json!({
-            "event": crate::infra::wire::WIRE_PLAN_CODE_REVIEW_EXHAUSTED,
-            "plan_id": plan_id,
-            "rounds": rounds,
-            "max_code_review_rounds": self.max_code_review_rounds(),
-            "outcome": "passed_to_acceptance_with_residual_findings",
-            "code_review_pass": true,
-            "residual_findings": residual_findings,
-        }));
     }
 
     /// Record provider usage for the active build only. Calls made in normal chat or planning
@@ -1920,22 +1698,10 @@ impl PlanRuntime {
         let plan_id = active.id;
         self.completion_guard_observations.lock().remove(&plan_id);
         self.completion_guard_stalled.lock().remove(&plan_id);
-        // ② 改写磁盘
+        // ② 仅降级计划生命周期；todo 状态原样保留。
         let path = active.path;
-        // The half-open recovery write is intentionally separate from the state
-        // demotion below: it records the terminal review event once while the
-        // raw half-open state is still observable.
-        let had_review_in_progress =
-            file_store::recover_runtime_gates_on_load(&path, self.lock_timeout_ms)
-                .map_err(PlanRuntimeError::from_plan_io)?
-                .recovered_code_review;
         file_store::update_plan_locked(&path, self.lock_timeout_ms, |plan| {
             plan.frontmatter.state = file_store::PlanFileState::Pending;
-            for todo in &mut plan.frontmatter.todos {
-                if todo.kind.is_gate() && todo.status == file_store::TodoStatus::InProgress {
-                    todo.status = file_store::TodoStatus::Pending;
-                }
-            }
             Ok::<(), PlanRuntimeError>(())
         })
         .map_err(|e| match e {
@@ -1954,20 +1720,6 @@ impl PlanRuntime {
             Some(&plan_id),
             Some(path),
         );
-        if had_review_in_progress {
-            let summary = code_reviewer::CodeReviewSummary::aborted_with(
-                "recovered half-open code review was reset to pending",
-            );
-            self.write_code_review_transcript(
-                &plan_id,
-                &summary,
-                0,
-                &format!("{plan_id}:recovery"),
-                "recovery",
-                false,
-                0,
-            );
-        }
         Ok(Some(plan_id))
     }
 

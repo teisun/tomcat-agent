@@ -4,6 +4,10 @@
 
 > 注：本文件包含历史集成记录，个别条目会提及当时仍存在的 WasmEdge / `integration-wasm` 等链路；这些内容仅表示**历史上下文**，不代表当前实现。当前插件运行时请以 `rquickjs` 与现行测试/脚本入口为准。
 
+> Plan Runtime 当前口径：运行时不追加验收 todo，也不自动派发收口评审；最终验收由
+> LLM 加载 `verify` skill 后按影响范围完成。详见
+> [`architecture/plan-exec-code-verification.md`](architecture/plan-exec-code-verification.md)。
+
 
 ## develop
 

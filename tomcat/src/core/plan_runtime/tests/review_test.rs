@@ -167,23 +167,19 @@ fn build_review_prompt_includes_plan_and_workspace_paths() {
     assert!(prompt.contains("do not guess"));
 }
 
-/// The plan reviewer is the second pair of eyes on the declared acceptance floor: it checks
-/// that the list exists, is runnable, and matches what the todos touch, and may fix it in
-/// place because the plan is still being written.
+/// The plan reviewer advises on the final acceptance todo and can add it while
+/// the plan is still being written.
 #[test]
-fn build_review_prompt_asks_the_plan_reviewer_to_check_the_declared_acceptance_floor() {
+fn build_review_prompt_asks_the_plan_reviewer_to_check_the_final_acceptance_todo() {
     let prompt = build_review_prompt(
         "plan-1",
         "body",
         Path::new("/tmp/plan-1.plan.md"),
         Some(Path::new("/repo/root")),
     );
-    assert!(
-        prompt.contains("Check the declared acceptance floor, frontmatter `acceptance_commands`")
-    );
-    assert!(prompt.contains("every entry must be one complete runnable shell command"));
-    assert!(prompt.contains("every test or script a todo promises to add"));
-    assert!(prompt.contains("fix it directly through\n  `update_plan` with `acceptance_commands`"));
+    assert!(prompt.contains("one final `kind=Acceptance` todo"));
+    assert!(prompt.contains("human-readable acceptance section"));
+    assert!(prompt.contains("`todo_kind` is `acceptance`"));
 }
 
 #[test]

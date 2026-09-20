@@ -432,21 +432,14 @@ Parameters:
 - Destructive: `false`
 - Search hint: `plan create planning goal draft todos reviewer`
 
-Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, writes frontmatter under an advisory lock, then appends runtime-owned `[gate] review` and `[gate] Acceptance` todos to the end of the returned list. The gates are the visible close-out flow and must not be supplied by the caller. The runtime then runs an advisory reviewer whose summary rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.
+Create a new plan file under `~/.tomcat/plans/<slug>_<hash>.plan.md` (PLAN mode only). Pass `goal` (short objective), `draft` (plan-body content), and an initial flat `todos` list; the runtime derives `plan_id` from goal (do NOT pass plan_id), normalizes `draft` into the `## Plan` section, and writes frontmatter under an advisory lock. A coding plan may include one final todo with kind `acceptance`; the runtime does not append todos. The runtime then runs an advisory reviewer whose summary rides back on this tool's result `review` field. Reviewer output is advisory only and does NOT gate `/plan build`. Calling outside Planning returns a tool error.
 
 Parameters:
 
 ```json
 {
-  "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id.",
+  "description": "Create a plan file under ~/.tomcat/plans/. Only callable when PlanRuntime mode == Planning. plan_id is derived by runtime from goal; do NOT pass plan_id. For a coding plan, normally include one final `kind=acceptance` todo and describe its acceptance in plain language in the plan body; omitting it does not block creation.",
   "properties": {
-    "acceptance_commands": {
-      "description": "Declared acceptance commands: the mandatory floor that `[gate] Acceptance` must run. One complete, runnable shell command per entry, exactly as it will be launched (put any `cd` inside the command). Size it to the change's impact radius; the verify skill decides how far beyond this floor to widen. Blank entries are dropped and duplicates removed.",
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
-    },
     "draft": {
       "description": "Markdown for the plan body `## Plan` section (approach, key decisions, constraints; <= ~2000 chars). Do NOT include the `## Goal` / `## Plan` / `## Todos Board` headings yourself.",
       "type": "string"
@@ -465,6 +458,14 @@ Parameters:
           },
           "id": {
             "description": "Stable kebab-case todo id, unique within the plan.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Optional todo semantic type, default `work`. `acceptance` is only for the final acceptance todo; a plan may have at most one.",
+            "enum": [
+              "work",
+              "acceptance"
+            ],
             "type": "string"
           },
           "status": {
@@ -506,81 +507,16 @@ Parameters:
 - Destructive: `false`
 - Search hint: `plan update todos upsert set_status remove replace`
 
-Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. In EXEC, an existing work todo's `content` is frozen; record progress and verification in `set_status.evidence` instead. Up to three independent todos may be `in_progress`. When all todos reach `completed` in EXEC, the runtime runs applicable completion gates before allowing state=completed. Only frontmatter.todos is mutated; plan body markdown is left untouched.
+Apply incremental todo-only ops (`upsert` / `set_status` / `remove`) to the active plan, persisted to its `.plan.md` frontmatter under an advisory lock. Visible in CHAT / PLAN / EXEC. `plan_id` and `path` target the plan; `replace=true` swaps the entire todo list with the provided upsert results. In EXEC, an existing work todo's `content` is frozen; record progress and verification in `set_status.evidence` instead. Up to three independent todos may be `in_progress`. A plan completes when it has at least one todo and every todo is completed or cancelled. Starting a final `acceptance` todo returns a verify-skill hint; only frontmatter.todos is mutated.
 
 Parameters:
 
 ```json
 {
-  "description": "Apply todo ops, submit a P1 code-review dispute, or submit verified green-build evidence to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
+  "description": "Apply todo ops to the active plan. Callable in CHAT / PLAN / EXEC; requires an active plan. `replace=true` swaps the whole todo list with the upsert results; each op is tagged by `kind` (`upsert` / `set_status` / `remove`).",
   "properties": {
-    "acceptance_commands": {
-      "description": "Complete replacement for the plan's declared acceptance command list (one runnable command per entry). Omit to leave it unchanged. While planning/pending the list is replaced as given; once executing it is a ratchet: the new list must still contain every previously declared command, so it can only grow. A completed plan is immutable.",
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
-    },
-    "dispute_findings": {
-      "description": "P1 findings, or P0 findings after an explicit user acknowledgement of a P0 handoff, that the main Agent accepts as a trade-off. Use only for wontfix; fixing code is communicated by a later review, not here.",
-      "items": {
-        "additionalProperties": false,
-        "properties": {
-          "area": {
-            "description": "Finding area copied for audit readability; matching uses ref.",
-            "type": "string"
-          },
-          "reason": {
-            "description": "Concrete accepted trade-off reason.",
-            "type": "string"
-          },
-          "ref": {
-            "description": "Round-local finding reference such as F01.",
-            "type": "string"
-          },
-          "resolution": {
-            "enum": [
-              "wontfix"
-            ],
-            "type": "string"
-          }
-        },
-        "required": [
-          "ref",
-          "area",
-          "resolution",
-          "reason"
-        ],
-        "type": "object"
-      },
-      "type": "array"
-    },
-    "green_build_evidence": {
-      "description": "Finished background bash commands used as green-build evidence. Required with green_build_pass=true; command must exactly match the recorded task, and every declared `acceptance_commands` entry must appear here with its own task_id (extra commands are fine, narrower substitutes are not).",
-      "items": {
-        "additionalProperties": false,
-        "properties": {
-          "command": {
-            "type": "string"
-          },
-          "task_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "command",
-          "task_id"
-        ],
-        "type": "object"
-      },
-      "type": "array"
-    },
-    "green_build_pass": {
-      "description": "Set true only after loading the verify skill and completing its background acceptance commands.",
-      "type": "boolean"
-    },
     "ops": {
-      "description": "Ordered todo mutations applied atomically. Omit or pass [] only when submitting dispute_findings or green-build evidence.",
+      "description": "Ordered todo mutations applied atomically.",
       "items": {
         "oneOf": [
           {
@@ -607,6 +543,14 @@ Parameters:
                   "in_progress",
                   "completed",
                   "cancelled"
+                ],
+                "type": "string"
+              },
+              "todo_kind": {
+                "description": "Todo semantic type. Defaults to work. `kind` already identifies the operation, so todo type uses this separate key. `acceptance` is only for the one final acceptance todo in a plan.",
+                "enum": [
+                  "work",
+                  "acceptance"
                 ],
                 "type": "string"
               }

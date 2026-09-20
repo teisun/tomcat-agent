@@ -38,7 +38,7 @@ VS Code webview. Load it from the `verify` skill only when the task has UI scope
 
 ## Evidence handoff
 
-- Include every successful shot command and task ID in `green_build_evidence`.
+- Record every successful shot command and task ID in the acceptance todo's evidence.
 - Keep failed artifacts and report the concrete cause rather than claiming UI
   acceptance passed.
 - A passing lint/build/test suite alone is never visual acceptance evidence.

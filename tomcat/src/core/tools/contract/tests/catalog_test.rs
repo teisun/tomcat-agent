@@ -123,17 +123,29 @@ fn edit_guidelines_mention_batch_multi_file() {
 }
 
 #[test]
-fn green_build_evidence_schema_requires_recorded_command_and_task() {
-    let entry = BUILTIN_TOOL_CATALOG
+fn plan_todo_schemas_expose_optional_final_acceptance_kind() {
+    let create_plan = BUILTIN_TOOL_CATALOG
+        .iter()
+        .find(|entry| entry.name == "create_plan")
+        .expect("create_plan catalog entry");
+    let create_schema = (create_plan.parameters)();
+    assert_eq!(
+        create_schema["properties"]["todos"]["items"]["properties"]["kind"]["enum"],
+        serde_json::json!(["work", "acceptance"])
+    );
+
+    let update_plan = BUILTIN_TOOL_CATALOG
         .iter()
         .find(|entry| entry.name == "update_plan")
         .expect("update_plan catalog entry");
-    let schema = (entry.parameters)();
-    let evidence = &schema["properties"]["green_build_evidence"]["items"];
+    let schema = (update_plan.parameters)();
+    let upsert = &schema["properties"]["ops"]["items"]["oneOf"][0];
     assert_eq!(
-        evidence["required"],
-        serde_json::json!(["command", "task_id"])
+        upsert["properties"]["todo_kind"]["enum"],
+        serde_json::json!(["work", "acceptance"])
     );
+    assert!(schema["properties"].get("green_build_evidence").is_none());
+    assert!(schema["properties"].get("acceptance_commands").is_none());
 }
 
 #[test]

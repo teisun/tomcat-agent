@@ -1,335 +1,48 @@
-# 交付准确率与完整性：当前完成门禁
+# 交付准确性与完整性
 
-## 2026-09 交付描述与执行证据分离
+## 需求背景
 
-`TodoItem.content` 回答“原先承诺做什么”；`TodoItem.evidence[]` 回答“实际如何验证或交付”。
-两者不能在 EXEC 中互相替代：
+完成 todo 不等于交付正确。最终阶段仍要确认：实际 diff 是否兑现计划、是否遗漏行为、
+是否引入不必要的复杂度，以及验证是否覆盖真正受影响的边界。
 
-```text
-approved work content ──冻结──▶ 完成门禁 / review 范围可追溯
-                                  │
-status transition ──evidence─────┘
-  ├─ tests and observed output
-  ├─ delivered file / endpoint
-  └─ explicit limitation or handoff
-```
+## 解决方案
 
-因此已有 work todo 的 upsert content 改动会被拒，并指向 `set_status.evidence`；planning/pending
-仍允许改稿。完成而没有 evidence 仅发 warning（保证旧调用可恢复），不伪造验证通过。
-
-review 预算耗尽时不再把 P0 和 P1 混为一谈：残余 P0 立即 handoff 给用户，残余仅 P1 才进入
-Acceptance。用户发新消息是重新开始无人值守 review 预算的明确边界，未解决 findings 不会被清除。
-若审计显示 P1 放行也产生可避免的严重漏检，应收紧放行策略而非丢弃审计事件。
-
-### R3 事件触发的口径修正（2026-09-13）
-
-一次被取消的 review 曾把 gate 的 `in_progress` 半开态写到磁盘，并让后续执行无路可走；
-另一次预算耗尽则把 P0 当 P1 一样自动放行。这要求半开态必须有确定的恢复路径，也推翻了
-“轮次上限可替用户接受风险”的前提。现在两道 gate 都在启动时把 `in_progress` 写入
-PlanFile，盘上状态是跨调用的唯一事实；用户点停时 `park`、进程重启时
-`recover_runtime_gates_on_load` 都会把残留状态刷回 `pending`。被收回的 review 会补一条
-aborted 终态，P0 则保留 pending gate 并 handoff。
-
-跨轮 reviewer 复用持久化的轮次、open findings 和已裁决 findings，并复审当前完整 diff，
-而不续跑旧子 Agent 对话；每一个 reviewer 也拥有独立 `ReadFileState`，其首次 read 不会被
-另一轮短路。
-
-### 验收范围：声明清单地板 + 影响半径梯子（2026-09-13）
-
-同一事故还暴露出第二个漏洞：计划在正文里声明了 gate-fast / release / npm 三套检查，执行只跑了
-四条窄测试，运行时照样放行——它只核对「你说跑了的那条确实跑了」，不核对「该跑的都跑了没」，
-因为正文的验收段是散文。第一版修法「默认跑项目全量检查」被否决：小计划代价过高，且与系统
-提示词「先窄后宽」的既有规则矛盾，也挡不住计划阶段就写窄。
-
-现在验收范围由三件事决定：**地板**——计划 frontmatter 的 `acceptance_commands` 逐条必跑，
-运行时把每条声明与已核验的后台任务对账，缺一拒绝并列出；**梯子**——声明之外按实际 diff 的
-影响半径（改动文件 → 所属包 → 依赖它的包 → 项目全量检查集）决定加多少，定义只写在 verify
-skill；**棘轮**——说不清停在哪一级就上一级，计划执行后清单只能追加。清单在 PLAN 期写、由
-plan reviewer 多看一眼、随计划一起被用户批准；code reviewer 不承担这项核对。老计划未声明时沿用
-旧行为并记 `plan.acceptance.commands_undeclared` 事件。协议细节见
-[plan-exec-code-verification.md](plan-exec-code-verification.md)。运行时主动执行声明命令（B7''）
-仍是备选，仅当声明系统性偏窄且 plan reviewer 与用户都没拦住时再评估。
-
-### 备案：持续失败命令的非进展预算（暂不启用）
-
-不采用固定三次重试：大改动的全量测试可能需要超过三轮、且每轮都真实推进。仅当真实 transcript
-表明同一条 `acceptance_commands` 命令连续至少五次失败仍未交还，或用户反馈验收空转时，才考虑
-启用“非进展预算”。候选规则是：连续三次尝试中相邻两次没有代码写入，或有写入但
-`exit code + stderr 尾部哈希` 相同，则写 `plan.acceptance.stuck` 并由 `NextAction` 交还用户。
-它只用后台任务账本、代码 diff 和进程内观察表，不改变 PlanFile schema。
-
-> 状态：已实现（以当前工作树为准）。
-> 适用：代码变更计划的 EXEC 收口。字段、调用协议与完整决策以 [plan-exec-code-verification.md](plan-exec-code-verification.md) 为权威来源。
-> 规范：[ARCHITECTURE_SPEC.md](../openspec/specs/guides/workflow/ARCHITECTURE_SPEC.md)。相邻方案：[tools/reviewer.md](tools/reviewer.md)、[plan-runtime.md](plan-runtime.md)、[permission-system.md](permission-system.md)。
-> 本文 `## 1`–`## 10` 分别对应 ARCHITECTURE_SPEC §1–§10。
-
-## 摘要
-
-当前实现把“代码计划完成”定义为可复核的运行时事实，而不是 Agent 的完成声明：已绑定 workspace root 的工作树中存在代码 diff 时，计划必须先通过 P0/P1 code review，再提交由后台 bash 任务账本核验的绿构建证据。预算耗尽的 P0 必须交还用户，不能自动完成。证据为 `{command, task_id}`，运行时反查任务的精确命令和 `exit_code=0`；验收阶段改代码后由 verify skill 要求模型复审、补测试并重跑受影响检查。
-
-本文是交付可靠性总览；[plan-exec-code-verification.md](plan-exec-code-verification.md) 是协议和实现顺序的单一事实源。旧版 `TodoKind`/research evidence、自动 `cargo check`/`tsc`、以及“code reviewer 后派发 verifier”的说法均不再描述当前实现。
-
-**说人话**：待办全打勾不等于交付完成。改过代码时，要先审出没有大问题，再拿出一条实际跑成功的验收命令收据；如果验收途中又改代码，模型必须看 diff 后重跑受影响检查。
-
----
-
-## 文首导读：方案导图集
-
-阅读顺序建议：
-
-1. **A.1 抽象总图**：完成为何只认代码和任务账本等事实。
-2. **A.2 具体总图**：这些事实在当前 Tomcat 中由谁采集、保存和裁决。
-3. **B. 状态机**：todo 已完成为何仍可能保持 `executing`。
-
-### A.1 抽象 ASCII 总图
-
-完成门禁覆盖“所有 todo 已完成”后的最后一段。它不试图验证研究结论，也不预设某一种语言或编译器；在 workspace root 已绑定时，它只对当前工作树中的代码路径强制 review 与项目相关的验收命令。
+最终验收由 LLM 按 `verify` skill 执行，而不是由运行时自动评审或固定测试命令驱动。
 
 ```text
-主 Agent 标记最后一个 todo completed
-                  │
-                  ▼
-        ┌───────────────────────┐
-        │ Git 代码 diff 过滤     │
-        │ 路径 + 扩展名            │
-        └─────────┬───────┬─────┘
-                  │       │
-        无代码 diff       有代码 diff
-                  │       │
-                  ▼       ▼
-             completed  ┌─────────────────────────────────────────────┐
-                        │ 已保存的 review/build 是否覆盖最新代码？       │
-                        └──────┬───────────────────────────────┬──────┘
-                               │是                             │否
-                               ▼                               ▼
-                          completed                   P0/P1 code review
-                                                           │
-                                 ┌─────────────────────────┴────────────────────┐
-                                 │未裁决 P0/P1                                  │无 P0/P1
-                                 ▼                                               ▼
-                           EXEC：修复/申辩                              verify skill + background bash
-                                                                         │
-                                                                         ▼
-                                                         registry: command/task_id/exit=0
-                                                                         │
-                                                                     completed
+Plan
+ ├─ work todos: 实现与局部检查
+ └─ optional final acceptance todo
+             │ in_progress
+             ▼
+      review diff against plan
+             │
+      fix confirmed P0/P1 or over-design
+             │
+      validate by impact radius
+             ▼
+       mark the todo completed
 ```
 
-**说人话**：系统先看“这次有没有改代码”。没有就直接结束；有就必须让审查和实际命令结果都完成。验收途中又改代码时，由 verify skill 要求模型看 diff 后重跑。
+关键决策清单：
 
-### A.2 具体 ASCII 总图
+- 计划可有一个、也只能有一个最终 `acceptance` todo；普通里程碑检查是 `work`。
+- plan reviewer 只提出建议：缺少验收步骤、错误使用 kind、遗漏验收章节或过度设计都
+  是 concern，不阻塞计划。
+- “过度设计”有可复核定义：某个结构、依赖、协议、存储或状态分支服务于本次需求和
+  影响范围之外的场景，删掉后本次验收仍会全绿。
+- 验收按影响范围升级，不默认全量。核心/共享/基础设施、配置、构建与依赖、协议、
+  跨包改动或用户要求才需要 L3。
+- 运行时只提供一句 verify hint 并保存 todo 状态；它不裁定测试范围，也不伪造证据。
 
-`tools/plan_tool/update_plan.rs::execute_for_tool` 串联收口；它通过 `plan_runtime/code_reviewer.rs` 取得 diff，通过 PlanFile frontmatter 保存门禁状态，通过 `BashTaskRegistry` 验收命令事实。
+## 验证
 
-```text
-update_plan
-  │
-  ├─ collect_code_diff_context()
-  │    └─ git diff --name-only HEAD + git ls-files --others
-  │       → is_code_path() → changed_code_files
-  │
-  ├─ frontmatter
-  │    ├─ code_review_pass / gate-review status
-  │    ├─ green_build_pass / green_build_evidence[]
-  │    └─ gate-acceptance status
-  │
-  ├─ dispatch_code_reviewer()
-  │    └─ Finding::tier(): P0/P1 block; P1 may be accepted as wontfix
-  │
-  └─ require_green_build_pass()
-       ├─ load_skill("verify") discovers suitable commands
-       └─ BashTaskRegistry validates task_id
-            ├─ exact command
-            ├─ Finished + exit_code=0
-            └─ verify skill requires rerun after content edits
-```
+交付前必须能回答：
 
-**说人话**：skill 不是裁判，它只指导 Agent 找项目自己的检查；裁判是运行时，它会去后台任务账本核对“真的跑过、真的成功”。改完代码该不该重跑，skill 要求模型根据实际 diff 判断。
+1. 每项计划承诺是否能在 diff 中找到对应实现或明确取消理由？
+2. 是否有遗漏、错误范围、不可解释的抽象或未处理的 P0/P1？
+3. 检查从改动文件所属测试开始，是否已经覆盖到受影响的 API、协议或依赖方？
+4. 如果验收期间改了代码，是否重新检查了受影响边界？
 
-### B. 状态机
-
-```text
-┌───────────┐ final todo complete ┌──────────────────┐ review pass ┌────────────────────┐
-│ executing │────────────────────▶│ review required  │─────────────▶│ green build needed │
-└─────▲─────┘                     └───────┬──────────┘              └─────────┬──────────┘
-      │                                   │ P0/P1 / no pass                    │ valid evidence
-      │                                   ▼                                    ▼
-      └──── repair or add todo ────┌───────────┐                         ┌───────────┐
-                                   │ executing │                         │ completed │
-                                   └───────────┘                         └───────────┘
-```
-
-| 当前状态 | 条件 | 目标状态 | 运行时动作 | 说人话 |
-|----------|------|----------|------------|--------|
-| `executing` | workspace root 已绑定且无代码 diff | `completed` | 不触发代码门禁。 | 文档等非代码交付不必硬跑编译。 |
-| `executing` | P0/P1 未解决 | `executing` | 回传 `code_review`，主 Agent 修复或仅对 P1 申辩。 | 大问题没解决就继续干。 |
-| `executing` | review 已通过但无有效 build 证据 | `executing` | `BadArgs` 指引加载 skill 和提交 task ID。 | 审完还得实际跑检查。 |
-| `executing` | 证据通过账本核验 | `completed` | 持久化 evidence 并写完成事件。 | 收据核验过，才真完成。 |
-
----
-
-## 1. 术语统一
-
-| 术语 | 语义 | 数据载体 | 行为约束 | 说人话 |
-|------|------|----------|----------|--------|
-| **代码 diff** | 已绑定 workspace root 后，Git 已跟踪变更与未跟踪文件中被 `is_code_path` 认可的路径。 | `CodeDiffContext` | `.rs`、`.ts(x)`、`.js(x)`、`.py`、`.go`、`.java`、`.sh`、`.sql`、`.vue` 等进入门禁；非代码路径不进入。 | 改代码才需要代码验收。 |
-| **绿构建证据** | 后台 bash 任务的可复核收据。 | `GreenBuildEvidence` | 精确命令、唯一 task ID、`Finished(exit_code=0)`；改后重跑由 verify skill 要求。 | 后台任务跑成功才作数。 |
-| **P0/P1 门禁** | P0/critical/blocker 和 P1/major finding 阻止完成。 | `review::Finding::tier` | P2/unknown 归为不阻塞；reviewer 的 `pass` 文本不能覆盖 P0/P1。 | 严重问题一票否决。 |
-| **P1 申辩** | 主 Agent 接受 P1 取舍的书面记录。 | `dispute_findings` 与 runtime disputed findings | 只允许 `wontfix` 且理由非空；P0 仅在已 handoff 且用户发新消息确认后可申辩；修复必须改代码后复审。 | P1 可以解释为什么不改；P0 必须先交给用户裁决。 |
-
-本文的“收口”是 `update_plan` 中所有 todo 已完成后计算 `derived_completed` 的调用，不是 Agent 返回自然语言总结的时刻。
-
----
-
-## 2. 竞品 / 选型对比（调研）
-
-仍与现行实现相关的外部证据只有一条原则：**没有真实命令与输出，不能把验证写成 PASS**。
-
-| 参考实现 | 路径 / 符号 | 仍然借鉴 | 当前未采用 | 说人话 |
-|----------|-------------|----------|------------|--------|
-| `cc-fork-01` | `cc-fork-01/src/tools/AgentTool/built-in/verificationAgent.ts::VERIFICATION_SYSTEM_PROMPT`。 | 每个 PASS 必须有 `Command run` 与 `Output observed`；验证执行者不改项目。 | cc-fork 的独立 verification agent、文本 `VERDICT` 和后台子 Agent 生命周期。 | 保留“跑过才算”，但用任务账本替代子 Agent 的口头裁决。 |
-
-旧版有关 GenericAgent 的 `[VERIFY]`、Codex Guardian、语言固定命令表、`TodoKind` 研究证据与 internal verifier 的横向比较，不再决定当前代码路径，故未保留为架构依据。
-
----
-
-## 3. 落地选型与实施（已定稿）
-
-### 3.1 落地选型决策表
-
-| 维度 | 关切 | 决策 | 取自 | 入选理由 | 未入选 + 拒因 | 说人话 |
-|------|------|------|------|----------|---------------|--------|
-| G1 收口范围 | 哪些完成需要代码门禁？ | **采用** 已绑定 workspace root 的 Git 路径与扩展名过滤；**拒绝** todo 分类或模型自述。 | Tomcat `plan_runtime/code_reviewer.rs::{collect_code_diff_context,is_code_path}`；cc-fork-01 `verificationAgent.ts` 接收 changed files。 | 设计：识别 tracked/untracked 代码路径。理由：工作树是可复核事实，非代码交付不应被无关构建阻塞。 | **未入选**：旧 `TodoKind`/research evidence。**拒因**：它们不能说明是否改过代码。 | 用 Git 判断要不要验，不猜 todo 的意图。 |
-| G2 绿构建 | 如何证明当前代码真正验过？ | **采用** managed `verify` skill + `BashTaskRegistry` 硬核验；**拒绝**文本 PASS 和固定 `cargo check`。 | Tomcat `assets/skills/verify/SKILL.md`、`skill/builtin.rs::materialize_builtin_skills`、`update_plan.rs::require_green_build_pass`；cc-fork-01 `verificationAgent.ts` Command/Output 契约。 | 设计：skill 发现项目命令，后台任务提供 command/task/status/time，runtime 保存核验后快照。理由：既适配多语言/项目脚本，又不信模型自述。 | **未入选**：自动 cargo/tsc 检查或旧 `VerifySummary` 放行。**拒因**：前者不覆盖项目验收，后者不在当前收口链路。 | 项目自己决定怎么测，运行时决定测没测真。 |
-| G3 review 与争议 | 什么问题阻塞、合理取舍怎样表达？ | **采用** P0/P1 阻塞，P1 可 `wontfix` 申辩；**拒绝**仅看 reviewer verdict。 | Tomcat `review.rs::Finding::tier`、`update_plan.rs::{blocking_findings,prepare_disputes}`；cc-fork-01 `verificationAgent.ts` 的有意行为复核要求。 | 设计：运行时按 severity 做最终判断，把接受的 P1 取舍注入下一轮审查。理由：避免 “pass + P1” 矛盾，也不让已确认取舍无限重报。 | **未入选**：所有 finding 阻塞或所有 finding advisory。**拒因**：前者会被 P2 死锁，后者漏掉交付风险。 | 大问题要修；小问题不挡；P1 必须留下接受理由。 |
-| G4 终止循环 | 验收阶段改代码时如何避免自动重验循环？ | **采用** 删除自动失效/重开状态机，改由 verify skill 强制自审、补测试与重跑。 | Tomcat `assets/skills/verify/SKILL.md`、`update_plan.rs`。 | 自动重开制造了它要防的循环；应由模型依据实际 diff 决定重跑。 | **未入选**：重验周期上限自动完成。**拒因**：它会把未重新验证伪装成完成。 | skill 明说改了就要复审、补测试、重跑，不让程序反复拉回。 |
-
-### 3.2 实施点（已闭环）
-
-| 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
-|--------|----------------------|--------------------------|------------------|--------|
-| P1 diff 与状态 | 代码路径筛选、持久化 pass/evidence/gate 字段。 | `plan_runtime/code_reviewer.rs`、`plan_runtime/file_store.rs`、`update_plan.rs`。 | `green_build_gate_blocks_completion_until_pass`。 | 每份绿灯都有可查任务收据。 |
-| P2 code review | read-only reviewer、P0/P1 判定、P1 申辩与 handoff。 | `plan_runtime/{code_reviewer.rs,review.rs}`、`update_plan.rs`。 | `code_review_rounds_exhaustion_{hands_off_with_p0,unconditionally_advances_to_acceptance_with_p1}_residual`；`code_review_downgrades_uncited_plan_mismatch_but_keeps_cited_p1`。 | 预算内审查先挡住大问题；预算用尽后 P0 交还，只有 P1 能进入 acceptance。 |
-| P3 verify 证据 | 内置 skill 物化、后台命令与账本准入。 | `skill/builtin.rs` + `assets/skills/verify/**`、`tools/primitive`、`update_plan.rs`。 | `green_build_gate_blocks_completion_until_pass`。 | skill 会找检查，账本会验收据。 |
-| P4 收束防逃避 | 纯文本结束时的继续指令、review/build 不完整时保持 EXEC。 | `agent_loop/turn_finalize.rs::completion_guard_instruction`。 | `agent_loop/tests/completion_guard_test.rs` 的计划未收口 guard 覆盖。 | 没验完不能只写一句“完成了”。 |
-
----
-
-## 4. 协议（入参 / 出参 / Schema）
-
-完整字段表、调用样例和任务账本校验顺序见权威文档 [plan-exec-code-verification.md §4](plan-exec-code-verification.md#4-协议入参--出参--schema)。这里仅钉死交付门禁的外部接口边界。
-
-| 字段 | JSON 类型 | 必填 | 默认值 | 适用场景 | 说明 | 说人话 |
-|------|-----------|------|--------|----------|------|--------|
-| `dispute_findings[]` | object[] | 否 | `[]` | 接受 P1 风险 | `ref`、`area`、`resolution:"wontfix"`、`reason`。 | 记录为什么接受 P1。 |
-| `green_build_pass` | boolean | 否 | 缺省 | 验收命令完成后 | 传 `true` 时必须同时给有效 evidence。 | 申请把真实验收写进计划。 |
-| `green_build_evidence[]` | `{command,task_id}[]` | 条件必填 | `[]` | 同上 | 实际命令和后台任务 ID；运行时再补存时间与退出码。 | 给运行时一张可查的收据。 |
-
-```jsonc
-{
-  "ops": [],
-  "green_build_pass": true,
-  "green_build_evidence": [
-    { "command": "<exact background command>", "task_id": "<finished task id>" }
-  ]
-}
-```
-
----
-
-## 5. 文件职责总览（One-Glance Map）
-
-```text
-update_plan.rs
-  ├─ 收口编排、P0/P1 过滤、P1 申辩
-  ├─ 单一 gate/通过状态写入口
-  └─ BashTaskRegistry 证据核验
-        │
-        ├──► file_store.rs
-        │      └─ persist review/build pass、evidence、gate status
-        │
-        ├──► code_reviewer.rs + review.rs
-        │      └─ Git diff、read-only P0/P1 findings
-        │
-        └──► assets/skills/verify/SKILL.md
-               └─ 发现项目检查 → 后台 bash → task_id
-
-turn_finalize.rs
-  └─ 绿构建缺失时阻止 text-only 收束
-```
-
-专业上，所有完成判定收敛到 `update_plan`，所以门禁状态不会散落在 prompt、reviewer 文本或 UI 中。
-
-**说人话**：一处做最终判定，其他组件只负责提供事实，避免“每层都以为别人验过”的漏洞。
-
----
-
-## 6. 配置与环境变量
-
-当前设计使用 `[plan]` 配置，优先级为**配置文件 > 默认值**，没有对应环境变量。
-
-| 键 | 默认 | 含义 | 说人话 |
-|----|------|------|--------|
-| `[plan].max_code_review_rounds` | `4` | 收口可派发 code review 的最大次数；`0` 为跳过 review；预算用尽时残余 P0 handoff，残余仅 P1 才带入 acceptance，代码绿构建仍要求。 | 四轮给三次真实修复机会，同时保留无人值守的明确上限。 |
-
-旧 `[plan].verify_gate` 不控制本文完成路径：当前 `update_plan` 不自动调旧 verifier。
-
----
-
-## 7. 错误模型 / 截断 / 警告
-
-```text
-workspace root 已绑定且代码路径为空   → completed
-P0/P1 未裁决且预算未尽                 → executing + code_review result
-review 已通过但没有 green evidence   → Err(BadArgs) + load_skill 指引
-task 不存在 / 未完成 / 非零 / 命令不符  → Err(BadArgs)，仍 executing
-task 账本全部核验通过                 → persist evidence + completed
-review 基础设施重试耗尽               → executing + handoff
-review 轮次耗尽 + 残余 P0              → executing + handoff
-review 轮次耗尽 + 残余仅 P1            → review gate pass + 残余清单 + acceptance
-```
-
-没有 workspace root 时，代码 gate 自动跳过；生产路径应绑定 workspace root，才能完整启用代码路径过滤。
-
-**说人话**：正常 review 用尽预算时，P0 也要交还用户，只有 P1 转入客观验收；所有代码改动仍必须有真实绿构建凭据。
-
----
-
-## 8. 测试矩阵（验收）
-
-| 维度 | 用例 / 编号 | 状态 | 说人话 |
-|------|-------------|------|--------|
-| P0/P1 判定 | `tools::plan_tool::tests::code_review_test::only_p0_p1_block_completion_even_when_reviewer_says_pass` | ✅ 当前工作树 | 严重 finding 优先于模型 verdict。 |
-| 绿构建账本 | `tools::plan_tool::tests::code_review_test::green_build_gate_blocks_completion_until_pass` | ✅ 当前工作树 | 没有有效后台收据不能完成。 |
-| review 失败 / 预算耗尽 | `tools::plan_tool::tests::code_review_test::code_review_rounds_exhaustion_{hands_off_with_p0,unconditionally_advances_to_acceptance_with_p1}_residual` | ✅ 当前工作树 | 预算内 finding 先阻塞；耗尽时 P0 handoff、P1 才放行 review gate 并进入客观验收，不会偷标 completed。 |
-| 旧 verifier 不接管 | `tools::plan_tool::tests::verify_test::update_plan_does_not_dispatch_dormant_verifier_even_when_attached` | ✅ 当前工作树 | 文档不会误称还有自动 verifier。 |
-| 验收期改动 | verify skill 指令测试与 green-build 账本回归 | 本次整改 | 改代码后自审、补测试、重跑受影响检查。 |
-| 文档 | 本文与 [plan-exec-code-verification.md](plan-exec-code-verification.md) | ✅ 2026-08-10 | 高层与权威设计不两张皮。 |
-
----
-
-## 9. 风险与应对
-
-| 风险 | 影响 | 应对（具体动作） | 说人话 |
-|------|------|------------------|--------|
-| 声明代替执行 | 高 | 反查 `BashTaskRegistry`，校验命令、状态和退出码。 | 不信嘴，只信收据。 |
-| 改代码后沿用绿灯 | 高 | verify skill 明确要求模型看 diff、自审、补测试并重跑受影响检查。 | 最后改一行，模型必须决定重验。 |
-| reviewer 结论自相矛盾 | 高 | 以 `Finding::tier()` 的 P0/P1 为准。 | 严重问题不能被“pass”遮住。 |
-| 有意识的 P1 取舍反复出现 | 中 | 只允许有理由的 `wontfix`，在下轮 reviewer brief 注入已接受取舍。 | 接受了就留档，别每轮重吵。 |
-| 门禁循环 | 中 | review 轮次、基础设施重试和文本 guard 均有上限；guard 到顶可见交还。 | 卡住时总有明确出口。 |
-
----
-
-## 10. 历史决策 / 跨文档修订
-
-- ~~research todo 必须有 URL/`file:line` evidence 才能 completed~~ → **否**：当前 schema 没有 `TodoKind` 或 research evidence；本门禁只覆盖代码交付。
-- ~~运行时收口自动跑 `cargo check`/`tsc --noEmit`~~ → **否**：当前由 `verify` skill 根据用户/plan、文档、manifest、CI 和变更范围发现项目实际检查。
-- ~~code review pass 后自动派发 verifier 子 Agent，`verify_gate` 决定完成~~ → **否**：旧 verifier 是保留资产，`update_plan` 当前不派发；由 skill + `BashTaskRegistry` 替代。
-- ~~review 耗尽时 best-effort completed~~ → **否**：保持 `executing` 并 handoff。
-- **跨文档修订**：具体协议、状态顺序与代码落点以 [plan-exec-code-verification.md](plan-exec-code-verification.md) 为准；本文只保留交付准确率层面的原则与边界。
-
----
-
-## 一句话总结
-
-交付准确不靠“我认为完成了”：当前代码变更计划必须由 P0/P1 review 和任务账本中的真实成功命令共同证明；验收阶段改代码时，verify skill 要求模型复审、补测试并重跑受影响检查。
+`update_plan` 的持久化不重置进行中的 todo。因此中断、park 和恢复不会丢失最终验收
+进度，也不会把旧运行时流程重新带回完成路径。

@@ -14,10 +14,8 @@ use serde::Deserialize;
 
 use crate::core::plan_runtime::{
     file_store::{
-        normalize_acceptance_commands, plan_path_for_id, write_plan, PlanFile, PlanFileFrontmatter,
-        PlanFileState, TodoItem, TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_CONTENT,
-        GATE_ACCEPTANCE_TODO_ID, GATE_CODE_REVIEW_TODO_CONTENT, GATE_CODE_REVIEW_TODO_ID,
-        PLAN_FILE_SCHEMA_VERSION,
+        plan_path_for_id, validate_single_acceptance, write_plan, PlanFile, PlanFileFrontmatter,
+        PlanFileState, TodoItem, TodoKind, TodoStatus, PLAN_FILE_SCHEMA_VERSION,
     },
     ops,
     safety::assert_plan_id_safe,
@@ -36,6 +34,7 @@ use super::ToolError;
 ///   其它段落由模板拼接，
 ///   传 `body` 将报 [`ToolError::BadArgs`]；
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePlanArgs {
     /// 高层目标（必填）。runtime 由此派生 plan_id。
     pub goal: String,
@@ -43,10 +42,6 @@ pub struct CreatePlanArgs {
     pub draft: String,
     /// 任务列表（必填，至少 1 项）。
     pub todos: Vec<TodoArg>,
-    /// 验收命令清单（可选）。每项一条可运行命令，原样保存；`[gate] Acceptance`
-    /// 必须为每一条提供对应的绿构建任务。空白项会被丢弃、重复项去重。
-    #[serde(default)]
-    pub acceptance_commands: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +50,9 @@ pub struct TodoArg {
     pub content: String,
     #[serde(default = "default_pending")]
     pub status: TodoStatus,
+    /// `acceptance` only marks the one final acceptance todo in a coding plan.
+    #[serde(default)]
+    pub kind: TodoKind,
 }
 
 fn default_pending() -> TodoStatus {
@@ -152,23 +150,21 @@ pub fn execute(
     if args.todos.is_empty() {
         return Err(ToolError::BadArgs("todos 至少 1 项".into()));
     }
+    if args
+        .todos
+        .iter()
+        .any(|todo| matches!(todo.kind, TodoKind::Unknown))
+    {
+        return Err(ToolError::BadArgs(
+            "create_plan.todos[].kind 只支持 work 或 acceptance".into(),
+        ));
+    }
     // G4：runtime 由 goal 派生 plan_id；LLM 不传 plan_id。
     let plan_id = derive_plan_id(&args.goal);
     assert_plan_id_safe(&plan_id)
         .map_err(|e| ToolError::BadArgs(format!("派生 plan_id 非法: {e}")))?;
 
-    if args.todos.iter().any(|todo| {
-        matches!(
-            todo.id.as_str(),
-            GATE_CODE_REVIEW_TODO_ID | GATE_ACCEPTANCE_TODO_ID
-        )
-    }) {
-        return Err(ToolError::BadArgs(format!(
-            "todo id `{GATE_CODE_REVIEW_TODO_ID}` / `{GATE_ACCEPTANCE_TODO_ID}` is reserved for runtime close-out gates"
-        )));
-    }
-
-    let mut todos: Vec<TodoItem> = args
+    let todos: Vec<TodoItem> = args
         .todos
         .iter()
         .map(|t| TodoItem {
@@ -176,7 +172,7 @@ pub fn execute(
             content: t.content.clone(),
             status: t.status,
             evidence: Vec::new(),
-            kind: TodoKind::Work,
+            kind: t.kind,
         })
         .collect();
     // 复用 ops 引擎的不变量校验：duplicate id / bounded in_progress
@@ -186,20 +182,7 @@ pub fn execute(
         .map(|t| ops::TodoOp::AddTodo(t.clone()))
         .collect();
     ops::apply_todos_ops(&mut v, &add_ops)?;
-    todos.push(TodoItem {
-        id: GATE_CODE_REVIEW_TODO_ID.into(),
-        content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
-        status: TodoStatus::Pending,
-        evidence: Vec::new(),
-        kind: TodoKind::GateCodeReview,
-    });
-    todos.push(TodoItem {
-        id: GATE_ACCEPTANCE_TODO_ID.into(),
-        content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
-        status: TodoStatus::Pending,
-        evidence: Vec::new(),
-        kind: TodoKind::GateAcceptance,
-    });
+    validate_single_acceptance(&todos).map_err(|error| ToolError::BadArgs(error.to_string()))?;
 
     let now = chrono::Local::now().to_rfc3339();
     let frontmatter = PlanFileFrontmatter {
@@ -211,8 +194,6 @@ pub fn execute(
         created_at: now,
         schema_version: PLAN_FILE_SCHEMA_VERSION,
         todos,
-        green_build_pass: false,
-        green_build_evidence: Vec::new(),
         code_review_pass: false,
         code_review_rounds: 0,
         code_review_open_findings: Vec::new(),
@@ -220,7 +201,6 @@ pub fn execute(
         code_review_handoff: false,
         code_review_handoff_acknowledged: false,
         code_review_residual_findings: Vec::new(),
-        acceptance_commands: normalize_acceptance_commands(&args.acceptance_commands),
         unknown: serde_yaml::Mapping::new(),
     };
     let body = default_body(&args.goal, &args.draft);

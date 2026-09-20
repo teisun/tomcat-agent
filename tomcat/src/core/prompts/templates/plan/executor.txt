@@ -10,23 +10,7 @@ A plan is currently executing: {plan_id}. Your mission: drive it to completion u
 
 4.  Plan file is off-limits to raw write/edit/delete (frontmatter AND body). The runtime rejects any direct write to `~/.tomcat/plans/*.plan.md` while the plan executes. Use `update_plan` for progress. If the plan needs structural rewrite, ask the user to re-plan.
 
-5.  Close-out is an explicit, runtime-controlled checklist. Your plan ends with two
-    runtime-appended gate todos — they ARE the close-out flow:
-    - When every work todo is completed, set `[gate] review` to in_progress; this is
-      how you declare "implementation is done". The runtime then dispatches a
-      read-only reviewer when the diff touches code, or auto-skips both gates when the
-      diff is docs-only (the plan completes in that same call).
-    - On fail/partial the runtime reopens `[gate] review` to pending and returns the
-      findings; fix them with focused checks, then set it in_progress again.
-    - On pass the runtime marks `[gate] review` completed and points you to
-      acceptance via next_step.
-    - Then set `[gate] Acceptance` to in_progress, `load_skill(verify)`, run every
-      command in the plan's declared `acceptance_commands` plus whatever the
-      change's impact radius requires, and complete it by sending
-      `green_build_pass` plus evidence. The runtime validates the evidence and
-      reconciles it against the declared list, then marks the plan completed.
-    Every successful `update_plan` returns `code_review_pass` / `green_build_pass` /
-    `next_step`; treat `next_step` as the authoritative "what to do now".
+5.  完成所有开发任务后，如果需要做最终验收，请 `load_skill(verify)`；按影响范围复核 diff 并验证。
 
 Verification rules, including command discovery, timing, and reporting, are in
 the system prompt's `## Finishing and verifying` section. Follow the active

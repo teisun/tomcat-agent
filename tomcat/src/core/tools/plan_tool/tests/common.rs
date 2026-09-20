@@ -6,10 +6,7 @@ use async_trait::async_trait;
 pub(crate) use crate::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, validate_frontmatter_invariants, write_plan, PlanFile,
     PlanFileFrontmatter, PlanFileState, TodoItem, TodoKind, TodoStatus,
-    GATE_ACCEPTANCE_TODO_CONTENT, GATE_ACCEPTANCE_TODO_ID, GATE_CODE_REVIEW_TODO_CONTENT,
-    GATE_CODE_REVIEW_TODO_ID,
 };
-pub(crate) use crate::core::plan_runtime::review::Finding;
 pub(crate) use crate::core::plan_runtime::todo_runtime::TodosRuntime;
 pub(crate) use crate::core::plan_runtime::verify::{VerifyCheck, VerifySummary};
 pub(crate) use crate::core::plan_runtime::{
@@ -53,38 +50,6 @@ pub fn cleanup_home(p: &std::path::Path) {
     }
 }
 
-pub fn review_frontmatter(plan_id: &str) -> PlanFileFrontmatter {
-    read_plan(&plan_path_for_id(plan_id).unwrap())
-        .unwrap()
-        .frontmatter
-}
-
-pub fn review_rounds(plan_id: &str) -> u32 {
-    review_frontmatter(plan_id).code_review_rounds
-}
-
-pub fn open_findings(plan_id: &str) -> Vec<Finding> {
-    review_frontmatter(plan_id).code_review_open_findings
-}
-
-pub fn open_finding_references(plan_id: &str) -> Vec<String> {
-    open_findings(plan_id)
-        .into_iter()
-        .map(|finding| finding.reference)
-        .collect()
-}
-
-pub fn disputed_findings(plan_id: &str) -> Vec<crate::core::plan_runtime::DisputedFinding> {
-    review_frontmatter(plan_id).code_review_disputed_findings
-}
-
-pub fn set_open_findings(plan_id: &str, findings: Vec<Finding>) {
-    let path = plan_path_for_id(plan_id).unwrap();
-    let mut plan = read_plan(&path).unwrap();
-    plan.frontmatter.code_review_open_findings = findings;
-    write_plan(&path, &plan, 1_000).unwrap();
-}
-
 pub fn fresh_planning_plan(rt: &PlanRuntime) -> String {
     rt.set_max_code_review_rounds(0);
     rt.enter_plan().unwrap();
@@ -93,17 +58,18 @@ pub fn fresh_planning_plan(rt: &PlanRuntime) -> String {
         create_plan::CreatePlanArgs {
             goal: "g".into(),
             draft: "fresh draft body".into(),
-            acceptance_commands: Vec::new(),
             todos: vec![
                 create_plan::TodoArg {
                     id: "t1".into(),
                     content: "step 1".into(),
                     status: TodoStatus::Pending,
+                    kind: TodoKind::Work,
                 },
                 create_plan::TodoArg {
                     id: "t2".into(),
                     content: "step 2".into(),
                     status: TodoStatus::Pending,
+                    kind: TodoKind::Work,
                 },
             ],
         },
@@ -164,9 +130,6 @@ pub struct MockCodeReviewerDispatcher {
     summaries: parking_lot::Mutex<Vec<CodeReviewSummary>>,
     pub call_count: AtomicUsize,
     pub delay: Option<Duration>,
-    /// 每轮收到的 open findings，供 D1-d 核销断言使用。
-    open_findings_per_round: parking_lot::Mutex<Vec<Vec<Finding>>>,
-    dispatches: parking_lot::Mutex<Vec<crate::core::plan_runtime::CodeReviewDispatchInfo>>,
 }
 
 impl MockCodeReviewerDispatcher {
@@ -175,17 +138,7 @@ impl MockCodeReviewerDispatcher {
             summaries: parking_lot::Mutex::new(summaries),
             call_count: AtomicUsize::new(0),
             delay: None,
-            open_findings_per_round: parking_lot::Mutex::new(Vec::new()),
-            dispatches: parking_lot::Mutex::new(Vec::new()),
         }
-    }
-
-    pub fn open_findings_per_round(&self) -> Vec<Vec<Finding>> {
-        self.open_findings_per_round.lock().clone()
-    }
-
-    pub fn dispatches(&self) -> Vec<crate::core::plan_runtime::CodeReviewDispatchInfo> {
-        self.dispatches.lock().clone()
     }
 }
 
@@ -195,14 +148,10 @@ impl CodeReviewerDispatcher for MockCodeReviewerDispatcher {
         &self,
         _plan_id: &str,
         _plan_text: &str,
-        review_state: &crate::core::plan_runtime::file_store::PlanFileFrontmatter,
+        _review_state: &crate::core::plan_runtime::file_store::PlanFileFrontmatter,
         _dispatch: &crate::core::plan_runtime::CodeReviewDispatchInfo,
     ) -> CodeReviewSummary {
         self.call_count.fetch_add(1, Ordering::Relaxed);
-        self.open_findings_per_round
-            .lock()
-            .push(review_state.code_review_open_findings.clone());
-        self.dispatches.lock().push(_dispatch.clone());
         if let Some(d) = self.delay {
             tokio::time::sleep(d).await;
         }
@@ -229,10 +178,6 @@ pub fn ok_review() -> PlanReviewSummary {
         applied_changes: false,
         ..Default::default()
     }
-}
-
-pub fn aborted_code_review(summary: &str) -> CodeReviewSummary {
-    CodeReviewSummary::aborted_with(summary)
 }
 
 pub struct MockVerifierDispatcher {
@@ -298,11 +243,11 @@ pub fn good_args_with_todo() -> create_plan::CreatePlanArgs {
     create_plan::CreatePlanArgs {
         goal: "g".into(),
         draft: "draft body content".into(),
-        acceptance_commands: Vec::new(),
         todos: vec![create_plan::TodoArg {
             id: "t1".into(),
             content: "step".into(),
             status: TodoStatus::Pending,
+            kind: TodoKind::Work,
         }],
     }
 }
@@ -320,31 +265,13 @@ pub fn write_plan_file_at(
         session_id: Some("orig-uuid".into()),
         created_at: "2026-05-19T00:00:00Z".into(),
         schema_version: 1,
-        todos: vec![
-            TodoItem {
-                id: "step1".into(),
-                content: "do the thing".into(),
-                status: TodoStatus::Pending,
-                evidence: Vec::new(),
-                kind: TodoKind::Work,
-            },
-            TodoItem {
-                id: GATE_CODE_REVIEW_TODO_ID.into(),
-                content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
-                status: TodoStatus::Pending,
-                evidence: Vec::new(),
-                kind: TodoKind::GateCodeReview,
-            },
-            TodoItem {
-                id: GATE_ACCEPTANCE_TODO_ID.into(),
-                content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
-                status: TodoStatus::Pending,
-                evidence: Vec::new(),
-                kind: TodoKind::GateAcceptance,
-            },
-        ],
-        green_build_pass: false,
-        green_build_evidence: Vec::new(),
+        todos: vec![TodoItem {
+            id: "step1".into(),
+            content: "do the thing".into(),
+            status: TodoStatus::Pending,
+            evidence: Vec::new(),
+            kind: TodoKind::Work,
+        }],
         code_review_pass: false,
         code_review_rounds: 0,
         code_review_open_findings: Vec::new(),
@@ -352,7 +279,6 @@ pub fn write_plan_file_at(
         code_review_handoff: false,
         code_review_handoff_acknowledged: false,
         code_review_residual_findings: Vec::new(),
-        acceptance_commands: Vec::new(),
         unknown: Default::default(),
     };
     let plan = PlanFile {

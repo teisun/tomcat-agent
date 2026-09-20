@@ -46,7 +46,7 @@ fn executor_reminder_contains_no_legacy_mode_wording() {
 }
 
 #[test]
-fn runtime_reminders_batch_detailed_todos_without_repeating_final_acceptance() {
+fn runtime_reminders_point_final_acceptance_to_the_verify_skill() {
     let planner: &str = *reminders::PLANNER_REMINDER;
     let executor = reminders::render_executor_reminder("batch-contract");
     let verification =
@@ -54,12 +54,12 @@ fn runtime_reminders_batch_detailed_todos_without_repeating_final_acceptance() {
 
     assert!(planner.contains("not\nto the number of todos"));
     assert!(planner.contains("verification batches as shared\n  build/test boundaries"));
-    assert!(planner.contains("share a build target"));
-    assert!(planner.contains("milestone-level verification"));
+    assert!(planner.contains("one final todo with `kind=acceptance`"));
+    assert!(planner.contains("human-readable “验收” section"));
     assert!(verification.contains(
         "For final acceptance, run only checks not covered by a still-valid earlier\nresult"
     ));
     assert!(verification
         .contains("Do not schedule the same test family once per todo and again at the end"));
-    assert!(executor.contains("system prompt's `## Finishing and verifying` section"));
+    assert!(executor.contains("load_skill(verify)"));
 }

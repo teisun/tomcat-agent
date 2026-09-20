@@ -213,6 +213,13 @@ export type ServePlanEvent = {
   type: "plan.code_review.exhausted";
   unresolvedFindings?: null | string[];
 } | {
+  idleNudges?: null | number;
+  planId?: null | string;
+  reason?: null | string;
+  remainingWork?: null | string[];
+  sessionId?: null | string;
+  type: "plan.stalled";
+} | {
   path?: null | string;
   planId?: null | string;
   sessionId?: null | string;

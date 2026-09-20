@@ -16,10 +16,8 @@ use crate::core::compaction::preheat::Preheat;
 use crate::core::llm::{ChatMessage, MessageKind, StreamEvent};
 use crate::core::plan_runtime::file_store::{
     plan_path_for_id, read_plan, write_plan, PlanFile, PlanFileFrontmatter, PlanFileState,
-    TodoItem, TodoKind, TodoStatus, GATE_ACCEPTANCE_TODO_CONTENT, GATE_ACCEPTANCE_TODO_ID,
-    GATE_CODE_REVIEW_TODO_CONTENT, GATE_CODE_REVIEW_TODO_ID,
+    TodoItem, TodoKind, TodoStatus,
 };
-use crate::core::plan_runtime::review::Finding;
 use crate::core::plan_runtime::{NextAction, PlanRuntime};
 use crate::core::session::manager::{CompactionResult, ContextState, MessageAppendSink};
 use crate::core::tools::pipeline::read_state::{ReadFileState, ReadStamp};
@@ -57,8 +55,6 @@ fn write_plan_file(plan_id: &str, state: PlanFileState, todos: Vec<TodoItem>) ->
             created_at: "2026-07-27T00:00:00Z".to_string(),
             schema_version: 1,
             todos,
-            green_build_pass: false,
-            green_build_evidence: Vec::new(),
             code_review_pass: false,
             code_review_rounds: 0,
             code_review_open_findings: Vec::new(),
@@ -66,7 +62,6 @@ fn write_plan_file(plan_id: &str, state: PlanFileState, todos: Vec<TodoItem>) ->
             code_review_handoff: false,
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
-            acceptance_commands: Vec::new(),
             unknown: serde_yaml::Mapping::new(),
         },
         body: "## body\n".to_string(),
@@ -666,7 +661,7 @@ async fn guard_blocks_handback_while_todos_remain() {
     let injected = messages.last().unwrap();
     assert_eq!(injected.kind, MessageKind::Nudge);
     let text = injected.text_content().unwrap_or("");
-    assert!(text.contains("remaining work todos"), "text={text}");
+    assert!(text.contains("still implementing"), "text={text}");
     assert!(text.contains("t2 (in_progress)"), "text={text}");
     assert!(text.contains("t3 (pending)"), "text={text}");
 
@@ -711,8 +706,7 @@ async fn guard_persists_nudge_with_its_distinct_kind() {
 }
 
 #[tokio::test]
-async fn guard_blocks_handback_when_todos_done_but_review_pushed_back() {
-    // 41 项 todo 全勾完、计划文件仍是 executing —— 只可能是 code review 没过。
+async fn guard_allows_handback_when_all_todos_are_terminal() {
     let _home = home_guard();
     let plan_id = unique_plan_id("guard_review");
     let plan_path = write_plan_file(
@@ -725,44 +719,24 @@ async fn guard_blocks_handback_when_todos_done_but_review_pushed_back() {
     );
     let plan_runtime = PlanRuntime::new("sess-guard");
     plan_runtime.seed_active_plan_for_test(plan_id.clone(), PlanFileState::Executing);
-    let findings = vec![
-        Finding::new(
-            "concern".into(),
-            "logic".into(),
-            "missing null check".into(),
-        )
-        .with_reference("F01"),
-        Finding::new("nit".into(), "tests".into(), "no regression test".into())
-            .with_reference("F02"),
-    ];
-    let mut plan = read_plan(&plan_path).unwrap();
-    plan.frontmatter.code_review_open_findings = findings.clone();
-    write_plan(&plan_path, &plan, 1_000).unwrap();
-
     let mut agent = build_agent(Some(plan_runtime), SubagentType::User);
     let mut messages = vec![ChatMessage::user("start building")];
     let outcome = finalize(&mut agent, &mut messages).await;
 
-    assert_eq!(outcome, TurnOutcome::Continue);
-    let text = messages.last().unwrap().text_content().unwrap_or("");
+    assert_eq!(outcome, TurnOutcome::Finished);
     assert!(
-        text.contains("unresolved code-review findings"),
-        "text={text}"
-    );
-    assert!(
-        text.contains("F01 [concern] logic: missing null check"),
-        "text={text}"
-    );
-    assert!(
-        text.contains("F02 [nit] tests: no regression test"),
-        "text={text}"
+        messages
+            .last()
+            .and_then(|message| message.text_content())
+            .is_none_or(|text| !text.contains("code-review")),
+        "completion must not inject a code-review nudge"
     );
 
     cleanup_plan_file(&plan_path);
 }
 
 #[tokio::test]
-async fn exhausted_budget_keeps_the_agent_working_until_acceptance_can_start() {
+async fn in_progress_acceptance_todo_nudges_the_agent_to_load_verify_skill() {
     let _home = home_guard();
     let plan_id = unique_plan_id("guard_review_budget_exhausted");
     let plan_path = write_plan_file(
@@ -771,34 +745,15 @@ async fn exhausted_budget_keeps_the_agent_working_until_acceptance_can_start() {
         vec![
             todo("t1", TodoStatus::Completed),
             TodoItem {
-                id: GATE_CODE_REVIEW_TODO_ID.into(),
-                content: GATE_CODE_REVIEW_TODO_CONTENT.into(),
-                status: TodoStatus::Completed,
+                id: "acceptance".into(),
+                content: "验收".into(),
+                status: TodoStatus::InProgress,
                 evidence: Vec::new(),
-                kind: TodoKind::GateCodeReview,
-            },
-            TodoItem {
-                id: GATE_ACCEPTANCE_TODO_ID.into(),
-                content: GATE_ACCEPTANCE_TODO_CONTENT.into(),
-                status: TodoStatus::Pending,
-                evidence: Vec::new(),
-                kind: TodoKind::GateAcceptance,
+                kind: TodoKind::Acceptance,
             },
         ],
     );
     let plan_runtime = PlanRuntime::new("sess-guard");
-    plan_runtime.set_max_code_review_rounds(1);
-    let mut plan = read_plan(&plan_path).unwrap();
-    plan.frontmatter.code_review_rounds = 1;
-    plan.frontmatter.code_review_pass = true;
-    plan.frontmatter.code_review_residual_findings =
-        vec!["F01 [P1] logic: missing null check".into()];
-    plan.frontmatter.code_review_open_findings = vec![Finding::new(
-        "concern".into(),
-        "logic".into(),
-        "missing null check".into(),
-    )];
-    write_plan(&plan_path, &plan, 1_000).unwrap();
     plan_runtime.bind_plan_file_for_test(plan_path.clone());
 
     let mut agent = build_agent(Some(Arc::clone(&plan_runtime)), SubagentType::User);
@@ -806,17 +761,13 @@ async fn exhausted_budget_keeps_the_agent_working_until_acceptance_can_start() {
     assert_eq!(
         finalize(&mut agent, &mut messages).await,
         TurnOutcome::Continue,
-        "预算耗尽前尚有 finding 时，必须引导模型修复并触发 acceptance"
+        "in-progress acceptance must produce a verify nudge"
     );
     let text = messages
         .last()
         .and_then(|message| message.text_content())
         .unwrap_or("");
-    assert!(text.contains("configured round budget"), "text={text}");
-    assert!(
-        text.contains("run every declared `acceptance_commands` entry"),
-        "text={text}"
-    );
+    assert!(text.contains("load_skill(verify)"), "text={text}");
     let current_plan = read_plan(&plan_path).unwrap();
     let instruction = plan_runtime
         .next_action(&current_plan.frontmatter)
@@ -832,14 +783,14 @@ async fn exhausted_budget_keeps_the_agent_working_until_acceptance_can_start() {
         messages
             .iter()
             .any(|message| message.kind == MessageKind::Nudge),
-        "预算耗尽但尚未放行时，必须追加收口引导"
+        "in-progress acceptance must append a completion nudge"
     );
 
     cleanup_plan_file(&plan_path);
 }
 
 #[tokio::test]
-async fn exhausted_infra_retries_stop_completion_guard() {
+async fn review_infra_counters_do_not_block_a_completed_plan() {
     let _home = home_guard();
     let plan_id = unique_plan_id("guard_review_infra_retries_exhausted");
     let plan_path = write_plan_file(

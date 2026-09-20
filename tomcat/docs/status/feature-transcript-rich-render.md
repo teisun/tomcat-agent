@@ -1,8 +1,10 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-18 17:15 +0800 | ACTIVE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-20 08:04 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0] Plan 交付收口已去 runtime-owned gate**：计划不再追加 review / acceptance todo，也不再维护 `acceptance_commands` 或 green-build 证据。LLM 可写一个最终 `kind=acceptance` todo；运行时仅在它进入 `in_progress` 时提示 `load_skill(verify)`，且所有 todo 终态即完成。旧 gate kind 容错映射为 `Unknown`，不会保留旧行为；暂停和恢复不再改写 todo 状态。提示词、verify skill、工具契约、架构文档、schema fixture 与交付流测试同步完成。验证：`cargo fmt --check`、`cargo clippy -p tomcat --all-targets`、`cargo test -p tomcat --lib core::skill::`（25 passed）和 `cargo test -p tomcat --lib core::prompts::`（28 passed）。@2026-09-20
+- [✓] **(版本发布)** CLI `0.1.54 → 0.1.55`、扩展 `0.1.68 → 0.1.69`、bundled CLI `0.1.54 → 0.1.55`：使用 `node scripts/release-version.mjs bump --all patch` 更新权威清单与 Cargo/npm 镜像；`node scripts/release-version.mjs check` 通过。Cov% 未跑，保持 —。@2026-09-20
 - [✓] **[P0] Responses 截断误判、流终态重试与计划收口可靠性整改完成**：Responses adapter 不再把 reasoning-only 或正常 completed 回合臆测为 `max_output_tokens`；流内终态错误会丢弃不完整正文/工具调用、保留诊断并回到重试预算；恢复窗口从可重放 user turn 开始，避免截断工具协议。计划收口移除 mtime “新鲜度”警察，completion guard 改看 Git diff 内容指纹；review / acceptance 两道 gate 统一将 `in_progress` 持久化，以盘上状态判重，并由暂停或重启恢复为 pending。卡住计划在界面显示中文原因，busy 状态始终显示进度点；VS Code 验收启动统一使用 basic password store。CLI `0.1.53 → 0.1.54`、扩展 `0.1.67 → 0.1.68`、bundled CLI 同步。验证：Rust fmt、Clippy、9 项定向回归、扩展 lint、wire 检查、GUI 67 files / 585 tests 均通过；首轮 Rust lib 全量测试发现 5 项断言或恢复回归，修复后已定向复验，不宣称全量复跑通过。@2026-09-18
 - [✓] **(版本发布)** CLI `0.1.52 → 0.1.53`、扩展 `0.1.66 → 0.1.67`、bundled CLI `0.1.52 → 0.1.53`：使用 `node scripts/release-version.mjs bump --all patch` 统一更新权威版本清单与 Cargo/npm 镜像，随后 `node scripts/release-version.mjs check` 通过；Cov% 未跑，仍为 —。@2026-09-15
 - [✓] **[P0] 单列表上下文重构（方案 B）主体已落地**：持久消息列表现为唯一权威；回合开始以 `mem::take` 移交给 `AgentLoop`，结束统一停回 `ContextState.messages`。system prompt 移出持久列表，仅在请求组装时附加；L0/L1/L2/L3 均显式操作同一列表并维护 `start_idx`，tail-only overflow 在首次失败时能直接 collapse。已迁移受影响的单元、集成与 ignored 真实 LLM 用例，新增 serve stdio 长会话验收；真实 Terra 长会话、mid-turn/runtime 用例和 `integration-real-llm` 曾完成验收。期间补齐了 tool-only assistant 的 OpenAI-compatible `content: null` wire 兼容、`--resume` 不重放 assistant 尾部，以及代码评审被跳过时的 transcript 审计事件。当前复核已发现后续整改项（steering 的回合起点传递、失败路径归还列表、skipped 评审的低调 UI 呈现与验收记录回填），故分支保持 ACTIVE；本次提交按用户指令不重跑测试。@2026-09-15
@@ -98,6 +100,7 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- **当前交付接口（覆盖下方历史记录）**：`TodoKind` 收敛为 `work|acceptance|unknown`；一个计划最多一个、且仅最终验收可用 `acceptance`。`update_plan` 的 `upsert` 以 `todo_kind` 指定语义类型；所有 todo 完成或取消即完成计划，最终验收开始时返回 verify-skill hint。`acceptance_commands`、`green_build_pass` / evidence 及 runtime-owned gate 不再属于 PlanFile 或工具契约。旧 plan 的未知 kind 保留为 `unknown`，不执行旧 gate 行为。
 - Plan/serve：新增 `plan.stalled { reason, idleNudges?, remainingWork? }` 事件，webview 以本地中文文案显示；移除已废弃的 `plan.code_review.unreviewed_edit`。PlanFile 的 review / acceptance gate 现在都允许持久化 `in_progress`，暂停与恢复会统一刷回 pending。
 - `AgentLoopConfig::system_prompt`：system prompt 不再作为持久 `ChatMessage` 存在，`assemble_request_messages` 在真正发请求时组装它。
 - compaction 原语：`apply_boundary`、L0 清理和 L3 裁剪改为显式接收工作列表与历史上界；`AgentLoop::run` 期间 `ContextState.messages` 是空停车位。
@@ -196,18 +199,13 @@
 - plan 预览协议新增 `openFile { path, line? }`；plan body 内联路径与 transcript 复用同一套 linkify/open-file 语义。
 - `PromptKey::SystemOutputConventions` 继续承担 transcript 富渲染契约：除原有 clickable path 规则外，现新增 `![alt](path)` 本地图片约定，并显式禁止 `http:` / `https:` / `data:` / `blob:` 图像源；该模板通过 `include_str!` 编译进 CLI（运行期不读盘、不支持 env override），因此这类渲染能力发布时必须与 CLI 一起发版，或先发 CLI。
 
-### ⚠️ BLOCKED (阻塞/风险)
+### ⚠️ BLOCKED (当前风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| Rust lib 全量复跑 | 首轮 2,939 项测试发现 5 项断言或恢复回归，修复后 9 项定向回归已通过；尚未重新跑完整库测试 | 合并或发布前 |
-| 窄侧栏显示不足 | 本轮真实截图中长标题会截断，底栏控件和长工具内容拥挤；未修改产品布局 | 后续单独做布局改进及视觉验收 |
-| 系统 Save As 未完整验证 | 图片测试未自动走完原生保存窗口选路径、保存文件的全过程；403 是主动测试越界图片时的预期拒绝，不是正常图片失败 | 后续补原生保存流程验收 |
-| 审查结论的范围 | 运行时达到两轮审查上限后放行，并非新一轮零问题审查；最后的通知可见性意见已补真实窗口提示与点击恢复证据，见整改记录 | 如需独立确认，另行审查补证结果 |
-| checkpoint 快照边界 | checkpoint 改为异步后，若下一回合在后台 snapshot 完成前修改工作树，极端情况下 snapshot 可能跨 turn；不能为规避此风险重新阻塞 `agent_idle` | 若实测出现跨 turn 快照污染，再引入 session 级 FIFO，并在下一轮首个写文件工具前等待前一 snapshot |
-| 复杂跨未知子系统的真实 Explorer 派发冒烟未运行 | 前序接管会话明确禁止启动子 Agent；静态 catalog/prompt 契约与回归已通过，但专门的真实 `dispatch_agent > 0` 冒烟尚无本轮验收记录 | 在授权的隔离夹具中补跑并检查首次是否合并全部独立问题 |
-| 其余真实联网 / 手动测试未全部运行 | 本轮必验离线集与明确列出的真实窗口已通过；其他依赖真实模型行为、外部凭据或人工操作的测试不计入通过数，历史失败保留在整改记录与 Git 历史 | 按文档显式启用对应测试组后分别验证 |
+| 无 | 当前改动已通过格式、Clippy 与定向 skill/prompt 测试；本次提交按用户指令不新增测试执行 | — |
 
 ### 集成说明
+- 当前提交（2026-09-20 08:04）：Plan 交付收口移除 runtime gate 与 green-build 证据机制，最终验收改为 LLM-authored acceptance todo + verify skill；提示词、契约、文档、测试和 serve fixture 已同步。CLI `0.1.55` / 扩展 `0.1.69` / bundled CLI `0.1.55`；版本镜像检查与 `git diff --check` 通过。Cov% 未跑，保持 —。
 - 最新补充（2026-09-11 21:12）：Stop 约 30 秒卡顿已按根因修复，提交包含 Rust 实现、回归、架构不变量与 CLI `0.1.50` / 扩展 `0.1.64` 的版本镜像；版本工具 `check` 和空白 diff 检查通过。提交阶段依用户指令停止正在执行的 Rust 测试，不将其记为本轮验证。
 - 最新补充（2026-09-11 14:25）：方案 E 六项收尾与版本发布完成。全量门禁：Rust `gate-full`、真实 `integration-real-llm`（38/38）、CLI E2E（97/97）、QuickJS E2E（15/15）以及扩展 `npm run gate:full` 全绿；版本镜像检查与 19 条版本工具测试通过。Cov% 未测，保持 —。
 - 最新补充（2026-09-09 22:01）：缓存马拉松去掉 Terra 拒绝的采样参数，并加上 `TOMCAT_E2E_CACHE_PROBE_KEY` 与交替 wire A/B。不推送、不发版；CLI `0.1.48` / 扩展 `0.1.62` 不变。Cov% 未测，保持 —。

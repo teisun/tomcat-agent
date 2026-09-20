@@ -26,8 +26,7 @@ TOMCAT_INTEGRATION_PARALLEL_TESTS=(
   llm_tests
   llm_gateway_toggle_tests
   context_management_tests
-  plan_runtime_integration_tests
-  plan_e2e_with_mock_llm_tests
+  plan_delivery_flow_e2e
   robustness_tests
   read_tool_tests
   resume_hydration_tests
@@ -59,7 +58,6 @@ TOMCAT_INTEGRATION_MANUAL_TESTS=(
   prompt_cache_real_llm_tests
   ui_acceptance_real_llm_e2e
   openai_files_integration_tests
-  plan_evidence_real_llm_acceptance
 )
 
 # Network-only cases inside otherwise offline binaries; run explicitly with the
@@ -86,18 +84,13 @@ TOMCAT_INTEGRATION_SERIAL_TESTS=(
 # 这几个 target 现在会在各自测试进程内切到临时 HOME，把 `~/.tomcat/*` 隔离到
 # 私有 tempdir；剩余并发约束只来自 provider API 限流，因此 nextest profile 把本组
 # 限到 max-threads=2，而不再用 -j1 串行到底。
-# 其中 `plan_real_llm_cli_e2e` 现在只保留 planning-only / exec-only 两条窄 CLI smoke，
-# full completion / artifact / transcript 顺序 / EOF settlement 等重断言交给更快的
-# inprocess/runtime 层；CLI 只保留 resume/build wiring、EXEC prompt 与 session 绑定。
 # run-integration-tests.sh 默认跳过本组，用户/CI 需要时按需
 # `./scripts/run-integration-tests.sh integration-real-llm` 显式触发。
 TOMCAT_INTEGRATION_REAL_LLM_TESTS=(
-  current_tail_guard_real_llm_tests
   single_list_real_llm_long_session_e2e
   openai_responses_integration_tests
 
   plan_real_llm_inprocess_tests
-  plan_real_llm_cli_e2e
   reasoning_continuity_real_llm_tests
 )
 

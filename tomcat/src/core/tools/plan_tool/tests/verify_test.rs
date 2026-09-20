@@ -20,10 +20,6 @@ async fn update_plan_does_not_dispatch_dormant_verifier_even_when_attached() {
             plan_id: Some(plan_id.clone()),
             path: None,
             replace: false,
-            dispute_findings: Vec::new(),
-            green_build_pass: None,
-            green_build_evidence: Vec::new(),
-            acceptance_commands: None,
             ops: vec![
                 update_plan::UpdateOp::SetStatus {
                     id: "t1".into(),
@@ -45,8 +41,8 @@ async fn update_plan_does_not_dispatch_dormant_verifier_even_when_attached() {
         out.get("verify").is_none(),
         "update_plan 不应再返回 verify 字段"
     );
-    assert_eq!(out["plan_state_after"], "executing");
-    assert_eq!(out["next_step"]["phase"], "start_review");
+    assert_eq!(out["plan_state_after"], "completed");
+    assert_eq!(out["next_step"]["phase"], "done");
     assert_eq!(rt.mode(), AgentMode::Plan);
     assert_eq!(verifier.call_count.load(Ordering::Relaxed), 0);
     cleanup_home(&home);

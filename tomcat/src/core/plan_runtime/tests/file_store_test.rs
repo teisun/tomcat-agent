@@ -1,7 +1,7 @@
 use super::super::file_store::{
     read_plan, update_plan_locked, write_plan, PlanError, PlanFile, TodoItem, TodoKind, TodoStatus,
 };
-use super::{sample_frontmatter, temp_plans_dir};
+use super::sample_frontmatter;
 use fs2::FileExt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -18,17 +18,30 @@ fn todo_kind_round_trips_and_missing_kind_defaults_to_work() {
     assert_eq!(legacy.kind, TodoKind::Work);
     assert!(legacy.evidence.is_empty());
 
-    let gate = TodoItem {
-        id: "gate-review".into(),
-        content: "[gate] review".into(),
+    let acceptance = TodoItem {
+        id: "acceptance".into(),
+        content: "验收".into(),
         status: TodoStatus::Pending,
         evidence: Vec::new(),
-        kind: TodoKind::GateCodeReview,
+        kind: TodoKind::Acceptance,
     };
     assert_eq!(
-        serde_json::from_value::<TodoItem>(serde_json::to_value(&gate).unwrap()).unwrap(),
-        gate
+        serde_json::from_value::<TodoItem>(serde_json::to_value(&acceptance).unwrap()).unwrap(),
+        acceptance
     );
+}
+
+fn temp_plans_dir() -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "tomcat_plan_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&path).unwrap();
+    path
 }
 
 #[test]

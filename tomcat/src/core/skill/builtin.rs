@@ -131,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_skill_materialized_content_declares_evidence_contract() {
+    fn verify_skill_materialized_content_declares_review_and_acceptance_flow() {
         let skill = std::str::from_utf8(
             VERIFY_SKILL_ASSETS
                 .get_file("SKILL.md")
@@ -141,8 +141,10 @@ mod tests {
         .expect("embedded verify SKILL.md is UTF-8");
         assert!(skill.contains("name: verify"));
         assert!(skill.contains("run_in_background=true"));
-        assert!(skill.contains("\"green_build_pass\": true"));
-        assert!(skill.contains("\"command\": \"<the exact background bash command>\""));
+        assert!(skill.contains("## Review against the plan"));
+        assert!(skill.contains("## Acceptance flow"));
+        assert!(!skill.contains("acceptance_commands"));
+        assert!(!skill.contains("green_build_pass"));
         assert!(skill.contains("## UI acceptance"));
         assert!(
             VERIFY_SKILL_ASSETS
@@ -236,11 +238,9 @@ mod tests {
             .await
             .expect("load materialized verify skill through the normal loader");
         assert!(payload.contains("<skill name=\"verify\" location=\"SKILL.md\">"));
-        assert!(payload.contains("## Green-build verification"));
-        assert!(
-            payload.contains("Decide the acceptance scope with a floor, a ladder, and a ratchet")
-        );
-        assert!(payload.contains("every declared acceptance command in the plan"));
+        assert!(payload.contains("## Verify by impact radius"));
+        assert!(payload.contains("## Review against the plan"));
+        assert!(payload.contains("## Acceptance flow"));
         assert!(payload.contains("you may only widen, never narrow"));
         assert!(payload.contains("a full project run is not the default"));
         assert!(!payload.contains("complete check set"));

@@ -1,44 +1,7 @@
 use super::super::file_store::{
-    normalize_acceptance_command, normalize_acceptance_commands, parse_plan_file,
-    recover_runtime_gates_on_load, serialize_plan_file, write_plan, PlanError, PlanFile,
-    PlanFileState, TodoItem, TodoStatus,
+    parse_plan_file, serialize_plan_file, PlanError, PlanFile, PlanFileState, TodoItem, TodoStatus,
 };
 use super::sample_frontmatter;
-
-#[test]
-fn acceptance_commands_round_trip_and_default_to_empty_for_legacy_files() {
-    let mut frontmatter = sample_frontmatter();
-    frontmatter.acceptance_commands = vec![
-        "cd tomcat && cargo test --lib plan_tool".into(),
-        "cd tomcat-vscode-ext && npm test".into(),
-    ];
-    let plan = PlanFile {
-        frontmatter,
-        body: String::new(),
-    };
-    let text = serialize_plan_file(&plan).expect("serialize");
-    assert!(
-        text.contains("acceptance_commands:\n- cd tomcat && cargo test --lib plan_tool\n- cd tomcat-vscode-ext && npm test\n"),
-        "declared commands must be persisted verbatim as a YAML list:\n{text}"
-    );
-    let parsed = parse_plan_file(&text).expect("parse");
-    assert_eq!(
-        parsed.frontmatter.acceptance_commands,
-        plan.frontmatter.acceptance_commands
-    );
-
-    let legacy_text = serialize_plan_file(&PlanFile {
-        frontmatter: sample_frontmatter(),
-        body: String::new(),
-    })
-    .expect("serialize legacy shape");
-    assert!(
-        !legacy_text.contains("acceptance_commands"),
-        "an undeclared list must not be written as an empty key:\n{legacy_text}"
-    );
-    let legacy = parse_plan_file(&legacy_text).expect("legacy plan remains readable");
-    assert!(legacy.frontmatter.acceptance_commands.is_empty());
-}
 
 #[test]
 fn code_review_state_round_trips_and_defaults_for_legacy_files() {
@@ -81,27 +44,6 @@ fn code_review_state_round_trips_and_defaults_for_legacy_files() {
     assert_eq!(legacy.frontmatter.code_review_rounds, 0);
     assert!(legacy.frontmatter.code_review_open_findings.is_empty());
     assert!(legacy.frontmatter.code_review_disputed_findings.is_empty());
-}
-
-#[test]
-fn acceptance_command_normalization_collapses_whitespace_and_dedupes_only() {
-    assert_eq!(
-        normalize_acceptance_command("  cd tomcat  &&\tcargo   test  "),
-        "cd tomcat && cargo test"
-    );
-    // Whitespace-only differences collapse; anything else is a different command. A narrower
-    // filter never matches the declared broad command it was carved out of.
-    assert_eq!(
-        normalize_acceptance_commands(&[
-            "cargo test",
-            "  cargo   test ",
-            "",
-            "   ",
-            "cargo test --lib foo",
-            "cargo test",
-        ]),
-        vec!["cargo test".to_string(), "cargo test --lib foo".to_string()]
-    );
 }
 
 #[test]
@@ -201,17 +143,22 @@ fn ordinary_reads_preserve_all_gate_in_progress_states() {
 
     assert_eq!(parsed.frontmatter.todos[0].status, TodoStatus::InProgress);
     assert_eq!(parsed.frontmatter.todos[1].status, TodoStatus::InProgress);
+    assert!(parsed
+        .frontmatter
+        .todos
+        .iter()
+        .all(|todo| todo.kind == crate::core::plan_runtime::file_store::TodoKind::Unknown));
 }
 
 #[test]
 fn acceptance_in_progress_survives_serialize_and_parse_round_trip() {
     let mut frontmatter = sample_frontmatter();
     frontmatter.todos.push(TodoItem {
-        id: "gate-acceptance".into(),
-        content: "[gate] Acceptance".into(),
+        id: "acceptance".into(),
+        content: "验收".into(),
         status: TodoStatus::InProgress,
         evidence: Vec::new(),
-        kind: crate::core::plan_runtime::file_store::TodoKind::GateAcceptance,
+        kind: crate::core::plan_runtime::file_store::TodoKind::Acceptance,
     });
     let plan = PlanFile {
         frontmatter,
@@ -223,118 +170,6 @@ fn acceptance_in_progress_survives_serialize_and_parse_round_trip() {
     assert_eq!(
         parsed.frontmatter.todos.last().map(|todo| todo.status),
         Some(TodoStatus::InProgress)
-    );
-}
-
-#[test]
-fn review_in_progress_survives_serialize_and_parse_round_trip() {
-    let mut frontmatter = sample_frontmatter();
-    frontmatter.todos.push(TodoItem {
-        id: "gate-review".into(),
-        content: "[gate] review".into(),
-        status: TodoStatus::InProgress,
-        evidence: Vec::new(),
-        kind: crate::core::plan_runtime::file_store::TodoKind::GateCodeReview,
-    });
-    let plan = PlanFile {
-        frontmatter,
-        body: String::new(),
-    };
-
-    let parsed = parse_plan_file(&serialize_plan_file(&plan).expect("serialize review"))
-        .expect("parse review");
-    assert_eq!(
-        parsed.frontmatter.todos.last().map(|todo| todo.status),
-        Some(TodoStatus::InProgress)
-    );
-}
-
-#[test]
-fn recovery_resets_persisted_acceptance_in_progress() {
-    let dir = tempfile::tempdir().expect("temp plan directory");
-    let path = dir.path().join("plan.plan.md");
-    let mut frontmatter = sample_frontmatter();
-    frontmatter.todos.push(TodoItem {
-        id: "gate-acceptance".into(),
-        content: "[gate] Acceptance".into(),
-        status: TodoStatus::InProgress,
-        evidence: Vec::new(),
-        kind: crate::core::plan_runtime::file_store::TodoKind::GateAcceptance,
-    });
-    write_plan(
-        &path,
-        &PlanFile {
-            frontmatter,
-            body: String::new(),
-        },
-        1_000,
-    )
-    .expect("acceptance in progress is persistable");
-
-    let recovered = recover_runtime_gates_on_load(&path, 1_000).expect("recover plan");
-    assert_eq!(
-        recovered
-            .plan
-            .frontmatter
-            .todos
-            .last()
-            .map(|todo| todo.status),
-        Some(TodoStatus::Pending)
-    );
-    assert_eq!(
-        parse_plan_file(&std::fs::read_to_string(&path).expect("read plan"))
-            .expect("parse recovered plan")
-            .frontmatter
-            .todos
-            .last()
-            .map(|todo| todo.status),
-        Some(TodoStatus::Pending),
-        "recovery must make the retryable state durable"
-    );
-}
-
-#[test]
-fn recovery_resets_persisted_review_in_progress() {
-    let dir = tempfile::tempdir().expect("temp plan directory");
-    let path = dir.path().join("plan.plan.md");
-    let mut frontmatter = sample_frontmatter();
-    frontmatter.todos.push(TodoItem {
-        id: "gate-review".into(),
-        content: "[gate] review".into(),
-        status: TodoStatus::InProgress,
-        evidence: Vec::new(),
-        kind: crate::core::plan_runtime::file_store::TodoKind::GateCodeReview,
-    });
-    write_plan(
-        &path,
-        &PlanFile {
-            frontmatter,
-            body: String::new(),
-        },
-        1_000,
-    )
-    .expect("review in progress is persistable");
-
-    let recovered = recover_runtime_gates_on_load(&path, 1_000).expect("recover plan");
-    assert_eq!(
-        recovered
-            .plan
-            .frontmatter
-            .todos
-            .last()
-            .map(|todo| todo.status),
-        Some(TodoStatus::Pending)
-    );
-    assert!(recovered.recovered_code_review);
-    assert_eq!(
-        parse_plan_file(&std::fs::read_to_string(&path).expect("read plan"))
-            .expect("parse recovered plan")
-            .frontmatter
-            .todos
-            .last()
-            .map(|todo| todo.status),
-        Some(TodoStatus::Pending),
-        "recovery must make the retryable state durable"
     );
 }
 

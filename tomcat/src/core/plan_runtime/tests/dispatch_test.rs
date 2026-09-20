@@ -56,8 +56,6 @@ fn resolved_plan_path_prefers_active_external_path() {
                     evidence: Vec::new(),
                     kind: Default::default(),
                 }],
-                green_build_pass: false,
-                green_build_evidence: Vec::new(),
                 code_review_pass: false,
                 code_review_rounds: 0,
                 code_review_open_findings: Vec::new(),
@@ -65,7 +63,6 @@ fn resolved_plan_path_prefers_active_external_path() {
                 code_review_handoff: false,
                 code_review_handoff_acknowledged: false,
                 code_review_residual_findings: Vec::new(),
-                acceptance_commands: Vec::new(),
                 unknown: Default::default(),
             },
             body: "## Goal\nexternal\n".into(),
@@ -107,8 +104,6 @@ fn concurrent_exit_and_build_leave_one_chat_mode_transition() {
                     evidence: Vec::new(),
                     kind: Default::default(),
                 }],
-                green_build_pass: false,
-                green_build_evidence: Vec::new(),
                 code_review_pass: false,
                 code_review_rounds: 0,
                 code_review_open_findings: Vec::new(),
@@ -116,7 +111,6 @@ fn concurrent_exit_and_build_leave_one_chat_mode_transition() {
                 code_review_handoff: false,
                 code_review_handoff_acknowledged: false,
                 code_review_residual_findings: Vec::new(),
-                acceptance_commands: Vec::new(),
                 unknown: Default::default(),
             },
             body: "## Goal\nconcurrent transitions\n".into(),
@@ -185,7 +179,7 @@ fn concurrent_exit_and_build_leave_one_chat_mode_transition() {
 }
 
 #[test]
-fn park_resets_persisted_review_in_progress_and_emits_aborted() {
+fn park_preserves_in_progress_acceptance_without_review_event() {
     let runtime = PlanRuntime::new("session");
     let plan_dir = tempfile::tempdir().unwrap();
     let plan_path = plan_dir.path().join("plan-a.plan.md");
@@ -193,11 +187,11 @@ fn park_resets_persisted_review_in_progress_and_emits_aborted() {
     frontmatter.plan_id = "plan-a".into();
     frontmatter.state = PlanFileState::Executing;
     frontmatter.todos.push(TodoItem {
-        id: "gate-review".into(),
-        content: "[gate] review".into(),
+        id: "acceptance".into(),
+        content: "验收".into(),
         status: TodoStatus::InProgress,
         evidence: Vec::new(),
-        kind: TodoKind::GateCodeReview,
+        kind: TodoKind::Acceptance,
     });
     write_plan(
         &plan_path,
@@ -224,19 +218,12 @@ fn park_resets_persisted_review_in_progress_and_emits_aborted() {
     );
     let persisted = read_plan(&plan_path).unwrap();
     assert_eq!(
-        persisted.frontmatter.code_review_rounds, 0,
-        "parking a half-open review must not consume a durable round"
-    );
-    assert_eq!(
         persisted.frontmatter.todos.last().unwrap().status,
-        TodoStatus::Pending,
-        "parking must reset the visible review gate"
+        TodoStatus::InProgress,
+        "parking must preserve the visible acceptance state"
     );
     let events = events.lock();
-    assert_eq!(
-        events[1]["event"],
-        crate::infra::wire::WIRE_PLAN_CODE_REVIEW
-    );
-    assert_eq!(events[1]["aborted"], true);
-    assert_eq!(events[1]["review_attempt_id"], "plan-a:recovery");
+    assert!(events
+        .iter()
+        .all(|event| { event["event"] != crate::infra::wire::WIRE_PLAN_CODE_REVIEW }));
 }

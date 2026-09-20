@@ -24,7 +24,7 @@ fn cancel_token_demotes_executing_to_pending() {
 }
 
 #[test]
-fn restore_recovers_in_progress_gates_and_emits_one_aborted_review() {
+fn restore_preserves_in_progress_unknown_legacy_todos() {
     let _g = home_lock().lock().unwrap();
     let home = setup_isolated_home();
     let path = plan_path_for_id("legacy_review").unwrap();
@@ -33,16 +33,7 @@ fn restore_recovers_in_progress_gates_and_emits_one_aborted_review() {
         "---\nplan_id: legacy_review\ngoal: g\nstate: executing\nsession_key: session-a\nsession_id: sid-session-a\ncreated_at: t\nschema_version: 1\ntodos:\n  - id: gate-review\n    content: \"[gate] review\"\n    status: in_progress\n    kind: gate_code_review\n  - id: gate-acceptance\n    content: \"[gate] Acceptance\"\n    status: in_progress\n    kind: gate_acceptance\n---\n",
     )
     .unwrap();
-    let events = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
     let rt = PlanRuntime::new("session-a");
-    {
-        let events = std::sync::Arc::clone(&events);
-        rt.attach_transcript_appender(std::sync::Arc::new(move |event| {
-            events.lock().push(event);
-            Ok(())
-        }));
-    }
-
     rt.attach_from_resume_state(ResumeControlState {
         mode: Some(AgentMode::Chat),
         plan_path: Some(path.clone()),
@@ -55,22 +46,12 @@ fn restore_recovers_in_progress_gates_and_emits_one_aborted_review() {
         .frontmatter
         .todos
         .iter()
-        .all(|todo| !todo.kind.is_gate() || todo.status == TodoStatus::Pending));
-    assert_eq!(events.lock().len(), 1);
-    assert_eq!(events.lock()[0]["event"], "plan.code_review");
-    assert_eq!(events.lock()[0]["aborted"], true);
-
-    rt.attach_from_resume_state(ResumeControlState {
-        mode: Some(AgentMode::Chat),
-        plan_path: Some(path),
-        plan_id: Some("legacy_review".into()),
-    })
-    .unwrap();
-    assert_eq!(
-        events.lock().len(),
-        1,
-        "持久化恢复后再次加载不得重复写 aborted 终态"
-    );
+        .all(|todo| todo.status == TodoStatus::InProgress));
+    assert!(persisted
+        .frontmatter
+        .todos
+        .iter()
+        .all(|todo| todo.kind == TodoKind::Unknown));
     cleanup_home(&home);
 }
 
@@ -123,8 +104,6 @@ fn concurrent_write_plan_serialized_by_lock() {
             created_at: "2026-05-19T00:00:00Z".into(),
             schema_version: 1,
             todos: vec![],
-            green_build_pass: false,
-            green_build_evidence: Vec::new(),
             code_review_pass: false,
             code_review_rounds: 0,
             code_review_open_findings: Vec::new(),
@@ -132,7 +111,6 @@ fn concurrent_write_plan_serialized_by_lock() {
             code_review_handoff: false,
             code_review_handoff_acknowledged: false,
             code_review_residual_findings: Vec::new(),
-            acceptance_commands: Vec::new(),
             unknown: Default::default(),
         },
         body: "## seed\n".into(),
@@ -414,10 +392,8 @@ fn control_snapshot_reports_three_valued_mode_and_file_state() {
     assert!(matches!(
         snap.progress,
         Some(ProgressSource::PlanFile { ref todos })
-            if todos.len() == 3
+            if todos.len() == 1
                 && todos[0].id == "step1"
-                && todos[1].id == GATE_CODE_REVIEW_TODO_ID
-                && todos[2].id == GATE_ACCEPTANCE_TODO_ID
     ));
     cleanup_home(&home);
 }

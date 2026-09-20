@@ -19,11 +19,13 @@ fn todos_in_chat_writes_session_scratchpad_returns_full_snapshot() {
                     id: "x1".into(),
                     content: Some("scratchpad 1".into()),
                     status: Some(TodoStatus::Pending),
+                    todo_kind: None,
                 },
                 todos::TodoOpArg::Upsert {
                     id: "x2".into(),
                     content: Some("scratchpad 2".into()),
                     status: Some(TodoStatus::Pending),
+                    todo_kind: None,
                 },
                 todos::TodoOpArg::SetStatus {
                     id: "x1".into(),
@@ -63,6 +65,7 @@ fn todos_persists_to_disk_when_todos_runtime_is_injected() {
                 id: "p1".into(),
                 content: Some("persist me".into()),
                 status: Some(TodoStatus::Pending),
+                todo_kind: None,
             }],
         },
     )
@@ -99,6 +102,7 @@ fn todos_new_todos_overwrites_same_session_file() {
                 id: "old".into(),
                 content: Some("old item".into()),
                 status: Some(TodoStatus::Pending),
+                todo_kind: None,
             }],
         },
     )
@@ -115,6 +119,7 @@ fn todos_new_todos_overwrites_same_session_file() {
                 id: "new".into(),
                 content: Some("new item".into()),
                 status: Some(TodoStatus::InProgress),
+                todo_kind: None,
             }],
         },
     )
@@ -147,6 +152,7 @@ fn todos_never_writes_plan_file_in_chat() {
                 id: "x1".into(),
                 content: Some("should not touch plan".into()),
                 status: Some(TodoStatus::Pending),
+                todo_kind: None,
             }],
         },
     )
@@ -181,11 +187,13 @@ fn todos_state_allows_independent_in_progress_items() {
                     id: "x1".into(),
                     content: Some("1".into()),
                     status: Some(TodoStatus::InProgress),
+                    todo_kind: None,
                 },
                 todos::TodoOpArg::Upsert {
                     id: "x2".into(),
                     content: Some("2".into()),
                     status: Some(TodoStatus::Pending),
+                    todo_kind: None,
                 },
             ],
         },
@@ -236,6 +244,7 @@ fn todos_in_exec_writes_session_not_plan_file() {
                 id: "sub-1".into(),
                 content: Some("debug step".into()),
                 status: Some(TodoStatus::Pending),
+                todo_kind: None,
             }],
         },
     )

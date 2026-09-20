@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Run the plan's declared acceptance commands plus the checks the change's impact radius requires (P0–P5 discovery), then report real green-build evidence.
+description: Review the delivered diff against the plan, then run checks sized to the change's impact radius (P0–P5 discovery).
 allowed-tools:
   - read
   - search_files
@@ -15,12 +15,64 @@ allowed-tools:
   - update_plan
 ---
 
-## Green-build verification
+## Acceptance flow
+
+Follow this order exactly:
+
+```text
+review diff against plan → fix confirmed issues → verify by impact radius
+
+   development complete
+          │
+          ▼
+   [1] Review against the plan
+        · compare the diff against the plan
+        · deviations / omissions / scope creep / over-design / P0 · P1
+        · fix confirmed issues before going on
+          │
+          ▼
+   [2] Verify by impact radius
+        · widen only, never narrow:  L0 → L1 → L2 → L3
+          │
+          ▼
+   [2b] UI acceptance          (only when the change is user-visible)
+        · render the page + capture PNG / ARIA / console evidence
+          │
+          ▼
+   [3] Re-review edits made while verifying   (only if a check made you edit)
+        · review the new diff + add/extend regression test + rerun affected checks
+        · loop back to [2] until nothing changes
+          │
+          ▼
+     accept / close out
+```
+
+Do not run the full suite by default. Move to L3 only when the change touches
+core/shared/infra code, configuration, build files, dependency manifests or
+lockfiles, a wire/protocol contract, multiple packages, or the user explicitly
+requests it.
+
+## Review against the plan
+
+Before final verification, inspect the current `git diff` against the active plan:
+
+1. Check every promised behavior and deliverable: flag a plan deviation, omitted
+   item, or changed scope.
+2. Challenge unreasonable implementation and over-design. A mechanism is
+   over-designed when it exists for a scenario outside this change's impact radius
+   or requirements and deleting it would still leave this change's acceptance
+   checks green.
+3. Look for P0 issues (correctness, crashes, data loss, security, or a broken
+   build) and P1 issues (user-visible defects or a material mismatch with the
+   plan). Fix confirmed issues before accepting the change.
+4. Add or update the regression check that owns any behavior changed while fixing.
+
+## Verify by impact radius
 
 Produce real evidence that the current code builds and passes its checks — do not
 describe what would be tested.
 
-1. First identify the project and its documented acceptance commands. Use this order:
+1. First identify the project and its documented verification commands. Use this order:
    - P0: an explicit command from the user or the approved plan;
    - P1: repository instructions such as `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, or the nearest README;
    - P2: the nearest project manifest and its scripts/tasks;
@@ -28,13 +80,7 @@ describe what would be tested.
    - P4: a narrowly scoped smoke command inferred from the changed code;
    - P5: if no runnable command can be found, explain that fact with the files inspected and run the smallest safe parse/type/build check available.
 
-2. Decide the acceptance scope with a floor, a ladder, and a ratchet:
-   - Floor: every declared acceptance command in the plan (`acceptance_commands`
-     in the plan frontmatter, plus any command the user or the plan body names) is
-     mandatory. Run each one verbatim as its own background task; never merge two
-     declared commands into one, and never substitute a narrower command such as a
-     single-test filter for a declared package- or project-wide one. The runtime
-     rejects acceptance when a declared command has no matching finished task.
+2. Decide the verification scope with a ladder and a ratchet:
    - Ladder: for what the diff actually touched, widen from the change outward
      until every affected boundary is covered:
        L0 the tests owning the changed files;
@@ -55,51 +101,14 @@ describe what would be tested.
 
 Before choosing an output directory, read `workspace.project_resource_dir` from the active Tomcat configuration. It defaults to `.agents`. Pass the resolved project directory explicitly to `--out` so a custom setting such as `.workspace-data` stores screenshots under `.workspace-data/shots`; never rely on the script default for a custom configuration.
 
-3. Start every acceptance command with `bash(run_in_background=true)`. If the next
+3. Start every verification command with `bash(run_in_background=true)`. If the next
    step does not strictly depend on its result, do other independent work and wait
    for `<background-task-finished>`. If it does, call `task_output(block=true)` with
    a realistic wait slice until it finishes.
 
-4. A command is valid evidence only when its background task is `Finished` with
-   `exit_code=0` and the submitted command matches the task's actual command. Failed,
-   stopped, reused, or still-running tasks are not evidence. If code changes during
-   acceptance, apply the review-and-rerun rules below before submitting evidence.
-
-5. When all selected checks pass, call `update_plan` with:
-
-```json
-{
-  "green_build_pass": true,
-  "green_build_evidence": [{
-    "command": "<the exact background bash command>",
-    "task_id": "<finished-background-task-id>"
-  }],
-  "ops": []
-}
-```
-
-The runtime validates the task ID, actual command, and exit code itself.
-Never set `green_build_pass` to true without this evidence. If discovery found no
-meaningful command, leave the plan open and report the concrete missing acceptance
-path rather than fabricating success.
-
-## Review acceptance-phase edits
-
-Acceptance is not a free pass to make unreviewed changes. If a check exposes a
-problem and you edit code while verifying:
-
-1. Review the diff yourself before submitting evidence. State the change's intent
-   and affected boundary; do not rely on an earlier review of older code.
-2. Add or extend the regression test that owns the changed behavior, then include
-   it in the green-build run. Running only the old checks is insufficient.
-3. If any code changes after a check starts or finishes, rerun the affected check
-   before submitting evidence. Submit only green evidence that reflects the code
-   currently in the workspace.
-
-These are mandatory acceptance-quality steps, not optional advice. The runtime
-validates that evidence belongs to this session, finished successfully, and names
-the command it ran; deciding whether a content change requires a rerun belongs to
-this review step rather than to a filesystem timestamp.
+4. Treat a command as passed only when it has finished successfully with exit code
+   0. If discovery finds no meaningful command, report the concrete missing
+   verification path rather than claiming success.
 
 ## UI acceptance
 
@@ -131,7 +140,7 @@ browser runtime errors.
    This writes `<screen>.png` (visual truth), `<screen>.aria.txt` (structure), and
    `<screen>.console.json` (browser runtime). A page error or `console.error` makes
    the shot task fail. Its exact command and successful task ID are valid
-   `green_build_evidence`.
+   verification evidence for the delivery record.
 4. Read all three artifacts. Use the PNG for blank screens, clipping, overlap,
    spacing, color, and layout; use ARIA for roles, labels, and expanded/disabled
    state; use console output for runtime faults. For responsive UI, capture at
@@ -159,3 +168,17 @@ call `tool_call(name="mcp__playwright__browser_take_screenshot", arguments={...}
 intentionally saves a filename/full-page capture to disk and returns only a
 Markdown file link; it omits the image content needed for the model vision loop.
 Use the default viewport screenshot for visual judgement.
+
+## Review edits found while verifying
+
+Verification is not a free pass to make unreviewed changes. If a check exposes a
+problem and you edit code while verifying:
+
+1. Review the diff yourself before accepting it. State the change's intent
+   and affected boundary; do not rely on an earlier review of older code.
+2. Add or extend the regression test that owns the changed behavior, then include
+   it in the verification run. Running only the old checks is insufficient.
+3. If any code changes after a check starts or finishes, rerun the affected check
+   before accepting the code currently in the workspace.
+
+These are mandatory acceptance-quality steps, not optional advice.
