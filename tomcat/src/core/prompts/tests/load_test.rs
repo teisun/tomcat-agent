@@ -192,9 +192,26 @@ fn planner_prompt_carries_a_generic_plan_structure_section() {
         feature,
         "- For a feature requirement: \"Requirement background\", \"Solution\", and \"Verification\"."
     );
-    assert!(
-        section.contains("Every Solution must contain a plain-language key decisions checklist")
-    );
+    let solution_contract = "Every Solution must contain an explanation of the solution (ASCII diagram plus text) and a key decisions checklist written in plain language.";
+    assert!(section.contains(solution_contract));
+    assert!(section.contains(
+        "If it changes UI, it must also contain an ASCII UI diagram showing the proposed result."
+    ));
+    let reviewer_plan = load(PromptKey::ReviewerPlan);
+    for (label, text) in [("planner", s), ("plan reviewer", reviewer_plan)] {
+        assert!(
+            text.contains("explanation of the solution (ASCII diagram plus text)"),
+            "{label} must explain solutions with an ASCII diagram and text"
+        );
+        assert!(
+            text.contains("key decisions checklist written in plain language"),
+            "{label} must require a plain-language key decisions checklist"
+        );
+        assert!(
+            text.contains("ASCII UI diagram showing the proposed result"),
+            "{label} must require an ASCII UI diagram for UI changes"
+        );
+    }
     assert!(normalized
         .contains("Do not list all problems first and then present all solutions together"));
     assert!(normalized.contains(
@@ -530,7 +547,7 @@ fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
 }
 
 /// S6/S8 remain shared. Core identity keeps general explanation rules, while
-/// planner adds plan structure; the reviewer templates are unchanged in this update.
+/// planner and plan reviewer carry plan-structure requirements; code reviewer remains scoped.
 #[test]
 fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
     const S6: &str = "Reason from first principles: when planning or coding, work out the architecture and implementation from first principles, follow best practices, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.";
@@ -609,6 +626,27 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
         assert!(!identity.contains(plan_only));
     }
     assert!(reviewer_plan.contains("say it plainly"));
+    let plan_solution_contract = "Every Solution must contain an explanation of the solution (ASCII diagram plus text) and a key decisions checklist written in plain language.";
+    assert!(planner.contains(plan_solution_contract));
+    assert!(reviewer_plan.contains(plan_solution_contract));
+    assert!(
+        !identity.contains(plan_solution_contract),
+        "core_identity must not carry plan-specific solution structure"
+    );
+    assert!(
+        !reviewer_code.contains(plan_solution_contract),
+        "reviewer_code must not carry plan-specific solution structure"
+    );
+    assert!(reviewer_plan.contains(
+        "If it changes UI, it must also contain an ASCII UI diagram showing the proposed result."
+    ));
+    assert!(!reviewer_code.contains(
+        "If it changes UI, it must also contain an ASCII UI diagram showing the proposed result."
+    ));
+    assert!(reviewer_plan.contains("When creating or updating a development plan"));
+    assert!(!reviewer_code.contains("When creating or updating a development plan"));
+    assert!(reviewer_plan.contains("exact files, symbols, or contracts to change"));
+    assert!(!reviewer_code.contains("exact files, symbols, or contracts to change"));
     assert!(
         !reviewer_code.contains("Explain in plain, jargon-free language"),
         "read-only code reviewer must not promise plan-file ASCII explanations"

@@ -45,7 +45,7 @@ to the number of todos.
         - For a problem: "Problem symptoms", "Root cause and evidence", "Solution", and "Verification".
         - For a feature requirement: "Requirement background", "Solution", and "Verification".
     - Do not list all problems first and then present all solutions together.
-    - Every Solution must contain a plain-language key decisions checklist. If it changes UI, it must also contain an ASCII UI diagram showing the proposed result.
+    - Every Solution must contain an explanation of the solution (ASCII diagram plus text) and a key decisions checklist written in plain language. If it changes UI, it must also contain an ASCII UI diagram showing the proposed result.
     - Include ASCII diagrams in complex sections to aid understanding. In the accompanying explanations, use concise wording that conveys all essential points clearly and fully, and avoid long-winded exposition.
     - Do not explain problems or solutions using opaque jargon or strings of technical terms. When a technical term is necessary, immediately follow it with a plain-language explanation.
     - Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.
