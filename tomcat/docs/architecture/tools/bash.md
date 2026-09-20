@@ -127,6 +127,19 @@ AppConfig.tools.bash
 
 成功、拒绝、spawn 失败和 stop 都保留审计信息；后台任务额外携带 `task_id`，便于把命令、日志与终态关联起来。
 
+### 内部诊断目录的 Bash 例外
+
+Bash 访问以下 Tomcat 内部目录时，不再因为 `readonly` 规则被路径预检拦截：
+
+```text
+~/.tomcat/agents/<agentId>/sessions/**
+~/.tomcat/agents/<agentId>/logs/**
+~/.tomcat/agents/<agentId>/audit/**
+```
+
+这只是让 Bash/Python 能读取和统计历史数据，不是强制只读沙箱。Bash 本身仍可能修改文件；`deny` 规则仍优先，`write/edit` 工具仍不能借此写入。
+
+
 ## 7. 状态机
 
 ```text

@@ -522,6 +522,115 @@ fn pr9_agent_trail_dir_read_allow_write_deny() {
     );
 }
 
+/// 内置 sessions/logs/audit 目录对 Bash 永久放行，不区分 readonly 规则来源；
+/// 但 deny 仍然优先，Write/Edit 仍不放行。
+#[test]
+#[serial(env_lock)]
+fn pr9_internal_diagnostic_dirs_allow_bash_but_deny_still_wins() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tmpdir("home_pr9_bash_diagnostic");
+    let agents_root = home.join(".tomcat/agents/main");
+    let sessions = agents_root.join("sessions");
+    let logs = agents_root.join("logs");
+    let audit = agents_root.join("audit");
+    for directory in [&sessions, &logs, &audit] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+    let _home_guard = HomeGuard(std::env::var_os("HOME"));
+    std::env::set_var("HOME", &home);
+
+    let workspace = tmpdir("ws_pr9_bash_diagnostic");
+    let gate = DefaultPermissionGate::new(
+        GateConfig {
+            agent_definition_dir: workspace,
+            workspace_roots: vec![],
+            agent_trail_readonly_dirs: vec![],
+            user_path_rules: vec![PathRule::new(
+                agents_root.to_string_lossy().to_string(),
+                PathRuleMode::Readonly,
+            )],
+            user_bash_forbidden: vec![],
+            user_bash_approval: vec![],
+            auto_confirm: false,
+        },
+        SessionGrants::new(),
+    );
+    // 会话运行时追加同一类 readonly 规则，也不改变 Bash 例外。
+    gate.grant_path_rule(PathRule::new(
+        sessions.to_string_lossy().to_string(),
+        PathRuleMode::Readonly,
+    ));
+
+    for directory in [&sessions, &logs, &audit] {
+        let target = directory.join("fixture.jsonl");
+        let bash_dec = gate
+            .check(PrimitiveOperation::Bash, target.to_str().unwrap())
+            .unwrap();
+        assert!(matches!(
+            bash_dec,
+            PermissionDecision::Allow { grant, scope: PermissionScope::Bash }
+                if grant.grant_type == GrantType::BashPolicy
+                    && grant.trigger == GrantTrigger::BuiltinDefault
+        ));
+
+        let read_dec = gate
+            .check(PrimitiveOperation::Read, target.to_str().unwrap())
+            .unwrap();
+        assert!(matches!(
+            read_dec,
+            PermissionDecision::Allow {
+                scope: PermissionScope::Read,
+                ..
+            }
+        ));
+
+        for op in [PrimitiveOperation::Write, PrimitiveOperation::Edit] {
+            let write_dec = gate.check(op, target.to_str().unwrap()).unwrap();
+            assert!(
+                matches!(write_dec, PermissionDecision::Deny { .. }),
+                "{op:?} must remain denied for {target:?}, got {write_dec:?}"
+            );
+        }
+    }
+
+    let denied_target = logs.join("blocked.jsonl");
+    gate.grant_path_rule(PathRule::new(
+        denied_target.to_string_lossy().to_string(),
+        PathRuleMode::Deny,
+    ));
+    let denied = gate
+        .check(PrimitiveOperation::Bash, denied_target.to_str().unwrap())
+        .unwrap();
+    assert!(
+        matches!(denied, PermissionDecision::Deny { .. }),
+        "deny must override the Bash exception, got {denied:?}"
+    );
+
+    let outside = agents_root.join("agent/sessions/not-diagnostic.jsonl");
+    let outside_dec = gate
+        .check(PrimitiveOperation::Bash, outside.to_str().unwrap())
+        .unwrap();
+    assert!(
+        !matches!(
+            outside_dec,
+            PermissionDecision::Allow {
+                scope: PermissionScope::Bash,
+                ..
+            }
+        ),
+        "a same-named nested directory must not receive the exception: {outside_dec:?}"
+    );
+}
 #[test]
 fn workspace_roots_grant_writable() {
     let ws = tmpdir("ws_extra");

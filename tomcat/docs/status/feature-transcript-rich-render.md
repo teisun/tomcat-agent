@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-20 09:53 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-20 14:11 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0] 内部诊断目录的 Bash 排障权限已收口**：`DefaultPermissionGate` 仅对 `~/.tomcat/agents/<agent-id>/{sessions,logs,audit}/**` 的 Bash 访问跳过 readonly 拦截；路径按组件匹配，`deny` 仍优先，原生 Write/Edit 和敏感凭据保护不变。前台 executor、后台任务与插件 `executeBash` 都已用临时 JSONL 真实读取回归覆盖。CLI `0.1.55 → 0.1.56`、扩展 `0.1.69 → 0.1.70`、bundled CLI 同步；版本脚本的镜像检查和 19 项自身测试已通过。提交阶段依用户指令不额外运行测试，Cov% 未跑，保持 —。@2026-09-20
 - [✓] **[P0] 通用真实 LLM 验收统一迁移到 idatatlas Terra**：通用 Responses、CLI、计划、skill、checkpoint/resume 与长会话 fixture 统一按 `idatatlas/gpt-5.6-terra` 及完整 catalog capabilities 解析；DeepSeek / Sunmi 专项路径保留隔离。计划真测现真实发现并公布 `verify` skill，最终 acceptance 确实调用 `load_skill(verify)`；批量 read 的 CLI 工具行也保留单文件失败原因，不再只显示“读取失败”计数。验证：`integration-real-llm` 29/29、ignored idatatlas 长会话 E2E、`cargo fmt --check`、`git diff --check` 均通过。Cov% 未跑，保持 —。@2026-09-20
 - [✓] **[P0] Plan 交付收口已去 runtime-owned gate**：计划不再追加 review / acceptance todo，也不再维护 `acceptance_commands` 或 green-build 证据。LLM 可写一个最终 `kind=acceptance` todo；运行时仅在它进入 `in_progress` 时提示 `load_skill(verify)`，且所有 todo 终态即完成。旧 gate kind 容错映射为 `Unknown`，不会保留旧行为；暂停和恢复不再改写 todo 状态。提示词、verify skill、工具契约、架构文档、schema fixture 与交付流测试同步完成。验证：`cargo fmt --check`、`cargo clippy -p tomcat --all-targets`、`cargo test -p tomcat --lib core::skill::`（25 passed）和 `cargo test -p tomcat --lib core::prompts::`（28 passed）。@2026-09-20
 - [✓] **(版本发布)** CLI `0.1.54 → 0.1.55`、扩展 `0.1.68 → 0.1.69`、bundled CLI `0.1.54 → 0.1.55`：使用 `node scripts/release-version.mjs bump --all patch` 更新权威清单与 Cargo/npm 镜像；`node scripts/release-version.mjs check` 通过。Cov% 未跑，保持 —。@2026-09-20
@@ -101,6 +102,7 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- Bash 权限：仅上述三个 Tomcat 内部诊断目录的 Bash 访问不受 readonly 规则阻挡；任何 `deny` 仍优先，原生文件写入工具及 `agent/credentials*`、`auth-profiles*.json` 等敏感路径保护不变。CLI `0.1.56`、扩展 `0.1.70`、`bundledCliVersion=0.1.56`。
 - CLI：`ToolDisplay::Files` 含失败文件时，工具结束摘要会展示该文件的 `note`，使 `read` 的真实路径错误直接可见。
 - **当前交付接口（覆盖下方历史记录）**：`TodoKind` 收敛为 `work|acceptance|unknown`；一个计划最多一个、且仅最终验收可用 `acceptance`。`update_plan` 的 `upsert` 以 `todo_kind` 指定语义类型；所有 todo 完成或取消即完成计划，最终验收开始时返回 verify-skill hint。`acceptance_commands`、`green_build_pass` / evidence 及 runtime-owned gate 不再属于 PlanFile 或工具契约。旧 plan 的未知 kind 保留为 `unknown`，不执行旧 gate 行为。
 - Plan/serve：新增 `plan.stalled { reason, idleNudges?, remainingWork? }` 事件，webview 以本地中文文案显示；移除已废弃的 `plan.code_review.unreviewed_edit`。PlanFile 的 review / acceptance gate 现在都允许持久化 `in_progress`，暂停与恢复会统一刷回 pending。
@@ -204,9 +206,10 @@
 ### ⚠️ BLOCKED (当前风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| 无 | 真实 idatatlas 验收与离线格式/空白检查均已通过；本次提交按用户指令不新增测试执行 | — |
+| 无 | 本次只提交内部诊断目录 Bash 例外和补丁版本升级；依用户指令，提交前不新增测试执行。 | — |
 
 ### 集成说明
+- 当前提交（2026-09-20 14:11）：Bash 可对 `sessions/`、`logs/`、`audit/` 做内部诊断；deny、敏感路径保护和原生写入限制保持不变。版本脚本已将 CLI 升至 `0.1.56`、扩展升至 `0.1.70`、bundled CLI 升至 `0.1.56`，镜像检查与版本脚本 19 项测试通过；按用户指令，提交前不额外运行测试。
 - 当前提交（2026-09-20 09:53）：通用真实 LLM 配置和真实验收迁移至 idatatlas Terra；完整真实组 `integration-real-llm` 29/29 通过，ignored 长会话 E2E 通过。计划真测已验证 `plan.review`、最终 `load_skill(verify)`、两项 todo 收口和真实 Python 产物；不推送、不发版，Cov% 未跑。
 - 当前提交（2026-09-20 08:04）：Plan 交付收口移除 runtime gate 与 green-build 证据机制，最终验收改为 LLM-authored acceptance todo + verify skill；提示词、契约、文档、测试和 serve fixture 已同步。CLI `0.1.55` / 扩展 `0.1.69` / bundled CLI `0.1.55`；版本镜像检查与 `git diff --check` 通过。Cov% 未跑，保持 —。
 - 最新补充（2026-09-11 21:12）：Stop 约 30 秒卡顿已按根因修复，提交包含 Rust 实现、回归、架构不变量与 CLI `0.1.50` / 扩展 `0.1.64` 的版本镜像；版本工具 `check` 和空白 diff 检查通过。提交阶段依用户指令停止正在执行的 Rust 测试，不将其记为本轮验证。

@@ -259,6 +259,58 @@ async fn dispatch_read_file_with_primitive_returns_ok() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(env_lock)]
+async fn dispatch_execute_bash_reads_internal_session() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let sessions = home.path().join(".tomcat/agents/main/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let fixture = sessions.join("plugin.jsonl");
+    std::fs::write(&fixture, b"plugin-line\n").unwrap();
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+    let _home_guard = HomeGuard(std::env::var_os("HOME"));
+    std::env::set_var("HOME", home.path());
+
+    let root = tempfile::tempdir().expect("plugin workspace tempdir");
+    let (dispatcher, _registry) = make_real_bash_dispatcher(root.path(), true);
+    let req = HostRequest {
+        module: "fs".to_string(),
+        method: "executeBash".to_string(),
+        params: serde_json::json!({
+            "command": format!("cat {}", fixture.display()),
+            "cwd": root.path().display().to_string(),
+            "foreground_wait_ms": 8_000
+        }),
+        call_id: None,
+    };
+    let response = dispatcher
+        .dispatch_async("inst-internal-session", req)
+        .await
+        .expect("dispatcher call");
+    assert!(
+        response.ok,
+        "internal session read should succeed: {response:?}"
+    );
+    let data = response.data.expect("bash response data");
+    assert!(
+        data["stdout"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("plugin-line"),
+        "unexpected plugin bash output: {data}"
+    );
+    assert_eq!(std::fs::read_to_string(&fixture).unwrap(), "plugin-line\n");
+}
 #[tokio::test]
 async fn dispatch_write_file_with_primitive_returns_ok() {
     let bus = Arc::new(DefaultEventBus::new());

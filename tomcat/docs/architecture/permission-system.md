@@ -6,7 +6,7 @@
 
 - **统一入口**：文件读写、编辑、bash 执行、`/path` 路径授权、cwd lazy prompt、Workspace State 渲染都通过同一个 `PermissionGate` 视图判断。
 - **deny 优先**：内置与用户配置的 `path_rules deny` 命中后直接拒绝，不能被 `workspace_roots`、session grant、`/path` 授权或确认弹窗绕过。
-- **readonly 降级**：`path_rules readonly` 与 agent 运行态轨迹目录只允许读；写入不会展示扩大授权选项。
+- **readonly 的 Bash 例外**：`~/.tomcat/agents/<agentId>/sessions`、`logs`、`audit` 及其子文件允许 Bash 访问，方便用 Python 等程序做统计；这只影响 Bash 的路径预检，不代表系统提供强制只读保护。`deny` 仍然优先，`write/edit` 仍然按 readonly 拒绝。
 - **默认可写根是 `agent_definition_dir`**：即 `~/.tomcat/workspace-main/` 或 `workspace-<agentId>/`，承载 Agent 设计态文件。
 - **启动 cwd 不是默认授权根**：`agent_workspace_dir` 只用于 prompt 中解释“当前目录 / 这个项目 / 相对路径”。访问该目录仍需 `workspace.workspace_roots`、会话授权或 cwd lazy prompt 授权。
 - **executor 必须带 gate**：`DefaultPrimitiveExecutor` 构造时强制传入 `Arc<dyn PermissionGate>`，不存在 no-gate legacy 分支。
@@ -34,7 +34,8 @@ Layer 0: normalize_path + canonicalize_with_existing_ancestor
   v
 Layer 1: path_rules / readonly
   Deny 命中      -> Deny
-  Readonly+Write -> Deny
+  Readonly+Write/Edit -> Deny
+  Readonly+Bash+内部诊断目录 -> Allow(BashPolicy, BuiltinDefault)
   Readonly+Read  -> Allow(PathRuleReadOnly, PathRulesConfig)
   |
   v
@@ -137,9 +138,9 @@ Bash 执行分两部分：
    - 命中 `bash_forbidden` -> `Deny`
    - 命中 `bash_approval_required` -> `NeedConfirm`
    - 未命中 -> `Allow { grant_type: BashPolicy, trigger: BashRegexConfig }`
-2. `DefaultPrimitiveExecutor::execute_bash` 仅对真实 `cwd` 做 `gate_check_path(Read, cwd)`，随后直接进入 `bash_ast` / `check_bash(command)` / `spawn`。
+2. `DefaultPrimitiveExecutor::execute_bash` 对 cwd 和命令中识别出的显式路径做 `gate_check_path(Bash, path)`。命中 `~/.tomcat/agents/<agentId>/{sessions,logs,audit}` 时，readonly 不再阻挡 Bash；明确的 `deny` 仍拒绝，`write/edit` 行为不变。这个例外只是权限层放行，不是操作系统沙箱，Bash/Python 仍有能力写文件。
 
-不再从 bash 命令字符串里静态猜测路径再做 `gate_check_path(Bash, token)`。原因是 `node:fs/promises`、`@scope/pkg`、jq 过滤式、heredoc、`node -e` 等组合太多，误判成本远高于收益。
+Bash 路径预检仍是“尽力识别”：复杂脚本、heredoc 和重定向不保证都能提取到路径；这次不扩展 parser，只让已被提取的内部诊断路径不再被 readonly 挡住。
 
 ## 8. Audit Schema
 

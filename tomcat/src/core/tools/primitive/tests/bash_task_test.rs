@@ -131,6 +131,56 @@ async fn read_output_unknown_task_id_errors() {
 
 // ─── P1（bash background monitor）追加 ─────────────────────────────────────
 
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(env_lock)]
+async fn spawn_reads_internal_session_with_guard() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let sessions = home.path().join(".tomcat/agents/main/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let fixture = sessions.join("background.jsonl");
+    std::fs::write(&fixture, b"line-a\nline-b\n").unwrap();
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+    let _home_guard = HomeGuard(std::env::var_os("HOME"));
+    std::env::set_var("HOME", home.path());
+
+    let workspace = tempfile::tempdir().expect("workspace tempdir");
+    let guard = make_guard(workspace.path(), vec![], vec![], BashAstChecker::default());
+    let registry =
+        BashTaskRegistry::new(workspace.path().join("tool-results")).with_background_guard(guard);
+    let ticket = registry
+        .spawn(
+            format!("cat {}", fixture.display()),
+            Some(workspace.path().to_path_buf()),
+        )
+        .await
+        .expect("background Bash should pass the internal session path");
+    registry
+        .wait_for_finish(&ticket.task_id)
+        .await
+        .expect("background task should finish");
+    let output = registry
+        .read_output(&ticket.task_id, None)
+        .await
+        .expect("read task output");
+    assert!(output.finished);
+    assert!(output.content.contains("line-a"));
+    assert!(output.content.contains("line-b"));
+    assert_eq!(
+        std::fs::read_to_string(&fixture).unwrap(),
+        "line-a\nline-b\n"
+    );
+}
+
 /// `wait_for_finish` 不会因为持续新输出而提前返回；只有终态才会结束等待。
 #[tokio::test]
 async fn wait_for_finish_ignores_new_output_until_terminal() {

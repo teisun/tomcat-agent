@@ -15,7 +15,7 @@
 //! `auto_confirm = true` 仅短路 Layer-2 NeedConfirm（写入审计标记 `AutoConfirmFlag`），
 //! Layer-1 Forbidden 永远不可被绕过。
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use globset::Glob;
@@ -177,6 +177,31 @@ impl DefaultPermissionGate {
         path_starts_with(&s, &plans.to_string_lossy())
     }
 
+    /// 是否位于 Tomcat 内置的诊断目录：
+    /// `~/.tomcat/agents/<agent-id>/{sessions,logs,audit}` 及其子路径。
+    ///
+    /// 这里故意按路径组件判断，而不是用字符串 contains，避免把
+    /// `agent/sessions` 或其它同名目录误当成内部诊断目录。
+    fn in_builtin_bash_diagnostic_set(&self, target: &Path) -> bool {
+        let Some(home) = crate::infra::platform::home_dir() else {
+            return false;
+        };
+        let agents_dir = canonicalize_with_existing_ancestor(&home.join(".tomcat/agents"));
+        let Ok(relative) = target.strip_prefix(&agents_dir) else {
+            return false;
+        };
+        let mut components = relative.components();
+        let Some(Component::Normal(_agent_id)) = components.next() else {
+            return false;
+        };
+        let Some(Component::Normal(directory)) = components.next() else {
+            return false;
+        };
+        directory == std::ffi::OsStr::new("sessions")
+            || directory == std::ffi::OsStr::new("logs")
+            || directory == std::ffi::OsStr::new("audit")
+    }
+
     fn path_rules_snapshot(&self) -> Vec<PathRule> {
         let mut rules = self.path_rules.clone();
         rules.extend(self.session_path_rules.snapshot());
@@ -214,6 +239,11 @@ impl PermissionGate for DefaultPermissionGate {
                     });
                 }
                 PathRuleMode::Readonly => {
+                    if matches!(op, PrimitiveOperation::Bash)
+                        && self.in_builtin_bash_diagnostic_set(&target)
+                    {
+                        return Ok(allow_builtin_bash());
+                    }
                     if matches!(
                         op,
                         PrimitiveOperation::Write
@@ -247,6 +277,12 @@ impl PermissionGate for DefaultPermissionGate {
                     });
                 }
             }
+        }
+
+        // 内置诊断目录即使没有命中 readonly 规则，也允许 Bash 访问；
+        // 但前面的 deny 已经优先返回，不能绕过明确禁止。
+        if matches!(op, PrimitiveOperation::Bash) && self.in_builtin_bash_diagnostic_set(&target) {
+            return Ok(allow_builtin_bash());
         }
 
         // ── Layer 3 第一波：在 writable 集合内（agent_definition_dir / workspace_roots） ──
@@ -393,6 +429,13 @@ fn agent_plans_dir_path() -> Option<PathBuf> {
 // ─────────────────────────────────────────────────────────────────────────────
 // 辅助
 // ─────────────────────────────────────────────────────────────────────────────
+
+fn allow_builtin_bash() -> PermissionDecision {
+    PermissionDecision::Allow {
+        grant: GrantTrace::new(GrantType::BashPolicy, GrantTrigger::BuiltinDefault),
+        scope: PermissionScope::Bash,
+    }
+}
 
 fn scope_for_op(op: PrimitiveOperation) -> PermissionScope {
     match op {

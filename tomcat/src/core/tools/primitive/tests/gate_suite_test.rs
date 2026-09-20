@@ -251,6 +251,53 @@ async fn execute_bash_audit_records_bash_scope() {
 
 // ── PR-9：Agent trail dir read-only / 凭据 deny 经 executor 落地 ──
 
+#[cfg(unix)]
+#[tokio::test]
+#[serial_test::serial(env_lock)]
+async fn execute_bash_reads_internal_session_with_python() {
+    let _home_lock = crate::test_support::home_env_lock().lock().unwrap();
+    let home = tempfile::tempdir().expect("home tempdir");
+    let sessions = home.path().join(".tomcat/agents/main/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let fixture = sessions.join("session.jsonl");
+    std::fs::write(&fixture, b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n").unwrap();
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+    let _home_guard = HomeGuard(std::env::var_os("HOME"));
+    std::env::set_var("HOME", home.path());
+
+    let workspace = workspace_dir("bash_internal_session_python");
+    let exec = make_executor(workspace.clone(), vec![], Arc::new(AllowAllConfirmation));
+    let command = format!(
+        "python3 -c 'import sys; print(sum(1 for _ in open(sys.argv[1])))' {}",
+        fixture.display()
+    );
+    let result = exec
+        .execute_bash(&command, Some(&workspace.to_string_lossy()), "p1", None)
+        .await
+        .expect("Bash should read the internal session fixture");
+
+    assert_eq!(result.exit_code, 0);
+    assert!(
+        result.stdout.contains("2"),
+        "unexpected stdout: {:?}",
+        result.stdout
+    );
+    assert_eq!(
+        std::fs::read_to_string(&fixture).unwrap().lines().count(),
+        2
+    );
+
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
 fn make_executor_with_agent_ro(
     agent_definition_dir: PathBuf,
     agent_ro: Vec<PathBuf>,
