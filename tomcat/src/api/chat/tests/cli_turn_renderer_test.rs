@@ -18,7 +18,7 @@ use super::{
 use crate::api::render::MarkdownRenderer;
 use crate::infra::config::{ThinkingDisplay, ToolCliVerbosity};
 use crate::infra::event_bus::{DefaultEventBus, EventBus, EventContext};
-use crate::infra::events::ToolDisplay;
+use crate::infra::events::{ToolDisplay, ToolDisplayFileEntry, ToolDisplayFileStatus};
 use crate::infra::wire;
 
 #[derive(Default)]
@@ -566,6 +566,36 @@ fn result_summary_picks_best_field_for_success_and_error() {
     assert_eq!(
         result_summary(&json!("No such file or directory"), true),
         "No such file or directory"
+    );
+}
+
+#[test]
+fn result_summary_surfaces_failed_file_read_reason() {
+    let display = ToolDisplay::Files {
+        summary: "已读取 0 个文件，1 个读取失败".to_string(),
+        files: vec![ToolDisplayFileEntry {
+            file: "/tmp/missing.txt".to_string(),
+            added: None,
+            removed: None,
+            diff: None,
+            diff_truncated: false,
+            expired: false,
+            range: None,
+            status: Some(ToolDisplayFileStatus::Failed),
+            note: Some("No such file or directory (os error 2)".to_string()),
+        }],
+        expired: false,
+    };
+
+    let summary = result_summary_for_tool(&json!("tool output"), Some(&display), false);
+
+    assert!(
+        summary.contains("No such file or directory"),
+        "failed read reason must remain visible: {summary}"
+    );
+    assert!(
+        summary.contains("os error 2"),
+        "failed read errno must remain visible: {summary}"
     );
 }
 

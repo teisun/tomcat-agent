@@ -43,7 +43,7 @@ use crate::api::render::MarkdownRenderer;
 use crate::core::llm::ThinkingSource;
 use crate::infra::config::{ThinkingDisplay, ToolCliVerbosity};
 use crate::infra::event_bus::{EventContext, EventListenerId};
-use crate::infra::events::ToolDisplay;
+use crate::infra::events::{ToolDisplay, ToolDisplayFileStatus};
 use crate::infra::{wire, EventBus};
 
 fn format_countdown_ms(ms: u64) -> String {
@@ -741,7 +741,20 @@ fn expand_path_for_terminal(path: &str) -> String {
 fn display_summary(display: &ToolDisplay) -> String {
     match display {
         ToolDisplay::File { file, .. } => expand_path_for_terminal(file),
-        ToolDisplay::Files { summary, .. } => summary.trim().to_string(),
+        ToolDisplay::Files { summary, files, .. } => {
+            let failures = files
+                .iter()
+                .filter(|file| matches!(file.status, Some(ToolDisplayFileStatus::Failed)))
+                .filter_map(|file| file.note.as_deref())
+                .map(str::trim)
+                .filter(|note| !note.is_empty())
+                .collect::<Vec<_>>();
+            if failures.is_empty() {
+                summary.trim().to_string()
+            } else {
+                format!("{}: {}", summary.trim(), failures.join("; "))
+            }
+        }
         ToolDisplay::Plan { plan } => expand_path_for_terminal(plan),
         ToolDisplay::Text { text } => text.trim().to_string(),
     }
@@ -779,12 +792,20 @@ pub fn result_summary_for_tool(
     if let Some(display) = display {
         let summary = display_summary(display);
         if !summary.is_empty() {
-            let max_chars =
-                if matches!(display, ToolDisplay::File { .. } | ToolDisplay::Plan { .. }) {
-                    PATH_MAX_CHARS
-                } else {
-                    DEFAULT_MAX_CHARS
-                };
+            let max_chars = if matches!(
+                display,
+                ToolDisplay::File { .. } | ToolDisplay::Plan { .. }
+            ) || matches!(
+                display,
+                ToolDisplay::Files { files, .. }
+                    if files
+                        .iter()
+                        .any(|file| matches!(file.status, Some(ToolDisplayFileStatus::Failed)))
+            ) {
+                PATH_MAX_CHARS
+            } else {
+                DEFAULT_MAX_CHARS
+            };
             return truncate_chars(&summary, max_chars);
         }
     }

@@ -1,5 +1,6 @@
 //! 集成测试：LLM 与真实外部 API 的协作（chat / chat_stream）。
-//! 不 Mock 网络，在配置 DEEPSEEK_API_KEY 时真实发起 HTTP 请求；无 key 时视为失败，不得 ignore。
+//! 不 Mock 网络，在配置 IDATATLAS_OPENAI_API_KEY 时通过 OpenAI Responses 真实发起 HTTP
+//! 请求；无 key 时视为失败，不得 ignore。
 //! 鲁棒性：异步用例均包裹在超时内，避免依赖挂起导致测试挂起（INTEGRATION_TEST_ROBUSTNESS 2.2）。
 //!
 //! 调用面：所有 Provider 通过 [`tomcat::resolve_llm`] 拿 `Arc<dyn LlmProvider>`，
@@ -26,28 +27,29 @@ fn is_transient_connect_failure_text(text: &str) -> bool {
         || text.contains("stage=Some(Connect)")
 }
 
-fn completions_config() -> AppConfig {
+fn responses_config() -> AppConfig {
     let mut cfg = AppConfig::default();
     let dir = tempfile::tempdir().expect("create llm test workdir");
     cfg.storage.work_dir = Some(dir.path().display().to_string());
-    common::apply_deepseek_app_config(&mut cfg);
+    common::apply_idatatlas_app_config(&mut cfg);
     std::mem::forget(dir);
     cfg
 }
 
-/// [LLM 非流式 chat] 真实 API 调用 DeepSeek OpenAI-compatible Chat Completions 返回合法响应
+/// [LLM 非流式 chat] 真实 API 调用 idatatlas OpenAI Responses 返回合法响应
 ///
 /// 验证：choices 非空、首条 index=0（超时 60s）
-/// 意义：TASK-05 LLM 端到端——非流式请求正向路径；无 DEEPSEEK_API_KEY 时用例必须失败（INTEGRATION_TEST_SPEC）
+/// 意义：TASK-05 LLM 端到端——非流式请求正向路径；无 IDATATLAS_OPENAI_API_KEY 时用例必须失败（INTEGRATION_TEST_SPEC）
 #[tokio::test]
 #[serial(env_lock)]
 async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn std::error::Error>>
 {
     common::setup_logging();
     let _span = tracing::info_span!("test_llm_provider_chat_real_request_returns_ok").entered();
-    common::load_deepseek_test_env();
+    let _api_key =
+        common::require_idatatlas_api_key("test_llm_provider_chat_real_request_returns_ok");
 
-    let config = completions_config();
+    let config = responses_config();
     let provider = common::resolve_main_provider(&config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say exactly: ok")],
@@ -88,7 +90,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
                             continue;
                         }
                         eprintln!(
-                            "skipping test_llm_provider_chat_real_request_returns_ok: DeepSeek connect failures persisted: {detail}"
+                            "skipping test_llm_provider_chat_real_request_returns_ok: idatatlas connect failures persisted: {detail}"
                         );
                         return Ok(());
                     }
@@ -110,7 +112,7 @@ async fn test_llm_provider_chat_real_request_returns_ok() -> Result<(), Box<dyn 
 /// [LLM 流式 chat_stream] 真实 API 调用产生流式事件
 ///
 /// 验证：stream 至少产生一个 StreamEvent（超时 60s）
-/// 意义：TASK-05 LLM 端到端——流式请求正向路径；无 DEEPSEEK_API_KEY 时用例必须失败
+/// 意义：TASK-05 LLM 端到端——流式请求正向路径；无 IDATATLAS_OPENAI_API_KEY 时用例必须失败
 #[tokio::test]
 #[serial(env_lock)]
 async fn test_llm_provider_chat_stream_real_request_yields_events(
@@ -118,9 +120,11 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
     common::setup_logging();
     let _span =
         tracing::info_span!("test_llm_provider_chat_stream_real_request_yields_events").entered();
-    common::load_deepseek_test_env();
+    let _api_key = common::require_idatatlas_api_key(
+        "test_llm_provider_chat_stream_real_request_yields_events",
+    );
 
-    let config = completions_config();
+    let config = responses_config();
     let provider = common::resolve_main_provider(&config);
     let request = ChatRequest {
         messages: vec![ChatMessage::user("Say hi")],
@@ -162,7 +166,7 @@ async fn test_llm_provider_chat_stream_real_request_yields_events(
                             continue;
                         }
                         eprintln!(
-                            "skipping test_llm_provider_chat_stream_real_request_yields_events: DeepSeek connect failures persisted: {detail}"
+                            "skipping test_llm_provider_chat_stream_real_request_yields_events: idatatlas connect failures persisted: {detail}"
                         );
                         return Ok(());
                     }

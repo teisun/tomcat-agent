@@ -115,10 +115,10 @@ impl FixedResolver {
 
     fn resolved_call(&self, model: &str) -> ResolvedCall {
         let mut call = ResolvedCall::from_parts_unchecked(self.provider.clone(), model, model);
-        call.api = "openai".to_string();
-        call.provider = "deepseek".to_string();
-        call.base_url = Some(common::DEEPSEEK_TEST_API_BASE.to_string());
-        call.key_source = common::DEEPSEEK_TEST_API_KEY_ENV.to_string();
+        call.api = "openai-responses".to_string();
+        call.provider = "idatatlas".to_string();
+        call.base_url = Some(common::IDATATLAS_TEST_BASE_URL.to_string());
+        call.key_source = common::IDATATLAS_TEST_API_KEY_ENV.to_string();
         call.thinking_format = tomcat::core::llm::thinking_policy::thinking_format_for_model(model);
         call.capabilities = Capabilities {
             vision: false,
@@ -290,13 +290,11 @@ fn build_system_text(ctx: &ChatContext, skill_set: &tomcat::core::skill::SkillSe
 #[tokio::test]
 #[serial(env_lock)]
 async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
-    const ENV_KEY: &str = "TOMCAT_SKILL_TOOL_TEST_KEY";
-
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _home_guard = EnvGuard::set("HOME", home.path().as_os_str().to_os_string());
-    let _api_guard = EnvGuard::set(ENV_KEY, "stub");
+    let _api_guard = EnvGuard::set(common::IDATATLAS_TEST_API_KEY_ENV, "stub");
     let _cwd_guard = CurrentDirGuard::set(workspace.path());
 
     write_skill_fixture(workspace.path(), "commit", "Create a git commit", false);
@@ -309,7 +307,7 @@ async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
-    common::apply_openai_responses_test_config(&mut cfg, ENV_KEY, None);
+    common::apply_idatatlas_app_config(&mut cfg);
     let mut ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 
     let skill_set =
@@ -326,7 +324,7 @@ async fn test_chat_skill_discovery_disclosure_and_load_skill_roundtrip() {
         cli_tool_call_stream("call_skill", "load_skill", r#"{"name":"commit"}"#),
         cli_text_stream("SKILL_OK"),
     ]));
-    install_fixed_resolver(&mut ctx, mock_llm, "gpt-5.4");
+    install_fixed_resolver(&mut ctx, mock_llm, &common::idatatlas_test_model());
 
     let mut state = init_context_state(
         &ctx.session_runtime.session,
@@ -377,7 +375,7 @@ async fn live_skill_load_roundtrip_with_real_llm() {
     if std::env::var("PI_LIVE_SKILL").ok().as_deref() != Some("1") {
         return;
     }
-    let _api_key = common::require_deepseek_api_key("live_skill_load_roundtrip_with_real_llm");
+    let _api_key = common::require_idatatlas_api_key("live_skill_load_roundtrip_with_real_llm");
 
     let home = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -395,7 +393,7 @@ async fn live_skill_load_roundtrip_with_real_llm() {
 
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(work.path().to_string_lossy().to_string());
-    common::apply_deepseek_app_config(&mut cfg);
+    common::apply_idatatlas_app_config(&mut cfg);
     cfg.workspace.workspace_roots = vec![workspace.path().to_string_lossy().to_string()];
     let ctx = ChatContext::from_config(cfg).expect("chat context should be created");
 

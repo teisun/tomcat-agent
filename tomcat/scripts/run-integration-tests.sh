@@ -73,13 +73,19 @@ build_test_args() {
 }
 
 openai_responses_target() {
-  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-gpt-5.4_litellm-sunmi}"
+  printf '%s' "${TOMCAT_E2E_OPENAI_TARGET:-idatatlas/gpt-5.6-terra}"
 }
 
 openai_responses_key_env() {
   local target
   target="$(openai_responses_target)"
   case "$target" in
+    idatatlas/*)
+    printf '%s' "IDATATLAS_OPENAI_API_KEY"
+    ;;
+    fcodex/*)
+    printf '%s' "FCODEX_OPENAI_API_KEY"
+    ;;
     gpt-5.2|gpt-5.4|gpt-5.5|gpt-5.6)
     printf '%s' "OPENAI_API_KEY"
     ;;
@@ -94,12 +100,6 @@ missing_required_envs_for_real_llm() {
   openai_key_env="$(openai_responses_key_env)"
   if [ -z "${!openai_key_env}" ]; then
     printf '%s\n' "$openai_key_env"
-  fi
-  if [ -z "$DEEPSEEK_API_KEY" ]; then
-    printf '%s\n' "DEEPSEEK_API_KEY"
-  fi
-  if [ -z "$MIMO_API_KEY" ]; then
-    printf '%s\n' "MIMO_API_KEY"
   fi
 }
 
@@ -195,7 +195,7 @@ run_integration_real_llm() {
     return 2
   fi
   ensure_nextest
-  log_phase "开始 integration-real-llm（真 LLM 显式层；nextest real-llm profile，max-threads=2；需 ${openai_key_env} + DEEPSEEK_API_KEY + MIMO_API_KEY）"
+  log_phase "开始 integration-real-llm（真 LLM 显式层；nextest real-llm profile，max-threads=2；需 ${openai_key_env}）"
   PI_LIVE_OPENAI_RESPONSES=1 cargo nextest run --profile real-llm --no-fail-fast
   local status=$?
   log_phase "结束 integration-real-llm"
@@ -304,7 +304,7 @@ case "$CMD" in
     echo "用法: $0 [release|clippy|lib|doctest|integration|integration-parallel|integration-serial|integration-real-llm|integration-openai-responses-wire|gate-fast|gate-full|all|-h]" >&2
     echo "  默认与 all：clippy → lib → doctest → integration" >&2
     echo "  gate-full：gate-fast → integration-real-llm" >&2
-    echo "  integration-real-llm 需当前 OpenAI target 对应 key + DEEPSEEK_API_KEY + MIMO_API_KEY；不进默认门禁，须显式触发" >&2
+    echo "  integration-real-llm 需当前 Responses target 对应 key；不进默认门禁，须显式触发" >&2
     exit 2
     ;;
 esac

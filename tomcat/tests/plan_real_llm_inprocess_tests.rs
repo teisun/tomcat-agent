@@ -1,15 +1,14 @@
 //! E2E-PLAN-RL-002：进程内真 LLM 全路径测试（真 LlmProvider + real reviewer subagents）。
 //!
-//! 与 [`plan_e2e_with_mock_llm_tests.rs`](./plan_e2e_with_mock_llm_tests.rs) 互补：那个
-//! 测试把 "LLM 决策一次 tool_call" 用直接调 `tools::execute` 代替，本测试不做任何 mock，
-//! 真的让主 LLM 调 `create_plan` / `update_plan`。临时工作目录无 reviewable Git diff 时，
-//! code review gate 会合法自动通过；有 diff 的 reviewer 路径由 mock E2E 覆盖。
-//! 对 Plan 模式真 LLM 验收来说，这里是 full completion / artifact / review /
-//! transcript 顺序的主验收锚点；CLI smoke 只保留 resume/build wiring。
+//! 与离线的 [`plan_delivery_flow_e2e.rs`](./plan_delivery_flow_e2e.rs) 和 plan-tool
+//! 单元测试互补：它们直接调 `tools::execute`，本测试不做任何 mock，真的让主 LLM
+//! 调 `create_plan` / `update_plan`。对 Plan 模式真 LLM 验收来说，这里是 final
+//! acceptance todo、真实产物、planner review 和 transcript 顺序的主验收锚点。
 //!
 //! ## 门禁
-//! - `DEEPSEEK_API_KEY` 必须存在；缺失 → 测试 panic 失败（E2E_TEST_SPEC §4）。
-//! - 默认模型来自 `TOMCAT_E2E_DEEPSEEK_MODEL` env，未设则 `deepseek-v4-pro`。
+//! - `IDATATLAS_OPENAI_API_KEY` 必须存在；缺失 → 测试 panic 失败（E2E_TEST_SPEC §4）。
+//! - 默认模型来自 `TOMCAT_E2E_IDATATLAS_MODEL` env，未设则
+//!   `idatatlas/gpt-5.6-terra`。
 //!
 //! ## 数据目录
 //! - 每个测试进程先切到独立临时 `HOME`，把 `~/.tomcat/*` 隔离到私有 tempdir。
@@ -23,12 +22,10 @@
 //! 2. 所有 `frontmatter.todos[].status == Completed`
 //! 3. workdir 中真实生成 `counter.py`，且 `python3 counter.py` 输出严格为 `0\n`
 //! 4. 会话 `AgentMode` 与计划文件生命周期相互独立
-//! 5. code review 通过或由无 reviewable diff 的运行时合法跳过后，`update_plan`
-//!    只把计划文件推进到 completed；会话仍是 Chat
+//! 5. 一个最终 `kind=acceptance` todo 进入 `in_progress` 后引导模型加载 verify skill，
+//!    所有 todo 终态后 `update_plan` 把计划推进到 completed；会话仍是 Chat
 //! 6. transcript 至少有一条 `plan.review` 自定义事件
-//! 7. 有 reviewable Git diff 时 transcript 至少有一条 `plan.code_review` 自定义事件；
-//!    否则 `code_review_pass` 必须为 true
-//! 8. transcript 不应再出现 `plan.verify` 自定义事件（链路已掐断）
+//! 7. transcript 不出现已删除 runtime gate 的 `plan.code_review` / `plan.verify` 事件
 //!
 //! ## 软断言（不强求）
 //! - reviewer summary aborted=false（reviewer LLM 可能格式漂移）
@@ -48,10 +45,11 @@ use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 
 use tomcat::core::llm::system_prompt::{
-    SystemPromptBuilder, WorkspaceContext, WorkspaceState, WorkspaceStateSection,
+    AvailableSkillsSection, SystemPromptBuilder, WorkspaceContext, WorkspaceState,
+    WorkspaceStateSection,
 };
 use tomcat::core::plan_runtime::file_store::{
-    plan_path_for_id, read_plan, PlanFileState, TodoStatus,
+    plan_path_for_id, read_plan, PlanFileState, TodoKind, TodoStatus,
 };
 use tomcat::core::session::{AgentMode, ContextState};
 use tomcat::{
@@ -62,8 +60,7 @@ use tomcat::{
 const COUNTER_PLAN_GOAL: &str = "inprocess e2e: write counter.py that prints 0";
 
 // 真 LLM 进程内全路径会串起 planning + reviewer + 执行轮次；
-// 在 gpt-5.4 下 180s exec round 已被实测打满，因此把总时限与阶段时限
-// 上调到更符合当前上游时延的窗口，同时保留硬超时兜底。
+// 保留宽松的阶段时限以覆盖上游 Responses 网关的瞬时延迟，同时仍有硬超时兜底。
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 const PLANNING_TIMEOUT: Duration = Duration::from_secs(240);
 const EXEC_TURN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -72,11 +69,7 @@ const TRANSIENT_LLM_RETRY_DELAY: Duration = Duration::from_secs(2);
 const TRANSIENT_LLM_MAX_ATTEMPTS: usize = 3;
 
 fn require_api_key() {
-    let _ = common::require_deepseek_api_key("plan_real_llm_inprocess_tests");
-}
-
-fn default_model() -> String {
-    common::deepseek_test_model()
+    let _ = common::require_idatatlas_api_key("plan_real_llm_inprocess_tests");
 }
 
 fn current_home() -> PathBuf {
@@ -99,7 +92,13 @@ fn load_user_config() -> tomcat::AppConfig {
     } else {
         tomcat::load_config(None).expect("load_config 失败")
     };
-    common::apply_deepseek_app_config(&mut cfg);
+    cfg.storage.work_dir = Some(
+        current_home()
+            .join(".tomcat")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    common::apply_idatatlas_app_config(&mut cfg);
     cfg
 }
 
@@ -115,8 +114,8 @@ fn build_counter_planning_prompt(goal: &str, workdir: &Path) -> String {
             "If you mention or inspect a directory, use this exact absolute path and do not substitute alternate roots such as `/home/sandbox/...`. ",
             "Constraints: the deliverable is a single file named `counter.py` in the current writable working directory; ",
             "running `python3 counter.py` must exit 0, write exactly `0\\n` to stdout, and write nothing to stderr; ",
-            "todos must be exactly two with ids `t1` and `t2`; `t1` must cover creating `counter.py`; ",
-            "`t2` must cover running/verifying it and finishing the plan; ",
+            "todos must be exactly two with ids `t1` and `t2`; `t1` must have `kind=work` and cover creating `counter.py`; ",
+            "`t2` must be the final `kind=acceptance` todo and cover reviewing, verifying, and finishing the plan; ",
             "prefer to call create_plan immediately; only if a critical ambiguity truly blocks planning may you call ask_question first; ",
             "the `draft` must be short markdown for the `## Plan` section only and must not include `## Goal`, `## Plan`, or `## Notes` headings; ",
             "do not use any tools during planning besides an optional ask_question followed by create_plan; ",
@@ -142,6 +141,7 @@ fn build_counter_exec_prompt(todo_ids: &[String], workdir: &Path) -> String {
         "- Running `python3 counter.py` from the current working directory must exit 0, print exactly `0\\n` to stdout, and print nothing to stderr.".to_string(),
         "- Use `bash` to run and verify the program yourself before closing the plan.".to_string(),
         "- Use update_plan to claim progress, perform the work, and finish all current todos.".to_string(),
+        "- After completing `t1`, start the final `t2` acceptance todo with update_plan. Its result must return `next_step.phase=run_verify`; load_skill(verify), follow the returned guidance, then complete `t2`.".to_string(),
         "The current todo ids are:".to_string(),
     ];
     for id in todo_ids {
@@ -149,13 +149,12 @@ fn build_counter_exec_prompt(todo_ids: &[String], workdir: &Path) -> String {
     }
     lines.extend([
         "Rules:".to_string(),
-        "- You may use list_dir, read, search_files, write, edit, bash, and update_plan.".to_string(),
+        "- You may use list_dir, read, search_files, write, edit, bash, load_skill, and update_plan.".to_string(),
         "- Use the exact current todo ids from the latest plan/tool results.".to_string(),
-        "- Do NOT rewrite, replace, or upsert todo ids/content unless a non-pass code review or verify result truly requires adding a fix todo.".to_string(),
-        "- Prefer `set_status` on existing todos; only add a new fix todo if the runtime kept the plan in EXEC after code_review or verify.".to_string(),
+        "- Do NOT rewrite, replace, or upsert todo ids/content. Keep exactly the two planned todos.".to_string(),
+        "- Prefer `set_status` on the existing todos and include concrete evidence.".to_string(),
         "- When the final update_plan returns, inspect the tool result.".to_string(),
-        "- If `code_review.verdict != pass` or `plan_state_after` is still `executing`, do NOT stop: read the findings, reopen an existing todo or add a fix todo, perform the fix, and continue.".to_string(),
-        "- Only stop once the runtime has either returned `verify` or moved the plan to `completed`.".to_string(),
+        "- Do not stop while `next_step.phase=continue_work` or `run_verify`; only stop after the final update_plan moves the plan to `completed`.".to_string(),
         "- Do NOT edit the plan file directly. Do NOT call ask_question.".to_string(),
     ]);
     lines.join(" ")
@@ -225,12 +224,25 @@ fn build_system_text_minimal(ctx: &ChatContext) -> String {
             .to_string(),
         tool_lines: None,
     };
+    let skill_set = tomcat::core::skill::discover(&ctx.config, &ctx.scope_services.resource_root);
+    assert!(
+        skill_set.by_name.contains_key("verify"),
+        "built-in verify skill must be discoverable in the real plan test"
+    );
+    *ctx.scope_services.skill_set.write() = skill_set.clone();
+
     let mut builder = SystemPromptBuilder::default();
     builder.register(Box::new(WorkspaceStateSection::new(WorkspaceState {
         read_write: Vec::new(),
         read_only: Vec::new(),
         path_rules: Vec::new(),
     })));
+    let budget = tomcat::infra::compute_context_budget_chars(&ctx.config.context);
+    if let Some(section) =
+        AvailableSkillsSection::from_skill_set(&skill_set, budget, &ctx.config.skills)
+    {
+        builder.register(Box::new(section));
+    }
     builder.build(&workspace_context)
 }
 
@@ -591,17 +603,8 @@ async fn inprocess_full_plan_path_with_real_llm() {
     common::setup_logging();
     let _home_guard = common::TempHomeGuard::new();
     ensure_plans_dir();
-    std::env::set_var("TOMCAT__LLM__DEFAULT_MODEL", default_model());
-    std::env::set_var("TOMCAT__LLM__PROVIDER", "openai");
-    std::env::set_var("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE);
-    std::env::set_var(
-        "TOMCAT__LLM__API_KEY_ENV",
-        common::DEEPSEEK_TEST_API_KEY_ENV,
-    );
-    std::env::set_var("TOMCAT__CONTEXT__COMPACTION_MODEL", default_model());
     let home = current_home();
-    let mut config = load_user_config();
-    config.plan.max_code_review_rounds = 1;
+    let config = load_user_config();
     let workdir = common::dot_tomcat_e2e_workdir("inprocess_real_llm");
     let _cwd = common::CwdGuard::set(&workdir);
     let sessions_dir = resolve_sessions_dir(&config).expect("resolve sessions dir");
@@ -651,7 +654,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
                 true,
             );
             eprintln!(
-                "skipping inprocess_full_plan_path_with_real_llm: DeepSeek connect failures persisted after {} attempts during planning",
+                "skipping inprocess_full_plan_path_with_real_llm: idatatlas connect failures persisted after {} attempts during planning",
                 TRANSIENT_LLM_MAX_ATTEMPTS
             );
             return;
@@ -735,7 +738,7 @@ async fn inprocess_full_plan_path_with_real_llm() {
                     true,
                 );
                 eprintln!(
-                    "skipping inprocess_full_plan_path_with_real_llm: DeepSeek connect failures persisted after {} attempts during exec round {}",
+                "skipping inprocess_full_plan_path_with_real_llm: idatatlas connect failures persisted after {} attempts during exec round {}",
                     TRANSIENT_LLM_MAX_ATTEMPTS,
                     exec_rounds
                 );
@@ -776,6 +779,27 @@ async fn inprocess_full_plan_path_with_real_llm() {
         }
         let final_plan = read_plan(&plan_path).expect("read final plan 失败");
         assert_eq!(
+            final_plan.frontmatter.todos.len(),
+            2,
+            "真实模型必须保留精简计划的两个原始 todo"
+        );
+        let work_todo = final_plan
+            .frontmatter
+            .todos
+            .iter()
+            .find(|todo| todo.id == "t1")
+            .expect("work todo t1 must exist");
+        assert_eq!(work_todo.kind, TodoKind::Work);
+        assert_eq!(work_todo.status, TodoStatus::Completed);
+        let acceptance_todo = final_plan
+            .frontmatter
+            .todos
+            .iter()
+            .find(|todo| todo.id == "t2")
+            .expect("final acceptance todo t2 must exist");
+        assert_eq!(acceptance_todo.kind, TodoKind::Acceptance);
+        assert_eq!(acceptance_todo.status, TodoStatus::Completed);
+        assert_eq!(
             final_plan.frontmatter.session_key.as_deref(),
             Some(tomcat::DEFAULT_SESSION_KEY),
             "EXEC/completed 盘应绑定固定 DEFAULT_SESSION_KEY"
@@ -790,9 +814,8 @@ async fn inprocess_full_plan_path_with_real_llm() {
         // 6) 完成计划只改变文件生命周期；会话模式在 build 时已回到 Chat。
         assert_eq!(ctx.session_runtime.plan_runtime.mode(), AgentMode::Chat);
 
-        // 7) transcript 必须有 plan.review。临时工作目录没有 reviewable Git diff 时，
-        //    code review gate 会被运行时合法自动通过；否则必须留下 code-review 事件。
-        //    verify 链路已被掐断，不应再出现 plan.verify。
+        // 7) planner review 独立于运行时 close-out；最终验收由 acceptance todo +
+        // verify skill 驱动，不会派发已删除的 code-review / verifier gate。
         let transcript_path = ctx
             .session_runtime
             .session
@@ -810,15 +833,17 @@ async fn inprocess_full_plan_path_with_real_llm() {
             plan_review_idx.is_some(),
             "transcript 应含至少一条 plan.review 自定义事件，实际未发现"
         );
-        let review_auto_skipped = final_plan.frontmatter.code_review_pass;
         assert!(
-            plan_code_review_idx.is_some() || review_auto_skipped,
-            "有 reviewable Git diff 时 transcript 应含 plan.code_review；无 diff 时必须由运行时自动通过 code review gate。events={plan_code_review_idx:?}, plan={:?}",
-            final_plan.frontmatter
+            plan_code_review_idx.is_none(),
+            "transcript 不应再含 plan.code_review runtime gate 事件，实际：{plan_code_review_idx:?}"
         );
         assert!(
             plan_verify_idx.is_none(),
             "transcript 不应再含 plan.verify 自定义事件，实际仍发现旧 verifier 链路"
+        );
+        assert!(
+            transcript.contains(r#""name":"load_skill""#),
+            "最终 acceptance 必须调用 load_skill，transcript 中未发现该 tool call"
         );
     })
     .await;

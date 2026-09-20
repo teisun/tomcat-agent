@@ -1,8 +1,9 @@
 | Owner | Update Time | State | Branch | Cov% |
 | :--- | :--- | :--- | :--- | :--- |
-| tomcat | 2026-09-20 08:04 +0800 | DONE | feature/transcript-rich-render | — |
+| tomcat | 2026-09-20 09:53 +0800 | DONE | feature/transcript-rich-render | — |
 
 ### ✅ DONE (已完成/进行中)
+- [✓] **[P0] 通用真实 LLM 验收统一迁移到 idatatlas Terra**：通用 Responses、CLI、计划、skill、checkpoint/resume 与长会话 fixture 统一按 `idatatlas/gpt-5.6-terra` 及完整 catalog capabilities 解析；DeepSeek / Sunmi 专项路径保留隔离。计划真测现真实发现并公布 `verify` skill，最终 acceptance 确实调用 `load_skill(verify)`；批量 read 的 CLI 工具行也保留单文件失败原因，不再只显示“读取失败”计数。验证：`integration-real-llm` 29/29、ignored idatatlas 长会话 E2E、`cargo fmt --check`、`git diff --check` 均通过。Cov% 未跑，保持 —。@2026-09-20
 - [✓] **[P0] Plan 交付收口已去 runtime-owned gate**：计划不再追加 review / acceptance todo，也不再维护 `acceptance_commands` 或 green-build 证据。LLM 可写一个最终 `kind=acceptance` todo；运行时仅在它进入 `in_progress` 时提示 `load_skill(verify)`，且所有 todo 终态即完成。旧 gate kind 容错映射为 `Unknown`，不会保留旧行为；暂停和恢复不再改写 todo 状态。提示词、verify skill、工具契约、架构文档、schema fixture 与交付流测试同步完成。验证：`cargo fmt --check`、`cargo clippy -p tomcat --all-targets`、`cargo test -p tomcat --lib core::skill::`（25 passed）和 `cargo test -p tomcat --lib core::prompts::`（28 passed）。@2026-09-20
 - [✓] **(版本发布)** CLI `0.1.54 → 0.1.55`、扩展 `0.1.68 → 0.1.69`、bundled CLI `0.1.54 → 0.1.55`：使用 `node scripts/release-version.mjs bump --all patch` 更新权威清单与 Cargo/npm 镜像；`node scripts/release-version.mjs check` 通过。Cov% 未跑，保持 —。@2026-09-20
 - [✓] **[P0] Responses 截断误判、流终态重试与计划收口可靠性整改完成**：Responses adapter 不再把 reasoning-only 或正常 completed 回合臆测为 `max_output_tokens`；流内终态错误会丢弃不完整正文/工具调用、保留诊断并回到重试预算；恢复窗口从可重放 user turn 开始，避免截断工具协议。计划收口移除 mtime “新鲜度”警察，completion guard 改看 Git diff 内容指纹；review / acceptance 两道 gate 统一将 `in_progress` 持久化，以盘上状态判重，并由暂停或重启恢复为 pending。卡住计划在界面显示中文原因，busy 状态始终显示进度点；VS Code 验收启动统一使用 basic password store。CLI `0.1.53 → 0.1.54`、扩展 `0.1.67 → 0.1.68`、bundled CLI 同步。验证：Rust fmt、Clippy、9 项定向回归、扩展 lint、wire 检查、GUI 67 files / 585 tests 均通过；首轮 Rust lib 全量测试发现 5 项断言或恢复回归，修复后已定向复验，不宣称全量复跑通过。@2026-09-18
@@ -100,6 +101,7 @@
 - [✓] **[P0]** 回归门禁：GUI focused（首帧即有 code-card/copy/clickable-path；thinking 为 `<pre>`）+ host E2E `assertTranscriptRichRenderingFlow`（copy、两帧 DOM 稳定、点击 openFile、thinking 纯文本边界）+ `npm run lint` / `test:unit` / 全量 `test:e2e:vscode-devhost` / Rust prompt focused / `package:vsix` 全绿。@2026-07-18
 
 ### 🔌 INTERFACE (接口变更)
+- CLI：`ToolDisplay::Files` 含失败文件时，工具结束摘要会展示该文件的 `note`，使 `read` 的真实路径错误直接可见。
 - **当前交付接口（覆盖下方历史记录）**：`TodoKind` 收敛为 `work|acceptance|unknown`；一个计划最多一个、且仅最终验收可用 `acceptance`。`update_plan` 的 `upsert` 以 `todo_kind` 指定语义类型；所有 todo 完成或取消即完成计划，最终验收开始时返回 verify-skill hint。`acceptance_commands`、`green_build_pass` / evidence 及 runtime-owned gate 不再属于 PlanFile 或工具契约。旧 plan 的未知 kind 保留为 `unknown`，不执行旧 gate 行为。
 - Plan/serve：新增 `plan.stalled { reason, idleNudges?, remainingWork? }` 事件，webview 以本地中文文案显示；移除已废弃的 `plan.code_review.unreviewed_edit`。PlanFile 的 review / acceptance gate 现在都允许持久化 `in_progress`，暂停与恢复会统一刷回 pending。
 - `AgentLoopConfig::system_prompt`：system prompt 不再作为持久 `ChatMessage` 存在，`assemble_request_messages` 在真正发请求时组装它。
@@ -202,9 +204,10 @@
 ### ⚠️ BLOCKED (当前风险)
 | 阻塞项 | 原因 | 预计解决 |
 | :--- | :--- | :--- |
-| 无 | 当前改动已通过格式、Clippy 与定向 skill/prompt 测试；本次提交按用户指令不新增测试执行 | — |
+| 无 | 真实 idatatlas 验收与离线格式/空白检查均已通过；本次提交按用户指令不新增测试执行 | — |
 
 ### 集成说明
+- 当前提交（2026-09-20 09:53）：通用真实 LLM 配置和真实验收迁移至 idatatlas Terra；完整真实组 `integration-real-llm` 29/29 通过，ignored 长会话 E2E 通过。计划真测已验证 `plan.review`、最终 `load_skill(verify)`、两项 todo 收口和真实 Python 产物；不推送、不发版，Cov% 未跑。
 - 当前提交（2026-09-20 08:04）：Plan 交付收口移除 runtime gate 与 green-build 证据机制，最终验收改为 LLM-authored acceptance todo + verify skill；提示词、契约、文档、测试和 serve fixture 已同步。CLI `0.1.55` / 扩展 `0.1.69` / bundled CLI `0.1.55`；版本镜像检查与 `git diff --check` 通过。Cov% 未跑，保持 —。
 - 最新补充（2026-09-11 21:12）：Stop 约 30 秒卡顿已按根因修复，提交包含 Rust 实现、回归、架构不变量与 CLI `0.1.50` / 扩展 `0.1.64` 的版本镜像；版本工具 `check` 和空白 diff 检查通过。提交阶段依用户指令停止正在执行的 Rust 测试，不将其记为本轮验证。
 - 最新补充（2026-09-11 14:25）：方案 E 六项收尾与版本发布完成。全量门禁：Rust `gate-full`、真实 `integration-real-llm`（38/38）、CLI E2E（97/97）、QuickJS E2E（15/15）以及扩展 `npm run gate:full` 全绿；版本镜像检查与 19 条版本工具测试通过。Cov% 未测，保持 —。

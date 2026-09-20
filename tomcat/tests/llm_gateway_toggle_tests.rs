@@ -21,39 +21,51 @@ fn resolve_main_call(cfg: &AppConfig) -> tomcat::ResolvedCall {
 
 #[test]
 #[serial(env_lock)]
-fn default_openai_target_uses_gateway_model_and_key() {
+fn default_responses_target_uses_idatatlas_terra_configuration() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut cfg = AppConfig::default();
     cfg.storage.work_dir = Some(dir.path().to_string_lossy().to_string());
 
     unsafe {
         std::env::remove_var(common::OPENAI_TEST_MODEL_ENV);
-        std::env::set_var(common::OPENAI_GATEWAY_TEST_API_KEY_ENV, "gateway-stub");
+        std::env::set_var(common::IDATATLAS_TEST_API_KEY_ENV, "idatatlas-stub");
     }
 
     common::apply_openai_app_config(&mut cfg);
     let resolved = resolve_main_call(&cfg);
+    let catalog = ModelCatalog::load(&cfg).expect("load model catalog");
+    let entry = catalog
+        .lookup(common::IDATATLAS_TEST_DEFAULT_MODEL)
+        .expect("idatatlas Terra entry");
 
-    assert_eq!(cfg.llm.default_model, "gpt-5.4_litellm-sunmi");
-    assert_eq!(resolved.provider, "litellm-sunmi");
+    assert_eq!(cfg.llm.default_model, common::IDATATLAS_TEST_DEFAULT_MODEL);
+    assert_eq!(resolved.provider, "idatatlas");
     assert_eq!(resolved.api, "openai-responses");
-    assert_eq!(resolved.model, "gpt-5.4");
-    assert_eq!(resolved.key_source, common::OPENAI_GATEWAY_TEST_API_KEY_ENV);
+    assert_eq!(resolved.model, "gpt-5.6-terra");
+    assert_eq!(resolved.key_source, common::IDATATLAS_TEST_API_KEY_ENV);
+    assert_eq!(entry.context_window, Some(400_000));
+    assert_eq!(entry.context_window_options, vec![400_000, 1_000_000]);
+    assert_eq!(entry.max_output_tokens, Some(128_000));
+    assert_eq!(
+        entry.supported_reasoning_levels,
+        vec!["low", "medium", "high", "xhigh"]
+    );
+    assert!(entry.capabilities.vision);
+    assert!(entry.capabilities.files);
+    assert!(entry.capabilities.tools);
+    assert!(entry.capabilities.reasoning);
+    assert!(!entry.capabilities.web_search);
 
     unsafe {
-        std::env::remove_var(common::OPENAI_GATEWAY_TEST_API_KEY_ENV);
+        std::env::remove_var(common::IDATATLAS_TEST_API_KEY_ENV);
     }
 }
 
 /// 派发子 Agent 只能用 catalog id，不能用 `ResolvedCall::model` 那个线上模型名。
 ///
-/// 两者在网关型条目上必然不同：`gpt-5.4_litellm-sunmi` 走到线上是 `gpt-5.4`。子 Agent
+/// 两者在 relay 型条目上必然不同：`idatatlas/gpt-5.6-terra` 走到线上是 `gpt-5.6-terra`。子 Agent
 /// 拿到线上名后会再回 catalog 查一次 provider，于是有两种结局 —— 查不到就 404，查到了
 /// 同名的另一个条目就更糟：复审在你完全不知情的情况下换了个账号组跑。
-///
-/// 实测（2026-07-27 冒烟）：会话切到 `fcodex/claude-opus-4-8` 后，复审子 Agent 带着
-/// `claude-opus-4-8` 去派发，报 `Model "claude-opus-4-8" is not supported by any
-/// configured account in this group`，复审连一轮都没跑起来。
 #[test]
 #[serial(env_lock)]
 fn wire_model_name_is_not_a_catalog_id_so_subagents_must_dispatch_by_id() {
@@ -63,7 +75,7 @@ fn wire_model_name_is_not_a_catalog_id_so_subagents_must_dispatch_by_id() {
 
     unsafe {
         std::env::remove_var(common::OPENAI_TEST_MODEL_ENV);
-        std::env::set_var(common::OPENAI_GATEWAY_TEST_API_KEY_ENV, "gateway-stub");
+        std::env::set_var(common::IDATATLAS_TEST_API_KEY_ENV, "idatatlas-stub");
     }
     common::apply_openai_app_config(&mut cfg);
 
@@ -73,18 +85,15 @@ fn wire_model_name_is_not_a_catalog_id_so_subagents_must_dispatch_by_id() {
 
     assert_ne!(id, wire, "网关条目的 catalog id 与线上名本就不同");
     let by_id = catalog.lookup(&id).expect("catalog id 必须能查回条目");
-    assert_eq!(by_id.provider, "litellm-sunmi");
+    assert_eq!(by_id.provider, "idatatlas");
 
-    // 这份 catalog 里 `gpt-5.4` 恰好也是一个条目 —— 于是拿线上名去派发不会报错，
-    // 只会安静地换一个 provider 跑。这比 404 更难发现，也正是必须传 id 的理由。
-    assert_eq!(
-        catalog.lookup(&wire).map(|entry| entry.provider.clone()),
-        Some("openai".to_string()),
-        "线上名 `{wire}` 指向的是另一个条目，拿它派发子 Agent 会串到别的 provider"
+    assert!(
+        catalog.lookup(&wire).is_none(),
+        "线上名 `{wire}` 不是 catalog id；子 Agent 必须保留 id `{id}`"
     );
 
     unsafe {
-        std::env::remove_var(common::OPENAI_GATEWAY_TEST_API_KEY_ENV);
+        std::env::remove_var(common::IDATATLAS_TEST_API_KEY_ENV);
     }
 }
 

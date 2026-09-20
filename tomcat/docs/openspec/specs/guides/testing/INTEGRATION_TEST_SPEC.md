@@ -130,7 +130,7 @@ my_project/
 *   运行真 LLM 显式层：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh integration-real-llm`
 *   运行 Rust 快门禁：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-fast`
 *   运行 Rust 全门禁：`RUST_LOG=tomcat=debug,info ./scripts/run-integration-tests.sh gate-full`
-*   运行特定文件：默认目标可用 `RUST_LOG=tomcat=debug,info cargo nextest run --test audit_tests`；显式 real-llm 目标用 `RUST_LOG=tomcat=debug,info cargo nextest run --profile real-llm --test plan_real_llm_cli_e2e`。若要覆盖 doctest，额外执行 `cargo test --doc`。
+*   运行特定文件：默认目标可用 `RUST_LOG=tomcat=debug,info cargo nextest run --test audit_tests`；显式 real-llm 目标用 `RUST_LOG=tomcat=debug,info cargo nextest run --profile real-llm --test plan_real_llm_inprocess_tests`。若要覆盖 doctest，额外执行 `cargo test --doc`。
 *   仅运行库内单元测试：`RUST_LOG=tomcat=debug,info cargo test --lib`
 *   仅运行 doctest：`cargo test --doc`
 
@@ -149,7 +149,7 @@ my_project/
 *   `nextest` 是“一用例一进程”，因此 `set_var` / `cwd` 这类进程内状态不再天然要求整组 `-j1 --test-threads=1`。
 *   真 LLM / CLI E2E 里凡会落盘到 `~/.tomcat` 的路径，都必须在测试入口先切到**临时 HOME**，让 `~/.tomcat/*` 落到私有 tempdir；默认门禁不再依赖真实家目录。
 *   默认过滤排除上述真实模型/外网 binary 和 case，以及明确列出的手动项。离线集成可使用固定本地服务，但其通过不能代替真实供应商链路验证。
-*   `run-integration-tests.sh` 只使用当前 shell 已导出的凭据（`TOMCAT_TEST_EXPORTED_ENV_ONLY=1`），不让 Rust helper 偷偷从 dotenv 补到与预检不同的 key。默认 OpenAI target 为 `gpt-5.4_litellm-sunmi`，由 `TOMCAT_E2E_OPENAI_TARGET` 覆盖；直连 GPT 使用 `OPENAI_API_KEY`，其他 target 使用 `LITELLM_SUNMI_API_KEY`，另需 `DEEPSEEK_API_KEY` 和 `MIMO_API_KEY`。缺凭据退出 2 并说明“未运行”，不是成功跳过。
+*   `run-integration-tests.sh` 只使用当前 shell 已导出的凭据（`TOMCAT_TEST_EXPORTED_ENV_ONLY=1`），不让 Rust helper 偷偷从 dotenv 补到与预检不同的 key。默认 Responses target 是 `idatatlas/gpt-5.6-terra`，由 `TOMCAT_E2E_OPENAI_TARGET` 覆盖，对应凭据为 `IDATATLAS_OPENAI_API_KEY`；若显式改为内置 GPT target，则使用 `OPENAI_API_KEY`。DeepSeek / MiMo 的协议专项测试保留为单独目标，不进入这条通用门禁。缺凭据退出 2 并说明“未运行”，不是成功跳过。
 *   真 CLI 测试请从正常独立测试 shell 启动；harness 不清除继承的 `TOMCAT_AGENT_ACTIVE`。guard 开关行为由显式开/关单测覆盖。
 
 ### 7.3 CI 检查项

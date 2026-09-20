@@ -8,7 +8,7 @@ mod common;
 
 use std::collections::HashSet;
 use std::fs;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::serve::{setup_serve_fixture, spawn_serve_child, ServeChild, ServeFixture};
 use serde_json::{json, Value};
@@ -16,7 +16,7 @@ use serial_test::serial;
 use tomcat::load_config_toml_file;
 
 const MODEL_ENV: &str = "TOMCAT_E2E_GUARD_REAL_MODEL";
-const DEFAULT_MODEL: &str = "fcodex/gpt-5.6-terra";
+const DEFAULT_MODEL: &str = "idatatlas/gpt-5.6-terra";
 const TURN_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_WARMUP_TURNS: usize = 8;
 
@@ -136,6 +136,21 @@ fn transcript_entries(fixture: &ServeFixture, session_id: &str) -> Vec<Value> {
         .lines()
         .map(|line| serde_json::from_str(line).expect("parse transcript row"))
         .collect()
+}
+
+fn boundary_marker_and_body_ids(entries: &[Value]) -> (HashSet<String>, HashSet<String>) {
+    let marker_ids = entries
+        .iter()
+        .filter(|entry| entry["type"].as_str() == Some("branch_summary"))
+        .filter(|entry| entry["isBoundary"].as_bool() == Some(true))
+        .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
+        .collect();
+    let body_ids = entries
+        .iter()
+        .filter(|entry| entry["type"].as_str() == Some("branch_summary_text"))
+        .filter_map(|entry| entry["forId"].as_str().map(str::to_owned))
+        .collect();
+    (marker_ids, body_ids)
 }
 
 fn get_messages(child: &mut ServeChild, session_id: &str) -> Vec<Value> {
@@ -320,18 +335,22 @@ fn real_terra_long_session_exercises_single_list_handoffs() {
         "no stale boundary is permitted in production serve stderr: {}",
         child.stderr()
     );
-    let entries = transcript_entries(&fixture, &session_id);
-    let marker_ids: HashSet<_> = entries
-        .iter()
-        .filter(|entry| entry["type"].as_str() == Some("branch_summary"))
-        .filter(|entry| entry["isBoundary"].as_bool() == Some(true))
-        .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
-        .collect();
-    let body_ids: HashSet<_> = entries
-        .iter()
-        .filter(|entry| entry["type"].as_str() == Some("branch_summary_text"))
-        .filter_map(|entry| entry["forId"].as_str().map(str::to_owned))
-        .collect();
+    // Marker persistence deliberately precedes the async summary body. Wait for all but the
+    // newest marker to settle before examining the durable transcript: a real relay can finish
+    // its final agent turn before the prior background summary write reaches disk.
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let (_entries, marker_ids, body_ids) = loop {
+        let entries = transcript_entries(&fixture, &session_id);
+        let (marker_ids, body_ids) = boundary_marker_and_body_ids(&entries);
+        let unmatched = marker_ids
+            .iter()
+            .filter(|id| !body_ids.contains(*id))
+            .count();
+        if unmatched <= 1 || Instant::now() >= deadline {
+            break (entries, marker_ids, body_ids);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
     assert!(
         !marker_ids.is_empty(),
         "the preheat start event must have created a durable boundary marker"

@@ -36,6 +36,7 @@ fn cmd() -> Command {
     // 避免宿主环境或并行测试残留的 TOMCAT__* 覆盖子进程自己的临时 work_dir/config。
     for key in [
         "TOMCAT__LLM__DEFAULT_MODEL",
+        "TOMCAT__LLM__TITLE_MODEL",
         "TOMCAT__CONTEXT__COMPACTION_MODEL",
         "TOMCAT__LLM__PROVIDER",
         "TOMCAT__LLM__API_BASE",
@@ -51,34 +52,36 @@ fn cmd() -> Command {
 }
 
 fn real_llm_api_key(test_name: &str) -> String {
-    common::require_deepseek_api_key(test_name)
+    common::require_idatatlas_api_key(test_name)
 }
 
-fn configure_deepseek_real_llm(command: &mut Command, api_key: &str) {
-    let model = common::deepseek_test_model();
+fn seed_idatatlas_real_llm_catalog(work_dir: &Path) {
+    let mut cfg = AppConfig::default();
+    cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
+    common::apply_idatatlas_app_config(&mut cfg);
+    assert!(
+        work_dir.join("models.toml").is_file(),
+        "idatatlas Terra entry must be written before the CLI resolves it"
+    );
+}
+
+fn configure_idatatlas_real_llm(command: &mut Command, api_key: &str, work_dir: &Path) {
+    seed_idatatlas_real_llm_catalog(work_dir);
+    let model = common::idatatlas_test_model();
     command
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, api_key)
-        .env("TOMCAT__LLM__PROVIDER", "openai")
-        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
-        .env(
-            "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
-        )
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, api_key)
         .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
+        .env("TOMCAT__LLM__TITLE_MODEL", &model)
         .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
 }
 
-fn configure_deepseek_without_key(command: &mut Command) {
-    let model = common::deepseek_test_model();
+fn configure_idatatlas_without_key(command: &mut Command, work_dir: &Path) {
+    seed_idatatlas_real_llm_catalog(work_dir);
+    let model = common::idatatlas_test_model();
     command
-        .env_remove(common::DEEPSEEK_TEST_API_KEY_ENV)
-        .env("TOMCAT__LLM__PROVIDER", "openai")
-        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
-        .env(
-            "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
-        )
+        .env_remove(common::IDATATLAS_TEST_API_KEY_ENV)
         .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
+        .env("TOMCAT__LLM__TITLE_MODEL", &model)
         .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
 }
 
@@ -86,12 +89,12 @@ fn trunc(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-fn is_transient_deepseek_connect_failure(stderr: &str) -> bool {
+fn is_transient_idatatlas_connect_failure(stderr: &str) -> bool {
     [
         "流式请求连接失败",
         "请求连接失败",
         "connection closed via error",
-        "error sending request for url (https://api.deepseek.com",
+        "error sending request for url (https://sub2api.idatatlas.com",
         "retryable_llm_transport_stage",
         "stage=Some(Connect)",
     ]
@@ -99,17 +102,17 @@ fn is_transient_deepseek_connect_failure(stderr: &str) -> bool {
     .any(|needle| stderr.contains(needle))
 }
 
-fn maybe_skip_transient_deepseek_connect_failure(
+fn maybe_skip_transient_idatatlas_connect_failure(
     test_name: &str,
     stdout: &str,
     stderr: &str,
     contract: &str,
 ) -> bool {
-    if !is_transient_deepseek_connect_failure(stderr) {
+    if !is_transient_idatatlas_connect_failure(stderr) {
         return false;
     }
     eprintln!(
-        "skipping {test_name}: transient DeepSeek connect failure prevented validating {contract}"
+        "skipping {test_name}: transient idatatlas connect failure prevented validating {contract}"
     );
     if !stdout.is_empty() {
         eprintln!("stdout: {}", trunc(stdout, 400));
@@ -1729,10 +1732,9 @@ fn test_chat_without_config_exits_with_error() {
 
     let dir = tempfile::tempdir().unwrap();
 
-    info!("Arrange: 无 ~/.tomcat/ 配置且无 DEEPSEEK_API_KEY（HOME 指向空临时目录）");
+    info!("Arrange: 无 ~/.tomcat/ 配置（HOME 指向空临时目录）");
     let mut c = cmd();
     c.arg("chat").env("HOME", dir.path());
-    configure_deepseek_without_key(&mut c);
 
     info!("Act: execute chat");
     let assert = c.assert();
@@ -1749,7 +1751,7 @@ fn test_chat_without_config_exits_with_error() {
 #[serial(env_lock)]
 fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span =
         info_span!("test_chat_with_valid_config_and_api_key_starts_and_produces_output").entered();
 
@@ -1757,7 +1759,7 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
     let work_dir = dir.path().join("work");
     std::fs::create_dir_all(&work_dir).unwrap();
 
-    info!("Arrange: init config in temp dir, set work_dir and DEEPSEEK_API_KEY");
+    info!("Arrange: init config in temp dir, set work_dir and IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -1773,7 +1775,7 @@ fn test_chat_with_valid_config_and_api_key_starts_and_produces_output() {
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .write_stdin("hi\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
 
     info!("Act: execute chat with stdin 'hi', timeout 60s");
     let assert = c.assert();
@@ -1823,7 +1825,7 @@ fn test_chat_with_session_dir_does_not_crash() {
         .env("TOMCAT__STORAGE__WORK_DIR", work_dir.to_str().unwrap())
         .write_stdin("\n")
         .timeout(std::time::Duration::from_secs(5));
-    configure_deepseek_without_key(&mut c);
+    configure_idatatlas_without_key(&mut c, &work_dir);
 
     info!("Act: run chat without API key, timeout 5s");
     let output = c.output().expect("chat 进程应在 5s 内结束");
@@ -2058,7 +2060,7 @@ fn test_audit_export_creates_file() {
 #[test]
 fn test_user_first_time_setup_init_and_doctor() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_first_time_setup_init_and_doctor").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2386,18 +2388,18 @@ fn test_ensure_embedded_assets_tolerates_existing_assets_files() {
     assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
 }
 
-// ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 DEEPSEEK_API_KEY） ────────────────────
+// ──────────────────── Story 2: 4原语安全管控（E2E-CLI-011~012，需 IDATATLAS_OPENAI_API_KEY） ────────────────────
 
 /// [E2E-CLI-011] 用户向助手提问并收到回答
 ///
 /// 用户意图：在 tomcat chat 中提问，收到 AI 回复
 /// 验证：exit 0；stdout 非空
-/// 要求：DEEPSEEK_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
+/// 要求：IDATATLAS_OPENAI_API_KEY 环境变量已设置；无 key 时 panic（符合规范）
 #[test]
 #[serial(env_lock)]
 fn test_user_asks_pi_a_question() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_a_question").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2405,7 +2407,7 @@ fn test_user_asks_pi_a_question() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -2421,7 +2423,7 @@ fn test_user_asks_pi_a_question() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("你好，介绍一下你自己\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let out = String::from_utf8_lossy(&assert.get_output().stdout.clone()).to_string();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
@@ -2436,12 +2438,12 @@ fn test_user_asks_pi_a_question() {
 ///
 /// 用户意图：问 Rust 所有权系统
 /// 验证：exit 0；stdout 含"所有权"或"ownership"
-/// 要求：DEEPSEEK_API_KEY 环境变量已设置
+/// 要求：IDATATLAS_OPENAI_API_KEY 环境变量已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_asks_pi_technical_question() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_technical_question").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2449,7 +2451,7 @@ fn test_user_asks_pi_technical_question() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -2465,7 +2467,7 @@ fn test_user_asks_pi_technical_question() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("用一句话解释什么是 Rust 的所有权系统\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -2477,7 +2479,7 @@ fn test_user_asks_pi_technical_question() {
         trunc(&out, 300)
     );
     if (!success || !has_ownership)
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_asks_pi_technical_question",
             &out,
             &stderr,
@@ -2502,7 +2504,7 @@ fn test_user_asks_pi_technical_question() {
 #[serial(env_lock)]
 fn test_user_asks_pi_to_run_bash_command() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_to_run_bash_command").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2510,7 +2512,7 @@ fn test_user_asks_pi_to_run_bash_command() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -2527,7 +2529,7 @@ fn test_user_asks_pi_to_run_bash_command() {
         .env("RUST_LOG", "tomcat=info")
         .write_stdin("请执行 echo hello_from_pi\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2542,7 +2544,7 @@ fn test_user_asks_pi_to_run_bash_command() {
         trunc(&out, 300)
     );
     if (!success || !ran_echo)
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_asks_pi_to_run_bash_command",
             &out,
             &stderr,
@@ -2562,12 +2564,12 @@ fn test_user_asks_pi_to_run_bash_command() {
 /// [E2E-CLI-016B] 用户触发 read 失败时，终端应显示真实错误原因（非 failed 占位）
 ///
 /// 验证：exit 0；stderr 含 `[tool] read` 且包含 not found 语义，并且不退化为 `✗ failed`
-/// 要求：DEEPSEEK_API_KEY 环境变量已设置
+/// 要求：IDATATLAS_OPENAI_API_KEY 环境变量已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_sees_read_failure_reason_in_tool_line() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_sees_read_failure_reason_in_tool_line").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -2575,7 +2577,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
     std::fs::create_dir_all(work_dir.join("workspace-main")).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -2597,7 +2599,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin(format!("{prompt}\n"))
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2615,7 +2617,7 @@ fn test_user_sees_read_failure_reason_in_tool_line() {
             || stderr.contains("不存在"))
         && !stderr.contains("✗ failed");
     if (!success || !contract_ok)
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_sees_read_failure_reason_in_tool_line",
             "",
             &stderr,
@@ -2693,7 +2695,7 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
     let scratch = scratch.canonicalize().expect("workspace-temp scratch path");
     let scratch_str = scratch.to_str().expect("utf8 scratch path");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .current_dir(&scratch)
@@ -2705,7 +2707,7 @@ fn setup_background_bash_p1_real_llm_fixture(scratch_leaf: &str) -> BackgroundBa
     let api_key = real_llm_api_key("setup_background_bash_p1_real_llm_fixture");
     let mut cfg = tomcat::load_config_toml_file(&config_path).expect("private live fixture config");
     cfg.storage.work_dir = Some(work_dir.to_string_lossy().into_owned());
-    common::apply_deepseek_app_config(&mut cfg);
+    common::apply_idatatlas_app_config(&mut cfg);
     fs::write(&config_path, toml::to_string_pretty(&cfg).unwrap()).unwrap();
     fs::write(work_dir.join("mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
 
@@ -2743,17 +2745,12 @@ fn run_background_bash_autofeed_real_llm_chat(
         .env("TOMCAT__STORAGE__WORK_DIR", fx.work_dir.to_str().unwrap())
         .env("RUST_LOG", "tomcat=info")
         .env_remove("TOMCAT_AGENT_ACTIVE")
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, &fx.api_key)
-        .env("TOMCAT__LLM__PROVIDER", "openai")
-        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
-        .env(
-            "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
-        )
-        .env("TOMCAT__LLM__DEFAULT_MODEL", common::deepseek_test_model())
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, &fx.api_key)
+        .env("TOMCAT__LLM__DEFAULT_MODEL", common::idatatlas_test_model())
+        .env("TOMCAT__LLM__TITLE_MODEL", common::idatatlas_test_model())
         .env(
             "TOMCAT__CONTEXT__COMPACTION_MODEL",
-            common::deepseek_test_model(),
+            common::idatatlas_test_model(),
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2820,7 +2817,7 @@ fn run_background_bash_p1_real_llm_chat(
         .env("RUST_LOG", "tomcat=info")
         .write_stdin(format!("{prompt}\n"))
         .timeout(timeout);
-    configure_deepseek_real_llm(&mut c, &fx.api_key);
+    configure_idatatlas_real_llm(&mut c, &fx.api_key, &fx.work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     CliChatRunCapture {
@@ -2864,7 +2861,7 @@ fn load_background_bash_p1_real_llm_transcript(fx: &BackgroundBashP1RealLlmFixtu
 #[serial(env_lock)]
 fn test_user_background_bash_autofeed_real_llm_cli() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_background_bash_autofeed_real_llm_cli").entered();
 
     // This is deliberately a real-provider black-box check. Each independent attempt still
@@ -2917,7 +2914,7 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
         if core_ok {
             return;
         }
-        if maybe_skip_transient_deepseek_connect_failure(
+        if maybe_skip_transient_idatatlas_connect_failure(
             "test_user_background_bash_autofeed_real_llm_cli",
             &stdout,
             &stderr,
@@ -2961,7 +2958,7 @@ fn test_user_background_bash_autofeed_real_llm_cli() {
 #[serial(env_lock)]
 fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_background_bash_blocking_waitslice_real_llm_cli").entered();
 
     let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016d_blockwait");
@@ -2995,7 +2992,7 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
     }
     let core_ok = run.success && done_path.exists() && stdout.contains("BLOCKWAIT_OK");
     if !core_ok
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_background_bash_blocking_waitslice_real_llm_cli",
             &stdout,
             &stderr,
@@ -3089,7 +3086,7 @@ fn test_user_background_bash_blocking_waitslice_real_llm_cli() {
 #[serial(env_lock)]
 fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span =
         info_span!("test_user_background_bash_multiple_timeout_slices_real_llm_cli").entered();
 
@@ -3125,7 +3122,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
     }
     let core_ok = run.success && done_path.exists() && stdout.contains("MULTI_TIMEOUT_OK");
     if !core_ok
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_background_bash_multiple_timeout_slices_real_llm_cli",
             &stdout,
             &stderr,
@@ -3245,7 +3242,7 @@ fn test_user_background_bash_multiple_timeout_slices_real_llm_cli() {
 #[serial(env_lock)]
 fn test_user_background_bash_midturn_followup_real_llm_cli() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_background_bash_midturn_followup_real_llm_cli").entered();
 
     let fx = setup_background_bash_p1_real_llm_fixture("e2e_cli016f_midturn_followup");
@@ -3285,7 +3282,7 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
         && bg_done.exists()
         && fg_done.exists();
     if !core_ok
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_background_bash_midturn_followup_real_llm_cli",
             &stdout,
             &stderr,
@@ -3402,7 +3399,7 @@ fn test_user_background_bash_midturn_followup_real_llm_cli() {
 #[serial(env_lock)]
 fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli")
         .entered();
 
@@ -3430,7 +3427,7 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
     }
     let core_ok = run.success && stdout.contains("HUNG_TIMEOUT_BOUNDED_OK");
     if !core_ok
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli",
             &stdout,
             &stderr,
@@ -3539,7 +3536,7 @@ fn test_user_background_bash_timeout_snapshot_stays_bounded_real_llm_cli() {
 #[serial(env_lock)]
 fn test_user_asks_pi_to_write_hello_world_bash() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_asks_pi_to_write_hello_world_bash").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -3554,7 +3551,7 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
     let scratch_canon = scratch.canonicalize().expect("workspace-temp scratch path");
     let scratch_str = scratch_canon.to_str().expect("utf8 scratch path");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -3584,7 +3581,7 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin(prompt)
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -3607,7 +3604,7 @@ fn test_user_asks_pi_to_write_hello_world_bash() {
             || out.contains("创建了")
     };
     if (!success || !file_or_output_ok)
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_asks_pi_to_write_hello_world_bash",
             &out,
             &stderr,
@@ -4458,18 +4455,18 @@ fn test_user_uninstalls_scope_package_and_cleans_scope_layer() {
         .stdout(predicate::str::contains("scope:").and(predicate::str::contains("(none)")));
 }
 
-// ──────────────────── Story 7: LLM 统一接入（E2E-CLI-041~042，需 DEEPSEEK_API_KEY） ────────────────────
+// ──────────────────── Story 7: LLM 统一接入（E2E-CLI-041~042，需 IDATATLAS_OPENAI_API_KEY） ────────────────────
 
 /// [E2E-CLI-041] 用户与 LLM 对话，获得流式渲染回复
 ///
 /// 用户意图：与 LLM 对话，获得非空 AI 回复
 /// 验证：exit 0；stdout 含 AI 回复
-/// 要求：DEEPSEEK_API_KEY 已设置
+/// 要求：IDATATLAS_OPENAI_API_KEY 已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_chats_with_llm_gets_streaming_response() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_chats_with_llm_gets_streaming_response").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -4477,7 +4474,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -4493,7 +4490,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("请用一句话回答：1+1 等于几？\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -4504,7 +4501,7 @@ fn test_user_chats_with_llm_gets_streaming_response() {
         trunc(&out, 300)
     );
     if (!success || out.trim().is_empty())
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_chats_with_llm_gets_streaming_response",
             &out,
             &stderr,
@@ -4524,12 +4521,12 @@ fn test_user_chats_with_llm_gets_streaming_response() {
 ///
 /// 用户意图：发送极短提问，验证 LLM 回复非空
 /// 验证：exit 0；stdout 非空
-/// 要求：DEEPSEEK_API_KEY 已设置
+/// 要求：IDATATLAS_OPENAI_API_KEY 已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_receives_nonempty_llm_response() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_receives_nonempty_llm_response").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -4537,7 +4534,7 @@ fn test_user_receives_nonempty_llm_response() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -4553,7 +4550,7 @@ fn test_user_receives_nonempty_llm_response() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("说一个字\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -4561,7 +4558,7 @@ fn test_user_receives_nonempty_llm_response() {
     let success = output.status.success();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
     if (!success || out.trim().is_empty())
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_receives_nonempty_llm_response",
             &out,
             &stderr,
@@ -4843,7 +4840,7 @@ fn test_user_chat_without_api_key_fails_gracefully() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init，移除 DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init，移除 IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -4858,7 +4855,7 @@ fn test_user_chat_without_api_key_fails_gracefully() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("hello\n")
         .timeout(std::time::Duration::from_secs(5));
-    configure_deepseek_without_key(&mut c);
+    configure_idatatlas_without_key(&mut c, &work_dir);
     let output = c.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -5233,12 +5230,12 @@ fn test_user_init_then_doctor_roundtrip() {
 ///
 /// 用户意图：用 --resume 恢复已有会话，历史消息从 JSONL 加载
 /// 验证：exit 0；进程正常退出（不崩溃）
-/// 要求：DEEPSEEK_API_KEY 已设置
+/// 要求：IDATATLAS_OPENAI_API_KEY 已设置
 #[test]
 #[serial(env_lock)]
 fn test_user_chat_resumes_last_session() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_chat_resumes_last_session").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -5246,7 +5243,7 @@ fn test_user_chat_resumes_last_session() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init + DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init + IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -5263,13 +5260,13 @@ fn test_user_chat_resumes_last_session() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("请回答：1+1=？\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut first_round, &api_key);
+    configure_idatatlas_real_llm(&mut first_round, &api_key, &work_dir);
     let first_assert = first_round.assert();
     let first_output = first_assert.get_output();
     let first_stdout = String::from_utf8_lossy(&first_output.stdout).to_string();
     let first_stderr = String::from_utf8_lossy(&first_output.stderr).to_string();
     if !first_output.status.success()
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_chat_resumes_last_session",
             &first_stdout,
             &first_stderr,
@@ -5288,7 +5285,7 @@ fn test_user_chat_resumes_last_session() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("好的，谢谢\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
     let assert = c.assert();
     let output = assert.get_output();
     let out = String::from_utf8_lossy(&output.stdout).to_string();
@@ -5296,7 +5293,7 @@ fn test_user_chat_resumes_last_session() {
     let success = output.status.success();
     info!("Assert: exit 0 + stdout 非空；actual: {}", trunc(&out, 300));
     if (!success || out.trim().is_empty())
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_chat_resumes_last_session",
             &out,
             &stderr,
@@ -7093,13 +7090,13 @@ fn test_session_model_override_persists_across_chat_context_restart() {
 
 /// [用户场景] 用户启动 `tomcat chat` 并输入单句提问，AgentLoop 执行并输出 AI 回复
 ///
-/// 验证：exit 0 且 stdout 包含非空 AI 回复文本（需 DEEPSEEK_API_KEY；无 key 时 panic，符合规范）
+/// 验证：exit 0 且 stdout 包含非空 AI 回复文本（需 IDATATLAS_OPENAI_API_KEY；无 key 时 panic，符合规范）
 /// 意义：TASK-14 T1-P1-005 E2E 门禁——验证 AgentLoop::run() 已完整接入 tomcat chat 交互链路（E2E_TEST_SPEC §6）
 #[test]
 #[serial(env_lock)]
 fn test_user_chat_non_interactive_with_prompt_flag() {
     common::setup_logging();
-    common::load_deepseek_test_env();
+    common::load_openai_test_env();
     let _span = info_span!("test_user_chat_non_interactive_with_prompt_flag").entered();
 
     let dir = tempfile::tempdir().unwrap();
@@ -7107,7 +7104,7 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
     std::fs::create_dir_all(&work_dir).unwrap();
     let config_path = dir.path().join(".tomcat").join("tomcat.config.toml");
 
-    info!("Arrange: tomcat init 生成配置；加载 DEEPSEEK_API_KEY");
+    info!("Arrange: tomcat init 生成配置；加载 IDATATLAS_OPENAI_API_KEY");
     cmd()
         .args(["init"])
         .env("HOME", dir.path())
@@ -7124,7 +7121,7 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
         .env("TOMCAT__CONFIG_PATH", config_path.to_str().unwrap())
         .write_stdin("Reply with exactly: pong\n")
         .timeout(std::time::Duration::from_secs(60));
-    configure_deepseek_real_llm(&mut c, &api_key);
+    configure_idatatlas_real_llm(&mut c, &api_key, &work_dir);
 
     let assert = c.assert();
     let output = assert.get_output();
@@ -7138,7 +7135,7 @@ fn test_user_chat_non_interactive_with_prompt_flag() {
         out_str.chars().take(300).collect::<String>()
     );
     if (!success || out_str.trim().is_empty())
-        && maybe_skip_transient_deepseek_connect_failure(
+        && maybe_skip_transient_idatatlas_connect_failure(
             "test_user_chat_non_interactive_with_prompt_flag",
             &out_str,
             &stderr,

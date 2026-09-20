@@ -16,16 +16,10 @@ fn cmd() -> Command {
     c
 }
 
-fn apply_deepseek_env(command: &mut Command) {
-    let model = common::deepseek_test_model();
+fn apply_idatatlas_env(command: &mut Command) {
+    let model = common::idatatlas_test_model();
     command
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
-        .env(
-            "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
-        )
-        .env("TOMCAT__LLM__PROVIDER", "openai")
-        .env("TOMCAT__LLM__API_BASE", common::DEEPSEEK_TEST_API_BASE)
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, "dummy-key")
         .env("TOMCAT__LLM__DEFAULT_MODEL", &model)
         .env("TOMCAT__CONTEXT__COMPACTION_MODEL", &model);
 }
@@ -52,18 +46,26 @@ fn setup_fixture() -> Fixture {
 
     let config_path = home_path.join(".tomcat").join("tomcat.config.toml");
     let mut cfg = load_config_toml_file(&config_path).expect("config should load");
-    common::apply_deepseek_app_config(&mut cfg);
+    cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
+    common::apply_idatatlas_app_config(&mut cfg);
+    // This fixture asserts the primary hydrated request. Keep the title scene from
+    // consuming the single local mock-server response first.
+    cfg.llm.title_model = Some("test-title-disabled".to_string());
     std::fs::write(
         &config_path,
-        toml::to_string_pretty(&cfg).expect("serialize deepseek test config"),
+        toml::to_string_pretty(&cfg).expect("serialize idatatlas test config"),
     )
-    .expect("persist deepseek test config");
-    cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
+    .expect("persist idatatlas test config");
     let sessions_dir = resolve_sessions_dir(&cfg).unwrap();
     std::fs::create_dir_all(&sessions_dir).unwrap();
     let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &workdir);
     let session = SessionManager::new_scoped(sessions_dir, session_key.clone());
     session.create_session(&session_key, None).unwrap();
+    session
+        .update_session(&session_key, |entry| {
+            entry.title = Some("Resume fixture".to_string());
+        })
+        .expect("seed fixed resume fixture title");
     let _ = resolve_agent_trail_dir(&cfg).unwrap();
 
     Fixture {
@@ -240,7 +242,7 @@ fn resume_cli_cold_start_trace_is_bounded_with_sidecar() {
         .env("SHELL", "/bin/zsh")
         .env("TOMCAT_RESUME_TRACE", "1")
         .write_stdin("");
-    apply_deepseek_env(&mut command);
+    apply_idatatlas_env(&mut command);
     let output = command.output().expect("code --resume should run");
     assert!(
         output.status.success(),
@@ -302,7 +304,7 @@ fn resume_cli_plan_fastpath_reports_sidecar_plan_source() {
         .env("SHELL", "/bin/zsh")
         .env("TOMCAT_RESUME_TRACE", "1")
         .write_stdin("");
-    apply_deepseek_env(&mut command);
+    apply_idatatlas_env(&mut command);
     let output = command.output().expect("code --resume should run");
     assert!(
         output.status.success(),
@@ -348,7 +350,7 @@ fn resume_cli_corrupt_index_rebuilds_on_startup() {
         .env("SHELL", "/bin/zsh")
         .env("TOMCAT_RESUME_TRACE", "1")
         .write_stdin("");
-    apply_deepseek_env(&mut command);
+    apply_idatatlas_env(&mut command);
     let output = command.output().expect("code --resume should run");
     assert!(
         output.status.success(),
@@ -398,7 +400,7 @@ fn resume_cli_heals_dangling_tool_call_tail_without_llm() {
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
         .write_stdin("");
-    apply_deepseek_env(&mut command);
+    apply_idatatlas_env(&mut command);
     let output = command.output().expect("code --resume should run");
     assert!(
         output.status.success(),
@@ -494,7 +496,7 @@ fn resume_cli_large_session_restores_recent_context_in_request_body() {
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .write_stdin("continue\n");
-    apply_deepseek_env(&mut command);
+    apply_idatatlas_env(&mut command);
     command.env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local");
     let output = command.output().expect("code --resume should run");
     assert!(

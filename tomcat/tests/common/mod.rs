@@ -31,8 +31,12 @@ pub const DEEPSEEK_TEST_API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 pub const DEEPSEEK_TEST_API_BASE: &str = "https://api.deepseek.com";
 pub const DEEPSEEK_TEST_MODEL_ENV: &str = "TOMCAT_E2E_DEEPSEEK_MODEL";
 pub const DEEPSEEK_TEST_DEFAULT_MODEL: &str = "deepseek-v4-pro";
+pub const IDATATLAS_TEST_MODEL_ENV: &str = "TOMCAT_E2E_IDATATLAS_MODEL";
+pub const IDATATLAS_TEST_DEFAULT_MODEL: &str = "idatatlas/gpt-5.6-terra";
+pub const IDATATLAS_TEST_API_KEY_ENV: &str = "IDATATLAS_OPENAI_API_KEY";
+pub const IDATATLAS_TEST_BASE_URL: &str = "https://sub2api.idatatlas.com";
 pub const OPENAI_TEST_MODEL_ENV: &str = "TOMCAT_E2E_OPENAI_TARGET";
-pub const OPENAI_TEST_DEFAULT_MODEL: &str = "gpt-5.4_litellm-sunmi";
+pub const OPENAI_TEST_DEFAULT_MODEL: &str = IDATATLAS_TEST_DEFAULT_MODEL;
 pub const OPENAI_GATEWAY_TEST_API_KEY_ENV: &str = "LITELLM_SUNMI_API_KEY";
 pub const OPENAI_GATEWAY_TEST_BASE_URL: &str = "https://aigateway.sunmi.com";
 pub const FCODEX_TEST_MODEL_ENV: &str = "TOMCAT_E2E_FCODEX_MODEL";
@@ -79,7 +83,7 @@ pub fn load_openai_test_env() {
     let _ = dotenvy::dotenv();
 }
 
-/// 为通用 real-LLM / E2E 测试加载环境变量；当前统一走 DeepSeek。
+/// 为 DeepSeek 协议专项测试加载环境变量。
 pub fn load_deepseek_test_env() {
     load_openai_test_env();
 }
@@ -87,6 +91,11 @@ pub fn load_deepseek_test_env() {
 pub fn deepseek_test_model() -> String {
     std::env::var(DEEPSEEK_TEST_MODEL_ENV)
         .unwrap_or_else(|_| DEEPSEEK_TEST_DEFAULT_MODEL.to_string())
+}
+
+pub fn idatatlas_test_model() -> String {
+    std::env::var(IDATATLAS_TEST_MODEL_ENV)
+        .unwrap_or_else(|_| IDATATLAS_TEST_DEFAULT_MODEL.to_string())
 }
 
 pub fn e2e_openai_model() -> String {
@@ -136,7 +145,9 @@ pub fn openai_target_uses_builtin_responses_key(target: &str) -> bool {
 }
 
 pub fn openai_test_api_key_env_for_model(target: &str) -> &'static str {
-    if openai_target_uses_builtin_responses_key(target) {
+    if target.starts_with("idatatlas/") {
+        IDATATLAS_TEST_API_KEY_ENV
+    } else if openai_target_uses_builtin_responses_key(target) {
         "OPENAI_API_KEY"
     } else {
         OPENAI_GATEWAY_TEST_API_KEY_ENV
@@ -151,6 +162,14 @@ pub fn require_deepseek_api_key(test_name: &str) -> String {
     })
 }
 
+pub fn require_idatatlas_api_key(test_name: &str) -> String {
+    setup_logging();
+    load_openai_test_env();
+    std::env::var(IDATATLAS_TEST_API_KEY_ENV).unwrap_or_else(|_| {
+        panic!("{test_name} 必须设置 {IDATATLAS_TEST_API_KEY_ENV}（环境变量或 tomcat/.env）")
+    })
+}
+
 pub fn apply_deepseek_llm_config(cfg: &mut tomcat::LlmConfig) {
     cfg.default_model = deepseek_test_model();
     cfg.thinking.enabled = true;
@@ -160,13 +179,48 @@ pub fn apply_deepseek_llm_config(cfg: &mut tomcat::LlmConfig) {
 pub fn apply_deepseek_app_config(cfg: &mut tomcat::AppConfig) {
     apply_deepseek_llm_config(&mut cfg.llm);
     cfg.context.compaction_model = deepseek_test_model();
-    maybe_write_test_models(cfg);
+    seed_provider_specific_test_models(cfg);
 }
 
 pub fn apply_openai_app_config(cfg: &mut AppConfig) {
-    cfg.llm.default_model = e2e_openai_model();
-    cfg.context.compaction_model = cfg.llm.default_model.clone();
-    maybe_write_test_models(cfg);
+    let model_id = e2e_openai_model();
+    if model_id.starts_with("idatatlas/") {
+        apply_idatatlas_responses_app_config(cfg, &model_id);
+    } else {
+        cfg.llm.default_model = model_id;
+        cfg.context.compaction_model = cfg.llm.default_model.clone();
+        seed_provider_specific_test_models(cfg);
+    }
+}
+
+pub fn apply_idatatlas_app_config(cfg: &mut AppConfig) {
+    let model_id = idatatlas_test_model();
+    apply_idatatlas_responses_app_config(cfg, &model_id);
+}
+
+pub fn apply_idatatlas_responses_app_config(cfg: &mut AppConfig, model_id: &str) {
+    let model_name = model_id.strip_prefix("idatatlas/").unwrap_or(model_id);
+    cfg.llm.default_model = model_id.to_string();
+    cfg.llm.title_model = Some(model_id.to_string());
+    cfg.context.compaction_model = model_id.to_string();
+    write_model_override(
+        cfg,
+        ModelOverrideSpec {
+            model_id,
+            api: "openai-responses",
+            provider: "idatatlas",
+            env_key: IDATATLAS_TEST_API_KEY_ENV,
+            base_url: Some(IDATATLAS_TEST_BASE_URL),
+            model_name: Some(model_name),
+            context_window: Some(400_000),
+            context_window_options: Some(&[400_000, 1_000_000]),
+            max_output_tokens: Some(128_000),
+            thinking_format: Some("openai"),
+            supported_reasoning_levels: Some(&["low", "medium", "high", "xhigh"]),
+            supports_files: true,
+            supports_reasoning: true,
+        },
+    );
 }
 
 pub fn apply_fcodex_app_config(cfg: &mut AppConfig) {
@@ -188,7 +242,11 @@ pub fn apply_fcodex_responses_app_config(cfg: &mut AppConfig, model_id: &str) {
             env_key: FCODEX_TEST_API_KEY_ENV,
             base_url: Some(base_url.as_str()),
             model_name: Some(model_name),
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
             thinking_format: Some("openai"),
+            supported_reasoning_levels: None,
             supports_files: true,
             supports_reasoning: true,
         },
@@ -208,7 +266,11 @@ pub fn apply_fcodex_anthropic_app_config(cfg: &mut AppConfig) {
             env_key: FCODEX_ANTHROPIC_TEST_API_KEY_ENV,
             base_url: Some(base_url.as_str()),
             model_name: Some("claude-opus-5"),
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
             thinking_format: Some("anthropic-adaptive"),
+            supported_reasoning_levels: None,
             supports_files: true,
             supports_reasoning: true,
         },
@@ -241,7 +303,11 @@ pub fn apply_kimi_app_config(cfg: &mut AppConfig) {
             env_key: KIMI_TEST_API_KEY_ENV,
             base_url: Some(base_url.as_str()),
             model_name: None,
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
             thinking_format: Some(if is_kimi_k3 { "openai" } else { "doubao" }),
+            supported_reasoning_levels: None,
             supports_files: true,
             supports_reasoning: true,
         },
@@ -262,7 +328,11 @@ pub fn apply_anthropic_app_config(cfg: &mut AppConfig) {
             env_key: ANTHROPIC_TEST_API_KEY_ENV,
             base_url: Some(base_url.as_str()),
             model_name: None,
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
             thinking_format: Some("anthropic"),
+            supported_reasoning_levels: None,
             supports_files: true,
             supports_reasoning: true,
         },
@@ -290,7 +360,11 @@ pub fn apply_openai_responses_test_config(
             env_key,
             base_url: base_url.or(Some("https://api.openai.com")),
             model_name: None,
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
             thinking_format: Some("openai"),
+            supported_reasoning_levels: None,
             supports_files: true,
             supports_reasoning: true,
         },
@@ -316,7 +390,11 @@ pub fn apply_openai_compatible_test_config(
             env_key,
             base_url: Some(base_url),
             model_name: None,
+            context_window: None,
+            context_window_options: None,
+            max_output_tokens: None,
             thinking_format,
+            supported_reasoning_levels: None,
             supports_files: false,
             supports_reasoning: true,
         },
@@ -345,7 +423,9 @@ pub fn resolve_main_call(cfg: &AppConfig) -> tomcat::ResolvedCall {
         .expect("resolve main provider for test")
 }
 
-fn maybe_write_test_models(cfg: &AppConfig) {
+/// Seed only the model entries required by provider-specific DeepSeek and MiMo
+/// fixtures. Generic real-LLM tests use the explicit idatatlas helper above.
+pub fn seed_provider_specific_test_models(cfg: &AppConfig) {
     let Some(work_dir) = cfg.storage.work_dir.as_deref().map(Path::new) else {
         return;
     };
@@ -405,7 +485,11 @@ struct ModelOverrideSpec<'a> {
     env_key: &'a str,
     base_url: Option<&'a str>,
     model_name: Option<&'a str>,
+    context_window: Option<u32>,
+    context_window_options: Option<&'a [u32]>,
+    max_output_tokens: Option<u32>,
     thinking_format: Option<&'a str>,
+    supported_reasoning_levels: Option<&'a [&'a str]>,
     supports_files: bool,
     supports_reasoning: bool,
 }
@@ -427,8 +511,30 @@ fn write_model_override(cfg: &AppConfig, spec: ModelOverrideSpec<'_>) {
     if let Some(base_url) = spec.base_url {
         lines.push(format!("base_url = \"{base_url}\""));
     }
+    if let Some(context_window) = spec.context_window {
+        lines.push(format!("context_window = {context_window}"));
+    }
+    if let Some(options) = spec.context_window_options {
+        let rendered = options
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("context_window_options = [{rendered}]"));
+    }
+    if let Some(max_output_tokens) = spec.max_output_tokens {
+        lines.push(format!("max_output_tokens = {max_output_tokens}"));
+    }
     if let Some(thinking_format) = spec.thinking_format {
         lines.push(format!("thinking_format = \"{thinking_format}\""));
+    }
+    if let Some(levels) = spec.supported_reasoning_levels {
+        let rendered = levels
+            .iter()
+            .map(|level| format!("\"{level}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("supported_reasoning_levels = [{rendered}]"));
     }
     lines.push(format!(
         "capabilities = {{ vision = true, files = {}, tools = true, reasoning = {}, web_search = false }}",

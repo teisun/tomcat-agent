@@ -79,14 +79,17 @@ fn setup_fixture() -> Fixture {
     let config_path = home_path.join(".tomcat").join("tomcat.config.toml");
     let mut cfg = load_config_toml_file(&config_path).expect("config should load");
     cfg.storage.work_dir = Some(home_path.join(".tomcat").to_string_lossy().to_string());
+    common::apply_idatatlas_app_config(&mut cfg);
+    // Checkpoint mock servers model the main turn only; an implicit title request
+    // must not consume their first scripted response.
+    cfg.llm.title_model = Some("test-title-disabled".to_string());
     // Checkpoint tests are offline; never bootstrap the default live MCP server.
     fs::write(home_path.join(".tomcat/mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
-    common::apply_deepseek_app_config(&mut cfg);
     fs::write(
         &config_path,
-        toml::to_string_pretty(&cfg).expect("serialize deepseek test config"),
+        toml::to_string_pretty(&cfg).expect("serialize idatatlas test config"),
     )
-    .expect("persist deepseek test config");
+    .expect("persist idatatlas test config");
     let sessions_dir = resolve_sessions_dir(&cfg).unwrap();
     fs::create_dir_all(&sessions_dir).unwrap();
     let session_key = tomcat::session_key_for(tomcat::SessionMode::Code, &workdir);
@@ -95,6 +98,11 @@ fn setup_fixture() -> Fixture {
         .create_session(&session_key, None)
         .unwrap()
         .session_id;
+    session
+        .update_session(&session_key, |entry| {
+            entry.title = Some("Checkpoint fixture".to_string());
+        })
+        .expect("seed fixed checkpoint fixture title");
     let store = ShadowGitStore::new(resolve_agent_trail_dir(&cfg).unwrap(), workdir.clone());
 
     Fixture {
@@ -598,10 +606,10 @@ fn test_resume_after_interrupt() {
         .args(["code", "--resume"])
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, "dummy-key")
         .env(
             "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
+            common::IDATATLAS_TEST_API_KEY_ENV,
         )
         .write_stdin("/ckpt list\n")
         .assert();
@@ -654,10 +662,10 @@ fn test_slash_restore_recovers_after_bad_edit() {
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, "dummy-key")
         .env(
             "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
+            common::IDATATLAS_TEST_API_KEY_ENV,
         )
         .write_stdin(format!("/restore {checkpoint_id}\n"))
         .assert();
@@ -735,10 +743,10 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, "dummy-key")
         .env(
             "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
+            common::IDATATLAS_TEST_API_KEY_ENV,
         )
         .write_stdin(format!("/restore {turn_end_ckpt}\n"))
         .timeout(Duration::from_secs(20))
@@ -783,10 +791,10 @@ fn test_pre_rollback_only_before_turn_end_restore() {
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, "dummy-key")
         .env(
             "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
+            common::IDATATLAS_TEST_API_KEY_ENV,
         )
         .write_stdin(format!("/restore {manual_ckpt}\n"))
         .timeout(Duration::from_secs(20))
@@ -827,10 +835,10 @@ fn test_idle_readline_eof_exits_without_interrupt_ckpt() {
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, "dummy-key")
         .env(
             "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
+            common::IDATATLAS_TEST_API_KEY_ENV,
         )
         .write_stdin("")
         .assert()
@@ -875,10 +883,10 @@ fn test_idle_readline_eof_with_loaded_lazy_plugin_avoids_cleanup_warning() {
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, "dummy-key")
         .env(
             "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
+            common::IDATATLAS_TEST_API_KEY_ENV,
         )
         .write_stdin("")
         .assert()
@@ -908,10 +916,11 @@ fn test_hangup_during_run_leaves_interrupt_ckpt() {
     // 与 resolver::tests::catalog_route_ignores_legacy_api_base_override）。因此把 mock
     // endpoint 通过 `models.toml` 自定义 model 声明出来，再用 default_model 选中它。
     let models_toml = fx.home_path.join(".tomcat").join("models.toml");
-    fs::write(
-        &models_toml,
-        format!(
-            r#"[[models]]
+    let mut models = fs::read_to_string(&models_toml).expect("read idatatlas fixture catalog");
+    models.push_str(&format!(
+        r#"
+
+[[models]]
 id = "mock-local"
 api = "openai"
 provider = "openai"
@@ -919,10 +928,9 @@ api_key_env = "{api_key_env}"
 base_url = "{base_url}"
 capabilities = {{ vision = false, files = false, tools = true, reasoning = false }}
 "#,
-            api_key_env = common::DEEPSEEK_TEST_API_KEY_ENV,
-        ),
-    )
-    .unwrap();
+        api_key_env = common::IDATATLAS_TEST_API_KEY_ENV,
+    ));
+    fs::write(&models_toml, models).unwrap();
 
     let transcript_path = fx
         .session
@@ -935,12 +943,13 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, "dummy-key")
         .env(
             "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
+            common::IDATATLAS_TEST_API_KEY_ENV,
         )
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
+        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost");
     let mut child = CheckpointChild::spawn(&mut command);
@@ -1024,10 +1033,11 @@ fn test_hangup_during_tool_run_allows_same_process_followup() {
         spawn_tool_then_text_openai_stream_server(background_pid_path.clone());
 
     let models_toml = fx.home_path.join(".tomcat").join("models.toml");
-    fs::write(
-        &models_toml,
-        format!(
-            r#"[[models]]
+    let mut models = fs::read_to_string(&models_toml).expect("read idatatlas fixture catalog");
+    models.push_str(&format!(
+        r#"
+
+[[models]]
 id = "mock-local"
 api = "openai"
 provider = "openai"
@@ -1035,10 +1045,9 @@ api_key_env = "{api_key_env}"
 base_url = "{base_url}"
 capabilities = {{ vision = false, files = false, tools = true, reasoning = false }}
 "#,
-            api_key_env = common::DEEPSEEK_TEST_API_KEY_ENV,
-        ),
-    )
-    .unwrap();
+        api_key_env = common::IDATATLAS_TEST_API_KEY_ENV,
+    ));
+    fs::write(&models_toml, models).unwrap();
 
     let transcript_path = fx
         .session
@@ -1051,12 +1060,13 @@ capabilities = {{ vision = false, files = false, tools = true, reasoning = false
         .arg("code")
         .env("HOME", &fx.home_path)
         .env("SHELL", "/bin/zsh")
-        .env(common::DEEPSEEK_TEST_API_KEY_ENV, "dummy-key")
+        .env(common::IDATATLAS_TEST_API_KEY_ENV, "dummy-key")
         .env(
             "TOMCAT__LLM__API_KEY_ENV",
-            common::DEEPSEEK_TEST_API_KEY_ENV,
+            common::IDATATLAS_TEST_API_KEY_ENV,
         )
         .env("TOMCAT__LLM__DEFAULT_MODEL", "mock-local")
+        .env("TOMCAT__CONTEXT__COMPACTION_MODEL", "mock-local")
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost");
     let mut child = CheckpointChild::spawn(&mut command);

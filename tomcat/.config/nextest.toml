@@ -13,7 +13,7 @@ test-group = 'serial'
 
 [profile.real-llm]
 inherits = "default"
-default-filter = '''(binary(single_list_real_llm_long_session_e2e) or binary(openai_responses_integration_tests) or binary(plan_real_llm_inprocess_tests) or binary(reasoning_continuity_real_llm_tests) or (binary(cli_tests) and test(/_real_llm_cli$/)) or (binary(cli_tests) and test(/^(test_chat_with_valid_config_and_api_key_starts_and_produces_output|test_user_asks_pi_a_question|test_user_asks_pi_technical_question|test_user_asks_pi_to_run_bash_command|test_user_sees_read_failure_reason_in_tool_line|test_user_asks_pi_to_write_hello_world_bash|test_user_chats_with_llm_gets_streaming_response|test_user_receives_nonempty_llm_response|test_user_chat_resumes_last_session|test_user_chat_non_interactive_with_prompt_flag)$/)) or (binary(llm_tests) and test(/^test_llm_provider_chat/)))'''
+default-filter = '''(binary(single_list_real_llm_long_session_e2e) or binary(openai_responses_integration_tests) or binary(plan_real_llm_inprocess_tests) or (binary(reasoning_continuity_real_llm_tests) and test(=openai_responses_roundtrip_replays_reasoning_items)) or (binary(cli_tests) and test(/_real_llm_cli$/)) or (binary(cli_tests) and test(/^(test_chat_with_valid_config_and_api_key_starts_and_produces_output|test_user_asks_pi_a_question|test_user_asks_pi_technical_question|test_user_asks_pi_to_run_bash_command|test_user_sees_read_failure_reason_in_tool_line|test_user_asks_pi_to_write_hello_world_bash|test_user_chats_with_llm_gets_streaming_response|test_user_receives_nonempty_llm_response|test_user_chat_resumes_last_session|test_user_chat_non_interactive_with_prompt_flag)$/)) or (binary(llm_tests) and test(/^test_llm_provider_chat/)))'''
 
 [[profile.real-llm.overrides]]
 filter = 'all()'
