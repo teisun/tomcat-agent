@@ -190,6 +190,9 @@ pub struct UpsertModelResponse {
 #[serde(rename_all = "camelCase")]
 pub struct RemoveModelResponse {
     pub model_id: String,
+    /// 模型文件已提交删除后，目录缓存刷新失败等不会推翻提交结果的辅助警告。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

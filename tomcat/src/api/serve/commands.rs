@@ -26,9 +26,10 @@ use crate::core::connector::mcp::config::{
 use crate::core::connector::mcp::manager::ServerState;
 use crate::core::connector::ConnectorRegistry;
 use crate::core::llm::{
-    list_model_views_with_prefs, list_provider_keys, remove_user_model, set_provider_key,
-    upsert_user_model, ChatMessage, ChatMessageContent, ChatMessageContentPart, ContextRefKind,
-    ContextReference, LlmScene, ProviderKeyInput, ThinkingLevel,
+    list_model_views_with_prefs, list_provider_keys, remove_user_model_with_config_path,
+    set_provider_key, upsert_user_model, with_current_model_catalog, ChatMessage,
+    ChatMessageContent, ChatMessageContentPart, ContextRefKind, ContextReference, LlmScene,
+    ProviderKeyInput, ThinkingLevel,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
 use crate::core::session::attachments::{
@@ -41,6 +42,7 @@ use crate::core::session::transcript::{
     entry_id, find_entry_line_offset, read_entries_tail_before, read_entry_at_offset,
     TranscriptEntry, TranscriptPage,
 };
+use crate::infra::config::AppConfig;
 use crate::infra::events::{AgentEvent, WireEvent};
 use crate::AppError;
 use crate::{CheckpointId, ListOptions, SessionManager, SessionMode};
@@ -1024,12 +1026,15 @@ pub(crate) async fn handle_command(
             else {
                 return Ok(());
             };
-            if let Err(error) = slot
-                .ctx
-                .global_services
-                .model_catalog
-                .lookup_explicit(&model)
-            {
+            let previous_entry = slot.ctx.session_runtime.session.current_session_entry()?;
+            let model_changed = slot.ctx.effective_model(previous_entry.as_ref()) != model;
+            if let Err(error) = with_current_model_catalog(&state.cfg, |catalog| {
+                catalog.lookup_explicit(&model)?;
+                slot.ctx
+                    .session_runtime
+                    .session
+                    .switch_current_model(None, Some(model.as_str()))
+            }) {
                 send_error(
                     &state,
                     id,
@@ -1038,12 +1043,6 @@ pub(crate) async fn handle_command(
                 )?;
                 return Ok(());
             }
-            let previous_entry = slot.ctx.session_runtime.session.current_session_entry()?;
-            let model_changed = slot.ctx.effective_model(previous_entry.as_ref()) != model;
-            slot.ctx
-                .session_runtime
-                .session
-                .switch_current_model(None, Some(model.as_str()))?;
             if model_changed {
                 let entry = slot.ctx.session_runtime.session.current_session_entry()?;
                 let main_call = slot.ctx.resolve_call(LlmScene::Main, entry.as_ref())?;
@@ -1194,6 +1193,15 @@ pub(crate) async fn handle_command(
             )))?;
         }
         ServeCommand::ListModels { id } => {
+            if let Err(error) = refresh_all_model_catalogs(&state) {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    render_error_message(&error),
+                )?;
+                return Ok(());
+            }
             let catalog = resolve_model_catalog_snapshot(&state)?;
             let models = list_model_views_with_prefs(catalog.as_ref(), &state.shared_model_prefs);
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
@@ -1235,7 +1243,10 @@ pub(crate) async fn handle_command(
             )))?;
         }
         ServeCommand::RemoveModel { id, model_id } => {
-            if let Err(error) = remove_user_model(&state.cfg, &model_id) {
+            let config_path = crate::api::cli::config_file_path()?;
+            if let Err(error) =
+                remove_user_model_with_config_path(&state.cfg, Some(&config_path), &model_id)
+            {
                 send_error(
                     &state,
                     id,
@@ -1244,14 +1255,28 @@ pub(crate) async fn handle_command(
                 )?;
                 return Ok(());
             }
-            refresh_all_model_catalogs(&state)?;
+            let config_after_delete = crate::load_config_toml_file(&config_path);
+            let warnings = match config_after_delete
+                .and_then(|config| refresh_model_runtime(&state, &config))
+            {
+                Ok(()) => Vec::new(),
+                Err(error) => vec![format!(
+                    "模型 `{}` 已删除，但刷新模型目录失败：{}。请刷新后核对当前列表。",
+                    model_id,
+                    render_error_message(&error)
+                )],
+            };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
                 Some(
-                    serde_json::to_value(RemoveModelResponse { model_id }).map_err(|error| {
-                        AppError::Config(format!("serialize remove_model payload failed: {error}"))
-                    })?,
+                    serde_json::to_value(RemoveModelResponse { model_id, warnings }).map_err(
+                        |error| {
+                            AppError::Config(format!(
+                                "serialize remove_model payload failed: {error}"
+                            ))
+                        },
+                    )?,
                 ),
             )))?;
         }
@@ -2109,10 +2134,21 @@ fn resolve_model_catalog_snapshot(
 }
 
 fn refresh_all_model_catalogs(state: &ServeState) -> Result<(), AppError> {
-    state.shared_model_catalog.reload(&state.cfg)?;
+    refresh_model_runtime(state, &state.cfg)
+}
+
+/// Apply a disk-backed config snapshot to every active resolver before the next model decision.
+/// The catalog reload keeps add/edit/key workflows working; resolver refresh specifically avoids
+/// a deleted default/reference surviving in an already-open session.
+fn refresh_model_runtime(state: &ServeState, config: &AppConfig) -> Result<(), AppError> {
+    state.shared_model_catalog.reload(config)?;
     for summary in state.registry.list() {
         if let Some(slot) = state.registry.get(&summary.session_id) {
-            slot.ctx.global_services.model_catalog.reload(&state.cfg)?;
+            slot.ctx.global_services.model_catalog.reload(config)?;
+            slot.ctx
+                .global_services
+                .llm_resolver
+                .reload_config(config.clone());
         }
     }
     Ok(())

@@ -566,6 +566,8 @@ export function SettingsApp({
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [selectedProvider, setSelectedProvider] = useState("");
   const [formMode, setFormMode] = useState<FormMode>("create");
+  // `true` means the user has taken ownership of the suggestion, including by clearing it.
+  const [idManuallyEdited, setIdManuallyEdited] = useState(false);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -577,6 +579,8 @@ export function SettingsApp({
     envName: string;
     modelIds: string[];
   } | null>(null);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<string | null>(null);
+  const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const keySlotRefreshPendingRef = useRef(false);
 
   useEffect(() => {
@@ -629,6 +633,19 @@ export function SettingsApp({
       window.clearTimeout(timer);
     };
   }, [keySlotRefreshFeedback]);
+
+  useEffect(() => {
+    const receipt = state.modelRemovalReceipt;
+    if (!receipt || receipt.modelId !== deletingModelId) {
+      return;
+    }
+    setDeletingModelId(null);
+    if (receipt.success) {
+      setIsFormOpen(false);
+      setFormMode("create");
+      setDeleteConfirmation(null);
+    }
+  }, [deletingModelId, state.modelRemovalReceipt]);
 
   const providerPresets = useMemo(
     () => buildProviderPresets(state.models),
@@ -781,9 +798,12 @@ export function SettingsApp({
   const effectiveApiKeyEnv = fieldText(form.apiKeyEnv) || suggestedApiKeyEnv;
   const derivedId =
     dialogKind === "official" ? effectiveModelName : relayDerived.id;
-  const effectiveId = selectedModel
-    ? selectedModel.id
-    : fieldText(form.id) || derivedId;
+  const effectiveId =
+    formMode === "edit"
+      ? (selectedModelId ?? fieldText(form.id))
+      : idManuallyEdited
+        ? fieldText(form.id)
+        : derivedId;
   const normalizedContextWindow = finiteNumberOrNull(form.contextWindow);
   const automaticContextWindow = finiteNumberOrNull(
     automaticReusableModel?.contextWindow,
@@ -858,6 +878,7 @@ export function SettingsApp({
     setIsKeySlotRefreshing(false);
     setKeySlotRefreshFeedback(null);
     setSelectedModelId(null);
+    setIdManuallyEdited(false);
     setSelectedProvider(providerPresets[0]?.provider ?? "");
     setShowAdvanced(false);
     setValidationError(null);
@@ -872,6 +893,9 @@ export function SettingsApp({
   }
 
   function closeForm() {
+    if (deletingModelId) {
+      return;
+    }
     setIsFormOpen(false);
     setFormMode("create");
     resetForm();
@@ -890,6 +914,7 @@ export function SettingsApp({
         ? (providerPresetByProvider.get(inferred.selectedProvider) ?? null)
         : null;
     setSelectedModelId(model.id);
+    setIdManuallyEdited(false);
     setDraftApiKey("");
     setIsApiKeyFocused(false);
     setValidationError(null);
@@ -922,7 +947,7 @@ export function SettingsApp({
           preset?.capabilities ?? RELAY_DEFAULT_CAPABILITIES,
         ),
         contextWindow: current.contextWindow ?? null,
-        id: selectedModel ? selectedModel.id : "",
+        id: formMode === "edit" ? (selectedModelId ?? current.id) : current.id,
         modelName: current.modelName ?? "",
       }));
       return;
@@ -936,7 +961,7 @@ export function SettingsApp({
       baseUrl: current.baseUrl ?? "",
       capabilities: cloneCapabilities(RELAY_DEFAULT_CAPABILITIES),
       contextWindow: current.contextWindow ?? null,
-      id: selectedModel ? selectedModel.id : "",
+      id: formMode === "edit" ? (selectedModelId ?? current.id) : current.id,
       modelName: current.modelName ?? "",
     }));
   }
@@ -1129,16 +1154,22 @@ export function SettingsApp({
   }
 
   function handleDelete() {
-    if (!selectedModel || selectedModel.source !== "user") {
+    if (!selectedModel || selectedModel.source !== "user" || deletingModelId) {
       return;
     }
+    setDeleteConfirmation(selectedModel.id);
+  }
+
+  function confirmDelete() {
+    if (!deleteConfirmation || deletingModelId) {
+      return;
+    }
+    setDeletingModelId(deleteConfirmation);
+    setDeleteConfirmation(null);
     send(vscodeApi, {
-      data: {
-        modelId: selectedModel.id,
-      },
+      data: { modelId: deleteConfirmation },
       type: "removeModel",
     });
-    closeForm();
   }
 
   function handleInlineSave(model: SettingsModelView) {
@@ -1160,8 +1191,8 @@ export function SettingsApp({
   }
 
   const formTitle =
-    formMode === "edit" && selectedModel
-      ? `Edit ${selectedModel.id}`
+    formMode === "edit" && selectedModelId
+      ? `Edit ${selectedModelId}`
       : "Add Model";
   const formDescription =
     formMode === "edit"
@@ -1425,7 +1456,10 @@ export function SettingsApp({
         )}
 
         {isFormOpen ? (
-          <div className="tc-settings-modal" onClick={closeForm}>
+          <div
+            className="tc-settings-modal"
+            onClick={deletingModelId ? undefined : closeForm}
+          >
             <section
               aria-labelledby="settings-model-form-title"
               aria-modal="true"
@@ -1443,6 +1477,7 @@ export function SettingsApp({
                   aria-label="Close model form"
                   className="tc-icon-button tc-settings-modal__close"
                   data-testid="settings-close-model-form"
+                  disabled={Boolean(deletingModelId)}
                   onClick={closeForm}
                   type="button"
                 >
@@ -1453,6 +1488,12 @@ export function SettingsApp({
               {validationError ? (
                 <div className="tc-banner tc-banner--warning">
                   {validationError}
+                </div>
+              ) : null}
+
+              {deletingModelId ? (
+                <div className="tc-banner" role="status">
+                  Deleting {deletingModelId}…
                 </div>
               ) : null}
               {builtinCollision ? (
@@ -1553,20 +1594,6 @@ export function SettingsApp({
                             </small>
                           </label>
                         </div>
-
-                        <label className="tc-field">
-                          <span>Model ID (alias)</span>
-                          <input
-                            className="tc-input tc-input--readonly"
-                            disabled
-                            readOnly
-                            value={effectiveId}
-                          />
-                          <small className="tc-field__hint">
-                            This is how the model appears inside Tomcat. You can
-                            override the alias in Advanced.
-                          </small>
-                        </label>
 
                         <div className="tc-settings-preset-summary">
                           <span className="tc-settings-preset-summary__line">
@@ -1699,6 +1726,32 @@ export function SettingsApp({
                   </div>
                 )}
 
+                <label className="tc-field">
+                  <span>Model ID (alias)</span>
+                  <input
+                    aria-label="Model ID (alias)"
+                    className={`tc-input${formMode === "edit" ? " tc-input--readonly" : ""}`}
+                    onChange={(event) => {
+                      if (formMode === "edit") {
+                        return;
+                      }
+                      setIdManuallyEdited(true);
+                      setForm((current) => ({
+                        ...current,
+                        id: event.target.value,
+                      }));
+                    }}
+                    placeholder={derivedId || "Defaults to the model name"}
+                    readOnly={formMode === "edit"}
+                    value={effectiveId}
+                  />
+                  <small className="tc-field__hint">
+                    {formMode === "edit"
+                      ? "Model ID cannot be changed after creation."
+                      : "Tomcat suggests this alias from the model name. You can replace it, or clear it to correct the value before saving."}
+                  </small>
+                </label>
+
                 {showSharedFormFields ? (
                   <>
                     <div
@@ -1821,26 +1874,6 @@ export function SettingsApp({
                         ) : null}
 
                         <div className="tc-settings-form__row">
-                          <label className="tc-field">
-                            <span>Model ID (alias)</span>
-                            <input
-                              className="tc-input"
-                              disabled={selectedModel !== null}
-                              onChange={(event) =>
-                                setForm((current) => ({
-                                  ...current,
-                                  id: event.target.value,
-                                }))
-                              }
-                              placeholder={
-                                derivedId || "Defaults to the model name"
-                              }
-                              value={selectedModel ? selectedModel.id : form.id}
-                            />
-                            <small className="tc-field__hint">
-                              Leave this empty to use the suggested alias.
-                            </small>
-                          </label>
                           <label className="tc-field">
                             <span>Provider override</span>
                             <input
@@ -1995,6 +2028,7 @@ export function SettingsApp({
                 <div className="tc-button-row tc-settings-form__actions">
                   <button
                     className="tc-button tc-button--ghost"
+                    disabled={Boolean(deletingModelId)}
                     onClick={closeForm}
                     type="button"
                   >
@@ -2003,7 +2037,7 @@ export function SettingsApp({
                   {selectedModel?.source === "user" ? (
                     <button
                       className="tc-button tc-button--ghost"
-                      disabled={!state.capabilities.removeModel}
+                      disabled={!state.capabilities.removeModel || Boolean(deletingModelId)}
                       onClick={handleDelete}
                       type="button"
                     >
@@ -2012,7 +2046,7 @@ export function SettingsApp({
                   ) : null}
                   <button
                     className="tc-button tc-button--primary"
-                    disabled={saveDisabled}
+                    disabled={saveDisabled || Boolean(deletingModelId)}
                     onClick={handleSave}
                     type="button"
                   >
@@ -2024,6 +2058,42 @@ export function SettingsApp({
                     {saveDisabledReason}
                   </div>
                 ) : null}
+              </div>
+            </section>
+          </div>
+        ) : null}
+        {deleteConfirmation ? (
+          <div className="tc-settings-modal" role="presentation">
+            <section
+              aria-labelledby="delete-model-title"
+              aria-modal="true"
+              className="tc-card tc-settings-modal__card"
+              data-testid="settings-delete-model-confirmation"
+              role="alertdialog"
+            >
+              <div className="tc-settings-modal__header">
+                <div>
+                  <h3 id="delete-model-title">Delete {deleteConfirmation}?</h3>
+                  <p>
+                    This removes the custom model and clears a matching Build preference. This cannot be undone.
+                  </p>
+                </div>
+              </div>
+              <div className="tc-button-row tc-settings-form__actions">
+                <button
+                  className="tc-button tc-button--ghost"
+                  onClick={() => setDeleteConfirmation(null)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="tc-button tc-button--danger"
+                  onClick={confirmDelete}
+                  type="button"
+                >
+                  Delete model
+                </button>
               </div>
             </section>
           </div>

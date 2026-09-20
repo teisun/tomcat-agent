@@ -3,7 +3,9 @@ use super::super::file_store::{
     write_plan, PlanFile, PlanFileFrontmatter, PlanFileState, TodoItem, TodoStatus,
 };
 use super::super::plan_reviewer::{build_review_prompt, plan_reviewer_allowed_tools_with_policy};
-use super::super::prod_reviewer::{ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher};
+use super::super::prod_reviewer::{
+    read_parent_session_model, ProdCodeReviewerDispatcher, ProdPlanReviewerDispatcher,
+};
 use super::super::review::resolve_internal_tools;
 use super::super::{
     CodeReviewDispatchInfo, CodeReviewerDispatcher, PlanReviewerDispatcher, PlanRuntime,
@@ -41,6 +43,38 @@ async fn prod_code_reviewer_stub_returns_aborted_with_origin() {
     assert_eq!(r.verdict.as_deref(), Some("aborted"));
     assert!(r.summary.contains("test_origin"));
     assert!(!r.applied_changes);
+}
+
+#[test]
+fn persisted_parent_selection_overrides_or_clears_the_cached_child_model() {
+    use crate::core::session::manager::SessionManager;
+
+    let sessions = tempfile::tempdir().unwrap();
+    let manager = SessionManager::new(sessions.path().to_path_buf());
+    let entry = manager
+        .create_session(manager.current_session_key(), None)
+        .expect("create parent session");
+    manager
+        .update_session(manager.current_session_key(), |entry| {
+            entry.model_override = Some("selected-now".to_string());
+        })
+        .expect("persist parent model");
+    assert_eq!(
+        read_parent_session_model(sessions.path(), &entry.session_id),
+        Some(Some("selected-now".to_string()))
+    );
+
+    manager
+        .update_session(manager.current_session_key(), |entry| {
+            entry.model_override = None
+        })
+        .expect("clear parent model as deletion does");
+    assert_eq!(
+        read_parent_session_model(sessions.path(), &entry.session_id),
+        Some(None),
+        "a cleared persisted selection must be distinguishable from an unreadable session"
+    );
+    assert_eq!(read_parent_session_model(sessions.path(), "missing"), None);
 }
 
 #[test]

@@ -107,9 +107,11 @@ describe("settings panel model management flow", () => {
       sendListProviderKeys: () => Promise<unknown>;
       sendAddConnector: (input: unknown) => Promise<unknown>;
       sendSetProviderKey: (envName: string, value: string) => Promise<unknown>;
+      sendRemoveModel: (modelId: string) => Promise<unknown>;
       sendUpsertModel: (model: unknown) => Promise<unknown>;
     }>;
     onModelCatalogChanged?: () => Promise<void> | void;
+    clearBuildModelPreference?: (modelId: string) => Promise<boolean | void> | boolean | void;
     selectConnectorWorkspaceRoot?: () => Promise<string | null>;
   }) {
     const messenger = {
@@ -127,6 +129,7 @@ describe("settings panel model management flow", () => {
       }),
       sendAddConnector: vi.fn().mockResolvedValue({ payload: null, success: true }),
       sendSetProviderKey: vi.fn().mockResolvedValue({ payload: null, success: true }),
+      sendRemoveModel: vi.fn().mockResolvedValue({ payload: null, success: true }),
       sendUpsertModel: vi.fn().mockResolvedValue({ payload: null, success: true }),
       ...overrides?.messenger,
     };
@@ -150,6 +153,7 @@ describe("settings panel model management flow", () => {
       extensionUri: vscode.Uri.file("/tmp/tomcat-ext"),
       extensionVersion: overrides?.extensionVersion ?? "0.1.24",
       messenger: messenger as never,
+      clearBuildModelPreference: overrides?.clearBuildModelPreference,
       onModelCatalogChanged: overrides?.onModelCatalogChanged,
       selectConnectorWorkspaceRoot: overrides?.selectConnectorWorkspaceRoot,
     });
@@ -472,6 +476,99 @@ describe("settings panel model management flow", () => {
     });
     expect(snapshot.status).toContain("Connector saved, but connection was not started.");
     expect(snapshot.status).toContain("trust store is temporarily unavailable");
+  });
+
+  it("clears the matching Build preference before deletion and forwards warning receipts", async () => {
+    const clearBuildModelPreference = vi.fn().mockResolvedValue(undefined);
+    const removeModel = vi.fn().mockResolvedValue({
+      payload: { modelId: "relay/remove-me", warnings: ["session B was cleared"] },
+      success: true,
+    });
+    const { panel } = createPanel({
+      clearBuildModelPreference,
+      messenger: { sendRemoveModel: removeModel },
+    });
+
+    await panel.__testingDispatchIntent({
+      data: { modelId: "relay/remove-me" },
+      messageId: "remove-with-warning",
+      type: "removeModel",
+    } satisfies SettingsIntent);
+
+    expect(clearBuildModelPreference).toHaveBeenCalledWith("relay/remove-me");
+    expect(removeModel).toHaveBeenCalledWith("relay/remove-me");
+    expect(
+      clearBuildModelPreference.mock.invocationCallOrder[0],
+    ).toBeLessThan(removeModel.mock.invocationCallOrder[0]);
+    expect(panel.__testingSnapshot().state).toMatchObject({
+      modelRemovalReceipt: {
+        modelId: "relay/remove-me",
+        success: true,
+        warnings: ["session B was cleared"],
+      },
+      status: "Model removed with warnings.",
+      warnings: ["session B was cleared"],
+    });
+  });
+
+  it("keeps the model untouched when clearing its Build preference fails", async () => {
+    const clearBuildModelPreference = vi.fn().mockRejectedValue(new Error("settings write denied"));
+    const { messenger, panel } = createPanel({ clearBuildModelPreference });
+
+    await panel.__testingDispatchIntent({
+      data: { modelId: "relay/keep-me" },
+      messageId: "remove-build-preference-failure",
+      type: "removeModel",
+    } satisfies SettingsIntent);
+
+    expect(messenger.sendRemoveModel).not.toHaveBeenCalled();
+    expect(panel.__testingSnapshot().state).toMatchObject({
+      error: "Error: settings write denied",
+      modelRemovalReceipt: { modelId: "relay/keep-me", success: false, warnings: [] },
+    });
+  });
+
+  it("reports a timed-out delete and lets a later catalog refresh recover", async () => {
+    const sendListModels = vi
+      .fn()
+      .mockResolvedValueOnce({ error: "catalog refresh timed out", success: false })
+      .mockResolvedValue({
+        payload: { models: [{ id: "relay/survived" }] },
+        success: true,
+      });
+    const { messenger, panel } = createPanel({
+      clearBuildModelPreference: vi.fn().mockResolvedValue(true),
+      messenger: {
+        sendListModels,
+        sendRemoveModel: vi.fn().mockRejectedValue(new Error("remove request timed out")),
+      },
+    });
+
+    await panel.__testingDispatchIntent({
+      data: { modelId: "relay/survived" },
+      messageId: "remove-timeout",
+      type: "removeModel",
+    } satisfies SettingsIntent);
+    expect(panel.__testingSnapshot().state).toMatchObject({
+      error: "Error: remove request timed out",
+      modelRemovalReceipt: {
+        modelId: "relay/survived",
+        success: false,
+        warnings: ["The matching Build preference was cleared before deletion."],
+      },
+      warnings: ["The matching Build preference was cleared before deletion."],
+    });
+    expect(sendListModels).toHaveBeenCalledTimes(1);
+
+    await panel.__testingDispatchIntent({
+      data: { route: "models" },
+      messageId: "refresh-after-timeout",
+      type: "settings.ready",
+    } satisfies SettingsIntent);
+    expect(panel.__testingSnapshot().state.models.map((model) => model.id)).toEqual([
+      "relay/survived",
+    ]);
+    expect(panel.__testingSnapshot().state.error).toBeNull();
   });
 
   it("marks the webview ready only after the settings.ready handshake arrives", async () => {

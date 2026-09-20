@@ -404,7 +404,7 @@ describe("SettingsApp", () => {
     });
     fireEvent.click(within(dialog).getByRole("button", { name: /advanced/i }));
     fireEvent.change(
-      within(dialog).getByPlaceholderText("chatanywhere/gpt-5.4"),
+      within(dialog).getByLabelText("Model ID (alias)"),
       {
         target: { value: "custom-relay-id" },
       },
@@ -882,6 +882,60 @@ describe("SettingsApp", () => {
     });
   });
 
+  it("confirms model deletion, ignores a delayed receipt, and shows the real warning outcome", async () => {
+    const { postMessage } = mount();
+    const userModel = builtinModel({
+      id: "relay/remove-me",
+      keyPresent: true,
+      modelName: "remove-me",
+      source: "user",
+    });
+    await emitState(readyState({
+      models: [builtinModel({ keyPresent: true }), userModel],
+      providerKeys: [providerKey({ keyPresent: true })],
+    }));
+    postMessage.mockClear();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
+    const form = screen.getByRole("dialog");
+    fireEvent.click(within(form).getByRole("button", { name: "Delete" }));
+    const confirmation = screen.getByRole("alertdialog");
+    expect(within(confirmation).getByText("Delete relay/remove-me?")).toBeTruthy();
+    expect(postMessage).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(confirmation).getByRole("button", { name: "Delete model" }),
+    );
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      data: { modelId: "relay/remove-me" },
+      type: "removeModel",
+    }));
+    expect(screen.getByRole("status").textContent).toContain("Deleting relay/remove-me");
+
+    await emitState(readyState({
+      modelRemovalReceipt: { modelId: "relay/other", success: true, warnings: [] },
+      models: [builtinModel({ keyPresent: true }), userModel],
+      providerKeys: [providerKey({ keyPresent: true })],
+    }));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toContain("Deleting relay/remove-me");
+
+    await emitState(readyState({
+      modelRemovalReceipt: {
+        modelId: "relay/remove-me",
+        success: true,
+        warnings: ["A later catalog refresh is still required."],
+      },
+      models: [builtinModel({ keyPresent: true })],
+      providerKeys: [providerKey({ keyPresent: true })],
+      status: "Model removed with warnings.",
+      warnings: ["A later catalog refresh is still required."],
+    }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByText("Model removed with warnings.")).toBeTruthy();
+    expect(screen.getByText("A later catalog refresh is still required.")).toBeTruthy();
+  });
+
   it("copies matching built-in metadata, but keeps only catalog limits read-only", async () => {
     const { postMessage } = mount();
     await emitState(
@@ -1305,6 +1359,62 @@ describe("SettingsApp", () => {
       ),
     ).toBeTruthy();
     expect(screen.getByText("Model saved.")).toBeTruthy();
+  });
+
+  it("keeps an Add ID override including a deliberate clear, and locks the ID opened for Edit", async () => {
+    const { postMessage } = mount();
+    const editable = builtinModel({
+      id: "relay/original-id",
+      keyPresent: true,
+      modelName: "original-model",
+      source: "user",
+    });
+    await emitState(
+      readyState({
+        models: [builtinModel({ keyPresent: true }), editable],
+        providerKeys: [providerKey({ keyPresent: true })],
+      }),
+    );
+    postMessage.mockClear();
+
+    let dialog = openAddModelDialog();
+    const modelName = within(dialog).getByRole("textbox", { name: /model name/i });
+    const id = within(dialog).getByLabelText("Model ID (alias)") as HTMLInputElement;
+    fireEvent.change(modelName, { target: { value: "suggested-id" } });
+    expect(id.value).toBe("suggested-id");
+    fireEvent.change(id, { target: { value: "chosen-id" } });
+    fireEvent.change(modelName, { target: { value: "another-suggestion" } });
+    expect(id.value).toBe("chosen-id");
+
+    fireEvent.click(
+      within(dialog).getByRole("tab", { name: /relay \/ custom endpoint/i }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("tab", { name: /official new model/i }),
+    );
+    expect(id.value).toBe("chosen-id");
+    fireEvent.change(id, { target: { value: "" } });
+    fireEvent.change(modelName, { target: { value: "third-suggestion" } });
+    expect(id.value).toBe("");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save Model" }));
+    expect(within(dialog).getByText("Model ID, provider, and API are all required.")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[1]);
+    dialog = screen.getByRole("dialog");
+    const editId = within(dialog).getByLabelText("Model ID (alias)") as HTMLInputElement;
+    expect(editId.value).toBe("relay/original-id");
+    expect(editId.readOnly).toBe(true);
+    fireEvent.change(editId, { target: { value: "must-not-change" } });
+    expect(editId.value).toBe("relay/original-id");
+
+    await emitState(
+      readyState({
+        models: [builtinModel({ keyPresent: true })],
+        providerKeys: [providerKey({ keyPresent: true })],
+      }),
+    );
+    expect(editId.value).toBe("relay/original-id");
   });
 
   it("shows extension and serve versions, and warns on missing or mismatched serve versions", async () => {

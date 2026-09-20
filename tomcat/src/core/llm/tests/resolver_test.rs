@@ -719,6 +719,56 @@ base_url = "https://fcodex.top"
 
 #[test]
 #[serial(env_lock)]
+fn reloaded_blank_defaults_keep_compaction_on_the_current_session_catalog_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.toml");
+    std::fs::write(
+        &path,
+        r#"
+[[models]]
+id = "relay/selected-alias"
+model_name = "provider-wire-name"
+api = "openai-responses"
+provider = "relay"
+api_key_env = "RELAY_API_KEY"
+base_url = "https://gateway.example.test/v1"
+"#,
+    )
+    .unwrap();
+    let mut cfg = AppConfig::default();
+    cfg.llm.default_model = "relay/selected-alias".to_string();
+    cfg.context.compaction_model = "relay/selected-alias".to_string();
+    let catalog = Arc::new(ModelCatalog::load_from_path(&cfg, path).unwrap());
+    let resolver = DefaultLlmResolver::new(cfg.clone(), catalog, model_prefs(dir.path()));
+
+    unsafe {
+        std::env::set_var("RELAY_API_KEY", "stub");
+    }
+    let mut cleared = cfg;
+    cleared.llm.default_model.clear();
+    cleared.context.compaction_model.clear();
+    resolver.reload_config(cleared);
+
+    assert!(
+        resolver.resolve(LlmScene::Main, None).is_err(),
+        "the deleted default must not survive in a live resolver"
+    );
+    let main = resolver
+        .resolve(LlmScene::Main, Some("relay/selected-alias"))
+        .expect("surviving session selection resolves");
+    let compaction = resolver
+        .resolve(LlmScene::Compaction, Some(main.catalog_id()))
+        .expect("compaction follows the selected main catalog id when both defaults are blank");
+    assert_eq!(compaction.catalog_id(), "relay/selected-alias");
+    assert_eq!(compaction.model, "provider-wire-name");
+
+    unsafe {
+        std::env::remove_var("RELAY_API_KEY");
+    }
+}
+
+#[test]
+#[serial(env_lock)]
 fn main_scene_is_unchanged_by_compaction_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("models.toml");

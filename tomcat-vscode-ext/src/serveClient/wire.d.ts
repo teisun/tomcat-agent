@@ -399,6 +399,7 @@ export interface ProviderKeyView {
 }
 export interface RemoveModelResponse {
   modelId: string;
+  warnings?: string[];
 }
 export interface ResponseFrame {
   error?: null | string;

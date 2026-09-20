@@ -9,8 +9,8 @@ fn load_store_missing_file_returns_empty() {
     let store = load_store(&path).unwrap();
     assert!(store.is_empty());
     assert!(
-        path.exists(),
-        "missing store should be initialized on first load"
+        !path.exists(),
+        "a read of a missing store must not create a file"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -61,62 +61,51 @@ fn save_and_load_store_roundtrip() {
 }
 
 #[test]
-fn load_store_empty_file_returns_empty() {
+fn load_store_empty_file_returns_error_without_rewriting() {
     let dir = std::env::temp_dir().join("tomcat_store_test_empty");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("empty.json");
     std::fs::write(&path, "").unwrap();
-    let store = load_store(&path).unwrap();
-    assert!(store.is_empty());
-    let rewritten = std::fs::read_to_string(&path).unwrap();
-    let parsed: SessionStore = serde_json::from_str(&rewritten).unwrap();
-    assert!(parsed.is_empty());
+
+    let error = load_store(&path).expect_err("blank store must not be reset during a read");
+    assert!(error.to_string().contains("拒绝覆盖"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
 }
 
 #[test]
-fn load_store_resets_legacy_shape_to_new_store() {
+fn load_store_legacy_shape_returns_error_without_rewriting() {
     let dir = std::env::temp_dir().join("tomcat_store_test_v1_reset");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sessions.json");
-    std::fs::write(
-        &path,
-        r#"{
+    let legacy = r#"{
   "agent:main:main": {
     "sessionId": "legacy_1",
     "updatedAt": 42,
     "cwd": "/tmp/project"
   }
-}"#,
-    )
-    .unwrap();
+}"#;
+    std::fs::write(&path, legacy).unwrap();
 
-    let loaded = load_store(&path).unwrap();
-    assert!(
-        loaded.is_empty(),
-        "legacy shape should be replaced directly"
-    );
-    let rewritten = std::fs::read_to_string(&path).unwrap();
-    let parsed: SessionStore = serde_json::from_str(&rewritten).unwrap();
-    assert!(parsed.is_empty());
+    load_store(&path).expect_err("legacy store must not be reset during a read");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
 }
 
 #[test]
-fn load_store_resets_invalid_json_to_new_store() {
+fn load_store_invalid_json_returns_error_without_rewriting() {
     let dir = std::env::temp_dir().join("tomcat_store_test_invalid_reset");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sessions.json");
-    std::fs::write(&path, "{not-json").unwrap();
+    let invalid = "{not-json";
+    std::fs::write(&path, invalid).unwrap();
 
-    let loaded = load_store(&path).unwrap();
-    assert!(loaded.is_empty());
-    let rewritten = std::fs::read_to_string(&path).unwrap();
-    let parsed: SessionStore = serde_json::from_str(&rewritten).unwrap();
-    assert!(parsed.is_empty());
+    load_store(&path).expect_err("invalid store must not be reset during a read");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);

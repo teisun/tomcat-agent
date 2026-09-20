@@ -31,8 +31,9 @@ mod types;
 
 pub use admin::{
     list_model_views, list_model_views_with_prefs, list_provider_keys, remove_user_model,
-    resolve_provider_key_env_name, set_default_model, set_provider_key, upsert_user_model,
-    ModelEntryInput, ModelKeyStatus, ModelSource, ModelView, ProviderKeyInput, ProviderKeyView,
+    remove_user_model_with_config_path, resolve_provider_key_env_name, set_default_model,
+    set_provider_key, upsert_user_model, with_current_model_catalog, ModelEntryInput,
+    ModelKeyStatus, ModelSource, ModelView, ProviderKeyInput, ProviderKeyView,
 };
 pub use auth::{env_name_for_provider, missing_key_message, AuthStore, Credential};
 pub use catalog::{Capabilities, ModelCatalog, ModelEntry, SharedModelCatalog};

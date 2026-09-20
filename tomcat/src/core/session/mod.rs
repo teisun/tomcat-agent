@@ -37,6 +37,7 @@ pub use scope::{
     fnv1a_hex, project_root, resolve_session_mode, session_key_for, session_key_for_agent,
     SessionMode,
 };
+pub(crate) use store::{clear_model_overrides_in_store, precheck_model_override_store};
 pub use store::{load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY};
 pub use transcript::{
     append_entry, append_line, insert_entry_after_message_id,

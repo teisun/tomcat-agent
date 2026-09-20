@@ -254,9 +254,16 @@ pub struct ProdVerifierDeps {
 
 impl ProdVerifierDeps {
     fn resolve_model(&self, plan_runtime: &PlanRuntime) -> String {
+        let session_model = match super::prod_reviewer::read_parent_session_model(
+            &self.sessions_dir,
+            &self.parent_session_id,
+        ) {
+            Some(model) => model,
+            None => plan_runtime.session_model(),
+        };
         super::prod_reviewer::resolve_dispatch_model(
             self.model_override.as_deref(),
-            plan_runtime.session_model().as_deref(),
+            session_model.as_deref(),
             &self.fallback_model,
         )
     }

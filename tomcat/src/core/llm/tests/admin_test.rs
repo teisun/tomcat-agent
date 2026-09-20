@@ -12,14 +12,12 @@ use serial_test::serial;
 use crate::core::llm::thinking_policy::ThinkingFormat;
 use crate::core::llm::{
     auth::clear_managed_credentials_for_test, list_model_views, list_model_views_with_prefs,
-    list_provider_keys, remove_user_model, set_provider_key, upsert_user_model, Capabilities,
-    DefaultLlmResolver, LlmResolver, LlmScene, ModelCatalog, ModelEntryInput, ModelSource,
-    ProviderKeyInput, SharedModelCatalog,
+    list_provider_keys, remove_user_model, remove_user_model_with_config_path, set_provider_key,
+    upsert_user_model, Capabilities, DefaultLlmResolver, LlmResolver, LlmScene, ModelCatalog,
+    ModelEntryInput, ModelSource, ProviderKeyInput, SharedModelCatalog,
 };
 use crate::infra::config::AppConfig;
-use crate::{
-    resolve_sessions_dir, save_store, ModelPrefsStore, SessionEntry, SessionStore, ThinkingLevel,
-};
+use crate::{resolve_sessions_dir, ModelPrefsStore, SessionEntry, SessionStore, ThinkingLevel};
 
 fn temp_cfg() -> (tempfile::TempDir, AppConfig) {
     let work_dir = tempfile::tempdir().expect("tempdir");
@@ -497,61 +495,141 @@ fn set_provider_key_waits_for_env_lock_and_then_succeeds() {
 
 #[test]
 #[serial(env_lock)]
-fn remove_user_model_rejects_models_still_referenced_by_config_or_sessions() {
+fn remove_user_model_forgets_config_and_all_session_overrides() {
     clear_managed_credentials_for_test();
-    let (_work_dir, mut cfg) = temp_cfg();
+    let (work_dir, mut cfg) = temp_cfg();
     upsert_user_model(&cfg, custom_claude_input()).expect("seed custom model");
     cfg.llm.default_model = "custom-claude".to_string();
+    cfg.llm.vision_model = Some("custom-claude".to_string());
+    cfg.llm.title_model = Some("custom-claude".to_string());
     cfg.context.compaction_model = "custom-claude".to_string();
+    let config_path = work_dir.path().join("tomcat.config.toml");
+    fs::write(
+        &config_path,
+        toml::to_string_pretty(&cfg).expect("serialize config"),
+    )
+    .expect("write config");
 
-    let sessions_dir = resolve_sessions_dir(&cfg).expect("sessions dir");
-    std::fs::create_dir_all(&sessions_dir).expect("mkdir sessions dir");
-    save_store(
-        &sessions_dir.join("sessions.json"),
-        &SessionStore {
-            current: [("agent:main:main".to_string(), "session-1".to_string())]
-                .into_iter()
-                .collect(),
-            sessions: [(
-                "session-1".to_string(),
-                SessionEntry {
-                    session_key: "agent:main:main".to_string(),
-                    session_id: "session-1".to_string(),
-                    updated_at: 1,
-                    session_file: None,
-                    cwd: None,
-                    project_root: None,
-                    thinking_level: None,
-                    model_override: Some("custom-claude".to_string()),
-                    input_tokens: None,
-                    output_tokens: None,
-                    compaction_count: None,
-                    compaction_tokens_freed: None,
-                    tool_result_chars_persisted: None,
-                    context_utilization_ratio: None,
-                    last_checkpoint_id: None,
-                    title: Some("Pinned Claude Session".to_string()),
-                },
-            )]
+    let entry = SessionEntry {
+        session_key: "agent:main:main".to_string(),
+        session_id: "session-1".to_string(),
+        updated_at: 1,
+        session_file: None,
+        cwd: Some("/workspace".to_string()),
+        project_root: None,
+        thinking_level: None,
+        model_override: Some("custom-claude".to_string()),
+        input_tokens: Some(10),
+        output_tokens: Some(20),
+        compaction_count: None,
+        compaction_tokens_freed: None,
+        tool_result_chars_persisted: None,
+        context_utilization_ratio: None,
+        last_checkpoint_id: None,
+        title: Some("Pinned Claude Session".to_string()),
+    };
+    let store = SessionStore {
+        current: [("agent:main:main".to_string(), "session-1".to_string())]
             .into_iter()
             .collect(),
-        },
-    )
-    .expect("save session store");
+        sessions: [("session-1".to_string(), entry)].into_iter().collect(),
+    };
+    let mut document = serde_json::to_value(&store).expect("serialize store");
+    document.as_object_mut().expect("store root").insert(
+        "futureRoot".to_string(),
+        serde_json::json!({ "keep": true }),
+    );
+    document["sessions"]["session-1"]
+        .as_object_mut()
+        .expect("session object")
+        .insert("futureField".to_string(), serde_json::json!("keep me"));
 
-    let error = remove_user_model(&cfg, "custom-claude").expect_err("in-use model must fail");
-    let message = error.to_string();
+    let main_store = resolve_sessions_dir(&cfg)
+        .expect("main sessions dir")
+        .join("sessions.json");
+    let reviewer_store = work_dir
+        .path()
+        .join("agents")
+        .join("reviewer")
+        .join("sessions")
+        .join("sessions.json");
+    for path in [&main_store, &reviewer_store] {
+        std::fs::create_dir_all(path.parent().expect("store parent")).expect("mkdir store parent");
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&document).expect("render store"),
+        )
+        .expect("write store");
+    }
+
+    remove_user_model_with_config_path(&cfg, Some(&config_path), "custom-claude")
+        .expect("remove model and clear references");
+
+    let persisted = crate::load_config_toml_file(&config_path).expect("read cleaned config");
+    assert_eq!(persisted.llm.default_model, "");
+    assert_eq!(persisted.context.compaction_model, "");
+    assert_eq!(persisted.llm.vision_model.as_deref(), Some(""));
+    assert_eq!(persisted.llm.title_model.as_deref(), Some(""));
+    for path in [&main_store, &reviewer_store] {
+        let cleaned: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("read cleaned store"))
+                .expect("parse cleaned store");
+        assert!(cleaned["sessions"]["session-1"]
+            .get("modelOverride")
+            .is_none());
+        assert_eq!(
+            cleaned["sessions"]["session-1"]["title"],
+            "Pinned Claude Session"
+        );
+        assert_eq!(cleaned["sessions"]["session-1"]["futureField"], "keep me");
+        assert_eq!(cleaned["futureRoot"]["keep"], true);
+    }
     assert!(
-        message.contains("llm.default_model"),
-        "unexpected error: {message}"
+        ModelCatalog::load(&cfg)
+            .expect("reload catalog")
+            .lookup("custom-claude")
+            .is_none(),
+        "models.toml is committed only after the reference cleanup"
     );
-    assert!(
-        message.contains("context.compaction_model"),
-        "unexpected error: {message}"
+}
+
+#[test]
+#[serial(env_lock)]
+fn remove_user_model_does_not_touch_files_when_session_precheck_fails() {
+    clear_managed_credentials_for_test();
+    let (work_dir, mut cfg) = temp_cfg();
+    upsert_user_model(&cfg, custom_claude_input()).expect("seed custom model");
+    cfg.llm.default_model = "custom-claude".to_string();
+    let config_path = work_dir.path().join("tomcat.config.toml");
+    fs::write(
+        &config_path,
+        toml::to_string_pretty(&cfg).expect("serialize config"),
+    )
+    .expect("write config");
+    let store_path = resolve_sessions_dir(&cfg)
+        .expect("sessions dir")
+        .join("sessions.json");
+    std::fs::create_dir_all(store_path.parent().expect("store parent")).expect("mkdir sessions");
+    let corrupt = "{not-json";
+    fs::write(&store_path, corrupt).expect("write corrupt store");
+    let models_path = ModelCatalog::default_user_path(&cfg).expect("models path");
+    let models_before = fs::read(&models_path).expect("read models before");
+    let config_before = fs::read(&config_path).expect("read config before");
+
+    let error = remove_user_model_with_config_path(&cfg, Some(&config_path), "custom-claude")
+        .expect_err("corrupt sessions store must block deletion");
+    assert!(error.to_string().contains("拒绝覆盖"));
+    assert_eq!(
+        fs::read(&models_path).expect("read models after"),
+        models_before
     );
-    assert!(
-        message.contains("session `session-1`"),
-        "unexpected error: {message}"
+    assert_eq!(
+        fs::read(&config_path).expect("read config after"),
+        config_before
+    );
+    assert_eq!(
+        fs::read_to_string(&store_path).expect("read store after"),
+        corrupt
     );
 }
 

@@ -2128,6 +2128,26 @@ describe("plan build orchestration", () => {
     provider.dispose();
   });
 
+  it("abandons a build when its confirmed model is cleared while the dialog is open", async () => {
+    __testing.setConfiguration("tomcat.plan.buildModel", "removed-model");
+    const sendSetModel = vi.fn().mockResolvedValue({ success: true });
+    const sendSetPlanMode = vi.fn().mockResolvedValue({ success: true });
+    const provider = createBuildProvider({ sendSetModel, sendSetPlanMode });
+    const { postState, refreshModels } = stubBuildInternals(provider);
+    vi.spyOn(provider as any, "confirmBuildModel").mockImplementation(async () => {
+      __testing.setConfiguration("tomcat.plan.buildModel", "");
+      return true;
+    });
+
+    await provider.buildPlan("plan-1");
+
+    expect(sendSetModel).not.toHaveBeenCalled();
+    expect(sendSetPlanMode).not.toHaveBeenCalled();
+    expect(refreshModels).toHaveBeenCalledTimes(1);
+    expect(postState).toHaveBeenCalledTimes(1);
+    provider.dispose();
+  });
+
   it("buildPlan skips the model switch when no build model is configured", async () => {
     const sendSetModel = vi.fn().mockResolvedValue({ success: true });
     const sendSetPlanMode = vi.fn().mockResolvedValue({ success: true });

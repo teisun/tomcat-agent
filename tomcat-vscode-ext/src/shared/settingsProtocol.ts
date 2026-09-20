@@ -64,6 +64,12 @@ export interface SettingsProviderKeyInput {
   value: string;
 }
 
+export interface SettingsModelRemovalReceipt {
+  modelId: string;
+  success: boolean;
+  warnings: string[];
+}
+
 export interface SettingsCapabilities {
   listModels: boolean;
   listProviderKeys: boolean;
@@ -98,6 +104,7 @@ export interface SettingsStateSnapshot {
   expectedCliVersion?: string | null;
   extensionVersion?: string | null;
   models: SettingsModelView[];
+  modelRemovalReceipt?: SettingsModelRemovalReceipt | null;
   providerKeys: SettingsProviderKeyView[];
   connectors?: ConnectorView[];
   connectorConfigPaths?: ConnectorConfigPaths;

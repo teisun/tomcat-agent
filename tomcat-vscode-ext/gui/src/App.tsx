@@ -1279,6 +1279,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   const [approvalAnswers, setApprovalAnswers] = useState<Record<string, ApprovalAnswerState>>(
     () => readPersistedApprovalAnswers(vscodeApi.getState?.()),
   );
+  const [pendingQuestionDockCollapsed, setPendingQuestionDockCollapsed] = useState<Record<string, boolean>>({});
   const [contextSearch, setContextSearch] = useState<ContextSearchState>(
     EMPTY_CONTEXT_SEARCH_STATE,
   );
@@ -1349,6 +1350,14 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         : undefined,
     [state.activeSessionId, state.sessionViews],
   );
+  const activePendingApprovals = useMemo(
+    () => activeSession?.timeline.filter(
+      (item): item is WebviewApprovalCard =>
+        item.type === "approval" && !item.resolved && item.live,
+    ) ?? [],
+    [activeSession],
+  );
+  const activePendingApproval = activePendingApprovals[0];
   stateRef.current = state;
   approvalAnswersRef.current = approvalAnswers;
 
@@ -1361,6 +1370,20 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     }
     return counts;
   }, [state.sessionViews]);
+
+  useEffect(() => {
+    setPendingQuestionDockCollapsed((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const sessionId of Object.keys(next)) {
+        if ((pendingQuestionCounts[sessionId] ?? 0) === 0) {
+          delete next[sessionId];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [pendingQuestionCounts]);
 
   useEffect(() => {
     const newlyPending: string[] = [];
@@ -1391,7 +1414,9 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     window.requestAnimationFrame(() => {
       const panel = [...document.querySelectorAll<HTMLElement>("[data-pending-session-id]")]
         .find((candidate) => candidate.dataset.pendingSessionId === state.activeSessionId);
-      panel?.querySelector<HTMLElement>("button:not([disabled]), input:not([disabled])")?.focus();
+      panel?.querySelector<HTMLElement>(
+        '[data-testid^="approval-option-"]:not([disabled]), input:not([disabled])',
+      )?.focus();
     });
   }, [pendingQuestionCounts, state.activeSessionId]);
 
@@ -2131,6 +2156,16 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
     [vscodeApi],
   );
 
+  const handlePendingQuestionDockCollapse = useCallback(
+    (sessionId: string, collapsed: boolean) => {
+      setPendingQuestionDockCollapsed((current) => ({
+        ...current,
+        [sessionId]: collapsed,
+      }));
+    },
+    [],
+  );
+
   const handleAnswerQuestion = useCallback(
     (sessionId: string, requestId: string, result: AskQuestionResult) => {
       const ownerSessionId = sessionId || stateRef.current.activeSessionId;
@@ -2635,36 +2670,34 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         ) : null}
       </div>
 
-      {activeSession
-        ? activeSession.timeline
-            .filter(
-              (item): item is WebviewApprovalCard =>
-                item.type === "approval" && !item.resolved && item.live,
-            )
-            .map((item) => {
-              const answerState = approvalAnswers[
-                approvalAnswerKey(item.sessionId ?? activeSession.sessionId, item.request.requestId)
-              ];
-              return (
-                <section
-                  aria-label="Needs your answer"
-                  className="tc-pending-question-panel"
-                  data-pending-session-id={item.sessionId ?? activeSession.sessionId}
-                  data-testid="pending-question-panel"
-                  key={item.id}
-                >
-                  <h2 className="tc-visually-hidden">Needs your answer</h2>
-                  <ApprovalCard
-                    draft={answerState?.draft}
-                    item={item}
-                    onAnswer={handleAnswerQuestion}
-                    onDraftChange={handleApprovalDraftChange}
-                    submitting={answerState?.submitting}
-                  />
-                </section>
-              );
-            })
-        : null}
+      {activeSession && activePendingApproval ? (() => {
+        const ownerSessionId = activePendingApproval.sessionId ?? activeSession.sessionId;
+        const answerState = approvalAnswers[
+          approvalAnswerKey(ownerSessionId, activePendingApproval.request.requestId)
+        ];
+        return (
+          <section
+            aria-label="Needs your answer"
+            className="tc-pending-question-panel"
+            data-pending-session-id={ownerSessionId}
+            data-testid="pending-question-panel"
+          >
+            <h2 className="tc-visually-hidden">Needs your answer</h2>
+            <ApprovalCard
+              collapsed={pendingQuestionDockCollapsed[ownerSessionId] === true}
+              draft={answerState?.draft}
+              item={activePendingApproval}
+              onAnswer={handleAnswerQuestion}
+              onCollapsedChange={(collapsed) =>
+                handlePendingQuestionDockCollapse(ownerSessionId, collapsed)}
+              onDraftChange={handleApprovalDraftChange}
+              pendingGroupCount={activePendingApprovals.length}
+              presentation="pending"
+              submitting={answerState?.submitting}
+            />
+          </section>
+        );
+      })() : null}
 
       <TodoListWidget
         busy={!!activeSession?.busy}

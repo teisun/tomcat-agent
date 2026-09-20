@@ -35,6 +35,7 @@ use crate::core::plan_runtime::{
     CodeReviewDispatchInfo, CodeReviewerDispatcher, ExplorerDispatcher, PlanReviewerDispatcher,
     PlanRuntime,
 };
+use crate::core::session::manager::SessionManager;
 use crate::core::tools::pipeline::read_state::ReadFileState;
 use crate::core::tools::primitive::PrimitiveExecutor;
 use crate::core::{CheckpointStore, ModelPrefsStore};
@@ -93,9 +94,16 @@ pub struct ProdReviewerDeps {
 
 impl ProdReviewerDeps {
     fn resolve_model(&self, plan_runtime: &PlanRuntime) -> String {
+        let session_model =
+            match read_parent_session_model(&self.sessions_dir, &self.parent_session_id) {
+                // A readable parent entry with no override is authoritative: deletion has cleared
+                // the selection, so never revive PlanRuntime's previous in-memory choice.
+                Some(model) => model,
+                None => plan_runtime.session_model(),
+            };
         resolve_dispatch_model(
             self.model_override.as_deref(),
-            plan_runtime.session_model().as_deref(),
+            session_model.as_deref(),
             &self.fallback_model,
         )
     }
@@ -117,9 +125,10 @@ pub(crate) struct ResolvedSubagentRuntime {
 fn resolve_subagent_compaction_runtime(
     llm_resolver: &dyn LlmResolver,
     base_context_config: &ContextConfig,
+    main_catalog_id: &str,
 ) -> (ContextConfig, Option<Arc<dyn LlmProvider>>, Option<u32>) {
     let mut context_config = base_context_config.clone();
-    match llm_resolver.resolve(LlmScene::Compaction, None) {
+    match llm_resolver.resolve(LlmScene::Compaction, Some(main_catalog_id)) {
         Ok(call) => {
             let output_limit = call.output_limit_for_request(None).0;
             context_config.compaction_model = call.model;
@@ -145,7 +154,11 @@ pub(crate) fn resolve_subagent_runtime(
 ) -> Result<ResolvedSubagentRuntime, crate::infra::error::AppError> {
     let main_call = llm_resolver.resolve(LlmScene::Main, Some(model_id))?;
     let (context_config, compaction_provider, compaction_output_limit) =
-        resolve_subagent_compaction_runtime(llm_resolver, base_context_config);
+        resolve_subagent_compaction_runtime(
+            llm_resolver,
+            base_context_config,
+            main_call.catalog_id(),
+        );
     let openai_files_runtime = crate::core::llm::openai_files::build_runtime_for_provider(
         main_call.provider_impl.as_ref(),
         llm_files_config,
@@ -160,6 +173,23 @@ pub(crate) fn resolve_subagent_runtime(
         compaction_output_limit,
         openai_files_runtime,
     })
+}
+
+/// Reads the parent session at child-dispatch time. `Some(None)` means the record was read and
+/// deliberately has no override, so callers must not fall through to a stale in-memory cache.
+pub(crate) fn read_parent_session_model(
+    sessions_dir: &std::path::Path,
+    parent_session_id: &str,
+) -> Option<Option<String>> {
+    let manager = SessionManager::new(sessions_dir.to_path_buf());
+    match manager.get_session_by_id(parent_session_id) {
+        Ok(Some(entry)) => Some(
+            entry
+                .model_override
+                .filter(|model| !model.trim().is_empty()),
+        ),
+        Ok(None) | Err(_) => None,
+    }
 }
 
 /// 子 Agent 派发模型的解析顺序：显式 override > 当前会话模型 > 启动兜底。

@@ -69,14 +69,22 @@ input:focus-visible {
 .tc-pending-question-panel {
   background: var(--tc-panel-bg);
   border-block: 1px solid var(--tc-panel-border);
-  max-height: min(48vh, 32rem);
-  overflow: auto;
-  padding: 0.55rem 0.75rem;
+  display: flex;
+  max-height: min(30vh, 20rem);
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
   scrollbar-gutter: stable;
 }
 
 .tc-pending-question-panel .tc-approval-card {
+  border: 0;
+  border-radius: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   margin: 0;
+  min-height: 0;
 }
 
 .tc-pending-question-panel .tc-approval-question__prompt p,
@@ -2777,6 +2785,89 @@ span.tc-attachment-strip__file-chip {
   display: flex;
   gap: 12px;
   justify-content: flex-end;
+}
+
+.tc-approval-card--pending .tc-approval-card__header {
+  flex: 0 0 auto;
+  gap: 8px;
+  padding: 0.55rem 0.75rem;
+}
+
+.tc-approval-card__navigation {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.tc-approval-card__more-groups {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  margin-right: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tc-approval-card__nav-button,
+.tc-approval-card__collapse {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 24px;
+  justify-content: center;
+  padding: 0;
+  width: 24px;
+}
+
+.tc-approval-card__nav-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.tc-approval-card__collapse:hover,
+.tc-approval-card__nav-button:not(:disabled):hover {
+  color: var(--vscode-foreground);
+}
+
+.tc-approval-questions--pending {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.55rem 0.75rem;
+  scrollbar-gutter: stable;
+}
+
+.tc-approval-questions--pending .tc-approval-question + .tc-approval-question {
+  border-top: 1px solid var(--tc-panel-border);
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+}
+
+.tc-approval-card--pending .tc-approval-actions {
+  flex: 0 0 auto;
+  padding: 0.55rem 0.75rem;
+}
+
+@media (max-height: 300px) {
+  .tc-pending-question-panel {
+    overflow-y: auto;
+  }
+
+  .tc-approval-card--pending {
+    flex: 0 0 auto;
+  }
+
+  .tc-approval-questions--pending {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
 }
 
 .tc-thinking {

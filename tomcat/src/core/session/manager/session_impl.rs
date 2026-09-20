@@ -23,7 +23,7 @@ use crate::core::session::tool_display_sidecar::{
 use crate::core::session::user_message_sidecar::user_message_sidecar_path;
 
 use crate::core::session::store::{
-    load_store, save_store, SessionEntry, SessionStore, DEFAULT_SESSION_KEY,
+    load_store, save_store, with_store_write_lock, SessionEntry, SessionStore, DEFAULT_SESSION_KEY,
 };
 use crate::core::session::transcript::{
     append_entry, append_entry_with_sync, get_branch, get_children, get_entry, get_leaf_entry,
@@ -283,8 +283,6 @@ pub struct SessionManager {
     /// 这允许磁盘 `current[key]` 继续承担“跨进程默认指针”的角色，同时保证已启动
     /// 的 chat 在会话存活期间始终写回同一个 session_id。
     pinned_session_id: Arc<parking_lot::RwLock<Option<String>>>,
-    /// 序列化 store 写入，禁止锁文件
-    write_mutex: Arc<Mutex<()>>,
     transcript_mutexes: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
     append_in_flight: Arc<AtomicUsize>,
 }
@@ -296,7 +294,6 @@ impl Clone for SessionManager {
             store_path: self.store_path.clone(),
             session_key: self.session_key.clone(),
             pinned_session_id: Arc::clone(&self.pinned_session_id),
-            write_mutex: Arc::clone(&self.write_mutex),
             transcript_mutexes: Arc::clone(&self.transcript_mutexes),
             append_in_flight: Arc::clone(&self.append_in_flight),
         }
@@ -317,7 +314,6 @@ impl SessionManager {
             store_path,
             session_key: session_key.into(),
             pinned_session_id: Arc::new(parking_lot::RwLock::new(None)),
-            write_mutex: Arc::new(Mutex::new(())),
             transcript_mutexes: Arc::new(Mutex::new(HashMap::new())),
             append_in_flight: Arc::new(AtomicUsize::new(0)),
         }
@@ -605,7 +601,7 @@ impl SessionManager {
         Arc::clone(&self.append_in_flight)
     }
 
-    /// 加载当前 store；文件不存在或空则返回空 map。
+    /// 加载当前 store；缺失文件返回内存空 store，现存空白或损坏文件返回错误。
     pub fn load_store(&self) -> Result<SessionStore, AppError> {
         load_store(&self.store_path)
     }
@@ -619,14 +615,12 @@ impl SessionManager {
         &self,
         f: impl FnOnce(&mut SessionStore) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
-        let _guard = self
-            .write_mutex
-            .lock()
-            .map_err(|e| AppError::Config(format!("session store 写入锁异常: {}", e)))?;
-        let mut store = load_store(&self.store_path)?;
-        let output = f(&mut store)?;
-        self.save_store(&store)?;
-        Ok(output)
+        with_store_write_lock(&self.store_path, || {
+            let mut store = load_store(&self.store_path)?;
+            let output = f(&mut store)?;
+            self.save_store(&store)?;
+            Ok(output)
+        })
     }
 
     pub(crate) fn transcript_mutex_for_path(

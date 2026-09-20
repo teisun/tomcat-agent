@@ -28,6 +28,7 @@ import type {
   SettingsIntent,
   SettingsModelCapabilities,
   SettingsModelInput,
+  SettingsModelRemovalReceipt,
   SettingsModelView,
   SettingsProviderKeyInput,
   SettingsProviderKeyView,
@@ -228,6 +229,8 @@ export interface SettingsPanelDeps {
   extensionUri: vscode.Uri;
   extensionVersion: string | null;
   messenger: TomcatMessenger;
+  /** Clear the global Build preference if it points to a model being removed. */
+  clearBuildModelPreference?(modelId: string): Promise<boolean | void> | boolean | void;
   onModelCatalogChanged?(): Promise<void> | void;
   /** The extension host, not a webview/editor heuristic, owns workspace choice. */
   selectConnectorWorkspaceRoot?(): Promise<string | null>;
@@ -778,25 +781,78 @@ export class SettingsPanel implements vscode.Disposable {
     );
   }
 
-  private async handleRemoveModel(modelId: string): Promise<void> {    try {
+  private async handleRemoveModel(modelId: string): Promise<void> {
+    let buildPreferenceCleared = false;
+    const report = async (
+      error: string | null,
+      status: string | null,
+      warnings: string[],
+      success: boolean,
+    ) => {
+      const modelRemovalReceipt = { modelId, success, warnings };
+      // Publish the authoritative operation result before an auxiliary catalog reload.
+      // The form can stop its spinner even if that later read is slow or fails.
+      this.state = {
+        ...this.state,
+        error,
+        modelRemovalReceipt,
+        status,
+        warnings,
+      };
+      this.postState();
+      await this.refreshState(
+        error,
+        status,
+        warnings,
+        null,
+        modelRemovalReceipt,
+      );
+    };
+    const failed = async (error: unknown) => {
+      const warnings = buildPreferenceCleared
+        ? ["The matching Build preference was cleared before deletion."]
+        : [];
+      await report(String(error), null, warnings, false);
+    };
+    try {
       const capabilities = this.buildCapabilities(
         await this.deps.ensureInitialized(),
       );
       if (!capabilities.removeModel) {
-        await this.refreshState(
-          "Model removal is unavailable for this serve instance.",
-        );
+        await failed("Model removal is unavailable for this serve instance.");
         return;
       }
+      // This write belongs to the extension host. Await it before asking serve to delete,
+      // so a remembered Build choice cannot point to an ID that no longer exists.
+      buildPreferenceCleared =
+        (await this.deps.clearBuildModelPreference?.(modelId)) === true;
+      this.state = {
+        ...this.state,
+        error: null,
+        modelRemovalReceipt: null,
+        status: `Removing ${modelId}…`,
+        warnings: null,
+      };
+      this.postState();
       const response = await this.deps.messenger.sendRemoveModel(modelId);
       if (!response.success) {
-        await this.refreshState(response.error ?? "Unable to remove model.");
+        await failed(response.error ?? "Unable to remove model.");
         return;
       }
-      await this.refreshState(null, "Model removed.");
+      const removalWarnings = (response.payload as { warnings?: unknown } | null)
+        ?.warnings;
+      const warnings = Array.isArray(removalWarnings)
+        ? removalWarnings.filter((warning): warning is string => typeof warning === "string")
+        : [];
+      await report(
+        null,
+        warnings.length > 0 ? "Model removed with warnings." : "Model removed.",
+        warnings,
+        true,
+      );
       await this.deps.onModelCatalogChanged?.();
     } catch (error) {
-      await this.refreshState(String(error), null);
+      await failed(error);
     }
   }
 
@@ -834,6 +890,7 @@ export class SettingsPanel implements vscode.Disposable {
     status: string | null = null,
     warnings: string[] | null = null,
     connectorReceipt: SettingsConnectorReceipt | null = null,
+    modelRemovalReceipt: SettingsModelRemovalReceipt | null = null,
   ): Promise<void> {
     const viewEpoch = ++this.viewEpoch;
     const initializeResult = await this.deps.ensureInitialized();
@@ -863,6 +920,7 @@ export class SettingsPanel implements vscode.Disposable {
       expectedCliVersion: this.deps.expectedCliVersion,
       extensionVersion: this.deps.extensionVersion,
       models: modelsResult.models,
+      modelRemovalReceipt,
       providerKeys: providerKeysResult.providerKeys,
       connectors: connectorsResult.connectors,
       connectorConfigPaths: connectorsResult.configPaths,

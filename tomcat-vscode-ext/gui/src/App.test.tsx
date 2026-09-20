@@ -1890,6 +1890,63 @@ describe("Tomcat webview App", () => {
     ).toBe(true);
   });
 
+  it("shows one pending question group at a time and moves to the next group after the host confirms completion", async () => {
+    const { postMessage } = mount();
+    const snapshot = approvalDraftSnapshot("s1");
+    const firstPending = snapshot.sessionViews.s1.timeline.find(
+      (item) => item.type === "approval",
+    );
+    if (!firstPending || firstPending.type !== "approval") {
+      throw new Error("expected the approval fixture to include a pending question");
+    }
+    const nextPending = {
+      ...firstPending,
+      id: "approval-next",
+      request: {
+        ...firstPending.request,
+        questions: [{
+          id: "q-next",
+          options: [
+            { id: "finish", label: "Finish", recommended: true },
+            { id: "later", label: "Later" },
+          ],
+          prompt: "What should happen next?",
+        }],
+        requestId: "request-next",
+      },
+    };
+    snapshot.sessionViews.s1.timeline = [firstPending, nextPending];
+    await emitState({
+      channel: "state",
+      content: snapshot,
+      messageId: "two-pending-question-groups",
+    });
+
+    expect(screen.getByText("1 more question group waiting")).toBeTruthy();
+    expect(screen.getByTestId("approval-option-q-draft-yes")).toBeTruthy();
+    expect(screen.queryByTestId("approval-option-q-next-finish")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("approval-option-q-draft-yes"));
+    fireEvent.click(screen.getByTestId("approval-continue"));
+    expect(
+      postMessage.mock.calls.some(
+        ([message]) => message.type === "answerQuestion" && message.data?.requestId === "request-draft-1",
+      ),
+    ).toBe(true);
+
+    const resolvedFirst = approvalDraftSnapshot("s1");
+    resolvedFirst.sessionViews.s1.timeline = [nextPending];
+    await emitState({
+      channel: "state",
+      content: resolvedFirst,
+      messageId: "first-pending-question-group-resolved",
+    });
+
+    expect(screen.queryByText("1 more question group waiting")).toBeNull();
+    expect(screen.queryByTestId("approval-option-q-draft-yes")).toBeNull();
+    expect(screen.getByTestId("approval-option-q-next-finish")).toBeTruthy();
+  });
+
   it("keeps an answer draft across session switches and a webview DOM reload", async () => {
     const first = mount();
     await emitState({

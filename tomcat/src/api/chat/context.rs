@@ -927,11 +927,9 @@ impl ChatContext {
     }
 
     pub(crate) fn effective_model(&self, entry: Option<&SessionEntry>) -> String {
-        entry
-            .and_then(|e| e.model_override.as_deref())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&self.config.llm.default_model)
-            .to_string()
+        self.resolve_call(LlmScene::Main, entry)
+            .map(|call| call.catalog_id)
+            .unwrap_or_default()
     }
 
     pub(crate) fn resolve_thinking_level(&self, model_id: &str) -> ThinkingLevel {

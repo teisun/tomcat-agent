@@ -6235,6 +6235,13 @@
     "properties": {
       "modelId": {
         "type": "string"
+      },
+      "warnings": {
+        "description": "模型文件已提交删除后，目录缓存刷新失败等不会推翻提交结果的辅助警告。",
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
       }
     }
   },

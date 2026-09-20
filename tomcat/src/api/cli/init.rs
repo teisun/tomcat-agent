@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     ensure_embedded_assets, ensure_work_dir_structure, get_work_dir, load_config,
-    load_config_for_init, load_store, normalize_path, resolve_sessions_dir, validate_config,
-    write_file_atomic, AppConfig, AppError, PluginEngine, DEFAULT_LLM_MODEL,
+    load_config_for_init, load_store, normalize_path, resolve_sessions_dir, save_store,
+    validate_config, write_file_atomic, AppConfig, AppError, PluginEngine, SessionStore,
+    DEFAULT_LLM_MODEL,
 };
 
 use super::DEFAULT_CONFIG_PATH;
@@ -67,7 +68,17 @@ pub(crate) fn run_init() -> Result<(), AppError> {
     let mcp_config_path = crate::core::connector::mcp::builtin::materialize_default_mcp_json(&cfg)?;
     println!("  ✓ 默认 MCP 配置已就绪: {}", mcp_config_path.display());
     let sessions_path = resolve_sessions_dir(&cfg)?.join("sessions.json");
-    let store = load_store(&sessions_path)?;
+    let store = match load_store(&sessions_path) {
+        Ok(store) => store,
+        // `init` is an explicit user recovery/migration command. Ordinary session reads
+        // still reject malformed data without changing it.
+        Err(AppError::Config(_)) => {
+            save_store(&sessions_path, &SessionStore::new())?;
+            println!("  ✓ sessions.json 格式已重置为当前版本");
+            SessionStore::new()
+        }
+        Err(error) => return Err(error),
+    };
     if store.is_empty() {
         println!("  ✓ sessions.json 已初始化");
     } else {

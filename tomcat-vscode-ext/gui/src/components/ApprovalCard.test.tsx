@@ -50,17 +50,26 @@ function buildItem(
 function ControlledApprovalCard({
   item,
   onAnswer,
+  pendingGroupCount = 1,
+  presentation = "default",
 }: {
   item: WebviewApprovalCard;
   onAnswer: (sessionId: string, requestId: string, result: AskQuestionResult) => void;
+  pendingGroupCount?: number;
+  presentation?: "default" | "pending";
 }) {
+  const [collapsed, setCollapsed] = useState(false);
   const [draft, setDraft] = useState<ApprovalAnswerDraft>(() => createApprovalAnswerDraft(item));
   return (
     <ApprovalCard
+      collapsed={collapsed}
       draft={draft}
       item={item}
       onAnswer={onAnswer}
+      onCollapsedChange={setCollapsed}
       onDraftChange={(_sessionId, _requestId, next) => setDraft(next)}
+      pendingGroupCount={pendingGroupCount}
+      presentation={presentation}
     />
   );
 }
@@ -87,6 +96,48 @@ describe("ApprovalCard", () => {
     expect(screen.getAllByText("Recommended")).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Skip" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Continue" })).toBeTruthy();
+  });
+
+  it("uses the active question count, navigation, and an icon-only collapsible pending dock", () => {
+    const onAnswer = vi.fn();
+    render(
+      <ControlledApprovalCard
+        item={buildItem([
+          buildQuestion("q1", "Pick a time"),
+          buildQuestion("q2", "Pick a language"),
+        ])}
+        onAnswer={onAnswer}
+        pendingGroupCount={2}
+        presentation="pending"
+      />,
+    );
+
+    expect(screen.getByTestId("approval-question-count").textContent).toBe("1 of 2");
+    expect((screen.getByTestId("approval-previous-question") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("approval-next-question") as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText("1 more question group waiting")).toBeTruthy();
+    expect(screen.getByTestId("approval-collapse").getAttribute("title")).toBe("Collapse questions");
+    expect(screen.getByTestId("approval-collapse").querySelector(".codicon-chevron-down")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("approval-next-question"));
+    expect(screen.getByTestId("approval-question-count").textContent).toBe("2 of 2");
+    expect((screen.getByTestId("approval-previous-question") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("approval-next-question") as HTMLButtonElement).disabled).toBe(true);
+    expect(onAnswer).not.toHaveBeenCalled();
+
+    const firstAnswer = screen.getByTestId("approval-option-q1-q1-a");
+    fireEvent.click(firstAnswer);
+    firstAnswer.focus();
+    fireEvent.click(screen.getByTestId("approval-collapse"));
+    expect(document.activeElement).toBe(screen.getByTestId("approval-collapse"));
+    expect(screen.queryByTestId("approval-questions-body")).toBeNull();
+    expect(screen.queryByTestId("approval-continue")).toBeNull();
+    expect(screen.getByTestId("approval-collapse").getAttribute("aria-label")).toBe("Expand questions");
+    expect(screen.getByTestId("approval-collapse").querySelector(".codicon-chevron-right")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("approval-collapse"));
+    expect(screen.getByTestId("approval-question-count").textContent).toBe("2 of 2");
+    expect(screen.getByTestId("approval-option-q1-q1-a").getAttribute("aria-checked")).toBe("true");
   });
 
   it("does not render resolved cards", () => {

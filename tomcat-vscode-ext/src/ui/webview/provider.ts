@@ -2810,6 +2810,18 @@ export class TomcatWebviewViewProvider implements vscode.WebviewViewProvider, vs
       // 取消就是彻底取消：既不 build，也不动会话模型。
       return;
     }
+    // Settings may have cleared a deleted Build model while the confirmation dialog was
+    // open. Do not replace it with a newly-read value: that value was not confirmed.
+    if (this.readBuildModelConfig() !== buildModel) {
+      this.stateStore.appendMessage(
+        sessionId,
+        "notice",
+        "Build model changed while confirmation was open. Please start the build again.",
+      );
+      await this.refreshModels();
+      await this.postState();
+      return;
+    }
     try {
       if (buildModel) {
         const modelResponse = await this.deps.messenger.sendSetModel(sessionId, buildModel);

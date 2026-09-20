@@ -1,4 +1,4 @@
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use tracing::warn;
 
@@ -411,10 +411,14 @@ pub trait LlmResolver: Send + Sync {
         scene: LlmScene,
         session_override: Option<&str>,
     ) -> Result<ResolvedCall, AppError>;
+
+    /// Model deletion updates only the selection-related configuration in a live process.
+    /// Stateless/test resolvers intentionally retain their existing behavior.
+    fn reload_config(&self, _config: AppConfig) {}
 }
 
 pub struct DefaultLlmResolver {
-    config: AppConfig,
+    config: RwLock<AppConfig>,
     catalog: SharedModelCatalog,
     auth: AuthStore,
     provider_cache: Mutex<HashMap<ProviderCacheKey, Arc<dyn LlmProvider>>>,
@@ -428,7 +432,7 @@ impl DefaultLlmResolver {
         model_prefs: Arc<crate::core::session::ModelPrefsStore>,
     ) -> Self {
         Self {
-            config,
+            config: RwLock::new(config),
             catalog: catalog.into(),
             auth: AuthStore,
             provider_cache: Mutex::new(HashMap::new()),
@@ -436,52 +440,56 @@ impl DefaultLlmResolver {
         }
     }
 
+    fn config_snapshot(&self) -> AppConfig {
+        self.config.read().clone()
+    }
+
     fn select_model_id(&self, scene: LlmScene, session_override: Option<&str>) -> String {
+        let config = self.config_snapshot();
+        let session_model = session_override
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+        let default_model = config.llm.default_model.trim();
         match scene {
-            LlmScene::Main => session_override
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
+            LlmScene::Main => session_model
                 .map(str::to_string)
-                .unwrap_or_else(|| self.config.llm.default_model.clone()),
+                .unwrap_or_else(|| default_model.to_string()),
             LlmScene::Compaction => {
-                let model = self.config.context.compaction_model.trim();
-                if model.is_empty() {
-                    self.config.llm.default_model.clone()
+                let compaction_model = config.context.compaction_model.trim();
+                if !compaction_model.is_empty() {
+                    compaction_model.to_string()
+                } else if !default_model.is_empty() {
+                    default_model.to_string()
                 } else {
-                    model.to_string()
+                    // Deleting both configuration references must not make a still-selected
+                    // session model unusable for compaction. The catalog ID is passed through
+                    // from the main selection, not the provider's wire model name.
+                    session_model.unwrap_or_default().to_string()
                 }
             }
-            LlmScene::Vision => self
-                .config
+            LlmScene::Vision => config
                 .llm
                 .vision_model
                 .as_deref()
                 .map(str::trim)
                 .filter(|model| !model.is_empty())
                 .map(str::to_string)
-                .unwrap_or_else(|| {
-                    session_override
-                        .map(str::trim)
-                        .filter(|model| !model.is_empty())
-                        .unwrap_or(&self.config.llm.default_model)
-                        .to_string()
-                }),
-            LlmScene::Title => self
-                .config
+                .or_else(|| session_model.map(str::to_string))
+                .unwrap_or_else(|| default_model.to_string()),
+            LlmScene::Title => config
                 .llm
                 .title_model
                 .as_deref()
                 .map(str::trim)
                 .filter(|model| !model.is_empty())
                 .map(str::to_string)
-                .unwrap_or_else(|| {
-                    let fallback = self.config.context.compaction_model.trim();
-                    if fallback.is_empty() {
-                        self.config.llm.default_model.clone()
-                    } else {
-                        fallback.to_string()
-                    }
-                }),
+                .or_else(|| {
+                    let compaction_model = config.context.compaction_model.trim();
+                    (!compaction_model.is_empty()).then(|| compaction_model.to_string())
+                })
+                .or_else(|| (!default_model.is_empty()).then(|| default_model.to_string()))
+                .or_else(|| session_model.map(str::to_string))
+                .unwrap_or_default(),
         }
     }
 
@@ -490,10 +498,11 @@ impl DefaultLlmResolver {
     }
 
     fn guard_scene(&self, scene: LlmScene, entry: &ModelEntry) -> Result<(), AppError> {
+        let config = self.config_snapshot();
         self.catalog.with_catalog(|catalog| {
             validate_capabilities(
                 catalog,
-                &self.config.llm.default_model,
+                &config.llm.default_model,
                 scene,
                 &entry.id,
                 &entry.capabilities,
@@ -518,7 +527,8 @@ impl DefaultLlmResolver {
     }
 
     fn compaction_fallback_env(&self, entry: &ModelEntry) -> Option<String> {
-        let default_model = self.config.llm.default_model.trim();
+        let config = self.config_snapshot();
+        let default_model = config.llm.default_model.trim();
         if default_model.is_empty() || entry.id == default_model {
             return None;
         }
@@ -532,7 +542,9 @@ impl DefaultLlmResolver {
 
     fn effective_base_url(&self, entry: &ModelEntry) -> Option<String> {
         #[cfg(test)]
-        if let Some(base_url) = self.config.llm.api_base.clone() {
+        let config = self.config_snapshot();
+        #[cfg(test)]
+        if let Some(base_url) = config.llm.api_base.clone() {
             return Some(base_url);
         }
         entry
@@ -544,7 +556,7 @@ impl DefaultLlmResolver {
 
     #[cfg(test)]
     fn test_fallback_env(&self) -> Option<String> {
-        self.config.llm.api_key_env.clone()
+        self.config_snapshot().llm.api_key_env
     }
 
     #[cfg(not(test))]
@@ -553,17 +565,18 @@ impl DefaultLlmResolver {
     }
 
     fn resolved_thinking_format(&self, entry: &ModelEntry) -> ThinkingFormat {
+        let config = self.config_snapshot();
         ThinkingFormat::parse_or_auto(
             entry
                 .thinking_format
                 .as_deref()
-                .or(self.config.llm.thinking.format.as_deref()),
+                .or(config.llm.thinking.format.as_deref()),
         )
         .resolve_for_api(entry.api.as_str())
     }
 
     fn runtime(&self) -> LlmRuntimeConfig {
-        self.config.llm.runtime()
+        self.config_snapshot().llm.runtime()
     }
 
     fn provider_cache_key(&self, entry: &ModelEntry, credential: &Credential) -> ProviderCacheKey {
@@ -613,9 +626,10 @@ impl DefaultLlmResolver {
                 .context_window_for(&entry.id)
                 .filter(|value| entry.context_window_options.contains(value))
         };
+        let config = self.config_snapshot();
         let limits = EffectiveModelLimits::resolve_with_context_window(
             &entry,
-            &self.config.context,
+            &config.context,
             selected_context_window,
         )?;
         Ok(ResolvedCall {
@@ -627,7 +641,7 @@ impl DefaultLlmResolver {
             base_url,
             key_source: credential.env_name,
             thinking_format: self.resolved_thinking_format(&entry),
-            thinking_config: self.config.llm.thinking.clone(),
+            thinking_config: config.llm.thinking.clone(),
             capabilities: entry.capabilities.clone(),
             limits,
             sealed: Sealed,
@@ -635,8 +649,9 @@ impl DefaultLlmResolver {
     }
 
     fn resolve_compaction_call(&self, model_id: &str) -> Result<ResolvedCall, AppError> {
+        let config = self.config_snapshot();
         let selected_model = model_id.trim();
-        let default_model = self.config.llm.default_model.trim();
+        let default_model = config.llm.default_model.trim();
         match self.resolve_model_call(LlmScene::Compaction, selected_model) {
             Ok(resolved) => Ok(resolved),
             Err(original_err) if !default_model.is_empty() && selected_model != default_model => {
@@ -670,5 +685,9 @@ impl LlmResolver for DefaultLlmResolver {
             LlmScene::Compaction => self.resolve_compaction_call(&model_id),
             _ => self.resolve_model_call(scene, &model_id),
         }
+    }
+
+    fn reload_config(&self, config: AppConfig) {
+        *self.config.write() = config;
     }
 }

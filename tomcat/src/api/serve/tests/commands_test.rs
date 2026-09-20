@@ -4999,6 +4999,112 @@ async fn serve_set_model_rejects_invalid_id_without_mutating_session_override() 
 
 #[tokio::test]
 #[serial(env_lock)]
+async fn serve_set_model_rejects_a_model_removed_after_the_catalog_was_cached() {
+    let _api_key = install_test_api_key();
+    let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;
+    let model_id = "stale-catalog-model";
+    crate::core::llm::upsert_user_model(
+        &state.cfg,
+        ModelEntryInput {
+            id: model_id.to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            api: "openai-responses".to_string(),
+            provider: "relay".to_string(),
+            api_key_env: None,
+            base_url: Some("https://gateway.example.test/v1".to_string()),
+            capabilities: Capabilities {
+                tools: true,
+                ..Capabilities::default()
+            },
+            context_window: Some(200_000),
+            context_window_options: None,
+            max_output_tokens: None,
+            description: None,
+            supported_reasoning_levels: None,
+            thinking_format: Some("openai".to_string()),
+        },
+    )
+    .expect("write a user model");
+    state
+        .shared_model_catalog
+        .reload(&state.cfg)
+        .expect("cache the new model before external removal");
+    slot.ctx
+        .global_services
+        .model_catalog
+        .reload(&state.cfg)
+        .expect("cache the new model in the active session before external removal");
+    crate::core::llm::remove_user_model(&state.cfg, model_id).expect("remove model from disk");
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetModel {
+            id: Some("set-removed-model".to_string()),
+            session_id: Some(slot.session_id.clone()),
+            model: model_id.to_string(),
+        },
+    )
+    .await
+    .expect("handle stale selection");
+
+    let lines = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("set-removed-model")
+    })
+    .await;
+    let response = lines
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some("set-removed-model")
+        })
+        .expect("removed model response");
+    assert_eq!(response["success"].as_bool(), Some(false));
+    assert!(response["error"]
+        .as_str()
+        .is_some_and(|error| error.contains(model_id)));
+    assert_eq!(
+        slot.ctx
+            .session_runtime
+            .session
+            .current_session_entry()
+            .expect("read current session")
+            .expect("current session")
+            .model_override,
+        None,
+        "a stale cached catalog must not put a deleted model back into sessions.json"
+    );
+
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListModels {
+            id: Some("list-after-external-removal".to_string()),
+        },
+    )
+    .await
+    .expect("refresh list from disk");
+    let listed = wait_for_line(&buffer, |line| {
+        line.get("id").and_then(serde_json::Value::as_str) == Some("list-after-external-removal")
+    })
+    .await;
+    let list_response = listed
+        .iter()
+        .find(|line| {
+            line.get("id").and_then(serde_json::Value::as_str)
+                == Some("list-after-external-removal")
+        })
+        .expect("list response");
+    assert_eq!(list_response["success"].as_bool(), Some(true));
+    assert!(
+        !list_response["payload"]["models"]
+            .as_array()
+            .expect("models list")
+            .iter()
+            .any(|model| model["id"].as_str() == Some(model_id)),
+        "list_models must read the disk catalog instead of returning the old cache"
+    );
+}
+
+#[tokio::test]
+#[serial(env_lock)]
 async fn serve_set_thinking_level_roundtrips_in_get_state() {
     let _api_key = install_test_api_key();
     let (state, buffer, _temp, slot) = build_initialized_state_with_streams(vec![]).await;

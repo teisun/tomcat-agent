@@ -1,5 +1,5 @@
 use crate::core::llm::{
-    list_model_views_with_prefs, list_provider_keys, remove_user_model,
+    list_model_views_with_prefs, list_provider_keys, remove_user_model_with_config_path,
     resolve_provider_key_env_name, set_default_model, set_provider_key, upsert_user_model,
     Capabilities, ModelEntryInput, ModelView, ProviderKeyInput,
 };
@@ -107,7 +107,8 @@ pub(crate) fn run_model(sub: ModelSub, cfg: &AppConfig) -> Result<(), AppError> 
             );
         }
         ModelSub::Remove { id } => {
-            remove_user_model(cfg, &id)?;
+            let path = config_file_path()?;
+            remove_user_model_with_config_path(cfg, Some(&path), &id)?;
             println!("已删除用户模型 {}。", id.trim());
         }
         ModelSub::Key { sub } => match sub {

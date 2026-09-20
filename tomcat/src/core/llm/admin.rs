@@ -9,9 +9,12 @@ use std::time::{Duration, Instant};
 use crate::core::llm::auth::{
     env_name_for_provider, key_present_for_env, refresh_managed_credentials,
 };
-use crate::core::session::ModelPrefsStore;
+use crate::core::session::{
+    clear_model_overrides_in_store, precheck_model_override_store, ModelPrefsStore,
+};
 use crate::infra::config::{
-    get_work_dir, read_env_entries, write_default_model, write_env_entries, ThinkingConfig,
+    clear_model_references, get_work_dir, read_env_entries, write_default_model, write_env_entries,
+    ThinkingConfig,
 };
 use crate::infra::platform::write_file_atomic;
 use crate::{AppConfig, AppError};
@@ -316,7 +319,34 @@ pub fn upsert_user_model(
     })
 }
 
+/// 在 models.toml 锁内从磁盘加载当前目录，并在同一临界区完成依赖该目录的写入。
+///
+/// 删除和选择模型都通过此入口，以免一个请求已基于旧缓存验证模型、另一个请求
+/// 随后删除该模型后，前者又把已删除的 ID 写回会话或默认配置。
+pub fn with_current_model_catalog<T>(
+    cfg: &AppConfig,
+    work: impl FnOnce(&ModelCatalog) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let path = ModelCatalog::default_user_path(cfg)?;
+    with_file_lock(&models_lock_path(&path), || {
+        let catalog = ModelCatalog::load_from_path(cfg, path.clone())?;
+        work(&catalog)
+    })
+}
+
 pub fn remove_user_model(cfg: &AppConfig, model_id: &str) -> Result<(), AppError> {
+    remove_user_model_with_config_path(cfg, None, model_id)
+}
+
+/// 删除用户模型，并在提供真实配置路径时一并忘掉所有持久化的同名选择。
+///
+/// CLI / serve 必须传配置路径；保留无路径 wrapper 仅供旧的内存隔离测试使用，不能用于
+/// 用户实际删除操作。
+pub fn remove_user_model_with_config_path(
+    cfg: &AppConfig,
+    config_path: Option<&Path>,
+    model_id: &str,
+) -> Result<(), AppError> {
     let trimmed = model_id.trim();
     if trimmed.is_empty() {
         return Err(AppError::Config("模型 id 不能为空。".to_string()));
@@ -332,7 +362,32 @@ pub fn remove_user_model(cfg: &AppConfig, model_id: &str) -> Result<(), AppError
             }
             return Err(AppError::Config(format!("模型 `{trimmed}` 不存在。")));
         }
-        ensure_model_not_in_use(cfg, trimmed)?;
+
+        let keeps_builtin_entry = current.is_builtin_seed(trimmed);
+        let session_stores = session_store_paths(cfg)?;
+        if !keeps_builtin_entry {
+            for store_path in &session_stores {
+                precheck_model_override_store(store_path)?;
+            }
+        }
+
+        let mut cleared = Vec::new();
+        if !keeps_builtin_entry {
+            if let Some(config_path) = config_path {
+                let references = clear_model_references(config_path, trimmed)?;
+                cleared.extend(references.into_iter().map(str::to_string));
+            }
+            for store_path in &session_stores {
+                match clear_model_overrides_in_store(store_path, trimmed) {
+                    Ok(0) => {}
+                    Ok(count) => {
+                        cleared.push(format!("{} 个会话选择 ({})", count, store_path.display()))
+                    }
+                    Err(error) => return Err(removal_partial_error(trimmed, &cleared, error)),
+                }
+            }
+        }
+
         let mut file = load_user_models_file(&path)?;
         let before = file.models.len();
         file.models.retain(|entry| entry.id.trim() != trimmed);
@@ -347,6 +402,40 @@ pub fn remove_user_model(cfg: &AppConfig, model_id: &str) -> Result<(), AppError
     })
 }
 
+fn session_store_paths(cfg: &AppConfig) -> Result<Vec<PathBuf>, AppError> {
+    let agents_dir = get_work_dir(cfg)?.join("agents");
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(AppError::Io(error)),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(AppError::Io)?;
+        if !entry.file_type().map_err(AppError::Io)?.is_dir() {
+            continue;
+        }
+        let store_path = entry.path().join("sessions").join("sessions.json");
+        match std::fs::metadata(&store_path) {
+            Ok(_) => paths.push(store_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(AppError::Io(error)),
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn removal_partial_error(model_id: &str, cleared: &[String], error: AppError) -> AppError {
+    if cleared.is_empty() {
+        return error;
+    }
+    AppError::Config(format!(
+        "模型 `{model_id}` 尚未删除；已清理 {}；原因: {error}",
+        cleared.join("、")
+    ))
+}
+
 pub fn set_default_model(
     cfg: &AppConfig,
     config_path: &Path,
@@ -356,9 +445,10 @@ pub fn set_default_model(
     if trimmed.is_empty() {
         return Err(AppError::Config("默认模型不能为空。".to_string()));
     }
-    let catalog = ModelCatalog::load(cfg)?;
-    catalog.lookup_explicit(trimmed)?;
-    write_default_model(config_path, trimmed)
+    with_current_model_catalog(cfg, |catalog| {
+        catalog.lookup_explicit(trimmed)?;
+        write_default_model(config_path, trimmed)
+    })
 }
 
 pub fn set_provider_key(
@@ -418,49 +508,6 @@ fn inferred_api_key_env(entry: &ModelEntry) -> String {
         .api_key_env
         .clone()
         .unwrap_or_else(|| env_name_for_provider(&entry.provider))
-}
-
-fn ensure_model_not_in_use(cfg: &AppConfig, model_id: &str) -> Result<(), AppError> {
-    let mut refs = Vec::new();
-    if cfg.llm.default_model.trim() == model_id {
-        refs.push("llm.default_model".to_string());
-    }
-    if cfg.context.compaction_model.trim() == model_id {
-        refs.push("context.compaction_model".to_string());
-    }
-    if cfg.llm.vision_model.as_deref().map(str::trim) == Some(model_id) {
-        refs.push("llm.vision_model".to_string());
-    }
-    if cfg.llm.title_model.as_deref().map(str::trim) == Some(model_id) {
-        refs.push("llm.title_model".to_string());
-    }
-
-    let sessions_path = crate::resolve_sessions_dir(cfg)?.join("sessions.json");
-    let store = crate::load_store(&sessions_path)?;
-    for entry in store.sessions.values().filter(|entry| {
-        entry
-            .model_override
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|current| current == model_id)
-    }) {
-        let label = entry
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map(|title| format!("session `{}` ({title})", entry.session_id))
-            .unwrap_or_else(|| format!("session `{}`", entry.session_id));
-        refs.push(label);
-    }
-
-    if refs.is_empty() {
-        return Ok(());
-    }
-    Err(AppError::Config(format!(
-        "模型 `{model_id}` 仍被以下位置引用：{}。请先切换这些位置的模型，再删除。",
-        refs.join("、")
-    )))
 }
 
 fn model_entry_to_user_model(entry: &ModelEntry) -> UserModelEntry {
@@ -590,7 +637,9 @@ fn with_file_lock<T>(
         }
     }
     let result = work();
-    file.unlock().map_err(AppError::Io)?;
+    if let Err(error) = file.unlock() {
+        tracing::warn!(path = %lock_path.display(), error = %error, "model file lock release failed");
+    }
     result
 }
 

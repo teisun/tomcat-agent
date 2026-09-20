@@ -946,6 +946,19 @@ export async function activate(
     extensionUri: context.extensionUri,
     extensionVersion,
     messenger,
+    clearBuildModelPreference: async (modelId) => {
+      const configuration = vscode.workspace.getConfiguration(TOMCAT_CONFIG_SECTION);
+      if ((configuration.get<string>("plan.buildModel", "") ?? "") !== modelId) {
+        return false;
+      }
+      await configuration.update(
+        "plan.buildModel",
+        "",
+        vscode.ConfigurationTarget.Global,
+      );
+      await webviewProvider.syncBuildModel();
+      return true;
+    },
     onModelCatalogChanged: () => webviewProvider.refreshModelCatalog(),
     selectConnectorWorkspaceRoot,
   });

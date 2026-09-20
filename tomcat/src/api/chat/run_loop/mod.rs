@@ -755,7 +755,7 @@ async fn run_chat_turn_with_message_and_tool_definitions(
         .as_ref()
         .and_then(|c| c.output_limit_for_request(None).0)
         .or_else(|| main_call.output_limit_for_request(None).0);
-    let thinking_model_id = ctx.effective_model(entry.as_ref());
+    let thinking_model_id = main_call.catalog_id.clone();
     // 让 reviewer / verifier 在下一次派发时跟上会话当前的模型。
     //
     // 这里记的必须是 catalog id（`fcodex/claude-opus-4-8`），不是 `main_call.model`
