@@ -2,10 +2,10 @@
 
 | Field | Value |
 | :--- | :--- |
-| Updated | 2026-09-21 21:23 +0800 |
+| Updated | 2026-09-21 22:03 +0800 |
 | State | ACTIVE |
 | Branch | feature/transcript-rich-render |
-| Scope | Single-question pagination and responsive dock, model/draft safety, verification contracts, and CLI/extension release metadata |
+| Scope | Plan explanation and test-case contracts, single-question pagination and responsive dock, model/draft safety, verification contracts, and CLI/extension release metadata |
 | Cov% | - |
 
 ### DONE
@@ -13,8 +13,9 @@
 - Preserved independent unsent drafts, references, and attachments for every chat session across switching and webview reload.
 - Prevented late storage/state results and send acknowledgements from deleting newer edits.
 - Made real-service test fixtures use disposable storage without inheriting the parent agent-session guard.
-- Updated release metadata through the repository script to CLI `0.1.58`, VS Code extension `0.1.72`, and bundled CLI pin `0.1.58`.
-- Aligned core identity, planner, and plan-reviewer explanations with the engineering-standards source: visuals first, with each key decision followed by concrete targets, before/after behavior, and scope boundaries.
+- Updated release metadata through one repository-script patch bump: CLI `0.1.58 -> 0.1.59`, VS Code extension `0.1.72 -> 0.1.73`, and bundled CLI pin `0.1.58 -> 0.1.59`; only the five release-version mirror files changed.
+- Synchronized planner and plan-reviewer explanation blocks verbatim with the updated engineering standards, including the Test case checklist, solution subsections, small gray decision details, and paths of tests to add or modify; kept core identity and code-reviewer role boundaries unchanged.
+- Updated prompt contract tests to protect the complete wording, subsection order, nesting, and single-copy parity between planner and plan reviewer; replaced the stale core-identity assertion with the current beginner-friendly explanation requirement without weakening the check or restoring obsolete prompt text.
 - Cleared persisted model references before deleting a user model, kept session reads write-free, and serialized same-store writes so stale selections cannot restore deleted references.
 - Routed main chat, compaction, and new sub-agents through the current model selection; surfaced deletion progress, partial failures, and catalog-refresh failures accurately.
 - Kept suggested model IDs editable during creation and locked the original ID while editing an existing model.
@@ -29,7 +30,8 @@
 ### INTERFACE
 
 - The VS Code composer continues to show the active session's own unsent draft; switching sessions does not alter either draft.
-- Release metadata declares VS Code extension `0.1.72` with bundled CLI `0.1.58`; changing these values is not evidence of a rebuilt or installed artifact.
+- Release metadata declares VS Code extension `0.1.73` with bundled CLI `0.1.59`; changing these values is not evidence of a rebuilt or installed artifact.
+- Plan authoring and plan review now share the explicit Test case checklist contract; permissions, advisory review output, runtime protocols, and the core/code-review explanation scope are unchanged. Prompt templates remain compile-time embedded and require a rebuilt CLI/new process to take effect.
 - CLI and serve model deletion now use `remove_user_model_with_config_path`; model selection and deletion share `with_current_model_catalog` to reject stale catalog choices.
 - The remove-model response and settings state distinguish the deletion outcome from catalog-refresh feedback; matching `tomcat.plan.buildModel` is cleared before deletion.
 - Pending question `N of M` denotes the current page, not the answered count; page navigation does not submit answers, and `Continue` still submits the collected answers together. The answer protocol is unchanged.
@@ -49,4 +51,7 @@
 - The final browser matrix passed nine scenarios with PNG/ARIA/console evidence (task `1789995584849-ibdcbp`); ordinary short-question pages passed full visibility checks, while narrow/large-font and long-question cases explicitly exercised scrolling rather than claiming full first-screen visibility.
 - The existing real-host suite passed its seven checks (task `1789995181374-ee1dfl`); the final native mouse/keyboard acceptance also passed pagination, Other focus, and submission at 120% zoom after waiting for both frame layouts to settle (task `1789995953920-a2543y`). Both pages measured a 665px webview and a 150.44px panel, with each prompt and all three options visible; captured console reports contained zero errors.
 - The pure `tomcat-vscode-ext-0.1.72-pagination.vsix` was built before this commit request; ZIP integrity, exclusion of bundled CLI binaries, and byte-for-byte agreement of its CSS/JS with the accepted dist were checked. Generated screenshots, host profiles, and VSIX files remain ignored local artifacts.
+- Prompt implementation acceptance initially reproduced the stale core-identity wording failure (task `1789997511479-etozf7`), then recorded 27 passing prompt tests plus that same failure (task `1789998173938-uafahn`). After the user requested its repair, `cargo test --manifest-path tomcat/Cargo.toml --lib core::prompts::tests::load_test` passed all 28 tests (task `1789998744359-mrbnfr`); this run preceded the version-only bump and this commit request.
+- Source-wording parity, unchanged surrounding prompt contracts, and role boundaries were checked during implementation; the repaired test file passed `rustfmt --check` and `git diff --check` (task `1789998762644-mtxqmt`). These are earlier checks, not new runs for this commit.
+- The one-time version bump passed both pre/post `release-version.mjs check` calls (task `1789999059484-ecdt8q`), and the five-file version diff and whitespace check passed (task `1789999073438-uf5ula`); no dependencies, private GUI version, builds, installations, or published artifacts were changed by that operation.
 - This commit intentionally does not rerun tests, builds, or coverage, as explicitly requested by the user. Commit-time checks are limited to Git scope, whitespace, status metadata, and commit-message format; no new coverage percentage is claimed.
