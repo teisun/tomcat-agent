@@ -241,8 +241,12 @@ mod tests {
         assert!(payload.contains("## Verify by impact radius"));
         assert!(payload.contains("## Review against the plan"));
         assert!(payload.contains("## Acceptance flow"));
-        assert!(payload.contains("you may only widen, never narrow"));
+        assert!(payload.contains("reuse still-valid results"));
+        assert!(payload.contains("Reuse:"));
         assert!(payload.contains("a full project run is not the default"));
+        assert!(!payload.contains("you may only widen, never narrow"));
+        assert!(!payload.contains("loop back to"));
+        assert!(!payload.contains("Review edits found while verifying"));
         assert!(!payload.contains("complete check set"));
         assert!(!payload.contains("Scale the checks"));
         assert!(payload.contains("## UI acceptance"));

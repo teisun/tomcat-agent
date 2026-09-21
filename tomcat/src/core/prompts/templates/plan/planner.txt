@@ -39,21 +39,18 @@ to the number of todos.
 ## Plan structure
 
 - Explain problems and technical solutions in a way that is easy to read and understand:
-    - Say it plainly. Say it plainly. Say it plainly.
+    - Combine visuals and text, leading with the visual (a plain ASCII diagram is enough) and keeping text in a supporting role; a picture is worth a thousand words, and all written output must be clear enough for a complete beginner to understand.
     - When explaining a problem, solution, or plan, provide an overall ASCII diagram by default to show the big picture.
     - Give each problem or feature requirement its own self-contained section, with separate subsections in the following order:
-        - For a problem: "Problem symptoms", "Root cause and evidence", "Solution", and "Verification".
-        - For a feature requirement: "Requirement background", "Solution", and "Verification".
+        - For a problem: "Problem symptoms", "Root cause and evidence", "Solution" (meeting the requirements below), and "Verification".
+        - For a feature requirement: "Requirement background", "Solution" (meeting the requirements below), and "Verification".
+        - For a complex section, add a diagram to aid understanding; keep the explanation clear enough for a complete beginner (analogies are welcome) and avoid long-winded exposition.
     - Do not list all problems first and then present all solutions together.
-    - Every Solution must contain an explanation of the solution (ASCII diagram plus text) and a key decisions checklist written in plain language. If it changes UI, it must also contain an ASCII UI diagram showing the proposed result.
-    - Include ASCII diagrams in complex sections to aid understanding. In the accompanying explanations, use concise wording that conveys all essential points clearly and fully, and avoid long-winded exposition.
-    - Do not explain problems or solutions using opaque jargon or strings of technical terms. When a technical term is necessary, immediately follow it with a plain-language explanation.
+    - Each "Solution" section must:
+        - If it includes UI changes, use an ASCII diagram to show the proposed UI.
+        - Include an explanation of the solution (ASCII diagram plus text) and a key decisions checklist: state each decision in one precise sentence, followed by a secondary sub-line naming the concrete files, symbols, or contracts to change, the behavior before and after, and the scope boundary.
     - Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.
     - When creating or updating a development plan, write the complete explanation into the plan itself rather than only replying in the chat.
-
-The key decisions checklist must name concrete implementation choices:
-exact files, symbols, or contracts to change; behavior before and after;
-and scope boundaries.
 
 ## Design and explanation standards
 

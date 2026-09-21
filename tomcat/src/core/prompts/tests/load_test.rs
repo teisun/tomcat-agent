@@ -119,7 +119,7 @@ fn acceptance_scope_policy_lives_only_in_the_verify_skill() {
         "code review brief must not mention removed acceptance-list duties"
     );
 
-    let ladder_markers = ["Ladder:", "Ratchet:", "L0 ", "L3 "];
+    let ladder_markers = ["Ladder:", "Reuse:", "L0 ", "L3 "];
     for marker in ladder_markers {
         assert!(
             VERIFY_SKILL.contains(marker),
@@ -178,7 +178,7 @@ fn planner_prompt_carries_a_generic_plan_structure_section() {
         .trim();
     assert_eq!(
         problem,
-        "- For a problem: \"Problem symptoms\", \"Root cause and evidence\", \"Solution\", and \"Verification\"."
+        "- For a problem: \"Problem symptoms\", \"Root cause and evidence\", \"Solution\" (meeting the requirements below), and \"Verification\"."
     );
     let feature = section
         .lines()
@@ -190,13 +190,16 @@ fn planner_prompt_carries_a_generic_plan_structure_section() {
         .trim();
     assert_eq!(
         feature,
-        "- For a feature requirement: \"Requirement background\", \"Solution\", and \"Verification\"."
+        "- For a feature requirement: \"Requirement background\", \"Solution\" (meeting the requirements below), and \"Verification\"."
     );
-    let solution_contract = "Every Solution must contain an explanation of the solution (ASCII diagram plus text) and a key decisions checklist written in plain language.";
-    assert!(section.contains(solution_contract));
+    assert!(section.contains("Each \"Solution\" section must:"));
     assert!(section.contains(
-        "If it changes UI, it must also contain an ASCII UI diagram showing the proposed result."
+        "If it includes UI changes, use an ASCII diagram to show the proposed UI."
     ));
+    assert!(section.contains(
+        "key decisions checklist: state each decision in one precise sentence, followed by a secondary sub-line naming the concrete files, symbols, or contracts to change, the behavior before and after, and the scope boundary."
+    ));
+
     let reviewer_plan = load(PromptKey::ReviewerPlan);
     for (label, text) in [("planner", s), ("plan reviewer", reviewer_plan)] {
         assert!(
@@ -204,11 +207,23 @@ fn planner_prompt_carries_a_generic_plan_structure_section() {
             "{label} must explain solutions with an ASCII diagram and text"
         );
         assert!(
-            text.contains("key decisions checklist written in plain language"),
-            "{label} must require a plain-language key decisions checklist"
+            text.contains("key decisions checklist: state each decision in one precise sentence"),
+            "{label} must require a precise key decisions checklist"
         );
         assert!(
-            text.contains("ASCII UI diagram showing the proposed result"),
+            text.contains("files, symbols, or contracts to change"),
+            "{label} must name concrete implementation targets"
+        );
+        assert!(
+            text.contains("behavior before and after"),
+            "{label} must require before-and-after behavior"
+        );
+        assert!(
+            text.contains("scope boundary"),
+            "{label} must require a scope boundary"
+        );
+        assert!(
+            text.contains("use an ASCII diagram to show the proposed UI"),
             "{label} must require an ASCII UI diagram for UI changes"
         );
     }
@@ -217,19 +232,9 @@ fn planner_prompt_carries_a_generic_plan_structure_section() {
     assert!(normalized.contains(
         "When creating or updating a development plan, write the complete explanation into the plan itself rather than only replying in the chat."
     ));
-    assert!(normalized
-        .contains("The key decisions checklist must name concrete implementation choices"));
-    assert!(normalized.contains("exact files, symbols, or contracts to change"));
-    assert!(normalized.contains("behavior before and after; and scope boundaries"));
-
-    let checklist = section
-        .split_once("\n\nThe key decisions checklist")
-        .expect("planner must retain concrete implementation requirements")
-        .1;
-    assert!(
-        checklist.lines().all(|line| line.len() <= 100),
-        "Plan-specific prose should stay reviewable instead of collapsing into long lines"
-    );
+    assert!(!section.contains("\n\nThe key decisions checklist"));
+    assert!(!s.contains("Every Solution must contain"));
+    assert!(!s.contains("ASCII UI diagram showing the proposed result"));
     assert!(!normalized.contains("root cause (or governing constraint for new work)"));
 
     assert!(!s.contains(
@@ -552,6 +557,8 @@ fn planner_prompt_uses_precise_decomposition_and_multi_perspective_tests() {
 fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
     const S6: &str = "Reason from first principles: when planning or coding, work out the architecture and implementation from first principles, follow best practices, pursue the most elegant solution, and dare to overturn a flawed technical design rather than patch around it.";
     const S8: &str = "Put user experience first: when a task involves UI, design it from the user's experience and above all follow the existing UI design conventions of the user's project.";
+    const OLD_PLAN_SOLUTION_CONTRACT: &str = "Every Solution must contain an explanation of the solution (ASCII diagram plus text) and a key decisions checklist written in plain language.";
+    const OLD_UI_CONTRACT: &str = "If it changes UI, it must also contain an ASCII UI diagram showing the proposed result.";
 
     let identity = load(PromptKey::SystemCoreIdentity);
     let planner = load(PromptKey::PlannerReminder);
@@ -572,12 +579,14 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
             "{label} 应逐字出现在 reviewer_code"
         );
     }
+
     let common_explanation_rules = [
         "Explain problems and technical solutions in a way that is easy to read and understand:",
+        "Combine visuals and text, leading with the visual (a plain ASCII diagram is enough) and keeping text in a supporting role; a picture is worth a thousand words, and all written output must be clear enough for a complete beginner to understand.",
         "When explaining a problem, solution, or plan, provide an overall ASCII diagram by default to show the big picture.",
-        "Do not explain problems or solutions using opaque jargon or strings of technical terms. When a technical term is necessary, immediately follow it with a plain-language explanation.",
         "Assume the reader knows nothing about the problems or code involved, and clearly explain all relevant background.",
     ];
+    let complex_section_rule = "For a complex section, add a diagram to aid understanding; keep the explanation clear enough for a complete beginner (analogies are welcome) and avoid long-winded exposition.";
     for (label, text) in [("core_identity", identity), ("planner", planner)] {
         for rule in common_explanation_rules {
             assert_eq!(
@@ -586,38 +595,21 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
                 "{label} must preserve each shared explanation rule exactly once: {rule}"
             );
         }
+        assert_eq!(
+            text.matches(complex_section_rule).count(),
+            1,
+            "{label} must preserve the shared complex-section rule exactly once"
+        );
         assert!(
-            !text.contains("Explain in plain, jargon-free language"),
-            "{label} must not retain the old explanation rule"
+            !text.contains("Do not explain problems or solutions using opaque jargon"),
+            "{label} must not retain the removed jargon rule"
+        );
+        assert!(
+            !text.contains("say it plainly"),
+            "{label} must not retain the removed repetition rule"
         );
     }
-    assert_eq!(
-        identity
-            .matches(
-                "All writing must use plain language—say it plainly, say it plainly, say it plainly."
-            )
-            .count(),
-        1,
-        "core_identity must retain the plain-language rule exactly once"
-    );
-    assert_eq!(
-        identity
-            .matches(
-                "Include ASCII diagrams in complex sections to aid understanding. In the accompanying explanations, prioritize clear and complete communication while avoiding unnecessarily long-winded exposition."
-            )
-            .count(),
-        1,
-        "core_identity must retain the updated concise-explanation rule exactly once"
-    );
-    assert_eq!(
-        planner
-            .matches(
-                "Include ASCII diagrams in complex sections to aid understanding. In the accompanying explanations, use concise wording that conveys all essential points clearly and fully, and avoid long-winded exposition."
-            )
-            .count(),
-        1,
-        "planner must retain its role-specific concise-explanation rule exactly once"
-    );
+
     for plan_only in [
         "Give each problem or feature requirement its own self-contained section",
         "When creating or updating a development plan, write the complete explanation into the plan itself rather than only replying in the chat.",
@@ -625,27 +617,54 @@ fn standards_6_7_8_follow_shared_and_role_specific_contracts() {
         assert!(planner.contains(plan_only));
         assert!(!identity.contains(plan_only));
     }
-    assert!(reviewer_plan.contains("say it plainly"));
-    let plan_solution_contract = "Every Solution must contain an explanation of the solution (ASCII diagram plus text) and a key decisions checklist written in plain language.";
-    assert!(planner.contains(plan_solution_contract));
-    assert!(reviewer_plan.contains(plan_solution_contract));
+
+    assert!(!reviewer_plan.contains("say it plainly"));
+    assert!(!reviewer_plan.contains("jargon-free"));
+    assert!(planner.contains("Each \"Solution\" section must:"));
+    assert!(reviewer_plan.contains("Each Solution must include"));
+    for (label, text) in [("planner", planner), ("plan reviewer", reviewer_plan)] {
+        assert!(
+            text.contains("key decisions checklist: state each decision in one precise sentence"),
+            "{label} must require a precise key decisions checklist"
+        );
+        assert!(
+            text.contains("files, symbols, or contracts to change"),
+            "{label} must name concrete implementation targets"
+        );
+        assert!(
+            text.contains("behavior before and after"),
+            "{label} must require before-and-after behavior"
+        );
+        assert!(
+            text.contains("scope boundary"),
+            "{label} must require scope boundaries"
+        );
+        assert!(
+            text.contains("use an ASCII diagram to show the proposed UI"),
+            "{label} must require the aligned UI diagram instruction"
+        );
+    }
     assert!(
-        !identity.contains(plan_solution_contract),
+        !identity.contains("Each \"Solution\" section must:"),
         "core_identity must not carry plan-specific solution structure"
     );
     assert!(
-        !reviewer_code.contains(plan_solution_contract),
-        "reviewer_code must not carry plan-specific solution structure"
+        !reviewer_code.contains(OLD_PLAN_SOLUTION_CONTRACT),
+        "reviewer_code must not carry the old plan-specific solution structure"
     );
-    assert!(reviewer_plan.contains(
-        "If it changes UI, it must also contain an ASCII UI diagram showing the proposed result."
-    ));
-    assert!(!reviewer_code.contains(
-        "If it changes UI, it must also contain an ASCII UI diagram showing the proposed result."
-    ));
-    assert!(reviewer_plan.contains("When creating or updating a development plan"));
+    assert!(
+        !reviewer_code.contains(OLD_UI_CONTRACT),
+        "reviewer_code must not carry the old plan-specific UI structure"
+    );
+    assert!(
+        !reviewer_code.contains("key decisions checklist: state each decision in one precise sentence"),
+        "reviewer_code must not carry plan-specific key-decision structure"
+    );
+    assert!(
+        !reviewer_code.contains("use an ASCII diagram to show the proposed UI"),
+        "reviewer_code must not carry plan-specific UI structure"
+    );
     assert!(!reviewer_code.contains("When creating or updating a development plan"));
-    assert!(reviewer_plan.contains("exact files, symbols, or contracts to change"));
     assert!(!reviewer_code.contains("exact files, symbols, or contracts to change"));
     assert!(
         !reviewer_code.contains("Explain in plain, jargon-free language"),
