@@ -88,6 +88,8 @@ describe("ApprovalCard", () => {
 
     expect(screen.getByText("Questions")).toBeTruthy();
     expect(screen.getByText("2 of 2")).toBeTruthy();
+    expect(screen.getByText("2 of 2").className).toBe("tc-chip tc-chip--warning");
+    expect(screen.getByRole("heading", { name: "Questions" }).querySelector(".codicon-question")).toBeNull();
     expect(screen.getByText("1.")).toBeTruthy();
     expect(screen.getByText("2.")).toBeTruthy();
     expect(screen.getAllByText("A")).toHaveLength(2);
@@ -113,6 +115,13 @@ describe("ApprovalCard", () => {
     );
 
     expect(screen.getByTestId("approval-question-count").textContent).toBe("1 of 2");
+    expect(screen.getByTestId("approval-question-count").className).toBe("tc-approval-card__count");
+    expect(screen.getAllByRole("radio", { name: "Option A Recommended" })).toHaveLength(1);
+    expect(screen.getAllByRole("radiogroup")).toHaveLength(1);
+    expect(screen.queryByText("Pick a language")).toBeNull();
+    fireEvent.click(screen.getByTestId("approval-option-q1-q1-a"));
+    expect(screen.getByRole("heading", { name: "Questions" }).querySelector(".codicon-question")).toBeTruthy();
+    expect(screen.getByTestId("approval-next-question").getAttribute("title")).toBe("Next question");
     expect((screen.getByTestId("approval-previous-question") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTestId("approval-next-question") as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByText("1 more question group waiting")).toBeTruthy();
@@ -123,11 +132,17 @@ describe("ApprovalCard", () => {
     expect(screen.getByTestId("approval-question-count").textContent).toBe("2 of 2");
     expect((screen.getByTestId("approval-previous-question") as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByTestId("approval-next-question") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getAllByRole("radiogroup")).toHaveLength(1);
+    expect(screen.queryByText("Pick a time")).toBeNull();
+    expect(screen.getByText("Pick a language")).toBeTruthy();
+    fireEvent.scroll(screen.getByTestId("approval-questions-body"), { target: { scrollTop: 100 } });
+    fireEvent(window, new Event("resize"));
+    expect(screen.getByTestId("approval-question-count").textContent).toBe("2 of 2");
     expect(onAnswer).not.toHaveBeenCalled();
 
-    const firstAnswer = screen.getByTestId("approval-option-q1-q1-a");
-    fireEvent.click(firstAnswer);
-    firstAnswer.focus();
+    const secondAnswer = screen.getByTestId("approval-option-q2-q2-a");
+    fireEvent.click(secondAnswer);
+    secondAnswer.focus();
     fireEvent.click(screen.getByTestId("approval-collapse"));
     expect(document.activeElement).toBe(screen.getByTestId("approval-collapse"));
     expect(screen.queryByTestId("approval-questions-body")).toBeNull();
@@ -137,7 +152,65 @@ describe("ApprovalCard", () => {
 
     fireEvent.click(screen.getByTestId("approval-collapse"));
     expect(screen.getByTestId("approval-question-count").textContent).toBe("2 of 2");
+    expect(screen.getByTestId("approval-option-q2-q2-a").getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByTestId("approval-option-q1-q1-a")).toBeNull();
+    fireEvent.click(screen.getByTestId("approval-previous-question"));
+    expect(screen.getByTestId("approval-questions-body").scrollTop).toBe(0);
     expect(screen.getByTestId("approval-option-q1-q1-a").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("retains Other text across pages and submits the full ordered batch once", () => {
+    const onAnswer = vi.fn();
+    render(
+      <ControlledApprovalCard
+        item={buildItem([buildQuestion("q1", "First?"), buildQuestion("q2", "Second?")])}
+        onAnswer={onAnswer}
+        presentation="pending"
+      />,
+    );
+    fireEvent.click(screen.getByTestId("approval-option-q1-__custom__"));
+    expect(document.activeElement).toBe(screen.getByTestId("approval-custom-q1"));
+    fireEvent.change(screen.getByTestId("approval-custom-q1"), { target: { value: "  My answer  " } });
+    expect((screen.getByTestId("approval-continue") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId("approval-next-question"));
+    expect(screen.queryByTestId("approval-custom-q1")).toBeNull();
+    fireEvent.click(screen.getByTestId("approval-option-q2-q2-a"));
+    fireEvent.click(screen.getByTestId("approval-previous-question"));
+    expect((screen.getByTestId("approval-custom-q1") as HTMLInputElement).value).toBe("  My answer  ");
+    fireEvent.click(screen.getByTestId("approval-continue"));
+    expect(onAnswer).toHaveBeenCalledTimes(1);
+    expect(onAnswer).toHaveBeenCalledWith("session-1", "request-1", {
+      answers: [
+        { questionId: "q1", optionIds: ["__custom__"], customText: "My answer", pickedRecommended: false },
+        { questionId: "q2", optionIds: ["q2-a"], pickedRecommended: true },
+      ],
+      cancelled: false,
+      outcome: "answered",
+    });
+  });
+
+  it("starts a replacement request on its first page", () => {
+    const onAnswer = vi.fn();
+    const { rerender } = render(
+      <ControlledApprovalCard
+        item={buildItem([buildQuestion("q1", "First?"), buildQuestion("q2", "Second?")])}
+        onAnswer={onAnswer}
+        presentation="pending"
+      />,
+    );
+    fireEvent.click(screen.getByTestId("approval-next-question"));
+    rerender(
+      <ControlledApprovalCard
+        item={buildItem([buildQuestion("new", "New question?")], {
+          request: { requestId: "request-2", responseEvent: "response-2", questions: [buildQuestion("new", "New question?")] },
+        })}
+        onAnswer={onAnswer}
+        presentation="pending"
+      />,
+    );
+    expect(screen.getByTestId("approval-question-count").textContent).toBe("1 of 1");
+    expect(screen.getAllByRole("radiogroup")).toHaveLength(1);
+    expect(screen.getByText("New question?")).toBeTruthy();
   });
 
   it("does not render resolved cards", () => {

@@ -2532,7 +2532,7 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
   };
 
   return (
-    <main className="tc-shell">
+    <main className={`tc-shell${activePendingApproval ? " tc-shell--question-pending" : ""}`}>
       <SessionBar
         activeSessionId={activeSession?.sessionId ?? null}
         canCompact={Boolean(activeSession && !activeSession.busy)}
@@ -2670,6 +2670,13 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
         ) : null}
       </div>
 
+      <TodoListWidget
+        busy={!!activeSession?.busy}
+        planState={activeSession?.activePlan?.state}
+        planTodos={activeSession?.planTodos ?? []}
+        sessionTodos={activeSession?.sessionTodos ?? []}
+      />
+
       {activeSession && activePendingApproval ? (() => {
         const ownerSessionId = activePendingApproval.sessionId ?? activeSession.sessionId;
         const answerState = approvalAnswers[
@@ -2698,13 +2705,6 @@ export function App({ vscodeApi }: { vscodeApi: VsCodeApiLike }) {
           </section>
         );
       })() : null}
-
-      <TodoListWidget
-        busy={!!activeSession?.busy}
-        planState={activeSession?.activePlan?.state}
-        planTodos={activeSession?.planTodos ?? []}
-        sessionTodos={activeSession?.sessionTodos ?? []}
-      />
 
       <AttachmentStrip
         attachments={activeSession?.pendingAttachments ?? []}

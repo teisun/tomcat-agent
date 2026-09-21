@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useId, useRef, useState } from "react";
 
 import {
   CUSTOM_OPTION_ID,
@@ -76,62 +76,15 @@ function ApprovalCardComponent({
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const collapseButtonRef = useRef<HTMLButtonElement | null>(null);
-  const questionElementsRef = useRef<Array<HTMLDivElement | null>>([]);
   const bodyId = `approval-questions-${useId().replaceAll(":", "")}`;
 
   useEffect(() => {
     setActiveQuestionIndex(0);
   }, [item.request.requestId]);
 
-  const updateActiveQuestionFromScroll = useCallback(() => {
-    const body = bodyRef.current;
-    if (!body || questions.length === 0) {
-      return;
-    }
-    if (
-      body.scrollHeight > body.clientHeight
-      && body.scrollTop + body.clientHeight >= body.scrollHeight - 1
-    ) {
-      setActiveQuestionIndex(questions.length - 1);
-      return;
-    }
-    const bodyRect = body.getBoundingClientRect();
-    setActiveQuestionIndex((current) => {
-      let bestIndex = current;
-      let bestVisible = 0;
-      for (let index = 0; index < questions.length; index += 1) {
-        const element = questionElementsRef.current[index];
-        if (!element) continue;
-        const rect = element.getBoundingClientRect();
-        const visible = Math.max(
-          0,
-          Math.min(rect.bottom, bodyRect.bottom) - Math.max(rect.top, bodyRect.top),
-        );
-        // Keeping the previous index for ties stops the count from flickering while two
-        // neighbouring questions are equally visible.
-        if (visible > bestVisible) {
-          bestIndex = index;
-          bestVisible = visible;
-        }
-      }
-      return bestIndex;
-    });
-  }, [questions.length]);
-
-  const showQuestion = useCallback((index: number) => {
-    const nextIndex = Math.max(0, Math.min(index, questions.length - 1));
-    const body = bodyRef.current;
-    const target = questionElementsRef.current[nextIndex];
-    if (body && target) {
-      const top = Math.max(0, target.offsetTop - body.offsetTop);
-      if (typeof body.scrollTo === "function") {
-        body.scrollTo({ behavior: "smooth", top });
-      } else {
-        body.scrollTop = top;
-      }
-    }
-    setActiveQuestionIndex(nextIndex);
-  }, [questions.length]);
+  const showQuestion = (index: number) => {
+    setActiveQuestionIndex(Math.max(0, Math.min(index, questions.length - 1)));
+  };
 
   const toggleCollapsed = () => {
     // Move focus before the panel body is unmounted so a focused option never disappears
@@ -141,51 +94,6 @@ function ApprovalCardComponent({
     }
     onCollapsedChange?.(!collapsed);
   };
-
-  // Reopening the dock creates a fresh scroll container. Restore the question that
-  // was active when it collapsed before the scroll observer derives a new count.
-  useLayoutEffect(() => {
-    if (!isPendingPanel || collapsed) {
-      return;
-    }
-    const body = bodyRef.current;
-    const target = questionElementsRef.current[activeQuestionIndex];
-    if (!body || !target) {
-      return;
-    }
-    body.scrollTop = Math.max(0, target.offsetTop - body.offsetTop);
-  }, [collapsed, isPendingPanel, item.request.requestId]);
-
-  useEffect(() => {
-    if (!isPendingPanel || collapsed) {
-      return;
-    }
-    const body = bodyRef.current;
-    if (!body) return;
-    const observe = () => updateActiveQuestionFromScroll();
-    window.addEventListener("resize", observe);
-    const resizeObserver = typeof ResizeObserver === "undefined"
-      ? null
-      : new ResizeObserver(observe);
-    resizeObserver?.observe(body);
-    questionElementsRef.current.forEach((element) => element && resizeObserver?.observe(element));
-    observe();
-    return () => {
-      window.removeEventListener("resize", observe);
-      resizeObserver?.disconnect();
-    };
-  }, [collapsed, isPendingPanel, suppliedDraft, updateActiveQuestionFromScroll]);
-
-  useEffect(() => {
-    if (
-      !isPendingPanel
-      || !collapsed
-      || !bodyRef.current?.contains(document.activeElement)
-    ) {
-      return;
-    }
-    collapseButtonRef.current?.focus();
-  }, [collapsed, isPendingPanel]);
 
   if (item.resolved) {
     return null;
@@ -293,7 +201,10 @@ function ApprovalCardComponent({
       data-testid="approval-card"
     >
       <div className="tc-card__header tc-approval-card__header">
-        <h3>Questions</h3>
+        <h3>
+          {isPendingPanel ? <span aria-hidden="true" className="codicon codicon-question" /> : null}
+          Questions
+        </h3>
         {isPendingPanel ? (
           <div className="tc-approval-card__navigation">
             {extraGroupCount > 0 ? (
@@ -308,14 +219,15 @@ function ApprovalCardComponent({
                 data-testid="approval-previous-question"
                 disabled={!hasPreviousQuestion}
                 onClick={() => showQuestion(activeQuestionIndex - 1)}
+                title="Previous question"
                 type="button"
               >
-                <span aria-hidden="true" className="codicon codicon-chevron-up" />
+                <span aria-hidden="true" className="codicon codicon-chevron-left" />
               </button>
             ) : null}
             <span
               aria-live="polite"
-              className="tc-chip tc-chip--warning"
+              className="tc-approval-card__count"
               data-testid="approval-question-count"
             >
               {questions.length === 0 ? 0 : activeQuestionIndex + 1} of {questions.length}
@@ -327,9 +239,10 @@ function ApprovalCardComponent({
                 data-testid="approval-next-question"
                 disabled={!hasNextQuestion}
                 onClick={() => showQuestion(activeQuestionIndex + 1)}
+                title="Next question"
                 type="button"
               >
-                <span aria-hidden="true" className="codicon codicon-chevron-down" />
+                <span aria-hidden="true" className="codicon codicon-chevron-right" />
               </button>
             ) : null}
             <button
@@ -359,10 +272,12 @@ function ApprovalCardComponent({
           className={`tc-approval-questions${isPendingPanel ? " tc-approval-questions--pending" : ""}`}
           data-testid={isPendingPanel ? "approval-questions-body" : undefined}
           id={isPendingPanel ? bodyId : undefined}
-          onScroll={isPendingPanel ? updateActiveQuestionFromScroll : undefined}
+          key={isPendingPanel ? activeQuestionIndex : "all"}
           ref={isPendingPanel ? bodyRef : undefined}
         >
           {questions.map((question, questionIndex) => {
+            // Only the current page is mounted; answers remain in the shared draft.
+            if (isPendingPanel && questionIndex !== activeQuestionIndex) return null;
             const questionDraft = draft[question.id] ?? { customText: "", optionId: null };
             const options: WebviewApprovalOption[] = [
               ...question.options,
@@ -373,9 +288,6 @@ function ApprovalCardComponent({
               <div
                 className="tc-approval-question"
                 key={question.id}
-                ref={isPendingPanel
-                  ? (element) => { questionElementsRef.current[questionIndex] = element; }
-                  : undefined}
               >
                 <div className="tc-approval-question__prompt">
                   <span className="tc-approval-question__index">{questionIndex + 1}.</span>
@@ -391,6 +303,7 @@ function ApprovalCardComponent({
                     return (
                       <button
                         aria-checked={selected}
+                        aria-label={option.recommended ? `${option.label} Recommended` : option.label}
                         className={
                           selected
                             ? "tc-approval-option tc-approval-option--selected"
@@ -427,6 +340,7 @@ function ApprovalCardComponent({
                   <label className="tc-field tc-approval-custom">
                     <span>Custom answer</span>
                     <input
+                      autoFocus={isPendingPanel}
                       className="tc-approval-custom__input"
                       data-testid={`approval-custom-${question.id}`}
                       disabled={submitting}

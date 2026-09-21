@@ -1855,6 +1855,10 @@ describe("Tomcat webview App", () => {
     fireEvent.click(screen.getByTestId("approval-option-q1-day"));
     expect((continueButton as HTMLButtonElement).disabled).toBe(true);
 
+    expect(screen.getAllByRole("radiogroup")).toHaveLength(1);
+    expect(screen.queryByTestId("approval-option-q2-rs")).toBeNull();
+    fireEvent.click(screen.getByTestId("approval-next-question"));
+    expect(screen.queryByTestId("approval-option-q1-day")).toBeNull();
     fireEvent.click(screen.getByTestId("approval-option-q2-rs"));
     expect((continueButton as HTMLButtonElement).disabled).toBe(false);
 
@@ -1888,6 +1892,45 @@ describe("Tomcat webview App", () => {
             ]),
       ),
     ).toBe(true);
+  });
+
+  it("places the pending panel after todos without remounting or clearing the composer", async () => {
+    mount();
+    const pending = approvalDraftSnapshot("s1");
+    pending.sessionViews.s1.busy = true;
+    pending.sessionViews.s1.sessionTodos = [
+      { id: "todo-1", content: "Check the question panel", status: "in_progress" },
+    ];
+    const idle = {
+      ...pending,
+      sessionViews: {
+        ...pending.sessionViews,
+        s1: { ...pending.sessionViews.s1, busy: false, timeline: [] },
+      },
+    };
+    await emitState({ channel: "state", content: idle, messageId: "before-question" });
+    const editor = screen.getByTestId("composer-input");
+    fireEvent.paste(editor, {
+      clipboardData: { getData: (type: string) => type === "text/plain" ? "Keep this draft" : "" },
+    });
+    expect(document.querySelector(".tc-shell--question-pending")).toBeNull();
+
+    await emitState({ channel: "state", content: pending, messageId: "show-question" });
+    expect(document.querySelector(".tc-shell--question-pending")).toBeTruthy();
+    const panel = screen.getByTestId("pending-question-panel");
+    const todo = screen.getByTestId("todo-widget");
+    expect(todo.parentElement).toBe(panel.parentElement);
+    expect(todo.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(panel.parentElement).toBe(screen.getByTestId("composer").parentElement);
+    expect(screen.getByTestId("composer-input")).toBe(editor);
+    expect(editor.textContent).toBe("Keep this draft");
+
+    fireEvent.click(screen.getByTestId("approval-collapse"));
+    fireEvent.click(screen.getByTestId("approval-collapse"));
+    await emitState({ channel: "state", content: idle, messageId: "question-finished" });
+    expect(document.querySelector(".tc-shell--question-pending")).toBeNull();
+    expect(screen.getByTestId("composer-input")).toBe(editor);
+    expect(editor.textContent).toBe("Keep this draft");
   });
 
   it("shows one pending question group at a time and moves to the next group after the host confirms completion", async () => {

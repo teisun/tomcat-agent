@@ -137,10 +137,10 @@ suite("Tomcat ask_question reverify", () => {
       (snapshot) =>
         snapshot.approvalCount === 1 &&
         snapshot.html.includes("你更喜欢在什么时候写代码?") &&
+        snapshot.approvalOptionStates.some((entry) => entry.testId === "approval-option-q1-day") &&
         snapshot.html.includes("白天") &&
         snapshot.html.includes("晚上") &&
-        snapshot.html.includes("TypeScript") &&
-        snapshot.html.includes("Rust") &&
+        snapshot.approvalOptionStates.every((entry) => entry.testId.startsWith("approval-option-q1-")) &&
         snapshot.html.includes("Other...")
           ? snapshot
           : undefined,
@@ -163,6 +163,19 @@ suite("Tomcat ask_question reverify", () => {
       5_000,
     );
     screenshots.push(await captureScreenshot("03-ask-question-first-selection.png"));
+
+    await sendDomAction(api, { kind: "clickTestId", testId: "approval-next-question" });
+    const secondPage = await waitForDom(
+      api,
+      (snapshot) =>
+        snapshot.html.includes("TypeScript") &&
+        snapshot.html.includes("Rust") &&
+        snapshot.approvalOptionStates.some((entry) => entry.testId === "approval-option-q2-ts") &&
+        snapshot.approvalOptionStates.every((entry) => entry.testId.startsWith("approval-option-q2-"))
+          ? snapshot
+          : undefined,
+      5_000,
+    );
 
     await sendDomAction(api, {
       kind: "clickTestId",
@@ -261,13 +274,15 @@ suite("Tomcat ask_question reverify", () => {
         customInputAppears: {
           passed: customVisible.approvalInputTestIds.includes("approval-custom-q2"),
         },
-        optionMatrixVisible: {
+        questionPagesRenderIndividually: {
           passed:
             initialApproval.html.includes("白天") &&
             initialApproval.html.includes("晚上") &&
-            initialApproval.html.includes("TypeScript") &&
-            initialApproval.html.includes("Rust") &&
-            initialApproval.html.includes("Other..."),
+            initialApproval.html.includes("Other...") &&
+            initialApproval.approvalOptionStates.every((entry) => entry.testId.startsWith("approval-option-q1-")) &&
+            secondPage.html.includes("TypeScript") &&
+            secondPage.html.includes("Rust") &&
+            secondPage.approvalOptionStates.every((entry) => entry.testId.startsWith("approval-option-q2-")),
         },
         selectionStateVisible: {
           passed:

@@ -66,25 +66,43 @@ input:focus-visible {
   position: relative;
 }
 
+.tc-shell--question-pending {
+  gap: 0.375em;
+  /* Short windows can scroll the existing shell instead of hiding controls. */
+  overflow-y: auto;
+}
+
+.tc-shell--question-pending > :not(.tc-stream-shell):not(.tc-pending-question-panel) {
+  flex-shrink: 0;
+}
+
 .tc-pending-question-panel {
-  background: var(--tc-panel-bg);
-  border-block: 1px solid var(--tc-panel-border);
+  --tc-question-accent: #ad8954;
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background, #181818));
+  border: 1px solid color-mix(in srgb, var(--tc-question-accent) 45%, var(--vscode-panel-border, #555));
   display: flex;
+  flex: 0 1 auto;
+  /* Page content grows naturally up to the existing compact height budget. */
   max-height: min(30vh, 20rem);
   min-height: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: auto;
   padding: 0;
-  scrollbar-gutter: stable;
 }
 
 .tc-pending-question-panel .tc-approval-card {
+  background: transparent;
   border: 0;
   border-radius: 0;
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
+  gap: 0;
   margin: 0;
+  min-inline-size: 0;
   min-height: 0;
+  padding: 0;
 }
 
 .tc-pending-question-panel .tc-approval-question__prompt p,
@@ -2789,22 +2807,109 @@ span.tc-attachment-strip__file-chip {
 
 .tc-approval-card--pending .tc-approval-card__header {
   flex: 0 0 auto;
-  gap: 8px;
-  padding: 0.55rem 0.75rem;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  padding: 0.125em 1em;
+}
+
+.tc-approval-card--pending .tc-approval-card__header h3 {
+  align-items: center;
+  display: flex;
+  font-size: 1.125em;
+  font-weight: 500;
+  gap: 0.5em;
+}
+
+.tc-approval-card--pending .tc-approval-card__header h3 .codicon {
+  color: var(--vscode-descriptionForeground);
+  font-size: 1.2em;
+}
+
+.tc-approval-card__count {
+  white-space: nowrap;
+}
+
+.tc-approval-card--pending .tc-approval-card__collapse {
+  margin-left: 0.5em;
+}
+
+.tc-approval-card--pending .tc-approval-question {
+  flex: 0 0 auto;
+  gap: 0.25em;
+}
+
+.tc-approval-card--pending .tc-approval-question__prompt {
+  font-weight: 600;
+  line-height: 1.5;
+  gap: 0.75em;
+  padding: 0 0.375em;
+}
+
+.tc-approval-card--pending .tc-approval-options {
+  gap: 0.125em;
+}
+
+.tc-approval-card--pending .tc-approval-option {
+  align-items: flex-start;
+  gap: 0.75em;
+  padding: 0.125em 0.375em;
+}
+
+.tc-approval-card--pending .tc-approval-option:hover {
+  background: color-mix(in srgb, var(--vscode-foreground, #ccc) 6%, transparent);
+}
+
+.tc-approval-card--pending .tc-approval-option--selected {
+  background: color-mix(in srgb, var(--vscode-foreground, #ccc) 10%, transparent);
+}
+
+.tc-approval-card--pending .tc-approval-option__code {
+  border: 1px solid color-mix(in srgb, var(--vscode-foreground, #ccc) 20%, transparent);
+  font-size: 0.9em;
+  block-size: 1.5em;
+  inline-size: 1.5em;
+}
+
+.tc-approval-card--pending .tc-approval-option__content {
+  display: block;
+  line-height: 1.4;
+}
+
+.tc-approval-card--pending .tc-approval-option__label {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.tc-approval-card--pending .tc-approval-option__recommended {
+  font-size: 0.85em;
+  margin-inline-start: 0.5em;
+}
+
+.tc-approval-card--pending .tc-approval-actions .tc-button--ghost {
+  border-color: transparent;
+}
+
+.tc-approval-card--pending .tc-approval-actions .tc-button--primary {
+  background: var(--tc-question-accent);
+  color: #171717;
 }
 
 .tc-approval-card__navigation {
   align-items: center;
   display: flex;
-  gap: 4px;
+  gap: 0.25em;
   margin-left: auto;
   min-width: 0;
 }
 
+.tc-approval-card__navigation .codicon {
+  font-size: 1.2em;
+}
+
 .tc-approval-card__more-groups {
   color: var(--vscode-descriptionForeground);
-  font-size: 11px;
-  margin-right: 4px;
+  font-size: 0.85em;
+  margin-right: 0.25em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2819,10 +2924,10 @@ span.tc-attachment-strip__file-chip {
   cursor: pointer;
   display: inline-flex;
   flex: 0 0 auto;
-  height: 24px;
+  block-size: 1.75em;
   justify-content: center;
   padding: 0;
-  width: 24px;
+  inline-size: 1.75em;
 }
 
 .tc-approval-card__nav-button:disabled {
@@ -2837,37 +2942,58 @@ span.tc-attachment-strip__file-chip {
 
 .tc-approval-questions--pending {
   flex: 1 1 auto;
-  min-height: 0;
+  /* VS Code injects a root scrollbar-color, which otherwise overrides the custom thumb. */
+  scrollbar-color: auto;
+  /* Keep a readable control area; at very small heights the outer panel scrolls naturally. */
+  min-block-size: 3lh;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 0.55rem 0.75rem;
+  padding: 0.125em 0.5em;
+  gap: 0;
   scrollbar-gutter: stable;
 }
 
-.tc-approval-questions--pending .tc-approval-question + .tc-approval-question {
-  border-top: 1px solid var(--tc-panel-border);
-  margin-top: 0.75rem;
-  padding-top: 0.75rem;
+/* Webview Chromium: a persistent thumb makes overflow discoverable on macOS too. */
+.tc-pending-question-panel::-webkit-scrollbar,
+.tc-approval-questions--pending::-webkit-scrollbar {
+  width: 0.375em;
+}
+
+.tc-pending-question-panel::-webkit-scrollbar-thumb,
+.tc-approval-questions--pending::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background, #8888);
+}
+
+.tc-approval-card--pending .tc-approval-custom {
+  gap: 0.375em;
+  padding-inline-start: 2.5em;
+}
+
+.tc-approval-card--pending .tc-approval-custom > span {
+  font-size: 0.85em;
+  min-block-size: 0;
+}
+
+.tc-approval-card--pending .tc-approval-custom__input {
+  min-block-size: 2lh;
+  padding: 0.375em 0.5em;
 }
 
 .tc-approval-card--pending .tc-approval-actions {
   flex: 0 0 auto;
-  padding: 0.55rem 0.75rem;
+  gap: 0.75em;
+  padding: 0.125em 1em;
 }
 
-@media (max-height: 300px) {
-  .tc-pending-question-panel {
-    overflow-y: auto;
-  }
+.tc-approval-card--pending .tc-approval-actions .tc-button {
+  min-block-size: 2em;
+  padding: 0.125em 0.75em;
+}
 
-  .tc-approval-card--pending {
-    flex: 0 0 auto;
-  }
-
-  .tc-approval-questions--pending {
-    flex: 0 0 auto;
-    overflow: visible;
-  }
+.tc-shell--question-pending .tc-composer__editor {
+  min-height: 3em;
+  max-height: min(20vh, 12em);
+  overflow-y: auto;
 }
 
 .tc-thinking {
