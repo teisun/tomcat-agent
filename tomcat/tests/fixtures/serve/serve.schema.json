@@ -535,6 +535,54 @@
       {
         "type": "object",
         "required": [
+          "path",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "get_project_trust"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "projectRoot",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "projectRoot": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "trust_project"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
           "context",
           "type"
         ],
@@ -640,6 +688,10 @@
           "scope": {
             "$ref": "#/definitions/ConnectorScope"
           },
+          "trustProject": {
+            "default": false,
+            "type": "boolean"
+          },
           "type": {
             "type": "string",
             "enum": [
@@ -678,38 +730,6 @@
             "type": "string",
             "enum": [
               "remove_connector"
-            ]
-          }
-        }
-      },
-      {
-        "type": "object",
-        "required": [
-          "configKey",
-          "context",
-          "trusted",
-          "type"
-        ],
-        "properties": {
-          "configKey": {
-            "type": "string"
-          },
-          "context": {
-            "$ref": "#/definitions/ConnectorContext"
-          },
-          "id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "trusted": {
-            "type": "boolean"
-          },
-          "type": {
-            "type": "string",
-            "enum": [
-              "set_connector_trust"
             ]
           }
         }
@@ -892,6 +912,42 @@
             "type": "string",
             "enum": [
               "set_connector_tool_filter"
+            ]
+          }
+        }
+      },
+      {
+        "type": "object",
+        "required": [
+          "configKey",
+          "context",
+          "enabled",
+          "rawName",
+          "type"
+        ],
+        "properties": {
+          "configKey": {
+            "type": "string"
+          },
+          "context": {
+            "$ref": "#/definitions/ConnectorContext"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rawName": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "set_connector_tool_enabled"
             ]
           }
         }
@@ -6303,6 +6359,171 @@
             "type": "string"
           }
         }
+      }
+    }
+  },
+  "connector_reload_receipt": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ReloadReceipt",
+    "type": "object",
+    "required": [
+      "accepted",
+      "configKey",
+      "generation",
+      "recoveryTimeoutMs"
+    ],
+    "properties": {
+      "accepted": {
+        "type": "boolean"
+      },
+      "configKey": {
+        "type": "string"
+      },
+      "generation": {
+        "type": "string"
+      },
+      "recoveryTimeoutMs": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0.0
+      }
+    }
+  },
+  "connector_recovery_progress": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "RecoveryStatus",
+    "type": "object",
+    "required": [
+      "maxAttempts",
+      "phase",
+      "remainingMs"
+    ],
+    "properties": {
+      "maxAttempts": {
+        "type": "integer",
+        "format": "uint8",
+        "minimum": 0.0
+      },
+      "phase": {
+        "type": "string"
+      },
+      "remainingMs": {
+        "type": "integer",
+        "format": "uint64",
+        "minimum": 0.0
+      }
+    }
+  },
+  "list_connector_tools_payload": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ListConnectorToolsPayload",
+    "type": "object",
+    "required": [
+      "attempt",
+      "configKey",
+      "generation",
+      "tools"
+    ],
+    "properties": {
+      "attempt": {
+        "type": "integer",
+        "format": "uint8",
+        "minimum": 0.0
+      },
+      "configKey": {
+        "type": "string"
+      },
+      "generation": {
+        "description": "Decimal text avoids losing the backend u64 identity in JavaScript.",
+        "type": "string"
+      },
+      "tools": {
+        "type": "array",
+        "items": {
+          "$ref": "#/definitions/ConnectorToolPayload"
+        }
+      }
+    },
+    "definitions": {
+      "ConnectorToolPayload": {
+        "type": "object",
+        "required": [
+          "description",
+          "enabled",
+          "label",
+          "modelName",
+          "rawName"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "label": {
+            "type": "string"
+          },
+          "modelName": {
+            "type": "string"
+          },
+          "rawName": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "project_trust_payload": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "ProjectTrustPayload",
+    "type": "object",
+    "required": [
+      "projectRoot",
+      "trusted"
+    ],
+    "properties": {
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "projectRoot": {
+        "type": "string"
+      },
+      "trusted": {
+        "type": "boolean"
+      }
+    }
+  },
+  "set_connector_tool_enabled_response": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "SetConnectorToolEnabledResponse",
+    "description": "The result of setting one tool's desired enabled state. These fields describe this command's durable write and current-process cache synchronization; they are not an asynchronous job or a second tool catalog.",
+    "type": "object",
+    "required": [
+      "configKey",
+      "configSaved",
+      "enabled",
+      "rawName",
+      "runtimeApplied"
+    ],
+    "properties": {
+      "configKey": {
+        "type": "string"
+      },
+      "configSaved": {
+        "type": "boolean"
+      },
+      "enabled": {
+        "type": "boolean"
+      },
+      "rawName": {
+        "type": "string"
+      },
+      "runtimeApplied": {
+        "type": "boolean"
       }
     }
   },

@@ -1,24 +1,37 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::Serialize;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::warn;
 
+pub use super::call::McpCallContext;
+use super::call::{CallFailure, CallRuntime};
+use super::recovery::{RecoveryBudget, RecoveryRun};
+#[path = "connection.rs"]
+mod connection;
+#[path = "lifecycle.rs"]
+mod lifecycle;
+#[path = "login.rs"]
+mod login;
+use connection::{ConnectionId, ServiceOwner};
+use lifecycle::ConnectionEvent;
+pub use lifecycle::{RecoveryStatus, ReloadReceipt};
+
 use crate::core::connector::mcp::config::{
-    load_server_definitions, remove_global_server, remove_project_server, set_global_tool_filter,
-    set_project_tool_filter, ConfiguredMcpServer, McpConfigSource, ToolFilter,
+    load_server_definitions, remove_global_server, remove_project_server, set_global_tool_enabled,
+    set_global_tool_filter, set_project_tool_enabled, set_project_tool_filter, ConfiguredMcpServer,
+    McpConfigSource, ToolFilter, ToolFilterMatcher,
 };
 use crate::core::connector::mcp::naming::to_model_name;
-use crate::core::connector::mcp::oauth;
 use crate::core::connector::mcp::oauth::OAuthTokenStore;
-use crate::core::connector::mcp::transport::{
-    http_client_for, HttpTransport, McpClient, McpTransport, StdioTransport,
-};
-use crate::core::connector::mcp::trust::{TrustDecision, TrustStatus, TrustStore};
+use crate::core::security::project_trust::ProjectTrustStore;
 use crate::infra::error::AppError;
 use crate::AppConfig;
 
@@ -28,9 +41,8 @@ pub enum ServerState {
     Connecting,
     Ready,
     Disconnected,
-    NeedsConfirmation,
+    AwaitingProjectTrust,
     NeedsAuthorization,
-    Blocked,
     Failed(String),
 }
 
@@ -41,9 +53,8 @@ impl ServerState {
             Self::Connecting => "connecting",
             Self::Ready => "connected",
             Self::Disconnected => "disconnected",
-            Self::NeedsConfirmation => "needs_confirmation",
+            Self::AwaitingProjectTrust => "awaiting_project_trust",
             Self::NeedsAuthorization => "needs_authorization",
-            Self::Blocked => "blocked",
             Self::Failed(_) => "failed",
         }
     }
@@ -54,9 +65,8 @@ impl ServerState {
             Self::Connecting => "连接中",
             Self::Ready => "已连接",
             Self::Disconnected => "已断开",
-            Self::NeedsConfirmation => "待确认",
+            Self::AwaitingProjectTrust => "等待项目信任",
             Self::NeedsAuthorization => "需要授权",
-            Self::Blocked => "已阻止",
             Self::Failed(_) => "失败",
         }
     }
@@ -71,9 +81,11 @@ pub struct ServerStatus {
     /// Global definition remains visible for management but cannot run tools.
     pub overridden: bool,
     pub state: ServerState,
-    pub trust: TrustStatus,
     pub tool_count: usize,
     pub resource_count: usize,
+    pub generation: String,
+    pub attempt: u8,
+    pub recovery: Option<RecoveryStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -107,6 +119,14 @@ pub struct McpToolSummary {
     pub enabled: bool,
 }
 
+/// A catalog and the exact connection that produced it, captured atomically.
+pub struct McpToolCatalog {
+    pub config_key: String,
+    pub generation: String,
+    pub attempt: u8,
+    pub tools: Vec<McpToolSummary>,
+}
+
 /// 关键词检索的命中项；`source` 保持元工具的通用术语。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct McpToolSearchMatch {
@@ -128,15 +148,42 @@ pub struct McpToolLookupError {
     pub message: String,
 }
 
+#[derive(Debug)]
+pub struct ToolEnableApplyError {
+    pub config_saved: bool,
+    pub error: AppError,
+}
+
+impl ToolEnableApplyError {
+    fn not_saved(error: AppError) -> Self {
+        Self {
+            config_saved: false,
+            error,
+        }
+    }
+
+    fn saved(error: AppError) -> Self {
+        Self {
+            config_saved: true,
+            error,
+        }
+    }
+}
+
 pub struct McpManager {
     entries: RwLock<BTreeMap<String, ConnectorEntry>>,
     /// Retains the newest incarnation after deletion so old async work cannot
     /// publish into a re-added configKey.
     generations: RwLock<BTreeMap<String, u64>>,
-    trust: TrustStore,
+    runtime: crate::infra::config::McpRuntimeConfig,
+    project_root: Option<std::path::PathBuf>,
+    project_trusted: AtomicBool,
+    project_trust: ProjectTrustStore,
     oauth_store: OAuthTokenStore,
-    oauth_cancellations: DashMap<String, CancellationToken>,
+    oauth_cancellations: DashMap<String, Arc<CancellationToken>>,
     workspace_root: Option<std::path::PathBuf>,
+    self_weak: Weak<Self>,
+    retirements: RwLock<BTreeMap<String, TaskTracker>>,
 }
 
 #[derive(Clone)]
@@ -145,6 +192,79 @@ struct ConnectorEntry {
     status: ServerStatus,
     connection: Option<Arc<ConnectedServer>>,
     generation: u64,
+    budget: Option<RecoveryBudget>,
+    run: Option<Arc<RecoveryRun>>,
+    ready_since: Option<Instant>,
+    recovery_phase: &'static str,
+    suspended: bool,
+    retiring: Option<TaskTracker>,
+}
+
+impl ConnectorEntry {
+    fn new(server: ConfiguredMcpServer, status: ServerStatus, generation: u64) -> Self {
+        Self {
+            server,
+            status,
+            generation,
+            connection: None,
+            budget: None,
+            run: None,
+            ready_since: None,
+            recovery_phase: "idle",
+            suspended: false,
+            retiring: None,
+        }
+    }
+    fn retire_connection(&mut self) {
+        self.status.tool_count = 0;
+        self.status.resource_count = 0;
+        self.ready_since = None;
+        let connection = self.connection.take();
+        let run = self.run.take();
+        if connection.is_none() && run.is_none() {
+            return;
+        }
+        if let Some(connection) = &connection {
+            connection.retire();
+        }
+        if let Some(run) = &run {
+            run.cancel.cancel();
+        }
+        let previous = self.retiring.take();
+        let tracker = TaskTracker::new();
+        let receipt = tracker.token();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _receipt = receipt;
+                // Wait for the startup owner FIRST: it can register transport
+                // close receipts while unwinding an interrupted initialization.
+                if let Some(run) = run {
+                    run.done.cancelled().await;
+                    run.cleanup.close();
+                    run.cleanup.wait().await;
+                }
+                if let Some(connection) = connection {
+                    connection.wait_retired().await;
+                }
+                if let Some(previous) = previous {
+                    previous.wait().await;
+                }
+            });
+        }
+        tracker.close();
+        self.retiring = Some(tracker);
+    }
+}
+
+impl Drop for McpManager {
+    fn drop(&mut self) {
+        for entry in self.entries.get_mut().values_mut() {
+            entry.retire_connection();
+        }
+        for cancel in self.oauth_cancellations.iter() {
+            cancel.value().cancel();
+        }
+    }
 }
 
 fn overridden_config_keys(servers: &[ConfiguredMcpServer]) -> BTreeSet<String> {
@@ -164,12 +284,12 @@ fn overridden_config_keys(servers: &[ConfiguredMcpServer]) -> BTreeSet<String> {
 }
 
 struct ConnectedServer {
-    client: McpClient,
+    id: ConnectionId,
+    owner: ServiceOwner,
     all_tools: BTreeMap<String, McpToolDef>,
     title: Option<String>,
     instructions: Option<String>,
-    call_timeout: Duration,
-    call_lock: tokio::sync::Mutex<()>,
+    calls: CallRuntime,
     resource_count: usize,
 }
 
@@ -178,23 +298,32 @@ impl McpManager {
         cfg: &AppConfig,
         workspace_root: Option<&std::path::Path>,
     ) -> Result<Arc<Self>, AppError> {
+        let runtime = cfg.connector.mcp;
+        runtime.validate()?;
         let servers = load_server_definitions(cfg, workspace_root)?;
         let overridden = overridden_config_keys(&servers);
-        let trust = TrustStore::open(cfg)?;
+        let project_trust = ProjectTrustStore::open(cfg)?;
+        let project_root = workspace_root
+            .map(ProjectTrustStore::root_for)
+            .transpose()?;
+        let trusted = project_root.as_deref().is_some_and(|root| {
+            project_trust.is_trusted(root).unwrap_or_else(|error| {
+                warn!(error = %error, "project trust unreadable; denying project MCP");
+                false
+            })
+        });
         let oauth_store = OAuthTokenStore::open(cfg)?;
         let entries = servers
             .into_iter()
             .map(|server| {
-                let status =
-                    initial_server_status(&server, &trust, overridden.contains(&server.config_key));
+                let status = initial_server_status(
+                    &server,
+                    trusted,
+                    overridden.contains(&server.config_key),
+                );
                 (
                     server.config_key.clone(),
-                    ConnectorEntry {
-                        server,
-                        status,
-                        connection: None,
-                        generation: 0,
-                    },
+                    ConnectorEntry::new(server, status, 0),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -202,10 +331,15 @@ impl McpManager {
             .keys()
             .map(|key| (key.clone(), 0))
             .collect::<BTreeMap<_, _>>();
-        Ok(Arc::new(Self {
+        Ok(Arc::new_cyclic(|weak| Self {
+            self_weak: weak.clone(),
+            retirements: RwLock::new(BTreeMap::new()),
             entries: RwLock::new(entries),
             generations: RwLock::new(generations),
-            trust,
+            runtime,
+            project_root,
+            project_trusted: AtomicBool::new(trusted),
+            project_trust,
             oauth_store,
             workspace_root: workspace_root.map(std::path::Path::to_path_buf),
             oauth_cancellations: DashMap::new(),
@@ -216,12 +350,85 @@ impl McpManager {
         self.entries
             .read()
             .values()
-            .map(|entry| entry.status.clone())
+            .map(|entry| {
+                let mut status = entry.status.clone();
+                status.generation = entry.generation.to_string();
+                status.attempt = entry.budget.as_ref().map_or(0, |budget| budget.used);
+                status.recovery = entry
+                    .run
+                    .as_ref()
+                    .filter(|run| run.is_active())
+                    .and(entry.budget.as_ref())
+                    .map(|budget| RecoveryStatus {
+                        phase: entry.recovery_phase,
+                        max_attempts: budget.limit,
+                        remaining_ms: budget.remaining_ms(),
+                    });
+                status
+            })
             .collect()
+    }
+
+    /// Test-only lifecycle receipt: task count, free execution slots, free admissions.
+    #[cfg(any(test, feature = "test-streamable-http-server"))]
+    pub fn call_debug_counts(&self, identifier: &str) -> Option<(usize, usize, usize)> {
+        let key = self.resolve_key(identifier).ok()?;
+        let entries = self.entries.read();
+        let calls = &entries.get(&key)?.connection.as_ref()?.calls;
+        Some((
+            calls.tasks.len(),
+            calls.slots.available_permits(),
+            calls.admitted.available_permits(),
+        ))
+    }
+
+    #[cfg(any(test, feature = "test-streamable-http-server"))]
+    pub fn retirement_debug_count(&self, identifier: &str) -> Option<usize> {
+        let key = self.resolve_key(identifier).ok()?;
+        let entries = self.entries.read();
+        Some(
+            entries
+                .get(&key)?
+                .retiring
+                .as_ref()
+                .map_or(0, TaskTracker::len),
+        )
     }
 
     pub fn workspace_root(&self) -> Option<&std::path::Path> {
         self.workspace_root.as_deref()
+    }
+
+    pub fn project_root(&self) -> Option<&std::path::Path> {
+        self.project_root.as_deref()
+    }
+
+    pub fn project_trusted(&self) -> bool {
+        self.project_trusted.load(Ordering::Acquire)
+    }
+
+    pub fn project_trusted_for(&self, server: &ConfiguredMcpServer) -> bool {
+        server.source == McpConfigSource::Global || self.project_trusted()
+    }
+
+    /// A user decision applies to all sources in this project; never revokes live work.
+    pub fn wake_project(&self) -> Vec<String> {
+        self.project_trusted.store(true, Ordering::Release);
+        let mut entries = self.entries.write();
+        entries
+            .iter_mut()
+            .filter_map(|(key, entry)| {
+                if entry.server.source != McpConfigSource::Project
+                    || entry.suspended
+                    || entry.status.overridden
+                    || entry.status.state != ServerState::AwaitingProjectTrust
+                {
+                    return None;
+                }
+                entry.status.state = ServerState::Pending;
+                Some(key.clone())
+            })
+            .collect()
     }
 
     pub fn remove_configured_server(
@@ -251,9 +458,71 @@ impl McpManager {
             // credentials, then retire this entry's generation.
             self.oauth_store.remove(&key)?;
             self.invalidate_generation(&key);
-            self.entries.write().remove(&key);
+            if let Some(mut removed_entry) = self.entries.write().remove(&key) {
+                removed_entry.retire_connection();
+                if let Some(retiring) = removed_entry.retiring {
+                    self.retirements.write().insert(key.clone(), retiring);
+                }
+            }
         }
         Ok(removed)
+    }
+
+    /// Changes one tool's desired effective state. A config write is a durable
+    /// success even if this process cannot subsequently reload its cache; the
+    /// caller needs that distinction to offer an idempotent retry.
+    pub fn set_configured_tool_enabled(
+        &self,
+        identifier: &str,
+        raw_name: &str,
+        enabled: bool,
+        cfg: &AppConfig,
+    ) -> Result<(), ToolEnableApplyError> {
+        let key = self
+            .resolve_key(identifier)
+            .map_err(ToolEnableApplyError::not_saved)?;
+        self.ensure_runnable(&key)
+            .map_err(ToolEnableApplyError::not_saved)?;
+        let server = self
+            .configured_server(&key)
+            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {identifier}")))
+            .map_err(ToolEnableApplyError::not_saved)?;
+        let known_tool = self
+            .entries
+            .read()
+            .get(&key)
+            .and_then(|entry| entry.connection.as_ref())
+            .is_some_and(|connection| {
+                connection
+                    .all_tools
+                    .values()
+                    .any(|tool| tool.raw_name == raw_name)
+            });
+        if !known_tool {
+            return Err(ToolEnableApplyError::not_saved(AppError::Tool(format!(
+                "unknown MCP tool '{raw_name}' for source '{identifier}'"
+            ))));
+        }
+        match server.source {
+            McpConfigSource::Global => {
+                set_global_tool_enabled(cfg, &server.name, raw_name, enabled)
+            }
+            McpConfigSource::Project => {
+                let workspace_root = self.workspace_root.as_deref().ok_or_else(|| {
+                    AppError::Config(
+                        "project MCP configuration requires an explicit session project root"
+                            .into(),
+                    )
+                });
+                workspace_root.and_then(|workspace_root| {
+                    set_project_tool_enabled(cfg, workspace_root, &server.name, raw_name, enabled)
+                })
+            }
+        }
+        .map_err(ToolEnableApplyError::not_saved)?;
+        self.reload_configuration(cfg)
+            .map_err(ToolEnableApplyError::saved)?;
+        Ok(())
     }
 
     pub fn set_configured_tool_filter(
@@ -279,6 +548,10 @@ impl McpManager {
                 set_project_tool_filter(cfg, workspace_root, &server.name, filter)?
             }
         }
+        // A successful mutation must also update this manager before queued
+        // calls can observe completion. Serve still synchronizes other cached
+        // registries according to the existing Global/Workspace scope rules.
+        self.reload_configuration(cfg)?;
         Ok(())
     }
 
@@ -320,6 +593,7 @@ impl McpManager {
             .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {identifier}")))
     }
 
+    #[cfg(test)]
     fn current_generation(&self, key: &str) -> u64 {
         *self.generations.write().entry(key.to_string()).or_insert(0)
     }
@@ -329,15 +603,6 @@ impl McpManager {
         let generation = generations.entry(key.to_string()).or_insert(0);
         *generation = generation.saturating_add(1);
         *generation
-    }
-
-    fn is_current_generation(&self, key: &str, generation: u64) -> bool {
-        self.generations.read().get(key) == Some(&generation)
-            && self
-                .entries
-                .read()
-                .get(key)
-                .is_some_and(|entry| entry.generation == generation)
     }
 
     pub fn has_configured_servers(&self) -> bool {
@@ -408,8 +673,23 @@ impl McpManager {
             .collect()
     }
 
-    /// L2：列出单个来源的工具卡片，不泄露 schema。
+    /// L2：列出允许 AI 发现和调用的工具卡片，不泄露 schema。
+    ///
+    /// Settings must use [`Self::tool_catalog_snapshot`] instead: the management
+    /// catalog deliberately retains disabled tools so a user can re-enable them.
     pub fn list_tools(&self, identifier: &str) -> Result<Vec<McpToolSummary>, AppError> {
+        Ok(self
+            .tool_catalog_snapshot(identifier)?
+            .tools
+            .into_iter()
+            .filter(|tool| tool.enabled)
+            .collect())
+    }
+
+    /// Complete user-management catalog for one ready source. The same
+    /// `ToolFilterMatcher` decides both the `enabled` flags here and every
+    /// AI-callable projection below; this is not a second persisted catalog.
+    pub fn tool_catalog_snapshot(&self, identifier: &str) -> Result<McpToolCatalog, AppError> {
         let key = self
             .resolve_key(identifier)
             .map_err(|_| AppError::Tool(format!("unknown MCP source: {identifier}")))?;
@@ -419,6 +699,11 @@ impl McpManager {
             let entry = entries
                 .get(&key)
                 .ok_or_else(|| AppError::Tool(format!("unknown MCP source: {identifier}")))?;
+            if entry.status.overridden {
+                return Err(AppError::Tool(
+                    "MCP source is overridden by workspace configuration".into(),
+                ));
+            }
             (
                 entry.connection.clone().ok_or_else(|| {
                     AppError::Tool(format!(
@@ -428,22 +713,23 @@ impl McpManager {
                 entry.server.config.tool_filter.clone(),
             )
         };
-        let include = build_glob_set(&filter.include)?;
-        let exclude = build_glob_set(&filter.exclude)?;
-        Ok(connection
+        let matcher = ToolFilterMatcher::compile(&filter)?;
+        let tools = connection
             .all_tools
             .values()
-            .filter(|tool| {
-                (filter.include.is_empty() || include.is_match(&tool.raw_name))
-                    && !exclude.is_match(&tool.raw_name)
-            })
             .map(|tool| McpToolSummary {
                 name: tool.model_name.clone(),
                 raw_name: tool.raw_name.clone(),
                 description: tool.description.clone(),
-                enabled: true,
+                enabled: matcher.allows(&tool.raw_name),
             })
-            .collect())
+            .collect();
+        Ok(McpToolCatalog {
+            config_key: key,
+            generation: connection.id.generation.to_string(),
+            attempt: connection.id.attempt,
+            tools,
+        })
     }
 
     pub fn search(
@@ -530,196 +816,104 @@ impl McpManager {
         model_tool_name: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AppError> {
+        self.call_model_tool_with_context(model_tool_name, params, McpCallContext::default())
+            .await
+    }
+
+    pub async fn call_model_tool_with_context(
+        &self,
+        model_tool_name: &str,
+        params: serde_json::Value,
+        context: McpCallContext,
+    ) -> Result<serde_json::Value, AppError> {
         let tool = self.lookup_tool(model_tool_name).ok_or_else(|| {
             AppError::Tool(format!(
                 "unknown or not-ready deferred tool: {model_tool_name}"
             ))
         })?;
-        self.call_tool(&tool.server, &tool.model_name, params).await
-    }
-
-    pub fn approve(&self, identifier: &str) -> Result<(), AppError> {
-        let key = self.resolve_key(identifier)?;
-        self.ensure_runnable(&key)?;
-        let server = self
-            .configured_server(&key)
-            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {identifier}")))?;
-        self.trust.approve(&server)?;
-        self.refresh_trust_status(&key, &server);
-        Ok(())
-    }
-
-    pub fn deny(&self, identifier: &str) -> Result<(), AppError> {
-        let key = self.resolve_key(identifier)?;
-        self.ensure_runnable(&key)?;
-        let server = self
-            .configured_server(&key)
-            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {identifier}")))?;
-        self.trust.deny(&server)?;
-        let generation = self.invalidate_generation(&key);
-        if let Some(entry) = self.entries.write().get_mut(&key) {
-            entry.generation = generation;
-            entry.connection = None;
-            entry.status.resource_count = 0;
-            entry.status.state = ServerState::Blocked;
-            entry.status.tool_count = 0;
-        }
-        self.refresh_trust_status(&key, &server);
-        Ok(())
+        self.call_tool_with_context(&tool.server, &tool.model_name, params, context)
+            .await
     }
 
     pub fn reload_configuration(&self, cfg: &AppConfig) -> Result<Vec<String>, AppError> {
-        let loaded_servers = load_server_definitions(cfg, self.workspace_root.as_deref())?;
-        let overridden = overridden_config_keys(&loaded_servers);
-        let next_servers = loaded_servers
-            .into_iter()
-            .map(|server| (server.config_key.clone(), server))
-            .collect::<BTreeMap<_, _>>();
-        let previous = self.entries.read().clone();
-        let mut changed_keys = BTreeSet::new();
-        let mut next_entries = BTreeMap::new();
-        for (key, server) in next_servers {
+        // Serialize the file snapshot with reconciliation. Never overwrite live
+        // recovery/permission changes using an earlier clone of the entries map.
+        let servers = load_server_definitions(cfg, self.workspace_root.as_deref())?;
+        let disk_trusted = self.project_root.as_deref().is_some_and(|root| {
+            self.project_trust.is_trusted(root).unwrap_or_else(|error| {
+                warn!(error = %error, "project trust unreadable on reload; denying new project MCP");
+                false
+            })
+        });
+        if disk_trusted {
+            self.wake_project();
+        }
+        let trusted = self.project_trusted();
+        let mut entries = self.entries.write();
+        let overridden = overridden_config_keys(&servers);
+        let mut previous = std::mem::take(&mut *entries);
+        let mut changed = Vec::new();
+        for server in servers {
+            let key = server.config_key.clone();
             let is_overridden = overridden.contains(&key);
-            if let Some(previous_entry) = previous.get(&key) {
-                if same_transport_configuration(&previous_entry.server, &server) {
-                    let mut retained = previous_entry.clone();
-                    retained.server = server;
-                    if let Some(connection) = retained.connection.as_ref() {
-                        retained.status.tool_count =
-                            visible_tools(connection, &retained.server.config.tool_filter)
-                                .map_or(0, |tools| tools.len());
+            let mut old = previous.remove(&key);
+            if old
+                .as_ref()
+                .is_some_and(|entry| same_transport_configuration(&entry.server, &server))
+            {
+                let mut retained = old.take().expect("retained entry checked");
+                retained.server = server;
+                if retained.status.overridden != is_overridden {
+                    retained.retire_connection();
+                    retained.generation = self.invalidate_generation(&key);
+                    retained.budget = None;
+                    retained.suspended = false;
+                    retained.status =
+                        initial_server_status(&retained.server, trusted, is_overridden);
+                    if let Some(cancel) = self.oauth_cancellations.get(&key) {
+                        cancel.cancel();
                     }
-                    if retained.status.overridden != is_overridden {
-                        retained.connection = None;
-                        retained.generation = self.invalidate_generation(&key);
-                        retained.status =
-                            initial_server_status(&retained.server, &self.trust, is_overridden);
-                        if !is_overridden {
-                            changed_keys.insert(key.clone());
-                        }
+                    if !is_overridden {
+                        changed.push(key.clone());
                     }
-                    next_entries.insert(key, retained);
-                    continue;
+                } else if let Some(connection) = &retained.connection {
+                    retained.status.tool_count =
+                        visible_tools(connection, &retained.server.config.tool_filter)
+                            .map_or(0, |tools| tools.len());
                 }
+                entries.insert(key, retained);
+                continue;
+            }
+            // Replaced sources retain their cleanup fence just like a deleted
+            // and immediately re-added source with the same configKey.
+            let generation = self.invalidate_generation(&key);
+            let status = initial_server_status(&server, trusted, is_overridden);
+            let mut entry = ConnectorEntry::new(server, status, generation);
+            entry.retiring = if let Some(mut replaced) = old {
+                replaced.retire_connection();
+                replaced.retiring.take()
+            } else {
+                self.retirements.write().remove(&key)
+            };
+            if let Some(cancel) = self.oauth_cancellations.get(&key) {
+                cancel.cancel();
             }
             if !is_overridden {
-                changed_keys.insert(key.clone());
+                changed.push(key.clone());
             }
-            let generation = if previous.contains_key(&key) {
-                self.invalidate_generation(&key)
-            } else {
-                self.current_generation(&key)
-            };
-            next_entries.insert(
-                key,
-                ConnectorEntry {
-                    status: initial_server_status(&server, &self.trust, is_overridden),
-                    server,
-                    connection: None,
-                    generation,
-                },
-            );
+            entries.insert(key, entry);
         }
-        for key in previous
-            .keys()
-            .filter(|key| !next_entries.contains_key(*key))
-        {
-            self.invalidate_generation(key);
-        }
-        *self.entries.write() = next_entries;
-        Ok(changed_keys.into_iter().collect())
-    }
-
-    pub async fn connect_server(&self, identifier: &str) -> Result<(), AppError> {
-        let key = self.resolve_key(identifier)?;
-        self.ensure_runnable(&key)?;
-        let (server, generation, already_connected) = {
-            let entries = self.entries.read();
-            let entry = entries
-                .get(&key)
-                .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {identifier}")))?;
-            (
-                entry.server.clone(),
-                entry.generation,
-                entry.connection.is_some(),
-            )
-        };
-        if already_connected {
-            return Ok(());
-        }
-        match self.trust.decide(&server)? {
-            TrustDecision::Allowed => {}
-            TrustDecision::NeedsConfirmation => {
-                self.update_state(&key, ServerState::NeedsConfirmation, 0);
-                return Ok(());
+        for (key, mut removed) in previous {
+            self.invalidate_generation(&key);
+            if let Some(cancel) = self.oauth_cancellations.get(&key) {
+                cancel.cancel();
             }
-            TrustDecision::Blocked => {
-                self.update_state(&key, ServerState::Blocked, 0);
-                return Ok(());
+            removed.retire_connection();
+            if let Some(retiring) = removed.retiring {
+                self.retirements.write().insert(key, retiring);
             }
         }
-        self.refresh_trust_status(&key, &server);
-        self.update_state(&key, ServerState::Connecting, 0);
-        let startup_timeout = Duration::from_millis(server.config.startup_timeout_ms);
-        let connected = match tokio::time::timeout(
-            startup_timeout,
-            ConnectedServer::connect(
-                &server,
-                self.workspace_root.as_deref(),
-                self.oauth_store.clone(),
-            ),
-        )
-        .await
-        {
-            Ok(Ok(connection)) => Arc::new(connection),
-            Ok(Err(error)) => {
-                let state = if error
-                    .to_string()
-                    .to_ascii_lowercase()
-                    .contains("authorization required")
-                {
-                    ServerState::NeedsAuthorization
-                } else {
-                    ServerState::Failed(error.to_string())
-                };
-                self.update_state_if_generation(&key, generation, state, 0);
-                return Err(error);
-            }
-            Err(_) => {
-                let error = AppError::Tool(format!(
-                    "MCP server '{identifier}' startup timed out after {} ms",
-                    server.config.startup_timeout_ms
-                ));
-                self.update_state_if_generation(
-                    &key,
-                    generation,
-                    ServerState::Failed(error.to_string()),
-                    0,
-                );
-                return Err(error);
-            }
-        };
-        let tool_count = visible_tools(&connected, &server.config.tool_filter)?.len();
-        let resource_count = connected.resource_count;
-        let mut entries = self.entries.write();
-        let Some(entry) = entries.get_mut(&key) else {
-            return Err(AppError::Tool(format!(
-                "MCP server '{identifier}' was removed while connecting"
-            )));
-        };
-        if entry.generation != generation
-            || entry.server.config_key != server.config_key
-            || !same_transport_configuration(&entry.server, &server)
-        {
-            return Err(AppError::Tool(format!(
-                "MCP server '{identifier}' changed while connecting"
-            )));
-        }
-        entry.connection = Some(connected);
-        entry.status.state = ServerState::Ready;
-        entry.status.tool_count = tool_count;
-        entry.status.resource_count = resource_count;
-        Ok(())
+        Ok(changed)
     }
 
     pub async fn call_tool(
@@ -728,6 +922,26 @@ impl McpManager {
         model_tool_name: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AppError> {
+        self.call_tool_with_context(
+            identifier,
+            model_tool_name,
+            params,
+            McpCallContext::default(),
+        )
+        .await
+    }
+
+    pub async fn call_tool_with_context(
+        &self,
+        identifier: &str,
+        model_tool_name: &str,
+        params: serde_json::Value,
+        mut context: McpCallContext,
+    ) -> Result<serde_json::Value, AppError> {
+        let entered = tokio::time::Instant::now();
+        // Even callers reusing a context cannot let A's Drop cancel sibling B.
+        context.cancel = context.cancel.child_token();
+        let _cancel_on_drop = context.cancel.clone().drop_guard();
         let key = self.resolve_key(identifier)?;
         self.ensure_runnable(&key)?;
         let (connection, filter, generation) = {
@@ -758,133 +972,97 @@ impl McpManager {
         })?;
         let request = rmcp::model::CallToolRequestParams::new(tool.raw_name.clone())
             .with_arguments(arguments);
-        let _call_guard = connection.call_lock.lock().await;
-        let result = tokio::time::timeout(
-            connection.call_timeout,
-            connection.client.peer().call_tool(request),
-        )
-        .await
-        .map_err(|_| AppError::Tool(format!("MCP tool '{model_tool_name}' timed out")))
-        .and_then(|result| {
-            result.map_err(|error| {
-                AppError::Tool(format!("MCP tool '{model_tool_name}' failed: {error}"))
-            })
-        });
+        if connection.owner.peer.is_transport_closed() {
+            self.connection_event(&key, connection.id, ConnectionEvent::SubmissionClosed);
+            return Err(AppError::Tool(
+                "MCP submission channel closed; request not sent".into(),
+            ));
+        }
+        let deadline = entered
+            .checked_add(connection.calls.timeout)
+            .ok_or_else(|| AppError::Config("MCP admission timeout is too large".into()))?;
+        let admission = connection
+            .calls
+            .admitted
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CallFailure::Busy.to_app_error(model_tool_name))?;
+        let slot = tokio::select! {
+            biased;
+            _ = context.cancel.cancelled() => return Err(CallFailure::Cancelled { possibly_sent: false }.to_app_error(model_tool_name)),
+            _ = connection.calls.retired.cancelled() => return Err(CallFailure::Retired { possibly_sent: false }.to_app_error(model_tool_name)),
+            _ = tokio::time::sleep_until(deadline) => return Err(CallFailure::QueueTimeout.to_app_error(model_tool_name)),
+            permit = connection.calls.slots.clone().acquire_owned() => permit
+                .map_err(|_| CallFailure::Retired { possibly_sent: false }.to_app_error(model_tool_name))?,
+        };
+        let result = {
+            // This short boundary grants permission to submit. Revocation and
+            // replacement take the same entries lock; no network await here.
+            let entries = self.entries.read();
+            let current = entries.get(&key).ok_or_else(|| {
+                CallFailure::Retired {
+                    possibly_sent: false,
+                }
+                .to_app_error(model_tool_name)
+            })?;
+            if current.generation != generation
+                || current.status.overridden
+                || !current
+                    .connection
+                    .as_ref()
+                    .is_some_and(|live| Arc::ptr_eq(live, &connection))
+                || context.cancel.is_cancelled()
+                || connection.calls.retired.is_cancelled()
+            {
+                return Err(CallFailure::Retired {
+                    possibly_sent: false,
+                }
+                .to_app_error(model_tool_name));
+            }
+            if !visible_tools(&connection, &current.server.config.tool_filter)?
+                .contains_key(model_tool_name)
+            {
+                return Err(AppError::Tool(
+                    "MCP request no longer permitted; request not sent".into(),
+                ));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(CallFailure::QueueTimeout.to_app_error(model_tool_name));
+            }
+            connection.calls.spawn(
+                connection.owner.peer.clone(),
+                rmcp::model::ClientRequest::CallToolRequest(rmcp::model::Request::new(request)),
+                context,
+                deadline,
+                slot,
+                admission,
+            )
+        };
+        let result = result.await.map_err(|_| {
+            AppError::Tool(
+                "MCP request task ended without a result; execution result unknown".into(),
+            )
+        })?;
         let result = match result {
             Ok(result) => result,
             Err(error) => {
-                self.mark_disconnected(&key, generation);
-                return Err(error);
+                // TransportClosed by itself can describe only one response
+                // stream. Require an explicit shared-connection fact.
+                if connection.owner.peer.is_transport_closed() {
+                    self.connection_event(&key, connection.id, ConnectionEvent::SubmissionClosed);
+                } else if error.session_expired() {
+                    self.connection_event(&key, connection.id, ConnectionEvent::SessionExpired);
+                } else if let Some(facts) = error
+                    .facts()
+                    .filter(|facts| facts.kind == super::failure::FailureKind::Authorization)
+                {
+                    self.authorization_failure(&key, connection.id, facts);
+                }
+                return Err(error.to_app_error(model_tool_name));
             }
         };
         serde_json::to_value(result)
-            .map_err(|error| AppError::Tool(format!("serialize MCP tool result: {error}")))
-    }
-
-    pub async fn login_server(&self, identifier: &str) -> Result<(), AppError> {
-        let key = self.resolve_key(identifier)?;
-        self.ensure_runnable(&key)?;
-        let generation = self.current_generation(&key);
-        let server = self
-            .configured_server(&key)
-            .ok_or_else(|| AppError::Tool(format!("unknown MCP server: {identifier}")))?;
-        match self.trust.decide(&server)? {
-            TrustDecision::Allowed => {}
-            TrustDecision::NeedsConfirmation => {
-                self.update_state(&key, ServerState::NeedsConfirmation, 0);
-                return Err(AppError::Tool(format!(
-                    "connector '{identifier}' requires trust confirmation before OAuth login"
-                )));
-            }
-            TrustDecision::Blocked => {
-                self.update_state(&key, ServerState::Blocked, 0);
-                return Err(AppError::Tool(format!(
-                    "connector '{identifier}' is blocked"
-                )));
-            }
-        }
-        let url = server.config.url.clone().ok_or_else(|| {
-            AppError::Tool(format!("MCP server '{identifier}' does not use HTTP OAuth"))
-        })?;
-        let oauth = server.config.oauth.clone().unwrap_or_default();
-        let client = http_client_for(&url)?;
-        let cancellation = CancellationToken::new();
-        self.oauth_cancellations
-            .insert(key.clone(), cancellation.clone());
-        let result = tokio::select! {
-            result = oauth::authorize(&client, &self.oauth_store, &key, &url, &oauth, true) => result,
-            _ = cancellation.cancelled() => Err(AppError::Tool("OAuth login cancelled".to_string())),
-        };
-        self.oauth_cancellations.remove(&key);
-        if let Err(error) = result {
-            if error.to_string().contains("cancelled") {
-                self.update_state(&key, ServerState::Disconnected, 0);
-            } else {
-                self.update_state(&key, ServerState::NeedsAuthorization, 0);
-            }
-            return Err(error);
-        }
-        if !self.is_current_generation(&key, generation) {
-            // OAuth may have completed concurrently with removal or replacement.
-            // The newer entry owns this configKey, so erase the late credential.
-            self.oauth_store.remove(&key)?;
-            return Err(AppError::Tool(
-                "OAuth login cancelled because the connector changed".to_string(),
-            ));
-        }
-        self.reconnect_server(&key).await
-    }
-
-    pub fn cancel_login(&self, identifier: &str) -> bool {
-        let Ok(key) = self.resolve_key(identifier) else {
-            return false;
-        };
-        self.oauth_cancellations
-            .remove(&key)
-            .map(|(_, cancellation)| cancellation.cancel())
-            .is_some()
-    }
-
-    pub fn save_static_bearer(
-        &self,
-        identifier: &str,
-        access_token: String,
-        resource: Option<String>,
-    ) -> Result<(), AppError> {
-        let key = self.resolve_key(identifier)?;
-        self.ensure_runnable(&key)?;
-        self.oauth_store
-            .save_static_bearer(&key, access_token, resource)
-    }
-
-    pub fn logout_server(&self, identifier: &str) -> Result<bool, AppError> {
-        let key = self.resolve_key(identifier)?;
-        self.ensure_runnable(&key)?;
-        self.cancel_login(&key);
-        let removed = self.oauth_store.remove(&key)?;
-        if removed {
-            if let Some(entry) = self.entries.write().get_mut(&key) {
-                entry.connection = None;
-                entry.status.state = ServerState::Disconnected;
-                entry.status.tool_count = 0;
-                entry.status.resource_count = 0;
-            }
-        }
-        Ok(removed)
-    }
-
-    pub async fn reconnect_server(&self, identifier: &str) -> Result<(), AppError> {
-        let key = self.resolve_key(identifier)?;
-        self.ensure_runnable(&key)?;
-        let generation = self.invalidate_generation(&key);
-        if let Some(entry) = self.entries.write().get_mut(&key) {
-            entry.connection = None;
-            entry.status.state = ServerState::Pending;
-            entry.status.tool_count = 0;
-            entry.status.resource_count = 0;
-            entry.generation = generation;
-        }
-        self.connect_server(&key).await
+            .map_err(|_| AppError::Tool("serialize MCP tool result failed".into()))
     }
 
     pub async fn connect_all(&self) {
@@ -909,21 +1087,7 @@ impl McpManager {
         }
     }
 
-    fn refresh_trust_status(&self, key: &str, server: &ConfiguredMcpServer) {
-        match self.trust.inspect(server) {
-            Ok(trust) => {
-                if let Some(entry) = self.entries.write().get_mut(key) {
-                    entry.status.trust = trust;
-                }
-            }
-            Err(error) => warn!(
-                server = %server.name,
-                error = %error,
-                "failed to inspect MCP server trust status"
-            ),
-        }
-    }
-
+    #[cfg(test)]
     fn update_state_if_generation(
         &self,
         key: &str,
@@ -945,6 +1109,7 @@ impl McpManager {
         entry.status.tool_count = tool_count;
     }
 
+    #[cfg(test)]
     fn mark_disconnected(&self, key: &str, generation: u64) {
         let mut entries = self.entries.write();
         let Some(entry) = entries.get_mut(key) else {
@@ -953,7 +1118,7 @@ impl McpManager {
         if entry.generation != generation {
             return;
         }
-        entry.connection = None;
+        entry.retire_connection();
         entry.status.resource_count = 0;
         entry.status.state = ServerState::Disconnected;
         entry.status.tool_count = 0;
@@ -990,15 +1155,11 @@ fn visible_tools(
     connection: &ConnectedServer,
     filter: &ToolFilter,
 ) -> Result<BTreeMap<String, McpToolDef>, AppError> {
-    let include = build_glob_set(&filter.include)?;
-    let exclude = build_glob_set(&filter.exclude)?;
+    let matcher = ToolFilterMatcher::compile(filter)?;
     Ok(connection
         .all_tools
         .iter()
-        .filter(|(_, tool)| {
-            (filter.include.is_empty() || include.is_match(&tool.raw_name))
-                && !exclude.is_match(&tool.raw_name)
-        })
+        .filter(|(_, tool)| matcher.allows(&tool.raw_name))
         .map(|(name, tool)| (name.clone(), tool.clone()))
         .collect())
 }
@@ -1050,144 +1211,31 @@ fn tool_search_score(
 
 fn initial_server_status(
     server: &ConfiguredMcpServer,
-    trust: &TrustStore,
+    trusted: bool,
     overridden: bool,
 ) -> ServerStatus {
-    let trust = trust.inspect(server).unwrap_or_else(|error| {
-        warn!(
-            server = %server.name,
-            error = %error,
-            "failed to inspect MCP server trust status"
-        );
-        TrustStatus::Blocked
-    });
     ServerStatus {
         config_key: server.config_key.clone(),
         name: server.name.clone(),
         source: server.source,
         overridden,
-        state: ServerState::Pending,
-        trust,
+        state: if server.source == McpConfigSource::Project && !trusted && !overridden {
+            ServerState::AwaitingProjectTrust
+        } else {
+            ServerState::Pending
+        },
         tool_count: 0,
         resource_count: 0,
+        generation: "0".into(),
+        attempt: 0,
+        recovery: None,
     }
-}
-
-impl ConnectedServer {
-    async fn connect(
-        server: &ConfiguredMcpServer,
-        workspace_root: Option<&std::path::Path>,
-        oauth_store: OAuthTokenStore,
-    ) -> Result<Self, AppError> {
-        let client = if server.config.url.is_some() {
-            HttpTransport::new(oauth_store).connect(server).await?
-        } else {
-            StdioTransport::new(workspace_root).connect(server).await?
-        };
-        let listed_value = list_all_tools(&client, &server.name).await?;
-        let mut all_tools = parse_tools(
-            &server.name,
-            &crate::core::connector::mcp::config::ToolFilter::default(),
-            &listed_value,
-        )?;
-        for tool in all_tools.values_mut() {
-            tool.server = server.config_key.clone();
-        }
-        let (title, instructions) = client
-            .peer()
-            .peer_info()
-            .map(|info| {
-                (
-                    info.server_info.as_ref().map(|server| server.name.clone()),
-                    info.instructions.clone(),
-                )
-            })
-            .unwrap_or_default();
-        let resource_count = list_resource_count(&client).await;
-        Ok(Self {
-            client,
-            all_tools,
-            title,
-            instructions,
-            call_timeout: Duration::from_millis(server.config.call_timeout_ms),
-            call_lock: tokio::sync::Mutex::new(()),
-            resource_count,
-        })
-    }
-}
-
-async fn list_resource_count(client: &McpClient) -> usize {
-    let resources_supported = client
-        .peer()
-        .peer_info()
-        .and_then(|info| serde_json::to_value(info.capabilities.clone()).ok())
-        .and_then(|capabilities| capabilities.get("resources").cloned())
-        .is_some();
-    if !resources_supported {
-        return 0;
-    }
-    match client.peer().list_resources(None).await {
-        Ok(resources) => serde_json::to_value(resources)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("resources")
-                    .and_then(serde_json::Value::as_array)
-                    .cloned()
-            })
-            .map_or(0, |resources| resources.len()),
-        Err(error) => {
-            warn!(error = %error, "MCP server advertised resources but resources/list failed");
-            0
-        }
-    }
-}
-
-async fn list_all_tools(
-    client: &McpClient,
-    server_name: &str,
-) -> Result<serde_json::Value, AppError> {
-    let mut cursor = None;
-    let mut all_tools = Vec::new();
-    for _ in 0..100 {
-        let params = cursor
-            .take()
-            .map(|cursor| rmcp::model::PaginatedRequestParams::default().with_cursor(Some(cursor)));
-        let listed =
-            client.peer().list_tools(params).await.map_err(|error| {
-                AppError::Tool(format!("list MCP tools '{server_name}': {error}"))
-            })?;
-        let listed_value = serde_json::to_value(listed)
-            .map_err(|error| AppError::Tool(format!("serialize MCP tool list: {error}")))?;
-        let tools = listed_value
-            .get("tools")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                AppError::Tool(format!(
-                    "MCP server '{server_name}' returned invalid tools/list"
-                ))
-            })?;
-        all_tools.extend(tools.iter().cloned());
-        cursor = listed_value
-            .get("nextCursor")
-            .and_then(serde_json::Value::as_str)
-            .map(ToOwned::to_owned);
-        if cursor.is_none() {
-            return Ok(serde_json::json!({ "tools": all_tools }));
-        }
-    }
-    Err(AppError::Tool(format!(
-        "MCP server '{server_name}' returned more than 100 pages of tools"
-    )))
 }
 
 fn parse_tools(
     server: &str,
-    filter: &crate::core::connector::mcp::config::ToolFilter,
     listed: &serde_json::Value,
 ) -> Result<BTreeMap<String, McpToolDef>, AppError> {
-    let include = build_glob_set(&filter.include)?;
-    let exclude = build_glob_set(&filter.exclude)?;
     let tools = listed
         .get("tools")
         .and_then(serde_json::Value::as_array)
@@ -1204,9 +1252,6 @@ fn parse_tools(
                     "MCP server '{server}' returned a tool without name"
                 ))
             })?;
-        if !filter.include.is_empty() && !include.is_match(raw_name) || exclude.is_match(raw_name) {
-            continue;
-        }
         let model_name = to_model_name(server, raw_name);
         definitions.insert(
             model_name.clone(),
@@ -1259,21 +1304,10 @@ fn tool_name_summary(tools: &BTreeMap<String, McpToolDef>) -> Option<String> {
     ))
 }
 
-fn build_glob_set(patterns: &[String]) -> Result<globset::GlobSet, AppError> {
-    let mut builder = globset::GlobSetBuilder::new();
-    for pattern in patterns {
-        builder.add(globset::Glob::new(pattern).map_err(|error| {
-            AppError::Config(format!("invalid MCP tool filter '{pattern}': {error}"))
-        })?);
-    }
-    builder
-        .build()
-        .map_err(|error| AppError::Config(format!("build MCP tool filter: {error}")))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1284,7 +1318,36 @@ mod tests {
     use crate::infra::config::get_work_dir;
     use crate::AppConfig;
 
-    fn manager_with_fake_server(
+    #[test]
+    fn manager_uses_one_runtime_for_global_and_workspace_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        std::fs::create_dir_all(workspace.join(".agents")).unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        cfg.connector.mcp.startup_timeout_ms = 31_000;
+        cfg.connector.mcp.call_timeout_ms = 91_000;
+        cfg.connector.mcp.max_concurrent_calls = 3;
+        add_global_server(
+            &cfg,
+            "global".into(),
+            serde_json::from_value(serde_json::json!({"command":"node"})).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(".agents/mcp.json"),
+            r#"{"mcpServers":{"project":{"command":"node"}}}"#,
+        )
+        .unwrap();
+        let manager = McpManager::new(&cfg, Some(&workspace)).unwrap();
+        assert_eq!(manager.statuses().len(), 2);
+        assert_eq!(manager.runtime, cfg.connector.mcp);
+        let mut invalid = cfg.clone();
+        invalid.connector.mcp.max_concurrent_calls = 0;
+        assert!(McpManager::new(&invalid, Some(&workspace)).is_err());
+    }
+
+    pub(super) fn manager_with_fake_server(
         args: Vec<String>,
         call_timeout_ms: u64,
     ) -> (tempfile::TempDir, Arc<McpManager>) {
@@ -1293,6 +1356,7 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("workspace");
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        cfg.connector.mcp.call_timeout_ms = call_timeout_ms;
         let config_path = get_work_dir(&cfg).expect("work dir").join("mcp.json");
         std::fs::create_dir_all(config_path.parent().expect("config parent"))
             .expect("config directory");
@@ -1303,7 +1367,6 @@ mod tests {
                     "fake": {
                         "command": "node",
                         "args": args,
-                        "callTimeoutMs": call_timeout_ms,
                     }
                 }
             })
@@ -1342,7 +1405,7 @@ mod tests {
         (temp, manager)
     }
 
-    fn fake_server_args(extra: &[String]) -> Vec<String> {
+    pub(super) fn fake_server_args(extra: &[String]) -> Vec<String> {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/mcp/fake_stdio_server.mjs");
         std::iter::once(fixture.to_string_lossy().into_owned())
@@ -1461,26 +1524,16 @@ mod tests {
     }
 
     #[test]
-    fn deny_retires_the_generation_before_blocking_the_entry() {
-        let (_temp, manager) = manager_with_fake_server(fake_server_args(&[]), 120_000);
-        let key = manager
-            .configured_server("fake")
-            .expect("configured fake server")
-            .config_key;
+    fn removed_source_cannot_publish_old_generation() {
+        let (temp, manager) = manager_with_fake_server(fake_server_args(&[]), 120_000);
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let key = manager.configured_server("fake").unwrap().config_key;
         let old_generation = manager.current_generation(&key);
-
-        manager.deny(&key).expect("deny connector");
+        assert!(manager.remove_configured_server(&key, &cfg).unwrap());
         manager.update_state_if_generation(&key, old_generation, ServerState::Ready, 2);
-
-        let entry = manager
-            .entries
-            .read()
-            .get(&key)
-            .expect("blocked entry")
-            .clone();
-        assert!(entry.generation > old_generation);
-        assert!(entry.connection.is_none());
-        assert!(matches!(entry.status.state, ServerState::Blocked));
+        assert!(manager.entries.read().get(&key).is_none());
+        assert!(manager.current_generation(&key) > old_generation);
     }
 
     #[test]
@@ -1629,6 +1682,63 @@ mod tests {
         assert_eq!(manager.list_tools(&key).expect("filtered tools").len(), 1);
         assert_eq!(manager.tool_defs(&key).len(), 1);
         assert_eq!(manager.list_servers()[0].tool_count, 1);
+        let management = manager
+            .tool_catalog_snapshot(&key)
+            .expect("complete management catalog");
+        assert_eq!(
+            management
+                .tools
+                .into_iter()
+                .map(|tool| (tool.raw_name, tool.enabled))
+                .collect::<Vec<_>>(),
+            vec![("capture".to_string(), true), ("status".to_string(), false)],
+            "Settings keeps the disabled row while every AI-facing projection remains filtered"
+        );
+    }
+
+    #[tokio::test]
+    async fn single_tool_toggle_updates_the_catalog_and_blocks_model_calls() {
+        let (temp, manager) = manager_with_fake_server(fake_server_args(&[]), 120_000);
+        manager
+            .connect_server("fake")
+            .await
+            .expect("connect fake server");
+        let key = manager
+            .configured_server("fake")
+            .expect("configured fake server")
+            .config_key;
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+
+        manager
+            .set_configured_tool_enabled(&key, "capture", false, &cfg)
+            .expect("disable one tool");
+        let catalog = manager
+            .tool_catalog_snapshot(&key)
+            .expect("complete management catalog");
+        assert_eq!(
+            catalog
+                .tools
+                .into_iter()
+                .map(|tool| (tool.raw_name, tool.enabled))
+                .collect::<Vec<_>>(),
+            vec![("capture".to_string(), false), ("status".to_string(), true)]
+        );
+        manager
+            .call_model_tool("mcp__fake__capture", serde_json::json!({}))
+            .await
+            .expect_err("disabled tool must not be callable by the model");
+
+        manager
+            .set_configured_tool_enabled(&key, "capture", true, &cfg)
+            .expect("re-enable one tool");
+        assert_eq!(
+            manager
+                .call_model_tool("mcp__fake__capture", serde_json::json!({}))
+                .await
+                .expect("re-enabled tool must be callable")["content"][0]["text"],
+            "fake capture complete"
+        );
     }
 
     #[tokio::test]
@@ -1730,7 +1840,7 @@ mod tests {
             .expect("untrusted source is recorded as awaiting confirmation, not connected");
         assert!(matches!(
             manager.statuses().pop().expect("source status").state,
-            ServerState::NeedsConfirmation
+            ServerState::AwaitingProjectTrust
         ));
         assert!(manager.list_servers().is_empty());
 
@@ -1744,6 +1854,63 @@ mod tests {
                 .contains("unknown or not-ready deferred tool"),
             "unapproved sources must not expose a callable deferred tool: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn project_trust_gates_execution_once_and_survives_configuration_edits() {
+        let (temp, manager) = manager_with_untrusted_project_server();
+        let root = manager.project_root().unwrap().to_path_buf();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let store = crate::core::security::project_trust::ProjectTrustStore::open(&cfg).unwrap();
+        assert!(!manager.project_trusted());
+        assert_eq!(
+            manager.statuses()[0].state,
+            ServerState::AwaitingProjectTrust
+        );
+        manager.connect_server("project-fake").await.unwrap();
+        assert!(manager.test_server("project-fake").await.is_err());
+        assert!(manager.login_server("project-fake").await.is_err());
+        assert!(manager.list_servers().is_empty());
+
+        store.trust(&root).unwrap();
+        assert_eq!(manager.wake_project().len(), 1);
+        assert!(manager.wake_project().is_empty(), "idempotent wake");
+        assert_eq!(manager.statuses()[0].state, ServerState::Pending);
+        manager.connect_server("project-fake").await.unwrap();
+        assert_eq!(manager.statuses()[0].state, ServerState::Ready);
+
+        let project_path = root.join(".agents/mcp.json");
+        let mut file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&project_path).unwrap()).unwrap();
+        file["mcpServers"]["project-fake"]["env"] = serde_json::json!({"RECONFIGURED":"yes"});
+        std::fs::write(&project_path, file.to_string()).unwrap();
+        manager.reload_configuration(&cfg).unwrap();
+        manager.connect_server("project-fake").await.unwrap();
+        assert_eq!(manager.statuses()[0].state, ServerState::Ready);
+
+        let other = temp.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let unrelated = McpManager::new(&cfg, Some(&other)).unwrap();
+        assert!(!unrelated.project_trusted());
+    }
+
+    #[test]
+    fn corrupt_project_trust_file_cannot_approve_workspace_sources() {
+        let (temp, manager) = manager_with_untrusted_project_server();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let store = crate::core::security::project_trust::ProjectTrustStore::open(&cfg).unwrap();
+        std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        std::fs::write(store.path(), b"not json").unwrap();
+        let second = McpManager::new(&cfg, manager.workspace_root()).unwrap();
+        assert!(!second.project_trusted());
+        assert_eq!(
+            second.statuses()[0].state,
+            ServerState::AwaitingProjectTrust
+        );
+        assert!(second.reload_configuration(&cfg).is_ok());
+        assert!(store.trust(second.project_root().unwrap()).is_err());
     }
 
     #[test]
@@ -1798,7 +1965,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_tool_timeout_returns_error_and_marks_server_disconnected() {
+    async fn call_tool_timeout_preserves_shared_connection() {
         let (_temp, manager) =
             manager_with_fake_server(fake_server_args(&["--hang".to_string()]), 25);
         manager
@@ -1815,12 +1982,43 @@ mod tests {
         assert!(error.to_string().contains("timed out"));
         assert!(matches!(
             manager.statuses().pop().expect("server status").state,
-            ServerState::Disconnected
+            ServerState::Ready
         ));
+        assert!(!manager.tool_defs("fake").is_empty());
     }
 
     #[tokio::test]
-    async fn transport_drop_marks_disconnected_without_replaying_call() {
+    async fn idle_stdio_service_exit_recovers_without_a_call_and_stops_at_three() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("methods");
+        let (_manager_temp, manager) = manager_with_fake_server(
+            fake_server_args(&[
+                "--record".into(),
+                log.to_string_lossy().into_owned(),
+                "--exit-after-catalog-ms".into(),
+                "1000".into(),
+            ]),
+            1000,
+        );
+        manager.connect_server("fake").await.unwrap();
+        assert_eq!(manager.statuses()[0].state, ServerState::Ready);
+        tokio::time::timeout(Duration::from_secs(8), async {
+            while !matches!(manager.statuses()[0].state, ServerState::Failed(_)) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("idle service exit is observable without another tools/call");
+        for _ in 0..3 {
+            assert!(manager.connect_server("fake").await.is_err());
+        }
+        let log = std::fs::read_to_string(log).unwrap();
+        assert_eq!(log.lines().filter(|line| *line == "initialize").count(), 3);
+        assert_eq!(log.lines().filter(|line| *line == "tools/call").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn transport_drop_recovers_without_replaying_call() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let call_log = temp.path().join("calls.log");
         let (_manager_temp, manager) = manager_with_fake_server(
@@ -1842,6 +2040,17 @@ mod tests {
             .await
             .expect_err("connection drop should fail the in-flight call");
 
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = manager.statuses().pop().expect("status");
+                if status.state == ServerState::Ready && status.attempt == 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("concrete stdio service exit must recover");
         let methods = std::fs::read_to_string(&call_log).expect("read call log");
         assert_eq!(
             methods
@@ -1851,10 +2060,17 @@ mod tests {
             1,
             "the in-flight call must not be replayed"
         );
-        assert!(matches!(
+        assert_eq!(
+            methods
+                .lines()
+                .filter(|method| *method == "initialize")
+                .count(),
+            2
+        );
+        assert_eq!(
             manager.statuses().pop().expect("server status").state,
-            ServerState::Disconnected
-        ));
+            ServerState::Ready
+        );
     }
 
     #[tokio::test]

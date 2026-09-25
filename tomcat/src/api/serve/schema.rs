@@ -11,9 +11,10 @@ use crate::infra::events::WireEvent;
 use crate::{resolve_agent_trail_dir, AppConfig, AppError};
 
 use super::types::{
-    ControlFrame, IngestAttachmentResponse, ListModelsPayload, ListProviderKeysPayload, OutFrame,
-    RemoveModelResponse, ResponseFrame, RetainAttachmentLeasesResponse, ServeCommand,
-    SetProviderKeyResponse, UpsertModelResponse,
+    ConnectorRecoveryProgress, ConnectorReloadReceipt, ControlFrame, IngestAttachmentResponse,
+    ListConnectorToolsPayload, ListModelsPayload, ListProviderKeysPayload, OutFrame,
+    ProjectTrustPayload, RemoveModelResponse, ResponseFrame, RetainAttachmentLeasesResponse,
+    ServeCommand, SetConnectorToolEnabledResponse, SetProviderKeyResponse, UpsertModelResponse,
 };
 use crate::core::llm::{ModelKeyStatus, ModelView, ProviderKeyView};
 
@@ -32,6 +33,11 @@ pub(crate) struct ServeSchemaBundle {
     remove_model_response: schemars::schema::RootSchema,
     set_provider_key_response: schemars::schema::RootSchema,
     list_provider_keys_payload: schemars::schema::RootSchema,
+    connector_reload_receipt: schemars::schema::RootSchema,
+    connector_recovery_progress: schemars::schema::RootSchema,
+    list_connector_tools_payload: schemars::schema::RootSchema,
+    project_trust_payload: schemars::schema::RootSchema,
+    set_connector_tool_enabled_response: schemars::schema::RootSchema,
     /// 响应方向也必须纳入生成 —— 否则 TS 侧只能靠 `as any` 加手写 parser，
     /// 而漂移风险最大的恰恰是响应方向。
     ingest_attachment_response: schemars::schema::RootSchema,
@@ -60,6 +66,11 @@ pub(crate) fn build_schema_bundle() -> ServeSchemaBundle {
         remove_model_response: schema_for!(RemoveModelResponse),
         set_provider_key_response: schema_for!(SetProviderKeyResponse),
         list_provider_keys_payload: schema_for!(ListProviderKeysPayload),
+        connector_reload_receipt: schema_for!(ConnectorReloadReceipt),
+        connector_recovery_progress: schema_for!(ConnectorRecoveryProgress),
+        list_connector_tools_payload: schema_for!(ListConnectorToolsPayload),
+        project_trust_payload: schema_for!(ProjectTrustPayload),
+        set_connector_tool_enabled_response: schema_for!(SetConnectorToolEnabledResponse),
         ingest_attachment_response: schema_for!(IngestAttachmentResponse),
         retain_attachment_leases_response: schema_for!(RetainAttachmentLeasesResponse),
     }
@@ -102,6 +113,20 @@ fn render_typescript(bundle: &ServeSchemaBundle) -> String {
         ("UpsertModelResponse", &bundle.upsert_model_response),
         ("RemoveModelResponse", &bundle.remove_model_response),
         ("SetProviderKeyResponse", &bundle.set_provider_key_response),
+        ("ConnectorReloadReceipt", &bundle.connector_reload_receipt),
+        (
+            "ConnectorRecoveryProgress",
+            &bundle.connector_recovery_progress,
+        ),
+        (
+            "ListConnectorToolsPayload",
+            &bundle.list_connector_tools_payload,
+        ),
+        ("ProjectTrustPayload", &bundle.project_trust_payload),
+        (
+            "SetConnectorToolEnabledResponse",
+            &bundle.set_connector_tool_enabled_response,
+        ),
         (
             "ListProviderKeysPayload",
             &bundle.list_provider_keys_payload,

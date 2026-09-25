@@ -1183,6 +1183,11 @@ span.tc-attachment-strip__file-chip {
   justify-content: space-between;
 }
 
+.tc-settings-shell__header > .tc-button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .tc-settings-shell__header h1,
 .tc-settings-shell__header p {
   margin: 0;
@@ -1455,6 +1460,21 @@ span.tc-attachment-strip__file-chip {
   text-transform: uppercase;
 }
 
+.tc-settings-group__heading {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.tc-settings-group__project-path {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .tc-settings-model {
   border-bottom: 1px solid var(--vscode-panel-border, rgba(127, 127, 127, 0.22));
   display: flex;
@@ -1670,6 +1690,39 @@ span.tc-attachment-strip__file-chip {
 }
 
 @media (max-width: 720px) {
+  .tc-settings-shell {
+    gap: 12px;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    padding: 12px;
+  }
+
+  .tc-settings-shell__nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 4px;
+    overflow: visible;
+    padding: 0;
+  }
+
+  .tc-settings-shell__brand {
+    flex-basis: 100%;
+    margin-bottom: 4px;
+  }
+
+  .tc-settings-shell__version {
+    border: 0;
+    display: flex;
+    flex-basis: 100%;
+    gap: 12px;
+    margin-top: 4px;
+    padding: 0;
+  }
+
+  .tc-settings-nav__item { padding: 8px 10px; }
+  .tc-settings-shell__header { flex-wrap: wrap; }
+  .tc-settings-shell__content { min-width: 0; padding-right: 0; }
+
   .tc-settings-model__header {
     align-items: center;
     gap: 12px;
@@ -5024,13 +5077,26 @@ span.tc-attachment-strip__file-chip {
   font-size: 12px;
 }
 
+.tc-connector-spinner {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.tc-connector-feedback,
+.tc-connector-card__body {
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tc-connector-spinner { animation: none; }
+}
+
 .tc-connector-status--connected { color: var(--vscode-testing-iconPassed, #73c991); }
 .tc-connector-status--connecting { color: var(--vscode-charts-yellow, #e5c07b); }
 .tc-connector-status--failed { color: var(--vscode-testing-iconFailed, #f14c4c); }
-.tc-connector-status--needs_confirmation,
+.tc-connector-status--awaiting_project_trust,
 .tc-connector-status--needs_authorization,
 .tc-connector-status--pending { color: var(--vscode-descriptionForeground); }
-.tc-connector-status--blocked { color: var(--vscode-disabledForeground); }
 
 .tc-modal-backdrop {
   align-items: center;
@@ -5196,19 +5262,18 @@ span.tc-attachment-strip__file-chip {
 }
 
 .tc-connector-config-link {
-  background: transparent;
-  border: 0;
-  color: var(--vscode-textLink-foreground, #3794ff);
-  cursor: pointer;
-  font: inherit;
-  padding: 0;
+  max-width: 100%;
   text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 
-.tc-connector-config-link:hover {
-  color: var(--vscode-textLink-activeForeground, #4daafc);
+.tc-connector-config-link__label {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.tc-connector-config-link:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
 }
 
 .tc-connector-inline-actions {
@@ -5262,6 +5327,16 @@ span.tc-attachment-strip__file-chip {
 .tc-connector-flat-section .tc-connector-tools {
   margin-top: 10px;
 }
+.tc-connector-tool-feedback {
+  align-items: center;
+  color: var(--vscode-errorForeground, #f14c4c);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  min-width: 0;
+}
+
 
 .tc-connector-form-row input,
 .tc-connector-form-row select,

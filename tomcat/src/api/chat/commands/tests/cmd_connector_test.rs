@@ -65,6 +65,24 @@ fn connector_rejects_invalid_subcommands() {
     ));
 }
 
+#[test]
+fn project_trust_is_one_command_without_server_identity() {
+    assert_eq!(
+        parse_chat_command("/connector trust-project"),
+        ChatCommand::Connector(ConnectorCommand::TrustProject)
+    );
+    for command in [
+        "/connector trust fake",
+        "/connector deny fake",
+        "/connector trust-project fake",
+    ] {
+        assert!(matches!(
+            parse_chat_command(command),
+            ChatCommand::UsageError { .. }
+        ));
+    }
+}
+
 #[tokio::test]
 #[serial(env_lock)]
 async fn cmd_connector_add_and_list_round_trips_filtered_tools() {
@@ -124,4 +142,11 @@ async fn cmd_connector_add_and_list_round_trips_filtered_tools() {
 
     let outcome = run(&ctx, ConnectorCommand::List).await;
     assert!(matches!(outcome, ChatCommandOutcome::Handled));
+
+    let root = ctx.scope_services.session_project_root.as_deref().unwrap();
+    let store = crate::core::security::project_trust::ProjectTrustStore::open(&cfg).unwrap();
+    assert!(!store.is_trusted(root).unwrap());
+    let outcome = run(&ctx, ConnectorCommand::TrustProject).await;
+    assert!(matches!(outcome, ChatCommandOutcome::Handled));
+    assert!(store.is_trusted(root).unwrap());
 }

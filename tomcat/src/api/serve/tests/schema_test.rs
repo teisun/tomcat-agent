@@ -12,6 +12,10 @@ fn serve_dts_emits_named_types_not_unknown() {
     assert!(dts.contains("export type WireEvent = "));
     assert!(dts.contains("export interface WireModelView {"));
     assert!(dts.contains("export interface SetProviderKeyResponse {"));
+    assert!(dts.contains("export interface SetConnectorToolEnabledResponse {"));
+    assert!(dts.contains("configSaved: boolean;"));
+    assert!(dts.contains("runtimeApplied: boolean;"));
+
     assert!(dts.contains("export interface ProviderKeyView {"));
     assert!(dts.contains("export interface ListModelsPayload {"));
     assert!(!dts.contains("export type ServeCommand = unknown;"));
@@ -100,6 +104,10 @@ fn serve_dts_includes_plan_code_review_findings() {
 fn build_schema_bundle_includes_wire_event() {
     let value = serde_json::to_value(build_schema_bundle()).expect("serialize schema bundle");
     assert!(value.get("wire_event").is_some(), "wire_event root missing");
+    assert!(
+        value.get("set_connector_tool_enabled_response").is_some(),
+        "single-tool response root missing"
+    );
 }
 
 #[test]

@@ -23,10 +23,14 @@ import type {
   ServeCommand,
   ServeEvent,
   GetMessagesParams,
+  ConnectorReloadReceipt,
+  ListConnectorToolsPayload,
   ListModelsPayload,
   ListProviderKeysPayload,
+  ProjectTrustPayload,
   ModelEntryInput,
   RemoveModelResponse,
+  SetConnectorToolEnabledResponse,
   SetProviderKeyResponse,
   SetPlanModeAction,
   UpsertModelResponse,
@@ -458,8 +462,8 @@ export class TomcatMessenger {
     configKey: string,
     context: { workspaceRoot?: string | null },
     timeoutMs = this.timeoutMs(),
-  ): Promise<ResponseFrame> {
-    return this.request({ configKey, context, type: "list_connector_tools" }, timeoutMs);
+  ): Promise<TypedResponseFrame<ListConnectorToolsPayload>> {
+    return this.request({ configKey, context, type: "list_connector_tools" }, timeoutMs) as Promise<TypedResponseFrame<ListConnectorToolsPayload>>;
   }
 
   sendAddConnector(input: {
@@ -472,6 +476,7 @@ export class TomcatMessenger {
     env?: Record<string, string>;
     oauth?: unknown;
     scope: "global" | "workspace";
+    trustProject?: boolean;
     context: { workspaceRoot?: string | null };
   }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
     return this.request({ ...input, type: "add_connector" }, timeoutMs);
@@ -481,11 +486,16 @@ export class TomcatMessenger {
     return this.request({ configKey, context, type: "remove_connector" }, timeoutMs);
   }
 
-  sendReloadConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
-    return this.request({ configKey, context, type: "reload_connector" }, timeoutMs);
+  /** This wait ends at acceptance, not at completion of the recovery round. */
+  sendReloadConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<TypedResponseFrame<ConnectorReloadReceipt>> {
+    return this.request({ configKey, context, type: "reload_connector" }, timeoutMs) as Promise<TypedResponseFrame<ConnectorReloadReceipt>>;
   }
-  sendSetConnectorTrust(configKey: string, trusted: boolean, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
-    return this.request({ configKey, context, trusted, type: "set_connector_trust" }, timeoutMs);
+  sendGetProjectTrust(path: string, timeoutMs = this.timeoutMs()): Promise<TypedResponseFrame<ProjectTrustPayload>> {
+    return this.request({ path, type: "get_project_trust" }, timeoutMs) as Promise<TypedResponseFrame<ProjectTrustPayload>>;
+  }
+
+  sendTrustProject(projectRoot: string, timeoutMs = this.timeoutMs()): Promise<TypedResponseFrame<ProjectTrustPayload>> {
+    return this.request({ projectRoot, type: "trust_project" }, timeoutMs) as Promise<TypedResponseFrame<ProjectTrustPayload>>;
   }
 
   sendTestConnector(configKey: string, context: { workspaceRoot?: string | null }, timeoutMs = this.timeoutMs()): Promise<ResponseFrame> {
@@ -511,6 +521,16 @@ export class TomcatMessenger {
     timeoutMs = this.timeoutMs(),
   ): Promise<ResponseFrame> {
     return this.request({ configKey, context, exclude, include, type: "set_connector_tool_filter" }, timeoutMs);
+  }
+
+  sendSetConnectorToolEnabled(
+    configKey: string,
+    rawName: string,
+    enabled: boolean,
+    context: { workspaceRoot?: string | null },
+    timeoutMs = this.timeoutMs(),
+  ): Promise<TypedResponseFrame<SetConnectorToolEnabledResponse>> {
+    return this.request({ configKey, context, enabled, rawName, type: "set_connector_tool_enabled" }, timeoutMs) as Promise<TypedResponseFrame<SetConnectorToolEnabledResponse>>;
   }
 
 

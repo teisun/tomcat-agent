@@ -1,6 +1,8 @@
 import type {
   ConnectorConfigPaths,
+  ConnectorConnectionIdentity,
   ConnectorInput,
+  ConnectorProject,
   ConnectorToolFilter,
   ConnectorToolView,
   ConnectorView,
@@ -85,8 +87,9 @@ export interface SettingsConnectorCapabilities {
   add: boolean;
   remove: boolean;
   reload: boolean;
-  trust: boolean;
+  trustProject: boolean;
   filter: boolean;
+  toggle: boolean;
   login: boolean;
 }
 
@@ -98,6 +101,27 @@ export interface SettingsConnectorReceipt {
   name?: string | null;
 }
 
+/** One latest click per source, not a second copy of backend connection state. */
+export interface SettingsConnectorReloadReceipt {
+  requestId: string;
+  configKey: string;
+  phase: "pending" | "accepted" | "succeeded" | "failed" | "unknown";
+  generation?: string;
+  message?: string;
+  reason?: "superseded" | "removed" | "rejected" | "connection-lost" | "timeout" | "incompatible";
+}
+/** One durable setting result per source tool; it is not a second tool catalog. */
+export interface SettingsConnectorToolToggleReceipt {
+  requestId: string;
+  configKey: string;
+  rawName: string;
+  enabled: boolean;
+  configSaved?: boolean;
+  runtimeApplied?: boolean;
+  error?: string | null;
+}
+
+
 export interface SettingsStateSnapshot {
   capabilities: SettingsCapabilities;
   error?: string | null;
@@ -108,9 +132,15 @@ export interface SettingsStateSnapshot {
   providerKeys: SettingsProviderKeyView[];
   connectors?: ConnectorView[];
   connectorConfigPaths?: ConnectorConfigPaths;
+  connectorProject?: ConnectorProject | null;
+  connectorTrustPending?: boolean;
   connectorCapabilities?: SettingsConnectorCapabilities;
   connectorTools?: ConnectorToolView[];
   connectorReceipt?: SettingsConnectorReceipt | null;
+  connectorReloads?: Record<string, SettingsConnectorReloadReceipt>;
+  connectorToolToggles?: Record<string, SettingsConnectorToolToggleReceipt>;
+  connectorToolsIdentity?: ConnectorConnectionIdentity | null;
+
 
   selectedConnector?: string | null;
   ready: boolean;
@@ -171,18 +201,28 @@ export type SettingsIntent =
     }
   | {
       messageId: string;
-      type: "listConnectorTools" | "reloadConnector" | "removeConnector" | "loginConnector" | "logoutConnector" | "trustConnector" | "denyConnector" | "cancelLoginConnector";
+      type: "listConnectorTools" | "reloadConnector" | "removeConnector" | "loginConnector" | "logoutConnector" | "cancelLoginConnector";
       data: { name: string; configKey: string };
     }
   | {
       messageId: string;
+      type: "trustProject";
+      data: { projectRoot: string };
+    }
+  | {
+      messageId: string;
       type: "addConnector";
-      data: { connector: ConnectorInput };
+      data: { connector: ConnectorInput; trustProject?: true };
     }
   | {
       messageId: string;
       type: "setConnectorToolFilter";
       data: { name: string; configKey: string; filter: ConnectorToolFilter };
+    }
+  | {
+      messageId: string;
+      type: "setConnectorToolEnabled";
+      data: { name: string; configKey: string; rawName: string; enabled: boolean };
     }
   | {
       messageId: string;
@@ -298,14 +338,18 @@ export function isSettingsIntent(value: unknown): value is SettingsIntent {
     case "removeConnector":
     case "loginConnector":
     case "logoutConnector":
-    case "trustConnector":
-    case "denyConnector":
     case "cancelLoginConnector":
       return isRecord(value.data) && typeof value.data.name === "string" && typeof value.data.configKey === "string";
+    case "trustProject":
+      return isRecord(value.data) && typeof value.data.projectRoot === "string" && value.data.projectRoot.length > 0;
     case "addConnector":
-      return isRecord(value.data) && isRecord(value.data.connector) && typeof value.data.connector.name === "string";
+      return isRecord(value.data) && isRecord(value.data.connector) && typeof value.data.connector.name === "string"
+        && (value.data.trustProject === undefined || value.data.trustProject === true);
     case "setConnectorToolFilter":
-      return isRecord(value.data) && typeof value.data.name === "string" && typeof value.data.configKey === "string" && isRecord(value.data.filter);
+      return isRecord(value.data) && typeof value.data.name === "string" && typeof value.data.configKey === "string" && isRecord(value.data.filter);    case "setConnectorToolEnabled":
+      return isRecord(value.data) && typeof value.data.name === "string" && typeof value.data.configKey === "string"
+        && typeof value.data.rawName === "string" && typeof value.data.enabled === "boolean";
+
     case "openConnectorConfig":
       return (
         isRecord(value.data) &&

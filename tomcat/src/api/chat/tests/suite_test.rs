@@ -437,7 +437,7 @@ async fn tool_catalog_is_identical_across_all_mode_and_executing_combinations() 
 
 #[tokio::test]
 #[serial(env_lock)]
-async fn mcp_lifecycle_never_changes_prompt_snapshot() {
+async fn mcp_connection_lifecycle_keeps_prompt_snapshot_until_source_removed() {
     const ENV_KEY: &str = "TOMCAT_MCP_PREFIX_STABILITY_TEST_KEY";
     let _api_key = EnvGuard::set(ENV_KEY, "stub");
     let dir = tempfile::tempdir().expect("temporary directory");
@@ -503,30 +503,39 @@ async fn mcp_lifecycle_never_changes_prompt_snapshot() {
     );
     let ready = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
 
-    connectors.deny("fake").expect("disconnect fake MCP");
+    connectors
+        .mcp_manager()
+        .remove_configured_server("fake", &ctx.config)
+        .expect("disconnect fake MCP");
     assert!(
         connectors.mcp_manager().list_servers().is_empty(),
-        "denied source must disappear from the live deferred catalog"
+        "removed source must disappear from the live deferred catalog"
     );
     let disconnected = crate::api::chat::build_prompt_snapshot(&ctx, budget).await;
 
-    for snapshot in [&ready, &disconnected] {
-        assert_eq!(
-            snapshot.system_text(),
-            connecting.system_text(),
-            "MCP lifecycle state may not change the system prompt prefix"
-        );
-        assert_eq!(
-            snapshot.tool_definitions(),
-            connecting.tool_definitions(),
-            "MCP lifecycle state may not change the function-definition prefix"
-        );
-        assert_eq!(
-            snapshot.signature(),
-            connecting.signature(),
-            "MCP lifecycle state may not change the cache signature"
-        );
-    }
+    // Connection readiness is a runtime transition and must not change the
+    // prompt. Removing the only configured source is different: it disables
+    // connector discovery and intentionally removes its four host tools.
+    assert_eq!(
+        ready.system_text(),
+        connecting.system_text(),
+        "MCP connection readiness may not change the system prompt prefix"
+    );
+    assert_eq!(
+        ready.tool_definitions(),
+        connecting.tool_definitions(),
+        "MCP connection readiness may not change the function-definition prefix"
+    );
+    assert_eq!(
+        ready.signature(),
+        connecting.signature(),
+        "MCP connection readiness may not change the cache signature"
+    );
+    assert_ne!(disconnected.signature(), connecting.signature());
+    assert!(disconnected
+        .tool_definitions()
+        .iter()
+        .all(|definition| definition["function"]["name"] != "tool_search"));
     assert!(
         connecting
             .tool_definitions()

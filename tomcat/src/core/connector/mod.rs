@@ -88,6 +88,7 @@ struct ConnectorRegistryCacheKey {
     workspace_config_path: Option<PathBuf>,
     enabled: bool,
     disabled: Vec<String>,
+    mcp: crate::infra::config::McpRuntimeConfig,
 }
 
 fn connector_registry_cache(
@@ -122,10 +123,26 @@ fn connector_registry_cache_key(
             .transpose()?,
         enabled: cfg.connector.enabled,
         disabled,
+        mcp: cfg.connector.mcp,
     })
 }
 
 impl ConnectorRegistry {
+    /// Creates a connector registry and schedules startup for all configured MCP servers.
+    /// Startup is fire-and-forget: connection attempts run in background tasks.
+    pub fn create_and_start(
+        cfg: &AppConfig,
+        workspace_root: Option<&std::path::Path>,
+    ) -> Result<Arc<Self>, AppError> {
+        let registry = Self::new(cfg, workspace_root)?;
+        registry.spawn_connect_all_now();
+        Ok(registry)
+    }
+
+    /// Synchronously creates a connector registry without starting connections.
+    /// Intended for tests that need precise control over connection timing.
+    /// Most callers should use `create_and_start` instead.
+    #[doc(hidden)]
     pub fn new(
         cfg: &AppConfig,
         workspace_root: Option<&std::path::Path>,
@@ -135,6 +152,7 @@ impl ConnectorRegistry {
             return Ok(existing);
         }
 
+        tracing::debug!(global_config_path = ?key.global_config_path, workspace_config_path = ?key.workspace_config_path, enabled = key.enabled, disabled = ?key.disabled, "creating MCP connector registry");
         let created = Arc::new(Self {
             enabled: cfg.connector.enabled,
             config: cfg.clone(),
@@ -165,6 +183,10 @@ impl ConnectorRegistry {
     /// spawns tasks; it never waits for a server and therefore cannot delay a
     /// chat's first request or a serve handshake.
     pub async fn spawn_connect_all(self: &Arc<Self>) {
+        self.spawn_connect_all_now();
+    }
+
+    fn spawn_connect_all_now(self: &Arc<Self>) {
         if !self.enabled || self.started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -174,28 +196,50 @@ impl ConnectorRegistry {
             }
             let manager = self.mcp.clone();
             tokio::spawn(async move {
-                connect_with_backoff(manager, status.config_key).await;
+                connect_in_background(manager, status.config_key).await;
             });
         }
     }
 
-    pub async fn approve_and_connect(&self, server_name: &str) -> Result<(), AppError> {
-        self.mcp.approve(server_name)?;
-        self.mcp.connect_server(server_name).await
-    }
-
-    pub fn deny(&self, server_name: &str) -> Result<(), AppError> {
-        self.mcp.deny(server_name)
+    /// Notify every cached manager for this project after the durable decision.
+    pub fn project_trusted(cfg: &AppConfig, root: &Path) -> Result<(), AppError> {
+        let config_root = normalized_config_path(&global_mcp_path(cfg)?);
+        let affected: Vec<_> = connector_registry_cache()
+            .read()
+            .values()
+            .filter(|registry| {
+                registry.mcp.project_root() == Some(root)
+                    && global_mcp_path(&registry.config)
+                        .is_ok_and(|path| normalized_config_path(&path) == config_root)
+            })
+            .cloned()
+            .collect();
+        for registry in affected {
+            let waiting = registry.mcp.wake_project();
+            if registry.started.load(Ordering::Acquire) {
+                for key in waiting {
+                    let manager = registry.mcp.clone();
+                    tokio::spawn(async move { connect_in_background(manager, key).await });
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn reload(&self) -> Result<(), AppError> {
         let server_names = self.mcp.reload_configuration(&self.config)?;
+        let mut errors = Vec::new();
         for server_name in server_names {
             if let Err(error) = self.mcp.connect_server(&server_name).await {
                 warn!(server = %server_name, error = %error, "MCP server did not become ready after reload");
+                errors.push(error.to_string());
             }
         }
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Tool(errors.join("; ")))
+        }
     }
 
     /// Reconcile every cached registry touched by a config-file mutation without
@@ -207,6 +251,21 @@ impl ConnectorRegistry {
         workspace_root: Option<&Path>,
     ) -> Result<(), AppError> {
         let changed_global_path = normalized_config_path(&global_mcp_path(cfg)?);
+        let changed_project_path = match source {
+            McpConfigSource::Global => None,
+            McpConfigSource::Project => {
+                let workspace_root = workspace_root.ok_or_else(|| {
+                    AppError::Config(
+                        "project MCP configuration requires an explicit session project root"
+                            .into(),
+                    )
+                })?;
+                Some(normalized_config_path(&project_mcp_path(
+                    cfg,
+                    workspace_root,
+                )?))
+            }
+        };
         let cache = connector_registry_cache().read();
         let mut registries = Vec::new();
         for registry in cache.values() {
@@ -215,34 +274,35 @@ impl ConnectorRegistry {
             if normalized_config_path(&global_mcp_path(&registry.config)?) != changed_global_path {
                 continue;
             }
-            if source == McpConfigSource::Global || registry.mcp.workspace_root() == workspace_root
-            {
-                registries.push(Arc::clone(registry));
+            if let Some(changed_project_path) = &changed_project_path {
+                let Some(registry_workspace_root) = registry.mcp.workspace_root() else {
+                    continue;
+                };
+                if normalized_config_path(&project_mcp_path(
+                    &registry.config,
+                    registry_workspace_root,
+                )?) != *changed_project_path
+                {
+                    continue;
+                }
             }
+            registries.push(Arc::clone(registry));
         }
         drop(cache);
         for registry in registries {
-            registry.mcp.reload_configuration(cfg)?;
+            // The receiver's configuration chooses its resource directory and
+            // disabled servers; never reload it with the mutating session's cfg.
+            registry.mcp.reload_configuration(&registry.config)?;
         }
         Ok(())
     }
 }
 
-async fn connect_with_backoff(manager: Arc<McpManager>, server_name: String) {
-    for delay in [0_u64, 250, 1_000] {
-        if delay > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-        }
-        match manager.connect_server(&server_name).await {
-            Ok(()) => return,
-            Err(error) => {
-                warn!(
-                    server = %server_name,
-                    error = %error,
-                    "MCP server did not become ready during background startup"
-                );
-            }
-        }
+async fn connect_in_background(manager: Arc<McpManager>, server_name: String) {
+    // The manager owns the only attempt counter/backoff/deadline. This caller
+    // only waits for its terminal result and never replenishes that budget.
+    if let Err(error) = manager.connect_server(&server_name).await {
+        warn!(server = %server_name, error = %error, "MCP server did not become ready during background startup");
     }
 }
 
@@ -360,7 +420,10 @@ mod tests {
             "MCP tools must not enter the prompt-facing registry"
         );
 
-        connectors.deny("fake").expect("deny MCP server");
+        connectors
+            .mcp_manager()
+            .remove_configured_server("fake", &cfg)
+            .expect("remove MCP server");
         assert!(connectors.mcp_manager().tool_defs("fake").is_empty());
     }
 
@@ -400,6 +463,34 @@ mod tests {
                 .state,
             crate::core::connector::mcp::manager::ServerState::Pending
         ));
+    }
+
+    #[test]
+    fn cache_distinguishes_each_runtime_parameter_but_reuses_identical_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let baseline = ConnectorRegistry::new(&cfg, None).unwrap();
+        assert!(Arc::ptr_eq(
+            &baseline,
+            &ConnectorRegistry::new(&cfg, None).unwrap()
+        ));
+        for change in [
+            (30_001, 120_000, 16),
+            (30_000, 120_001, 16),
+            (30_000, 120_000, 1),
+        ] {
+            let mut modified = cfg.clone();
+            modified.connector.mcp.startup_timeout_ms = change.0;
+            modified.connector.mcp.call_timeout_ms = change.1;
+            modified.connector.mcp.max_concurrent_calls = change.2;
+            let distinct = ConnectorRegistry::new(&modified, None).unwrap();
+            assert!(!Arc::ptr_eq(&baseline, &distinct));
+            assert!(Arc::ptr_eq(
+                &distinct,
+                &ConnectorRegistry::new(&modified, None).unwrap()
+            ));
+        }
     }
 
     #[test]
@@ -444,6 +535,232 @@ mod tests {
 
         assert!(first.mcp_manager().statuses().is_empty());
         assert!(second.mcp_manager().statuses().is_empty());
+    }
+
+    #[test]
+    fn project_config_changes_only_reload_caches_using_the_changed_file() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut sender_cfg = AppConfig::default();
+        sender_cfg.connector.enabled = true;
+        sender_cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        sender_cfg.workspace.project_resource_dir = ".sender".to_string();
+        let mut receiver_cfg = sender_cfg.clone();
+        receiver_cfg.workspace.project_resource_dir = ".receiver".to_string();
+        let global = get_work_dir(&sender_cfg)
+            .expect("work dir")
+            .join("mcp.json");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::fs::write(global, fake_mcp_config(fake_fixture_args(&[])).to_string())
+            .expect("write global config");
+        for (cfg, name) in [
+            (&sender_cfg, "sender-only"),
+            (&receiver_cfg, "receiver-only"),
+        ] {
+            let project = crate::core::connector::mcp::config::project_mcp_path(cfg, &workspace)
+                .expect("project config path");
+            std::fs::create_dir_all(project.parent().expect("project parent"))
+                .expect("project parent");
+            std::fs::write(
+                project,
+                serde_json::json!({ "mcpServers": { name: { "command": "node", "args": [] } } })
+                    .to_string(),
+            )
+            .expect("write project config");
+        }
+        let sender =
+            ConnectorRegistry::new(&sender_cfg, Some(&workspace)).expect("sender registry");
+        let receiver =
+            ConnectorRegistry::new(&receiver_cfg, Some(&workspace)).expect("receiver registry");
+
+        ConnectorRegistry::synchronize_cached_config_change(
+            &sender_cfg,
+            crate::core::connector::mcp::config::McpConfigSource::Project,
+            Some(&workspace),
+        )
+        .expect("synchronize sender project config");
+
+        let receiver_names = receiver
+            .mcp_manager()
+            .statuses()
+            .into_iter()
+            .map(|status| status.name)
+            .collect::<Vec<_>>();
+        assert!(receiver_names.contains(&"receiver-only".to_string()));
+        assert!(!receiver_names.contains(&"sender-only".to_string()));
+        assert!(sender
+            .mcp_manager()
+            .statuses()
+            .into_iter()
+            .any(|status| status.name == "sender-only"));
+    }
+
+    #[test]
+    fn global_config_changes_keep_each_receiver_disabled_set() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut sender_cfg = AppConfig::default();
+        sender_cfg.connector.enabled = true;
+        sender_cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let mut receiver_cfg = sender_cfg.clone();
+        receiver_cfg.connector.disabled = vec!["fake".to_string()];
+        let global = get_work_dir(&sender_cfg)
+            .expect("work dir")
+            .join("mcp.json");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::fs::write(global, fake_mcp_config(fake_fixture_args(&[])).to_string())
+            .expect("write global config");
+        let _sender =
+            ConnectorRegistry::new(&sender_cfg, Some(&workspace)).expect("sender registry");
+        let receiver =
+            ConnectorRegistry::new(&receiver_cfg, Some(&workspace)).expect("receiver registry");
+        assert!(receiver.mcp_manager().statuses().is_empty());
+
+        ConnectorRegistry::synchronize_cached_config_change(
+            &sender_cfg,
+            crate::core::connector::mcp::config::McpConfigSource::Global,
+            None,
+        )
+        .expect("synchronize global config");
+
+        assert!(receiver.mcp_manager().statuses().is_empty());
+    }
+    #[tokio::test]
+    async fn factory_method_auto_starts_global_and_trusted_project_servers() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut cfg = AppConfig::default();
+        cfg.connector.enabled = true;
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+
+        let global_path = get_work_dir(&cfg).expect("work dir").join("mcp.json");
+        std::fs::create_dir_all(global_path.parent().expect("global parent"))
+            .expect("global parent");
+        std::fs::write(
+            &global_path,
+            serde_json::json!({
+                "mcpServers": {
+                    "global-fake": { "command": "node", "args": fake_fixture_args(&[]) }
+                }
+            })
+            .to_string(),
+        )
+        .expect("global MCP config");
+
+        let project_path = crate::core::connector::mcp::config::project_mcp_path(&cfg, &workspace)
+            .expect("project MCP path");
+        std::fs::create_dir_all(project_path.parent().expect("project parent"))
+            .expect("project parent");
+        std::fs::write(
+            &project_path,
+            serde_json::json!({
+                "mcpServers": {
+                    "project-fake": { "command": "node", "args": fake_fixture_args(&[]) }
+                }
+            })
+            .to_string(),
+        )
+        .expect("project MCP config");
+
+        let root = crate::core::security::project_trust::ProjectTrustStore::root_for(&workspace)
+            .expect("project root");
+        crate::core::security::project_trust::ProjectTrustStore::open(&cfg)
+            .expect("trust store")
+            .trust(&root)
+            .expect("trust project");
+
+        let registry = ConnectorRegistry::create_and_start(&cfg, Some(&workspace))
+            .expect("create and start connector registry");
+        assert!(registry.mcp_manager().project_trusted());
+        for (server, model_name) in [
+            ("global-fake", "mcp__global-fake__capture"),
+            ("project-fake", "mcp__project-fake__capture"),
+        ] {
+            for _ in 0..100 {
+                if !registry.mcp_manager().tool_defs(server).is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(
+                !registry.mcp_manager().tool_defs(server).is_empty(),
+                "{model_name} did not become available"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_new_does_not_auto_start_connections() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut cfg = AppConfig::default();
+        cfg.connector.enabled = true;
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let config_path = get_work_dir(&cfg).expect("work dir").join("mcp.json");
+        std::fs::create_dir_all(config_path.parent().expect("config parent"))
+            .expect("config directory");
+        std::fs::write(
+            &config_path,
+            fake_mcp_config(fake_fixture_args(&[])).to_string(),
+        )
+        .expect("MCP config");
+
+        let registry = ConnectorRegistry::new(&cfg, Some(&workspace)).expect("registry");
+        assert_eq!(registry.mcp_manager().statuses().len(), 1);
+        assert!(matches!(
+            registry.mcp_manager().statuses()[0].state,
+            crate::core::connector::mcp::manager::ServerState::Pending
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(registry.mcp_manager().tool_defs("fake").is_empty());
+    }
+
+    #[test]
+    fn create_and_start_reuses_the_cached_registry_and_is_idempotent() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.connector.enabled = true;
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let first = ConnectorRegistry::create_and_start(&cfg, None).expect("first registry");
+        let second = ConnectorRegistry::create_and_start(&cfg, None).expect("second registry");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn factory_method_leaves_untrusted_project_servers_awaiting_trust() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut cfg = AppConfig::default();
+        cfg.connector.enabled = true;
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let project_path = crate::core::connector::mcp::config::project_mcp_path(&cfg, &workspace)
+            .expect("project MCP path");
+        std::fs::create_dir_all(project_path.parent().expect("project parent"))
+            .expect("project parent");
+        std::fs::write(
+            project_path,
+            serde_json::json!({
+                "mcpServers": {
+                    "project-fake": { "command": "node", "args": fake_fixture_args(&[]) }
+                }
+            })
+            .to_string(),
+        )
+        .expect("project MCP config");
+
+        let registry = ConnectorRegistry::create_and_start(&cfg, Some(&workspace))
+            .expect("create and start connector registry");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            registry.mcp_manager().statuses()[0].state,
+            crate::core::connector::mcp::manager::ServerState::AwaitingProjectTrust
+        );
+        assert!(registry.mcp_manager().tool_defs("project-fake").is_empty());
     }
 
     #[tokio::test]

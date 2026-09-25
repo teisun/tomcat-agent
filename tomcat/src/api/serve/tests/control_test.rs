@@ -127,10 +127,12 @@ async fn serve_initialize_control_request_sets_ready_state() {
         "list_connector_tools",
         "add_connector",
         "remove_connector",
-        "set_connector_trust",
+        "get_project_trust",
+        "trust_project",
         "test_connector",
         "reload_connector",
         "set_connector_tool_filter",
+        "set_connector_tool_enabled",
         "new_session",
         "switch_session",
         "get_messages",
@@ -218,8 +220,29 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         "an empty connector list must still provide the actual workspace config path",
     );
 
+    assert_eq!(empty_listed["payload"]["project"]["trusted"], false);
+    let project_root = empty_listed["payload"]["project"]["root"].as_str().unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::GetProjectTrust {
+            id: Some("trust-before-add".into()),
+            path: workspace_root.to_string_lossy().into_owned(),
+        },
+    )
+    .await
+    .unwrap();
+    let trust_status = wait_for_line(&buffer, |line| line["id"] == "trust-before-add").await;
+    let trust_status = trust_status
+        .iter()
+        .find(|line| line["id"] == "trust-before-add")
+        .unwrap();
+    assert_eq!(trust_status["payload"]["projectRoot"], project_root);
+    assert_eq!(trust_status["payload"]["trusted"], false);
+
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/mcp/fake_stdio_server.mjs");
+    let startup_gate = _temp.path().join("connector-startup-gate");
+    fs::write(&startup_gate, "open").unwrap();
 
     handle_command(
         Arc::clone(&state),
@@ -227,7 +250,11 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
             id: Some("add-connector".to_string()),
             name: "fake".to_string(),
             command: "node".to_string(),
-            args: vec![fixture.to_string_lossy().into_owned()],
+            args: vec![
+                fixture.to_string_lossy().into_owned(),
+                "--startup-gate-file".into(),
+                startup_gate.to_string_lossy().into_owned(),
+            ],
             url: None,
             headers: Default::default(),
             oauth: None,
@@ -235,6 +262,7 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
             auth: None,
             scope: crate::api::serve::types::ConnectorScope::Workspace,
             context: connector_context.clone(),
+            trust_project: true,
         },
     )
     .await
@@ -276,6 +304,40 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
 
     handle_command(
         Arc::clone(&state),
+        ServeCommand::GetProjectTrust {
+            id: Some("trust-after-add".into()),
+            path: workspace_root.to_string_lossy().into_owned(),
+        },
+    )
+    .await
+    .unwrap();
+    let trust_after = wait_for_line(&buffer, |line| line["id"] == "trust-after-add").await;
+    let trust_after = trust_after
+        .iter()
+        .find(|line| line["id"] == "trust-after-add")
+        .unwrap();
+    assert_eq!(trust_after["payload"]["trusted"], true);
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::TrustProject {
+            id: Some("reject-child".into()),
+            project_root: workspace_root
+                .join(".workspace-data/..")
+                .to_string_lossy()
+                .into_owned(),
+        },
+    )
+    .await
+    .unwrap();
+    let rejected = wait_for_line(&buffer, |line| line["id"] == "reject-child").await;
+    let rejected = rejected
+        .iter()
+        .find(|line| line["id"] == "reject-child")
+        .unwrap();
+    assert_eq!(rejected["success"], false);
+
+    handle_command(
+        Arc::clone(&state),
         ServeCommand::ListConnectors {
             id: Some("list-connectors".to_string()),
             context: connector_context.clone(),
@@ -293,6 +355,8 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         .expect("list response");
     let summary = &listed["payload"]["connectors"][0];
     assert_eq!(summary["name"], "fake");
+    assert_eq!(listed["payload"]["project"]["trusted"], true);
+    assert!(summary.get("trust").is_none());
     assert_eq!(summary["source"], "workspace");
     let config_key = summary["configKey"]
         .as_str()
@@ -321,7 +385,10 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         "connector summaries must identify the configuration file",
     );
     assert_eq!(summary["state"], "connected");
-    assert_eq!(summary["trust"]["state"], "trusted");
+    let first_generation = summary["generation"].as_str().unwrap().to_owned();
+    assert_eq!(summary["attempt"], 1);
+    assert!(summary["recovery"].is_null());
+    assert!(summary.get("trust").is_none());
     assert_eq!(summary["toolCount"], 2);
     assert!(
         summary.get("tools").is_none(),
@@ -372,8 +439,8 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         Arc::clone(&state),
         ServeCommand::ListConnectorTools {
             id: Some("list-filtered-tools".to_string()),
-            config_key,
-            context: connector_context,
+            config_key: config_key.clone(),
+            context: connector_context.clone(),
         },
     )
     .await
@@ -390,8 +457,181 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
         .expect("filtered tools response")["payload"]["tools"]
         .as_array()
         .expect("filtered tools array");
-    assert_eq!(tools.len(), 1);
+    assert_eq!(tools.len(), 2);
     assert_eq!(tools[0]["rawName"], "capture");
+    assert_eq!(tools[0]["enabled"], true);
+    assert_eq!(tools[1]["rawName"], "status");
+    assert_eq!(tools[1]["enabled"], false);
+
+    // A real child is blocked before initialize completes. Reload/list must
+    // still return, and repeated Reload must join rather than start over.
+    for (request_id, enabled) in [("disable-capture", false), ("enable-capture", true)] {
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::SetConnectorToolEnabled {
+                id: Some(request_id.to_string()),
+                config_key: config_key.clone(),
+                raw_name: "capture".to_string(),
+                enabled,
+                context: connector_context.clone(),
+            },
+        )
+        .await
+        .expect("toggle one connector tool");
+        let lines = wait_for_line(&buffer, |line| {
+            line.get("id").and_then(serde_json::Value::as_str) == Some(request_id)
+        })
+        .await;
+        let response = lines
+            .iter()
+            .find(|line| line.get("id").and_then(serde_json::Value::as_str) == Some(request_id))
+            .expect("tool toggle response");
+        assert_eq!(response["success"], true);
+        assert_eq!(response["payload"]["configSaved"], true);
+        assert_eq!(response["payload"]["configKey"], config_key);
+
+        assert_eq!(response["payload"]["runtimeApplied"], true);
+        assert_eq!(response["payload"]["rawName"], "capture");
+        assert_eq!(response["payload"]["enabled"], enabled);
+    }
+
+    fs::remove_file(&startup_gate).unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::SetConnectorToolEnabled {
+            id: Some("missing-tool-source".to_string()),
+            config_key: "mcp:missing".to_string(),
+            raw_name: "capture".to_string(),
+            enabled: false,
+            context: connector_context.clone(),
+        },
+    )
+    .await
+    .expect("unknown source gets a typed error response");
+    let lines = wait_for_line(&buffer, |line| line["id"] == "missing-tool-source").await;
+    let response = lines
+        .iter()
+        .find(|line| line["id"] == "missing-tool-source")
+        .expect("typed missing-source response");
+    assert_eq!(response["success"], false);
+    assert_eq!(response["payload"]["configKey"], "mcp:missing");
+    assert_eq!(response["payload"]["rawName"], "capture");
+    assert_eq!(response["payload"]["enabled"], false);
+    assert_eq!(response["payload"]["configSaved"], false);
+    assert_eq!(response["payload"]["runtimeApplied"], false);
+
+    let mut accepted_generation = String::new();
+    for request_id in ["reload-one", "reload-join"] {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            handle_command(
+                Arc::clone(&state),
+                ServeCommand::ReloadConnector {
+                    id: Some(request_id.into()),
+                    config_key: config_key.clone(),
+                    context: connector_context.clone(),
+                },
+            ),
+        )
+        .await
+        .expect("Reload acknowledgement cannot await MCP")
+        .unwrap();
+        let frames = wait_for_line(&buffer, |line| line["id"] == request_id).await;
+        let receipt = &frames.iter().find(|line| line["id"] == request_id).unwrap()["payload"];
+        assert_eq!(receipt["accepted"], true);
+        assert_eq!(receipt["configKey"], config_key);
+        assert!(receipt.get("reloaded").is_none());
+        let remaining = receipt["recoveryTimeoutMs"].as_u64().unwrap();
+        assert!(remaining > 0 && remaining <= 111_250);
+        let generation = receipt["generation"].as_str().unwrap();
+        assert_ne!(generation, first_generation);
+        if accepted_generation.is_empty() {
+            accepted_generation = generation.to_owned();
+        } else {
+            assert_eq!(generation, accepted_generation);
+        }
+    }
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        handle_command(
+            Arc::clone(&state),
+            ServeCommand::ListConnectors {
+                id: Some("list-during-reload".into()),
+                context: connector_context.clone(),
+            },
+        ),
+    )
+    .await
+    .expect("list must remain responsive")
+    .unwrap();
+    let frames = wait_for_line(&buffer, |line| line["id"] == "list-during-reload").await;
+    let pending = &frames
+        .iter()
+        .find(|line| line["id"] == "list-during-reload")
+        .unwrap()["payload"]["connectors"][0];
+    assert_eq!(pending["state"], "connecting");
+    assert_eq!(pending["generation"], accepted_generation);
+    assert!(pending["recovery"].is_object());
+    assert_eq!(pending["toolCount"], 0);
+    fs::write(&startup_gate, "open").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while session_connector.mcp_manager().statuses()[0].state.code() != "connected" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    handle_command(
+        Arc::clone(&state),
+        ServeCommand::ListConnectorTools {
+            id: Some("tools-after-reload".into()),
+            config_key: config_key.clone(),
+            context: connector_context.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let frames = wait_for_line(&buffer, |line| line["id"] == "tools-after-reload").await;
+    let catalog = &frames
+        .iter()
+        .find(|line| line["id"] == "tools-after-reload")
+        .unwrap()["payload"];
+    assert_eq!(catalog["generation"], accepted_generation);
+    assert_eq!(catalog["attempt"], 1);
+    assert_eq!(
+        catalog["tools"].as_array().unwrap().len(),
+        2,
+        "the management catalog retains disabled tools across recovery"
+    );
+    assert_eq!(catalog["tools"][0]["rawName"], "capture");
+    assert_eq!(catalog["tools"][0]["enabled"], true);
+    assert_eq!(catalog["tools"][1]["rawName"], "status");
+    assert_eq!(catalog["tools"][1]["enabled"], false);
+    session_connector
+        .mcp_manager()
+        .remove_configured_server(&config_key, &state.cfg)
+        .unwrap();
+    for command in [
+        ServeCommand::ReloadConnector {
+            id: Some("reload-denied".into()),
+            config_key: config_key.clone(),
+            context: connector_context.clone(),
+        },
+        ServeCommand::TestConnector {
+            id: Some("test-denied".into()),
+            config_key: config_key.clone(),
+            context: connector_context,
+        },
+    ] {
+        handle_command(Arc::clone(&state), command).await.unwrap();
+    }
+    for id in ["reload-denied", "test-denied"] {
+        let frames = wait_for_line(&buffer, |line| line["id"] == id).await;
+        let rejected = frames.iter().find(|line| line["id"] == id).unwrap();
+        assert_eq!(rejected["success"], false);
+        assert_ne!(rejected["payload"]["accepted"], true);
+        assert_ne!(rejected["payload"]["connected"], true);
+    }
 }
 
 #[tokio::test]
@@ -542,6 +782,7 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
             auth: None,
             scope: crate::api::serve::types::ConnectorScope::Workspace,
             context,
+            trust_project: false,
         },
     )
     .await
@@ -617,6 +858,7 @@ capabilities = {{ vision = true, files = true, tools = true, reasoning = true, w
             context: crate::api::serve::types::ConnectorContext {
                 workspace_root: Some(workspace_root.to_string_lossy().into_owned()),
             },
+            trust_project: false,
         },
     )
     .await

@@ -5,8 +5,13 @@
 //! authorization endpoint deterministically redirects to the callback so tests
 //! never require a human or a real account.
 
+mod streamable_http_faults;
+
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use axum::extract::Request;
 use axum::extract::{Form, Query, State};
@@ -19,7 +24,7 @@ use axum::Router;
 use base64::Engine;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, ContentBlock, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, ContentBlock, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -39,8 +44,8 @@ const REFRESH_TOKEN: &str = "fake-refresh-token";
 struct FakeMcpServer;
 
 impl ServerHandler for FakeMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions("Deterministic fake MCP server for Tomcat connector tests.")
     }
 
@@ -91,6 +96,7 @@ impl ServerHandler for FakeMcpServer {
 struct OAuthState {
     pending: Arc<Mutex<HashMap<String, PendingAuthorization>>>,
     refreshes: Arc<Mutex<usize>>,
+    initializations: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -132,6 +138,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(path, address.to_string())?;
     }
     eprintln!("fake Streamable HTTP MCP server: http://{address}/mcp");
+
+    if std::env::args().any(|arg| arg == "--faults") {
+        axum::serve(listener, streamable_http_faults::router()).await?;
+        return Ok(());
+    }
 
     let oauth = OAuthState::default();
     let discovery_unavailable =
@@ -185,7 +196,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/token", post(token))
         .route("/register", post(register))
         .nest_service("/mcp", service)
-        .layer(middleware::from_fn(require_mcp_bearer))
+        .layer(middleware::from_fn_with_state(
+            oauth.clone(),
+            require_mcp_bearer,
+        ))
         .with_state(metadata_state);
 
     axum::serve(listener, router)
@@ -194,14 +208,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn require_mcp_bearer(request: Request, next: Next) -> Response {
-    if request.uri().path() == "/mcp"
-        && request
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            != Some("Bearer fake-access-token")
-    {
+async fn require_mcp_bearer(
+    State(state): State<OAuthState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let authorized = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        == Some("Bearer fake-access-token");
+    if request.uri().path() == "/mcp" && request.method() == axum::http::Method::POST {
+        let (parts, body) = request.into_parts();
+        let body = match axum::body::to_bytes(body, 16 * 1024 * 1024).await {
+            Ok(body) => body,
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        };
+        let message = serde_json::from_slice::<serde_json::Value>(&body).ok();
+        if message
+            .as_ref()
+            .is_some_and(|message| message["method"] == "initialize")
+        {
+            let count = state.initializations.fetch_add(1, Ordering::SeqCst) + 1;
+            if let Some(path) = std::env::var_os("MCP_STREAMABLE_HTTP_INIT_COUNT_FILE") {
+                std::fs::write(path, count.to_string()).expect("record initialize");
+            }
+            if authorized
+                && std::env::var_os("MCP_STREAMABLE_HTTP_FAIL_AUTHENTICATED_STARTUP").is_some()
+            {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+        }
+        request = Request::from_parts(parts, axum::body::Body::from(body));
+    }
+    if request.uri().path() == "/mcp" && !authorized {
         return (
             StatusCode::UNAUTHORIZED,
             [(

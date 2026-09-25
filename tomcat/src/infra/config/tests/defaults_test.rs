@@ -21,6 +21,19 @@ fn security_config_default() {
 }
 
 #[test]
+fn mcp_runtime_defaults_and_partial_toml() {
+    let defaults = AppConfig::default().connector.mcp;
+    assert_eq!(defaults.startup_timeout_ms, 30_000);
+    assert_eq!(defaults.call_timeout_ms, 120_000);
+    assert_eq!(defaults.max_concurrent_calls, 16);
+
+    let cfg: AppConfig = toml::from_str("[connector.mcp]\ncall_timeout_ms = 90000\n").unwrap();
+    assert_eq!(cfg.connector.mcp.call_timeout_ms, 90_000);
+    assert_eq!(cfg.connector.mcp.startup_timeout_ms, 30_000);
+    assert_eq!(cfg.connector.mcp.max_concurrent_calls, 16);
+}
+
+#[test]
 fn deserialize_security_config_uses_default_helpers() {
     let s = r#"{"security":{}}"#;
     let cfg: AppConfig = serde_json::from_str(s).unwrap();

@@ -14,6 +14,48 @@ use std::io::Write;
 
 #[test]
 #[serial(env_lock)]
+fn mcp_example_defaults_and_explicit_sixty_second_start_are_loadable() {
+    let example = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tomcat.config.toml.example"),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tomcat.config.toml");
+    std::fs::write(&path, &example).unwrap();
+    let defaults = load_config(Some(&path)).unwrap();
+    assert_eq!(defaults.connector.mcp.startup_timeout_ms, 30_000);
+    assert_eq!(defaults.connector.mcp.call_timeout_ms, 120_000);
+    assert_eq!(defaults.connector.mcp.max_concurrent_calls, 16);
+
+    let slower = example.replace("startup_timeout_ms = 30000", "startup_timeout_ms = 60000");
+    assert_ne!(slower, example);
+    std::fs::write(&path, slower).unwrap();
+    let overridden = load_config(Some(&path)).unwrap();
+    assert_eq!(overridden.connector.mcp.startup_timeout_ms, 60_000);
+}
+
+#[test]
+#[serial(env_lock)]
+fn mcp_runtime_env_overrides_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[connector.mcp]\nstartup_timeout_ms = 41000\ncall_timeout_ms = 91000\n",
+    )
+    .unwrap();
+    let configured = load_config(Some(&path)).unwrap();
+    assert_eq!(configured.connector.mcp.startup_timeout_ms, 41_000);
+    assert_eq!(configured.connector.mcp.call_timeout_ms, 91_000);
+    assert_eq!(configured.connector.mcp.max_concurrent_calls, 16);
+    unsafe { std::env::set_var("TOMCAT__CONNECTOR__MCP__MAX_CONCURRENT_CALLS", "3") };
+    let overridden = load_config(Some(&path));
+    unsafe { std::env::remove_var("TOMCAT__CONNECTOR__MCP__MAX_CONCURRENT_CALLS") };
+    assert_eq!(overridden.unwrap().connector.mcp.max_concurrent_calls, 3);
+}
+
+#[test]
+#[serial(env_lock)]
 fn removed_ask_question_timeout_sources_are_reported_but_ignored() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");

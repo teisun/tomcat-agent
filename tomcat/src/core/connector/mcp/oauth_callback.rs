@@ -130,6 +130,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_a_scoped_callback_releases_its_listener() {
+        let listener = OAuthCallbackListener::bind().await.unwrap();
+        let address = listener.listener.local_addr().unwrap();
+        let mut waiting = Box::pin(listener.wait("state"));
+        tokio::select! {
+            biased;
+            _ = &mut waiting => panic!("callback should still be waiting"),
+            _ = tokio::task::yield_now() => {},
+        }
+        drop(waiting);
+        let _rebound = tokio::net::TcpListener::bind(address)
+            .await
+            .expect("listener must not remain in a detached task");
+    }
+
+    #[tokio::test]
     async fn rejects_invalid_state() {
         let listener = OAuthCallbackListener::bind().await.expect("listener");
         let address = listener.listener.local_addr().expect("address");

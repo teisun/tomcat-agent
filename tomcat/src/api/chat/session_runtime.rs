@@ -58,6 +58,7 @@ pub struct ScopeContainer {
     pub plugin_manager: Option<Arc<PluginManager>>,
     pub plugin_function_invoker: Option<Arc<PluginFunctionInvoker>>,
     pub connector_registry: Option<Arc<ConnectorRegistry>>,
+    pub connector_load_error: Option<String>,
     pub dispatcher: Arc<HostApiDispatcher>,
     pub skill_set: Arc<RwLock<crate::core::skill::SkillSet>>,
     pub skill_discovery_handle:

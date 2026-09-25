@@ -782,9 +782,12 @@ pi.registerTool({
     let next = ctx1
         .session_runtime
         .session
-        .new_current_session(Some(workspace.path().to_string_lossy().to_string()))
-        .expect("create second session");
-    let ctx2 = ChatContext::from_config(cfg).expect("ctx2");
+        .new_current_session_with_project_root(
+            Some(workspace.path().to_string_lossy().to_string()),
+            Some(workspace.path().to_string_lossy().to_string()),
+        )
+        .expect("create second project-bound session");
+    let ctx2 = ChatContext::from_config(cfg.clone()).expect("ctx2");
     let session2 = current_session_id(&ctx2);
     assert_ne!(
         session1, session2,
@@ -831,6 +834,21 @@ pi.registerTool({
             &ctx2.session_runtime.read_file_state
         ),
         "session 级运行态仍应隔离"
+    );
+
+    // A matching cwd is discovery metadata, not permission to inherit the
+    // explicitly bound Workspace connector scope of either project session.
+    ctx1.session_runtime
+        .session
+        .new_current_session(Some(workspace.path().to_string_lossy().to_string()))
+        .expect("create rootless session with the same cwd");
+    let rootless = ChatContext::from_config(cfg).expect("rootless context");
+    assert!(
+        !Arc::ptr_eq(
+            &ctx1.global_services.tool_registry,
+            &rootless.global_services.tool_registry
+        ),
+        "an unbound session must not inherit a project-bound scope container"
     );
 }
 
@@ -1160,10 +1178,20 @@ pi.registerTool({
     let session1 = current_session_id(&ctx1);
     ctx1.session_runtime
         .session
-        .new_current_session(Some(workspace.path().to_string_lossy().to_string()))
-        .expect("create second session");
+        .new_current_session_with_project_root(
+            Some(workspace.path().to_string_lossy().to_string()),
+            Some(workspace.path().to_string_lossy().to_string()),
+        )
+        .expect("create second project-bound session");
     let ctx2 = ChatContext::from_config(cfg).expect("ctx2");
     let session2 = current_session_id(&ctx2);
+    assert!(
+        Arc::ptr_eq(
+            &ctx1.global_services.tool_registry,
+            &ctx2.global_services.tool_registry
+        ),
+        "shared scope must share the registry, not just return identical tool names"
+    );
     let tools1 = list_tool_names(&ctx1).await;
     let tools2 = list_tool_names(&ctx2).await;
     assert_eq!(tools1, vec!["shared_registry_tool".to_string()]);

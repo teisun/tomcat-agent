@@ -35,11 +35,12 @@ pub use types::WorkspaceEntry;
 pub use types::{
     compute_context_budget_chars, compute_context_budget_chars_from_tokens,
     fallback_input_budget_tokens, AgentConfig, AppConfig, CheckpointConfig, ConnectorConfig,
-    ContextConfig, LlmConfig, LlmFilesConfig, LlmRuntimeConfig, LogConfig, OpenAiResponsesConfig,
-    PreflightConfig, PrimitiveConfig, ReasoningContinuityConfig, ResumeHydrationMode,
-    SecurityConfig, SessionConfig, SkillsConfig, SplashConfig, ThinkingConfig, ThinkingDisplay,
-    ToolCliVerbosity, WorkspaceConfig, DEFAULT_AGENT_MAX_ATTEMPTS,
-    DEFAULT_AGENT_RETRY_BASE_DELAY_MS, DEFAULT_LLM_MODEL,
+    ContextConfig, LlmConfig, LlmFilesConfig, LlmRuntimeConfig, LogConfig, McpRuntimeConfig,
+    OpenAiResponsesConfig, PreflightConfig, PrimitiveConfig, ReasoningContinuityConfig,
+    ResumeHydrationMode, SecurityConfig, SessionConfig, SkillsConfig, SplashConfig, ThinkingConfig,
+    ThinkingDisplay, ToolCliVerbosity, WorkspaceConfig, DEFAULT_AGENT_MAX_ATTEMPTS,
+    DEFAULT_AGENT_RETRY_BASE_DELAY_MS, DEFAULT_LLM_MODEL, DEFAULT_MCP_CALL_TIMEOUT_MS,
+    DEFAULT_MCP_MAX_CONCURRENT_CALLS, DEFAULT_MCP_STARTUP_TIMEOUT_MS,
 };
 // PlanConfig / ReviewerConfig 由 PlanRuntime / reviewer 分别消费（P1/P4 起），
 // 这里先 re-export 保证 `tomcat::infra::config::PlanConfig` 可用而不污染默认 import。

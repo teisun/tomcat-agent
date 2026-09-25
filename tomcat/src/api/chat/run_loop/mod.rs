@@ -1,4 +1,4 @@
-use std::io::{self, Write as IoWrite};
+use std::io::{self, IsTerminal, Write as IoWrite};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -89,7 +89,6 @@ pub(crate) async fn build_tool_definitions(ctx: &ChatContext) -> Vec<serde_json:
 }
 
 async fn observe_tool_surface(ctx: &ChatContext) -> ToolSurface {
-    ctx.spawn_connector_startup_if_needed().await;
     let skill_set = ctx.skill_set_snapshot();
     let allow_load_skill = ctx.config.skills.enabled && !skill_set.visible_skills().is_empty();
     let plugin_tools = match ctx.global_services.tool_registry.list_tools(None).await {
@@ -301,6 +300,52 @@ pub(crate) fn append_planned_messages_with_rehydrate_retry(
     }
 }
 
+/// Only interactive terminals may consume an answer; piped first input belongs to chat.
+fn prompt_project_trust(ctx: &ChatContext) {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return;
+    }
+    let Some(project_dir) = ctx.scope_services.session_project_root.as_deref() else {
+        return;
+    };
+    let result = crate::core::security::project_trust::ProjectTrustStore::root_for(project_dir)
+        .and_then(|root| {
+            Ok((
+                root,
+                crate::core::security::project_trust::ProjectTrustStore::open(&ctx.config)?,
+            ))
+        });
+    let (root, store) = match result {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("[project trust] {error}");
+            return;
+        }
+    };
+    match store.is_trusted(&root) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("[project trust] {error}");
+            return;
+        }
+    }
+    print!("Trust this project?  {}  [y/N] ", root.display());
+    if io::stdout().flush().is_err() {
+        return;
+    }
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    {
+        if let Err(error) = store.trust(&root).and_then(|_| {
+            crate::core::connector::ConnectorRegistry::project_trusted(&ctx.config, &root)
+        }) {
+            eprintln!("[project trust] {error}");
+        }
+    }
+}
+
 pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> {
     ensure_session(ctx)?;
     if ctx.config.skills.enabled {
@@ -325,6 +370,15 @@ pub async fn chat_loop(ctx: &ChatContext, resume: bool) -> Result<(), AppError> 
     println!("tomcat 对话模式 (模型: {})", model);
     println!("输入消息开始对话，Ctrl+D 退出，Ctrl+C 中断生成。");
     println!("输入 /help 查看命令列表。\n");
+    if let Some(error) = ctx
+        .scope_services
+        .scope_container
+        .connector_load_error
+        .as_deref()
+    {
+        println!("[MCP 未加载] {error}。修正 mcp.json 后重启 Tomcat。");
+    }
+    prompt_project_trust(ctx);
 
     let mut rl = input::make_readline_editor()?;
 

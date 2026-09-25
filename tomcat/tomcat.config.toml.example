@@ -53,6 +53,22 @@ workspace_roots = []
 # 可改为 `.team-agents` 或 `tools/agents`；改后重启 Tomcat 生效。
 project_resource_dir = ".agents"
 
+[connector.mcp]
+# One policy for all MCP servers in this process, regardless of scope or transport.
+# Defaults: 30s to start, 120s admission + renewable idle window per call,
+# 16 concurrent calls PER source (not one shared pool across all sources).
+# Older per-server mcp.json fields startupTimeoutMs/callTimeoutMs/maxConcurrentCalls,
+# trusted, and integrity are ignored with a warning. They do not stop MCP loading.
+# Tomcat does not rewrite mcp.json while loading; however, the next successful
+# mcp.json save (Add, Remove, or a tool toggle) removes every unrecognized key.
+# Keep comments and metadata that Tomcat does not own outside mcp.json.
+startup_timeout_ms = 30000
+call_timeout_ms = 120000
+max_concurrent_calls = 16
+# For a slower Playwright startup, explicitly set startup_timeout_ms = 60000
+# here (applies to all MCP sources). Environment overrides use
+# TOMCAT__CONNECTOR__MCP__STARTUP_TIMEOUT_MS and likewise for the other keys.
+
 [plugin]
 auto_load = []
 

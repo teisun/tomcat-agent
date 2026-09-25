@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::warn;
 
 use crate::infra::config::{get_work_dir, resolve_project_resource_dir};
 use crate::infra::error::AppError;
@@ -44,6 +43,28 @@ pub struct ToolFilter {
     pub exclude: Vec<String>,
 }
 
+/// Compiled once per operation so Settings, deferred discovery and actual calls
+/// all use the same include-then-exclude decision for one tool name.
+pub(crate) struct ToolFilterMatcher {
+    include_all: bool,
+    include: globset::GlobSet,
+    exclude: globset::GlobSet,
+}
+
+impl ToolFilterMatcher {
+    pub(crate) fn compile(filter: &ToolFilter) -> Result<Self, AppError> {
+        Ok(Self {
+            include_all: filter.include.is_empty(),
+            include: build_glob_set(&filter.include)?,
+            exclude: build_glob_set(&filter.exclude)?,
+        })
+    }
+
+    pub(crate) fn allows(&self, raw_name: &str) -> bool {
+        (self.include_all || self.include.is_match(raw_name)) && !self.exclude.is_match(raw_name)
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpOAuthConfig {
@@ -62,7 +83,7 @@ pub struct McpOAuthConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct McpServerConfig {
     /// Stdio executable. Empty when `url` selects Streamable HTTP.
     #[serde(default)]
@@ -82,14 +103,6 @@ pub struct McpServerConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub cwd: Option<PathBuf>,
-    #[serde(default)]
-    pub trusted: bool,
-    #[serde(default)]
-    pub integrity: Option<String>,
-    #[serde(default = "default_startup_timeout_ms")]
-    pub startup_timeout_ms: u64,
-    #[serde(default = "default_call_timeout_ms")]
-    pub call_timeout_ms: u64,
     #[serde(default)]
     pub tool_filter: ToolFilter,
 }
@@ -157,11 +170,6 @@ impl McpServerConfig {
                 )));
             }
         }
-        if self.startup_timeout_ms == 0 || self.call_timeout_ms == 0 {
-            return Err(AppError::Config(format!(
-                "MCP server '{server_name}' timeouts must be positive"
-            )));
-        }
         Ok(())
     }
 
@@ -174,52 +182,6 @@ impl McpServerConfig {
     }
 }
 
-pub fn is_floating_npm_version(args: &[String]) -> bool {
-    let mut args = args.iter().peekable();
-    while let Some(argument) = args.next() {
-        match argument.as_str() {
-            "-y" | "--yes" | "--quiet" => continue,
-            "-p" | "--package" => {
-                let _ = args.next();
-                continue;
-            }
-            value if value.starts_with('-') => continue,
-            package => return !has_exact_npm_version(package),
-        }
-    }
-    false
-}
-
-fn has_exact_npm_version(package: &str) -> bool {
-    let Some((_, version)) = package.rsplit_once('@') else {
-        return false;
-    };
-    let mut components = version
-        .split(['-', '+'])
-        .next()
-        .unwrap_or_default()
-        .split('.');
-    matches!(
-        (
-            components.next(),
-            components.next(),
-            components.next(),
-            components.next(),
-        ),
-        (Some(major), Some(minor), Some(patch), None)
-            if [major, minor, patch]
-                .into_iter()
-                .all(|component| !component.is_empty()
-                    && component.chars().all(|character| character.is_ascii_digit()))
-    )
-}
-
-fn is_npx_command(command: &str) -> bool {
-    Path::new(command)
-        .file_name()
-        .is_some_and(|name| name == "npx")
-}
-
 #[derive(Debug, Clone)]
 pub struct ConfiguredMcpServer {
     pub config_key: String,
@@ -228,8 +190,12 @@ pub struct ConfiguredMcpServer {
     pub source: McpConfigSource,
 }
 
+/// The file envelope stays tolerant: a document copied from another tool may
+/// carry keys such as `$schema`, and one unrecognized key must not make every
+/// server in the file unreachable. The nested `toolFilter` and `oauth` objects
+/// keep `deny_unknown_fields`, where a typo changes behavior silently.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct McpFile {
     #[serde(default)]
     mcp_servers: BTreeMap<String, McpServerConfig>,
@@ -339,12 +305,6 @@ fn configured_servers_from_file(
         .into_iter()
         .map(|(name, config)| {
             config.validate(&name)?;
-            if is_npx_command(&config.command) && is_floating_npm_version(&config.args) {
-                warn!(
-                    server = %name,
-                    "MCP server uses a floating npx package version; pin an exact @x.y.z version"
-                );
-            }
             Ok(ConfiguredMcpServer {
                 config_key: connector_config_key(path, &name)?,
                 name,
@@ -437,11 +397,151 @@ fn set_tool_filter_in_file(
     })
 }
 
+/// Set one tool's desired effective state while retaining all unrelated
+/// include/exclude rules. `true` means this tool must be allowed by the final
+/// filter; a pre-existing broader rule is reported instead of being weakened.
+pub fn set_global_tool_enabled(
+    cfg: &AppConfig,
+    name: &str,
+    raw_name: &str,
+    enabled: bool,
+) -> Result<bool, AppError> {
+    set_tool_enabled_in_file(&global_mcp_path(cfg)?, name, raw_name, enabled)
+}
+
+pub fn set_project_tool_enabled(
+    cfg: &AppConfig,
+    workspace_root: &Path,
+    name: &str,
+    raw_name: &str,
+    enabled: bool,
+) -> Result<bool, AppError> {
+    set_tool_enabled_in_file(
+        &project_mcp_path(cfg, workspace_root)?,
+        name,
+        raw_name,
+        enabled,
+    )
+}
+
+fn set_tool_enabled_in_file(
+    path: &Path,
+    name: &str,
+    raw_name: &str,
+    enabled: bool,
+) -> Result<bool, AppError> {
+    if raw_name.is_empty() {
+        return Err(AppError::Config("MCP tool name cannot be empty".into()));
+    }
+    let exact_pattern = globset::escape(raw_name);
+    mutate_mcp_file(path, |file| {
+        let server = file.mcp_servers.get_mut(name).ok_or_else(|| {
+            AppError::Tool(format!("unknown MCP server '{name}' in {}", path.display()))
+        })?;
+        let before = server.tool_filter.clone();
+        let mut next = before.clone();
+        let current = ToolFilterMatcher::compile(&before)?;
+        if enabled {
+            // New writes use an escaped exact pattern. For historical ordinary
+            // names this is the same text; a historical wildcard remains
+            // untouched because it cannot safely be identified as one tool.
+            next.exclude.retain(|pattern| pattern != &exact_pattern);
+            let included = next.include.is_empty()
+                || ToolFilterMatcher::compile(&ToolFilter {
+                    include: next.include.clone(),
+                    exclude: Vec::new(),
+                })?
+                .allows(raw_name);
+            if !included && !next.include.contains(&exact_pattern) {
+                next.include.push(exact_pattern.clone());
+            }
+        } else if current.allows(raw_name) && !next.exclude.contains(&exact_pattern) {
+            next.exclude.push(exact_pattern.clone());
+        }
+
+        if !ToolFilterMatcher::compile(&next)?.allows(raw_name) && enabled {
+            return Err(AppError::Tool(
+                "此工具被配置中的批量规则禁用，请打开配置文件修改。".into(),
+            ));
+        }
+        let changed = next != before;
+        if changed {
+            server.tool_filter = next;
+        }
+        Ok((changed, changed))
+    })
+}
+
+fn build_glob_set(patterns: &[String]) -> Result<globset::GlobSet, AppError> {
+    let mut builder = globset::GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(globset::Glob::new(pattern).map_err(|error| {
+            AppError::Config(format!("invalid MCP tool filter '{pattern}': {error}"))
+        })?);
+    }
+    builder
+        .build()
+        .map_err(|error| AppError::Config(format!("build MCP tool filter: {error}")))
+}
+
+/// Server-level keys Tomcat no longer reads. They stay tolerated on purpose: a
+/// key this version does not understand must never take the whole file down, or
+/// an old `tomcat init` file would leave every MCP server unusable.
+const IGNORED_SERVER_KEYS: &[(&str, &str)] = &[
+    (
+        "startupTimeoutMs",
+        "moved to [connector.mcp].startup_timeout_ms in tomcat.config.toml",
+    ),
+    (
+        "callTimeoutMs",
+        "moved to [connector.mcp].call_timeout_ms in tomcat.config.toml",
+    ),
+    (
+        "maxConcurrentCalls",
+        "moved to [connector.mcp].max_concurrent_calls in tomcat.config.toml",
+    ),
+    (
+        "trusted",
+        "replaced by one-time project trust; approve the project when Tomcat asks",
+    ),
+    (
+        "integrity",
+        "replaced by one-time project trust; just delete this key",
+    ),
+];
+
+fn warn_about_ignored_server_keys(path: &Path, raw: &serde_json::Value) {
+    let Some(servers) = raw.get("mcpServers").and_then(serde_json::Value::as_object) else {
+        return;
+    };
+    for (name, definition) in servers {
+        for (key, remedy) in IGNORED_SERVER_KEYS {
+            if definition.get(key).is_some() {
+                tracing::warn!(
+                    file = %path.display(),
+                    server = %name,
+                    ignored_key = %key,
+                    "MCP server '{}' contains key '{}' that this version ignores ({remedy})",
+                    name,
+                    key
+                );
+            }
+        }
+    }
+}
+
 fn read_mcp_file(path: &Path) -> Result<McpFile, AppError> {
     if !path.exists() {
         return Ok(McpFile::default());
     }
     let content = std::fs::read_to_string(path)?;
+    let raw: serde_json::Value = serde_json::from_str(&content).map_err(|error| {
+        AppError::Config(format!(
+            "parse MCP configuration '{}': {error}",
+            path.display()
+        ))
+    })?;
+    warn_about_ignored_server_keys(path, &raw);
     serde_json::from_str(&content).map_err(|error| {
         AppError::Config(format!(
             "parse MCP configuration '{}': {error}",
@@ -515,22 +615,32 @@ fn write_mcp_file(path: &Path, file: &McpFile) -> Result<(), AppError> {
     crate::infra::platform::write_file_atomic(path, &contents)
 }
 
-const fn default_startup_timeout_ms() -> u64 {
-    30_000
-}
-
-const fn default_call_timeout_ms() -> u64 {
-    120_000
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        add_global_server, connector_config_key, global_mcp_path, is_floating_npm_version,
-        load_server_definitions, load_servers, project_mcp_path, McpConfigSource, McpServerConfig,
+        add_global_server, connector_config_key, global_mcp_path, load_server_definitions,
+        load_servers, project_mcp_path, set_global_tool_enabled, McpConfigSource, McpServerConfig,
+        ToolFilterMatcher, IGNORED_SERVER_KEYS,
     };
     use crate::infra::config::get_work_dir;
     use crate::AppConfig;
+
+    #[derive(Clone)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("lock test log")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn minimal_cursor_style_server_uses_optional_field_defaults() {
@@ -555,13 +665,153 @@ mod tests {
         assert_eq!(servers[0].source, McpConfigSource::Global);
         assert!(servers[0].config.env.is_empty());
         assert!(servers[0].config.cwd.is_none());
-        assert!(!servers[0].config.trusted);
-        assert!(servers[0].config.integrity.is_none());
-        assert_eq!(servers[0].config.startup_timeout_ms, 30_000);
-        assert_eq!(servers[0].config.call_timeout_ms, 120_000);
         assert!(servers[0].config.tool_filter.include.is_empty());
         assert!(servers[0].config.tool_filter.exclude.is_empty());
     }
+    #[test]
+    fn legacy_server_keys_are_tolerated_without_rewriting_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let path = global_mcp_path(&cfg).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let contents = serde_json::json!({
+            "mcpServers": {
+                "legacy": {
+                    "command": "node",
+                    "startupTimeoutMs": 30_000,
+                    "callTimeoutMs": 90_000,
+                    "maxConcurrentCalls": 16,
+                    "trusted": true,
+                    "integrity": "obsolete"
+                }
+            }
+        })
+        .to_string();
+        std::fs::write(&path, &contents).unwrap();
+
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer({
+                let logs = std::sync::Arc::clone(&logs);
+                move || SharedLogWriter(std::sync::Arc::clone(&logs))
+            })
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let servers = load_servers(&cfg, None).expect("legacy keys must not block loading");
+        assert_eq!(servers.len(), 1);
+        let serialized = serde_json::to_string(&servers[0].config).unwrap();
+        let rendered = String::from_utf8(logs.lock().expect("lock test log").clone())
+            .expect("warnings must be UTF-8");
+        for key in [
+            "startupTimeoutMs",
+            "callTimeoutMs",
+            "maxConcurrentCalls",
+            "trusted",
+            "integrity",
+        ] {
+            assert!(
+                !serialized.contains(key),
+                "ignored legacy key leaked into output: {key}"
+            );
+            assert!(
+                IGNORED_SERVER_KEYS
+                    .iter()
+                    .any(|(ignored, _)| ignored == &key),
+                "legacy key must retain its ignored-with-WARN classification: {key}"
+            );
+            assert!(
+                rendered.contains(&format!("ignored_key={key}")),
+                "missing ignored-key warning for {key}: {rendered}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
+    }
+
+    #[test]
+    fn truly_unknown_fields_are_silently_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let path = global_mcp_path(&cfg).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"future":{"command":"node","futureField":{"version":2}}}}"#,
+        )
+        .unwrap();
+
+        let servers = load_servers(&cfg, None).expect("unknown server fields must be ignored");
+        assert_eq!(servers[0].name, "future");
+        assert_eq!(servers[0].config.command, "node");
+    }
+
+    #[test]
+    fn single_tool_mutation_uses_exact_patterns_and_preserves_batch_rules() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let server: McpServerConfig = serde_json::from_value(serde_json::json!({
+            "command": "node", "args": []
+        }))
+        .expect("server configuration");
+        add_global_server(&cfg, "fake".to_string(), server).expect("add server");
+
+        assert!(set_global_tool_enabled(&cfg, "fake", "capture", false).expect("disable capture"));
+        let disabled = load_servers(&cfg, None).expect("load disabled server");
+        assert_eq!(disabled[0].config.tool_filter.exclude, ["capture"]);
+        assert!(!ToolFilterMatcher::compile(&disabled[0].config.tool_filter)
+            .expect("compile disabled filter")
+            .allows("capture"));
+
+        assert!(set_global_tool_enabled(&cfg, "fake", "capture", true).expect("re-enable capture"));
+        let enabled = load_servers(&cfg, None).expect("load enabled server");
+        assert!(enabled[0].config.tool_filter.exclude.is_empty());
+        assert!(ToolFilterMatcher::compile(&enabled[0].config.tool_filter)
+            .expect("compile enabled filter")
+            .allows("capture"));
+
+        let mixed_include = r#"{"mcpServers":{"fake":{"command":"node","args":[],"toolFilter":{"include":["status*"]}}}}"#;
+        std::fs::write(global_mcp_path(&cfg).expect("global config"), mixed_include)
+            .expect("write mixed include rule");
+        assert!(set_global_tool_enabled(&cfg, "fake", "capture", true)
+            .expect("add exact capture include beside a glob"));
+        let mixed_enabled = load_servers(&cfg, None).expect("load mixed include rule");
+        assert_eq!(
+            mixed_enabled[0].config.tool_filter.include,
+            ["status*", "capture"]
+        );
+        assert!(!set_global_tool_enabled(&cfg, "fake", "capture", true)
+            .expect("same desired state is a no-op"));
+
+        let special_name = "capture[1]";
+        std::fs::write(
+            global_mcp_path(&cfg).expect("global config"),
+            r#"{"mcpServers":{"fake":{"command":"node","args":[],"toolFilter":{"include":["status*"]}}}}"#,
+        )
+        .expect("reset mixed include rule");
+        assert!(set_global_tool_enabled(&cfg, "fake", special_name, true)
+            .expect("escape special-character tool name"));
+        let special_enabled = load_servers(&cfg, None).expect("load special tool rule");
+        assert!(
+            ToolFilterMatcher::compile(&special_enabled[0].config.tool_filter)
+                .expect("compile special tool rule")
+                .allows(special_name)
+        );
+        let path = global_mcp_path(&cfg).expect("global config");
+        let batch_rule = r#"{"mcpServers":{"fake":{"command":"node","args":[],"toolFilter":{"exclude":["capture*"]}}}}"#;
+        std::fs::write(&path, batch_rule).expect("write batch rule");
+        let error = set_global_tool_enabled(&cfg, "fake", "capture", true)
+            .expect_err("a single tool must not weaken a batch rule");
+        assert!(error.to_string().contains("批量规则禁用"));
+        assert_eq!(
+            std::fs::read_to_string(path).expect("read unchanged batch rule"),
+            batch_rule
+        );
+    }
+
     #[test]
     fn no_project_root_loads_global_mcp_without_touching_a_project_path() {
         let temp = tempfile::tempdir().expect("temporary directory");
@@ -681,18 +931,68 @@ mod tests {
     }
 
     #[test]
-    fn current_schema_rejects_unknown_fields_without_rewriting_the_file() {
+    fn unknown_fields_are_ignored_without_rewriting_the_file() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let mut cfg = AppConfig::default();
         cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
         let path = global_mcp_path(&cfg).expect("global config path");
         std::fs::create_dir_all(path.parent().expect("config parent")).expect("config parent");
-        let raw = r#"{"mcpServers":{"browser":{"command":"node","args":[],"removedField":true}}}"#;
-        std::fs::write(&path, raw).expect("write malformed current config");
+        let raw = r#"{"$schema":"https://example.invalid/mcp.schema.json","comment":"kept until a save","mcpServers":{"browser":{"command":"node","args":[],"removedField":true}}}"#;
+        std::fs::write(&path, raw).expect("write config with unknown fields");
 
-        let error = load_servers(&cfg, None).expect_err("unknown fields must be rejected");
-        assert!(error.to_string().contains("removedField"));
+        let servers = load_servers(&cfg, None).expect("unknown fields must be ignored");
+        assert_eq!(servers[0].config.command, "node");
         assert_eq!(std::fs::read_to_string(path).expect("read source"), raw);
+    }
+
+    #[test]
+    fn unknown_fields_inside_tool_filter_remain_errors() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let path = global_mcp_path(&cfg).expect("global config path");
+        std::fs::create_dir_all(path.parent().expect("config parent")).expect("config parent");
+        let raw =
+            r#"{"mcpServers":{"browser":{"command":"node","toolFilter":{"unknownRule":true}}}}"#;
+        std::fs::write(&path, raw).expect("write invalid nested configuration");
+
+        let error = load_servers(&cfg, None)
+            .expect_err("toolFilter must keep rejecting unknown fields")
+            .to_string();
+        assert!(error.contains("unknownRule"), "{error}");
+        assert_eq!(std::fs::read_to_string(path).expect("read source"), raw);
+    }
+
+    #[test]
+    fn saving_drops_unrecognized_keys_without_touching_known_ones() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let path = global_mcp_path(&cfg).expect("global config path");
+        std::fs::create_dir_all(path.parent().expect("config parent")).expect("config parent");
+        std::fs::write(
+            &path,
+            r#"{"$schema":"https://example.invalid/mcp.schema.json","mcpServers":{"browser":{"command":"node","args":["bridge"],"futureField":true}}}"#,
+        )
+        .expect("write config with unknown fields");
+
+        assert!(set_global_tool_enabled(&cfg, "browser", "capture", false)
+            .expect("save a known configuration mutation"));
+        let saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("read rewritten configuration"),
+        )
+        .expect("parse rewritten configuration");
+        assert!(saved.get("$schema").is_none());
+        assert!(saved["mcpServers"]["browser"].get("futureField").is_none());
+        assert_eq!(saved["mcpServers"]["browser"]["command"], "node");
+        assert_eq!(
+            saved["mcpServers"]["browser"]["args"],
+            serde_json::json!(["bridge"])
+        );
+        assert_eq!(
+            saved["mcpServers"]["browser"]["toolFilter"]["exclude"],
+            serde_json::json!(["capture"])
+        );
     }
 
     #[test]
@@ -743,26 +1043,5 @@ mod tests {
             .map(|server| server.name)
             .collect::<Vec<_>>();
         assert_eq!(names, ["left", "right"]);
-    }
-
-    #[test]
-    fn identifies_floating_npx_package_versions() {
-        assert!(is_floating_npm_version(&[
-            "-y".to_string(),
-            "browser-mcp".to_string()
-        ]));
-        assert!(is_floating_npm_version(&[
-            "--yes".to_string(),
-            "@scope/browser-mcp@latest".to_string(),
-        ]));
-        assert!(is_floating_npm_version(&[
-            "-y".to_string(),
-            "browser-mcp@next".to_string(),
-        ]));
-        assert!(!is_floating_npm_version(&[
-            "-y".to_string(),
-            "@playwright/mcp@0.0.79".to_string(),
-            "--headless".to_string(),
-        ]));
     }
 }

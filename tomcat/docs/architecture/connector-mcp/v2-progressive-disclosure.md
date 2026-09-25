@@ -2,7 +2,7 @@
 
 > 适用范围：v1（[v1-connector-foundation.md](./v1-connector-foundation.md)）把 MCP 工具**像插件一样注册进 `ToolRegistry`、随 `list_tools` 进每轮前缀**（§3.1 R4「Option B」）。上线后暴露出**一根病根、两个症状**：*易变且完整的 MCP 工具目录被放进了每次都要重发的缓存前缀* → ① 中转站 prompt 缓存基本打不中；② server 越接越多、前缀越堆越大、token 爆炸。v2 改走**渐进式披露**根治之。
 > 关联：总纲/导航见 [../mcp-client.md](../mcp-client.md)；v1 基座设计见 [v1-connector-foundation.md](./v1-connector-foundation.md)；研发计划 `~/.cursor/plans/mcp缓存前缀失稳整改_66bd7b9d.plan.md`（以本文为单一真相，计划只承载 todos / 交付顺序 / 测试清单）。
-> 单一真相：v2 只**修订** v1 的 §3.1 R4「MCP 工具进 `ToolRegistry` / 进前缀」与 R9「Ready 即注册工具」两处；**R2 传输、R5 图片回流、R7 信任、R10 配置形状等其余 v1 决策全部继续有效**。凡与本文冲突处，以本文为准。
+> 当前运行时设置与信任规则见 [MCP 配置升级与项目信任](./mcp-upgrade-project-trust.md)。本文聚焦渐进式工具披露；早期关于 v1 R7 指纹/逐服务批准及 JSON 运行键的文字属于历史设计，不能作为当前实现依据。
 
 **一句话定位**：v2 = 「让 MCP 的完整工具目录**根本不进缓存前缀**」的整改。前缀里只常驻**三个泛化元工具 `tool_search / tool_describe / tool_call` + 一条写死的 `connectors` skill 索引**；「有哪些 MCP、各有哪些工具」这类**易变**信息，改由**元工具结果**承载并做**两级渐进式披露**（`tool_search()` 列 source → `tool_search(source=…)` 列该 source 工具 → `tool_describe` 取 schema → `tool_call` 调用，随工具结果进消息体），`connectors` skill 保持**静态、只教方法**（与 `verify` 同一物化范式，skill 子系统对连接器零认知）；扇出/大数据场景由**复用现成插件 JS VM**（无新沙箱、无新 IPC）的代码执行承担。结果：前缀恒小恒稳、O(1) 与 server 数无关 —— 缓存失效与 token 爆炸两症状一并消失（关键设计取舍见 §2.3、发现示例见 §2.2）。
 
@@ -386,10 +386,10 @@ core/skill/ 定义端口(skill 拥有插槽)             组合根/装配层实�
 
 `core/connector/mod.rs` 的 `ConnectorRegistry::spawn_connect_all` 不再接收 `ToolRegistry`，也**不再把 per-tool `mcp__{server}__{tool}` 注册进共享 `ToolRegistry`**；连接/断开只更新 `McpManager` 目录。于是 `observe_tool_surface / list_tools` 再也看不到任何**具体** MCP 工具或 schema（`tool_call` 描述中的常量 canonical-name 语法除外），**前缀与连接时序彻底解耦**——连上、断开、接多少 server，前缀逐字节不变。
 
-### 2.5 图片回流与信任（复用 v1，不变）
+### 2.5 图片回流与项目信任
 
 - **图片**：`tool_call` 是内置工具、走 `tool_exec` 路径（不经注册表分支），因此其 handler 必须对 MCP 结果跑与 `extract_tool_result_media` 等价的逻辑——**按结果内容里的 `{type:"image", mimeType, data}` 块判定**（而非按工具名），把图片转成 `follow_up_parts` 的 `InputImage`。这与 [v1 §3.2.1 / §4.3](./v1-connector-foundation.md) 完全一致，只是触发点从「注册表 Ok 臂」搬到「`tool_call` 内置分支」。
-- **信任**：`tool_call` 入口仍受 [v1 §3.1 R7](./v1-connector-foundation.md) 约束——server 未信任/未连接则返回明确可行动错误；trust 仍绑命令指纹、在 connect 时把关。
+- **信任**：Global 连接器无需项目批准；未批准项目的 Workspace 连接器返回 `awaiting_project_trust`，不启动也不可 Login。用户批准项目根后，`tool_call` 仍要查当前连接和工具可用性，未连接就返回可行动错误；不再按服务或命令指纹确认。
 
 ### 2.6 决策清单 / 什么条件应推翻
 

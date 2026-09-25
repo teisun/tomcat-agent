@@ -81,6 +81,8 @@ impl StoredOAuthToken {
 struct TokenFile {
     #[serde(default)]
     servers: BTreeMap<String, StoredOAuthToken>,
+    #[serde(default)]
+    revisions: BTreeMap<String, u64>,
 }
 #[derive(Debug, Clone)]
 pub struct OAuthTokenStore {
@@ -88,6 +90,27 @@ pub struct OAuthTokenStore {
     lock: Arc<Mutex<()>>,
     lock_path: std::path::PathBuf,
 }
+
+impl TokenFile {
+    fn bump(&mut self, key: &str) -> Result<(), AppError> {
+        let revision = self.revisions.entry(key.to_owned()).or_default();
+        *revision = revision
+            .checked_add(1)
+            .ok_or_else(|| AppError::Config("OAuth credential revision exhausted".into()))?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CredentialSnapshot {
+    pub token: Option<StoredOAuthToken>,
+    revision: u64,
+}
+
+/// Commit capability supplied by the source owner. The caller holds its
+/// permission/generation boundary while the store performs credential CAS.
+pub(crate) type TokenCommit =
+    Arc<dyn Fn(&CredentialSnapshot, StoredOAuthToken) -> Result<bool, AppError> + Send + Sync>;
 
 impl OAuthTokenStore {
     pub fn open(cfg: &AppConfig) -> Result<Self, AppError> {
@@ -106,31 +129,57 @@ impl OAuthTokenStore {
     }
 
     pub fn load(&self, server_name: &str) -> Result<Option<StoredOAuthToken>, AppError> {
+        Ok(self.snapshot(server_name)?.token)
+    }
+
+    pub(crate) fn snapshot(&self, server_name: &str) -> Result<CredentialSnapshot, AppError> {
         let _guard = self.lock.lock();
         let _file_guard = self.acquire_file_lock()?;
-        Ok(self.read_file()?.servers.get(server_name).cloned())
+        let file = self.read_file()?;
+        Ok(CredentialSnapshot {
+            token: file.servers.get(server_name).cloned(),
+            revision: file.revisions.get(server_name).copied().unwrap_or_default(),
+        })
     }
 
     pub fn save(&self, server_name: &str, token: StoredOAuthToken) -> Result<(), AppError> {
         let _guard = self.lock.lock();
         let _file_guard = self.acquire_file_lock()?;
         let mut file = self.read_file()?;
+        file.bump(server_name)?;
         file.servers.insert(server_name.to_string(), token);
         self.write_file(&file)
     }
 
+    #[cfg(test)]
     fn save_if_current(
         &self,
         server_name: &str,
         expected: &StoredOAuthToken,
         updated: StoredOAuthToken,
     ) -> Result<bool, AppError> {
+        let snapshot = self.snapshot(server_name)?;
+        if snapshot.token.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        self.save_if_snapshot_current(server_name, &snapshot, updated)
+    }
+
+    pub(crate) fn save_if_snapshot_current(
+        &self,
+        server_name: &str,
+        expected: &CredentialSnapshot,
+        updated: StoredOAuthToken,
+    ) -> Result<bool, AppError> {
         let _guard = self.lock.lock();
         let _file_guard = self.acquire_file_lock()?;
         let mut file = self.read_file()?;
-        if file.servers.get(server_name) != Some(expected) {
+        if file.servers.get(server_name) != expected.token.as_ref()
+            || file.revisions.get(server_name).copied().unwrap_or_default() != expected.revision
+        {
             return Ok(false);
         }
+        file.bump(server_name)?;
         file.servers.insert(server_name.to_string(), updated);
         self.write_file(&file)?;
         Ok(true)
@@ -165,9 +214,8 @@ impl OAuthTokenStore {
         let _file_guard = self.acquire_file_lock()?;
         let mut file = self.read_file()?;
         let removed = file.servers.remove(server_name).is_some();
-        if removed {
-            self.write_file(&file)?;
-        }
+        file.bump(server_name)?;
+        self.write_file(&file)?;
         Ok(removed)
     }
     pub fn valid_access_token(&self, server_name: &str) -> Result<Option<String>, AppError> {
@@ -185,25 +233,18 @@ impl OAuthTokenStore {
         client: &reqwest::Client,
         server_name: &str,
     ) -> Result<Option<String>, AppError> {
-        let Some(token) = self.load(server_name)? else {
+        let snapshot = self.snapshot(server_name)?;
+        let Some(token) = snapshot.token.as_ref() else {
             return Ok(None);
         };
+        if token.access_token_is_valid() {
+            return Ok(Some(token.access_token.clone()));
+        }
         if token.refresh_token.is_none() {
-            if token
-                .expires_at
-                .is_some_and(|expires| expires <= now_secs() + TOKEN_EXPIRY_SKEW_SECS)
-            {
-                return Ok(None);
-            }
-            return Ok(Some(token.access_token));
+            return Ok(None);
         }
-        if token
-            .expires_at
-            .is_none_or(|expires| expires > now_secs() + TOKEN_EXPIRY_SKEW_SECS)
-        {
-            return Ok(Some(token.access_token));
-        }
-        self.refresh_loaded(client, server_name, token).await
+        self.refresh_checked(client, server_name, snapshot, None)
+            .await
     }
 
     pub async fn force_refresh(
@@ -211,21 +252,28 @@ impl OAuthTokenStore {
         client: &reqwest::Client,
         server_name: &str,
     ) -> Result<Option<String>, AppError> {
-        let Some(token) = self.load(server_name)? else {
-            return Ok(None);
-        };
-        if token.refresh_token.is_none() {
+        let snapshot = self.snapshot(server_name)?;
+        if snapshot
+            .token
+            .as_ref()
+            .is_none_or(|token| token.refresh_token.is_none())
+        {
             return Ok(None);
         }
-        self.refresh_loaded(client, server_name, token).await
+        self.refresh_checked(client, server_name, snapshot, None)
+            .await
     }
 
-    async fn refresh_loaded(
+    pub(crate) async fn refresh_checked(
         &self,
         client: &reqwest::Client,
         server_name: &str,
-        token: StoredOAuthToken,
+        snapshot: CredentialSnapshot,
+        commit: Option<&TokenCommit>,
     ) -> Result<Option<String>, AppError> {
+        let Some(token) = snapshot.token.as_ref() else {
+            return Ok(None);
+        };
         let refresh_token = token
             .refresh_token
             .clone()
@@ -273,7 +321,11 @@ impl OAuthTokenStore {
         // The refresh runs outside the file lock. Commit only if the exact
         // credential that started it is still current: logout, removal, or a
         // newer login wins over this late network response.
-        if !self.save_if_current(server_name, &token, updated)? {
+        let saved = match commit {
+            Some(commit) => commit(&snapshot, updated)?,
+            None => self.save_if_snapshot_current(server_name, &snapshot, updated)?,
+        };
+        if !saved {
             return Ok(None);
         }
         Ok(Some(refreshed.access_token))
@@ -365,17 +417,42 @@ pub struct OAuthDiscovery {
 
 impl OAuthDiscovery {
     pub async fn discover(client: &reqwest::Client, mcp_url: &str) -> Result<Self, AppError> {
+        Self::discover_inner(client, mcp_url, None, true).await
+    }
+
+    /// Background connection preparation must not perform an uncounted MCP
+    /// initialize POST. Reuse a real handshake's challenge when available.
+    pub(crate) async fn discover_for_connection(
+        client: &reqwest::Client,
+        mcp_url: &str,
+        challenge: Option<&str>,
+    ) -> Result<Self, AppError> {
+        Self::discover_inner(client, mcp_url, challenge, false).await
+    }
+
+    async fn discover_inner(
+        client: &reqwest::Client,
+        mcp_url: &str,
+        supplied_challenge: Option<&str>,
+        allow_initialize_probe: bool,
+    ) -> Result<Self, AppError> {
         let base = Url::parse(mcp_url)
             .map_err(|error| AppError::Config(format!("invalid MCP URL: {error}")))?;
-        let response = client.get(base.clone()).send().await.map_err(|error| {
-            AppError::Tool(format!("MCP OAuth discovery request failed: {error}"))
-        })?;
-        let challenge = response
-            .headers()
-            .get(reqwest::header::WWW_AUTHENTICATE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let challenge = if challenge.is_some() {
+        let challenge = if let Some(challenge) = supplied_challenge {
+            Some(challenge.to_owned())
+        } else {
+            let response = client
+                .get(base.clone())
+                .send()
+                .await
+                .map_err(|_| AppError::Tool("MCP OAuth discovery request failed".into()))?;
+            response
+                .headers()
+                .get(reqwest::header::WWW_AUTHENTICATE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let challenge = if challenge.is_some() || !allow_initialize_probe {
             challenge
         } else {
             let response = client
@@ -420,10 +497,7 @@ impl OAuthDiscovery {
             found
         };
         let resource_url = resource_url.ok_or_else(|| {
-            AppError::Tool(format!(
-                "MCP server '{}' did not advertise protected-resource metadata",
-                base
-            ))
+            AppError::Tool("MCP server did not advertise protected-resource metadata".into())
         })?;
         let resource_response = client.get(resource_url).send().await.map_err(|error| {
             AppError::Tool(format!("fetch MCP protected-resource metadata: {error}"))
@@ -488,6 +562,20 @@ struct TokenResponse {
 pub async fn authorize(
     client: &reqwest::Client,
     store: &OAuthTokenStore,
+    server_name: &str,
+    mcp_url: &str,
+    oauth: &McpOAuthConfig,
+    open_browser: bool,
+) -> Result<StoredOAuthToken, AppError> {
+    let stored = authorize_token(client, server_name, mcp_url, oauth, open_browser).await?;
+    store.save(server_name, stored.clone())?;
+    Ok(stored)
+}
+
+/// Obtain a credential without writing it. The source owner commits only after
+/// rechecking its generation, login nonce, permission and credential revision.
+pub(crate) async fn authorize_token(
+    client: &reqwest::Client,
     server_name: &str,
     mcp_url: &str,
     oauth: &McpOAuthConfig,
@@ -621,33 +709,32 @@ pub async fn authorize(
             query.append_pair("scope", &scopes.join(" "));
         }
     }
-    let callback_state = state.clone();
-    let mut callback_task = tokio::spawn(async move { callback.wait(&callback_state).await });
-    if open_browser {
-        open_url(authorization_url.as_str())?;
-    } else {
-        let response = client
-            .get(authorization_url)
-            .send()
+    // Scoped futures, not a detached callback task. Dropping this authorization
+    // future (logout, source replacement, cancellation) closes the listener.
+    let callback = async {
+        tokio::time::timeout(std::time::Duration::from_secs(240), callback.wait(&state))
             .await
-            .map_err(|error| AppError::Tool(format!("drive test OAuth authorization: {error}")))?;
-        if !response.status().is_success() {
-            return Err(AppError::Tool(format!(
-                "test OAuth authorization returned HTTP {}",
-                response.status()
-            )));
-        }
-    }
-    let code = match tokio::time::timeout(std::time::Duration::from_secs(240), &mut callback_task)
-        .await
-    {
-        Ok(result) => result
-            .map_err(|error| AppError::Tool(format!("OAuth callback task failed: {error}")))??,
-        Err(_) => {
-            callback_task.abort();
-            return Err(AppError::Tool("OAuth authorization timed out".to_string()));
-        }
+            .map_err(|_| AppError::Tool("OAuth authorization timed out".into()))?
     };
+    let navigate = async {
+        if open_browser {
+            open_url(authorization_url.as_str())?;
+        } else {
+            let response = client
+                .get(authorization_url)
+                .send()
+                .await
+                .map_err(|_| AppError::Tool("drive test OAuth authorization failed".into()))?;
+            if !response.status().is_success() {
+                return Err(AppError::Tool(format!(
+                    "test OAuth authorization returned HTTP {}",
+                    response.status()
+                )));
+            }
+        }
+        Ok::<_, AppError>(())
+    };
+    let (code, ()) = tokio::try_join!(callback, navigate)?;
     let mut form = vec![
         ("grant_type", "authorization_code".to_string()),
         ("code", code),
@@ -695,7 +782,6 @@ pub async fn authorize(
         client_id,
         client_secret,
     };
-    store.save(server_name, stored.clone())?;
     Ok(stored)
 }
 fn open_url(url: &str) -> Result<(), AppError> {
@@ -856,6 +942,32 @@ mod tests {
         }))
         .expect("authorization metadata");
         assert_eq!(metadata.token_endpoint, "http://127.0.0.1/token");
+    }
+
+    #[test]
+    fn credential_revision_rejects_identical_token_aba_and_empty_logout_across_stores() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().to_string_lossy().into_owned());
+        let store = OAuthTokenStore::open(&cfg).unwrap();
+        let other = OAuthTokenStore::open(&cfg).unwrap();
+        let token: super::StoredOAuthToken = serde_json::from_value(serde_json::json!({"accessToken":"same-token", "tokenEndpoint":"http://127.0.0.1/token", "clientId":"fixture"})).unwrap();
+        let empty = store.snapshot("empty").unwrap();
+        assert!(!other.remove("empty").unwrap());
+        assert!(!store
+            .save_if_snapshot_current("empty", &empty, token.clone())
+            .unwrap());
+        store.save("server", token.clone()).unwrap();
+        let before = store.snapshot("server").unwrap();
+        other.remove("server").unwrap();
+        other.save("server", token.clone()).unwrap();
+        assert!(!store
+            .save_if_snapshot_current("server", &before, token.clone())
+            .unwrap());
+        let current = store.snapshot("server").unwrap();
+        assert!(store
+            .save_if_snapshot_current("server", &current, token)
+            .unwrap());
     }
 
     #[test]

@@ -22,17 +22,41 @@ pub struct ServeFixture {
     pub workspace: PathBuf,
 }
 
+// A standalone test instance owns a disposable HOME and workspace. Do not let
+// parent-agent markers, configuration overrides, proxies or real keys escape
+// into it; this never mutates the parent process environment or real config.
+fn isolated_serve_command(home: &Path) -> StdCommand {
+    let mut command = StdCommand::new(cargo_bin_path());
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy();
+        if name == "TOMCAT_AGENT_ACTIVE"
+            || name.starts_with("TOMCAT__")
+            || name.ends_with("_API_KEY")
+            || matches!(
+                name.to_ascii_lowercase().as_str(),
+                "http_proxy" | "https_proxy" | "all_proxy"
+            )
+        {
+            command.env_remove(key);
+        }
+    }
+    command
+        .env("HOME", home)
+        .env("SHELL", "/bin/zsh")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost");
+    command
+}
+
 pub fn setup_serve_fixture(base_url: &str) -> ServeFixture {
     let home = tempfile::tempdir().expect("temp home");
     let home_path = home.path().to_path_buf();
     let workspace = home_path.join("workspace");
     fs::create_dir_all(&workspace).expect("create workspace");
 
-    let init_output = StdCommand::new(cargo_bin_path())
-        .env_remove("TOMCAT__LLM__DEFAULT_MODEL")
+    let init_output = isolated_serve_command(&home_path)
         .args(["init"])
-        .env("HOME", &home_path)
-        .env("SHELL", "/bin/zsh")
+        .current_dir(&workspace)
         .output()
         .expect("run tomcat init");
     assert!(
@@ -220,10 +244,7 @@ impl Drop for ServeChild {
 }
 
 pub fn spawn_serve_child(fx: &ServeFixture) -> ServeChild {
-    let mut child = StdCommand::new(cargo_bin_path())
-        .env_remove("TOMCAT__LLM__DEFAULT_MODEL")
-        .env("HOME", &fx.home_path)
-        .env("SHELL", "/bin/zsh")
+    let mut child = isolated_serve_command(&fx.home_path)
         .env("OPENAI_API_KEY", "dummy-key")
         .env("MOONSHOT_API_KEY", "dummy-key")
         .env("ANTHROPIC_API_KEY", "dummy-key")
@@ -323,6 +344,64 @@ pub fn spawn_scripted_openai_stream_server_with_auto_title(
     responses: Vec<ScriptedResponse>,
 ) -> ScriptedOpenAiServer {
     spawn_scripted_openai_stream_server_internal(responses, true)
+}
+
+/// Concurrent content-routed LLM for multi-session tests. Delays belong in the
+/// MCP fixture, not this router; existing FIFO helpers keep their old behavior.
+pub fn spawn_routed_openai_stream_server<F>(route: F) -> ScriptedOpenAiServer
+where
+    F: Fn(&Value) -> ScriptedResponse + Send + Sync + 'static,
+{
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let stop = shutdown.clone();
+    let route = Arc::new(route);
+    let join = thread::spawn(move || {
+        let mut workers = Vec::new();
+        while !stop.load(Ordering::Relaxed) {
+            let (mut stream, _) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("accept routed LLM request: {error}"),
+            };
+            let stop = stop.clone();
+            let route = route.clone();
+            let captured = captured.clone();
+            workers.push(thread::spawn(move || {
+                stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
+                let request = read_http_request_with_shutdown(&mut stream, Some(&stop));
+                if stop.load(Ordering::Relaxed) || request.trim().is_empty() { return; }
+                captured.lock().unwrap().push(request.clone());
+                let (headers, parts) = if request_is_session_title_request(&request) {
+                    session_title_response(&request, "MCP session")
+                } else {
+                    ("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n", route(&extract_json_body(&request)).parts)
+                };
+                if stream.write_all(headers.as_bytes()).is_err() { return; }
+                for part in parts {
+                    assert_eq!(part.delay_ms, 0, "use MCP barriers, not LLM timing, to prove concurrency");
+                    if stop.load(Ordering::Relaxed) || stream.write_all(part.body.as_bytes()).is_err() || stream.flush().is_err() { return; }
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("routed LLM worker");
+        }
+    });
+    ScriptedOpenAiServer {
+        base_url: format!("http://{addr}"),
+        requests,
+        join: Some(join),
+        shutdown,
+    }
 }
 
 fn spawn_scripted_openai_stream_server_internal(
@@ -560,12 +639,22 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    read_http_request_with_shutdown(stream, None)
+}
+
+fn read_http_request_with_shutdown(
+    stream: &mut std::net::TcpStream,
+    shutdown: Option<&AtomicBool>,
+) -> String {
     let mut raw = Vec::new();
     let mut chunk = [0u8; 4096];
     let mut body_start = None;
     let mut content_len = None;
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
+        if shutdown.is_some_and(|shutdown| shutdown.load(Ordering::Relaxed)) {
+            break;
+        }
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => {

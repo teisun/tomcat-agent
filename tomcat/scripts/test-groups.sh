@@ -73,6 +73,7 @@ TOMCAT_INTEGRATION_MANUAL_CASES=(
 )
 
 TOMCAT_INTEGRATION_SERIAL_TESTS=(
+  project_trust_cli_tests
   serve_multi_session
   serve_ask_question_tests
   serve_robustness_tests

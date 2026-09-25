@@ -235,6 +235,52 @@ pub struct ConnectorContext {
     pub workspace_root: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTrustPayload {
+    pub project_root: String,
+    pub trusted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+pub use crate::core::connector::mcp::manager::{
+    RecoveryStatus as ConnectorRecoveryProgress, ReloadReceipt as ConnectorReloadReceipt,
+};
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorToolPayload {
+    pub model_name: String,
+    pub raw_name: String,
+    pub label: String,
+    pub description: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListConnectorToolsPayload {
+    pub config_key: String,
+    /// Decimal text avoids losing the backend u64 identity in JavaScript.
+    pub generation: String,
+    pub attempt: u8,
+    pub tools: Vec<ConnectorToolPayload>,
+}
+
+/// The result of setting one tool's desired enabled state. These fields describe
+/// this command's durable write and current-process cache synchronization; they
+/// are not an asynchronous job or a second tool catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetConnectorToolEnabledResponse {
+    pub config_key: String,
+    pub raw_name: String,
+    pub enabled: bool,
+    pub config_saved: bool,
+    pub runtime_applied: bool,
+}
+
 /// UI 通过 stdin 发送给 `tomcat serve` 的命令帧。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -389,6 +435,18 @@ pub enum ServeCommand {
         id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
+    GetProjectTrust {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    TrustProject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        project_root: String,
+    },
+    #[serde(rename_all = "camelCase")]
     ListConnectors {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -421,6 +479,8 @@ pub enum ServeCommand {
         auth: Option<String>,
         scope: ConnectorScope,
         context: ConnectorContext,
+        #[serde(default)]
+        trust_project: bool,
     },
     #[serde(rename_all = "camelCase")]
     RemoveConnector {
@@ -428,15 +488,6 @@ pub enum ServeCommand {
         id: Option<String>,
         #[serde(rename = "configKey")]
         config_key: String,
-        context: ConnectorContext,
-    },
-    #[serde(rename_all = "camelCase")]
-    SetConnectorTrust {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(rename = "configKey")]
-        config_key: String,
-        trusted: bool,
         context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
@@ -489,6 +540,17 @@ pub enum ServeCommand {
         include: Vec<String>,
         #[serde(default)]
         exclude: Vec<String>,
+        context: ConnectorContext,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetConnectorToolEnabled {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(rename = "configKey")]
+        config_key: String,
+        #[serde(rename = "rawName")]
+        raw_name: String,
+        enabled: bool,
         context: ConnectorContext,
     },
     #[serde(rename_all = "camelCase")]
@@ -707,17 +769,19 @@ impl ServeCommand {
             | Self::RemoveModel { id, .. }
             | Self::SetProviderKey { id, .. }
             | Self::ListProviderKeys { id, .. }
+            | Self::GetProjectTrust { id, .. }
+            | Self::TrustProject { id, .. }
             | Self::ListConnectors { id, .. }
             | Self::ListConnectorTools { id, .. }
             | Self::AddConnector { id, .. }
             | Self::RemoveConnector { id, .. }
-            | Self::SetConnectorTrust { id, .. }
             | Self::TestConnector { id, .. }
             | Self::LoginConnector { id, .. }
             | Self::CancelLoginConnector { id, .. }
             | Self::LogoutConnector { id, .. }
             | Self::ReloadConnector { id, .. }
             | Self::SetConnectorToolFilter { id, .. }
+            | Self::SetConnectorToolEnabled { id, .. }
             | Self::NewSession { id, .. }
             | Self::SwitchSession { id, .. }
             | Self::GetMessages { id, .. }
@@ -766,17 +830,19 @@ impl ServeCommand {
             | Self::RemoveModel { .. }
             | Self::SetProviderKey { .. }
             | Self::ListProviderKeys { .. }
+            | Self::GetProjectTrust { .. }
+            | Self::TrustProject { .. }
             | Self::ListConnectors { .. }
             | Self::ListConnectorTools { .. }
             | Self::AddConnector { .. }
             | Self::RemoveConnector { .. }
-            | Self::SetConnectorTrust { .. }
             | Self::TestConnector { .. }
             | Self::LoginConnector { .. }
             | Self::CancelLoginConnector { .. }
             | Self::LogoutConnector { .. }
             | Self::ReloadConnector { .. }
             | Self::SetConnectorToolFilter { .. }
+            | Self::SetConnectorToolEnabled { .. }
             | Self::ListSessions { .. } => None,
         }
     }
@@ -817,17 +883,19 @@ impl ServeCommand {
             Self::RemoveModel { .. } => "remove_model",
             Self::SetProviderKey { .. } => "set_provider_key",
             Self::ListProviderKeys { .. } => "list_provider_keys",
+            Self::GetProjectTrust { .. } => "get_project_trust",
+            Self::TrustProject { .. } => "trust_project",
             Self::ListConnectors { .. } => "list_connectors",
             Self::ListConnectorTools { .. } => "list_connector_tools",
             Self::AddConnector { .. } => "add_connector",
             Self::RemoveConnector { .. } => "remove_connector",
-            Self::SetConnectorTrust { .. } => "set_connector_trust",
             Self::TestConnector { .. } => "test_connector",
             Self::LoginConnector { .. } => "login_connector",
             Self::CancelLoginConnector { .. } => "cancel_login_connector",
             Self::LogoutConnector { .. } => "logout_connector",
             Self::ReloadConnector { .. } => "reload_connector",
             Self::SetConnectorToolFilter { .. } => "set_connector_tool_filter",
+            Self::SetConnectorToolEnabled { .. } => "set_connector_tool_enabled",
             Self::NewSession { .. } => "new_session",
             Self::SwitchSession { .. } => "switch_session",
             Self::GetMessages { .. } => "get_messages",
@@ -1245,6 +1313,21 @@ impl ResponseFrame {
             session_id,
             error: Some(error.into()),
             payload: None,
+        }
+    }
+    pub fn error_with_payload(
+        id: Option<String>,
+        session_id: Option<String>,
+        error: impl Into<String>,
+        payload: Value,
+    ) -> Self {
+        Self {
+            frame_type: "response".to_string(),
+            id,
+            success: false,
+            session_id,
+            error: Some(error.into()),
+            payload: Some(payload),
         }
     }
 }

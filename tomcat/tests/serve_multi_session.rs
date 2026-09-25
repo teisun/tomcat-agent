@@ -1,5 +1,9 @@
 mod common;
 
+#[cfg(feature = "test-streamable-http-server")]
+#[path = "support/serve_mcp_multi_session.rs"]
+mod mcp_cases;
+
 use std::time::Duration;
 
 use serde_json::json;

@@ -17,6 +17,45 @@ fn validate_config_accepts_valid() {
 }
 
 #[test]
+fn mcp_runtime_validation_rejects_bad_values_and_accepts_bounds() {
+    for (name, invalid) in [
+        ("startup_timeout_ms", 0),
+        ("startup_timeout_ms", u64::MAX),
+        ("call_timeout_ms", 0),
+        ("call_timeout_ms", u64::MAX),
+    ] {
+        let mut cfg = AppConfig::default();
+        match name {
+            "startup_timeout_ms" => cfg.connector.mcp.startup_timeout_ms = invalid,
+            _ => cfg.connector.mcp.call_timeout_ms = invalid,
+        }
+        assert!(validate_config(&cfg)
+            .unwrap_err()
+            .to_string()
+            .contains(name));
+    }
+    for invalid in [0, 65] {
+        let mut cfg = AppConfig::default();
+        cfg.connector.mcp.max_concurrent_calls = invalid;
+        assert!(validate_config(&cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("max_concurrent_calls"));
+    }
+    for valid in [1, 64] {
+        let mut cfg = AppConfig::default();
+        cfg.connector.mcp.max_concurrent_calls = valid;
+        assert!(validate_config(&cfg).is_ok());
+    }
+    for invalid in [
+        "[connector.mcp]\ncall_timeout_ms = -1\n",
+        "[connector.mcp]\nmax_concurrent_calls = \"many\"\n",
+    ] {
+        assert!(toml::from_str::<AppConfig>(invalid).is_err());
+    }
+}
+
+#[test]
 fn validate_config_rejects_invalid_session_default_mode() {
     let mut cfg = AppConfig::default();
     cfg.session.default_mode = "invalid".to_string();

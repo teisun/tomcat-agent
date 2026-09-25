@@ -3,4 +3,5 @@
 //! 仅触达公共 API（`scan` / `format_preview` / `SecretHit`），
 //! 与 [`crate::core::security::secrets`] 模块文档保持冻结的 4 条规则集对齐。
 
+mod project_trust_test;
 mod secrets_test;

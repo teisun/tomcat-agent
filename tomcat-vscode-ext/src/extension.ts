@@ -49,6 +49,7 @@ import {
   type SessionStatePayload,
 } from "./serveClient/sessionRouter";
 import { TomcatMessenger } from "./serveClient/TomcatMessenger";
+import { ProjectTrustPrompt } from "./ui/ProjectTrustPrompt";
 import type { ServeEvent } from "./serveClient/wire";
 import {
   createHostFrameMessageId,
@@ -830,6 +831,23 @@ export async function activate(
     isExecutableAvailable: () => resolvedExecutable.found,
     messenger,
   });
+  const projectTrustPrompt = new ProjectTrustPrompt({
+    getDefaultCwd,
+    messenger,
+    confirm: async (root) => {
+      const choice = await vscode.window.showWarningMessage(
+        "Trust this project?",
+        { modal: true, detail: root },
+        { title: "Trust project" },
+        { title: "Not now", isCloseAffordance: true },
+      );
+      return choice?.title === "Trust project";
+    },
+    reportError: (error, visible) => {
+      appendOutput(output, "error", `project trust: ${String(error)}`);
+      if (visible) void vscode.window.showErrorMessage(`Could not trust this project: ${String(error)}`);
+    },
+  });
   const supervisorStateSubscription = supervisor.onStateChange((state) => {
     appendOutput(
       output,
@@ -851,6 +869,7 @@ export async function activate(
       if (firstRunSetupInProgress) {
         stopFirstRunSetup();
       }
+      void projectTrustPrompt.onServeReady(state.result);
       if (reconnected && webviewProvider) {
         void webviewProvider.refreshAfterServeRestart();
       }
@@ -962,6 +981,7 @@ export async function activate(
     onModelCatalogChanged: () => webviewProvider.refreshModelCatalog(),
     selectConnectorWorkspaceRoot,
   });
+  const projectTrustRefresh = projectTrustPrompt.onDidTrustProject(() => settingsPanel.onProjectTrusted());
   const selectionCodeLensProvider = new TomcatSelectionCodeLensProvider();
   let selectionCodeLensTimer: ReturnType<typeof setTimeout> | undefined;
   const scheduleSelectionCodeLensRefresh = () => {
@@ -1413,6 +1433,7 @@ export async function activate(
     stderrSubscription.dispose();
     frameErrorSubscription.dispose();
     exitLoggingSubscription.dispose();
+    projectTrustRefresh.dispose();
     supervisorStateSubscription.dispose();
     settingsPanel.dispose();
     for (const waiter of [...eventWaiters]) {

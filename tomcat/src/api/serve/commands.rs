@@ -13,7 +13,7 @@ use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use tracing::warn;
 
 use crate::api::chat::commands::{
@@ -32,6 +32,7 @@ use crate::core::llm::{
     ProviderKeyInput, ThinkingLevel,
 };
 use crate::core::plan_runtime::PlanRuntimeError;
+use crate::core::security::project_trust::ProjectTrustStore;
 use crate::core::session::attachments::{
     safe_filename, validate_file_bytes, validate_image_bytes, AttachmentBlobStore,
     REBUILDABLE_MAX_BYTES,
@@ -53,8 +54,8 @@ use super::types::{
     IngestAttachmentResponse, ListModelsPayload, ListProviderKeysPayload, ListSessionsScope,
     OutFrame, RemoveModelResponse, ResponseFrame, ServeAttachment, ServeAttachmentKind,
     ServeCommand, ServeContentSegment, ServeContextRefKind, ServeContextReference,
-    ServeMessageParams, ServeSessionMode, SetPlanModeAction, SetProviderKeyResponse,
-    UpsertModelResponse,
+    ServeMessageParams, ServeSessionMode, SetConnectorToolEnabledResponse, SetPlanModeAction,
+    SetProviderKeyResponse, UpsertModelResponse,
 };
 use super::{
     cleanup_session_slot, create_session_slot, register_slot_hooks, run_slot_turn, ServeState,
@@ -64,6 +65,23 @@ pub(crate) enum TurnAck {
     Accepted,
     Payload(serde_json::Value),
     Silent,
+}
+
+fn set_connector_tool_enabled_payload(
+    config_key: &str,
+    raw_name: &str,
+    enabled: bool,
+    config_saved: bool,
+    runtime_applied: bool,
+) -> Value {
+    serde_json::to_value(SetConnectorToolEnabledResponse {
+        config_key: config_key.to_owned(),
+        raw_name: raw_name.to_owned(),
+        enabled,
+        config_saved,
+        runtime_applied,
+    })
+    .expect("connector tool-enable response must serialize")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1337,8 +1355,74 @@ pub(crate) async fn handle_command(
                 ),
             )))?;
         }
+        ServeCommand::GetProjectTrust { id, path } => {
+            let root = match ProjectTrustStore::root_for(std::path::Path::new(&path)) {
+                Ok(root) => root,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            let decision =
+                ProjectTrustStore::open(&state.cfg).and_then(|store| store.is_trusted(&root));
+            let payload = super::types::ProjectTrustPayload {
+                project_root: root.to_string_lossy().into_owned(),
+                trusted: decision.as_ref().copied().unwrap_or(false),
+                error: decision.err().map(|error| render_error_message(&error)),
+            };
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(serde_json::to_value(payload)?),
+            )))?;
+        }
+        ServeCommand::TrustProject { id, project_root } => {
+            let result = ProjectTrustStore::open(&state.cfg).and_then(|store| {
+                let root = ProjectTrustStore::validate_root(std::path::Path::new(&project_root))?;
+                store.trust(&root)?;
+                ConnectorRegistry::project_trusted(&state.cfg, &root)?;
+                Ok(root)
+            });
+            let root = match result {
+                Ok(root) => root,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(serde_json::to_value(super::types::ProjectTrustPayload {
+                    project_root: root.to_string_lossy().into_owned(),
+                    trusted: true,
+                    error: None,
+                })?),
+            )))?;
+        }
         ServeCommand::ListConnectors { id, context } => {
-            let connector = resolve_connector_registry_for_context(&state, &context)?;
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
             let global_config_path = match global_mcp_path(&state.cfg) {
                 Ok(path) => path,
                 Err(error) => {
@@ -1382,7 +1466,9 @@ pub(crate) async fn handle_command(
                         "source": status.source.wire_scope(),
                         "overridden": status.overridden,
                         "state": status.state.code(),
-                        "trust": status.trust,
+                        "generation": status.generation,
+                        "attempt": status.attempt,
+                        "recovery": status.recovery,
                         "toolCount": status.tool_count,
                         "resourceCount": status.resource_count,
                         "transport": if configured.as_ref().is_some_and(|server| server.config.url.is_some()) { "http" } else { "stdio" },
@@ -1422,7 +1508,14 @@ pub(crate) async fn handle_command(
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(json!({ "connectors": servers, "configPaths": config_paths })),
+                Some(json!({
+                    "connectors": servers,
+                    "configPaths": config_paths,
+                    "project": connector.mcp_manager().project_root().map(|root| json!({
+                        "root": root.to_string_lossy().to_string(),
+                        "trusted": connector.mcp_manager().project_trusted(),
+                    })),
+                })),
             )))?;
         }
         ServeCommand::ListConnectorTools {
@@ -1442,8 +1535,8 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            let tools = match connector.mcp_manager().list_tools(&config_key) {
-                Ok(tools) => tools,
+            let catalog = match connector.mcp_manager().tool_catalog_snapshot(&config_key) {
+                Ok(catalog) => catalog,
                 Err(error) => {
                     send_error(
                         &state,
@@ -1453,22 +1546,27 @@ pub(crate) async fn handle_command(
                     )?;
                     return Ok(());
                 }
-            }
-            .into_iter()
-            .map(|tool| {
-                json!({
-                    "modelName": tool.name,
-                    "rawName": tool.raw_name,
-                    "label": tool.raw_name,
-                    "description": tool.description,
-                    "enabled": tool.enabled,
-                })
-            })
-            .collect::<Vec<_>>();
+            };
+            let payload = super::types::ListConnectorToolsPayload {
+                config_key: catalog.config_key,
+                generation: catalog.generation,
+                attempt: catalog.attempt,
+                tools: catalog
+                    .tools
+                    .into_iter()
+                    .map(|tool| super::types::ConnectorToolPayload {
+                        model_name: tool.name,
+                        label: tool.raw_name.clone(),
+                        raw_name: tool.raw_name,
+                        description: tool.description,
+                        enabled: tool.enabled,
+                    })
+                    .collect(),
+            };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(json!({ "configKey": config_key, "tools": tools })),
+                Some(serde_json::to_value(payload)?),
             )))?;
         }
         ServeCommand::AddConnector {
@@ -1483,7 +1581,17 @@ pub(crate) async fn handle_command(
             auth,
             scope,
             context,
+            trust_project,
         } => {
+            if trust_project && scope != ConnectorScope::Workspace {
+                send_error(
+                    &state,
+                    id,
+                    state.registry.active_session_id(),
+                    "trustProject is only valid for Workspace connectors",
+                )?;
+                return Ok(());
+            }
             let connector = match resolve_connector_registry_for_context(&state, &context) {
                 Ok(connector) => connector,
                 Err(error) => {
@@ -1549,14 +1657,19 @@ pub(crate) async fn handle_command(
                 oauth,
                 env,
                 cwd: None,
-                trusted: false,
-                integrity: None,
-                startup_timeout_ms: 30_000,
-                call_timeout_ms: 120_000,
                 tool_filter: ToolFilter::default(),
             };
             let use_workspace = matches!(scope, ConnectorScope::Workspace);
             let workspace_root = connector_context_workspace_root(&context)?;
+            let project_root = if use_workspace {
+                Some(ProjectTrustStore::root_for(
+                    workspace_root.as_deref().ok_or_else(|| {
+                        AppError::Config("workspace connector requires a project root".into())
+                    })?,
+                )?)
+            } else {
+                None
+            };
             let config_path = if use_workspace {
                 let workspace_root = workspace_root.as_deref().ok_or_else(|| {
                     AppError::Config(
@@ -1587,29 +1700,29 @@ pub(crate) async fn handle_command(
                 )?;
                 return Ok(());
             }
-            ConnectorRegistry::synchronize_cached_config_change(
-                &state.cfg,
-                if use_workspace {
-                    McpConfigSource::Project
-                } else {
-                    McpConfigSource::Global
-                },
-                workspace_root.as_deref(),
-            )?;
             let manager = connector.mcp_manager();
-            let post_save_error = if let Some(token) = static_bearer {
-                manager
-                    .save_static_bearer(&config_key, token, token_resource)
-                    .err()
-                    .map(|error| render_error_message(&error))
-            } else if use_workspace {
-                manager
-                    .approve(&config_key)
-                    .err()
-                    .map(|error| render_error_message(&error))
-            } else {
-                None
-            };
+            let post_save_error = (|| -> Result<(), AppError> {
+                ConnectorRegistry::synchronize_cached_config_change(
+                    &state.cfg,
+                    if use_workspace {
+                        McpConfigSource::Project
+                    } else {
+                        McpConfigSource::Global
+                    },
+                    workspace_root.as_deref(),
+                )?;
+                if trust_project {
+                    let root = project_root.as_deref().expect("validated workspace root");
+                    ProjectTrustStore::open(&state.cfg)?.trust(root)?;
+                    ConnectorRegistry::project_trusted(&state.cfg, root)?;
+                }
+                if let Some(token) = static_bearer {
+                    manager.save_static_bearer(&config_key, token, token_resource)?;
+                }
+                Ok(())
+            })()
+            .err()
+            .map(|error| render_error_message(&error));
             if let Some(error) = post_save_error {
                 state.writer.send(OutFrame::Response(ResponseFrame::ok(
                     id,
@@ -1624,12 +1737,15 @@ pub(crate) async fn handle_command(
                 )))?;
                 return Ok(());
             }
-            let connect_key = config_key.clone();
-            tokio::spawn(async move {
-                if let Err(error) = manager.connect_server(&connect_key).await {
-                    warn!(config_key = %connect_key, error = %error, "connector configuration saved but server is not ready yet");
-                }
-            });
+            let connection_started = !use_workspace || manager.project_trusted();
+            if connection_started {
+                let connect_key = config_key.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = manager.connect_server(&connect_key).await {
+                        warn!(config_key = %connect_key, error = %error, "connector configuration saved but server is not ready yet");
+                    }
+                });
+            }
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
@@ -1637,7 +1753,7 @@ pub(crate) async fn handle_command(
                     "name": name,
                     "configKey": config_key,
                     "configSaved": true,
-                    "connectionStarted": true,
+                    "connectionStarted": connection_started,
                 })),
             )))?;
         }
@@ -1696,44 +1812,6 @@ pub(crate) async fn handle_command(
                 Some(json!({ "configKey": config_key, "removed": removed })),
             )))?;
         }
-        ServeCommand::SetConnectorTrust {
-            id,
-            config_key,
-            trusted,
-            context,
-        } => {
-            let connector = match resolve_connector_registry_for_context(&state, &context) {
-                Ok(connector) => connector,
-                Err(error) => {
-                    send_error(
-                        &state,
-                        id,
-                        state.registry.active_session_id(),
-                        render_error_message(&error),
-                    )?;
-                    return Ok(());
-                }
-            };
-            let result = if trusted {
-                connector.approve_and_connect(&config_key).await
-            } else {
-                connector.deny(&config_key)
-            };
-            if let Err(error) = result {
-                send_error(
-                    &state,
-                    id,
-                    state.registry.active_session_id(),
-                    render_error_message(&error),
-                )?;
-                return Ok(());
-            }
-            state.writer.send(OutFrame::Response(ResponseFrame::ok(
-                id,
-                state.registry.active_session_id(),
-                Some(json!({ "configKey": config_key, "trusted": trusted })),
-            )))?;
-        }
         ServeCommand::TestConnector {
             id,
             config_key,
@@ -1751,7 +1829,7 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            if let Err(error) = connector.mcp_manager().reconnect_server(&config_key).await {
+            if let Err(error) = connector.mcp_manager().test_server(&config_key).await {
                 send_error(
                     &state,
                     id,
@@ -1861,19 +1939,22 @@ pub(crate) async fn handle_command(
                     return Ok(());
                 }
             };
-            if let Err(error) = connector.mcp_manager().reconnect_server(&config_key).await {
-                send_error(
-                    &state,
-                    id,
-                    state.registry.active_session_id(),
-                    render_error_message(&error),
-                )?;
-                return Ok(());
-            }
+            let receipt = match connector.mcp_manager().request_reconnect(&config_key) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    send_error(
+                        &state,
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                    )?;
+                    return Ok(());
+                }
+            };
             state.writer.send(OutFrame::Response(ResponseFrame::ok(
                 id,
                 state.registry.active_session_id(),
-                Some(json!({ "configKey": config_key, "reloaded": true })),
+                Some(serde_json::to_value(receipt)?),
             )))?;
         }
         ServeCommand::SetConnectorToolFilter {
@@ -1936,6 +2017,107 @@ pub(crate) async fn handle_command(
                 id,
                 state.registry.active_session_id(),
                 Some(json!({ "configKey": config_key, "updated": true })),
+            )))?;
+        }
+        ServeCommand::SetConnectorToolEnabled {
+            id,
+            config_key,
+            raw_name,
+            enabled,
+            context,
+        } => {
+            let connector = match resolve_connector_registry_for_context(&state, &context) {
+                Ok(connector) => connector,
+                Err(error) => {
+                    state
+                        .writer
+                        .send(OutFrame::Response(ResponseFrame::error_with_payload(
+                            id,
+                            state.registry.active_session_id(),
+                            render_error_message(&error),
+                            set_connector_tool_enabled_payload(
+                                &config_key,
+                                &raw_name,
+                                enabled,
+                                false,
+                                false,
+                            ),
+                        )))?;
+                    return Ok(());
+                }
+            };
+            let manager = connector.mcp_manager();
+            let source = match manager.configured_server_source(&config_key) {
+                Ok(source) => source,
+                Err(error) => {
+                    state
+                        .writer
+                        .send(OutFrame::Response(ResponseFrame::error_with_payload(
+                            id,
+                            state.registry.active_session_id(),
+                            render_error_message(&error),
+                            set_connector_tool_enabled_payload(
+                                &config_key,
+                                &raw_name,
+                                enabled,
+                                false,
+                                false,
+                            ),
+                        )))?;
+                    return Ok(());
+                }
+            };
+            if let Err(error) =
+                manager.set_configured_tool_enabled(&config_key, &raw_name, enabled, &state.cfg)
+            {
+                let message = render_error_message(&error.error);
+                state
+                    .writer
+                    .send(OutFrame::Response(ResponseFrame::error_with_payload(
+                        id,
+                        state.registry.active_session_id(),
+                        message,
+                        set_connector_tool_enabled_payload(
+                            &config_key,
+                            &raw_name,
+                            enabled,
+                            error.config_saved,
+                            false,
+                        ),
+                    )))?;
+                return Ok(());
+            }
+            if let Err(error) = ConnectorRegistry::synchronize_cached_config_change(
+                &state.cfg,
+                source,
+                manager.workspace_root(),
+            ) {
+                state
+                    .writer
+                    .send(OutFrame::Response(ResponseFrame::error_with_payload(
+                        id,
+                        state.registry.active_session_id(),
+                        render_error_message(&error),
+                        set_connector_tool_enabled_payload(
+                            &config_key,
+                            &raw_name,
+                            enabled,
+                            true,
+                            false,
+                        ),
+                    )))?;
+                return Ok(());
+            }
+            state.writer.send(OutFrame::Response(ResponseFrame::ok(
+                id,
+                state.registry.active_session_id(),
+                Some(set_connector_tool_enabled_payload(
+                    &config_key,
+                    &raw_name,
+                    enabled,
+                    true,
+                    true,
+                )),
             )))?;
         }
         ServeCommand::DiscardDetachedSession { id, session_id } => {
@@ -2111,7 +2293,7 @@ fn resolve_connector_registry_for_context(
     let workspace_root = connector_context_workspace_root(context)?;
     // ConnectorRegistry owns the process-wide identity cache. Settings and chat
     // both resolve through it, keyed by the explicit workspace context.
-    ConnectorRegistry::new(&state.cfg, workspace_root.as_deref())
+    ConnectorRegistry::create_and_start(&state.cfg, workspace_root.as_deref())
 }
 
 fn resolve_model_catalog_snapshot(

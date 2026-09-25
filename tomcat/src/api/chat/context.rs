@@ -200,7 +200,7 @@ fn connector_registry_for(
     config
         .connector
         .enabled
-        .then(|| ConnectorRegistry::new(config, workspace_root))
+        .then(|| ConnectorRegistry::create_and_start(config, workspace_root))
         .transpose()
 }
 
@@ -247,10 +247,18 @@ fn checkpoint_store_for(
     store
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ScopeRuntimeCacheKey {
+    resource_root: std::path::PathBuf,
+    // Equal discovery directories do not imply equal connector scopes: a
+    // default Serve session has no explicit Workspace MCP configuration.
+    project_root: Option<std::path::PathBuf>,
+}
+
 fn scope_runtime_cache(
-) -> &'static RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>> {
+) -> &'static RwLock<std::collections::HashMap<ScopeRuntimeCacheKey, Weak<ScopeContainer>>> {
     static CACHE: OnceLock<
-        RwLock<std::collections::HashMap<std::path::PathBuf, Weak<ScopeContainer>>>,
+        RwLock<std::collections::HashMap<ScopeRuntimeCacheKey, Weak<ScopeContainer>>>,
     > = OnceLock::new();
     CACHE.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
 }
@@ -269,11 +277,15 @@ fn scope_runtime_for(
 ) -> Result<Arc<ScopeContainer>, AppError> {
     let disable_cache = overrides.fetch_http_client.is_some();
     let key = std::fs::canonicalize(&resource_root).unwrap_or(resource_root);
+    let cache_key = ScopeRuntimeCacheKey {
+        resource_root: key.clone(),
+        project_root: session_project_root.clone(),
+    };
     let current_tokio_handle = tokio::runtime::Handle::try_current().ok();
     if !disable_cache {
         if let Some(existing) = scope_runtime_cache()
             .read()
-            .get(&key)
+            .get(&cache_key)
             .and_then(Weak::upgrade)
         {
             if current_tokio_handle.is_none() || existing.dispatcher.has_tokio_handle() {
@@ -284,7 +296,7 @@ fn scope_runtime_for(
 
     let mut cache_guard = (!disable_cache).then(|| scope_runtime_cache().write());
     if let Some(cache) = cache_guard.as_ref() {
-        if let Some(existing) = cache.get(&key).and_then(Weak::upgrade) {
+        if let Some(existing) = cache.get(&cache_key).and_then(Weak::upgrade) {
             if current_tokio_handle.is_none() || existing.dispatcher.has_tokio_handle() {
                 return Ok(existing);
             }
@@ -301,7 +313,14 @@ fn scope_runtime_for(
         bash_task_registry,
         session,
     };
-    let connector_registry = connector_registry_for(config, session_project_root.as_deref())?;
+    let (connector_registry, connector_load_error) =
+        match connector_registry_for(config, session_project_root.as_deref()) {
+            Ok(registry) => (registry, None),
+            Err(error) => {
+                tracing::warn!(error = %error, "MCP connectors unavailable; chat continues");
+                (None, Some(error.to_string()))
+            }
+        };
     let (tool_registry, function_registry, plugin_manager, plugin_function_invoker, dispatcher) =
         build_plugin_runtime(
             config,
@@ -318,12 +337,13 @@ fn scope_runtime_for(
         plugin_manager,
         plugin_function_invoker,
         connector_registry,
+        connector_load_error,
         dispatcher,
         skill_set: Arc::new(RwLock::new(crate::core::skill::SkillSet::default())),
         skill_discovery_handle: Arc::new(tokio::sync::Mutex::new(None)),
     });
     if let Some(cache) = cache_guard.as_mut() {
-        cache.insert(key, Arc::downgrade(&shared));
+        cache.insert(cache_key, Arc::downgrade(&shared));
     }
     Ok(shared)
 }
@@ -998,13 +1018,6 @@ impl ChatContext {
 
     pub(crate) fn skill_set_snapshot(&self) -> crate::core::skill::SkillSet {
         self.scope_services.skill_set.read().clone()
-    }
-
-    pub(crate) async fn spawn_connector_startup_if_needed(&self) {
-        let Some(connectors) = self.global_services.connector_registry.as_ref() else {
-            return;
-        };
-        connectors.spawn_connect_all().await;
     }
 
     pub(crate) async fn spawn_skill_discovery_if_needed(&self) {
@@ -1748,6 +1761,41 @@ mod tests {
             .expect("disabled connector registry")
             .is_none());
     }
+    #[tokio::test]
+    async fn legacy_mcp_keys_do_not_disable_connectors() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let path = crate::core::connector::mcp::config::global_mcp_path(&cfg).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"old":{"command":"node","trusted":true,"integrity":"obsolete"}}}"#,
+        )
+        .unwrap();
+
+        assert!(connector_registry_for(&cfg, Some(temp.path()))
+            .expect("legacy MCP keys must not disable connectors")
+            .is_some());
+    }
+
+    #[test]
+    fn malformed_mcp_json_disables_mcp_without_failing_chat() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.storage.work_dir = Some(temp.path().join("work").to_string_lossy().into_owned());
+        let path = crate::core::connector::mcp::config::global_mcp_path(&cfg).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"mcpServers":{"broken": "#).unwrap();
+
+        let error = match connector_registry_for(&cfg, Some(temp.path())) {
+            Ok(_) => panic!("invalid JSON should isolate the MCP runtime"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("parse MCP configuration"), "{error}");
+        assert!(error.contains(&path.to_string_lossy().to_string()));
+    }
+
     #[test]
     #[serial(env_lock)]
     fn child_agent_dispatch_runtime_preserves_resolved_model_provider_pair() {

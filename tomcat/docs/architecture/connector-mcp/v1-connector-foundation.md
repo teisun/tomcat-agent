@@ -10,7 +10,9 @@
 
 ---
 
-> **文档已拆分（总-分结构）**：本文是 **v1（连接器基座 / Option B）** 的完整设计。**总纲/导航**见 [../mcp-client.md](../mcp-client.md)；**v2（渐进式披露，最新且权威）**见 [v2-progressive-disclosure.md](./v2-progressive-disclosure.md)。v1 的 §3.1 **R4「MCP 工具进 `ToolRegistry`/进前缀」与 R9「Ready 即注册」已被 v2 修订**（该做法导致缓存前缀失稳 + token 爆炸）；本文其余决策（R2 传输 / R5 图片回流 / R7 信任 / R10 配置形状）**v1 仍是权威**。凡与 v2 冲突处以 v2 为准。
+> **当前实现优先读 [MCP 配置升级与项目信任](./mcp-upgrade-project-trust.md)**：本文是 v1 的历史设计记录。早期图示、R7 命令指纹/逐服务批准、`trusted`/`integrity`、旧 JSON 超时键以及 §5/§8 的旧测试路径不再是当前契约；当前实现以新指南和实际代码为准。本文保留这些段落仅供设计溯源，请勿直接复制旧示例或旧命令。
+> **兼容性与保存边界（2026-09）**：当前实现读取 `mcp.json` 时容忍文件顶层和 server 对象里的未知/历史字段；`startupTimeoutMs`、`callTimeoutMs`、`maxConcurrentCalls`、`trusted`、`integrity` 会记录 WARN 后忽略，不能让同文件的其他 server 不可用。读取不改写字节；但下一次 Add、Remove 或工具开关保存会从 Tomcat 的类型化配置重新序列化，**移除所有无法识别的键**。`toolFilter` 与 `oauth` 这类有明确行为语义的嵌套对象仍严格拒绝未知键；要长期保留的注释或其他工具的 metadata 不应放在 `mcp.json`。
+>
 
 ---
 
@@ -215,9 +217,9 @@ PreSpawn 信任检查（spawn 前唯一关卡，默认无感放行）
 | **R4 工具面接入 + 执行路径** | MCP 工具独立走 `mcp__` 前缀分支，还是统一进 `ToolRegistry`？ | **采用 Option B**：MCP 工具**注册进 `ToolRegistry`**（`plugin_id="mcp:{server}"`，由 `CompositeToolExecutor` 按 `plugin_id` 路由到 `McpManager`）；`list_tools` 自动并入工具面；`tool_dispatcher` 的 registry 分支用向后兼容的**工具结果媒体转换器**把 `content[].type=="image"` 变成 `follow_up_parts`（纯文本插件 no-op）。**拒绝**独立 `mcp__` 前缀分支。 | Tomcat：`core/tools/contract/registry.rs::{ToolExecutor,ToolRegistry}`（`DefaultToolRegistry` 持单个 `executor: Arc<dyn ToolExecutor>`、`call_tool` 的边界是 JSON）、`tool_dispatcher.rs::extract_tool_result_media`、`run_loop/mod.rs::observe_tool_surface`、`ext/plugin_tool_executor.rs`；外部：`codex convert_mcp_content_to_items`（JSON image→input_image 转换器范式）、`pi_agent_rust` 把 MCP 挂成原生 `Tool`。 | 注册表/插件契约是 JSON-only（`execute -> serde_json::Value`，因插件是 rquickjs JS-VM），原来没有承载原生图片 parts 的通道（是「无通道」非「清空」）。Option B 的三件事：(1) `McpToolExecutor` 包 `McpManager`，`CompositeToolExecutor` 按 `tool.plugin_id` 路由；(2) `ConnectorRegistry` 在 Ready 后把工具登记进 `DefaultToolRegistry`；(3) dispatcher 用 `extract_tool_result_media()` 将 text 写进 `model_text`、将 image 块转 `follow_up_parts`。它复用上传/内容类型的共享原语，不调用 `read.rs` 的流程；对纯文本插件 no-op。 | 未入选：(a) surface-only + `mcp__` 前缀分支——可见/执行两条路不对称、靠字符串前缀路由有抢注隐患；(b) 注册进 registry 但不加转换器——图片仍回流不了。 | 让 MCP 和插件走同一条注册表路；出口加一个「JSON 图片→图片」的小转换器，MCP 截图就能回来，纯文本插件不受影响。 |
 | **R5 图片回流** | MCP 返回的 image 块怎么进模型？ | **采用** `follow_up_parts` + `InputImage`（小图内联、大图 Files API）；**拒绝**新建一套上传策略。 | Tomcat：`tool_dispatcher.rs::mcp_image_part`、`core/llm/types.rs::ChatMessageContentPart::{image_base64_data,image_file_id}`、`openai_files.rs::upload_decision_by_size`；外部：`codex/.../models.rs::convert_mcp_content_to_items`（image→input_image）、`cline::toToolResultImagePart`。 | MCP 路径单独解 base64 和组装结果；base64 块小图调 `image_base64_data(mime,b64)`，大图落临时文件后调 `OpenAiFilesRuntime::resolve_or_upload_path`，文本块进 `model_text`，非 vision 由 `degrade_unsupported_multimodal` 降级。共享的是大小策略、Files API 和消息类型，不是假称调用 `read.rs`。 | 未入选：continue `callTool.ts` 把 image 当不支持类型报错**丢弃**；pi_agent_rust 图片入 `details` 不回流。拒因：视觉验收场景丢图 = 功能失效。 | 图片会进模型能看见的 InputImage；上传规则共用，流程不复制。 |
 | **R6 配置位置与作用域** | MCP server 声明放哪、怎么分层？ | **采用** `~/.tomcat/mcp.json`（全局）+ 项目级 `<workspace>/.tomcat/mcp.json`（覆盖同名 server）+ 主配置 `[connector] enabled` 总开关；init 物化 curated 默认；**形状见 R10** | Tomcat：`infra/config/types/skills.rs::SkillsConfig` 分层、`skill/builtin.rs::materialize_builtin_skills` 物化；外部：**Cursor `~/.cursor/mcp.json`(user) + 项目 `.cursor/mcp.json`**、`vscode` `mcp.json`(user/workspace)、Claude Desktop `claude_desktop_config.json` | 设计：user + workspace 两层，workspace 覆盖同名 server；`~/.tomcat/mcp.json` 缺失时物化含 `@playwright/mcp` 的默认；总开关在主配置 `[connector] enabled`。理由：与 Cursor/VS Code/Claude 的 user+workspace 分层完全一致，用户心智零迁移；server 列表独立于主配置便于整文件分享/复制粘贴。 | 未入选：全塞进主 `tomcat.config.toml` 的 `[mcp.servers]`（codex 式）。拒因：server 列表频繁增删、且要能整段从生态复制粘贴，独立文件更合适。 | server 清单放独立的 `mcp.json`，全局一份、项目可覆盖，自带一条 playwright。 |
- | **R10 配置形状与最小字段面（对齐生态标准 `mcpServers`）** | 用什么配置形状、必填几个字段？ | **采用** 生态标准 `mcpServers` JSON 形状：`{"mcpServers":{"<name>":{"command","args","env?","cwd?"}}}`。**每条 server 必填 `command`+`args`**（`name`=键），`env`/`cwd` 可选；`trusted`/`integrity`/`startupTimeoutMs`/`callTimeoutMs`/`toolFilter` 为**可选高级字段**；**MCP 配置无 `type` 字段**（文件即声明 MCP，连接器类型在代码侧）。curated `playwright` 预置。**推翻条件**：当 CLI/A2A 真正落地、需同一文件声明多类型连接器时，再评估引入带 `type` 的统一配置（届时 `mcp.json` 可作为 MCP 专属子配置保留）。 | 外部：**Cursor `~/.cursor/mcp.json`（用户截图：`{mcpServers:{playwright:{command:"npx",args:["-y","@executeautomation/playwright-mcp-server"]}}}`）**、Claude Desktop `claude_desktop_config.json`（同 `mcpServers`）、`vscode`（`servers`）、`codex` `[mcp_servers]`（TOML 变体，字段同构）；Tomcat：`core/connector/mcp/config.rs::McpServerConfig`（serde `#[serde(default)]` 实现可选字段） | **第一性原理**：Cursor「配置简单」的根因**不是字段少，而是用了生态既成事实的 `mcpServers` 形状——从任意 MCP 文档/注册表/Cursor 复制一段即用、零翻译**，这是最大的 onboarding 收益。必填收敛到 `command`+`args`（与 Cursor 完全一致）降低认知负担；把 `type` 留在代码而非强推进配置，避免在 CLI/A2A 尚未落地时就摊派「本不该存在」的字段（YAGNI）。安全所需的 `trusted`/`integrity` 做**可选**；裸 Cursor 片段写入全局配置会直接连接，项目配置则按 R7 的首见确认规则处理。 | 未入选：(a) 自研多类型配置文件 + 每条带 `type`（本文初稿 R6）——拒因：与生态 `mcpServers` 片段不可直接复制、要手工翻成 TOML；只有 MCP 时 `type` 是冗余字段。(b) 必填 `type`/`transport`/`trusted`——拒因：Cursor 仅需 `command`/`args` 即连上，多一个必填都是摩擦。 | 用大家都在用的 `mcp.json`（`mcpServers`）格式，网上或 Cursor 抄一段就能用；只有 command 和 args 必填，环境变量、目录想填才填。 |
+ | **R10 配置形状与最小字段面（对齐生态标准 `mcpServers`）** | 用什么配置形状、必填几个字段？ | **采用** 生态标准 `mcpServers` JSON 形状：`{"mcpServers":{"<name>":{"command","args","env?","cwd?"}}}`。**每条 server 必填 `command`+`args`**（`name`=键），`env`/`cwd` 可选；`trusted`/`integrity`/`startupTimeoutMs`/`callTimeoutMs`/`maxConcurrentCalls`/`toolFilter` 为**可选高级字段**；**MCP 配置无 `type` 字段**（文件即声明 MCP，连接器类型在代码侧）。curated `playwright` 预置。**推翻条件**：当 CLI/A2A 真正落地、需同一文件声明多类型连接器时，再评估引入带 `type` 的统一配置（届时 `mcp.json` 可作为 MCP 专属子配置保留）。 | 外部：**Cursor `~/.cursor/mcp.json`（用户截图：`{mcpServers:{playwright:{command:"npx",args:["-y","@executeautomation/playwright-mcp-server"]}}}`）**、Claude Desktop `claude_desktop_config.json`（同 `mcpServers`）、`vscode`（`servers`）、`codex` `[mcp_servers]`（TOML 变体，字段同构）；Tomcat：`core/connector/mcp/config.rs::McpServerConfig`（serde `#[serde(default)]` 实现可选字段） | **第一性原理**：Cursor「配置简单」的根因**不是字段少，而是用了生态既成事实的 `mcpServers` 形状——从任意 MCP 文档/注册表/Cursor 复制一段即用、零翻译**，这是最大的 onboarding 收益。必填收敛到 `command`+`args`（与 Cursor 完全一致）降低认知负担；把 `type` 留在代码而非强推进配置，避免在 CLI/A2A 尚未落地时就摊派「本不该存在」的字段（YAGNI）。安全所需的 `trusted`/`integrity` 做**可选**；裸 Cursor 片段写入全局配置会直接连接，项目配置则按 R7 的首见确认规则处理。 | 未入选：(a) 自研多类型配置文件 + 每条带 `type`（本文初稿 R6）——拒因：与生态 `mcpServers` 片段不可直接复制、要手工翻成 TOML；只有 MCP 时 `type` 是冗余字段。(b) 必填 `type`/`transport`/`trusted`——拒因：Cursor 仅需 `command`/`args` 即连上，多一个必填都是摩擦。 | 用大家都在用的 `mcp.json`（`mcpServers`）格式，网上或 Cursor 抄一段就能用；只有 command 和 args 必填，环境变量、目录想填才填。 |
 | **R7 信任模型（Cursor 对齐：config 即信任 + MCPoison 防护）** | 用户配好一个 MCP 要不要额外一步才能用？怎么防被掉包/同名换命令？ | **默认 config 即信任、零额外步骤（Cursor 对齐）**：出现在**用户全局 `~/.tomcat/mcp.json`** 的 server（含内置 curated）**直接自动连接、开箱即用，无 `/connector trust` 步骤**。**唯一保留的门是 Cursor 踩坑后补的那一个**（CVE-2025-54136 MCPoison）：信任**绑定到实际启动命令**（`command+args+env+cwd` 指纹）而非仅 server 名——**项目级 `<workspace>/.tomcat/mcp.json`**（可能随不可信仓库进来）**首次出现**、或**已知 server 的命令被改**时，spawn 前**一次性确认**。浮动版本（`@latest`）对用户 server **只告警不拦**（curated 内置仍钉死）；内容哈希（integrity/SHA256）为**可选强档**，非必需。 | 外部：**CVE-2025-54136「MCPoison」（Check Point）——Cursor 早期把信任钉在 config 的 server 名上、不绑实际命令，攻击者在共享仓库 `.cursor/mcp.json` 同名换命令即静默执行；Cursor 1.3（2025-07）改为绑定实际命令**；Cursor 文档：全局/项目 `mcp.json` 合并、项目优先、**配置即自动启动**（无 spawn 审批，tool-call 才审批）；`vscode::mcpRegistry._checkTrust`（nonce=启动配置哈希 + **workspace trust**）；Tomcat：新增 `core/connector/mcp/trust.rs`（`~/.tomcat/connector-trust.json`）、可选强档参照 `pi_agent_rust::StoredExecutionIdentity`（二进制 SHA256） | 第一性原理——**「人把 server 写进自己的配置文件」本身就是同意**（Cursor 同理），全局配置=你的机器，零摩擦。真正的 agent 风险是「**项目仓库带来的 `.tomcat/mcp.json` 被同名换了命令**」——这正是 MCPoison；对策不是给所有 server 加确认，而是**只在项目来源首见 + 命令变化时确认**，且把信任**绑到命令而非名字**。这样 UX 与 Cursor 一致（全局即用），却避开了 Cursor 曾经的坑。version/integrity 做成「curated 钉死 + 用户 server 告警 + 可选强档」，不给普通用户添堵。 | 未入选：(a) 每个 server spawn 前都要 `/connector trust`（本文初稿）——拒因：与「跟 Cursor 一样开箱即用」冲突，普通场景纯摩擦；(b) 只按 server 名信任（Cursor 早期）——拒因：正是 MCPoison，同名换命令静默执行；(c) 硬拦所有 `@latest`——拒因：Cursor 都不拦，用户 server 告警即可，别挡路；(d) 强依赖 `PermissionGate` 或 per-call 审批——拒因：Gate 是路径/bash 语义、tool-call 审批是另一层（本就有），与 spawn 信任正交。 | 你自己全局配的 MCP，配好直接能用，跟 Cursor 一模一样，不用额外点信任。只有「项目仓库里带来的 MCP 配置」第一次用、或某个 MCP 的启动命令被人偷偷改了，才需确认一次（本期在 `/connector list` 里 `/connector trust` 批一次，不是启动时打断你的弹框）——因为 Cursor 早年就栽在「只认名字不认命令」上（MCPoison），我们把这一个坑堵上。 |
-| **R8 在途失败语义** | `tools/call` 途中传输断裂怎么办？ | **采用** 当前调用不 replay；标记 `Disconnected` 并撤工具；用户显式 `/connector test` 或 `/connector reload` 才重连。启动期失败仍有限退避。 | Tomcat：`McpManager::call_tool` 错误分支、`ConnectorRegistry::connect_with_backoff`（仅启动期）；外部：`pi_agent_rust` `MCP_DELIVERY_INDETERMINATE`（不 replay）、`codex` `reinitialize_after_session_expiry`（仅 HTTP session）。 | stdio 传输断裂时当前 `call_tool` 返回明确错误并标记 `Disconnected`。自动重放会重复副作用；运行中是否自动重连还需要有不与 deny/reload 竞态的生命周期设计，本期不假称已实现。 | 未入选：自动重放在途调用。拒因：MCP 工具可能有副作用，重放不安全。 | 断在半路的调用宁可报错，也不重来；需要恢复时用 test/reload 明确重连。 |
+| **R8 在途失败语义** | `tools/call` 途中传输断裂怎么办？ | **采用** 当前调用不 replay；取消、空闲超时、业务错误或不明确断流只结束本次调用，不撤共享目录；只有明确连接事实才标记 `Disconnected`。用户可显式 `/connector test` 或 `/connector reload`。启动期失败仍有限退避。 | Tomcat：`McpManager::call_tool` 错误分支、`ConnectorRegistry::connect_with_backoff`（仅启动期）；外部：`pi_agent_rust` `MCP_DELIVERY_INDETERMINATE`（不 replay）、`codex` `reinitialize_after_session_expiry`（仅 HTTP session）。 | 不能把一条响应流的 `Transport closed` 当成共享通信任务已结束；业务 `isError=true` 仍作为工具结果返回。仅在SDK请求通道已关闭、后台任务结束或带session的请求返回SessionExpired等明确事实下处理连接。自动重放会重复副作用；运行中自动恢复须完成生命周期隔离后才能宣称已交付。 | 未入选：自动重放在途调用。拒因：MCP 工具可能有副作用，重放不安全。 | 断在半路的调用宁可报错，也不重来；需要恢复时用 test/reload 明确重连。 |
 | **R9 连接时机与工具生命周期** | 配置好的 MCP server 何时连接？同步卡住首轮、后台预连，还是模型首次调用时才连？ | **采用** Chat/serve 会话初始化后，对每个**默认放行的 server**（全局/curated/已确认项目 server，R7）**后台并行预连** `ConnectorRegistry::spawn_connect_all()`（需确认的项目来源 server 不自动连、留待用户确认）；不 await、不阻塞首轮/serve handshake。`Ready` 事件才注册 `plugin_id="mcp:{server}"` 的工具；断裂/失败先 `unregister_plugin_tools`，用户 test/reload 重连成功后 Ready 再登记；协调器只持 `Weak<dyn ToolRegistry>`，避免强引用环。 | Tomcat：`core/skill/discovery.rs::spawn_discovery_task`、`api/chat/context.rs::spawn_skill_discovery_if_needed` 的启动期后台任务先例；`api/chat/run_loop/mod.rs::observe_tool_surface` 每轮 `list_tools(None)`，故工具登记后天然在下一轮出现。外部：Codex `codex-mcp/src/runtime.rs::McpStartupPolicy::Eager` + `connection_manager.rs::join_set.spawn`（主 agent 预连）；Continue `core/context/mcp/MCPManagerSingleton.ts::setConnections`（`void refreshConnections()`）；VS Code `mcpService.ts::autostart` / `chatServiceImpl.ts` 是可选、会等待的反例。 | **第一性原理**：模型只能调用已在本轮 ToolSurface 中的工具；若懒连到首次调用，工具尚未可见，模型没有触发连接的入口；若同步等待，慢 server/`npx` 下载把可用的首轮对话拖住。故选“后台预连 + Ready 才登记 + 每轮自动刷新”。断线必须撤销已登记工具，否则工具仍可见却必失败。Codex 的 root agent Eager、Continue IDE 异步预连支持此选择；VS Code 的可选 autostart 可在未来作为 `initial_tool_grace_ms` 增强，**本期默认 0、不延迟首轮**。 | 未入选：(a) 同步等待所有 server 后才允许首轮——拒因：任一慢/坏 server 把主交互卡住；(b) 首次工具调用才连接——拒因：未连接工具不在 ToolSurface，模型无从调用，且首个调用等待不可预测；(c) Ready 后不断线撤销——拒因：向模型暴露必失败的陈旧工具。 | 开机时悄悄并行去连；连好才让模型看见工具，断了就撤下。聊天和服务先可用，绝不等慢 MCP。 |
 | **R-C1 「添加连接器」命令（两模式对等）** | 用户/GUI 怎么新增一个连接器？ | **采用** Chat 斜杠 `/connector add` + serve `add_connector`，两模式**对等**、都落到同一份配置写盘逻辑。 | Tomcat：Chat 仿 [cmd_model.rs](../../../src/api/chat/commands/cmd_model.rs)（模型 add 的现成范式）+ [commands/parse.rs](../../../src/api/chat/commands/parse.rs)；serve 仿 [control.rs](../../../src/api/serve/control.rs) capabilities 登记 + [commands.rs](../../../src/api/serve/commands.rs) 处理 + [types.rs](../../../src/api/serve/types.rs)::`ServeCommand` 变体；外部：`hermes-agent hermes_cli/mcp_config.py`（`mcp add` CLI）、`vscode` mcp.json add 流。 | 写盘统一由 `config.rs::upsert_global_server()` 完成，再 `ConnectorRegistry::reload()` 读取并重连；Chat 与 serve 只是两个门面。理由：Tomcat 既有 model-admin 已是「CLI + serve 双门面 + 单写盘」的成熟范式。 | 未入选：只做 serve 命令、Chat 不管。拒因：Chat（CLI）用户也要能加连接器，双模式对等是产品要求。 | 加连接器：命令行敲 `/connector add`、GUI 发 `add_connector`，落到同一份 `mcp.json`。 |
 | **R-C2 「查看/管理连接器」命令（两模式对等）** | 怎么看/信任/删/测连接器与其工具？ | **采用** Chat `/connector list\|trust\|deny\|remove\|test\|reload\|tools` + serve `list_connectors`/`list_connector_tools`/`set_connector_trust`/`remove_connector`/`test_connector`/`reload_connector`/`set_connector_tool_filter`，两模式对等。 | Tomcat：对齐既有 `list_models`/`set_provider_key`/`remove_model` 与 [cmd_model.rs](../../../src/api/chat/commands/cmd_model.rs)；trust 落 `~/.tomcat/connector-trust.json`（R7）；外部：`hermes-agent`（`mcp list/test`）、`cline` McpHub 管理面。 | `list_connectors` 只返回轻量状态摘要 + 信任态，避免每次列表带上几百个工具；展开单个 server 时才调 `list_connector_tools(name)`。Chat `/connector tools <name>` 与 serve 都复用 `McpManager::tool_defs`，因此看到同一份经 `toolFilter` 裁剪的事实。 | 未入选：把管理揉进 add 命令，或把完整工具塞进每次 list。拒因：list/trust/remove/test 是不同动作；全量 tools 会让摘要列表随 server 数量膨胀。 | 看/信任/删/测连接器先看摘要；想看某个 server 的工具再单独展开，列表不会越来越重。 |
@@ -229,8 +231,8 @@ PreSpawn 信任检查（spawn 前唯一关卡，默认无感放行）
 | 实施点 | 交付范围（含交付物） | 主要代码落点（含落地点） | 验收锚点（示例） | 说人话 |
 |--------|----------------------|--------------------------|------------------|--------|
 | **P0 连接器框架** | `Connector` trait + `ConnectorType {Mcp,Cli,A2a}` + `ConnectorRegistry`（按配置源构造）+ `CompositeToolExecutor`（按 `plugin_id` 路由）；`[connector] enabled` 总开关（MCP 的 `mcp.json` schema 见 P1/R10） | `core/connector/mod.rs`（trait/enum/registry/`CompositeToolExecutor`）、`infra/config/types/connector.rs`（`ConnectorConfig` 总开关）、`infra/config/types/mod.rs`（挂 `AppConfig.connector`）；`Cli`/`A2a` 仅枚举预留 | `core::connector::tests::{composite_routes_by_plugin_id,connector_disabled_master_switch_does_not_connect_or_register_tools}` | 先把「连接器插座 + 总开关」搭好，MCP 插上去。 |
-| **P1 MCP 配置与物化（`mcp.json`/`mcpServers`，R6/R10）** | `McpServerConfig`（`command`+`args` 必填、`env`/`cwd`/`trusted`/`integrity`/`startupTimeoutMs`/`callTimeoutMs`/`toolFilter` 可选）、`mcpServers` schema、user+workspace 分层覆盖、`{work_dir}/cache/playwright` 浏览器缓存目录、init 物化含 `@playwright/mcp` 的默认 | `core/connector/mcp/config.rs`（`McpServerConfig` + `serde(default)` 解析全局 `mcp.json` + 项目级 `.tomcat/mcp.json` 覆盖）、`core/connector/mcp/builtin.rs`（`materialize_default_mcp_json()`，仿 `skill/builtin.rs`） | `core::connector::mcp::config::tests::{minimal_cursor_style_server_uses_optional_field_defaults,project_server_overrides_global_server_with_same_name}`；`builtin::tests::materializes_cursor_style_pinned_playwright_config_idempotently` | 用生态标准 `mcp.json`：只填 command/args 就能加 server，自带 playwright，浏览器共用缓存。 |
-| **P2 传输与管理器** | `rmcp` stdio 传输封装、`McpManager`（连接/`tools/list`/`call_tool`）、连接状态机、启动期退避/调用超时/不 replay；发 `Ready{tools}` / `NotReady` 生命周期事件 | `core/connector/mcp/transport.rs`、`core/connector/mcp/manager.rs`（`ServerState`/`ServerStatus`/`McpToolDef`/`ServerLifecycleEvent`）；`Cargo.toml` 加 `rmcp` | `manager::tests::{fake_stdio_server_lists_and_calls_tools,call_tool_timeout_returns_error_and_marks_server_disconnected,transport_drop_marks_disconnected_without_replaying_call,reconnect_refetches_tools_without_a_persistent_cache}` | 把 server 拉起来、拿到工具、能调用；状态变化通知协调器挂/撤工具。 |
+| **P1 MCP 配置与物化（`mcp.json`/`mcpServers`，R6/R10）** | `McpServerConfig`（`command`+`args` 必填、`env`/`cwd`/`trusted`/`integrity`/`startupTimeoutMs`/`callTimeoutMs`/`maxConcurrentCalls`/`toolFilter` 可选）、`mcpServers` schema、user+workspace 分层覆盖、`{work_dir}/cache/playwright` 浏览器缓存目录、init 物化含 `@playwright/mcp` 的默认 | `core/connector/mcp/config.rs`（`McpServerConfig` + `serde(default)` 解析全局 `mcp.json` + 项目级 `.tomcat/mcp.json` 覆盖）、`core/connector/mcp/builtin.rs`（`materialize_default_mcp_json()`，仿 `skill/builtin.rs`） | `core::connector::mcp::config::tests::{minimal_cursor_style_server_uses_optional_field_defaults,project_server_overrides_global_server_with_same_name}`；`builtin::tests::materializes_cursor_style_pinned_playwright_config_idempotently` | 用生态标准 `mcp.json`：只填 command/args 就能加 server，自带 playwright，浏览器共用缓存。 |
+| **P2 传输与管理器** | `rmcp` stdio 传输封装、`McpManager`（连接/`tools/list`/`call_tool`）、连接状态机、启动期退避/调用超时/不 replay；发 `Ready{tools}` / `NotReady` 生命周期事件 | `core/connector/mcp/transport.rs`、`core/connector/mcp/manager.rs`（`ServerState`/`ServerStatus`/`McpToolDef`/`ServerLifecycleEvent`）；`Cargo.toml` 加 `rmcp` | `manager::tests::{fake_stdio_server_lists_and_calls_tools,call_tool_timeout_preserves_shared_connection,transport_drop_marks_disconnected_without_replaying_call,reconnect_refetches_tools_without_a_persistent_cache}` | 把 server 拉起来、拿到工具、能调用；状态变化通知协调器挂/撤工具。 |
 | **P3 信任模型（Cursor 对齐，R7）** | `TrustStore`（`connector-trust.json`）；**默认 config 即信任 + 命令指纹绑定（防 MCPoison）**：全局/curated 无感、项目来源首见或命令变化才确认；用户浮动版本告警不拦；可选强档 integrity/SHA256；`/connector trust\|deny\|list` | `core/connector/mcp/trust.rs`；`api/chat/commands/cmd_connector.rs`（斜杠命令/确认弹窗）；serve 侧 `set_connector_trust` | `core::connector::mcp::trust::tests::{global_config_server_auto_trusted_no_prompt,curated_trusted_by_default,project_server_first_seen_requires_confirm,command_fingerprint_change_requires_reconfirm,user_floating_version_warns_not_blocks,optional_strong_tier_integrity_mismatch_blocks}` | 你自己配的直接用；只在项目来源/命令被改时确认一次。 |
 | **P4 工具注册与路由（Option B）** | 把 MCP 工具 `register_tool` 进 `DefaultToolRegistry`（`plugin_id="mcp:{server}"`）；`CompositeToolExecutor` 按 `plugin_id` 路由到 `McpManager`；命名映射；`list_tools` 自动上工具面 | `core/connector/mod.rs::CompositeToolExecutor`（新增）、`core/connector/mcp/executor.rs::McpToolExecutor`（新增，impl `ToolExecutor` 包 `McpManager`）、`core/connector/mcp/naming.rs`、`api/chat/context.rs`（连接后 `register_tool` + 用 `CompositeToolExecutor` 建 `DefaultToolRegistry`） | `core::connector::tests::mcp_tools_appear_in_surface_via_list_tools`、`core::connector::mcp::executor::tests::mcp_call_routes_to_mcp_manager`、`core::connector::mcp::naming::tests::long_name_keeps_readable_head_plus_short_hash` | MCP 工具像插件一样登记进注册表、按 plugin_id 路由，自动出现在工具菜单。 |
 | **P5 出口媒体转换器 + 图片回流（Option B 关键）** | `tool_dispatcher` registry 分支用 `extract_tool_result_media()`：text→`model_text`、`image` 块→`follow_up_parts`（复用共享图片原语）；**对纯文本插件 no-op**；非 vision 降级 | `core/agent_loop/tool_dispatcher.rs::extract_tool_result_media`（registry 分支 Ok 臂）、`types.rs::ChatMessageContentPart` / `openai_files.rs` / `multimodal.rs::degrade_unsupported_multimodal` | `tool_dispatcher::tool_result_media_tests::{mcp_image_block_becomes_input_image,text_only_plugin_result_preserves_prior_empty_follow_up_parts_behavior,text_block_becomes_model_text,unknown_block_becomes_a_text_summary}` | 注册表出口加个小转换器：MCP 图片翻成 InputImage，纯文本插件完全不受影响。 |
@@ -269,7 +271,7 @@ CallToolResult.content[i]
 
 ### 4.1 `mcp.json` 配置（`mcpServers`，对齐生态标准）
 
-文件位置：`~/.tomcat/mcp.json`（全局）；`<workspace>/.tomcat/mcp.json`（项目级，覆盖同名 server）。**形状与 Cursor / Claude Desktop 的 `mcpServers` 完全一致**——从生态复制的 MCP 片段零翻译即用（R6/R10）。顶层是 `mcpServers`：`server 名 → 配置对象`。每个 server **只有 `command` + `args` 必填**（server 名 = 键），其余全部可选；可选字段是 Tomcat 对 Cursor 形状的**超集**（安全/超时/工具裁剪），一段裸 Cursor 片段照样能跑。
+文件位置：`~/.tomcat/mcp.json`（全局）；`<project>/<workspace.project_resource_dir>/mcp.json`（项目级，默认 `.agents`，覆盖同名 server）。顶层 `mcpServers`：`server 名 → 配置对象`。下表只列仍受支持的 JSON 字段；五个已移除字段和迁移步骤见 [升级指南](./mcp-upgrade-project-trust.md)。
 
 | 字段 | JSON 类型 | 必填 | 默认值 | 说明 | 说人话 |
 |------|-----------|------|--------|------|--------|
@@ -279,13 +281,42 @@ CallToolResult.content[i]
 | `args` | string[] | **是** | — | 命令行参数；npm 型建议钉死精确版本，`@latest`/`@next`/无版本会告警但不阻止连接（R7） | 启动参数，版本写死更稳；没写死会提醒。 |
 | `env` | object | 否 | `{}` | 注入子进程的环境变量（`env_clear` 后仅注入这些 + 最小白名单 `PATH`/`HOME`；值**不经 shell 展开**） | 环境变量（PATH 由白名单兜底）。 |
 | `cwd` | string | 否 | 当前 workspace | 子进程工作目录 | 在哪个目录起。 |
-| `trusted` | bool | 否 | `false` | 声明式信任（供 CI/非交互）；**仍过「启动方式指纹+内容身份」双重校验**；curated 由代码 allowlist 默认信任（R7） | 是否已授权（仍要过身份校验）。 |
-| `integrity` | string | 否（安全敏感部署） | — | **本地预装入口文件**的 `sha256:<hex>` / `sha256-<base64>` / `sha512-<base64>`；spawn 前逐字节比对。纯 `npx` 没有可校验的本地入口，不能填这一项假装已验（R7） | 要最严就记住本地启动入口的内容指纹。 |
-| `startupTimeoutMs` | number | 否 | `30000` | spawn+initialize+首次 list 总超时 | 起不来多久算失败。 |
-| `callTimeoutMs` | number | 否 | `120000` | 单次 `tools/call` 超时 | 一次调用最多等多久。 |
 | `toolFilter` | `{include?,exclude?}` | 否 | 全部 | glob 裁剪暴露给模型的工具子集（R11 的声明式 per-tool 控制） | 只暴露/排除部分工具。 |
 
+#### Settings 单工具开关契约（管理目录与模型调用分离）
+
+```text
+McpManager 同一运行时目录（rawName + enabled）
+         ├─ Settings 管理目录：保留全部行，关闭后仍可重新开启
+         └─ 模型可调用投影：只保留 enabled=true，tool_search/tool_call 不可触达关闭项
+
+单工具开关 → 精确 `toolFilter` 规则 → 匹配的五字段回执
+             └─ 成功先就地更新行和计数；后续只读刷新只核实，失败不能清行
+```
+
+Settings 不保存第二份开关配置；`tool_catalog_snapshot` 与模型可调用投影都使用同一 `ToolFilterMatcher` 判定。宽泛 `include`/`exclude` 规则不可被单工具动作悄悄削弱，规则冲突保留空心行并引导用户编辑配置。
+
+`set_connector_tool_enabled` 回执必须同时匹配 `configKey`、`rawName` 和目标 `enabled`，再使用既有 `configSaved/runtimeApplied` 表示完整成功、明确失败、部分失败或未知。未知/部分失败结束“保存中”，先只读核实并暂禁按旧值取反；Retry 始终复用原目标，断线也要发布“结果未知”的终态回执而非永远等待。
+
+
 > **HTTP/OAuth 已实现**：`core/connector/mcp/transport.rs::HttpTransport` 使用 rmcp 的 Streamable HTTP client，支持无认证、Bearer 与 custom headers；`core/connector/mcp/oauth.rs` 实现 protected-resource → authorization-server/OIDC metadata discovery、动态 client registration、PKCE、token refresh 与安全文件存储；`oauth_callback.rs` 绑定 `127.0.0.1:0` 并校验 state。
+
+#### 完整调用并发与时限
+
+```text
+多个Agent/会话 ──> 同一来源实例（同一连接、目录、信任）
+                        ├─ 最多 N 个完整调用（默认16）
+                        ├─ 最多 N 个等待准入者
+                        └─ 更多调用立即 Busy，未发送
+每个调用：固定准入 Q ──> SDK提交 ──> 空闲等待 I ↻ 本请求进度 ──> 结果/取消与清理
+HTTP底层：POST额度 H=N；SSE打开可释放H，不释放完整调用名额N
+```
+
+- `Q=connector.mcp.call_timeout_ms` 从进入准入开始，覆盖等待名额与SDK提交，不续期。`I=connector.mcp.call_timeout_ms` 从成功提交后重新计时，复用 rmcp 3.4.0 的 `reset_timeout_on_progress()`，不设累计调用上限。排队20秒不会把后面的120秒缩成100秒。
+- 只有**本请求匹配token的MCP `notifications/progress`**续期；响应头、心跳、部分字节、其他请求的进度和日志均不续期。显示100%也不等于最终结果；用户仍可停止自己的调用。
+- N由主配置 `[connector.mcp] max_concurrent_calls` 决定，不按名称、浏览器类目或`readOnlyHint`暗中降为1。若服务本身不支持并行，用户可显式设为1（影响进程内所有 MCP 来源，但每来源独立拥有该额度）。进度不断的长调用仍占一个名额；名额满时后来请求只能在Q内排队。
+- HTTP协议客户端不再带30秒整请求/读体期限；认证控制面仍有独立期限。HTTP隐式重试及SDK会话过期后重发均禁用；收到超时或断流不代表远端未执行。
+- 单次调用由独立受跟踪任务拥有；停止调用者只取消对应调用，不销毁共享连接。取消递送与清理独立于I；SDK能力边界与清理证据见 [mcp-concurrency-sdk-evidence.md](./mcp-concurrency-sdk-evidence.md)。
 
 主配置 `tomcat.config.toml` 侧（`AppConfig.connector`）：
 
@@ -293,18 +324,13 @@ CallToolResult.content[i]
 |------|------|------|------|--------|
 | `[connector] enabled` | bool | `true` | 连接器模块总开关；关则完全不发现/连接 | 一个总闸，默认开；没有 mcp.json server 时不会拉起任何进程。 |
 | `[connector] disabled` | string[] | `[]` | 按 name 禁用某些连接器 | 点名停用。 |
+| `[connector.mcp] startup_timeout_ms` | 正整数毫秒 | `30000` | 启动到首轮工具目录的时限；Playwright 不再单独延长。 | 所有服务共用启动规则。 |
+| `[connector.mcp] call_timeout_ms` | 正整数毫秒 | `120000` | 准入时限 Q 与每次成功提交后的可续期空闲窗口 I。 | 等待中的进度只为当前调用续时。 |
+| `[connector.mcp] max_concurrent_calls` | 1—64 | `16` | 每来源独立的完整调用额度，非所有来源共用一池。 | 默认每个服务可同时处理 16 笔。 |
 
-**默认放行 + 命令绑定（R7 落地，Cursor 对齐）**：默认「config 即信任」——**没有 per-server 信任提示**。为堵 MCPoison，信任**绑定到启动命令指纹**（`command/args/env/cwd` 的哈希）而非 server 名：
+**一次项目批准**：Global MCP 无须项目批准；Workspace MCP 未获项目根批准时显示 `awaiting_project_trust`，既不连接也不 Login；VS Code 首次加载项目时问一次，设置页等待分组有单一按钮，CLI 可 `/connector trust-project`。选择“暂不”只暂停 Workspace MCP，不存拒绝；批准存入 `{work_dir}/project-trust.json`，不绑定单服务或命令指纹。以前的 `connector-trust.json` 不迁移。
 
-- **全局 `~/.tomcat/mcp.json` / curated / 已确认的项目 server**：命令指纹匹配即**直接 spawn，无感**。
-- **项目 `<workspace>/.tomcat/mcp.json` 首次出现，或任意已知 server 的命令指纹变化**：spawn 前**一次确认**（附命令 diff），确认后把指纹记入 `connector-trust.json`。这一步专防「共享仓库同名换命令」（CVE-2025-54136 MCPoison）。
-
-**版本与内容强度（不给普通用户添堵）**：`@latest`/`@next`/无版本对**用户 server 只告警、不拦**（Cursor 亦不拦）；**curated 内置仍钉死精确版本**（我们作者、零用户摩擦）。内容哈希是**可选强档**，非默认必需：
-
-- **【默认·命令绑定】**：信任绑到 `command+args+env+cwd` 指纹（同 Cursor 1.3+）；命令没变就放行，命令变了就再确认。够挡 MCPoison。
-- **【可选强档·预装 + integrity/SHA256】**：安全敏感者可 `npm ci`（带 `package-lock.json`）预装、`command` 改 `node <dir>/.../mcp` 直启入口，填写该**本地入口文件**的 `sha256:<hex>` / `sha256-<base64>` / `sha512-<base64>`，spawn 前逐字节校验。`package-lock.json` 可让安装可复现，但其中 tarball 的 integrity **不能直接冒充入口文件哈希**。**诚实边界**：纯 `npx` 无法 spawn 前逐字节校验（要自己重放 npm 解析），强档才有此保证。
-
-**三个信任来源，同一道命令指纹闸（避免"两份真相"）**：放行一个 server，「我批准」可来自三处——① init 物化到**全局** `mcp.json` 的 curated 条目（因此走全局默认信任）；② 用户 `/connector trust <server>`（或未来确认弹窗）写入 `~/.tomcat/connector-trust.json`；③ 项目 `mcp.json` 里 `"trusted": true`（声明式，供 CI/非交互）。**三者都只表达"我批准"，最终一律经同一道命令指纹匹配放行**；指纹变了（命令被换）就需重新确认。`connector-trust.json` 是确认记录，`"trusted": true` 是配置声明，两者不冲突。
+**版本提醒**：用户 server 使用 `@latest` / `@next` / 未写版本会提示钉死精确版本，但不会因此单独拦截；内置 Playwright 固定使用 `@playwright/mcp@0.0.79`。已信任项目中的命令变更不会再触发逐服务确认；在批准项目之前请检查仓库中的启动命令。Tomcat 不对 `npx` 包内容提供哈希校验承诺。
 
 **Playwright 浏览器目录（与 Phase 1 无头截图共用）**：`env.PLAYWRIGHT_BROWSERS_PATH` 只指定 Chromium 二进制的目录，**不指定 npm JavaScript 包的 `node_modules` 目录**。Tomcat 统一把它解析为 `{work_dir}/cache/playwright`（默认即 `~/.tomcat/cache/playwright`）；Phase 1 的 `verify/scripts/bootstrap.mjs` 往此处安装 Chromium，Phase 2 的 `@playwright/mcp` 子进程从此处寻找 Chromium。这样两种验收方式共用一份数百 MB 的浏览器，而 Tomcat 升级更新 skill 文件也不会重下浏览器。
 
@@ -320,14 +346,13 @@ CallToolResult.content[i]
     "playwright": {
       "command": "npx",
       "args": ["-y", "@playwright/mcp@0.0.79", "--headless"],
-      "env": { "PLAYWRIGHT_BROWSERS_PATH": "/absolute/path/to/work_dir/cache/playwright" },
-      "startupTimeoutMs": 60000
+      "env": { "PLAYWRIGHT_BROWSERS_PATH": "/absolute/path/to/work_dir/cache/playwright" }
     }
   }
 }
 ```
 
-> 关于上例：`args` 里 `@0.0.79` 是**钉死精确版本**，`--headless` 保证 MCP 浏览器不弹窗口；curated `playwright` 的**默认信任来自代码 allowlist（R7 来源①）**，故物化的最小条目**连 `trusted` 都不必写**。`/absolute/path/to/work_dir/...` 是占位——init 写入 `get_work_dir(cfg)` 的绝对值。
+> 关于上例：`args` 里 `@0.0.79` 是精确版本，`--headless` 保证 MCP 浏览器不弹窗口；全局 MCP 无需项目信任。`/absolute/path/to/work_dir/...` 是占位——init 写入 `get_work_dir(cfg)` 的绝对值。内置启动上限为统一默认的 30000 毫秒；确需 60000 时在主配置 `[connector.mcp]` 显式覆盖。
 
 用户加自己的 server，最少只要三样（**与 Cursor 完全一致，可从任意 MCP 文档整段粘贴**）：
 
@@ -335,22 +360,6 @@ CallToolResult.content[i]
 {
   "mcpServers": {
     "my-server": { "command": "npx", "args": ["-y", "some-mcp@1.2.3"] }
-  }
-}
-```
-
-> **【强档·更严格部署】** 把 npm 型换成「预装 + 直接启动入口 + `integrity`/SHA256」，spawn 前逐字节校验（R7）：
-
-```json
-{
-  "mcpServers": {
-    "playwright": {
-      "command": "node",
-      "args": ["/absolute/path/to/work_dir/mcp/playwright/node_modules/@playwright/mcp/cli.js"],
-      "env": { "PLAYWRIGHT_BROWSERS_PATH": "/absolute/path/to/work_dir/cache/playwright" },
-      "integrity": "sha512-...",
-      "trusted": true
-    }
   }
 }
 ```
@@ -477,8 +486,9 @@ MCP 连接器（本期实现）
 | `[connector] enabled` | bool | 连接器模块总开关 | config | 配置文件里的总闸，默认开；没有 server 时不产生进程。 |
 | `[connector] disabled` | string[] | 按 name 停用连接器 | config | 点名停用某个连接器。 |
 | `~/.tomcat/mcp.json` | 文件 | MCP server 列表（`mcpServers`，全局） | config | 全局 MCP 清单（形状同 Cursor）。 |
-| `<workspace>/.tomcat/mcp.json` | 文件 | 项目级覆盖同名 server | config（高于全局） | 项目自己的 MCP 清单。 |
-| `~/.tomcat/connector-trust.json` | 文件 | 信任记录（启动方式指纹 + 内容身份） | 运行时状态 | 记住批准过哪些连接器、以及批准的是哪一版。 |
+| `<project>/<workspace.project_resource_dir>/mcp.json` | 文件 | 项目级覆盖同名 server（默认 `.agents/mcp.json`） | config（高于全局） | 项目自己的 MCP 清单。 |
+| `{work_dir}/project-trust.json` | 文件 | 一次批准的项目根 | 信任记录 | 旧的逐服务批准不自动升级。 |
+| `[connector.mcp]` | TOML 表 | 所有 MCP 来源的启动、调用时限与每来源并发额度 | config（可由 env 覆盖） | JSON 只留服务清单。 |
 
 总则：**env > config > 默认**；`enabled` 默认 `true`，但**没有 `mcp.json` server 时不拉起任何进程**。这样用户只需添加 `name / command / args`，不必再记一个总开关；需要一键停用全部连接器时才显式设为 `false`。
 
@@ -487,12 +497,11 @@ MCP 连接器（本期实现）
 ## 7. 错误模型 / 截断 / 警告
 
 ```text
-[connector] enabled=false            → 完全不发现/连接，工具面无 mcp__*（静默）
-全局 mcp.json / curated / 命令未变    → 默认放行：直接 spawn（无感，Cursor 对齐）
-项目 mcp.json 首见 / 命令指纹变化     → NeedsConfirm：不自动连（后台预连跳过，不阻塞会话），`/connector list` 列为「待确认」+命令 diff；`/connector trust` 批准后 spawn 并记指纹（防 MCPoison 同名换命令）
-用户 /connector deny（或不批）        → Blocked：不 spawn，工具面不含其工具（可行动错误，非 Err 中断）
-用户 server 用浮动版本(@latest/无版本) → 仍连接 + 一行告警建议钉死（不拦；curated 内置本就钉死）
-integrity 已配但比对不一致（同版本被掉包）→ Blocked：需重新确认（可选强档才有此校验）
+[connector] enabled=false             → 不发现/连接 MCP
+全局 mcp.json / curated               → 无须项目批准，直接连接
+Workspace 项目根尚未信任               → awaiting_project_trust：不连接，不 Login；聊天和 Global 照常
+/connector trust-project 或设置页按钮 → 项目根只记一次，同项目下所有 Workspace MCP 可以连接
+mcp.json 存在已移除的键               → 给出文件、服务、键和改法；MCP 不可用，聊天照常
 spawn 失败 / initialize 超时    → Failed：warning，该 server 缺席工具面（不影响其它 server 与主循环）
 tools/list 分页失败            → 本次连接失败，server 转 Failed；该 server 缺席工具面
 tools/call 超时                → 返回明确错误文本给模型、server 转 Disconnected，不重放调用
@@ -502,7 +511,7 @@ image 块解码失败 / 超 IMAGE_MAX_BYTES → 跳过该图 + 文本注明 `[MC
 重连预算耗尽                    → server 停留 Failed；不无限重试（有界退避）
 ```
 
-原则：**单个 server 的任何失败都不拖垮主循环，也不拖垮其它 server**；致命面只有「配置解析非法」在启动时 warn 并跳过该条目。
+原则：**配置文件解析失败只让 MCP 不可用，不阻断 chat 或 Serve 新会话**；单个服务的传输失败不拖垮其它服务。
 
 ---
 
@@ -513,7 +522,7 @@ image 块解码失败 / 超 IMAGE_MAX_BYTES → 跳过该图 + 文本注明 `[MC
 | 单元 | `config::tests::{minimal_cursor_style_server_uses_optional_field_defaults,project_server_overrides_global_server_with_same_name,identifies_floating_npx_package_versions}`；`builtin::tests::materializes_cursor_style_pinned_playwright_config_idempotently` | EXISTS | `mcpServers` 最小字段、默认值、分层覆盖、物化浏览器缓存路径与浮动版本检测。 |
 | 单元 | `naming::tests::{short_names_remain_readable,long_names_keep_a_readable_head_and_unique_hash,underscore_in_server_and_tool_names_is_preserved}` | EXISTS | 常态可读、超长哈希不撞、下划线不丢；反解由 manager 的 `McpToolDef` 查表承担。 |
 | 单元 | `trust::tests::{global_config_is_auto_trusted_but_command_change_requires_confirmation,configured_curated_server_is_trusted_by_default,project_config_requires_one_explicit_approval,user_floating_version_warns_not_blocks,environment_change_never_leaks_value}` | EXISTS | 默认放行、项目确认、命令/环境变化与脱敏，浮动版本只告警。 |
-| 单元 | `manager::tests::{fake_stdio_server_lists_and_calls_tools,call_tool_timeout_returns_error_and_marks_server_disconnected,transport_drop_marks_disconnected_without_replaying_call,reconnect_refetches_tools_without_a_persistent_cache}` | EXISTS | 连接、超时、断裂不 replay；显式重连现取 `tools/list`，不落盘缓存。 |
+| 单元 | `manager::tests::{fake_stdio_server_lists_and_calls_tools,call_tool_timeout_preserves_shared_connection,transport_drop_marks_disconnected_without_replaying_call,reconnect_refetches_tools_without_a_persistent_cache}` | EXISTS | 连接、超时、断裂不 replay；显式重连现取 `tools/list`，不落盘缓存。 |
 | 单元 | `tool_dispatcher::tool_result_media_tests::{mcp_image_block_becomes_input_image,text_block_becomes_model_text,unknown_block_becomes_a_text_summary,text_only_plugin_result_preserves_prior_empty_follow_up_parts_behavior}`；`multimodal_test::degrade_unsupported_multimodal_replaces_images_and_files_with_placeholders` | EXISTS | 出口转换器分流、图片回流、纯文本插件 no-op、非 vision 降级。 |
 | 单元 | `connector::tests::{composite_routes_by_plugin_id,connector_disabled_master_switch_does_not_connect_or_register_tools,startup_connect_is_non_blocking,ready_mcp_tools_register_into_the_shared_tool_registry}`；`context::tests::connector_registry_constructed_when_enabled` | EXISTS | plugin_id 路由、总开关、后台启动、Ready 挂工具与 NotReady 撤工具。 |
 | 集成 | `tests/connector_mcp_tests.rs::{pending_confirm_project_server_is_absent_until_confirmed,pasted_cursor_style_mcp_snippet_connects_without_translation,fake_stdio_server_end_to_end_image_reflow}` | EXISTS | 项目配置确认门、Cursor 片段零翻译、真实 stdio→注册表→下一轮 `InputImage`。 |
@@ -537,7 +546,7 @@ image 块解码失败 / 超 IMAGE_MAX_BYTES → 跳过该图 + 文本注明 `[MC
 | 非 vision 模型收到图片 | 低 | `degrade_unsupported_multimodal` 占位替换，不报错 | 模型看不了图就换成占位说明。 |
 | server 启动慢阻塞首轮 / 首轮看不到工具 | 低 | **后台启动期连接（非阻塞）**，不 block 首轮；就绪前工具缺席 surface、就绪后下一轮自动出现；`startup_timeout_ms` 兜底；失败 server 缺席工具面不阻塞主循环。**不采用"首次调用才连接"**——那会让模型看不到工具、无从调起 | 后台连、不卡对话；连上了下一轮工具就出现，别等到调用才连。 |
 | schema 破坏（provider 工具名 64/128 字符限制） | 低 | 常态原样保留；仅超限时消毒 + 截断可读头 + 短哈希（R3），单测 `long_name_keeps_readable_head_plus_short_hash` 锁死 | 常态是完整可读名；太长才截断加小尾巴，不撞协议限制。 |
-| 同一 server 并发 `tools/call` 打乱 stdio | 中 | 每 server 一把请求锁串行化 `call_tool`（仿 pi_agent_rust `_rpc_lock`）；rmcp 靠 JSON-RPC id 关联响应，锁只防同进程读写交错 | 一个 server 同时只处理一个调用，别把管道搅乱。 |
+| 同一 server 并发 `tools/call` 的归属与资源上限 | 中 | 所有来源默认16个完整调用名额；rmcp 保证stdio帧写入与JSON-RPC request id路由，不用跨越整个回答期的独占锁；显式`maxConcurrentCalls: 1`才串行 | 共享同一连接，但不互相等答案；谁先返回不影响答案属于谁。 |
 | server 运行时改工具集（`tools/list_changed`） | 低 | 首期**不处理** `notifications/tools/list_changed`（`@playwright/mcp` 工具集静态）；工具集变化在下次连接/刷新时生效——列为非目标，与持久缓存一起做 fast-follow（R12；cline/vscode 有现成 debounced 刷新范式） | playwright 工具是固定的，暂不追它的动态变更通知。 |
 | MCP 工具名与插件/builtin 重名 | 低 | Option B 下路由靠注册与 `plugin_id`（非字符串前缀），不会误路由；重名由 `register_tool_local` 的 builtin/跨-plugin 重名校验拒绝；`mcp__` 前缀本身也让撞名概率极低 | 靠登记路由不靠猜前缀；重名直接被注册校验挡下。 |
 

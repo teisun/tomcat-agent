@@ -170,6 +170,11 @@ fn configure_real_vision_agent(
     config.llm.title_model = None;
     config.skills.enabled = true;
     config.connector.enabled = playwright_mcp != PlaywrightMcpMode::Disabled;
+    // The opt-in browser fixture needs a longer start window; this is a
+    // process-wide runtime setting, never a field on an mcp.json server.
+    if playwright_mcp != PlaywrightMcpMode::Disabled {
+        config.connector.mcp.startup_timeout_ms = 60_000;
+    }
     std::fs::write(
         &config_path,
         toml::to_string_pretty(&config).expect("serialize real LLM config"),
@@ -240,7 +245,6 @@ capabilities = {{ vision = true, files = false, tools = true, reasoning = true, 
                             "PLAYWRIGHT_BROWSERS_PATH":
                                 fixture.home_path.join(".tomcat/cache/playwright"),
                         },
-                        "startupTimeoutMs": 60_000,
                     }
                 }
             })

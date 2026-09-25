@@ -1,6 +1,6 @@
 [package]
 name = "tomcat"
-version = "0.1.59"
+version = "0.1.60"
 edition = "2021"
 license = "MIT"
 
@@ -89,7 +89,7 @@ aes-gcm = "0.10.3"
 ed25519-dalek = "2.2.0"
 # Do not use rmcp's `reqwest` feature: it enables reqwest/rustls and feature unification would
 # silently reintroduce a second TLS backend. Keep this aligned with the direct reqwest feature.
-rmcp = { version = "3.1.4", default-features = false, features = ["auth", "client", "reqwest-native-tls", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "=3.4.0", default-features = false, features = ["auth", "client", "reqwest-native-tls", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 
 # Unix-only：bash 工具超时时按整组 SIGKILL 杀掉 sh 派生的子进程
 # （仅 sh -c 的复合命令会派生子 shell，单 PID kill 不到 sleep 等被遗弃的孙子进程）。

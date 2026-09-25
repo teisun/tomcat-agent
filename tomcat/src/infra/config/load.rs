@@ -510,6 +510,7 @@ pub fn ensure_work_dir_structure(cfg: &AppConfig) -> Result<(), AppError> {
 /// # Errors
 /// * [`AppError::Config`] - `audit_log_retention_days` 为 0、`log.level` 非法、`llm.proxy` 格式非法（非 `http://`/`https://` 开头），或 `llm.files.expires_after_seconds` 越界（非 0 且不在 [3600, 2592000]）时返回。
 pub fn validate_config(cfg: &AppConfig) -> Result<(), AppError> {
+    cfg.connector.mcp.validate()?;
     if !(super::types::MIN_TOOLS_BASH_FOREGROUND_WAIT_MS
         ..=super::types::MAX_TOOLS_BASH_FOREGROUND_WAIT_MS)
         .contains(&cfg.tools.bash.foreground_wait_ms)

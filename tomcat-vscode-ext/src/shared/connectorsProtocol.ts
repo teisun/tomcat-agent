@@ -1,3 +1,26 @@
+import type {
+  ConnectorRecoveryProgress,
+  ConnectorReloadReceipt,
+  ListConnectorToolsPayload,
+  ProjectTrustPayload,
+  SetConnectorToolEnabledResponse,
+} from "../serveClient/wire";
+export type {
+  ConnectorRecoveryProgress,
+  ConnectorReloadReceipt,
+  ListConnectorToolsPayload,
+  ProjectTrustPayload,
+  SetConnectorToolEnabledResponse,
+};
+
+export const CONNECTOR_PROTOCOL_MISMATCH = "Serve and extension connector protocols do not match. Restart with a matching Tomcat build.";
+
+export interface ConnectorConnectionIdentity {
+  configKey: string;
+  generation: string;
+  attempt: number;
+}
+
 export type ConnectorType = "mcp" | "cli" | "a2a";
 export type ConnectorTransport = "stdio" | "http";
 export type ConnectorState =
@@ -5,9 +28,8 @@ export type ConnectorState =
   | "connecting"
   | "connected"
   | "disconnected"
-  | "needs_confirmation"
+  | "awaiting_project_trust"
   | "needs_authorization"
-  | "blocked"
   | "failed";
 export type ConnectorScope = "global" | "workspace";
 
@@ -22,6 +44,30 @@ export interface ConnectorConfigPaths {
   workspace?: ConnectorConfigPath;
 }
 
+export interface ConnectorProject {
+  root: string;
+  trusted: boolean;
+}
+
+/** Trust lookup can diagnose an unreadable record without granting access. */
+export function parseProjectTrustPayload(value: unknown): ProjectTrustPayload {
+  if (!isRecord(value) || typeof value.projectRoot !== "string" || !value.projectRoot
+    || typeof value.trusted !== "boolean"
+    || (value.error !== undefined && value.error !== null && typeof value.error !== "string")
+    || (value.trusted && typeof value.error === "string")) {
+    throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+  }
+  return { projectRoot: value.projectRoot, trusted: value.trusted, error: value.error as string | null | undefined };
+}
+
+export function parseConnectorProject(value: unknown): ConnectorProject | null {
+  if (value === null) return null;
+  if (!isRecord(value) || typeof value.root !== "string" || !value.root || typeof value.trusted !== "boolean") {
+    throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+  }
+  return { root: value.root, trusted: value.trusted };
+}
+
 export interface ConnectorView {
   configKey: string;
   name: string;
@@ -33,7 +79,11 @@ export interface ConnectorView {
   auth?: "none" | "bearer" | "oauth" | null;
   oauthConfigured: boolean;
   state: ConnectorState;
-  trust: string;
+  /** Absent only for an incompatible Serve; never synthesize an identity. */
+  generation?: string;
+  attempt?: number;
+  recovery?: ConnectorRecoveryProgress | null;
+  compatibilityError?: string;
   toolCount: number;
   resourceCount: number;
   url?: string | null;
@@ -78,6 +128,7 @@ export interface ConnectorInput {
 
 export interface ConnectorsHostFrame {
   connectors: ConnectorView[];
+  project: ConnectorProject | null;
   selected?: string | null;
 }
 
@@ -85,13 +136,78 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+export function isConnectorGeneration(value: unknown): value is string {
+  return typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value)
+    && (value.length < 20 || (value.length === 20 && value <= "18446744073709551615"));
+}
+
+function isInteger(value: unknown, minimum: number, maximum = Number.MAX_SAFE_INTEGER): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+}
+
+function isRecoveryProgress(value: unknown): value is ConnectorRecoveryProgress {
+  return isRecord(value) && typeof value.phase === "string" && value.phase.length > 0
+    && isInteger(value.maxAttempts, 1, 3) && isInteger(value.remainingMs, 0);
+}
+
+export function parseConnectorReloadReceipt(value: unknown, configKey: string): ConnectorReloadReceipt {
+  if (!isRecord(value) || value.configKey !== configKey || value.accepted !== true
+    || !isConnectorGeneration(value.generation) || value.generation === "0"
+    || !isInteger(value.recoveryTimeoutMs, 1, Number.MAX_SAFE_INTEGER - 10_000)) {
+    throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+  }
+  return { configKey, accepted: true, generation: value.generation, recoveryTimeoutMs: value.recoveryTimeoutMs };
+}
+
+export function parseConnectorToolCatalog(value: unknown, configKey: string): ListConnectorToolsPayload {
+  if (!isRecord(value) || value.configKey !== configKey || !isConnectorGeneration(value.generation)
+    || !isInteger(value.attempt, 1, 3) || !Array.isArray(value.tools)) throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+  const tools = value.tools.map((tool: unknown) => {
+    if (!isRecord(tool) || typeof tool.modelName !== "string" || typeof tool.rawName !== "string"
+      || typeof tool.label !== "string" || typeof tool.description !== "string" || typeof tool.enabled !== "boolean") {
+      throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+    }
+    return { modelName: tool.modelName, rawName: tool.rawName, label: tool.label, description: tool.description, enabled: tool.enabled };
+  });
+  return { configKey, generation: value.generation, attempt: value.attempt, tools };
+}
+
+export function parseSetConnectorToolEnabledResponse(
+  value: unknown,
+  expected: Pick<SetConnectorToolEnabledResponse, "configKey" | "rawName" | "enabled">,
+): SetConnectorToolEnabledResponse {
+  if (!isRecord(value)
+    || value.configKey !== expected.configKey
+    || value.rawName !== expected.rawName
+    || value.enabled !== expected.enabled
+    || typeof value.configSaved !== "boolean"
+    || typeof value.runtimeApplied !== "boolean") {
+    throw new Error(CONNECTOR_PROTOCOL_MISMATCH);
+  }
+  return {
+    configKey: expected.configKey,
+    rawName: expected.rawName,
+    enabled: expected.enabled,
+    configSaved: value.configSaved,
+    runtimeApplied: value.runtimeApplied,
+  };
+}
+
+function isConnectorState(value: unknown): value is ConnectorState {
+  return value === "pending" || value === "connecting" || value === "connected"
+    || value === "disconnected" || value === "awaiting_project_trust"
+    || value === "needs_authorization" || value === "failed";
+}
+
 export function normalizeConnectorView(value: unknown): ConnectorView | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
-  const state = typeof raw.state === "string" ? raw.state : "failed";
+  const state = raw.state;
   const source = raw.source === "workspace" ? "workspace" : raw.source === "global" ? "global" : null;
   const transport = typeof raw.url === "string" ? "http" : "stdio";
-  if (typeof raw.name !== "string" || typeof raw.configKey !== "string" || !source) return null;
+  if (typeof raw.name !== "string" || typeof raw.configKey !== "string" || !source || !isConnectorState(state)) return null;
+  const validIdentity = isConnectorGeneration(raw.generation) && isInteger(raw.attempt, 0, 3);
+  const validRecovery = raw.recovery === null || isRecoveryProgress(raw.recovery);
   return {
     configKey: raw.configKey,
     name: raw.name,
@@ -101,8 +217,11 @@ export function normalizeConnectorView(value: unknown): ConnectorView | null {
     overridden: raw.overridden === true,
     auth: raw.auth === "none" || raw.auth === "bearer" || raw.auth === "oauth" ? raw.auth : null,
     oauthConfigured: raw.oauthConfigured === true || raw.auth === "oauth",
-    state: state as ConnectorState,
-    trust: typeof raw.trust === "string" ? raw.trust : "unknown",
+    state,
+    generation: isConnectorGeneration(raw.generation) ? raw.generation : undefined,
+    attempt: isInteger(raw.attempt, 0, 3) ? raw.attempt : undefined,
+    recovery: isRecoveryProgress(raw.recovery) ? raw.recovery : null,
+    compatibilityError: validIdentity && validRecovery ? undefined : CONNECTOR_PROTOCOL_MISMATCH,
     toolCount: typeof raw.toolCount === "number" ? raw.toolCount : 0,
     resourceCount: typeof raw.resourceCount === "number" ? raw.resourceCount : 0,
     url: typeof raw.url === "string" ? raw.url : null,

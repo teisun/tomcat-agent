@@ -118,6 +118,23 @@ function getPasswordInput(scope: HTMLElement): HTMLInputElement {
 }
 
 describe("SettingsApp", () => {
+  it("carries a correlated Reload receipt through actual Settings state frames", async () => {
+    const { postMessage } = mount();
+    const source = { configKey: "key", name: "deepwiki", type: "mcp" as const, transport: "http" as const, source: "global" as const, state: "connected" as const, generation: "1", attempt: 1, recovery: null, toolCount: 2, resourceCount: 0, overridden: false, oauthConfigured: false };
+    await emitState(readyState({ route: "connectors", connectors: [source] }));
+    await emitDomAction({ kind: "clickTestId", testId: "connector-card-deepwiki" });
+    await emitDomAction({ kind: "clickTestId", testId: "connector-reload" });
+    expect(screen.getByTestId("connector-reload")).toHaveProperty("disabled", true);
+    const request = postMessage.mock.calls.map(([message]) => message as SettingsIntent).find((message) => message.type === "reloadConnector")!;
+    const receipt = { configKey: "key", requestId: request.messageId, generation: "2", phase: "accepted" as const };
+    await emitState(readyState({ route: "connectors", connectors: [{ ...source, state: "connecting", generation: "2", recovery: { phase: "starting", maxAttempts: 3, remainingMs: 90_000 } }], connectorReloads: { key: receipt } }));
+    expect(within(screen.getByRole("dialog")).getByText("Reconnecting… 1/3")).toBeTruthy();
+    await emitState(readyState({ route: "connectors", connectors: [{ ...source, generation: "2" }], connectorReloads: { key: { ...receipt, phase: "succeeded" } } }));
+    expect(screen.getByTestId("connector-reload")).toHaveProperty("disabled", false);
+    expect(within(screen.getByRole("dialog")).getByText("Connector reconnected.")).toBeTruthy();
+    expect(postMessage.mock.calls.filter(([message]) => message.type === "reloadConnector")).toHaveLength(1);
+  });
+
   it("drives React-controlled connector form inputs through the DOM-action bridge", async () => {
     const { postMessage } = mount();
     await emitState(readyState({ connectors: [], route: "connectors" }));

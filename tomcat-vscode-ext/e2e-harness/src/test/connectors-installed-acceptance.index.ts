@@ -10,6 +10,7 @@ export async function run(): Promise<void> {
     ui: "tdd",
   });
   mocha.addFile(path.resolve(__dirname, "connectors-installed-acceptance.test.js"));
+  mocha.addFile(path.resolve(__dirname, "connectors-reload-acceptance.test.js"));  mocha.addFile(path.resolve(__dirname, "connectors-tools-acceptance.test.js"));
   await new Promise<void>((resolve, reject) => {
     mocha.run((failures) => {
       if (failures > 0) {

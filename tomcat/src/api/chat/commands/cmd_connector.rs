@@ -2,9 +2,8 @@ use crate::api::chat::ChatContext;
 use crate::core::connector::mcp::config::{
     add_global_server, remove_global_server, set_global_tool_filter, McpServerConfig, ToolFilter,
 };
-use crate::core::connector::mcp::trust::{
-    SafeLaunchSnapshot, TrustConfirmationReason, TrustStatus,
-};
+use crate::core::connector::ConnectorRegistry;
+use crate::core::security::project_trust::ProjectTrustStore;
 
 use super::parse::{ChatCommand, ChatCommandOutcome};
 
@@ -19,12 +18,7 @@ pub enum ConnectorCommand {
     Remove {
         name: String,
     },
-    Trust {
-        name: String,
-    },
-    Deny {
-        name: String,
-    },
+    TrustProject,
     Test {
         name: String,
     },
@@ -60,11 +54,8 @@ pub(crate) fn parse_args(tokens: Vec<String>) -> ChatCommand {
         [command, sub, name] if command == "/connector" && sub == "remove" => {
             ChatCommand::Connector(ConnectorCommand::Remove { name: name.clone() })
         }
-        [command, sub, name] if command == "/connector" && sub == "trust" => {
-            ChatCommand::Connector(ConnectorCommand::Trust { name: name.clone() })
-        }
-        [command, sub, name] if command == "/connector" && sub == "deny" => {
-            ChatCommand::Connector(ConnectorCommand::Deny { name: name.clone() })
+        [command, sub] if command == "/connector" && sub == "trust-project" => {
+            ChatCommand::Connector(ConnectorCommand::TrustProject)
         }
         [command, sub, name] if command == "/connector" && sub == "test" => {
             ChatCommand::Connector(ConnectorCommand::Test { name: name.clone() })
@@ -106,8 +97,7 @@ pub(crate) async fn run(ctx: &ChatContext, command: ConnectorCommand) -> ChatCom
             args,
         } => add(ctx, name, command, args).await,
         ConnectorCommand::Remove { name } => remove(ctx, &name).await,
-        ConnectorCommand::Trust { name } => trust(ctx, &name).await,
-        ConnectorCommand::Deny { name } => deny(ctx, &name),
+        ConnectorCommand::TrustProject => trust_project(ctx),
         ConnectorCommand::Test { name } => test(ctx, &name).await,
         ConnectorCommand::Login { name } => login(ctx, &name).await,
         ConnectorCommand::Logout { name } => logout(ctx, &name),
@@ -117,7 +107,7 @@ pub(crate) async fn run(ctx: &ChatContext, command: ConnectorCommand) -> ChatCom
 
 fn usage() -> ChatCommand {
     ChatCommand::UsageError {
-        message: "用法错误：/connector list | add <name> <command> [args...] | remove <name> | trust|deny|test <name> | login|logout <name> | tools <name> [--include <glob>]... [--exclude <glob>]... | reload".to_string(),
+        message: "用法错误：/connector list | add <name> <command> [args...] | remove <name> | trust-project | test <name> | login|logout <name> | tools <name> [--include <glob>]... [--exclude <glob>]... | reload".to_string(),
     }
 }
 
@@ -142,70 +132,15 @@ fn list(ctx: &ChatContext) -> ChatCommandOutcome {
     println!("MCP servers:");
     for status in statuses {
         println!(
-            "  - {} [{}] {}; {} tool(s), {} resource(s); {}",
+            "  - {} [{}] {}; {} tool(s), {} resource(s)",
             status.name,
             status.source.as_str(),
             status.state.display_label(),
             status.tool_count,
             status.resource_count,
-            trust_summary(&status.trust),
         );
-        print_trust_details(&status.trust);
     }
     ChatCommandOutcome::Handled
-}
-
-fn trust_summary(trust: &TrustStatus) -> &'static str {
-    match trust {
-        TrustStatus::Trusted => "已信任",
-        TrustStatus::NeedsConfirmation { .. } => "待确认",
-        TrustStatus::Blocked => "已阻止",
-    }
-}
-
-fn print_trust_details(trust: &TrustStatus) {
-    let TrustStatus::NeedsConfirmation {
-        reason,
-        previous,
-        current,
-        environment_changed,
-        hidden_argument_changed,
-    } = trust
-    else {
-        return;
-    };
-    match reason {
-        TrustConfirmationReason::FirstSeen => println!("      原因：项目配置中的 MCP 首次出现。"),
-        TrustConfirmationReason::LaunchChanged => {
-            println!("      原因：已信任 MCP 的启动配置发生变化。")
-        }
-    }
-    if let Some(previous) = previous {
-        println!("      原来：{}", format_launch_snapshot(previous));
-    } else if matches!(reason, TrustConfirmationReason::LaunchChanged) {
-        println!("      原来：旧记录没有可安全展示的启动快照。");
-    }
-    println!("      现在：{}", format_launch_snapshot(current));
-    if *hidden_argument_changed {
-        println!("      提示：敏感启动参数已变化，值已隐藏。");
-    }
-    if *environment_changed {
-        println!("      提示：环境配置已变化，名称和值均已隐藏。");
-    }
-}
-
-fn format_launch_snapshot(snapshot: &SafeLaunchSnapshot) -> String {
-    let mut command = std::iter::once(snapshot.command.as_str())
-        .chain(snapshot.args.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if let Some(cwd) = &snapshot.cwd {
-        command.push_str(&format!(" (cwd: {})", cwd.display()));
-    }
-    if snapshot.has_redacted_arguments {
-        command.push_str(" (敏感参数已隐藏)");
-    }
-    command
 }
 
 async fn tools(
@@ -277,10 +212,6 @@ async fn add(
         headers: Default::default(),
         oauth: None,
         cwd: None,
-        trusted: false,
-        integrity: None,
-        startup_timeout_ms: 30_000,
-        call_timeout_ms: 120_000,
         tool_filter: ToolFilter::default(),
     };
     match add_global_server(&ctx.config, name.clone(), config) {
@@ -315,26 +246,18 @@ async fn remove(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
     ChatCommandOutcome::Handled
 }
 
-async fn trust(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
-    let Some(registry) = registry(ctx) else {
-        println!("[connector] 模块未启用。");
+fn trust_project(ctx: &ChatContext) -> ChatCommandOutcome {
+    let Some(root) = ctx.scope_services.session_project_root.as_deref() else {
+        println!("[connector] 当前会话没有项目目录。");
         return ChatCommandOutcome::Handled;
     };
-    match registry.approve_and_connect(name).await {
-        Ok(()) => println!("[connector] 已信任并开始连接: {name}"),
-        Err(error) => println!("[connector] 信任/连接失败: {error}"),
-    }
-    ChatCommandOutcome::Handled
-}
-
-fn deny(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
-    let Some(registry) = registry(ctx) else {
-        println!("[connector] 模块未启用。");
-        return ChatCommandOutcome::Handled;
-    };
-    match registry.deny(name) {
-        Ok(()) => println!("[connector] 已拒绝并停止: {name}"),
-        Err(error) => println!("[connector] 拒绝失败: {error}"),
+    match ProjectTrustStore::root_for(root).and_then(|root| {
+        ProjectTrustStore::open(&ctx.config)?.trust(&root)?;
+        ConnectorRegistry::project_trusted(&ctx.config, &root)?;
+        Ok(root)
+    }) {
+        Ok(root) => println!("[connector] 已信任项目: {}", root.display()),
+        Err(error) => println!("[connector] 项目信任失败: {error}"),
     }
     ChatCommandOutcome::Handled
 }
@@ -344,7 +267,7 @@ async fn test(ctx: &ChatContext, name: &str) -> ChatCommandOutcome {
         println!("[connector] 模块未启用。");
         return ChatCommandOutcome::Handled;
     };
-    match registry.mcp_manager().reconnect_server(name).await {
+    match registry.mcp_manager().test_server(name).await {
         Ok(()) => println!("[connector] 测试连接成功: {name}"),
         Err(error) => println!("[connector] 测试连接失败: {error}"),
     }
@@ -382,8 +305,8 @@ async fn reload(ctx: &ChatContext) -> ChatCommandOutcome {
         return ChatCommandOutcome::Handled;
     };
     match registry.reload().await {
-        Ok(()) => println!("[connector] 已重读 mcp.json 并重连。"),
-        Err(error) => println!("[connector] 重载失败: {error}"),
+        Ok(()) => println!("[connector] 已重读 mcp.json；未变化的健康连接保持不变。"),
+        Err(error) => println!("[connector] 重载未全部成功: {error}"),
     }
-    ChatCommandOutcome::Handled
+    list(ctx)
 }

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 use super::crypto_native::register_crypto_globals;
 use super::engine_config::PluginEngineConfig;
@@ -31,8 +32,15 @@ type HostInvokeFn = dyn Fn(&str) -> Result<String, AppError> + Send + Sync;
 
 #[derive(Debug, Clone, Copy)]
 enum InterruptReason {
+    Cancelled,
     Timeout,
     BudgetExceeded,
+}
+
+#[derive(Clone)]
+struct AgentExecutionControl {
+    cancel: CancellationToken,
+    waiting_on_host: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 struct ExecutionGuardState {
@@ -42,10 +50,12 @@ struct ExecutionGuardState {
     timeout: Duration,
     budget: u64,
     timeout_paused: AtomicBool,
+    agent: Option<AgentExecutionControl>,
+    host_wait_since: Mutex<Option<Instant>>,
 }
 
 impl ExecutionGuardState {
-    fn new(timeout: Duration, budget: u64) -> Self {
+    fn new(timeout: Duration, budget: u64, agent: Option<AgentExecutionControl>) -> Self {
         Self {
             started_at: Mutex::new(Instant::now()),
             interrupt_count: AtomicU64::new(0),
@@ -53,6 +63,8 @@ impl ExecutionGuardState {
             timeout,
             budget,
             timeout_paused: AtomicBool::new(false),
+            agent,
+            host_wait_since: Mutex::new(None),
         }
     }
 
@@ -80,13 +92,56 @@ impl ExecutionGuardState {
         self.resume_timeout();
     }
 
-    fn should_interrupt(&self) -> bool {
+    // Only the agent-code runner calls these at Rust poll boundaries. Sleeping
+    // while real host work is pending is not JS execution; runnable JS is never
+    // exempted, even when a sibling host call remains pending.
+    fn resume_from_host_wait(&self) {
+        if let Some(since) = self.host_wait_since.lock().take() {
+            let mut started = self.started_at.lock();
+            if let Some(adjusted) = started.checked_add(since.elapsed()) {
+                *started = adjusted;
+            }
+        }
+    }
+
+    fn pause_for_host_work(&self) {
+        if self
+            .agent
+            .as_ref()
+            .is_some_and(|agent| (agent.waiting_on_host)())
+        {
+            *self.host_wait_since.lock() = Some(Instant::now());
+        }
+    }
+
+    fn stop_requested(&self) -> bool {
+        if self
+            .agent
+            .as_ref()
+            .is_some_and(|agent| agent.cancel.is_cancelled())
+        {
+            *self.reason.lock() = Some(InterruptReason::Cancelled);
+            return true;
+        }
         if self.timeout_paused.load(Ordering::SeqCst) {
             return false;
         }
-        if !self.timeout.is_zero() && self.started_at.lock().elapsed() >= self.timeout {
+        let now = self.host_wait_since.lock().unwrap_or_else(Instant::now);
+        if !self.timeout.is_zero()
+            && now.saturating_duration_since(*self.started_at.lock()) >= self.timeout
+        {
             *self.reason.lock() = Some(InterruptReason::Timeout);
             return true;
+        }
+        false
+    }
+
+    fn should_interrupt(&self) -> bool {
+        if self.stop_requested() {
+            return true;
+        }
+        if self.timeout_paused.load(Ordering::SeqCst) {
+            return false;
         }
         if self.budget > 0 && self.interrupt_count.fetch_add(1, Ordering::SeqCst) + 1 > self.budget
         {
@@ -98,6 +153,7 @@ impl ExecutionGuardState {
 
     fn reason_message(&self) -> Option<String> {
         match *self.reason.lock() {
+            Some(InterruptReason::Cancelled) => Some("execution was cancelled".into()),
             Some(InterruptReason::Timeout) => Some(format!(
                 "execution exceeded {}ms timeout",
                 self.timeout.as_millis()
@@ -180,6 +236,17 @@ impl PluginVmInstance {
     /// Its returned value is serialized as structured JSON rather than flattened into text;
     /// this preserves MCP image blocks for the agent-loop media splitter.
     pub fn run_agent_code(&mut self, code: &str) -> Result<serde_json::Value, AppError> {
+        self.run_agent_code_with_cancel(code, CancellationToken::new(), || false)
+    }
+
+    /// Agent-only cancellation and host-wait ownership. Ordinary plugin runs
+    /// keep their existing limits and event-loop behavior.
+    pub(crate) fn run_agent_code_with_cancel(
+        &mut self,
+        code: &str,
+        cancel: CancellationToken,
+        waiting_on_host: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Result<serde_json::Value, AppError> {
         let wrapped = format!(
             r#"
 globalThis.callTool = async function (name, arguments_) {{
@@ -208,7 +275,15 @@ globalThis.callTool = async function (name, arguments_) {{
 }})();
 "#
         );
-        let value = self.run_script(&wrapped)?;
+        let (path, _file_guard) = temp_js_file(&wrapped)?;
+        let combined = self.build_combined_script(&path, false)?;
+        let value = self.execute_script_with_control(
+            &combined,
+            Some(AgentExecutionControl {
+                cancel,
+                waiting_on_host: Arc::new(waiting_on_host),
+            }),
+        )?;
         let envelope = value.as_object().ok_or_else(|| {
             AppError::QuickJS("agent code returned invalid result envelope".into())
         })?;
@@ -295,6 +370,14 @@ globalThis.callTool = async function (name, arguments_) {{
     pub fn destroy(self) {}
 
     fn execute_script(&self, code: &str) -> Result<serde_json::Value, AppError> {
+        self.execute_script_with_control(code, None)
+    }
+
+    fn execute_script_with_control(
+        &self,
+        code: &str,
+        control: Option<AgentExecutionControl>,
+    ) -> Result<serde_json::Value, AppError> {
         let bridge = HostBridge {
             plugin_id: self.plugin_id.clone(),
             host_invoke: self.host_invoke.clone(),
@@ -308,7 +391,11 @@ globalThis.callTool = async function (name, arguments_) {{
         } else {
             Some(self.config.quickjs_heap_mb as usize * 1024 * 1024)
         };
-        let guard = Arc::new(ExecutionGuardState::new(timeout, interrupt_budget));
+        let guard = Arc::new(ExecutionGuardState::new(
+            timeout,
+            interrupt_budget,
+            control.clone(),
+        ));
 
         run_with_local_runtime(move || async move {
             guard.reset();
@@ -329,20 +416,60 @@ globalThis.callTool = async function (name, arguments_) {{
                 .await
                 .map_err(to_app_js_error)?;
 
-            context
-                .with(|ctx| -> rquickjs::Result<()> {
-                    install_host_globals(
-                        ctx.clone(),
-                        bridge.clone(),
-                        plugin_id.clone(),
-                        guard.clone(),
-                    )?;
-                    ctx.eval::<(), _>(code.as_str())
-                })
-                .await
-                .map_err(|err| to_guarded_app_error(err, &guard))?;
-
-            js_runtime.idle().await;
+            if let Some(control) = control {
+                let eval_guard = guard.clone();
+                // Await only the snippet's top-level promise, not every timer or
+                // unawaited call it ever spawned. Dropping this runtime clears
+                // its scheduler; the Rust owner separately drains MCP children.
+                let evaluation = context.async_with(async |ctx| {
+                    install_host_globals(ctx.clone(), bridge, plugin_id, eval_guard)?;
+                    ctx.eval::<rquickjs::Promise<'_>, _>(code.as_str())?
+                        .into_future::<()>()
+                        .await
+                });
+                tokio::pin!(evaluation);
+                let execution = std::future::poll_fn(|cx| {
+                    guard.resume_from_host_wait();
+                    let result = evaluation.as_mut().poll(cx);
+                    if result.is_pending() {
+                        guard.pause_for_host_work();
+                    }
+                    result
+                });
+                tokio::pin!(execution);
+                let mut watchdog = tokio::time::interval(Duration::from_millis(25));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = control.cancel.cancelled() => {
+                            return Err(AppError::QuickJS("agent code execution was cancelled".into()));
+                        }
+                        result = &mut execution => {
+                            result.map_err(|err| to_guarded_app_error(err, &guard))?;
+                            break;
+                        }
+                        _ = watchdog.tick() => {
+                            if guard.stop_requested() {
+                                return Err(AppError::QuickJS(guard.reason_message().unwrap_or_else(|| "agent code interrupted".into())));
+                            }
+                        }
+                    }
+                }
+            } else {
+                context
+                    .with(|ctx| -> rquickjs::Result<()> {
+                        install_host_globals(
+                            ctx.clone(),
+                            bridge.clone(),
+                            plugin_id.clone(),
+                            guard.clone(),
+                        )?;
+                        ctx.eval::<(), _>(code.as_str())
+                    })
+                    .await
+                    .map_err(|err| to_guarded_app_error(err, &guard))?;
+                js_runtime.idle().await;
+            }
 
             if let Some(reason) = guard.reason_message() {
                 return Err(AppError::QuickJS(format!(
@@ -627,6 +754,117 @@ mod tests {
             combined.contains("__pi_resume_timeout"),
             "combined script should resume the timeout budget at the user-code boundary"
         );
+    }
+
+    #[test]
+    fn agent_result_does_not_wait_for_unawaited_timers() {
+        let mut vm =
+            PluginVmInstance::new(PluginEngineConfig::default(), "agent-final".into()).unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(
+            vm.run_agent_code("setTimeout(() => {}, 60000); return 42;")
+                .unwrap(),
+            42
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn agent_external_cancel_stops_busy_and_idle_execution() {
+        use std::time::{Duration, Instant};
+        use tokio_util::sync::CancellationToken;
+        for body in ["while (true) {}", "await new Promise(() => {});"] {
+            let mut vm = PluginVmInstance::new(
+                PluginEngineConfig {
+                    call_timeout_ms: 500,
+                    interrupt_budget: 0,
+                    ..Default::default()
+                },
+                "agent-stop".into(),
+            )
+            .unwrap();
+            let cancel = CancellationToken::new();
+            let stop = cancel.clone();
+            let (ready, seen) = std::sync::mpsc::channel();
+            vm.register_host_binding(move |_| {
+                ready.send(()).unwrap();
+                Ok(serde_json::json!({"ok":true,"data":null}).to_string())
+            })
+            .unwrap();
+            let stopper = std::thread::spawn(move || {
+                seen.recv_timeout(Duration::from_secs(2)).unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+                stop.cancel();
+            });
+            let start = Instant::now();
+            let error = vm
+                .run_agent_code_with_cancel(
+                    &format!("__pi_host_call('{{}}'); {body}"),
+                    cancel,
+                    move || start.elapsed() < Duration::from_secs(2),
+                )
+                .unwrap_err();
+            stopper.join().unwrap();
+            assert!(error.to_string().contains("cancelled"), "{error}");
+            assert!(start.elapsed() < Duration::from_secs(2));
+        }
+    }
+
+    #[test]
+    fn agent_host_wait_exceeds_short_vm_window_but_local_work_still_times_out() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+        use tokio_util::sync::CancellationToken;
+        for tail in ["return result;", "while (true) {}"] {
+            let mut vm = PluginVmInstance::new(
+                PluginEngineConfig {
+                    call_timeout_ms: 20,
+                    interrupt_budget: 0,
+                    ..Default::default()
+                },
+                "agent-host-wait".into(),
+            )
+            .unwrap();
+            let pending = Arc::new(AtomicBool::new(false));
+            let binding_pending = pending.clone();
+            let started = parking_lot::Mutex::new(None::<Instant>);
+            vm.register_host_binding(move |request| {
+                let request: serde_json::Value = serde_json::from_str(request).unwrap();
+                let response = if request["module"] == "connector" {
+                    binding_pending.store(true, Ordering::SeqCst);
+                    *started.lock() = Some(Instant::now());
+                    serde_json::json!({"ok":true,"data":{"pending":true},"callId":request["callId"]})
+                } else if started.lock().unwrap().elapsed() >= Duration::from_millis(350) {
+                    binding_pending.store(false, Ordering::SeqCst);
+                    serde_json::json!({"ok":true,"data":{"ready":true,"response":{"ok":true,"data":42}}})
+                } else { serde_json::json!({"ok":true,"data":{"ready":false}}) };
+                Ok(response.to_string())
+            }).unwrap();
+            let value = vm.run_agent_code_with_cancel(
+                &format!("const result = await callTool('fixture', {{}}); {tail}"),
+                CancellationToken::new(),
+                move || pending.load(Ordering::SeqCst),
+            );
+            if tail.starts_with("return") {
+                assert_eq!(value.unwrap(), 42);
+            } else {
+                assert!(value.unwrap_err().to_string().contains("20ms timeout"));
+            }
+        }
+        let mut vm = PluginVmInstance::new(
+            PluginEngineConfig {
+                call_timeout_ms: 50,
+                interrupt_budget: 0,
+                ..Default::default()
+            },
+            "agent-empty-promise".into(),
+        )
+        .unwrap();
+        assert!(vm
+            .run_agent_code("await new Promise(() => {});")
+            .unwrap_err()
+            .to_string()
+            .contains("50ms timeout"));
     }
 
     #[test]

@@ -4,15 +4,160 @@ use async_trait::async_trait;
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use rmcp::ServiceExt;
 
+use super::failure::FailureKind;
+pub use super::failure::McpFailure;
 use crate::core::connector::mcp::config::ConfiguredMcpServer;
 use crate::core::connector::mcp::oauth::{OAuthDiscovery, OAuthTokenStore};
 use crate::infra::error::AppError;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 pub type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
+/// Bound cancellation delivery, including time queued inside rmcp. Dropping the
+/// *inner send future* releases rmcp's per-request lifetime guard; merely timing
+/// out RequestHandle::cancel would leave the independently owned send running.
+/// Ordinary requests and progress-driven response waiting are not timed here.
+pub struct CancellationBoundedTransport<T: rmcp::transport::Transport<rmcp::RoleClient> + 'static> {
+    inner: Option<T>,
+    cleanup: Option<TaskTracker>,
+}
+
+impl<T: rmcp::transport::Transport<rmcp::RoleClient> + 'static> CancellationBoundedTransport<T> {
+    pub fn new(inner: T) -> Self {
+        Self {
+            inner: Some(inner),
+            cleanup: None,
+        }
+    }
+    fn managed(inner: T, cleanup: TaskTracker) -> Self {
+        Self {
+            inner: Some(inner),
+            cleanup: Some(cleanup),
+        }
+    }
+}
+
+impl<T: rmcp::transport::Transport<rmcp::RoleClient> + 'static> Drop
+    for CancellationBoundedTransport<T>
+{
+    fn drop(&mut self) {
+        let Some(mut inner) = self.inner.take() else {
+            return;
+        };
+        // Initialization can fail before a RunningService exists. Keep the
+        // actual transport close/join owned, including stdio's kill AND wait.
+        let receipt = self.cleanup.as_ref().map(TaskTracker::token);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _receipt = receipt;
+                let _ = inner.close().await;
+            });
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CancellationTransportError<E: std::error::Error + 'static> {
+    #[error("MCP transport operation failed")]
+    Inner(#[source] E),
+    #[error("MCP cancellation delivery timed out; remote completion is unknown")]
+    DeliveryTimeout,
+    #[error("MCP request was cancelled before transport submission")]
+    NotSubmitted,
+}
+
+impl<T: rmcp::transport::Transport<rmcp::RoleClient> + 'static>
+    rmcp::transport::Transport<rmcp::RoleClient> for CancellationBoundedTransport<T>
+{
+    type Error = CancellationTransportError<T::Error>;
+
+    fn send(
+        &mut self,
+        message: rmcp::model::ClientJsonRpcMessage,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let cancellation = matches!(&message, rmcp::model::ClientJsonRpcMessage::Notification(n)
+            if matches!(n.notification, rmcp::model::ClientNotification::CancelledNotification(_)));
+        // Call synchronously: WorkerTransport registers local cancellation here,
+        // before its returned future can wait on the remote control queue.
+        use rmcp::model::GetExtensions;
+        let rejected = if let rmcp::model::ClientJsonRpcMessage::Request(request) = &message {
+            request
+                .request
+                .extensions()
+                .get::<std::sync::Arc<super::call::CallIo>>()
+                .is_some_and(|scope| {
+                    let rejected = scope.rejected.load(std::sync::atomic::Ordering::SeqCst);
+                    if !rejected {
+                        scope
+                            .possibly_sent
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    rejected
+                })
+        } else {
+            false
+        };
+        let send = if rejected {
+            None
+        } else {
+            self.inner.as_mut().map(|inner| inner.send(message))
+        };
+        async move {
+            let send = send.ok_or(CancellationTransportError::NotSubmitted)?;
+            if cancellation {
+                // Leave four seconds of K=5s for response tasks/streams to reap.
+                tokio::time::timeout(std::time::Duration::from_secs(1), send)
+                    .await
+                    .map_err(|_| CancellationTransportError::DeliveryTimeout)?
+                    .map_err(CancellationTransportError::Inner)
+            } else {
+                send.await.map_err(CancellationTransportError::Inner)
+            }
+        }
+    }
+
+    async fn receive(&mut self) -> Option<rmcp::model::ServerJsonRpcMessage> {
+        match self.inner.as_mut() {
+            Some(inner) => inner.receive().await,
+            None => None,
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), Self::Error> {
+        let Some(mut inner) = self.inner.take() else {
+            return Ok(());
+        };
+        let _receipt = self.cleanup.as_ref().map(TaskTracker::token);
+        // Never drop graceful_shutdown halfway through: the SDK has already
+        // taken the child out of its Drop guard at that point. Its own close
+        // waits up to 3s then kills/reaps; HTTP DELETE is separately bounded.
+        inner
+            .close()
+            .await
+            .map_err(CancellationTransportError::Inner)
+    }
+}
+
 #[async_trait]
 pub trait McpTransport: Send + Sync {
-    async fn connect(&self, server: &ConfiguredMcpServer) -> Result<McpClient, AppError>;
+    async fn connect(&self, server: &ConfiguredMcpServer) -> Result<McpClient, AppError> {
+        let cancel = CancellationToken::new();
+        let guard = cancel.clone().drop_guard();
+        let result = self
+            .connect_cancellable(server, cancel, TaskTracker::new())
+            .await;
+        if result.is_ok() {
+            guard.disarm();
+        }
+        result.map_err(|error| error.to_app_error(&server.name))
+    }
+    async fn connect_cancellable(
+        &self,
+        server: &ConfiguredMcpServer,
+        cancel: CancellationToken,
+        cleanup: TaskTracker,
+    ) -> Result<McpClient, McpFailure>;
 }
 
 /// Client-side stdio transport. Only PATH and HOME survive env_clear; configured
@@ -32,6 +177,7 @@ impl StdioTransport {
     fn command(&self, server: &ConfiguredMcpServer) -> tokio::process::Command {
         tokio::process::Command::new(&server.config.command).configure(|command| {
             command.args(&server.config.args);
+            command.kill_on_drop(true);
             if let Some(cwd) = server.config.cwd.as_deref() {
                 let cwd = Path::new(cwd);
                 if cwd.is_absolute() {
@@ -78,13 +224,23 @@ fn managed_playwright_executable(server: &ConfiguredMcpServer) -> Option<PathBuf
 
 #[async_trait]
 impl McpTransport for StdioTransport {
-    async fn connect(&self, server: &ConfiguredMcpServer) -> Result<McpClient, AppError> {
-        let transport = TokioChildProcess::new(self.command(server)).map_err(|error| {
-            AppError::Tool(format!("spawn MCP server '{}': {error}", server.name))
-        })?;
-        ().serve(transport).await.map_err(|error| {
-            AppError::Tool(format!("initialize MCP server '{}': {error}", server.name))
-        })
+    async fn connect_cancellable(
+        &self,
+        server: &ConfiguredMcpServer,
+        cancel: CancellationToken,
+        cleanup: TaskTracker,
+    ) -> Result<McpClient, McpFailure> {
+        if cancel.is_cancelled() {
+            return Err(McpFailure::new(FailureKind::Cancelled, "spawn"));
+        }
+        let transport = TokioChildProcess::new(self.command(server))
+            .map_err(|_| McpFailure::new(FailureKind::Configuration, "spawn"))?;
+        ().serve_with_ct(
+            CancellationBoundedTransport::managed(transport, cleanup),
+            cancel,
+        )
+        .await
+        .map_err(|error| McpFailure::from_initialization(&error))
     }
 }
 
@@ -95,14 +251,49 @@ impl McpTransport for StdioTransport {
 /// is passed through rmcp's dedicated auth slot so it cannot be rejected as a
 /// reserved custom header. OAuth token acquisition/refresh will use the same
 /// slot once the connector OAuth store is wired in.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpTransport {
     oauth_store: OAuthTokenStore,
+    refresh: Option<McpFailure>,
+    refresh_used: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    token_commit: Option<super::oauth::TokenCommit>,
+    max_concurrent_requests: usize,
+}
+
+impl std::fmt::Debug for HttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HttpTransport")
+    }
 }
 
 impl HttpTransport {
     pub fn new(oauth_store: OAuthTokenStore) -> Self {
-        Self { oauth_store }
+        Self {
+            oauth_store,
+            refresh: None,
+            refresh_used: Default::default(),
+            token_commit: None,
+            max_concurrent_requests: crate::infra::config::DEFAULT_MCP_MAX_CONCURRENT_CALLS,
+        }
+    }
+
+    pub(crate) fn with_refresh(
+        mut self,
+        failure: Option<McpFailure>,
+        used: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.refresh = failure;
+        self.refresh_used = used;
+        self
+    }
+    pub(crate) fn with_max_concurrent_requests(mut self, limit: usize) -> Self {
+        self.max_concurrent_requests = limit;
+        self
+    }
+
+    pub(crate) fn with_token_commit(mut self, commit: super::oauth::TokenCommit) -> Self {
+        self.token_commit = Some(commit);
+        self
     }
 
     fn config(
@@ -154,11 +345,28 @@ impl HttpTransport {
         }
         Ok(config
             .custom_headers(custom_headers)
-            .reinit_on_expired_session(true))
+            .max_concurrent_requests(self.max_concurrent_requests)
+            .reinit_on_expired_session(false))
     }
 }
 
 pub(crate) fn http_client_for(url: &str) -> Result<reqwest::Client, AppError> {
+    http_client_builder(url)?
+        .timeout(std::time::Duration::from_secs(30))
+        .retry(reqwest::retry::never())
+        .build()
+        .map_err(|_| AppError::Tool("build HTTP MCP authorization client failed".into()))
+}
+
+fn mcp_http_client_for(url: &str) -> Result<reqwest::Client, AppError> {
+    http_client_builder(url)?
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .retry(super::scoped_http::no_replay_policy())
+        .build()
+        .map_err(|_| AppError::Tool("build HTTP MCP protocol client failed".into()))
+}
+
+fn http_client_builder(url: &str) -> Result<reqwest::ClientBuilder, AppError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|error| AppError::Config(format!("invalid HTTP MCP URL: {error}")))?;
     let mut builder = reqwest::Client::builder();
@@ -168,22 +376,27 @@ pub(crate) fn http_client_for(url: &str) -> Result<reqwest::Client, AppError> {
     {
         builder = builder.no_proxy();
     }
-    builder
-        .timeout(std::time::Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| AppError::Tool(format!("build HTTP MCP client: {error}")))
+    Ok(builder.redirect(reqwest::redirect::Policy::none()))
 }
 
-#[async_trait]
-impl McpTransport for HttpTransport {
-    async fn connect(&self, server: &ConfiguredMcpServer) -> Result<McpClient, AppError> {
+impl HttpTransport {
+    async fn prepare(
+        &self,
+        server: &ConfiguredMcpServer,
+    ) -> Result<
+        (
+            super::scoped_http::ScopedHttpClient,
+            rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig,
+        ),
+        McpFailure,
+    > {
         let url = server.config.url.as_deref().ok_or_else(|| {
             AppError::Config(format!("MCP server '{}' has no HTTP url", server.name))
         })?;
         let client = http_client_for(url)?;
         let mut config = self.config(server)?;
-        let stored_token = self.oauth_store.load(&server.config_key)?;
+        let stored_snapshot = self.oauth_store.snapshot(&server.config_key)?;
+        let stored_token = stored_snapshot.token.clone();
         let stored_identity_matches = if let Some(token) = stored_token.as_ref() {
             if token.mcp_url.as_deref().or(token.resource.as_deref()) != Some(url) {
                 false
@@ -219,21 +432,28 @@ impl McpTransport for HttpTransport {
                                         && token.scopes == oauth.scopes
                                 },
                             );
-                            let discovery_matches =
-                                match OAuthDiscovery::discover(&client, url).await {
-                                    Ok(discovery) => {
-                                        token.token_endpoint
-                                            == discovery.authorization_server.token_endpoint
-                                            && token.issuer.as_deref()
-                                                == discovery.authorization_server.issuer.as_deref()
-                                    }
-                                    // A live discovery lookup is a safety re-check, not a
-                                    // prerequisite for an already usable access token. Never
-                                    // refresh against a possibly migrated issuer without that
-                                    // re-check, but do let an unexpired token reach its MCP
-                                    // server during a transient discovery outage.
-                                    Err(_) => token.access_token_is_valid(),
-                                };
+                            let discovery_matches = match OAuthDiscovery::discover_for_connection(
+                                &client,
+                                url,
+                                self.refresh
+                                    .as_ref()
+                                    .and_then(|failure| failure.challenge.as_deref()),
+                            )
+                            .await
+                            {
+                                Ok(discovery) => {
+                                    token.token_endpoint
+                                        == discovery.authorization_server.token_endpoint
+                                        && token.issuer.as_deref()
+                                            == discovery.authorization_server.issuer.as_deref()
+                                }
+                                // A live discovery lookup is a safety re-check, not a
+                                // prerequisite for an already usable access token. Never
+                                // refresh against a possibly migrated issuer without that
+                                // re-check, but do let an unexpired token reach its MCP
+                                // server during a transient discovery outage.
+                                Err(_) => self.refresh.is_none() && token.access_token_is_valid(),
+                            };
                             client_id_matches && oauth_identity_matches && discovery_matches
                         }
                     }
@@ -248,86 +468,71 @@ impl McpTransport for HttpTransport {
             Some("bearer") | Some("oauth") | None => stored_identity_matches,
             _ => false,
         };
-        let token = if can_use_stored_token {
-            self.oauth_store
-                .refresh_if_needed(&client, &server.config_key)
-                .await?
+        let token = if let Some(token) = stored_token.filter(|_| can_use_stored_token) {
+            if self.refresh.is_none() && token.access_token_is_valid() {
+                Some(token.access_token)
+            } else if token.refresh_token.is_some()
+                && server.config.auth.as_deref() != Some("bearer")
+                && !self
+                    .refresh_used
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                // Refresh the identity-checked snapshot, never reload a possibly
+                // replaced credential after discovery. No extra SDK handshake.
+                self.oauth_store
+                    .refresh_checked(
+                        &client,
+                        &server.config_key,
+                        stored_snapshot,
+                        self.token_commit.as_ref(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        McpFailure::new(FailureKind::Authorization, "credential refresh")
+                    })?
+            } else {
+                None
+            }
         } else {
             None
         };
-        if let Some(token) = token.clone() {
+        if let Some(token) = token {
             config = config.auth_header(token);
-        } else if token.is_none() && server.config.auth.as_deref() != Some("bearer") {
-            let mut probe = client.get(url);
-            for (name, value) in &config.custom_headers {
-                probe = probe.header(name, value);
-            }
-            if let Some(auth_header) = config.auth_header.clone() {
-                probe = probe.bearer_auth(auth_header);
-            }
-            let response = probe.send().await.map_err(|error| {
-                AppError::Tool(format!("probe HTTP MCP authorization: {error}"))
-            })?;
-            if response.status() == reqwest::StatusCode::UNAUTHORIZED
-                && server.config.auth.as_deref() != Some("none")
-                || server.config.auth.as_deref() == Some("oauth")
-            {
-                let _ = OAuthDiscovery::discover(&client, url).await?;
-                return Err(AppError::Tool(format!(
-                    "authorization required for HTTP MCP server '{}'; run /connector login {}",
-                    server.name, server.name
-                )));
-            }
+        } else if self.refresh.is_some() || server.config.auth.as_deref() == Some("oauth") {
+            return Err(McpFailure::new(FailureKind::Authorization, "prepare"));
         }
-        let transport =
-            rmcp::transport::StreamableHttpClientTransport::with_client(client.clone(), config);
-        match ().serve(transport).await {
-            Ok(client) => Ok(client),
-            Err(error) => {
-                if token.is_none()
-                    && server.config.auth.as_deref() != Some("bearer")
-                    && OAuthDiscovery::discover(&client, url).await.is_ok()
-                {
-                    return Err(AppError::Tool(format!(
-                        "authorization required for HTTP MCP server '{}'; run /connector login {}",
-                        server.name, server.name
-                    )));
-                }
-                if token.is_some() && server.config.auth.as_deref() != Some("bearer") {
-                    if let Some(refreshed) = self
-                        .oauth_store
-                        .force_refresh(&client, &server.config_key)
-                        .await?
-                    {
-                        let retry_config = self.config(server)?.auth_header(refreshed);
-                        let retry_transport =
-                            rmcp::transport::StreamableHttpClientTransport::with_client(
-                                client.clone(),
-                                retry_config,
-                            );
-                        return ().serve(retry_transport).await.map_err(|retry_error| {
-                            AppError::Tool(format!(
-                                "initialize HTTP MCP server '{}' after token refresh: {retry_error}",
-                                server.name
-                            ))
-                        });
-                    }
-                }
-                if token.is_some()
-                    && server.config.auth.as_deref() != Some("bearer")
-                    && OAuthDiscovery::discover(&client, url).await.is_ok()
-                {
-                    return Err(AppError::Tool(format!(
-                        "authorization required for HTTP MCP server '{}'; run /connector login {}",
-                        server.name, server.name
-                    )));
-                }
-                Err(AppError::Tool(format!(
-                    "initialize HTTP MCP server '{}': {error}",
-                    server.name
-                )))
-            }
-        }
+        Ok((
+            super::scoped_http::ScopedHttpClient::new(mcp_http_client_for(url)?),
+            config,
+        ))
+    }
+}
+
+#[async_trait]
+impl McpTransport for HttpTransport {
+    async fn connect_cancellable(
+        &self,
+        server: &ConfiguredMcpServer,
+        cancel: CancellationToken,
+        cleanup: TaskTracker,
+    ) -> Result<McpClient, McpFailure> {
+        let (client, config) = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(McpFailure::new(FailureKind::Cancelled, "prepare")),
+            result = self.prepare(server) => result?,
+        };
+        let transport = rmcp::transport::StreamableHttpClientTransport::with_client(
+            client.with_lifetime(cancel.clone()),
+            config,
+        );
+        // Exactly one SDK startup. A refresh followed by another handshake
+        // must consume another manager-owned attempt, never a hidden retry.
+        ().serve_with_ct(
+            CancellationBoundedTransport::managed(transport, cleanup),
+            cancel,
+        )
+        .await
+        .map_err(|error| McpFailure::from_initialization(&error))
     }
 }
 
@@ -357,10 +562,6 @@ mod tests {
                 oauth: None,
 
                 cwd: Some(std::path::PathBuf::from(".")),
-                trusted: false,
-                integrity: None,
-                startup_timeout_ms: 30_000,
-                call_timeout_ms: 120_000,
                 tool_filter: ToolFilter::default(),
             },
         };
@@ -401,10 +602,6 @@ mod tests {
                 headers: Default::default(),
                 oauth: None,
                 cwd: None,
-                trusted: false,
-                integrity: None,
-                startup_timeout_ms: 30_000,
-                call_timeout_ms: 120_000,
                 tool_filter: ToolFilter::default(),
             },
         };
@@ -446,10 +643,6 @@ mod tests {
                 oauth: None,
                 env: Default::default(),
                 cwd: None,
-                trusted: false,
-                integrity: None,
-                startup_timeout_ms: 30_000,
-                call_timeout_ms: 120_000,
                 tool_filter: ToolFilter::default(),
             },
         };
@@ -457,5 +650,14 @@ mod tests {
         assert_eq!(config.auth_header.as_deref(), Some("static-token"));
         assert_eq!(config.custom_headers.len(), 1);
         assert_eq!(config.custom_headers.values().next().unwrap(), "ok");
+        assert_eq!(config.max_concurrent_requests, 16);
+        assert!(!config.reinit_on_expired_session);
+        for limit in [1, 32, 64] {
+            let overridden = transport.clone().with_max_concurrent_requests(limit);
+            assert_eq!(
+                overridden.config(&server).unwrap().max_concurrent_requests,
+                limit
+            );
+        }
     }
 }

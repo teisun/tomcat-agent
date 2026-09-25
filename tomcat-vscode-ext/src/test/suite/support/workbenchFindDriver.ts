@@ -247,6 +247,170 @@ export async function captureWorkbenchArtifacts(targetPath: string): Promise<voi
   } finally { main.close(); }
 }
 
+export type SettingsDomEvidence = {
+  title: string;
+  url: string;
+  viewport: { width: number; height: number };
+  text: string;
+  buttons: Array<{ name: string; testId: string | null; disabled: boolean; busy: string | null; x: number; y: number; width: number; height: number }>;
+  feedback: Array<{ text: string; width: number; scrollWidth: number }>;
+};
+
+/** Only Settings' execution context (or its exact loaded asset directory) owns
+ * these records. The chat provider's error list is deliberately not consulted. */
+export function settingsConsoleReport(events: CdpReply[], contextId: number, assets: string[]) {
+  const ownsAsset = (url?: string): boolean => Boolean(url && assets.some((asset) => url.startsWith(asset.slice(0, asset.lastIndexOf("/") + 1))));
+  const selected = events.filter((event) => {
+    const params = event.params as { executionContextId?: number; exceptionDetails?: { executionContextId?: number }; entry?: { url?: string } } | undefined;
+    if (event.method === "Runtime.consoleAPICalled") return params?.executionContextId === contextId;
+    if (event.method === "Runtime.exceptionThrown") return params?.exceptionDetails?.executionContextId === contextId;
+    return event.method === "Log.entryAdded" && ownsAsset(params?.entry?.url);
+  });
+  const errors = selected.filter((event) => {
+    const params = event.params as { type?: string; entry?: { level?: string } };
+    return event.method === "Runtime.exceptionThrown" || params.type === "error" || params.entry?.level === "error";
+  });
+  return { events: selected, errors };
+}
+
+export function assertCleanSettingsConsole(report: ReturnType<typeof settingsConsoleReport>): void {
+  if (report.errors.length) throw new Error(`Settings browser errors: ${JSON.stringify(report.errors)}`);
+}
+
+/** A real installed Settings frame, not a mocked state page or the chat frame. */
+export class SettingsFrameDriver {
+  private constructor(
+    private readonly main: CdpClient,
+    private readonly frame: CdpClient,
+    private readonly contextId: number,
+    private readonly frameId: string,
+    private readonly target: CdpTarget,
+    private readonly assets: string[],
+  ) {}
+
+  static async connectFromEnvironment(): Promise<SettingsFrameDriver> {
+    const port = Number(process.env[CDP_PORT_ENV]);
+    if (!Number.isInteger(port) || port <= 0) throw new Error(`${CDP_PORT_ENV} is required`);
+    const found = await waitFor(async () => {
+      const workbench = await discoverWorkbenchTarget(port);
+      const main = await CdpClient.connect(workbench.webSocketDebuggerUrl!);
+      let retained = false;
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(10_000) });
+        if (!response.ok) throw new Error(`CDP targets: HTTP ${response.status}`);
+        const targets = await response.json() as CdpTarget[];
+        for (const target of [workbench, ...targets.filter((entry) => entry.type === "iframe" && entry.webSocketDebuggerUrl)]) {
+          const client = target === workbench ? main : await CdpClient.connect(target.webSocketDebuggerUrl!);
+          let selected = false;
+          try {
+            await client.send("Runtime.enable");
+            await client.send("Log.enable");
+            const contexts = client.events.filter((event) => event.method === "Runtime.executionContextCreated").map((event) =>
+              (event.params as { context: { id: number; auxData?: { frameId?: string; isDefault?: boolean } } }).context);
+            for (const context of contexts) {
+              if (!context.auxData?.isDefault || !context.auxData.frameId) continue;
+              const result = await client.send("Runtime.evaluate", {
+                contextId: context.id, returnByValue: true,
+                expression: `(() => { const assets = [...document.scripts].map(script => script.src).filter(Boolean); return document.title === 'Tomcat Settings' && document.querySelector('.tc-settings-shell') && assets.some(src => /\\/settings(?:-[^/]+)?\\.js(?:[?#]|$)/.test(src)) ? { assets } : null; })()`,
+              }) as { result?: { value?: { assets: string[] } }; exceptionDetails?: unknown };
+              if (!result.exceptionDetails && result.result?.value) {
+                retained = selected = true;
+                return new SettingsFrameDriver(main, client, context.id, context.auxData.frameId, target, result.result.value.assets);
+              }
+            }
+          } finally { if (!selected && client !== main) client.close(); }
+        }
+        return null;
+      } finally { if (!retained) main.close(); }
+    }, (value) => value !== null, "Rendered installed Settings frame not found", 20_000);
+    if (!found) throw new Error("Settings frame not found");
+    return found;
+  }
+
+  async evaluate<T>(expression: string): Promise<T> {
+    const result = await this.frame.send("Runtime.evaluate", { contextId: this.contextId, expression, awaitPromise: true, returnByValue: true }) as { exceptionDetails?: unknown; result?: { value?: T } };
+    if (result.exceptionDetails) throw new Error(`Settings evaluation failed: ${JSON.stringify(result.exceptionDetails)}`);
+    return result.result?.value as T;
+  }
+
+  snapshot(): Promise<SettingsDomEvidence> {
+    return this.evaluate(`(() => ({ title: document.title, url: location.href,
+      viewport: {width: innerWidth, height: innerHeight}, text: document.body.innerText,
+      buttons: [...document.querySelectorAll('button')].map(button => { const r = button.getBoundingClientRect(); return {name: button.textContent.trim(), testId: button.getAttribute('data-testid'), disabled: button.disabled, busy: button.getAttribute('aria-busy'), x:r.x, y:r.y, width:r.width, height:r.height}; }),
+      feedback: [...document.querySelectorAll('.tc-connector-feedback')].map(node => ({text: node.textContent, width: node.clientWidth, scrollWidth: node.scrollWidth}))
+    }))()`);
+  }
+
+  waitForSnapshot(predicate: (snapshot: SettingsDomEvidence) => boolean, description: string): Promise<SettingsDomEvidence> {
+    return waitFor(() => this.snapshot(), predicate, description, 15_000);
+  }
+
+  async setViewport(width: number, height: number): Promise<void> {
+    await this.main.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    // VS Code webview iframe layout update can lag significantly; wait and retry
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const viewport = await this.snapshot().then(s => s.viewport).catch(() => ({ width: 0, height: 0 }));
+      if (viewport.width > 0) return;
+    }
+    // Final wait if still not ready
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  async focusAndPress(testId: string, key: "Enter" | "Escape"): Promise<void> {
+    const focused = await this.evaluate<boolean>(`(() => { const button = [...document.querySelectorAll('button')].find(node => node.dataset.testid === ${JSON.stringify(testId)}); if (!button || button.disabled) return false; button.focus(); return document.activeElement === button; })()`);
+    if (!focused) throw new Error(`Cannot focus Settings button ${testId}`);
+    const keyCode = key === "Enter" ? 13 : 27;
+    // Enter's character event activates native buttons; keyDown without text
+    // only delivers keydown and does not emulate a real Enter keypress.
+    const text = key === "Enter" ? "\r" : undefined;
+    await this.main.send("Input.dispatchKeyEvent", { type: "keyDown", key, code: key, text, unmodifiedText: text, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode });
+    await this.main.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode });
+  }
+  async hover(testId: string): Promise<void> {
+    const point = await this.evaluate<{ x: number; y: number } | null>(`(() => {
+      const button = [...document.querySelectorAll('button')].find(node => node.dataset.testid === ${JSON.stringify(testId)});
+      if (!button) return null;
+      const rect = button.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 ? { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 } : null;
+    })()`);
+    if (!point) throw new Error(`Cannot hover Settings button ${testId}`);
+    await this.frame.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
+  }
+
+
+  async capture(targetPath: string): Promise<SettingsDomEvidence> {
+    const dom = await this.snapshot();
+    const tree = await this.frame.send("Accessibility.getFullAXTree", { frameId: this.frameId });
+    // Clip the workbench's compositor surface to this webview's visible owner.
+    // Looking up its unique origin prevents accidentally screenshotting chat.
+    const owner = await this.main.send("Runtime.evaluate", { returnByValue: true, expression: `(() => {
+      const urls = ${JSON.stringify([this.target.url, dom.url].filter(Boolean))};
+      const identity = url => { const parsed = new URL(url); return parsed.protocol + '//' + parsed.host; };
+      const origins = urls.map(identity);
+      const collect = root => [...root.querySelectorAll('iframe'), ...[...root.querySelectorAll('*')].filter(node => node.shadowRoot).flatMap(node => collect(node.shadowRoot))];
+      const frame = collect(document).find(node => { const r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0 && (urls.includes(node.src) || origins.includes(identity(node.src))); });
+      if (!frame) return null; const r = frame.getBoundingClientRect(); return {x:r.x, y:r.y, width:r.width, height:r.height, scale:1};
+    })()` }) as { result?: { value?: { x: number; y: number; width: number; height: number; scale: number } } };
+    const clip = owner.result?.value;
+    if (!clip || clip.width <= 0 || clip.height <= 0) throw new Error(`Cannot locate the visible Settings frame owner: ${dom.url}`);
+    const shot = await this.main.send("Page.captureScreenshot", { format: "png", fromSurface: true, clip }) as { data?: string };
+    if (!shot.data) throw new Error("Settings PNG was not returned");
+    const report = settingsConsoleReport(this.frame.events, this.contextId, this.assets);
+    const metadata = { target: this.target, frameId: this.frameId, executionContextId: this.contextId, assets: this.assets, clip };
+    const stem = targetPath.replace(/\.png$/, "");
+    await Promise.all([
+      fs.writeFile(targetPath, shot.data, "base64"),
+      fs.writeFile(`${stem}.aria.txt`, JSON.stringify({ metadata, dom, tree }, null, 2)),
+      fs.writeFile(`${stem}.console.json`, JSON.stringify({ scope: "Settings context: buffered records plus events since attachment (not full-run monitoring)", metadata, ...report }, null, 2)),
+    ]);
+    assertCleanSettingsConsole(report);
+    return dom;
+  }
+
+  close(): void { if (this.frame !== this.main) this.frame.close(); this.main.close(); }
+}
+
 export class WorkbenchFindDriver {
   private constructor(private readonly cdp: CdpClient) {}
 

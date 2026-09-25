@@ -21,6 +21,13 @@ export interface ConnectorContext {
 }
 export type ConnectorScope = "global" | "workspace";
 
+export interface ConnectorToolPayload {
+  description: string;
+  enabled: boolean;
+  label: string;
+  modelName: string;
+  rawName: string;
+}
 export type DiffTag = "add" | "del" | "ctx" | "gap";
 
 export interface FileDiffLine {
@@ -353,6 +360,17 @@ export type ToolDisplayFileStatus = "applied" | "failed" | "skipped";
 
 export type ToolOutput = any;
 
+export interface ConnectorRecoveryProgress {
+  maxAttempts: number;
+  phase: string;
+  remainingMs: number;
+}
+export interface ConnectorReloadReceipt {
+  accepted: boolean;
+  configKey: string;
+  generation: string;
+  recoveryTimeoutMs: number;
+}
 export type ControlFrame = {
   payload?: any;
   requestId: string;
@@ -379,6 +397,12 @@ export interface IngestAttachmentResponse {
   mimeType: string;
   providerSha?: null | string;
 }
+export interface ListConnectorToolsPayload {
+  attempt: number;
+  configKey: string;
+  generation: string;
+  tools: ConnectorToolPayload[];
+}
 export interface ListModelsPayload {
   models: ModelView[];
 }
@@ -391,6 +415,11 @@ export interface ModelKeyStatus {
 }
 export type OutFrame = ControlFrame | ResponseFrame | ServeEvent;
 
+export interface ProjectTrustPayload {
+  error?: null | string;
+  projectRoot: string;
+  trusted: boolean;
+}
 export interface ProviderKeyView {
   envName: string;
   keyPresent: boolean;
@@ -429,6 +458,7 @@ export type ServeCommand = {
   name: string;
   oauth?: any;
   scope: ConnectorScope;
+  trustProject?: boolean;
   type: "add_connector";
   url?: null | string;
 } | {
@@ -446,16 +476,17 @@ export type ServeCommand = {
 } | {
   configKey: string;
   context: ConnectorContext;
+  enabled: boolean;
+  id?: null | string;
+  rawName: string;
+  type: "set_connector_tool_enabled";
+} | {
+  configKey: string;
+  context: ConnectorContext;
   exclude?: string[];
   id?: null | string;
   include?: string[];
   type: "set_connector_tool_filter";
-} | {
-  configKey: string;
-  context: ConnectorContext;
-  id?: null | string;
-  trusted: boolean;
-  type: "set_connector_trust";
 } | {
   configKey: string;
   context: ConnectorContext;
@@ -564,6 +595,14 @@ export type ServeCommand = {
   type: "steer";
 } | {
   id?: null | string;
+  path: string;
+  type: "get_project_trust";
+} | {
+  id?: null | string;
+  projectRoot: string;
+  type: "trust_project";
+} | {
+  id?: null | string;
   scope?: ListSessionsScope | null;
   type: "list_sessions";
 } | {
@@ -627,6 +666,13 @@ export type ServeCommand = {
   type: "control_response";
 };
 
+export interface SetConnectorToolEnabledResponse {
+  configKey: string;
+  configSaved: boolean;
+  enabled: boolean;
+  rawName: string;
+  runtimeApplied: boolean;
+}
 export interface SetProviderKeyResponse {
   envName: string;
   keyPresent: boolean;
